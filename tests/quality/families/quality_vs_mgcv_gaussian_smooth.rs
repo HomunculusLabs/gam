@@ -24,7 +24,9 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, r2, rmse, run_r};
+use gam::test_support::reference::{
+    Column, QualityPair, paired_holdout_partition, r2, rmse, run_r,
+};
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
 use std::path::Path;
@@ -37,20 +39,6 @@ const LIDAR_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/lid
 const K_SPLITS: usize = 10;
 /// Held-out fraction per partition (~80/20, matching the former split scale).
 const HOLDOUT: f64 = 0.20;
-
-/// Deterministic uniform(0,1) hash of (row, split_key) via splitmix64 — row `i`
-/// is in the TEST fold of partition `split_key` iff it maps below `HOLDOUT`. No
-/// RNG dep; gam and mgcv, fed the SAME masks, partition byte-identically.
-fn is_heldout(i: usize, split_key: usize) -> bool {
-    let mut z = (i as u64)
-        .wrapping_add((split_key as u64).wrapping_mul(0x9E3779B97F4A7C15))
-        .wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    let u = ((z >> 11) as f64) / ((1u64 << 53) as f64);
-    u < HOLDOUT
-}
 
 /// Fit gam (`gam_formula`) + mgcv (`mgcv_formula`) on `K_SPLITS` random partitions
 /// of the lidar data and return averaged (gam_rmse, gam_r2, mgcv_rmse) plus a
@@ -82,14 +70,9 @@ fn gs_kfold_lidar(gam_formula: &str, mgcv_formula: &str, seed_base: usize) -> (f
 
     for k in 0..K_SPLITS {
         let split_key = seed_base + k;
-        let train_rows: Vec<usize> = (0..n).filter(|&i| !is_heldout(i, split_key)).collect();
-        let test_rows: Vec<usize> = (0..n).filter(|&i| is_heldout(i, split_key)).collect();
-        assert!(
-            train_rows.len() > 100 && test_rows.len() > 20,
-            "#2395 gaussian_smooth split {k} degenerate: train={} test={}",
-            train_rows.len(),
-            test_rows.len()
-        );
+        let partition = paired_holdout_partition(n, HOLDOUT, split_key as u64);
+        let train_rows = &partition.train;
+        let test_rows = &partition.test;
         let test_range: Vec<f64> = test_rows.iter().map(|&i| range[i]).collect();
         let test_logratio: Vec<f64> = test_rows.iter().map(|&i| logratio[i]).collect();
 
@@ -120,11 +103,7 @@ fn gs_kfold_lidar(gam_formula: &str, mgcv_formula: &str, seed_base: usize) -> (f
         gam_rmses.push(rmse(&gam_test_pred, &test_logratio));
         gam_r2s.push(r2(&gam_test_pred, &test_logratio));
 
-        fold_data.push(
-            (0..n)
-                .map(|i| if is_heldout(i, split_key) { 1.0 } else { 0.0 })
-                .collect(),
-        );
+        fold_data.push(partition.mask);
         fold_names.push(format!("fold{k}"));
     }
 

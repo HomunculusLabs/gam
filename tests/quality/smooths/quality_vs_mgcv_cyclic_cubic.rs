@@ -24,7 +24,9 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, r2, rmse, run_r};
+use gam::test_support::reference::{
+    Column, QualityPair, paired_holdout_partition, r2, rmse, run_r,
+};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
     load_csvwith_inferred_schema,
@@ -53,20 +55,6 @@ const HOLDOUT: f64 = 0.25;
 
 fn mean(v: &[f64]) -> f64 {
     v.iter().sum::<f64>() / v.len() as f64
-}
-
-/// Deterministic uniform(0,1) hash of (row, split) via splitmix64 — row `i` is in
-/// the TEST fold of partition `split` iff it maps below `HOLDOUT`. No RNG dep; gam
-/// and mgcv, fed the SAME masks, partition byte-identically.
-fn is_heldout(i: usize, split: usize) -> bool {
-    let mut z = (i as u64)
-        .wrapping_add((split as u64).wrapping_mul(0x9E3779B97F4A7C15))
-        .wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    let u = ((z >> 11) as f64) / ((1u64 << 53) as f64);
-    u < HOLDOUT
 }
 
 #[test]
@@ -253,14 +241,9 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
     let mut gam_edf_repr = f64::NAN;
 
     for split in 0..K_SPLITS {
-        let train_rows: Vec<usize> = (0..n).filter(|&i| !is_heldout(i, split)).collect();
-        let test_rows: Vec<usize> = (0..n).filter(|&i| is_heldout(i, split)).collect();
-        assert!(
-            train_rows.len() > 150 && test_rows.len() > 30,
-            "#2395 cyclic split {split} degenerate: train={} test={}",
-            train_rows.len(),
-            test_rows.len()
-        );
+        let partition = paired_holdout_partition(n, HOLDOUT, split as u64);
+        let train_rows = &partition.train;
+        let test_rows = &partition.test;
         let test_month: Vec<f64> = test_rows.iter().map(|&i| month[i]).collect();
         let test_temp: Vec<f64> = test_rows.iter().map(|&i| temp[i]).collect();
 
@@ -297,11 +280,7 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
             gam_edf_repr = fit.fit.edf_total().expect("gam reports total edf");
         }
 
-        fold_data.push(
-            (0..n)
-                .map(|i| if is_heldout(i, split) { 1.0 } else { 0.0 })
-                .collect(),
-        );
+        fold_data.push(partition.mask);
         fold_names.push(format!("fold{split}"));
     }
 

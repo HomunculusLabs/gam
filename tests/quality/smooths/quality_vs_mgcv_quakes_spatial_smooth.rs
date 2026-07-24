@@ -34,7 +34,9 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, pad_to, r2, rmse, run_r};
+use gam::test_support::reference::{
+    Column, QualityPair, pad_to, paired_holdout_partition, r2, rmse, run_r,
+};
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
 use std::path::Path;
@@ -48,20 +50,6 @@ const QUAKES_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/qu
 const K_SPLITS: usize = 5;
 /// Held-out fraction per partition (~80/20, matching the former split scale).
 const HOLDOUT: f64 = 0.20;
-
-/// Deterministic uniform(0,1) hash of (row, split) via splitmix64 — row `i` is in
-/// the TEST fold of partition `split` iff it maps below `HOLDOUT`. No RNG dep; gam
-/// and mgcv, fed the SAME masks, partition byte-identically.
-fn is_heldout(i: usize, split: usize) -> bool {
-    let mut z = (i as u64)
-        .wrapping_add((split as u64).wrapping_mul(0x9E3779B97F4A7C15))
-        .wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^= z >> 31;
-    let u = ((z >> 11) as f64) / ((1u64 << 53) as f64);
-    u < HOLDOUT
-}
 
 #[test]
 fn gam_spatial_smooth_predicts_quakes_better_than_baseline() {
@@ -94,14 +82,9 @@ fn gam_spatial_smooth_predicts_quakes_better_than_baseline() {
     let mut gam_edf_repr = f64::NAN;
 
     for split in 0..K_SPLITS {
-        let train_rows: Vec<usize> = (0..n).filter(|&i| !is_heldout(i, split)).collect();
-        let test_rows: Vec<usize> = (0..n).filter(|&i| is_heldout(i, split)).collect();
-        assert!(
-            train_rows.len() > 700 && test_rows.len() > 120,
-            "#2395 quakes split {split} degenerate: train={} test={}",
-            train_rows.len(),
-            test_rows.len()
-        );
+        let partition = paired_holdout_partition(n, HOLDOUT, split as u64);
+        let train_rows = &partition.train;
+        let test_rows = &partition.test;
         let test_long: Vec<f64> = test_rows.iter().map(|&i| long[i]).collect();
         let test_lat: Vec<f64> = test_rows.iter().map(|&i| lat[i]).collect();
         let test_depth: Vec<f64> = test_rows.iter().map(|&i| depth[i]).collect();
@@ -137,11 +120,7 @@ fn gam_spatial_smooth_predicts_quakes_better_than_baseline() {
         gam_rmses.push(rmse(&gam_test_pred, &test_mag));
         gam_r2s.push(r2(&gam_test_pred, &test_mag));
 
-        fold_data.push(
-            (0..n)
-                .map(|i| if is_heldout(i, split) { 1.0 } else { 0.0 })
-                .collect(),
-        );
+        fold_data.push(partition.mask);
         fold_names.push(format!("fold{split}"));
     }
 
