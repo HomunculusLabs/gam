@@ -1530,23 +1530,15 @@ impl FitConvergenceEvidence {
 
     fn try_from_parts(parts: &UnifiedFitResultParts) -> Result<Self, EstimationError> {
         // Inner and outer stationarity are independent obligations. An outer
-        // envelope certificate cannot prove that the coefficient mode is
-        // stationary, so diagnostic stalled checkpoints never mint fits. The
-        // inner obligation is discharged by a *certified minimum*: either a
-        // strict-KKT `Converged` mode, or a `StalledAtValidMinimum` — a point
-        // that the PIRLS final-state gate already cleared against the
-        // near-stationary soft-acceptance band (KKT-tolerance-gated plateau /
-        // boundary saturation / exact decrement) but reached only after the
-        // iteration/LM budget ran out. Both are stationary modes; the only
-        // difference is whether the certificate is strict-KKT or plateau. A
-        // bare `MaxIterationsReached` / `LmStepSearchExhausted` (never cleared
-        // that band) and `Unstable` (separation) stay rejected. Keeping this
-        // predicate the single authority makes live construction and
-        // deserialization enforce one contract.
-        if !parts.pirls_status.is_certified_minimum() {
+        // envelope certificate cannot prove that the coefficient mode
+        // converged, so every diagnostic stalled/exhausted checkpoint remains
+        // non-minting. A final-state gate that truly discharges convergence
+        // must promote the status to `Converged` before assembly; constructors
+        // never reinterpret a non-converged status as a model (SPEC rule 20).
+        if !parts.pirls_status.is_converged() {
             return Err(Self::assembly_error(
                 parts,
-                "outer evidence was not considered because the inner mode is uncertified"
+                "outer evidence was not considered because the inner mode did not report convergence"
                     .to_string(),
             ));
         }
@@ -1657,36 +1649,23 @@ mod assembly_inner_status_gate_tests {
         })
     }
 
-    /// `StalledAtValidMinimum` is a certified valid minimum (the iteration
-    /// budget ran out at a point already cleared against the near-stationary
-    /// soft-acceptance band), so it mints a fit exactly like `Converged`. This
-    /// is the poisson/beta tensor-te regression (#1561): the outer REML search
-    /// certified `|Pg|` within its bound while the stiff reparameterized tensor
-    /// basis left the inner P-IRLS one status short of strict `Converged`.
+    /// SPEC rule 20 is deliberately status-exact: only a `Converged` inner
+    /// optimization may mint. Stalled, exhausted, and unstable states remain
+    /// checkpoints even when separate diagnostics describe a promising point.
     #[test]
-    fn stalled_at_valid_minimum_mints_a_fit_like_converged() {
+    fn only_converged_inner_status_mints_a_fit() {
         assert!(
             assemble_with_inner_status(PirlsStatus::Converged).is_ok(),
             "a strictly converged inner mode must mint a fit"
         );
-        assert!(
-            assemble_with_inner_status(PirlsStatus::StalledAtValidMinimum).is_ok(),
-            "a stalled-at-valid-minimum inner mode carries valid-minimum KKT \
-             evidence and must mint a fit"
-        );
-    }
-
-    /// The non-certified inner exits stay rejected: they never cleared the
-    /// near-stationary band, so no fit may be minted from them.
-    #[test]
-    fn uncertified_inner_exits_are_still_refused() {
         for status in [
+            PirlsStatus::StalledAtValidMinimum,
             PirlsStatus::MaxIterationsReached,
             PirlsStatus::LmStepSearchExhausted,
             PirlsStatus::Unstable,
         ] {
             let err = assemble_with_inner_status(status)
-                .expect_err("uncertified inner status must not mint a fit");
+                .expect_err("a non-converged inner status must not mint a fit");
             assert!(
                 matches!(err, EstimationError::FitDidNotConverge { .. }),
                 "expected a non-convergence assembly error for {status:?}, got {err:?}"

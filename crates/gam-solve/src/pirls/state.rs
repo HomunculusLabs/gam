@@ -259,7 +259,9 @@ pub struct WorkingModelPirlsResult {
 pub enum PirlsStatus {
     /// Converged successfully within tolerance.
     Converged,
-    /// Reached maximum iterations but the gradient and Hessian indicate a valid minimum.
+    /// Reached the iteration limit at a near-stationary checkpoint whose local
+    /// gradient/Hessian diagnostics look minimum-like. This remains a
+    /// non-converged checkpoint; only `Converged` may mint a fit.
     StalledAtValidMinimum,
     /// Reached maximum iterations without converging.
     MaxIterationsReached,
@@ -308,29 +310,6 @@ impl PirlsStatus {
     #[inline]
     pub const fn is_converged(self) -> bool {
         matches!(self, PirlsStatus::Converged)
-    }
-
-    /// Whether this status certifies a stationary inner mode that may mint a
-    /// fit. `StalledAtValidMinimum` qualifies alongside `Converged`: it is
-    /// *only* produced when the iteration/LM budget was exhausted AT a point
-    /// that already passed the near-stationary soft-acceptance band (a
-    /// KKT-tolerance-gated plateau / boundary-saturation / relative-decrement
-    /// certificate — see `reweight.rs` final-state certification and the
-    /// `loop_driver.rs` `stalled_at_valid_minimum` rescue). Per the variant's
-    /// own contract, "the gradient and Hessian indicate a valid minimum"; the
-    /// exhausted resource is the iteration counter, not the validity of the
-    /// mode. `MaxIterationsReached` and `LmStepSearchExhausted` (which never
-    /// cleared that band) and `Unstable` (separation) do NOT qualify.
-    ///
-    /// This is deliberately broader than [`Self::is_converged`], which keeps
-    /// its strict "clean convergence, only `Converged`" meaning for callers
-    /// that must distinguish a strict-KKT mode from a plateau-rescued one.
-    #[inline]
-    pub const fn is_certified_minimum(self) -> bool {
-        matches!(
-            self,
-            PirlsStatus::Converged | PirlsStatus::StalledAtValidMinimum
-        )
     }
 }
 
