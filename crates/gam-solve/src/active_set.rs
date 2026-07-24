@@ -9,7 +9,7 @@ use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite, boundary_hit_st
 use gam_problem::{
     ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, LinearInequalityConstraints,
 };
-use ndarray::{Array1, Array2, s};
+use ndarray::{Array1, Array2, ArrayView1, s};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -1234,6 +1234,18 @@ impl ActiveEqualityResidualCertificate {
 /// the whole (potentially very stiff) saddle system: an O(1e-8) equality drift
 /// can be backward-stable against a huge Hessian block while still moving the
 /// constrained quadratic by O(1e-3).
+///
+/// The bound also carries the scale at which `direction` was COMPUTED, not only
+/// the scale of the products this row happens to sum. `direction` comes out of a
+/// linear solve, so each component carries an absolute error of order
+/// `eps·‖direction‖`, never `eps·|d_j|`: cancellation inside one row does not buy
+/// that row a smaller input error. Bounding by `sum_j |a_ij d_j|` alone makes the
+/// tolerance shrink with exactly the cancellation it exists to tolerate, and on a
+/// degenerate face it shrinks below anything f64 can deliver. A factored cone
+/// reaches that face routinely — when one coefficient block goes to zero, every
+/// observation row over that block becomes tight while its products underflow, so
+/// the row-local scale is ~1e-65 and the certificate demands an equality residual
+/// no arithmetic can produce. The `‖a_i‖₁·‖direction‖_∞` term is that floor.
 fn certify_active_equalities(
     active_a: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -1244,6 +1256,9 @@ fn certify_active_equalities(
     let operations = p.saturating_add(1).max(1);
     let roundoff = operations as f64 * f64::EPSILON;
     let gamma = roundoff / (1.0 - roundoff);
+    let direction_scale = direction
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
     let mut worst = ActiveEqualityResidualCertificate {
         worst_row: 0,
         residual: 0.0,
@@ -1253,14 +1268,18 @@ fn certify_active_equalities(
     for active_row in 0..m {
         let mut dot = KahanSum::default();
         let mut magnitude = KahanSum::default();
+        let mut row_magnitude = KahanSum::default();
         for column in 0..p {
-            let product = active_a[[active_row, column]] * direction[column];
+            let entry = active_a[[active_row, column]];
+            let product = entry * direction[column];
             dot.add(product);
             magnitude.add(product.abs());
+            row_magnitude.add(entry.abs());
         }
         let residual = (rhs[active_row] - dot.sum()).abs();
-        let allowed =
-            (gamma * (magnitude.sum() + rhs[active_row].abs())).max(f64::MIN_POSITIVE);
+        let solve_scale = row_magnitude.sum() * direction_scale;
+        let allowed = (gamma * (magnitude.sum() + rhs[active_row].abs() + solve_scale))
+            .max(f64::MIN_POSITIVE);
         if !residual.is_finite() || !allowed.is_finite() {
             return ActiveEqualityResidualCertificate {
                 worst_row: active_row,
@@ -3228,6 +3247,127 @@ impl<'a> ConstraintSetOps<'a> {
     }
 }
 
+/// Add every geometrically independent violated separator available at one
+/// operator iterate, in descending scaled-violation order.
+///
+/// A factored cone can expose `m ≫ p` violated observation rows after a
+/// globalized Newton step leaves the previous endpoint face. Adding one row
+/// and re-solving the conditioned `p`-dimensional KKT system after every
+/// separator makes face discovery cost `O(p)` dense factorizations. The #979
+/// CTN witness had `m=24_000`, `p=144`, and only 24 point-tight warm rows; that
+/// serial path spent the remainder of a 300-second command inside one metric
+/// projection.
+///
+/// This routine performs one full value scan (already required by the primal
+/// gate), orders candidates by their geometric violation, and streams their
+/// unit normals in coefficient-sized chunks. Modified Gram--Schmidt extends
+/// the current active normal basis until no coefficient-space direction
+/// remains or the rank reaches `p`. At most `p` dense rows are retained and no
+/// `m × p` matrix is materialized.
+fn independent_violated_operator_rows(
+    ops: &ConstraintSetOps<'_>,
+    values: &Array1<f64>,
+    active: &[usize],
+    is_active: &[bool],
+    banned: &[bool],
+    max_new: usize,
+) -> Result<Vec<usize>, EstimationError> {
+    let p = ops.set.ncols();
+    if max_new == 0 {
+        return Ok(Vec::new());
+    }
+    if values.len() != ops.nrows()
+        || is_active.len() != ops.nrows()
+        || banned.len() != ops.nrows()
+    {
+        crate::bail_invalid_estim!(
+            "operator batch-separation dimension mismatch: values={}, active_mask={}, \
+             banned_mask={}, constraints={}",
+            values.len(),
+            is_active.len(),
+            banned.len(),
+            ops.nrows(),
+        );
+    }
+
+    let mut candidates = Vec::<(usize, f64)>::new();
+    for row in 0..ops.nrows() {
+        if is_active[row] || banned[row] || ops.norms[row] <= 0.0 {
+            continue;
+        }
+        let violation = (-ops.scaled_slack(values, row)).max(0.0);
+        if violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+            candidates.push((row, violation));
+        }
+    }
+    candidates.sort_unstable_by(|(left_row, left_violation), (right_row, right_violation)| {
+        right_violation
+            .total_cmp(left_violation)
+            .then_with(|| left_row.cmp(right_row))
+    });
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Every gathered row is unit-normalized. Use the same relative rank scale
+    // as the working-face reducer, with `p` (the maximum attainable rank) in
+    // place of a row-count-dependent tolerance.
+    let rank_tolerance = 100.0 * f64::EPSILON * p.max(1) as f64;
+    let mut basis = Vec::<Array1<f64>>::with_capacity(p);
+    if !active.is_empty() {
+        let active_rows = ops.gather_unit_rows(active)?;
+        for row in active_rows.a.rows() {
+            extend_operator_normal_basis(&mut basis, row, rank_tolerance);
+        }
+    }
+
+    let chunk_size = p.max(32);
+    let mut selected = Vec::with_capacity(max_new.min(p.saturating_sub(basis.len())));
+    for chunk in candidates.chunks(chunk_size) {
+        let chunk_ids = chunk.iter().map(|(row, _)| *row).collect::<Vec<_>>();
+        let gathered = ops.gather_unit_rows(&chunk_ids)?;
+        for (position, &row) in chunk_ids.iter().enumerate() {
+            if extend_operator_normal_basis(
+                &mut basis,
+                gathered.a.row(position),
+                rank_tolerance,
+            ) {
+                selected.push(row);
+                if selected.len() == max_new || basis.len() == p {
+                    return Ok(selected);
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// Reorthogonalized modified Gram--Schmidt append for one unit constraint
+/// normal. Returns true exactly when the row adds a resolved normal-space
+/// direction.
+fn extend_operator_normal_basis(
+    basis: &mut Vec<Array1<f64>>,
+    row: ArrayView1<'_, f64>,
+    rank_tolerance: f64,
+) -> bool {
+    let mut residual = row.to_owned();
+    // The second pass prevents a long, nearly dependent active basis from
+    // manufacturing a false new direction through first-pass roundoff.
+    for _ in 0..2 {
+        for direction in basis.iter() {
+            let projection = residual.dot(direction);
+            residual.scaled_add(-projection, direction);
+        }
+    }
+    let residual_norm = residual.dot(&residual).sqrt();
+    if !(residual_norm.is_finite() && residual_norm > rank_tolerance) {
+        return false;
+    }
+    residual /= residual_norm;
+    basis.push(residual);
+    true
+}
+
 /// Retain only candidate row ids that are genuinely tight at `beta`.
 ///
 /// Active-face provenance is point-local. A constrained QP reports its full
@@ -4305,36 +4445,35 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
         };
 
         let candidate_before_transition = candidate.clone();
-        // The passive face is a BASIS in coefficient space, not a bag of
-        // observation-row ids. A factored cone can expose thousands of
-        // distinct binding rows whose normals span at most `p` directions.
-        // Appending every id makes the passive Gram grow with n despite the
-        // advertised metric-dual contract; the #979 CTN witness consequently
-        // spent the remainder of its 300-second budget inside one p=144 QP.
-        //
-        // Test rank before changing the existing multiplier coordinates. If
-        // the entering separator adds a new direction, the ordinary append is
-        // exact. If it is dependent, rebuild the basis with the VIOLATED row
-        // first: the deterministic greedy RRQR then keeps that row and exchanges
-        // out whichever old representatives it spans. Abandon the old dual
-        // chord because its multiplier coordinates changed; the loop below
-        // immediately solves the new passive face. This is the standard
-        // active-face exchange for an over-complete polyhedral vertex and keeps
-        // every dense system bounded by `p × p`.
-        let mut augmented = active.clone();
-        augmented.push(row);
-        let augmented_face = ops.compress_working(&augmented)?;
-        let mut passive_basis_restarted = false;
-        if augmented_face.constraints.a.nrows() == augmented.len() {
-            active.push(row);
-            is_active[row] = true;
-            let mut expanded = Array1::<f64>::zeros(active.len());
-            expanded
-                .slice_mut(s![..multipliers.len()])
-                .assign(&multipliers);
-            multipliers = expanded;
+        // Discover a complete independent separator batch before paying for
+        // another conditioned face solve. A partial trust step can invalidate
+        // most of the previous endpoint face at once; adding those missing
+        // directions serially makes one Newton cycle pay O(p) null-space
+        // factorizations. The batch scanner keeps memory coefficient-bounded
+        // and returns at most `p-active.len()` rows.
+        let independent_entering = independent_violated_operator_rows(
+            &ops,
+            &values,
+            &active,
+            &is_active,
+            &banned,
+            p.saturating_sub(active.len()),
+        )?;
+        if !independent_entering.is_empty() {
+            for &entering_row in &independent_entering {
+                active.push(entering_row);
+                is_active[entering_row] = true;
+            }
+            transitions += independent_entering.len();
         } else {
-            let mut prioritized = Vec::with_capacity(augmented.len());
+            // Every violated row lies in the current normal span. For a
+            // homogeneous cone an exactly enforced independent basis makes
+            // this possible only at roundoff; affine carriers can instead have
+            // a genuinely tighter dependent separator. Preserve the standard
+            // active-face exchange for that case, prioritizing the most
+            // violated row and replacing whichever old representative it
+            // spans.
+            let mut prioritized = Vec::with_capacity(active.len() + 1);
             prioritized.push(row);
             prioritized.extend(active.iter().copied());
             let exchanged_face = ops.compress_working(&prioritized)?;
@@ -4364,10 +4503,12 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
             for &active_row in &active {
                 is_active[active_row] = true;
             }
-            passive_basis_restarted = true;
+            transitions += 1;
         }
-        transitions += 1;
-
+        // Every transition above changes the passive coordinates in one batch
+        // (either by appending several zero-dual directions or exchanging a
+        // dependent representative). There is no valid old-to-new dual chord:
+        // solve the new face, prune wrong-signed rows directly, and resolve.
         loop {
             let rows = ops.gather_unit_rows(&active)?;
             let (trial, trial_candidate) = if conditioned_phase {
@@ -4400,68 +4541,10 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
                 let trial_candidate = &unconstrained + &inverse_rows_t.dot(&trial);
                 (trial, trial_candidate)
             };
-            if passive_basis_restarted {
-                // The exchange changed multiplier coordinates, so there is no
-                // valid old-to-new dual chord. Prune wrong-signed rows directly
-                // and resolve the smaller face, exactly as the original-metric
-                // terminal refinement does.
-                let mut retained_rows = Vec::with_capacity(active.len());
-                for (position, &active_row) in active.iter().enumerate() {
-                    if trial[position].is_finite() && trial[position] > 0.0 {
-                        retained_rows.push(active_row);
-                    } else {
-                        is_active[active_row] = false;
-                        banned[active_row] = true;
-                        transitions += 1;
-                    }
-                }
-                active = retained_rows;
-                if active.is_empty() {
-                    candidate.assign(&unconstrained);
-                    multipliers = Array1::<f64>::zeros(0);
-                    break;
-                }
-                if active.len() != trial.len() {
-                    multipliers = Array1::<f64>::zeros(active.len());
-                    continue;
-                }
-                multipliers = trial;
-                candidate = trial_candidate;
-                break;
-            }
-            if trial.iter().all(|value| value.is_finite() && *value > 0.0) {
-                multipliers = trial;
-                candidate = trial_candidate;
-                break;
-            }
-
-            let mut alpha = 1.0_f64;
-            for position in 0..active.len() {
-                if trial[position] <= 0.0 {
-                    let denominator = multipliers[position] - trial[position];
-                    if denominator > 0.0 {
-                        alpha = alpha.min(
-                            (multipliers[position] / denominator).clamp(0.0, 1.0),
-                        );
-                    } else {
-                        alpha = 0.0;
-                    }
-                }
-            }
-            for position in 0..active.len() {
-                multipliers[position] +=
-                    alpha * (trial[position] - multipliers[position]);
-            }
-            let candidate_chord = &trial_candidate - &candidate;
-            candidate.scaled_add(alpha, &candidate_chord);
-
             let mut retained_rows = Vec::with_capacity(active.len());
-            let mut retained_multipliers = Vec::with_capacity(active.len());
-            for position in 0..active.len() {
-                let active_row = active[position];
-                if multipliers[position] > 0.0 {
+            for (position, &active_row) in active.iter().enumerate() {
+                if trial[position].is_finite() && trial[position] > 0.0 {
                     retained_rows.push(active_row);
-                    retained_multipliers.push(multipliers[position]);
                 } else {
                     is_active[active_row] = false;
                     banned[active_row] = true;
@@ -4469,11 +4552,17 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
                 }
             }
             active = retained_rows;
-            multipliers = Array1::from_vec(retained_multipliers);
             if active.is_empty() {
                 candidate.assign(&unconstrained);
+                multipliers = Array1::<f64>::zeros(0);
                 break;
             }
+            if active.len() != trial.len() {
+                continue;
+            }
+            multipliers = trial;
+            candidate = trial_candidate;
+            break;
         }
 
         let moved = candidate
@@ -4730,6 +4819,43 @@ mod tests {
         assert_eq!(certificate.worst_row, 0);
         assert_relative_eq!(certificate.residual, 8.604942e-9, epsilon = 0.0);
         assert!(certificate.residual > 1.0e6 * certificate.allowed);
+    }
+
+    #[test]
+    fn active_equality_certificate_uses_the_solve_scale_not_the_collapsed_row_scale() {
+        // A degenerate face: row 0 is supported only on coordinate 2, and the
+        // solve drove that coordinate to a pure-underflow residue while the rest
+        // of the direction stayed O(1). This is the ordinary state of a factored
+        // cone whose coefficient block has gone to zero — every observation row
+        // over that block is tight at once.
+        //
+        // Bounding the row by `sum_j |a_ij d_j|` alone makes the tolerance
+        // collapse WITH the coordinate (~1e-48 here), so the certificate demands
+        // an equality residual no f64 arithmetic can produce and the face can
+        // never be certified. That is the observed #979 refusal signature:
+        // residual/allowed pinned at ~1/eps regardless of the actual geometry.
+        let active_a = array![[0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0]];
+        let rhs = array![0.0, 0.5];
+        let collapsed = array![0.5, 0.3, 1.0e-33, 0.0];
+        let certificate = certify_active_equalities(&active_a, &rhs, &collapsed);
+        assert!(
+            certificate.is_certified(),
+            "an equality residual {:.3e} that is 1e-33 of the solve scale is \
+             roundoff-resolved, not a face defect (allowed {:.3e})",
+            certificate.residual,
+            certificate.allowed
+        );
+
+        // …and the ambient scale does NOT become a blanket loosening: a drift in
+        // the public tolerance band on the same face is still refused, because
+        // `gamma · ||a_i||_1 · ||d||_inf` is ~1e-16 here, not ~1e-9.
+        let drifted = array![0.5, 0.3, 1.0e-9, 0.0];
+        let certificate = certify_active_equalities(&active_a, &rhs, &drifted);
+        assert!(
+            !certificate.is_certified(),
+            "a 1e-9 equality drift against an O(1) solve scale is a real defect"
+        );
+        assert_eq!(certificate.worst_row, 0);
     }
 
     #[test]
@@ -5879,6 +6005,68 @@ mod tests {
             active.len() <= residual.len(),
             "a three-dimensional cone projection gathered {} supported rows",
             active.len()
+        );
+    }
+
+    /// A globalized CTN step can retain only a small subset of the previous
+    /// endpoint face. The next H-metric projection must recover every missing
+    /// independent normal direction in one separator batch, not pay one dense
+    /// face solve per observation-row id.
+    #[test]
+    fn operator_metric_projection_batches_a_partial_warm_face_979() {
+        let rows = 24_000;
+        let p = 24;
+        let psi = Array2::from_shape_fn((rows, p), |(row, column)| {
+            if column == row % p { 1.0 } else { 0.0 }
+        });
+        let cone =
+            KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+                .expect("many-row coordinate cone");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let hessian = Array2::<f64>::eye(p);
+        let rhs = Array1::<f64>::from_elem(p, -1.0);
+        let beta_start = Array1::<f64>::zeros(p);
+        let warm = [0usize, 1, 2, 3];
+
+        let ops = ConstraintSetOps::new(&set, 0.0).expect("operator geometry");
+        let unconstrained = rhs.clone();
+        let values = ops.values(&unconstrained).expect("free values");
+        let mut is_active = vec![false; rows];
+        for &row in &warm {
+            is_active[row] = true;
+        }
+        let banned = vec![false; rows];
+        let selected = independent_violated_operator_rows(
+            &ops,
+            &values,
+            &warm,
+            &is_active,
+            &banned,
+            p - warm.len(),
+        )
+        .expect("batch separation");
+        assert_eq!(
+            selected.len(),
+            p - warm.len(),
+            "one scan must recover every coefficient-space direction missing from the warm face"
+        );
+
+        let (candidate, active) = solve_quadratic_with_constraint_set(
+            &hessian,
+            &rhs,
+            &beta_start,
+            &set,
+            Some(&warm),
+        )
+        .expect("batched metric projection");
+        assert!(
+            candidate.iter().all(|value| value.abs() <= 1e-12),
+            "projection onto the repeated coordinate cone must be the origin: {candidate:?}"
+        );
+        assert_eq!(
+            active.len(),
+            p,
+            "the returned face must contain one representative per independent coordinate"
         );
     }
 
