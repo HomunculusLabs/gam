@@ -30,6 +30,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub use gam_linalg::test_support::{PairedHoldout, paired_holdout_partition};
+
 /// Parsed results emitted by a reference-tool body via `emit(key, values)`.
 pub struct ReferenceResult {
     values: BTreeMap<String, Vec<f64>>,
@@ -386,76 +388,6 @@ pub fn rmse(a: &[f64], b: &[f64]) -> f64 {
     assert_eq!(a.len(), b.len(), "rmse length mismatch");
     let s: f64 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum();
     (s / a.len().max(1) as f64).sqrt()
-}
-
-/// One exact-cardinality train/test partition for a paired quality comparison.
-///
-/// `mask` is the wire-format companion to `train` and `test`: it contains `1.0`
-/// at held-out rows and `0.0` at training rows, ready to send to an external
-/// reference implementation through [`Column`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct PairedHoldout {
-    /// Source-row indices used to fit both implementations.
-    pub train: Vec<usize>,
-    /// Source-row indices scored for both implementations.
-    pub test: Vec<usize>,
-    /// Full-width external-tool mask: `1.0` for test, `0.0` for train.
-    pub mask: Vec<f64>,
-}
-
-/// Build a reproducible, exact-cardinality paired holdout partition.
-///
-/// Rows are ranked by a SplitMix64 score keyed by `split_key`; the lowest
-/// `round(n * holdout_fraction)` scores form the test set. Ranking instead of
-/// thresholding a pseudo-random value keeps every split the same size. That
-/// matters when per-split metrics are averaged: every term then represents the
-/// same amount of held-out evidence, and small fixtures cannot accidentally
-/// produce a degenerate fold.
-///
-/// The returned row indices retain source order. A quality test must use the
-/// same returned partition for both gam and its reference tool.
-pub fn paired_holdout_partition(
-    n: usize,
-    holdout_fraction: f64,
-    split_key: u64,
-) -> PairedHoldout {
-    assert!(n >= 2, "paired holdout needs at least two rows, got {n}");
-    assert!(
-        holdout_fraction.is_finite() && 0.0 < holdout_fraction && holdout_fraction < 1.0,
-        "paired holdout fraction must be finite and strictly between zero and one, got {holdout_fraction}"
-    );
-
-    let test_len = (n as f64 * holdout_fraction).round() as usize;
-    assert!(
-        0 < test_len && test_len < n,
-        "paired holdout fraction {holdout_fraction} yields {test_len} test rows for n={n}"
-    );
-
-    const GOLDEN_RATIO: u64 = 0x9E3779B97F4A7C15;
-    let score = |row: usize| {
-        let mut z = (row as u64)
-            .wrapping_add(split_key.wrapping_mul(GOLDEN_RATIO))
-            .wrapping_add(GOLDEN_RATIO);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    };
-
-    let mut ranked: Vec<(u64, usize)> = (0..n).map(|row| (score(row), row)).collect();
-    ranked.sort_unstable();
-
-    let mut held_out = vec![false; n];
-    for &(_, row) in &ranked[..test_len] {
-        held_out[row] = true;
-    }
-
-    let train = (0..n).filter(|&row| !held_out[row]).collect();
-    let test = (0..n).filter(|&row| held_out[row]).collect();
-    let mask = held_out
-        .into_iter()
-        .map(|is_test| if is_test { 1.0 } else { 0.0 })
-        .collect();
-    PairedHoldout { train, test, mask }
 }
 
 /// A single machine-readable GAM-vs-reference quality pair for the #1561
@@ -991,8 +923,8 @@ pub fn pearson(a: &[f64], b: &[f64]) -> f64 {
 }
 
 #[cfg(test)]
-mod reference_tests {
-    use super::{pad_to, paired_holdout_partition};
+mod pad_to_tests {
+    use super::pad_to;
 
     /// Regression for #1084: the exact shape that used to panic with the
     /// inscrutable "pad target 490 shorter than source 654". A full-data column
@@ -1032,27 +964,4 @@ mod reference_tests {
         assert_eq!(train_wire[n - 1], train[n_train - 1]);
     }
 
-    #[test]
-    fn paired_holdout_is_exact_reproducible_and_partitioned() {
-        let first = paired_holdout_partition(221, 0.20, 17);
-        let replay = paired_holdout_partition(221, 0.20, 17);
-        let other = paired_holdout_partition(221, 0.20, 18);
-
-        assert_eq!(first, replay);
-        assert_ne!(first.test, other.test);
-        assert_eq!(first.test.len(), 44);
-        assert_eq!(first.train.len(), 177);
-        assert_eq!(first.mask.len(), 221);
-
-        let mut memberships = vec![0usize; 221];
-        for &row in &first.train {
-            memberships[row] += 1;
-            assert_eq!(first.mask[row], 0.0);
-        }
-        for &row in &first.test {
-            memberships[row] += 1;
-            assert_eq!(first.mask[row], 1.0);
-        }
-        assert!(memberships.into_iter().all(|count| count == 1));
-    }
 }

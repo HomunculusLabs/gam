@@ -1,19 +1,24 @@
-//! Linear-algebra test fixtures shared across the workspace.
+//! Low-level numerical test fixtures shared across the workspace.
 //!
-//! These fixtures exercise `gam-linalg`'s operator-backed design machinery, so
-//! they live here — the crate that owns [`LinearOperator`], [`DesignMatrix`],
-//! and friends — rather than in a downstream crate. Following the workspace
-//! convention for `test_support` modules (and matching the root `gam` crate),
-//! this is a plain always-compiled `pub mod`: feature gates and `#[cfg(test)]`
-//! module gates are banned here, and a `cfg(test)` module would be invisible to
-//! downstream crates' test builds anyway. The contents are `pub`, so they are
-//! reachable (no dead-code lint) yet only ever called from `#[cfg(test)]` code.
+//! The operator fixtures exercise `gam-linalg`'s design machinery, so they live
+//! here — the crate that owns [`LinearOperator`], [`DesignMatrix`], and friends
+//! — rather than in a downstream crate. Following the workspace convention for
+//! `test_support` modules (and matching the root `gam` crate), this is a plain
+//! always-compiled `pub mod`: feature gates and `#[cfg(test)]` module gates are
+//! banned here, and a `cfg(test)` module would be invisible to downstream
+//! crates' test builds anyway. The contents are `pub`, so they are reachable
+//! (no dead-code lint) yet only ever called from `#[cfg(test)]` code.
 //!
 //! [`fd_checker`] carries the same argument one level down: a central-difference
 //! derivative check is `ndarray` in, `ndarray` out and owns no model-layer type,
 //! so it belongs to the leaf that owns the dense-array seam. Keeping it here
 //! means a crate cross-checking an analytic derivative pulls one leaf dependency
 //! it already has instead of the whole model layer.
+//!
+//! [`paired_holdout_partition`] is likewise model-free deterministic numerical
+//! test design. Keeping its row-ranking primitive here lets downstream quality
+//! tests share one paired partition without making its invariant test compile
+//! the reference bridge and the entire model stack.
 
 pub mod fd_checker;
 
@@ -22,6 +27,73 @@ use gam_runtime::resource::MatrixMaterializationError;
 use ndarray::{Array1, Array2, Axis, s};
 use std::ops::Range;
 use std::sync::Arc;
+
+/// One exact-cardinality train/test partition for a paired quality comparison.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PairedHoldout {
+    /// Source-row indices used to fit both implementations.
+    pub train: Vec<usize>,
+    /// Source-row indices scored for both implementations.
+    pub test: Vec<usize>,
+    /// Full-width external-tool mask: `1.0` for test, `0.0` for train.
+    pub mask: Vec<f64>,
+}
+
+/// Build a reproducible, exact-cardinality paired holdout partition.
+///
+/// Rows are ranked by a SplitMix64 score keyed by `split_key`; the lowest
+/// `round(n * holdout_fraction)` scores form the test set. Ranking instead of
+/// thresholding a pseudo-random value keeps every split the same size. That
+/// matters when per-split metrics are averaged: every term then represents the
+/// same amount of held-out evidence, and small fixtures cannot accidentally
+/// produce a degenerate fold.
+///
+/// The returned row indices retain source order. A quality test must use the
+/// same returned partition for both the implementation under test and its
+/// reference tool.
+pub fn paired_holdout_partition(
+    n: usize,
+    holdout_fraction: f64,
+    split_key: u64,
+) -> PairedHoldout {
+    assert!(n >= 2, "paired holdout needs at least two rows, got {n}");
+    assert!(
+        holdout_fraction.is_finite() && 0.0 < holdout_fraction && holdout_fraction < 1.0,
+        "paired holdout fraction must be finite and strictly between zero and one, got {holdout_fraction}"
+    );
+
+    let test_len = (n as f64 * holdout_fraction).round() as usize;
+    assert!(
+        0 < test_len && test_len < n,
+        "paired holdout fraction {holdout_fraction} yields {test_len} test rows for n={n}"
+    );
+
+    const GOLDEN_RATIO: u64 = 0x9E3779B97F4A7C15;
+    let score = |row: usize| {
+        let mut z = (row as u64)
+            .wrapping_add(split_key.wrapping_mul(GOLDEN_RATIO))
+            .wrapping_add(GOLDEN_RATIO);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    };
+
+    let mut ranked: Vec<(u64, usize)> = (0..n).map(|row| (score(row), row)).collect();
+    ranked.sort_unstable();
+
+    let mut held_out = vec![false; n];
+    for &(_, row) in &ranked[..test_len] {
+        held_out[row] = true;
+    }
+
+    let train = (0..n).filter(|&row| !held_out[row]).collect();
+    let test = (0..n).filter(|&row| held_out[row]).collect();
+    let mask = held_out
+        .into_iter()
+        .map(|is_test| if is_test { 1.0 } else { 0.0 })
+        .collect();
+    PairedHoldout { train, test, mask }
+}
 
 /// A dense-backed [`LinearOperator`] that refuses to materialize itself.
 ///
@@ -95,7 +167,7 @@ pub fn no_densify_design(dense: Array2<f64>) -> DesignMatrix {
 
 #[cfg(test)]
 mod tests {
-    use super::no_densify_design;
+    use super::{no_densify_design, paired_holdout_partition};
     use ndarray::array;
 
     /// Regression guard for #1566: `no_densify_design` must live in `gam-linalg`
@@ -131,5 +203,29 @@ mod tests {
     fn no_densify_design_rejects_materialization() {
         let design = no_densify_design(array![[1.0, 2.0], [3.0, 4.0]]);
         design.as_dense_cow();
+    }
+
+    #[test]
+    fn paired_holdout_is_exact_reproducible_and_partitioned() {
+        let first = paired_holdout_partition(221, 0.20, 17);
+        let replay = paired_holdout_partition(221, 0.20, 17);
+        let other = paired_holdout_partition(221, 0.20, 18);
+
+        assert_eq!(first, replay);
+        assert_ne!(first.test, other.test);
+        assert_eq!(first.test.len(), 44);
+        assert_eq!(first.train.len(), 177);
+        assert_eq!(first.mask.len(), 221);
+
+        let mut memberships = vec![0usize; 221];
+        for &row in &first.train {
+            memberships[row] += 1;
+            assert_eq!(first.mask[row], 0.0);
+        }
+        for &row in &first.test {
+            memberships[row] += 1;
+            assert_eq!(first.mask[row], 1.0);
+        }
+        assert!(memberships.into_iter().all(|count| count == 1));
     }
 }
