@@ -26,8 +26,3 @@ cudarc.workspace = true
 [dev-dependencies]
 gam-problem = { path = "../gam-problem" }
 tempfile = "3.27.0"
-# Test-only edge: `gam-sae` depends on `gam-gpu` (normal dep), so this back-edge
-# closes a cycle. Cargo permits a dependency cycle as long as at least one edge
-# is dev-only — which this is (it exists solely so the encode-full-path
-# throughput integration test can drive the production `EncodeAtlas` encode).
-gam-sae = { path = "../gam-sae" }

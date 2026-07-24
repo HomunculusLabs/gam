@@ -24,10 +24,12 @@
 //! ## Reuse, not reimplementation
 //!
 //! The encode math is NOT reimplemented here: the test calls the production
-//! `EncodeAtlas::certified_encode_batch` / `certified_encode_row`. `gam-sae`
-//! normally depends on `gam-gpu`; the dev-only back-edge in this crate's
-//! `Cargo.toml` (allowed by cargo because the cycle has a dev edge) is what lets
-//! this `gam-gpu` integration test call into `gam-sae`.
+//! `EncodeAtlas::certified_encode_batch` / `certified_encode_row`. It lives in
+//! `gam-sae` because that is the crate that owns the composition under test —
+//! `gam-sae` depends on `gam-gpu`, so both halves are reachable along the normal
+//! dependency direction. (It previously lived in `gam-gpu` behind a dev-only
+//! back-edge onto `gam-sae`; that edge made every `gam-gpu` unit-test build
+//! compile the entire SAE and solver stack.)
 //!
 //! ## Device status (honest)
 //!

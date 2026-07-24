@@ -2961,7 +2961,6 @@ dependencies = [
  "gam-linalg",
  "gam-problem",
  "gam-runtime",
- "gam-sae",
  "libloading 0.8.9",
  "libm",
  "log",
