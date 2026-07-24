@@ -5,7 +5,7 @@ edition = "2024"
 description = "Smooth-term basis construction and penalty assembly for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/SauersML/gam"
-rust-version = "1.93"
+rust-version = "1.97"
 
 [lints.rust]
 warnings = "deny"
@@ -30,7 +30,7 @@ rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 smallvec = "1"
-statrs = "0.18.0"
+statrs = "0.19.0"
 wide = "1.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -2,7 +2,7 @@
 name = "gam-row-macros"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 description = "Build-time symbolic lowering for gam row-program atoms"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/SauersML/gam"

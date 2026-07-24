@@ -2,7 +2,7 @@
 name = "gam-inference"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 description = "Posterior sampling, HMC/NUTS, Polya-Gamma, and inference diagnostics for the gam engine"
 license = "AGPL-3.0-or-later"
 
@@ -26,7 +26,7 @@ rand = "0.10.1"
 rand_core_06 = { package = "rand_core", version = "0.6.4" }
 polya-gamma = { version = "0.5.3", default-features = false }
 faer = "0.24.0"
-statrs = "0.18.0"
+statrs = "0.19.0"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
 

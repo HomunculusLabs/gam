@@ -2,7 +2,7 @@
 name = "gam-spec"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 description = "Serializable model-spec types for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/SauersML/gam"

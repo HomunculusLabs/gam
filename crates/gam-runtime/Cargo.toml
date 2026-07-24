@@ -2,7 +2,7 @@
 name = "gam-runtime"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 description = "Resource policy, caching, and warm-start runtime foundation for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/SauersML/gam"
@@ -16,7 +16,7 @@ ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 sha2 = "0.11.0"
-sysinfo = { version = "0.38.3", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 thiserror = "2.0.18"
 
 [dev-dependencies]

@@ -5,7 +5,7 @@ edition = "2024"
 description = "Custom-family blockwise carrier and joint-Newton solve for the gam penalized-likelihood engine"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/SauersML/gam"
-rust-version = "1.93"
+rust-version = "1.97"
 
 [lints.rust]
 warnings = "deny"

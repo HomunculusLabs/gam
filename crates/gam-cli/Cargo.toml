@@ -2,7 +2,7 @@
 name = "gam-cli"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 publish = false
 
 [[bin]]
@@ -24,7 +24,7 @@ npyz = { version = "0.9.1", features = ["half"] }
 rand = "0.10.1"
 rayon = "1.12.0"
 serde_json = "1.0.149"
-statrs = "0.18.0"
+statrs = "0.19.0"
 thiserror = "2.0.18"
 
 [dev-dependencies]

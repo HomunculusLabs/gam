@@ -2,7 +2,7 @@
 name = "gam"
 version = "0.3.150"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97"
 autobins = false
 description = "Generalized penalized likelihood engine"
 license = "AGPL-3.0-or-later"
@@ -89,7 +89,7 @@ faer = "0.24.0"
 # persistence (e.g. the #1034 spline-scan smoother state).
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 rand_distr = "0.6.0"
-statrs = "0.18.0"
+statrs = "0.19.0"
 libm = "0.2.16"
 # Foundation crates extracted under #1521. They publish to crates.io as part of
 # the gam family so the published `gam` crate's path dependencies resolve to real
