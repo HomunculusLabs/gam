@@ -604,16 +604,30 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
     // Sweep one group's μ penalty (index `sweep_idx`) over ρ∈[-8,8], holding the
     // other group + intercept at production; measure THAT group's μ-RMSE under
     // both frozen-σ̂ and truth-σ weights.
+    // The window has to be wide enough on the UPPER side to actually flatten the
+    // swept block, otherwise a curve that never leaves the under-smoothed regime
+    // reads as "flat ⇒ no smoothing level helps ⇒ representation floor" when it
+    // is really "the sweep never reached the smoothing levels that matter".
+    // λ̂_{μ,A} is O(1e-2) here, so the old ρ_hi=+8 only reached λ≈4e1 — the block
+    // was still spending most of its columns at the top of the window. ρ_hi=+24
+    // takes λ̂·e^24 ≈ 3e8, which drives the block onto its penalty null space, so
+    // the curve is guaranteed to contain both branches of the bias/variance U.
+    //
+    // Each printed row carries the swept group's edf at that ρ, because edf is
+    // what discriminates the two readings: a genuine representation floor is
+    // flat in RMSE *while edf moves*, whereas a too-narrow window is flat in
+    // RMSE *because edf does not move*. Without it the flat curve is ambiguous.
     let sweep_mu = |group: &str,
                     sweep_idx: usize,
+                    cols: &[usize],
                     rmse_of: &dyn Fn(&Array1<f64>) -> f64|
      -> (f64, f64, f64, f64) {
-        let n_grid = 65usize;
-        let (rho_lo, rho_hi) = (-8.0, 8.0);
+        let n_grid = 129usize;
+        let (rho_lo, rho_hi) = (-8.0, 24.0);
         let mut best_hat = (f64::INFINITY, 0.0f64);
         let mut best_true = (f64::INFINITY, 0.0f64);
         eprintln!(
-            "[zz1561:bygroup] μ sweep group {group} (λ_{{μ,{group}}} scaled):  rho | frozen-σ̂ rmse | truth-σ rmse"
+            "[zz1561:bygroup] μ sweep group {group} (λ_{{μ,{group}}} scaled):  rho | edf_{group} | frozen-σ̂ rmse | truth-σ rmse"
         );
         for g in 0..n_grid {
             let rho = rho_lo + (rho_hi - rho_lo) * (g as f64) / ((n_grid - 1) as f64);
@@ -631,16 +645,21 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
                 best_true = (rt, rho);
             }
             if g % 4 == 0 || g == n_grid - 1 {
-                eprintln!("[zz1561:bygroup]   {group} {rho:6.2} |  {rh:.5}  |  {rt:.5}");
+                let mut penalized = xtwx_hat.clone();
+                penalized += &mu_penalty(&scale);
+                let edf = ainv_b_diag_sum(&chol_with_jitter(&penalized), &xtwx_hat, cols);
+                eprintln!(
+                    "[zz1561:bygroup]   {group} {rho:6.2} | {edf:7.3} |  {rh:.5}  |  {rt:.5}"
+                );
             }
         }
         (best_hat.1, best_hat.0, best_true.1, best_true.0)
     };
 
     let (rho_a_hat, rmse_a_hat, rho_a_true, rmse_a_true) =
-        sweep_mu("A", mu_a_idx, &grid_mu_rmse_a);
+        sweep_mu("A", mu_a_idx, &mu_a_cols, &grid_mu_rmse_a);
     let (rho_b_hat, rmse_b_hat, rho_b_true, rmse_b_true) =
-        sweep_mu("B", mu_b_idx, &grid_mu_rmse_b);
+        sweep_mu("B", mu_b_idx, &mu_b_cols, &grid_mu_rmse_b);
 
     let verdict_mu = |rho_star: f64, gain_rel: f64| -> &'static str {
         if rho_star.abs() < 0.75 || gain_rel < 0.05 {
@@ -751,8 +770,10 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
                      sweep_idx: usize,
                      rmse_of: &dyn Fn(&Array1<f64>) -> f64|
      -> (f64, f64) {
-        let n_grid = 65usize;
-        let (rho_lo, rho_hi) = (-8.0, 8.0);
+        // Same widened upper bound as the μ sweep: the σ block has to be driven
+        // onto its null space inside the window or a flat curve is unreadable.
+        let n_grid = 129usize;
+        let (rho_lo, rho_hi) = (-8.0, 24.0);
         let mut best = (f64::INFINITY, 0.0f64);
         eprintln!(
             "[zz1561:bygroup] σ sweep group {group} (λ_{{σ,{group}}} scaled):  rho | logσ-rmse"
