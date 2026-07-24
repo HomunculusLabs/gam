@@ -50,7 +50,7 @@ fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync + 'static>(
 fn test_design_hyper_layout(
     derivative_blocks: Vec<Vec<CustomFamilyBlockPsiDerivative>>,
 ) -> CustomFamilyHyperLayout {
-    let axis_count = derivative_blocks.iter().map(Vec::len).sum();
+    let axis_count = derivative_blocks.iter().map(Vec::len).sum::<usize>();
     CustomFamilyHyperLayout::new(
         derivative_blocks,
         Vec::new(),
