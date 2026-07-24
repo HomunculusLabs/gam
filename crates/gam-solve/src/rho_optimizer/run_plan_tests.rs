@@ -3978,25 +3978,51 @@ fn plan_hybrid_efs_selected_few_params() {
 }
 
 #[test]
-fn plan_exact_hvp_capability_selects_arc_even_when_fixed_point_is_available() {
+fn declared_second_order_capability_outranks_an_available_fixed_point() {
     // Large spatial/custom-family problems may also expose EFS/HybridEFS
-    // fixed-point traces, but an explicit dense Hessian or exact HVP
-    // operator is stronger geometry. The planner must therefore select
-    // ARC + Analytic rather than cost-demoting to BFGS/EFS when the
-    // evaluator advertises second-order capability.
-    let cap = OuterCapability {
+    // fixed-point traces, but an explicit dense Hessian or exact HVP operator
+    // is stronger geometry: `fixed_point_available` must never demote a
+    // declared second-order capability to the fixed-point solver.
+    //
+    // #2359 (`28502ae9f`) split WHERE that geometry is spent, and this test
+    // states the invariant on both sides of that split. The generic REML/LAML
+    // Hessian consumes the row-family derivative ladder through order four
+    // while its analytic gradient stops at order three, so an evaluator that
+    // sets `prefer_gradient_only` is declaring "reserve order four for the one
+    // terminal mint certificate" — search then runs analytic-gradient BFGS.
+    // That is a choice between second-order SEARCH and second-order MINT. It is
+    // never a demotion to `Efs`/`HybridEfs`, which is what an available fixed
+    // point would otherwise pull the plan toward.
+    let second_order_search = OuterCapability {
         gradient: Derivative::Analytic,
         hessian: DeclaredHessianForm::Either,
         n_params: 64,
         psi_dim: 16,
         fixed_point_available: true,
         barrier_config: None,
-        prefer_gradient_only: true,
+        prefer_gradient_only: false,
         disable_fixed_point: false,
     };
-    let p = plan(&cap);
-    assert_eq!(p.solver, Solver::Arc);
+    let p = plan(&second_order_search);
+    assert_eq!(
+        p.solver,
+        Solver::Arc,
+        "an exact HVP/dense Hessian outranks the fixed-point trace during search"
+    );
     assert_eq!(p.hessian_source, HessianSource::Analytic);
+
+    let order_four_reserved = OuterCapability {
+        prefer_gradient_only: true,
+        ..second_order_search
+    };
+    let p = plan(&order_four_reserved);
+    assert_eq!(
+        p.solver,
+        Solver::Bfgs,
+        "reserving order four for mint searches with the analytic gradient (#2359), \
+         and still does not fall back to the fixed point"
+    );
+    assert_eq!(p.hessian_source, HessianSource::BfgsApprox);
 }
 
 #[test]
