@@ -1879,14 +1879,27 @@ pub(crate) fn run_outer_with_plan(
         // A refusal here is terminal by design: the run does not fall back to a
         // runner-up, because that would spend order four a second time and the
         // contract is that a failed mint audit is still one-shot.
-        let mint_certificate = certify_outer_optimality_with_fidelity(
-            obj,
-            config,
-            context,
-            &mut result,
-            CertificationFidelity::Mint,
-        )?;
-        result.criterion_certificate = Some(mint_certificate);
+        //
+        // …but ONLY when there is an order to escalate to. The screening pass
+        // and the mint pass differ in exactly one respect — whether the terminal
+        // evaluation is allowed to request `ValueGradientHessian` — so when the
+        // objective declares no analytic Hessian the two are the SAME
+        // computation, and re-running it is pure duplication: a second terminal
+        // re-evaluation of the same ρ, a second same-ρ value-agreement audit,
+        // and on the EFS route a second `certify_fixed_point_optimality`. The
+        // screening certificate already IS the mint certificate there, so keep
+        // it. Measured: without this guard the EFS mock's terminal value audits
+        // went from 2 to 3.
+        if cap.hessian.is_analytic() {
+            let mint_certificate = certify_outer_optimality_with_fidelity(
+                obj,
+                config,
+                context,
+                &mut result,
+                CertificationFidelity::Mint,
+            )?;
+            result.criterion_certificate = Some(mint_certificate);
+        }
         // The finalize evaluation re-installs the selected outer result by
         // re-running the inner P-IRLS at θ̂. During the outer search the ARC /
         // BFGS bridge schedule throttles `RemlState::outer_inner_cap` down to a
