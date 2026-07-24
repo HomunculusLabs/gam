@@ -3997,7 +3997,7 @@ mod tests {
         }
     }
 
-    fn spec_with_callback(
+    fn penalized_spec_with_callback(
         name: &str,
         n: usize,
         p: usize,
@@ -4009,9 +4009,14 @@ mod tests {
                 gam_linalg::matrix::DenseDesignMatrix::from(Array2::<f64>::zeros((n, p))),
             ),
             offset: ndarray::Array1::<f64>::zeros(n),
-            penalties: Vec::new(),
-            nullspace_dims: Vec::new(),
-            initial_log_lambdas: ndarray::Array1::<f64>::zeros(0),
+            // The fixture isolates structural column selection, so make the
+            // synthetic posterior proper without changing its Jacobian
+            // geometry. Leaving S=0 makes the later MAP-uniqueness gate
+            // correctly refuse the intentionally rank-deficient raw carrier
+            // before the test can inspect the canonical gauge.
+            penalties: vec![gam_problem::PenaltyMatrix::Dense(Array2::eye(p))],
+            nullspace_dims: vec![0],
+            initial_log_lambdas: ndarray::Array1::<f64>::zeros(1),
             initial_beta: None,
             gauge_priority: 100,
             jacobian_callback: Some(cb),
@@ -4106,8 +4111,8 @@ mod tests {
             p,
         });
         let specs = vec![
-            spec_with_callback("time_cause_1", n, p, cb1),
-            spec_with_callback("time_cause_2", n, p, cb2),
+            penalized_spec_with_callback("time_cause_1", n, p, cb1),
+            penalized_spec_with_callback("time_cause_2", n, p, cb2),
         ];
 
         // The true joint rank of the channel-major stacked design [J1 | J2].
