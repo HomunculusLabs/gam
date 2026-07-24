@@ -2214,9 +2214,15 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // the same first-order evidence the no-analytic-Hessian path already
     // certifies on, so the multi-start keeps its filter without building the
     // order-four family tower once per seed.
-    let order = if capability.hessian.is_analytic()
-        && matches!(fidelity, CertificationFidelity::Mint)
-    {
+    // One boolean drives BOTH the request below and the requirement at the
+    // analytic-Hessian block: a pass that does not ask for curvature must not
+    // then refuse the candidate for not supplying it. Splitting them made every
+    // screened candidate of an analytic-Hessian objective fail certification
+    // with "declared analytic curvature but returned none at the final point" —
+    // a statement about this pass's own eval order, not about the candidate.
+    let wants_analytic_hessian =
+        capability.hessian.is_analytic() && matches!(fidelity, CertificationFidelity::Mint);
+    let order = if wants_analytic_hessian {
         OuterEvalOrder::ValueGradientHessian
     } else {
         OuterEvalOrder::ValueAndGradient
@@ -2333,7 +2339,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     result.final_gradient = Some(evaluation.gradient);
     result.converged = false;
 
-    let analytic_hessian = if capability.hessian.is_analytic() {
+    let analytic_hessian = if wants_analytic_hessian {
         match evaluation.hessian.materialize_dense() {
             Ok(Some(hessian)) => {
                 layout
