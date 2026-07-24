@@ -901,6 +901,9 @@ fn keep_positive_eigenspace(
     // scale. Return the RAW eigenvectors (top-`rank` by descending raw
     // eigenvalue), so blocks already ranked correctly are byte-identical — only
     // stiff-direction-mislabeled blocks gain their true rank.
+    // Problem-size factor shared by the equilibrated rank cutoff and the raw
+    // absorption floor below, so the two stay in the same currency.
+    let nk = (n.saturating_mul(k)).max(p).max(1) as f64;
     let rank = {
         // Diagonally equilibrate into the column-scale gauge (Sylvester's law of
         // inertia: the congruence preserves rank), then take the count from the
@@ -910,7 +913,6 @@ fn keep_positive_eigenspace(
             CompilerError::LinalgFailure(format!("equilibrated residual Gram eigh failed: {err:?}"))
         })?;
         let lambda_max_eq = evals_eq.iter().cloned().fold(0.0_f64, f64::max).max(0.0);
-        let nk = (n.saturating_mul(k)).max(p).max(1) as f64;
         let tau_eq = lambda_max_eq * RANK_REVEAL_EPS_SLACK * nk * f64::EPSILON;
         // Threshold count the pipeline has always acted on: the decision we must
         // preserve exactly.
@@ -943,13 +945,45 @@ fn keep_positive_eigenspace(
         }
     };
 
-    // Top-`rank` RAW eigenvectors by descending raw eigenvalue (stable order).
+    // ABSORPTION FLOOR, in the RAW gauge. Equilibration is scale-invariant by
+    // construction — that is exactly why it fixes the stiff-direction case — and
+    // that same invariance makes it blind to a block that carries no residual at
+    // all. When block `b` is fully absorbed by a higher-priority anchor its
+    // residual Gram is pure roundoff, `O(ε²·tr(G_BB))` in EVERY direction;
+    // dividing each column by its own `√diag` turns that noise into a
+    // correlation matrix with unit diagonal and `O(1)` eigenvalues, so a cutoff
+    // relative to `λ_max(G_eq)` admits all of it and the block is reported
+    // `Independent`. This function's own contract already says the tolerance is
+    // relative to `max(λ_max(G̃), tr(G_BB))`; the `tr(G_BB)` half was what the
+    // equilibrated count dropped.
+    //
+    // Restore it as an absolute admission test rather than by inflating `τ_eq`:
+    // a direction is genuine only if its residual NORM clears the roundoff of
+    // the ORIGINAL block norm, i.e. `√(λ_raw / tr(G_BB)) > SLACK·n·K·ε`. The
+    // floor is therefore the SQUARE of the usual rank tolerance, because a Gram
+    // is the square of the residual it is built from. That separates the two
+    // regimes by orders of magnitude in both directions and does not re-open the
+    // stiff case: a fully absorbed block sits at `λ_raw/tr ≈ ε² ≈ 5e-32`, while
+    // the marginal-slope effective Jacobian's smallest GENUINE direction sat at
+    // `2.3e-3 / 7.5e15 ≈ 3e-19` — seven orders above this floor and seven below
+    // where a raw λ_max-relative cutoff would have killed it.
+    //
+    // Blocks where the floor does not bind are untouched, so every already-ranked
+    // block keeps its exact previous basis.
+    let raw_absorption_floor = {
+        let rel = RANK_REVEAL_EPS_SLACK * nk * f64::EPSILON;
+        g_bb_trace * rel * rel
+    };
+
+    // Top-`rank` RAW eigenvectors by descending raw eigenvalue (stable order),
+    // restricted to those clearing the absorption floor.
     let mut kept: Vec<usize> = (0..p).collect();
     kept.sort_by(|&a, &b| {
         evals[b]
             .partial_cmp(&evals[a])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    kept.retain(|&i| evals[i] > raw_absorption_floor);
     kept.truncate(rank);
     let mut v = Array2::<f64>::zeros((p, kept.len()));
     for (out_col, &src_col) in kept.iter().enumerate() {
