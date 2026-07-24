@@ -4,7 +4,7 @@ use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerCholesky, FaerLinalgError, FaerSvd, array1_to_col_matmut,
 };
-use gam_linalg::utils::{StableSolver, array_is_finite, boundary_hit_step_fraction};
+use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite, boundary_hit_step_fraction};
 use gam_problem::{
     ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, LinearInequalityConstraints,
 };
@@ -1208,6 +1208,95 @@ fn scaled_constraint_slack(
     }
 }
 
+struct KktEqualityResidualCertificate {
+    worst_row: usize,
+    residual: f64,
+    allowed: f64,
+}
+
+impl KktEqualityResidualCertificate {
+    fn is_certified(&self) -> bool {
+        self.residual.is_finite() && self.allowed.is_finite() && self.residual <= self.allowed
+    }
+}
+
+/// Certify the equality block of a bordered KKT solve in the geometry in which
+/// the active rows were assembled.
+///
+/// The bottom block is `a_i' d = r_i`. Its representable residual is governed
+/// by the standard length-`p` dot-product roundoff bound
+///
+/// `gamma_(p+1) * (sum_j |a_ij d_j| + |r_i|)`,
+///
+/// where the extra operation is the final subtraction. This is a forward
+/// equality certificate, not only the normwise backward-error certificate for
+/// the whole (potentially very stiff) saddle system: an O(1e-8) equality drift
+/// can be backward-stable against a huge Hessian block while still moving the
+/// constrained quadratic by O(1e-3).
+fn certify_kkt_active_equalities(
+    kkt: &Array2<f64>,
+    rhs: &Array1<f64>,
+    solution: &Array1<f64>,
+    p: usize,
+    m: usize,
+) -> KktEqualityResidualCertificate {
+    let operations = p.saturating_add(1).max(1);
+    let roundoff = operations as f64 * f64::EPSILON;
+    let gamma = roundoff / (1.0 - roundoff);
+    let mut worst = KktEqualityResidualCertificate {
+        worst_row: 0,
+        residual: 0.0,
+        allowed: f64::MIN_POSITIVE,
+    };
+    let mut worst_ratio = 0.0_f64;
+    for active_row in 0..m {
+        let row = p + active_row;
+        let mut dot = KahanSum::default();
+        let mut magnitude = KahanSum::default();
+        for column in 0..p {
+            let product = kkt[[row, column]] * solution[column];
+            dot.add(product);
+            magnitude.add(product.abs());
+        }
+        let residual = (rhs[row] - dot.sum()).abs();
+        let allowed = (gamma * (magnitude.sum() + rhs[row].abs())).max(f64::MIN_POSITIVE);
+        if !residual.is_finite() || !allowed.is_finite() {
+            return KktEqualityResidualCertificate {
+                worst_row: active_row,
+                residual,
+                allowed,
+            };
+        }
+        let ratio = residual / allowed;
+        if ratio > worst_ratio {
+            worst_ratio = ratio;
+            worst = KktEqualityResidualCertificate {
+                worst_row: active_row,
+                residual,
+                allowed,
+            };
+        }
+    }
+    worst
+}
+
+/// Compute `rhs - matrix * solution` with compensated row reductions. This is
+/// used once for a KKT defect-correction pass; the factorization is reused, and
+/// no perturbed matrix or alternative estimator is introduced.
+fn compensated_linear_residual(
+    matrix: &Array2<f64>,
+    rhs: &Array1<f64>,
+    solution: &Array1<f64>,
+) -> Array1<f64> {
+    Array1::from_shape_fn(matrix.nrows(), |row| {
+        let mut dot = KahanSum::default();
+        for column in 0..matrix.ncols() {
+            dot.add(matrix[[row, column]] * solution[column]);
+        }
+        rhs[row] - dot.sum()
+    })
+}
+
 pub(crate) fn solve_kkt_direction(
     hessian: &Array2<f64>,
     gradient: &Array1<f64>,
@@ -1255,6 +1344,43 @@ pub(crate) fn solve_kkt_direction(
     factor.solve_in_place(rhs_col.as_mut());
     if !rhs.iter().all(|v| v.is_finite()) {
         solve_dense_system_via_pseudoinverse(&kkt, &rhs_target, &mut rhs)?;
+    }
+    let initial_certificate = certify_kkt_active_equalities(&kkt, &rhs_target, &rhs, p, m);
+    if !initial_certificate.is_certified() {
+        // One classical defect-correction step against the SAME bordered
+        // factor. A backward-stable direct solve normally reaches the
+        // dot-product floor after this pass. If it does not, the KKT system
+        // cannot represent the requested active face accurately enough and
+        // must refuse rather than mint a tolerance-feasible endpoint whose
+        // quadratic value is materially wrong.
+        let mut correction = compensated_linear_residual(&kkt, &rhs_target, &rhs);
+        let mut correction_col = array1_to_col_matmut(&mut correction);
+        factor.solve_in_place(correction_col.as_mut());
+        if !correction.iter().all(|value| value.is_finite()) {
+            return Err(EstimationError::ParameterConstraintViolation(format!(
+                "bordered KKT defect correction produced a non-finite value \
+                 (active_row={}, residual={:.3e}, roundoff_bound={:.3e})",
+                initial_certificate.worst_row,
+                initial_certificate.residual,
+                initial_certificate.allowed,
+            )));
+        }
+        rhs += &correction;
+        let refined_certificate = certify_kkt_active_equalities(&kkt, &rhs_target, &rhs, p, m);
+        if !refined_certificate.is_certified() {
+            return Err(EstimationError::ParameterConstraintViolation(format!(
+                "bordered KKT active equality is unresolved after residual correction \
+                 (active_row={}, residual={:.3e}, roundoff_bound={:.3e}; \
+                 initial_active_row={}, initial_residual={:.3e}, \
+                 initial_roundoff_bound={:.3e})",
+                refined_certificate.worst_row,
+                refined_certificate.residual,
+                refined_certificate.allowed,
+                initial_certificate.worst_row,
+                initial_certificate.residual,
+                initial_certificate.allowed,
+            )));
+        }
     }
     let d = rhs.slice(s![0..p]).to_owned();
     let lambda = rhs.slice(s![p..(p + m)]).to_owned();
@@ -4258,19 +4384,21 @@ pub fn solve_quadratic_with_linear_constraints(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintSet,
-        ConstraintRowId, ConstraintSetOps, ConstraintSetReducedFace, LinearInequalityConstraints,
-        active_set_boundary_hit_step_fraction, compute_constraint_kkt_diagnostics,
-        constraint_set_rows_tight_at_point, fallback_projected_gradient_direction,
-        khatri_rao_cone_reduced_face,
-        fallback_projected_gradient_direction_with_constraint_set, moreau_projection_via_primal_qp,
-        nonnegative_cone_multipliers, project_point_strictly_into_feasible_cone,
+        ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId,
+        ConstraintSet, ConstraintSetOps, ConstraintSetReducedFace, LinearInequalityConstraints,
+        active_set_boundary_hit_step_fraction, certify_kkt_active_equalities,
+        compute_constraint_kkt_diagnostics, constraint_set_rows_tight_at_point,
+        fallback_projected_gradient_direction,
+        fallback_projected_gradient_direction_with_constraint_set, khatri_rao_cone_reduced_face,
+        moreau_projection_via_primal_qp, nonnegative_cone_multipliers,
+        project_point_strictly_into_feasible_cone,
         project_point_strictly_into_feasible_constraint_set,
         project_stationarity_residual_on_constraint_cone,
         project_stationarity_residual_on_constraint_set,
         rank_reduce_rows_pivoted_qr_with_dependence, record_active_working_set,
-        scaled_constraint_slack, solve_newton_direction_with_linear_constraints_impl,
-        solve_quadratic_with_constraint_set, solve_quadratic_with_linear_constraints,
+        scaled_constraint_slack, solve_kkt_direction,
+        solve_newton_direction_with_linear_constraints_impl, solve_quadratic_with_constraint_set,
+        solve_quadratic_with_linear_constraints,
     };
     use approx::assert_relative_eq;
     use gam_problem::KhatriRaoConeConstraints;
@@ -4305,6 +4433,53 @@ mod tests {
         let blocked = active_set_boundary_hit_step_fraction(-2.5e-15, -1.0, 1.0)
             .expect("an at-boundary outward-moving row must block");
         assert_eq!(blocked, 0.0);
+    }
+
+    #[test]
+    fn kkt_equality_certificate_rejects_public_tolerance_band_drift() {
+        // The #979 production endpoint was accepted by the public 1e-8 primal
+        // gate while carrying this much active-equality drift. Against a
+        // unit-normalized KKT row, that is many orders above representational
+        // roundoff and must not seed the next reduced-face quadratic.
+        let p = 2usize;
+        let m = 1usize;
+        let kkt = array![[1.0e16, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0],];
+        let rhs = array![0.0, 0.0, 0.0];
+        let solution = array![8.604942e-9, 0.0, 0.0];
+        let certificate = certify_kkt_active_equalities(&kkt, &rhs, &solution, p, m);
+        assert!(
+            !certificate.is_certified(),
+            "a tolerance-band endpoint is not a roundoff-resolved active equality"
+        );
+        assert_eq!(certificate.worst_row, 0);
+        assert_relative_eq!(certificate.residual, 8.604942e-9, epsilon = 0.0);
+        assert!(certificate.residual > 1.0e6 * certificate.allowed);
+    }
+
+    #[test]
+    fn stiff_bordered_kkt_returns_roundoff_resolved_active_equality() {
+        // A strongly anisotropic SPD metric coupled to an oblique equality.
+        // Normwise backward stability against the 1e16 Hessian entry alone is
+        // insufficient: the active equality itself must resolve to its
+        // length-p dot-product floor.
+        let hessian = array![[1.0e16, 1.0e8], [1.0e8, 2.0]];
+        let gradient = array![1.0e8, -3.0];
+        let active_a = array![[0.6, 0.8]];
+        let active_residual = array![1.0e-4];
+        let (direction, multiplier) =
+            solve_kkt_direction(&hessian, &gradient, &active_a, Some(&active_residual))
+                .expect("stiff bordered KKT solve");
+
+        let kkt = array![[1.0e16, 1.0e8, 0.6], [1.0e8, 2.0, 0.8], [0.6, 0.8, 0.0],];
+        let rhs = array![-1.0e8, 3.0, 1.0e-4];
+        let solution = array![direction[0], direction[1], multiplier[0]];
+        let certificate = certify_kkt_active_equalities(&kkt, &rhs, &solution, 2, 1);
+        assert!(
+            certificate.is_certified(),
+            "active equality residual {:.3e} exceeds its roundoff bound {:.3e}",
+            certificate.residual,
+            certificate.allowed,
+        );
     }
 
     #[test]
