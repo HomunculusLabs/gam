@@ -933,7 +933,11 @@ pub(crate) fn run_outer_with_plan(
                     cost_stall_guard.observe_second_order_seed(
                         &seed,
                         seed_eval.cost,
-                        projected_gradient_norm(
+                        // Same rail-relaxed box the guard's later observations
+                        // and the terminal certificate use (#2412); a seed that
+                        // starts on a rail must not be scored against a
+                        // different box than the iterates that follow it.
+                        rail_projected_gradient_norm(
                             &seed,
                             &seed_eval.gradient,
                             Some(&(lo.clone(), hi.clone())),

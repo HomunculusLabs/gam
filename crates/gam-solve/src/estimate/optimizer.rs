@@ -1452,7 +1452,11 @@ where
 
             let rho_lower = Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND);
             let rho_upper = Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND);
-            let rho_residual = crate::rho_optimizer::projected_gradient_norm(
+            // Judged against `certificate.stationarity.bound()` just below, so
+            // it must be projected against the box that certificate used
+            // (#2412) — otherwise a railed coordinate's outward pull is scored
+            // against a bound derived without it.
+            let rho_residual = crate::rho_optimizer::rail_projected_gradient_norm(
                 &final_rho,
                 &rho_gradient,
                 Some(&(rho_lower, rho_upper)),
@@ -2058,7 +2062,9 @@ where
         let (value, gradient) = reml_state.compute_cost_and_gradient(&final_rho)?;
         let lower = Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND);
         let upper = Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND);
-        let projected = crate::rho_optimizer::projected_gradient_norm(
+        // Compared against the certificate's own stationarity bound below, so
+        // it shares the certificate's rail-relaxed box (#2412).
+        let projected = crate::rho_optimizer::rail_projected_gradient_norm(
             &final_rho,
             &gradient,
             Some(&(lower, upper)),

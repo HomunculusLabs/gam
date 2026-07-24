@@ -1432,8 +1432,12 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
             // persistent out-of-bounds ∂V/∂ρ that inflates the raw norm forever
             // and otherwise blocks the converged verdict (#1082). The raw
             // `g_norm` is kept for the inner-cap schedule / logging.
+            // Measured against the rail-relaxed box, the same one the terminal
+            // certificate uses (#2412): a coordinate creeping onto the ceiling
+            // must not keep an outward pull here that certification discards,
+            // or the guard never reaches the verdict certification would give.
             let projected_g_norm =
-                projected_gradient_norm(x, &gradient, self.cost_stall_bounds.as_ref());
+                rail_projected_gradient_norm(x, &gradient, self.cost_stall_bounds.as_ref());
             match guard.observe(x, eval.cost, projected_g_norm, inner_converged) {
                 CostStallVerdict::Continue => {}
                 CostStallVerdict::StuckKeepDescending {
@@ -1909,7 +1913,12 @@ impl OuterSecondOrderBridge<'_> {
         let Some(guard) = self.cost_stall.as_mut() else {
             return;
         };
-        let projected_g_norm = projected_gradient_norm(x, gradient, bounds.as_ref());
+        // Rail-relaxed box (#2412) — see the first-order bridge's matching
+        // read. `separation_bound_stationary` above deliberately keeps the raw
+        // box: it counts coordinates pinned at the LOWER bound for the
+        // λ→0 separation fast-path (#1082/#1237), which is a different question
+        // from whether a residual is stationary.
+        let projected_g_norm = rail_projected_gradient_norm(x, gradient, bounds.as_ref());
         let verdict = if separation_bound_stationary {
             // #1426: certify the constrained-stationary fast-path with the REAL
             // bound-projected gradient norm, not a hardcoded 0.0. The projection
@@ -2431,6 +2440,74 @@ pub(crate) fn projected_gradient_norm(
         .map(|v| v * v)
         .sum::<f64>()
         .sqrt()
+}
+
+/// The search box relaxed inward by [`CERTIFICATE_RAIL_MARGIN`] — the box a
+/// projected *stationarity residual* must be measured against.
+///
+/// A penalty creeping toward the ±rho_bound infinite-smoothing ceiling never
+/// reaches it exactly: each outer step only shrinks the gap, so it lands
+/// strictly inside the box (the #2299 checkpoint sat at ρ=29.9938, not 30).
+/// The rail detector flags such a coordinate railed by margin, but the exact
+/// `x >= upper` / `x <= lower` test in [`project_gradient_vector`] reads it as
+/// interior and keeps its outward pull in the residual.
+///
+/// That disagreement is only safe if both layers make it. They did not: the
+/// terminal certificate relaxed the box (#2299) while every consumer inside
+/// the search projected against the raw one, so the cost-stall guard measured
+/// a residual the certificate would have discarded, never reached a stationary
+/// verdict, and let the solver run to its iteration cap on points the
+/// certificate goes on to accept (#2412). Route every projected-residual
+/// consumer through this one box so "railed" means one thing.
+///
+/// Relaxing cannot certify a non-optimum: [`project_gradient_vector`] zeros
+/// only the OUTWARD half (`.max(0.0)` / `.min(0.0)`), so a near-bound
+/// coordinate that still has feasible-descent gradient keeps it and still
+/// registers as a stationarity residual.
+/// The margin is capped at a quarter of each coordinate's own width, so the
+/// relaxed interval always retains at least half the original and the two
+/// endpoints can never cross. Without that cap a box narrower than twice the
+/// margin would invert, making *every* point read as railed at both ends and
+/// zeroing the coordinate's residual outright — a silent false certification on
+/// exactly the tightly-boxed coordinates that most need a real one. A fixed
+/// coordinate (`lower == upper`) gets no relaxation and stays on the exact test.
+pub(crate) fn rail_relaxed_bounds(
+    bounds: &(Array1<f64>, Array1<f64>),
+) -> (Array1<f64>, Array1<f64>) {
+    let (lower, upper) = bounds;
+    let margins: Vec<f64> = lower
+        .iter()
+        .zip(upper.iter())
+        .map(|(lo, hi)| {
+            let quarter_width = (hi - lo) * 0.25;
+            if quarter_width.is_finite() && quarter_width > 0.0 {
+                CERTIFICATE_RAIL_MARGIN.min(quarter_width)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    (
+        Array1::from_iter(lower.iter().zip(&margins).map(|(v, m)| v + m)),
+        Array1::from_iter(upper.iter().zip(&margins).map(|(v, m)| v - m)),
+    )
+}
+
+/// Projected stationarity-residual norm measured against [`rail_relaxed_bounds`].
+///
+/// Every comparison of a projected residual against a stationarity bound must
+/// go through here rather than projecting against the raw box, so the search
+/// loop and the terminal certificate cannot disagree about whether a railed
+/// coordinate contributes. Bound-free problems are unaffected.
+pub(crate) fn rail_projected_gradient_norm(
+    x: &Array1<f64>,
+    gradient: &Array1<f64>,
+    bounds: Option<&(Array1<f64>, Array1<f64>)>,
+) -> f64 {
+    match bounds {
+        Some(bounds) => projected_gradient_norm(x, gradient, Some(&rail_relaxed_bounds(bounds))),
+        None => projected_gradient_norm(x, gradient, None),
+    }
 }
 
 /// Apply the same strict-complementarity critical-cone reduction used by the

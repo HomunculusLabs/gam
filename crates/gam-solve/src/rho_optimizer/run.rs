@@ -2274,13 +2274,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // projection only zeros the OUTWARD half (`.max(0.0)`/`.min(0.0)`), so a coordinate near
     // the bound that still has feasible-descent gradient keeps it and is never falsely
     // certified.
-    let rail_projection_bounds = {
-        let (lower, upper) = &bounds;
-        (
-            lower.mapv(|v| v + CERTIFICATE_RAIL_MARGIN),
-            upper.mapv(|v| v - CERTIFICATE_RAIL_MARGIN),
-        )
-    };
+    let rail_projection_bounds = rail_relaxed_bounds(&bounds);
     let grad_norm = evaluation.gradient.dot(&evaluation.gradient).sqrt();
     // The terminal inner coefficients β(ρ̂), published by the REML bridge on
     // every eval (`inner_beta_hint`). Used to scale the estimand tolerance for
