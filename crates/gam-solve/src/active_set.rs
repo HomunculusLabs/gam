@@ -1,8 +1,9 @@
 use crate::estimate::EstimationError;
-use faer::linalg::solvers::{Lblt as FaerLblt, Solve as FaerSolve, SolveLstsq};
+use faer::linalg::solvers::{Solve as FaerSolve, SolveLstsq};
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerCholesky, FaerLinalgError, FaerSvd, array1_to_col_matmut,
+    default_rrqr_rank_alpha, rrqr_nullspace_basis,
 };
 use gam_linalg::utils::{KahanSum, StableSolver, array_is_finite, boundary_hit_step_fraction};
 use gam_problem::{
@@ -1208,20 +1209,20 @@ fn scaled_constraint_slack(
     }
 }
 
-struct KktEqualityResidualCertificate {
+struct ActiveEqualityResidualCertificate {
     worst_row: usize,
     residual: f64,
     allowed: f64,
 }
 
-impl KktEqualityResidualCertificate {
+impl ActiveEqualityResidualCertificate {
     fn is_certified(&self) -> bool {
         self.residual.is_finite() && self.allowed.is_finite() && self.residual <= self.allowed
     }
 }
 
-/// Certify the equality block of a bordered KKT solve in the geometry in which
-/// the active rows were assembled.
+/// Certify an active affine face in the normalized geometry in which it was
+/// solved.
 ///
 /// The bottom block is `a_i' d = r_i`. Its representable residual is governed
 /// by the standard length-`p` dot-product roundoff bound
@@ -1233,35 +1234,35 @@ impl KktEqualityResidualCertificate {
 /// the whole (potentially very stiff) saddle system: an O(1e-8) equality drift
 /// can be backward-stable against a huge Hessian block while still moving the
 /// constrained quadratic by O(1e-3).
-fn certify_kkt_active_equalities(
-    kkt: &Array2<f64>,
+fn certify_active_equalities(
+    active_a: &Array2<f64>,
     rhs: &Array1<f64>,
-    solution: &Array1<f64>,
-    p: usize,
-    m: usize,
-) -> KktEqualityResidualCertificate {
+    direction: &Array1<f64>,
+) -> ActiveEqualityResidualCertificate {
+    let p = active_a.ncols();
+    let m = active_a.nrows();
     let operations = p.saturating_add(1).max(1);
     let roundoff = operations as f64 * f64::EPSILON;
     let gamma = roundoff / (1.0 - roundoff);
-    let mut worst = KktEqualityResidualCertificate {
+    let mut worst = ActiveEqualityResidualCertificate {
         worst_row: 0,
         residual: 0.0,
         allowed: f64::MIN_POSITIVE,
     };
     let mut worst_ratio = 0.0_f64;
     for active_row in 0..m {
-        let row = p + active_row;
         let mut dot = KahanSum::default();
         let mut magnitude = KahanSum::default();
         for column in 0..p {
-            let product = kkt[[row, column]] * solution[column];
+            let product = active_a[[active_row, column]] * direction[column];
             dot.add(product);
             magnitude.add(product.abs());
         }
-        let residual = (rhs[row] - dot.sum()).abs();
-        let allowed = (gamma * (magnitude.sum() + rhs[row].abs())).max(f64::MIN_POSITIVE);
+        let residual = (rhs[active_row] - dot.sum()).abs();
+        let allowed =
+            (gamma * (magnitude.sum() + rhs[active_row].abs())).max(f64::MIN_POSITIVE);
         if !residual.is_finite() || !allowed.is_finite() {
-            return KktEqualityResidualCertificate {
+            return ActiveEqualityResidualCertificate {
                 worst_row: active_row,
                 residual,
                 allowed,
@@ -1270,7 +1271,7 @@ fn certify_kkt_active_equalities(
         let ratio = residual / allowed;
         if ratio > worst_ratio {
             worst_ratio = ratio;
-            worst = KktEqualityResidualCertificate {
+            worst = ActiveEqualityResidualCertificate {
                 worst_row: active_row,
                 residual,
                 allowed,
@@ -1280,23 +1281,75 @@ fn certify_kkt_active_equalities(
     worst
 }
 
-/// Compute `rhs - matrix * solution` with compensated row reductions. This is
-/// used once for a KKT defect-correction pass; the factorization is reused, and
-/// no perturbed matrix or alternative estimator is introduced.
-fn compensated_linear_residual(
-    matrix: &Array2<f64>,
+/// Compute `rhs - A * direction` with compensated row reductions.
+fn compensated_active_residual(
+    active_a: &Array2<f64>,
     rhs: &Array1<f64>,
-    solution: &Array1<f64>,
+    direction: &Array1<f64>,
 ) -> Array1<f64> {
-    Array1::from_shape_fn(matrix.nrows(), |row| {
+    Array1::from_shape_fn(active_a.nrows(), |row| {
         let mut dot = KahanSum::default();
-        for column in 0..matrix.ncols() {
-            dot.add(matrix[[row, column]] * solution[column]);
+        for column in 0..active_a.ncols() {
+            dot.add(active_a[[row, column]] * direction[column]);
         }
         rhs[row] - dot.sum()
     })
 }
 
+fn minimum_norm_from_svd(
+    u: &Array2<f64>,
+    singular: &Array1<f64>,
+    vt: &Array2<f64>,
+    rank: usize,
+    rhs: &Array1<f64>,
+) -> Array1<f64> {
+    let mut solution = Array1::<f64>::zeros(vt.ncols());
+    for index in 0..rank {
+        let coefficient = u.column(index).dot(rhs) / singular[index];
+        solution.scaled_add(coefficient, &vt.row(index));
+    }
+    solution
+}
+
+fn transposed_minimum_norm_from_svd(
+    u: &Array2<f64>,
+    singular: &Array1<f64>,
+    vt: &Array2<f64>,
+    rank: usize,
+    rhs: &Array1<f64>,
+) -> Array1<f64> {
+    let mut solution = Array1::<f64>::zeros(u.nrows());
+    for index in 0..rank {
+        let coefficient = vt.row(index).dot(rhs) / singular[index];
+        solution.scaled_add(coefficient, &u.column(index));
+    }
+    solution
+}
+
+/// Solve the equality-constrained strictly-convex quadratic
+///
+/// `min_d 1/2 d' H d + g' d  subject to A d = r`
+///
+/// in an orthonormal null-space coordinate system.
+///
+/// The bordered KKT representation `[H A'; A 0]` mixes the scale of a stiff
+/// positive-definite metric with unit-normalized active equations in one
+/// indefinite factor. On the #979 CTN face that finite LBLT answer missed an
+/// active equation by `6.384e-4`, and even its residual-correction solve became
+/// non-finite. The null-space representation never forms that saddle matrix:
+///
+/// * normalize each active equation;
+/// * use a thin SVD `A = U S V'` for a minimum-norm affine point `d_p` and a
+///   rank-revealing Householder QR of `A'` for its full orthonormal null basis
+///   `Z`;
+/// * solve the positive-definite reduced problem
+///   `(Z' H Z) z = -Z' (g + H d_p)`; and
+/// * recover active multipliers from the stationarity equation.
+///
+/// This is algebraically the same constrained minimizer. Rank-deficient active
+/// equations use the RRQR rank consistently in both decompositions; an
+/// inconsistent affine right-hand side is rejected by the forward equality
+/// certificate rather than hidden by a pseudoinverse rank drop.
 pub(crate) fn solve_kkt_direction(
     hessian: &Array2<f64>,
     gradient: &Array1<f64>,
@@ -1306,13 +1359,13 @@ pub(crate) fn solve_kkt_direction(
     let p = hessian.nrows();
     let m = active_a.nrows();
     if hessian.ncols() != p || gradient.len() != p || active_a.ncols() != p {
-        crate::bail_invalid_estim!("KKT solve dimension mismatch");
+        crate::bail_invalid_estim!("null-space constrained solve dimension mismatch");
     }
     if let Some(residual) = active_residual
         && residual.len() != m
     {
         crate::bail_invalid_estim!(
-            "KKT active residual length mismatch: got {}, expected {}",
+            "active-equality residual length mismatch: got {}, expected {}",
             residual.len(),
             m
         );
@@ -1322,54 +1375,139 @@ pub(crate) fn solve_kkt_direction(
         solve_newton_direction_dense(hessian, gradient, &mut d)?;
         return Ok((d, Array1::zeros(0)));
     }
-    let mut kkt = Array2::<f64>::zeros((p + m, p + m));
-    kkt.slice_mut(s![0..p, 0..p]).assign(hessian);
-    kkt.slice_mut(s![0..p, p..(p + m)]).assign(&active_a.t());
-    kkt.slice_mut(s![p..(p + m), 0..p]).assign(active_a);
 
-    let mut rhs = Array1::<f64>::zeros(p + m);
-    for i in 0..p {
-        rhs[i] = -gradient[i];
-    }
-    if let Some(residual) = active_residual {
-        for i in 0..m {
-            rhs[p + i] = residual[i];
+    let mut scaled_a = active_a.clone();
+    let mut scaled_rhs = active_residual
+        .cloned()
+        .unwrap_or_else(|| Array1::<f64>::zeros(m));
+    let mut row_norms = Array1::<f64>::zeros(m);
+    for row in 0..m {
+        let norm = active_a.row(row).dot(&active_a.row(row)).sqrt();
+        if !(norm.is_finite() && norm > 0.0) {
+            crate::bail_invalid_estim!(
+                "active equality row {row} has invalid norm {norm}"
+            );
         }
+        row_norms[row] = norm;
+        let inverse = 1.0 / norm;
+        scaled_a.row_mut(row).mapv_inplace(|value| value * inverse);
+        scaled_rhs[row] *= inverse;
     }
-    let rhs_target = rhs.clone();
 
-    let kkt_view = FaerArrayView::new(&kkt);
-    let factor = FaerLblt::new(kkt_view.as_ref(), Side::Lower);
-    let mut rhs_col = array1_to_col_matmut(&mut rhs);
-    factor.solve_in_place(rhs_col.as_mut());
-    if !rhs.iter().all(|v| v.is_finite()) {
-        solve_dense_system_via_pseudoinverse(&kkt, &rhs_target, &mut rhs)?;
+    let (u_opt, singular, vt_opt) = scaled_a.svd(true, true).map_err(|_| {
+        EstimationError::InvalidInput(
+            "null-space constrained quadratic active-equation SVD failed".to_string(),
+        )
+    })?;
+    let (Some(u), Some(vt)) = (u_opt, vt_opt) else {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic SVD omitted singular vectors"
+        );
+    };
+    let (mut null_basis, rank) =
+        rrqr_nullspace_basis(&scaled_a.t(), default_rrqr_rank_alpha()).map_err(|_| {
+            EstimationError::InvalidInput(
+                "null-space constrained quadratic active-equation RRQR failed".to_string(),
+            )
+        })?;
+    if rank == 0 {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic active equations have numerical rank zero"
+        );
     }
-    let initial_certificate = certify_kkt_active_equalities(&kkt, &rhs_target, &rhs, p, m);
+    if rank > singular.len()
+        || !singular[rank - 1].is_finite()
+        || singular[rank - 1] <= 0.0
+    {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic RRQR rank {rank} has no positive SVD pivot"
+        );
+    }
+    let nullity = p.saturating_sub(rank);
+    if null_basis.dim() != (p, nullity) {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic RRQR basis has shape {}x{}, expected {}x{}",
+            null_basis.nrows(),
+            null_basis.ncols(),
+            p,
+            nullity,
+        );
+    }
+    let zero_active_rhs = Array1::<f64>::zeros(m);
+    for column in 0..nullity {
+        let basis_column = null_basis.column(column).to_owned();
+        let residual =
+            compensated_active_residual(&scaled_a, &zero_active_rhs, &basis_column);
+        let correction =
+            minimum_norm_from_svd(&u, &singular, &vt, rank, &residual);
+        null_basis.column_mut(column).scaled_add(1.0, &correction);
+    }
+    if !array_is_finite(&null_basis) {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic refined RRQR basis is non-finite"
+        );
+    }
+
+    let mut particular = minimum_norm_from_svd(&u, &singular, &vt, rank, &scaled_rhs);
+    if !array_is_finite(&particular) {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic affine solution is non-finite"
+        );
+    }
+
+    let initial_affine_residual =
+        compensated_active_residual(&scaled_a, &scaled_rhs, &particular);
+    let affine_correction =
+        minimum_norm_from_svd(&u, &singular, &vt, rank, &initial_affine_residual);
+    particular += &affine_correction;
+
+    let mut direction = particular.clone();
+    if nullity > 0 {
+        let mut reduced_hessian = null_basis.t().dot(hessian).dot(&null_basis);
+        for row in 0..nullity {
+            for column in (row + 1)..nullity {
+                let average =
+                    0.5 * (reduced_hessian[[row, column]] + reduced_hessian[[column, row]]);
+                reduced_hessian[[row, column]] = average;
+                reduced_hessian[[column, row]] = average;
+            }
+        }
+        let affine_gradient = gradient + &hessian.dot(&particular);
+        let reduced_rhs = -null_basis.t().dot(&affine_gradient);
+        let factor = reduced_hessian
+            .cholesky(Side::Lower)
+            .map_err(EstimationError::LinearSystemSolveFailed)?;
+        let reduced_solution = factor.solvevec(&reduced_rhs);
+        if !array_is_finite(&reduced_solution) {
+            crate::bail_invalid_estim!(
+                "null-space constrained quadratic reduced solve is non-finite"
+            );
+        }
+        direction += &null_basis.dot(&reduced_solution);
+    }
+
+    let initial_certificate =
+        certify_active_equalities(&scaled_a, &scaled_rhs, &direction);
     if !initial_certificate.is_certified() {
-        // One classical defect-correction step against the SAME bordered
-        // factor. A backward-stable direct solve normally reaches the
-        // dot-product floor after this pass. If it does not, the KKT system
-        // cannot represent the requested active face accurately enough and
-        // must refuse rather than mint a tolerance-feasible endpoint whose
-        // quadratic value is materially wrong.
-        let mut correction = compensated_linear_residual(&kkt, &rhs_target, &rhs);
-        let mut correction_col = array1_to_col_matmut(&mut correction);
-        factor.solve_in_place(correction_col.as_mut());
+        let affine_residual =
+            compensated_active_residual(&scaled_a, &scaled_rhs, &direction);
+        let correction =
+            minimum_norm_from_svd(&u, &singular, &vt, rank, &affine_residual);
         if !correction.iter().all(|value| value.is_finite()) {
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "bordered KKT defect correction produced a non-finite value \
+                "null-space active-equality correction produced a non-finite value \
                  (active_row={}, residual={:.3e}, roundoff_bound={:.3e})",
                 initial_certificate.worst_row,
                 initial_certificate.residual,
                 initial_certificate.allowed,
             )));
         }
-        rhs += &correction;
-        let refined_certificate = certify_kkt_active_equalities(&kkt, &rhs_target, &rhs, p, m);
+        direction += &correction;
+        let refined_certificate =
+            certify_active_equalities(&scaled_a, &scaled_rhs, &direction);
         if !refined_certificate.is_certified() {
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "bordered KKT active equality is unresolved after residual correction \
+                "null-space active equality is unresolved after affine correction \
                  (active_row={}, residual={:.3e}, roundoff_bound={:.3e}; \
                  initial_active_row={}, initial_residual={:.3e}, \
                  initial_roundoff_bound={:.3e})",
@@ -1382,9 +1520,17 @@ pub(crate) fn solve_kkt_direction(
             )));
         }
     }
-    let d = rhs.slice(s![0..p]).to_owned();
-    let lambda = rhs.slice(s![p..(p + m)]).to_owned();
-    Ok((d, lambda))
+
+    let stationarity_rhs = -(gradient + &hessian.dot(&direction));
+    let scaled_multiplier =
+        transposed_minimum_norm_from_svd(&u, &singular, &vt, rank, &stationarity_rhs);
+    let multiplier = &scaled_multiplier / &row_norms;
+    if !array_is_finite(&multiplier) {
+        crate::bail_invalid_estim!(
+            "null-space constrained quadratic multiplier recovery is non-finite"
+        );
+    }
+    Ok((direction, multiplier))
 }
 
 #[derive(Clone, Debug)]
@@ -2563,8 +2709,8 @@ fn solve_newton_direction_with_linear_constraints_impl(
         // Scaled (geometric) slack: a row with ‖a_i‖ ≫ 1 (e.g. a B-spline
         // endpoint-derivative clamp at k = 12, ‖a_i‖ ≈ 38) would otherwise
         // require a raw slack of `tol_active·‖a_i‖` ≈ 4e-9 to activate, which
-        // is below LBLT-solve precision on the KKT system and starves the
-        // active set of rows that genuinely belong on the boundary.
+        // falls below an unscaled linear-solve resolution and starves the active
+        // set of rows that genuinely belong on the boundary.
         let slack = scaled_constraint_slack(&x, constraints, i);
         if slack <= tol_active && !is_active[i] {
             active.push(i);
@@ -4045,14 +4191,14 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
 
         let Some(row) = entering else {
             // Row generation uses the fast Schur/Gram system to identify the
-            // passive face. Refine that face ONCE through the bordered KKT
-            // system before certification. This avoids squaring H's condition
-            // number at the equality boundary without refactorizing a
-            // (p+k)-square saddle system for every entering generator. In
-            // particular, do this BEFORE the full primal-feasibility gate:
-            // the fast Gram candidate is only a face-discovery iterate, and
-            // its active equalities can carry exactly the condition-squared
-            // drift that the bordered solve exists to remove.
+            // passive face. Refine that face ONCE in the active equations'
+            // orthonormal null space before certification. This avoids
+            // squaring H's condition number at the equality boundary without
+            // paying an SVD for every entering generator. In particular, do
+            // this BEFORE the full primal-feasibility gate: the fast Gram
+            // candidate is only a face-discovery iterate, and its active
+            // equalities can carry exactly the condition-squared drift that
+            // the null-space solve removes.
             if !conditioned_phase {
                 (candidate, multipliers) = refine_operator_metric_face(
                     hessian,
@@ -4386,7 +4532,7 @@ mod tests {
     use super::{
         ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId,
         ConstraintSet, ConstraintSetOps, ConstraintSetReducedFace, LinearInequalityConstraints,
-        active_set_boundary_hit_step_fraction, certify_kkt_active_equalities,
+        active_set_boundary_hit_step_fraction, certify_active_equalities,
         compute_constraint_kkt_diagnostics, constraint_set_rows_tight_at_point,
         fallback_projected_gradient_direction,
         fallback_projected_gradient_direction_with_constraint_set, khatri_rao_cone_reduced_face,
@@ -4436,17 +4582,15 @@ mod tests {
     }
 
     #[test]
-    fn kkt_equality_certificate_rejects_public_tolerance_band_drift() {
+    fn active_equality_certificate_rejects_public_tolerance_band_drift() {
         // The #979 production endpoint was accepted by the public 1e-8 primal
         // gate while carrying this much active-equality drift. Against a
-        // unit-normalized KKT row, that is many orders above representational
+        // unit-normalized active row, that is many orders above representational
         // roundoff and must not seed the next reduced-face quadratic.
-        let p = 2usize;
-        let m = 1usize;
-        let kkt = array![[1.0e16, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0],];
-        let rhs = array![0.0, 0.0, 0.0];
-        let solution = array![8.604942e-9, 0.0, 0.0];
-        let certificate = certify_kkt_active_equalities(&kkt, &rhs, &solution, p, m);
+        let active_a = array![[1.0, 0.0]];
+        let rhs = array![0.0];
+        let direction = array![8.604942e-9, 0.0];
+        let certificate = certify_active_equalities(&active_a, &rhs, &direction);
         assert!(
             !certificate.is_certified(),
             "a tolerance-band endpoint is not a roundoff-resolved active equality"
@@ -4457,7 +4601,7 @@ mod tests {
     }
 
     #[test]
-    fn stiff_bordered_kkt_returns_roundoff_resolved_active_equality() {
+    fn stiff_null_space_solve_returns_roundoff_resolved_active_equality() {
         // A strongly anisotropic SPD metric coupled to an oblique equality.
         // Normwise backward stability against the 1e16 Hessian entry alone is
         // insufficient: the active equality itself must resolve to its
@@ -4468,18 +4612,42 @@ mod tests {
         let active_residual = array![1.0e-4];
         let (direction, multiplier) =
             solve_kkt_direction(&hessian, &gradient, &active_a, Some(&active_residual))
-                .expect("stiff bordered KKT solve");
+                .expect("stiff null-space constrained solve");
 
-        let kkt = array![[1.0e16, 1.0e8, 0.6], [1.0e8, 2.0, 0.8], [0.6, 0.8, 0.0],];
-        let rhs = array![-1.0e8, 3.0, 1.0e-4];
-        let solution = array![direction[0], direction[1], multiplier[0]];
-        let certificate = certify_kkt_active_equalities(&kkt, &rhs, &solution, 2, 1);
+        let certificate =
+            certify_active_equalities(&active_a, &active_residual, &direction);
         assert!(
             certificate.is_certified(),
             "active equality residual {:.3e} exceeds its roundoff bound {:.3e}",
             certificate.residual,
             certificate.allowed,
         );
+        assert!(multiplier.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn dependent_active_equalities_share_one_null_space() {
+        // Two scaled copies of one equality describe one geometric face. The
+        // SVD must retain that rank-one row space, optimize in its orthogonal
+        // complement, and return a direction satisfying both original rows.
+        let hessian = array![
+            [1.0e12, 0.0, 0.0],
+            [0.0, 3.0, 0.5],
+            [0.0, 0.5, 2.0],
+        ];
+        let gradient = array![2.0e5, -4.0, 1.0];
+        let active_a = array![[1.0, 2.0, 0.0], [2.0, 4.0, 0.0]];
+        let active_residual = array![1.0e-4, 2.0e-4];
+        let (direction, multiplier) =
+            solve_kkt_direction(&hessian, &gradient, &active_a, Some(&active_residual))
+                .expect("rank-deficient active face must have one certified null space");
+
+        let residual = &active_a.dot(&direction) - &active_residual;
+        assert!(
+            residual.iter().all(|value| value.abs() <= 1.0e-14),
+            "dependent active equations were not resolved: {residual:?}"
+        );
+        assert!(multiplier.iter().all(|value| value.is_finite()));
     }
 
     #[test]
