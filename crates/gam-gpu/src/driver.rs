@@ -13,6 +13,7 @@ use libloading::Library;
 use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_NOW};
 use ndarray::{Array2, ArrayBase, Data, Ix2};
 use std::borrow::Cow;
+use std::error::Error as StdError;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
@@ -81,14 +82,11 @@ fn load_library_names(candidates: &[String]) -> Result<Library, GpuError> {
         match unsafe { Library::new(candidate) } {
             Ok(library) => return Ok(library),
             Err(error) => {
+                let detail = library_load_error_detail(&error);
                 let candidate_present = Path::new(candidate).components().count() > 1
                     && std::fs::symlink_metadata(candidate).is_ok();
-                if !load_failure_is_candidate_absence(
-                    candidate,
-                    candidate_present,
-                    &error.to_string(),
-                ) {
-                    load_faults.push(format!("{candidate}: {error}"));
+                if !load_failure_is_candidate_absence(candidate, candidate_present, &detail) {
+                    load_faults.push(format!("{candidate}: {detail}"));
                 }
             }
         }
@@ -104,6 +102,23 @@ fn load_library_names(candidates: &[String]) -> Result<Library, GpuError> {
     Err(GpuError::DriverLibraryUnavailable {
         reason: format!("could not load any of: {}", candidates.join(", ")),
     })
+}
+
+/// Recover the platform loader's actual diagnostic from `libloading`.
+///
+/// `libloading 0.9` deliberately made its top-level `Display` stable and
+/// generic (`"dlopen failed"` / `"LoadLibraryExW failed"`); the `dlerror()` or
+/// Windows loader detail now lives in the standard error source chain. CUDA
+/// admission needs that detail to distinguish a genuinely absent driver from
+/// a present library with an ABI or transitive-dependency fault.
+fn library_load_error_detail(error: &libloading::Error) -> String {
+    let mut detail = error.to_string();
+    let mut source = StdError::source(error);
+    while let Some(cause) = source {
+        detail = cause.to_string();
+        source = cause.source();
+    }
+    detail
 }
 
 /// True only when a failed loader attempt proves that the requested candidate
@@ -154,7 +169,24 @@ pub fn cuda_driver_available() -> Result<bool, GpuError> {
 
 #[cfg(test)]
 mod loader_classification_tests {
-    use super::load_failure_is_candidate_absence;
+    use super::{library_load_error_detail, load_failure_is_candidate_absence};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn libloading_source_preserves_the_missing_bare_soname() {
+        const SONAME: &str = "libgamfit_cuda_driver_absence_probe.so.2411";
+        // SAFETY: this deliberately attempts to open a unique nonexistent
+        // soname and retains no symbols or library handle.
+        let error = match unsafe { libloading::Library::new(SONAME) } {
+            Ok(_) => panic!("the CUDA absence-probe soname unexpectedly exists"),
+            Err(error) => error,
+        };
+        let detail = library_load_error_detail(&error);
+        assert!(
+            load_failure_is_candidate_absence(SONAME, false, &detail),
+            "missing-soname detail was not classified as absence: {detail}"
+        );
+    }
 
     #[test]
     fn missing_bare_soname_is_absence() {
