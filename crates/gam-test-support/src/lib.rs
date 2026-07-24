@@ -37,22 +37,6 @@ pub use gam_problem::test_support::{
     spec_from_dense_with_priority,
 };
 
-/// Assert that a central difference of an array-producing function matches the analytical derivative.
-#[macro_export]
-macro_rules! assert_central_difference_array {
-    ($x:expr, $h:expr, |$var:ident| $eval:expr, $analytical:expr, $tol:expr) => {
-        let f_plus = {
-            let $var = $x + $h;
-            $eval
-        };
-        let f_minus = {
-            let $var = $x - $h;
-            $eval
-        };
-        assert_eq!(f_plus.len(), $analytical.len());
-        for j in 0..$analytical.len() {
-            let fd = (f_plus[j] - f_minus[j]) / (2.0 * $h);
-            approx::assert_abs_diff_eq!(fd, $analytical[j], epsilon = $tol);
-        }
-    };
-}
+// The central-difference macro is `ndarray`-only and expands `approx` at the
+// call site, so it lives in `gam-linalg` with the rest of the FD harness.
+pub use gam_linalg::assert_central_difference_array;

@@ -3351,7 +3351,7 @@ fn test_ispline_derivative_matches_cumulative_bspline_derivative_finite_differen
             d_i[j - 1] = running;
         }
 
-        gam_test_support::assert_central_difference_array!(
+        gam_linalg::assert_central_difference_array!(
             x,
             h,
             |x_eval| {
@@ -3924,7 +3924,7 @@ fn testsecond_derivative_matches_finite_difference() {
     evaluate_bsplinesecond_derivative_scalar(x, knots.view(), degree, &mut d2)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "second derivative", e));
 
-    gam_test_support::assert_central_difference_array!(
+    gam_linalg::assert_central_difference_array!(
         x,
         h,
         |x_eval| {
@@ -3950,7 +3950,7 @@ fn testthird_derivative_matches_finite_difference() {
     evaluate_bsplinethird_derivative_scalar(x, knots.view(), degree, &mut d3)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "third derivative", e));
 
-    gam_test_support::assert_central_difference_array!(
+    gam_linalg::assert_central_difference_array!(
         x,
         h,
         |x_eval| {
@@ -3976,7 +3976,7 @@ fn test_fourth_derivative_matches_finite_difference() {
     evaluate_bspline_fourth_derivative_scalar(x, knots.view(), degree, &mut d4)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "fourth derivative", e));
 
-    gam_test_support::assert_central_difference_array!(
+    gam_linalg::assert_central_difference_array!(
         x,
         h,
         |x_eval| {

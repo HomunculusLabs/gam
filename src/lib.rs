@@ -191,8 +191,10 @@ pub mod terms {
 /// tests under `tests/` keep their `gam::test_support::*` / `gam::gam_binary!`
 /// paths unchanged. The `assert_central_difference_array!` derivative-check
 /// macro is used only by the in-crate `#[cfg(test)]` unit tests, which call it
-/// through its defining-crate path `gam_test_support::assert_central_difference_array!`,
-/// so it is intentionally NOT re-exported onto the non-test public surface.
+/// through its defining-crate path `gam_linalg::assert_central_difference_array!`
+/// (it moved down to the leaf that owns the FD harness so crates needing it no
+/// longer pull the model layer into their test builds), so it is intentionally
+/// NOT re-exported onto the non-test public surface.
 pub use gam_test_support as test_support;
 pub use gam_test_support::gam_binary;
 pub mod types;

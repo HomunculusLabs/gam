@@ -43,3 +43,28 @@ pub mod utils;
 
 pub use error::LinalgError;
 pub use types::{RidgeDeterminantMode, RidgePolicy};
+
+/// Assert that a central difference of an array-producing function matches the
+/// analytical derivative.
+///
+/// Expands `approx::assert_abs_diff_eq!` at the call site, so the caller needs
+/// `approx` in scope; it deliberately does not force that dependency on this
+/// crate's non-test build.
+#[macro_export]
+macro_rules! assert_central_difference_array {
+    ($x:expr, $h:expr, |$var:ident| $eval:expr, $analytical:expr, $tol:expr) => {
+        let f_plus = {
+            let $var = $x + $h;
+            $eval
+        };
+        let f_minus = {
+            let $var = $x - $h;
+            $eval
+        };
+        assert_eq!(f_plus.len(), $analytical.len());
+        for j in 0..$analytical.len() {
+            let fd = (f_plus[j] - f_minus[j]) / (2.0 * $h);
+            approx::assert_abs_diff_eq!(fd, $analytical[j], epsilon = $tol);
+        }
+    };
+}
