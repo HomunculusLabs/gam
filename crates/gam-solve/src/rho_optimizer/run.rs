@@ -2047,11 +2047,40 @@ fn certify_fixed_point_optimality(
 /// substitute for a stationarity certificate. Exact analytic curvature is
 /// checked when the objective declares it and can materialize it; BFGS/EFS
 /// solver geometry is never mistaken for objective curvature.
+/// Which derivative fidelity a certification pass is allowed to spend.
+///
+/// #2359: the generic REML/LAML Hessian consumes the row-family derivative
+/// ladder through order FOUR while its analytic gradient stops at order three,
+/// so order four is a mint-time cost, not a per-candidate one. A multi-start
+/// screens every seed it starts — that screening is a first-order gate
+/// (stationarity, KKT projection, rail facts), and `curvature_admissible()`
+/// reads `hessian_psd != Some(false)`, so a `None` curvature verdict certifies
+/// on stationarity alone. The one order-four evaluation belongs to the winner,
+/// once, and its verdict is the one that mints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CertificationFidelity {
+    /// Per-candidate multi-start gate. Never spends order four.
+    Screening,
+    /// The single terminal mint audit. Spends order four when the objective
+    /// declares an analytic Hessian.
+    Mint,
+}
+
 pub(crate) fn certify_outer_optimality(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
     context: &str,
     result: &mut OuterResult,
+) -> Result<OuterCriterionCertificate, EstimationError> {
+    certify_outer_optimality_with_fidelity(obj, config, context, result, CertificationFidelity::Mint)
+}
+
+pub(crate) fn certify_outer_optimality_with_fidelity(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    context: &str,
+    result: &mut OuterResult,
+    fidelity: CertificationFidelity,
 ) -> Result<OuterCriterionCertificate, EstimationError> {
     let terminal_cap_guard = config
         .outer_inner_cap
@@ -2071,7 +2100,8 @@ pub(crate) fn certify_outer_optimality(
         // bimodal at `rho_star`.
         obj.reset();
     }
-    let outcome = certify_outer_optimality_at_terminal_fidelity(obj, config, context, result, true);
+    let outcome =
+        certify_outer_optimality_at_terminal_fidelity(obj, config, context, result, true, fidelity);
     drop(terminal_cap_guard);
     outcome
 }
@@ -2082,6 +2112,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     context: &str,
     result: &mut OuterResult,
     allow_tail_snap: bool,
+    fidelity: CertificationFidelity,
 ) -> Result<OuterCriterionCertificate, EstimationError> {
     let capability = obj.capability();
     let layout = capability.theta_layout();
@@ -2179,7 +2210,13 @@ fn certify_outer_optimality_at_terminal_fidelity(
         ));
     }
 
-    let order = if capability.hessian.is_analytic() {
+    // Order four is reserved for the mint audit (#2359). A screening pass takes
+    // the same first-order evidence the no-analytic-Hessian path already
+    // certifies on, so the multi-start keeps its filter without building the
+    // order-four family tower once per seed.
+    let order = if capability.hessian.is_analytic()
+        && matches!(fidelity, CertificationFidelity::Mint)
+    {
         OuterEvalOrder::ValueGradientHessian
     } else {
         OuterEvalOrder::ValueAndGradient

@@ -63,7 +63,19 @@ impl CertifiedOuterCandidate {
         context: &str,
         mut candidate: OuterResult,
     ) -> Result<Self, (OuterResult, EstimationError)> {
-        match certify_outer_optimality(obj, config, context, &mut candidate) {
+        // #2359: this is the multi-start's FILTER, not the mint. It spends
+        // first-order evidence only; the single order-four curvature audit is
+        // paid once, on the winner, at the `PlanRunOutcome::Converged` exit
+        // below. A candidate that is stationary but sits on inadmissible
+        // curvature therefore survives screening and is refused at mint, which
+        // is where the one order-four evaluation lives.
+        match certify_outer_optimality_with_fidelity(
+            obj,
+            config,
+            context,
+            &mut candidate,
+            CertificationFidelity::Screening,
+        ) {
             Ok(certificate) => {
                 candidate.criterion_certificate = Some(certificate);
                 Ok(Self(candidate))
@@ -1852,7 +1864,21 @@ pub(crate) fn run_outer_with_plan(
     }
 
     if let Some(certified) = best {
-        let result = certified.into_result();
+        let mut result = certified.into_result();
+        // THE mint audit (#2359). Every candidate above was screened at order
+        // three; the winner — and only the winner — now pays the order-four
+        // derivative-ladder evaluation, and its verdict is the one that mints.
+        // A refusal here is terminal by design: the run does not fall back to a
+        // runner-up, because that would spend order four a second time and the
+        // contract is that a failed mint audit is still one-shot.
+        let mint_certificate = certify_outer_optimality_with_fidelity(
+            obj,
+            config,
+            context,
+            &mut result,
+            CertificationFidelity::Mint,
+        )?;
+        result.criterion_certificate = Some(mint_certificate);
         // The finalize evaluation re-installs the selected outer result by
         // re-running the inner P-IRLS at θ̂. During the outer search the ARC /
         // BFGS bridge schedule throttles `RemlState::outer_inner_cap` down to a
