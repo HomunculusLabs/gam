@@ -3999,14 +3999,15 @@ mod tests {
 
     fn penalized_spec_with_callback(
         name: &str,
-        n: usize,
-        p: usize,
+        design: Array2<f64>,
         cb: Arc<dyn BlockEffectiveJacobian>,
     ) -> ParameterBlockSpec {
+        let n = design.nrows();
+        let p = design.ncols();
         ParameterBlockSpec {
             name: name.to_string(),
             design: gam_linalg::matrix::DesignMatrix::Dense(
-                gam_linalg::matrix::DenseDesignMatrix::from(Array2::<f64>::zeros((n, p))),
+                gam_linalg::matrix::DenseDesignMatrix::from(design),
             ),
             offset: ndarray::Array1::<f64>::zeros(n),
             // The fixture isolates structural column selection, so make the
@@ -4111,8 +4112,16 @@ mod tests {
             p,
         });
         let specs = vec![
-            penalized_spec_with_callback("time_cause_1", n, p, cb1),
-            penalized_spec_with_callback("time_cause_2", n, p, cb2),
+            penalized_spec_with_callback(
+                "time_cause_1",
+                full1.slice(ndarray::s![..n, ..]).to_owned(),
+                cb1,
+            ),
+            penalized_spec_with_callback(
+                "time_cause_2",
+                full2.slice(ndarray::s![..n, ..]).to_owned(),
+                cb2,
+            ),
         ];
 
         // The true joint rank of the channel-major stacked design [J1 | J2].
