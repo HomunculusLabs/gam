@@ -281,6 +281,61 @@ struct SummaryPayload {
     /// the fit carries no coefficient standard errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     coefficient_se_source: Option<String>,
+    /// The convergence certificate the fit itself carries (#2411). `None` only
+    /// for routes that solve no optimizer whose termination could be certified
+    /// (the O(n) spline scan).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    convergence: Option<SummaryConvergence>,
+}
+
+/// How the optimization that produced this fit terminated.
+///
+/// Every field is read from the sealed `FitConvergenceEvidence` the fitted
+/// result owns; nothing here is recomputed. That matters: the evidence object
+/// is the same one the mint gate consulted and the same one `Deserialize`
+/// revalidates on load, so this block cannot drift into disagreeing with the
+/// verdict that allowed the fit to exist.
+#[derive(Serialize)]
+struct SummaryConvergence {
+    /// The verdict the mint gate used. A returned fit always carries a
+    /// certified evidence object, so this is `true` on any model that exists —
+    /// it is reported so consumers can assert on it rather than infer it.
+    certified: bool,
+    /// Terminal status of the certified inner P-IRLS solve.
+    inner_status: String,
+    /// Outer iterations covered by the proof.
+    outer_iterations: usize,
+    /// `None` when no smoothing coordinate was optimized: there is no outer
+    /// stationarity equation to solve, which is a different statement from a
+    /// projected gradient that happened to be zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outer: Option<SummaryOuterCertificate>,
+}
+
+/// The outer (smoothing-parameter) stationarity certificate.
+///
+/// `projected_gradient_norm` and `stationarity_bound` are in the same gauge, so
+/// a consumer can check `projected_gradient_norm <= stationarity_bound`
+/// directly, or impose a tolerance of their own without parsing a log.
+#[derive(Serialize)]
+struct SummaryOuterCertificate {
+    /// Which stationarity equation was certified: `"analytic_gradient"`,
+    /// `"fixed_point"`, or `"asymptote_rail"`. The residual means different
+    /// things across the three, so the kind travels with the numbers.
+    kind: String,
+    /// Unprojected residual norm (gradient norm, fixed-point residual, or the
+    /// interior projected gradient for an asymptote rail).
+    gradient_norm: f64,
+    /// Residual after projecting onto the feasible directions at the optimum.
+    projected_gradient_norm: f64,
+    /// Bound the projected residual had to clear.
+    stationarity_bound: f64,
+    /// Whether the final outer Hessian was positive semidefinite. `None` when
+    /// the solver tracked no final Hessian.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hessian_psd: Option<bool>,
+    /// Smoothing coordinates pinned at a box bound at the optimum.
+    lambdas_railed: Vec<usize>,
 }
 
 #[derive(Serialize)]

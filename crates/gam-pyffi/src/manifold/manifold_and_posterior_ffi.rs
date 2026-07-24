@@ -1618,6 +1618,50 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         // Scan-routed (O(n) 1D spline) models carry no `curv(...)` curvature
         // smooths, so there are no curvature estimands to report.
         curvature_estimands: Vec::new(),
+        // The O(n) smoother solves no inner P-IRLS and no outer stationarity
+        // equation, so there is no termination to certify. Reporting a
+        // fabricated "certified" block here would be the exact confusion
+        // #2411 exists to remove.
+        convergence: None,
+    }
+}
+
+/// Project the fit's sealed convergence evidence onto the summary surface
+/// (#2411).
+///
+/// Strictly a read: every value comes from the `FitConvergenceEvidence` the
+/// fitted result already owns — the same object the mint gate consulted and
+/// the same one `Deserialize` revalidates on load. Recomputing any of it here
+/// would create a second source of truth that could drift from the verdict
+/// that allowed the fit to exist.
+fn summary_convergence(fit: &gam::solver::estimate::UnifiedFitResult) -> SummaryConvergence {
+    use gam::solver::rho_optimizer::OuterStationarityCertificate;
+
+    let evidence = fit.convergence_evidence();
+    let certificate = evidence.outer_certificate();
+    let outer = certificate.map(|certificate| SummaryOuterCertificate {
+        // The residual means a different thing in each arm, so the kind
+        // travels with the numbers rather than being inferred from them.
+        kind: match &certificate.stationarity {
+            OuterStationarityCertificate::AnalyticGradient { .. } => "analytic_gradient",
+            OuterStationarityCertificate::FixedPoint { .. } => "fixed_point",
+            OuterStationarityCertificate::AsymptoteRail { .. } => "asymptote_rail",
+        }
+        .to_string(),
+        gradient_norm: certificate.stationarity.raw_norm(),
+        projected_gradient_norm: certificate.stationarity.projected_norm(),
+        stationarity_bound: certificate.stationarity.bound(),
+        hessian_psd: certificate.hessian_psd,
+        lambdas_railed: certificate.lambdas_railed.clone(),
+    });
+    SummaryConvergence {
+        // No outer coordinate was optimized in the `Fixed` arm, so there is no
+        // outer equation that could fail: the converged inner mode is the
+        // complete proof, and the fit's existence already attests to it.
+        certified: certificate.is_none_or(|certificate| certificate.certifies()),
+        inner_status: evidence.inner_status().label().to_string(),
+        outer_iterations: evidence.outer_iterations(),
+        outer,
     }
 }
 
@@ -1687,6 +1731,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         covariance_flat: covariance.map(|(_, cov)| cov.iter().copied().collect()),
         coefficient_se_source: display_uncertainty
             .map(|view| view.definition.as_str().to_string()),
+        convergence: Some(summary_convergence(&fit)),
     };
     serde_json::to_string(&payload).map_err(|err| format!("failed to serialize summary: {err}"))
 }

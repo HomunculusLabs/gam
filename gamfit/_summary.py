@@ -43,6 +43,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "coefficient_se_source",
     "group_metadata",
     "deployment_extensions",
+    "convergence",
 )
 
 
@@ -203,6 +204,19 @@ class Summary:
         Saved group-level metadata for grouped fits.
     deployment_extensions : list of dict
         Post-fit deployment extensions attached via :meth:`Model.extend_with_group`.
+    convergence : dict or None
+        How the optimization that produced this fit terminated, read from the
+        certificate the fit carries rather than recomputed. ``certified`` is the
+        verdict the mint gate used; ``inner_status`` is the terminal P-IRLS
+        status; ``outer_iterations`` is the iteration count the proof covers;
+        ``outer`` is ``None`` when no smoothing coordinate was optimized (there
+        is no outer stationarity equation, which is *not* the same as a zero
+        gradient), else a mapping carrying ``kind``, ``gradient_norm``,
+        ``projected_gradient_norm``, ``stationarity_bound``, ``hessian_psd`` and
+        ``lambdas_railed``. The projected norm and the bound are in the same
+        gauge, so a caller can impose a tolerance of their own without reading a
+        log. ``None`` for routes that certify no optimizer (the O(n) spline
+        scan).
     extras : dict
         Any keys returned by the Rust engine that are not in the typed
         schema. Kept so newer engine versions can add fields without
@@ -245,6 +259,13 @@ class Summary:
     coefficient_se_source: str | None = None
     group_metadata: dict[str, Any] | None = None
     deployment_extensions: list[dict[str, Any]] = field(default_factory=list)
+    #: How the optimization that produced this fit terminated (#2411), read
+    #: from the certificate the fit itself carries. Keys: ``certified``,
+    #: ``inner_status``, ``outer_iterations``, and ``outer`` — the last being
+    #: ``None`` when no smoothing coordinate was optimized, else a mapping with
+    #: ``kind``, ``gradient_norm``, ``projected_gradient_norm``,
+    #: ``stationarity_bound``, ``hessian_psd`` and ``lambdas_railed``.
+    convergence: dict[str, Any] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
