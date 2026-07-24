@@ -331,6 +331,11 @@ fn certified_reduced_face_candidate(
             trust_metric_diag.len(),
         ));
     }
+    let geometry_started = std::time::Instant::now();
+    let geometry_scope = gam_runtime::process_monitor::track_scope(format!(
+        "reduced face tangent geometry p={p} active_rows={}",
+        active_rows.len(),
+    ));
     let gathered = constraints
         .gather_rows(active_rows)
         .map_err(|error| format!("exact active-face row gather failed: {error}"))?;
@@ -338,6 +343,20 @@ fn certified_reduced_face_candidate(
         ActiveConstraintTangentGeometry::FullyPinned => None,
         ActiveConstraintTangentGeometry::Tangent(tangent) => Some(tangent),
     };
+    drop(geometry_scope);
+    let geometry_elapsed = geometry_started.elapsed();
+    if geometry_elapsed >= std::time::Duration::from_secs(1) {
+        log::warn!(
+            "[gam#979 reduced-face phase] phase=tangent-geometry elapsed_s={:.3} p={p} active_rows={}",
+            geometry_elapsed.as_secs_f64(),
+            active_rows.len(),
+        );
+    }
+    let metric_started = std::time::Instant::now();
+    let metric_scope = gam_runtime::process_monitor::track_scope(format!(
+        "reduced face metric construction p={p} tangent_dim={}",
+        tangent.as_ref().map_or(0, |basis| basis.ncols()),
+    ));
     let mut trust_metric = Array2::<f64>::zeros((p, p));
     for index in 0..p {
         trust_metric[[index, index]] = trust_metric_diag[index];
@@ -394,10 +413,25 @@ fn certified_reduced_face_candidate(
             )
         };
     symmetrize_dense_in_place(&mut face_metric);
+    drop(metric_scope);
+    let metric_elapsed = metric_started.elapsed();
+    if metric_elapsed >= std::time::Duration::from_secs(1) {
+        log::warn!(
+            "[gam#979 reduced-face phase] phase=metric-construction elapsed_s={:.3} p={p} tangent_dim={}",
+            metric_elapsed.as_secs_f64(),
+            tangent.as_ref().map_or(0, |basis| basis.ncols()),
+        );
+    }
     if face_metric.iter().any(|value| !value.is_finite()) {
         return Err("reduced-face lifted metric is non-finite".into());
     }
     let rhs_beta = face_metric.dot(beta) + rhs;
+    let projection_started = std::time::Instant::now();
+    let projection_scope = gam_runtime::process_monitor::track_scope(format!(
+        "reduced face operator projection p={p} warm_rows={} constraint_rows={}",
+        active_rows.len(),
+        constraints.nrows(),
+    ));
     let (candidate, next_active) =
         gam_solve::active_set::solve_quadratic_with_constraint_set(
             &face_metric,
@@ -414,6 +448,16 @@ fn certified_reduced_face_candidate(
                 constraints.nrows(),
             )
         })?;
+    drop(projection_scope);
+    let projection_elapsed = projection_started.elapsed();
+    if projection_elapsed >= std::time::Duration::from_secs(1) {
+        log::warn!(
+            "[gam#979 reduced-face phase] phase=operator-projection elapsed_s={:.3} p={p} warm_rows={} constraint_rows={}",
+            projection_elapsed.as_secs_f64(),
+            active_rows.len(),
+            constraints.nrows(),
+        );
+    }
     let delta = &candidate - beta;
     let directional_descent = rhs.dot(&delta);
     let metric_delta = face_metric.dot(&delta);
@@ -2924,6 +2968,10 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // `lhs` is the right input) and the augmented stationarity RHS, so
                 // the decrement read is consistent with the dense path. Diagnostic
                 // only for the convergence test — it does NOT change the QP step.
+                let spectrum_started = std::time::Instant::now();
+                let spectrum_scope = gam_runtime::process_monitor::track_scope(format!(
+                    "joint Newton ambient spectrum cycle={cycle} p={total_p}"
+                ));
                 if let Ok(spectrum) = whitened_spectrum::WhitenedHessianSpectrum::decompose(
                     &lhs,
                     &rhs_step,
@@ -2932,11 +2980,31 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 ) {
                     joint_spectrum = Some(spectrum);
                 }
+                drop(spectrum_scope);
+                let spectrum_elapsed = spectrum_started.elapsed();
+                if spectrum_elapsed >= std::time::Duration::from_secs(1) {
+                    log::warn!(
+                        "[gam#979 constrained-QP phase] cycle={cycle} phase=ambient-spectrum elapsed_s={:.3}",
+                        spectrum_elapsed.as_secs_f64(),
+                    );
+                }
+                let convexification_started = std::time::Instant::now();
+                let convexification_scope = gam_runtime::process_monitor::track_scope(format!(
+                    "joint Newton convexification cycle={cycle} p={total_p}"
+                ));
                 let constrained_geometry = symmetric_constrained_hessian_geometry(
                     &lhs,
                     constrained_levenberg_mu,
                     family.levenberg_on_ill_conditioning(),
                 )?;
+                drop(convexification_scope);
+                let convexification_elapsed = convexification_started.elapsed();
+                if convexification_elapsed >= std::time::Duration::from_secs(1) {
+                    log::warn!(
+                        "[gam#979 constrained-QP phase] cycle={cycle} phase=convexification elapsed_s={:.3}",
+                        convexification_elapsed.as_secs_f64(),
+                    );
+                }
                 if cycle <= 2 {
                     let min_eval_raw = constrained_geometry.raw_min_eigenvalue;
                     let min_eval_refl = constrained_geometry.stabilized_min_eigenvalue;
@@ -2959,7 +3027,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 let rhs_beta = &lhs.dot(&beta_joint) + &rhs_step;
                 let exact_face_candidate = if lower_bounds.is_none() {
                     if let Some(active_rows) = warm_joint_active.as_deref() {
-                        certified_reduced_face_candidate(
+                        let reduced_face_started = std::time::Instant::now();
+                        let reduced_face_scope =
+                            gam_runtime::process_monitor::track_scope(format!(
+                                "joint Newton reduced face cycle={cycle} p={total_p} warm_rows={}",
+                                active_rows.len(),
+                            ));
+                        let result = certified_reduced_face_candidate(
                             &exact_lhs,
                             &rhs_step,
                             &beta_joint,
@@ -2967,7 +3041,17 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                             active_rows,
                             &joint_trust_metric_diag,
                             joint_trust_radius,
-                        )?
+                        );
+                        drop(reduced_face_scope);
+                        let reduced_face_elapsed = reduced_face_started.elapsed();
+                        if reduced_face_elapsed >= std::time::Duration::from_secs(1) {
+                            log::warn!(
+                                "[gam#979 constrained-QP phase] cycle={cycle} phase=reduced-face elapsed_s={:.3} warm_rows={}",
+                                reduced_face_elapsed.as_secs_f64(),
+                                active_rows.len(),
+                            );
+                        }
+                        result?
                     } else {
                         None
                     }
@@ -2976,6 +3060,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 };
                 let reduced_face_kind =
                     exact_face_candidate.as_ref().map(|(_, _, kind)| *kind);
+                let metric_projection_started = std::time::Instant::now();
+                let metric_projection_scope =
+                    gam_runtime::process_monitor::track_scope(format!(
+                        "joint Newton metric projection cycle={cycle} p={total_p}"
+                    ));
                 let solve_result = if let Some((candidate, active, _)) = exact_face_candidate {
                     Ok((candidate, active))
                 } else if let Some(bounds) = lower_bounds.as_ref() {
@@ -2996,6 +3085,14 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     )
                     .map_err(|e| e.to_string())
                 };
+                drop(metric_projection_scope);
+                let metric_projection_elapsed = metric_projection_started.elapsed();
+                if metric_projection_elapsed >= std::time::Duration::from_secs(1) {
+                    log::warn!(
+                        "[gam#979 constrained-QP phase] cycle={cycle} phase=metric-projection elapsed_s={:.3}",
+                        metric_projection_elapsed.as_secs_f64(),
+                    );
+                }
                 match solve_result {
                     Ok((beta_new, active_set)) => {
                         // Durable constrained-QP liveness: per-cycle active-face
