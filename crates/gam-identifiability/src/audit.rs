@@ -4038,25 +4038,23 @@ mod tests {
             .unwrap_or_else(|error| panic!("RRQR rank oracle failed: {error}"))
     }
 
-    /// Regression for gam#1590: competing-risks (cause-specific, k=2) survival
-    /// fits aborted in identifiability canonicalisation with
-    /// "post-T rank invariant violated — J_can is rank-deficient", because the
-    /// channel-aware per-block column-selection T dropped a genuinely-independent
-    /// cause-specific direction while KEEPING a baseline component that is
-    /// redundant ACROSS the two cause channels.
+    /// Regression for gam#1590: a penalty-covered competing-risks
+    /// (cause-specific, k=2) redundancy must canonicalise without dropping a
+    /// genuine data direction or failing MAP uniqueness.
     ///
     /// We build two k=2 cause-time blocks (p_raw=8 total, true joint rank 6) that
-    /// reproduce the cross-channel redundancy exactly: each block carries an
-    /// intra-block redundancy AND block 2 carries a large-norm SHARED baseline
-    /// column (`a+b+c`) that lies wholly in span(block 1). The block-local pivot
-    /// kept that large-norm shared column and shed a real direction, so the kept
-    /// 6 columns spanned only rank 4 — the bug.
+    /// reproduce the cross-channel redundancy exactly: block 1 carries an
+    /// intra-block redundancy and block 2 carries a large-norm SHARED baseline
+    /// column (`a+b+c`) that lies wholly in span(block 1).
     ///
-    /// After the joint-rank-aware (cross-block residual) selection, the shared
-    /// column is the one dropped, so `canonicalize_for_identifiability` SUCCEEDS
-    /// and the reduced design reaches the full joint rank.
+    /// Each synthetic block carries `S=I`, so the posterior criterion is
+    /// `ker(J) ∩ ker(S) = {0}` rather than `p == rank(J)`: the canonical section
+    /// may retain one penalty-covered coefficient direction beyond the six
+    /// data-supported directions. The executable contract is therefore that
+    /// `J_can` retains all six genuine directions and every retained null
+    /// direction remains covered by the pulled-back positive-definite penalty.
     #[test]
-    fn competing_risks_cross_channel_redundancy_canonicalises_cleanly_1590() {
+    fn penalty_covered_competing_risks_redundancy_canonicalises_cleanly_1590() {
         let n = 64;
         let x = linspace(n);
         // Mutually orthogonal Legendre directions so every "independent" direction
@@ -4084,10 +4082,9 @@ mod tests {
         }
         // Block 2 (cause 2): three genuinely-new cause-specific directions
         // d1,d2,d3 and a LARGE-norm SHARED baseline combination a+b+c that lies
-        // wholly in span(block 1). Isolation rank 4, but its residual against
-        // block 1 is only 3-D ({d1,d2,d3}), so the compiler keeps 3. The shared
-        // column's large norm previously fooled the block-local pivot into keeping
-        // it and dropping a real cause direction (the gam#1590 bug).
+        // wholly in span(block 1). Its data residual against block 1 is only
+        // 3-D ({d1,d2,d3}); the penalty makes the remaining coefficient
+        // difference estimable without pretending it has likelihood curvature.
         let shared = (&(&a + &b) + &c).mapv(|v| v * 50.0);
         let mut full2 = Array2::<f64>::zeros((k * n, p));
         for ch in 0..k {
@@ -4149,15 +4146,16 @@ mod tests {
             "the multi-cause (k=2) design must route through the channel-aware audit",
         );
 
-        // The reduced specs must have total width == true joint rank, and the
-        // reduced design (raw J · block-diagonal T) must ACTUALLY reach that rank —
-        // i.e. the kept columns are jointly independent, no redundant column kept
-        // and no independent direction dropped.
+        // Current penalty-aware canonicalisation removes the intra-block
+        // redundancy and retains one penalty-covered cross-block direction.
+        // Coefficient width therefore exceeds data rank by exactly one; equating
+        // these would incorrectly discard a direction identified by S.
         let total_reduced: usize = canon.reduced_specs.iter().map(|s| s.design.ncols()).sum();
         assert_eq!(
-            total_reduced, joint_rank,
-            "reduced total width must equal the true joint rank {joint_rank}; got \
-             {total_reduced}",
+            total_reduced,
+            joint_rank + 1,
+            "penalty-aware section must retain exactly one coefficient beyond \
+             the true data rank {joint_rank}; got {total_reduced}",
         );
 
         // Materialise the reduced channel-major joint Jacobian J_can and certify
@@ -4188,7 +4186,32 @@ mod tests {
         assert_eq!(
             rank_j_can, joint_rank,
             "reduced design J_can must reach the true joint rank {joint_rank} \
-             (the kept columns must be jointly independent); got {rank_j_can}",
+             (no genuine cause direction may be dropped); got {rank_j_can}",
         );
+
+        // Pulling S=I through a column-selection gauge must leave an identity
+        // penalty on every retained block coordinate. This is the direct
+        // certificate that the one data-null coefficient direction is not
+        // posterior-null.
+        for (block_idx, spec) in canon.reduced_specs.iter().enumerate() {
+            assert_eq!(
+                spec.penalties.len(),
+                1,
+                "reduced block {block_idx} must retain its propriety penalty"
+            );
+            let penalty = spec.penalties[0].as_dense_cow();
+            let width = spec.design.ncols();
+            assert_eq!(penalty.dim(), (width, width));
+            for row in 0..width {
+                for col in 0..width {
+                    let expected = if row == col { 1.0 } else { 0.0 };
+                    assert_eq!(
+                        penalty[[row, col]],
+                        expected,
+                        "pulled-back identity penalty changed at block {block_idx}, ({row},{col})"
+                    );
+                }
+            }
+        }
     }
 }
