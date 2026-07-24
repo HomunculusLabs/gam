@@ -4132,15 +4132,19 @@ fn refine_operator_metric_face(
 fn solve_strictly_convex_quadratic_with_constraint_set_dual(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
+    beta_start: &Array1<f64>,
     set: &ConstraintSet,
+    warm_active_set: Option<&[usize]>,
 ) -> Result<(Array1<f64>, Vec<usize>), EstimationError> {
     let p = rhs.len();
     if p == 0
         || hessian.nrows() != p
         || hessian.ncols() != p
+        || beta_start.len() != p
         || set.ncols() != p
         || hessian.iter().any(|value| !value.is_finite())
         || rhs.iter().any(|value| !value.is_finite())
+        || beta_start.iter().any(|value| !value.is_finite())
     {
         crate::bail_invalid_estim!("operator metric-projection dimension/finite contract failed");
     }
@@ -4156,20 +4160,52 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
 
     let ops = ConstraintSetOps::new(set, 0.0)?;
     let m = ops.nrows();
-    let mut candidate = unconstrained.clone();
-    let mut active = Vec::<usize>::new();
-    let mut multipliers = Array1::<f64>::zeros(0);
+    // Warm faces are point-local: globalization may accept only part of the
+    // previous QP chord, so retain only cached rows that remain tight at this
+    // cycle's accepted `beta_start`. Compress them to an independent basis
+    // before any dense solve. The public API has always carried this hint; the
+    // former operator arm silently discarded it and rediscovered the same
+    // 60–90 row CTN face from scratch on every Newton cycle.
+    let warm_tight = constraint_set_rows_tight_at_point(
+        set,
+        beta_start,
+        warm_active_set.unwrap_or(&[]),
+    )?;
+    let warm_face = ops.compress_working(&warm_tight)?;
+    let mut active = warm_face
+        .groups
+        .iter()
+        .filter_map(|group| group.first())
+        .map(|&position| warm_tight[position])
+        .collect::<Vec<_>>();
     let mut is_active = vec![false; m];
+    for &row in &active {
+        is_active[row] = true;
+    }
     let mut banned = vec![false; m];
+    let mut transitions = 0usize;
+    let (mut candidate, mut multipliers) = if active.is_empty() {
+        (unconstrained.clone(), Array1::<f64>::zeros(0))
+    } else {
+        refine_operator_metric_face(
+            hessian,
+            &unconstrained,
+            &ops,
+            &mut active,
+            &mut is_active,
+            &mut transitions,
+        )?
+    };
+    let mut conditioned_phase = !active.is_empty();
     let mut visited = HashSet::<(bool, Vec<usize>, Vec<usize>, Vec<u64>)>::new();
+    let mut initial_active_key = active.clone();
+    initial_active_key.sort_unstable();
     visited.insert((
-        false,
-        Vec::new(),
+        conditioned_phase,
+        initial_active_key,
         Vec::new(),
         candidate.iter().map(|value| value.to_bits()).collect(),
     ));
-    let mut transitions = 0usize;
-    let mut conditioned_phase = false;
 
     loop {
         let values = ops.values(&candidate)?;
@@ -4269,13 +4305,67 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
         };
 
         let candidate_before_transition = candidate.clone();
-        active.push(row);
-        is_active[row] = true;
-        let mut expanded = Array1::<f64>::zeros(active.len());
-        expanded
-            .slice_mut(s![..multipliers.len()])
-            .assign(&multipliers);
-        multipliers = expanded;
+        // The passive face is a BASIS in coefficient space, not a bag of
+        // observation-row ids. A factored cone can expose thousands of
+        // distinct binding rows whose normals span at most `p` directions.
+        // Appending every id makes the passive Gram grow with n despite the
+        // advertised metric-dual contract; the #979 CTN witness consequently
+        // spent the remainder of its 300-second budget inside one p=144 QP.
+        //
+        // Test rank before changing the existing multiplier coordinates. If
+        // the entering separator adds a new direction, the ordinary append is
+        // exact. If it is dependent, rebuild the basis with the VIOLATED row
+        // first: the deterministic greedy RRQR then keeps that row and exchanges
+        // out whichever old representatives it spans. Abandon the old dual
+        // chord because its multiplier coordinates changed; the loop below
+        // immediately solves the new passive face. This is the standard
+        // active-face exchange for an over-complete polyhedral vertex and keeps
+        // every dense system bounded by `p × p`.
+        let mut augmented = active.clone();
+        augmented.push(row);
+        let augmented_face = ops.compress_working(&augmented)?;
+        let mut passive_basis_restarted = false;
+        if augmented_face.constraints.a.nrows() == augmented.len() {
+            active.push(row);
+            is_active[row] = true;
+            let mut expanded = Array1::<f64>::zeros(active.len());
+            expanded
+                .slice_mut(s![..multipliers.len()])
+                .assign(&multipliers);
+            multipliers = expanded;
+        } else {
+            let mut prioritized = Vec::with_capacity(augmented.len());
+            prioritized.push(row);
+            prioritized.extend(active.iter().copied());
+            let exchanged_face = ops.compress_working(&prioritized)?;
+            let exchanged_active = exchanged_face
+                .groups
+                .iter()
+                .filter_map(|group| group.first())
+                .map(|&position| prioritized[position])
+                .collect::<Vec<_>>();
+            if exchanged_active.first().copied() != Some(row)
+                || exchanged_active.len() != exchanged_face.constraints.a.nrows()
+                || exchanged_active.len() > p
+            {
+                crate::bail_invalid_estim!(
+                    "operator metric-projection dependent-face exchange failed \
+                     to retain entering row {row} in a rank-bounded basis"
+                );
+            }
+            for &active_row in &active {
+                is_active[active_row] = false;
+                if !exchanged_active.contains(&active_row) {
+                    banned[active_row] = true;
+                    transitions += 1;
+                }
+            }
+            active = exchanged_active;
+            for &active_row in &active {
+                is_active[active_row] = true;
+            }
+            passive_basis_restarted = true;
+        }
         transitions += 1;
 
         loop {
@@ -4310,6 +4400,35 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
                 let trial_candidate = &unconstrained + &inverse_rows_t.dot(&trial);
                 (trial, trial_candidate)
             };
+            if passive_basis_restarted {
+                // The exchange changed multiplier coordinates, so there is no
+                // valid old-to-new dual chord. Prune wrong-signed rows directly
+                // and resolve the smaller face, exactly as the original-metric
+                // terminal refinement does.
+                let mut retained_rows = Vec::with_capacity(active.len());
+                for (position, &active_row) in active.iter().enumerate() {
+                    if trial[position].is_finite() && trial[position] > 0.0 {
+                        retained_rows.push(active_row);
+                    } else {
+                        is_active[active_row] = false;
+                        banned[active_row] = true;
+                        transitions += 1;
+                    }
+                }
+                active = retained_rows;
+                if active.is_empty() {
+                    candidate.assign(&unconstrained);
+                    multipliers = Array1::<f64>::zeros(0);
+                    break;
+                }
+                if active.len() != trial.len() {
+                    multipliers = Array1::<f64>::zeros(active.len());
+                    continue;
+                }
+                multipliers = trial;
+                candidate = trial_candidate;
+                break;
+            }
             if trial.iter().all(|value| value.is_finite() && *value > 0.0) {
                 multipliers = trial;
                 candidate = trial_candidate;
@@ -4361,6 +4480,13 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
             .iter()
             .zip(candidate_before_transition.iter())
             .any(|(left, right)| left.to_bits() != right.to_bits());
+        if active.len() > p {
+            crate::bail_invalid_estim!(
+                "operator metric-projection passive face escaped its coefficient-rank bound: \
+                 active={}, p={p}",
+                active.len()
+            );
+        }
         if moved {
             banned.fill(false);
         }
@@ -4428,7 +4554,13 @@ pub fn solve_quadratic_with_constraint_set(
                     "operator-constrained quadratic solve: system dimension mismatch"
                 );
             }
-            solve_strictly_convex_quadratic_with_constraint_set_dual(hessian, rhs, set)
+            solve_strictly_convex_quadratic_with_constraint_set_dual(
+                hessian,
+                rhs,
+                beta_start,
+                set,
+                warm_active_set,
+            )
         }
     }
 }
@@ -5889,7 +6021,7 @@ mod tests {
         let rhs = array![0.3_f64, -0.1, -2.5, -1.2, -0.4, 0.2];
         let beta_start = array![0.0_f64, 0.0, 1.0, 0.1, 1.0, 0.1];
 
-        let (beta_op, _active_op) =
+        let (beta_op, active_op) =
             solve_quadratic_with_constraint_set(&hessian, &rhs, &beta_start, &set, None)
                 .expect("operator QP solve over an over-complete face");
         let (beta_dense, _active_dense) =
@@ -5916,6 +6048,12 @@ mod tests {
                 );
             }
         }
+        assert!(
+            active_op.len() <= p,
+            "operator passive face must contain at most one row per coefficient-space direction: \
+             active={}, p={p}",
+            active_op.len()
+        );
     }
 
     #[test]
@@ -5934,14 +6072,23 @@ mod tests {
         let rhs = array![0.3_f64, -0.2, -1.0, 0.0];
         let beta_start = Array1::<f64>::zeros(4);
 
-        let (beta, active) =
-            solve_quadratic_with_constraint_set(&hessian, &rhs, &beta_start, &set, Some(&[0]))
-                .expect("vertex solve");
+        // Seed a non-first representative. The operator arm must consume this
+        // point-tight warm face instead of rescanning 4,096 equivalent rows and
+        // deterministically rediscovering row zero.
+        let warm_row = 2048usize;
+        let (beta, active) = solve_quadratic_with_constraint_set(
+            &hessian,
+            &rhs,
+            &beta_start,
+            &set,
+            Some(&[warm_row]),
+        )
+        .expect("vertex solve");
 
         assert_eq!(
             active,
-            vec![0],
-            "redundant tight rows entered the working set"
+            vec![warm_row],
+            "the compact point-tight warm representative was discarded or redundant rows entered"
         );
         assert!(beta[2].abs() <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL);
         assert!((beta[0] - 0.3).abs() < 1e-10);
