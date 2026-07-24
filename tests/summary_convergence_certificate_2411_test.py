@@ -121,7 +121,7 @@ def test_certificate_survives_save_and_load(tmp_path) -> None:
         assert float(outer_after[key]) == float(outer_before[key]), key
 
 
-def test_unpenalized_fit_reports_no_outer_equation_rather_than_a_zero_gradient() -> None:
+def test_intercept_only_fit_reports_no_outer_equation_rather_than_a_zero_gradient() -> None:
     """With no smoothing coordinate there is no outer stationarity equation.
 
     Reporting that as a projected gradient of 0.0 against a bound of 0.0 would
@@ -132,7 +132,7 @@ def test_unpenalized_fit_reports_no_outer_equation_rather_than_a_zero_gradient()
     n = 300
     x = rng.uniform(0.0, 1.0, n)
     y = 1.0 + 0.5 * x + 0.1 * rng.standard_normal(n)
-    model = gamfit.fit(pd.DataFrame({"x": x, "y": y}), "y ~ x")
+    model = gamfit.fit(pd.DataFrame({"x": x, "y": y}), "y ~ 1")
 
     convergence = model.summary().convergence
     assert convergence is not None
