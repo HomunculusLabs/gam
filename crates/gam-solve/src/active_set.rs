@@ -1,5 +1,5 @@
 use crate::estimate::EstimationError;
-use faer::linalg::solvers::{Solve as FaerSolve, SolveLstsq};
+use faer::linalg::solvers::SolveLstsq;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerArrayView, FaerCholesky, FaerLinalgError, FaerSvd, array1_to_col_matmut,
