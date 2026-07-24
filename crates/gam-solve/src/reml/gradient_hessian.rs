@@ -7320,11 +7320,46 @@ impl<'a> RemlState<'a> {
                         pirls_result.iteration
                     );
                 } else {
-                    log::error!(
-                        "P-IRLS could not certify a valid minimum: {kind} (gradient norm {:.3e}, iter {})",
-                        pirls_result.lastgradient_norm,
-                        pirls_result.iteration
+                    // Outside screening the only thing that can shorten the
+                    // inner budget below the configured one is the outer
+                    // schedule (`screening_iteration_cap_applies` requires
+                    // `in_screening`). `MaxIterationsReached` under that
+                    // throttle is the scheduled budget event the geometric
+                    // backoff immediately below exists to correct — NOT a
+                    // statement about the fit. Both the gradient norm and the
+                    // iteration index describe a solve that was stopped early
+                    // on purpose, so reporting them at ERROR under a
+                    // certification verdict makes a routine, self-correcting
+                    // event indistinguishable from a real refusal to any
+                    // consumer reading the log stream. `LmStepSearchExhausted`
+                    // is a genuine step-search failure at any budget and keeps
+                    // its ERROR.
+                    let configured_cap = self.config.max_iterations;
+                    let budget_was_throttled = inner_budget_exhaustion_was_scheduled(
+                        pirls_result.status,
+                        pirls_result.iteration,
+                        outer_cap,
+                        configured_cap,
                     );
+                    if budget_was_throttled {
+                        log::debug!(
+                            "P-IRLS stopped at the scheduled inner cap: {kind} (gradient norm \
+                             {:.3e}, iter {}; scheduled cap {} of configured budget {}). The \
+                             outer schedule grows the cap for the next outer iteration.",
+                            pirls_result.lastgradient_norm,
+                            pirls_result.iteration,
+                            outer_cap,
+                            configured_cap,
+                        );
+                    } else {
+                        log::error!(
+                            "P-IRLS could not certify a valid minimum: {kind} (gradient norm \
+                             {:.3e}, iter {} of configured budget {})",
+                            pirls_result.lastgradient_norm,
+                            pirls_result.iteration,
+                            configured_cap,
+                        );
+                    }
                     // Adaptive-cap feedback: cap was hit. Geometric
                     // backoff on the next outer iter's cap. Only write
                     // outside screening so the 3-iter screening cap
@@ -7577,6 +7612,144 @@ impl<'a> RemlState<'a> {
 /// every multistart full solve run with `in_screening == false`, so the
 /// converged REML/LAML optimum and its bit-results are unchanged.
 pub(crate) const SEED_SCREENING_INNER_CONVERGENCE_TOLERANCE: f64 = 1e-3;
+
+/// Whether an inner P-IRLS budget exhaustion is the outer schedule's own
+/// truncation rather than evidence about the fit.
+///
+/// The outer→inner cap schedule (`first_order_inner_cap_schedule`) hands the
+/// inner solver as few as `INNER_CAP_FLOOR` iterations and grows the budget
+/// geometrically as soon as a solve reports it ran out — the truncation is the
+/// mechanism, and hitting it is the signal the backoff consumes. Outside seed
+/// screening that schedule is the only thing that can shorten the budget below
+/// the configured `max_iterations` (`screening_iteration_cap_applies` requires
+/// `in_screening`), so a `MaxIterationsReached` at or under the scheduled cap
+/// is routine and self-correcting: its gradient norm and iteration index
+/// describe a solve stopped early on purpose and say nothing about whether a
+/// minimum exists at this ρ.
+///
+/// `LmStepSearchExhausted` is a genuine step-search failure at any budget and
+/// is never scheduled.
+pub(crate) fn inner_budget_exhaustion_was_scheduled(
+    status: pirls::PirlsStatus,
+    iteration: usize,
+    scheduled_cap: usize,
+    configured_cap: usize,
+) -> bool {
+    matches!(status, pirls::PirlsStatus::MaxIterationsReached)
+        && scheduled_cap > 0
+        && scheduled_cap < configured_cap
+        && iteration <= scheduled_cap
+}
+
+#[cfg(test)]
+mod scheduled_inner_cap_exhaustion_tests {
+    use super::inner_budget_exhaustion_was_scheduled;
+    use crate::pirls::PirlsStatus;
+
+    /// The configured inner budget a production fit runs under. Any scheduled
+    /// cap is strictly below this; the point of the predicate is to tell the
+    /// two apart.
+    const CONFIGURED: usize = 200;
+
+    #[test]
+    fn schedules_cold_start_caps_are_recognized_as_scheduled() {
+        // `first_order_inner_cap_schedule` returns 3 / 5 / 10 for the first
+        // outer iterations before any inner-progress history exists. Each of
+        // those exhausting its budget is the schedule working, not a fit
+        // verdict.
+        for cap in [3usize, 5, 10] {
+            assert!(
+                inner_budget_exhaustion_was_scheduled(
+                    PirlsStatus::MaxIterationsReached,
+                    cap,
+                    cap,
+                    CONFIGURED,
+                ),
+                "cold-start scheduled cap {cap} must read as scheduled"
+            );
+        }
+    }
+
+    #[test]
+    fn the_widest_throttle_below_the_budget_is_still_scheduled() {
+        // The schedule can grow the cap geometrically; as long as it stays
+        // strictly under the configured budget the exhaustion is still the
+        // schedule's, not the fit's.
+        assert!(inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::MaxIterationsReached,
+            CONFIGURED - 1,
+            CONFIGURED - 1,
+            CONFIGURED,
+        ));
+    }
+
+    #[test]
+    fn exhausting_the_configured_budget_is_not_scheduled() {
+        // `scheduled_cap == 0` is the "no cap from this source" sentinel: the
+        // solve ran on the caller's own budget and genuinely failed.
+        assert!(!inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::MaxIterationsReached,
+            CONFIGURED,
+            0,
+            CONFIGURED,
+        ));
+    }
+
+    #[test]
+    fn a_schedule_that_does_not_shorten_the_budget_is_not_scheduled() {
+        // A scheduled cap at or above the configured budget throttles nothing,
+        // so exhaustion under it is exhaustion of the real budget.
+        assert!(!inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::MaxIterationsReached,
+            CONFIGURED,
+            CONFIGURED,
+            CONFIGURED,
+        ));
+        assert!(!inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::MaxIterationsReached,
+            CONFIGURED,
+            CONFIGURED + 8,
+            CONFIGURED,
+        ));
+    }
+
+    #[test]
+    fn lm_step_search_exhaustion_is_never_scheduled() {
+        // A collapsed LM step search is a real failure of the inner Newton at
+        // whatever budget it had; the schedule never produces it.
+        assert!(!inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::LmStepSearchExhausted,
+            5,
+            5,
+            CONFIGURED,
+        ));
+    }
+
+    #[test]
+    fn converged_and_stalled_states_are_not_scheduled_exhaustion() {
+        for status in [PirlsStatus::Converged, PirlsStatus::StalledAtValidMinimum] {
+            assert!(!inner_budget_exhaustion_was_scheduled(
+                status,
+                5,
+                5,
+                CONFIGURED,
+            ));
+        }
+    }
+
+    #[test]
+    fn running_past_the_scheduled_cap_is_not_scheduled() {
+        // If the solve reached more iterations than the scheduled cap allowed,
+        // something other than the schedule bounded it, so the schedule cannot
+        // claim the exhaustion.
+        assert!(!inner_budget_exhaustion_was_scheduled(
+            PirlsStatus::MaxIterationsReached,
+            12,
+            5,
+            CONFIGURED,
+        ));
+    }
+}
 
 /// Default cap on |Δρ_k| beyond which the IFT linear predictor rejects.
 /// Δρ = log(λ_new / λ_old); 2.0 corresponds to a 7.4× change in λ along
