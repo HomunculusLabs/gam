@@ -904,6 +904,37 @@ fn keep_positive_eigenspace(
     // Problem-size factor shared by the equilibrated rank cutoff and the raw
     // absorption floor below, so the two stay in the same currency.
     let nk = (n.saturating_mul(k)).max(p).max(1) as f64;
+
+    // BLOCK-LEVEL FULL ABSORPTION, decided in the RAW gauge before any
+    // equilibration. This is a different question from "which directions
+    // survive", and it is the only one a first-order tolerance can answer safely.
+    //
+    // Callers hand this function residual Grams built by different arithmetic.
+    // `orthogonalize_design_blocks` residualises the weighted DESIGN and then
+    // squares it, so an absorbed block's residual Gram is `O(ε²·tr(G_BB))`.
+    // `compile_from_raw_grams` instead forms a Schur complement of Grams,
+    // `G_bb − G_abᵀ·G_aa⁺·G_ab`, which is ONE cancellation between computed
+    // `O(tr)` quantities through a pseudo-inverse: an absorbed block leaves
+    // `O(κ(G_AA)·ε·tr(G_BB))`, first order in ε. A per-direction floor at that
+    // first-order level is NOT safe — the marginal-slope effective Jacobian's
+    // smallest genuine direction sits at `2.3e-3` of `7.5e15 ≈ 3e-19`, five
+    // orders below it, and `b58bd1909` records that this is exactly the route
+    // (`compile_from_raw_grams → keep_positive_eigenspace`) that regression
+    // travelled.
+    //
+    // But FULL absorption is a statement about the whole residual, not about one
+    // direction: for an exact alias `B = A·L` the Schur complement is
+    // identically zero in exact arithmetic, so EVERY eigenvalue is noise,
+    // `λ_max` included. Testing `λ_max` therefore separates the two regimes with
+    // no ambiguity — the stiff case keeps its block alive on `λ_max = 7.5e15`
+    // however small its other directions are, and cannot be touched by this
+    // branch. Partial absorption is left entirely to the equilibrated count
+    // below, which is where it belongs.
+    let lambda_max_raw = evals.iter().cloned().fold(0.0_f64, f64::max).max(0.0);
+    if lambda_max_raw <= g_bb_trace * RANK_REVEAL_EPS_SLACK * nk * f64::EPSILON {
+        return Ok(Array2::zeros((p, 0)));
+    }
+
     let rank = {
         // Diagonally equilibrate into the column-scale gauge (Sylvester's law of
         // inertia: the congruence preserves rank), then take the count from the
