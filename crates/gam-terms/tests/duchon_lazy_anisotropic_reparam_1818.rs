@@ -11,7 +11,7 @@ use gam_terms::basis::{
     BasisMetadata, BasisWorkspace, CenterStrategy, DuchonBasisSpec, DuchonNullspaceOrder,
     DuchonOperatorPenaltySpec, build_duchon_basiswithworkspace,
 };
-use ndarray::{Array2, Axis, s};
+use ndarray::{Array1, Array2, Axis, s};
 
 #[test]
 fn lazy_anisotropic_duchon_uses_data_metric_radial_chart() {
@@ -64,12 +64,31 @@ fn lazy_anisotropic_duchon_uses_data_metric_radial_chart() {
     );
 
     // `V` is defined by Vᵀ G_c V = I.  The first `V.ncols()` columns of the
-    // realized operator are exactly K·Z·V, so their training-data Gram is the
+    // operator are exactly K·Z·V, so their training-data Gram is the
     // coordinate-free executable certificate that the lazy branch applied the
     // generalized-eigen chart rather than merely persisting metadata.
-    let realized = built.design.to_dense();
-    let radial = realized.slice(s![.., ..radial_reparam.ncols()]);
-    let gram = radial.t().dot(&radial);
+    //
+    // Compute that Gram through operator products. Calling `to_dense()` here
+    // would contradict the fixture's one-byte materialization ceiling and test
+    // the refusal mechanism rather than the anisotropic chart.
+    assert!(
+        built.design.is_operator_backed(),
+        "one-byte materialization policy must select the lazy design"
+    );
+    let radial_width = radial_reparam.ncols();
+    let mut gram = Array2::<f64>::zeros((radial_width, radial_width));
+    for col in 0..radial_width {
+        let mut basis_vector = Array1::<f64>::zeros(built.design.ncols());
+        basis_vector[col] = 1.0;
+        let realized_column = built.design.dot(&basis_vector);
+        let cross_products = built.design.transpose_vector_multiply(&realized_column);
+        gram.column_mut(col)
+            .assign(&cross_products.slice(s![..radial_width]));
+    }
+    assert!(
+        built.design.is_operator_backed(),
+        "matrix-free Gram evaluation must preserve the lazy design"
+    );
     let mut max_identity_residual = 0.0_f64;
     for row in 0..gram.nrows() {
         for col in 0..gram.ncols() {
