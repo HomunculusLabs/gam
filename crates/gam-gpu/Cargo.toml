@@ -13,7 +13,7 @@ warnings = "deny"
 faer = "0.24.0"
 gam-linalg = { path = "../gam-linalg", version = "=0.3.150" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.150" }
-libloading = "0.8.9"
+libloading = "0.9.0"
 libm = "0.2.16"
 log = "0.4.29"
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
