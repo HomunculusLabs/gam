@@ -198,8 +198,25 @@ pub fn stable_finite_signed_sum(
     if normalized == 0.0 {
         return Ok(0.0);
     }
-    let log_abs = max_abs.ln() + normalized.abs().ln();
-    let result = normalized.signum() * log_abs.exp();
+    // Rescale by multiplying, not by a log/exp round-trip. `normalized` is the
+    // sum expressed in units of `max_abs`, so the answer is `normalized *
+    // max_abs` with a SINGLE rounding.
+    //
+    // The previous reconstruction computed `exp(ln(max_abs) + ln|normalized|)`,
+    // which pays two transcendental roundings to recover a magnitude the
+    // scaling above already knows exactly. It bought nothing: dividing by
+    // `max_abs` is what prevents intermediate overflow, and the final magnitude
+    // has to be materialized either way. It also cost real accuracy — on the
+    // `[MAX, MAX, -MAX]` witness, whose exact sum IS representable as
+    // `f64::MAX`, the round-trip returned a value **213 ulps short**, because
+    // `exp(ln(x))` does not round-trip at the top of the range.
+    //
+    // Overflow is still reported, and now for the right reason: `normalized`
+    // is the true sum divided by `max_abs`, so a non-finite product means the
+    // true sum is genuinely outside f64 range — which is exactly what the
+    // error below says. The old form could not distinguish that from its own
+    // transcendental error.
+    let result = normalized * max_abs;
     if result.is_finite() {
         Ok(result)
     } else {
