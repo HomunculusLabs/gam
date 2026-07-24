@@ -915,12 +915,16 @@ pub(crate) fn run_outer_with_plan(
                             EstimationError::RemlOptimizationFailed(message)
                         }
                     })?;
+                    // Same rail-relaxed box the guard's later curvature reads
+                    // use (#2412); the seed must not be judged against a
+                    // different critical cone than the iterates that follow it.
+                    let seed_rail_bounds = rail_relaxed_bounds(&(lo.clone(), hi.clone()));
                     let seed_hessian_psd = seed_hessian.as_ref().and_then(|dense| {
                         reduced_hessian_psd_at_point(
                             &seed,
                             &seed_eval.gradient,
                             dense,
-                            Some((lo, hi)),
+                            Some((&seed_rail_bounds.0, &seed_rail_bounds.1)),
                         )
                     });
 

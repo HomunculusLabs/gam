@@ -2177,14 +2177,27 @@ impl SecondOrderObjective for OuterSecondOrderBridge<'_> {
             eval.hessian,
             self.materialize_operator_max_dim,
         )?;
+        // Rail-relaxed box here too (#2412). The strict-activity test inside
+        // `reduced_hessian_psd_at_point` uses a 1e-10 proximity, which a bound
+        // that is only ever approached in the limit can never satisfy — so a
+        // coordinate running its smoothing parameter to the ceiling stays in
+        // the free set and its still-descending direction can read indefinite,
+        // blocking the guard's converged verdict.
+        //
+        // The gradient-sign requirement is kept, so this excludes only
+        // coordinates that are BOTH within the rail margin AND pushing out of
+        // the box. That leaves the guard's free set a superset of the
+        // certificate's (which drops every margin-railed coordinate outright,
+        // `certificate_hessian_is_psd_off_railed`), so the guard stays no more
+        // permissive than the authority it answers to and can never certify
+        // curvature the certificate would reject.
+        let rail_bounds = self.cost_stall_bounds.as_ref().map(rail_relaxed_bounds);
         let hessian_psd = hessian.as_ref().and_then(|dense| {
             reduced_hessian_psd_at_point(
                 x,
                 &eval.gradient,
                 dense,
-                self.cost_stall_bounds
-                    .as_ref()
-                    .map(|(lower, upper)| (lower, upper)),
+                rail_bounds.as_ref().map(|(lower, upper)| (lower, upper)),
             )
         });
         // Observe finite cost progress, but never let this first-order guard

@@ -13,9 +13,10 @@
 
 use super::bridges::{
     projected_gradient_norm, rail_projected_gradient_norm, rail_relaxed_bounds,
+    reduced_hessian_psd_at_point,
 };
 use crate::model_types::CERTIFICATE_RAIL_MARGIN;
-use ndarray::Array1;
+use ndarray::{Array1, array};
 
 /// The default outer search box, wide enough that the margin is not width-capped.
 fn wide_box(n: usize) -> (Array1<f64>, Array1<f64>) {
@@ -130,6 +131,77 @@ fn a_narrow_box_is_relaxed_without_inverting() {
     let x = Array1::from_vec(vec![0.0]);
     let gradient = Array1::from_vec(vec![2.0]);
     assert!((rail_projected_gradient_norm(&x, &gradient, Some(&bounds)) - 2.0).abs() < 1e-12);
+}
+
+#[test]
+fn a_rail_direction_does_not_poison_the_curvature_verdict() {
+    // The same disagreement reaching the curvature test. A coordinate running
+    // its smoothing parameter to the ceiling is still descending along that
+    // direction, so its curvature reads indefinite. The `1e-10` strict-activity
+    // test inside the reduction cannot see a bound that is only approached in
+    // the limit, so it keeps the direction in the critical cone and returns
+    // NOT-PSD — blocking the guard's converged verdict on a direction that is
+    // not in the cone at all.
+    let bounds = wide_box(2);
+    let x = array![29.9938, 0.0];
+    let gradient = array![-4.0, 0.0]; // outward at the upper bound
+    let hessian = array![[-3.0, 0.0], [0.0, 2.0]];
+
+    assert_eq!(
+        reduced_hessian_psd_at_point(&x, &gradient, &hessian, Some((&bounds.0, &bounds.1))),
+        Some(false),
+        "the raw box keeps the rail direction in the critical cone"
+    );
+
+    let relaxed = rail_relaxed_bounds(&bounds);
+    assert_eq!(
+        reduced_hessian_psd_at_point(&x, &gradient, &hessian, Some((&relaxed.0, &relaxed.1))),
+        Some(true),
+        "the rail direction leaves the cone; the interior block is judged alone"
+    );
+}
+
+#[test]
+fn a_near_bound_coordinate_with_feasible_descent_keeps_its_curvature() {
+    // Only coordinates pushing OUT of the box leave the critical cone. One near
+    // the ceiling whose gradient points back INTO it is not at an optimum, so
+    // its curvature must still be judged — otherwise the relaxation would start
+    // certifying saddles rather than rails.
+    let bounds = wide_box(2);
+    let relaxed = rail_relaxed_bounds(&bounds);
+    let x = array![29.9938, 0.0];
+    let gradient = array![4.0, 0.0]; // feasible descent, back into the box
+    let hessian = array![[-3.0, 0.0], [0.0, 2.0]];
+
+    assert_eq!(
+        reduced_hessian_psd_at_point(&x, &gradient, &hessian, Some((&relaxed.0, &relaxed.1))),
+        Some(false),
+        "a near-bound coordinate that is not railed keeps its negative curvature"
+    );
+}
+
+#[test]
+fn the_guard_stays_no_more_permissive_than_the_certificate() {
+    // The certificate drops EVERY margin-railed coordinate before testing PSD,
+    // with no gradient-sign condition. The guard's rule additionally requires
+    // an outward gradient, so the guard's free set is a superset of the
+    // certificate's and its verdict can never be more permissive. Here the
+    // railed coordinate has feasible-descent gradient: the certificate would
+    // drop it, the guard keeps it, and the guard therefore reports the stricter
+    // NOT-PSD.
+    let bounds = wide_box(2);
+    let relaxed = rail_relaxed_bounds(&bounds);
+    let x = array![29.9938, 0.0];
+    let gradient = array![1.0, 0.0];
+    let hessian = array![[-3.0, 0.0], [0.0, 2.0]];
+
+    let guard = reduced_hessian_psd_at_point(
+        &x,
+        &gradient,
+        &hessian,
+        Some((&relaxed.0, &relaxed.1)),
+    );
+    assert_eq!(guard, Some(false));
 }
 
 #[test]
