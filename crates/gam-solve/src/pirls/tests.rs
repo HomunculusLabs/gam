@@ -4434,7 +4434,7 @@ mod root_cause_tests {
     }
 
     #[test]
-    pub(crate) fn rejected_noise_scale_step_requires_near_stationary_projected_gradient() {
+    pub(crate) fn rejected_noise_scale_step_can_finish_via_exact_decrement_certificate_2316() {
         let mut model = PlateauStatusModel {
             gradient: 2e-5,
             current_deviance: 1.0e6,
@@ -4457,16 +4457,27 @@ mod root_cause_tests {
             runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
                 .expect("noise-scale rejected step should still preserve the current state");
 
-        // Same exit path as the plateau test: noise-scale rejection drives the
-        // LM block to exhaustion with projected_grad 2e-5 above the
-        // near-stationary band (= 1e-5), so the exact status is
-        // LmStepSearchExhausted — keep the assertion strict so a future
-        // regression that silently promotes to Converged/Stalled OR falls back
-        // to the generic MaxIterationsReached default fails immediately.
+        // The candidate is objectively worse, so the LM trial is rejected.
+        // That says nothing about the unchanged current iterate's stationarity:
+        // #2316 deliberately pays for one exact final Newton-decrement
+        // certificate after any finite bounded exit. Here H=1 and g=2e-5, so
+        // g'H^-1g=4e-10, far below tol²(1+objective)≈5e-7. The final iterate is
+        // therefore independently certified and promoted to Converged. The old
+        // June test predated #2316 and incorrectly made a trial-step verdict
+        // override the later final-state certificate.
+        assert!(model.candidate_deviance > model.current_deviance);
+        let exact_decrement_sq = model.gradient * model.gradient;
+        let final_penalized_objective = 0.5 * model.current_deviance;
+        let exact_decrement_bound = options.convergence_tolerance.powi(2)
+            * (1.0 + final_penalized_objective.abs());
+        assert!(
+            exact_decrement_sq <= exact_decrement_bound,
+            "fixture must carry the decisive #2316 exact-decrement certificate"
+        );
         assert_eq!(
             result.status,
-            PirlsStatus::LmStepSearchExhausted,
-            "projected gradient 2e-5 exceeds the near-stationary band and must hit the LM-exhaust exit, not be accepted after a noise-scale rejection or fall through to MaxIterationsReached"
+            PirlsStatus::Converged,
+            "the rejected trial must not suppress an independent exact certificate for the unchanged final iterate"
         );
     }
 
