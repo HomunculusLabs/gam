@@ -4866,7 +4866,18 @@ fn run_indefinite_analytic_seed_stays_on_arc() {
         .with_max_iter(1);
     let mut obj = problem.build_objective(
         (),
-        |_: &mut (), theta: &Array1<f64>| Ok(theta[0] * theta[0]),
+        // Both lanes must price the SAME function. The derivative-bearing lane
+        // below reports a flat criterion (cost 0, gradient 0) so that every
+        // point is stationary and the refusal under test is unambiguously a
+        // CURVATURE verdict; the value lane therefore has to report that same
+        // flat criterion. It previously returned `theta²`, which no evaluation
+        // ever consulted — until the terminal same-ρ value-agreement audit
+        // started sampling the value lane, at which point the run refused for
+        // `cost-only value disagrees with analytic-sample value` and this test's
+        // curvature assertion could never be reached. A mock whose two lanes
+        // disagree is exactly the desync the audit exists to catch, so the mock
+        // is what has to give.
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
         |_: &mut (), _: &Array1<f64>| {
             Ok(OuterEval {
                 cost: 0.0,
