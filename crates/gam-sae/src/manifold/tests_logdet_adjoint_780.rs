@@ -10,7 +10,10 @@ use super::derivative_oracle::{
     dual_spd_logdet, guarded_exact_trace_report,
 };
 use super::dual::{Dual, DualKinkBranch};
-use super::tests::{fixed_state_logdet, gamma_fd_tiny_fixture};
+use super::tests::{
+    FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
+    fixed_state_logdet, fixed_state_logdet_sample, gamma_fd_tiny_fixture,
+};
 use super::*;
 use approx::assert_abs_diff_eq;
 
@@ -840,6 +843,7 @@ fn assert_live_theta_logdet_fd_2156(
     let certificate = BranchCertificate::from_arrow_cache(cache, MajorizerAnchorMode::FrozenAnchor);
     assert_branch_certificate_green_2156(label, &certificate);
     eprintln!("gam#2156 {label} live-theta branch certificate: {certificate:?}");
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(cache);
     let solver = DeflatedArrowSolver::plain(cache);
     let gamma = term
         .logdet_theta_adjoint(rho, cache, &solver)
@@ -855,8 +859,13 @@ fn assert_live_theta_logdet_fd_2156(
         let mut minus = term.clone();
         perturb_theta_slot_2156(&mut plus, row, var, h);
         perturb_theta_slot_2156(&mut minus, row, var, -h);
-        let fd = (fixed_state_logdet(plus, target, rho) - fixed_state_logdet(minus, target, rho))
-            / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!("{label} live theta row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, target, rho),
+            fixed_state_logdet_sample(minus, target, rho),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let rel = relative_error_2156(fd, analytic);
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
@@ -1946,10 +1955,15 @@ pub(crate) fn ordered_beta_bernoulli_sparse_strength_trace_matches_dense_fd() {
     let mut rho_minus = rho.clone();
     rho_plus.log_lambda_sparse += h;
     rho_minus.log_lambda_sparse -= h;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let fd_half = 0.5
-        * (fixed_state_logdet(term.clone(), &target, &rho_plus)
-            - fixed_state_logdet(term.clone(), &target, &rho_minus))
-        / (2.0 * h);
+        * certified_central_logdet_difference(
+            "ordered Beta--Bernoulli rho_sparse trace",
+            &fd_stratum,
+            fixed_state_logdet_sample(term.clone(), &target, &rho_plus),
+            fixed_state_logdet_sample(term.clone(), &target, &rho_minus),
+            h,
+        );
     let tol = 3.0e-3 * (1.0 + fd_half.abs().max(analytic.abs()));
     assert!(
         (fd_half - analytic).abs() <= tol,

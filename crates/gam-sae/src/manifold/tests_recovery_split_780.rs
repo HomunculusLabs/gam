@@ -2,6 +2,9 @@
 // registry/assignment tests from line ~6560 onward. Shared fixtures come via
 // the parent-module glob below.
 use super::*;
+use super::derivative_oracle::{
+    BranchCertificate, EigenDerivativeRoute, MajorizerAnchorMode, PivotBranch,
+};
 use approx::assert_abs_diff_eq;
 use gam_solve::arrow_schur::{
     ArrowFactorSlab, ArrowHtbetaCache, ArrowPcgDiagnostics, ArrowSolverMode, ArrowUndampedFactors,
@@ -1464,10 +1467,175 @@ pub(crate) fn gamma_fd_tiny_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManif
 }
 
 pub(crate) fn fixed_state_logdet(
-    mut term: SaeManifoldTerm,
+    term: SaeManifoldTerm,
     target: &Array2<f64>,
     rho: &SaeManifoldRho,
 ) -> f64 {
+    fixed_state_logdet_sample(term, target, rho).value
+}
+
+/// Discrete branch identity for a finite-difference endpoint.
+///
+/// This is intentionally distinct from
+/// [`super::derivative_oracle::BranchCertificate`]. That certificate proves
+/// exact same-cache identity before analytic trace channels are combined, so
+/// it correctly includes numeric Hessian fingerprints and exact eigengap
+/// evidence. A finite-difference endpoint is a different cache by definition:
+/// its numeric Hessian and eigenvalues should change. The quotient is a valid
+/// derivative oracle only when the discrete classifier decisions stay fixed.
+///
+/// Every field below is authoritative classifier output or structural layout.
+/// No threshold is re-derived from rounded factors and no continuous value is
+/// mistaken for branch identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FiniteDifferenceStratumCertificate {
+    row_dims: Vec<usize>,
+    row_offsets: Vec<usize>,
+    beta_dim: usize,
+    manifold_mode_fingerprint: u64,
+    solver_mode: ArrowSolverMode,
+    gauge_deflated_directions: usize,
+    deflated_per_row: Vec<usize>,
+    row_spectral_conditioning: Vec<Option<Vec<RowSpectralConditioning>>>,
+    beta_schur_deflated: Option<Vec<bool>>,
+    beta_gauge_rank: usize,
+    eigen_derivative_route: EigenDerivativeRoute,
+    min_row_pivot_branch: PivotBranch,
+    min_schur_pivot_branch: PivotBranch,
+    min_pivot_branch: PivotBranch,
+    max_pivot_branch: PivotBranch,
+}
+
+impl FiniteDifferenceStratumCertificate {
+    pub(crate) fn from_arrow_cache(cache: &ArrowFactorCache) -> Self {
+        let min_pivot = arrow_factor_min_pivot(cache);
+        Self {
+            row_dims: cache.row_dims.to_vec(),
+            row_offsets: cache.row_offsets.to_vec(),
+            beta_dim: cache.k,
+            manifold_mode_fingerprint: cache.manifold_mode_fingerprint,
+            solver_mode: cache.solver_mode,
+            gauge_deflated_directions: cache.gauge_deflated_directions,
+            deflated_per_row: cache.deflated_row_directions.iter().map(Vec::len).collect(),
+            row_spectral_conditioning: cache
+                .deflation_row_spectra
+                .iter()
+                .map(|spectrum| {
+                    spectrum
+                        .as_ref()
+                        .map(|spectrum| spectrum.conditioning.to_vec())
+                })
+                .collect(),
+            beta_schur_deflated: cache
+                .beta_schur_deflation
+                .as_ref()
+                .map(|spectrum| spectrum.deflated.to_vec()),
+            beta_gauge_rank: cache
+                .beta_gauge_quotient
+                .as_ref()
+                .map_or(0, |quotient| quotient.directions.len()),
+            eigen_derivative_route: BranchCertificate::from_arrow_cache(
+                cache,
+                MajorizerAnchorMode::FrozenAnchor,
+            )
+            .eigen_derivative_route(),
+            min_row_pivot_branch: classify_fd_pivot(min_pivot.min_row_pivot),
+            min_schur_pivot_branch: classify_fd_pivot(min_pivot.min_schur_pivot),
+            min_pivot_branch: classify_fd_pivot(min_pivot.min_pivot),
+            max_pivot_branch: classify_fd_pivot(arrow_factor_max_pivot(cache)),
+        }
+    }
+
+    pub(crate) fn changed_fields(&self, endpoint: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.row_dims != endpoint.row_dims {
+            changed.push("row_dims");
+        }
+        if self.row_offsets != endpoint.row_offsets {
+            changed.push("row_offsets");
+        }
+        if self.beta_dim != endpoint.beta_dim {
+            changed.push("beta_dim");
+        }
+        if self.manifold_mode_fingerprint != endpoint.manifold_mode_fingerprint {
+            changed.push("manifold_mode");
+        }
+        if self.solver_mode != endpoint.solver_mode {
+            changed.push("solver_mode");
+        }
+        if self.gauge_deflated_directions != endpoint.gauge_deflated_directions {
+            changed.push("gauge_deflated_directions");
+        }
+        if self.deflated_per_row != endpoint.deflated_per_row {
+            changed.push("deflated_per_row");
+        }
+        if self.row_spectral_conditioning != endpoint.row_spectral_conditioning {
+            changed.push("row_spectral_conditioning");
+        }
+        if self.beta_schur_deflated != endpoint.beta_schur_deflated {
+            changed.push("beta_schur_deflated");
+        }
+        if self.beta_gauge_rank != endpoint.beta_gauge_rank {
+            changed.push("beta_gauge_rank");
+        }
+        if self.eigen_derivative_route != endpoint.eigen_derivative_route {
+            changed.push("eigen_derivative_route");
+        }
+        if self.min_row_pivot_branch != endpoint.min_row_pivot_branch {
+            changed.push("min_row_pivot_branch");
+        }
+        if self.min_schur_pivot_branch != endpoint.min_schur_pivot_branch {
+            changed.push("min_schur_pivot_branch");
+        }
+        if self.min_pivot_branch != endpoint.min_pivot_branch {
+            changed.push("min_pivot_branch");
+        }
+        if self.max_pivot_branch != endpoint.max_pivot_branch {
+            changed.push("max_pivot_branch");
+        }
+        changed
+    }
+
+    pub(crate) fn assert_same_stratum(&self, label: &str, endpoint: &Self) {
+        assert_eq!(
+            self.eigen_derivative_route,
+            EigenDerivativeRoute::IndividualEigenpairs,
+            "{label}: finite-difference center has an unresolved spectral invariant-subspace block"
+        );
+        assert_eq!(
+            endpoint.eigen_derivative_route,
+            EigenDerivativeRoute::IndividualEigenpairs,
+            "{label}: finite-difference endpoint has an unresolved spectral invariant-subspace block"
+        );
+        let changed = self.changed_fields(endpoint);
+        assert!(
+            changed.is_empty(),
+            "{label}: finite-difference endpoint crossed a nondifferentiable structural stratum; \
+             changed_fields={changed:?}\ncenter={self:#?}\nendpoint={endpoint:#?}"
+        );
+    }
+}
+
+fn classify_fd_pivot(pivot: Option<f64>) -> PivotBranch {
+    match pivot {
+        None => PivotBranch::Missing,
+        Some(value) if !value.is_finite() => PivotBranch::NonFinite,
+        Some(value) if value > 0.0 => PivotBranch::Positive,
+        Some(_) => PivotBranch::NonPositive,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FixedStateLogdetSample {
+    pub(crate) value: f64,
+    pub(crate) stratum: FiniteDifferenceStratumCertificate,
+}
+
+pub(crate) fn fixed_state_logdet_sample(
+    mut term: SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+) -> FixedStateLogdetSample {
     let (_value, _loss, cache) = term
         .penalized_quasi_laplace_criterion_with_cache(
             target.view(),
@@ -1479,7 +1647,26 @@ pub(crate) fn fixed_state_logdet(
             1.0e-6,
         )
         .expect("fixed-state cache");
-    arrow_log_det_from_cache(&cache).expect("fixed-state authoritative joint logdet")
+    let value =
+        arrow_log_det_from_cache(&cache).expect("fixed-state authoritative joint logdet");
+    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    FixedStateLogdetSample { value, stratum }
+}
+
+pub(crate) fn certified_central_logdet_difference(
+    label: &str,
+    center: &FiniteDifferenceStratumCertificate,
+    plus: FixedStateLogdetSample,
+    minus: FixedStateLogdetSample,
+    step: f64,
+) -> f64 {
+    assert!(
+        step.is_finite() && step > 0.0,
+        "{label}: central-difference step must be finite and positive, got {step}"
+    );
+    center.assert_same_stratum(&format!("{label} (+h)"), &plus.stratum);
+    center.assert_same_stratum(&format!("{label} (-h)"), &minus.stratum);
+    (plus.value - minus.value) / (2.0 * step)
 }
 
 // [#780 line-count gate] The #1557 arrow-Schur parallelism-invariance

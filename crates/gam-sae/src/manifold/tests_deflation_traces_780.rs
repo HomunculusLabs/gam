@@ -4,7 +4,10 @@
 //! `gamma_fd_tiny_fixture` / `fixed_state_logdet` are sourced from the sibling
 //! `tests` module.
 
-use super::tests::{fixed_state_logdet, gamma_fd_tiny_fixture};
+use super::tests::{
+    FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
+    fixed_state_logdet_sample, gamma_fd_tiny_fixture,
+};
 use super::*;
 
 /// Deflation-derivative regression for a NON-α ρ-component. The deflation that
@@ -45,6 +48,7 @@ pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
         .expect("ARD log-precision trace");
 
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let mut checked = 0usize;
     for atom in 0..rho.log_ard.len() {
         for axis in 0..rho.log_ard[atom].len() {
@@ -53,9 +57,13 @@ pub(crate) fn ard_log_precision_trace_matches_dense_fd_pd_region_deflation() {
             rho_plus.log_ard[atom][axis] += h;
             rho_minus.log_ard[atom][axis] -= h;
             let fd_half = 0.5
-                * (fixed_state_logdet(term.clone(), &target, &rho_plus)
-                    - fixed_state_logdet(term.clone(), &target, &rho_minus))
-                / (2.0 * h);
+                * certified_central_logdet_difference(
+                    &format!("ARD trace atom={atom} axis={axis}"),
+                    &fd_stratum,
+                    fixed_state_logdet_sample(term.clone(), &target, &rho_plus),
+                    fixed_state_logdet_sample(term.clone(), &target, &rho_minus),
+                    h,
+                );
             let a = analytic[atom][axis];
             let tol = 5.0e-3 * (1.0 + fd_half.abs().max(a.abs()));
             assert!(
