@@ -7,7 +7,8 @@
 
 use super::*;
 use crate::custom_family::{
-    OuterCriterionDiagnostics, evaluate_rho_outer_criterion_for_diagnostics,
+    CustomFamilyHyperLayout, OuterCriterionDiagnostics,
+    evaluate_rho_outer_criterion_for_diagnostics,
 };
 use gam_test_support::binomial_location_scale_base_fixture;
 use ndarray::{Array1, Array2, array};
@@ -284,10 +285,9 @@ pub(crate) fn rho_only_outer_objective_matches_joint_hyper_when_psi_is_empty() {
 }
 
 /// Shared probit binomial-location-scale outer-derivative test fixture:
-/// builds the (threshold, log_sigma) block specs, family, penalty counts,
-/// and outer options that every `outer_laml*_binomial_location_scale_*`
-/// finite-difference test constructs identically apart from `y` and the
-/// two block initial betas.
+/// builds the (threshold, log_sigma) block specs, family, and outer options
+/// that every `outer_laml*_binomial_location_scale_*` finite-difference test
+/// constructs identically apart from `y` and the two block initial betas.
 fn binomial_location_scale_outer_fixture(
     y: Array1<f64>,
     threshold_initial_beta: f64,
@@ -295,7 +295,6 @@ fn binomial_location_scale_outer_fixture(
 ) -> (
     BinomialLocationScaleFamily,
     Vec<ParameterBlockSpec>,
-    Vec<usize>,
     BlockwiseFitOptions,
 ) {
     let n = y.len();
