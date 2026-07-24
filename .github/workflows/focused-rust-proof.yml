@@ -1,0 +1,184 @@
+name: Focused Rust Proof
+
+# Package-scoped compile-and-run lane for a newly edited leaf-crate test that
+# does not yet exist in a full-workspace nextest archive.
+#
+# Validate One remains execution-only and exact-archive-only. This workflow has
+# the opposite, deliberately narrow contract: compile one named package target
+# only while the shared compiler cache is reachable, then run literal test-name
+# filters. It never falls back to a workspace build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Cargo package containing the focused tests."
+        required: true
+      target:
+        description: "Compile library tests or one integration-test binary."
+        type: choice
+        options:
+          - lib
+          - integration
+        default: lib
+        required: true
+      test_binary:
+        description: "Integration-test binary name; required only for target=integration."
+        default: ""
+        required: false
+      filters:
+        description: "Bare Rust test-name substring(s), whitespace-separated."
+        required: true
+      issue:
+        description: "Issue number, used only for concurrency and display."
+        default: ""
+        required: false
+
+concurrency:
+  group: focused-rust-proof-${{ github.event.inputs.issue }}-${{ github.event.inputs.package }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  # Match the full Rust archive builder so compiler objects are reusable across
+  # the focused and complete lanes.
+  RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  prove:
+    name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact requested SHA
+        uses: actions/checkout@v5
+        with:
+          # build.rs's human-author gate needs real history.
+          fetch-depth: 0
+
+      - name: Set up warm Rust toolchain
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          free-disk-space: "false"
+          # Compiler outputs belong in shared sccache. A target-directory cache
+          # would be a second, key-sensitive source of truth.
+          cache-targets: "false"
+
+      - name: Require reachable shared compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUSTC_WRAPPER:-}" != "sccache" ]]; then
+            echo "::error::Shared sccache is unavailable; refusing a cold source build."
+            exit 1
+          fi
+          sccache --show-stats
+          # Attribute every subsequent request and hit to this proof only.
+          sccache --zero-stats
+
+      - name: Run package-scoped tests
+        shell: bash
+        env:
+          FILTERS: ${{ github.event.inputs.filters }}
+          PACKAGE: ${{ github.event.inputs.package }}
+          TARGET: ${{ github.event.inputs.target }}
+          TEST_BINARY: ${{ github.event.inputs.test_binary }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PACKAGE" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
+            echo "::error::package contains unsupported characters: ${PACKAGE}"
+            exit 1
+          fi
+
+          target_args=()
+          case "$TARGET" in
+            lib)
+              if [[ -n "$TEST_BINARY" ]]; then
+                echo "::error::test_binary must be empty when target=lib."
+                exit 1
+              fi
+              target_args=(--lib)
+              ;;
+            integration)
+              if [[ ! "$TEST_BINARY" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
+                echo "::error::target=integration requires a safe, non-empty test_binary."
+                exit 1
+              fi
+              target_args=(--test "$TEST_BINARY")
+              ;;
+            *)
+              echo "::error::unsupported target: ${TARGET}"
+              exit 1
+              ;;
+          esac
+
+          read -r -a filters <<< "$FILTERS"
+          if [[ "${#filters[@]}" -eq 0 ]]; then
+            echo "::error::filters must contain at least one test-name substring."
+            exit 1
+          fi
+
+          mkdir -p focused-rust-logs
+          for filter in "${filters[@]}"; do
+            if [[ ! "$filter" =~ ^[A-Za-z0-9_][A-Za-z0-9_:.-]*$ ]]; then
+              echo "::error::filter '${filter}' is not a bare Rust test-name substring."
+              exit 1
+            fi
+
+            log_file="focused-rust-logs/${filter//[:.]/_}.log"
+            echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} ${filter}"
+            # Ten minutes includes both the package-scoped link and execution.
+            # Hitting this bound is a failed warm-iteration proof, never an
+            # invitation to continue into a full cold build.
+            timeout --signal=TERM --kill-after=15s 600 \
+              cargo test -p "$PACKAGE" --all-features \
+                "${target_args[@]}" "$filter" \
+                -- --nocapture --test-threads=1 2>&1 | tee "$log_file"
+
+            ran=$(awk '/test result:/ {
+              for (i = 1; i < NF; i++) {
+                if ($(i + 1) == "passed;") passed += $i;
+                if ($(i + 1) == "failed;") failed += $i;
+              }
+            } END { print passed + failed + 0 }' "$log_file")
+            if [[ "${ran:-0}" -eq 0 ]]; then
+              echo "::error::filter '${filter}' executed zero tests."
+              exit 1
+            fi
+            echo "filter '${filter}' executed ${ran} test(s)."
+          done
+
+      - name: Require measured compiler-cache reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          stats=$(sccache --show-stats)
+          printf '%s\n' "$stats"
+          hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not read sccache hit count; refusing an unmeasured warm proof."
+            exit 1
+          fi
+          if (( hits == 0 )); then
+            echo "::error::Focused proof reused zero compiler objects; this was a cold build."
+            exit 1
+          fi
+          echo "Focused proof reused ${hits} cached compiler object(s)."
+
+      - name: Report compiler-cache evidence
+        if: ${{ always() }}
+        shell: bash
+        run: sccache --show-stats
+
+      - name: Upload focused logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: focused-rust-${{ github.run_id }}
+          path: focused-rust-logs
+          if-no-files-found: ignore
