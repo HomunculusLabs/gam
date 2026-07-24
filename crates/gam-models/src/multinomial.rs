@@ -4723,13 +4723,20 @@ mod reference_class_invariance_tests {
                 .clone()
                 .with_joint_initial_log_lambdas(rho_star.to_vec());
             let eval_at = |rho_vec: &[f64]| -> (f64, ndarray::Array1<f64>, bool) {
-                crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
-                    &fam,
-                    &parts.blocks,
-                    &probe_options,
-                    &ndarray::Array1::from(rho_vec.to_vec()),
+                let diagnostics =
+                    crate::custom_family::evaluate_labeled_outer_criterion_for_diagnostics(
+                        &fam,
+                        &parts.blocks,
+                        &probe_options,
+                        &ndarray::Array1::from(rho_vec.to_vec()),
+                        gam_problem::EvalMode::ValueAndGradient,
+                    )
+                    .expect("labeled outer evaluation at the checkpoint");
+                (
+                    diagnostics.objective,
+                    diagnostics.gradient,
+                    diagnostics.inner_converged,
                 )
-                .expect("labeled outer evaluation at the checkpoint")
             };
             let (v0, g0, conv0) = eval_at(&rho_star);
             eprintln!(

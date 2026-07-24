@@ -2685,14 +2685,75 @@ pub fn fit_custom_family_fixed_log_lambda_warm_start<
     Ok((block_beta, inner.converged, inner.cycles))
 }
 
+/// Exact outer-criterion evidence returned by the diagnostic evaluators.
+pub struct OuterCriterionDiagnostics {
+    pub objective: f64,
+    pub gradient: Array1<f64>,
+    pub outer_hessian: Option<Array2<f64>>,
+    pub inner_converged: bool,
+}
+
+fn materialize_outer_criterion_diagnostics(
+    eval: OuterObjectiveEvalResult,
+    context: &'static str,
+) -> Result<OuterCriterionDiagnostics, CustomFamilyError> {
+    let outer_hessian = eval
+        .outer_hessian
+        .materialize_dense()
+        .map_err(|reason| CustomFamilyError::Optimization {
+            context,
+            reason: reason.to_string(),
+        })?;
+    Ok(OuterCriterionDiagnostics {
+        objective: eval.objective,
+        gradient: eval.gradient,
+        outer_hessian,
+        inner_converged: eval.inner_converged,
+    })
+}
+
+/// Evaluate the generic rho-only outer criterion without penalty-label
+/// aggregation or identifiability canonicalization. Model-family derivative
+/// gates use this entry to test the exact carrier functional independently of
+/// the higher-level labeled-coordinate transformation.
+pub fn evaluate_rho_outer_criterion_for_diagnostics<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    rho: &Array1<f64>,
+    eval_mode: EvalMode,
+) -> Result<OuterCriterionDiagnostics, CustomFamilyError> {
+    let penalty_counts = validate_blockspecs(specs)?;
+    let eval = outerobjectivegradienthessian_internal(
+        family,
+        specs,
+        options,
+        &penalty_counts,
+        rho,
+        None,
+        gam_problem::RhoPrior::Flat,
+        eval_mode,
+    )
+    .map_err(|reason| CustomFamilyError::Optimization {
+        context: "evaluate_rho_outer_criterion_for_diagnostics",
+        reason,
+    })?;
+    materialize_outer_criterion_diagnostics(
+        eval,
+        "evaluate_rho_outer_criterion_for_diagnostics",
+    )
+}
+
 /// Diagnostic-only entry: evaluate the SAME labeled outer criterion and
-/// analytic gradient the production outer optimizer descends (identifiability
-/// canonicalization → pulled-back joint penalty specs → labeled layout →
-/// `outerobjectivegradienthessian_labeled` with a flat ρ-prior), at a
-/// caller-supplied outer coordinate. This exists so obj↔grad desync
-/// investigations (#2349) can FD-gate the exact production functional from an
-/// integration test; it performs a cold inner solve per call and is not a
-/// fitting API.
+/// analytic derivatives the production outer optimizer consumes
+/// (identifiability canonicalization → pulled-back joint penalty specs →
+/// labeled layout → `outerobjectivegradienthessian_labeled` with a flat
+/// ρ-prior), at a caller-supplied outer coordinate. This exists so
+/// objective↔derivative desynchronization investigations can FD-gate the exact
+/// production functional from the model crate that owns the family; it
+/// performs a cold inner solve per call and is not a fitting API.
 pub fn evaluate_labeled_outer_criterion_for_diagnostics<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -2700,7 +2761,8 @@ pub fn evaluate_labeled_outer_criterion_for_diagnostics<
     raw_specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
     rho: &Array1<f64>,
-) -> Result<(f64, Array1<f64>, bool), CustomFamilyError> {
+    eval_mode: EvalMode,
+) -> Result<OuterCriterionDiagnostics, CustomFamilyError> {
     let canonical =
         gam_identifiability::canonical::canonicalize_for_identifiability_with_operating_scalars(
             raw_specs,
@@ -2729,11 +2791,14 @@ pub fn evaluate_labeled_outer_criterion_for_diagnostics<
         rho,
         None,
         &gam_problem::RhoPrior::Flat,
-        EvalMode::ValueAndGradient,
+        eval_mode,
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "evaluate_labeled_outer_criterion_for_diagnostics",
         reason,
     })?;
-    Ok((eval.objective, eval.gradient, eval.inner_converged))
+    materialize_outer_criterion_diagnostics(
+        eval,
+        "evaluate_labeled_outer_criterion_for_diagnostics",
+    )
 }

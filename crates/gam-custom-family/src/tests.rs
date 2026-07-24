@@ -244,8 +244,6 @@ pub(crate) fn batched_outer_gradient_override_rejected_when_jeffreys_curvature_i
 use approx::assert_relative_eq;
 use faer::sparse::{SparseColMat, Triplet};
 use gam_linalg::matrix::DesignMatrix;
-use gam_models::gamlss::{BinomialLocationScaleFamily, BinomialLocationScaleWiggleFamily};
-use gam_problem::test_support::binomial_location_scale_base_fixture;
 use ndarray::{Array1, Array2, array};
 
 #[test]
@@ -1364,7 +1362,7 @@ pub(crate) fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync +
     rho: &Array1<f64>,
     warm_start: Option<&ConstrainedWarmStart>,
 ) -> Result<(f64, Array1<f64>, ConstrainedWarmStart), String> {
-    let (obj, grad, _, warm) = super::test_support::outerobjectivegradienthessian(
+    let (objective, gradient, _, warm_start) = super::test_support::outerobjectivegradienthessian(
         family,
         specs,
         options,
@@ -1373,77 +1371,7 @@ pub(crate) fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync +
         warm_start,
         EvalMode::ValueAndGradient,
     )?;
-    Ok((obj, grad, warm))
-}
-
-pub(crate) struct BinomialLocationScaleWiggleOuterFixture {
-    pub(crate) family: BinomialLocationScaleWiggleFamily,
-    pub(crate) specs: Vec<ParameterBlockSpec>,
-    pub(crate) penalty_counts: Vec<usize>,
-    pub(crate) rho: Array1<f64>,
-    pub(crate) options: BlockwiseFitOptions,
-}
-
-pub(crate) fn binomial_location_scale_wiggle_outer_fixture()
--> BinomialLocationScaleWiggleOuterFixture {
-    let base = binomial_location_scale_base_fixture();
-    let q_seed = Array1::linspace(-1.4, 1.4, base.n);
-    let knots =
-        gam_terms::basis::initializewiggle_knots_from_seed(q_seed.view(), 3, 4).expect("knots");
-    let wiggle_block =
-        gam_models::wiggle::buildwiggle_block_input_from_knots(q_seed.view(), &knots, 3, 2, false)
-            .expect("wiggle block");
-    let wigglespec = ParameterBlockSpec {
-        name: "wiggle".to_string(),
-        design: wiggle_block.design.clone(),
-        offset: wiggle_block.offset.clone(),
-        penalties: wiggle_block
-            .penalties
-            .iter()
-            .map(|ps| match ps {
-                gam_solve::model_types::PenaltySpec::Block {
-                    local, col_range, ..
-                } => PenaltyMatrix::Blockwise {
-                    local: local.clone(),
-                    col_range: col_range.clone(),
-                    total_dim: wiggle_block.design.ncols(),
-                },
-                gam_solve::model_types::PenaltySpec::Dense(m)
-                | gam_solve::model_types::PenaltySpec::DenseWithMean { matrix: m, .. } => {
-                    PenaltyMatrix::Dense(m.clone())
-                }
-            })
-            .collect(),
-        nullspace_dims: wiggle_block.nullspace_dims.clone(),
-        initial_log_lambdas: array![0.1],
-        initial_beta: Some(Array1::from_elem(wiggle_block.design.ncols(), 0.03)),
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let family = BinomialLocationScaleWiggleFamily {
-        y: base.y,
-        weights: base.weights,
-        link_kind: gam_problem::InverseLink::Standard(gam_problem::StandardLink::Probit),
-        threshold_design: Some(base.threshold_design),
-        log_sigma_design: Some(base.log_sigma_design),
-        wiggle_knots: knots,
-        wiggle_degree: 3,
-        policy: gam_runtime::resource::ResourcePolicy::default_library(),
-    };
-    BinomialLocationScaleWiggleOuterFixture {
-        family,
-        specs: vec![base.threshold_spec, base.log_sigma_spec, wigglespec],
-        penalty_counts: vec![1usize, 1usize, 1usize],
-        rho: array![0.05, -0.15, 0.1],
-        options: BlockwiseFitOptions {
-            use_remlobjective: true,
-            ridge_floor: 1e-10,
-            outer_max_iter: 1,
-            ..BlockwiseFitOptions::default()
-        },
-    }
+    Ok((objective, gradient, warm_start))
 }
 
 #[derive(Clone)]
