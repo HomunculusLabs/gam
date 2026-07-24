@@ -16,9 +16,7 @@ fn outerobjectivegradienthessian<F: CustomFamily + Clone + Send + Sync + 'static
     family: &F,
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
-    _penalty_counts: &[usize],
     rho: &Array1<f64>,
-    _warm_start: Option<&()>,
     eval_mode: gam_problem::EvalMode,
 ) -> Result<(f64, Array1<f64>, Option<Array2<f64>>, ()), String> {
     let diagnostics: OuterCriterionDiagnostics =
@@ -36,17 +34,13 @@ fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
-    penalty_counts: &[usize],
     rho: &Array1<f64>,
-    warm_start: Option<&()>,
 ) -> Result<(f64, Array1<f64>, ()), String> {
     let (objective, gradient, _, warm_start) = outerobjectivegradienthessian(
         family,
         specs,
         options,
-        penalty_counts,
         rho,
-        warm_start,
         gam_problem::EvalMode::ValueAndGradient,
     )?;
     Ok((objective, gradient, warm_start))
@@ -67,7 +61,6 @@ fn test_design_hyper_layout(
 pub(crate) struct BinomialLocationScaleWiggleOuterFixture {
     pub(crate) family: BinomialLocationScaleWiggleFamily,
     pub(crate) specs: Vec<ParameterBlockSpec>,
-    pub(crate) penalty_counts: Vec<usize>,
     pub(crate) rho: Array1<f64>,
     pub(crate) options: BlockwiseFitOptions,
 }
@@ -123,7 +116,6 @@ pub(crate) fn binomial_location_scale_wiggle_outer_fixture(
     BinomialLocationScaleWiggleOuterFixture {
         family,
         specs: vec![base.threshold_spec, base.log_sigma_spec, wigglespec],
-        penalty_counts: vec![1usize, 1usize, 1usize],
         rho: array![0.05, -0.15, 0.1],
         options: BlockwiseFitOptions {
             use_remlobjective: true,
@@ -139,7 +131,6 @@ pub(crate) fn outer_lamlgradient_matches_finite_differencewhen_joint_exact_path_
     let BinomialLocationScaleWiggleOuterFixture {
         family,
         specs,
-        penalty_counts,
         rho,
         options: base_options,
     } = binomial_location_scale_wiggle_outer_fixture();
@@ -154,7 +145,7 @@ pub(crate) fn outer_lamlgradient_matches_finite_differencewhen_joint_exact_path_
     };
 
     let (f0, g0, _) =
-        outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho, None)
+        outerobjective_andgradient(&family, &specs, &options, &rho)
             .expect("objective/gradient");
     assert!(f0.is_finite());
     assert_eq!(g0.len(), rho.len());
@@ -166,10 +157,10 @@ pub(crate) fn outer_lamlgradient_matches_finite_differencewhen_joint_exact_path_
         rho_p[k] += h;
         rho_m[k] -= h;
         let (fp, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_p, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_p)
                 .expect("objective+");
         let (fm, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_m, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_m)
                 .expect("objective-");
         let gfd = (fp - fm) / (2.0 * h);
 
@@ -226,7 +217,6 @@ pub(crate) fn rho_only_outer_objective_matches_joint_hyper_when_psi_is_empty() {
     let BinomialLocationScaleWiggleOuterFixture {
         family,
         specs,
-        penalty_counts,
         rho,
         options,
     } = binomial_location_scale_wiggle_outer_fixture();
@@ -236,9 +226,7 @@ pub(crate) fn rho_only_outer_objective_matches_joint_hyper_when_psi_is_empty() {
             &family,
             &specs,
             &options,
-            &penalty_counts,
             &rho,
-            None,
             gam_problem::EvalMode::ValueGradientHessian,
         )
         .expect("rho-only outer objective");
@@ -353,25 +341,24 @@ fn binomial_location_scale_outer_fixture(
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
     };
     let specs = vec![thresholdspec, log_sigmaspec];
-    let penalty_counts = vec![1usize, 1usize];
     let options = BlockwiseFitOptions {
         use_remlobjective: true,
         ridge_floor: 1e-10,
         outer_max_iter: 1,
         ..BlockwiseFitOptions::default()
     };
-    (family, specs, penalty_counts, options)
+    (family, specs, options)
 }
 
 #[test]
 pub(crate) fn outer_lamlgradient_diagonal_binomial_location_scale_matchesfd() {
     let y = Array1::from_vec(vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-    let (family, specs, penalty_counts, options) =
+    let (family, specs, options) =
         binomial_location_scale_outer_fixture(y, 0.0, 0.0);
     let rho = array![0.0, 0.0];
 
     let (f0, g0, _) =
-        outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho, None)
+        outerobjective_andgradient(&family, &specs, &options, &rho)
             .expect("objective/gradient");
     assert!(f0.is_finite());
     assert_eq!(g0.len(), rho.len());
@@ -383,10 +370,10 @@ pub(crate) fn outer_lamlgradient_diagonal_binomial_location_scale_matchesfd() {
         rho_p[k] += h;
         rho_m[k] -= h;
         let (fp, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_p, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_p)
                 .expect("objective+");
         let (fm, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_m, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_m)
                 .expect("objective-");
         let gfd = (fp - fm) / (2.0 * h);
         let abs = (g0[k] - gfd).abs();
@@ -416,12 +403,12 @@ pub(crate) fn outer_lamlgradient_diagonal_binomial_location_scale_matchesfd() {
 #[test]
 pub(crate) fn outer_lamlgradient_diagonal_binomial_location_scale_hard_case_matchesfd() {
     let y = Array1::from_vec(vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-    let (family, specs, penalty_counts, options) =
+    let (family, specs, options) =
         binomial_location_scale_outer_fixture(y, 0.2, -0.1);
     let rho = array![0.15, -0.25];
 
     let (f0, g0, _) =
-        outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho, None)
+        outerobjective_andgradient(&family, &specs, &options, &rho)
             .expect("objective/gradient");
     assert!(f0.is_finite());
     assert_eq!(g0.len(), rho.len());
@@ -433,10 +420,10 @@ pub(crate) fn outer_lamlgradient_diagonal_binomial_location_scale_hard_case_matc
         rho_p[k] += h;
         rho_m[k] -= h;
         let (fp, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_p, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_p)
                 .expect("objective+");
         let (fm, _, _) =
-            outerobjective_andgradient(&family, &specs, &options, &penalty_counts, &rho_m, None)
+            outerobjective_andgradient(&family, &specs, &options, &rho_m)
                 .expect("objective-");
         let gfd = (fp - fm) / (2.0 * h);
         let abs = (g0[k] - gfd).abs();
@@ -474,7 +461,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd() 
     // β̂_threshold ≠ 0, coupling the (β_0, β_1) blocks through the
     // observed-information weights and making all four entries validatable.
     let y = Array1::from_vec(vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0]);
-    let (family, specs, penalty_counts, options) =
+    let (family, specs, options) =
         binomial_location_scale_outer_fixture(y, 0.15, -0.05);
     let rho = array![0.1, -0.2];
 
@@ -482,9 +469,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd() 
         &family,
         &specs,
         &options,
-        &penalty_counts,
         &rho,
-        None,
         gam_problem::EvalMode::ValueGradientHessian,
     )
     .expect("objective/gradient/hessian");
@@ -502,9 +487,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd() 
             &family,
             &specs,
             &options,
-            &penalty_counts,
             &rho_p,
-            None,
             gam_problem::EvalMode::ValueAndGradient,
         )
         .expect("objective/gradient +");
@@ -512,9 +495,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd() 
             &family,
             &specs,
             &options,
-            &penalty_counts,
             &rho_m,
-            None,
             gam_problem::EvalMode::ValueAndGradient,
         )
         .expect("objective/gradient -");
@@ -557,7 +538,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_matchesfd() 
 #[test]
 pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_hard_case_matchesfd() {
     let y = Array1::from_vec(vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-    let (family, specs, penalty_counts, options) =
+    let (family, specs, options) =
         binomial_location_scale_outer_fixture(y, 0.2, -0.1);
     let rho = array![0.15, -0.25];
 
@@ -565,9 +546,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_hard_case_ma
         &family,
         &specs,
         &options,
-        &penalty_counts,
         &rho,
-        None,
         gam_problem::EvalMode::ValueGradientHessian,
     )
     .expect("objective/gradient/hessian");
@@ -585,9 +564,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_hard_case_ma
             &family,
             &specs,
             &options,
-            &penalty_counts,
             &rho_p,
-            None,
             gam_problem::EvalMode::ValueAndGradient,
         )
         .expect("objective/gradient +");
@@ -595,9 +572,7 @@ pub(crate) fn outer_lamlhessian_joint_exact_binomial_location_scale_hard_case_ma
             &family,
             &specs,
             &options,
-            &penalty_counts,
             &rho_m,
-            None,
             gam_problem::EvalMode::ValueAndGradient,
         )
         .expect("objective/gradient -");
