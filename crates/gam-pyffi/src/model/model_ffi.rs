@@ -308,7 +308,6 @@ struct SummaryConvergence {
     /// `None` when no smoothing coordinate was optimized: there is no outer
     /// stationarity equation to solve, which is a different statement from a
     /// projected gradient that happened to be zero.
-    #[serde(skip_serializing_if = "Option::is_none")]
     outer: Option<SummaryOuterCertificate>,
 }
 
