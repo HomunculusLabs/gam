@@ -1,7 +1,7 @@
 //! Stationary-cache `∂log|H|/∂θ` adjoint regression tests (#1416),
 //! split verbatim out of `tests.rs` to keep that tracked file under the #780
 //! 10k-line gate. Declared as a sibling `#[cfg(test)] mod` in `mod.rs`; shared
-//! `gamma_fd_tiny_fixture` / `fixed_state_logdet` are sourced from the sibling
+//! `gamma_fd_tiny_fixture` / `fixed_state_logdet_sample` are sourced from the sibling
 //! `tests` module.
 
 use super::construction::{active_softmax_gershgorin_majorizer_entry, softmax_majorizer_log_mean};
@@ -12,7 +12,7 @@ use super::derivative_oracle::{
 use super::dual::{Dual, DualKinkBranch};
 use super::tests::{
     FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
-    fixed_state_logdet, fixed_state_logdet_sample, gamma_fd_tiny_fixture,
+    fixed_state_logdet_sample, gamma_fd_tiny_fixture,
 };
 use super::*;
 use approx::assert_abs_diff_eq;
@@ -1306,12 +1306,19 @@ pub(crate) fn sae_logdet_theta_adjoint_logit0_dense_trace_localization_2156() {
         .expect("Gamma");
     let analytic = gamma.t[base + local_w];
     let h = 1.0e-5;
-    let at = |dl: f64| -> f64 {
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let at = |dl: f64| {
         let mut t = term.clone();
         t.assignment.logits[[row, 0]] += dl;
-        fixed_state_logdet(t, &target, &rho)
+        fixed_state_logdet_sample(t, &target, &rho)
     };
-    let fd_total = (at(h) - at(-h)) / (2.0 * h);
+    let fd_total = certified_central_logdet_difference(
+        "gam#2156 localized logit trace",
+        &fd_stratum,
+        at(h),
+        at(-h),
+        h,
+    );
     eprintln!(
         "gam#2156 row=0 logit=0 dense_trace={trace:.12e} gamma={analytic:.12e} fd_total={fd_total:.12e} gamma_live_fd_abs_err={:.12e}",
         (analytic - fd_total).abs()
@@ -1386,6 +1393,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_on_tiny_fixture() {
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let probes = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (3usize, 1usize, SaeLocalRowVar::Coord { atom: 0, axis: 0 }),
@@ -1402,7 +1410,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_on_tiny_fixture() {
             SaeLocalRowVar::Logit { atom } => (Some(atom), None, 0usize),
             SaeLocalRowVar::Coord { atom, axis } => (None, Some(atom), axis),
         };
-        let at = |dl: f64| -> f64 {
+        let at = |dl: f64| {
             let mut t = term.clone();
             if let Some(atom) = logit_atom {
                 t.assignment.logits[[row, atom]] += dl;
@@ -1412,9 +1420,15 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_on_tiny_fixture() {
                 flat[idx] += dl;
                 t.assignment.coords[atom].set_flat(flat.view());
             }
-            fixed_state_logdet(t, &target, &rho)
+            fixed_state_logdet_sample(t, &target, &rho)
         };
-        let fd = (at(h) - at(-h)) / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!("tiny-fixture Gamma row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            at(h),
+            at(-h),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 2.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
         assert!(
@@ -1504,6 +1518,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
         .expect("Gamma_joint");
 
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let mut checked = 0usize;
     let mut worst = 0.0_f64;
     for row in 0..term.n_obs() {
@@ -1521,15 +1536,23 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
             if cos_kt.abs() < 0.2 {
                 continue;
             }
-            let at = |dt: f64| -> f64 {
+            let at = |dt: f64| {
                 let mut t = term.clone();
                 let mut flat = t.assignment.coords[atom].as_flat().clone();
                 let idx = row * t.assignment.coords[atom].latent_dim() + axis;
                 flat[idx] += dt;
                 t.assignment.coords[atom].set_flat(flat.view());
-                fixed_state_logdet(t, &target, &rho)
+                fixed_state_logdet_sample(t, &target, &rho)
             };
-            let fd = (at(h) - at(-h)) / (2.0 * h);
+            let fd = certified_central_logdet_difference(
+                &format!(
+                    "deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis}"
+                ),
+                &fd_stratum,
+                at(h),
+                at(-h),
+                h,
+            );
             let analytic = gamma.t[cache.row_offsets[row] + local_pos];
             let err = (fd - analytic).abs();
             worst = worst.max(err);
@@ -1557,7 +1580,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
 pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli() {
     // The integrated marginal's empirical-mass channel couples every row of
     // column `k`, so perturbing one logit shifts every retained row-local
-    // assembled `htt` diagonal in that column. `fixed_state_logdet` rebuilds
+    // assembled `htt` diagonal in that column. `fixed_state_logdet_sample` rebuilds
     // H at the perturbed state, so a single-logit FD captures both the
     // row-local direct-z channel and the global `M_k` channel that
     // `logdet_theta_adjoint` accumulates column-wise. lambda_sparse is the
@@ -1590,6 +1613,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli()
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     // Probe both atoms across distinct rows so the shared-mass derivative is
     // exercised on both columns, and probe coordinate channels so the whole
     // theta adjoint remains on the same assembled curvature operator.
@@ -1623,9 +1647,13 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli()
                 minus.assignment.coords[atom].set_flat(flat_m.view());
             }
         }
-        let fd = (fixed_state_logdet(plus, &target, &rho)
-            - fixed_state_logdet(minus, &target, &rho))
-            / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!("ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
         assert!(
@@ -1724,7 +1752,7 @@ pub(crate) fn exact_stationarity_a_minus_b_includes_ordered_beta_bernoulli_share
 /// metric-first analogue of `..._ordered_beta_bernoulli`: install a rank-2 BehavioralFisher
 /// metric (`s = 2 < p = 3`, a genuinely rank-deficient whitening) on the ordered Beta--Bernoulli tiny
 /// fixture and check the analytic `Γ` matches the fixed-state dense FD of `log|H|`
-/// — both flow through the majorized assembly (`fixed_state_logdet` rebuilds the
+/// — both flow through the majorized assembly (`fixed_state_logdet_sample` rebuilds the
 /// SAME majorized `H`). This guards the majorized θ-adjoint channels against the
 /// majorized criterion log-det in the whitened+rank-deficient regime, where the
 /// whitened data curvature cannot dominate the raw indefinite prior pieces.
@@ -1779,6 +1807,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -1803,9 +1832,15 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
                 minus.assignment.coords[atom].set_flat(flat_m.view());
             }
         }
-        let fd = (fixed_state_logdet(plus, &target, &rho)
-            - fixed_state_logdet(minus, &target, &rho))
-            / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!(
+                "majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"
+            ),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
         assert!(
@@ -1883,6 +1918,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -1907,9 +1943,13 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
                 minus.assignment.coords[atom].set_flat(flat_m.view());
             }
         }
-        let fd = (fixed_state_logdet(plus, &target, &rho)
-            - fixed_state_logdet(minus, &target, &rho))
-            / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!("full-rank whitened Gamma row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
         assert!(
@@ -1948,7 +1988,7 @@ pub(crate) fn ordered_beta_bernoulli_sparse_strength_trace_matches_dense_fd() {
         .expect("rho_sparse logdet trace");
 
     // Fixed-state central difference of log|H| w.r.t. ρ_sparse: vary λ_sparse,
-    // hold (t, β) at the converged state (`fixed_state_logdet` re-assembles H
+    // hold (t, β) at the converged state (`fixed_state_logdet_sample` re-assembles H
     // with inner_max_iter=0). The analytic trace is ½ ∂log|H|/∂ρ_sparse.
     let h = 1.0e-5;
     let mut rho_plus = rho.clone();
@@ -1983,7 +2023,7 @@ pub(crate) fn ordered_beta_bernoulli_sparse_strength_trace_matches_dense_fd() {
 /// diagnosis driving the whole #1625 fix, the analytic
 /// `Γ = tr(H⁻¹ ∂H/∂θ)` equals the fixed-state central difference of `log|H|`
 /// only at a CONVERGED inner cache. A short inner budget (e.g. `iter = 5`) leaves
-/// (t, β) non-stationary, and `fixed_state_logdet` (which re-solves with
+/// (t, β) non-stationary, and `fixed_state_logdet_sample` (which re-solves with
 /// `iter = 0`) then differences `log|H|` about a different state, manufacturing a
 /// spurious O(several-%) mismatch that does NOT shrink with the FD step — the
 /// tell that it is a state desync, not truncation. Converging the inner solve
@@ -2013,6 +2053,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
+    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     // Probe both atoms across distinct rows so the shared-mass channel is
     // exercised on both columns under learnable alpha.
     let probes = [
@@ -2025,9 +2066,15 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
         let mut minus = term.clone();
         plus.assignment.logits[[row, atom]] += h;
         minus.assignment.logits[[row, atom]] -= h;
-        let fd = (fixed_state_logdet(plus, &target, &rho)
-            - fixed_state_logdet(minus, &target, &rho))
-            / (2.0 * h);
+        let fd = certified_central_logdet_difference(
+            &format!(
+                "learnable-alpha ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"
+            ),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
         let analytic = gamma.t[cache.row_offsets[row] + local_pos];
         let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
         assert!(

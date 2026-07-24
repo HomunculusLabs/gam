@@ -2,7 +2,7 @@ use gam_linalg::faer_ndarray::fast_ata;
 
 pub(crate) use super::tests_recovery_split_780::{
     FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
-    diagonal_latent_cache, fixed_state_logdet, fixed_state_logdet_sample, gamma_fd_tiny_fixture,
+    diagonal_latent_cache, fixed_state_logdet_sample, gamma_fd_tiny_fixture,
     warmstart_test_objective, warmstart_test_objective_with_evaluator,
 };
 use super::*;

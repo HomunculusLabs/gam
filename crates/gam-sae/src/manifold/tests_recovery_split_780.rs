@@ -1466,14 +1466,6 @@ pub(crate) fn gamma_fd_tiny_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManif
     (term, target, rho)
 }
 
-pub(crate) fn fixed_state_logdet(
-    term: SaeManifoldTerm,
-    target: &Array2<f64>,
-    rho: &SaeManifoldRho,
-) -> f64 {
-    fixed_state_logdet_sample(term, target, rho).value
-}
-
 /// Discrete branch identity for a finite-difference endpoint.
 ///
 /// This is intentionally distinct from
@@ -1677,5 +1669,5 @@ pub(crate) fn certified_central_logdet_difference(
 // The stationary-cache `∂log|H|/∂θ` adjoint and assignment-prior trace
 // regressions were likewise split into the sibling
 // `tests_logdet_adjoint_780.rs` module for the same gate; they still source the
-// shared `gamma_fd_tiny_fixture` / `fixed_state_logdet` helpers, which remain
+// shared `gamma_fd_tiny_fixture` / `fixed_state_logdet_sample` helpers, which remain
 // defined here.
