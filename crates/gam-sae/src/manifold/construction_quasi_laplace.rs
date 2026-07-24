@@ -3838,6 +3838,7 @@ impl SaeManifoldTerm {
         }
         let raw = &spec.raw_evals;
         let cond = &spec.cond_evals;
+        let conditioning = &spec.conditioning;
         // M = Uᵀ D U, W = Uᵀ inv_vv U (both q×q, symmetric).
         let m = u.t().dot(d_mat).dot(u);
         let w = u.t().dot(inv_vv).dot(u);
@@ -3854,7 +3855,7 @@ impl SaeManifoldTerm {
                 let denom = raw[a] - raw[b];
                 let f1 = if denom.abs() > gap_threshold {
                     (cond[a] - cond[b]) / denom
-                } else if cond[a] == raw[a] {
+                } else if conditioning[a] == RowSpectralConditioning::Raw {
                     1.0
                 } else {
                     0.0

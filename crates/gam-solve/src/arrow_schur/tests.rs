@@ -1532,6 +1532,38 @@ pub(crate) fn evidence_row_spectral_deflation_count_is_stable_across_the_cutoff(
         "deflation count must be STABLE across an eigenvalue straddling the \
              bare cutoff — the quotient-dimension guard must not trip mid-walk"
     );
+    let lo_conditioning = &lo
+        .deflation_spectrum
+        .as_ref()
+        .expect("lo iterate spectral metadata")
+        .conditioning;
+    let hi_conditioning = &hi
+        .deflation_spectrum
+        .as_ref()
+        .expect("hi iterate spectral metadata")
+        .conditioning;
+    assert_eq!(
+        &**lo_conditioning,
+        &[
+            RowSpectralConditioning::UnitDeflated,
+            RowSpectralConditioning::FloorClamped,
+            RowSpectralConditioning::Raw,
+        ],
+        "the lo iterate must expose the classifier's floor-clamped branch"
+    );
+    assert_eq!(
+        &**hi_conditioning,
+        &[
+            RowSpectralConditioning::UnitDeflated,
+            RowSpectralConditioning::Raw,
+            RowSpectralConditioning::Raw,
+        ],
+        "the hi iterate must expose the classifier's raw-retained branch"
+    );
+    assert_ne!(
+        lo_conditioning, hi_conditioning,
+        "equal deflation counts must not hide a floor-clamp stratum crossing"
+    );
 
     // Sanity: the bare (non-hysteresis) cutoff WOULD have split these two
     // iterates, confirming the test actually exercises the flicker regime.

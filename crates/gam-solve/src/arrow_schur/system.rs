@@ -2319,22 +2319,39 @@ impl ArrowHtbetaCache {
     }
 }
 
-/// RAW per-row spectral data of a spectrally-deflated undamped evidence `H_tt`
-/// block (see [`ArrowFactorCache::deflation_row_spectra`]).
+/// The authoritative conditioning branch selected for one raw row eigenvalue.
+///
+/// This is classifier output, not a state reconstructed from floating-point
+/// values after the fact. In particular, `cond_evals[m] == 1` does not imply
+/// unit deflation: an ordinary retained eigenvalue can itself equal one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSpectralConditioning {
+    /// Preserve the raw positive eigenvalue.
+    Raw,
+    /// Preserve the direction, but raise its positive eigenvalue to the
+    /// numerical factorization floor.
+    FloorClamped,
+    /// Remove the raw quotient direction and replace it with unit stiffness.
+    UnitDeflated,
+}
+
+/// RAW per-row spectral data of a spectrally-conditioned undamped evidence
+/// `H_tt` block (see [`ArrowFactorCache::deflation_row_spectra`]).
 ///
 /// `evecs` columns are the RAW symmetric eigenvectors `uₘ` of `H_tt`
 /// (orthonormal; the deflated directions `vᵢ` are the subset whose eigenvalue
 /// was pinned). `raw_evals[m]` is the RAW eigenvalue `λₘ` BEFORE the unit-pin /
 /// floor-clamp. `cond_evals[m]` is the conditioned eigenvalue `λ̃ₘ` the factor
-/// actually uses (`λ̃ = λ` for an unclamped kept direction, the positive `floor`
-/// for a clamped kept direction, `1` for a deflated direction). Together they
-/// give the Daleckii–Krein divided differences the outer-gradient deflation
-/// correction needs.
+/// actually uses. `conditioning[m]` is the authoritative discrete decision:
+/// raw retention, positive floor clamp, or unit deflation. Together they give
+/// the Daleckii–Krein divided differences the outer-gradient deflation
+/// correction needs without inferring branches from coincident numeric values.
 #[derive(Debug, Clone)]
 pub struct RowDeflationSpectrum {
     pub evecs: Array2<f64>,
     pub raw_evals: Array1<f64>,
     pub cond_evals: Array1<f64>,
+    pub conditioning: Arc<[RowSpectralConditioning]>,
 }
 
 /// Raw and conditioned eigenspectrum of an evidence β-Schur that underwent

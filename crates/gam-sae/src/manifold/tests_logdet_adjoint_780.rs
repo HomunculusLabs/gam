@@ -265,7 +265,7 @@ fn row_deflation_pushforward_2156(
             let denom = spec.raw_evals[a] - spec.raw_evals[b];
             let factor = if denom.abs() > gap_threshold {
                 (spec.cond_evals[a] - spec.cond_evals[b]) / denom
-            } else if spec.cond_evals[a] == spec.raw_evals[a] {
+            } else if spec.conditioning[a] == RowSpectralConditioning::Raw {
                 1.0
             } else {
                 0.0
