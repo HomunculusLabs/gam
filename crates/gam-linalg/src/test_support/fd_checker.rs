@@ -1,17 +1,23 @@
 //! Central-difference finite-difference checking harness for tests.
 //!
-//! Test modules across the crate repeatedly hand-roll the same central-difference
-//! gradient check: clone the parameter vector, bump one coordinate by `±eps`,
-//! evaluate a scalar objective, form `(f₊ − f₋) / (2·eps)`, and compare against an
-//! analytic gradient component. This module captures the two mechanical shapes —
-//! a coordinate-wise scalar-objective gradient and a directional derivative of a
-//! vector-valued map — behind named helpers so each call site routes through one
-//! audited implementation instead of an open-coded loop.
+//! Test modules across the workspace repeatedly hand-roll the same central-
+//! difference gradient check: clone the parameter vector, bump one coordinate by
+//! `±eps`, evaluate a scalar objective, form `(f₊ − f₋) / (2·eps)`, and compare
+//! against an analytic gradient component. This module captures the mechanical
+//! shapes — a coordinate-wise scalar-objective gradient, a directional
+//! derivative of a vector-valued map, a full central-difference Hessian, and the
+//! matrix-level agreement assertions — behind named helpers so each call site
+//! routes through one audited implementation instead of an open-coded loop.
 //!
-//! These helpers are *only* for tests. They are not part of any production solver
-//! path; the production outer-gradient FD audit lives in
-//! [`crate::solver::rho_optimizer::fd_audit`] and is a different (criterion-level,
-//! diagnostic-logging) facility.
+//! These helpers own no model-layer types: they are `ndarray` in, `ndarray` out.
+//! That is exactly why they live in `gam-linalg` (the leaf that owns the dense
+//! array seam) rather than in the model-level `gam-test-support` crate. Any
+//! crate needing an FD cross-check gets it from a leaf dependency it already
+//! has, instead of dragging the entire model layer into its test build.
+//!
+//! They are *only* for tests. They are not part of any production solver path;
+//! the production outer-gradient FD audit is a different (criterion-level,
+//! diagnostic-logging) facility that lives with the outer optimizer.
 
 use ndarray::{Array1, Array2};
 
@@ -139,6 +145,100 @@ where
     Ok(())
 }
 
+/// Asserts that a finite difference dense matrix closely matches an analytically
+/// computed directional derivative matrix, both in tolerance and in
+/// component-wise sign.
+pub fn assert_matrix_derivativefd(fd: &Array2<f64>, analytic: &Array2<f64>, tol: f64, label: &str) {
+    assert_eq!(analytic.dim(), fd.dim(), "{} dimensions must match", label);
+    for i in 0..analytic.nrows() {
+        for j in 0..analytic.ncols() {
+            let analytic_ij = analytic[[i, j]];
+            let fd_ij = fd[[i, j]];
+            let diff = (analytic_ij - fd_ij).abs();
+
+            if analytic_ij.abs() > tol && fd_ij.abs() > tol {
+                assert_eq!(
+                    analytic_ij.signum(),
+                    fd_ij.signum(),
+                    "{} sign mismatch at ({}, {}): analytic={}, fd={}",
+                    label,
+                    i,
+                    j,
+                    analytic_ij,
+                    fd_ij
+                );
+            }
+            assert!(
+                diff <= tol,
+                "{} value mismatch at ({}, {}): analytic={}, fd={}, abs_diff={}, tol={}",
+                label,
+                i,
+                j,
+                analytic_ij,
+                fd_ij,
+                diff,
+                tol
+            );
+        }
+    }
+}
+
+/// Asserts that a finite difference dense matrix matches an analytically
+/// computed directional derivative matrix to a *relative* tolerance
+/// `rel_tol·(1 + |analytic|)`, plus component-wise sign agreement.
+///
+/// Use this (rather than the absolute-tolerance [`assert_matrix_derivativefd`])
+/// when the comparison's dominant components are O(0.1–1) and the finite
+/// difference is contaminated by a small, non-smooth solver channel — e.g. an
+/// adaptive PIRLS stabilization ridge whose magnitude shifts discontinuously
+/// across the ± FD re-solves. There the exact analytic IFT derivative (which
+/// correctly excludes that solver-only ridge) and the FD disagree by a fixed
+/// *fraction* of the component magnitude, not a fixed absolute amount, so an
+/// absolute bound tuned for the small components is spuriously tight on the
+/// large ones. The two underlying derivative channels are validated separately
+/// against their own FDs, so this asserts the composite to the achievable
+/// relative precision rather than weakening the per-channel checks (gam#855).
+pub fn assert_matrix_derivativefd_rel(
+    fd: &Array2<f64>,
+    analytic: &Array2<f64>,
+    rel_tol: f64,
+    label: &str,
+) {
+    assert_eq!(analytic.dim(), fd.dim(), "{} dimensions must match", label);
+    for i in 0..analytic.nrows() {
+        for j in 0..analytic.ncols() {
+            let analytic_ij = analytic[[i, j]];
+            let fd_ij = fd[[i, j]];
+            let tol = rel_tol * (1.0 + analytic_ij.abs());
+            if analytic_ij.abs() > tol && fd_ij.abs() > tol {
+                assert_eq!(
+                    analytic_ij.signum(),
+                    fd_ij.signum(),
+                    "{} sign mismatch at ({}, {}): analytic={}, fd={}",
+                    label,
+                    i,
+                    j,
+                    analytic_ij,
+                    fd_ij
+                );
+            }
+            let diff = (analytic_ij - fd_ij).abs();
+            assert!(
+                diff <= tol,
+                "{} value mismatch at ({}, {}): analytic={}, fd={}, abs_diff={}, rel_tol={}, tol={}",
+                label,
+                i,
+                j,
+                analytic_ij,
+                fd_ij,
+                diff,
+                rel_tol,
+                tol
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +281,10 @@ mod tests {
                 assert_abs_diff_eq!(hess_fd[[i, j]], a[[i, j]], epsilon = 1e-6);
             }
         }
+
+        // The matrix-level assertions accept the agreeing pair …
+        assert_matrix_derivativefd(&hess_fd, &a, 1e-5, "quadratic curvature");
+        assert_matrix_derivativefd_rel(&hess_fd, &a, 1e-5, "quadratic curvature (relative)");
     }
 
     /// A wrong analytic gradient must be rejected with the offending coordinate
@@ -199,5 +303,15 @@ mod tests {
             err.contains("coordinate 1"),
             "error should name coord 1: {err}"
         );
+    }
+
+    /// … and reject a matrix that disagrees beyond tolerance, naming the entry
+    /// so the failure localizes instead of just reporting "matrices differ".
+    #[test]
+    #[should_panic(expected = "identity curvature value mismatch at (1, 1)")]
+    fn matrix_assert_rejects_a_disagreeing_entry() {
+        let analytic = array![[1.0, 0.0], [0.0, 1.0]];
+        let fd = array![[1.0, 0.0], [0.0, 1.5]];
+        assert_matrix_derivativefd(&fd, &analytic, 1e-6, "identity curvature");
     }
 }

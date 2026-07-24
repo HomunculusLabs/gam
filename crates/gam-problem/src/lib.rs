@@ -57,6 +57,10 @@ pub mod schedule;
 pub mod laplace_sampler_contract;
 mod seeding;
 pub mod solver_contract;
+// Fixtures that build `ParameterBlockSpec`s live with the type they build, so
+// downstream crates' test builds reach them through a leaf dependency instead of
+// the model-layer `gam-test-support` crate.
+pub mod test_support;
 pub mod topology_certificates;
 pub mod types;
 

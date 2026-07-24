@@ -38,6 +38,5 @@ cudarc.workspace = true
 
 [dev-dependencies]
 approx = "0.5.1"
-gam-test-support = { path = "../gam-test-support" }
 num-dual = "0.14.1"
 rand = "0.10.1"

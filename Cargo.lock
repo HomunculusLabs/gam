@@ -2919,7 +2919,6 @@ dependencies = [
  "gam-solve",
  "gam-spec",
  "gam-terms",
- "gam-test-support",
  "log",
  "ndarray 0.17.2",
  "opt",
@@ -2983,7 +2982,6 @@ dependencies = [
  "gam-math",
  "gam-problem",
  "gam-runtime",
- "gam-test-support",
  "log",
  "ndarray 0.17.2",
  "rayon",
@@ -3023,6 +3021,7 @@ dependencies = [
 name = "gam-linalg"
 version = "0.3.150"
 dependencies = [
+ "approx",
  "dyn-stack 0.13.2",
  "faer",
  "gam-runtime",
@@ -3249,7 +3248,6 @@ dependencies = [
  "gam-runtime",
  "gam-spec",
  "gam-terms",
- "gam-test-support",
  "log",
  "ndarray 0.17.2",
  "num-dual",
@@ -3287,7 +3285,6 @@ dependencies = [
  "gam-problem",
  "gam-runtime",
  "gam-spec",
- "gam-test-support",
  "log",
  "memmap2",
  "ndarray 0.17.2",

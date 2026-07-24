@@ -22,8 +22,5 @@ rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 
-[dev-dependencies]
-gam-test-support = { path = "../gam-test-support" }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 cudarc.workspace = true

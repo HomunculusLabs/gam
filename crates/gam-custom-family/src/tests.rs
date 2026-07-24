@@ -245,7 +245,7 @@ use approx::assert_relative_eq;
 use faer::sparse::{SparseColMat, Triplet};
 use gam_linalg::matrix::DesignMatrix;
 use gam_models::gamlss::{BinomialLocationScaleFamily, BinomialLocationScaleWiggleFamily};
-use gam_test_support::binomial_location_scale_base_fixture;
+use gam_problem::test_support::binomial_location_scale_base_fixture;
 use ndarray::{Array1, Array2, array};
 
 #[test]

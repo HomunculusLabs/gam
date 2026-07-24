@@ -3502,7 +3502,7 @@ fn dominant_block_for_direction(
 mod tests {
     use super::*;
 
-    use gam_test_support::{spec_from_dense, spec_from_dense_with_priority};
+    use gam_problem::test_support::{spec_from_dense, spec_from_dense_with_priority};
     use linspace as linspace_minus_one_to_one;
     use ndarray::Array2;
 

@@ -8,6 +8,14 @@
 //! module gates are banned here, and a `cfg(test)` module would be invisible to
 //! downstream crates' test builds anyway. The contents are `pub`, so they are
 //! reachable (no dead-code lint) yet only ever called from `#[cfg(test)]` code.
+//!
+//! [`fd_checker`] carries the same argument one level down: a central-difference
+//! derivative check is `ndarray` in, `ndarray` out and owns no model-layer type,
+//! so it belongs to the leaf that owns the dense-array seam. Keeping it here
+//! means a crate cross-checking an analytic derivative pulls one leaf dependency
+//! it already has instead of the whole model layer.
+
+pub mod fd_checker;
 
 use crate::matrix::{DenseDesignMatrix, DenseDesignOperator, DesignMatrix, LinearOperator};
 use gam_runtime::resource::MatrixMaterializationError;
