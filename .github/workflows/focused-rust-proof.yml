@@ -53,7 +53,7 @@ jobs:
   prove:
     name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Checkout exact requested SHA
         uses: actions/checkout@v5
@@ -132,10 +132,17 @@ jobs:
 
             log_file="focused-rust-logs/${filter//[:.]/_}.log"
             echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} ${filter}"
-            # Ten minutes includes both the package-scoped link and execution.
-            # Hitting this bound is a failed warm-iteration proof, never an
-            # invitation to continue into a full cold build.
-            timeout --signal=TERM --kill-after=15s 600 \
+            # The bound below covers the package-scoped codegen, link and
+            # execution of ONE filter. It is not the cold-build guard: that job
+            # belongs entirely to the sccache gates above and below, which
+            # refuse an unreachable cache and refuse a proof that reused zero
+            # compiler objects. A measured-warm `gam-sae --lib` link alone
+            # exceeded 600s at a 71% sccache hit rate (run 30138247639), so a
+            # ten-minute bound rejected warm proofs it was never meant to
+            # police. Twenty minutes covers the largest leaf crate in the
+            # workspace while still failing fast on a genuinely cold tree,
+            # which the zero-hit gate catches independently.
+            timeout --signal=TERM --kill-after=15s 1200 \
               cargo test -p "$PACKAGE" --all-features \
                 "${target_args[@]}" "$filter" \
                 -- --nocapture --test-threads=1 2>&1 | tee "$log_file"
