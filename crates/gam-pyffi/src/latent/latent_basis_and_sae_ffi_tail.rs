@@ -3034,18 +3034,21 @@ mod sae_linear_atom_tests {
     };
     use ndarray::Array2;
 
-    /// #1221 — `"linear"` (and its synonyms) is a first-class topology distinct
-    /// from `"euclidean"`/`"euclidean_patch"` (the degree-2 quadratic patch), and
-    /// it round-trips under the honest name `"linear"`. The quadratic patch keeps
-    /// its own `"euclidean_patch"` name and additionally accepts the explicit
-    /// `"euclidean_quadratic_patch"` synonym.
+    /// #1221 — the canonical `"linear"` token is a first-class topology
+    /// distinct from the degree-2 `"euclidean"` patch. Removed aliases must not
+    /// silently acquire linear semantics at the internal artifact converter.
     #[test]
     fn linear_topology_is_first_class_and_round_trips() {
-        for name in ["linear", "linear_rank1", "affine", "LINEAR"] {
+        assert_eq!(
+            sae_atom_basis_kind_from_str("linear"),
+            SaeAtomBasisKind::Linear,
+            "the canonical token must parse to the genuinely-linear atom"
+        );
+        for removed in ["linear_rank1", "affine", "LINEAR"] {
             assert_eq!(
-                sae_atom_basis_kind_from_str(name),
-                SaeAtomBasisKind::Linear,
-                "{name:?} must parse to the genuinely-linear atom"
+                sae_atom_basis_kind_from_str(removed),
+                SaeAtomBasisKind::Precomputed(removed.to_string()),
+                "removed alias {removed:?} must remain an opaque native artifact tag"
             );
         }
         assert_eq!(
@@ -3055,11 +3058,16 @@ mod sae_linear_atom_tests {
         );
         // The quadratic patch is a DIFFERENT kind — `"linear"` must not collapse
         // onto it, or the curved-vs-linear comparison would be mislabeled again.
-        for name in ["euclidean", "euclidean_patch", "euclidean_quadratic_patch"] {
+        assert_eq!(
+            sae_atom_basis_kind_from_str("euclidean"),
+            SaeAtomBasisKind::EuclideanPatch,
+            "the canonical euclidean token is the degree-2 patch"
+        );
+        for removed in ["euclidean_patch", "euclidean_quadratic_patch"] {
             assert_eq!(
-                sae_atom_basis_kind_from_str(name),
-                SaeAtomBasisKind::EuclideanPatch,
-                "{name:?} is the degree-2 quadratic patch, distinct from linear"
+                sae_atom_basis_kind_from_str(removed),
+                SaeAtomBasisKind::Precomputed(removed.to_string()),
+                "removed alias {removed:?} must remain an opaque native artifact tag"
             );
         }
     }
