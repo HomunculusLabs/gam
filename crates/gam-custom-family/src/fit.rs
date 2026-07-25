@@ -959,7 +959,6 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
 /// `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the requested ρ*
 /// bitwise, because everything downstream binds the mode and its ρ as one
 /// identity.
-#[allow(clippy::too_many_arguments)]
 fn anchored_continuation_pass<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
