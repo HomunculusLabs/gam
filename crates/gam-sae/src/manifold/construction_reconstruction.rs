@@ -8,19 +8,30 @@
 
 use super::*;
 
-/// Upper bound on the largest eigenvalue of any per-row undamped coordinate
-/// block, from the Cholesky factors the cache already carries.
+/// Assembly scale of the arrow's diagonal blocks, from the Cholesky factors the
+/// cache already carries.
 ///
-/// `λ_max(A_i) = ‖A_i‖₂ ≤ ‖A_i‖_F = ‖L_i L_iᵀ‖_F ≤ ‖L_i‖_F²`, using
-/// `‖XY‖_F ≤ ‖X‖₂‖Y‖_F ≤ ‖X‖_F‖Y‖_F`. This is the assembly scale of the
-/// blocks whose inverse diagonal the ARD trace reads, and therefore the scale
-/// at which that trace's forward error lives.
+/// For each block, `λ_max = ‖·‖₂ ≤ ‖·‖_F = ‖L Lᵀ‖_F ≤ ‖L‖_F²`, using
+/// `‖XY‖_F ≤ ‖X‖₂‖Y‖_F ≤ ‖X‖_F‖Y‖_F`.
+///
+/// BOTH blocks are needed. The ARD trace reads the latent diagonal of `H⁻¹`,
+/// which is `A_i⁻¹ + G_i S⁻¹ G_iᵀ` — a row-local term plus a border term folded
+/// through the β-Schur complement. Measuring only the row factors misses the
+/// decoder curvature entirely, and on the shared two-atom fixture that is where
+/// the large entries live: the row blocks give a scale of ~4, while the
+/// excursion the trace actually carries implies an assembly scale of ~10³.
+/// A tolerance built on the row blocks alone is therefore still short by
+/// almost three orders of magnitude, which is the same category error one level
+/// down.
 pub(super) fn undamped_row_curvature_scale(cache: &ArrowFactorCache) -> f64 {
+    let frobenius_squared =
+        |factor: ArrayView2<'_, f64>| -> f64 { factor.iter().map(|entry| entry * entry).sum() };
     let mut scale = 0.0_f64;
     for row in 0..cache.undamped_factor_count() {
-        let factor = cache.undamped_factor(row);
-        let frobenius_squared: f64 = factor.iter().map(|entry| entry * entry).sum();
-        scale = scale.max(frobenius_squared);
+        scale = scale.max(frobenius_squared(cache.undamped_factor(row)));
+    }
+    if let Some(schur) = cache.schur_factor.as_ref() {
+        scale = scale.max(frobenius_squared(schur.view()));
     }
     scale
 }
