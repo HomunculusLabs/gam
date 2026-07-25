@@ -471,6 +471,134 @@ fn gaussian_identity_response_scale(
     (rms.is_finite() && rms > 0.0 && !(0.1..=10.0).contains(&rms)).then_some(rms)
 }
 
+/// Pin the λ-search nuisance freeze to a canonical, cache-independent anchor
+/// (#2363).
+///
+/// The λ-search optimizes `F(ρ) = REML(ρ, ψ)` with the estimated nuisance ψ
+/// (Gamma shape, Tweedie φ, Beta precision) held FIXED across ρ. Without that
+/// freeze ψ is re-profiled from every trial's warm-start η, the analytic outer
+/// gradient — which holds ψ fixed — can never match the cost's ψ(ρ) motion, the
+/// projected gradient floors above tolerance and the search stalls or rails
+/// (#1074 / #1477 / #2369). The freeze is therefore load-bearing; what was not
+/// load-bearing, and was wrong, is WHERE ψ got captured.
+///
+/// Until this call existed, ψ was captured opportunistically at the first
+/// non-screening solve that happened to converge — and the persistent warm-start
+/// cache decides which solve that is. It donates `initial_rho`, which
+/// `run_outer_with_plan` inserts as seed 0, and it donates the warm β that
+/// decides whether the pre-search reference solve at ρ = 0 converges at all. So
+/// a cold machine and a warm machine froze ψ at different fits, i.e. they
+/// minimized DIFFERENT criteria and legitimately landed at different optima:
+/// measured on the #2363 fixture, the same Beta fit reported REML −6.382e2 cold
+/// and −7.408e2 warm. That is the invariant violation at its root — the
+/// objective was a function of the search path, not of the problem.
+///
+/// The repair is to define ψ, once, by a computation that depends on nothing but
+/// `(data, model spec)`: solve P-IRLS at the symmetric reference ρ = 0 (every
+/// λ = 1 — the same order-invariant reference point `canonical_rho_keys` uses to
+/// label ρ-coordinates) on a state that has no warm start attached and no
+/// persistent session open, and let the ordinary capture path freeze ψ at THAT
+/// solve's converged η. If the reference point's inner solve does not converge,
+/// the deterministic seed candidates are walked in their generated order, so the
+/// anchor stays a pure function of the problem in every branch.
+///
+/// The warm-start slots are emptied on the way in and on the way out, so the
+/// anchor solve cannot inherit a caller-supplied β and the search — including the
+/// persistent restore that runs inside it — sees exactly the state it saw before.
+/// The one precondition this function cannot enforce by clearing is that the
+/// on-disk session must not be open yet (the inner solve would reload the cached
+/// β mid-anchor), so that is checked and refused. The ρ-keyed eval/P-IRLS memos
+/// are kept: they cache a deterministic computation at a ρ the caller is about to
+/// evaluate again.
+///
+/// Negative-Binomial θ is deliberately not handled here. It is seeded from the
+/// resolved family spec before the search and then driven to a certified joint
+/// (θ, ρ) fixed point by the alternation loop below, which is already a function
+/// of the data alone.
+pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
+    reml_state: &RemlState<'_>,
+    resolved_likelihood_scale: &gam_problem::ResolvedLikelihoodScale,
+    k: usize,
+    heuristic_lambdas: Option<&[f64]>,
+    seed_config: &SeedConfig,
+) -> Result<(), EstimationError> {
+    let (frozen, family) = match resolved_likelihood_scale {
+        gam_problem::ResolvedLikelihoodScale::Gamma {
+            estimated: true, ..
+        } => (&reml_state.frozen_gamma_shape, "gamma shape"),
+        gam_problem::ResolvedLikelihoodScale::Tweedie {
+            estimated: true, ..
+        } => (&reml_state.frozen_tweedie_phi, "tweedie dispersion"),
+        gam_problem::ResolvedLikelihoodScale::BetaPrecision {
+            estimated: true, ..
+        } => (&reml_state.frozen_beta_phi, "beta precision"),
+        _ => return Ok(()),
+    };
+    if k == 0 || frozen.load(Ordering::Relaxed) != 0 {
+        return Ok(());
+    }
+    if reml_state
+        .persistent_warm_start_disk_enabled
+        .load(Ordering::Relaxed)
+    {
+        crate::bail_invalid_estim!(
+            "the {family} λ-search freeze must be anchored before the persistent warm-start \
+             layer is attached (#2363); with the on-disk session open the anchor solve would \
+             reload the cached β and the outer criterion would again depend on cache state"
+        );
+    }
+    // The anchor must see the same starting predictor on every machine, so an
+    // externally supplied seed is not admissible input to it.
+    reml_state.clear_warm_start_predictor_state();
+    reml_state.clear_warm_start_adaptive_signals();
+
+    let mut anchors = vec![Array1::<f64>::zeros(k)];
+    anchors.extend(
+        crate::seeding::generate_rho_candidates(k, heuristic_lambdas, seed_config)?
+            .into_iter()
+            .filter(|candidate| candidate.iter().any(|value| *value != 0.0)),
+    );
+    for anchor in &anchors {
+        if let Err(error) = reml_state.compute_cost(anchor) {
+            log::debug!("[OUTER] nuisance anchor candidate rejected: {error:?}");
+            continue;
+        }
+        let bits = frozen.load(Ordering::Relaxed);
+        if bits != 0 {
+            log::info!(
+                "[OUTER] {family} λ-search freeze anchored at ρ=[{}] before any warm start (#2363): \
+                 value {:.6e}; the outer criterion is now a function of the data and the model spec alone",
+                anchor
+                    .iter()
+                    .take(4)
+                    .map(|value| format!("{value:.3}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                f64::from_bits(bits),
+            );
+            break;
+        }
+    }
+    if frozen.load(Ordering::Relaxed) == 0 {
+        // No deterministic anchor produced a converged inner solve. The search
+        // is about to try the same points and will report its own refusal;
+        // leaving the freeze unset keeps the pre-existing capture path rather
+        // than converting a seed-cascade failure into a different error here.
+        log::warn!(
+            "[OUTER] no deterministic anchor converged for the {family} λ-search freeze; \
+             the outer criterion cannot be pinned before the seed cascade"
+        );
+    }
+    // Return the warm-start layer to the empty state the caller left it in. In
+    // particular `warm_start_beta` must be clear: `load_persistent_warm_start_once`
+    // skips the restore whenever a warm β is already present, so an anchor
+    // residue here would silently disable the persistent warm start it is this
+    // function's whole purpose to make harmless.
+    reml_state.clear_warm_start_predictor_state();
+    reml_state.clear_warm_start_adaptive_signals();
+    Ok(())
+}
+
 pub(crate) fn optimize_external_designwith_heuristic_lambdas_andwarm_start<X>(
     y: ArrayView1<'_, f64>,
     w: ArrayView1<'_, f64>,
@@ -624,12 +752,6 @@ where
     if let Some(kf) = opts.kronecker_factored.clone() {
         reml_state.set_kronecker_factored(kf);
     }
-    if opts.persist_warm_start_disk {
-        // Caller opted into cross-process resume (#1082): engage the on-disk
-        // warm-start layer. Default-false keeps replicate/CI loops disk-silent.
-        reml_state.enable_persistent_warm_start_disk();
-    }
-    reml_state.setwarm_start_original_beta(warm_start_beta);
     let resolved_likelihood_scale = cfg
         .likelihood
         .resolved_scale()
@@ -658,6 +780,24 @@ where
             .store(theta_seed.to_bits(), Ordering::Relaxed);
     }
 
+    let reml_seed_config = external_reml_seed_config(k, cfg.link_function());
+    // #2363: pin the λ-search nuisance BEFORE any warm start — external, in
+    // memory, or on disk — can reach this state. `freeze_lambda_search_nuisance_at_canonical_anchor`
+    // documents why the criterion is otherwise a function of the search path.
+    freeze_lambda_search_nuisance_at_canonical_anchor(
+        &reml_state,
+        &resolved_likelihood_scale,
+        k,
+        heuristic_lambdas,
+        &reml_seed_config,
+    )?;
+    if opts.persist_warm_start_disk {
+        // Caller opted into cross-process resume (#1082): engage the on-disk
+        // warm-start layer. Default-false keeps replicate/CI loops disk-silent.
+        reml_state.enable_persistent_warm_start_disk();
+    }
+    reml_state.setwarm_start_original_beta(warm_start_beta);
+
     // Term/margin-order invariance (#1538/#1539). The per-ρ-coordinate canonical
     // keys label each coordinate by its placement-independent (penalty + data)
     // content, letting the outer optimizer operate in an identical canonical
@@ -666,7 +806,6 @@ where
     // match the ρ-dimension (legacy native-order path, unchanged).
     let canon_keys = reml_state.canonical_rho_keys(k);
 
-    let reml_seed_config = external_reml_seed_config(k, cfg.link_function());
     let reml_tol = cfg.reml_convergence_tolerance;
     let reml_max_iter = opts.max_iter;
     let outer_eval_idx = AtomicUsize::new(0usize);

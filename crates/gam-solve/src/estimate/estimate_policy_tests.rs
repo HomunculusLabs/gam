@@ -3,7 +3,9 @@ use super::evaluation::{
     sas_log_delta_edge_barriercostgradhess,
 };
 use super::external_options::resolve_external_family;
-use super::optimizer::external_reml_seed_config;
+use super::optimizer::{
+    external_reml_seed_config, freeze_lambda_search_nuisance_at_canonical_anchor,
+};
 use super::penalty::REML_SEED_SCREENING_RHO_CAP;
 use super::prefit::{
     PrefitRegularityDiagnostic, detect_prefit_binomial_single_column_separation_in_design,
@@ -22,6 +24,7 @@ use gam_problem::{
 use ndarray::{Array1, Array2, array};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use std::sync::atomic::Ordering;
 
 #[test]
 fn gaussian_external_reml_seeds_over_smoothing_safety_net() {
@@ -1691,4 +1694,174 @@ fn link_binomial_aux_carries_sas_complement_and_zero_weights_saturated_rows() {
             "inconsistent saturated SAS row must be a typed refusal at eta={eta}; got {res:?}"
         );
     }
+}
+
+/// Build a Beta-precision (φ estimated) outer state on a deterministic
+/// fixture: `logit(μ) = 1.6·(x − ½)`, three design columns `[1, x, x²]`, one
+/// dense penalty on the two non-intercept columns.
+fn beta_precision_anchor_state<'a>(
+    y: &'a Array1<f64>,
+    w: &'a Array1<f64>,
+    x: &Array2<f64>,
+    cfg: &'a RemlConfig,
+) -> RemlState<'a> {
+    let p = x.ncols();
+    let offset = Array1::<f64>::zeros(y.len());
+    let mut s = Array2::<f64>::zeros((p, p));
+    s[[1, 1]] = 1.0;
+    s[[2, 2]] = 1.0;
+    let canonical = gam_terms::construction::canonicalize_penalty_specs(
+        &[crate::estimate::PenaltySpec::Dense(s)],
+        &[1],
+        p,
+        "beta_precision_anchor_state",
+    )
+    .map(|(canonical, _)| canonical)
+    .expect("canonicalize the anchor fixture penalty");
+    RemlState::newwith_offset(
+        y.view(),
+        x.clone(),
+        w.view(),
+        offset.view(),
+        canonical,
+        p,
+        cfg,
+        Some(vec![1]),
+        None,
+        None,
+    )
+    .expect("build the Beta-precision anchor state")
+}
+
+fn beta_precision_anchor_fixture() -> (Array1<f64>, Array1<f64>, Array2<f64>, RemlConfig) {
+    let n = 60usize;
+    let mut y = Array1::<f64>::zeros(n);
+    let mut x = Array2::<f64>::zeros((n, 3));
+    for i in 0..n {
+        let xi = i as f64 / (n as f64 - 1.0);
+        let eta = 1.6 * (xi - 0.5);
+        let mu = 1.0 / (1.0 + (-eta).exp());
+        // Deterministic alternating perturbation: enough conditional spread for
+        // the Pearson precision to be a genuinely data-driven quantity.
+        let wiggle = if i % 2 == 0 { 0.06 } else { -0.06 };
+        y[i] = (mu + wiggle).clamp(0.02, 0.98);
+        x[[i, 0]] = 1.0;
+        x[[i, 1]] = xi;
+        x[[i, 2]] = xi * xi;
+    }
+    let w = Array1::<f64>::ones(n);
+    let phi = 8.0;
+    let likelihood = GlmLikelihoodSpec {
+        spec: LikelihoodSpec::new(
+            ResponseFamily::Beta { phi },
+            InverseLink::Standard(StandardLink::Logit),
+        ),
+        scale: gam_problem::LikelihoodScaleMetadata::EstimatedBetaPhi { phi },
+    };
+    (y, w, x, RemlConfig::external(likelihood, 1e-8, false))
+}
+
+#[test]
+fn lambda_search_nuisance_freeze_is_a_function_of_data_and_spec_alone_2363() {
+    // #2363. The λ-search holds the estimated nuisance ψ fixed so that
+    // `F(ρ) = REML(ρ, ψ)` is stationary in ρ (#1074 / #1477 / #2369). Which
+    // value gets frozen therefore DEFINES the criterion the outer search
+    // minimizes — so if it is captured at whatever solve the persistent
+    // warm-start cache happened to steer the search into first, a cold machine
+    // and a warm machine minimize different criteria and legitimately report
+    // different fits (measured: the same Beta fit at REML −6.382e2 cold and
+    // −7.408e2 warm).
+    //
+    // The contract this pins is the repair: ψ is anchored at the symmetric
+    // reference ρ = 0 on a state with no warm start attached, so it is a
+    // function of (data, model spec) alone — BITWISE identical no matter what
+    // seed β or heuristic λ a caller (or a cache) supplies.
+    let (y, w, x, cfg) = beta_precision_anchor_fixture();
+    let resolved = cfg
+        .likelihood
+        .resolved_scale()
+        .expect("the fixture declares an estimated Beta precision");
+    assert!(
+        matches!(
+            resolved,
+            gam_problem::ResolvedLikelihoodScale::BetaPrecision {
+                estimated: true,
+                ..
+            }
+        ),
+        "fixture precondition: the freeze under test only exists for an ESTIMATED Beta precision"
+    );
+    let seed_config = external_reml_seed_config(1, LinkFunction::Logit);
+
+    let pristine = beta_precision_anchor_state(&y, &w, &x, &cfg);
+    freeze_lambda_search_nuisance_at_canonical_anchor(&pristine, &resolved, 1, None, &seed_config)
+        .expect("the anchor must succeed on a pristine state");
+    let anchored_bits = pristine.frozen_beta_phi.load(Ordering::Relaxed);
+    assert_ne!(
+        anchored_bits, 0,
+        "the anchor must actually freeze a precision; an unfrozen λ-search re-profiles φ from \
+         every trial's warm-start η and the outer criterion drifts with ρ"
+    );
+    let anchored_phi = f64::from_bits(anchored_bits);
+    assert!(
+        anchored_phi.is_finite() && anchored_phi > 0.0,
+        "the anchored Beta precision must be a finite positive value; got {anchored_phi}"
+    );
+
+    // A caller-supplied warm β and a different heuristic λ are exactly what the
+    // persistent cache donates. Neither may move the frozen value by one ulp.
+    let seeded = beta_precision_anchor_state(&y, &w, &x, &cfg);
+    let donated_beta = array![0.35, -1.7, 2.4];
+    seeded.setwarm_start_original_beta(Some(donated_beta.view()));
+    assert!(
+        seeded.current_original_basis_beta().is_some(),
+        "precondition: the donated warm β is installed before the anchor runs"
+    );
+    freeze_lambda_search_nuisance_at_canonical_anchor(
+        &seeded,
+        &resolved,
+        1,
+        Some(&[3.0]),
+        &seed_config,
+    )
+    .expect("the anchor must succeed regardless of what a caller donated");
+    assert_eq!(
+        seeded.frozen_beta_phi.load(Ordering::Relaxed),
+        anchored_bits,
+        "the λ-search nuisance freeze must be BITWISE independent of the donated warm β and \
+         heuristic λ: it defines the outer criterion, and a criterion that moves with cache \
+         state is the #2363 defect"
+    );
+
+    // The anchor must also leave the warm-start slot empty:
+    // `load_persistent_warm_start_once` skips its restore whenever a warm β is
+    // already present, so an anchor residue would silently disable the very
+    // cache this function exists to make harmless.
+    assert!(
+        seeded.current_original_basis_beta().is_none(),
+        "the anchor must hand the search an empty warm-start slot"
+    );
+
+    // And it must refuse to run at all once the on-disk session is open: from
+    // that point the inner solve reloads the cached β, so an anchor taken there
+    // would be cache-dependent again.
+    let attached = beta_precision_anchor_state(&y, &w, &x, &cfg);
+    attached.enable_persistent_warm_start_disk();
+    let refusal = freeze_lambda_search_nuisance_at_canonical_anchor(
+        &attached,
+        &resolved,
+        1,
+        None,
+        &seed_config,
+    );
+    assert!(
+        matches!(refusal, Err(EstimationError::InvalidInput(_))),
+        "anchoring after the persistent layer is attached must be a typed refusal, not a \
+         silently cache-dependent freeze; got {refusal:?}"
+    );
+    assert_eq!(
+        attached.frozen_beta_phi.load(Ordering::Relaxed),
+        0,
+        "a refused anchor must not leave a partially-established freeze behind"
+    );
 }
