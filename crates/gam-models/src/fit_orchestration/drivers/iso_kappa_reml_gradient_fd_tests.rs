@@ -40,7 +40,7 @@ mod iso_kappa_reml_gradient_fd_tests {
 
 #[test]
 fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "duchon_probit_n80",
         80,
         LikelihoodSpec::binomial_probit(),
@@ -90,7 +90,7 @@ fn iso_kappa_fd_variant_driver(
     skip_psi: bool,
     well_conditioned: bool,
     extra_rho_probes: &[f64],
-) -> (bool, f64, Vec<String>) {
+) -> (bool, f64, Vec<String>, Vec<(String, Array1<f64>)>) {
     // A `"*_2d"` label builds an ordinary 2-D feature cloud (the production
     // `matern(x1, x2)` regime: operator triplet {mass, tension, stiffness}, with
     // the per-axis tension and mixed-curvature stiffness blocks that only carry
@@ -330,6 +330,7 @@ fn iso_kappa_fd_variant_driver(
     let h = 1e-5_f64;
     let rel_tol = 5e-3_f64;
     let mut violations: Vec<String> = Vec::new();
+    let mut analytic_by_probe: Vec<(String, Array1<f64>)> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
     let base_probes: [(&str, &Array1<f64>); 4] = [
         ("zero", &theta_zero),
@@ -344,6 +345,7 @@ fn iso_kappa_fd_variant_driver(
     for (probe, theta) in all_probes {
         let (cost_an, grad_an) = analytic_at(theta, &mut cache, &mut evaluator);
         assert!(cost_an.is_finite(), "{label} {probe}: cost not finite");
+        analytic_by_probe.push((probe.to_string(), grad_an.clone()));
         // Objective↔gradient desync probe: the analytic gradient path
         // (evaluate_joint_reml_outer_eval_at_theta) and the cost-only FD
         // path (evaluate_cost_only) must agree on the COST itself at the
@@ -393,12 +395,12 @@ fn iso_kappa_fd_variant_driver(
              violations={}",
         violations.len()
     );
-    (pass, worst_psi_rel, violations)
+    (pass, worst_psi_rel, violations, analytic_by_probe)
 }
 
 #[test]
 fn iso_kappa_duchon_gaussian_identity_fd() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "duchon_gaussian",
         80,
         LikelihoodSpec::gaussian_identity(),
@@ -425,7 +427,7 @@ fn iso_kappa_duchon_gaussian_identity_fd() {
 /// wrong, the optimizer's stall is explained and this fails loudly.
 #[test]
 fn iso_kappa_matern_gaussian_identity_fd() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "matern_gaussian",
         80,
         LikelihoodSpec::gaussian_identity(),
@@ -450,7 +452,7 @@ fn iso_kappa_matern_gaussian_identity_fd() {
 /// off-diagonal structure when d ≥ 2.
 #[test]
 fn iso_kappa_matern_2d_gaussian_identity_fd() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "matern_gaussian_2d",
         120,
         LikelihoodSpec::gaussian_identity(),
@@ -839,7 +841,7 @@ fn iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic() {
 /// #1122 stall is driven by the double-penalty value-path / re-key topology.
 #[test]
 fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "matern_gaussian_2d_dp",
         120,
         LikelihoodSpec::gaussian_identity(),
@@ -857,7 +859,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
 
 #[test]
 fn iso_kappa_duchon_binomial_logit_fd() {
-    let (pass, worst, violations) =
+    let (pass, worst, violations, _) =
         iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false, &[]);
     assert!(
         pass,
@@ -874,7 +876,7 @@ fn iso_kappa_duchon_binomial_logit_fd() {
 
 #[test]
 fn iso_kappa_duchon_n_smaller_fd() {
-    let (pass, worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
         "duchon_probit_n20",
         20,
         LikelihoodSpec::binomial_probit(),
@@ -896,7 +898,7 @@ fn iso_kappa_duchon_n_smaller_fd() {
 
 #[test]
 fn iso_kappa_duchon_no_psi_fd() {
-    let (pass, _worst, violations) = iso_kappa_fd_variant_driver(
+    let (pass, _worst, violations, _) = iso_kappa_fd_variant_driver(
         "duchon_probit_rho_only",
         80,
         LikelihoodSpec::binomial_probit(),
@@ -940,7 +942,7 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
         ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
         ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
     ] {
-        let (pass, worst, violations) =
+        let (pass, worst, violations, _) =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5]);
         eprintln!(
             "[zz-rail-2425] {label}: pass={pass} worst_psi_rel={worst:.3e} \
@@ -987,7 +989,7 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
         ("matern_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
         ("duchon_gaussian", 80, LikelihoodSpec::gaussian_identity()),
     ] {
-        let (pass, worst, violations) =
+        let (pass, worst, violations, _) =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &LADDER);
         eprintln!(
             "[zz-ladder-2425] {label}: fd_pass={pass} worst_psi_rel={worst:.3e} \
@@ -997,6 +999,86 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
         for v in &violations {
             eprintln!("[zz-ladder-2425] {label}: {v}");
         }
+    }
+}
+
+/// #2450 — the derivation, executable: at large ρ the ENTIRE outer gradient is
+/// the ρ-PRIOR, so the criterion has no λ=∞ face for any rail certificate to
+/// find.
+///
+/// `FitOptions::default()` carries `RhoPrior::default() = Normal { mean: 0.0,
+/// sd: 3.0 }` (`gam-spec/src/lib.rs`), and `rho_prior_eval` adds per coordinate
+/// `cost += ½(ρ−mean)²/sd²`, `grad += (ρ−mean)/sd²`. So once ρ is large enough
+/// that the REML/LAML part's own λ→∞ face is reached — its ρ-derivative decays
+/// like `O(e^{−ρ})` — the surviving gradient is exactly `ρ/sd² = ρ/9`.
+///
+/// Why this is a gate and not a curiosity. Every rail path in
+/// `rho_optimizer::run` decides by asking whether `ĉ = −e^ρ·∂V/∂ρ` is CONSTANT
+/// over a probe run (`try_certify_asymptote_rail` #2348 Inc 1,
+/// `try_tail_snap_to_rail`, `detect_wrong_rail_pullback` #2392). With
+/// `∂V/∂ρ → ρ/9` we get `ĉ → −ρe^ρ/9 → −∞`, so that law can never hold and no
+/// coordinate can ever be certified at an asymptote. That is measured, not
+/// argued: `..._monotone_..._for_matern` refuses with `|Pg| = 1.333e0` = `12/9`
+/// exactly, and `..._two_feature` with `1.886e0` = `√2·12/9`, both at ρ railed
+/// on 12 — i.e. their entire residual projected gradient IS this prior.
+///
+/// `gam-custom-family`'s deterministic entry passes `RhoPrior::Flat` explicitly,
+/// which is why the same certificates work there. If this test fails, the
+/// default ρ-prior or its scale changed, or the criterion stopped including it —
+/// any of which invalidates the reasoning recorded on #2450, so read that issue
+/// before adjusting a tolerance here.
+#[test]
+fn outer_gradient_at_large_rho_is_exactly_the_rho_prior_2450() {
+    /// `RhoPrior::default()`'s standard deviation. Not imported, deliberately:
+    /// the point of this gate is to fail if the shipped default stops matching
+    /// the value the #2450 derivation was carried out at.
+    const PRIOR_SD: f64 = 3.0;
+    // ρ ≥ 21 is where the ladder measured the REML part's own ρ-derivative to be
+    // below 1e-10, so the prior is all that is left. (ψ's gradient decays with
+    // it: 3.6e-11 at ρ=30.)
+    const SATURATED: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
+
+    // Only `matern_gaussian`: these are the rungs the ladder actually measured
+    // out to 30 (2.3333 / 2.6667 / 3.0000 / 3.3333 on every ρ coordinate, FD
+    // agreeing to 1e-10, ψ decaying 2.9e-7 → 3.6e-11). The Duchon run's high
+    // rungs were truncated out of that job's captured output, so asserting on
+    // them here would be a guess; extend once they are measured.
+    for (label, family) in [("matern_gaussian", LikelihoodSpec::gaussian_identity())] {
+        let (_pass, _worst, _violations, grads) =
+            iso_kappa_fd_variant_driver(label, 80, family, false, false, &SATURATED);
+        let mut checked = 0usize;
+        for value in SATURATED {
+            let probe = format!("rhoALL@{value}");
+            let grad = &grads
+                .iter()
+                .find(|(name, _)| *name == probe)
+                .unwrap_or_else(|| panic!("{label}: probe {probe} missing"))
+                .1;
+            let expected = value / (PRIOR_SD * PRIOR_SD);
+            // Only the ρ block carries the smoothing prior; ψ is a length-scale
+            // coordinate and is asserted to have decayed instead.
+            for (j, &observed) in grad.iter().enumerate() {
+                if j + 1 == grad.len() {
+                    assert!(
+                        observed.abs() <= 1.0e-6,
+                        "{label} {probe}: psi gradient should have decayed at a \
+                         saturated rho, got {observed:+.6e}"
+                    );
+                    continue;
+                }
+                let rel = (observed - expected).abs() / expected;
+                assert!(
+                    rel <= 1.0e-4,
+                    "{label} {probe} rho j={j}: outer gradient should be the \
+                     Normal(0, sd={PRIOR_SD}) rho-prior's {expected:.10e} \
+                     (= rho/sd^2) once the REML part has saturated, got \
+                     {observed:.10e} (rel={rel:.3e}). See #2450."
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= SATURATED.len(), "{label}: nothing was checked");
+        eprintln!("[#2450-gate] {label}: {checked} rho components == rho/sd^2");
     }
 }
 
