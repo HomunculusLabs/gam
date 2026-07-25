@@ -130,14 +130,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+          artifact_name="gamfit-runtime-${TARGET_SHA}"
+          run_id=""
+          while IFS=$'\t' read -r candidate candidate_sha; do
+            if [[ -z "$candidate" || "$candidate_sha" != "$TARGET_SHA" ]]; then
+              continue
+            fi
+            artifact_count=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts?per_page=100" \
+              --jq ".artifacts | map(select(.name == \"${artifact_name}\" and (.expired == false))) | length")
+            if [[ "$artifact_count" -eq 1 ]]; then
+              run_id="$candidate"
+              break
+            fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow wheel-nightly.yml \
             --commit "$TARGET_SHA" \
             --limit 20 \
-            --json databaseId,conclusion \
-            --jq 'map(select(.conclusion == "success"))[0].databaseId // empty')
+            --json databaseId,headSha \
+            --jq '.[] | [.databaseId, .headSha] | @tsv')
           if [[ -z "$run_id" ]]; then
-            echo "::error::No successful rolling-wheel run exists for exact commit ${TARGET_SHA}. Wait for wheel-nightly.yml; Validate One never builds an extension."
+            echo "::error::No unexpired ${artifact_name} exists for exact commit ${TARGET_SHA}. Wait for wheel-nightly.yml; Validate One never builds an extension."
             exit 1
           fi
           runtime_sha=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
@@ -146,7 +159,6 @@ jobs:
             echo "::error::Rolling-wheel provenance mismatch: requested ${TARGET_SHA}, run ${run_id} is ${runtime_sha}."
             exit 1
           fi
-          artifact_name="gamfit-runtime-${TARGET_SHA}"
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
             --name "$artifact_name" --dir python-runtime
           grep -Fx "commit=${TARGET_SHA}" python-runtime/RUNTIME_PROVENANCE.txt
@@ -195,29 +207,32 @@ jobs:
           run_id=""
           archive_source=""
           for workflow_file in rust-archive.yml test.yml; do
-            candidate=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            while IFS=$'\t' read -r candidate candidate_sha; do
+              if [[ -z "$candidate" || "$candidate_sha" != "$TARGET_SHA" ]]; then
+                continue
+              fi
+              artifact_count=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts?per_page=100" \
+                --jq ".artifacts | map(select(.name == \"${archive_name}\" and (.expired == false))) | length")
+              if [[ "$artifact_count" -ne 1 ]]; then
+                echo "${workflow_file} run ${candidate} has no unexpired ${archive_name}."
+                continue
+              fi
+              if gh run download "$candidate" --repo "$GITHUB_REPOSITORY" \
+                --name "$archive_name" --dir rust-archive; then
+                run_id="$candidate"
+                archive_source="$workflow_file"
+                break
+              fi
+            done < <(gh run list --repo "$GITHUB_REPOSITORY" \
               --workflow "$workflow_file" \
               --commit "$TARGET_SHA" \
               --limit 20 \
-              --json databaseId,status,conclusion \
-              --jq 'map(select(.status == "in_progress" or .conclusion == "success"))[0].databaseId // empty')
-            if [[ -z "$candidate" ]]; then
-              echo "no run for ${TARGET_SHA} in ${workflow_file}"
-              continue
-            fi
-            candidate_sha=$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" \
-              --json headSha --jq .headSha)
-            if [[ "$candidate_sha" != "$TARGET_SHA" ]]; then
-              echo "::warning::${workflow_file} run ${candidate} reports ${candidate_sha}, not ${TARGET_SHA}; skipping."
-              continue
-            fi
-            if gh run download "$candidate" --repo "$GITHUB_REPOSITORY" \
-              --name "$archive_name" --dir rust-archive; then
-              run_id="$candidate"
-              archive_source="$workflow_file"
+              --json databaseId,headSha \
+              --jq '.[] | [.databaseId, .headSha] | @tsv')
+            if [[ -n "$run_id" ]]; then
               break
             fi
-            echo "${workflow_file} run ${candidate} has not produced ${archive_name} yet."
           done
           if [[ -z "$run_id" ]]; then
             echo "::error::No exact-SHA ${archive_name} exists for ${TARGET_SHA} from rust-archive.yml or test.yml. Dispatch 'Rust Test Archive' for this SHA and wait for its archive step; Validate One never performs a source-build fallback."
