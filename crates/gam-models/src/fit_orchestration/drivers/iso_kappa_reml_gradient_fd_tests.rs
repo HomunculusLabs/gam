@@ -1831,6 +1831,41 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
         (cost, grad)
     };
 
+    // #2454 STEP-LAW at the sign-disagreement point. At rho=15 the analytic and
+    // FD gradients disagree by 166% AND on the SIGN (an=+6.499e-2, fd=-9.835e-2,
+    // gap 0.163). A cost-noise floor of nu~1e-11 gives nu/h ~ 3e-8 at h=3e-4,
+    // seven orders too small, so either the inner solve's noise explodes here or
+    // truncation needs a third derivative of order 1e7. Sweeping h separates
+    // them WITHOUT needing a higher-precision reference:
+    //     gap proportional to 1/h  => NOISE (inner PIRLS not resolving at rho=15)
+    //     gap proportional to h^2  => TRUNCATION (FD wrong; analytic stands)
+    //     gap flat in h            => the ANALYTIC gradient is wrong
+    {
+        let value = 15.0_f64;
+        let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
+        for j in 0..rho_dim {
+            theta[j] = value;
+        }
+        let (cost, grad) = analytic_at(&theta, &mut cache, &mut evaluator);
+        let an = grad[0];
+        eprintln!("[zz-steplaw15-2454] rho=15 COST={cost:+.12e} analytic_rho0={an:+.8e}");
+        for hh in [1e-2_f64, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5, 3e-6, 1e-6] {
+            let mut plus = theta.clone();
+            plus[0] += hh;
+            let mut minus = theta.clone();
+            minus[0] -= hh;
+            let cp = cost_at(&plus, &mut cache, &mut evaluator);
+            let cm = cost_at(&minus, &mut cache, &mut evaluator);
+            let fd = (cp - cm) / (2.0 * hh);
+            let gap = an - fd;
+            eprintln!(
+                "[zz-steplaw15-2454] h={hh:.1e} fd={fd:+.8e} gap={gap:+.4e} \
+                 gap_times_h={:.4e} gap_over_h2={:.4e}",
+                gap * hh,
+                gap / (hh * hh)
+            );
+        }
+    }
     let h = 3e-4_f64;
     for value in [6.0_f64, 9.0, 12.0, 15.0, 18.0, 21.0] {
         let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
