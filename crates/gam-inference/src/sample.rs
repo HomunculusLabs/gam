@@ -479,17 +479,7 @@ pub fn laplace_gaussian_fallback(
     // would silently fabricate draws the caller never asked for.
     validate_nuts_config(cfg).map_err(String::from)?;
     let fit = fit_result_from_saved_model_for_prediction(model)?;
-    let geometry = fit.geometry.as_ref().ok_or_else(|| {
-        "standard constrained-coefficient posterior: saved fit has no coefficient geometry"
-            .to_string()
-    })?;
-    let constrained = geometry.constrained_posterior.as_ref().ok_or_else(|| {
-        "standard constrained-coefficient posterior: saved fit has constraints but no persisted \
-         inequality-truncated posterior identity; refit with the current schema"
-            .to_string()
-    })?;
-    let mode = constrained.mode.clone();
-    let center = constrained.unconstrained_center.clone();
+    let mode = fit.beta.clone();
     let p = mode.len();
     if p == 0 {
         return Err(format!(
@@ -1063,7 +1053,22 @@ fn sample_standard_truncated(
 ) -> Result<NutsResult, String> {
     validate_nuts_config(cfg).map_err(String::from)?;
     let fit = fit_result_from_saved_model_for_prediction(model)?;
-    let mode = fit.beta.clone();
+    // Consume the persisted inequality-truncated posterior identity (#2417 /
+    // #2419) rather than re-deriving it from the rebuilt design: the reported
+    // coefficient vector is the feasible KKT mode, which is NOT the ambient
+    // Gaussian centre the truncated law is centred on whenever a constraint is
+    // active. Both, and the exact `A β ≥ b`, come from the fit.
+    let geometry = fit.geometry.as_ref().ok_or_else(|| {
+        "standard constrained-coefficient posterior: saved fit has no coefficient geometry"
+            .to_string()
+    })?;
+    let constrained = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+        "standard constrained-coefficient posterior: saved fit has constraints but no persisted \
+         inequality-truncated posterior identity; refit with the current schema"
+            .to_string()
+    })?;
+    let mode = constrained.mode.clone();
+    let center = constrained.unconstrained_center.clone();
     let p = mode.len();
     if p == 0 {
         return Err(
