@@ -2003,7 +2003,7 @@ fn outer_nonconvergence_error(
 /// Their relative disagreement must nevertheless stay below the square root of
 /// machine epsilon: beyond that scale the derivative sample is not evidence
 /// about the scalar objective the optimizer's value lane ranks.
-fn outer_value_agreement_bound(value_only: f64, derivative_sample: f64) -> f64 {
+pub fn outer_value_agreement_bound(value_only: f64, derivative_sample: f64) -> f64 {
     f64::EPSILON.sqrt() * value_only.abs().max(derivative_sample.abs()).max(1.0)
 }
 

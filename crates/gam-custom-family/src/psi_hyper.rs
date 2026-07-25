@@ -2806,6 +2806,39 @@ pub struct CustomFamilyJointHyperModeSelection {
     pub(crate) mode: CustomFamilyOwnedMode,
 }
 
+/// Preserve the scalar value that ranked a coefficient-mode candidate while
+/// proving that derivative assembly still describes that same objective.
+///
+/// Value-only and derivative-bearing paths can legitimately use different
+/// reduction trees, so bitwise equality is not a valid identity test. The
+/// outer optimizer already owns the canonical roundoff envelope for two
+/// independently assembled values at the same point; mode selection uses that
+/// same contract and retains the screened value as the scalar authority.
+fn canonicalize_screened_objective(
+    screened: f64,
+    derivative_sample: f64,
+    selected_candidate: usize,
+) -> Result<f64, CustomFamilyError> {
+    let bound =
+        gam_solve::rho_optimizer::outer_value_agreement_bound(screened, derivative_sample);
+    let disagreement = (screened - derivative_sample).abs();
+    if !screened.is_finite()
+        || !derivative_sample.is_finite()
+        || !disagreement.is_finite()
+        || disagreement > bound
+    {
+        return Err(CustomFamilyError::UnsupportedConfiguration {
+            reason: format!(
+                "best coefficient-mode candidate {selected_candidate} changed profile objective \
+                 between value screening and derivative assembly: screened={screened:.16e}, \
+                 derivative={derivative_sample:.16e}, disagreement={disagreement:.3e}, \
+                 roundoff bound={bound:.3e}"
+            ),
+        });
+    }
+    Ok(screened)
+}
+
 /// Profile a nonconvex coefficient mode without assembling expensive outer
 /// derivatives for every candidate.
 ///
@@ -2934,11 +2967,11 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
     let screened_winner = screened_results[selected_candidate]
         .take()
         .expect("ranked candidate retains its screened result");
-    let screened_objective_bits = screened_winner.objective.to_bits();
+    let screened_objective = screened_winner.objective;
     let selected_inner = screened_winner.inner;
     let (eval_options, _) =
         derivative_quality_options_and_warm_start(options, None, has_psi_derivatives);
-    let derivative_eval = evaluate_custom_family_hyper_internal_shared(
+    let mut derivative_eval = evaluate_custom_family_hyper_internal_shared(
         family,
         specs,
         &eval_options,
@@ -2956,13 +2989,11 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
             "best coefficient-mode candidate {selected_candidate} failed requested derivative assembly: {error}"
         ),
     })?;
-    if derivative_eval.objective.to_bits() != screened_objective_bits {
-        return Err(CustomFamilyError::UnsupportedConfiguration {
-            reason: format!(
-                "best coefficient-mode candidate {selected_candidate} changed profile objective between value screening and derivative assembly"
-            ),
-        });
-    }
+    derivative_eval.objective = canonicalize_screened_objective(
+        screened_objective,
+        derivative_eval.objective,
+        selected_candidate,
+    )?;
     validate_requested_best_mode_derivatives(
         &derivative_eval,
         eval_mode,
@@ -2977,6 +3008,27 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
         rejected_candidates,
         mode: owned.mode,
     })
+}
+
+#[cfg(test)]
+mod mode_selection_value_tests {
+    use super::*;
+
+    #[test]
+    fn screened_objective_is_canonical_within_shared_roundoff_envelope() {
+        let screened = 100.0;
+        let bound = gam_solve::rho_optimizer::outer_value_agreement_bound(screened, screened);
+        let derivative_sample = screened + 0.25 * bound;
+        let canonical =
+            canonicalize_screened_objective(screened, derivative_sample, 0).expect("same value");
+        assert_eq!(canonical.to_bits(), screened.to_bits());
+
+        let inconsistent_sample = screened + 2.0 * bound;
+        assert!(
+            canonicalize_screened_objective(screened, inconsistent_sample, 0).is_err(),
+            "a derivative lane outside the shared roundoff envelope must be rejected"
+        );
+    }
 }
 
 fn validate_requested_best_mode_derivatives(
