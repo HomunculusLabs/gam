@@ -5341,6 +5341,14 @@ impl SaeManifoldTerm {
                 "SaeManifoldTerm::run_fixed_decoder_arrow_schur: step_size must be finite and positive; got {step_size}"
             ));
         }
+        // #2267 — the backtracking search only ever CONTRACTS from its first
+        // trial, so pinning that trial to the caller's `step_size` caps the
+        // per-iteration contraction at `1 - step_size` regardless of how good
+        // the direction is. Clean acceptances ratchet the trial toward the unit
+        // Newton step instead; the Armijo bound is unchanged.
+        let warm_growth = 1.0 / BacktrackConfig::default().contraction;
+        let unit_step_ceiling = step_size.max(1.0);
+        let mut warm_step = step_size;
         if max_iter < 1 {
             return Err(
                 "SaeManifoldTerm::run_fixed_decoder_arrow_schur: max_iter must be positive".into(),
@@ -5397,7 +5405,7 @@ impl SaeManifoldTerm {
             let mut first_trial = true;
             let accepted = backtracking_line_search::<_, String>(
                 BacktrackConfig {
-                    initial_step: step_size,
+                    initial_step: warm_step,
                     max_steps: SAE_MANIFOLD_MAX_LINESEARCH_HALVINGS + 1,
                     ..BacktrackConfig::default()
                 },
@@ -5424,7 +5432,19 @@ impl SaeManifoldTerm {
                 },
             )?;
             match accepted {
-                Some(_) => last_loss = self.loss(target, rho)?,
+                Some(step) => {
+                    // Same ratchet as the joint driver (#2267): this is a Newton
+                    // step too, so its natural length is one, and the caller's
+                    // `step_size` is the conservative first trial, not a ceiling
+                    // the accepted step may never exceed.
+                    warm_step = (if step.step >= warm_step {
+                        warm_step * warm_growth
+                    } else {
+                        step.step * warm_growth
+                    })
+                    .min(unit_step_ceiling);
+                    last_loss = self.loss(target, rho)?;
+                }
                 None => {
                     self.restore_mutable_state(&snapshot)?;
                     last_loss = pre_step_loss;
@@ -7910,6 +7930,12 @@ impl SaeManifoldTerm {
                 "SaeManifoldTerm::run_joint_fit_arrow_schur_streaming: step_size must be finite and positive; got {step_size}"
             ));
         }
+        // #2267 — same ceiling, same fix as the joint driver: the reduced-beta
+        // Newton step's natural length is one, and `step_size` is the
+        // conservative first trial, not a cap the search may never exceed.
+        let warm_growth = 1.0 / BacktrackConfig::default().contraction;
+        let unit_step_ceiling = step_size.max(1.0);
+        let mut warm_step = step_size;
         if chunk_size == 0 {
             return Err(
                 "SaeManifoldTerm::run_joint_fit_arrow_schur_streaming: chunk_size must be positive"
@@ -8103,7 +8129,7 @@ impl SaeManifoldTerm {
             // trial β. Evaluation errors propagate (`?`), as before.
             let accepted_loss = backtracking_line_search::<_, String>(
                 BacktrackConfig {
-                    initial_step: step_size,
+                    initial_step: warm_step,
                     max_steps: SAE_MANIFOLD_MAX_LINESEARCH_HALVINGS + 1,
                     ..BacktrackConfig::default()
                 },
@@ -8128,8 +8154,19 @@ impl SaeManifoldTerm {
                         pre_step_total - SAE_MANIFOLD_ARMIJO_C1 * trial_step * directional_decrease;
                     trial_total.is_finite() && trial_total <= armijo_bound
                 },
-            )?
-            .map(|step| step.payload);
+            )?;
+            let accepted_length = accepted_loss.as_ref().map(|step| step.step);
+            let accepted_loss = accepted_loss.map(|step| step.payload);
+            if let Some(length) = accepted_length {
+                // Same ratchet as the joint driver (#2267): the reduced-β solve
+                // is a Newton step in β, so the unit step is its natural length.
+                warm_step = (if length >= warm_step {
+                    warm_step * warm_growth
+                } else {
+                    length * warm_growth
+                })
+                .min(unit_step_ceiling);
+            }
             match accepted_loss {
                 Some(loss) => {
                     last_loss = loss;
