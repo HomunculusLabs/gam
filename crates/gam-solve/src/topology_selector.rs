@@ -2598,10 +2598,17 @@ where
             value: -point.tk_score,
             derivative: -point.score_gradient,
             curvature: -point.score_curvature,
+            // The closure profile's enclosure is a caller-supplied interval
+            // extension over the cell, so no endpoint third derivative is read.
+            third: 0.0,
         })
     };
-    let mut score_enclosure = |lo: f64, hi: f64| {
-        let tk = enclose_derivatives(lo, hi)?;
+    // The caller-supplied `enclose_derivatives` is a genuine interval extension
+    // over the cell, not an endpoint Taylor pad, so it reads only the abscissae
+    // of the samples the search hands in.
+    let mut score_enclosure = |lo: gam_math::score_opt::ScoreSample,
+                               hi: gam_math::score_opt::ScoreSample| {
+        let tk = enclose_derivatives(lo.x, hi.x)?;
         Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
             derivative: gam_math::score_opt::ClosedInterval::outward(
                 -tk.derivative.hi,

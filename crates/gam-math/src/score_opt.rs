@@ -183,12 +183,22 @@ impl ClosedInterval {
     }
 }
 
-/// Value and first two analytic derivatives at one abscissa.
+/// Value and the analytic derivatives at one abscissa.
+///
+/// `third` is carried alongside the first two because every endpoint-anchored
+/// [`DerivativeEnclosure`] in this workspace is built from the endpoint
+/// curvature and third derivative. Dropping it here used to force the enclosure
+/// oracle to RE-EVALUATE the criterion at both endpoints of every
+/// branch-and-bound cell — endpoints the search had already sampled — which
+/// tripled the number of criterion evaluations the search actually paid for.
+/// Oracles that have no third derivative to report set it to zero; enclosures
+/// that do not consult it are unaffected.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScoreJet {
     pub value: f64,
     pub derivative: f64,
     pub curvature: f64,
+    pub third: f64,
 }
 
 /// A point evaluation augmented with its abscissa.
@@ -198,6 +208,7 @@ pub struct ScoreSample {
     pub value: f64,
     pub derivative: f64,
     pub curvature: f64,
+    pub third: f64,
 }
 
 /// Outer derivative ranges supplied to the certified search.
@@ -344,6 +355,7 @@ where
         value: jet.value,
         derivative: jet.derivative,
         curvature: jet.curvature,
+        third: jet.third,
     };
     if sample.value.is_finite() && sample.derivative.is_finite() && sample.curvature.is_finite() {
         Ok(sample)
@@ -357,15 +369,21 @@ fn checked_enclosure<E, F>(
     enclose: &mut F,
 ) -> Result<DerivativeEnclosure, ScoreSearchError<E>>
 where
-    F: FnMut(f64, f64) -> Result<DerivativeEnclosure, E>,
+    F: FnMut(ScoreSample, ScoreSample) -> Result<DerivativeEnclosure, E>,
 {
     let lo = node.left.x;
     let hi = node.right.x;
-    let enclosure = enclose(lo, hi).map_err(|source| ScoreSearchError::EnclosureEvaluation {
-        lo,
-        hi,
-        source,
-    })?;
+    // The cell's endpoints are handed to the oracle as the SAMPLES the search
+    // already paid for, not as bare abscissae. An endpoint-anchored enclosure
+    // needs the endpoint jets and nothing else, so this is what makes it free:
+    // the oracle reads `left`/`right` instead of re-evaluating the criterion at
+    // two points it has already evaluated.
+    let enclosure =
+        enclose(node.left, node.right).map_err(|source| ScoreSearchError::EnclosureEvaluation {
+            lo,
+            hi,
+            source,
+        })?;
     if !(enclosure.derivative.is_valid() && enclosure.curvature.is_valid()) {
         return Err(ScoreSearchError::InvalidEnclosure { lo, hi, enclosure });
     }
@@ -481,10 +499,17 @@ where
 /// Globally maximize a smooth score on `[lo, hi]` by certified stationary
 /// isolation.
 ///
-/// `evaluate` returns the score and its first two analytic derivatives at a
-/// point. `enclose(a, b)` must return OUTER ranges containing the first and
-/// second derivative at every point of `[a, b]`.  The search additionally
-/// checks that both endpoint jets lie inside every returned enclosure.
+/// `evaluate` returns the score jet at a point. `enclose(a, b)` receives the
+/// cell's two ENDPOINT SAMPLES — the jets the search already obtained from
+/// `evaluate` — and must return OUTER ranges containing the first and second
+/// derivative at every point of `[a.x, b.x]`.  The search additionally checks
+/// that both endpoint jets lie inside every returned enclosure.
+///
+/// Handing the samples in (rather than the bare abscissae) is what keeps an
+/// endpoint-anchored enclosure free: such an oracle is a Taylor pad around the
+/// endpoint jets, so with the jets in hand it performs no criterion evaluation
+/// of its own. An oracle whose enclosure is a genuine interval extension may
+/// ignore the jets and use `a.x`/`b.x`.
 ///
 /// There is no evaluation or subdivision budget.  A successful return means
 /// every stationary interval was either excluded or isolated to `resolution`.
@@ -499,7 +524,7 @@ pub fn maximize_score_1d<E, Eval, Enclose>(
 ) -> Result<ScoreSearchResult, ScoreSearchError<E>>
 where
     Eval: FnMut(f64) -> Result<ScoreJet, E>,
-    Enclose: FnMut(f64, f64) -> Result<DerivativeEnclosure, E>,
+    Enclose: FnMut(ScoreSample, ScoreSample) -> Result<DerivativeEnclosure, E>,
 {
     if !(lo.is_finite() && hi.is_finite() && lo <= hi && (hi - lo).is_finite()) {
         return Err(ScoreSearchError::InvalidDomain { lo, hi });
@@ -930,6 +955,11 @@ impl<'a> AffineRemlProfile<'a> {
                 * (outputs * determinant_derivative + self.residual_dof * residual_derivative_sum),
             curvature: -0.5
                 * (outputs * determinant_curvature + self.residual_dof * residual_curvature_sum),
+            // This profile's companion `enclose` is a true interval extension
+            // over the whole cell (it evaluates the mode kernels on interval
+            // lambda), not an endpoint-anchored Taylor pad, so it never reads
+            // the endpoint third derivative and none is computed here.
+            third: 0.0,
         })
     }
 
@@ -1011,7 +1041,7 @@ impl<'a> AffineRemlProfile<'a> {
             hi,
             resolution,
             |x| self.evaluate(x),
-            |a, b| self.enclose(a, b),
+            |a, b| self.enclose(a.x, b.x),
         )
     }
 }
@@ -1181,6 +1211,7 @@ mod tests {
             value: x + 1000.0 * p * p,
             derivative: 1.0 + 2000.0 * p * dp,
             curvature: 2000.0 * (dp * dp + p * ddp),
+            third: 2000.0 * (3.0 * dp * ddp + p * 6.0),
         }
     }
 
@@ -1208,7 +1239,7 @@ mod tests {
             1.0,
             1.0e-9,
             |x| -> Result<_, String> { Ok(polynomial_hidden_bump_jet(x)) },
-            |lo, hi| -> Result<_, String> { Ok(polynomial_hidden_bump_enclosure(lo, hi)) },
+            |lo, hi| -> Result<_, String> { Ok(polynomial_hidden_bump_enclosure(lo.x, hi.x)) },
         )
         .expect("certified search");
 
@@ -1227,6 +1258,7 @@ mod tests {
             value: -(x * x - 1.0).powi(2),
             derivative: 4.0 * x - 4.0 * x * x * x,
             curvature: 4.0 - 12.0 * x * x,
+            third: -24.0 * x,
         }
     }
 
@@ -1245,7 +1277,7 @@ mod tests {
             2.0,
             1.0e-10,
             |x| -> Result<_, String> { Ok(quartic_jet(x)) },
-            |lo, hi| -> Result<_, String> { Ok(quartic_enclosure(lo, hi)) },
+            |lo, hi| -> Result<_, String> { Ok(quartic_enclosure(lo.x, hi.x)) },
         )
         .expect("certified search");
         assert_eq!(result.stationary_points.len(), 3);
@@ -1267,6 +1299,7 @@ mod tests {
                     value: 0.3 * x,
                     derivative: 0.3,
                     curvature: 0.0,
+                    third: 0.0,
                 })
             },
             |_, _| -> Result<_, String> {
@@ -1293,10 +1326,11 @@ mod tests {
                     value: x * x * x,
                     derivative: 3.0 * x * x,
                     curvature: 6.0 * x,
+                    third: 6.0,
                 })
             },
             |lo, hi| -> Result<_, String> {
-                let x = ClosedInterval::new(lo, hi);
+                let x = ClosedInterval::new(lo.x, hi.x);
                 Ok(DerivativeEnclosure {
                     derivative: x.square().scale(3.0),
                     curvature: x.scale(6.0),

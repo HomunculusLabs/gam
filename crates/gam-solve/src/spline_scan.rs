@@ -53,7 +53,9 @@
 //! boundaries compete exactly. σ² is profiled in closed form from the proper
 //! innovations plus the within-tie residual sum.
 
-use gam_math::score_opt::{ClosedInterval, DerivativeEnclosure, ScoreJet, maximize_score_1d};
+use gam_math::score_opt::{
+    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, maximize_score_1d,
+};
 
 /// One pooled (distinct-abscissa) observation node.
 #[derive(Clone, Copy, Debug)]
@@ -389,9 +391,24 @@ struct FilterPass {
     n_proper: usize,
 }
 
-fn run_filter(nodes: &[PooledNode], q: f64, order: usize) -> Result<FilterPass, String> {
+/// One forward pass of the exact diffuse filter.
+///
+/// `RECORD_STEPS` selects whether the per-node filtered/predicted states are
+/// retained. They are needed ONLY by the RTS backward smoother in
+/// [`fit_spline_scan_at`]; the profiled REML criterion
+/// ([`concentrated_criterion_jet`]) reads nothing but the scalar accumulators.
+/// Recording them unconditionally made every criterion evaluation of the
+/// certified log-lambda search allocate, fill, and immediately drop
+/// `n * size_of::<FilterStep>()` bytes — at the biobank scale this fast path
+/// exists for (n = 1e6, 192 B per node) that is 192 MB of write traffic per
+/// evaluation, thrown away.
+fn run_filter<const RECORD_STEPS: bool>(
+    nodes: &[PooledNode],
+    q: f64,
+    order: usize,
+) -> Result<FilterPass, String> {
     let n = nodes.len();
-    let mut steps = Vec::with_capacity(n);
+    let mut steps = Vec::with_capacity(if RECORD_STEPS { n } else { 0 });
     // Exact diffuse initialization (Durbin–Koopman): P = P* + κ·P_∞, κ → ∞.
     // The order-`m` polynomial null space (degree < m) is fully diffuse: the
     // diffuse rank starts at `order`, consumed by the first `order` distinct
@@ -600,12 +617,14 @@ fn run_filter(nodes: &[PooledNode], q: f64, order: usize) -> Result<FilterPass, 
             sum_v2_over_f_d3 += t3;
             n_proper += 1;
         }
-        steps.push(FilterStep {
-            a_filt: a,
-            p_filt: p_star,
-            a_pred,
-            p_pred,
-        });
+        if RECORD_STEPS {
+            steps.push(FilterStep {
+                a_filt: a,
+                p_filt: p_star,
+                a_pred,
+                p_pred,
+            });
+        }
         // Predict to the next node.
         if t + 1 < n {
             let delta = nodes[t + 1].x - nodes[t].x;
@@ -791,7 +810,7 @@ fn concentrated_criterion_jet(
 ) -> Result<(f64, f64, f64, f64), String> {
     let q = gam_problem::checked_exp_log_strength(-log_lambda)
         .map_err(|error| format!("spline scan inverse log strength: {error}"))?;
-    let pass = run_filter(nodes, q, order)?;
+    let pass = run_filter::<false>(nodes, q, order)?;
     // Profiled σ̂² over the proper innovations plus within-tie residuals;
     // the restricted degrees of freedom subtract the diffuse dimension `order`.
     let dof = (n_obs - order) as f64;
@@ -840,23 +859,29 @@ fn concentrated_criterion_jet(
 /// residual energy is lambda-independent and only tightens these bounds.
 /// Endpoint jets plus these analytic Lipschitz bounds therefore enclose the
 /// entire interval without a sampling lattice.
+///
+/// The pad is built ENTIRELY from the two endpoint jets and closed-form
+/// Lipschitz constants, so the search's own endpoint samples are the only
+/// evaluations it needs: `maximize_score_1d` hands them in (`left`/`right`)
+/// and this function performs no filter pass of its own. It used to re-run
+/// `concentrated_criterion_jet` at both endpoints of every cell, which made
+/// each branch-and-bound cell cost three O(n) filter passes (two here plus the
+/// midpoint evaluation) where one suffices.
 fn concentrated_criterion_enclosure(
-    nodes: &[PooledNode],
-    ssr_within: f64,
+    n_nodes: usize,
     n_obs: usize,
-    lo: f64,
-    hi: f64,
+    left: ScoreSample,
+    right: ScoreSample,
     order: usize,
 ) -> Result<DerivativeEnclosure, String> {
+    let (lo, hi) = (left.x, right.x);
     if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
         return Err(format!(
             "spline scan: invalid score-enclosure interval [{lo}, {hi}]"
         ));
     }
-    let left = concentrated_criterion_jet(nodes, ssr_within, n_obs, lo, order)?;
-    let right = concentrated_criterion_jet(nodes, ssr_within, n_obs, hi, order)?;
     let width = hi - lo;
-    let proper_modes = (nodes.len() - order) as f64;
+    let proper_modes = (n_nodes - order) as f64;
     let residual_dof = (n_obs - order) as f64;
     let fourth_abs_bound = 0.5 * (0.25 * proper_modes + 26.0 * residual_dof);
     // Derivative enclosure from ENDPOINT JETS through third order, not a
@@ -873,8 +898,8 @@ fn concentrated_criterion_enclosure(
     // exact V''' endpoint jets makes the pad CUBIC in w on plateaus, so a
     // tail cell certifies at width ~(|V'|/L4)^{1/3} and the walk costs
     // e^{X/3} — each exact derivative order divides the exponent again.
-    let curvature_endpoint_abs = left.2.abs().max(right.2.abs());
-    let third_endpoint_abs = left.3.abs().max(right.3.abs());
+    let curvature_endpoint_abs = left.curvature.abs().max(right.curvature.abs());
+    let third_endpoint_abs = left.third.abs().max(right.third.abs());
     let derivative_radius = curvature_endpoint_abs * width
         + 0.5 * third_endpoint_abs * width * width
         + fourth_abs_bound * width * width * width / 6.0;
@@ -883,12 +908,12 @@ fn concentrated_criterion_enclosure(
     let curvature_radius = third_endpoint_abs * width + 0.5 * fourth_abs_bound * width * width;
     Ok(DerivativeEnclosure {
         derivative: ClosedInterval::outward(
-            (left.1 - derivative_radius).min(right.1 - derivative_radius),
-            (left.1 + derivative_radius).max(right.1 + derivative_radius),
+            (left.derivative - derivative_radius).min(right.derivative - derivative_radius),
+            (left.derivative + derivative_radius).max(right.derivative + derivative_radius),
         ),
         curvature: ClosedInterval::outward(
-            (left.2 - curvature_radius).min(right.2 - curvature_radius),
-            (left.2 + curvature_radius).max(right.2 + curvature_radius),
+            (left.curvature - curvature_radius).min(right.curvature - curvature_radius),
+            (left.curvature + curvature_radius).max(right.curvature + curvature_radius),
         ),
     })
 }
@@ -1078,7 +1103,7 @@ pub fn fit_spline_scan_at(
     let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
     let q = gam_problem::checked_exp_log_strength(-log_lambda)
         .map_err(|error| format!("spline scan inverse log strength: {error}"))?;
-    let pass = run_filter(&nodes, q, order)?;
+    let pass = run_filter::<true>(&nodes, q, order)?;
     let n = nodes.len();
     let dof = (n_obs - order) as f64;
     let sigma2 = match sigma2 {
@@ -1222,20 +1247,22 @@ pub fn fit_spline_scan(
     };
     let lo_anchor = LOG_LAMBDA_LO + scale_shift;
     let hi_anchor = LOG_LAMBDA_HI + scale_shift;
+    let n_nodes = nodes.len();
     let search = maximize_score_1d(
         lo_anchor,
         hi_anchor,
         f64::EPSILON.sqrt(),
         |ll| {
             concentrated_criterion_jet(&nodes, ssr_within, n_obs, ll, order).map(
-                |(value, derivative, curvature, _third)| ScoreJet {
+                |(value, derivative, curvature, third)| ScoreJet {
                     value,
                     derivative,
                     curvature,
+                    third,
                 },
             )
         },
-        |lo, hi| concentrated_criterion_enclosure(&nodes, ssr_within, n_obs, lo, hi, order),
+        |left, right| concentrated_criterion_enclosure(n_nodes, n_obs, left, right, order),
     )
     .map_err(|error| format!("spline scan: REML stationary isolation failed: {error}"))?;
     fit_spline_scan_at(x, y, w, search.optimum.x, None, order)
@@ -1682,6 +1709,7 @@ mod tests {
             let lo = LOG_LAMBDA_LO + scale_shift;
             let hi = LOG_LAMBDA_HI + scale_shift;
 
+            let n_nodes = nodes.len();
             let evals = std::cell::Cell::new(0u64);
             let last_x = std::cell::Cell::new(f64::NAN);
             let budget = 2_000_000u64;
@@ -1700,14 +1728,15 @@ mod tests {
                          [{lo:.3}, {hi:.3}]) — non-terminating subdivision reproduced"
                     );
                     concentrated_criterion_jet(&nodes, ssr_within, n_obs, ll, order).map(
-                        |(value, derivative, curvature, _third)| gam_math::score_opt::ScoreJet {
+                        |(value, derivative, curvature, third)| gam_math::score_opt::ScoreJet {
                             value,
                             derivative,
                             curvature,
+                            third,
                         },
                     )
                 },
-                |a, b| concentrated_criterion_enclosure(&nodes, ssr_within, n_obs, a, b, order),
+                |a, b| concentrated_criterion_enclosure(n_nodes, n_obs, a, b, order),
             );
             match result {
                 Ok(search) => {

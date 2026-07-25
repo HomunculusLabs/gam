@@ -95,7 +95,9 @@ use std::sync::Arc;
 
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
-use gam_math::score_opt::{ClosedInterval, DerivativeEnclosure, ScoreJet, maximize_score_1d};
+use gam_math::score_opt::{
+    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, maximize_score_1d,
+};
 use gam_terms::grid_spline_2d::{chol_solve, cholesky_logdet};
 use ndarray::Array2;
 
@@ -803,7 +805,10 @@ impl CascadeRemlProfile<'_> {
             .map_err(|error| format!("residual cascade: {error}"))?;
 
         let core = self.core;
-        let (coeff, _, _) = core.solve_coeff(lambda, &core.rhs, None)?;
+        // ONE factorization of `A = X'WX + λD` for BOTH right-hand sides below;
+        // the matrix is the same at this λ and only the right-hand side differs.
+        let solver = core.coeff_solver(lambda)?;
+        let coeff = solver.solve(core, lambda, &core.rhs)?;
         let rss = core.rss_pen(&coeff);
         if !(rss.is_finite() && rss > 0.0) {
             return Err(format!(
@@ -827,7 +832,7 @@ impl CascadeRemlProfile<'_> {
             .zip(dc.iter())
             .map(|(&c, &v)| c * v)
             .sum::<f64>();
-        let (u, _, _) = core.solve_coeff(lambda, &dc, None)?;
+        let u = solver.solve(core, lambda, &dc)?;
         let inverse_penalty_energy = dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum::<f64>();
         let third_energy = u
             .iter()
@@ -881,6 +886,11 @@ impl CascadeRemlProfile<'_> {
             value: -0.5 * (normalized_logdet + dof * (rss / dof).ln()),
             derivative: -0.5 * (determinant_d1 + dof * rss_log_d1),
             curvature: -0.5 * (determinant_d2 + dof * rss_log_d2),
+            // This profile's enclosure pads with the CLOSED-FORM `third_abs_bound`
+            // Lipschitz constant rather than the endpoint third derivative, so it
+            // never reads this field; the exact `rss_log_d3` above is retained
+            // only as the analyticity check that justifies that bound.
+            third: 0.0,
         };
         if !(jet.value.is_finite() && jet.derivative.is_finite() && jet.curvature.is_finite()) {
             return Err(format!(
@@ -902,14 +912,20 @@ impl CascadeRemlProfile<'_> {
     /// residual. Its log therefore has `|g''| <= 2`, `|g'''| <= 6` (the loose
     /// moment bounds for variables in `[0,1]`). Endpoint jets plus these bounds
     /// enclose the complete interval without sampling it.
-    fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, String> {
+    ///
+    /// Those endpoint jets arrive as the search's own `left`/`right` SAMPLES —
+    /// `maximize_score_1d` already evaluated them to build the cell — so this
+    /// function evaluates the profile zero times. It used to re-run
+    /// `self.evaluate` at both endpoints, and since each `evaluate` performs
+    /// TWO penalized linear solves, every branch-and-bound cell paid six solves
+    /// where two suffice, at every refinement level of `fit_residual_cascade`.
+    fn enclose(&self, left: ScoreSample, right: ScoreSample) -> Result<DerivativeEnclosure, String> {
+        let (lo, hi) = (left.x, right.x);
         if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
             return Err(format!(
                 "residual cascade: invalid score-enclosure interval [{lo}, {hi}]"
             ));
         }
-        let left = self.evaluate(lo)?.jet;
-        let right = self.evaluate(hi)?.jet;
         let width = hi - lo;
         let rank = (self.core.m - self.core.nullity()) as f64;
         let dof = (self.core.y.len() - self.core.nullity()) as f64;
@@ -927,6 +943,26 @@ impl CascadeRemlProfile<'_> {
                 (left.curvature + curvature_radius).max(right.curvature + curvature_radius),
             ),
         })
+    }
+}
+
+/// A coefficient solver pinned to one λ (see [`Core::coeff_solver`]). The
+/// dense arms hold the Cholesky factor so repeated right-hand sides at that λ
+/// cost only triangular solves; the iterative arm has no factor to share and
+/// simply defers to the certified PCG per right-hand side.
+enum CoeffSolver<'a> {
+    Cached(&'a [f64]),
+    Factored(Vec<f64>),
+    Iterative,
+}
+
+impl CoeffSolver<'_> {
+    fn solve(&self, core: &Core, lambda: f64, b: &[f64]) -> Result<Vec<f64>, String> {
+        match self {
+            Self::Cached(l) => Ok(chol_solve(l, core.m, b)),
+            Self::Factored(l) => Ok(chol_solve(l, core.m, b)),
+            Self::Iterative => core.pcg(lambda, b, None).map(|(coeff, _, _)| coeff),
+        }
     }
 }
 
@@ -1584,6 +1620,27 @@ impl Core {
         } else {
             Ok((self.logdet_slq(lambda)?, LogdetMethod::Slq))
         }
+    }
+
+    /// The coefficient solver at a FIXED λ, obtained once so that several
+    /// right-hand sides can share one factorization.
+    ///
+    /// `A = X'WX + λD` does not depend on the right-hand side, so a caller that
+    /// needs two solves at the same λ must not pay two O(m³) Cholesky
+    /// factorizations for it. `CascadeScoreProfile::evaluate` needs exactly
+    /// that pair (`A⁻¹b` and then `A⁻¹Dc`), and going through `solve_coeff`
+    /// twice rebuilt and refactorized the identical matrix — the dominant cost
+    /// of the whole REML search, since `cholesky_logdet` is where the profile
+    /// spends its time.
+    fn coeff_solver(&self, lambda: f64) -> Result<CoeffSolver<'_>, String> {
+        if let Some(l) = &self.predict_chol {
+            return Ok(CoeffSolver::Cached(l));
+        }
+        if let Some(mut a) = self.dense_system(lambda) {
+            cholesky_logdet(&mut a, self.m)?;
+            return Ok(CoeffSolver::Factored(a));
+        }
+        Ok(CoeffSolver::Iterative)
     }
 
     /// Coefficient solve at λ: dense Cholesky when cached, else certified PCG.
@@ -2321,7 +2378,7 @@ impl ResidualCascadeDesign {
                     .evaluate(log_lambda)
                     .map(|evaluation| evaluation.jet)
             },
-            |lo, hi| profile.enclose(lo, hi),
+            |left, right| profile.enclose(left, right),
         )
         .map_err(|error| format!("residual cascade: REML stationary isolation failed: {error}"))?;
         let selected = profile.evaluate(search.optimum.x)?;
