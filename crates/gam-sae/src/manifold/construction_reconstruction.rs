@@ -8,30 +8,37 @@
 
 use super::*;
 
-/// Assembly scale of the arrow's diagonal blocks, from the Cholesky factors the
+/// Assembly scale `‖H‖₂` of the whole arrow, from the Cholesky factors the
 /// cache already carries.
 ///
-/// For each block, `λ_max = ‖·‖₂ ≤ ‖·‖_F = ‖L Lᵀ‖_F ≤ ‖L‖_F²`, using
-/// `‖XY‖_F ≤ ‖X‖₂‖Y‖_F ≤ ‖X‖_F‖Y‖_F`.
+/// The arrow factorizes as `H = L Lᵀ` with `L` block-lower: the per-row
+/// coordinate factors on the diagonal, the border rows below them, and the
+/// β-Schur factor last. So `‖H‖₂ ≤ ‖L‖₂² ≤ ‖L‖_F²`, and `‖L‖_F²` is the SUM of
+/// its blocks' squared Frobenius norms — not their maximum. The distinction
+/// matters: the ARD trace reads the latent diagonal of `H⁻¹`, which is
+/// `A_i⁻¹ + G_i S⁻¹ G_iᵀ`, so both the row-local and the border-through-Schur
+/// paths contribute, and the n-fold accumulation across rows is already
+/// carried by the `shrinkage` factor in the tolerance rather than by this
+/// scale.
 ///
-/// BOTH blocks are needed. The ARD trace reads the latent diagonal of `H⁻¹`,
-/// which is `A_i⁻¹ + G_i S⁻¹ G_iᵀ` — a row-local term plus a border term folded
-/// through the β-Schur complement. Measuring only the row factors misses the
-/// decoder curvature entirely, and on the shared two-atom fixture that is where
-/// the large entries live: the row blocks give a scale of ~4, while the
-/// excursion the trace actually carries implies an assembly scale of ~10³.
-/// A tolerance built on the row blocks alone is therefore still short by
-/// almost three orders of magnitude, which is the same category error one level
-/// down.
+/// The border rows themselves are an operator (`apply_htbeta_row`), not a
+/// stored matrix, so this sums the two block families the cache materializes
+/// and omits the border's own contribution. `‖L‖_F²` is therefore
+/// under-counted, which makes this an observable scale rather than a proved
+/// bound on `‖H‖₂`. The certificate does not rest on tightness: roundoff at
+/// this scale and a genuinely indefinite block are separated by ten orders of
+/// magnitude on every state measured (`1.97e-9` against `5.5e1` on the same
+/// fixture), so what the scale has to get right is the exponent, not the
+/// constant.
 pub(super) fn undamped_row_curvature_scale(cache: &ArrowFactorCache) -> f64 {
     let frobenius_squared =
         |factor: ArrayView2<'_, f64>| -> f64 { factor.iter().map(|entry| entry * entry).sum() };
     let mut scale = 0.0_f64;
     for row in 0..cache.undamped_factor_count() {
-        scale = scale.max(frobenius_squared(cache.undamped_factor(row)));
+        scale += frobenius_squared(cache.undamped_factor(row));
     }
     if let Some(schur) = cache.schur_factor.as_ref() {
-        scale = scale.max(frobenius_squared(schur.view()));
+        scale += frobenius_squared(schur.view());
     }
     scale
 }
