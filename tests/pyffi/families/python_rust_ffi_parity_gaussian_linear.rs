@@ -45,6 +45,9 @@ out={
  'beta': [c['estimate'] for c in s['coefficients']],
  'll': float(s['deviance']) if 'deviance' in s else float('nan'),
  'reml': float(s['reml_score']),
+ 'raw_reml': float(s['raw_reml_score']),
+ 'null_dim': s['null_dim'],
+ 'null_space_logdet': s['null_space_logdet'],
 }
 print(json.dumps(out))
 "#;
@@ -66,14 +69,44 @@ print(json.dumps(out))
         .map(|x| x.as_f64().unwrap())
         .collect();
     let reml_py = v["reml"].as_f64().unwrap();
+    let raw_reml_py = v["raw_reml"].as_f64().unwrap();
 
     assert_eq!(beta_rust.len(), beta_py.len());
     for (i, (a, b)) in beta_rust.iter().zip(beta_py.iter()).enumerate() {
         assert!((a - b).abs() <= 1e-9, "beta[{i}] rust={a} py={b}");
     }
+    // `UnifiedFitResult::reml_score` is the outer optimizer's own criterion
+    // value, whose Python counterpart is `raw_reml_score`. The summary's
+    // headline `reml_score` is the CROSS-MODEL comparable score: raw plus the
+    // rank-aware Tierney-Kadane normalizer over the penalty null space. The two
+    // coincide only when that null space is empty, which a formula fit is not
+    // required to produce — `y ~ x` carries a REML-selected `LinearTermRidge` on
+    // `x`, leaving the intercept as a one-dimensional flat prior direction.
     assert!(
-        (reml_rust - reml_py).abs() <= 1e-9,
-        "reml rust={reml_rust} py={reml_py}"
+        (reml_rust - raw_reml_py).abs() <= 1e-9,
+        "raw reml rust={reml_rust} py={raw_reml_py}"
+    );
+    // Pin the headline's documented relationship to the raw score as well, so a
+    // normalizer that silently changes definition (or stops being applied) is a
+    // failure rather than an invisible shift in what `Summary.reml_score` means.
+    let expected_headline = match v["null_dim"].as_f64() {
+        Some(null_dim) => gam::solver::topology_selector::tk_normalized_score(
+            raw_reml_py,
+            null_dim,
+            v["null_space_logdet"].as_f64(),
+            1.0,
+            1,
+            gam::solver::evidence::TopologyScoreScale::PerObservation,
+        )
+        .expect("summary null-space metadata must admit the TK normalizer"),
+        None => raw_reml_py,
+    };
+    assert!(
+        (reml_py - expected_headline).abs() <= 1e-9,
+        "comparable reml py={reml_py} expected={expected_headline} \
+         (raw={raw_reml_py}, null_dim={:?}, null_space_logdet={:?})",
+        v["null_dim"].as_f64(),
+        v["null_space_logdet"].as_f64()
     );
     // The Python summary emits deviance (not the log-likelihood), so there is no
     // direct parity counterpart for `ll_rust`; assert the fitted Gaussian
