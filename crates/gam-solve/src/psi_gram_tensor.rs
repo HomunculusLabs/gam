@@ -491,18 +491,29 @@ struct RangeProjector {
 /// cutoff. Two Grams can both carry a comfortably certified rank `r` while their
 /// rank-`r` eigenspaces are individually undetermined.
 ///
-/// Davis–Kahan: for symmetric `A` perturbed to `A + E`, if the kept block's
-/// eigenvalues are separated from the dropped block's by `δ`, the spectral
-/// projectors satisfy `‖P̂ − P‖₂ = ‖sinΘ‖₂ ≤ ‖E‖₂ / (δ − ‖E‖₂)` (the `−‖E‖₂` is
-/// the conservative form: it charges the perturbation for closing the gap from
-/// both sides before it starts rotating the eigenvectors). With `‖E‖₂` the
-/// eigensolver's backward-error bar `p(k)·ε·λ_max`, this is exactly the
-/// resolution limit of the instrument the witness gates on.
+/// DERIVATION, because the denominator is the part that is easy to get wrong.
+/// The `sinΘ` theorem in its mixed form (Stewart & Sun V.3.6) bounds the rotation
+/// by `‖E‖₂ / η`, where `η` separates the spectrum of the PERTURBED kept block
+/// from the spectrum of the UNPERTURBED dropped block — `η = λ̂_r − λ_{r+1}`. We
+/// only ever hold computed eigenvalues, so `η` has to be bounded from below by
+/// them: Weyl gives `λ_{r+1} ≤ λ̂_{r+1} + ‖E‖₂`, hence
 ///
-/// When `δ ≤ ‖E‖₂` the kept and dropped blocks are not separated at all: the
+///   `η ≥ λ̂_r − λ̂_{r+1} − ‖E‖₂ = gap − ‖E‖₂`
+///
+/// with `gap` the separation as MEASURED. So `‖P̂ − P‖₂ ≤ ‖E‖₂ / (gap − ‖E‖₂)`
+/// with a single `−‖E‖₂`, and that is already rigorous — it is not the asymptotic
+/// `‖E‖/gap` waiting to be sharpened, and it does not need a second or third
+/// `‖E‖₂` subtracted for the "the measured gap is not the true gap" step. That
+/// step is what the mixed form absorbs. With `‖E‖₂` the eigensolver's
+/// backward-error bar `p(k)·ε·λ_max`, this is exactly the resolution limit of the
+/// instrument the witness gates on.
+///
+/// When `gap ≤ ‖E‖₂` the kept and dropped blocks are not separated at all: the
 /// computed eigenvectors are an arbitrary rotation within a numerically
 /// degenerate cluster and NO subspace claim can be made. Reported as
 /// `f64::INFINITY`, which every consumer of this bar must read as "refuse".
+/// Malformed input (either argument non-finite) refuses for the same reason —
+/// never return a `NaN` that a `<= ATOL` test would silently read as certified.
 ///
 /// `gap` is passed as the raw eigenvalue separation `λ_min(kept) − λ_max(dropped)`;
 /// `backward_error` as the absolute bar on those eigenvalues. Both are in the
