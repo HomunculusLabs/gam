@@ -1380,7 +1380,93 @@ mod tests {
     #[test]
     fn quantile_at_0975_is_near_196() {
         let q = standard_normal_quantile(0.975).unwrap();
-        assert!((q - 1.959_963_985).abs() < 1e-7, "q={q}");
+        assert!((q - 1.959_963_984_540_054).abs() < 1e-14, "q={q}");
+    }
+
+    /// `standard_normal_quantile` and its log-CDF sibling, against a 120-digit
+    /// root of `Φ(x) = p` (respectively `ln Φ(x) = log_p`).
+    ///
+    /// The seed is Acklam's rational approximation, whose accuracy is `1.15e-9`
+    /// relative; the two Halley steps after it are what make the result
+    /// ulp-accurate. Deleting the polish loop entirely leaves EVERY other
+    /// quantile test in this module green except `quantile_roundtrip_cdf`, and
+    /// that one only by a factor of 1.9 — so the polish had no real gate. This
+    /// table is that gate: it fails by six orders if the seed ships unpolished.
+    ///
+    /// The grid straddles Acklam's own `P_LOW = 0.02425` branch on both sides,
+    /// runs out to `p = 1e-300` where the seed is far from the root, and covers
+    /// the reflected upper tail where the residual must be formed from
+    /// `(1 − p) − ½erfc(x/√2)` rather than `Φ(x) − p`.
+    #[test]
+    fn normal_quantiles_match_independent_high_precision_reference() {
+        const QUANTILE_REFERENCE: [[f64; 2]; 22] = [
+            [1e-300, -37.0470962993612],
+            [1e-100, -21.273453560965326],
+            [1e-20, -9.262340089798407],
+            [1e-08, -5.612001244174789],
+            [0.001, -3.0902323061678136],
+            [0.02424, -1.9731366119445441],
+            [0.02425, -1.972961051311885],
+            [0.02426, -1.9727855514678605],
+            [0.05, -1.6448536269514726],
+            [0.1, -1.2815515655446004],
+            [0.25, -0.6744897501960817],
+            [0.4, -0.2533471031357997],
+            [0.5, 0.0],
+            [0.6, 0.2533471031357997],
+            [0.75, 0.6744897501960817],
+            [0.9, 1.2815515655446006],
+            [0.95, 1.6448536269514722],
+            [0.975, 1.9599639845400538],
+            [0.99, 2.3263478740408408],
+            [0.999, 3.090232306167813],
+            [0.99999999, 5.612001243305505],
+            [0.9999999999999999, 8.209536151601387],
+        ];
+        for [p, want] in QUANTILE_REFERENCE {
+            let got = standard_normal_quantile(p).expect("p in (0,1) has a quantile");
+            let error = (got - want).abs();
+            // `Φ⁻¹(½) = 0` exactly, so it is the one absolute comparison.
+            let budget = if want == 0.0 {
+                1e-16
+            } else {
+                4e-15 * want.abs()
+            };
+            assert!(
+                error <= budget,
+                "Φ⁻¹({p}): got {got:.17e}, want {want:.17e} (error {error:.3e} > {budget:.3e})"
+            );
+        }
+
+        const LOG_CDF_QUANTILE_REFERENCE: [[f64; 2]; 9] = [
+            [-0.7, -0.008559478582480282],
+            [-2.0, -1.1015196284987503],
+            [-10.0, -3.913946240531893],
+            [-50.0, -9.674825283612357],
+            [-200.0, -19.803669380301212],
+            [-1000.0, -44.6157477319694],
+            [-10000.0, -141.37983987312717],
+            [-100000.0, -447.1978936785251],
+            [-1000000.0, -1414.2077829910174],
+        ];
+        for [log_p, want] in LOG_CDF_QUANTILE_REFERENCE {
+            let got =
+                standard_normal_quantile_from_log_cdf(log_p).expect("finite log_p < 0 has a root");
+            let error = (got - want).abs();
+            // Rounding `log_p` itself to `f64` already moves the root by
+            // `ulp(log_p)·dx/d(log_p)`, and `dx/d(log_p) = Φ/φ = 1/λ` — about
+            // `1.25` near `p = ½` and `≈ 1/|x|` in the deep tail. That input
+            // conditioning, not the solver, is what limits `log_p = −0.7`,
+            // where the root sits at `−0.00856` and one ulp of `0.7` is already
+            // `1.4e-16` of it.
+            let conditioning = 8.0 * f64::EPSILON * log_p.abs() / want.abs().max(0.8);
+            let budget = 4e-15 * want.abs() + conditioning;
+            assert!(
+                error <= budget,
+                "Φ⁻¹(exp({log_p})): got {got:.17e}, want {want:.17e} \
+                 (error {error:.3e} > {budget:.3e})"
+            );
+        }
     }
 
     #[test]
@@ -1397,8 +1483,12 @@ mod tests {
         ] {
             let q = standard_normal_quantile(p).unwrap();
             let p_back = normal_cdf(q);
+            // RELATIVE, and sized by what the round trip can cost: a few ulp of
+            // `q` propagated through `φ(q)`, plus a couple of ulp from `erfc`
+            // itself. The former absolute `1e-10` bar was two orders looser than
+            // an unpolished Acklam seed at its worst point.
             assert!(
-                (p_back - p).abs() < 1e-10,
+                (p_back - p).abs() <= 1e-14 * p,
                 "roundtrip failed at p={p}: q={q} p_back={p_back}"
             );
         }
