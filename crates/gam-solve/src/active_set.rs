@@ -6211,11 +6211,12 @@ mod tests {
         assert_relative_eq!(gradient[1], 0.0, epsilon = 1e-12);
     }
 
-    /// The passive-set transition cone and the terminal KKT certificate must be
-    /// the same numerical cone. A face multiplier a half tolerance below zero
-    /// is certificate-admissible; dropping and rediscovering that row under a
-    /// stricter `μ > 0` pivot rule is the degenerate conditioned-face cycle
-    /// observed by the Python transformation fits in #2432.
+    /// A KKT tolerance is an acceptance bound, not permission for a warm face to
+    /// change the unique minimizer of a strictly convex QP. Here the free
+    /// optimum is `epsilon` inside the cone while the warm boundary face has a
+    /// negative multiplier whose magnitude is only half the dual tolerance.
+    /// The history-independent Moreau solve must return the interior optimum,
+    /// not retain the numerically admissible but suboptimal boundary point.
     #[test]
     fn operator_metric_dual_uses_the_certificate_multiplier_cone_2432() {
         let psi = array![[1.0_f64, 0.0], [0.0, 1.0]];
@@ -6235,17 +6236,17 @@ mod tests {
             &set,
             Some(&[0]),
         )
-        .expect("certificate-admissible degenerate face must not pivot-cycle");
+        .expect("warm face must not perturb the unique cone projection");
 
-        assert_eq!(active, vec![0]);
-        assert_relative_eq!(candidate[0], 0.0, epsilon = 1e-14);
+        assert!(
+            active.is_empty(),
+            "the exact interior optimum has no active cone row"
+        );
+        assert_relative_eq!(candidate[0], epsilon, epsilon = 1e-14);
         assert_relative_eq!(candidate[1], 1.0, epsilon = 1e-14);
         let gradient = hessian.dot(&candidate) - rhs;
-        assert_relative_eq!(gradient[0], -epsilon, epsilon = 1e-14);
-        assert!(
-            (-gradient[0]).abs() <= ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
-            "the retained numerical multiplier must lie inside the certified dual cone"
-        );
+        assert_relative_eq!(gradient[0], 0.0, epsilon = 1e-14);
+        assert_relative_eq!(gradient[1], 0.0, epsilon = 1e-14);
     }
 
     #[test]
