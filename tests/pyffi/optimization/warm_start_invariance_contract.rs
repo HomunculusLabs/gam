@@ -22,31 +22,62 @@
 //! store is process-global and memoized; mutating `TMPDIR` cannot reset that
 //! `OnceLock` and therefore cannot prove coldness.
 //!
-//! ## The contract
+//! ## The contract, and why it is not bitwise
 //!
-//! For every configuration, cold and warm must agree BITWISE on the outer
-//! criterion value (REML/LAML), on every coefficient, and on the certified
-//! log-λ. Both arms converging is not a separate assertion — a fit object
-//! only ever comes from a converged optimization, so an arm that fails to
-//! certify fails the fit call and names itself.
+//! Both arms converging is not a separate assertion — a fit object only ever
+//! comes from a converged optimization, so an arm that fails to certify fails
+//! the fit call and names itself.
 //!
-//! Bitwise, not "close". This gate previously allowed 1e-6 on the criterion
-//! and 1e-4 on β, and under that bound two of the three families it caught in
-//! #2363 agreed with their warm twin to three or four digits while actually
-//! minimizing a *different* criterion (the frozen nuisance differed, so the
-//! objective differed). A tolerance wide enough to absorb solver wobble is
-//! therefore wide enough to absorb the next instance of the bug — and
-//! numerically close state is not interchangeable provenance for a profiled
-//! nonconvex objective anyway, which is the same argument
-//! `bind_certified_custom_family_terminal_mode` makes about inner modes.
+//! Bit-identity was the obvious contract to want here and it was tried: the
+//! criterion, β and the certified log-λ were compared with `to_bits()`. It is
+//! not achievable, and the measurement says exactly why. On `gaussian_smooth`
+//! (a family with no estimated nuisance at all, so nothing to do with #2363):
 //!
-//! What makes bitwise achievable — and what makes this a real contract rather
-//! than a lucky coincidence — is that both the nuisance freeze (#2363) and the
-//! inner mode (#2366) are now pinned to canonical anchors rather than to
-//! whatever the search happened to be handed, so the two arms do not merely
-//! converge near each other, they follow the same computation.
+//! ```text
+//! criterion     cold=-1.011582068973655e3  warm=-1.011582068973655e3  2 ulps
+//! β[1]          cold= 7.892570385059583e-1 warm= 7.892570383686568e-1  |Δ|=1.4e-10
+//! certified ρ̂   cold=-2.230626112156725e0  warm=-2.230625914619381e0  |Δ|=2.0e-7
+//! ```
 //!
-//! Failures name the first disagreeing coordinate and its ulp distance, so a
+//! That is not a second optimum, it is one optimum located twice. The outer
+//! search certifies `‖P∇F‖ ≤ 1e-7`; a certificate is a tolerance, not an
+//! equation, so two arms entering from different seeds stop at two different
+//! points inside the same tolerance ball. The criterion moving by 2 ulps while
+//! ρ̂ moves by 2e-7 is the *proof* of that: `F` is stationary at the optimum, so
+//! a within-ball ρ̂ displacement can only move `F` to second order. A cache that
+//! donates a starting point therefore cannot produce bit-identical iterates
+//! unless the terminal point is itself canonicalised, which is a different
+//! design (and a much more expensive one) than this issue's.
+//!
+//! So the bounds below are derived from that structure rather than chosen to
+//! fit, and every one of them is far tighter than what this gate allowed
+//! before:
+//!
+//! | quantity | old bound | bound here | measured | #2363 defect |
+//! |---|---|---|---|---|
+//! | criterion | 1e-6 relative | 1024 ulps ≈ 2e-13 relative | 2 ulps | ~4e11 ulps |
+//! | β | 1e-4 relative | 1e-7 relative | 1.4e-10 | 4.98e-4 |
+//! | certified ρ̂ | *not checked* | 1e-5 absolute | 2.0e-7 | — |
+//!
+//! The criterion bound is the load-bearing one and it is the one with a real
+//! derivation: at a certified stationary point the criterion is flat in ρ, so
+//! agreement is limited only by floating-point reassociation over the O(n)
+//! reduction plus a second-order term — a handful of ulps, measured at 2. The
+//! #2363 defect sat nine orders above that. The ρ̂ and β bounds size the
+//! certified-optimum ball itself: `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖`, whose amplification
+//! along a flat REML direction is problem-dependent, so those two carry the
+//! measured value in the table above as their justification and still sit four
+//! orders below a genuine basin change (#873's was ~30% of the ρ range).
+//!
+//! Bit-identity IS asserted, but on the thing that is exactly reproducible by
+//! construction rather than on an optimizer's terminal iterate: the frozen
+//! nuisance itself, in
+//! `lambda_search_nuisance_freeze_is_a_function_of_data_and_spec_alone_2363`
+//! (`gam-solve --lib`). That is the quantity #2363 was actually about, it is a
+//! deterministic sub-computation rather than a search result, and it is
+//! bit-identical across donated warm βs and heuristic λs.
+//!
+//! Failures name the first offending coordinate and its ulp distance, so a
 //! regression reports how far it moved rather than only that it moved.
 
 use gam::inference::data::load_csvwith_inferred_schema;
@@ -88,9 +119,45 @@ fn ulp_distance(left: f64, right: f64) -> i128 {
     order(left) - order(right)
 }
 
-/// Describe the first coordinate at which two arms disagree BITWISE, or
-/// `None` when every coordinate is bit-identical.
-fn first_bitwise_gap(cold: &[f64], warm: &[f64]) -> Option<String> {
+/// Ulp budget for the outer criterion. At a certified stationary point `F` is
+/// flat in ρ, so two arms that stop at different points inside the same
+/// tolerance ball can differ only by floating-point reassociation over the
+/// O(n) reduction plus a second-order term. Measured at 2 ulps; this leaves
+/// three decimal digits of headroom and still sits nine orders below the
+/// #2363 defect (~4e11 ulps).
+const CRITERION_ULP_BUDGET: i128 = 1024;
+
+/// Sup-norm bound on the certified log-λ, sizing the certified-optimum ball
+/// itself: `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖` with the outer search certifying
+/// `‖P∇F‖ ≤ 1e-7`. The flat-direction amplification is problem-dependent, so
+/// the justification is the measured 2.0e-7 above — four orders below a
+/// genuine basin change.
+const RHO_ABS_BOUND: f64 = 1e-5;
+
+/// Sup-norm bound on β relative to its own scale. β̂ is the inner mode at ρ̂ and
+/// the map `ρ ↦ β̂(ρ)` is Lipschitz, so a within-ball ρ̂ displacement moves β by
+/// a comparable amount. Measured at 1.4e-10; a thousand times tighter than the
+/// 1e-4 this gate allowed before, and still far below the 4.98e-4 the #2363
+/// Beta defect produced.
+const COEF_REL_BOUND: f64 = 1e-7;
+
+/// Describe the first coordinate at which two arms disagree by more than
+/// `budget_ulps`, or `None` when every coordinate is within it.
+fn first_ulp_gap(cold: &[f64], warm: &[f64], budget_ulps: i128) -> Option<String> {
+    describe_first_gap(cold, warm, |a, b| ulp_distance(a, b).abs() > budget_ulps)
+}
+
+/// Describe the first coordinate at which two arms disagree by more than
+/// `bound`, or `None` when every coordinate is within it.
+fn first_absolute_gap(cold: &[f64], warm: &[f64], bound: f64) -> Option<String> {
+    describe_first_gap(cold, warm, move |a, b| (a - b).abs() > bound)
+}
+
+fn describe_first_gap(
+    cold: &[f64],
+    warm: &[f64],
+    exceeds: impl Fn(f64, f64) -> bool,
+) -> Option<String> {
     if cold.len() != warm.len() {
         return Some(format!(
             "layout differs: cold len={} warm len={}",
@@ -101,7 +168,7 @@ fn first_bitwise_gap(cold: &[f64], warm: &[f64]) -> Option<String> {
     cold.iter()
         .zip(warm.iter())
         .enumerate()
-        .find(|(_, (a, b))| a.to_bits() != b.to_bits())
+        .find(|(_, (a, b))| exceeds(**a, **b))
         .map(|(index, (a, b))| {
             format!(
                 "coordinate {index}: cold={a:.17e} warm={b:.17e} ulps={} |Δ|={:.3e}",
@@ -362,24 +429,31 @@ fn fits_are_invariant_to_warm_start_cache_state_across_families() {
         drop(fit_once(case, &x, &y, "prime", true));
         let warm = fit_once(case, &x, &y, "warm", true);
 
-        if let Some(gap) = first_bitwise_gap(
+        if let Some(gap) = first_ulp_gap(
             std::slice::from_ref(&cold.criterion),
             std::slice::from_ref(&warm.criterion),
+            CRITERION_ULP_BUDGET,
         ) {
             failures.push(format!(
-                "[{}] criterion depends on cache state: {gap}",
+                "[{}] criterion depends on cache state (budget {CRITERION_ULP_BUDGET} ulps): {gap}",
                 case.name
             ));
         }
-        if let Some(gap) = first_bitwise_gap(&cold.beta, &warm.beta) {
+        let beta_scale = cold
+            .beta
+            .iter()
+            .fold(0.0f64, |acc, value| acc.max(value.abs()))
+            .max(1.0);
+        if let Some(gap) = first_absolute_gap(&cold.beta, &warm.beta, COEF_REL_BOUND * beta_scale) {
             failures.push(format!(
-                "[{}] coefficients depend on cache state: {gap}",
-                case.name
+                "[{}] coefficients depend on cache state (bound {:.3e}): {gap}",
+                case.name,
+                COEF_REL_BOUND * beta_scale
             ));
         }
-        if let Some(gap) = first_bitwise_gap(&cold.log_lambdas, &warm.log_lambdas) {
+        if let Some(gap) = first_absolute_gap(&cold.log_lambdas, &warm.log_lambdas, RHO_ABS_BOUND) {
             failures.push(format!(
-                "[{}] certified log-λ depends on cache state: {gap}",
+                "[{}] certified log-λ depends on cache state (bound {RHO_ABS_BOUND:.3e}): {gap}",
                 case.name
             ));
         }
