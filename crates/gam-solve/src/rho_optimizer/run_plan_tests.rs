@@ -2517,10 +2517,35 @@ fn certify_four_refuses_stationary_negative_curvature_2359() {
         error.to_string().contains("hessian_psd=NO"),
         "refusal must name the failed fourth-order curvature audit: {error}"
     );
-    assert_eq!(
-        fourth_order_calls.load(Ordering::Relaxed),
-        1,
-        "a failed mint audit is still one-shot"
+    // Order four is spent once per TERMINAL CERTIFICATION, not once per
+    // multistart candidate — that is the economics #2359 exists to protect, and
+    // it is what the bound below pins.
+    //
+    // It is deliberately not `== 1`. Until `bf43b3861` the plan level minted
+    // before `run_outer` did, so an indefinite-curvature refusal propagated out
+    // of `run_outer_uncertified` and never reached `run_outer`'s certify-last
+    // loop — which meant the #2357 interior strict-saddle escape was
+    // unreachable for every analytic-Hessian objective. Now the refusal lands
+    // where the escape lives, so a genuine saddle gets its bounded attempt to
+    // step below itself and re-certify there. This mock reports negative
+    // curvature at every point, so its escape cannot succeed and the run still
+    // refuses — after `OUTER_SADDLE_ESCAPE_BUDGET`-bounded extra certifications
+    // (measured: exactly one).
+    //
+    // A regression that re-introduced per-candidate order four would scale with
+    // the seed budget and blow this ceiling; a regression that dropped the mint
+    // entirely would fall below the floor.
+    let fourth_order_calls = fourth_order_calls.load(Ordering::Relaxed);
+    assert!(
+        fourth_order_calls >= 1,
+        "the mint audit must actually evaluate order four; got {fourth_order_calls}"
+    );
+    assert!(
+        fourth_order_calls <= 1 + crate::rho_optimizer::run::OUTER_SADDLE_ESCAPE_BUDGET,
+        "order four is paid once per terminal certification, and terminal \
+         certifications are bounded by the saddle-escape budget \
+         ({}); got {fourth_order_calls}",
+        crate::rho_optimizer::run::OUTER_SADDLE_ESCAPE_BUDGET,
     );
 }
 
@@ -7170,11 +7195,27 @@ fn exact_final_cache_hit_resumes_and_recertifies_without_resolving() {
         result.iterations,
     );
     // The cache donates only the SEED: the resume path optimizes through the
-    // gradient objective, so `seen` (the cost_fn trace) legitimately stays empty.
-    assert!(
-        seen.lock().unwrap().is_empty(),
-        "resume path uses the gradient objective, not cost_fn; saw {:?}",
-        *seen.lock().unwrap(),
+    // gradient objective, so `cost_fn` is never used to SOLVE. It is used
+    // exactly once, at the end, for the mandatory same-rho value-agreement
+    // audit that mints the certificate — the same single call
+    // `run_efs_skips_global_cost_screening` demands, and terminal proof work
+    // rather than seed screening.
+    //
+    // This used to see TWO calls, because screening and mint each ran the
+    // audit; `5cfedc005` made it mint-only. Zero was never the right number
+    // once the audit existed — a run with no `cost_fn` call at all would be a
+    // certificate minted without ever pricing the scalar lane.
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the resume path must use the gradient objective to solve and cost_fn \
+         only for the one terminal value-agreement audit; saw {seen:?}",
+    );
+    assert_eq!(
+        seen[0],
+        array![2.5],
+        "the audit must price the CACHED rho, not a cold-solve iterate; saw {seen:?}",
     );
 }
 

@@ -4471,7 +4471,7 @@ const OUTER_CERTIFY_RESUME_BUDGET: usize = 16;
 /// cleared in one escape; the small cap keeps a pathological non-convergent
 /// objective (e.g. a bimodal inner solve, #2363) from re-escaping a family of
 /// shallow saddles until the general resume budget is spent.
-const OUTER_SADDLE_ESCAPE_BUDGET: usize = 3;
+pub(crate) const OUTER_SADDLE_ESCAPE_BUDGET: usize = 3;
 
 /// Roundoff-relative scale below which a certify-last reseed's objective
 /// reduction is numerical noise rather than exploited descent (#2374). A
