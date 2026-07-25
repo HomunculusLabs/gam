@@ -1751,6 +1751,7 @@ mod assembly_inner_status_gate_tests {
         parts.blocks[0].lambdas = Array1::zeros(0);
         parts.log_lambdas = Array1::zeros(0);
         parts.lambdas = Array1::zeros(0);
+        parts.covariance_conditional = Some(Array2::from_diag(&Array1::from_vec(vec![2.0, 3.0])));
         if let Some(inference) = parts.inference.as_mut() {
             inference.edf_by_block.clear();
             inference.penalty_block_trace.clear();
@@ -1790,6 +1791,12 @@ mod assembly_inner_status_gate_tests {
             fit.convergence_evidence().outer_iterations(),
             0,
             "sealed fixed-outer evidence must use the canonical zero count"
+        );
+        assert_eq!(
+            fit.beta_covariance_corrected(),
+            fit.beta_covariance(),
+            "with no smoothing coordinate Vp = Vb exactly; corrected prediction must consume \"
+             the persisted conditional covariance rather than refusing an algebraically complete fit"
         );
     }
 }
@@ -2929,12 +2936,20 @@ impl UnifiedFitResult {
     /// Get the smoothing-parameter-corrected beta covariance (`Vp`) if available.
     ///
     /// Wood/mgcv name for the smoothing-parameter-corrected covariance `Vp`.
+    /// When there are no smoothing coordinates, `Var(rho)` has dimension zero
+    /// and the correction `J Var(rho) Jᵀ` is identically zero. In that exact
+    /// case the persisted conditional covariance is already `Vp`; requiring a
+    /// duplicate corrected matrix would make ordinary parametric models lose
+    /// posterior-mean intervals after serialization.
     pub fn beta_covariance_corrected(&self) -> Option<&Array2<f64>> {
-        self.covariance_corrected.as_ref().or_else(|| {
-            self.inference
-                .as_ref()
-                .and_then(|inf| inf.beta_covariance_corrected.as_ref())
-        })
+        self.covariance_corrected
+            .as_ref()
+            .or_else(|| {
+                self.inference
+                    .as_ref()
+                    .and_then(|inf| inf.beta_covariance_corrected.as_ref())
+            })
+            .or_else(|| self.lambdas.is_empty().then(|| self.beta_covariance()).flatten())
     }
 
     /// Get beta standard errors (conditional) if available.
