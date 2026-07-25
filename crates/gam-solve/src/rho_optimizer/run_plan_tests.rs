@@ -7227,27 +7227,35 @@ fn exact_final_cache_hit_resumes_and_recertifies_without_resolving() {
         result.iterations,
     );
     // The cache donates only the SEED: the resume path optimizes through the
-    // gradient objective, so `cost_fn` is never used to SOLVE. It is used
-    // exactly once, at the end, for the mandatory same-rho value-agreement
-    // audit that mints the certificate — the same single call
-    // `run_efs_skips_global_cost_screening` demands, and terminal proof work
-    // rather than seed screening.
-    //
-    // This used to see TWO calls, because screening and mint each ran the
-    // audit; `5cfedc005` made it mint-only. Zero was never the right number
-    // once the audit existed — a run with no `cost_fn` call at all would be a
-    // certificate minted without ever pricing the scalar lane.
+    // gradient objective, so `cost_fn` is never used to SOLVE. The load-bearing
+    // statement is therefore about WHERE it is called, not how often — every
+    // call must price the CACHED rho. A regression that cold-solved from the
+    // -3.0 initial, or that priced a search iterate, shows up here as a rho
+    // that is not 2.5, whatever the count.
     let seen = seen.lock().unwrap();
+    assert!(
+        !seen.is_empty(),
+        "a certificate minted without ever pricing the scalar lane is not audited",
+    );
+    assert!(
+        seen.iter().all(|rho| *rho == array![2.5]),
+        "the audit must price the CACHED rho, never a cold-solve or search iterate; saw {seen:?}",
+    );
+    // Count, derived rather than observed. On the ANALYTIC route the same-rho
+    // value audit runs at BOTH certification fidelities and `8086f0f50` says why:
+    // it is a refusal gate on `final_value`, the very number
+    // `retain_best_outer_checkpoint` ranks multistart candidates by, so screening
+    // cannot skip it without letting an unvalidated value win the ranking. (The
+    // EFS route gates it to the mint instead — there screening and mint are
+    // otherwise identical work, which is what `run_efs_skips_global_cost_screening`
+    // pins.) One screening audit plus one mint audit is two. The bound matters
+    // because a regression that moved the audit back to per-CANDIDATE would scale
+    // it with the seed budget instead of staying at one per fidelity.
     assert_eq!(
         seen.len(),
-        1,
-        "the resume path must use the gradient objective to solve and cost_fn \
-         only for the one terminal value-agreement audit; saw {seen:?}",
-    );
-    assert_eq!(
-        seen[0],
-        array![2.5],
-        "the audit must price the CACHED rho, not a cold-solve iterate; saw {seen:?}",
+        2,
+        "the analytic route audits the scalar lane once per certification fidelity \
+         (screening, then mint), not once per candidate; saw {seen:?}",
     );
 }
 
