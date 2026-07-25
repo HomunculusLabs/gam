@@ -1358,6 +1358,47 @@ mod tests {
         );
     }
 
+    /// The PG(b, c) first-moment contract on the PRODUCTION entry, on EVERY host.
+    ///
+    /// The helper above states the claim "needs no device" — and it does not —
+    /// but until now every caller sat inside a `#[cfg(target_os = "linux")]`
+    /// test, so the contract was checked only where CUDA might exist. Two
+    /// things followed. The customer-visible claim went unverified on Windows
+    /// and macOS entirely; and the helper, being unreachable off Linux, tripped
+    /// `-D dead-code` and turned the non-Linux cross-check red on every commit
+    /// to main. Silencing the lint or narrowing the helper to Linux would fix
+    /// the build by deleting the coverage. This restores it instead: the
+    /// production dispatcher is exercised on whatever host runs the suite, and
+    /// its draws must satisfy the moment contract there.
+    ///
+    /// Deterministic, not flaky: the seed is fixed and the tolerance is a `6σ`
+    /// band derived from the per-row theoretical variances, so the pass/fail
+    /// verdict is a fixed function of the code under test.
+    #[test]
+    fn pg_batch_mean_matches_theory_on_every_host() {
+        // Mixed shapes and both signs of tilt, so this exercises general
+        // PG(b, c) rather than only the PG(1, 0) special case.
+        let n = 20_000usize;
+        let shapes = Array1::<u32>::from_shape_fn(n, |i| 1 + (i % 4) as u32);
+        let tilts = Array1::<f64>::from_shape_fn(n, |i| ((i as f64) / (n as f64)) * 6.0 - 3.0);
+        let seed = PgSeed(0x9E_37_79_B9_7F_4A_7C_15);
+
+        let draws = draw_batch(PolyaGammaBatchInput {
+            shapes: shapes.view(),
+            tilts: tilts.view(),
+            seed,
+        })
+        .expect("the production PG draw entry must succeed on every host");
+
+        assert_eq!(draws.len(), n, "production PG entry returned a short batch");
+        assert!(
+            draws.iter().all(|d| d.is_finite() && *d > 0.0),
+            "a Polya-Gamma draw is supported on (0, inf); the batch contains a \
+             non-positive or non-finite value"
+        );
+        assert_pg_batch_mean_matches_theory(&draws, &shapes, &tilts, "production entry");
+    }
+
     fn theoretical_mean(b: f64, c: f64) -> f64 {
         pg_mean(b, c)
     }
