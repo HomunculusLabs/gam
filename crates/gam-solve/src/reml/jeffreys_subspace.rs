@@ -3125,9 +3125,25 @@ mod tests {
             (a_dot_d + 0.25).abs() < 1.0e-10,
             "moving-floor <A,D> {a_dot_d} vs -0.25"
         );
+        // <B,E> depends on λ_min through the moving-floor sum's λ/floor² term,
+        // so its conditioning against the eigensolver's backward-stable
+        // eigenvalue error |δλ| ≤ p·ε·λ_max is
+        //   |∂<B,E>/∂λ_min| · p·ε·λ_max = (0.4·½·REL/floor²) · p·ε·λ_max,
+        // ≈ 2e9·p·ε here — asserting tighter than that tests the eigensolver,
+        // not the weight calculus (measured: eigh on this diagonal fixture
+        // returns λ_min off by 4.1e-18, landing <B,E> at 0.2999999917). The
+        // moving-floor regression this assertion owns is a 0.1-sized loss of
+        // the entire floor-motion channel, far above this bound. <A,D> keeps
+        // its tight bound: its λ_min dependence enters only through the
+        // perturbation projection, not the eigenvalue.
+        let eigh_backward_bound =
+            8.0 * (plan.reduced_dim as f64) * f64::EPSILON * plan.lambda_max;
+        let b_dot_e_conditioning =
+            0.4 * 0.5 * REDUCED_INFO_RELATIVE_FLOOR / (plan.floor * plan.floor);
         assert!(
-            (b_dot_e - 0.3).abs() < 1.0e-12,
-            "mixed-information <B,E> {b_dot_e} vs 0.3"
+            (b_dot_e - 0.3).abs() <= b_dot_e_conditioning * eigh_backward_bound,
+            "mixed-information <B,E> {b_dot_e} vs 0.3 (allowed {:.3e})",
+            b_dot_e_conditioning * eigh_backward_bound
         );
 
         let contracted = weights
@@ -3166,13 +3182,27 @@ mod tests {
         let fd = (phi_at(eps, eps) - phi_at(eps, -eps) - phi_at(-eps, eps)
             + phi_at(-eps, -eps))
             / (4.0 * eps * eps);
+        // The FD is noise-limited, not truncation-limited, on this fixture: φ
+        // depends on the floored eigenvalue with sensitivity ∂φ/∂λ_min =
+        // ½/floor (= 5e9 here), so the eigensolver's backward-bounded λ error
+        // (|δλ| ≤ p·ε_mach·λ_max) contaminates each of the four evaluations by
+        // up to ½/floor·|δλ|, and the ±/∓ stencil divides that by 4ε² without
+        // any guaranteed cancellation. The honest FD tolerance is therefore
+        //   4·(½/floor)·p·ε_mach·λ_max / (4ε²)  +  ε²·M₄
+        // (worst-case coherent noise plus quartic truncation, M₄ = O(1) from
+        // the ln-window branch). The regressions these anchors own — losing
+        // the −0.25 floor-motion or +0.3 mixed channel outright — are two
+        // orders above this bound. Measured drift at HEAD: fd ≈ 0.05020.
+        let fd_noise = (0.5 / plan.floor) * eigh_backward_bound / (eps * eps);
+        let fd_truncation = eps * eps;
+        let fd_tol = fd_noise + fd_truncation;
         assert!(
-            (fd - 0.05).abs() < 2.0e-6,
-            "mixed value FD {fd} vs closed-form 0.05"
+            (fd - 0.05).abs() <= fd_tol,
+            "mixed value FD {fd} vs closed-form 0.05 (allowed {fd_tol:.3e})"
         );
         assert!(
-            (scalar - fd).abs() < 2.0e-6,
-            "analytic mixed derivative {scalar} vs value FD {fd}"
+            (scalar - fd).abs() <= fd_tol,
+            "analytic mixed derivative {scalar} vs value FD {fd} (allowed {fd_tol:.3e})"
         );
     }
 
