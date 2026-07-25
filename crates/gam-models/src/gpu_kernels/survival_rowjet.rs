@@ -360,6 +360,36 @@ mod tests {
         }
     }
 
+    /// #2422 device-free half, shared by this module's CUDA-gated tests. With
+    /// no runtime two production contracts still hold and are checkable:
+    /// the ADMISSION decision must decline even above `DEVICE_ROW_THRESHOLD`,
+    /// where only the missing device can hold it back; and the
+    /// already-admitted execution entry must REFUSE with the device-absence
+    /// reason rather than run something. A `return` before the first assertion
+    /// could see neither.
+    fn assert_survival_device_seam_declines() {
+        let selected = survival_rigid_row_vgh_device_selected(DEVICE_ROW_THRESHOLD + 1024)
+            .expect("the survival V/G/H admission decision must not fault on a device-free host");
+        assert!(
+            !selected,
+            "no CUDA runtime on this host, yet the production admission decision selected the \
+             device for {} rows",
+            DEVICE_ROW_THRESHOLD + 1024
+        );
+        let rows = fixture(4);
+        let refusal = match survival_rigid_row_vgh(&rows, 0.7) {
+            Ok(_) => panic!(
+                "no CUDA runtime on this host, yet the admitted-only survival V/G/H execution \
+                 entry returned channels — it fabricated a device answer"
+            ),
+            Err(reason) => reason,
+        };
+        assert!(
+            refusal.contains("requires a device"),
+            "the device-free refusal must name device absence, got: {refusal}"
+        );
+    }
+
     #[inline]
     fn rigid_cpu_row_inputs(
         row: usize,
@@ -532,11 +562,33 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn device_only_vgh_matches_cpu_in_edge_regimes() {
-        if cuda_runtime_for_test("device_only_vgh_matches_cpu_in_edge_regimes").is_none() {
-            return;
-        }
         let rows = edge_fixture();
         let cpu = survival_rigid_row_vgh_cpu(&rows, 0.7);
+
+        // #2422 EVERY HOST: the CPU channels are the oracle the device is
+        // graded against, so they owe finiteness and non-degeneracy here. An
+        // all-zero or non-finite oracle would let the device parity assertions
+        // below pass while proving nothing.
+        for (label, channel) in [
+            ("value", &cpu.value),
+            ("gradient", &cpu.grad),
+            ("Hessian", &cpu.hess),
+        ] {
+            assert!(
+                channel.iter().all(|v| v.is_finite()),
+                "CPU survival V/G/H {label} channel is non-finite on the edge fixture"
+            );
+            assert!(
+                channel.iter().any(|&v| v != 0.0),
+                "CPU survival V/G/H {label} channel is identically zero on the edge fixture — \
+                 the device parity comparison below would be vacuous"
+            );
+        }
+
+        if cuda_runtime_for_test("device_only_vgh_matches_cpu_in_edge_regimes").is_none() {
+            assert_survival_device_seam_declines();
+            return;
+        }
         let device = survival_rigid_row_vgh_device_only(&rows, 0.7)
             .expect("CUDA runtime present but survival VGH edge sweep failed");
         assert_channel_parity("edge value", &cpu.value, &device.value);
@@ -555,6 +607,11 @@ mod tests {
         use std::time::{Duration, Instant};
 
         if cuda_runtime_for_test("measure_device_vgh_end_to_end_932").is_none() {
+            // #2422: a wall-clock measurement has no host-side substitute, and
+            // building the 1M-row fixture on a CPU-only runner would prove
+            // nothing. The dispatch seam's contracts are checkable and are what
+            // this test owes a device-free host.
+            assert_survival_device_seam_declines();
             return;
         }
         const ROWS: usize = 1_000_000;

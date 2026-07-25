@@ -2257,14 +2257,6 @@ mod cubic_bspline_moments_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn gpu_hex_tensor_moments_match_cpu_reference() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                eprintln!("skipping GPU parity test: no CUDA device");
-                return;
-            }
-            Err(error) => panic!("GPU parity CUDA probe failed: {error}"),
-        }
         let t = nonuniform_knots();
         let table = AxisCubicMomentTables::build(&t, 0, 0);
         let axes_cpu: Vec<&AxisCubicMomentTables> = vec![&table, &table];
@@ -2309,6 +2301,52 @@ mod cubic_bspline_moments_tests {
             n_cells,
             d: 2,
         };
+
+        // #2422 EVERY HOST: the CPU reference this fixture grades the device
+        // against must be non-degenerate. If every expected value were zero (an
+        // empty span table, a collapsed pair choice), the device parity loop
+        // below would compare zeros to zeros and pass while proving nothing.
+        // The per-axis moments themselves are pinned to Gauss-Legendre
+        // elsewhere in this module; what is checked here is that THIS fixture
+        // exercises them.
+        let mut nonzero_expected = 0usize;
+        for alpha in alphas.iter() {
+            for &(sx, sy, pa, pb) in cell_meta.iter() {
+                let expected = tensor_hex_moment_cpu(&axes_cpu, &[sx, sy], alpha, &[pa, pb]);
+                assert!(
+                    expected.is_finite(),
+                    "CPU hex-tensor reference produced a non-finite moment at \
+                     alpha={alpha:?} span=({sx}, {sy}) pair=({pa}, {pb})"
+                );
+                if expected != 0.0 {
+                    nonzero_expected += 1;
+                }
+            }
+        }
+        assert!(
+            nonzero_expected * 4 >= alphas.len() * cell_meta.len(),
+            "device parity fixture is near-degenerate: only {nonzero_expected} of {} expected \
+             moments are nonzero, so the parity comparison would prove little",
+            alphas.len() * cell_meta.len()
+        );
+
+        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                // Device-free host: the admitted-only device entry must REFUSE
+                // rather than fabricate a host-side answer (#1551 class). The
+                // parity claim itself needs a device and gets no stand-in.
+                eprintln!("no CUDA device: asserting the hex-tensor device entry declines");
+                assert!(
+                    super::build_hex_tensor_moments_device(&spec, &axes_for_build, &cells)
+                        .is_err(),
+                    "no CUDA runtime on this host, yet the hex-tensor device build returned a \
+                     table — the admitted-only device path fabricated a host answer"
+                );
+                return;
+            }
+            Err(error) => panic!("GPU parity CUDA probe failed: {error}"),
+        }
 
         let dev = super::build_hex_tensor_moments_device(&spec, &axes_for_build, &cells)
             .expect("GPU hex-tensor moment build must succeed after CUDA admission");
@@ -2365,14 +2403,39 @@ mod cubic_bspline_moments_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn hex_tensor_module_cache_hits_on_repeat_spec() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                eprintln!("skipping module-cache test: no CUDA device");
-                return;
-            }
-            Err(error) => panic!("module-cache CUDA probe failed: {error}"),
+        // #2422 EVERY HOST: the cache-key claim — "two structurally-identical
+        // specs must collide, a differing spec must not" — is a pure host-side
+        // property of the hashed alpha/derivative tables. Only the cache
+        // LOOKUP needs a device, so the discriminating half runs everywhere.
+        {
+            let alphas_a: Vec<Vec<u8>> = vec![vec![0, 0], vec![1, 0], vec![2, 1]];
+            let alphas_b: Vec<Vec<u8>> = vec![vec![0, 0], vec![1, 0], vec![2, 1]];
+            let alphas_c: Vec<Vec<u8>> = vec![vec![0, 0], vec![1, 0], vec![2, 2]];
+            assert_eq!(
+                hash_alpha_table(&alphas_a),
+                hash_alpha_table(&alphas_b),
+                "structurally identical alpha tables must hash equal, else every re-fit \
+                 recompiles the module"
+            );
+            assert_ne!(
+                hash_alpha_table(&alphas_a),
+                hash_alpha_table(&alphas_c),
+                "a different alpha grid must not collide, else a re-fit reuses a module \
+                 specialised for the wrong grid"
+            );
+            let deriv_zero = vec![vec![0u8, 0u8]; 3];
+            let deriv_one = vec![vec![0u8, 1u8]; 3];
+            assert_eq!(
+                hash_deriv_table(&deriv_zero, &deriv_zero),
+                hash_deriv_table(&deriv_zero, &deriv_zero)
+            );
+            assert_ne!(
+                hash_deriv_table(&deriv_zero, &deriv_zero),
+                hash_deriv_table(&deriv_zero, &deriv_one),
+                "a different derivative table must not collide with the undifferentiated one"
+            );
         }
+
         let t = nonuniform_knots();
         let table = AxisCubicMomentTables::build(&t, 0, 0);
         let axes_for_build: Vec<Vec<AxisCubicMomentTables>> =
@@ -2393,6 +2456,21 @@ mod cubic_bspline_moments_tests {
             n_cells: 1,
             d: 2,
         };
+
+        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                eprintln!("no CUDA device: asserting the hex-tensor device entry declines");
+                assert!(
+                    super::build_hex_tensor_moments_device(&spec, &axes_for_build, &cells)
+                        .is_err(),
+                    "no CUDA runtime on this host, yet the hex-tensor device build returned a \
+                     table — the admitted-only device path fabricated a host answer"
+                );
+                return;
+            }
+            Err(error) => panic!("module-cache CUDA probe failed: {error}"),
+        }
 
         // First build — compiles the module.
         let first = super::build_hex_tensor_moments_device(&spec, &axes_for_build, &cells)

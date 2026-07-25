@@ -608,14 +608,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn row_hessian_kernels_match_cpu_oracle_when_cuda_available() {
-        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                eprintln!("[row_hessian_ops parity] no CUDA device — skipping CUDA parity");
-                return;
-            }
-            Err(error) => panic!("[row_hessian_ops parity] CUDA probe failed: {error}"),
-        }
         let n_rows = 4;
         let r = 33;
         let (h_rows, v_rows) = make_fixture(n_rows, r);
@@ -630,6 +622,48 @@ mod tests {
             .validate()
             .expect("matvec fixture must validate");
         let cpu_y = cpu_row_hessian_matvec(&matvec_inputs);
+
+        // #2422 EVERY HOST: the CPU oracles are what the kernels are graded
+        // against, so the fixture must actually exercise them. A zero or
+        // non-finite oracle would make the parity loops below vacuous.
+        assert_eq!(cpu_y.len(), n_rows * r, "CPU matvec output length");
+        assert!(
+            cpu_y.iter().all(|v| v.is_finite()) && cpu_y.iter().any(|&v| v != 0.0),
+            "CPU row-Hessian matvec oracle is degenerate on the r={r} fixture"
+        );
+
+        match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                // Device-free host: the kernel-launch entries must REFUSE, not
+                // fabricate. The parity claim needs a device and gets no
+                // host-side stand-in.
+                eprintln!("[row_hessian_ops parity] no CUDA device — asserting launches decline");
+                assert!(
+                    launch_row_hessian_matvec(matvec_inputs).is_err(),
+                    "no CUDA runtime on this host, yet the row-Hessian matvec kernel launch \
+                     returned output — it fabricated a device answer"
+                );
+                let diag_inputs = RowHessianDiagInputs {
+                    n_rows,
+                    r,
+                    h_rows: &h_rows,
+                };
+                diag_inputs.validate().expect("diag fixture must validate");
+                let cpu_d = cpu_row_hessian_diag(&diag_inputs);
+                assert!(
+                    cpu_d.iter().all(|v| v.is_finite()) && cpu_d.iter().any(|&v| v != 0.0),
+                    "CPU row-Hessian diag oracle is degenerate on the r={r} fixture"
+                );
+                assert!(
+                    launch_row_hessian_diag(diag_inputs).is_err(),
+                    "no CUDA runtime on this host, yet the row-Hessian diag kernel launch \
+                     returned output — it fabricated a device answer"
+                );
+                return;
+            }
+            Err(error) => panic!("[row_hessian_ops parity] CUDA probe failed: {error}"),
+        }
         let gpu_y = match launch_row_hessian_matvec(matvec_inputs) {
             Ok(out) => out.y_rows,
             Err(err) => panic!(

@@ -813,6 +813,22 @@ mod pcg_device_parity_tests {
             cpu_dense_joint_hessian(&row_hessians, &marginal, &logslope, &block, &primary, n);
         let x_oracle = cpu_pcg_oracle(&h_dense, &b, 1e-12);
 
+        // #2422 EVERY HOST: the fixture's SPD certificate. The oracle must
+        // actually solve `H x = b`, otherwise a device-free run returns having
+        // verified nothing and a CUDA run grades the device against an
+        // unchecked reference.
+        {
+            let x = ndarray::Array1::from_vec(x_oracle.clone());
+            let residual = h_dense.dot(&x) - ndarray::Array1::from_vec(b.clone());
+            let r_inf = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let b_inf = b.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1.0);
+            assert!(
+                r_inf <= 1e-8 * b_inf,
+                "CPU PCG oracle does not solve the joint system: ‖Hx − b‖∞ = {r_inf:.3e} \
+                 (‖b‖∞ = {b_inf:.3e})"
+            );
+        }
+
         // Keep the SPD fixture certificate CPU-reachable. CUDA availability
         // controls only the device-parity half of this test.
         let runtime = match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {

@@ -336,16 +336,6 @@ mod tests {
         use crate::cubic_cell_kernel::{
             DenestedCubicCell, evaluate_cell_derivative_moments_uncached,
         };
-        match GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                eprintln!("[cubic_cell device-residency parity] no CUDA device — skipping");
-                return;
-            }
-            Err(error) => {
-                panic!("[cubic_cell device-residency parity] CUDA probe failed: {error}")
-            }
-        }
         // One cell per branch, plus a sextic NonAffineFinite stressor.
         let cpu_cells = vec![
             // Pure Affine.
@@ -414,6 +404,60 @@ mod tests {
                 c3: c.c3,
             })
             .collect();
+        // #2422 EVERY HOST: the CPU evaluator is the oracle the device branches
+        // are graded against, and every fixture cell must classify into a
+        // branch. Both hold with no device, and without them a device-free run
+        // returns having verified nothing.
+        for (i, cpu_cell) in cpu_cells.iter().enumerate() {
+            let cpu_state = evaluate_cell_derivative_moments_uncached(*cpu_cell, 21)
+                .expect("cpu reference must evaluate every parity fixture cell");
+            assert!(
+                cpu_state.moments.iter().all(|v| v.is_finite()),
+                "CPU cubic-cell moments are non-finite for fixture cell {i}"
+            );
+            assert!(
+                cpu_state.moments.iter().any(|&v| v != 0.0),
+                "CPU cubic-cell moments are identically zero for fixture cell {i} — the device \
+                 parity comparison would be vacuous"
+            );
+        }
+
+        match GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                // Device-free host. Note WHICH seam shape this is:
+                // `try_build_cubic_cell_derivative_moments` is an
+                // ADMITTED-ONLY entry — its contract is "runtime absence at
+                // this already-selected device boundary is a typed error,
+                // never host substitution", and `Ok(None)` means only "empty
+                // workload". So the refusal owed here is `Err`, not the quiet
+                // `Ok(None)` route that DISPATCH seams (e.g.
+                // `try_device_tetrahedral_moments`) take before any device
+                // call. Asserting the wrong one of those two shapes is its own
+                // way to write a test that cannot fail for the right reason.
+                eprintln!("[cubic_cell device-residency parity] no CUDA device — seam must refuse");
+                let view = CubicCellDerivativeMomentHostView {
+                    cells: &cells_gpu,
+                    max_degree: 9,
+                };
+                let refusal = match try_build_cubic_cell_derivative_moments(view) {
+                    Ok(_) => panic!(
+                        "no CUDA runtime on this host, yet the admitted-only cubic-cell device \
+                         entry returned Ok — it fabricated a host answer"
+                    ),
+                    Err(error) => error.to_string(),
+                };
+                assert!(
+                    refusal.contains("device") || refusal.contains("CUDA"),
+                    "the device-free refusal must name the device fault, got: {refusal}"
+                );
+                return;
+            }
+            Err(error) => {
+                panic!("[cubic_cell device-residency parity] CUDA probe failed: {error}")
+            }
+        }
+
         for &max_degree in &[9_usize, 15, 21] {
             let view = CubicCellDerivativeMomentHostView {
                 cells: &cells_gpu,
