@@ -471,7 +471,17 @@ pub fn xt_diag_x_symmetric(
             let row_ptr = sym.row_ptr();
             let col_idx = sym.col_idx();
             let vals = csr.val();
-            let acc_template = SparseHessianAccumulator::from_single_csr(&csr, p);
+            // Built once per design, not once per assembly: the comment above
+            // identified the repeated symbolic build as the dominant cost but
+            // the fix only routed the DENSE regime around it, leaving the
+            // genuinely-sparse arm here rebuilding the same pattern on every
+            // Newton iteration. The design owns the memo, so the pattern is
+            // shared by every later assembly against this same `X`.
+            // The memo is built for `self.ncols()`, which IS `p` here, so the
+            // template's dimension needs no separate check.
+            let acc_template = xs
+                .hessian_accumulator_template()
+                .ok_or_else(|| "xt_diag_x_symmetric: failed to obtain CSR view".to_string())?;
             let n_threads = rayon::current_num_threads().max(1);
             let target_chunks = (n_threads * 16).max(n_threads);
             let chunk_rows = (n / target_chunks).max(256).min(n.max(1));
@@ -693,5 +703,74 @@ mod tests {
         let design = DesignMatrix::Sparse(SparseDesignMatrix::new(sparse));
         let err = xt_diag_x_symmetric(&design, &array![1.0, f64::NAN, f64::INFINITY]).unwrap_err();
         assert!(err.contains("row 1"), "unexpected diagnostic: {err}");
+    }
+
+    /// Reusing one design's memoized Hessian pattern must not leak state
+    /// between assemblies.
+    ///
+    /// The symbolic pattern is now built once per design and shared by every
+    /// later `XᵀWX` against it. That is only sound if each assembly starts
+    /// from a zeroed values buffer: if the buffer were shared rather than the
+    /// pattern, the second call would return the SUM of both weightings and
+    /// the third would drift further — a wrong Hessian on every Newton
+    /// iteration after the first. Weights are varied and then repeated so a
+    /// stale-values bug shows up as a changed answer for identical input.
+    #[test]
+    fn repeated_assemblies_against_one_sparse_design_do_not_accumulate() {
+        use faer::sparse::{SparseColMat, Triplet};
+
+        // Banded, 3 nonzeros per row over 40 columns, so `4·avg_nnz ≥ p` is
+        // false and this takes the genuinely-sparse accumulator arm — the one
+        // that consults the memo.
+        let (n, p) = (200_usize, 40_usize);
+        let mut triplets = Vec::new();
+        let mut dense = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for k in 0..3 {
+                let col = (i + k) % p;
+                let value = 0.5 + ((i * 7 + k * 13) % 11) as f64 * 0.25;
+                triplets.push(Triplet::new(i, col, value));
+                dense[[i, col]] += value;
+            }
+        }
+        let sparse = SparseColMat::try_new_from_triplets(n, p, &triplets).expect("banded design");
+        let design = DesignMatrix::Sparse(SparseDesignMatrix::new(sparse));
+
+        let reference = |w: &Array1<f64>| -> Array2<f64> {
+            let mut out = Array2::<f64>::zeros((p, p));
+            for a in 0..p {
+                for b in 0..p {
+                    out[[a, b]] = (0..n).map(|i| w[i] * dense[[i, a]] * dense[[i, b]]).sum();
+                }
+            }
+            out
+        };
+        let w1 = Array1::from_shape_fn(n, |i| 0.25 + (i % 5) as f64 * 0.5);
+        let w2 = Array1::from_shape_fn(n, |i| 1.5 + (i % 3) as f64 * 0.75);
+
+        // w1, then a DIFFERENT w2, then w1 again: the third result must equal
+        // the first exactly, not merely be close to it.
+        let mut first: Option<Array2<f64>> = None;
+        for (label, w) in [("w1", &w1), ("w2", &w2), ("w1-again", &w1)] {
+            let got = xt_diag_x_symmetric(&design, w)
+                .unwrap_or_else(|e| panic!("{label}: {e}"))
+                .to_dense();
+            let want = reference(w);
+            for a in 0..p {
+                for b in 0..p {
+                    assert!(
+                        (got[[a, b]] - want[[a, b]]).abs() <= 1e-9 * want[[a, b]].abs().max(1.0),
+                        "{label}: XtWX[{a},{b}] = {} but direct sum gives {}",
+                        got[[a, b]],
+                        want[[a, b]]
+                    );
+                }
+            }
+            match (&first, label) {
+                (None, _) => first = Some(got),
+                (Some(f), "w1-again") => assert_eq!(*f, got, "repeat of w1 changed after w2"),
+                _ => {}
+            }
+        }
     }
 }

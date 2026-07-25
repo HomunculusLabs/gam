@@ -13,7 +13,13 @@ use std::sync::Arc;
 ///
 /// Shared via `Arc` across all parallel workers so that only the mutable values
 /// buffer needs to be cloned per worker.
-struct SparseHessianSymbolic {
+///
+/// Public so a design matrix can hold the pattern it induces for its own
+/// lifetime; the fields stay private because the invariants that make
+/// `add_upper` sound (upper-triangle-only, `values.len() == nnz`,
+/// `first_row`/`contiguous` agreeing with `row_indices`) are established
+/// solely by [`SparseHessianSymbolic::build`].
+pub struct SparseHessianSymbolic {
     dim: usize,
     nnz: usize,
     /// CSC column pointers, length `dim + 1`.
@@ -146,13 +152,31 @@ impl SparseHessianAccumulator {
     /// Build the symbolic upper-triangle pattern of the block Hessian produced
     /// by multiple sparse CSR designs that share the same column space.
     pub fn from_multi_csr(csrs: &[&SparseRowMat<usize, f64>], dim: usize) -> Self {
-        let sym = Arc::new(SparseHessianSymbolic::build(csrs, dim));
+        Self::from_symbolic(Arc::new(SparseHessianSymbolic::build(csrs, dim)))
+    }
+
+    /// Build the symbolic pattern for `dim` columns, returning it for reuse.
+    ///
+    /// The pattern is a function of the design's sparsity alone — the weights
+    /// never enter it — so a caller that assembles `Xᵀ diag(w) X` repeatedly
+    /// for one fixed `X` can build it once and hand the same `Arc` back to
+    /// [`Self::from_symbolic`] on every later assembly.
+    pub fn build_symbolic(
+        csrs: &[&SparseRowMat<usize, f64>],
+        dim: usize,
+    ) -> Arc<SparseHessianSymbolic> {
+        Arc::new(SparseHessianSymbolic::build(csrs, dim))
+    }
+
+    /// Zero-valued accumulator over an already-built pattern.
+    pub fn from_symbolic(sym: Arc<SparseHessianSymbolic>) -> Self {
         let nnz = sym.nnz;
         SparseHessianAccumulator {
             sym,
             values: vec![0.0; nnz],
         }
     }
+
 
     // ── accumulation ─────────────────────────────────────────────────
 

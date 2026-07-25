@@ -43,7 +43,7 @@ const TENSOR_GEMM_MAX_INTERMEDIATE_BYTES: usize = 128 * 1024 * 1024; // 128 MB
 pub use crate::utils::PcgSolveInfo;
 
 mod sparse_hessian;
-pub use sparse_hessian::SparseHessianAccumulator;
+pub use sparse_hessian::{SparseHessianAccumulator, SparseHessianSymbolic};
 
 mod weights;
 pub use weights::{FiniteSignedWeightsView, PsdWeightsView, SignedWeightsArc, SignedWeightsView};
@@ -900,6 +900,10 @@ pub struct SparseDesignMatrix {
     /// its bytes accounted for as long as the cache entry is alive.
     dense_cache: Arc<OnceLock<(Arc<Array2<f64>>, MemoryReservation)>>,
     csr_cache: Arc<OnceLock<Arc<SparseRowMat<usize, f64>>>>,
+    /// Memoized symbolic upper-triangle pattern of `XᵀWX`. The pattern depends
+    /// only on this matrix's sparsity, never on the weights, so it is an
+    /// immutable property of the design and belongs with it.
+    hessian_pattern_cache: Arc<OnceLock<Arc<SparseHessianSymbolic>>>,
 }
 
 impl SparseDesignMatrix {
@@ -908,7 +912,32 @@ impl SparseDesignMatrix {
             matrix,
             dense_cache: Arc::new(OnceLock::new()),
             csr_cache: Arc::new(OnceLock::new()),
+            hessian_pattern_cache: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// A zero-valued accumulator over this design's `XᵀWX` sparsity pattern,
+    /// building that pattern at most once per design.
+    ///
+    /// Every IRLS/Newton iteration reassembles `Xᵀ diag(w) X` with new weights
+    /// but the SAME `X`, and the symbolic pattern is a function of `X` alone.
+    /// Rebuilding it per assembly cost `O(Σ_i nnz_i² · log)` in `BTreeSet`
+    /// insertions and showed up as the second-largest symbol in a fit profile.
+    /// Caching it here — rather than in a process-global keyed by address —
+    /// ties the pattern's lifetime to the data that determines it, so a
+    /// dropped-and-reallocated design can never inherit a stale neighbour's
+    /// pattern (#2416).
+    pub fn hessian_accumulator_template(&self) -> Option<SparseHessianAccumulator> {
+        if let Some(sym) = self.hessian_pattern_cache.get() {
+            return Some(SparseHessianAccumulator::from_symbolic(Arc::clone(sym)));
+        }
+        let csr = self.to_csr_arc()?;
+        // First writer wins; a racing writer built from the same immutable
+        // matrix, so either pattern is correct and identical.
+        let sym = self.hessian_pattern_cache.get_or_init(|| {
+            SparseHessianAccumulator::build_symbolic(&[&csr], self.matrix.ncols())
+        });
+        Some(SparseHessianAccumulator::from_symbolic(Arc::clone(sym)))
     }
 
     fn dense_nbytes(&self) -> Result<usize, String> {
