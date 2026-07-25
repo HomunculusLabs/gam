@@ -17,9 +17,14 @@ on:
     # Daily full run at 02:00 America/Chicago (CDT); every job remains bounded to 50 minutes.
     - cron: "0 7 * * *"
 
+# #2443/#2437: the scale discriminator already keeps the hourly smoke from
+# cancelling the 07:00 full run, but it does NOT stop a `workflow_dispatch` with
+# `scale: full` from landing in the nightly's group and cancelling it. Scheduled
+# runs are records, so they key on `github.sha` and are never cancelled;
+# dispatched runs keep newest-wins per (ref, scale).
 concurrency:
-  group: large-scale-${{ github.ref }}-${{ github.event_name == 'schedule' && github.event.schedule == '0 7 * * *' && 'full' || inputs.scale || 'smoke' }}
-  cancel-in-progress: true
+  group: large-scale-${{ github.event_name == 'schedule' && github.sha || github.ref }}-${{ github.event_name == 'schedule' && github.event.schedule == '0 7 * * *' && 'full' || inputs.scale || 'smoke' }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   actions: read

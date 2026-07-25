@@ -5,9 +5,13 @@ on:
   schedule:
     - cron: "0 4 * * *"
 
+# #2443/#2437: a SCHEDULED run is a record of that commit's benchmark, so it is
+# keyed on `github.sha` and never cancelled — a lane's `workflow_dispatch` from
+# `main` would otherwise share the ref-keyed group and destroy the nightly's
+# only verdict. Dispatched runs keep newest-wins semantics on their own ref.
 concurrency:
-  group: benchmark-suite-${{ github.ref }}
-  cancel-in-progress: true
+  group: benchmark-suite-${{ github.event_name == 'schedule' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   actions: read

@@ -5,9 +5,13 @@ on:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
+# #2443/#2437: a fuzz run's value IS the corpus/findings it produced, so the
+# scheduled run is keyed on `github.sha` and never cancelled — under ref-keying a
+# lane `workflow_dispatch` from `main` shares the group and discards the night's
+# fuzzing. Dispatched runs retain newest-wins semantics on their own ref.
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.event_name == 'schedule' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   actions: read

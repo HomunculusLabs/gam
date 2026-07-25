@@ -5,9 +5,13 @@ on:
     - cron: "0 */2 * * *"
   workflow_dispatch:
 
+# #2443/#2437: the every-2h schedule is the release-artifact record for the
+# commit it ran on, so it is keyed on `github.sha` and never cancelled. Keyed on
+# `github.ref` with cancellation, any lane `workflow_dispatch` from `main` shares
+# the group and kills the scheduled build. Dispatches still supersede each other.
 concurrency:
-  group: build-release-all-${{ github.ref }}
-  cancel-in-progress: true
+  group: build-release-all-${{ github.event_name == 'schedule' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
   CARGO_TERM_COLOR: always
