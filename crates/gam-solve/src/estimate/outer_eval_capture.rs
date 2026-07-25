@@ -25,16 +25,24 @@ pub struct OuterEvalRecord {
     pub gradient: Array1<f64>,
 }
 
-/// Analytic-vs-finite-difference evidence at one real outer seed.
+/// Analytic-vs-finite-difference evidence for the ψ block at one real outer
+/// seed.
+///
+/// `theta` retains the complete outer seed and `rho_dim` locates the ψ block in
+/// that seed. The three gradient/stencil arrays contain exactly `psi_dim`
+/// entries in ψ-local order. Smoothing-parameter ρ coordinates are deliberately
+/// excluded: the κ/geometry gates that request this record do not grade them,
+/// and each unnecessary finite-difference coordinate costs two complete inner
+/// profiles.
 #[derive(Clone, Debug)]
 pub struct OuterGradientFdRecord {
     pub theta: Array1<f64>,
     pub rho_dim: usize,
     pub psi_dim: usize,
     pub cost: f64,
-    pub analytic_gradient: Array1<f64>,
-    pub finite_difference_gradient: Array1<f64>,
-    pub steps: Array1<f64>,
+    pub analytic_psi_gradient: Array1<f64>,
+    pub finite_difference_psi_gradient: Array1<f64>,
+    pub psi_steps: Array1<f64>,
 }
 
 /// Maximum evaluations retained per capture window (opening iterates only).

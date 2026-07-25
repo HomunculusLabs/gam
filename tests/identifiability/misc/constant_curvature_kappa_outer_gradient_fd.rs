@@ -129,9 +129,9 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
         audit.psi_dim >= 1,
         "constant-curvature smooth must enroll kappa as a psi coordinate"
     );
-    for j in audit.rho_dim..audit.rho_dim + audit.psi_dim {
-        let analytic = audit.analytic_gradient[j];
-        let fd = audit.finite_difference_gradient[j];
+    for j in 0..audit.psi_dim {
+        let analytic = audit.analytic_psi_gradient[j];
+        let fd = audit.finite_difference_psi_gradient[j];
         let gap = (analytic - fd).abs();
         assert!(
             analytic.is_finite() && fd.is_finite(),
@@ -143,7 +143,7 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
             "kappa outer-gradient analytic!=FD on coordinate {j}: \
              analytic={analytic:.6e} fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
             gap / scale,
-            audit.steps[j]
+            audit.psi_steps[j]
         );
     }
 }

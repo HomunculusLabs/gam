@@ -167,28 +167,28 @@ fn run_basis(basis_term: &str) {
         audit.psi_dim >= 1,
         "basis {basis_term:?} must enroll at least one psi coordinate"
     );
-    let worst = (0..audit.theta.len())
+    let worst = (0..audit.psi_dim)
         .map(|j| {
-            let analytic = audit.analytic_gradient[j];
-            let fd = audit.finite_difference_gradient[j];
+            let analytic = audit.analytic_psi_gradient[j];
+            let fd = audit.finite_difference_psi_gradient[j];
             (j, analytic, fd, (analytic - fd).abs())
         })
         .max_by(|a, b| a.3.total_cmp(&b.3))
         .expect("outer-gradient record must have at least one coordinate");
     eprintln!(
         "[FD-DIAG] basis={basis_term} rho_dim={} psi_dim={} worst coordinate: \
-         i={} analytic={:.6e} fd={:.6e} gap={:.3e}",
+         psi_i={} analytic={:.6e} fd={:.6e} gap={:.3e}",
         audit.rho_dim, audit.psi_dim, worst.0, worst.1, worst.2, worst.3
     );
 
-    for j in 0..audit.theta.len() {
-        let analytic = audit.analytic_gradient[j];
-        let fd = audit.finite_difference_gradient[j];
+    for j in 0..audit.psi_dim {
+        let analytic = audit.analytic_psi_gradient[j];
+        let fd = audit.finite_difference_psi_gradient[j];
         assert!(
-            analytic.is_finite() && fd.is_finite() && audit.steps[j] > 0.0,
+            analytic.is_finite() && fd.is_finite() && audit.psi_steps[j] > 0.0,
             "invalid gradient evidence for basis {basis_term:?}: i={j} \
              analytic={analytic} fd={fd} step={}",
-            audit.steps[j]
+            audit.psi_steps[j]
         );
     }
 }
@@ -200,5 +200,5 @@ fn survival_marginal_slope_outer_gradient_fd_audit_matern() {
 
 #[test]
 fn survival_marginal_slope_outer_gradient_fd_audit_duchon() {
-    run_basis("duchon(PC1, PC2, centers=4, order=1)");
+    run_basis("duchon(PC1, PC2, centers=4, order=1, length_scale=1.0)");
 }

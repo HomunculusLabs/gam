@@ -143,9 +143,12 @@ fn capture_outer_gradient_fd_at_seed(
             analytic.cost
         )));
     }
-    let mut finite_difference = Array1::<f64>::zeros(seed.len());
-    let mut steps = Array1::<f64>::zeros(seed.len());
-    for j in 0..seed.len() {
+    let analytic_psi_gradient =
+        Array1::from_iter((0..psi_dim).map(|psi_j| analytic.gradient[rho_dim + psi_j]));
+    let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
+    let mut psi_steps = Array1::<f64>::zeros(psi_dim);
+    for psi_j in 0..psi_dim {
+        let j = rho_dim + psi_j;
         let nominal_step = f64::EPSILON.powf(0.25) * (1.0 + seed[j].abs());
         let left_room = (seed[j] - lower[j]).max(0.0);
         let right_room = (upper[j] - seed[j]).max(0.0);
@@ -160,8 +163,9 @@ fn capture_outer_gradient_fd_at_seed(
             obj.reset();
             install_matching_initial_inner_seed(obj, config, seed, context)?;
             let cost_minus = obj.eval_cost(&minus)?;
-            finite_difference[j] = (cost_plus - cost_minus) / (2.0 * nominal_step);
-            steps[j] = nominal_step;
+            finite_difference_psi_gradient[psi_j] =
+                (cost_plus - cost_minus) / (2.0 * nominal_step);
+            psi_steps[psi_j] = nominal_step;
         } else if right_room >= left_room && right_room > 0.0 {
             let step = nominal_step.min(0.5 * right_room);
             let mut one = seed.clone();
@@ -174,9 +178,9 @@ fn capture_outer_gradient_fd_at_seed(
             obj.reset();
             install_matching_initial_inner_seed(obj, config, seed, context)?;
             let cost_two = obj.eval_cost(&two)?;
-            finite_difference[j] =
+            finite_difference_psi_gradient[psi_j] =
                 (-3.0 * analytic.cost + 4.0 * cost_one - cost_two) / (2.0 * step);
-            steps[j] = step;
+            psi_steps[psi_j] = step;
         } else if left_room > 0.0 {
             let step = nominal_step.min(0.5 * left_room);
             let mut one = seed.clone();
@@ -189,9 +193,9 @@ fn capture_outer_gradient_fd_at_seed(
             obj.reset();
             install_matching_initial_inner_seed(obj, config, seed, context)?;
             let cost_two = obj.eval_cost(&two)?;
-            finite_difference[j] =
+            finite_difference_psi_gradient[psi_j] =
                 (3.0 * analytic.cost - 4.0 * cost_one + cost_two) / (2.0 * step);
-            steps[j] = step;
+            psi_steps[psi_j] = step;
         } else {
             return Err(EstimationError::InvalidInput(format!(
                 "outer-gradient FD capture cannot perturb collapsed coordinate {j}"
@@ -205,9 +209,9 @@ fn capture_outer_gradient_fd_at_seed(
             rho_dim,
             psi_dim,
             cost: analytic.cost,
-            analytic_gradient: analytic.gradient,
-            finite_difference_gradient: finite_difference,
-            steps,
+            analytic_psi_gradient,
+            finite_difference_psi_gradient,
+            psi_steps,
         },
     );
     Ok(())

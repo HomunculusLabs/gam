@@ -139,9 +139,8 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
         "matern(x1,x2) must enroll at least one rho and one log-kappa coordinate"
     );
     assert_eq!(audit.psi_dim, 1, "isotropic Matérn must own one psi axis");
-    let kappa = audit.rho_dim;
-    let analytic = audit.analytic_gradient[kappa];
-    let fd = audit.finite_difference_gradient[kappa];
+    let analytic = audit.analytic_psi_gradient[0];
+    let fd = audit.finite_difference_psi_gradient[0];
     let gap = (analytic - fd).abs();
     assert!(
         analytic.is_finite() && fd.is_finite(),
@@ -153,7 +152,7 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
         "Matérn iso-kappa outer-gradient analytic!=FD: analytic={analytic:.6e} \
          fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
         gap / scale,
-        audit.steps[kappa],
+        audit.psi_steps[0],
     );
 }
 
@@ -258,12 +257,10 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         audit.psi_dim, 2,
         "anisotropic Matérn must own exactly two psi axes"
     );
-    let signal = audit.rho_dim;
-    let noise = audit.rho_dim + 1;
-    let g_signal = audit.analytic_gradient[signal];
-    let fd_signal = audit.finite_difference_gradient[signal];
-    let g_noise = audit.analytic_gradient[noise];
-    let fd_noise = audit.finite_difference_gradient[noise];
+    let g_signal = audit.analytic_psi_gradient[0];
+    let fd_signal = audit.finite_difference_psi_gradient[0];
+    let g_noise = audit.analytic_psi_gradient[1];
+    let fd_noise = audit.finite_difference_psi_gradient[1];
     let analytic_contrast = g_signal - g_noise;
     let fd_contrast = fd_signal - fd_noise;
     eprintln!(
