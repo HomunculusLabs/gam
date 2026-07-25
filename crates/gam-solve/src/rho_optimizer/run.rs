@@ -5829,6 +5829,31 @@ pub(crate) fn run_fixed_point_outer_solver(
             );
             Ok(solution_into_outer_result(*last_solution, false, the_plan))
         }
+        Err(FixedPointError::ObjectiveFailed { message })
+            if requests_immediate_first_order_fallback(&message) =>
+        {
+            // The bridge raises `EFS_FIRST_ORDER_FALLBACK_MARKER` when the
+            // fixed-point step is not a descent direction it can rescue — a
+            // ψ-stagnation streak, or a step every halving rejected on both
+            // the full vector and the ρ/τ-only fallback. That marker is a
+            // ROUTING REQUEST ("abandon the fixed point, run the joint
+            // gradient solver that enforces ∇_ψ V = 0"), not a defect: the
+            // ladder `automatic_fallback_attempts` builds for an
+            // analytic-gradient EFS/HybridEFS primary is exactly the
+            // `disable_fixed_point` BFGS plan it is asking for.
+            //
+            // The seed evaluation above already honours it. Every LATER
+            // iteration reached this arm instead, where the blanket
+            // `fatal_outer_evaluation` classification short-circuits both
+            // `run_outer_with_plan`'s own marker check and the attempt loop in
+            // `run_outer_with_strategy` — so a HybridEFS search that descended
+            // and then asked to hand over died fatally with the fallback plan
+            // never attempted. Carry the same recoverable routing the seed
+            // path uses, so the request is honoured wherever it is raised.
+            Err(FixedPointOuterRunError::ImmediateFallback(
+                EstimationError::RemlOptimizationFailed(message),
+            ))
+        }
         Err(FixedPointError::ObjectiveFailed { message }) => Err(FixedPointOuterRunError::Failed(
             EstimationError::fatal_outer_evaluation(
                 "outer fixed-point evaluation",

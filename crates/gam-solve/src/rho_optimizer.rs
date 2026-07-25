@@ -47,6 +47,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 pub mod asymptote_certificate;
 mod bridges;
 mod capability;
+#[cfg(test)]
+#[path = "rho_optimizer/efs_fallback_routing_tests.rs"]
+mod efs_fallback_routing_tests;
 mod hessian_operator;
 pub mod kl_certificate;
 mod objective;
