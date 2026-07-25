@@ -1382,29 +1382,21 @@ fn zz_measure_2228_value_lane_budget_sweep() {
 /// the Value lane goes red here instead of silently shipping the desync.
 #[test]
 fn value_lane_prices_at_shared_fixed_point_2228() {
-    // TEMP-INSTRUMENT (implSAE2 #2228)
-    {
-        struct FwdLog;
-        impl log::Log for FwdLog {
-            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-                true
-            }
-            fn log(&self, r: &log::Record<'_>) {
-                eprintln!("[{}] {}", r.level(), r.args());
-            }
-            fn flush(&self) {}
-        }
-        static L: FwdLog = FwdLog;
-        if log::set_logger(&L).is_ok() {
-            log::set_max_level(log::LevelFilter::Debug);
-        }
-    }
     let n = 96usize;
     let p = 48usize;
     let z = one_circle_wide_target(n, p, 0.05);
     let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
-    let imi = 8usize;
+    // Refine budget for BOTH arms. Measured (`zz_measure_2228_value_lane_budget_sweep`,
+    // run 30150455983): the full arm REFUSES at 8 and converges from 16 on, with the
+    // value identical to ten significant figures across 16/32/64/128, while the coarse
+    // arm refuses at EVERY budget with its ‖g‖ pinned at ~1.9032e-1 from 16 through 128
+    // — a 16× budget increase moves it by 4e-7 relative, i.e. the coarse path is at a
+    // floor and no budget rescues it. So 8 no longer buys this fixture the converged
+    // root its own precondition needs, and raising it cannot cost the coarse-inadequacy
+    // premise the assertion below rests on. The stability check after `v_true` turns
+    // "16 is enough" from an assumption into an assertion.
+    let imi = 16usize;
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
     // Over-smoothed rho: the undamped Laplace log-det is worst-conditioned here, so
     // the inner (t,beta) solve needs progress-extension refinement beyond the
@@ -1445,6 +1437,24 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
             .expect("full-budget bare criterion evaluates")
             .0
     };
+    // The full budget must be ADEQUATE, not merely non-erroring: a root that still
+    // moves when given twice the budget is not the root the Value lane is supposed to
+    // price, and pinning the test to one would make every assertion below a statement
+    // about a budget rather than about a fixed point. Doubling must not move it.
+    let v_true_double = {
+        let mut t = term.clone();
+        t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 2 * imi, lr, re, rb)
+            .expect("double-budget bare criterion evaluates")
+            .0
+    };
+    let root_bound = f64::EPSILON.sqrt() * v_true.abs().max(v_true_double.abs()).max(1.0);
+    assert!(
+        (v_true - v_true_double).abs() <= root_bound,
+        "the full budget must reach a converged root, but doubling it moved the value: \
+         v_true={v_true:.16e}, v_true(2x)={v_true_double:.16e}, diff={:.3e} > {root_bound:.3e} \
+         (raise `imi` until it stops moving)",
+        (v_true - v_true_double).abs()
+    );
     let coarse = {
         let mut t = term.clone();
         t.penalized_quasi_laplace_criterion_with_cache_refine_policy(
