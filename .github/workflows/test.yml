@@ -540,6 +540,17 @@ jobs:
       - name: Build MASTER_FAILURES.md
         id: master
         shell: bash
+        env:
+          # Authoritative upstream results. `ARCHIVE_MISSING` is a marker a
+          # SHARD writes, so it cannot exist when the shards were skipped —
+          # which is exactly what happens when the archive build fails
+          # (build FAILED -> shards SKIPPED -> this job succeeded, reporting
+          # 0 compile / 0 runtime; five of the fourteen runs 12-24 Jul 2026
+          # looked like clean runs that way). Read the job results directly so
+          # the not-measured signal does not depend on a log line that a
+          # skipped job could never emit.
+          BUILD_RESULT: ${{ needs.build.result }}
+          RUST_TEST_RESULT: ${{ needs.rust-test.result }}
         run: |
           set -uo pipefail
           python3 - <<'PY'
@@ -611,7 +622,26 @@ jobs:
           ]
           joined = '\n'.join(all_text)
           forbidden_hits = [p for p in forbidden if p in joined]
-          archive_missing = 'ARCHIVE_MISSING' in joined
+          shard_marker_missing = 'ARCHIVE_MISSING' in joined
+          # A skipped or failed archive build means the runtime surface was not
+          # exercised, whether or not any shard lived long enough to say so.
+          build_result = os.environ.get('BUILD_RESULT', '')
+          rust_test_result = os.environ.get('RUST_TEST_RESULT', '')
+          build_did_not_succeed = build_result not in ('', 'success')
+          shards_never_ran = rust_test_result == 'skipped' or not shard_logs
+          archive_missing = (
+              shard_marker_missing or build_did_not_succeed or shards_never_ran
+          )
+          not_measured_reasons = [
+              label
+              for label, fired in (
+                  (f'the archive build reported `{build_result}`', build_did_not_succeed),
+                  (f'the shard matrix reported `{rust_test_result}`', rust_test_result == 'skipped'),
+                  ('no shard log was collected at all', not shard_logs),
+                  ('a shard reported ARCHIVE_MISSING', shard_marker_missing),
+              )
+              if fired
+          ]
 
           # ---- write MASTER_FAILURES.md --------------------------------------
           out = []
@@ -638,10 +668,10 @@ jobs:
           out.append(counter('Slow/timeout notices (#1393)', len(slow), True))
           if archive_missing:
               out.append('')
-              out.append('> NOTE: at least one shard found NO test archive — the workspace '
-                         'test build did not fully compile, so runtime tests for the '
-                         'affected targets could not run. Fix the compile failures below '
-                         'first; the runtime surface will then be exercised.')
+              out.append('> NOTE: the runtime surface was NOT measured — '
+                         + '; '.join(not_measured_reasons)
+                         + '. Runtime counters above are not results. Fix the build '
+                           'first; the runtime surface will then be exercised.')
               if not compile_errs:
                   out.append('>')
                   out.append('> The archive is missing and NO compile error was captured '
