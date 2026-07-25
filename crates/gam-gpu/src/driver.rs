@@ -169,7 +169,9 @@ pub fn cuda_driver_available() -> Result<bool, GpuError> {
 
 #[cfg(test)]
 mod loader_classification_tests {
-    use super::{library_load_error_detail, load_failure_is_candidate_absence};
+    #[cfg(target_os = "linux")]
+    use super::library_load_error_detail;
+    use super::load_failure_is_candidate_absence;
 
     #[cfg(target_os = "linux")]
     #[test]
