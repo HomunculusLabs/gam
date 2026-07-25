@@ -4981,17 +4981,7 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         ..options.clone()
     };
     let per_block = split_labeled_log_lambdas(&theta, &layout).expect("empty block rho layout");
-    let covariance = compute_joint_covariance_required(
-        &family,
-        &specs,
-        &evaluated.inner.block_states,
-        &per_block,
-        &assembly_options,
-        Some(&hessian),
-    )
-    .expect("joint terminal covariance")
-    .expect("covariance requested");
-    let geometry = compute_joint_geometry(
+    let posterior = compute_joint_posterior(
         &family,
         &specs,
         &evaluated.inner.block_states,
@@ -4999,8 +4989,13 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         &assembly_options,
         Some(&hessian),
         evaluated.inner.terminal_working_sets.as_deref(),
+        evaluated.inner.joint_workspace.as_ref(),
     )
-    .expect("joint terminal geometry");
+    .expect("joint terminal posterior");
+    let covariance = posterior
+        .covariance_conditional
+        .expect("covariance requested");
+    let geometry = posterior.geometry;
     assert_eq!(
         family.evaluations.load(Ordering::Relaxed),
         evaluations_before_assembly,

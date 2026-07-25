@@ -1396,18 +1396,38 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         }
         refresh_all_block_etas(family, specs, &mut inner.block_states)?;
         audit_converged_identifiability(family, raw_specs, &canonical, &inner.block_states, 0)?;
-        let covariance_conditional = compute_joint_covariance_required(
+        let hessian = materialize_owned_terminal_unpenalized_hessian(
+            family,
+            specs,
+            &inner.block_states,
+            inner.joint_workspace.as_ref(),
+            inner.terminal_working_sets.as_deref(),
+            "custom-family no-smoothing terminal Hessian",
+        )
+        .map_err(|reason| CustomFamilyError::Optimization {
+            context: "fit_custom_family no-smoothing terminal curvature ownership",
+            reason,
+        })?;
+        let posterior = compute_joint_posterior(
             family,
             specs,
             &inner.block_states,
             &per_block,
             options,
-            None,
+            Some(&hessian),
+            inner.terminal_working_sets.as_deref(),
+            inner.joint_workspace.as_ref(),
         )
-        .map_err(|error| CustomFamilyError::Optimization {
-            context: "fit_custom_family no-smoothing covariance factorization",
-            reason: format!("{error}; no fit was assembled"),
+        .map_err(|reason| CustomFamilyError::Optimization {
+            context: "fit_custom_family no-smoothing terminal posterior",
+            reason: format!("{reason}; no fit was assembled"),
         })?;
+        let JointPosteriorAssembly {
+            covariance_conditional,
+            geometry,
+            reported_beta,
+        } = posterior;
+        let geometry = Some(geometry);
         let reml_term = if options.use_remlobjective {
             let logdet_h = inner.block_logdet_h.ok_or_else(|| CustomFamilyError::Optimization {
                 context: "fit_custom_family no-smoothing inner solve",
@@ -1421,19 +1441,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         } else {
             0.0
         };
-        let geometry = Some(compute_joint_geometry(
-            family,
-            specs,
-            &inner.block_states,
-            &per_block,
-            options,
-            None,
-            inner.terminal_working_sets.as_deref(),
-        )
-        .map_err(|reason| CustomFamilyError::Optimization {
-            context: "fit_custom_family no-smoothing joint geometry",
-            reason,
-        })?);
         let penalized_objective = checked_penalizedobjective(
             inner.log_likelihood,
             inner.penalty_value,
@@ -1460,6 +1467,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 true,
             );
         }
+        install_reported_posterior_mean(
+            family,
+            specs,
+            &mut inner.block_states,
+            reported_beta.as_ref(),
+        )
+        .map_err(|reason| CustomFamilyError::Optimization {
+            context: "fit_custom_family no-smoothing reported posterior mean",
+            reason,
+        })?;
         return assemble_custom_family_fit_result(
             inner,
             BlockwiseFitAssembly {
@@ -2232,23 +2249,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         reason,
     })?;
 
-    let covariance_conditional = compute_joint_covariance_required(
-        family,
-        specs,
-        &inner.block_states,
-        &per_block,
-        &final_options,
-        Some(&hessian),
-    )
-    .map_err(|error| CustomFamilyError::Optimization {
-        context: "fit_custom_family final covariance factorization",
-        reason: format!(
-            "{error}; rho_checkpoint={:?}; no fit was assembled",
-            rho_star.as_slice().unwrap_or(&[])
-        ),
-    })?;
-
-    let geometry = Some(compute_joint_geometry(
+    let posterior = compute_joint_posterior(
         family,
         specs,
         &inner.block_states,
@@ -2256,11 +2257,21 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         &final_options,
         Some(&hessian),
         inner.terminal_working_sets.as_deref(),
+        inner.joint_workspace.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
-        context: "fit_custom_family joint geometry",
-        reason,
-    })?);
+        context: "fit_custom_family final posterior assembly",
+        reason: format!(
+            "{reason}; rho_checkpoint={:?}; no fit was assembled",
+            rho_star.as_slice().unwrap_or(&[])
+        ),
+    })?;
+    let JointPosteriorAssembly {
+        covariance_conditional,
+        geometry,
+        reported_beta,
+    } = posterior;
+    let geometry = Some(geometry);
     // Cross-fit FitArtifact capture (Phase 0/1) for the converged smoothing
     // fit: persist the descriptor-indexed raw-β + ρ so a later fold transfers
     // ρ. Best-effort; never affects this fit's result. Gated on the same opt-in
@@ -2349,6 +2360,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         }
         _ => None,
     };
+    install_reported_posterior_mean(
+        family,
+        specs,
+        &mut inner.block_states,
+        reported_beta.as_ref(),
+    )
+    .map_err(|reason| CustomFamilyError::Optimization {
+        context: "fit_custom_family reported posterior mean",
+        reason,
+    })?;
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
@@ -2548,34 +2569,51 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         &inner.block_states,
         0,
     )?;
-    let covariance_conditional = compute_joint_covariance_required(
+    let hessian = materialize_owned_terminal_unpenalized_hessian(
+        family,
+        specs,
+        &inner.block_states,
+        inner.joint_workspace.as_ref(),
+        inner.terminal_working_sets.as_deref(),
+        "custom-family fixed-log-lambda terminal Hessian",
+    )
+    .map_err(|reason| CustomFamilyError::Optimization {
+        context: "fit_custom_family_fixed_log_lambdas terminal curvature ownership",
+        reason,
+    })?;
+    let posterior = compute_joint_posterior(
         family,
         specs,
         &inner.block_states,
         &per_block,
         options,
-        None,
+        Some(&hessian),
+        inner.terminal_working_sets.as_deref(),
+        inner.joint_workspace.as_ref(),
     )
-    .map_err(|error| CustomFamilyError::Optimization {
-        context: "fit_custom_family_fixed_log_lambdas covariance factorization",
+    .map_err(|reason| CustomFamilyError::Optimization {
+        context: "fit_custom_family_fixed_log_lambdas terminal posterior",
         reason: format!(
-            "{error}; rho_checkpoint={:?}; no fit was assembled",
+            "{reason}; rho_checkpoint={:?}; no fit was assembled",
             rho.as_slice().unwrap_or(&[])
         ),
     })?;
-    let geometry = Some(compute_joint_geometry(
+    let JointPosteriorAssembly {
+        covariance_conditional,
+        geometry,
+        reported_beta,
+    } = posterior;
+    install_reported_posterior_mean(
         family,
         specs,
-        &inner.block_states,
-        &per_block,
-        options,
-        None,
-        inner.terminal_working_sets.as_deref(),
+        &mut inner.block_states,
+        reported_beta.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
-        context: "fit_custom_family_fixed_log_lambdas joint geometry",
+        context: "fit_custom_family_fixed_log_lambdas reported posterior mean",
         reason,
-    })?);
+    })?;
+    let geometry = Some(geometry);
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
@@ -2769,19 +2807,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
         reason,
     })?;
 
-    let covariance_conditional = compute_joint_covariance_required(
-        family,
-        specs,
-        &inner.block_states,
-        &per_block,
-        options,
-        Some(&hessian),
-    )
-    .map_err(|error| CustomFamilyError::Optimization {
-        context: "fit_custom_family_fixed_log_lambdas_from_owned_mode covariance",
-        reason: error.to_string(),
-    })?;
-    let geometry = Some(compute_joint_geometry(
+    let posterior = compute_joint_posterior(
         family,
         specs,
         &inner.block_states,
@@ -2789,11 +2815,28 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
         options,
         Some(&hessian),
         inner.terminal_working_sets.as_deref(),
+        inner.joint_workspace.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
-        context: "fit_custom_family_fixed_log_lambdas_from_owned_mode geometry",
+        context: "fit_custom_family_fixed_log_lambdas_from_owned_mode posterior",
         reason,
-    })?);
+    })?;
+    let JointPosteriorAssembly {
+        covariance_conditional,
+        geometry,
+        reported_beta,
+    } = posterior;
+    install_reported_posterior_mean(
+        family,
+        specs,
+        &mut inner.block_states,
+        reported_beta.as_ref(),
+    )
+    .map_err(|reason| CustomFamilyError::Optimization {
+        context: "fit_custom_family_fixed_log_lambdas_from_owned_mode reported posterior mean",
+        reason,
+    })?;
+    let geometry = Some(geometry);
 
     assemble_custom_family_fit_result(
         inner,
