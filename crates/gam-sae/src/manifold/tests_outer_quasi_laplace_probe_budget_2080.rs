@@ -24,7 +24,7 @@ use super::tests::{deterministic_circle_noise, global_ev};
 use super::*;
 use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisSecondJet};
 use gam_linalg::faer_ndarray::{FaerCholesky, fast_atb};
-use gam_solve::rho_optimizer::{OuterEvalOrder, OuterObjective, OuterProblem};
+use gam_solve::rho_optimizer::{OuterEval, OuterEvalOrder, OuterObjective, OuterProblem};
 use ndarray::{Array1, Array2, ArrayView2, array, s};
 use std::sync::Arc;
 
@@ -1288,6 +1288,106 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
             a_dense.nrows(),
         );
     }
+}
+
+/// #2439 MEASUREMENT (zz_measure) — WHY does asking for the gradient change the value?
+///
+/// `value_lane_prices_at_shared_fixed_point_2228` measures that the same objective
+/// at the same ρ reports `1.1359321989218647e3` under `OuterEvalOrder::Value` and
+/// `1.1363163948443218e3` under `ValueAndGradient` — 22,700× the certification
+/// bound, with the `Value` lane matching the bare criterion to all 17 digits.
+///
+/// Two candidate causes, and this probe decides between them in one run:
+///
+/// 1. **the assembly differs** — both lanes converge to the SAME inner mode and
+///    still price it differently, which would put the defect in what is summed;
+/// 2. **the lanes evaluate at DIFFERENT inner modes** — `eval()` re-solves and
+///    lands elsewhere, so the value is computed at one mode while the gradient
+///    describes another. That is a violation of the envelope identity
+///    `dV/dρ = ∂ℓ_p/∂ρ|_θ̂` by construction, not merely a discrepancy.
+///
+/// Both lanes publish `inner_beta_hint`, so comparing them bitwise separates the
+/// two without instrumenting either lane.
+///
+/// The probe also varies something the failing test fixes: that test builds a
+/// FRESH objective per lane, so the `#2080 (a)` hand-off — install the value
+/// probe's converged inner state before the gradient lane's criterion loop, whose
+/// stated purpose is "same converged optimum ⇒ identical criterion value" — never
+/// happens. Production evaluates both on ONE objective. Arm B runs that ordering.
+/// If B agrees where A disagrees, the hand-off is load-bearing and the value is a
+/// functional of the starting state rather than of ρ; if B disagrees too, the
+/// defect is independent of the hand-off.
+#[test]
+fn zz_measure_2439_value_vs_gradient_inner_mode() {
+    let n = 96usize;
+    let p = 48usize;
+    let z = one_circle_wide_target(n, p, 0.05);
+    let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let imi = 16usize;
+    let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .unwrap();
+    let rho_flat = rho.to_flat();
+
+    let report = |tag: &str, a: &OuterEval, b: &OuterEval| {
+        let diff = (a.cost - b.cost).abs();
+        let bound = f64::EPSILON.sqrt() * a.cost.abs().max(b.cost.abs()).max(1.0);
+        eprintln!(
+            "[#2439 {tag}] value={:.16e} grad_lane={:.16e} diff={diff:.6e} bound={bound:.6e}",
+            a.cost, b.cost
+        );
+        match (&a.inner_beta_hint, &b.inner_beta_hint) {
+            (Some(bv), Some(bg)) if bv.len() == bg.len() => {
+                let identical = bv.iter().zip(bg.iter()).all(|(x, y)| x.to_bits() == y.to_bits());
+                let max_abs = bv
+                    .iter()
+                    .zip(bg.iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0_f64, f64::max);
+                eprintln!(
+                    "[#2439 {tag}] beta len={} identical={identical} \
+                     max|dbeta|={max_abs:.6e} => {}",
+                    bv.len(),
+                    if identical {
+                        "SAME MODE: the assembly differs (cause 1)"
+                    } else {
+                        "DIFFERENT MODES: envelope identity broken by construction (cause 2)"
+                    }
+                );
+            }
+            (bv, bg) => eprintln!(
+                "[#2439 {tag}] beta hints not comparable: value={:?} grad={:?}",
+                bv.as_ref().map(|v| v.len()),
+                bg.as_ref().map(|v| v.len())
+            ),
+        }
+    };
+
+    // Arm A — the failing test's construction: a FRESH objective per lane, so no
+    // converged inner state is handed from the value probe to the gradient lane.
+    let mut obj_v =
+        SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
+    let a_value = OuterObjective::eval_with_order(&mut obj_v, &rho_flat, OuterEvalOrder::Value)
+        .expect("arm A value lane");
+    let mut obj_g =
+        SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
+    let a_grad =
+        OuterObjective::eval_with_order(&mut obj_g, &rho_flat, OuterEvalOrder::ValueAndGradient)
+            .expect("arm A gradient lane");
+    report("A fresh-objective-per-lane", &a_value, &a_grad);
+
+    // Arm B — production's ordering: ONE objective, value probe first, so the
+    // `#2080 (a)` hand-off can install the probe's converged inner state.
+    let mut obj =
+        SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
+    let b_value = OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::Value)
+        .expect("arm B value lane");
+    let b_grad =
+        OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::ValueAndGradient)
+            .expect("arm B gradient lane");
+    report("B shared-objective ", &b_value, &b_grad);
 }
 
 /// #2228 MEASUREMENT (zz_measure) — is the value-lane fixture's inner solve at a
