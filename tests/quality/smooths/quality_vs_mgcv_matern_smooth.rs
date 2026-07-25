@@ -173,11 +173,27 @@ fn gam_matern_smooth_recovers_truth() {
 // 2-D Matérn ν=5/2 spatial smooth over (long, lat).
 const QUAKES_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/quakes.csv");
 
-/// #2395: K random train/test partitions for the real-data (quakes) arm. The 2-D
-/// Matérn GP fit (k=60 on ~800 rows) is the expensive one here, so K=5 keeps the
-/// 2*K=10 fits near ~5x the former single-split cost, inside the current
-/// slowest-normal-test envelope, while still cutting the metric's std error ~2.2x.
-const K_SPLITS: usize = 5;
+/// #2395: K random train/test partitions for the real-data (quakes) arm.
+///
+/// K is set by the resolution of the paired decision rule, not by a time budget
+/// (SPEC forbids wall-clock envelopes, and the former K=5 here was justified by
+/// one). The rule fires on a deficit wider than `t_{K-1,0.995} * s_d / sqrt(K)`,
+/// and dropping from K=10 to K=5 loses TWICE: the multiplier rises 3.250 ->
+/// 4.604 and `sqrt(K)` falls 3.162 -> 2.236, so the resolvable deficit is 2.0x
+/// wider for the same per-fold spread. Measured on 30 vCPU the panel runs in 36s
+/// at K=5 and 111s at K=10, so there is nothing to trade against that power.
+///
+/// The measurement also showed why five folds cannot be trusted to ESTIMATE the
+/// spread they are divided by. At K=5 this panel reported `effect -2.11%`,
+/// `s_d = 0.0117`, `d_z = -1.82` with gam ahead on 5/5 folds — the largest
+/// standardized effect in the suite. At K=10 the same panel reports
+/// `effect -1.31%`, `s_d = 0.0145`, `d_z = -0.91`: the advantage is real (9/10
+/// folds) but roughly half as large, and the spread is WIDER than five folds
+/// suggested. Both fold counts correctly decline to resolve it; K=5 merely made
+/// it look nearly resolvable. This is the rule refusing to be fooled, and it is
+/// why the fold count is chosen from the variance argument rather than from
+/// whichever K makes a verdict land.
+const K_SPLITS: usize = 10;
 /// Held-out fraction per partition (~80/20, matching the former split scale).
 const HOLDOUT: f64 = 0.20;
 

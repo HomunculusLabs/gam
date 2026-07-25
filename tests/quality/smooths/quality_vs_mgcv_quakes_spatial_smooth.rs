@@ -45,11 +45,16 @@ use std::path::Path;
 
 const QUAKES_CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bench/datasets/quakes.csv");
 
-/// #2395: K random train/test partitions for the primary arm. The 2-D thin-plate
-/// spatial fit on ~800 rows is the expensive one, so K=5 keeps the 2*K=10 fits
-/// near ~5x the former single-split cost, inside the current slowest-normal-test
-/// envelope, while still cutting the metric's std error ~2.2x.
-const K_SPLITS: usize = 5;
+/// #2395: K random train/test partitions for the primary arm.
+///
+/// K is set by the resolution of the paired decision rule, not by a time budget
+/// (SPEC forbids wall-clock envelopes, and the former K=5 here was justified by
+/// one). The rule fires on a deficit wider than `t_{K-1,0.995} * s_d / sqrt(K)`,
+/// and dropping from K=10 to K=5 loses TWICE: the multiplier rises 3.250 ->
+/// 4.604 and `sqrt(K)` falls 3.162 -> 2.236, so the resolvable deficit is 2.0x
+/// wider for the same per-fold spread. Measured on 30 vCPU this panel runs in
+/// 8s at K=5, so there is nothing to trade against that lost power.
+const K_SPLITS: usize = 10;
 /// Held-out fraction per partition (~80/20, matching the former split scale).
 const HOLDOUT: f64 = 0.20;
 

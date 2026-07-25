@@ -621,9 +621,11 @@ mod tests {
     }
 
     /// The closed-form integer-df Student-t CDF must reproduce published
-    /// quantiles. These are the two df the quality panels actually use (K=10 and
-    /// the expensive 2-D K=5 panels) plus the Cauchy and df=2 edge cases whose
-    /// CDFs have independent elementary closed forms.
+    /// quantiles. `df = 9` is what every K=10 quality panel uses; `df = 4` is
+    /// kept both as the even-branch counterpart and because it prices what a
+    /// smaller panel would cost (`4.604` vs `3.250` on the same spread). The
+    /// Cauchy and `df = 2` cases have independent elementary closed forms, so
+    /// they check the series against something other than a table.
     #[test]
     fn student_t_closed_form_matches_published_quantiles() {
         // Cauchy: F(t) = 1/2 + atan(t)/pi.
