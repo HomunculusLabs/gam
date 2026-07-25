@@ -1780,6 +1780,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     )?;
                     return Ok(OuterObjectiveEvalResult {
                         objective: value_only.objective,
+                        criterion_components: value_only.criterion_components,
                         gradient,
                         outer_hessian: gam_problem::HessianValue::Unavailable,
                         warm_start: value_only.warm_start,
@@ -2215,6 +2216,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     )?;
                     return Ok(OuterObjectiveEvalResult {
                         objective: value_only.objective,
+                        criterion_components: value_only.criterion_components,
                         gradient,
                         outer_hessian: gam_problem::HessianValue::Unavailable,
                         warm_start: value_only.warm_start,
@@ -2954,11 +2956,14 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
             "best coefficient-mode candidate {selected_candidate} failed requested derivative assembly: {error}"
         ),
     })?;
+    let derivative_objective = derivative_eval.objective;
     derivative_eval.objective = canonicalize_screened_objective(
         screened_objective,
-        derivative_eval.objective,
+        derivative_objective,
         selected_candidate,
     )?;
+    derivative_eval.criterion_components[0] +=
+        derivative_eval.objective - derivative_objective;
     validate_requested_best_mode_derivatives(
         &derivative_eval,
         eval_mode,

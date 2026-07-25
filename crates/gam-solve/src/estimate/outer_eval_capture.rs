@@ -140,7 +140,13 @@ pub(crate) fn begin_outer_criterion_component_capture() {
     });
 }
 
-pub(crate) fn record_outer_criterion_components(cost: f64, components: [f64; 4]) {
+/// Retain the final selected scalar-criterion decomposition for an armed
+/// outer-gradient audit.
+///
+/// This is public only so sibling workspace evaluators can report through the
+/// same typed sink after their own nonconvex mode selection. It is a no-op
+/// unless [`enable_outer_gradient_fd_capture`] armed the calling thread.
+pub fn record_outer_criterion_components(cost: f64, components: [f64; 4]) {
     FD_CAPTURE.with(|capture| {
         if let Some(state) = capture.borrow_mut().as_mut()
             && state.record.is_none()

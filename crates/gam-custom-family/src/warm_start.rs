@@ -1188,6 +1188,7 @@ pub struct CustomFamilyJointHyperEfsOwnedResult {
 
 pub(crate) struct OuterObjectiveEvalResult {
     pub(crate) objective: f64,
+    pub(crate) criterion_components: [f64; 4],
     pub(crate) gradient: Array1<f64>,
     pub(crate) outer_hessian: gam_problem::HessianValue,
     pub(crate) warm_start: ConstrainedWarmStart,
@@ -1207,6 +1208,7 @@ pub(crate) fn outer_eval_result_into_joint_hyper_owned_result(
 ) -> CustomFamilyJointHyperOwnedResult {
     let OuterObjectiveEvalResult {
         objective,
+        criterion_components,
         gradient,
         outer_hessian,
         warm_start,
@@ -1214,6 +1216,10 @@ pub(crate) fn outer_eval_result_into_joint_hyper_owned_result(
         hyper_values,
         inner,
     } = result;
+    gam_solve::estimate::outer_eval_capture::record_outer_criterion_components(
+        objective,
+        criterion_components,
+    );
     let rho = warm_start.rho.clone();
     CustomFamilyJointHyperOwnedResult {
         result: CustomFamilyJointHyperResult {

@@ -119,6 +119,7 @@ pub(crate) fn add_labeled_rho_prior_to_outer_eval(
     }
     let (cost, gradient, hessian) = rho_prior_cost_gradient_hessian(rho_prior, rho)?;
     result.objective += cost;
+    result.criterion_components[0] += cost;
     if eval_mode != EvalMode::ValueOnly {
         if result.gradient.len() != gradient.len() {
             return Err(CustomFamilyError::DimensionMismatch {
