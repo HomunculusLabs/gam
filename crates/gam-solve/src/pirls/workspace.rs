@@ -55,6 +55,17 @@ pub struct PirlsWorkspace {
 }
 
 impl PirlsWorkspace {
+    /// Coefficient-space scratch for an exact sufficient-statistic solve.
+    ///
+    /// The Gaussian value-only rho lane has already reduced every data-row
+    /// contribution into `XᵀWX`, `XᵀW(y-offset)`, and the centered response
+    /// norm. It never enters an IRLS iteration, so allocating the general
+    /// workspace's five observation-length vectors would reintroduce O(n)
+    /// work before the zero-iteration branch can consume those statistics.
+    pub fn coefficient_only(p: usize) -> Self {
+        Self::new(0, p, 0, 0)
+    }
+
     pub fn new(n: usize, p: usize, _: usize, _: usize) -> Self {
         // Default implementation ignores this parameter.
         // Default implementation ignores this parameter.

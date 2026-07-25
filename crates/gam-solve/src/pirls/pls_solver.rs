@@ -348,13 +348,18 @@ pub(super) fn solve_penalized_least_squares_implicit(
 
     // ── Dense / QS-rotated path ──────────────────────────────────────────
 
-    // 1. Prepare weighted buffers
-    if workspace.wz.len() != z.len() {
-        workspace.wz = Array1::zeros(z.len());
+    // 1. Prepare the row-weighted response only when no exact Gaussian
+    // sufficient statistics were supplied. A cached solve consumes XᵀWX and
+    // XᵀW(y-offset) directly, so materializing W(z-offset) would be an unused
+    // O(n) allocation and traversal on every rho candidate (#2435).
+    if gaussian_fixed_cache.is_none() {
+        if workspace.wz.len() != z.len() {
+            workspace.wz = Array1::zeros(z.len());
+        }
+        workspace.wz.assign(&z);
+        workspace.wz -= &offset;
+        workspace.wz *= &weights;
     }
-    workspace.wz.assign(&z);
-    workspace.wz -= &offset;
-    workspace.wz *= &weights;
 
     // 2. Form X'WX: compute in original coordinates, then rotate by Qs.
     //
@@ -362,7 +367,6 @@ pub(super) fn solve_penalized_least_squares_implicit(
     // design never change across the outer loop in that family), so when the
     // caller supplied a `GaussianFixedCache` we skip the O(N·p²) dense
     // assembly here and adopt the cached matrix as-is.
-    let weights_owned = weights.to_owned();
     let xtwx_orig = if let Some(cache) = gaussian_fixed_cache {
         // Cache hit: weights and design are invariant for Gaussian-Identity
         // across the outer REML loop, so adopt the precomputed XᵀWX directly
@@ -378,6 +382,7 @@ pub(super) fn solve_penalized_least_squares_implicit(
         }
         cache.xtwx_orig.clone()
     } else {
+        let weights_owned = weights.to_owned();
         match x_original {
             // Only materialized dense designs can use the shared dense assembly path.
             // Lazy operator-backed dense designs route to diag_xtw_x like sparse.

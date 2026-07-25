@@ -929,7 +929,15 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     let x_original: DesignMatrix = x.into();
     // Auto-detect sparse structure in dense designs so the sparse-native path
     // can engage for structurally sparse models that happen to be stored dense.
-    let x_original = {
+    //
+    // A Gaussian value-only probe already owns the exact dense coefficient
+    // statistics consumed by its solve. Scanning all design rows here to
+    // rediscover a sparse representation cannot change that solve and would
+    // make every rho candidate O(n) before the sufficient-statistic lane even
+    // begins (#2435).
+    let x_original = if cost_only_gaussian_rows.is_some() {
+        x_original
+    } else {
         let auto_sparse = x_original
             .as_dense()
             .and_then(|dense| sparse_from_denseview(dense.view()));
@@ -946,8 +954,29 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             .map(|cp| cp.rank())
             .sum::<usize>()
     };
-    let mut workspace = PirlsWorkspace::new(x_original.nrows(), x_original.ncols(), ebrows, erows);
-    let solver_decision = if let Some((_, _, _)) = kronecker_runtime.as_ref() {
+    // A value-only Gaussian probe is already represented completely by its
+    // coefficient-space sufficient statistics and shared frozen row carrier.
+    // It exits through the exact zero-iteration branch below, so constructing
+    // the general workspace with n rows would allocate five length-n scratch
+    // vectors that no consumer reads (#2435). Full gradients, final fits, and
+    // every iterative family retain the ordinary observation workspace.
+    let mut workspace = if cost_only_gaussian_rows.is_some() {
+        PirlsWorkspace::coefficient_only(x_original.ncols())
+    } else {
+        PirlsWorkspace::new(x_original.nrows(), x_original.ncols(), ebrows, erows)
+    };
+    let solver_decision = if cost_only_gaussian_rows.is_some() {
+        SparsePirlsDecision {
+            path: PirlsLinearSolvePath::DenseTransformed,
+            reason: "gaussian_sufficient_statistics",
+            p: x_original.ncols(),
+            nnz_x: 0,
+            nnz_xtwx_symbolic: None,
+            nnz_s_lambda: 0,
+            nnz_h_est: None,
+            density_h_est: None,
+        }
+    } else if let Some((_, _, _)) = kronecker_runtime.as_ref() {
         SparsePirlsDecision {
             path: PirlsLinearSolvePath::DenseTransformed,
             reason: "kronecker_runtime",
