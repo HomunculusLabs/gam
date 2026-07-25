@@ -1764,6 +1764,7 @@ pub(crate) fn compute_joint_geometry<F: CustomFamily + Clone + Send + Sync + 'st
     Ok(FitGeometry {
         coefficient_gauge: gam_problem::gauge::Gauge::identity(&block_widths),
         penalized_hessian: penalized_hessian.into(),
+        constrained_posterior: None,
         working,
     })
 }

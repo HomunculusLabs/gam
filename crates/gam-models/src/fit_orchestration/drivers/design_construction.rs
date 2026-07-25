@@ -2650,6 +2650,7 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
             let geometry = Some(gam_solve::estimate::FitGeometry {
                 coefficient_gauge: gam_problem::gauge::Gauge::identity(&[beta.len()]),
                 penalized_hessian: penalized_hessian.into(),
+                constrained_posterior: None,
                 working: Some(working),
             });
             let covariance_conditional = beta_covariance;
@@ -7105,6 +7106,7 @@ fn fit_bounded_term_collection_with_design(
     let geometry = Some(gam_solve::estimate::FitGeometry {
         coefficient_gauge: gam_problem::gauge::Gauge::identity(&[beta_user.len()]),
         penalized_hessian: penalized_hessian.clone().into(),
+        constrained_posterior: None,
         working: Some(gam_solve::estimate::WorkingGeometry {
             weights: eta_state.fisherweight.clone(),
             response: working_response,

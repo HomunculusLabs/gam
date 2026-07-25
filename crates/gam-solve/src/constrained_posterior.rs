@@ -90,6 +90,7 @@ use gam_math::probability::{
 };
 use gam_problem::LinearInequalityConstraints;
 use ndarray::{Array1, Array2, ArrayView2};
+use serde::{Deserialize, Serialize};
 
 /// Relative accuracy demanded of the orthant-moment cubature, measured against
 /// the PRE-TRUNCATION scale `sd_i = sqrt(W_ii)` so the criterion is invariant
@@ -128,6 +129,7 @@ const ORTHANT_MOMENT_MAXIMUM_POINTS: usize = 1 << 20;
 /// consumer that never materializes `Σ` (the factorized inference path, the
 /// prediction backends) apply the same correction with `q` extra solves:
 /// `xᵀΣ_π x = xᵀΣx − ‖Δ^{1/2} Gᵀ x‖²`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConstrainedPosteriorCorrection {
     /// `G = Σ Aᵀ W⁻¹`, `p × q`.
     pub lift: Array2<f64>,
@@ -181,6 +183,121 @@ impl ConstrainedPosteriorCorrection {
     /// `E_π[β] = β_unc + G·(E[u] − E_untrunc[u])`.
     pub fn posterior_mean(&self, unconstrained_center: &Array1<f64>) -> Array1<f64> {
         unconstrained_center + &self.lift.dot(&self.normal_mean_shift)
+    }
+}
+
+/// Persisted identity of an inequality-truncated Laplace posterior.
+///
+/// These three objects must remain distinct:
+///
+/// * `mode` is the feasible optimizer solution and the reflective sampler's
+///   valid starting point;
+/// * `unconstrained_center` is the centre of the ambient Gaussian before
+///   truncation and therefore the reflective sampler's target centre;
+/// * the user-facing coefficient vector is the ambient centre plus the
+///   retained correction's normal-coordinate mean shift (or exactly the
+///   ambient centre when truncation is invisible at f64 resolution).
+///
+/// Keeping the two locations next to the factored moment correction prevents a
+/// saved model from re-deriving either location from row evidence or from
+/// treating the reported posterior mean as though it were the optimizer mode.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConstrainedPosteriorGeometry {
+    /// Exact inequality system `Aβ ≥ b` in the same coefficient frame as the
+    /// locations, correction lift, and ambient precision.
+    pub constraints: LinearInequalityConstraints,
+    pub mode: Array1<f64>,
+    pub unconstrained_center: Array1<f64>,
+    /// Moment correction when at least one inequality changes the answer at
+    /// f64 resolution. `None` still records that an inequality system was
+    /// fitted; it means the ambient centre is far enough inside every row that
+    /// truncation is numerically invisible.
+    pub correction: Option<ConstrainedPosteriorCorrection>,
+}
+
+impl ConstrainedPosteriorGeometry {
+    pub fn posterior_mean(&self) -> Array1<f64> {
+        self.correction
+            .as_ref()
+            .map(|correction| correction.posterior_mean(&self.unconstrained_center))
+            .unwrap_or_else(|| self.unconstrained_center.clone())
+    }
+
+    pub fn validate_for_dimension(&self, dimension: usize) -> Result<(), String> {
+        if self.constraints.a.ncols() != dimension
+            || self.constraints.a.nrows() != self.constraints.b.len()
+        {
+            return Err(format!(
+                "constrained posterior inequalities have shape {}x{} with {} bounds, expected {dimension} columns",
+                self.constraints.a.nrows(),
+                self.constraints.a.ncols(),
+                self.constraints.b.len()
+            ));
+        }
+        if self.mode.len() != dimension || self.unconstrained_center.len() != dimension {
+            return Err(format!(
+                "constrained posterior locations have lengths mode={} and center={}, expected {dimension}",
+                self.mode.len(),
+                self.unconstrained_center.len()
+            ));
+        }
+        if self
+            .mode
+            .iter()
+            .chain(self.unconstrained_center.iter())
+            .chain(self.constraints.a.iter())
+            .chain(self.constraints.b.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err("constrained posterior geometry contains a non-finite value".to_string());
+        }
+        if let Some(correction) = self.correction.as_ref() {
+            let q = correction.lift.ncols();
+            if correction.lift.nrows() != dimension {
+                return Err(format!(
+                    "constrained posterior lift has {} rows, expected {dimension}",
+                    correction.lift.nrows()
+                ));
+            }
+            if correction.removed_normal_variance.dim() != (q, q)
+                || correction.normal_mean_shift.len() != q
+                || correction.rows.len() != q
+            {
+                return Err(format!(
+                    "constrained posterior normal geometry is inconsistent: lift={}x{q}, removed={:?}, mean={}, rows={}",
+                    correction.lift.nrows(),
+                    correction.removed_normal_variance.dim(),
+                    correction.normal_mean_shift.len(),
+                    correction.rows.len()
+                ));
+            }
+            let mut unique_rows = correction.rows.clone();
+            unique_rows.sort_unstable();
+            unique_rows.dedup();
+            if unique_rows.len() != q
+                || unique_rows
+                    .iter()
+                    .any(|&row| row >= self.constraints.a.nrows())
+            {
+                return Err(format!(
+                    "constrained posterior retained rows {:?} are not unique valid indices for {} inequalities",
+                    correction.rows,
+                    self.constraints.a.nrows()
+                ));
+            }
+            if correction
+                .lift
+                .iter()
+                .chain(correction.removed_normal_variance.iter())
+                .chain(correction.normal_mean_shift.iter())
+                .any(|value| !value.is_finite())
+            {
+                return Err(
+                    "constrained posterior correction contains a non-finite value".to_string()
+                );
+            }
+        }
+        Ok(())
     }
 }
 

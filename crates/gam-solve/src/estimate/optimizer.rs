@@ -1911,7 +1911,8 @@ where
             None
         };
 
-    if opts.compute_inference {
+    let needs_constrained_posterior = fit_linear_constraints.is_some();
+    if opts.compute_inference || needs_constrained_posterior {
         // EDF by block using stabilized H and penalty roots in transformed basis.
         let h = &pirls_res.stabilizedhessian_transformed;
         let p_dim = h.nrows();
@@ -2090,43 +2091,43 @@ where
             }
         }
 
-        // O(n⁻¹) frequentist bias correction vector b̂ = H⁻¹ S(λ̂)(β̂ - μ).
-        // Computed in transformed PIRLS basis (where the factorization above lives)
-        // and then mapped to the original coefficient basis via Qs.
-        // Frequentist bias of the linear predictor at x is -s_*(x)^T b̂; the
-        // corrected predictor is η̂_BC(x) = η̂(x) + s_*(x)^T b̂.
-        let beta_t = pirls_res.beta_transformed.as_ref();
-        let mut s_beta_t = Array1::<f64>::zeros(p_dim);
-        for (kk, cp) in pirls_res
-            .reparam_result
-            .canonical_transformed
-            .iter()
-            .enumerate()
-        {
-            // S_k(β - μ): only the col_range of beta couples through local penalty.
-            let r = &cp.col_range;
-            let local = cp.local_ref();
-            let beta_block = beta_t.slice(ndarray::s![r.clone()]);
-            let centered = &beta_block - &cp.prior_mean;
-            let local_beta = local.dot(&centered);
-            let lam_k = lambdas[kk];
-            let mut acc = s_beta_t.slice_mut(ndarray::s![r.clone()]);
-            acc.scaled_add(lam_k, &local_beta);
+        if opts.compute_inference {
+            // O(n⁻¹) frequentist bias correction vector b̂ =
+            // H⁻¹ S(λ̂)(β̂ - μ). This is an inference product, unlike the
+            // posterior-identity solves that constrained fits need regardless
+            // of whether standard errors were requested.
+            let beta_t = pirls_res.beta_transformed.as_ref();
+            let mut s_beta_t = Array1::<f64>::zeros(p_dim);
+            for (kk, cp) in pirls_res
+                .reparam_result
+                .canonical_transformed
+                .iter()
+                .enumerate()
+            {
+                let r = &cp.col_range;
+                let local = cp.local_ref();
+                let beta_block = beta_t.slice(ndarray::s![r.clone()]);
+                let centered = &beta_block - &cp.prior_mean;
+                let local_beta = local.dot(&centered);
+                let lam_k = lambdas[kk];
+                let mut acc = s_beta_t.slice_mut(ndarray::s![r.clone()]);
+                acc.scaled_add(lam_k, &local_beta);
+            }
+            let b_t = factor.solve(&s_beta_t).map_err(|reason| {
+                EstimationError::RemlOptimizationFailed(format!(
+                    "exact bias-correction solve failed: {reason}"
+                ))
+            })?;
+            certify_factorized_inference_vector_solve(h, &s_beta_t, &b_t, "bias correction")?;
+            let qs = &pirls_res.reparam_result.qs;
+            let b_orig = qs.dot(&b_t);
+            if b_orig.iter().any(|value| !value.is_finite()) {
+                return Err(EstimationError::RemlOptimizationFailed(
+                    "bias-correction basis map produced non-finite coefficients".to_string(),
+                ));
+            }
+            bias_correction_beta = Some(b_orig);
         }
-        let b_t = factor.solve(&s_beta_t).map_err(|reason| {
-            EstimationError::RemlOptimizationFailed(format!(
-                "exact bias-correction solve failed: {reason}"
-            ))
-        })?;
-        certify_factorized_inference_vector_solve(h, &s_beta_t, &b_t, "bias correction")?;
-        let qs = &pirls_res.reparam_result.qs;
-        let b_orig = qs.dot(&b_t);
-        if b_orig.iter().any(|value| !value.is_finite()) {
-            return Err(EstimationError::RemlOptimizationFailed(
-                "bias-correction basis map produced non-finite coefficients".to_string(),
-            ));
-        }
-        bias_correction_beta = Some(b_orig);
         // Preserve the factorization for solve-on-demand SE and covariance
         // computation below, after dispersion has been determined.
         edf_factor = Some(factor);
@@ -2141,15 +2142,16 @@ where
     // n − mp ≥ n − edf_total, and σ̂² was systematically biased low whenever any
     // smooth/random-effect spent real edf. edf_total ∈ [mp, p_dim] is the effective
     // df computed just above from tr(λ_k · H⁻¹ S_k), and is exactly the residual
-    // df mgcv uses. When inference is off, edf_total is unavailable, so the MLE
-    // RSS/n is returned instead.
+    // df mgcv uses. An inference-off unconstrained fit keeps the MLE RSS/n path;
+    // a constrained fit computes EDF regardless because its posterior mean and
+    // covariance scale are part of the fitted estimand, not optional inference.
     let resolved_likelihood_scale = pirls_res
         .likelihood
         .resolved_scale()
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
     let profiled_gaussian_standard_deviation = match resolved_likelihood_scale {
         gam_problem::ResolvedLikelihoodScale::ProfiledGaussian => {
-            let denom = if opts.compute_inference {
+            let denom = if opts.compute_inference || needs_constrained_posterior {
                 n - edf_total
             } else {
                 n
@@ -2222,6 +2224,100 @@ where
             "coefficient covariance scale {cov_scale:?} is inconsistent with dispersion {dispersion:?}"
         )));
     }
+
+    // A fit carrying inequality constraints reports the mean of its truncated
+    // Laplace posterior, never the boundary MAP. Build the posterior identity
+    // in the transformed PIRLS frame, where the accepted Hessian factor,
+    // constraint rows, score, and mode are exactly aligned, then lift its two
+    // locations and low-rank covariance factor through Qs together.
+    //
+    // This work is independent of `compute_inference`: requesting standard
+    // errors cannot change the fitted coefficient vector. It needs q+1 solves,
+    // not a dense p×p inverse.
+    let constrained_posterior = match pirls_res.linear_constraints_transformed.as_ref() {
+        Some(constraints) => {
+            let factor = edf_factor.as_ref().ok_or_else(|| {
+                EstimationError::RemlOptimizationFailed(
+                    "constrained posterior geometry requires the accepted Hessian factor"
+                        .to_string(),
+                )
+            })?;
+            let h = &pirls_res.stabilizedhessian_transformed;
+            let constraint_rhs = constraints.a.t().to_owned();
+            let sigma_at_unscaled = factor.solvemulti(&constraint_rhs).map_err(|reason| {
+                EstimationError::RemlOptimizationFailed(format!(
+                    "constrained posterior normal solve failed: {reason}"
+                ))
+            })?;
+            certify_factorized_inference_solve(
+                h,
+                &constraint_rhs,
+                &sigma_at_unscaled,
+                "constrained posterior normal geometry",
+            )?;
+            let sigma_at = sigma_at_unscaled * cov_scale;
+
+            let score_t = &pirls_res.penalized_gradient_transformed;
+            let center_step_unscaled = factor.solve(score_t).map_err(|reason| {
+                EstimationError::RemlOptimizationFailed(format!(
+                    "constrained posterior score solve failed: {reason}"
+                ))
+            })?;
+            certify_factorized_inference_vector_solve(
+                h,
+                score_t,
+                &center_step_unscaled,
+                "constrained posterior unconstrained centre",
+            )?;
+            // `penalized_gradient_transformed` and H share the solver's
+            // objective scale. For profiled Gaussian both omit the common
+            // 1/φ factor, which cancels in H⁻¹g; multiplying this displacement
+            // by `cov_scale=φ` would move the Gaussian centre by an extra φ.
+            let center_t = pirls_res.beta_transformed.as_ref() - &center_step_unscaled;
+            let mut correction =
+                crate::constrained_posterior::constrained_posterior_correction(
+                    sigma_at.view(),
+                    &center_t,
+                    constraints,
+                )
+                .map_err(|reason| {
+                    EstimationError::RemlOptimizationFailed(format!(
+                        "constrained posterior moments failed: {reason}"
+                    ))
+                })?;
+            let qs = &pirls_res.reparam_result.qs;
+            if let Some(value) = correction.as_mut() {
+                value.lift = qs.dot(&value.lift);
+            }
+            let constraints_internal = fit_linear_constraints.as_ref().ok_or_else(|| {
+                EstimationError::RemlOptimizationFailed(
+                    "PIRLS exported transformed inequalities without their pre-reparameterization geometry"
+                        .to_string(),
+                )
+            })?;
+            Some(
+                crate::constrained_posterior::ConstrainedPosteriorGeometry {
+                    constraints: constraints_internal.clone(),
+                    mode: beta_orig_internal.clone(),
+                    unconstrained_center: qs.dot(&center_t),
+                    correction,
+                },
+            )
+        }
+        None if needs_constrained_posterior => {
+            return Err(EstimationError::RemlOptimizationFailed(
+                "fit accepted linear inequalities but PIRLS did not export their transformed geometry"
+                    .to_string(),
+            ));
+        }
+        None => None,
+    };
+    let reported_beta_orig_internal = constrained_posterior
+        .as_ref()
+        .map(
+            crate::constrained_posterior::ConstrainedPosteriorGeometry::posterior_mean,
+        )
+        .unwrap_or_else(|| beta_orig_internal.clone());
 
     // Re-install the exact rho point and inner state that will be shipped, and
     // verify it IS the certified optimum. Seeds and nuisance refinements may
@@ -2300,8 +2396,10 @@ where
     outer_result.final_grad_norm = Some(finalgrad_norm);
     let outer_converged = true;
 
-    if opts.compute_inference {
+    if opts.compute_inference || needs_constrained_posterior {
         penalized_hessian = map_hessian_to_original_basis(&pirls_res)?;
+    }
+    if opts.compute_inference {
         let p_cov = penalized_hessian.nrows();
         let qs = &pirls_res.reparam_result.qs;
 
@@ -2340,8 +2438,15 @@ where
         if let Some(ref h_inv) = beta_covariance_unscaled {
             // Full inverse available: wrap as phi-scaled covariance, compute
             // frequentist quantities, and pass to smoothing-correction cubature.
+            let mut posterior_covariance = scaled_covariance(h_inv.clone(), cov_scale);
+            if let Some(correction) = constrained_posterior
+                .as_ref()
+                .and_then(|posterior| posterior.correction.as_ref())
+            {
+                correction.apply_to_covariance_in_place(&mut posterior_covariance);
+            }
             beta_covariance = Some(gam_problem::dispersion_cov::PhiScaledCovariance::wrap(
-                scaled_covariance(h_inv.clone(), cov_scale),
+                posterior_covariance,
             ));
 
             // Frequentist covariance Ve = F H⁻¹ φ and influence matrix F = H⁻¹ X'WX.
@@ -2542,17 +2647,17 @@ where
             se_chunk_target_bytes,
             qs.ncols().saturating_mul(2),
         );
-        beta_standard_errors = if let Some(ref h_inv) = beta_covariance_unscaled {
-            // Fast path: SE from stored full inverse (already phi-scaled via
-            // beta_covariance, but we need the unscaled diagonal here).
+        beta_standard_errors = if beta_covariance_unscaled.is_some() {
+            // The dense covariance already includes the inequality-truncation
+            // correction. Derive SEs from that same matrix so the dense and
+            // factorized representations cannot disagree.
+            let covariance = beta_covariance.as_ref().ok_or_else(|| {
+                EstimationError::RemlOptimizationFailed(
+                    "dense posterior covariance was not retained for standard errors".to_string(),
+                )
+            })?;
             let mut raw_se = Array1::<f64>::zeros(p_cov);
-            for (index, &variance_unscaled) in h_inv.diag().iter().enumerate() {
-                if !(variance_unscaled.is_finite() && variance_unscaled > 0.0) {
-                    return Err(EstimationError::RemlOptimizationFailed(format!(
-                        "exact SPD inverse has invalid diagonal {index}: {variance_unscaled:?}"
-                    )));
-                }
-                let variance = cov_scale * variance_unscaled;
+            for (index, &variance) in covariance.as_array().diag().iter().enumerate() {
                 let valid = if zero_covariance_boundary {
                     variance == 0.0
                 } else {
@@ -2622,6 +2727,11 @@ where
                 }
                 col_start = col_end;
             }
+            let removed_variance = constrained_posterior
+                .as_ref()
+                .and_then(|posterior| posterior.correction.as_ref())
+                .map(|correction| correction.removed_variance_diagonal())
+                .unwrap_or_else(|| Array1::<f64>::zeros(p_cov));
             let mut se = Array1::<f64>::zeros(p_cov);
             for (index, &variance_unscaled) in diag_inv.iter().enumerate() {
                 if !(variance_unscaled.is_finite() && variance_unscaled > 0.0) {
@@ -2629,7 +2739,7 @@ where
                         "exact factorized SPD inverse has invalid diagonal {index}: {variance_unscaled:?}"
                     )));
                 }
-                let variance = cov_scale * variance_unscaled;
+                let variance = cov_scale * variance_unscaled - removed_variance[index];
                 let valid = if zero_covariance_boundary {
                     variance == 0.0
                 } else {
@@ -2705,7 +2815,7 @@ where
         smoothing_correction_method,
         smoothing_correction_first_order,
         smoothing_correction_method_first_order,
-        penalized_hessian: penalized_hessian.into(),
+        penalized_hessian: penalized_hessian.clone().into(),
         reparam_qs: Some(pirls_res.reparam_result.qs.clone()),
         dispersion,
         beta_covariance,
@@ -2803,7 +2913,7 @@ where
     .total();
 
     let result = ExternalOptimResult {
-        beta: beta_orig_internal,
+        beta: reported_beta_orig_internal,
         log_lambdas,
         lambdas: lambdas.to_owned(),
         likelihood_family: reported_family,
@@ -2820,6 +2930,15 @@ where
         used_device: pirls_res.used_device,
         max_abs_eta: pirls_res.max_abs_eta,
         constraint_kkt: pirls_res.constraint_kkt.clone(),
+        geometry: (opts.compute_inference || needs_constrained_posterior).then(|| FitGeometry {
+            coefficient_gauge: gam_problem::Gauge::identity(&[beta_orig_internal.len()]),
+            penalized_hessian: penalized_hessian.into(),
+            constrained_posterior,
+            working: Some(WorkingGeometry {
+                weights: pirls_res.solveweights.to_owned(),
+                response: pirls_res.solveworking_response.to_owned(),
+            }),
+        }),
         artifacts: FitArtifacts {
             pirls: Some(pirls_res),
             criterion_certificate: outer_result.criterion_certificate.clone(),
@@ -3308,5 +3427,109 @@ mod negative_binomial_joint_certificate_tests {
             }
             other => panic!("expected typed negative-binomial joint exhaustion, got {other}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod constrained_posterior_transport_tests {
+    use super::optimize_external_design;
+    use crate::estimate::external_options::ExternalOptimOptions;
+    use gam_problem::{
+        InverseLink, LikelihoodSpec, LinearInequalityConstraints, ResponseFamily, StandardLink,
+    };
+    use ndarray::{Array1, Array2, array};
+
+    fn fit_nonnegative_intercept(
+        compute_inference: bool,
+    ) -> crate::estimate::ExternalOptimResult {
+        let y = array![-2.0, -1.4, -1.1, -0.8, -1.7, -0.6, -1.3, -0.9];
+        let n = y.len();
+        let opts = ExternalOptimOptions {
+            family: LikelihoodSpec::new(
+                ResponseFamily::Gaussian,
+                InverseLink::Standard(StandardLink::Identity),
+            ),
+            latent_cloglog: None,
+            mixture_link: None,
+            optimize_mixture: false,
+            sas_link: None,
+            optimize_sas: false,
+            compute_inference,
+            skip_rho_posterior_inference: true,
+            max_iter: 40,
+            tol: 1e-10,
+            nullspace_dims: Vec::new(),
+            linear_constraints: Some(
+                LinearInequalityConstraints::new(array![[1.0]], array![0.0])
+                    .expect("one nonnegative coefficient"),
+            ),
+            firth_bias_reduction: None,
+            penalty_shrinkage_floor: None,
+            rho_prior: Default::default(),
+            kronecker_penalty_system: None,
+            kronecker_factored: None,
+            persist_warm_start_disk: false,
+        };
+        optimize_external_design(
+            y.view(),
+            Array1::<f64>::ones(n).view(),
+            Array2::<f64>::ones((n, 1)),
+            Array1::<f64>::zeros(n).view(),
+            Vec::new(),
+            &opts,
+        )
+        .expect("constrained Gaussian fit")
+    }
+
+    #[test]
+    fn constrained_posterior_mean_is_inference_flag_invariant_and_strictly_interior() {
+        let without_inference = fit_nonnegative_intercept(false);
+        let with_inference = fit_nonnegative_intercept(true);
+        assert!(
+            (without_inference.beta[0] - with_inference.beta[0]).abs() <= 2e-12,
+            "posterior mean changed with compute_inference: {} vs {}",
+            without_inference.beta[0],
+            with_inference.beta[0],
+        );
+        assert!(
+            (without_inference.standard_deviation - with_inference.standard_deviation).abs()
+                <= 2e-12,
+            "profiled scale changed with compute_inference"
+        );
+
+        let posterior = with_inference
+            .geometry
+            .as_ref()
+            .expect("coefficient geometry")
+            .constrained_posterior
+            .as_ref()
+            .expect("persisted inequality posterior");
+        assert!(posterior.mode[0].abs() <= 1e-9, "mode={}", posterior.mode[0]);
+        assert!(
+            posterior.unconstrained_center[0] < 0.0,
+            "ambient centre must remain outside the feasible half-line"
+        );
+        assert!(
+            with_inference.beta[0] > posterior.mode[0],
+            "reported estimate must be the strictly interior posterior mean"
+        );
+
+        let inference = with_inference.inference.as_ref().expect("inference");
+        let variance = inference
+            .beta_covariance
+            .as_ref()
+            .expect("dense covariance")
+            .as_array()[[0, 0]];
+        let ambient_variance = with_inference.standard_deviation.powi(2)
+            / with_inference
+                .geometry
+                .as_ref()
+                .expect("coefficient geometry")
+                .penalized_hessian
+                .as_array()[[0, 0]];
+        assert!(
+            variance > 0.0 && variance < ambient_variance,
+            "truncated variance {variance} must be strictly between zero and ambient {ambient_variance}"
+        );
     }
 }

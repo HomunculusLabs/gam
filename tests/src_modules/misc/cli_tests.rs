@@ -778,6 +778,7 @@ fn cli_sample_bounded_model_reaches_sampler_config_validation() {
         Some(FitGeometry {
             coefficient_gauge: Gauge::identity(&[2]),
             penalized_hessian: array![[4.0, 1.0], [1.0, 3.0]].into(),
+            constrained_posterior: None,
             working: Some(gam::estimate::WorkingGeometry {
                 weights: array![1.0, 1.0, 1.0],
                 response: array![0.0, 1.0, 1.0],
@@ -1974,6 +1975,7 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
         geometry: Some(FitGeometry {
             coefficient_gauge: Gauge::identity(&[1]),
             penalized_hessian: array![[2.0]].into(),
+            constrained_posterior: None,
             working: None,
         }),
         block_states: Vec::new(),
@@ -2897,6 +2899,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
         geometry: Some(FitGeometry {
             coefficient_gauge: Gauge::identity(&[2]),
             penalized_hessian: hessian.into(),
+            constrained_posterior: None,
             working: Some(gam::estimate::WorkingGeometry {
                 weights: working_weights,
                 response: working_response,

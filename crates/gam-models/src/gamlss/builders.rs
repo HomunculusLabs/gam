@@ -1415,6 +1415,7 @@ mod binomial_mean_wiggle_saved_frame_tests {
         let geometry = gam_solve::model_types::FitGeometry {
             coefficient_gauge: active_to_solver,
             penalized_hessian: active_hessian.clone().into(),
+            constrained_posterior: None,
             working: None,
         };
         let saved_geometry = binomial_mean_wiggle_saved_geometry(&geometry, &saved_frame)

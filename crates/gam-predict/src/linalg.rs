@@ -1,5 +1,6 @@
 use gam_linalg::matrix::{DesignMatrix, FactorizedSystem, SymmetricMatrix};
 use gam_runtime::resource::prediction_chunk_rows;
+use gam_solve::constrained_posterior::ConstrainedPosteriorCorrection;
 use ndarray::{Array1, Array2, ArrayView2, s};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::ops::Range;
@@ -17,6 +18,10 @@ pub enum PredictionCovarianceBackend<'a> {
         /// `H^{-1} rhs` would silently drop `φ` and disagree with the stored
         /// `beta_covariance()` (which is already φ-scaled).
         phi_scale: f64,
+        /// Factored variance removed by inequality truncation. The lift already
+        /// lives on the same φ-scaled covariance metric returned by this
+        /// backend, so it is subtracted after the ambient precision solve.
+        constrained_correction: Option<&'a ConstrainedPosteriorCorrection>,
     },
 }
 
@@ -35,6 +40,14 @@ impl<'a> PredictionCovarianceBackend<'a> {
     pub fn from_factorized_hessian_scaled(
         hessian: SymmetricMatrix,
         phi: f64,
+    ) -> Result<Self, String> {
+        Self::from_factorized_hessian_scaled_with_correction(hessian, phi, None)
+    }
+
+    pub fn from_factorized_hessian_scaled_with_correction(
+        hessian: SymmetricMatrix,
+        phi: f64,
+        constrained_correction: Option<&'a ConstrainedPosteriorCorrection>,
     ) -> Result<Self, String> {
         if hessian.nrows() != hessian.ncols() {
             return Err(format!(
@@ -64,6 +77,7 @@ impl<'a> PredictionCovarianceBackend<'a> {
             factor,
             dim,
             phi_scale,
+            constrained_correction,
         })
     }
 
@@ -92,11 +106,21 @@ impl<'a> PredictionCovarianceBackend<'a> {
         match self {
             Self::Dense(covariance) => Ok(covariance.dot(rhs)),
             Self::Factorized {
-                factor, phi_scale, ..
+                factor,
+                phi_scale,
+                constrained_correction,
+                ..
             } => {
                 let mut solved = factor.solvemulti(rhs)?;
                 if (*phi_scale - 1.0).abs() > 0.0 {
                     solved.mapv_inplace(|v| v * *phi_scale);
+                }
+                if let Some(correction) = constrained_correction {
+                    let normal_rhs = correction.lift.t().dot(rhs);
+                    let removed = correction
+                        .lift
+                        .dot(&correction.removed_normal_variance.dot(&normal_rhs));
+                    solved -= &removed;
                 }
                 Ok(solved)
             }
@@ -368,6 +392,39 @@ mod tests {
             let g = grads.row(i).to_owned();
             let expected = g.dot(&covariance.dot(&g));
             assert!((out[0][0][i] - expected).abs() <= 1e-10);
+        }
+    }
+
+    #[test]
+    fn constrained_factorized_backend_matches_the_persisted_dense_moment() {
+        let precision = array![[4.0, 0.6, 0.1], [0.6, 3.0, -0.2], [0.1, -0.2, 2.5]];
+        let phi = 1.7;
+        let factor = SymmetricMatrix::Dense(precision.clone())
+            .factorize()
+            .expect("factorize ambient precision");
+        let mut dense = factor
+            .solvemulti(&Array2::eye(3))
+            .expect("ambient covariance");
+        dense *= phi;
+        let correction = ConstrainedPosteriorCorrection {
+            lift: array![[0.3, -0.1], [0.2, 0.25], [-0.05, 0.4]],
+            removed_normal_variance: array![[0.8, 0.1], [0.1, 0.5]],
+            normal_mean_shift: array![0.2, 0.1],
+            rows: vec![0, 1],
+        };
+        correction.apply_to_covariance_in_place(&mut dense);
+        let backend =
+            PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
+                SymmetricMatrix::Dense(precision),
+                phi,
+                Some(&correction),
+            )
+            .expect("factorized constrained covariance");
+        let rhs = array![[1.0, -0.5], [0.2, 2.0], [-0.7, 0.3]];
+        let actual = backend.apply_columns(&rhs).expect("covariance columns");
+        let expected = dense.dot(&rhs);
+        for (&left, &right) in actual.iter().zip(expected.iter()) {
+            assert!((left - right).abs() <= 2e-12, "{left} != {right}");
         }
     }
 

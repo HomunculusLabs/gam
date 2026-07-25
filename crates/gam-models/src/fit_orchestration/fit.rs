@@ -2301,6 +2301,7 @@ fn survival_unified_fit_result(
         geometry: Some(gam_solve::estimate::FitGeometry {
             coefficient_gauge: gam_problem::gauge::Gauge::identity(&[beta.len()]),
             penalized_hessian,
+            constrained_posterior: None,
             working: None,
         }),
         block_states: Vec::new(),

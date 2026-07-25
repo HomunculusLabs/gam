@@ -734,6 +734,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
         geometry: Some(FitGeometry {
             coefficient_gauge: gam_problem::Gauge::identity(&[2]),
             penalized_hessian: array![[2.0, 0.1], [0.1, 3.0]].into(),
+            constrained_posterior: None,
             working: Some(crate::model_types::WorkingGeometry {
                 weights: array![1.0, 0.5, 0.75],
                 response: array![0.1, 0.2, 0.3],

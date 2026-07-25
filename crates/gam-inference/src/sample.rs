@@ -479,7 +479,17 @@ pub fn laplace_gaussian_fallback(
     // would silently fabricate draws the caller never asked for.
     validate_nuts_config(cfg).map_err(String::from)?;
     let fit = fit_result_from_saved_model_for_prediction(model)?;
-    let mode = fit.beta.clone();
+    let geometry = fit.geometry.as_ref().ok_or_else(|| {
+        "standard constrained-coefficient posterior: saved fit has no coefficient geometry"
+            .to_string()
+    })?;
+    let constrained = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+        "standard constrained-coefficient posterior: saved fit has constraints but no persisted \
+         inequality-truncated posterior identity; refit with the current schema"
+            .to_string()
+    })?;
+    let mode = constrained.mode.clone();
+    let center = constrained.unconstrained_center.clone();
     let p = mode.len();
     if p == 0 {
         return Err(format!(
@@ -866,18 +876,19 @@ fn sample_standard(
     // (2) box / shape *inequality* constraints — `nonnegative()` /
     // `linear(min,max)` / `constrain()` box bounds on a parametric coefficient
     // (#1507) and the monotone/convex/concave shape cone `γ_j ≥ 0` on a spline
-    // (#1509). Both are reconstructed by `build_term_collection_design` into a
-    // single `A β ≥ b` polytope in the saved coefficient coordinate system, so
-    // one truncated-Gaussian sampler covers them uniformly. Like `bounded()`,
+    // (#1509). The rebuilt term collection identifies this model class; the
+    // sampler itself consumes the exact `A β ≥ b`, mode, and ambient centre
+    // persisted by the fit rather than re-deriving posterior identity from the
+    // rebuilt design. Like `bounded()`,
     // this must precede the Gaussian-identity shortcut so a constrained
     // Gaussian model is sampled inside its feasible region rather than from the
     // boundary-centred unconstrained Gaussian.
-    if let Some(constraints) = design
+    if design
         .linear_constraints
         .as_ref()
-        .filter(|c| c.a.nrows() > 0)
+        .is_some_and(|constraints| constraints.a.nrows() > 0)
     {
-        return sample_standard_truncated(model, cfg, constraints, &design.design);
+        return sample_standard_truncated(model, cfg);
     }
 
     // (3) unconstrained Gaussian identity — saved closed-form Laplace posterior.
@@ -1049,8 +1060,6 @@ fn sample_standard_bounded(
 fn sample_standard_truncated(
     model: &SavedModel,
     cfg: &NutsConfig,
-    constraints: &gam_solve::pirls::LinearInequalityConstraints,
-    design: &gam_linalg::matrix::DesignMatrix,
 ) -> Result<NutsResult, String> {
     validate_nuts_config(cfg).map_err(String::from)?;
     let fit = fit_result_from_saved_model_for_prediction(model)?;
@@ -1076,58 +1085,12 @@ fn sample_standard_truncated(
     let sqrt_cov_scale =
         sampling_sqrt_covariance_scale(&fit, "standard constrained-coefficient posterior")?;
 
-    // Recover the UNCONSTRAINED Gaussian center of the local quadratic (#2245
-    // finding 20). A Gaussian truncated to the polytope stays centred at its
-    // pre-truncation mean `H⁻¹X′Wz`; the boundary KKT mode is not that mean.
-    // With every constraint strictly inactive at the mode the KKT gradient is
-    // zero and the two coincide, so the geometry solve is only required when a
-    // constraint is active.
-    let mode_scale = mode.iter().map(|v| v.abs()).fold(1.0_f64, f64::max);
-    let min_slack = (constraints.a.dot(&mode) - &constraints.b)
-        .iter()
-        .cloned()
-        .fold(f64::INFINITY, f64::min);
-    let center = if min_slack > 1e-8 * mode_scale {
-        mode.clone()
-    } else {
-        let geometry = fit.geometry.as_ref().ok_or_else(|| {
-            "standard constrained-coefficient posterior: an inequality constraint is active at \
-             the mode but the saved model carries no working geometry to recover the \
-             unconstrained Gaussian center; refit with exact geometry export"
-                .to_string()
-        })?;
-        let working = geometry.working.as_ref().ok_or_else(|| {
-            "standard constrained-coefficient posterior: an inequality constraint is active at \
-             the mode but the saved coefficient geometry has no owned single-diagonal working \
-             evidence; Exact-Newton and multi-parameter fits cannot reconstruct the \
-             unconstrained Gaussian center from row geometry"
-                .to_string()
-        })?;
-        let n = design.nrows();
-        if working.weights.len() != n || working.response.len() != n {
-            return Err(format!(
-                "standard constrained-coefficient posterior: saved working geometry has {} rows \
-                 but the rebuilt design has {n}",
-                working.weights.len(),
-            ));
-        }
-        let wz = &working.weights * &working.response;
-        let rhs = design.transpose_vector_multiply(&wz);
-        let chol = penalized_hessian.cholesky(Side::Lower).map_err(|e| {
-            format!(
-                "standard constrained-coefficient posterior: Cholesky of the penalised Hessian \
-                 failed while recovering the unconstrained center: {e:?}"
-            )
-        })?;
-        gam_linalg::triangular::cholesky_solve_vector(&chol.lower_triangular(), &rhs)
-    };
-
     let samples = crate::truncated_gaussian::sample_truncated_gaussian_posterior(
         &center,
         &mode,
         &penalized_hessian,
         sqrt_cov_scale,
-        constraints,
+        &constrained.constraints,
         cfg.n_samples,
         cfg.n_chains,
         chain_stream_seed(cfg.seed, 0, 0x7290_C047_5D6E_B14Du64),

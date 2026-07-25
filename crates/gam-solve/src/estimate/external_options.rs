@@ -34,6 +34,7 @@ pub struct ExternalOptimResult {
     pub max_abs_eta: f64,
     pub constraint_kkt: Option<crate::pirls::ConstraintKktDiagnostics>,
     pub artifacts: FitArtifacts,
+    pub geometry: Option<FitGeometry>,
     pub inference: Option<FitInference>,
     /// Complete REML/LAML objective value used for smoothing selection.
     pub reml_score: f64,

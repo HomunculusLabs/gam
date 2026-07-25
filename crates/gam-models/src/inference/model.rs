@@ -5941,6 +5941,7 @@ mod tests {
         fit.geometry = Some(gam_solve::estimate::FitGeometry {
             coefficient_gauge: gam_problem::gauge::Gauge::identity(&[1]),
             penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(array![[2.0]]),
+            constrained_posterior: None,
             working: None,
         });
 
@@ -5961,6 +5962,7 @@ mod tests {
         fit.geometry = Some(gam_solve::estimate::FitGeometry {
             coefficient_gauge: gam_problem::gauge::Gauge::from_block_transforms(&[array![[2.0]]]),
             penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(array![[2.0]]),
+            constrained_posterior: None,
             working: None,
         });
 

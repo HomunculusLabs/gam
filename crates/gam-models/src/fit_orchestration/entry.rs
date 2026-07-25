@@ -680,6 +680,7 @@ fn constant_gaussian_standard_fit(
     let geometry = Some(gam_solve::estimate::FitGeometry {
         coefficient_gauge: gam_problem::gauge::Gauge::identity(&[beta.len()]),
         penalized_hessian: penalized_hessian_precision,
+        constrained_posterior: None,
         working: Some(gam_solve::estimate::WorkingGeometry {
             weights,
             response: working_response,

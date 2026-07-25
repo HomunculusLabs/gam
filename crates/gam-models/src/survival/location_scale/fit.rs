@@ -64,6 +64,7 @@ pub(crate) fn fit_reduced_parametric_aft(
                 .collect::<Vec<_>>(),
         ),
         penalized_hessian: h.into(),
+        constrained_posterior: None,
         working: None,
     });
 

@@ -920,6 +920,7 @@ pub(crate) fn finalize_survival_location_scale_fit(
             Ok::<_, String>(FitGeometry {
                 coefficient_gauge,
                 penalized_hessian: geom.penalized_hessian.clone(),
+                constrained_posterior: geom.constrained_posterior.clone(),
                 working: geom.working.clone(),
             })
         })

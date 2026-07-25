@@ -272,9 +272,15 @@ fn conditional_prediction_backend<'a>(
         // and shrink every SE by `√φ̂` (#679). For `φ ≡ 1` families
         // (Binomial / Poisson) this collapses to the original behavior.
         let scale = fit.coefficient_covariance_scale()?;
-        match PredictionCovarianceBackend::from_factorized_hessian_scaled(
+        let constrained_correction = fit
+            .geometry
+            .as_ref()
+            .and_then(|geometry| geometry.constrained_posterior.as_ref())
+            .and_then(|posterior| posterior.correction.as_ref());
+        match PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
             SymmetricMatrix::Dense(hessian.clone()),
             scale,
+            constrained_correction,
         ) {
             Ok(backend) => return Ok(Some(backend)),
             Err(err) => {

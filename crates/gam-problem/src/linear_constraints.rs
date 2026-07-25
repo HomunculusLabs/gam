@@ -1,6 +1,7 @@
 use ndarray::{Array1, Array2};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinearInequalityConstraints {
     pub a: Array2<f64>,
     pub b: Array1<f64>,

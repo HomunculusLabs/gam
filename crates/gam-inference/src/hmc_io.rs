@@ -1578,6 +1578,7 @@ mod tests {
             Some(FitGeometry {
                 coefficient_gauge: gam_problem::Gauge::identity(&[1, 1]),
                 penalized_hessian: hessian.clone().into(),
+                constrained_posterior: None,
                 working: None,
             }),
         );

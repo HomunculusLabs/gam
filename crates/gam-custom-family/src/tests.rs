@@ -107,6 +107,7 @@ pub(crate) fn blockwise_fit_from_parts_accepts_stacked_solver_eta_with_canonical
             geometry: Some(FitGeometry {
                 coefficient_gauge: gam_problem::gauge::Gauge::identity(&[1]),
                 penalized_hessian: Array2::eye(1).into(),
+                constrained_posterior: None,
                 working: Some(WorkingGeometry {
                     weights: Array1::ones(2),
                     response: Array1::zeros(2),
@@ -146,6 +147,7 @@ pub(crate) fn custom_family_geometry_keeps_active_precision_under_rectangular_ra
     let geometry = FitGeometry {
         coefficient_gauge: Gauge::identity(&[2]),
         penalized_hessian: active_hessian.clone().into(),
+        constrained_posterior: None,
         working: Some(WorkingGeometry {
             weights: array![1.0],
             response: array![0.0],
