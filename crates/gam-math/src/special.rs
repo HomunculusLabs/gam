@@ -109,7 +109,7 @@ const BESSEL_SERIES_MAX_TERMS: usize = 128;
 /// is used at; the cap also keeps the coefficient recurrence itself in range.
 const BESSEL_ASYMPTOTIC_MAX_TERMS: usize = 64;
 
-/// Ascending power series `(I0(x) − 1, I1(x))` for finite `x ≥ 0`.
+/// Ascending power series `(I0(x) − 1, I1(x), I0(x) − I1(x))` for finite `x ≥ 0`.
 ///
 /// `I0(x) = Σ_k (x/2)^{2k}/(k!)²` and `I1(x) = (x/2)·Σ_k (x/2)^{2k}/(k!(k+1)!)`,
 /// both carried by the ratio recurrence rather than by separate factorials.
@@ -119,24 +119,66 @@ const BESSEL_ASYMPTOTIC_MAX_TERMS: usize = 64;
 /// `I0 − 1` is returned instead of `I0` so the caller can take `ln_1p`: as
 /// `x → 0` the wanted `log I0(x) ≈ x²/4` falls below the resolution of
 /// `1 + x²/4`, and forming `I0` first would round it away entirely.
-fn bessel_ascending_series(ax: f64) -> (f64, f64) {
+///
+/// `I0 − I1` is returned as a sum in its OWN right, for the same reason the
+/// large-argument branch carries its `N = Σ (b_k − c_k) x^{−(k−1)}`: the caller
+/// wants `d1 = x(I1/I0 − 1) = −x·(I0 − I1)/I0`, and `I0 − I1 ≈ I0/(2x)` is
+/// smaller than either sum by the whole factor `2x`, so forming it by
+/// subtracting the two finished sums throws away `log₂(2x)` bits — five of them
+/// by the top of this branch's range. Writing `z = x/2`, the two series share a
+/// term ratio, `u_k/t_k = z/(k+1)` with `t_k = z^{2k}/(k!)²`, so the difference
+/// is summed directly as
+///
+/// `I0 − I1 = Σ_k t_k·(1 − z/(k+1)) = Σ_k t_k·(k+1−z)/(k+1)`.
+///
+/// That sum does change sign, at `k+1 = z`, so it is not cancellation-free the
+/// way `I0` and `I1` individually are; but its terms are damped by the very
+/// factor that vanishes there, and its condition number `Σ|terms|/|Σ terms|`
+/// grows only like `√x` — 6.8 at `x = 20`, against the 40 of the naive
+/// difference. Pairing termwise is what turns those five lost bits into three.
+fn bessel_ascending_series(ax: f64) -> BesselAscending {
     let half = 0.5 * ax;
     let quarter_square = half * half;
     let mut term_i0 = 1.0_f64;
     let mut i0_minus_one = 0.0_f64;
     let mut term_i1 = 1.0_f64;
     let mut sum_i1 = 1.0_f64;
+    // `k = 0`: `t_0 = 1` and the pairing factor is `(0+1−z)/(0+1)`.
+    let mut i0_minus_i1 = 1.0 - half;
     for k in 1..=BESSEL_SERIES_MAX_TERMS {
         let kf = k as f64;
         term_i0 *= quarter_square / (kf * kf);
         term_i1 *= quarter_square / (kf * (kf + 1.0));
         i0_minus_one += term_i0;
         sum_i1 += term_i1;
-        if term_i0 <= f64::EPSILON * (1.0 + i0_minus_one) && term_i1 <= f64::EPSILON * sum_i1 {
+        i0_minus_i1 += term_i0 * (kf + 1.0 - half) / (kf + 1.0);
+        // The difference sum sets the stopping rule, because it is the smallest
+        // of the three: cutting off at `ε·I0` would leave IT with a relative
+        // error of `2x·ε`, which is exactly the error this pairing exists to
+        // remove. Past the peak the terms fall factorially, so demanding the
+        // extra `log₂(2x)` bits costs only a couple of iterations.
+        if term_i0 <= f64::EPSILON * i0_minus_i1.abs()
+            && term_i0 <= f64::EPSILON * (1.0 + i0_minus_one)
+            && term_i1 <= f64::EPSILON * sum_i1
+        {
             break;
         }
     }
-    (i0_minus_one, half * sum_i1)
+    BesselAscending {
+        i0_minus_one,
+        i1: half * sum_i1,
+        i0_minus_i1,
+    }
+}
+
+/// The three ascending-series sums, each accumulated in its own right.
+struct BesselAscending {
+    /// `I0(x) − 1`.
+    i0_minus_one: f64,
+    /// `I1(x)`.
+    i1: f64,
+    /// `I0(x) − I1(x)`, summed termwise rather than by subtracting the two.
+    i0_minus_i1: f64,
 }
 
 /// One evaluation of the large-argument (Hankel) asymptotic expansions of `I0`
@@ -241,9 +283,19 @@ pub fn bessel_i0_centered_terms(eta: f64) -> (f64, f64, f64) {
         return (f64::NEG_INFINITY, 1.0, -0.5);
     }
     if ax < BESSEL_ASYMPTOTIC_THRESHOLD {
-        let (i0_minus_one, i1) = bessel_ascending_series(ax);
-        let ratio = i1 / (1.0 + i0_minus_one);
-        return (i0_minus_one.ln_1p() - ax, ratio, ax * (ratio - 1.0));
+        let series = bessel_ascending_series(ax);
+        let i0 = 1.0 + series.i0_minus_one;
+        // `d1 = x(I1/I0 − 1) = −x·(I0 − I1)/I0`, taken from the difference the
+        // series accumulated itself. Forming `ax * (ratio - 1.0)` here instead
+        // would reintroduce the very `2x` cancellation the large-argument branch
+        // is careful to avoid, and would leave a visible accuracy seam at the
+        // crossover: `1 − ratio` is `0.025` at `x = 20`, so a correctly rounded
+        // `ratio` still pins `d1` no tighter than `4e−15`.
+        return (
+            series.i0_minus_one.ln_1p() - ax,
+            series.i1 / i0,
+            -ax * (series.i0_minus_i1 / i0),
+        );
     }
     let series = bessel_asymptotic_series(ax);
     (
@@ -843,13 +895,24 @@ mod tests {
 
         // Sized from the arithmetic, not from the outcome. The value and ratio
         // are read off sums that cannot cancel, so they land within a few ulp.
-        // `d1` inherits `1/(1 − I1/I0)` ≈ 40x amplification at the top of the
-        // ascending-series branch. The curvature inherits a further ≈ 2η from
-        // `d1`'s ABSOLUTE error there, which peaks just under the crossover.
+        // `d1` now shares that footing on BOTH branches: each reads it off a
+        // difference series accumulated in its own right — `N/S0` above the
+        // crossover, `−x(I0−I1)/I0` below it — rather than by subtracting the
+        // ratio from one. The ascending difference series does have a sign
+        // change, so it carries a condition number, but that grows only like
+        // `√x` (6.8 at the crossover) instead of the `1/(1 − I1/I0)` ≈ 40 of the
+        // naive form: tens of ulp, not thousands.
+        //
+        // The curvature is the one term still amplified, inheriting ≈ 2η from
+        // `d1`'s ABSOLUTE error — `40 · 1e−15 / 0.007 ≈ 6e−12` just under the
+        // crossover, where `c''` is smallest and `η` already large. That is
+        // intrinsic to reaching `c''` through a `d1` held in one f64: `q = d1+½`
+        // is `−0.0066` there, so even a correctly rounded `d1` pins `q` no
+        // tighter than `ulp(½)/0.0066 ≈ 1.7e−14` relative.
         const CENTERED_TOL: f64 = 4.0e-15;
         const RATIO_TOL: f64 = 4.0e-15;
-        const D1_TOL: f64 = 1.0e-13;
-        const CURVATURE_TOL: f64 = 1.0e-10;
+        const D1_TOL: f64 = 4.0e-15;
+        const CURVATURE_TOL: f64 = 2.0e-11;
 
         for [eta, want_centered, want_ratio, want_d1, want_curvature] in REFERENCE {
             let (centered, ratio, d1) = bessel_i0_centered_terms(eta);
@@ -875,10 +938,14 @@ mod tests {
     }
 
     /// The three returned terms are computed from DIFFERENT representations on
-    /// the asymptotic branch — `ratio` from `S1/S0`, `d1` from the symbolically
-    /// pre-cancelled difference series — so their defining relations are a real
-    /// cross-check there, not a tautology. Both must hold to within the
-    /// cancellation the naive form suffers and the pre-cancelled one avoids.
+    /// BOTH branches — `ratio` from `S1/S0` or `I1/I0`, `d1` from the difference
+    /// series each branch accumulates in its own right — so their defining
+    /// relations are a real cross-check everywhere, not a tautology. (On the
+    /// ascending branch it once WAS a tautology: `d1` was literally
+    /// `η·(ratio − 1)`, so this assertion held by construction and the
+    /// cancellation it is meant to detect went unmeasured.) Both must hold to
+    /// within the cancellation the naive form suffers and the pre-cancelled one
+    /// avoids.
     #[test]
     fn bessel_centered_terms_satisfy_their_defining_relations() {
         for eta in [
