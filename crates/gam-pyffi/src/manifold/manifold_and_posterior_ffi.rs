@@ -4471,19 +4471,24 @@ fn compute_null_space_metadata(
     };
     let p = m;
 
-    // #757: A smooth-free model (`y ~ x1 + x2`, any family) carries no penalty
-    // blocks, so the assembled penalty is identically zero and its "null space"
-    // is the entire coefficient space. This metadata is the Tierney-Kadane /
-    // topology normalizer `log|Nᵀ H N|` over the *penalty* null space — a
-    // quantity that only discriminates among penalized-smooth topologies and is
-    // vacuous for a fully-parametric GLM (there is no penalized prior to
-    // Laplace-integrate; a REML restricted-likelihood already carries the
-    // fixed-effect `log|XᵀWX|` term). With an all-zero penalty the code below
-    // would Cholesky-factor the full Hessian in a basis that does not round-trip
-    // for the rank-zero penalty, which rejected every smooth-free fit from the
+    // #757: A model with NO penalty block at all (an intercept-only fit, or one
+    // whose every linear term was declared `double_penalty=false`) assembles an
+    // identically-zero penalty whose "null space" is the entire coefficient
+    // space. This metadata is the Tierney-Kadane / topology normalizer
+    // `log|Nᵀ H N|` over the *penalty* null space — a quantity that prices the
+    // flat directions of the penalized prior and is vacuous when there is no
+    // such prior to Laplace-integrate (a REML restricted-likelihood already
+    // carries the fixed-effect `log|XᵀWX|` term). With an all-zero penalty the
+    // code below would Cholesky-factor the full Hessian in a basis that does not
+    // round-trip for the rank-zero penalty, which rejected such fits from the
     // Python payload path even though the fit converged and the CLI (which never
     // computes this) accepts it. Treat "no penalty" as "no null-space
     // normalizer", consistent with the full-penalty-rank (`q == 0`) branch below.
+    //
+    // This is NOT the same test as "smooth-free": a formula linear term is
+    // penalized by default (its `LinearTermRidge`), so `y ~ x` reaches the code
+    // below with a rank-1 penalty and a one-dimensional null space — the
+    // intercept — and correctly earns a non-zero normalizer.
     if design.penalties.is_empty() {
         return Ok((0, 0.0));
     }
