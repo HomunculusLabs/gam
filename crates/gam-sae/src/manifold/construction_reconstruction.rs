@@ -8,15 +8,61 @@
 
 use super::*;
 
+/// Upper bound on the largest eigenvalue of any per-row undamped coordinate
+/// block, from the Cholesky factors the cache already carries.
+///
+/// `λ_max(A_i) = ‖A_i‖₂ ≤ ‖A_i‖_F = ‖L_i L_iᵀ‖_F ≤ ‖L_i‖_F²`, using
+/// `‖XY‖_F ≤ ‖X‖₂‖Y‖_F ≤ ‖X‖_F‖Y‖_F`. This is the assembly scale of the
+/// blocks whose inverse diagonal the ARD trace reads, and therefore the scale
+/// at which that trace's forward error lives.
+pub(super) fn undamped_row_curvature_scale(cache: &ArrowFactorCache) -> f64 {
+    let mut scale = 0.0_f64;
+    for row in 0..cache.undamped_factor_count() {
+        let factor = cache.undamped_factor(row);
+        let frobenius_squared: f64 = factor.iter().map(|entry| entry * entry).sum();
+        scale = scale.max(frobenius_squared);
+    }
+    scale
+}
+
+/// Forward-error constant for the ARD trace. Matches the constant the interval
+/// certificate has always used; the change below is the SCALE it multiplies,
+/// not its size.
+const ARD_EDF_FORWARD_ERROR_FACTOR: f64 = 64.0;
+
 /// Certify the ARD identity
 /// `edf = n_active - alpha * tr(H^-1)` against its exact `[0, n_active]`
 /// interval.  A tiny excursion at the forward-error scale of the accumulated
 /// trace is snapped to the boundary; a material excursion is a failed trace
 /// certificate, not an EDF that may be silently projected into another model.
+///
+/// # Why the tolerance carries the block's conditioning
+///
+/// The interval is exact for `H = C + αI` with data curvature `C ⪰ 0`: then
+/// `H ⪰ αI`, so every slot has `α·[H⁻¹]_ss ≤ 1` and the sum lands in
+/// `[0, n_active]`. The certificate is therefore asking whether the ASSEMBLED
+/// curvature is PSD, and it must tell a state whose curvature is genuinely
+/// indefinite from one whose curvature is zero on this axis and whose assembled
+/// copy carries a roundoff-scale negative eigenvalue.
+///
+/// For `Ĥ = H + E`,
+/// `|α·tr(Ĥ⁻¹) − α·tr(H⁻¹)| ≤ α‖E‖₂·tr(H⁻²) ≤ (‖E‖₂/λ_min(H))·α·tr(H⁻¹)`,
+/// and `λ_min(H) ≥ α`, so with `‖E‖₂ ≤ c·ε·‖H‖₂` the excursion is bounded by
+/// `c·ε·(‖H‖₂/α)·shrinkage`. The factor `‖H‖₂/α` is the block's conditioning,
+/// and it is exactly what a tolerance written against `n_active + shrinkage`
+/// omits: on a `d`-dimensional axis pinned at the prior, `shrinkage = n_active`
+/// identically, so that form measures the answer's magnitude rather than the
+/// accuracy with which it was reached. Measured on the shared two-atom fixture
+/// it was short by ~700x (excursion `1.97e-9` against a `2.84e-12` bound) at a
+/// state where the exact EDF is zero, which refused an ordinary dispersion.
+/// A genuinely indefinite state on the same fixture missed the interval by
+/// `17.3` on `n_active = 10` — ten orders of magnitude clear of either bound,
+/// so the conditioning factor costs the certificate no discrimination.
 pub(super) fn certified_ard_axis_edf(
     n_active: f64,
     alpha: f64,
     inverse_trace: f64,
+    curvature_scale: f64,
     atom: usize,
     axis: usize,
 ) -> Result<f64, String> {
@@ -40,15 +86,25 @@ pub(super) fn certified_ard_axis_edf(
              {atom}, axis {axis} (n_active={n_active}, alpha={alpha}, trace={inverse_trace})"
         ));
     }
-    let tolerance = 64.0
-        * n_active.max(1.0)
+    if !(curvature_scale.is_finite() && curvature_scale >= 0.0) {
+        return Err(format!(
+            "reconstruction_dispersion: ARD curvature scale at atom {atom}, axis {axis} \
+             must be finite and non-negative; got {curvature_scale}"
+        ));
+    }
+    // `‖H‖₂/α ≥ 1` always, since `H ⪰ αI`; a scale that says otherwise is a
+    // block whose largest eigenvalue is the prior itself.
+    let conditioning = (curvature_scale / alpha).max(1.0);
+    let tolerance = ARD_EDF_FORWARD_ERROR_FACTOR
         * f64::EPSILON
-        * (n_active.abs() + shrinkage.abs()).max(f64::MIN_POSITIVE);
+        * conditioning
+        * shrinkage.abs().max(n_active).max(1.0);
     if raw < -tolerance || raw > n_active + tolerance {
         return Err(format!(
             "reconstruction_dispersion: ARD EDF at atom {atom}, axis {axis} is \
              {raw:.6e}, outside certified [0, {n_active}] (roundoff tolerance \
-             {tolerance:.6e}; alpha={alpha:.6e}, trace={inverse_trace:.6e})"
+             {tolerance:.6e} at conditioning {conditioning:.6e}; alpha={alpha:.6e}, \
+             trace={inverse_trace:.6e})"
         ));
     }
     Ok(raw.clamp(0.0, n_active))
@@ -99,15 +155,66 @@ mod ard_edf_certificate_tests {
     fn snaps_only_trace_roundoff_at_the_ard_edf_faces() {
         let n = 8.0;
         let tiny = 8.0 * f64::EPSILON;
-        assert_eq!(certified_ard_axis_edf(n, 1.0, -tiny, 0, 0).unwrap(), n);
-        assert_eq!(certified_ard_axis_edf(n, 1.0, n + tiny, 0, 0).unwrap(), 0.0);
+        assert_eq!(certified_ard_axis_edf(n, 1.0, -tiny, 1.0, 0, 0).unwrap(), n);
+        assert_eq!(
+            certified_ard_axis_edf(n, 1.0, n + tiny, 1.0, 0, 0).unwrap(),
+            0.0
+        );
     }
 
     #[test]
     fn refuses_material_or_nonfinite_ard_edf_excursions() {
         for trace in [-1.0e-8, 8.0 + 1.0e-8, f64::NAN, f64::INFINITY] {
-            assert!(certified_ard_axis_edf(8.0, 1.0, trace, 2, 3).is_err());
+            assert!(certified_ard_axis_edf(8.0, 1.0, trace, 1.0, 2, 3).is_err());
         }
+    }
+
+    /// The tolerance must track the block's conditioning `‖H‖₂/α`, not the
+    /// magnitude of the answer.
+    ///
+    /// The state below is the one measured on the shared two-atom fixture: an
+    /// ARD axis pinned at the prior, so the exact EDF is zero and the trace is
+    /// `n_active/α` exactly. Its assembled copy overshoots by `1.97e-9`, which
+    /// is `c·ε·(‖H‖₂/α)·shrinkage` for an assembly scale of order `10³` — an
+    /// ordinary state, not an indefinite one. A tolerance written against
+    /// `n_active + shrinkage` alone rejects it, so this pins the scale.
+    #[test]
+    fn ard_edf_tolerance_admits_pinned_axis_roundoff_and_still_refuses_a_saddle() {
+        let n_active = 10.0_f64;
+        let alpha = 2.478752e-3_f64;
+        let pinned_trace = n_active / alpha;
+        // The measured excursion, expressed back in trace units.
+        let overshoot = 1.973920e-9 / alpha;
+        let curvature_scale = 1.0e3;
+        assert_eq!(
+            certified_ard_axis_edf(
+                n_active,
+                alpha,
+                pinned_trace + overshoot,
+                curvature_scale,
+                1,
+                0
+            )
+            .unwrap(),
+            0.0,
+            "a pinned ARD axis whose assembled trace overshoots at the block's \
+             own forward-error scale is EDF zero, not a failed certificate"
+        );
+        // The same fixture's genuinely indefinite state: `α·tr = 27.3` against
+        // `n_active = 10`. Ten orders of magnitude clear of the bound above.
+        let saddle_trace = 27.27_f64 / alpha;
+        assert!(
+            certified_ard_axis_edf(n_active, alpha, saddle_trace, curvature_scale, 1, 0).is_err(),
+            "coordinate curvature far below the prior is an indefinite block; the \
+             conditioning factor must not launder it"
+        );
+        // Conditioning cannot buy an arbitrary excursion: a scale large enough
+        // to admit the saddle is not one this certificate ever sees, but the
+        // bound must still be the derived product rather than a free pass.
+        assert!(
+            certified_ard_axis_edf(n_active, alpha, pinned_trace + overshoot, 0.0, 1, 0).is_err(),
+            "at unit conditioning the pinned-axis overshoot is far outside the bound"
+        );
     }
 
     #[test]
@@ -358,6 +465,10 @@ impl SaeManifoldTerm {
         let traces = self
             .ard_inverse_traces(cache)
             .map_err(|e| format!("reconstruction_dispersion: ARD traces: {e}"))?;
+        // The scale at which those traces' forward error lives (see
+        // `certified_ard_axis_edf`). One pass over factors the cache already
+        // holds.
+        let curvature_scale = undamped_row_curvature_scale(cache);
         let mut coord_edf = 0.0_f64;
         for (k, atom) in self.atoms.iter().enumerate() {
             let d_k = atom.latent_dim();
@@ -387,7 +498,7 @@ impl SaeManifoldTerm {
                 let edf_kj = if stochastic_ard_trace {
                     projected_hutchinson_ard_axis_edf(n_active_k, alpha, traces[k][j], k, j)?
                 } else {
-                    certified_ard_axis_edf(n_active_k, alpha, traces[k][j], k, j)?
+                    certified_ard_axis_edf(n_active_k, alpha, traces[k][j], curvature_scale, k, j)?
                 };
                 coord_edf += edf_kj;
             }

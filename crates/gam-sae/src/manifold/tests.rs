@@ -3234,6 +3234,7 @@ pub(crate) fn reconstruction_dispersion_uses_ard_shrunk_coordinate_edf() {
         n as f64,
         alpha,
         traces[0][0],
+        super::construction_reconstruction::undamped_row_curvature_scale(&cache),
         0,
         0,
     )

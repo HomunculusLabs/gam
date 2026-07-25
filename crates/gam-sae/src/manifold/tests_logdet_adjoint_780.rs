@@ -2164,7 +2164,7 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
 /// gate is only defined where no row deflates; a stronger assignment penalty
 /// conditions the over-parametrized chart out of the deflating regime, so the
 /// ladder climbs.
-const UNDEFLATED_SPARSE_LIFTS: [f64; 6] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
+const UNDEFLATED_SPARSE_LIFTS: [f64; 9] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
 
 /// The ordered Beta--Bernoulli majorizer is row-local, so the full-basis probe
 /// bundle must reproduce the dense theta adjoint exactly.
