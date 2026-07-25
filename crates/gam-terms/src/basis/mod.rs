@@ -40,6 +40,7 @@ mod duchon_psi_derivatives;
 mod duchon_thinplate;
 mod implicit_psi_derivative;
 pub mod input_loc_derivatives;
+mod invariant_tie_break;
 mod internal;
 pub mod matern_gradient;
 mod matern_kernel;

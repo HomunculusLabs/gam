@@ -1,5 +1,7 @@
 use super::*;
 
+use super::invariant_tie_break::resolve_sorted_profile_tie;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ConstraintNullspaceCacheKey {
     pub(crate) centersrows: usize,
@@ -853,80 +855,18 @@ fn spherical_center_dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// The sorted intrinsic distance profile of one spherical data row: the multiset
-/// `{uᵢ·u_j : j}` in ascending total order. Rows related by a rotation that maps
-/// the point cloud to itself have the SAME profile, which is what makes it a
-/// legal tie-break key — it depends on neither the frame nor the row order.
-///
-/// Building one costs `O(n log n)`, which is why the selector never uses it as a
-/// running-incumbent comparator. It minimizes the two `O(1)` keys first and only
-/// then builds a profile — one per row still tied at the extremum, reused for
-/// both the choice and the tie-class filter (see
-/// [`resolve_spherical_profile_tie`]).
-fn spherical_dot_profile(units: &[[f64; 3]], i: usize) -> Vec<f64> {
-    use rayon::prelude::*;
-    // `total_cmp` is a total order and the elements are plain values, so an
-    // unstable parallel sort produces the identical sequence a sequential
-    // `sort_by` would; only the order of equal-comparing bit patterns could
-    // differ, and equal bit patterns are indistinguishable to every consumer.
-    let anchor = units[i];
-    let mut profile: Vec<f64> = units
-        .par_iter()
-        .map(|u| spherical_center_dot(&anchor, u))
-        .collect();
-    profile.par_sort_by(f64::total_cmp);
-    profile
-}
-
-/// [`spherical_dot_profile`] with the pool spent on the CANDIDATES instead of on
-/// one profile's rows. Bit-identical to the parallel form: the mapped sequence is
-/// index-ordered either way, and sorting `f64` by `total_cmp` can only permute
-/// identical bit patterns.
-fn spherical_dot_profile_serial(units: &[[f64; 3]], i: usize) -> Vec<f64> {
-    let anchor = units[i];
-    let mut profile: Vec<f64> = units
-        .iter()
-        .map(|u| spherical_center_dot(&anchor, u))
-        .collect();
-    profile.sort_by(f64::total_cmp);
-    profile
-}
-
-/// Lexicographic order on two sorted dot profiles. `Equal` means the unordered
-/// geometry cannot distinguish the two rows: choosing one by row index would
-/// violate permutation invariance, so the selector must treat their whole class
-/// atomically.
-fn spherical_dot_profile_cmp(a: &[f64], b: &[f64]) -> std::cmp::Ordering {
-    for (x, y) in a.iter().zip(b.iter()) {
-        let ordering = x.total_cmp(y);
-        if !ordering.is_eq() {
-            return ordering;
-        }
-    }
-    std::cmp::Ordering::Equal
-}
-
 /// Reduce a candidate list that is already tied on every `O(1)` invariant key to
-/// the sub-list attaining the lexicographically LEAST sorted dot profile, in
-/// ascending row order.
+/// the sub-list attaining the lexicographically least sorted **dot** profile —
+/// the multiset `{uᵢ·u_j : j}` of one row against the whole cloud, in ascending
+/// total order. Rows related by a rotation that maps the point cloud to itself
+/// have the SAME profile, which is what makes it a legal tie-break key: it
+/// depends on neither the frame nor the row order.
 ///
-/// This is the whole of the profile key's cost, and it is charged only where the
-/// key can still change the answer. A lone candidate is already the extremum of
-/// any refinement, so it needs no profile at all — which is the common case on
-/// data with no exact symmetry, and the reason center selection no longer pays
-/// `O(n log n)` per outer iteration (#2420).
-///
-/// Equivalence to a running-incumbent scan over the composite key: lexicographic
-/// minimization is associative, so minimizing `(cheap…, profile)` in one pass is
-/// the same as minimizing the cheap prefix and then minimizing `profile` over the
-/// rows that attain it. Every row this returns has a profile bit-identical to
-/// every other, so which one a caller treats as the representative cannot change
-/// any subsequent key comparison.
-///
-/// `on_profile_builds` observes the number of `O(n log n)` profiles this actually
-/// constructs. The production caller passes a zero-sized no-op closure that
-/// optimizes away; tests use the same path to state the asymptotic contract in
-/// operation counts rather than wall-clock noise.
+/// The tie-break machinery itself — extremum-then-refine, one `O(n log n)`
+/// profile per candidate serving both the choice and the class filter, none at
+/// all for a lone candidate — is shared with the Euclidean twin
+/// ([`select_thin_plate_knots`]) in [`crate::basis::invariant_tie_break`]. Only
+/// the pairwise scalar differs: a dot product here, a squared distance there.
 fn resolve_spherical_profile_tie<F>(
     units: &[[f64; 3]],
     tied: &[usize],
@@ -935,34 +875,12 @@ fn resolve_spherical_profile_tie<F>(
 where
     F: FnMut(usize),
 {
-    use rayon::prelude::*;
-    if tied.len() <= 1 {
-        return tied.to_vec();
-    }
-    on_profile_builds(tied.len());
-    // Spend the pool on whichever axis actually has work: across candidates once
-    // there are enough of them to fill the pool, otherwise across each profile's
-    // rows. Both forms produce bit-identical profiles, so this is a scheduling
-    // choice only.
-    let profiles: Vec<Vec<f64>> = if tied.len() >= rayon::current_num_threads() {
-        tied.par_iter()
-            .map(|&i| spherical_dot_profile_serial(units, i))
-            .collect()
-    } else {
-        tied.iter()
-            .map(|&i| spherical_dot_profile(units, i))
-            .collect()
-    };
-    let mut least = 0usize;
-    for candidate in 1..profiles.len() {
-        if spherical_dot_profile_cmp(&profiles[candidate], &profiles[least]).is_lt() {
-            least = candidate;
-        }
-    }
-    (0..tied.len())
-        .filter(|&k| spherical_dot_profile_cmp(&profiles[k], &profiles[least]).is_eq())
-        .map(|k| tied[k])
-        .collect()
+    resolve_sorted_profile_tie(
+        units.len(),
+        tied,
+        |anchor, row| spherical_center_dot(&units[anchor], &units[row]),
+        on_profile_builds,
+    )
 }
 
 /// Remove coincident directions from one invariant tie class without choosing

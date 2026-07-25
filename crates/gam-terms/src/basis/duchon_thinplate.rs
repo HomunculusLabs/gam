@@ -1,5 +1,7 @@
 use super::*;
 
+use super::invariant_tie_break::resolve_sorted_profile_tie;
+
 /// Cross-disease Duchon basis cache.
 ///
 /// The biobank workload fits many models (e.g. 17 diseases) over the SAME base
@@ -1320,10 +1322,44 @@ const KNOT_MAXIMIN_TIE_REL_TOL: f64 = 1e-9;
 /// Deterministically selects thin-plate knots via farthest-point sampling.
 ///
 /// This produces a space-filling subset without introducing RNG/state coupling.
+///
+/// Each step minimizes its composite key in extremum-then-refine order rather
+/// than by carrying a running incumbent: the two `O(1)` keys first, then — only
+/// over the rows that attain them, and only if there is more than one — the
+/// `O(n·d + n log n)` sorted support-distance profile. Lexicographic
+/// minimization is associative, so this is the same total preorder the incumbent
+/// scan applied; what changes is that the profile key is charged where it can
+/// still decide something instead of four times per outer iteration whether or
+/// not anything is tied. On data with no exact symmetry it is never built at all
+/// (#2420, Euclidean twin of the spherical selector's fix).
 pub fn select_thin_plate_knots(
     data: ArrayView2<f64>,
     num_knots: usize,
 ) -> Result<Array2<f64>, BasisError> {
+    let d = data.ncols();
+    let selected = select_thin_plate_knot_rows_with_observer(data, num_knots, |_| {})?;
+    let mut knots = Array2::<f64>::zeros((selected.len(), d));
+    for (r, &idx) in selected.iter().enumerate() {
+        knots.row_mut(r).assign(&data.row(idx));
+    }
+    Ok(knots)
+}
+
+/// [`select_thin_plate_knots`] as the row indices it selects, with an observer on
+/// the number of `O(n·d + n log n)` support-distance profiles the shared
+/// tie-break actually builds.
+///
+/// Production callers pass a zero-sized no-op that optimizes away; tests use the
+/// same production path to state the tie-break's cost contract in operation
+/// counts rather than in wall-clock noise.
+fn select_thin_plate_knot_rows_with_observer<F>(
+    data: ArrayView2<f64>,
+    num_knots: usize,
+    mut on_profile_builds: F,
+) -> Result<Vec<usize>, BasisError>
+where
+    F: FnMut(usize),
+{
     let n = data.nrows();
     let d = data.ncols();
     if d == 0 {
@@ -1419,31 +1455,27 @@ pub fn select_thin_plate_knots(
     // deterministically rather than refusing the fit (see the seed/loop notes).
     // Only coincident rows are collapsed, because they generate the same kernel
     // column.
-    let distance_profile_cmp = |i: usize, j: usize| -> std::cmp::Ordering {
-        let mut profile_i = Vec::with_capacity(n);
-        let mut profile_j = Vec::with_capacity(n);
-        for row in 0..n {
-            let mut d2_i = 0.0;
-            let mut d2_j = 0.0;
-            for c in 0..d {
-                let delta_i = data[[i, c]] - data[[row, c]];
-                let delta_j = data[[j, c]] - data[[row, c]];
-                d2_i += delta_i * delta_i;
-                d2_j += delta_j * delta_j;
-            }
-            profile_i.push(d2_i);
-            profile_j.push(d2_j);
+    // The profile's pairwise scalar: the squared Euclidean distance between two
+    // rows. It is a pure function of the unordered geometry, so the multiset it
+    // generates over the whole support survives both a rigid motion and a row
+    // permutation.
+    let pair_dist2 = |i: usize, j: usize| -> f64 {
+        let mut distance2 = 0.0;
+        for c in 0..d {
+            let delta = data[[i, c]] - data[[j, c]];
+            distance2 += delta * delta;
         }
-        profile_i.sort_by(|a, b| a.total_cmp(b));
-        profile_j.sort_by(|a, b| a.total_cmp(b));
-        for (&di, &dj) in profile_i.iter().zip(profile_j.iter()) {
-            match di.total_cmp(&dj) {
-                std::cmp::Ordering::Less => return std::cmp::Ordering::Less,
-                std::cmp::Ordering::Greater => return std::cmp::Ordering::Greater,
-                std::cmp::Ordering::Equal => {}
-            }
-        }
-        std::cmp::Ordering::Equal
+        distance2
+    };
+    // Reduce an already-`O(1)`-tied candidate list to the rows attaining the
+    // lexicographically least sorted support-distance profile. The `O(n log n)`
+    // key is built once per candidate and serves both the choice and the class
+    // filter; a lone candidate — the common case, and every case on data without
+    // an exact symmetry — builds none at all. See
+    // [`crate::basis::invariant_tie_break`] for why this is the same total
+    // preorder the two-profile comparator scan applied.
+    let resolve_profile_tie = |tied: &[usize], observer: &mut F| -> Vec<usize> {
+        resolve_sorted_profile_tie(n, tied, &pair_dist2, observer)
     };
 
     let distinct_orbit = |candidates: &[usize], already_selected: &[usize]| -> Vec<usize> {
@@ -1486,22 +1518,10 @@ pub fn select_thin_plate_knots(
         .iter()
         .copied()
         .fold(f64::INFINITY, f64::min);
-    let seed_idx = (0..n)
+    let seed_tied: Vec<usize> = (0..n)
         .filter(|&i| dist2_to_centroid[i] <= seed_min + tie_tol)
-        .reduce(|a, b| {
-            if distance_profile_cmp(a, b).is_lt() {
-                a
-            } else {
-                b
-            }
-        })
-        .unwrap_or(0);
-
-    let seed_class: Vec<usize> = (0..n)
-        .filter(|&i| {
-            dist2_to_centroid[i] <= seed_min + tie_tol && distance_profile_cmp(i, seed_idx).is_eq()
-        })
         .collect();
+    let seed_class = resolve_profile_tie(&seed_tied, &mut on_profile_builds);
     // When an indivisible symmetry orbit is larger than the entire knot budget,
     // no rule can pick an *equivariant* strict subset of it — the orbit's members
     // are interchangeable under the data's symmetry group (#2319). The previous
@@ -1583,19 +1603,10 @@ pub fn select_thin_plate_knots(
             .fold(f64::NEG_INFINITY, f64::max);
         candidates.retain(|&i| dist2_to_centroid[i] >= cand_max_centroid - tie_tol);
         // Tertiary invariant key: smallest support-distance profile. A tie
-        // after every intrinsic key is an indivisible symmetry orbit.
-        let next_idx = candidates
-            .iter()
-            .copied()
-            .reduce(|a, b| {
-                if distance_profile_cmp(a, b).is_lt() {
-                    a
-                } else {
-                    b
-                }
-            })
-            .expect("candidate set is non-empty");
-        candidates.retain(|&i| distance_profile_cmp(i, next_idx).is_eq());
+        // after every intrinsic key is an indivisible symmetry orbit. A single
+        // surviving candidate has already won every refinement of the keys it
+        // attained, so the profile is not built at all there.
+        let candidates = resolve_profile_tie(&candidates, &mut on_profile_builds);
         let remaining = num_knots - selected.len();
         // Cap an oversized indivisible orbit to the remaining budget rather than
         // refusing the fit (see the seed-orbit note above): take its lowest-row
@@ -1639,11 +1650,7 @@ pub fn select_thin_plate_knots(
         );
     }
 
-    let mut knots = Array2::<f64>::zeros((selected.len(), d));
-    for (r, &idx) in selected.iter().enumerate() {
-        knots.row_mut(r).assign(&data.row(idx));
-    }
-    Ok(knots)
+    Ok(selected)
 }
 
 #[inline(always)]
