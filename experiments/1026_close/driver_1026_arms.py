@@ -639,7 +639,14 @@ def fit_hybrid_curved_resume(
         assignment="topk", top_k=curved_k, n_iter=max_epochs,
         random_state=seed)
     print(f"[hybrid_rust] curved tier fit {time.perf_counter()-t1:.0f}s", flush=True)
-    curved_recon_te = np.asarray(curved.reconstruct(r_te), dtype=np.float32)
+    # `reconstruct` is an f64 native entry, and the residual here is f32 (an f32
+    # activation block minus an f32 flat reconstruction). Handing it the f32 array
+    # raises a bare `TypeError: 'ndarray' object is not an instance of 'ndarray'`
+    # — on the far side of the curved fit, i.e. at the end of a multi-hour stage.
+    curved_recon_te = np.asarray(
+        curved.reconstruct(np.ascontiguousarray(r_te, dtype=np.float64)),
+        dtype=np.float32,
+    )
     combined = flat_recon_te + curved_recon_te
     collect["flat_decoder"] = arrays["decoder"]
     collect["flat_held_out_indices"] = arrays["held_out_indices"]

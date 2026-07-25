@@ -143,43 +143,76 @@ def build_gam_flat(x_bits, *, fit, score_mode: str) -> FittedFeaturizer:
 # --------------------------------------------------------------------------- #
 # Curved blocks (native sae_manifold tier)                                    #
 # --------------------------------------------------------------------------- #
+def _atom_basis_plan(model, atom: int) -> tuple[str, int, int]:
+    """``(basis kind, harmonic count, basis width)`` of one fitted curved atom.
+
+    Read from the plan the fit actually publishes. A fitted ``ManifoldSAE``
+    exposes ``basis_kinds`` / ``basis_sizes`` / ``atom_dims``; it carries no
+    ``basis_specs``, ``_n_harmonics`` or ``_duchon_centers``, so reaching for
+    those (as the ``bench/synth_sae_*`` helpers still do) raises
+    ``AttributeError`` the moment a curved atom is scored — after the fit, which
+    is the most expensive possible place to discover it.
+
+    A periodic basis of width ``m`` evaluates to ``[1, cos, sin, cos2, sin2, …]``,
+    i.e. ``m = 2H + 1``, which pins ``H`` exactly. No other kind has a
+    width-to-harmonic identity available here, and a Duchon atom additionally
+    needs its stored centers, which the fit does not publish — so those refuse
+    rather than score against a basis that is not the fitted one, matching
+    ``_basis_values``' own discipline.
+    """
+    kind = str(model.basis_kinds[atom])
+    width = int(model.basis_sizes[atom])
+    if kind != "periodic":
+        raise ValueError(
+            f"atom {atom} has basis kind {kind!r}; only a periodic basis has a "
+            "width-to-harmonic identity recoverable from the published plan, and "
+            "scoring against a guessed basis would not be the fitted model"
+        )
+    if width < 1 or width % 2 == 0:
+        raise ValueError(
+            f"atom {atom} reports a periodic basis of width {width}, which is not "
+            "of the form 2H+1"
+        )
+    return kind, (width - 1) // 2, width
+
+
 def _curved_block_rust(r_bits, *, model):
     """Curved tier from a fitted gamfit.sae_manifold model on residual r_bits."""
     _ensure_bench_on_path()
     from synth_sae_bench_manifold import _basis_values
 
-    payload = model.converged_latents(r_bits)
+    # The native latent solve takes f64; the residual reaching here is f32,
+    # because it is a difference of f32 activations and an f32 flat
+    # reconstruction. Passing it straight through raises a bare
+    # `TypeError: 'ndarray' object is not an instance of 'ndarray'` from the FFI
+    # — after the curved fit, which is the most expensive place to find out.
+    payload = model.converged_latents(
+        np.ascontiguousarray(np.asarray(r_bits, dtype=np.float64))
+    )
     assignments = np.asarray(payload["assignments"], dtype=float)  # (N, K)
     recon = np.asarray(payload["fitted"], dtype=float)             # (N, P)
     coords = [np.asarray(c, dtype=float) for c in payload["coords"]]
     blocks = [np.asarray(b, dtype=float) for b in model.decoder_blocks]
+    plans = [_atom_basis_plan(model, g) for g in range(len(blocks))]
 
     def atom_contribution(g: int):
-        basis = model.basis_specs[g]
-        n_harm = model._n_harmonics[g] if g < len(model._n_harmonics) else 1
-        centers = model._duchon_centers[g] if g < len(model._duchon_centers) else None
+        basis, n_harm, _width = plans[g]
 
-        def fn(take, g=g, basis=basis, n_harm=n_harm, centers=centers):
-            phi = _basis_values(basis, coords[g][take], n_harm, centers)
+        def fn(take, g=g, basis=basis, n_harm=n_harm):
+            phi = _basis_values(basis, coords[g][take], n_harm)
             rows = min(phi.shape[1], blocks[g].shape[0])
             return assignments[take, g:g + 1] * (phi[:, :rows] @ blocks[g][:rows])
 
         return _RowLazyContribution(fn)
 
-    d_atoms = [c.shape[1] if c.ndim == 2 else 1 for c in coords]
+    atom_dims = [int(d) for d in model.atom_dims]
     gate = np.abs(assignments)
-    code_dims = np.asarray([d + 1 for d in d_atoms], dtype=int)
+    code_dims = np.asarray([d + 1 for d in atom_dims], dtype=int)
     # The linear span each atom's contribution can occupy: the decoder rows its
     # evaluated basis actually reaches (2H+1 for an H-harmonic circle), which is
     # wider than the d+1 scalars the chart transmits. The Eq-4 scorer charges the
     # d+1 the theorem's ledger names; the audit re-prices at this span (#2283).
-    spans = []
-    for g in range(len(blocks)):
-        basis = model.basis_specs[g]
-        n_harm = model._n_harmonics[g] if g < len(model._n_harmonics) else 1
-        centers = model._duchon_centers[g] if g < len(model._duchon_centers) else None
-        phi_head = _basis_values(basis, coords[g][:1], n_harm, centers)
-        spans.append(min(phi_head.shape[1], blocks[g].shape[0]))
+    spans = [min(width, blocks[g].shape[0]) for g, (_k, _h, width) in enumerate(plans)]
     return (
         gate,
         atom_contribution,
