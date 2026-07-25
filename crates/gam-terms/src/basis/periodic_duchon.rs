@@ -1815,41 +1815,27 @@ pub(crate) fn duchon_native_penalty_candidates(
             .slice_mut(s![.., n_kernel..])
             .assign(&center_poly);
 
-        let (center_design, trend_frame) = if let Some(transform) = outer_identifiability {
-            if transform.nrows() != n_pre {
-                crate::bail_dim_basis!(
-                    "Duchon identifiability transform has {} rows, expected {}",
-                    transform.nrows(),
-                    n_pre
-                );
-            }
-            // The outer chart removes the global intercept. Its surviving
-            // polynomial-function subspace is therefore exactly the preimage
-            // of zero kernel coordinates under the fixed transform.
-            let kernel_coordinate_map = transform.slice(s![0..n_kernel, ..]).to_owned();
-            let (frame, _) = rrqr_nullspace_basis(
-                &kernel_coordinate_map.t().to_owned(),
-                default_rrqr_rank_alpha(),
-            )
-            .map_err(BasisError::LinalgError)?;
-            (fast_ab(&center_design, transform), frame)
-        } else {
-            // Without an outer intercept constraint, leave the explicit
-            // constant free and target only nonconstant polynomial trends.
-            let mut frame = Array2::<f64>::zeros((n_pre, poly_cols - 1));
-            for column in 1..poly_cols {
-                frame[[n_kernel + column, column - 1]] = 1.0;
-            }
-            (center_design, frame)
-        };
+        // Construct the physical trend functional in the RAW coefficient
+        // chart first, then restrict it through the same outer gauge as the
+        // Primary. This order is essential. The collection builder receives
+        // the raw Primary/ridge pair, restricts both by its global coefficient
+        // gauge, and only then rebuilds the complementary ridge from the
+        // constrained Primary. Inventing a fresh trend frame after the gauge
+        // is a different functional and can preserve a fifth penalty that the
+        // authoritative collection correctly eliminated (#2433).
+        let mut trend_frame = Array2::<f64>::zeros((n_pre, poly_cols - 1));
+        for column in 1..poly_cols {
+            trend_frame[[n_kernel + column, column - 1]] = 1.0;
+        }
         let function_gram = symmetrize_penalty(&fast_ata(&center_design));
         // Complementary metric ridge `N(NᵀGN)Nᵀ` (range = span(trend frame)),
         // NOT the leaky metric projector `GN(NᵀGN)⁻¹NᵀG` (range = span(GN)),
         // so the constant stays in the joint null space (gam#2372).
-        Some(function_space_subspace_trend_ridge(
+        let raw = function_space_subspace_trend_ridge(
             &trend_frame,
             &function_gram,
-        )?)
+        )?;
+        Some(project_penalty_matrix(&raw, outer_identifiability))
     } else {
         None
     };

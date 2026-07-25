@@ -2318,39 +2318,14 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     center_design_psi_psi
         .slice_mut(s![.., 0..kernel_cols])
         .assign(&kernel_center_design_psi_psi);
-    let (center_design, center_design_psi, center_design_psi_psi, trend_frame) =
-        if let Some(transform) = identifiability_transform {
-            if transform.nrows() != total_cols {
-                crate::bail_dim_basis!(
-                    "Duchon identifiability transform has {} rows, expected {}",
-                    transform.nrows(),
-                    total_cols
-                );
-            }
-            let kernel_coordinate_map = transform.slice(s![0..kernel_cols, ..]).to_owned();
-            let (frame, _) = rrqr_nullspace_basis(
-                &kernel_coordinate_map.t().to_owned(),
-                default_rrqr_rank_alpha(),
-            )
-            .map_err(BasisError::LinalgError)?;
-            (
-                fast_ab(&center_design, transform),
-                fast_ab(&center_design_psi, transform),
-                fast_ab(&center_design_psi_psi, transform),
-                frame,
-            )
-        } else {
-            let mut frame = Array2::<f64>::zeros((total_cols, poly_cols.saturating_sub(1)));
-            for column in 1..poly_cols {
-                frame[[kernel_cols + column, column - 1]] = 1.0;
-            }
-            (
-                center_design,
-                center_design_psi,
-                center_design_psi_psi,
-                frame,
-            )
-        };
+    // Differentiate the same RAW-chart trend functional used by the value
+    // builder. The outer gauge is a fixed chart, so its congruence is applied
+    // to the value and every derivative only after the raw jet is assembled.
+    // This matches the collection's restrict-then-rebuild order (#2433).
+    let mut trend_frame = Array2::<f64>::zeros((total_cols, poly_cols.saturating_sub(1)));
+    for column in 1..poly_cols {
+        trend_frame[[kernel_cols + column, column - 1]] = 1.0;
+    }
     let gram = symmetrize_penalty(&fast_ata(&center_design));
     let gram_psi = symmetrize_penalty(
         &(fast_atb(&center_design_psi, &center_design)
@@ -2370,11 +2345,11 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         &gram_psi,
         &gram_psi_psi,
     )?;
-    let (_, trend_psi_norm, trend_psi_psi_norm, _) = normalize_penaltywith_psi_derivatives(
-        &trend_jet.value,
-        &trend_jet.first_a,
-        &trend_jet.mixed,
-    );
+    let trend_value = project_penalty_matrix(&trend_jet.value, identifiability_transform);
+    let trend_first = project_penalty_matrix(&trend_jet.first_a, identifiability_transform);
+    let trend_second = project_penalty_matrix(&trend_jet.mixed, identifiability_transform);
+    let (_, trend_psi_norm, trend_psi_psi_norm, _) =
+        normalize_penaltywith_psi_derivatives(&trend_value, &trend_first, &trend_second);
     let candidates = duchon_native_penalty_candidates(
         centers,
         spec.length_scale,
