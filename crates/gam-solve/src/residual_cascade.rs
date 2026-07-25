@@ -3021,19 +3021,26 @@ mod refinement_decision_tests {
             // Finite differences are confined to this oracle test. The
             // production optimizer consumes the hand-derived score jet above.
             //
-            // A single central difference at the roundoff-optimal step
-            // `h = eps^(1/3)` carries truncation error `(h²/6)·S'''`, which is
-            // ~3.7e-11·S''' — not negligible for this profile, and it is charged
-            // against a `sqrt(eps)` bound of ~9e-8. Measured at HEAD the bare
-            // stencil missed by 1.1e-7, i.e. the *comparator* was outside the
-            // bound the comparison is held to, so the assertion was testing the
-            // stencil rather than the analytic slope.
+            // The comparator has to be built for a NOISY evaluator, and this
+            // one is: `profile.evaluate` runs a spectral solve, so its value
+            // carries roughly 1e-12 of evaluation noise rather than being exact
+            // to the last bit.
             //
-            // Richardson-extrapolate instead: `(4·D(h/2) − D(h))/3` cancels the
-            // h² term exactly, leaving O(h⁴) ≈ 1e-21 — far below roundoff — so
-            // what remains is a genuine measurement of the derivative. This
-            // makes the test STRICTER, not looser: the bound is unchanged and
-            // the comparator got better.
+            // That moves the optimal step. `h = eps^(1/3)` is optimal only when
+            // the sole error is representation roundoff; against noise `v` the
+            // central-difference error is `v/h + (h²/6)·S3`, minimized at
+            // `h ~ (3v/S3)^(1/3) ~ 1e-4` — three orders ABOVE `eps^(1/3)`.
+            // Measured at `eps^(1/3) = 6.06e-6`: D(h) = 5.025511346842242,
+            // D(h/2) = 5.025511611442345. The two stencils disagree by 2.6e-7
+            // and the FINER one is FARTHER from the analytic slope. Truncation
+            // shrinks with h and cannot do that; noise amplified by `1/h` does
+            // exactly that. The step was too small, not too crude.
+            //
+            // So: `h = 1e-4`, and Richardson there. The `h²` term cancels
+            // exactly (leaving O(h⁴) ~ 1e-16, negligible whatever `S3` is) and
+            // the noise floor is `~3v/h ~ 3e-8`, inside the unchanged
+            // `sqrt(eps)·(1+|S'|) ~ 9e-8` bound. The bound is not relaxed; the
+            // comparator is made accurate enough to be charged against it.
             let central = |step: f64| -> f64 {
                 let right = profile
                     .evaluate(log_lambda + step)
@@ -3047,7 +3054,7 @@ mod refinement_decision_tests {
                     .value;
                 (right - left) / (2.0 * step)
             };
-            let step = f64::EPSILON.cbrt();
+            let step = 1.0e-4;
             let coarse = central(step);
             let fine = central(0.5 * step);
             let numerical_slope = (4.0 * fine - coarse) / 3.0;
