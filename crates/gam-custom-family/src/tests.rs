@@ -4931,6 +4931,42 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         evaluations: Arc<AtomicUsize>,
     }
 
+    struct FixedJointQuadraticWorkspace;
+
+    impl ExactNewtonJointHessianWorkspace for FixedJointQuadraticWorkspace {
+        fn warm_up_outer_caches_for_mode(&self, _: EvalMode) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
+            Ok(Some(Array2::eye(2)))
+        }
+
+        fn hessian_matvec_available(&self) -> bool {
+            true
+        }
+
+        fn hessian_matvec(
+            &self,
+            direction: &Array1<f64>,
+        ) -> Result<Option<Array1<f64>>, String> {
+            assert_eq!(direction.len(), 2);
+            Ok(Some(direction.clone()))
+        }
+
+        fn hessian_diagonal(&self) -> Result<Option<Array1<f64>>, String> {
+            Ok(Some(Array1::ones(2)))
+        }
+
+        fn directional_derivative(
+            &self,
+            direction: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_eq!(direction.len(), 2);
+            Ok(Some(Array2::zeros((2, 2))))
+        }
+    }
+
     impl CustomFamily for CountingJointQuadratic {
         fn evaluate(
             &self,
@@ -4947,22 +4983,15 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
             })
         }
 
-        fn exact_newton_joint_hessian(
+        fn exact_newton_joint_hessian_workspace(
             &self,
             _: &[ParameterBlockState],
-        ) -> Result<Option<Array2<f64>>, String> {
-            Ok(Some(Array2::eye(2)))
+            _: &[ParameterBlockSpec],
+        ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+            Ok(Some(Arc::new(FixedJointQuadraticWorkspace)))
         }
 
-        fn exact_newton_joint_hessian_directional_derivative(
-            &self,
-            _: &[ParameterBlockState],
-            _: &Array1<f64>,
-        ) -> Result<Option<Array2<f64>>, String> {
-            Ok(Some(Array2::zeros((2, 2))))
-        }
-
-        fn has_explicit_joint_hessian(&self) -> bool {
+        fn inner_coefficient_hessian_hvp_available(&self, _: &[ParameterBlockSpec]) -> bool {
             true
         }
     }
