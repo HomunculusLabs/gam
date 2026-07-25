@@ -7,8 +7,9 @@ use gam::solver::arrow_schur::ArrowSolveOptions;
 use gam::solver::estimate::EstimationError;
 use gam::solver::gpu_kernels::arrow_schur::solve_reduced_beta_pcg_with_diagnostics;
 use gam::solver::gpu_kernels::sae_resident::{
-    DeviceResidentArrowError, DeviceResidentInnerOptions, qwen_non_gating_fixture,
-    qwen_non_gating_fixture_seeded, run_resident_fits_multiplexed, run_resident_fits_sequential,
+    DeviceResidentArrowError, DeviceResidentArrowShape, DeviceResidentInnerOptions, ResidencyReport,
+    SweepVariant, build_sweep_workspaces, qwen_non_gating_fixture, qwen_non_gating_fixture_seeded,
+    run_resident_fits_multiplexed, run_resident_fits_sequential,
 };
 use gam::solver::rho_optimizer::{
     EfsEval, OuterCapability, OuterEval, OuterObjective, OuterProblem, SeedOutcome,
@@ -287,6 +288,205 @@ fn print_stage(shape: &Shape, stage: &str, elapsed_ms: f64, extra: &str) {
     }
 }
 
+/// Render one fit's self-reported residency split (#2393). This is the
+/// transfer-vs-compute accounting the issue asks the fit itself to carry, so a
+/// future session without a GPU can read the split out of a logged run.
+fn residency_fields(prefix: &str, report: &ResidencyReport) -> String {
+    format!(
+        "{prefix}_operator_ms={:.3} {prefix}_solve_ms={:.3} {prefix}_operator_applies={} \
+         {prefix}_operator_device_applies={} {prefix}_operator_h2d_bytes={} \
+         {prefix}_operator_d2h_bytes={}",
+        1000.0 * report.operator_seconds,
+        1000.0 * report.solve_seconds,
+        report.operator_applies,
+        report.operator_device_applies,
+        report.operator_host_to_device_bytes,
+        report.operator_device_to_host_bytes,
+    )
+}
+
+/// Run one throwaway resident fit so CUDA context creation, cuBLAS handle
+/// creation, and first-kernel load are paid before anything is timed. Returns
+/// the warm-up cost so it is reported rather than hidden.
+fn warm_up_device(opts: &DeviceResidentInnerOptions) -> Result<f64, String> {
+    let start = Instant::now();
+    let variants = [SweepVariant {
+        dim: DeviceResidentArrowShape {
+            n: 2_000,
+            p: 256,
+            basis_cols: 8,
+            d: 2,
+        },
+        seed: 0x2393_0000_0AAA_5EED,
+    }];
+    let mut workspaces = build_sweep_workspaces(&variants).map_err(|err| err.to_string())?;
+    let workspace = workspaces.pop().ok_or("warm-up produced no workspace")?;
+    match workspace.device_fit(opts) {
+        Ok(_) | Err(DeviceResidentArrowError::Unavailable { .. }) => Ok(ms(start)),
+        Err(err) => Err(format!("device warm-up fit failed: {err}")),
+    }
+}
+
+/// Print the device's CALIBRATED dispatch thresholds.
+///
+/// The resident-frame admission is `route_through_gpu(Gemm { p, p, n·d })`, so
+/// `gemm_min_flops` is the number that decides at which border width the device
+/// path engages. Recording it alongside the timings is what lets a later session
+/// WITHOUT a GPU reproduce the crossover from this log instead of guessing.
+fn print_dispatch_policy() {
+    match gam::gpu::device_runtime::GpuRuntime::resolve(gam::gpu::GpuPolicy::Auto) {
+        Ok(Some(runtime)) => println!(
+            "PERF stage=gpu_dispatch_policy device_ordinal={} gemm_min_flops={} potrf_min_p={} \
+             small_dense_batched_potrf_max_p={} small_dense_batched_potrf_min_batch={}",
+            runtime.device.ordinal,
+            runtime.policy.gemm_min_flops,
+            runtime.policy.potrf_min_p,
+            runtime.policy.small_dense_batched_potrf_max_p,
+            runtime.policy.small_dense_batched_potrf_min_batch,
+        ),
+        Ok(None) => println!("PERF stage=gpu_dispatch_policy status=no_device"),
+        Err(error) => println!("PERF stage=gpu_dispatch_policy status=error reason=\"{error}\""),
+    }
+}
+
+/// Shapes for the residency sweep: the qwen border width swept over the range
+/// where the per-iterate `O(n·d·p)` contraction crosses from "cheap enough to
+/// keep on the host" to "the whole cost of the inner Newton". `n·d` and the
+/// basis depth are held fixed so the sweep isolates the border width.
+fn sweep_shapes() -> Vec<DeviceResidentArrowShape> {
+    [128usize, 256, 512, 1024, 2048, 4096]
+        .into_iter()
+        .map(|p| DeviceResidentArrowShape {
+            n: 2_000,
+            p,
+            basis_cols: 8,
+            d: 2,
+        })
+        .collect()
+}
+
+/// Per-shape CPU-vs-device residency comparison, one PERF line per shape.
+///
+/// Both arms run the IDENTICAL host control flow (`run_inner_loop`); they differ
+/// only in whether the per-iterate operator apply and the arrow solve execute on
+/// the device. The printed `operator_ms` / `solve_ms` split is what identifies
+/// the bottleneck at each shape.
+fn run_residency_sweep() -> Result<(), String> {
+    let opts = DeviceResidentInnerOptions::default();
+    print_dispatch_policy();
+    // Warm the device BEFORE the first timed shape. The first device call in a
+    // process pays CUDA context + cuBLAS handle creation and the first kernel's
+    // JIT/load, and on this harness that landed inside the smallest shape's
+    // timed region — 39.5 ms of warm-up against a 43 ms host baseline, which
+    // reads as "the device loses at small p" and is purely a startup artifact.
+    // The user's standing rule is to warm-start hard; this makes every reported
+    // number steady-state, which is the only kind that can justify a routing
+    // decision.
+    let warm = warm_up_device(&opts)?;
+    println!("PERF stage=device_warmup ms={warm:.3}");
+    for dim in sweep_shapes() {
+        let shape = Shape {
+            name: "sweep",
+            n: dim.n,
+            p: dim.p,
+            k: dim.basis_cols,
+            d: dim.d,
+            topology: Topology::Euclidean,
+        };
+        let variants = [SweepVariant {
+            dim,
+            seed: 0x2393_0001_D3A1_5EED ^ (dim.p as u64),
+        }];
+        let build_start = Instant::now();
+        let mut workspaces = build_sweep_workspaces(&variants).map_err(|err| err.to_string())?;
+        let workspace = workspaces
+            .pop()
+            .ok_or("residency sweep produced no workspace")?;
+        let build_ms = ms(build_start);
+
+        let cpu_start = Instant::now();
+        let cpu = workspace
+            .cpu_reference_fit(&opts)
+            .map_err(|err| format!("residency sweep CPU reference failed at p={}: {err}", dim.p))?;
+        let cpu_ms = ms(cpu_start);
+
+        // The honest CPU competitor: same loop, production structured host
+        // solve. The dense reference above is a correctness oracle whose wall
+        // clock no production host would pay.
+        let arrow_start = Instant::now();
+        let arrow = workspace
+            .cpu_arrow_fit(&opts)
+            .map_err(|err| format!("residency sweep CPU arrow baseline failed at p={}: {err}", dim.p))?;
+        let arrow_ms = ms(arrow_start);
+
+        let device_start = Instant::now();
+        let device = match workspace.device_fit(&opts) {
+            Ok(outcome) => outcome,
+            Err(DeviceResidentArrowError::Unavailable { reason }) => {
+                print_stage(
+                    &shape,
+                    "residency_sweep",
+                    ms(device_start),
+                    &format!(
+                        "status=skipped reason=\"{}\" build_ms={build_ms:.3} cpu_dense_ms={cpu_ms:.3} \
+                         cpu_arrow_ms={arrow_ms:.3} {}",
+                        reason.replace('"', "'"),
+                        residency_fields("cpu_arrow", &arrow.residency)
+                    ),
+                );
+                continue;
+            }
+            Err(err) => {
+                return Err(format!(
+                    "residency sweep device fit failed at p={}: {err}",
+                    dim.p
+                ));
+            }
+        };
+        let device_ms = ms(device_start);
+        let t_err = max_abs_diff(
+            cpu.t.as_slice().ok_or("CPU t not contiguous")?,
+            device.t.as_slice().ok_or("device t not contiguous")?,
+        );
+        let beta_err = max_abs_diff(
+            cpu.beta.as_slice().ok_or("CPU beta not contiguous")?,
+            device.beta.as_slice().ok_or("device beta not contiguous")?,
+        );
+        let obj_err = (cpu.objective - device.objective).abs();
+        let max_err = t_err.max(beta_err).max(obj_err);
+        let arrow_err = max_abs_diff(
+            cpu.t.as_slice().ok_or("CPU t not contiguous")?,
+            arrow.t.as_slice().ok_or("arrow t not contiguous")?,
+        )
+        .max(max_abs_diff(
+            cpu.beta.as_slice().ok_or("CPU beta not contiguous")?,
+            arrow.beta.as_slice().ok_or("arrow beta not contiguous")?,
+        ));
+        print_stage(
+            &shape,
+            "residency_sweep",
+            device_ms,
+            &format!(
+                "status=ok build_ms={build_ms:.3} cpu_dense_ms={cpu_ms:.3} cpu_arrow_ms={arrow_ms:.3} \
+                 speedup_vs_cpu_arrow={:.3} speedup_vs_cpu_dense={:.3} \
+                 max_abs_err={max_err:.3e} t_err={t_err:.3e} beta_err={beta_err:.3e} \
+                 obj_err={obj_err:.3e} arrow_vs_dense_max_abs_err={arrow_err:.3e} \
+                 cpu_iters={} arrow_iters={} device_iters={} resident_device_bytes={} {} {} {}",
+                arrow_ms / device_ms.max(f64::MIN_POSITIVE),
+                cpu_ms / device_ms.max(f64::MIN_POSITIVE),
+                cpu.iterations,
+                arrow.iterations,
+                device.iterations,
+                workspace.resident_device_bytes(),
+                residency_fields("cpu_dense", &cpu.residency),
+                residency_fields("cpu_arrow", &arrow.residency),
+                residency_fields("device", &device.residency),
+            ),
+        );
+    }
+    Ok(())
+}
+
 fn max_abs_diff(lhs: &[f64], rhs: &[f64]) -> f64 {
     lhs.iter()
         .zip(rhs)
@@ -508,6 +708,12 @@ fn run_device_fit(shape: &Shape) -> Result<(), String> {
         .map_err(|err| format!("device_fit CPU reference failed: {err}"))?;
     let cpu_ms = ms(cpu_start);
 
+    let arrow_start = Instant::now();
+    let arrow = workspace
+        .cpu_arrow_fit(&opts)
+        .map_err(|err| format!("device_fit CPU arrow baseline failed: {err}"))?;
+    let arrow_ms = ms(arrow_start);
+
     let device_start = Instant::now();
     let device = match workspace.device_fit(&opts) {
         Ok(outcome) => outcome,
@@ -517,7 +723,7 @@ fn run_device_fit(shape: &Shape) -> Result<(), String> {
                 "device_fit",
                 ms(device_start),
                 &format!(
-                    "status=skipped reason=\"{}\" build_ms={build_ms:.3} cpu_ms={cpu_ms:.3} cpu_iters={} cpu_converged={}",
+                    "status=skipped reason=\"{}\" build_ms={build_ms:.3} cpu_dense_ms={cpu_ms:.3} cpu_arrow_ms={arrow_ms:.3} cpu_iters={} cpu_converged={}",
                     reason.replace('"', "'"),
                     cpu.iterations,
                     cpu.converged
@@ -544,14 +750,19 @@ fn run_device_fit(shape: &Shape) -> Result<(), String> {
         "device_fit",
         device_ms,
         &format!(
-            "status=ok build_ms={build_ms:.3} cpu_ms={cpu_ms:.3} speedup={:.3} max_abs_err={max_err:.3e} iters={} accepted={} converged={} objective={:.6e} grad_norm={:.6e} execution_path={}",
+            "status=ok build_ms={build_ms:.3} cpu_dense_ms={cpu_ms:.3} cpu_arrow_ms={arrow_ms:.3} speedup_vs_cpu_arrow={:.3} speedup_vs_cpu_dense={:.3} max_abs_err={max_err:.3e} iters={} accepted={} converged={} objective={:.6e} grad_norm={:.6e} execution_path={} resident_device_bytes={} {} {} {}",
+            arrow_ms / device_ms.max(f64::MIN_POSITIVE),
             cpu_ms / device_ms.max(f64::MIN_POSITIVE),
             device.iterations,
             device.accepted_iterations,
             device.converged,
             device.objective,
             device.gradient_norm,
-            device.execution_path.as_str()
+            device.execution_path.as_str(),
+            workspace.resident_device_bytes(),
+            residency_fields("cpu_dense", &cpu.residency),
+            residency_fields("cpu_arrow", &arrow.residency),
+            residency_fields("device", &device.residency),
         ),
     );
     if max_err > DEVICE_PARITY_TOL {
@@ -798,15 +1009,27 @@ fn main() -> ExitCode {
         .next()
         .unwrap_or_else(|| "sae_perf_harness".to_string());
     let Some(shape_name) = args.next() else {
-        eprintln!("usage: {program} <tiny|color|qwen>");
+        eprintln!("usage: {program} <tiny|color|qwen|sweep>");
         return ExitCode::from(2);
     };
     if args.next().is_some() {
-        eprintln!("usage: {program} <tiny|color|qwen>");
+        eprintln!("usage: {program} <tiny|color|qwen|sweep>");
         return ExitCode::from(2);
     }
+    // `sweep` is the residency-vs-shape arm (#2393): it drives the resident
+    // workspace directly across a border-width ladder and never touches the
+    // full-system stages, so it stays tractable at every point on the ladder.
+    if shape_name == "sweep" {
+        return match run_residency_sweep() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("sae_perf_harness: {err}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let Some(shape) = shape_named(&shape_name) else {
-        eprintln!("unknown shape '{shape_name}'; expected tiny, color, or qwen");
+        eprintln!("unknown shape '{shape_name}'; expected tiny, color, qwen, or sweep");
         return ExitCode::from(2);
     };
     match run(shape) {

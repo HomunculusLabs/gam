@@ -360,6 +360,43 @@ fn pack_host(sys: &ArrowSchurSystem, ridge_t: f64) -> (Vec<f64>, Vec<f64>, Vec<f
     (d_buf, b_buf, g_buf)
 }
 
+/// Pack the per-row `D = H_tt + ρ_t I` blocks (block-contiguous `d×d`
+/// column-major, as the batched POTRF/TRSM require) together with the cross
+/// blocks `B` as ONE stacked `(n·d) × k` column-major matrix with leading
+/// dimension `n·d`: row `i·d + r` of the stack is row `r` of block `i`.
+///
+/// That single-matrix view is what makes the whole Schur reduction one GEMM
+/// (`schur_gemm_stacked`) instead of n rank-`d` updates, and both per-iterate
+/// accumulations one GEMV each — the per-op granularity #2393 identifies as the
+/// reason the LLM shape trips no dispatch gate despite being large in aggregate.
+#[cfg(target_os = "linux")]
+fn pack_host_d_and_stacked_b(sys: &ArrowSchurSystem, ridge_t: f64) -> (Vec<f64>, Vec<f64>) {
+    let n = sys.rows.len();
+    let d = sys.d;
+    let k = sys.k;
+    let rows = n * d;
+    let mut d_buf = Vec::with_capacity(n * d * d);
+    let mut b_buf = vec![0.0_f64; rows * k];
+    for (i, row) in sys.rows.iter().enumerate() {
+        for col in 0..d {
+            for r in 0..d {
+                let mut value = row.htt[[r, col]];
+                if r == col {
+                    value += ridge_t;
+                }
+                d_buf.push(value);
+            }
+        }
+        for col in 0..k {
+            let base = col * rows + i * d;
+            for r in 0..d {
+                b_buf[base + r] = row.htbeta[[r, col]];
+            }
+        }
+    }
+    (d_buf, b_buf)
+}
+
 #[cfg(target_os = "linux")]
 #[inline]
 fn pack_block(
@@ -1562,7 +1599,10 @@ pub fn sae_framed_schur_matvec_cpu(
 
 #[cfg(target_os = "linux")]
 mod cuda {
-    use super::{ArrowSchurGpuFailure, ArrowSchurGpuSolution, pack_block, pack_host};
+    use super::{
+        ArrowSchurGpuFailure, ArrowSchurGpuSolution, pack_block, pack_host,
+        pack_host_d_and_stacked_b,
+    };
     use crate::arrow_schur::{
         ArrowPcgDiagnostics, ArrowSchurSystem, DeviceSaeFrameData, DeviceSaePcgData, PcgStopReason,
     };
@@ -2191,6 +2231,60 @@ mod cuda {
     /// In-place lower-triangular solves `X_i ← L_i^{-1} X_i` over the n stacked
     /// d×nrhs RHS tiles in `rhs`. Uses `cublasDtrsmBatched` so all n solves
     /// hit the device in one launch.
+    /// One batched triangular solve `X_i ← L_i^{-∗} X_i`: the block geometry
+    /// plus the RHS memory layout the solve walks.
+    ///
+    /// The layout is a parameter because the same whitening feeds two different
+    /// downstream reductions. Block-contiguous tiles ([`Self::block_tiles`])
+    /// suit per-row consumers; the stacked layout ([`Self::stacked_matrix`])
+    /// makes the n whitened blocks ONE `(n·d) × nrhs` matrix, which is what lets
+    /// the Schur reduction be a single GEMM ([`schur_gemm_stacked`]) instead of
+    /// n rank-`d` updates. `cublasDtrsmBatched` takes an explicit `ldb`, so the
+    /// whitening costs the same single launch either way.
+    #[derive(Clone, Copy)]
+    struct BatchedTrsmSpec {
+        d: usize,
+        n: usize,
+        nrhs: usize,
+        rhs_leading_dim: usize,
+        rhs_block_stride: usize,
+        transposed: bool,
+    }
+
+    impl BatchedTrsmSpec {
+        /// Block `i` is a `d × nrhs` column-major tile at offset `i·d·nrhs`.
+        fn block_tiles(d: usize, n: usize, nrhs: usize) -> Self {
+            Self {
+                d,
+                n,
+                nrhs,
+                rhs_leading_dim: d,
+                rhs_block_stride: d * nrhs,
+                transposed: false,
+            }
+        }
+
+        /// Block `i` occupies rows `i·d .. i·d+d` of ONE `(n·d) × nrhs`
+        /// column-major matrix with leading dimension `n·d`.
+        fn stacked_matrix(d: usize, n: usize, nrhs: usize) -> Self {
+            Self {
+                d,
+                n,
+                nrhs,
+                rhs_leading_dim: n * d,
+                rhs_block_stride: d,
+                transposed: false,
+            }
+        }
+
+        fn transposed(self) -> Self {
+            Self {
+                transposed: true,
+                ..self
+            }
+        }
+    }
+
     fn trsm_batched_lower_inplace(
         blas: &CudaBlas,
         stream: &Arc<CudaStream>,
@@ -2200,7 +2294,13 @@ mod cuda {
         l_stack: &CudaSlice<f64>,
         rhs_stack: &mut CudaSlice<f64>,
     ) -> Result<(), ArrowSchurGpuFailure> {
-        trsm_batched_inplace_inner(blas, stream, d, n, nrhs, l_stack, rhs_stack, false)
+        trsm_batched_inplace_inner(
+            blas,
+            stream,
+            BatchedTrsmSpec::block_tiles(d, n, nrhs),
+            l_stack,
+            rhs_stack,
+        )
     }
 
     /// As above but with `L_i^T` instead of `L_i`.
@@ -2213,25 +2313,57 @@ mod cuda {
         l_stack: &CudaSlice<f64>,
         rhs_stack: &mut CudaSlice<f64>,
     ) -> Result<(), ArrowSchurGpuFailure> {
-        trsm_batched_inplace_inner(blas, stream, d, n, nrhs, l_stack, rhs_stack, true)
+        trsm_batched_inplace_inner(
+            blas,
+            stream,
+            BatchedTrsmSpec::block_tiles(d, n, nrhs).transposed(),
+            l_stack,
+            rhs_stack,
+        )
     }
 
-    fn trsm_batched_inplace_inner(
+    /// `X_i ← L_i^{-1} X_i` over the n row blocks of a SINGLE stacked
+    /// `(n·d) × nrhs` column-major matrix.
+    fn trsm_batched_lower_inplace_stacked(
         blas: &CudaBlas,
         stream: &Arc<CudaStream>,
         d: usize,
         n: usize,
         nrhs: usize,
         l_stack: &CudaSlice<f64>,
-        rhs_stack: &mut CudaSlice<f64>,
-        transposed: bool,
+        rhs_stacked: &mut CudaSlice<f64>,
     ) -> Result<(), ArrowSchurGpuFailure> {
+        trsm_batched_inplace_inner(
+            blas,
+            stream,
+            BatchedTrsmSpec::stacked_matrix(d, n, nrhs),
+            l_stack,
+            rhs_stacked,
+        )
+    }
+
+    fn trsm_batched_inplace_inner(
+        blas: &CudaBlas,
+        stream: &Arc<CudaStream>,
+        spec: BatchedTrsmSpec,
+        l_stack: &CudaSlice<f64>,
+        rhs_stack: &mut CudaSlice<f64>,
+    ) -> Result<(), ArrowSchurGpuFailure> {
+        let BatchedTrsmSpec {
+            d,
+            n,
+            nrhs,
+            rhs_leading_dim,
+            rhs_block_stride,
+            transposed,
+        } = spec;
         let alpha = 1.0_f64;
         let d_i = to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?;
         let nrhs_i = to_i32(nrhs).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let rhs_ld_i = to_i32(rhs_leading_dim).ok_or(ArrowSchurGpuFailure::Unavailable)?;
         let batch_i = to_i32(n).ok_or(ArrowSchurGpuFailure::Unavailable)?;
         let l_bytes_per = (d * d * std::mem::size_of::<f64>()) as u64;
-        let rhs_bytes_per = (d * nrhs * std::mem::size_of::<f64>()) as u64;
+        let rhs_bytes_per = (rhs_block_stride * std::mem::size_of::<f64>()) as u64;
         let (l_base, _l_record) = l_stack.device_ptr(stream);
         let (rhs_base, _rhs_record) = rhs_stack.device_ptr_mut(stream);
         let mut l_ptrs = Vec::with_capacity(n);
@@ -2269,7 +2401,7 @@ mod cuda {
                 l_ptrs_ptr as *const *const f64,
                 d_i,
                 rhs_ptrs_ptr as *const *mut f64,
-                d_i,
+                rhs_ld_i,
                 batch_i,
             )
         };
@@ -2379,43 +2511,108 @@ mod cuda {
         Ok(())
     }
 
-    /// `#1017` resident gradient path: accumulate ONLY the Schur RHS term
-    /// `rhs += Σ_i Y_iᵀ u_i`, skipping the `−Σ_i Y_iᵀ Y_i` matrix GEMM that the
-    /// resident frame already folded into its persistent `L_S` factor. This is
-    /// the per-iterate-cheap counterpart of [`accumulate_schur`]: the GEMV here
-    /// is bit-identical to the GEMV inside `accumulate_schur` (same config, same
-    /// `beta=1` accumulation order over rows), so the resident frame's `δβ`
-    /// matches a full `solve()` at the same gradient.
-    fn accumulate_schur_rhs_only(
+    /// `#2393` single-launch Schur reduction `S ← S − Yᵀ Y` for a STACKED
+    /// whitened `Y` (`(n·d) × k` column-major, leading dimension `n·d`).
+    ///
+    /// [`accumulate_schur`] performs the SAME arithmetic as n rank-`d` updates,
+    /// one cuBLAS launch per row block. At the SAE LLM shape (n≈2000, d=2,
+    /// k≈2048) that is 2000 launches whose individual arithmetic (≈17 MFLOP)
+    /// never fills the device, and each one reads AND writes the whole `k×k`
+    /// accumulator — ≈67 GB of device traffic for 33 GFLOP of work. Stacking the
+    /// row blocks into one matrix turns the whole reduction into a single
+    /// `k × k × (n·d)` GEMM: same flops, the accumulator touched once, and the
+    /// device saturated for the duration instead of drip-fed 2000 times.
+    ///
+    /// The reduction ORDER changes (cuBLAS's internal split rather than
+    /// ascending row blocks), so results differ from [`accumulate_schur`] by
+    /// float reassociation only.
+    fn schur_gemm_stacked(
         blas: &CudaBlas,
-        d: usize,
+        rows: usize,
         k: usize,
-        n: usize,
-        y_stack: &CudaSlice<f64>,
-        u_stack: &CudaSlice<f64>,
+        y_stacked: &CudaSlice<f64>,
+        schur: &mut CudaSlice<f64>,
+    ) -> Result<(), ArrowSchurGpuFailure> {
+        let k_i = to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let rows_i = to_i32(rows).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let cfg = GemmConfig::<f64> {
+            transa: cublasOperation_t::CUBLAS_OP_T,
+            transb: cublasOperation_t::CUBLAS_OP_N,
+            m: k_i,
+            n: k_i,
+            k: rows_i,
+            alpha: -1.0,
+            lda: rows_i,
+            ldb: rows_i,
+            beta: 1.0,
+            ldc: k_i,
+        };
+        // SAFETY: `y_stacked` is the live `(n·d)×k` column-major whitened block
+        // stack with leading dimension `n·d`; `schur` is the live `k×k`
+        // column-major accumulator with leading dimension `k`.
+        unsafe { blas.gemm(cfg, y_stacked, y_stacked, schur) }
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+    }
+
+    /// `#2393` single-launch Schur RHS accumulation `rhs += Yᵀ u` for the same
+    /// stacked `Y` — the counterpart of [`accumulate_schur_rhs_only`]'s n GEMV
+    /// launches, and the per-iterate half of the residency win (it runs on
+    /// EVERY resident solve, not just at frame build).
+    fn schur_rhs_stacked(
+        blas: &CudaBlas,
+        rows: usize,
+        k: usize,
+        y_stacked: &CudaSlice<f64>,
+        u_stacked: &CudaSlice<f64>,
         rhs: &mut CudaSlice<f64>,
     ) -> Result<(), ArrowSchurGpuFailure> {
-        let y_block_elems = d * k;
-        let u_block_elems = d;
-        for i in 0..n {
-            let y_slice = y_stack.slice(i * y_block_elems..(i + 1) * y_block_elems);
-            let u_slice = u_stack.slice(i * u_block_elems..(i + 1) * u_block_elems);
-            let gemv_cfg = GemvConfig::<f64> {
-                trans: cublasOperation_t::CUBLAS_OP_T,
-                m: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
-                n: to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?,
-                alpha: 1.0,
-                lda: to_i32(d).ok_or(ArrowSchurGpuFailure::Unavailable)?,
-                incx: 1,
-                beta: 1.0,
-                incy: 1,
-            };
-            // SAFETY: y_slice (d×k col-major) and u_slice (length d) are live
-            // device buffers; `rhs` is the length-k accumulator.
-            unsafe { blas.gemv(gemv_cfg, &y_slice, &u_slice, rhs) }
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-        }
-        Ok(())
+        let k_i = to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let rows_i = to_i32(rows).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let cfg = GemvConfig::<f64> {
+            trans: cublasOperation_t::CUBLAS_OP_T,
+            m: rows_i,
+            n: k_i,
+            alpha: 1.0,
+            lda: rows_i,
+            incx: 1,
+            beta: 1.0,
+            incy: 1,
+        };
+        // SAFETY: `y_stacked` is `(n·d)×k` column-major with leading dimension
+        // `n·d`; under OP_T the operand `u_stacked` has `n·d` entries and the
+        // accumulator `rhs` has `k`, both unit-stride and live.
+        unsafe { blas.gemv(cfg, y_stacked, u_stacked, rhs) }
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+    }
+
+    /// `#2393` single-launch back-substitution accumulation `u += Y δβ` for the
+    /// stacked `Y` — the counterpart of [`accumulate_back_sub_rhs`]'s n GEMV
+    /// launches.
+    fn back_sub_rhs_stacked(
+        blas: &CudaBlas,
+        rows: usize,
+        k: usize,
+        y_stacked: &CudaSlice<f64>,
+        delta_beta: &CudaSlice<f64>,
+        u_stacked: &mut CudaSlice<f64>,
+    ) -> Result<(), ArrowSchurGpuFailure> {
+        let k_i = to_i32(k).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let rows_i = to_i32(rows).ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        let cfg = GemvConfig::<f64> {
+            trans: cublasOperation_t::CUBLAS_OP_N,
+            m: rows_i,
+            n: k_i,
+            alpha: 1.0,
+            lda: rows_i,
+            incx: 1,
+            beta: 1.0,
+            incy: 1,
+        };
+        // SAFETY: `y_stacked` is `(n·d)×k` column-major with leading dimension
+        // `n·d`; under OP_N the operand `delta_beta` has `k` entries and the
+        // accumulator `u_stacked` has `n·d`, both unit-stride and live.
+        unsafe { blas.gemv(cfg, y_stacked, delta_beta, u_stacked) }
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
     }
 
     /// Accumulate `g_dev[i] ← u_i + Y_i · δβ` per block. This is the
@@ -3811,12 +4008,16 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 CudaBlas::new(stream.clone()).map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
 
             // Upload the constant blocks. `g` is uploaded per-gradient, not here.
-            let (d_host, b_host, _g_host) = pack_host(sys, ridge_t);
+            // `B` goes up in the STACKED `(n·d)×k` column-major layout so the
+            // Schur reduction and both per-iterate accumulations are each ONE
+            // launch (see `schur_gemm_stacked`); the `d×d` `D` blocks keep the
+            // block-contiguous layout the batched POTRF/TRSM expect.
+            let (d_host, b_host_stacked) = pack_host_d_and_stacked_b(sys, ridge_t);
             let mut l_dev = stream
                 .clone_htod(&d_host)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
             let mut y_dev = stream
-                .clone_htod(&b_host)
+                .clone_htod(&b_host_stacked)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
 
             // POTRF(D) → L_i, kept resident in l_dev.
@@ -3831,13 +4032,12 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 });
             }
 
-            // Y_i = L_i^{-1} B_i, in place over y_dev. Kept resident.
-            trsm_batched_lower_inplace(&blas, &stream, d, n, k, &l_dev, &mut y_dev)?;
+            // Y_i = L_i^{-1} B_i, in place over the stacked y_dev. Kept resident.
+            trsm_batched_lower_inplace_stacked(&blas, &stream, d, n, k, &l_dev, &mut y_dev)?;
 
             // Schur assembly S_β = (H_ββ + ρ_β I) − Σ Y_iᵀ Y_i, then POTRF → L_S.
             // The RHS accumulation is folded into the gradient path; here we
-            // only need the (gradient-independent) Schur factor, so accumulate
-            // into a throwaway rhs buffer.
+            // only need the (gradient-independent) Schur factor.
             let schur_init: Vec<f64> = {
                 let mut tmp = Vec::with_capacity(k * k);
                 for col in 0..k {
@@ -3854,24 +4054,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             let mut schur_dev = stream
                 .clone_htod(&schur_init)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            // A zero u-stack makes `Σ Y_iᵀ u_i = 0`, so only the `−Σ Y_iᵀ Y_i`
-            // Schur term is accumulated (the rhs is rebuilt per gradient).
-            let zero_u = stream
-                .clone_htod(&vec![0.0_f64; n * d])
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let mut throwaway_rhs = stream
-                .clone_htod(&vec![0.0_f64; k])
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            accumulate_schur(
-                &blas,
-                d,
-                k,
-                n,
-                &y_dev,
-                &zero_u,
-                &mut schur_dev,
-                &mut throwaway_rhs,
-            )?;
+            schur_gemm_stacked(&blas, n * d, k, &y_dev, &mut schur_dev)?;
             let info = potrf_single(&solver, &stream, k, &mut schur_dev)?;
             if info != 0 {
                 return Err(ArrowSchurGpuFailure::SchurFactorFailed {
@@ -3952,7 +4135,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .stream
                 .clone_htod(&rhs_init)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            accumulate_schur_rhs_only(&self.blas, d, k, n, &self.y_dev, &u_dev, &mut rhs_dev)?;
+            schur_rhs_stacked(&self.blas, n * d, k, &self.y_dev, &u_dev, &mut rhs_dev)?;
 
             // δβ ← L_S^{-T} L_S^{-1} rhs using the resident border factor.
             trsm_single(
@@ -3980,7 +4163,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             let delta_beta = Array1::from_vec(delta_beta_host);
 
             // Back-sub δt_i = −L_i^{-T}(u_i + Y_i δβ).
-            accumulate_back_sub_rhs(&self.blas, d, k, n, &self.y_dev, &rhs_dev, &mut u_dev)?;
+            back_sub_rhs_stacked(&self.blas, n * d, k, &self.y_dev, &rhs_dev, &mut u_dev)?;
             trsm_batched_lower_inplace_transposed(
                 &self.blas,
                 &self.stream,

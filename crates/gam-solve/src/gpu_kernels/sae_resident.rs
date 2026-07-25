@@ -31,11 +31,19 @@ use gam_problem::ExecutionPath;
 ///   This is the residency baseline the bench divides against.
 /// * [`InnerSolveMode::CpuReference`] — the dense f64 oracle (re-factors per
 ///   iterate on the host), used for the correctness parity check.
+/// * [`InnerSolveMode::CpuArrow`] — the honest CPU COMPETITOR: the production
+///   structured Arrow-Schur solve (`ArrowSchurSystem::solve_with_options` with
+///   the device policy off), which exploits the block structure exactly as a
+///   CPU-only production host would. `CpuReference`'s dense
+///   `(n·d+k) × (n·d+k)` Cholesky is an ORACLE, not a competitor — quoting a
+///   speedup against it would flatter the device by a baseline no production
+///   host would ever run (#2393).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InnerSolveMode {
     DeviceResident,
     DeviceReupload,
     CpuReference,
+    CpuArrow,
 }
 
 impl InnerSolveMode {
@@ -48,7 +56,22 @@ impl InnerSolveMode {
         match self {
             Self::DeviceResident => ExecutionPath::GpuResidentFull,
             Self::DeviceReupload => ExecutionPath::GpuReupload,
-            Self::CpuReference => ExecutionPath::Cpu,
+            Self::CpuReference | Self::CpuArrow => ExecutionPath::Cpu,
+        }
+    }
+
+    /// Whether this mode's per-iterate operator apply (`H·z`) may run on the
+    /// device.
+    ///
+    /// `CpuReference` is the INDEPENDENT host oracle the parity harness divides
+    /// against, so its contraction must stay on the host: routing it to the
+    /// device too would make "device == CPU" compare the device against itself,
+    /// and would make its wall clock a device measurement wearing a CPU label.
+    #[inline]
+    const fn operator_on_device(self) -> bool {
+        match self {
+            Self::DeviceResident | Self::DeviceReupload => true,
+            Self::CpuReference | Self::CpuArrow => false,
         }
     }
 }
@@ -180,6 +203,64 @@ pub struct DeviceResidentArrowBuffers {
     pub border_hessian_dev: cudarc::driver::CudaSlice<f64>,
     pub border_gradient_dev: cudarc::driver::CudaSlice<f64>,
     pub bytes: usize,
+    /// cuBLAS handle bound to `stream`, created ONCE with the resident buffers.
+    /// The per-iterate operator applies below reuse it; creating a handle per
+    /// apply would reintroduce exactly the per-iteration device setup cost that
+    /// residency exists to remove.
+    blas: cudarc::cublas::CudaBlas,
+    /// Persistent device scratch for the per-iterate operator apply. Held
+    /// behind a mutex because the apply runs through `&self` (the multiplexed
+    /// driver shares `&workspace` across a rayon scope); each workspace owns its
+    /// own stream, handle, and scratch, so the lock is uncontended within a fit
+    /// and prevents two applies on ONE workspace from aliasing the scratch.
+    operator_scratch: std::sync::Mutex<DeviceOperatorScratch>,
+}
+
+/// Device-side operand/result buffers for one resident operator apply.
+///
+/// These are the only allocations the per-iterate `H·z` contraction needs, and
+/// they are `O(n·d + p)` — the `O(n·d·p)` cross slab and the `O(p²)` border stay
+/// resident in [`DeviceResidentArrowBuffers`] and are never re-uploaded.
+#[cfg(target_os = "linux")]
+struct DeviceOperatorScratch {
+    t_dev: cudarc::driver::CudaSlice<f64>,
+    beta_dev: cudarc::driver::CudaSlice<f64>,
+    cross_t_dev: cudarc::driver::CudaSlice<f64>,
+    cross_beta_dev: cudarc::driver::CudaSlice<f64>,
+    border_beta_dev: cudarc::driver::CudaSlice<f64>,
+}
+
+/// One application of the resident bordered-quadratic operator at an iterate
+/// `z = (t, β)`.
+///
+/// These three products are the ONLY `O(n·d·p)` / `O(p²)` work the inner Newton
+/// loop needs at a point, and BOTH the residual gradient and the objective are
+/// algebraic combinations of them:
+///
+/// ```text
+///   cross_t[i·d+r] = Σ_j H_tβ^(i)[r,j] · β_j          (the (n·d)×p slab · β)
+///   cross_beta[j]  = Σ_i Σ_r H_tβ^(i)[r,j] · t_{i,r}  (that slab transposed · t)
+///   border_beta[j] = Σ_c H_ββ[j,c] · β_c              (the p×p border · β)
+/// ```
+///
+/// so
+///
+/// ```text
+///   r(z)_t[i,r] = (H_tt^(i) t_i)_r + cross_t[i·d+r] − g₀_t[i,r]
+///   r(z)_β[j]   = border_beta[j] + cross_beta[j] − g₀_β[j]
+///   φ(z)        = ½‖X‖² + ½(Σ_{i,r} t·((H_tt t) + 2·cross_t) + Σ_j β_j·border_beta[j])
+///                 − g₀ᵀz
+/// ```
+///
+/// The `H_tt` contribution is deliberately excluded: the per-row `d×d` blocks
+/// total `n·d²` entries (64 KiB at the qwen shape vs 64 MiB for the cross slab),
+/// so contracting them costs nothing and keeping them host-side avoids a kernel
+/// launch whose latency would exceed its arithmetic.
+#[derive(Clone, Debug)]
+struct ArrowOperatorApply {
+    cross_t: Vec<f64>,
+    cross_beta: Vec<f64>,
+    border_beta: Vec<f64>,
 }
 
 /// Upload-once workspace for the SAE data-fit Arrow-Schur inner iteration.
@@ -522,11 +603,34 @@ impl DeviceResidentArrowWorkspace {
     /// CPU dense-reference inner loop. Bit-for-bit the same host arithmetic as
     /// [`Self::device_fit`] except the per-iteration arrow solve uses the dense
     /// reference factorisation; the parity harness asserts the two agree.
+    ///
+    /// This is a correctness ORACLE, not a speed baseline: it factors the full
+    /// dense `(n·d+k) × (n·d+k)` joint Hessian, which is what makes it an
+    /// independent check of the arrow algebra, and also what makes its wall
+    /// clock meaningless as a CPU competitor. Use [`Self::cpu_arrow_fit`] for
+    /// the timing baseline.
     pub fn cpu_reference_fit(
         &self,
         opts: &DeviceResidentInnerOptions,
     ) -> Result<DeviceResidentInnerOutcome, DeviceResidentArrowError> {
         self.run_inner_loop(opts, InnerSolveMode::CpuReference)
+    }
+
+    /// The honest CPU competitor: the SAME inner Newton loop with the
+    /// per-iterate step taken by the PRODUCTION structured Arrow-Schur solve on
+    /// the host (device policy off). This is what a CPU-only production host
+    /// runs, so it — not the dense oracle — is what a device speedup must be
+    /// divided against.
+    ///
+    /// `log_det_hessian` is reported as NaN for this mode: the production solve
+    /// entry returns the step and its PCG diagnostics, not the joint log
+    /// determinant, and fabricating one from a second factorisation would put
+    /// work in the baseline that the production path does not do.
+    pub fn cpu_arrow_fit(
+        &self,
+        opts: &DeviceResidentInnerOptions,
+    ) -> Result<DeviceResidentInnerOutcome, DeviceResidentArrowError> {
+        self.run_inner_loop(opts, InnerSolveMode::CpuArrow)
     }
 
     fn run_inner_loop(
@@ -548,6 +652,10 @@ impl DeviceResidentArrowWorkspace {
 
         let base = self.to_arrow_system();
         let half_target_energy = 0.5 * squared_norm(&self.target_x);
+        // ONE residual system for the whole fit: the Hessian blocks are frozen
+        // for this frame, so only its gradients move (see `residual_into`).
+        let mut residual = self.to_arrow_system();
+        let mut accounting = ResidencyAccounting::default();
 
         let mut ridge_t = opts.initial_ridge_t.max(0.0);
         let mut ridge_beta = opts.initial_ridge_beta.max(0.0);
@@ -564,7 +672,9 @@ impl DeviceResidentArrowWorkspace {
             f64,
             crate::gpu_kernels::arrow_schur::ResidentArrowFrameHandle,
         )> = None;
-        let mut current_objective = self.objective_at(&base, half_target_energy, &t, &beta);
+        let mut current_apply = accounting.apply(self, mode, &t, &beta);
+        let mut current_objective =
+            self.objective_from_apply(&base, half_target_energy, &current_apply, &t, &beta);
         let mut accepted_iters = 0_usize;
         let mut total_iters = 0_usize;
         let mut converged = false;
@@ -578,8 +688,9 @@ impl DeviceResidentArrowWorkspace {
         };
 
         while total_iters < opts.max_iterations {
-            // Residual gradient r(z) = H z − g₀ becomes the system gradient.
-            let residual = self.residual_system(&base, &t, &beta);
+            // Residual gradient r(z) = H z − g₀ becomes the system gradient,
+            // read off the operator apply already computed at this iterate.
+            self.residual_into(&mut residual, &base, &current_apply, &t);
             let g_norm = arrow_system_gradient_norm(&residual);
             let scale = 1.0 + iterate_norm(&t, &beta);
             if g_norm / scale < opts.convergence_tolerance {
@@ -587,6 +698,7 @@ impl DeviceResidentArrowWorkspace {
                 break;
             }
 
+            let solve_start = std::time::Instant::now();
             let solution = match mode {
                 InnerSolveMode::DeviceResident => {
                     // Rebuild the resident frame only when the LM ridge changed; an
@@ -667,8 +779,12 @@ impl DeviceResidentArrowWorkspace {
                     solve_arrow_newton_step_dense_reference(&residual, ridge_t, ridge_beta)
                         .map_err(|reason| DeviceResidentArrowError::Solve { reason })
                 }
+                InnerSolveMode::CpuArrow => {
+                    cpu_arrow_newton_step(&residual, ridge_t, ridge_beta)
+                }
             };
 
+            accounting.solve_seconds += solve_start.elapsed().as_secs_f64();
             let solution = match solution {
                 Ok(sol) => sol,
                 Err(DeviceResidentArrowError::Solve { .. })
@@ -714,8 +830,14 @@ impl DeviceResidentArrowWorkspace {
             for (slot, dv) in trial_beta.iter_mut().zip(solution.delta_beta.iter()) {
                 *slot += *dv;
             }
-            let trial_objective =
-                self.objective_at(&base, half_target_energy, &trial_t, &trial_beta);
+            let trial_apply = accounting.apply(self, mode, &trial_t, &trial_beta);
+            let trial_objective = self.objective_from_apply(
+                &base,
+                half_target_energy,
+                &trial_apply,
+                &trial_t,
+                &trial_beta,
+            );
 
             // Trust-region gain-ratio noise floor keyed to the objective's own
             // magnitude, mirroring the production `LatentInnerSolver` (#1127): the
@@ -742,6 +864,7 @@ impl DeviceResidentArrowWorkspace {
             if rho > 0.0 && trial_objective.is_finite() {
                 t = trial_t;
                 beta = trial_beta;
+                current_apply = trial_apply;
                 current_objective = trial_objective;
                 ridge_t = (ridge_t * opts.lm_shrink).max(0.0);
                 ridge_beta = (ridge_beta * opts.lm_shrink).max(0.0);
@@ -780,6 +903,7 @@ impl DeviceResidentArrowWorkspace {
             accepted_iterations: accepted_iters,
             converged,
             execution_path,
+            residency: accounting.finish(),
         })
     }
 
@@ -925,7 +1049,11 @@ impl DeviceResidentArrowWorkspace {
         let mut beta = vec![0.0_f64; p];
         let mut ridge_t = opts.initial_ridge_t.max(0.0);
         let mut ridge_beta = opts.initial_ridge_beta.max(0.0);
-        let mut current_objective = self.objective_at(base, half_target_energy, &t, &beta);
+        let mut residual = self.to_arrow_system();
+        let mut accounting = ResidencyAccounting::default();
+        let mut current_apply = accounting.apply(self, mode, &t, &beta);
+        let mut current_objective =
+            self.objective_from_apply(base, half_target_energy, &current_apply, &t, &beta);
         let mut accepted_iters = 0_usize;
         let mut total_iters = 0_usize;
         let mut converged = false;
@@ -933,7 +1061,7 @@ impl DeviceResidentArrowWorkspace {
         let mut last_log_det = 0.0_f64;
 
         while total_iters < opts.max_iterations {
-            let residual = self.residual_system(base, &t, &beta);
+            self.residual_into(&mut residual, base, &current_apply, &t);
             let g_norm = arrow_system_gradient_norm(&residual);
             let scale = 1.0 + iterate_norm(&t, &beta);
             if g_norm / scale < opts.convergence_tolerance {
@@ -941,6 +1069,7 @@ impl DeviceResidentArrowWorkspace {
                 break;
             }
 
+            let solve_start = std::time::Instant::now();
             let solution = match mode {
                 InnerSolveMode::DeviceResident => {
                     let frame_matches = shared
@@ -997,8 +1126,12 @@ impl DeviceResidentArrowWorkspace {
                     solve_arrow_newton_step_dense_reference(&residual, ridge_t, ridge_beta)
                         .map_err(|reason| DeviceResidentArrowError::Solve { reason })
                 }
+                InnerSolveMode::CpuArrow => {
+                    cpu_arrow_newton_step(&residual, ridge_t, ridge_beta)
+                }
             };
 
+            accounting.solve_seconds += solve_start.elapsed().as_secs_f64();
             let solution = match solution {
                 Ok(sol) => sol,
                 Err(DeviceResidentArrowError::Solve { .. })
@@ -1038,8 +1171,14 @@ impl DeviceResidentArrowWorkspace {
             for (slot, dv) in trial_beta.iter_mut().zip(solution.delta_beta.iter()) {
                 *slot += *dv;
             }
-            let trial_objective =
-                self.objective_at(base, half_target_energy, &trial_t, &trial_beta);
+            let trial_apply = accounting.apply(self, mode, &trial_t, &trial_beta);
+            let trial_objective = self.objective_from_apply(
+                base,
+                half_target_energy,
+                &trial_apply,
+                &trial_t,
+                &trial_beta,
+            );
 
             let objective_scale = current_objective.abs();
             let noise_floor = objective_scale * 1e-14;
@@ -1055,6 +1194,7 @@ impl DeviceResidentArrowWorkspace {
             if rho > 0.0 && trial_objective.is_finite() {
                 t = trial_t;
                 beta = trial_beta;
+                current_apply = trial_apply;
                 current_objective = trial_objective;
                 ridge_t = (ridge_t * opts.lm_shrink).max(0.0);
                 ridge_beta = (ridge_beta * opts.lm_shrink).max(0.0);
@@ -1087,19 +1227,279 @@ impl DeviceResidentArrowWorkspace {
             accepted_iterations: accepted_iters,
             converged,
             execution_path,
+            residency: accounting.finish(),
         })
     }
 
-    /// Bordered-quadratic objective `½‖X‖² + ½ zᵀ H z − g₀ᵀ z` at iterate
-    /// `z = (t, β)`. Uses the resident arrow structure: per-row `H_tt`/`H_tβ`
-    /// contractions plus the shared `H_ββ` border, then the linear `g₀ᵀ z`
-    /// term. This is the reduction the device line search evaluates; on a CUDA
-    /// host the `H z` contraction rides the same resident slabs (batched
-    /// per-row GEMV + border GEMV), with only the final dot reduced to a scalar.
-    fn objective_at(
+    /// Apply the resident bordered-quadratic operator at `z = (t, β)`.
+    ///
+    /// This is the ONE `O(n·d·p + p²)` evaluation per visited point; the
+    /// residual gradient AND the objective are both read off the returned
+    /// products (see [`ArrowOperatorApply`]), so the loop below evaluates it
+    /// once per trial iterate instead of walking the cross slab three times.
+    ///
+    /// Routing is magic-by-default and shape-driven: the workspace is
+    /// device-resident exactly when `route_through_gpu` admitted the slab
+    /// upload at construction, so a below-break-even shape simply never has
+    /// device buffers and takes the host arm. A device apply that faults falls
+    /// back to the host arm and is reported once per process — never a silent
+    /// downgrade.
+    fn apply_operator(
+        &self,
+        on_device: bool,
+        t: &[f64],
+        beta: &[f64],
+    ) -> (ArrowOperatorApply, OperatorApplyCost) {
+        #[cfg(target_os = "linux")]
+        {
+            if on_device && self.device.is_some() {
+                match self.apply_operator_device(t, beta) {
+                    Some(apply) => {
+                        let moved = (t.len() + beta.len()) * std::mem::size_of::<f64>();
+                        let returned = (t.len() + 2 * beta.len()) * std::mem::size_of::<f64>();
+                        gam_gpu::profile::telemetry_record_h2d(moved);
+                        gam_gpu::profile::telemetry_record_kernel_launch();
+                        gam_gpu::profile::telemetry_record_d2h(returned);
+                        return (
+                            apply,
+                            OperatorApplyCost {
+                                on_device: true,
+                                host_to_device_bytes: moved,
+                                device_to_host_bytes: returned,
+                            },
+                        );
+                    }
+                    None => note_resident_engagement(
+                        false,
+                        "resident operator apply faulted on device; host contraction fallback",
+                    ),
+                }
+            }
+        }
+        (
+            self.apply_operator_host(t, beta),
+            OperatorApplyCost::default(),
+        )
+    }
+
+    /// Host arm of [`Self::apply_operator`]: two sequential sweeps over the
+    /// flat row-major cross slab plus one over the border.
+    ///
+    /// Reading the slabs FLAT is the point. The `ArrowSchurSystem` view of the
+    /// same data indexes `rows[i].htbeta[[r, j]]`, so accumulating
+    /// `Σ_i Σ_r H_tβ^(i)[r,j]·t` with `j` outermost walks `n` separate `d×p`
+    /// allocations with stride `p` — `n·d·p` cache-missing loads. The flat form
+    /// touches every byte exactly once in address order.
+    ///
+    /// Parallelism is deterministic by construction: the per-row `cross_t` and
+    /// per-border-row `border_beta` entries are independent, and the one real
+    /// reduction (`cross_beta`) is folded from fixed-size row chunks in chunk
+    /// order, so the result does not depend on the thread count or scheduling.
+    fn apply_operator_host(&self, t: &[f64], beta: &[f64]) -> ArrowOperatorApply {
+        let n = self.shape.n;
+        let d = self.shape.d;
+        let p = self.shape.p;
+        let cross = self.slabs.row_cross_slabs.as_slice();
+        let border = self.slabs.border_hessian.as_slice();
+
+        // Chunk width depends only on `n`, so the reduction order is identical
+        // on every host and at every thread count.
+        let chunk_rows = n.div_ceil(OPERATOR_MAX_ROW_CHUNKS).max(OPERATOR_MIN_ROW_CHUNK);
+        let parallel = n >= OPERATOR_PARALLEL_ROW_MIN && rayon::current_thread_index().is_none();
+
+        let mut cross_t = vec![0.0_f64; n * d];
+        let mut cross_beta = vec![0.0_f64; p];
+        let row_chunk = |rows: std::ops::Range<usize>,
+                         cross_t_chunk: &mut [f64],
+                         cross_beta_partial: &mut [f64]| {
+            for (local, i) in rows.enumerate() {
+                for r in 0..d {
+                    let base = (i * d + r) * p;
+                    let slab = &cross[base..base + p];
+                    let mut acc = 0.0_f64;
+                    for (j, &value) in slab.iter().enumerate() {
+                        acc += value * beta[j];
+                    }
+                    cross_t_chunk[local * d + r] = acc;
+                    let weight = t[i * d + r];
+                    for (j, &value) in slab.iter().enumerate() {
+                        cross_beta_partial[j] += value * weight;
+                    }
+                }
+            }
+        };
+
+        if parallel {
+            use rayon::prelude::*;
+            let partials: Vec<Vec<f64>> = cross_t
+                .par_chunks_mut(chunk_rows * d)
+                .enumerate()
+                .map(|(chunk_idx, cross_t_chunk)| {
+                    let start = chunk_idx * chunk_rows;
+                    let end = (start + chunk_rows).min(n);
+                    let mut partial = vec![0.0_f64; p];
+                    row_chunk(start..end, cross_t_chunk, &mut partial);
+                    partial
+                })
+                .collect();
+            // Fold in chunk order: bit-identical to the sequential arm's chunk
+            // sequence regardless of how the chunks were scheduled.
+            for partial in &partials {
+                for (slot, &value) in cross_beta.iter_mut().zip(partial.iter()) {
+                    *slot += value;
+                }
+            }
+        } else {
+            let mut chunk_start = 0_usize;
+            while chunk_start < n {
+                let chunk_end = (chunk_start + chunk_rows).min(n);
+                let mut partial = vec![0.0_f64; p];
+                let slice = &mut cross_t[chunk_start * d..chunk_end * d];
+                row_chunk(chunk_start..chunk_end, slice, &mut partial);
+                for (slot, value) in cross_beta.iter_mut().zip(partial) {
+                    *slot += value;
+                }
+                chunk_start = chunk_end;
+            }
+        }
+
+        let border_row = |r: usize| -> f64 {
+            let row = &border[r * p..(r + 1) * p];
+            let mut acc = 0.0_f64;
+            for (c, &value) in row.iter().enumerate() {
+                acc += value * beta[c];
+            }
+            acc
+        };
+        let border_beta: Vec<f64> = if parallel {
+            use rayon::prelude::*;
+            (0..p).into_par_iter().map(border_row).collect()
+        } else {
+            (0..p).map(border_row).collect()
+        };
+
+        ArrowOperatorApply {
+            cross_t,
+            cross_beta,
+            border_beta,
+        }
+    }
+
+    /// Device arm of [`Self::apply_operator`]: three cuBLAS `dgemv` launches
+    /// against the ALREADY-RESIDENT cross slab and border, moving only the
+    /// `O(n·d + p)` iterate up and the `O(n·d + p)` products back. The
+    /// `O(n·d·p)` and `O(p²)` operands never cross the bus after upload.
+    #[cfg(target_os = "linux")]
+    fn apply_operator_device(&self, t: &[f64], beta: &[f64]) -> Option<ArrowOperatorApply> {
+        use cudarc::cublas::sys::cublasOperation_t;
+        use cudarc::cublas::{Gemv, GemvConfig};
+
+        let device = self.device.as_ref()?;
+        let rows = self.shape.n.checked_mul(self.shape.d)?;
+        let p = self.shape.p;
+        let rows_i = i32::try_from(rows).ok()?;
+        let p_i = i32::try_from(p).ok()?;
+        let mut guard = device.operator_scratch.lock().ok()?;
+        let scratch = &mut *guard;
+        device.stream.memcpy_htod(t, &mut scratch.t_dev).ok()?;
+        device
+            .stream
+            .memcpy_htod(beta, &mut scratch.beta_dev)
+            .ok()?;
+
+        // `row_cross_dev` holds the `(n·d)×p` cross slab ROW-major, which cuBLAS
+        // reads as the `p×(n·d)` COLUMN-major matrix `Aᵀ` with `lda = p`. So
+        // `A·β` is the transposed product and `Aᵀ·t` the untransposed one — no
+        // repacking, no transpose copy.
+        let cross_t_cfg = GemvConfig::<f64> {
+            trans: cublasOperation_t::CUBLAS_OP_T,
+            m: p_i,
+            n: rows_i,
+            alpha: 1.0,
+            lda: p_i,
+            incx: 1,
+            beta: 0.0,
+            incy: 1,
+        };
+        // SAFETY: `row_cross_dev` is the live `p×(n·d)` column-major slab with
+        // `lda = p` uploaded at construction and validated against the shape;
+        // `beta_dev` holds `p` entries (the `m` operand length under OP_T) and
+        // `cross_t_dev` holds `n·d` (the `n` result length), both unit-stride.
+        unsafe {
+            device.blas.gemv(
+                cross_t_cfg,
+                &device.row_cross_dev,
+                &scratch.beta_dev,
+                &mut scratch.cross_t_dev,
+            )
+        }
+        .ok()?;
+
+        let cross_beta_cfg = GemvConfig::<f64> {
+            trans: cublasOperation_t::CUBLAS_OP_N,
+            m: p_i,
+            n: rows_i,
+            alpha: 1.0,
+            lda: p_i,
+            incx: 1,
+            beta: 0.0,
+            incy: 1,
+        };
+        // SAFETY: same slab as above; under OP_N the operand length is `n·d`
+        // (`t_dev`) and the result length is `p` (`cross_beta_dev`), unit-stride.
+        unsafe {
+            device.blas.gemv(
+                cross_beta_cfg,
+                &device.row_cross_dev,
+                &scratch.t_dev,
+                &mut scratch.cross_beta_dev,
+            )
+        }
+        .ok()?;
+
+        // `border_hessian_dev` is the `p×p` border ROW-major, i.e. `H_ββᵀ`
+        // column-major with `lda = p`; the transposed GEMV recovers `H_ββ·β`.
+        let border_cfg = GemvConfig::<f64> {
+            trans: cublasOperation_t::CUBLAS_OP_T,
+            m: p_i,
+            n: p_i,
+            alpha: 1.0,
+            lda: p_i,
+            incx: 1,
+            beta: 0.0,
+            incy: 1,
+        };
+        // SAFETY: `border_hessian_dev` is the live `p×p` slab with `lda = p`;
+        // `beta_dev` and `border_beta_dev` each hold `p` unit-stride entries.
+        unsafe {
+            device.blas.gemv(
+                border_cfg,
+                &device.border_hessian_dev,
+                &scratch.beta_dev,
+                &mut scratch.border_beta_dev,
+            )
+        }
+        .ok()?;
+
+        let cross_t = device.stream.clone_dtoh(&scratch.cross_t_dev).ok()?;
+        let cross_beta = device.stream.clone_dtoh(&scratch.cross_beta_dev).ok()?;
+        let border_beta = device.stream.clone_dtoh(&scratch.border_beta_dev).ok()?;
+        Some(ArrowOperatorApply {
+            cross_t,
+            cross_beta,
+            border_beta,
+        })
+    }
+
+    /// Bordered-quadratic objective `½‖X‖² + ½ zᵀ H z − g₀ᵀ z` at the iterate
+    /// whose operator apply is `apply`. Only the `O(n·d²)` per-row `H_tt`
+    /// contraction and `O(n·d + p)` dots remain here — the heavy products were
+    /// already formed (on device when admitted) by [`Self::apply_operator`].
+    fn objective_from_apply(
         &self,
         base: &ArrowSchurSystem,
         half_target_energy: f64,
+        apply: &ArrowOperatorApply,
         t: &[f64],
         beta: &[f64],
     ) -> f64 {
@@ -1109,58 +1509,45 @@ impl DeviceResidentArrowWorkspace {
         // quad = zᵀ H z, lin = g₀ᵀ z.
         let mut quad = 0.0_f64;
         let mut lin = 0.0_f64;
-        // Per-row blocks: tᵢᵀ H_tt tᵢ + 2 tᵢᵀ H_tβ β contributes to quad; the
-        // β border H_ββ is added once below.
         for i in 0..n {
             let t_base = i * d;
             for r in 0..d {
-                // H_tt tᵢ row.
                 let mut htt_t = 0.0_f64;
                 for c in 0..d {
                     htt_t += base.rows[i].htt[[r, c]] * t[t_base + c];
                 }
-                // H_tβ β row.
-                let mut htb_b = 0.0_f64;
-                for c in 0..p {
-                    htb_b += base.rows[i].htbeta[[r, c]] * beta[c];
-                }
-                quad += t[t_base + r] * (htt_t + 2.0 * htb_b);
+                quad += t[t_base + r] * (htt_t + 2.0 * apply.cross_t[t_base + r]);
                 lin += base.rows[i].gt[r] * t[t_base + r];
             }
         }
-        // β border: βᵀ H_ββ β and g_β ᵀ β.
         for r in 0..p {
-            let mut hbb_b = 0.0_f64;
-            for c in 0..p {
-                hbb_b += base.hbb[[r, c]] * beta[c];
-            }
-            quad += beta[r] * hbb_b;
+            quad += beta[r] * apply.border_beta[r];
             lin += base.gb[r] * beta[r];
         }
         half_target_energy + 0.5 * quad - lin
     }
 
-    /// Build the residual arrow system at iterate `z`: same Hessian blocks as
-    /// `base`, but the gradient set to `r(z) = H z − g₀`. The arrow solver
-    /// solves `H δ = −gradient = −r(z) = g₀ − H z`, the Newton direction toward
-    /// the quadratic's minimiser.
-    fn residual_system(
+    /// Overwrite `sys`'s gradients with the residual `r(z) = H z − g₀` at the
+    /// iterate whose operator apply is `apply`, leaving every Hessian block (and
+    /// the row-Hessian fingerprint, which those blocks alone determine) intact.
+    ///
+    /// The system is built ONCE per fit and mutated in place from here on. The
+    /// old per-iteration `to_arrow_system()` rebuild re-materialised all `n`
+    /// `d×p` cross blocks and the `p×p` border — 96 MiB of allocation and copy
+    /// at the qwen shape — and then re-hashed them through
+    /// `refresh_row_hessian_fingerprint` (documented as "intentionally
+    /// expensive"), every single iterate, to reproduce values that cannot move
+    /// while the frame is frozen.
+    fn residual_into(
         &self,
+        sys: &mut ArrowSchurSystem,
         base: &ArrowSchurSystem,
+        apply: &ArrowOperatorApply,
         t: &[f64],
-        beta: &[f64],
-    ) -> ArrowSchurSystem {
+    ) {
         let n = self.shape.n;
         let d = self.shape.d;
         let p = self.shape.p;
-        // `ArrowSchurSystem` is not `Clone` (it carries matrix-free operator
-        // closures whose sharing across a then-mutated system would be a
-        // footgun), so own a fresh system built from the resident slabs rather
-        // than cloning `base`. `to_arrow_system` reproduces the identical
-        // Hessian blocks; we overwrite only the gradients below with the
-        // residual `r(z) = H z − g₀`. The Hessian reads stay on `base` (bit-
-        // identical to the fresh system's blocks).
-        let mut sys = self.to_arrow_system();
         for i in 0..n {
             let t_base = i * d;
             for r in 0..d {
@@ -1168,29 +1555,127 @@ impl DeviceResidentArrowWorkspace {
                 for c in 0..d {
                     hz += base.rows[i].htt[[r, c]] * t[t_base + c];
                 }
-                for c in 0..p {
-                    hz += base.rows[i].htbeta[[r, c]] * beta[c];
-                }
+                hz += apply.cross_t[t_base + r];
                 sys.rows[i].gt[r] = hz - base.rows[i].gt[r];
             }
         }
         for r in 0..p {
-            let mut hz = 0.0_f64;
-            // H_ββ β.
-            for c in 0..p {
-                hz += base.hbb[[r, c]] * beta[c];
-            }
-            // Σ_i (H_tβ^(i))ᵀ tᵢ contribution to the β-gradient.
-            for i in 0..n {
-                let t_base = i * d;
-                for rr in 0..d {
-                    hz += base.rows[i].htbeta[[rr, r]] * t[t_base + rr];
-                }
-            }
-            sys.gb[r] = hz - base.gb[r];
+            sys.gb[r] = apply.border_beta[r] + apply.cross_beta[r] - base.gb[r];
         }
-        sys.refresh_row_hessian_fingerprint();
-        sys
+    }
+}
+
+/// Upper bound on the number of row chunks the host operator apply folds. Fixes
+/// the `cross_beta` reduction tree (and hence the exact floating-point result)
+/// as a function of `n` alone, and bounds the partial-buffer memory at
+/// `OPERATOR_MAX_ROW_CHUNKS · p` regardless of row count.
+const OPERATOR_MAX_ROW_CHUNKS: usize = 256;
+
+/// Smallest row chunk worth handing to a worker: below this the per-chunk
+/// `p`-wide partial buffer costs more than the rows it folds.
+const OPERATOR_MIN_ROW_CHUNK: usize = 64;
+
+/// Row count below which the host operator apply stays sequential — the fan-out
+/// and the per-chunk partial allocation dominate the contraction itself.
+const OPERATOR_PARALLEL_ROW_MIN: usize = 256;
+
+/// Where one [`ArrowOperatorApply`] ran and what it moved across the bus.
+#[derive(Clone, Copy, Debug, Default)]
+struct OperatorApplyCost {
+    on_device: bool,
+    host_to_device_bytes: usize,
+    device_to_host_bytes: usize,
+}
+
+/// Running residency accounting for one inner Newton loop.
+///
+/// The fit reports its OWN split rather than leaving it to an external profiler:
+/// #1017's flat tier landed the same discipline (`device_refresh_columns`), and
+/// #2393's utilization gate is unfalsifiable without it. `operator_seconds`
+/// covers the `O(n·d·p + p²)` contraction (host or device), `solve_seconds`
+/// covers the arrow factor/solve, and the byte counters are the ONLY traffic the
+/// resident loop generates after the one-time slab upload.
+#[derive(Default)]
+struct ResidencyAccounting {
+    operator_applies: usize,
+    operator_device_applies: usize,
+    operator_seconds: f64,
+    solve_seconds: f64,
+    host_to_device_bytes: usize,
+    device_to_host_bytes: usize,
+}
+
+impl ResidencyAccounting {
+    fn apply(
+        &mut self,
+        workspace: &DeviceResidentArrowWorkspace,
+        mode: InnerSolveMode,
+        t: &[f64],
+        beta: &[f64],
+    ) -> ArrowOperatorApply {
+        let start = std::time::Instant::now();
+        let (apply, cost) = workspace.apply_operator(mode.operator_on_device(), t, beta);
+        self.operator_seconds += start.elapsed().as_secs_f64();
+        self.operator_applies += 1;
+        if cost.on_device {
+            self.operator_device_applies += 1;
+        }
+        self.host_to_device_bytes += cost.host_to_device_bytes;
+        self.device_to_host_bytes += cost.device_to_host_bytes;
+        apply
+    }
+
+    fn finish(self) -> ResidencyReport {
+        ResidencyReport {
+            operator_applies: self.operator_applies,
+            operator_device_applies: self.operator_device_applies,
+            operator_seconds: self.operator_seconds,
+            solve_seconds: self.solve_seconds,
+            operator_host_to_device_bytes: self.host_to_device_bytes,
+            operator_device_to_host_bytes: self.device_to_host_bytes,
+        }
+    }
+}
+
+/// Honest per-fit residency accounting, reported BY the fit (#1017/#2393).
+///
+/// A resident inner Newton is only resident if the per-iterate traffic is
+/// `O(n·d + p)` and the `O(n·d·p)` operands stay put; these counters make that
+/// claim checkable from a run's own output instead of from a profiler that a
+/// GPU-less future session cannot rerun.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ResidencyReport {
+    /// Operator applies (`H·z` contractions) the loop performed.
+    pub operator_applies: usize,
+    /// How many of those ran on the device.
+    pub operator_device_applies: usize,
+    /// Wall seconds inside the operator applies.
+    pub operator_seconds: f64,
+    /// Wall seconds inside the per-iterate arrow factor/solve.
+    pub solve_seconds: f64,
+    /// Host→device bytes the operator applies moved (the iterate only).
+    pub operator_host_to_device_bytes: usize,
+    /// Device→host bytes the operator applies moved (the products only).
+    pub operator_device_to_host_bytes: usize,
+}
+
+impl ResidencyReport {
+    /// Fraction of operator applies that executed on the device. `0.0` when the
+    /// loop performed none (a fit that converged before its first step).
+    #[must_use]
+    pub fn operator_device_fraction(&self) -> f64 {
+        if self.operator_applies == 0 {
+            return 0.0;
+        }
+        self.operator_device_applies as f64 / self.operator_applies as f64
+    }
+
+    /// Total per-iterate bus traffic. Compare against
+    /// [`DeviceResidentArrowWorkspace::resident_device_bytes`]: residency is the
+    /// claim that this stays `O(n·d + p)` per apply while that stays put.
+    #[must_use]
+    pub fn transfer_bytes(&self) -> usize {
+        self.operator_host_to_device_bytes + self.operator_device_to_host_bytes
     }
 }
 
@@ -1234,6 +1719,8 @@ pub struct DeviceResidentInnerOutcome {
     pub accepted_iterations: usize,
     pub converged: bool,
     pub execution_path: ExecutionPath,
+    /// Where this fit's per-iterate work ran and what it moved (#2393).
+    pub residency: ResidencyReport,
 }
 
 /// Result of an across-outer resident sweep ([`DeviceResidentArrowWorkspace::device_fit_outer_sequence`]).
@@ -1289,6 +1776,32 @@ fn note_resident_engagement(engaged: bool, detail: &str) {
         };
         log::warn!("[gam-solve sae_resident inner step] {verdict}: {detail}");
     });
+}
+
+/// One production-structured Arrow-Schur Newton step on the HOST.
+///
+/// `gpu_policy = Off` is what makes this a CPU baseline rather than a device
+/// path wearing a CPU label: `solve_arrow_newton_step_core` will otherwise
+/// consult `try_device_arrow_direct` / `maybe_inject_gpu_schur_matvec` and route
+/// part of the solve to the device on a CUDA host, which would silently make the
+/// "CPU" side of a speedup ratio partly a GPU measurement.
+fn cpu_arrow_newton_step(
+    sys: &ArrowSchurSystem,
+    ridge_t: f64,
+    ridge_beta: f64,
+) -> Result<crate::gpu_kernels::arrow_schur::ArrowSchurGpuSolution, DeviceResidentArrowError> {
+    let mut options = crate::arrow_schur::ArrowSolveOptions::direct();
+    options.gpu_policy = gam_gpu::GpuPolicy::Off;
+    let (delta_t, delta_beta, _diagnostics) = sys
+        .solve_with_options(ridge_t, ridge_beta, &options)
+        .map_err(|err| DeviceResidentArrowError::Solve {
+            reason: format!("SAE CPU arrow baseline step failed: {err}"),
+        })?;
+    Ok(crate::gpu_kernels::arrow_schur::ArrowSchurGpuSolution {
+        delta_t,
+        delta_beta,
+        log_det_hessian: f64::NAN,
+    })
 }
 
 fn grow_ridge(current: f64, grow: f64) -> f64 {
@@ -1376,6 +1889,18 @@ fn upload_resident_buffers(
 ) -> Option<DeviceResidentArrowBuffers> {
     use gam_gpu::linalg_dispatch::{DispatchOp, route_through_gpu};
 
+    // Admission is the batched `d×d` POTRF over the n row blocks, with the
+    // reduced-Schur GEMM `p × p × (n·d)` — the op the frame build is actually
+    // dominated by — as the alternate route.
+    //
+    // Keying admission on the GEMM ALONE was tried and rejected on measurement
+    // (#2393): the A10 sweep appeared to show the resident path losing at
+    // p=128 (0.56× vs the production host solve), which would have justified a
+    // narrower gate, but the whole deficit was the FIRST device call in the
+    // process paying cuBLAS/context warm-up inside the timed region — 39.5 ms
+    // at p=128 against 0.5–2.5 ms steady-state at every larger border. Warmed,
+    // the device wins at every border width measured, so a gate that excluded
+    // small `p` would have been tuned to a startup artifact.
     let runtime = route_through_gpu(DispatchOp::SmallDenseBatchedPotrf {
         p: shape.d,
         batch: shape.n,
@@ -1384,7 +1909,7 @@ fn upload_resident_buffers(
         route_through_gpu(DispatchOp::Gemm {
             m: shape.p,
             n: shape.p,
-            k: shape.n * shape.basis_cols,
+            k: shape.n * shape.d,
         })
     })?;
     let ctx = gam_gpu::device_runtime::cuda_context_for(runtime.device.ordinal)?;
@@ -1397,6 +1922,17 @@ fn upload_resident_buffers(
     let row_gradient_dev = stream.clone_htod(&slabs.row_gradient_slabs).ok()?;
     let border_hessian_dev = stream.clone_htod(&slabs.border_hessian).ok()?;
     let border_gradient_dev = stream.clone_htod(&slabs.border_gradient).ok()?;
+    // One cuBLAS handle + one set of O(n·d + p) scratch buffers per workspace,
+    // created with the resident slabs and reused for every operator apply.
+    let blas = cudarc::cublas::CudaBlas::new(stream.clone()).ok()?;
+    let rows_times_d = shape.n.checked_mul(shape.d)?;
+    let operator_scratch = std::sync::Mutex::new(DeviceOperatorScratch {
+        t_dev: stream.alloc_zeros::<f64>(rows_times_d).ok()?,
+        beta_dev: stream.alloc_zeros::<f64>(shape.p).ok()?,
+        cross_t_dev: stream.alloc_zeros::<f64>(rows_times_d).ok()?,
+        cross_beta_dev: stream.alloc_zeros::<f64>(shape.p).ok()?,
+        border_beta_dev: stream.alloc_zeros::<f64>(shape.p).ok()?,
+    });
     let bytes = [
         target_x.len(),
         basis_values.len(),
@@ -1421,6 +1957,8 @@ fn upload_resident_buffers(
         border_hessian_dev,
         border_gradient_dev,
         bytes,
+        blas,
+        operator_scratch,
     })
 }
 
@@ -1962,6 +2500,180 @@ mod tests {
             g0[shape.n * shape.d + r] = sys.gb[r];
         }
         (h, g0)
+    }
+
+    /// The fused operator apply must reproduce the dense `H·z` blockwise: it is
+    /// the ONE contraction both the residual gradient and the objective are now
+    /// read from, so an error here would corrupt every downstream quantity while
+    /// still "converging".
+    #[test]
+    fn operator_apply_matches_dense_hessian_product() {
+        let ws = small_fixture(0x2393_0A01);
+        let sys = ws.to_arrow_system();
+        let (h, _g0) = dense_hz(&ws, &sys);
+        let shape = ws.shape;
+        let t_len = shape.n * shape.d;
+        let mut rng = SplitMix64::new(0x2393_0A02);
+        let t: Vec<f64> = (0..t_len).map(|_| rng.sample_signed()).collect();
+        let beta: Vec<f64> = (0..shape.p).map(|_| rng.sample_signed()).collect();
+
+        let apply = ws.apply_operator_host(&t, &beta);
+
+        // cross_t = H_tβ β (the t-rows of H·z minus the H_tt t part).
+        let mut max_err = 0.0_f64;
+        for row in 0..t_len {
+            let mut expect = 0.0_f64;
+            for (col, &b) in beta.iter().enumerate() {
+                expect += h[[row, t_len + col]] * b;
+            }
+            max_err = max_err.max((expect - apply.cross_t[row]).abs());
+        }
+        // cross_beta = H_βt t, border_beta = H_ββ β.
+        for col in 0..shape.p {
+            let mut cross = 0.0_f64;
+            for (row, &tv) in t.iter().enumerate() {
+                cross += h[[t_len + col, row]] * tv;
+            }
+            max_err = max_err.max((cross - apply.cross_beta[col]).abs());
+            let mut border = 0.0_f64;
+            for (c, &b) in beta.iter().enumerate() {
+                border += h[[t_len + col, t_len + c]] * b;
+            }
+            max_err = max_err.max((border - apply.border_beta[col]).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "fused operator apply disagrees with the dense H·z blocks: max_abs_err={max_err:e}"
+        );
+    }
+
+    /// The residual written by `residual_into` must equal `H z − g₀` from the
+    /// dense operator, and the objective read off the same apply must equal the
+    /// dense bordered quadratic. This pins the algebra that replaced the
+    /// per-iteration `to_arrow_system()` rebuild.
+    #[test]
+    fn residual_and_objective_from_apply_match_dense_quadratic() {
+        let ws = small_fixture(0x2393_0B01);
+        let base = ws.to_arrow_system();
+        let (h, g0) = dense_hz(&ws, &base);
+        let shape = ws.shape;
+        let t_len = shape.n * shape.d;
+        let total = t_len + shape.p;
+        let mut rng = SplitMix64::new(0x2393_0B02);
+        let t: Vec<f64> = (0..t_len).map(|_| rng.sample_signed()).collect();
+        let beta: Vec<f64> = (0..shape.p).map(|_| rng.sample_signed()).collect();
+        let z: Vec<f64> = t.iter().chain(beta.iter()).copied().collect();
+
+        let apply = ws.apply_operator_host(&t, &beta);
+        let mut residual = ws.to_arrow_system();
+        ws.residual_into(&mut residual, &base, &apply, &t);
+
+        let mut max_err = 0.0_f64;
+        for row in 0..total {
+            let mut hz = 0.0_f64;
+            for (col, &value) in z.iter().enumerate() {
+                hz += h[[row, col]] * value;
+            }
+            let want = hz - g0[row];
+            let got = if row < t_len {
+                residual.rows[row / shape.d].gt[row % shape.d]
+            } else {
+                residual.gb[row - t_len]
+            };
+            max_err = max_err.max((want - got).abs());
+        }
+        assert!(
+            max_err < 1e-12,
+            "residual_into disagrees with dense H z − g₀: max_abs_err={max_err:e}"
+        );
+
+        let half_target_energy = 0.5 * squared_norm(&ws.target_x);
+        let mut quad = 0.0_f64;
+        let mut lin = 0.0_f64;
+        for (row, &zr) in z.iter().enumerate() {
+            let mut hz = 0.0_f64;
+            for (col, &zc) in z.iter().enumerate() {
+                hz += h[[row, col]] * zc;
+            }
+            quad += zr * hz;
+            lin += g0[row] * zr;
+        }
+        let want = half_target_energy + 0.5 * quad - lin;
+        let got = ws.objective_from_apply(&base, half_target_energy, &apply, &t, &beta);
+        let rel = (want - got).abs() / want.abs().max(1.0);
+        assert!(
+            rel < 1e-12,
+            "objective_from_apply disagrees with the dense quadratic: want={want:e} got={got:e} rel={rel:e}"
+        );
+    }
+
+    /// The structured CPU baseline must land on the SAME iterate as the dense
+    /// oracle. Without this the honest speedup denominator could be fast for the
+    /// wrong reason (a different, cheaper problem).
+    #[test]
+    fn cpu_arrow_baseline_matches_dense_reference() {
+        let ws = small_fixture(0x2393_0C01);
+        let opts = DeviceResidentInnerOptions::default();
+        let dense = ws
+            .cpu_reference_fit(&opts)
+            .expect("dense reference fit must succeed on the PD fixture");
+        let arrow = ws
+            .cpu_arrow_fit(&opts)
+            .expect("structured CPU baseline must succeed on the PD fixture");
+        assert_eq!(arrow.execution_path, ExecutionPath::Cpu);
+        assert_eq!(arrow.residency.operator_device_applies, 0);
+        assert!(arrow.residency.operator_applies > 0);
+        let scale = dense
+            .t
+            .iter()
+            .chain(dense.beta.iter())
+            .fold(1.0_f64, |m, &v| m.max(v.abs()));
+        let mut max_rel = 0.0_f64;
+        for (a, b) in dense.t.iter().zip(arrow.t.iter()) {
+            max_rel = max_rel.max((a - b).abs() / scale);
+        }
+        for (a, b) in dense.beta.iter().zip(arrow.beta.iter()) {
+            max_rel = max_rel.max((a - b).abs() / scale);
+        }
+        assert!(
+            max_rel < 1e-9,
+            "structured CPU baseline solves a different problem than the dense oracle: max_rel={max_rel:e}"
+        );
+    }
+
+    /// The host operator apply must be independent of the thread count: its one
+    /// real reduction folds fixed-size row chunks in chunk order, so a 1-thread
+    /// and an 8-thread run are bit-identical. A scheduling-dependent result here
+    /// would move the criterion ranking across topology candidates (#1017's
+    /// verification gate).
+    #[test]
+    fn host_operator_apply_is_bit_identical_across_thread_counts() {
+        let shape = DeviceResidentArrowShape {
+            n: 600,
+            p: 12,
+            basis_cols: 2,
+            d: 2,
+        };
+        let ws = fixture_for_shape_seeded(shape, 0x2393_0D01)
+            .expect("sweep-shaped fixture must validate");
+        let t_len = shape.n * shape.d;
+        let mut rng = SplitMix64::new(0x2393_0D02);
+        let t: Vec<f64> = (0..t_len).map(|_| rng.sample_signed()).collect();
+        let beta: Vec<f64> = (0..shape.p).map(|_| rng.sample_signed()).collect();
+
+        // Outside a rayon pool this row count takes the PARALLEL arm.
+        let outside = ws.apply_operator_host(&t, &beta);
+        assert!(
+            shape.n >= OPERATOR_PARALLEL_ROW_MIN,
+            "fixture must be large enough to take the parallel arm"
+        );
+        // `rayon::join` runs both closures on pool workers, so the nested-rayon
+        // guard sends the apply down its SEQUENTIAL arm. Same chunk partition,
+        // same fold order ⇒ the values must match EXACTLY, not approximately.
+        let (inside, ()) = rayon::join(|| ws.apply_operator_host(&t, &beta), || ());
+        assert_eq!(outside.cross_t, inside.cross_t);
+        assert_eq!(outside.cross_beta, inside.cross_beta);
+        assert_eq!(outside.border_beta, inside.border_beta);
     }
 
     #[test]

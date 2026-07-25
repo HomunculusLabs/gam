@@ -4817,38 +4817,6 @@ pub(crate) fn batched_smooth_sb(
     // that are structurally ineligible for batching.
     let cpu_one = |idx: usize| -> Array2<f64> { s_mats[idx].dot(&sb_inputs[idx].1) };
 
-    // Size gate BEFORE the device probe (startup-tax ordering fix): each device
-    // tile issues one strided-batched GEMM over (a subset of) a uniform-shape
-    // group, whose flop count is at most the whole group's `Σ 2·m²·p`. Every
-    // reachable dispatch policy refuses a batched GEMM below
-    // `MIN_CALIBRATABLE_GEMM_FLOPS`, so when even the LARGEST group in
-    // aggregate is under the floor, every tile on every device would decline
-    // and each atom would take `cpu_one` — the exact result this early return
-    // produces without resolving `GpuRuntime` (whose first resolution creates
-    // a CUDA primary context on every GPU). Shapes with an admissible group
-    // probe and scatter exactly as before.
-    {
-        let mut group_flops: std::collections::BTreeMap<(usize, usize), u128> =
-            std::collections::BTreeMap::new();
-        for (idx, (_, b)) in sb_inputs.iter().enumerate() {
-            let m = s_mats[idx].nrows();
-            let p = b.ncols();
-            *group_flops.entry((m, p)).or_insert(0) +=
-                2u128 * (m as u128) * (m as u128) * (p as u128);
-        }
-        let max_group = group_flops.values().copied().max().unwrap_or(0);
-        if max_group < crate::gpu::GpuDispatchPolicy::MIN_CALIBRATABLE_GEMM_FLOPS {
-            return Ok((0..n_atoms).map(cpu_one).collect());
-        }
-    }
-
-    let rt = match crate::gpu::device_runtime::GpuRuntime::resolve(gpu_policy)
-        .map_err(|error| format!("decoder-smoothness CUDA admission failed: {error}"))?
-    {
-        Some(rt) => rt,
-        None => return Ok((0..n_atoms).map(cpu_one).collect()),
-    };
-
     // Group atom indices by uniform (m, p) shape; only same-shape groups can ride
     // a strided-batched GEMM tile.
     let mut groups: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
@@ -4859,12 +4827,61 @@ pub(crate) fn batched_smooth_sb(
         groups.entry((m, p)).or_default().push(idx);
     }
 
+    // The op a group's device tile actually issues: one strided-batched
+    // `A·Bᵀ` with `A = S_k` (m×m) and `B = B_kᵀ` (p×m), i.e. `batch = |group|`,
+    // `m = m_k`, `n = p`, `k = m_k`.
+    let group_op = |atoms: usize, m: usize, p: usize| crate::gpu::linalg_dispatch::DispatchOp::BatchedGemm {
+        batch: atoms,
+        m,
+        n: p,
+        k: m,
+    };
+
+    // Size gate BEFORE the device probe (startup-tax ordering fix): when NO
+    // group's tile op could be admitted by any reachable policy, every atom
+    // would take `cpu_one` anyway, so return without resolving `GpuRuntime`
+    // (whose first resolution creates a CUDA primary context on every GPU).
+    if !groups
+        .iter()
+        .any(|(&(m, p), members)| group_op(members.len(), m, p).admissible_under_any_policy())
+    {
+        return Ok((0..n_atoms).map(cpu_one).collect());
+    }
+
+    let rt = match crate::gpu::device_runtime::GpuRuntime::resolve(gpu_policy)
+        .map_err(|error| format!("decoder-smoothness CUDA admission failed: {error}"))?
+    {
+        Some(rt) => rt,
+        None => return Ok((0..n_atoms).map(cpu_one).collect()),
+    };
+
     let mut out: Vec<Option<Array2<f64>>> = (0..n_atoms).map(|_| None).collect();
     for ((m, p), members) in groups {
         // Singletons and tiny groups gain nothing from batched device launch;
         // the single-product `fast_*` shim (size-gated) already handles a large
         // lone GEMM, so route those straight through the CPU-or-shim helper.
-        if members.len() < 2 || m == 0 || p == 0 {
+        //
+        // The second condition is the SAME admission the tile's
+        // `try_fast_abt_strided_batched_with_policy` will run, on the SAME op,
+        // asked once here. Previously the caller pre-screened on a group's
+        // aggregate flops against `MIN_CALIBRATABLE_GEMM_FLOPS` — the most
+        // permissive bound ANY policy can carry — and then treated the
+        // calibrated policy's stricter (and correct) decline inside the scatter
+        // as a fatal error. At the LLM decoder shape (m=6, p=2048, 8 atoms) the
+        // whole group is 1.2 MFLOP: far below a real device's calibrated
+        // crossover, so a GPU host FAILED fits that a CPU host completes. The
+        // decline is a routing verdict, not a fault — the exact `cpu_one`
+        // product is the right continuation, and a post-admission scatter
+        // failure below is still fatal.
+        if members.len() < 2
+            || m == 0
+            || p == 0
+            || crate::gpu::linalg_dispatch::route_through_gpu_with_policy(
+                group_op(members.len(), m, p),
+                gpu_policy,
+            )
+            .is_none()
+        {
             for &idx in &members {
                 out[idx] = Some(cpu_one(idx));
             }
@@ -6082,5 +6099,74 @@ mod linear_parity_anchor_1026_tests {
             "#1026 hybrid: the union basis is the exact generating model, so its \
              projection EV must be ~1; got {ev_hybrid:.6}"
         );
+    }
+}
+
+#[cfg(test)]
+mod decoder_smoothness_dispatch_2393_tests {
+    //! #2393 — the decoder-smoothness batched GEMM must ROUTE, never refuse.
+    //!
+    //! `batched_smooth_sb` pre-screened a group on its aggregate flops against
+    //! `MIN_CALIBRATABLE_GEMM_FLOPS` (the most permissive floor ANY policy can
+    //! carry) and then treated the CALIBRATED policy's stricter decline inside
+    //! the device scatter as a fatal error. At the SAE LLM decoder shape
+    //! (`m=6`, `p=2048`, 8 atoms) the whole group is 1.2 MFLOP — far below a
+    //! real device's measured crossover — so on a CUDA host every SAE fit that
+    //! reached this call died with "device scatter declined admitted group",
+    //! while the identical fit completed on a CPU-only host. The decline is a
+    //! correct routing verdict; the exact host product is the continuation.
+
+    use super::batched_smooth_sb;
+    use ndarray::Array2;
+
+    /// The LLM decoder group must produce the exact per-atom products under
+    /// every policy the process can be in, on a device host and a CPU host
+    /// alike. `Auto` is the production policy; `Off` pins the host arm.
+    #[test]
+    fn llm_decoder_group_routes_instead_of_refusing() {
+        const M: usize = 6;
+        const P: usize = 2048;
+        const ATOMS: usize = 8;
+
+        let s_mats: Vec<Array2<f64>> = (0..ATOMS)
+            .map(|atom| {
+                Array2::from_shape_fn((M, M), |(i, j)| {
+                    if i == j {
+                        1.0 + 0.1 * (atom as f64)
+                    } else {
+                        0.01 * ((i + j + atom) as f64).sin()
+                    }
+                })
+            })
+            .collect();
+        let b_mats: Vec<Array2<f64>> = (0..ATOMS)
+            .map(|atom| {
+                Array2::from_shape_fn((M, P), |(i, j)| {
+                    0.05 * (((i + 1) * (j + 3) + atom) as f64 * 0.0037).cos()
+                })
+            })
+            .collect();
+        let expected: Vec<Array2<f64>> = (0..ATOMS)
+            .map(|atom| s_mats[atom].dot(&b_mats[atom]))
+            .collect();
+
+        for policy in [crate::gpu::GpuPolicy::Auto, crate::gpu::GpuPolicy::Off] {
+            let inputs: Vec<_> = (0..ATOMS)
+                .map(|atom| (s_mats[atom].view(), b_mats[atom].view()))
+                .collect();
+            let got = batched_smooth_sb(&inputs, false, policy).unwrap_or_else(|error| {
+                panic!(
+                    "#2393: the LLM decoder group must route to a product under \
+                     {policy}, not refuse; got error: {error}"
+                )
+            });
+            assert_eq!(got.len(), ATOMS);
+            for (atom, product) in got.iter().enumerate() {
+                assert_eq!(
+                    product, &expected[atom],
+                    "#2393: atom {atom} product differs from the exact S·B under {policy}"
+                );
+            }
+        }
     }
 }
