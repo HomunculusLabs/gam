@@ -2237,6 +2237,93 @@ mod soft_abs_gershgorin_2339_tests {
         }
     }
 
+    /// (4), the consequence production actually depends on: the majorizer is
+    /// **scale-equivariant**, so the two routes by which a #991 per-row design
+    /// weight `w_i` reaches it agree.
+    ///
+    /// The envelope is `σ_ε(x) = ε·h(x/ε)` with `h(u) = sqrt(u²+1)` a fixed smooth
+    /// majorizer of `|·|` (worst-case gap `ε·h(0) = ε`, linear in ε), and `ε` is
+    /// taken from the operator's OWN magnitude `ε₀‖H_k·‖₂`. Both factors are
+    /// degree-1 in `H_k·`, so `D̃(c·H) = c·D̃(H)` for every `c > 0`: a Gershgorin
+    /// bound that moved under a rescaling of the model would be a bug in the bound
+    /// itself.
+    ///
+    /// That is not an abstract property here — two production call sites weight
+    /// the SAME block differently and rely on the two being equal:
+    ///
+    /// * `psd_majorizer_diag` (the trait channel) computes `D̃` at the unweighted
+    ///   `scale` and post-multiplies: `w_i·D̃(scale)`.
+    /// * the SAE arrow-Schur assembly folds the weight into the strength instead:
+    ///   `row_psd_majorizer(logits, scale·w_i)`, i.e. `D̃(w_i·scale)`.
+    ///
+    /// With the hard `|·|` this was trivially true term by term. With a smoothed
+    /// radius it is true ONLY because `ε` is derived from the row rather than
+    /// fixed: a constant `ε` makes `D̃(w·scale) ≠ w·D̃(scale)`, silently splitting
+    /// the assembled `B` from the diagonal the trait reports, and no existing test
+    /// compares the two routes (`every_channel_scales_by_w_row_identically` checks
+    /// the trait channel against ITSELF reweighted, never against the assembly's
+    /// folded form). Exact for a power-of-two weight, tight-relative otherwise.
+    #[test]
+    fn smooth_gershgorin_weighting_routes_agree_by_scale_equivariance_2339() {
+        let k = 6_usize;
+        let pen = SoftmaxAssignmentSparsityPenalty::new(k, 1.1);
+        let scale = 0.75_f64;
+        let mut compared = 0_usize;
+        for row in seeded_rows(k, 0x2339_0200) {
+            // Power-of-two weights: equivariance must hold BIT-FOR-BIT, because
+            // scaling by a power of two is exact in every intermediate product.
+            for &w in &[0.5_f64, 2.0, 4.0] {
+                let post_multiplied = pen.psd_majorizer_abs_row_sums(&row, scale);
+                let folded = pen.psd_majorizer_abs_row_sums(&row, scale * w);
+                for kk in 0..k {
+                    assert_eq!(
+                        folded[kk],
+                        w * post_multiplied[kk],
+                        "the assembly's folded weight D̃(w·scale) and the trait \
+                         channel's w·D̃(scale) must be the SAME operator (#991/#2339, \
+                         w={w}, atom {kk}); a fixed absolute ε would split them"
+                    );
+                    compared += 1;
+                }
+            }
+            // Arbitrary weights: equal to rounding. A constant-ε envelope would
+            // miss by ≈(w−1)·K·ε, i.e. ~1e-8 relative — far outside this bound.
+            for &w in &[0.37_f64, 1.9, 6.25] {
+                let post_multiplied = pen.psd_majorizer_abs_row_sums(&row, scale);
+                let folded = pen.psd_majorizer_abs_row_sums(&row, scale * w);
+                for kk in 0..k {
+                    assert_abs_diff_eq!(
+                        folded[kk],
+                        w * post_multiplied[kk],
+                        epsilon = 1e-13 * (1.0 + w * post_multiplied[kk])
+                    );
+                }
+            }
+            // The adjoint the assembly pairs with that block carries the weight
+            // identically, so value and adjoint cannot drift apart under weighting.
+            for &w in &[0.5_f64, 2.0] {
+                for probe in 0..k {
+                    let post_multiplied =
+                        pen.row_psd_majorizer_logit_derivative(&row, scale, probe);
+                    let folded = pen.row_psd_majorizer_logit_derivative(&row, scale * w, probe);
+                    for kk in 0..k {
+                        assert_eq!(
+                            folded[[kk, kk]],
+                            w * post_multiplied[[kk, kk]],
+                            "∂D̃/∂z_w must carry the #991 row weight identically to \
+                             the value (#991/#2339, w={w}, atom {kk}, probe {probe})"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            compared == 8 * 3 * k,
+            "expected {} weighted comparisons, made {compared}",
+            8 * 3 * k
+        );
+    }
+
     /// (2), degenerate corner: an atom whose softmax mass underflows to exactly
     /// zero has an identically zero Hessian row, so the envelope's smoothing
     /// scale is exactly zero too. Value and adjoint must both be exactly `0.0` —
