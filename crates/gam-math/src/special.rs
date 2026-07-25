@@ -85,9 +85,22 @@ pub fn stable_polynomial_times_exp_neg(x: f64, coeffs: &[f64]) -> f64 {
 ///
 /// Both branches are accurate to a few ulp here, which is what leaves the
 /// crossover free of a visible seam. Below it the ascending series is exact up
-/// to rounding, because every one of its terms is positive and nothing cancels.
-/// Above it the asymptotic expansion's optimal-truncation error is `O(e^{−2x})`
-/// — below `5e−18` already at `x = 20`, and shrinking from there.
+/// to rounding, because every one of its terms is positive and nothing cancels
+/// — with the one exception of the `I0 − I1` difference the branch also carries,
+/// whose sign change costs a documented `√x`. Above it the asymptotic
+/// expansion's optimal-truncation error is `O(e^{−2x})` — below `5e−18` already
+/// at `x = 20`, and shrinking from there.
+///
+/// That `O(e^{−2x})` is the VALUE channel's floor, and only its. Differentiating
+/// an asymptotic series term by term multiplies the `k`-th term by `k`, and both
+/// derivative accumulators additionally carry the `x²` factored out of their
+/// powers, so their own smallest term is larger by `≈ k·x² ≈ 2x³`. Measured, the
+/// curvature channel's optimal truncation is `1.6e−14` absolute at the crossover
+/// — against a numerator of `1/8` — so `c''` cannot be better than `≈ 1e−13`
+/// relative there no matter how the loop is truncated. It achieves `2.5e−13`,
+/// within a factor of two of that floor. Anyone tightening `CURVATURE_TOL`
+/// further is chasing a bound the expansion itself does not admit; the fix would
+/// have to be a different expansion, not a different stopping rule.
 ///
 /// The former implementation used the single-precision Abramowitz & Stegun
 /// 9.8.1–9.8.4 minimax polynomials (crossover 3.75), whose stated accuracy is
