@@ -3243,10 +3243,11 @@ impl SaeManifoldTerm {
         // IndefiniteObservedInformation refusal. No new constant: the SAME shared
         // `SAE_EXACT_A_PD_FLOOR_REL` band, and a `|λ + vᵀEv| ≤ floor` result drops
         // into the existing radial-gauge unit-stiffness deflation (`log 1 = 0`).
-        // NOTE (#2330): this changes VALUE semantics only; the exact-A quotient
-        // pseudo-inverse the θ-adjoint consumes still refuses an indefinite A, so
-        // the analytic gradient and this value disagree on the priced directions
-        // by construction until a matching B-channel adjoint increment lands.
+        // The gradient twin is assembled by `priced_ard_adjoint_extras`: it adds
+        // the switched-direction eigenvector response, explicit dE/dρ leg, and
+        // implicit dE/dt θ-adjoint to the identically classified quotient inverse.
+        // Keep this pointer next to the value rule: reading the value in isolation
+        // must not suggest that the production objective and derivative disagree.
         let e_diag = self
             .materialize_ard_concave_clamp_diagonal(rho, cache)
             .map_err(SaeCriterionError::Numerical)?;
@@ -3297,8 +3298,9 @@ impl SaeManifoldTerm {
     /// uses: `A⁺ = Σ_{λ>floor} (1/λ) uᵀu`, dropping the `|λ|≤floor` gauge null.
     /// Both are returned as dense `dim×dim` operators (`A_tt⁺` has a zero β
     /// border) so they can feed `logdet_theta_adjoint_dense`'s border indexing
-    /// exactly as `materialize_block_diag_t_inverse` does. Refuses an indefinite
-    /// `A` (`λ < −floor`): the gradient must never be assembled at a saddle.
+    /// exactly as `materialize_block_diag_t_inverse` does. A clamp-attributable
+    /// negative direction uses its priced basin curvature; a genuine saddle still
+    /// refuses, so the gradient is never assembled outside the value's domain.
     pub(crate) fn materialize_exact_hessian_quotient_inverse(
         &self,
         rho: &SaeManifoldRho,
@@ -3312,11 +3314,12 @@ impl SaeManifoldTerm {
         // pseudo-inverse so the θ-adjoint is DEFINED (finite) at a wrinkle-priced
         // mode: an ARD-concave-clamp-attributable negative direction is inverted at
         // its priced basin curvature `1/(λ+e_v)` rather than refused; a genuine
-        // saddle (`λ+e_v < −floor`) still refuses. PROTOTYPE NOTE (#2336/#2330): this
-        // is NOT the exact adjoint of the priced value — the derivative of the priced
-        // `½log|A|` carries an extra `dE/dρ` B-channel on the switched directions that
-        // this inverse omits, so the analytic gradient and a finite-difference of the
-        // priced value disagree there by construction until that channel lands.
+        // saddle (`λ+e_v < −floor`) still refuses. This inverse is the (I) leg of
+        // the priced derivative. `dense_exact_a_logdet_channels` augments it with
+        // `priced_ard_adjoint_extras`, which supplies the (II) Daleckii–Krein
+        // eigenvector response plus the (III) direct dE/dρ and implicit dE/dt legs.
+        // The split is an implementation detail; callers consume the complete
+        // derivative of the value above.
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
         let pinv = |m: &Array2<f64>| -> Result<Array2<f64>, String> {
             let (eigs, vecs) = Self::cluster_stable_eigh(m, &e_diag, total_t)?;

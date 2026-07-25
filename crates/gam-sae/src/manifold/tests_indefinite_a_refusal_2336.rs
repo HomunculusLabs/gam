@@ -94,6 +94,130 @@ pub(crate) fn e_attributable_ard_saddle_prices_finite_2336() {
     }
 }
 
+/// #2434 regression gate — the switched-direction derivative already landed with
+/// the #2336 value rule in `e97238721`; two stale prototype comments later made it
+/// look absent. Pin the production direct-ρ channel against the value it actually
+/// differentiates so neither comments nor implementation can drift again.
+///
+/// Hold θ̂ fixed at the canonical E-attributable saddle, rebuild the cache at each
+/// perturbed ρ, and centrally difference
+/// `½(log|A_priced| − log|A_tt,priced|)`. The analytic side is the direct trace from
+/// `dense_exact_a_logdet_channels`, including:
+///
+/// 1. the priced inverse contraction;
+/// 2. the Daleckii–Krein eigenvector-response matrix; and
+/// 3. the explicit `dE/dρ_ard = E` term.
+///
+/// This deliberately probes only ARD coordinates: they are the coordinates on
+/// which the allegedly missing B-channel is live. The spectral assertion first
+/// proves the fixture really contains a switched negative direction; otherwise an
+/// ordinary positive-definite state could false-green the derivative comparison.
+#[test]
+fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
+    let (mut term, target, rho) = ard_saddle_state();
+    let (_value, loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            40,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("canonical E-attributable saddle must produce a priced cache");
+
+    let total_t = cache.delta_t_len();
+    let a = term
+        .materialize_exact_hessian_dense(&rho, target.view(), &cache)
+        .expect("materialize exact A at the priced state");
+    let e_diag = term
+        .materialize_ard_concave_clamp_diagonal(&rho, &cache)
+        .expect("materialize the clamp-attribution diagonal");
+    let (eigs, vecs) =
+        SaeManifoldTerm::cluster_stable_eigh(&a, &e_diag, total_t).expect("stable exact-A eigh");
+    let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
+    let switched = eigs
+        .iter()
+        .enumerate()
+        .filter(|(idx, lambda)| {
+            if **lambda >= -floor {
+                return false;
+            }
+            let v = vecs.column(*idx);
+            let e_v = (0..total_t)
+                .map(|row| e_diag[row] * v[row] * v[row])
+                .sum::<f64>();
+            **lambda + e_v >= -floor
+        })
+        .count();
+    assert!(
+        switched > 0,
+        "#2434 gate is invalid: the fixture contains no clamp-attributable switched direction"
+    );
+
+    let (analytic, _theta_adjoint) = term
+        .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
+        .expect("complete priced exact-A derivative");
+    let fixed_state_priced_logdet =
+        |mut candidate: SaeManifoldTerm, at_rho: &SaeManifoldRho| -> f64 {
+            let (_criterion, _loss, at_cache) = candidate
+                .penalized_quasi_laplace_criterion_with_cache(
+                    target.view(),
+                    at_rho,
+                    None,
+                    0,
+                    0.4,
+                    1.0e-6,
+                    1.0e-6,
+                )
+                .expect("fixed-state perturbed cache must remain on the priced stratum");
+            let (log_a, log_a_tt) = candidate
+                .exact_observed_information_log_dets(at_rho, target.view(), &at_cache)
+                .expect("fixed-state perturbed exact-A value");
+            0.5 * (log_a - log_a_tt)
+        };
+
+    let converged_term = term;
+    let h = 1.0e-5_f64;
+    let mut checked = 0usize;
+    let mut max_signal = 0.0_f64;
+    let mut worst_relative_error = 0.0_f64;
+    for atom in 0..rho.log_ard.len() {
+        for axis in 0..rho.log_ard[atom].len() {
+            let mut plus = rho.clone();
+            let mut minus = rho.clone();
+            plus.log_ard[atom][axis] += h;
+            minus.log_ard[atom][axis] -= h;
+            let value_plus = fixed_state_priced_logdet(converged_term.clone(), &plus);
+            let value_minus = fixed_state_priced_logdet(converged_term.clone(), &minus);
+            let finite_difference = (value_plus - value_minus) / (2.0 * h);
+            let index = rho.ard_flat_index(atom, axis);
+            let exact = analytic[index];
+            let scale = 1.0 + finite_difference.abs().max(exact.abs());
+            let relative_error = (finite_difference - exact).abs() / scale;
+            max_signal = max_signal.max(finite_difference.abs().max(exact.abs()));
+            worst_relative_error = worst_relative_error.max(relative_error);
+            eprintln!(
+                "#2434 priced ARD atom={atom} axis={axis}: analytic={exact:.12e} \
+                 fd={finite_difference:.12e} scaled_error={relative_error:.3e}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "#2434 gate found no ARD coordinates");
+    assert!(
+        max_signal > 1.0e-6,
+        "#2434 gate is not load-bearing: every priced ARD derivative is numerically zero"
+    );
+    assert!(
+        worst_relative_error <= 1.0e-4,
+        "priced exact-A analytic derivative disagrees with the fixed-state central \
+         difference of its value: worst scaled error {worst_relative_error:.3e}"
+    );
+}
+
 /// #2336 refusal companion — a GENUINE saddle (indefiniteness NOT attributable to
 /// the bounded ARD concave-clamp: `λ+e_v < −floor`) must STILL return the typed
 /// `IndefiniteObservedInformation` refusal, and the outer eval must price it as
