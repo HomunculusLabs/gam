@@ -1434,8 +1434,10 @@ extern "C" __global__ void chol_logdet_col_major(
         builder.arg(&ws.dir_orig_dev);
         builder.arg(&input.step_lm_lambda);
         builder.arg(&p_i);
+        builder.arg(&mut ws.beta_orig_dev);
         // SAFETY: correct_newton_rhs receives p-sized rhs/beta/shift vectors
-        // and a column-major p×p penalty matrix; the launch covers p threads.
+        // and a column-major p×p penalty matrix; the launch covers p threads
+        // and preserves `(S + lm I)β` in coefficient scratch for the selector.
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("correct Newton rhs on device: {e}"))?;
 
@@ -2037,7 +2039,8 @@ extern "C" __global__ void correct_newton_rhs(
     const double* __restrict__ beta,
     const double* __restrict__ linear_shift,
     double lm,
-    int p
+    int p,
+    double* __restrict__ penalty_beta
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= p) return;
@@ -2045,7 +2048,23 @@ extern "C" __global__ void correct_newton_rhs(
     for (int j = 0; j < p; ++j) {
         s_beta += penalty_step[i + j * p] * beta[j];
     }
+    penalty_beta[i] = s_beta;
     rhs[i] += -s_beta + lm * beta[i] + linear_shift[i];
+}
+
+extern "C" __global__ void apply_penalty(
+    const double* __restrict__ penalty_step,
+    const double* __restrict__ vector,
+    int p,
+    double* __restrict__ output
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p) return;
+    double value = 0.0;
+    for (int j = 0; j < p; ++j) {
+        value += penalty_step[i + j * p] * vector[j];
+    }
+    output[i] = value;
 }
 
 // Select the first acceptable member of the seven-point line-search ladder
@@ -2060,7 +2079,8 @@ extern "C" __global__ void select_alpha(
     const unsigned int* __restrict__ refusal_summary,
     const double* __restrict__ beta,
     const double* __restrict__ direction,
-    const double* __restrict__ penalty_step,
+    const double* __restrict__ penalty_beta_step,
+    const double* __restrict__ penalty_direction_step,
     const double* __restrict__ linear_shift,
     const double* __restrict__ direction_linf,
     double previous_deviance,
@@ -2079,14 +2099,8 @@ extern "C" __global__ void select_alpha(
     double linear_coeff_half = 0.0;
     double direction_penalty = 0.0;
     for (int i = 0; i < p; ++i) {
-        double s_beta = 0.0;
-        double s_direction = 0.0;
-        for (int j = 0; j < p; ++j) {
-            double s_ij = penalty_step[i + j * p];
-            if (i == j) s_ij -= lm;
-            s_beta += s_ij * beta[j];
-            s_direction += s_ij * direction[j];
-        }
+        double s_beta = penalty_beta_step[i] - lm * beta[i];
+        double s_direction = penalty_direction_step[i] - lm * direction[i];
         penalty_beta += beta[i] * s_beta - 2.0 * beta[i] * linear_shift[i];
         linear_coeff_half += direction[i] * (s_beta - linear_shift[i]);
         direction_penalty += direction[i] * s_direction;
@@ -2276,6 +2290,8 @@ extern "C" __global__ void status_first_ladder(
         /// Full production final-row buffers, written once at convergence.
         pub row_final: crate::gpu_kernels::pirls_row::RowOutputDevBuffers,
         pub direction_dev: CudaSlice<f64>,
+        /// Parallel `(S + lm I)δ` contraction consumed by `select_alpha`.
+        pub penalty_direction_dev: CudaSlice<f64>,
         pub xd_dev: CudaSlice<f64>,
         pub scalar_dev: CudaSlice<f64>,
         /// Compact alpha-selection record, written and selected entirely on
@@ -2314,6 +2330,7 @@ extern "C" __global__ void status_first_ladder(
                 row_final: crate::gpu_kernels::pirls_row::RowOutputDevBuffers::allocate(stream, n)
                     .map_err(|e| format!("pirls loop alloc row_final: {e}"))?,
                 direction_dev: alloc_f64("direction", p)?,
+                penalty_direction_dev: alloc_f64("penalty direction", p)?,
                 xd_dev: alloc_f64("xd", n)?,
                 scalar_dev: alloc_f64("scalar", 1)?,
                 alpha_selection_dev: alloc_f64("alpha selection", 8)?,
@@ -2618,6 +2635,9 @@ extern "C" __global__ void status_first_ladder(
         let select_alpha_func = loop_module
             .load_function("select_alpha")
             .map_err(|e| format!("load select_alpha: {e}"))?;
+        let apply_penalty_func = loop_module
+            .load_function("apply_penalty")
+            .map_err(|e| format!("load apply_penalty: {e}"))?;
 
         // beta_orig = Qs · beta  (transforms from transformed to original coords).
         // For identity Qs, this is a copy; always goes through ws.beta_orig_dev.
@@ -2790,7 +2810,21 @@ extern "C" __global__ void status_first_ladder(
                 &mut loop_ws.status_u32_dev,
             )?;
             let p_i = to_i32(p)?;
-            let cfg = LaunchConfig {
+            let contraction_cfg = LaunchConfig {
+                grid_dim: ((p as u32).div_ceil(256).max(1), 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut contraction_builder = ws.stream.launch_builder(&apply_penalty_func);
+            contraction_builder.arg(&ws.penalty_dev);
+            contraction_builder.arg(&loop_ws.direction_dev);
+            contraction_builder.arg(&p_i);
+            contraction_builder.arg(&mut loop_ws.penalty_direction_dev);
+            // SAFETY: apply_penalty covers p output rows and reads a
+            // column-major p×p matrix plus one p-vector.
+            unsafe { contraction_builder.launch(contraction_cfg) }
+                .map_err(|e| format!("apply penalty to direction it={it}: {e}"))?;
+            let selection_cfg = LaunchConfig {
                 grid_dim: (1, 1, 1),
                 block_dim: (1, 1, 1),
                 shared_mem_bytes: 0,
@@ -2800,7 +2834,8 @@ extern "C" __global__ void status_first_ladder(
             builder.arg(&loop_ws.status_u32_dev);
             builder.arg(&loop_ws.beta_dev);
             builder.arg(&loop_ws.direction_dev);
-            builder.arg(&ws.penalty_dev);
+            builder.arg(&ws.beta_orig_dev);
+            builder.arg(&loop_ws.penalty_direction_dev);
             builder.arg(&loop_ws.linear_shift_dev);
             builder.arg(&loop_ws.scalar_dev);
             builder.arg(&prev_deviance);
@@ -2812,7 +2847,7 @@ extern "C" __global__ void status_first_ladder(
             // SAFETY: select_alpha is a single-thread coefficient-space
             // reduction over p-sized vectors and the p×p penalty, with seven
             // ladder objectives and fourteen refusal-summary inputs.
-            unsafe { builder.launch(cfg) }
+            unsafe { builder.launch(selection_cfg) }
                 .map_err(|e| format!("select alpha on device it={it}: {e}"))?;
             let selection = ws
                 .stream
