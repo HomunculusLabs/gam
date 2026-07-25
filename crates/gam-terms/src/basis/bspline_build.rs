@@ -2712,7 +2712,7 @@ fn constructive_ridge_from_null_metric_action(
 /// function told the double-penalty rebuild there was nothing to shrink in one
 /// of them — a self-contradiction inside a single built term, and the origin of
 /// the realized 5-vs-4 Duchon penalty-topology split.
-fn constructive_nullspace_basis(
+pub(crate) fn constructive_nullspace_basis(
     quadratic: &ConstructiveQuadratic,
 ) -> Result<Option<Array2<f64>>, BasisError> {
     let coefficient_dim = quadratic.factor().ncols();
