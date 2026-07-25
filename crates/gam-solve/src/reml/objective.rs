@@ -1083,7 +1083,7 @@ impl<'a> RemlState<'a> {
             // dropped zero-weight observations) — identical to the effective `n`
             // estimate.rs uses for the dispersion denominator (#584). With no
             // weights / all weights 1 this equals `self.y.len()`.
-            n_observations: self.weights.iter().filter(|&&wi| wi > 0.0).count(),
+            n_observations: self.positive_weight_observation_count(),
             hessian_op,
             penalty_coords,
             penalty_logdet,

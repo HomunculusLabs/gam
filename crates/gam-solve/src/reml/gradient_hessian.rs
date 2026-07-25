@@ -3698,6 +3698,18 @@ impl<'a> RemlState<'a> {
             .sum::<f64>()
     }
 
+    /// Number of observations that participate in the likelihood after
+    /// zero-weight rows are dropped.
+    ///
+    /// This is a fit-invariant sufficient statistic of `weights`. Carry it
+    /// across outer evaluations instead of re-deriving it from all rows while
+    /// assembling every trial objective.
+    pub(crate) fn positive_weight_observation_count(&self) -> usize {
+        *self
+            .positive_weight_observation_count_cache
+            .get_or_init(|| self.weights.iter().filter(|&&weight| weight > 0.0).count())
+    }
+
     /// Weighted null deviance `D₀ = Σ wᵢ(yᵢ − ȳ_w)²` of the Gaussian response,
     /// used as the *relative* reference scale for the smooth penalized-deviance
     /// floor (`InnerSolution::dp_floor_scale`, see
@@ -4129,6 +4141,7 @@ impl<'a> RemlState<'a> {
             persistent_warm_start_disk_enabled: AtomicBool::new(false),
             gaussian_weight_log_sum_half_cache: std::sync::OnceLock::new(),
             gaussian_dp_floor_scale_cache: std::sync::OnceLock::new(),
+            positive_weight_observation_count_cache: std::sync::OnceLock::new(),
         })
     }
 
