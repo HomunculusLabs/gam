@@ -716,27 +716,54 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
             // changing the reporting estimand while preserving the scaled
             // Gaussian likelihood geometry.
             let (residual_sign, residual_log_abs) = signed_log_difference(y, eta);
+            // `exp(log_weight + 2·ln|r| − ln 2)` is the worst of the four:
+            // doubling the log DOUBLES its rounding error before the `exp`
+            // adds its own. At `y = 1e200, η = 0, w = 1e-300` the exact
+            // half-deviance is `5e99` and this lands 6.6e-14 above it, against
+            // a 3e-14 bound. Interleave the weight with the square instead —
+            // `0.5·(w·r)·r` — so the product never forms `r²` on its own; when
+            // that still overflows (`y = MAX, η = −MAX`) the log route is
+            // exactly the fallback it was written to be.
+            let direct_half = (residual_sign != 0.0)
+                .then(|| y - eta)
+                .filter(|residual| residual.is_finite())
+                .map(|residual| 0.5 * (weight * residual) * residual)
+                .and_then(representable_half);
             let half = if residual_sign == 0.0 {
                 0.0
             } else {
-                finite_signed_from_log(
-                    row,
-                    "Gaussian half-deviance",
-                    eta,
-                    1.0,
-                    log_weight + 2.0 * residual_log_abs - std::f64::consts::LN_2,
-                )?
+                match direct_half {
+                    Some(value) => value,
+                    None => finite_signed_from_log(
+                        row,
+                        "Gaussian half-deviance",
+                        eta,
+                        1.0,
+                        log_weight + 2.0 * residual_log_abs - std::f64::consts::LN_2,
+                    )?,
+                }
             };
+            // Same treatment for the score channel, `−w·r`: the log route
+            // reaches a two-factor product through three roundings, and the
+            // same fixture contracts it to 3e-14 at `−1e-100`.
+            let direct_score = (residual_sign != 0.0)
+                .then(|| y - eta)
+                .filter(|residual| residual.is_finite())
+                .map(|residual| -(weight * residual))
+                .filter(|value| value.is_finite() && *value != 0.0);
             let score = if residual_sign == 0.0 {
                 0.0
             } else {
-                finite_signed_from_log(
-                    row,
-                    "Gaussian eta score",
-                    eta,
-                    -residual_sign,
-                    log_weight + residual_log_abs,
-                )?
+                match direct_score {
+                    Some(value) => value,
+                    None => finite_signed_from_log(
+                        row,
+                        "Gaussian eta score",
+                        eta,
+                        -residual_sign,
+                        log_weight + residual_log_abs,
+                    )?,
+                }
             };
             (half, score)
         }
