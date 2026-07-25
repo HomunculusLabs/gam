@@ -273,8 +273,10 @@ fn negative_normal_logcdf_from_scaled_tail(u: f64, scaled_tail: f64) -> f64 {
 
 /// Stable value and first four derivatives of `ln Φ(x)`.
 ///
-/// The moderate regime uses the exact Mills-ratio recurrence. In the deep
-/// left tail, differentiating the Laplace continued fraction
+/// The moderate regime uses the exact Mills-ratio recurrence, with the brackets
+/// collected in `q = λ + x` once `x < 0` so that they do not cancel as `λ`
+/// closes on `−x`. In the deep left tail, differentiating the Laplace continued
+/// fraction
 ///
 /// `φ(t)/Φ(-t) = t + 1/(t + 2/(t + 3/(...)))`, `t = -x`,
 ///
@@ -303,9 +305,42 @@ pub fn normal_logcdf_derivatives(x: f64) -> [f64; 5] {
     }
 
     let (log_cdf, lambda) = signed_probit_logcdf_and_mills_ratio(x);
+    let x2 = x * x;
+    if x < 0.0 {
+        // Left of the origin the brackets below are collected in the SAME Mills
+        // correction `q = λ + x` the continued-fraction branch carries, because
+        // written in `λ` they cancel catastrophically long before the branch
+        // ends. `λ(x) → −x` as `x → −∞`, so every term of, say,
+        // `(x³−3x) + (7x²−4)λ + 12xλ² + 6λ³` grows like `|x|³` while their sum
+        // decays: at `x = −4` they are `−52`, `456`, `−857`, `453` and add to
+        // `−0.0023`, a cancellation of 380000 that costs eleven digits. In `q`
+        // the same bracket is `−6q³ + 6xq² + (4−x²)q − x`, whose terms are
+        // `−0.069`, `−1.22`, `−2.71`, `4` — a cancellation of 1847, three
+        // orders milder. The reformulation is exact (`λ = q − x` substituted and
+        // re-collected), costs the same flops, and buys 16–34x across the whole
+        // branch: worst over `x ∈ [−4, 0]` falls from `4.5e−11` to `2.8e−12`.
+        //
+        // `q` itself is safe to form here: `λ/2 ≤ |x| ≤ 2λ` holds over most of
+        // the range, so `λ + x` is EXACT by Sterbenz, and where it is not (`x`
+        // near 0) `q` is the same size as `λ` and nothing cancels. That is the
+        // whole reason the rewrite works — it moves the cancellation out of the
+        // brackets and into a subtraction that has none.
+        //
+        // Past the origin `q → x` is no longer small, the `λ` form has nothing
+        // to cancel (`λ → 0` and `x² − 1` dominates), and it is the more
+        // accurate of the two — hence the sign test rather than a blanket swap.
+        let q = lambda + x;
+        let q2 = q * q;
+        return [
+            log_cdf,
+            lambda,
+            -lambda * q,
+            lambda * (2.0 * q2 - x * q - 1.0),
+            lambda * (-6.0 * q2 * q + 6.0 * x * q2 + (4.0 - x2) * q - x),
+        ];
+    }
     let lambda2 = lambda * lambda;
     let lambda3 = lambda2 * lambda;
-    let x2 = x * x;
     [
         log_cdf,
         lambda,
@@ -362,9 +397,28 @@ fn mills_correction_continued_fraction(t: f64) -> MillsCorrectionDerivatives {
         third: 0.0,
     };
     // The truncation error is damped by a product of the continued-fraction
-    // sensitivities `n/(t + q)^2`. At t >= 4, 32 levels put that product below
-    // binary64 roundoff while keeping this uncommon derivative path compact.
-    for n in (1..=32).rev() {
+    // sensitivities `n/(t + q)^2`, so the depth must be sized at `t = 4` — the
+    // LEAST converged point of the domain, and the one the log-CDF branch sits
+    // exactly on. Each successive derivative converges roughly 15x slower than
+    // the last, because differentiating the recursion multiplies each level's
+    // contribution by another factor of that same sensitivity. Measured against
+    // a 60-digit reference at `t = 4`:
+    //
+    // ```text
+    //            q         q'        q''       q'''
+    //   32   1.9e-15    7.0e-14    1.4e-12    2.1e-11
+    //   64   2.3e-23    1.4e-21    4.4e-20    1.0e-18
+    // ```
+    //
+    // 32 levels is enough for the VALUE and nothing else: it leaves `q'''` — the
+    // fourth log-CDF derivative — wrong in its eleventh digit. The depths that
+    // first reach `1e-17` at `t = 4` are 41, 47, 53 and 60 for the four
+    // channels, so 64 covers the worst of them with ~200x of margin, and the
+    // requirement falls off fast enough (33 levels at `t = 6`, 24 at `t = 8`,
+    // 12 at `t = 20`) that one constant sized for the edge is safe everywhere
+    // above it. The extra levels are pure convergence — every step divides
+    // positive quantities — so they cannot destabilise a large `t`.
+    for n in (1..=64).rev() {
         let denominator = t + q.value;
         let inv_denominator = denominator.recip();
         let value = f64::from(n) / denominator;
@@ -1482,6 +1536,29 @@ mod tests {
                     0.0095065764315958691,
                 ],
             ),
+            // Two points well inside the continued-fraction branch, where the
+            // truncation the depth controls is the ONLY error source: at -4 the
+            // branch is at its least converged, and these confirm it stays put.
+            (
+                -10.0,
+                [
+                    -53.231285150512471,
+                    10.098093233962512,
+                    -0.99055462217434374,
+                    0.0017864003921165069,
+                    0.00049785382237944016,
+                ],
+            ),
+            (
+                -6.0,
+                [
+                    -20.736768949974706,
+                    6.1584826045445989,
+                    -0.97601236321083323,
+                    0.0069535374991643118,
+                    0.0028992056785575027,
+                ],
+            ),
             (
                 -2.0,
                 [
@@ -1533,18 +1610,23 @@ mod tests {
                 ],
             ),
         ];
-        // The moderate-branch statrs regression produced ~1e-9 errors in f'';
-        // 1e-10 catches that head-on while respecting the deep-left-tail
-        // continued-fraction branch's inherent ~2e-11 accuracy in f'''' (its
-        // 32-level derivative propagation, not the `erfc` path this pins).
+        // The moderate-branch statrs regression produced ~1e-9 errors in f''.
+        // The bound used to sit at 1e-10 to respect what was called the
+        // continued-fraction branch's "inherent" ~2e-11 in f''''; that was not
+        // inherent but a depth, and at 64 levels the branch reproduces this
+        // 60-digit reference EXACTLY at x = -4, -6 and -10. What remains is the
+        // moderate branch, where the brackets are already collected in `q` and
+        // the floor is `λ`'s own relative error amplified by `λ/q` (18.7 at the
+        // switch): 1.8e-13 at x = -2, the worst point here. 1e-11 keeps 55x of
+        // headroom over that while still failing the 32-level truncation head-on.
         for &(x, reference) in refs {
             let got = normal_logcdf_derivatives(x);
             for (order, (&g, &r)) in got.iter().zip(reference.iter()).enumerate() {
                 let rel = (g - r).abs() / r.abs().max(1.0e-3);
                 assert!(
-                    rel < 1.0e-10,
+                    rel < 1.0e-11,
                     "normal_logcdf_derivatives({x})[{order}] = {g:.17e}, reference {r:.17e}, \
-                     rel {rel:.3e} >= 1e-10"
+                     rel {rel:.3e} >= 1e-11"
                 );
             }
         }
