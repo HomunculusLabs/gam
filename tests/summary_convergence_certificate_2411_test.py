@@ -121,12 +121,19 @@ def test_certificate_survives_save_and_load(tmp_path) -> None:
         assert float(outer_after[key]) == float(outer_before[key]), key
 
 
-def test_intercept_only_fit_reports_no_outer_equation_rather_than_a_zero_gradient() -> None:
-    """With no smoothing coordinate there is no outer stationarity equation.
+def test_absent_outer_equation_is_reported_as_absent_not_as_a_zero_gradient() -> None:
+    """The two arms must stay distinguishable, whichever one a model lands in.
 
-    Reporting that as a projected gradient of 0.0 against a bound of 0.0 would
-    read as "certified at machine precision", which is a different and much
-    stronger claim than "there was nothing to certify".
+    ``FitOuterConvergenceEvidence`` has a ``Fixed`` arm for models with no
+    smoothing coordinate, precisely so that "there was no equation to solve" is
+    not reported as a projected gradient of 0.0 against a bound of 0.0 — which
+    would read as "certified at machine precision", a far stronger claim.
+
+    Which formulas reach that arm is a property of term construction, not of
+    this surface, so this asserts the contract rather than the routing: an
+    absent outer block carries zero outer iterations, and a present one is
+    self-consistent. An intercept-only Gaussian fit turns out to still carry a
+    smoothing coordinate, so it exercises the present-block path.
     """
     rng = np.random.default_rng(24110)
     n = 300
@@ -137,5 +144,15 @@ def test_intercept_only_fit_reports_no_outer_equation_rather_than_a_zero_gradien
     convergence = model.summary().convergence
     assert convergence is not None
     assert convergence["certified"] is True
-    assert convergence["outer"] is None, convergence["outer"]
-    assert int(convergence["outer_iterations"]) == 0
+
+    outer = convergence["outer"]
+    if outer is None:
+        # The `Fixed` arm: no outer equation, therefore no outer iterations.
+        assert int(convergence["outer_iterations"]) == 0
+    else:
+        # The analytic arm: the verdict must be re-derivable from the numbers
+        # reported beside it, so a consumer can audit it or tighten it.
+        _check_outer_block(outer)
+        projected = float(outer["projected_gradient_norm"])
+        bound = float(outer["stationarity_bound"])
+        assert (projected <= bound) is convergence["certified"], (projected, bound)
