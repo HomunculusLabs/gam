@@ -1088,51 +1088,75 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
     }
 }
 
-/// #2450 — the derivation, executable: at large ρ the ENTIRE outer gradient is
-/// the ρ-PRIOR, so the criterion has no λ=∞ face for any rail certificate to
-/// find.
+/// #2450 — the λ=∞ face EXISTS: at large ρ the outer gradient has decayed to
+/// the criterion's own residual, seven orders below what a ρ-prior would leave.
 ///
-/// `FitOptions::default()` carries `RhoPrior::default() = Normal { mean: 0.0,
-/// sd: 3.0 }` (`gam-spec/src/lib.rs`), and `rho_prior_eval` adds per coordinate
-/// `cost += ½(ρ−mean)²/sd²`, `grad += (ρ−mean)/sd²`. So once ρ is large enough
-/// that the REML/LAML part's own λ→∞ face is reached — its ρ-derivative decays
-/// like `O(e^{−ρ})` — the surviving gradient is exactly `ρ/sd² = ρ/9`.
+/// This gate was landed inverted, as `outer_gradient_at_large_rho_is_exactly_
+/// the_rho_prior_2450`, to make the #2450 derivation executable while the
+/// defect was live: with `RhoPrior::default() = Normal { mean: 0, sd: 3 }` the
+/// shipped criterion was `REML + Σρ²/18`, so once the REML part's own λ→∞ face
+/// was reached the ENTIRE surviving gradient was the prior's `ρ/sd² = ρ/9`
+/// (measured 2.3333 / 2.6667 / 3.0000 / 3.3333 at ρ = 21/24/27/30, FD agreeing
+/// to 1e-10). Its doc said what to do if it ever failed: *"the default ρ-prior
+/// or its scale changed, or the criterion stopped including it"*. The criterion
+/// stopped including it — `RhoPrior::default()` is now `Flat` — so the gate is
+/// turned around to pin the property that replaced it, rather than deleted.
 ///
-/// Why this is a gate and not a curiosity. Every rail path in
+/// Why this direction is the one worth pinning. Every rail path in
 /// `rho_optimizer::run` decides by asking whether `ĉ = −e^ρ·∂V/∂ρ` is CONSTANT
 /// over a probe run (`try_certify_asymptote_rail` #2348 Inc 1,
-/// `try_tail_snap_to_rail`, `detect_wrong_rail_pullback` #2392). With
-/// `∂V/∂ρ → ρ/9` we get `ĉ → −ρe^ρ/9 → −∞`, so that law can never hold and no
-/// coordinate can ever be certified at an asymptote. That is measured, not
-/// argued: `..._monotone_..._for_matern` refuses with `|Pg| = 1.333e0` = `12/9`
-/// exactly, and `..._two_feature` with `1.886e0` = `√2·12/9`, both at ρ railed
-/// on 12 — i.e. their entire residual projected gradient IS this prior.
+/// `try_tail_snap_to_rail`, `detect_wrong_rail_pullback` #2392). That law is a
+/// statement about a REML/LAML criterion, whose λ=∞ face gives
+/// `∂V/∂ρ = O(e^{−ρ})`. A ρ-prior whose gradient survives into the tail makes
+/// `ĉ` divergent and no coordinate can ever be certified at an asymptote — one
+/// `Default` disabled the face certificate, the tail snap, AND the pullback
+/// that repairs a coordinate stuck on the wrong bound.
 ///
-/// `gam-custom-family`'s deterministic entry passes `RhoPrior::Flat` explicitly,
-/// which is why the same certificates work there. If this test fails, the
-/// default ρ-prior or its scale changed, or the criterion stopped including it —
-/// any of which invalidates the reasoning recorded on #2450, so read that issue
-/// before adjusting a tolerance here.
+/// Measured under the fixed default (same fixture, same ladder, A10):
+///
+/// ```text
+///   rhoALL@21  rho j=0/1/2  1.9959e-7  1.4371e-7  1.3320e-7   psi 2.9394e-7
+///   rhoALL@24               1.3624e-7  1.3346e-7  1.3293e-7   psi 1.4634e-8
+///   rhoALL@27               1.3330e-7  1.3316e-7  1.3314e-7   psi 7.2857e-10
+///   rhoALL@30               1.3324e-7  1.3324e-7  1.3324e-7   psi 3.6220e-11
+/// ```
+///
+/// analytic against central FD to 6.5e-9 relative at ρ=30, so this is the
+/// criterion itself and not a gradient artifact. Two things are worth reading
+/// off it rather than leaving implicit:
+///
+/// * the ρ-gradient is **seven orders** below the `ρ/9` the prior used to
+///   leave, which is what the assertion below is stated against — a relative
+///   statement, so it cannot be satisfied by the fixture merely getting smaller;
+/// * it settles on a FLOOR (1.3324e-7 identically at 24, 27 and 30) rather than
+///   continuing to decay like `e^{−ρ}`. That floor is not the smoothing prior —
+///   it is the same order on every coordinate and independent of ρ — and the
+///   remaining suspect is the soft ρ-guard atom the objective adds alongside
+///   the configured prior (`reml::objective`'s `soft_rho_guard_prior_atom`).
+///   Naming it here because a future reader will otherwise re-derive it: the
+///   floor is 1.1e-9 relative to `|V| ≈ 125`, far below any rail tolerance, but
+///   it is not zero and it is not the thing this gate is about.
 #[test]
-fn outer_gradient_at_large_rho_is_exactly_the_rho_prior_2450() {
-    /// `RhoPrior::default()`'s standard deviation. Not imported, deliberately:
-    /// the point of this gate is to fail if the shipped default stops matching
-    /// the value the #2450 derivation was carried out at.
-    const PRIOR_SD: f64 = 3.0;
-    // ρ ≥ 21 is where the ladder measured the REML part's own ρ-derivative to be
-    // below 1e-10, so the prior is all that is left. (ψ's gradient decays with
-    // it: 3.6e-11 at ρ=30.)
+fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
+    /// The standard deviation the shipped default USED to carry. Kept as a
+    /// literal, deliberately: the assertion is "at least four orders below what
+    /// `Normal { 0, 3 }` would have contributed here", and that reference has
+    /// to stay fixed even if some other prior is configured elsewhere.
+    const RETIRED_PRIOR_SD: f64 = 3.0;
+    /// How far below the retired prior's contribution the gradient must sit.
+    /// The measurement is 5e-8 of it, so this is three orders of headroom — it
+    /// discriminates "no prior in the criterion" from "a prior with a wider sd",
+    /// which a purely absolute bound could not.
+    const MAX_FRACTION_OF_RETIRED_PRIOR: f64 = 1.0e-4;
+    /// ρ ≥ 21 is where the ladder measured the REML part's own ρ-derivative
+    /// below 1e-10, so anything left is not the REML tail.
     const SATURATED: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
 
-    // Only `matern_gaussian`: these are the rungs the ladder actually measured
-    // out to 30 (2.3333 / 2.6667 / 3.0000 / 3.3333 on every ρ coordinate, FD
-    // agreeing to 1e-10, ψ decaying 2.9e-7 → 3.6e-11). The Duchon run's high
-    // rungs were truncated out of that job's captured output, so asserting on
-    // them here would be a guess; extend once they are measured.
     for (label, family) in [("matern_gaussian", LikelihoodSpec::gaussian_identity())] {
         let (_pass, _worst, _violations, grads) =
             iso_kappa_fd_variant_driver(label, 80, family, false, false, &SATURATED);
         let mut checked = 0usize;
+        let mut worst_fraction = 0.0f64;
         for value in SATURATED {
             let probe = format!("rhoALL@{value}");
             let grad = &grads
@@ -1140,9 +1164,7 @@ fn outer_gradient_at_large_rho_is_exactly_the_rho_prior_2450() {
                 .find(|(name, _)| *name == probe)
                 .unwrap_or_else(|| panic!("{label}: probe {probe} missing"))
                 .1;
-            let expected = value / (PRIOR_SD * PRIOR_SD);
-            // Only the ρ block carries the smoothing prior; ψ is a length-scale
-            // coordinate and is asserted to have decayed instead.
+            let retired = value / (RETIRED_PRIOR_SD * RETIRED_PRIOR_SD);
             for (j, &observed) in grad.iter().enumerate() {
                 if j + 1 == grad.len() {
                     assert!(
@@ -1152,19 +1174,26 @@ fn outer_gradient_at_large_rho_is_exactly_the_rho_prior_2450() {
                     );
                     continue;
                 }
-                let rel = (observed - expected).abs() / expected;
+                let fraction = observed.abs() / retired;
+                worst_fraction = worst_fraction.max(fraction);
                 assert!(
-                    rel <= 1.0e-4,
-                    "{label} {probe} rho j={j}: outer gradient should be the \
-                     Normal(0, sd={PRIOR_SD}) rho-prior's {expected:.10e} \
-                     (= rho/sd^2) once the REML part has saturated, got \
-                     {observed:.10e} (rel={rel:.3e}). See #2450."
+                    fraction <= MAX_FRACTION_OF_RETIRED_PRIOR,
+                    "{label} {probe} rho j={j}: the criterion must have a \
+                     lambda=infinity face, i.e. its rho-gradient at a saturated \
+                     rho must be far below the {retired:.10e} (= rho/sd^2) that a \
+                     Normal(0, sd={RETIRED_PRIOR_SD}) rho-prior would leave. Got \
+                     {observed:.10e}, a fraction {fraction:.3e} of it. A prior in \
+                     the deterministic criterion makes c-hat = -e^rho dV/drho \
+                     divergent and NO rail can ever be certified. See #2450."
                 );
                 checked += 1;
             }
         }
         assert!(checked >= SATURATED.len(), "{label}: nothing was checked");
-        eprintln!("[#2450-gate] {label}: {checked} rho components == rho/sd^2");
+        eprintln!(
+            "[#2450-gate] {label}: {checked} rho components, worst \
+             {worst_fraction:.3e} of the retired Normal(0,3) contribution"
+        );
     }
 }
 

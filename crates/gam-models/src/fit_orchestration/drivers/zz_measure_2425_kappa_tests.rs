@@ -336,7 +336,7 @@ mod zz_measure_2425_kappa_tests {
         .expect("baseline fit");
         let resolved = freeze_term_collection_from_design(&spec, &best.design).expect("freeze");
         let spatial_terms = spatial_length_scale_term_indices(&resolved);
-        let (resolved, best) = select_isotropic_matern_range_basin(
+        let basin = select_isotropic_matern_range_basin(
             data.view(),
             y.view(),
             weights.view(),
@@ -347,8 +347,21 @@ mod zz_measure_2425_kappa_tests {
             &baseline_options,
             &kappa_options,
             &spatial_terms,
-        )
-        .expect("basin selection");
+        );
+        // A measurement probe must RECORD what it saw, never die on it. Under
+        // the #2450 criterion fix this fixture's basin selection can refuse —
+        // `RhoPrior::default()` is no longer a soft box holding rho at 12, so
+        // the outer search runs out toward the infinite-smoothing face and the
+        // certificate correctly declines. That refusal text IS the measurement
+        // this probe exists to capture (it carries the full c-hat ladder), so
+        // print it and return instead of turning the probe into a red test.
+        let (resolved, best) = match basin {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("[2425-RAIL] basin selection REFUSED: {error}");
+                return;
+            }
+        };
 
         // The box the joint optimizer is actually handed. `JOINT_RHO_BOUND` is
         // the private ±12 constant; ψ's window is data-derived per term.

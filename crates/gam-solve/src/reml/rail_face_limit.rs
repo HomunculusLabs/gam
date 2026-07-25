@@ -63,8 +63,19 @@ impl RemlState<'_> {
             Some("the link carries runtime state, so the criterion is not the plain profiled-Gaussian one")
         } else if self.penalty_shrinkage_floor.is_some() {
             Some("a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes")
-        } else if !matches!(self.rho_prior, RhoPrior::Flat) {
-            Some("a non-flat rho-prior adds a term this closed form does not model")
+        } else if !self
+            .rho_prior
+            .upper_tail_gradient_vanishes_everywhere(rho.len())
+        {
+            // Not `matches!(prior, Flat)`: `Gamma(1, 0)` is the same flat
+            // coordinate spelled differently, and an `Independent` prior can be
+            // flat on the face and configured elsewhere. The question is the
+            // one the λ=∞ law actually asks — does the prior's gradient survive
+            // into the tail — and `RhoPrior` carries the answer (#2450/#2427).
+            Some(
+                "the rho-prior's gradient survives into the lambda -> infinity tail, so this \
+                 criterion has no lambda = infinity face for the closed form to describe",
+            )
         } else if !matches!(self.x, DesignMatrix::Dense(_)) {
             Some("the design is not dense")
         } else {

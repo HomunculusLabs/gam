@@ -446,9 +446,100 @@ pub enum RhoPrior {
     Independent(Vec<RhoPrior>),
 }
 
+impl RhoPrior {
+    /// Does this prior contribute **nothing** to `∂V/∂ρ_k` in the λ→∞
+    /// (`ρ_k → +∞`) tail?
+    ///
+    /// Every rail-reasoning path in the outer certificate — the analytic λ=∞
+    /// face form and the measured-tail probe alike — decides by the law
+    ///
+    /// ```text
+    /// ĉ = −e^{ρ} ∂V/∂ρ   is CONSTANT along the tail,
+    /// ```
+    ///
+    /// which is a statement about a REML/LAML criterion, whose λ=∞ face gives
+    /// `∂V/∂ρ = O(e^{−ρ})`. It holds only when the criterion really is that
+    /// one. Any ρ-prior whose own gradient survives into the tail adds a term
+    /// the law does not model, `ĉ` diverges, and **there is no λ=∞ face to
+    /// certify at any box width** (#2450: under `Normal { 0, 3 }` the measured
+    /// `∂V/∂ρ → ρ/9` and `ĉ → −ρe^{ρ}/9`).
+    ///
+    /// Carrying the answer here rather than re-deriving it at each consumer is
+    /// the point: the previous consumer-side test was `matches!(prior, Flat)`,
+    /// which silently misclassifies the two other spellings of a flat
+    /// coordinate.
+    ///
+    /// True exactly for the families whose ρ-gradient is identically zero on
+    /// the identified upper tail:
+    ///
+    /// * `Flat` — the REML runtime evaluates unset coordinates through the
+    ///   SELF-GATED, one-sided firth-default barrier, which is byte-identically
+    ///   flat above `ρ = −2 ln(upper)`. The wall it does carry is on the
+    ///   *other* side, against the `λ → 0` under-smoothing degeneracy.
+    /// * `GammaPrecision { shape: 1, rate: 0 }` — exactly flat under the
+    ///   MAP-in-λ convention (cost, gradient and Hessian all vanish); the same
+    ///   "unset" coordinate as `Flat`, spelled differently.
+    ///
+    /// False for every other family, each for a nameable reason: `Normal`
+    /// leaves `(ρ − mean)/sd² → ∞`; `PenalizedComplexity` leaves its persistent
+    /// `+1/2` Occam pull; a `GammaPrecision` with `rate > 0` leaves
+    /// `rate·e^{ρ}`, which diverges faster than the law's own scale.
+    ///
+    /// `coordinate` indexes the ρ vector, so an `Independent` prior answers per
+    /// coordinate — a face can be certifiable on one coordinate and not on
+    /// another. A nested `Independent` is structurally invalid and answers
+    /// `false` rather than pretending to know.
+    pub fn upper_tail_gradient_vanishes(&self, coordinate: usize) -> bool {
+        fn scalar_vanishes(prior: &RhoPrior) -> bool {
+            match prior {
+                RhoPrior::Flat => true,
+                RhoPrior::GammaPrecision { shape, rate } => *shape == 1.0 && *rate == 0.0,
+                RhoPrior::Normal { .. }
+                | RhoPrior::PenalizedComplexity { .. }
+                | RhoPrior::Independent(_) => false,
+            }
+        }
+        match self {
+            RhoPrior::Independent(priors) => priors.get(coordinate).is_some_and(scalar_vanishes),
+            scalar => scalar_vanishes(scalar),
+        }
+    }
+
+    /// Does the upper-tail law hold on **every** coordinate of a `ρ` of length
+    /// `rho_dim`? An `Independent` prior shorter than `rho_dim` is malformed
+    /// and answers `false`.
+    pub fn upper_tail_gradient_vanishes_everywhere(&self, rho_dim: usize) -> bool {
+        (0..rho_dim).all(|k| self.upper_tail_gradient_vanishes(k))
+    }
+}
+
+/// `Flat`, because the *deterministic* criterion is REML/LAML by contract.
+///
+/// SPEC: "REML (or LAML) always used for fitting, never GCV" and "posterior
+/// mean must always be the default (never MAP)". A `Default` that installs a
+/// proper prior on `ρ` makes the shipped deterministic criterion
+/// `REML + Σ_k ρ_k²/(2 sd²)` — MAP in `ρ` — which is a different estimator,
+/// not a stabilised version of the same one. `gam-custom-family` has always
+/// passed `Flat` explicitly at its entry point for exactly this reason; the
+/// `gam-models` / CLI / Python path reached the same solver through
+/// `FitOptions::default()` and inherited a prior the enum's own doc comment
+/// scopes to *joint HMC refinement* (#2450).
+///
+/// **The sampler does not lose its prior by this.** A flat prior on `ρ` gives
+/// an IMPROPER joint posterior — as `ρ → ∞` the REML criterion tends to the
+/// finite λ=∞ face value, so `exp(−V)` does not decay and `∫dρ` diverges — and
+/// that is precisely why joint HMC needs a proper one. The runtime already
+/// separates the two: `resolve_effective_rho_prior` fills unset (`Flat`)
+/// coordinates with the weakly-informative penalized-complexity default for
+/// consumers that need a *distribution* (serialization, joint-HMC refinement),
+/// while the REML/LAML objective evaluates those same coordinates through the
+/// self-gated one-sided barrier, which is byte-identically flat on the
+/// identified side. One default cannot serve both questions; `Flat` is the
+/// answer to "what criterion am I minimizing", and the sampler's answer is
+/// derived from it rather than shared with it.
 impl Default for RhoPrior {
     fn default() -> Self {
-        Self::Normal { mean: 0.0, sd: 3.0 }
+        Self::Flat
     }
 }
 
