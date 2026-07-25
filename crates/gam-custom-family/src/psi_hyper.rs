@@ -1678,7 +1678,13 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 &inner.block_states,
                 specs,
                 &ranges,
-                eval_mode,
+                // Atomic mode screening emits only a scalar, but it solves the
+                // inner mode at the derivative quality requested by its caller.
+                // The Jeffreys completion changes the mode-response operator
+                // used by the KKT cost correction, so objective geometry must
+                // follow that requested quality too; otherwise screening and
+                // derivative assembly price different scalar criteria.
+                inner_quality_mode,
             )?;
         let has_configured_rho_prior = !matches!(rho_prior, gam_problem::RhoPrior::Flat);
         let batched_gradient_contract_allows_override =
@@ -2104,7 +2110,9 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             &inner.block_states,
             specs,
             &ranges,
-            eval_mode,
+            // Keep the scalar criterion on the requested derivative-quality
+            // geometry even when this particular pass emits value only.
+            inner_quality_mode,
         )?;
     let batched_gradient_contract_allows_override = batched_outer_gradient_contract_allows_override(
         robust_jeffreys_hphi
