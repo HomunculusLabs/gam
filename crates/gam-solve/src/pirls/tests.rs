@@ -1857,6 +1857,12 @@ mod tests {
         )
         .expect("integrated logit PIRLS fit");
 
+        assert!(
+            fit.iteration < config.max_iterations,
+            "the one-parameter integrated-logit fit must converge before its {}-iteration cap; got status {:?}",
+            config.max_iterations,
+            fit.status
+        );
         let ctx = crate::quadrature::QuadratureContext::new();
         for i in 0..y.len() {
             let jet = crate::quadrature::integrated_inverse_link_jet(

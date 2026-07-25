@@ -174,22 +174,53 @@ impl<'a> GamWorkingModel<'a> {
                 .eq(beta.as_ref().iter().map(|value| value.to_bits()))
     }
 
-    fn refresh_firth_working_arrays_for_state(
+    pub(crate) fn refresh_working_arrays_for_state(
         &mut self,
         beta: &Coefficients,
         state: &WorkingState,
         operation: &'static str,
     ) -> Result<(), EstimationError> {
-        if !self.firth_bias_reduction || self.working_arrays_match_state(beta, state) {
+        if self.working_arrays_match_state(beta, state) {
             return Ok(());
         }
         let refreshed = self.update_with_curvature(beta, state.hessian_curvature)?;
         if refreshed.eta.as_ref() != state.eta.as_ref() {
             crate::bail_invalid_estim!(
-                "PIRLS Firth {operation} refresh changed the authoritative linear predictor"
+                "PIRLS {operation} refresh changed the authoritative linear predictor"
             );
         }
         Ok(())
+    }
+
+    fn current_data_objective(&self) -> Result<(f64, f64), EstimationError> {
+        if self.covariate_se.is_some() {
+            if !matches!(self.likelihood.spec.response, ResponseFamily::Binomial) {
+                crate::bail_invalid_estim!(
+                    "integrated PIRLS objective requires a binomial response"
+                );
+            }
+            binomial_deviance_and_log_kernel_from_mean(
+                self.y,
+                &self.lastmu,
+                self.priorweights,
+            )
+        } else {
+            let deviance = self.likelihood.loglik_deviance(
+                self.y,
+                &self.workspace.eta_buf,
+                &self.link_kind,
+                self.priorweights,
+            )?;
+            let log_kernel = pirls_data_log_kernel_from_eta(
+                self.y,
+                &self.workspace.eta_buf,
+                &self.likelihood,
+                &self.link_kind,
+                self.priorweights,
+                deviance,
+            )?;
+            Ok((deviance, log_kernel))
+        }
     }
 
     pub(crate) fn new(
@@ -982,6 +1013,10 @@ impl<'a> GamWorkingModel<'a> {
         direction: &Array1<f64>,
         current_eta: &LinearPredictor,
     ) -> Result<CandidateScreen, EstimationError> {
+        // A screen is speculative and overwrites row-space scratch. Until a
+        // full accepted-state update installs a new identity, those arrays are
+        // not eligible for export.
+        self.working_array_beta_bits.clear();
         let n = self.offset.len();
         if self.workspace.eta_buf.len() != n {
             self.workspace.eta_buf = Array1::zeros(n);
@@ -1068,12 +1103,7 @@ impl<'a> GamWorkingModel<'a> {
             }
         }
 
-        let deviance = self.likelihood.loglik_deviance(
-            self.y,
-            &self.workspace.eta_buf,
-            &self.link_kind,
-            self.priorweights,
-        )?;
+        let (deviance, _) = self.current_data_objective()?;
         let penalty_term = self.penalty.shifted_quadratic(beta.as_ref());
         // Finiteness is a property of the (deviance, penalty) pair regardless of
         // the family dispersion scale `k` applied later in the gain ratio, so the
@@ -1455,20 +1485,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         //
         // This keeps the PIRLS fixed point aligned with the stabilized Hessian
         // that drives log|H| and the implicit-gradient correction.
-        let deviance = self.likelihood.loglik_deviance(
-            self.y,
-            &self.workspace.eta_buf,
-            &self.link_kind,
-            self.priorweights,
-        )?;
-        let log_likelihood = pirls_data_log_kernel_from_eta(
-            self.y,
-            &self.workspace.eta_buf,
-            &self.likelihood,
-            &self.link_kind,
-            self.priorweights,
-            deviance,
-        )?;
+        let (deviance, log_likelihood) = self.current_data_objective()?;
 
         let mut penalty_term = self.penalty.shifted_quadratic(beta.as_ref());
         let mut ridge_grad_norm = 0.0;
@@ -1570,7 +1587,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         // state-locality repair, an LM retry combined A(candidate), q(candidate),
         // and beta/state(current), so it was not a Newton or Fisher-scoring step
         // for any objective.
-        self.refresh_firth_working_arrays_for_state(beta, state, "square-root operand")?;
+        self.refresh_working_arrays_for_state(beta, state, "square-root operand")?;
         let stabilizing_floor = lm_d2
             .iter()
             .map(|&scale| state.ridge_used + loop_lambda * scale)
@@ -1642,7 +1659,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         beta: &Coefficients,
         state: &WorkingState,
     ) -> Result<Option<f64>, EstimationError> {
-        self.refresh_firth_working_arrays_for_state(beta, state, "decrement")?;
+        self.refresh_working_arrays_for_state(beta, state, "decrement")?;
         if !augmented_root_represents_working_system(
             state.hessian_curvature,
             self.firth_bias_reduction,

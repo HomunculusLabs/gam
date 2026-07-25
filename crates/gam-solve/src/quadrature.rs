@@ -2885,45 +2885,6 @@ fn logit_wide_sigma_jet(mu: f64, sigma: f64) -> Result<IntegratedInverseLinkJet,
 }
 
 #[inline]
-pub fn integrated_logit_inverse_link_jet_pirls(
-    quadctx: &QuadratureContext,
-    mu: f64,
-    sigma: f64,
-) -> Result<IntegratedInverseLinkJet, EstimationError> {
-    // Direct jet integration via Gauss-Hermite: the same nodes deliver the
-    // full pointwise jet (mu, d1, d2, d3). Kept in sync with the Logit arm of
-    // `integrated_inverse_link_jet` so the PIRLS and general paths return
-    // identical values and modes.
-    if sigma <= 1e-10 {
-        let (mean, d1, d2, d3) = component_point_jet(LinkComponent::Logit, mu);
-        return Ok(IntegratedInverseLinkJet {
-            mean,
-            d1,
-            d2,
-            d3,
-            mode: IntegratedExpectationMode::ExactClosedForm,
-        });
-    }
-    if sigma > LOGIT_JET_GHQ_SIGMA_MAX {
-        return logit_wide_sigma_jet(mu, sigma);
-    }
-    let (mean, d1, d2, d3) = integrate_normal_ghq_adaptive(quadctx, mu, sigma, |x| {
-        component_point_jet(LinkComponent::Logit, x)
-    });
-    let mode = match logit_posterior_meanwith_deriv_controlled(mu, sigma) {
-        Ok(scalar) => scalar.mode,
-        Err(_) => IntegratedExpectationMode::QuadratureFallback,
-    };
-    Ok(IntegratedInverseLinkJet {
-        mean,
-        d1: d1.max(0.0),
-        d2,
-        d3,
-        mode,
-    })
-}
-
-#[inline]
 fn sas_point_jet(x: f64, epsilon: f64, log_delta: f64) -> (f64, f64, f64, f64) {
     let jet = sas_inverse_link_jet(x, epsilon, log_delta)
         .expect("normal quadrature nodes must be finite");
@@ -5772,38 +5733,6 @@ mod tests {
     }
 
     #[test]
-    fn test_integrated_logit_pirls_jet_matches_general_dispatch() {
-        // Assertion redesign: at (μ=1.1, σ=0.8) the erfcx series cannot
-        // meet the 1e-10 tail bound within LOGIT_MAX_TERMS=160 (derivation
-        // in `test_integrated_logit_jet_matches_central_differences`), so
-        // the dispatcher correctly routes to the GHQ backend. What matters
-        // for PIRLS is that the hot-path jet matches the general dispatcher
-        // in both routing AND value, not that they both happen to land on
-        // ExactSpecialFunction. We assert (a) both take the SAME path, and
-        // (b) their values agree to machine precision — that's the
-        // equivalence the PIRLS contract needs.
-        let ctx = QuadratureContext::new();
-        let mu = 1.1;
-        let sigma = 0.8;
-
-        let pirls =
-            integrated_logit_inverse_link_jet_pirls(&ctx, mu, sigma).expect("PIRLS logit jet");
-        let general = integrated_inverse_link_jet(&ctx, LinkFunction::Logit, mu, sigma)
-            .expect("general logit jet");
-
-        assert!(matches!(
-            pirls.mode,
-            IntegratedExpectationMode::ExactSpecialFunction
-                | IntegratedExpectationMode::QuadratureFallback
-        ));
-        assert_eq!(pirls.mode, general.mode);
-        assert_relative_eq!(pirls.mean, general.mean, epsilon = 1e-12);
-        assert_relative_eq!(pirls.d1, general.d1, epsilon = 1e-12);
-        assert_relative_eq!(pirls.d2, general.d2, epsilon = 1e-10);
-        assert_relative_eq!(pirls.d3, general.d3, epsilon = 1e-8);
-    }
-
-    #[test]
     fn test_integrated_cloglog_jet_matches_central_differences() {
         let ctx = QuadratureContext::new();
         let mu = 0.4;
@@ -6546,8 +6475,9 @@ mod tests {
         // and drifts from the truth (e.g. d1 ≈ 0.0702 vs 0.0700 at (3,3)). The
         // jet now routes σ > LOGIT_JET_GHQ_SIGMA_MAX through adaptive Simpson.
         // Pin ALL FOUR jet components (mean, d1, d2, d3) to an independent
-        // high-resolution Simpson reference, across the broad-σ band, and pin
-        // that the PIRLS hot-path jet returns identical values.
+        // high-resolution Simpson reference across the broad-σ band. PIRLS
+        // consumes this dispatcher directly, so there is no second jet to
+        // synchronize.
         let ctx = QuadratureContext::new();
         for &(mu, sigma) in &[(3.0, 3.0), (4.0, 4.0), (2.0, 5.0), (5.0, 5.0), (0.5, 20.0)] {
             let jet = integrated_inverse_link_jet(&ctx, LinkFunction::Logit, mu, sigma)
@@ -6563,14 +6493,6 @@ mod tests {
                     .expect("scalar logit moments");
             assert_relative_eq!(jet.d1, scalar.dmean_dmu, epsilon = 1e-12);
             assert_relative_eq!(jet.mean, scalar.mean, epsilon = 1e-12);
-            // PIRLS hot-path jet must match the general jet bit-for-bit.
-            let pirls = integrated_logit_inverse_link_jet_pirls(&ctx, mu, sigma)
-                .expect("wide-σ PIRLS logit jet");
-            assert_relative_eq!(pirls.mean, jet.mean, epsilon = 1e-12);
-            assert_relative_eq!(pirls.d1, jet.d1, epsilon = 1e-12);
-            assert_relative_eq!(pirls.d2, jet.d2, epsilon = 1e-12);
-            assert_relative_eq!(pirls.d3, jet.d3, epsilon = 1e-12);
-            assert_eq!(pirls.mode, jet.mode);
         }
     }
 

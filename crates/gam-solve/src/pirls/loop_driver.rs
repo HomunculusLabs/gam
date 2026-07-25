@@ -2133,6 +2133,17 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         }
     }
 
+    // Candidate screens and a rejected post-loop polish are speculative
+    // mutations of the model's row-space scratch. Reinstall the certified
+    // coefficient state's arrays only when that scratch no longer carries its
+    // exact coefficient identity; the common accepted-state path is an O(p)
+    // bit comparison and performs no extra curvature work.
+    working_model.refresh_working_arrays_for_state(
+        &working_summary.beta,
+        &working_summary.state,
+        "finalization",
+    )?;
+
     // Extract workspace before consuming working_model so we can reuse
     // the pre-allocated buffers in calculate_edfwithworkspace_with_penalty.
     // into_final_state() drops the workspace field anyway (it uses `..` in

@@ -287,8 +287,6 @@ pub fn update_glmvectors_integrated_for_link(
                     eta[i],
                     se[i].hypot(state.latent_sd),
                 )?
-            } else if matches!(inverse_link, InverseLink::Standard(StandardLink::Logit)) {
-                crate::quadrature::integrated_logit_inverse_link_jet_pirls(quadctx, eta[i], se[i])?
             } else {
                 crate::quadrature::integrated_inverse_link_jetwith_state(
                     quadctx,
