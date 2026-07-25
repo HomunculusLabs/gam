@@ -129,6 +129,45 @@ fn gaussian_constant_response_fits_completely_and_builds_payload_2254() {
     }
 }
 
+/// Zero dispersion is a property of the fitted residual, not only of a
+/// constant raw response. A full-rank unpenalized affine design that represents
+/// `y - offset` to its rowwise arithmetic bound has the same deterministic
+/// Gaussian law and must not enter the normalized positive-dispersion REML
+/// reporting path.
+#[test]
+fn gaussian_exact_affine_response_uses_deterministic_boundary_2254() {
+    let x = [0.0_f64, 1.0, 2.0, 3.0];
+    let y = [1.0_f64, 2.0, 3.0, 4.0];
+    let data = encode_columns(&["x", "y"], &[&x, &y]);
+    let FitResult::Standard(fit) = fit_from_formula("y ~ x", &data, &gaussian_cfg())
+        .expect("an exact affine Gaussian fit must mint its deterministic boundary")
+    else {
+        panic!("exact affine Gaussian formula did not produce a standard fit");
+    };
+
+    assert_eq!(
+        fit.fit.standard_deviation, 0.0,
+        "the exactly represented response has zero residual dispersion"
+    );
+    let predicted = fit.design.design.apply(&fit.fit.beta);
+    let roundoff = 3.0 * f64::EPSILON;
+    let gamma_3 = roundoff / (1.0 - roundoff);
+    for (row, (&actual, &expected)) in predicted.iter().zip(y.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() <= gamma_3 * (actual.abs() + expected.abs()),
+            "row {row}: deterministic affine prediction {actual} != {expected}"
+        );
+    }
+    let covariance = fit
+        .fit
+        .beta_covariance()
+        .expect("deterministic fit must persist coefficient covariance");
+    assert!(
+        covariance.iter().all(|value| *value == 0.0),
+        "zero residual dispersion implies exactly zero coefficient covariance"
+    );
+}
+
 /// The precise root cause of #2254's *second* wave (after the fit stopped
 /// returning `inference: None`) was a MALFORMED inference bundle: the shortcut
 /// hard-coded `edf_by_block = vec![edf_total]` (length 1), so the
