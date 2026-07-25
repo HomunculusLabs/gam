@@ -21,20 +21,35 @@
 //               criterion that honors its caller cannot return a bitwise
 //               identical ρ̂ under a prior pinning λ at e^{-6}.
 //
-// Two basis families, because they take opposite branches of the rewrite:
+// Two basis families, because they took opposite branches of the rewrite:
 //
-//   * `ps` (BSpline1D) is *relaxable*: `relax_smoothing_rho_prior` replaces the
-//     caller's cap with `Flat` on every coordinate the term owns whenever the
+//   * `ps` (BSpline1D) is *relaxable*: `relax_smoothing_rho_prior` replaced the
+//     caller's prior with `Flat` on every coordinate the term owns whenever the
 //     fit is well-determined (`n ≥ 2p`), no link-aux, no moving κ.
 //   * `matern` carries a moving log-κ coordinate, so the same function BAILS
 //     (`length_safe == false`) and returns the caller's prior untouched.
+//
+// WHAT THIS PROBE FOUND, and what changed because of it. At the #2450 landing
+// the four `ps` rows came back `d_rho_ABSURD == +0.0000` — bitwise identical ρ̂,
+// edf and MISE under a prior pinning λ six e-folds away — while `matern` moved.
+// That asymmetry is not a property of the two families' likelihoods; it is the
+// rewrite discarding a configured prior on the branch that takes it, filed as
+// #2463 and fixed by gating the rewrite on `RhoPrior::is_unset`. The four `ps`
+// rows now read `d_rho_ABSURD` ≈ −6 to −13 and every arm reports REACHES. The
+// `ps` column is therefore this instrument's live regression detector: a
+// `+0.0000` there again means a configured prior has stopped reaching the
+// criterion. Nothing about the ARM DEFINITIONS or the DGP changed, so the two
+// tables are directly comparable.
 //
 // The bail is a LENGTH-ALIGNMENT decision, not a modelling one: the per-
 // coordinate `Independent` prior it would need must match the full outer ρ
 // vector, and a moving κ appends trailing coordinates the rewrite cannot count.
 // So the families that still carry the `Normal{0,3}` cap are exactly the ones
 // where nobody decided they should — and exactly the ones where the λ=∞ rail
-// certificate is needed and provably cannot work (#2450, #2348, #2392).
+// certificate is needed and provably cannot work (#2450, #2348, #2392). That
+// half is unaffected by the #2463 gate: with the base prior UNSET, which is what
+// every shipped path now passes, the bail returns `Flat` and carries no cap at
+// all. It bites only when a caller configures one, which is now their choice.
 //
 // Measurement only: it prints and asserts only that the measurement was taken.
 #[cfg(test)]
