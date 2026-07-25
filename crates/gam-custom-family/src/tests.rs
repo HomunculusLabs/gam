@@ -4004,6 +4004,64 @@ impl CustomFamily for OneBlockConstrainedExactFamily {
     }
 }
 
+#[test]
+pub(crate) fn fixed_constrained_fit_reports_truncated_mean_and_retains_boundary_mode() {
+    let family = OneBlockConstrainedExactFamily {
+        target: -1.0,
+        lower: 0.0,
+    };
+    let specs = vec![ParameterBlockSpec {
+        name: "lower_bounded_quadratic".to_string(),
+        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![[1.0]])),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: Some(array![0.0]),
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    }];
+    let fit = fit_custom_family_fixed_log_lambdas(
+        &family,
+        &specs,
+        &BlockwiseFitOptions {
+            use_remlobjective: false,
+            compute_covariance: true,
+            ..BlockwiseFitOptions::default()
+        },
+        None,
+    )
+    .expect("certified lower-truncated quadratic fit");
+    let constrained = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("saved exact constrained-posterior geometry");
+    assert_eq!(constrained.mode, array![0.0]);
+    assert_eq!(constrained.unconstrained_center, array![-1.0]);
+    assert!(
+        fit.blocks[0].beta[0] > 0.0,
+        "reported coefficient must be the interior posterior mean, got {}",
+        fit.blocks[0].beta[0],
+    );
+    assert_eq!(
+        fit.blocks[0].beta,
+        constrained.posterior_mean(),
+        "the saved coefficient and persisted posterior identity must agree",
+    );
+    let variance = fit
+        .covariance_conditional
+        .as_ref()
+        .expect("requested truncated covariance")[[0, 0]];
+    assert!(
+        variance > 0.0 && variance < 1.0,
+        "an inequality cannot become either a zero-variance equality or an ignored ambient \
+         direction, got {variance}",
+    );
+}
+
 /// #2366 fixture: two coefficients, quadratic likelihood `−½‖β − target‖²`,
 /// elementwise box `β ≥ 0`. With `target = (1.0, −0.5)` the unconstrained
 /// optimum violates the box, so the constrained mode pins `β₂ = 0` with a
