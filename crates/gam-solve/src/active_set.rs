@@ -4248,238 +4248,538 @@ fn refine_operator_metric_face(
     }
 }
 
-/// Exact row norms after whitening by a positive-definite metric:
-/// `||a L^-T|| = sqrt(a H^-1 a^T)` for `H = L L^T`.
+/// Numerical dependence floor, in the whitened metric, for "the entering
+/// constraint normal is already spanned by the active face".
 ///
-/// The operator-native NNLS normalizes every generator before applying its
-/// scale-relative polar certificate. Reusing the original Euclidean row norm
-/// after metric whitening would violate that contract whenever `H != I`.
-/// Structured carriers compute the diagonal quadratic forms without
-/// materializing their complete row matrix.
-fn constraint_set_inverse_metric_row_norms(
-    set: &ConstraintSet,
-    inverse_metric: &Array2<f64>,
-) -> Result<Vec<f64>, EstimationError> {
-    if inverse_metric.nrows() != set.ncols() || inverse_metric.ncols() != set.ncols() {
-        crate::bail_invalid_estim!(
-            "constraint inverse-metric norm dimension mismatch: metric={}x{}, constraints={} cols",
-            inverse_metric.nrows(),
-            inverse_metric.ncols(),
-            set.ncols(),
-        );
-    }
-    let checked_norm = |quadratic: f64, scale: f64| -> Result<f64, EstimationError> {
-        let roundoff = 100.0 * f64::EPSILON * scale.max(1.0);
-        if !quadratic.is_finite() || quadratic < -roundoff {
-            return Err(EstimationError::ParameterConstraintViolation(format!(
-                "constraint inverse-metric row norm is not nonnegative: \
-                 quadratic={quadratic:.6e}, roundoff_bound={roundoff:.6e}"
-            )));
-        }
-        Ok(quadratic.max(0.0).sqrt())
-    };
+/// The dual step direction of the entering row `p` is `z = H⁻¹(n_p − Nᵀr)`,
+/// whose whitened form is the component of `L⁻¹n_p` orthogonal to the whitened
+/// active normals. `n_pᵀz = ‖z_w‖²` is therefore the *rate* at which a step
+/// closes row `p`'s violation, and it vanishes exactly when `n_p ∈ span(N)`. The
+/// test is relative to `‖L⁻¹n_p‖`, so it is invariant to the metric's scale, and
+/// it sits far above `eps`: a row that differs from the face only by roundoff
+/// must be classified DEPENDENT (and handled by a dual drop), never handed a
+/// spurious enormous step length.
+const ACTIVE_SET_DUAL_DEPENDENCE_TOL: f64 = 1e-11;
 
-    match set {
-        ConstraintSet::Dense(dense) => {
-            let transformed = dense.a.dot(inverse_metric);
-            (0..dense.a.nrows())
-                .map(|row| {
-                    let quadratic = dense.a.row(row).dot(&transformed.row(row));
-                    let scale = dense.a.row(row).dot(&dense.a.row(row))
-                        * inverse_metric
-                            .iter()
-                            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-                    checked_norm(quadratic, scale)
-                })
-                .collect()
-        }
-        ConstraintSet::KhatriRaoCone(cone) => {
-            let factor = cone.factor();
-            let p_cov = factor.ncols();
-            let metric_scale = inverse_metric
-                .iter()
-                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-            let mut norms = Vec::with_capacity(cone.nrows());
-            for &coefficient_row in cone.coupled_rows() {
-                let start = coefficient_row * p_cov;
-                let end = start + p_cov;
-                let block = inverse_metric.slice(s![start..end, start..end]);
-                let transformed = factor.dot(&block);
-                for row in 0..factor.nrows() {
-                    let quadratic = factor.row(row).dot(&transformed.row(row));
-                    let scale = factor.row(row).dot(&factor.row(row)) * metric_scale;
-                    norms.push(checked_norm(quadratic, scale)?);
-                }
+/// Maximum conditioned re-solve rounds after the dual iteration reports primal
+/// feasibility. The conditioned solve is exact on its face, so one round is the
+/// expected cost; a second is possible if conditioning releases a multiplier.
+/// More than a few means the face itself is still moving, which is a typed
+/// refusal rather than an unbounded loop.
+const ACTIVE_SET_DUAL_CONDITIONING_ROUNDS: usize = 4;
+
+/// Thin QR by reorthogonalized modified Gram--Schmidt: `columns = Q R` with `Q`
+/// orthonormal (returned as its column list) and `R` upper triangular.
+///
+/// Returns `None` when a column is numerically dependent on its predecessors.
+/// The dual active-set solve maintains an independent face by construction, so
+/// `None` is a genuine numerical breakdown rather than an expected branch, and
+/// the caller converts it into a typed refusal.
+fn thin_qr_reorthogonalized(
+    columns: &[Array1<f64>],
+    rank_tolerance: f64,
+) -> Option<(Vec<Array1<f64>>, Array2<f64>)> {
+    let k = columns.len();
+    let mut q: Vec<Array1<f64>> = Vec::with_capacity(k);
+    let mut r = Array2::<f64>::zeros((k, k));
+    for (column_index, column) in columns.iter().enumerate() {
+        let scale = column.dot(column).sqrt();
+        let mut residual = column.clone();
+        // Two passes: one sweep leaves a long, nearly dependent basis able to
+        // manufacture a false orthogonal direction out of first-pass roundoff.
+        for _ in 0..2 {
+            for (basis_index, basis) in q.iter().enumerate() {
+                let projection = residual.dot(basis);
+                r[[basis_index, column_index]] += projection;
+                residual.scaled_add(-projection, basis);
             }
-            Ok(norms)
         }
-        ConstraintSet::BlockDiagonal { blocks, total_cols } => {
-            if *total_cols != inverse_metric.nrows() {
-                crate::bail_invalid_estim!(
-                    "block constraint inverse-metric width {} != joint width {}",
-                    inverse_metric.nrows(),
-                    total_cols,
-                );
-            }
-            let mut norms = Vec::with_capacity(set.nrows());
-            for block in blocks {
-                let start = block.col_start;
-                let end = start + block.set.ncols();
-                let local_metric = inverse_metric.slice(s![start..end, start..end]).to_owned();
-                norms.extend(constraint_set_inverse_metric_row_norms(
-                    &block.set,
-                    &local_metric,
-                )?);
-            }
-            Ok(norms)
+        let norm = residual.dot(&residual).sqrt();
+        if !(norm.is_finite() && scale.is_finite() && norm > rank_tolerance * scale.max(1.0)) {
+            return None;
         }
+        r[[column_index, column_index]] = norm;
+        residual /= norm;
+        q.push(residual);
     }
+    Some((q, r))
 }
 
-/// Solve a homogeneous operator-cone QP by Moreau decomposition in the exact
-/// Hessian metric.
-///
-/// For `H = L Lᵀ`, `u = H⁻¹ rhs`, and homogeneous constraints `A beta >= 0`,
-/// introduce `z = Lᵀ beta` and `C = A L⁻ᵀ`. The QP becomes the Euclidean
-/// projection of `z_u = Lᵀu` onto `{z : C z >= 0}`. Its polar is the finitely
-/// generated cone `cone(-Cᵀ)`, so one operator-native nonnegative least-squares
-/// solve gives
+/// Back substitution against an upper-triangular `R` (`R x = y`).
+fn upper_triangular_back_substitution(r: &Array2<f64>, y: &Array1<f64>) -> Option<Array1<f64>> {
+    let k = y.len();
+    if r.nrows() != k || r.ncols() != k {
+        return None;
+    }
+    let mut x = Array1::<f64>::zeros(k);
+    for row in (0..k).rev() {
+        let mut sum = y[row];
+        for column in (row + 1)..k {
+            sum -= r[[row, column]] * x[column];
+        }
+        let pivot = r[[row, row]];
+        if !(pivot.is_finite() && pivot != 0.0) {
+            return None;
+        }
+        x[row] = sum / pivot;
+    }
+    if array_is_finite(&x) { Some(x) } else { None }
+}
+
+/// One violated row plus its scaled violation, as produced by a full scan.
+struct ViolatedConstraintRow {
+    row: usize,
+    violation: f64,
+}
+
+/// Full-set primal scan: worst scaled violation over every row, the row that
+/// attains it, and the INACTIVE rows that breach the feasibility contract.
+fn scan_operator_violations(
+    ops: &ConstraintSetOps<'_>,
+    values: &Array1<f64>,
+    is_active: &[bool],
+) -> Result<(f64, usize, Vec<ViolatedConstraintRow>), EstimationError> {
+    if values.len() != ops.nrows() || is_active.len() != ops.nrows() {
+        crate::bail_invalid_estim!(
+            "operator violation scan dimension mismatch: values={}, active_mask={}, rows={}",
+            values.len(),
+            is_active.len(),
+            ops.nrows(),
+        );
+    }
+    let mut worst = 0.0_f64;
+    let mut worst_row = 0usize;
+    let mut violated = Vec::<ViolatedConstraintRow>::new();
+    for row in 0..ops.nrows() {
+        if ops.norms[row] <= 0.0 {
+            // A vacuous row constrains nothing unless its bound is positive, in
+            // which case the feasible set is empty and no projection exists.
+            if ops.bounds[row] > 0.0 {
+                return Err(EstimationError::ParameterConstraintViolation(format!(
+                    "operator metric projection has an infeasible zero-norm constraint row {row} \
+                     with bound {:.3e}",
+                    ops.bounds[row]
+                )));
+            }
+            continue;
+        }
+        let violation = (-ops.scaled_slack(values, row)).max(0.0);
+        if violation > worst {
+            worst = violation;
+            worst_row = row;
+        }
+        if violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL && !is_active[row] {
+            violated.push(ViolatedConstraintRow { row, violation });
+        }
+    }
+    Ok((worst, worst_row, violated))
+}
+
+/// Goldfarb--Idnani dual active-set solve of the strictly convex operator
+/// metric projection
 ///
 /// ```text
-/// -z_u = Cᵀ mu + residual,  mu >= 0
-/// z*   = -residual = z_u + Cᵀ mu.
+/// minimize  ½ βᵀHβ − rhsᵀβ    subject to   Aβ ≥ b,   H ≻ 0.
 /// ```
 ///
-/// This representation has no working-face history and therefore no
-/// degenerate add/drop cycle. Only selected rows are materialized by the
-/// Lawson--Hanson solve; full constraint scans remain carrier-native. Failure
-/// of its polar certificate is a typed refusal, never a request to retry the
-/// history-dependent active-set path.
-fn solve_homogeneous_operator_metric_projection_by_moreau(
+/// # Why this algorithm and not an add/drop primal face iteration
+///
+/// The predecessor solved the equality-constrained subproblem on a working
+/// face, added violated rows, dropped negative-multiplier rows, and repeated.
+/// That iteration has **no monotone merit function**: nothing forbids it from
+/// returning to a face it has already left, so its only termination argument was
+/// an exact-state memo plus a temporary ban set — and on a degenerate face
+/// (`m ≫ p` with many parallel rows, exactly the shape-constrained
+/// transformation carriers this solver exists for) it duly cycled and refused
+/// (#2432: 565 / 390 / 210 / 70 dual transitions across three shapes).
+///
+/// The dual method removes that failure mode *structurally*:
+///
+/// * its iterate `(β, μ)` is always the exact minimizer subject to the active
+///   rows held as EQUALITIES, with `μ ≥ 0` — dual feasible throughout, primal
+///   feasible only at the end;
+/// * an entering row is closed by a step `t = min(t₁, t₂)` along
+///   `z = H⁻¹(n_p − Nᵀr)`, where `t₂` reaches that row's boundary and `t₁` is the
+///   largest step keeping every multiplier nonnegative;
+/// * a **full** step (`t = t₂ > 0`) strictly increases the dual objective, so no
+///   active set can ever be revisited;
+/// * a **partial** step (`t = t₁ < t₂`) drops exactly one row and keeps the same
+///   entering row, so at most `|A| ≤ p` of them can occur consecutively without
+///   an intervening strict increase.
+///
+/// Together those are a finite-termination proof that does not assume
+/// non-degeneracy: no anti-cycling rule, no ban set and no state memo is needed,
+/// because a cycle is not representable. Linear independence of the active
+/// normals is maintained rather than assumed — a row dependent on the face
+/// (`‖z_w‖ ≈ 0`) can only be admitted after a dual drop makes room for it, and
+/// if no drop is available the feasible set is empty and the solve refuses with
+/// that diagnosis instead of grinding.
+///
+/// # Operator-native cost
+///
+/// Full constraint scans (`ops.values`) happen only when the candidate queue
+/// empties; an individual entering row costs one single-row gather plus an
+/// `O(p·k²)` face factorization with `k ≤ p`. Observation-row cardinality
+/// therefore affects linear scans only, never the size or number of dense
+/// systems — the #979 property, preserved. The caller's warm active set and the
+/// batched independent-separator scan feed the queue as *ordering hints only*:
+/// the returned minimizer is a function of `(H, rhs, A, b)` alone, so warm-start
+/// history can change how fast this solve runs but never what it returns.
+fn solve_operator_metric_projection_dual_active_set(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
     unconstrained: &Array1<f64>,
     factor: &gam_linalg::faer_ndarray::FaerCholeskyFactor,
     ops: &ConstraintSetOps<'_>,
+    warm_rows: &[usize],
 ) -> Result<(Array1<f64>, Vec<usize>), EstimationError> {
     use gam_linalg::triangular::{
-        back_substitution_lower_transpose, forward_substitution_lower_matrix,
+        back_substitution_lower_transpose, forward_substitution_lower_vector,
     };
 
+    let p = unconstrained.len();
+    let m = ops.nrows();
     let lower = factor.lower_triangular();
-    let z_unconstrained = lower.t().dot(unconstrained);
-    let target = -&z_unconstrained;
-    let inverse_metric = factor.solve_mat(&Array2::<f64>::eye(hessian.nrows()));
-    let metric_row_norms = constraint_set_inverse_metric_row_norms(ops.set, &inverse_metric)?;
-    let Some((positive_multipliers, polar_residual)) = nonnegative_cone_projection_by_rows(
-        &metric_row_norms,
-        &target,
-        |whitened_vector| {
-            let coefficient_vector =
-                back_substitution_lower_transpose(lower.view(), whitened_vector.view());
-            ops.values(&coefficient_vector).ok()
-        },
-        |rows| {
-            let gathered = ops.set.gather_rows(rows).ok()?;
-            let whitened_transpose =
-                forward_substitution_lower_matrix(lower.view(), gathered.a.t());
-            Some(whitened_transpose.t().to_owned())
-        },
-    ) else {
-        return Err(EstimationError::ParameterConstraintViolation(
-            "homogeneous operator metric projection did not certify its Moreau polar decomposition"
-                .to_string(),
-        ));
+    let face_rank_tolerance = 100.0 * f64::EPSILON * (p.max(1) as f64);
+
+    let mut beta = unconstrained.clone();
+    let mut active = Vec::<usize>::new();
+    let mut is_active = vec![false; m];
+    // Whitened active normals `L⁻¹n_i`, index-parallel to `active`.
+    let mut whitened_active = Vec::<Array1<f64>>::new();
+    let mut multipliers = Vec::<f64>::new();
+    let mut queue = std::collections::VecDeque::<usize>::new();
+    for &row in warm_rows {
+        if row < m && ops.norms[row] > 0.0 && !queue.contains(&row) {
+            queue.push_back(row);
+        }
+    }
+
+    // Backstops, not working limits: the finiteness argument above bounds the
+    // real iteration count by the number of distinct active sets visited, each
+    // entered at a strictly larger dual objective. Crossing either cap means
+    // floating point has broken an exact-arithmetic invariant — a refusal, not a
+    // retry.
+    let max_transitions = 8usize
+        .saturating_mul(p.saturating_add(2))
+        .saturating_mul(p.saturating_add(2))
+        .saturating_add(64);
+    let max_refills = 4usize.saturating_mul(p).saturating_add(32);
+    let mut transitions = 0usize;
+    let mut refills = 0usize;
+    let mut conditioning_rounds = 0usize;
+    let mut refine_transitions = 0usize;
+
+    let (candidate, refined_multipliers) = loop {
+        'dual: loop {
+            let Some(entering) = queue.pop_front() else {
+                let values = ops.values(&beta)?;
+                let (_, _, violated) = scan_operator_violations(ops, &values, &is_active)?;
+                if violated.is_empty() {
+                    break 'dual;
+                }
+                refills += 1;
+                if refills > max_refills {
+                    return Err(EstimationError::ParameterConstraintViolation(format!(
+                        "operator metric projection exceeded {max_refills} separator scans with \
+                         {} rows still violated (worst {:.3e}); the dual iteration is not closing",
+                        violated.len(),
+                        violated
+                            .iter()
+                            .map(|entry| entry.violation)
+                            .fold(0.0_f64, f64::max),
+                    )));
+                }
+                // Prefer a batch of mutually independent separators: each is
+                // admissible without an intervening drop, so one scan can rebuild
+                // a whole face. When the face already spans every violated normal
+                // the batch is empty and plain most-violated order is queued —
+                // those rows are dependent, and the dual drop rule makes room.
+                let no_bans = vec![false; m];
+                let batch = independent_violated_operator_rows(
+                    ops,
+                    &values,
+                    &active,
+                    &is_active,
+                    &no_bans,
+                    p.saturating_sub(active.len()),
+                )?;
+                if batch.is_empty() {
+                    let mut ordered = violated;
+                    ordered.sort_unstable_by(|left, right| {
+                        right
+                            .violation
+                            .total_cmp(&left.violation)
+                            .then_with(|| left.row.cmp(&right.row))
+                    });
+                    queue.extend(
+                        ordered
+                            .iter()
+                            .take(p.saturating_add(8))
+                            .map(|entry| entry.row),
+                    );
+                } else {
+                    queue.extend(batch);
+                }
+                continue 'dual;
+            };
+            if is_active[entering] || ops.norms[entering] <= 0.0 {
+                continue 'dual;
+            }
+            let entering_rows = ops.gather_unit_rows(&[entering])?;
+            let normal = entering_rows.a.row(0).to_owned();
+            let bound = entering_rows.b[0];
+            let whitened_normal = forward_substitution_lower_vector(lower.view(), normal.view());
+            let whitened_scale = whitened_normal.dot(&whitened_normal).sqrt();
+            if !(array_is_finite(&whitened_normal) && whitened_scale > 0.0) {
+                crate::bail_invalid_estim!(
+                    "operator metric projection whitened entering row {entering} to a degenerate \
+                     normal (scale {whitened_scale:.3e})"
+                );
+            }
+
+            // Inner dual loop: hold `entering` fixed and take dual steps until it
+            // is admitted (full step) or proven inadmissible (no drop available).
+            loop {
+                let violation = bound - normal.dot(&beta);
+                if violation <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+                    // The iterate moved since this row was queued; it is
+                    // satisfied now and carries no dual step.
+                    continue 'dual;
+                }
+                let (dual_direction, tangent) = if active.is_empty() {
+                    (Array1::<f64>::zeros(0), whitened_normal.clone())
+                } else {
+                    let Some((q, r)) =
+                        thin_qr_reorthogonalized(&whitened_active, face_rank_tolerance)
+                    else {
+                        crate::bail_invalid_estim!(
+                            "operator metric projection lost independence of its {} active normals",
+                            active.len()
+                        );
+                    };
+                    let projections =
+                        Array1::from_iter(q.iter().map(|basis| basis.dot(&whitened_normal)));
+                    let Some(dual_direction) =
+                        upper_triangular_back_substitution(&r, &projections)
+                    else {
+                        crate::bail_invalid_estim!(
+                            "operator metric projection could not solve its {}-row dual direction",
+                            active.len()
+                        );
+                    };
+                    let mut tangent = whitened_normal.clone();
+                    for (basis, projection) in q.iter().zip(projections.iter()) {
+                        tangent.scaled_add(-projection, basis);
+                    }
+                    (dual_direction, tangent)
+                };
+
+                // `n_pᵀ z = ‖tangent‖²`: the rate at which a unit dual step
+                // closes this row's violation, zero exactly on a dependent normal.
+                let rate = tangent.dot(&tangent);
+                let dependence_floor = ACTIVE_SET_DUAL_DEPENDENCE_TOL * whitened_scale;
+                let full_step = if rate > dependence_floor * dependence_floor {
+                    violation / rate
+                } else {
+                    f64::INFINITY
+                };
+
+                // Largest step preserving `μ ≥ 0`, with the lowest constraint id
+                // breaking exact ties so the drop rule is deterministic.
+                let mut partial_step = f64::INFINITY;
+                let mut blocking: Option<usize> = None;
+                for (position, &direction) in dual_direction.iter().enumerate() {
+                    if !(direction > 0.0) {
+                        continue;
+                    }
+                    let ratio = (multipliers[position] / direction).max(0.0);
+                    let replaces = match blocking {
+                        None => true,
+                        Some(current) => {
+                            ratio < partial_step
+                                || (ratio == partial_step && active[position] < active[current])
+                        }
+                    };
+                    if replaces {
+                        partial_step = ratio;
+                        blocking = Some(position);
+                    }
+                }
+
+                if !full_step.is_finite() && blocking.is_none() {
+                    return Err(EstimationError::ParameterConstraintViolation(format!(
+                        "operator metric projection proved its constraint set infeasible: row \
+                         {entering} is violated by {violation:.3e} and lies in the span of the \
+                         {} active normals with no releasable multiplier",
+                        active.len(),
+                    )));
+                }
+                let step = full_step.min(partial_step);
+                if !step.is_finite() {
+                    crate::bail_invalid_estim!(
+                        "operator metric projection produced a non-finite dual step for row \
+                         {entering}"
+                    );
+                }
+                if step > 0.0 {
+                    let primal_direction =
+                        back_substitution_lower_transpose(lower.view(), tangent.view());
+                    beta.scaled_add(step, &primal_direction);
+                    if !array_is_finite(&beta) {
+                        crate::bail_invalid_estim!(
+                            "operator metric projection iterate left the finite range"
+                        );
+                    }
+                    for (multiplier, direction) in
+                        multipliers.iter_mut().zip(dual_direction.iter())
+                    {
+                        *multiplier = (*multiplier - step * direction).max(0.0);
+                    }
+                }
+
+                transitions += 1;
+                if transitions > max_transitions {
+                    return Err(EstimationError::ParameterConstraintViolation(format!(
+                        "operator metric projection exceeded {max_transitions} dual transitions \
+                         with {} active rows; a strictly increasing dual objective cannot revisit \
+                         a face, so this is a floating-point breakdown",
+                        active.len(),
+                    )));
+                }
+
+                if full_step <= partial_step {
+                    active.push(entering);
+                    is_active[entering] = true;
+                    whitened_active.push(whitened_normal);
+                    multipliers.push(step);
+                    continue 'dual;
+                }
+                let leaving = blocking.expect("a finite partial step names a blocking row");
+                let leaving_row = active.remove(leaving);
+                whitened_active.remove(leaving);
+                multipliers.remove(leaving);
+                is_active[leaving_row] = false;
+            }
+        }
+
+        // Terminal conditioning. Every dual step preserved `Nβ = b_N` in exact
+        // arithmetic, so re-deriving the endpoint from the face's KKT system in
+        // the ORIGINAL metric changes nothing mathematically — it removes only
+        // the drift accumulated along the step path, which is exactly what an
+        // absolute feasibility certificate stated in un-whitened row units
+        // measures. The refinement also releases any multiplier that
+        // conditioning pushed materially negative; a release re-enters the dual
+        // iteration from the conditioned face rather than being certified.
+        let refined = refine_operator_metric_face(
+            hessian,
+            unconstrained,
+            ops,
+            &mut active,
+            &mut is_active,
+            &mut refine_transitions,
+        )?;
+        let values = ops.values(&refined.0)?;
+        let (worst, worst_row, violated) = scan_operator_violations(ops, &values, &is_active)?;
+        if worst <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+            break refined;
+        }
+        conditioning_rounds += 1;
+        if conditioning_rounds > ACTIVE_SET_DUAL_CONDITIONING_ROUNDS {
+            return Err(EstimationError::ParameterConstraintViolation(format!(
+                "operator metric projection could not condition its terminal face: scaled \
+                 violation {worst:.3e} at row {worst_row} survives \
+                 {ACTIVE_SET_DUAL_CONDITIONING_ROUNDS} conditioned re-solves over {} active rows",
+                active.len(),
+            )));
+        }
+        // The conditioned face solve is itself a valid dual state — `β` is the
+        // exact equality-constrained minimizer and every multiplier is
+        // nonnegative — so the dual iteration resumes from it directly.
+        beta = refined.0;
+        multipliers = refined.1.to_vec();
+        whitened_active.clear();
+        if !active.is_empty() {
+            let face_rows = ops.gather_unit_rows(&active)?;
+            for position in 0..active.len() {
+                whitened_active.push(forward_substitution_lower_vector(
+                    lower.view(),
+                    face_rows.a.row(position),
+                ));
+            }
+        }
+        queue.clear();
+        queue.extend(violated.iter().map(|entry| entry.row));
     };
 
-    let z_projected = -polar_residual;
-    let candidate = back_substitution_lower_transpose(lower.view(), z_projected.view());
-    if !array_is_finite(&candidate) {
-        crate::bail_invalid_estim!(
-            "homogeneous operator metric projection produced non-finite coefficients"
-        );
-    }
-
-    let values = ops.values(&candidate)?;
-    let (primal_violation, primal_row) = ops.max_violation(&values);
-    if primal_violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
-        return Err(EstimationError::ParameterConstraintViolation(format!(
-            "homogeneous operator metric projection failed primal certification: \
-             scaled violation={primal_violation:.3e} at row {primal_row}"
-        )));
-    }
-
-    let active = positive_multipliers
-        .iter()
-        .map(|(row, _)| *row)
-        .collect::<Vec<_>>();
+    let active_ids = active.clone();
     let gradient = hessian.dot(&candidate) - rhs;
-    let (stationarity, complementarity) = if active.is_empty() {
-        (gradient_inf_norm(&gradient), 0.0)
+    let (stationarity, complementarity, dual_violation) = if active_ids.is_empty() {
+        (gradient_inf_norm(&gradient), 0.0, 0.0)
     } else {
-        let rows = ops.set.gather_rows(&active).map_err(|error| {
-            EstimationError::ParameterConstraintViolation(format!(
-                "homogeneous operator metric projection KKT gather failed: {error}"
-            ))
-        })?;
-        let multipliers =
-            Array1::from_iter(positive_multipliers.iter().map(|(_, multiplier)| *multiplier));
-        let residual = &gradient - &rows.a.t().dot(&multipliers);
-        let complementarity = positive_multipliers
+        let rows = ops.gather_unit_rows(&active_ids)?;
+        let residual = &gradient - &rows.a.t().dot(&refined_multipliers);
+        let complementarity = refined_multipliers
             .iter()
             .enumerate()
-            .map(|(position, (row, multiplier))| {
-                let slack = values[*row] - rows.b[position];
+            .map(|(position, multiplier)| {
+                let slack = rows.a.row(position).dot(&candidate) - rows.b[position];
                 (multiplier * slack).abs()
             })
             .fold(0.0_f64, f64::max);
-        (gradient_inf_norm(&residual), complementarity)
+        let dual_violation = refined_multipliers
+            .iter()
+            .map(|multiplier| (-multiplier).max(0.0))
+            .fold(0.0_f64, f64::max);
+        (
+            gradient_inf_norm(&residual),
+            complementarity,
+            dual_violation,
+        )
     };
     let gradient_scale = gradient_inf_norm(&gradient).max(1.0);
     if stationarity > ACTIVE_SET_KKT_STATIONARITY_TOL
         && stationarity / gradient_scale > ACTIVE_SET_KKT_STATIONARITY_TOL
     {
         return Err(EstimationError::ParameterConstraintViolation(format!(
-            "homogeneous operator metric projection failed stationarity certification: \
-             residual={stationarity:.3e}, relative={:.3e}, active={}",
+            "operator metric projection failed stationarity certification: \
+             residual={stationarity:.3e}, relative={:.3e}, active={}, transitions={transitions}",
             stationarity / gradient_scale,
-            active.len(),
+            active_ids.len(),
         )));
     }
-    if complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL {
+    if dual_violation > ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
+        || complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL
+    {
         return Err(EstimationError::ParameterConstraintViolation(format!(
-            "homogeneous operator metric projection failed complementarity certification: \
-             residual={complementarity:.3e}, active={}",
-            active.len(),
+            "operator metric projection failed dual/complementarity certification: \
+             dual={dual_violation:.3e}, complementarity={complementarity:.3e}, active={}",
+            active_ids.len(),
         )));
     }
-    Ok((candidate, active))
+    Ok((candidate, active_ids))
 }
 
-/// Operator-carrier constrained quadratic solve: minimize
-/// `½ βᵀHβ − rhsᵀβ` subject to the [`ConstraintSet`]. Dense sets take the
-/// existing dense path byte-identically; factored carriers use metric-dual row
-/// generation. Same public feasibility contract as
-/// [`solve_quadratic_with_linear_constraints`]: the returned point is
-/// feasible to [`ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`] or the solve errors.
+/// Operator-carrier constrained quadratic solve: minimize `½ βᵀHβ − rhsᵀβ`
+/// subject to the [`ConstraintSet`]. Dense sets take the existing dense path
+/// byte-identically; factored carriers use the dual active-set metric
+/// projection.
 ///
-/// For an operator carrier, the Hessian must be strictly positive definite.
-/// The unique minimizer is obtained from the metric-projection dual. If
-/// `u = H⁻¹ rhs`, unit-scaled constraint rows are `C`, and their bounds are
-/// `d`, the KKT equations are
+/// Same public feasibility contract as
+/// [`solve_quadratic_with_linear_constraints`]: the returned point is feasible
+/// to [`ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`] or the solve errors. For an operator
+/// carrier the Hessian must be strictly positive definite; the unique minimizer
+/// then satisfies
 ///
 /// ```text
-/// β = u + H⁻¹ Cᵀ μ
-/// Cβ - d >= 0,  μ >= 0,  μ ⊙ (Cβ - d) = 0.
+/// β = u + H⁻¹ Cᵀ μ,   Cβ − d ≥ 0,   μ ≥ 0,   μ ⊙ (Cβ − d) = 0
 /// ```
 ///
-/// Row generation finds the most violated constraint through one batched
-/// carrier product and materializes only the passive rows. The passive set has
-/// coefficient-space rank at most `p`; observation-row cardinality therefore
-/// affects linear scans, never the number or size of dense KKT systems. This is
-/// also a semantic boundary: a quadratic-projection API either returns the
-/// certified minimizer or an error. It never substitutes a generic feasible
-/// descent direction after exhausting a primal working-set path (#979).
+/// for `u = H⁻¹rhs` and unit-scaled rows `C` with bounds `d`, and
+/// [`solve_operator_metric_projection_dual_active_set`] computes it exactly.
+/// This is also a semantic boundary: a quadratic-projection API either returns
+/// the certified minimizer or an error. It never substitutes a generic feasible
+/// descent direction after exhausting a working-set path (#979).
 fn solve_strictly_convex_quadratic_with_constraint_set_dual(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -4510,382 +4810,21 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
     }
 
     let ops = ConstraintSetOps::new(set, 0.0)?;
-    let m = ops.nrows();
-    if ops.bounds.iter().all(|bound| *bound == 0.0) {
-        return solve_homogeneous_operator_metric_projection_by_moreau(
-            hessian,
-            rhs,
-            &unconstrained,
-            &factor,
-            &ops,
-        );
-    }
     // Warm faces are point-local: globalization may accept only part of the
     // previous QP chord, so retain only cached rows that remain tight at this
-    // cycle's accepted `beta_start`. Compress them to an independent basis
-    // before any dense solve. The public API has always carried this hint; the
-    // former operator arm silently discarded it and rediscovered the same
-    // 60–90 row CTN face from scratch on every Newton cycle.
-    let warm_tight = constraint_set_rows_tight_at_point(
-        set,
-        beta_start,
-        warm_active_set.unwrap_or(&[]),
-    )?;
-    let warm_face = ops.compress_working(&warm_tight)?;
-    let mut active = warm_face
-        .groups
-        .iter()
-        .filter_map(|group| group.first())
-        .map(|&position| warm_tight[position])
-        .collect::<Vec<_>>();
-    let mut is_active = vec![false; m];
-    for &row in &active {
-        is_active[row] = true;
-    }
-    let mut banned = vec![false; m];
-    let mut transitions = 0usize;
-    let (mut candidate, mut multipliers) = if active.is_empty() {
-        (unconstrained.clone(), Array1::<f64>::zeros(0))
-    } else {
-        refine_operator_metric_face(
-            hessian,
-            &unconstrained,
-            &ops,
-            &mut active,
-            &mut is_active,
-            &mut transitions,
-        )?
-    };
-    let mut conditioned_phase = !active.is_empty();
-    let mut visited = HashSet::<(bool, Vec<usize>, Vec<usize>, Vec<u64>)>::new();
-    let mut initial_active_key = active.clone();
-    initial_active_key.sort_unstable();
-    visited.insert((
-        conditioned_phase,
-        initial_active_key,
-        Vec::new(),
-        candidate.iter().map(|value| value.to_bits()).collect(),
-    ));
-
-    loop {
-        let values = ops.values(&candidate)?;
-        let mut entering = None;
-        let mut entering_violation = ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
-        let mut worst_violation = 0.0_f64;
-        let mut worst_row = 0usize;
-        for row in 0..m {
-            let violation = (-ops.scaled_slack(&values, row)).max(0.0);
-            if violation > worst_violation {
-                worst_violation = violation;
-                worst_row = row;
-            }
-            if !is_active[row] && !banned[row] {
-                if conditioned_phase {
-                    // Bland entering rule: after promotion to the numerically
-                    // authoritative metric, choose the lowest-index violated
-                    // row. The discovery phase above still chooses the most
-                    // violated separator for fast face identification.
-                    if entering.is_none() && violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
-                        entering = Some(row);
-                        entering_violation = violation;
-                    }
-                } else if violation > entering_violation {
-                    entering = Some(row);
-                    entering_violation = violation;
-                }
-            }
-        }
-
-        let Some(row) = entering else {
-            // Row generation uses the fast Schur/Gram system to identify the
-            // passive face. Refine that face ONCE in the active equations'
-            // orthonormal null space before certification. This avoids
-            // squaring H's condition number at the equality boundary without
-            // paying an SVD for every entering generator. In particular, do
-            // this BEFORE the full primal-feasibility gate: the fast Gram
-            // candidate is only a face-discovery iterate, and its active
-            // equalities can carry exactly the condition-squared drift that
-            // the null-space solve removes.
-            if !conditioned_phase {
-                (candidate, multipliers) = refine_operator_metric_face(
-                    hessian,
-                    &unconstrained,
-                    &ops,
-                    &mut active,
-                    &mut is_active,
-                    &mut transitions,
-                )?;
-                banned.fill(false);
-                conditioned_phase = true;
-                continue;
-            }
-
-            if worst_violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
-                return Err(EstimationError::ParameterConstraintViolation(format!(
-                    "operator metric projection has an unresolved scaled violation \
-                     {worst_violation:.3e} at row {worst_row} after conditioned face \
-                     refinement and {transitions} rank-bounded dual transitions"
-                )));
-            }
-
-            let gradient = hessian.dot(&candidate) - rhs;
-            let (stationarity, complementarity) = if active.is_empty() {
-                (gradient_inf_norm(&gradient), 0.0)
-            } else {
-                let rows = ops.gather_unit_rows(&active)?;
-                let residual = &gradient - &rows.a.t().dot(&multipliers);
-                let stationarity = gradient_inf_norm(&residual);
-                let complementarity = multipliers
-                    .iter()
-                    .enumerate()
-                    .map(|(position, multiplier)| {
-                        let slack =
-                            rows.a.row(position).dot(&candidate) - rows.b[position];
-                        (multiplier * slack).abs()
-                    })
-                    .fold(0.0_f64, f64::max);
-                (stationarity, complementarity)
-            };
-            let gradient_scale = gradient_inf_norm(&gradient).max(1.0);
-            let dual_violation = multipliers
-                .iter()
-                .map(|value| (-value).max(0.0))
-                .fold(0.0_f64, f64::max);
-            if stationarity > ACTIVE_SET_KKT_STATIONARITY_TOL
-                && stationarity / gradient_scale > ACTIVE_SET_KKT_STATIONARITY_TOL
-            {
-                return Err(EstimationError::ParameterConstraintViolation(format!(
-                    "operator metric projection failed stationarity after {transitions} \
-                     dual transitions: residual={stationarity:.3e}, \
-                     relative={:.3e}, active={}",
-                    stationarity / gradient_scale,
-                    active.len(),
-                )));
-            }
-            if dual_violation > ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
-                || complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL
-            {
-                return Err(EstimationError::ParameterConstraintViolation(format!(
-                    "operator metric projection failed dual/complementarity certification \
-                     after {transitions} transitions: dual={dual_violation:.3e}, \
-                     complementarity={complementarity:.3e}, active={}",
-                    active.len(),
-                )));
-            }
-            return Ok((candidate, active));
-        };
-
-        let candidate_before_transition = candidate.clone();
-        // Discover a complete independent separator batch before paying for
-        // another conditioned face solve. A partial trust step can invalidate
-        // most of the previous endpoint face at once; adding those missing
-        // directions serially makes one Newton cycle pay O(p) null-space
-        // factorizations. The batch scanner keeps memory coefficient-bounded
-        // and returns at most `p-active.len()` rows.
-        let independent_entering = if conditioned_phase {
-            // The conditioned phase uses one Bland pivot at a time. Route the
-            // selected row through the exchange below even when it increases
-            // rank; `compress_working` then either appends it or replaces the
-            // dependent representative without a batch pivot.
-            Vec::new()
-        } else {
-            independent_violated_operator_rows(
-                &ops,
-                &values,
-                &active,
-                &is_active,
-                &banned,
-                p.saturating_sub(active.len()),
-            )?
-        };
-        if !independent_entering.is_empty() {
-            for &entering_row in &independent_entering {
-                active.push(entering_row);
-                is_active[entering_row] = true;
-            }
-            transitions += independent_entering.len();
-        } else {
-            // Every violated row lies in the current normal span. For a
-            // homogeneous cone an exactly enforced independent basis makes
-            // this possible only at roundoff; affine carriers can instead have
-            // a genuinely tighter dependent separator. Preserve the standard
-            // active-face exchange for that case, prioritizing the most
-            // violated row and replacing whichever old representative it
-            // spans.
-            let mut prioritized = Vec::with_capacity(active.len() + 1);
-            prioritized.push(row);
-            prioritized.extend(active.iter().copied());
-            let exchanged_face = ops.compress_working(&prioritized)?;
-            let exchanged_active = exchanged_face
-                .groups
-                .iter()
-                .filter_map(|group| group.first())
-                .map(|&position| prioritized[position])
-                .collect::<Vec<_>>();
-            if exchanged_active.first().copied() != Some(row)
-                || exchanged_active.len() != exchanged_face.constraints.a.nrows()
-                || exchanged_active.len() > p
-            {
-                crate::bail_invalid_estim!(
-                    "operator metric-projection dependent-face exchange failed \
-                     to retain entering row {row} in a rank-bounded basis"
-                );
-            }
-            for &active_row in &active {
-                is_active[active_row] = false;
-                if !exchanged_active.contains(&active_row) {
-                    banned[active_row] = true;
-                    transitions += 1;
-                }
-            }
-            active = exchanged_active;
-            for &active_row in &active {
-                is_active[active_row] = true;
-            }
-            transitions += 1;
-        }
-        // Every transition above changes the passive coordinates in one batch
-        // (either by appending several zero-dual directions or exchanging a
-        // dependent representative). There is no valid old-to-new dual chord:
-        // solve the new face, prune wrong-signed rows directly, and resolve.
-        loop {
-            let rows = ops.gather_unit_rows(&active)?;
-            let (trial, trial_candidate) = if conditioned_phase {
-                // Once the fast row generator has identified and refined its
-                // terminal face, keep every newly exposed separator in the
-                // original H conditioning. Returning to the Schur/Gram solve
-                // here can recreate the approximate face that refinement just
-                // left, producing an exact add/drop cycle.
-                let active_residual = &rows.b - &rows.a.dot(&unconstrained);
-                let zero_gradient = Array1::<f64>::zeros(p);
-                let (correction, system_multipliers) = solve_kkt_direction(
-                    hessian,
-                    &zero_gradient,
-                    &rows.a,
-                    Some(&active_residual),
-                )?;
-                (-system_multipliers, &unconstrained + &correction)
-            } else {
-                let mut inverse_rows_t = rows.a.t().to_owned();
-                factor.solve_mat_in_place(&mut inverse_rows_t);
-                if inverse_rows_t.iter().any(|value| !value.is_finite()) {
-                    crate::bail_invalid_estim!(
-                        "operator metric-projection passive inverse is non-finite"
-                    );
-                }
-                let gram = rows.a.dot(&inverse_rows_t);
-                let target = &rows.b - &rows.a.dot(&unconstrained);
-                let mut trial = Array1::<f64>::zeros(active.len());
-                solve_dense_system_via_pseudoinverse(&gram, &target, &mut trial)?;
-                let trial_candidate = &unconstrained + &inverse_rows_t.dot(&trial);
-                (trial, trial_candidate)
-            };
-            let materially_negative = |value: f64| {
-                !value.is_finite() || value < -ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
-            };
-            if conditioned_phase {
-                let leaving_position = trial
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, value)| materially_negative(**value))
-                    .min_by_key(|(position, _)| active[*position])
-                    .map(|(position, _)| position);
-                if let Some(leaving_position) = leaving_position {
-                    let leaving_row = active.remove(leaving_position);
-                    is_active[leaving_row] = false;
-                    banned[leaving_row] = true;
-                    transitions += 1;
-                }
-            } else {
-                let mut retained_rows = Vec::with_capacity(active.len());
-                for (position, &active_row) in active.iter().enumerate() {
-                    if !materially_negative(trial[position]) {
-                        retained_rows.push(active_row);
-                    } else {
-                        is_active[active_row] = false;
-                        banned[active_row] = true;
-                        transitions += 1;
-                    }
-                }
-                active = retained_rows;
-            }
-            if active.is_empty() {
-                candidate.assign(&unconstrained);
-                multipliers = Array1::<f64>::zeros(0);
-                break;
-            }
-            if active.len() != trial.len() {
-                continue;
-            }
-            multipliers = trial;
-            candidate = trial_candidate;
-            break;
-        }
-
-        let movement_norm = candidate
-            .iter()
-            .zip(candidate_before_transition.iter())
-            .map(|(left, right)| {
-                let delta = left - right;
-                delta * delta
-            })
-            .sum::<f64>()
-            .sqrt();
-        let movement_scale = candidate
-            .iter()
-            .chain(candidate_before_transition.iter())
-            .map(|value| value * value)
-            .sum::<f64>()
-            .sqrt()
-            .max(1.0);
-        let moved = movement_norm > ACTIVE_SET_WORKING_FACE_TOL * movement_scale;
-        if active.len() > p {
-            crate::bail_invalid_estim!(
-                "operator metric-projection passive face escaped its coefficient-rank bound: \
-                 active={}, p={p}",
-                active.len()
-            );
-        }
-        if moved {
-            banned.fill(false);
-        }
-        let mut active_key = active.clone();
-        active_key.sort_unstable();
-        let banned_key = banned
-            .iter()
-            .enumerate()
-            .filter_map(|(row, is_banned)| is_banned.then_some(row))
-            .collect::<Vec<_>>();
-        let point_key = candidate
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>();
-        if !visited.insert((conditioned_phase, active_key, banned_key, point_key)) {
-            if !conditioned_phase {
-                // The Schur/Gram phase is deliberately an inexpensive face
-                // discoverer, not the final numerical authority. An exact
-                // add/drop repeat means it has extracted all useful progress
-                // from the condition-squared system. Promote the repeated face
-                // immediately to the original-metric KKT phase; only a repeat
-                // after that promotion is a genuine active-set cycle.
-                (candidate, multipliers) = refine_operator_metric_face(
-                    hessian,
-                    &unconstrained,
-                    &ops,
-                    &mut active,
-                    &mut is_active,
-                    &mut transitions,
-                )?;
-                banned.fill(false);
-                conditioned_phase = true;
-                continue;
-            }
-            return Err(EstimationError::ParameterConstraintViolation(format!(
-                "operator metric projection repeated an identical conditioned dual state \
-                 after {transitions} rank-bounded dual transitions"
-            )));
-        }
-    }
+    // cycle's accepted `beta_start`. They are an ENTERING ORDER, not a preset
+    // basis — the dual solve admits each through the same certified step as any
+    // other row, so a stale hint costs a skipped queue pop and nothing else.
+    let warm_tight =
+        constraint_set_rows_tight_at_point(set, beta_start, warm_active_set.unwrap_or(&[]))?;
+    solve_operator_metric_projection_dual_active_set(
+        hessian,
+        rhs,
+        &unconstrained,
+        &factor,
+        &ops,
+        &warm_tight,
+    )
 }
 
 pub fn solve_quadratic_with_constraint_set(

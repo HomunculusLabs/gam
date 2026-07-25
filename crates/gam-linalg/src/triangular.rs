@@ -221,6 +221,19 @@ pub fn forward_substitution_lower_matrix<'l, 'b>(
     out
 }
 
+/// Solve the lower-triangular system `L y = b` for a single right-hand side —
+/// forward substitution only, no back solve.
+///
+/// This is the metric-whitening primitive: for `H = L Lᵀ`, a constraint row `a`
+/// becomes `a L⁻ᵀ` in the coordinates where the `H`-metric projection is a plain
+/// Euclidean projection, and `(a L⁻ᵀ)ᵀ = L⁻¹ aᵀ` is exactly this solve.
+pub fn forward_substitution_lower_vector<'l, 'b>(
+    l: impl Into<ArrayView2<'l, f64>>,
+    b: impl Into<ArrayView1<'b, f64>>,
+) -> Array1<f64> {
+    forward_kernel(l.into(), b.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
