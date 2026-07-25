@@ -3575,10 +3575,18 @@ mod function_space_null_shrinkage_tests {
         )
         .expect("PSD dense congruence");
 
+        // The two routes describe the same penalty to the precision each one is
+        // entitled to: route B re-factors the dense congruence, so it discards
+        // the sub-tolerance mode that route A carries in its factor. That
+        // difference is bounded by the canonical cutoff itself, and it is
+        // precisely why the two used to disagree about the NULL SPACE — which
+        // is the thing asserted below.
+        let gap = max_abs_difference(by_restriction.dense(), by_refactoring.dense());
         assert!(
-            max_abs_difference(by_restriction.dense(), by_refactoring.dense()) < 1.0e-18,
-            "the two routes must produce the same constrained penalty; the point of \
-             this fixture is that they did NOT produce the same null space"
+            gap < 1.0e-8,
+            "the two routes must describe the same constrained penalty (gap {gap:.3e}); \
+             the point of this fixture is that they disagreed about its null space, not \
+             about the matrix"
         );
         for (label, quadratic) in [
             ("restricted factor", &by_restriction),
