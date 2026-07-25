@@ -462,30 +462,15 @@ fn logsumexp(xs: &[f64]) -> f64 {
     m + s.ln()
 }
 
-/// Overflow-safe `ln I0(x)` for `x ≥ 0` (Abramowitz & Stegun 9.8.1 / 9.8.2). The
-/// large branch factors the `e^x/√x` envelope into the log so it never
-/// materialises `e^x`.
+/// Overflow-safe `ln I0(x)`, still never materialising `e^x`.
+///
+/// This was a fifth in-tree transcription of the Abramowitz & Stegun 9.8.1 /
+/// 9.8.2 polynomials, whose `2e-7` accuracy landed directly in a per-row
+/// log-density that is summed over rows and then differenced into a
+/// likelihood-ratio statistic — so the error accumulated with `n` before the
+/// FDR decision saw it.
 fn ln_i0(x: f64) -> f64 {
-    let ax = x.abs();
-    if ax < 3.75 {
-        let t = ax / 3.75;
-        let t2 = t * t;
-        (1.0 + t2
-            * (3.5156229
-                + t2 * (3.0899424
-                    + t2 * (1.2067492 + t2 * (0.2659732 + t2 * (0.0360768 + t2 * 0.0045813))))))
-            .ln()
-    } else {
-        let y = 3.75 / ax;
-        let poly = 0.39894228
-            + y * (0.01328592
-                + y * (0.00225319
-                    + y * (-0.00157565
-                        + y * (0.00916281
-                            + y * (-0.02057706
-                                + y * (0.02635537 + y * (-0.01647633 + y * 0.00392377)))))));
-        ax - 0.5 * ax.ln() + poly.ln()
-    }
+    gam_math::special::bessel_i0_log_and_ratio(x).0
 }
 
 #[cfg(test)]
