@@ -49,25 +49,33 @@
 //! unless the terminal point is itself canonicalised, which is a different
 //! design (and a much more expensive one) than this issue's.
 //!
-//! So the bounds below are derived from that structure rather than chosen to
-//! fit, and every one of them is far tighter than what this gate allowed
-//! before:
+//! Every bound below is far tighter than what this gate allowed before — but
+//! they are NOT all the same kind of number, and the difference matters to
+//! anyone who later wants to tighten one:
 //!
-//! | quantity | old bound | bound here | measured | #2363 defect |
-//! |---|---|---|---|---|
-//! | criterion | 1e-6 relative | 1024 ulps ≈ 2e-13 relative | 2 ulps | ~4e11 ulps |
-//! | β | 1e-4 relative | 1e-7 relative | 1.4e-10 | 4.98e-4 |
-//! | certified ρ̂ | *not checked* | 1e-5 absolute | 2.0e-7 | — |
+//! | quantity | old bound | bound here | kind | measured | #2363 defect |
+//! |---|---|---|---|---|---|
+//! | criterion | 1e-6 relative | 1024 ulps ≈ 2e-13 relative | **DERIVED** | 2 ulps | ~4e11 ulps |
+//! | β | 1e-4 relative | 1e-7 relative | **GUARD** | 1.4e-10 | 4.98e-4 |
+//! | certified ρ̂ | *not checked* | 1e-5 absolute | **GUARD** | 2.0e-7 | — |
 //!
-//! The criterion bound is the load-bearing one and it is the one with a real
-//! derivation: at a certified stationary point the criterion is flat in ρ, so
-//! agreement is limited only by floating-point reassociation over the O(n)
-//! reduction plus a second-order term — a handful of ulps, measured at 2. The
-//! #2363 defect sat nine orders above that. The ρ̂ and β bounds size the
-//! certified-optimum ball itself: `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖`, whose amplification
-//! along a flat REML direction is problem-dependent, so those two carry the
-//! measured value in the table above as their justification and still sit four
-//! orders below a genuine basin change (#873's was ~30% of the ρ range).
+//! **DERIVED** means the number follows from the structure of the problem and
+//! tightening it would contradict an argument. The criterion bound is the only
+//! one of those, and it is the load-bearing assertion: at a certified
+//! stationary point the criterion is flat in ρ, so cold-vs-warm agreement is
+//! limited only by floating-point reassociation over the O(n) reduction plus a
+//! second-order term — a handful of ulps, measured at 2. The #2363 defect sat
+//! nine orders above it.
+//!
+//! **GUARD** means a coarse bound with deliberate slack, calibrated to the
+//! measurement rather than deduced. Both size the certified-optimum ball,
+//! `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖`, whose amplification along a flat REML direction is
+//! problem-dependent — there is no a-priori constant to compute, so these carry
+//! the measured column as their only justification. The ρ̂ guard in particular
+//! sits about two orders above what was measured. That slack is intentional
+//! headroom for a legitimately flatter fixture, not a derivation, and it can be
+//! tightened freely on evidence: doing so contradicts nothing. Both still sit
+//! four orders below a genuine basin change (#873's was ~30% of the ρ range).
 //!
 //! Bit-identity IS asserted, but on the thing that is exactly reproducible by
 //! construction rather than on an optimizer's terminal iterate: the frozen
@@ -119,26 +127,33 @@ fn ulp_distance(left: f64, right: f64) -> i128 {
     order(left) - order(right)
 }
 
-/// Ulp budget for the outer criterion. At a certified stationary point `F` is
-/// flat in ρ, so two arms that stop at different points inside the same
-/// tolerance ball can differ only by floating-point reassociation over the
-/// O(n) reduction plus a second-order term. Measured at 2 ulps; this leaves
-/// three decimal digits of headroom and still sits nine orders below the
-/// #2363 defect (~4e11 ulps).
+/// DERIVED. Ulp budget for the outer criterion — the load-bearing assertion of
+/// this gate. At a certified stationary point `F` is flat in ρ, so two arms
+/// that stop at different points inside the same tolerance ball can differ only
+/// by floating-point reassociation over the O(n) reduction plus a second-order
+/// term. Measured at 2 ulps; this leaves three decimal digits of headroom and
+/// still sits nine orders below the #2363 defect (~4e11 ulps).
+///
+/// Tightening this contradicts the derivation above unless the reduction's
+/// reassociation behaviour changes with it.
 const CRITERION_ULP_BUDGET: i128 = 1024;
 
-/// Sup-norm bound on the certified log-λ, sizing the certified-optimum ball
-/// itself: `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖` with the outer search certifying
-/// `‖P∇F‖ ≤ 1e-7`. The flat-direction amplification is problem-dependent, so
-/// the justification is the measured 2.0e-7 above — four orders below a
-/// genuine basin change.
+/// GUARD, not a derivation. Sup-norm bound on the certified log-λ. It sizes the
+/// certified-optimum ball, `‖Δρ̂‖ ≲ ‖H⁻¹‖·‖P∇F‖`, with the outer search
+/// certifying `‖P∇F‖ ≤ 1e-7` — but the flat-direction amplification `‖H⁻¹‖` is
+/// problem-dependent and is not computed here, so there is no constant to
+/// deduce. The only justification is the measured 2.0e-7, about two orders
+/// below this bound; the slack is deliberate headroom for a legitimately
+/// flatter fixture. Tighten on evidence whenever you like — nothing here
+/// argues for 1e-5 specifically.
 const RHO_ABS_BOUND: f64 = 1e-5;
 
-/// Sup-norm bound on β relative to its own scale. β̂ is the inner mode at ρ̂ and
-/// the map `ρ ↦ β̂(ρ)` is Lipschitz, so a within-ball ρ̂ displacement moves β by
-/// a comparable amount. Measured at 1.4e-10; a thousand times tighter than the
-/// 1e-4 this gate allowed before, and still far below the 4.98e-4 the #2363
-/// Beta defect produced.
+/// GUARD, not a derivation. Sup-norm bound on β relative to its own scale. β̂ is
+/// the inner mode at ρ̂ and `ρ ↦ β̂(ρ)` is Lipschitz, so a within-ball ρ̂
+/// displacement moves β by a comparable amount — but the Lipschitz constant is
+/// not computed, so this is calibrated to the measured 1.4e-10 rather than
+/// deduced from it. Still a thousand times tighter than the 1e-4 this gate
+/// allowed before, and far below the 4.98e-4 the #2363 Beta defect produced.
 const COEF_REL_BOUND: f64 = 1e-7;
 
 /// Describe the first coordinate at which two arms disagree by more than
