@@ -448,8 +448,45 @@ pub fn validate_finite_symmetric_matrix(
             let lower = matrix[[row, col]];
             let upper = matrix[[col, row]];
             let defect = (lower - upper).abs();
+            // Scale the allowance to the magnitude the entry's ACCUMULATION ran
+            // at, not to the magnitude that survived it.
+            //
+            // The two triangles of an assembled symmetric matrix
+            // (`XᵀWX + S_λ + ridge·I`) are separate inner products whenever the
+            // Gram is built by a full GEMM instead of a mirrored triangular
+            // update — `CrossprodStructure::{Full, SymmetricLower}`, which that
+            // enum documents as producing identical output. Summation order
+            // therefore differs between `A[i,j]` and `A[j,i]`, and the resulting
+            // difference is bounded by `Σ_k |X_ki W_k X_kj|`, i.e. by the scale
+            // of the terms being summed. It is NOT bounded by `|A_ij|`, which is
+            // free to cancel to nothing.
+            //
+            // Scoring the defect against `ulp(|A_ij|)` alone therefore demands
+            // the most precision from exactly the entries carrying the least
+            // information. Measured on this crate's own failing fits: an entry
+            // that cancelled to `2.06e-11` inside a Hessian whose diagonal at
+            // those rows is `94.8` and `125.3` was asked to agree to `1.03e-25`
+            // — about 38 significant digits, unreachable in binary64 by any
+            // assembly whatsoever. That bound is unsatisfiable, not strict.
+            //
+            // Cauchy–Schwarz supplies the honest scale: `|A_ij| ≤ √(A_ii·A_jj)`
+            // is the largest this entry could legitimately have been, and it is
+            // the scale its accumulation actually ran at. Using it keeps the
+            // test scale-COVARIANT (`A ↦ cA` scales the bound by `c`, so the
+            // verdict is invariant under uniform rescaling) and LOCAL to the
+            // `(i, j)` block rather than a global matrix norm, so a well-scaled
+            // block inside a badly-scaled matrix still gets a tight bound.
+            //
+            // `pair_scale` stays in the maximum: this validator also admits
+            // indefinite symmetric systems, where the diagonal can vanish while
+            // the off-diagonal does not, and Cauchy–Schwarz does not apply.
+            // Each factor is square-rooted before multiplying so a large finite
+            // diagonal cannot overflow the product.
             let pair_scale = lower.abs().max(upper.abs());
-            let tolerance = SYMMETRY_ULP_ALLOWANCE * positive_ulp(pair_scale);
+            let gram_scale = (matrix[[row, row]].abs().sqrt()
+                * matrix[[col, col]].abs().sqrt())
+            .min(f64::MAX);
+            let tolerance = SYMMETRY_ULP_ALLOWANCE * positive_ulp(pair_scale.max(gram_scale));
             if defect > tolerance {
                 return Err(CertifiedSymmetricSolveError::NotSymmetric {
                     label: label.to_string(),
@@ -1433,8 +1470,112 @@ mod certified_inverse_tests {
     use super::{
         CertifiedSymmetricSolveError, certified_spd_factorize, certified_spd_inverse,
         certified_symmetric_solve, rank_certified_psd_pseudoinverse,
+        validate_finite_symmetric_matrix,
     };
     use ndarray::array;
+
+    /// The symmetry allowance must be read at the scale the entry's
+    /// accumulation ran at (Cauchy-Schwarz, `sqrt(A_ii*A_jj)`), not at the
+    /// magnitude that survived cancellation.
+    ///
+    /// Both matrices below carry the SAME absolute defect `8.518e-15` on the
+    /// same off-diagonal, and both are the real numbers measured off a failing
+    /// `bc=anchored` REML fit. They differ only in the diagonal at those two
+    /// rows, and that is what decides the verdict:
+    ///
+    /// * order-100 diagonal -> the defect is 0.6 ULP of `sqrt(A_ii*A_jj)`, i.e.
+    ///   ordinary GEMM summation-order roundoff, and must be ACCEPTED. Under the
+    ///   superseded entry-relative bound this case demanded agreement to
+    ///   `1.03e-25` -- roughly 38 significant digits, which no assembly can
+    ///   reach in binary64, so the bound was unsatisfiable rather than strict;
+    /// * order-1e-11 diagonal -> the same defect is now the whole scale of the
+    ///   block and must still be REJECTED.
+    ///
+    /// The pair is what pins LOCALITY: a bound taken against the global matrix
+    /// norm would accept both, and the entry-relative bound rejects both.
+    #[test]
+    fn symmetry_allowance_follows_the_block_scale_not_the_cancelled_entry() {
+        let lower = 2.062188620938984e-11_f64;
+        let upper = 2.0613368342631325e-11_f64;
+        let defect = (lower - upper).abs();
+        assert!(
+            (defect - 8.518e-15).abs() < 1e-18,
+            "fixture defect drifted: {defect:.6e}"
+        );
+
+        let accumulated_at_order_100 = array![
+            [9.484713e1, upper, 0.0],
+            [lower, 1.253071e2, 0.0],
+            [0.0, 0.0, 1.0]
+        ];
+        validate_finite_symmetric_matrix(&accumulated_at_order_100, "order-100 block")
+            .expect("roundoff below one ULP of the block's own Cauchy-Schwarz scale is symmetric");
+
+        let accumulated_at_the_defect_scale = array![
+            [2.0e-11, upper, 0.0],
+            [lower, 3.0e-11, 0.0],
+            [0.0, 0.0, 1.0]
+        ];
+        assert!(
+            matches!(
+                validate_finite_symmetric_matrix(
+                    &accumulated_at_the_defect_scale,
+                    "defect-scale block"
+                ),
+                Err(CertifiedSymmetricSolveError::NotSymmetric { row: 1, col: 0, .. })
+            ),
+            "a defect the size of its own block's scale is a real asymmetry and must be refused"
+        );
+    }
+
+    /// The verdict must not depend on the units the matrix is expressed in.
+    /// Every term in the bound is homogeneous of degree one in the matrix, so
+    /// scaling by any exact power of two -- across 400 binades, well past where
+    /// an absolute floor would take over -- must leave both verdicts fixed.
+    #[test]
+    fn symmetry_verdict_is_invariant_under_uniform_rescaling() {
+        let benign = array![
+            [9.484713e1, 2.0613368342631325e-11],
+            [2.062188620938984e-11, 1.253071e2]
+        ];
+        let asymmetric = array![[2.0, 0.25], [0.5, 2.0]];
+        for exponent in [-200_i32, -37, 0, 37, 200] {
+            let scale = 2.0_f64.powi(exponent);
+            validate_finite_symmetric_matrix(&(&benign * scale), "rescaled benign")
+                .unwrap_or_else(|error| {
+                    panic!("benign roundoff rejected at 2^{exponent}: {error}")
+                });
+            assert!(
+                matches!(
+                    validate_finite_symmetric_matrix(&(&asymmetric * scale), "rescaled asymmetric"),
+                    Err(CertifiedSymmetricSolveError::NotSymmetric { .. })
+                ),
+                "genuine asymmetry accepted at 2^{exponent}"
+            );
+        }
+    }
+
+    /// Cauchy-Schwarz does not apply to the indefinite systems this validator
+    /// also admits, so the entry's own magnitude has to stay in the maximum:
+    /// a hollow symmetric matrix has a zero diagonal and a non-zero
+    /// off-diagonal, and dropping `pair_scale` would score it against
+    /// `ulp(0)` and refuse every one of them.
+    #[test]
+    fn hollow_indefinite_systems_keep_the_entry_relative_floor() {
+        // Four ULP of roundoff on the off-diagonal of a matrix whose diagonal
+        // is exactly zero. `sqrt(A_ii*A_jj)` is 0 here, so this is accepted
+        // only because the entry's own magnitude stays in the maximum; scoring
+        // it against `ulp(0)` would demand bit-equality and refuse every
+        // hollow system that ever saw a rounding.
+        let upper = 2.0_f64 + 4.0 * (f64::EPSILON * 2.0);
+        let hollow = array![[0.0, upper], [2.0, 0.0]];
+        assert!(
+            (upper - 2.0) > 0.0,
+            "fixture must carry a real roundoff on the off-diagonal"
+        );
+        validate_finite_symmetric_matrix(&hollow, "hollow indefinite")
+            .expect("ULP-level roundoff on a zero-diagonal system is symmetric");
+    }
 
     #[test]
     fn spd_inverse_never_adds_a_diagonal_perturbation() {
