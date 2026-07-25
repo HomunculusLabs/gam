@@ -48,7 +48,7 @@
 //! Trials outside `[psi_lo, psi_hi]` are the caller's signal to fall back to
 //! the exact path ([`PsiGramTensor::contains`]).
 
-use gam_linalg::decision::{RankDecision, certified_rank};
+use gam_linalg::decision::{RankDecision, certified_rank, projector_error_bar};
 use ndarray::{Array1, Array2, ArrayView1};
 
 /// Relative ceiling on the per-column Chebyshev coefficient tail (#1216).
@@ -472,62 +472,16 @@ struct RangeProjector {
     rank: usize,
     /// Certified upper bound on `‖P̂ − P‖₂` — how far the COMPUTED projector can
     /// sit from the projector of the exact Gram, given the eigensolver's own
-    /// backward error and the eigen-gap that defines the kept/dropped split. See
-    /// [`projector_error_bar`]. Zero at full rank (`P` is the identity exactly);
-    /// `f64::INFINITY` when the gap is not wide enough to determine the subspace
-    /// at all.
+    /// backward error and the eigen-gap that defines the kept/dropped split.
+    /// Zero at full rank (`P` is the identity exactly); `f64::INFINITY` when the
+    /// gap is not wide enough to determine the subspace at all.
+    ///
+    /// Computed by [`gam_linalg::decision::projector_error_bar`], which carries
+    /// the derivation. It lives next to [`certified_rank`] deliberately: the
+    /// whole content of #2448 is that certifying the RANK does not certify the
+    /// EIGENSPACE realizing it, and a reader arriving at the rank primitive needs
+    /// that caveat in the same file.
     err_bar: f64,
-}
-
-/// Davis–Kahan `sinΘ` bar on a spectral projector (#2448).
-///
-/// A rank decision and a SUBSPACE decision are not the same decision, and they
-/// are conditioned by different quantities. The rank of `XᵀWX(ψ)` is decided on
-/// where `λ_r` sits relative to the CUTOFF, and [`PsiGramTensor::rank_guard_gap`]
-/// already gives that decision a margin. The reduced-basis witness
-/// [`PsiGramTensor::reduced_basis_equal`] decides something else — whether two
-/// range SUBSPACES coincide — and a subspace is conditioned by the GAP between
-/// the eigenvalues it keeps and the ones it drops, not by their distance from a
-/// cutoff. Two Grams can both carry a comfortably certified rank `r` while their
-/// rank-`r` eigenspaces are individually undetermined.
-///
-/// DERIVATION, because the denominator is the part that is easy to get wrong.
-/// The `sinΘ` theorem in its mixed form (Stewart & Sun V.3.6) bounds the rotation
-/// by `‖E‖₂ / η`, where `η` separates the spectrum of the PERTURBED kept block
-/// from the spectrum of the UNPERTURBED dropped block — `η = λ̂_r − λ_{r+1}`. We
-/// only ever hold computed eigenvalues, so `η` has to be bounded from below by
-/// them: Weyl gives `λ_{r+1} ≤ λ̂_{r+1} + ‖E‖₂`, hence
-///
-///   `η ≥ λ̂_r − λ̂_{r+1} − ‖E‖₂ = gap − ‖E‖₂`
-///
-/// with `gap` the separation as MEASURED. So `‖P̂ − P‖₂ ≤ ‖E‖₂ / (gap − ‖E‖₂)`
-/// with a single `−‖E‖₂`, and that is already rigorous — it is not the asymptotic
-/// `‖E‖/gap` waiting to be sharpened, and it does not need a second or third
-/// `‖E‖₂` subtracted for the "the measured gap is not the true gap" step. That
-/// step is what the mixed form absorbs. With `‖E‖₂` the eigensolver's
-/// backward-error bar `p(k)·ε·λ_max`, this is exactly the resolution limit of the
-/// instrument the witness gates on.
-///
-/// When `gap ≤ ‖E‖₂` the kept and dropped blocks are not separated at all: the
-/// computed eigenvectors are an arbitrary rotation within a numerically
-/// degenerate cluster and NO subspace claim can be made. Reported as
-/// `f64::INFINITY`, which every consumer of this bar must read as "refuse".
-/// Malformed input (either argument non-finite) refuses for the same reason —
-/// never return a `NaN` that a `<= ATOL` test would silently read as certified.
-///
-/// `gap` is passed as the raw eigenvalue separation `λ_min(kept) − λ_max(dropped)`;
-/// `backward_error` as the absolute bar on those eigenvalues. Both are in the
-/// Gram's own units, so the returned bar is dimensionless — the same currency as
-/// [`PSI_GRAM_SKIP_PROJ_ATOL`], which is what makes them comparable.
-fn projector_error_bar(gap: f64, backward_error: f64) -> f64 {
-    if !(gap.is_finite() && backward_error.is_finite()) {
-        return f64::INFINITY;
-    }
-    let separation = gap - backward_error;
-    if !(separation > 0.0) {
-        return f64::INFINITY;
-    }
-    backward_error / separation
 }
 
 impl PsiGramTensor {
@@ -3032,92 +2986,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// #2448 — [`projector_error_bar`] must be a TRUE upper bound on the rotation
-    /// a perturbation induces in a spectral projector, graded against the one case
-    /// where that rotation is known in closed form.
-    ///
-    /// For `A = diag(a, b)` with `a > b` and the symmetric off-diagonal
-    /// perturbation `E = [[0, e], [e, 0]]`, the eigenvectors of `A + E` are those
-    /// of `A` turned by exactly `θ = ½·atan(2e / (a−b))`, so the distance between
-    /// the rank-1 leading projectors is `sinθ` in closed form. `‖E‖₂ = |e|` and the
-    /// gap is `δ = a − b`, so the Davis–Kahan bar `e / (δ − e)` must dominate
-    /// `sinθ` at every ratio `e/δ` — including ratios far outside the small-`e`
-    /// regime the asymptotic form `e/δ` is derived in.
-    ///
-    /// Also pinned: the bar is not vacuous where it is meant to bite (it stays
-    /// within a small factor of the truth for `e ≪ δ`), and it REFUSES — reports
-    /// `+∞` — exactly when the perturbation is wide enough to close the gap, where
-    /// the eigenvectors of a numerically degenerate pair carry no information at
-    /// all.
-    #[test]
-    fn projector_error_bar_bounds_the_true_projector_rotation_2448() {
-        use gam_linalg::faer_ndarray::FaerEigh;
-        let gap = 1.0_f64;
-        let (a, b) = (2.0_f64, 2.0 - gap);
-        // Leading-eigenvector projector of the symmetric 2×2 [[a, e], [e, b]].
-        let leading_projector = |e: f64| -> Array2<f64> {
-            let m = ndarray::arr2(&[[a, e], [e, b]]);
-            let (evals, evecs) = m.eigh(faer::Side::Lower).expect("2x2 eigh");
-            let top = evals
-                .iter()
-                .enumerate()
-                .max_by(|(_, x), (_, y)| x.total_cmp(y))
-                .map(|(i, _)| i)
-                .expect("non-empty spectrum");
-            let u = evecs.column(top);
-            let mut p = Array2::<f64>::zeros((2, 2));
-            for i in 0..2 {
-                for j in 0..2 {
-                    p[[i, j]] = u[i] * u[j];
-                }
-            }
-            p
-        };
-        let unperturbed = leading_projector(0.0);
-        for &e in &[1e-12_f64, 1e-8, 1e-4, 1e-2, 0.1, 0.4, 0.9] {
-            let diff = &leading_projector(e) - &unperturbed;
-            let measured = subspace_spectral_distance(&diff).expect("finite 2x2 difference");
-            // Closed form: the rotation angle is exactly ½·atan(2e/δ).
-            let exact = (0.5 * (2.0 * e / gap).atan()).sin();
-            assert!(
-                (measured - exact).abs() <= 1e-12 + 1e-9 * exact,
-                "the 2×2 oracle disagrees with the measured projector distance at \
-                 e={e}: measured={measured}, closed form={exact} — the oracle, not \
-                 the bound, is what is wrong here"
-            );
-            let bar = projector_error_bar(gap, e);
-            assert!(
-                bar >= measured,
-                "Davis–Kahan bar must DOMINATE the true rotation at e={e} \
-                 (gap={gap}): bar={bar}, measured={measured}"
-            );
-            if e <= 1e-2 {
-                // Not vacuous in the regime that decides the witness: the bar is
-                // `e/(δ−e)` and the truth is `≈ e/δ`, so it may exceed it by a
-                // factor of at most `δ/(δ−e)`, here ≤ 1.02.
-                assert!(
-                    bar <= 1.05 * measured.max(f64::MIN_POSITIVE),
-                    "bar must stay tight for e ≪ δ, else it would refuse sound \
-                     skips: e={e}, bar={bar}, measured={measured}"
-                );
-            }
-        }
-        // The perturbation closes the gap → no subspace claim is possible.
-        for &(g, e) in &[(1.0_f64, 1.0_f64), (1.0, 2.0), (0.0, 1e-30)] {
-            assert!(
-                projector_error_bar(g, e).is_infinite(),
-                "a perturbation that spans the gap (gap={g}, ‖E‖={e}) leaves the \
-                 kept/dropped split undetermined; the bar must refuse, not report \
-                 a finite rotation"
-            );
-        }
-        // Non-finite inputs refuse rather than propagating a NaN into a `<=`
-        // comparison, which would silently read as "certified".
-        assert!(projector_error_bar(f64::NAN, 1.0).is_infinite());
-        assert!(projector_error_bar(1.0, f64::NAN).is_infinite());
-        assert!(projector_error_bar(f64::INFINITY, f64::INFINITY).is_infinite());
     }
 
     /// #2448 — the floor search still finds a REAL interior band edge, and

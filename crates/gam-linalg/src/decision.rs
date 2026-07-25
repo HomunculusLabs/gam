@@ -8,7 +8,8 @@
 //! wider than the backward error committed forming the quantity we decide on.
 //! Each item below carries its derivation as a doc comment.
 //!
-//! The four currencies:
+//! The currencies (the list is not numbered on purpose — it grows, and a count
+//! in this header has already gone stale once):
 //!   * [`equilibrate_gram`] — a Gram/rank decision must be gauge-invariant under
 //!     positive per-column rescaling; equilibration puts it in that gauge.
 //!   * [`certified_rank`] — a rank claim with a two-sided multiplicative gap is
@@ -18,6 +19,11 @@
 //!     whose certified radius is read straight off the gap; a decision whose
 //!     operating point moves is reused only while the realized excursion stays
 //!     inside that radius (§8 Thm 8.3).
+//!   * [`projector_error_bar`] — a claim about the SUBSPACE realizing a rank is
+//!     a different claim from the rank, conditioned by a different quantity (the
+//!     eigen-GAP, not the distance to the cutoff). Certifying the integer does
+//!     not certify the eigenspace, and a subspace comparison run below this bar
+//!     is deciding on roundoff (#2448).
 //!   * [`newton_decrement_enclosure`] — the Newton decrement λ_N² is the
 //!     affine-invariant stationarity currency; an inexact solve still yields a
 //!     rigorous two-sided enclosure of it.
@@ -165,9 +171,17 @@ pub fn certified_rank(singular_values: &[f64], tol: f64, gap: f64) -> RankDecisi
 
     // Clean split: everything is either `≥ high` (kept) or `≤ low` (dropped).
     let rank = sv.iter().filter(|&&s| s >= high).count();
-    let sigma_r = if rank == 0 { f64::INFINITY } else { sv[rank - 1] };
+    let sigma_r = if rank == 0 {
+        f64::INFINITY
+    } else {
+        sv[rank - 1]
+    };
     let sigma_next = if rank < n { sv[rank] } else { 0.0 };
-    let margin_high = if rank == 0 { f64::INFINITY } else { sigma_r / high };
+    let margin_high = if rank == 0 {
+        f64::INFINITY
+    } else {
+        sigma_r / high
+    };
     let margin_low = if sigma_next == 0.0 {
         f64::INFINITY
     } else {
@@ -369,6 +383,82 @@ pub fn spectral_excursion_lower_bound(reference: &[f64], current: &[f64]) -> f64
     worst
 }
 
+/// Davis–Kahan resolution bar on a SPECTRAL PROJECTOR (#2448).
+///
+/// Returns a certified upper bound on `‖P̂ − P‖₂` — the distance between the
+/// projector computed from a perturbed symmetric operator and the projector of
+/// the exact one, onto the same kept/dropped partition. `f64::INFINITY` when the
+/// partition is not resolved at all, which every consumer must read as "refuse".
+///
+/// `gap` is the MEASURED eigenvalue separation `λ_min(kept) − λ_max(dropped)`;
+/// `backward_error` is an absolute bar `‖E‖₂` on those eigenvalues (for a
+/// backward-stable symmetric eigensolver, `p(k)·ε·λ_max`). Both live in the
+/// operator's own units, so the returned bar is dimensionless and directly
+/// comparable to whatever subspace tolerance the caller is about to gate on.
+///
+/// # Why this is a currency of its own, distinct from the rank
+///
+/// [`certified_rank`] and [`rank_transport_radius`] certify an INTEGER: how many
+/// directions clear a cutoff, and how far the operator may move before that
+/// count changes. Neither says anything about WHICH directions those are. The
+/// two claims are conditioned by different quantities — the rank by the distance
+/// from `λ_r` to the cutoff, the eigenspace by the gap from `λ_r` down to
+/// `λ_{r+1}` — and an operator can have a comfortably certified rank whose
+/// eigenspace is individually undetermined. That happens exactly when the
+/// spectrum DECAYS SMOOTHLY through the cutoff instead of cliffing at it, which
+/// is the common case for kernel Grams, and it is invisible to a rank test.
+///
+/// So: any gate that compares two computed subspaces to a tolerance must first
+/// establish that it can resolve that tolerance. Otherwise the comparison
+/// returns roundoff, and roundoff is not monotone in anything — a bisection over
+/// such a predicate has no crossing to find, and the "edge" it converges to is a
+/// property of the last bits of the eigensolver.
+///
+/// # Derivation (the denominator is the part that is easy to get wrong)
+///
+/// The `sinΘ` theorem in its mixed form (Stewart & Sun, Thm V.3.6) bounds the
+/// rotation by `‖E‖₂ / η`, where `η` separates the spectrum of the PERTURBED
+/// kept block from that of the UNPERTURBED dropped block: `η = λ̂_r − λ_{r+1}`.
+/// Only computed eigenvalues are ever in hand, so `η` must be bounded below by
+/// them. Weyl gives `λ_{r+1} ≤ λ̂_{r+1} + ‖E‖₂`, hence
+///
+/// ```text
+///   η ≥ λ̂_r − λ̂_{r+1} − ‖E‖₂ = gap − ‖E‖₂
+/// ```
+///
+/// so `‖P̂ − P‖₂ ≤ ‖E‖₂ / (gap − ‖E‖₂)` with a SINGLE `−‖E‖₂`, `gap` being the
+/// measured separation. This is already rigorous: it is not the asymptotic
+/// `‖E‖/gap` awaiting a correction factor, and it does not need a second or
+/// third `‖E‖₂` subtracted to account for "the measured gap is not the true
+/// gap". That step is precisely what the mixed form absorbs.
+///
+/// # Refusal
+///
+/// When `gap ≤ ‖E‖₂` the kept and dropped blocks are not separated: the computed
+/// eigenvectors are an arbitrary rotation inside a numerically degenerate
+/// cluster and no subspace claim is available at any tolerance. Malformed input
+/// (either argument non-finite) refuses identically — returning `NaN` would be
+/// worse than useless, since `NaN <= atol` is `false` in a refuse-on-false gate
+/// but `atol <= NaN` is also `false` in an accept-on-false one, so the direction
+/// of the mistake would depend on how the caller spelled the comparison.
+///
+/// Callers holding TWO computed projectors and a measured distance between them
+/// should gate on `measured + bar_a + bar_b` (the triangle inequality), not on
+/// `measured` alone: that sum is a certified upper bound on the true subspace
+/// distance, and it degrades to the measurement itself wherever both gaps are
+/// wide — in particular to exactly `0` at full rank, where the projector is the
+/// identity on every host.
+pub fn projector_error_bar(gap: f64, backward_error: f64) -> f64 {
+    if !(gap.is_finite() && backward_error.is_finite()) {
+        return f64::INFINITY;
+    }
+    let separation = gap - backward_error;
+    if !(separation > 0.0) {
+        return f64::INFINITY;
+    }
+    backward_error / separation
+}
+
 /// A rigorous two-sided enclosure `[lower, upper]` of a scalar quantity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecrementEnclosure {
@@ -520,6 +610,113 @@ mod tests {
         evals.to_vec()
     }
 
+    /// #2448 — the Davis–Kahan bar must DOMINATE the true projector rotation,
+    /// graded against the one case where that rotation is known in closed form.
+    ///
+    /// For `A = diag(a, b)` with `a > b` and the symmetric off-diagonal
+    /// perturbation `E = [[0, e], [e, 0]]`, the eigenvectors of `A + E` are those
+    /// of `A` turned by exactly `θ = ½·atan(2e/(a−b))`, so the distance between
+    /// the rank-1 leading projectors is `sinθ`. Here `‖E‖₂ = |e|` and the gap is
+    /// `δ = a − b`, and the bar must dominate at every ratio `e/δ` — including
+    /// ratios far outside the small-`e` regime the asymptotic form is derived in.
+    ///
+    /// Tightness is asserted too. A bound that simply returned `+∞` would pass
+    /// every domination check while making the whole currency useless, so the
+    /// bar is also required to stay within 5% of the truth for `e ≪ δ` — the
+    /// regime in which a real gate has to be able to CERTIFY, not just refuse.
+    #[test]
+    fn projector_error_bar_dominates_the_closed_form_rotation_and_stays_tight_2448() {
+        let gap = 1.0_f64;
+        let (a, b) = (2.0_f64, 2.0 - gap);
+        // Leading-eigenvector projector of the symmetric 2×2 [[a, e], [e, b]],
+        // and the spectral norm of its difference from the unperturbed one.
+        let rotation = |e: f64| -> f64 {
+            let leading = |off: f64| -> Array2<f64> {
+                let m = ndarray::arr2(&[[a, off], [off, b]]);
+                let (evals, evecs) = m.eigh(Side::Lower).expect("2x2 eigh");
+                let top = evals
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, x), (_, y)| x.total_cmp(y))
+                    .map(|(i, _)| i)
+                    .expect("non-empty spectrum");
+                let u = evecs.column(top);
+                let mut p = Array2::<f64>::zeros((2, 2));
+                for i in 0..2 {
+                    for j in 0..2 {
+                        p[[i, j]] = u[i] * u[j];
+                    }
+                }
+                p
+            };
+            let diff = &leading(e) - &leading(0.0);
+            let dsym = 0.5 * (&diff + &diff.t());
+            let (evals, _) = dsym.eigh(Side::Lower).expect("difference eigh");
+            evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+        };
+
+        for &e in &[1e-12_f64, 1e-8, 1e-4, 1e-2, 0.1, 0.4, 0.9] {
+            let measured = rotation(e);
+            let exact = (0.5 * (2.0 * e / gap).atan()).sin();
+            assert!(
+                (measured - exact).abs() <= 1e-12 + 1e-9 * exact,
+                "the 2×2 oracle disagrees with the measured projector distance at \
+                 e={e}: measured={measured}, closed form={exact} — the oracle, not \
+                 the bound, is what is wrong here"
+            );
+            let bar = projector_error_bar(gap, e);
+            assert!(
+                bar >= measured,
+                "the bar must DOMINATE the true rotation at e={e} (gap={gap}): \
+                 bar={bar}, measured={measured}"
+            );
+            if e <= 1e-2 {
+                // `e/(δ−e)` against a truth of `≈ e/δ`: at most a factor
+                // `δ/(δ−e)`, here ≤ 1.02.
+                assert!(
+                    bar <= 1.05 * measured.max(f64::MIN_POSITIVE),
+                    "the bar must stay tight for e ≪ δ, else it would refuse \
+                     decidable subspace claims: e={e}, bar={bar}, measured={measured}"
+                );
+            }
+        }
+
+        // A perturbation wide enough to span the gap leaves the kept/dropped
+        // split undetermined: refuse, never report a finite rotation.
+        for &(g, e) in &[(1.0_f64, 1.0_f64), (1.0, 2.0), (0.0, 1e-30), (-1.0, 1e-30)] {
+            assert!(
+                projector_error_bar(g, e).is_infinite(),
+                "gap={g} with ‖E‖={e} determines no subspace; the bar must refuse"
+            );
+        }
+        // Malformed input refuses rather than producing a NaN, whose comparison
+        // verdict would depend on how the caller spelled the `<=`.
+        assert!(projector_error_bar(f64::NAN, 1.0).is_infinite());
+        assert!(projector_error_bar(1.0, f64::NAN).is_infinite());
+        assert!(projector_error_bar(f64::INFINITY, f64::INFINITY).is_infinite());
+
+        // A certified RANK does not imply a certified EIGENSPACE — the point of
+        // the currency being separate. A spectrum decaying smoothly through the
+        // cutoff certifies its integer with margin to spare while leaving the
+        // eigenspace realizing it undetermined at the same backward error.
+        let lambda_max = 1.0_f64;
+        let spectrum = [lambda_max, 1.3e-2, 4.4e-4, 5.1e-6, 3.6e-8, 1.2e-10, 3.0e-13];
+        let rank_tol = 1.0e-10 * lambda_max;
+        let backward_error = 8.0 * (spectrum.len() as f64) * f64::EPSILON * lambda_max;
+        let decision = certified_rank(&spectrum, rank_tol, backward_error / rank_tol);
+        let RankDecision::Certified { rank, .. } = decision else {
+            panic!("the integer is decidable here: {decision:?}");
+        };
+        assert_eq!(rank, 6, "six eigenvalues clear the cutoff with margin");
+        let bar = projector_error_bar(spectrum[rank - 1] - spectrum[rank], backward_error);
+        assert!(
+            bar > 1e-6,
+            "the rank-6 eigenspace of a smoothly decaying spectrum is NOT resolved \
+             even though the rank is certified; got bar={bar:e}, which would mean \
+             the two currencies had collapsed into one"
+        );
+    }
+
     #[test]
     fn equilibration_certifies_full_rank_where_raw_gram_would_kill_eleven_columns() {
         // A 12-column design whose first column is stiffened by 2.4e6 so the
@@ -623,7 +820,10 @@ mod tests {
 
         match transport_certified_rank(&reference, 0.25) {
             RankTransport::Transported {
-                rank, slack, radius: r, ..
+                rank,
+                slack,
+                radius: r,
+                ..
             } => {
                 assert_eq!(rank, 2);
                 assert!((r - radius).abs() < 1e-12);
@@ -784,11 +984,8 @@ mod tests {
     #[test]
     fn decrement_enclosure_is_exact_when_residual_zero_and_contains_truth_when_perturbed() {
         // Small SPD H, exact g, exact z = H⁻¹g.
-        let h = Array2::from_shape_vec(
-            (3, 3),
-            vec![4.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0],
-        )
-        .unwrap();
+        let h = Array2::from_shape_vec((3, 3), vec![4.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0])
+            .unwrap();
         let g = Array1::from_vec(vec![1.0, -2.0, 0.5]);
 
         // Exact solve via the spectral inverse H⁻¹ = V diag(1/λ) Vᵀ.
@@ -796,8 +993,7 @@ mod tests {
         let lambda_min = evals.iter().cloned().fold(f64::INFINITY, f64::min);
         assert!(lambda_min > 0.0, "H must be SPD");
         let vt_g = evecs.t().dot(&g);
-        let scaled: Array1<f64> =
-            Array1::from_shape_fn(3, |i| vt_g[i] / evals[i]);
+        let scaled: Array1<f64> = Array1::from_shape_fn(3, |i| vt_g[i] / evals[i]);
         let z = evecs.dot(&scaled);
         let true_lambda_n_sq = g.dot(&z);
 
@@ -820,20 +1016,19 @@ mod tests {
         let z_bad = &z + &Array1::from_vec(vec![0.05, -0.03, 0.02]);
         let hz_bad = h.dot(&z_bad);
         let r_bad = &g - &hz_bad;
-        let encl = newton_decrement_enclosure(
-            g.dot(&z_bad),
-            r_bad.dot(&z_bad),
-            r_bad.dot(&r_bad),
-            ell,
-        )
-        .expect("positive definite");
+        let encl =
+            newton_decrement_enclosure(g.dot(&z_bad), r_bad.dot(&z_bad), r_bad.dot(&r_bad), ell)
+                .expect("positive definite");
         assert!(
             encl.lower <= true_lambda_n_sq + 1e-9 && true_lambda_n_sq <= encl.upper + 1e-9,
             "enclosure [{}, {}] must contain λ_N² = {true_lambda_n_sq}",
             encl.lower,
             encl.upper
         );
-        assert!(encl.upper - encl.lower > 0.0, "inexact solve widens the band");
+        assert!(
+            encl.upper - encl.lower > 0.0,
+            "inexact solve widens the band"
+        );
 
         // A non-positive lower bound yields no certificate.
         assert!(newton_decrement_enclosure(g_dot_z, r_dot_z, r_norm_sq, 0.0).is_none());
