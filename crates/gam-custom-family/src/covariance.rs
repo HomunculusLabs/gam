@@ -1456,6 +1456,9 @@ fn spd_covariance_from_precision(
     Ok(cov)
 }
 
+/// `Debug` is derived because the assembly is named in test panic messages that
+/// report which variant a refusal produced; every field already derives it.
+#[derive(Debug)]
 pub(crate) struct JointPosteriorAssembly {
     pub(crate) covariance_conditional: Option<Array2<f64>>,
     pub(crate) geometry: FitGeometry,
