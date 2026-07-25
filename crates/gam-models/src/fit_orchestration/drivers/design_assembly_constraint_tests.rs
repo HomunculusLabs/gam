@@ -6052,6 +6052,7 @@ struct DuchonProbitSetup {
     y: Array1<f64>,
     weights: Array1<f64>,
     offset: Array1<f64>,
+    raw: TermCollectionSpec,
     frozen: TermCollectionSpec,
     frozen_design: TermCollectionDesign,
     spatial_terms: Vec<usize>,
@@ -6115,6 +6116,7 @@ fn build_duchon_probit_setup() -> DuchonProbitSetup {
         y,
         weights,
         offset,
+        raw: spec,
         frozen,
         frozen_design,
         spatial_terms,
@@ -6122,6 +6124,49 @@ fn build_duchon_probit_setup() -> DuchonProbitSetup {
         rho_dim,
         psi_dim,
     }
+}
+
+#[test]
+fn incremental_realizer_replays_raw_duchon_spec_in_emitted_chart_2433() {
+    let DuchonProbitSetup {
+        data,
+        raw,
+        frozen_design,
+        ..
+    } = build_duchon_probit_setup();
+    let mut realizer = FrozenTermCollectionIncrementalRealizer::new(
+        data.view(),
+        raw,
+        frozen_design.clone(),
+    )
+    .unwrap_or_else(|e| panic!("raw-spec realizer construction failed: {e}"));
+
+    // The constructor must freeze the caller's pre-assembly spec against the
+    // authoritative design before the first κ proposal. Otherwise this update
+    // rebuilds the source term's five-block chart and collides with the four
+    // blocks retained by collection-level identifiability.
+    let replay_spec = realizer.spec().clone();
+    let spatial_terms = spatial_length_scale_term_indices(&replay_spec);
+    let updated_log_kappa = SpatialLogKappaCoords::new_with_dims(array![0.2], vec![1]);
+    let updated_spec = updated_log_kappa
+        .apply_tospec(&replay_spec, &spatial_terms)
+        .unwrap_or_else(|e| panic!("updated frozen replay spec failed: {e}"));
+    realizer
+        .apply_log_kappa(&updated_log_kappa, &spatial_terms)
+        .unwrap_or_else(|e| panic!("first raw-spec κ replay failed: {e}"));
+
+    let rebuilt = build_term_collection_design(data.view(), &updated_spec)
+        .unwrap_or_else(|e| panic!("full frozen-chart rebuild failed: {e}"));
+    assert_term_collection_designs_match(
+        realizer.design(),
+        &rebuilt,
+        "raw-spec incremental replay",
+    );
+    assert_eq!(
+        realizer.design().penalties.len(),
+        frozen_design.penalties.len(),
+        "κ replay must preserve the authoritative emitted penalty topology",
+    );
 }
 
 /// Behavioral pin for the iso-κ Duchon ψ-axis under BinomialProbit: the
@@ -6134,6 +6179,7 @@ fn iso_kappa_duchon_outer_gradient_matches_centered_fd() {
         y,
         weights,
         offset,
+        raw: _,
         frozen,
         frozen_design,
         spatial_terms,
@@ -6272,6 +6318,7 @@ fn duchon_probit_pirls_determinism_at_zero() {
         y,
         weights,
         offset,
+        raw: _,
         frozen,
         frozen_design,
         spatial_terms,

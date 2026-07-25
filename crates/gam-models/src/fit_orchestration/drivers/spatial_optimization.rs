@@ -4839,6 +4839,18 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         // blocks: unpenalized fixed/random effects own columns but emit no
         // penalty, and multi-penalty smooths own more than one coordinate.
         let (smooth_penalty_ranges, full_penalty_ranges) = emitted_smooth_penalty_ranges(&design)?;
+        // The emitted collection design is also the authority for the replay
+        // specification. In particular, global smooth identifiability can
+        // restrict a source term's coefficient chart and eliminate a dependent
+        // double-penalty ridge. Retaining the caller's raw pre-assembly spec
+        // would let the first κ proposal rebuild in that obsolete chart even
+        // though every cached range below describes the emitted chart (#2433).
+        //
+        // Freeze once at this ownership boundary so value rebuilds, analytic
+        // derivatives, and the geometry cache all start from the same centers,
+        // scaling, identifiability transform, and penalty topology.
+        let spec = freeze_term_collection_from_design(&spec, &design)
+            .map_err(|e| format!("failed to freeze incremental replay specification: {e}"))?;
         let fixed_blocks = build_term_collection_fixed_blocks(data, &spec)
             .map_err(|e| format!("failed to cache fixed term-collection blocks: {e}"))?;
 
