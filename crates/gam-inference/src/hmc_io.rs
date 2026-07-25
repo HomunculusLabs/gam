@@ -1741,7 +1741,20 @@ mod tests {
             let (value, score) = exact_eta_geometry(&likelihood, &y, &weights, &eta)
                 .unwrap_or_else(|error| panic!("{}: {error}", likelihood.spec.pretty_name()));
             assert!(value.is_finite());
-            assert_eq!(score[0].to_bits(), 0.0_f64.to_bits());
+            // A zero prior weight must contribute EXACTLY zero — not merely
+            // something small — which is why this is an equality against 0.0
+            // and not a tolerance. The SIGN of that zero is not part of the
+            // contract: production reaches it as `-0.0` (bit pattern 2^63,
+            // which is what `left: 9223372036854775808` in the old failure
+            // was) through a negated product, and `-0.0 == 0.0` is precisely
+            // the numerical statement being made. Comparing `to_bits()`
+            // promoted an IEEE sign bit into a correctness claim; `== 0.0`
+            // still rejects every nonzero, including subnormals.
+            assert_eq!(
+                score[0], 0.0,
+                "{} must erase a zero-weight row's score exactly",
+                likelihood.spec.pretty_name()
+            );
             assert!(
                 score[1] != 0.0 && score[1].is_finite(),
                 "{} erased a positive tiny weight",
