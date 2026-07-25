@@ -11,17 +11,47 @@ use super::*;
 /// always-present native penalty keeps those slope directions structurally
 /// penalized without changing the Duchon Hilbert scale at statistical scale.
 ///
-/// This is a RELATIVE coefficient (`√ε ≈ 2⁻²⁶`): the ridge placed on each affine
-/// slope column is this fraction of the curvature block's mean diagonal, NOT an
-/// absolute constant. An absolute floor over-penalizes a low-magnitude curvature
-/// Gram (few centers / small support): once the whole penalty is Frobenius-
+/// This is a RELATIVE coefficient: the ridge placed on each affine slope column
+/// is this fraction of the curvature block's mean diagonal, NOT an absolute
+/// constant. An absolute floor over-penalizes a low-magnitude curvature Gram
+/// (few centers / small support): once the whole penalty is Frobenius-
 /// normalized the absolute ridge no longer sits below the curvature scale, so the
 /// affine slopes leave the penalty's null space and the smooth loses the affine
 /// trend it is supposed to leave free at statistical scale (gam#880). Scaling by
 /// the curvature magnitude keeps the ridge machine-scale relative to the penalty
 /// in every configuration, so the affine trend stays in the effective null space
 /// while the slopes remain structurally (non-zero) penalized.
-pub(crate) const DUCHON_AFFINE_NATIVE_RIDGE_REL: f64 = 1.490_116_119_384_765_6e-8;
+///
+/// The MAGNITUDE is pinned three decades below the canonical penalty-spectrum
+/// null cutoff, because the sentence above has two halves and they are not the
+/// same requirement:
+///
+/// * *"structurally (non-zero) penalized"* is an exact-arithmetic statement —
+///   any strictly positive value satisfies it, and it is what gam#1816 pins;
+/// * *"stays in the effective null space"* is a statement about the classifier
+///   — the affine mode must read as unpenalized under `spectral_tolerance`
+///   (`p·1e-10·λ_max`), which is what every consumer of `nullity` and every
+///   double-penalty rebuild keys on.
+///
+/// At the previous value (`√ε ≈ 1.49e-8`) the second half was simply false:
+/// `√ε·mean_diag(Ω)` lands *above* `p·1e-10·λ_max` whenever the Gram is not
+/// badly ill-conditioned, so the affine trend read as PENALIZED and the
+/// Marra & Wood trend ridge — whose whole job is to shrink `null(S)` — was
+/// dropped as having nothing to shrink. Whether a Duchon smooth got a double
+/// penalty at all then depended on the conditioning of its own kernel Gram: on
+/// the production standardized fixture it survived, while on equally-spaced
+/// centers it never did, across a 32× length-scale sweep. That is not a
+/// statistical contract, and the curvature seminorm annihilates affine
+/// functions at every κ and every center set, so the answer must not depend on
+/// it (gam#2433).
+///
+/// `mean_diag(Ω) ≤ λ_max(Ω)` and `p ≥ 1`, so `1e-13·mean_diag(Ω) ≤ 1e-3·tol`
+/// for every configuration — the classification is unambiguous with three
+/// decades of margin, in the raw chart and under any orthonormal identifiability
+/// congruence (which cannot raise `λ_max`). It also stays ~1e3 above the
+/// assembly noise of the block it sits in, whose exact entries are zero, so it
+/// remains representable rather than notional.
+pub(crate) const DUCHON_AFFINE_NATIVE_RIDGE_REL: f64 = 1e-13;
 
 /// N-D periodic-cyclic-B-spline first-derivative jet `∂Φ̃/∂t` per row.
 ///
@@ -1776,16 +1806,17 @@ pub(crate) fn duchon_native_penalty_candidates(
         .slice_mut(s![..n_kernel, ..n_kernel])
         .assign(&omega);
     if poly_cols > 1 {
-        // Machine-scale ridge on the affine SLOPE columns (the constant column
-        // `n_kernel` stays free — it is the model intercept). Scale by the
-        // curvature block's mean diagonal so the ridge is `√ε`-relative to the
-        // penalty, not an absolute floor that would survive Frobenius
-        // normalization and push the affine slopes out of the null space on a
-        // low-curvature Gram (gam#880). `omega` is PSD, so its diagonal is
-        // non-negative; the mean diagonal is a scale-faithful proxy for the
-        // curvature magnitude and is bounded above by `‖omega‖_F`, so the
-        // normalized ridge stays ≤ `√ε/√n_kernel < 1e-8` — below the statistical
-        // scale while remaining strictly positive (structurally penalized).
+        // Sub-classification ridge on the affine SLOPE columns (the constant
+        // column `n_kernel` stays free — it is the model intercept). Scale by
+        // the curvature block's mean diagonal so it is RELATIVE to the penalty,
+        // not an absolute floor that would survive Frobenius normalization and
+        // push the affine slopes out of the null space on a low-curvature Gram
+        // (gam#880). `omega` is PSD, so its diagonal is non-negative and its
+        // mean is a scale-faithful proxy for the curvature magnitude, bounded
+        // above by `λ_max`; with the coefficient pinned three decades under the
+        // canonical null cutoff (see `DUCHON_AFFINE_NATIVE_RIDGE_REL`) the
+        // affine trend reads as unpenalized in every chart while staying
+        // strictly positive.
         let curvature_scale = if n_kernel > 0 {
             let trace: f64 = (0..n_kernel).map(|i| omega[[i, i]].abs()).sum();
             trace / n_kernel as f64
@@ -2168,6 +2199,69 @@ mod mixed_periodicity_psd_tests {
                 "affine trend column {col} must carry the native ridge floor"
             );
         }
+    }
+
+    /// gam#2433: the affine conditioning ridge has to satisfy BOTH halves of
+    /// its contract at once, and they pull in opposite directions.
+    ///
+    /// gam#1816 needs it strictly positive (the test above). The double-penalty
+    /// machinery needs the affine trend to read as UNPENALIZED under the
+    /// canonical classifier, because `null(S_primary)` is what the Marra & Wood
+    /// ridge is rebuilt onto — if the conditioning term pushes the trend out of
+    /// the null space, the ridge is dropped as having nothing to shrink and the
+    /// Duchon double penalty silently ceases to exist. At `√ε` that is what
+    /// happened, and *whether* it happened depended on the kernel Gram's
+    /// conditioning, so an equally-spaced center set lost its double penalty
+    /// while a standardized one kept it.
+    ///
+    /// The curvature seminorm annihilates affine functions at every κ and every
+    /// center set, so this must hold structurally, not by luck of conditioning.
+    #[test]
+    fn native_primary_affine_ridge_is_positive_and_reads_as_unpenalized_2433() {
+        // Deliberately a WELL-conditioned center set: this is the regime where
+        // `mean_diag(Ω)/λ_max(Ω)` is largest, i.e. the worst case for keeping
+        // the ridge under the cutoff.
+        let centers = Array2::from_shape_fn((10, 1), |(i, _)| -3.0 + (i as f64) * 6.0 / 9.0);
+        let order = DuchonNullspaceOrder::Linear;
+        let poly_cols = polynomial_block_from_order(centers.view(), order).ncols();
+        let mut workspace = BasisWorkspace::default();
+        let z = kernel_constraint_nullspace(centers.view(), order, &mut workspace.cache)
+            .expect("kernel constraint nullspace");
+        let n_kernel = z.ncols();
+        let candidates = duchon_native_penalty_candidates(
+            centers.view(),
+            Some(1.0),
+            1.0,
+            order,
+            None,
+            &z,
+            None,
+        )
+        .expect("native Duchon penalties must build");
+        let primary = candidates
+            .iter()
+            .find(|candidate| matches!(candidate.source, PenaltySource::Primary))
+            .expect("Primary candidate must be present");
+        let dense = primary
+            .matrix
+            .scaled(primary.normalization_scale, "physical primary")
+            .expect("physical primary");
+        for col in (n_kernel + 1)..(n_kernel + poly_cols) {
+            assert!(
+                dense.dense()[[col, col]] > 0.0,
+                "affine trend column {col} must stay strictly positive (gam#1816)"
+            );
+        }
+        let block = crate::basis::analyze_penalty_block(dense.dense())
+            .expect("canonical spectral classification");
+        assert_eq!(
+            block.nullity, poly_cols,
+            "the curvature seminorm's null space is its whole polynomial block \
+             ({poly_cols} directions: the intercept plus {} affine trend(s)); the \
+             conditioning ridge must not classify any of them as penalized, or the \
+             double-penalty ridge is rebuilt onto a smaller space (or dropped)",
+            poly_cols - 1
+        );
     }
 
     /// gam#2372: the Duchon trend block is the COMPLEMENTARY metric ridge
