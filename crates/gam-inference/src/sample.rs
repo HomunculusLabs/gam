@@ -15,15 +15,13 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use rand::{RngExt, SeedableRng};
 
 use super::hmc_io::{
-    FamilyNutsInputs, GlmFlatInputs, LinkWiggleFamilyParams, LinkWiggleSplineArtifacts,
-    SurvivalFlatInputs, explicit_fit_hessian_for_whitening, run_link_wiggle_nuts_sampling,
+    FamilyNutsInputs, GlmFlatInputs, SurvivalFlatInputs, explicit_fit_hessian_for_whitening,
     run_nuts_sampling_flattened_family, run_survival_nuts_sampling_flattened, validate_nuts_config,
 };
 pub use super::hmc_io::{NutsConfig, NutsResult};
 use crate::formula_dsl::{LinkWiggleFormulaSpec, parse_formula};
 use crate::model::{
-    FittedModel as SavedModel, PredictModelClass, SavedLinkWiggleRuntime,
-    load_survival_time_basis_config_from_model,
+    FittedModel as SavedModel, PredictModelClass, load_survival_time_basis_config_from_model,
 };
 use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_linalg::triangular::back_substitution_lower_transpose_guarded_into;
@@ -44,11 +42,11 @@ use gam_models::survival::{
 };
 use gam_models::wiggle::{
     append_selected_wiggle_function_penalties, buildwiggle_block_input_from_knots,
-    canonical_wiggle_function_penalties, split_wiggle_penalty_orders,
+    split_wiggle_penalty_orders,
 };
-use gam_problem::types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
+use gam_problem::types::{LikelihoodSpec, ResponseFamily};
 use gam_runtime::resource::{MemoryGovernor, ResourcePolicy, rows_for_target_bytes};
-use gam_solve::estimate::{BlockRole, validate_all_finite};
+use gam_solve::estimate::validate_all_finite;
 use gam_terms::smooth::build_term_collection_design;
 use gam_terms::smooth::{LinearCoefficientGeometry, weighted_blockwise_penalty_sum};
 use gam_terms::term_builder::resolve_role_col;
@@ -144,119 +142,6 @@ pub fn saved_baseline_timewiggle_spec(
                 double_penalty: saved.double_penalty,
             })
         })
-}
-
-fn weighted_penalty_matrix(
-    penalties: &[Array2<f64>],
-    lambdas: ArrayView1<'_, f64>,
-) -> Result<Array2<f64>, String> {
-    if penalties.len() != lambdas.len() {
-        return Err(format!(
-            "penalty/lambda mismatch: {} penalties vs {} lambdas",
-            penalties.len(),
-            lambdas.len()
-        ));
-    }
-    if penalties.is_empty() {
-        return Err("cannot sample without at least one penalty block".to_string());
-    }
-    let p = penalties[0].nrows();
-    let mut out = Array2::<f64>::zeros((p, p));
-    for (k, s) in penalties.iter().enumerate() {
-        if s.nrows() != p || s.ncols() != p {
-            return Err(format!(
-                "penalty block {k} shape mismatch: got {}x{}, expected {}x{}",
-                s.nrows(),
-                s.ncols(),
-                p,
-                p
-            ));
-        }
-        let lam = lambdas[k];
-        out += &(s * lam);
-    }
-    Ok(out)
-}
-
-/// Rebuild the standard link-wiggle penalty from the exact semantic metadata
-/// persisted by fitting. The canonical constructor is shared with fit-time
-/// block assembly, and every count, shape, and ordered block kind is checked
-/// before lambdas are applied. There is intentionally no inferred order,
-/// skipped block, or zero-matrix completion path.
-fn saved_link_wiggle_penalty_matrix(
-    runtime: &SavedLinkWiggleRuntime,
-    lambdas: ArrayView1<'_, f64>,
-    expected_dimension: usize,
-) -> Result<Array2<f64>, String> {
-    let metadata = runtime.penalty_metadata.as_ref().ok_or_else(|| {
-        "standard link-wiggle sampling requires saved canonical penalty metadata; refit".to_string()
-    })?;
-    let canonical = canonical_wiggle_function_penalties(
-        &Array1::from_vec(runtime.knots.clone()),
-        runtime.degree,
-        &metadata.derivative_orders,
-        metadata.double_penalty,
-    )
-    .map_err(|error| format!("saved link-wiggle penalty reconstruction failed: {error}"))?;
-    if canonical.metadata != *metadata {
-        return Err(format!(
-            "saved link-wiggle penalty topology {:?} disagrees with canonical topology {:?}",
-            metadata.blocks, canonical.metadata.blocks,
-        ));
-    }
-    if canonical.matrices.len() != lambdas.len() {
-        return Err(format!(
-            "saved link-wiggle penalty/lambda mismatch: canonical topology has {} blocks but fit stores {} lambdas",
-            canonical.matrices.len(),
-            lambdas.len(),
-        ));
-    }
-    for (index, matrix) in canonical.matrices.iter().enumerate() {
-        if matrix.dim() != (expected_dimension, expected_dimension) {
-            return Err(format!(
-                "saved link-wiggle penalty block {index} is {}x{} but fitted LinkWiggle coordinate has dimension {expected_dimension}",
-                matrix.nrows(),
-                matrix.ncols(),
-            ));
-        }
-    }
-    weighted_penalty_matrix(&canonical.matrices, lambdas)
-}
-
-fn validate_explicit_link_wiggle_joint_hessian(
-    hessian: &Array2<f64>,
-    expected_dim: usize,
-) -> Result<(), String> {
-    if hessian.nrows() != expected_dim || hessian.ncols() != expected_dim {
-        return Err(format!(
-            "link-wiggle sample: explicit joint Hessian is {}x{} but expected {}x{}",
-            hessian.nrows(),
-            hessian.ncols(),
-            expected_dim,
-            expected_dim,
-        ));
-    }
-    validate_all_finite(
-        "link-wiggle explicit joint Hessian",
-        hessian.iter().copied(),
-    )?;
-    let mut max_abs = 0.0_f64;
-    for r in 0..expected_dim {
-        for c in 0..expected_dim {
-            max_abs = max_abs.max(hessian[[r, c]].abs());
-            let scale = hessian[[r, c]].abs().max(hessian[[c, r]].abs()).max(1.0);
-            if (hessian[[r, c]] - hessian[[c, r]]).abs() > 1e-9 * scale {
-                return Err(format!(
-                    "link-wiggle sample: explicit joint Hessian is not symmetric at ({r},{c})"
-                ));
-            }
-        }
-    }
-    if max_abs == 0.0 {
-        return Err("link-wiggle sample: explicit joint Hessian is all zeros; refit with exact Hessian export"
-                    .to_string());
-    }
-    Ok(())
 }
 
 /// Resolve the fitted prior-weights column for saved-model sampling.
@@ -744,56 +629,56 @@ fn sample_standard(
     mut likelihood: LikelihoodSpec,
     cfg: &NutsConfig,
 ) -> Result<NutsResult, String> {
-    // A coefficient that needs a *constraint-aware* posterior sampler must not
-    // take the gaussian-identity closed-form Laplace shortcut: that shortcut
-    // draws an unconstrained `N(mode, φ·H⁻¹)`, which for an active bound puts
-    // ~half its mass on the forbidden side of the boundary. Three geometries
-    // qualify, and all reproduce on a default gaussian model:
-    //   * a `bounded(x, min, max)` interval transform (#1508) — sampled on its
-    //     latent logit scale by `sample_standard_bounded`;
-    //   * a `nonnegative()`/`nonpositive()`/`linear(min,max)`/`constrain()` box
-    //     bound on a parametric coefficient (#1507); and
-    //   * a monotone/convex/concave shape cone on a spline (#1509).
-    // The latter two are sampled from the truncated Gaussian below. Detect all
-    // three cheaply from the saved termspec so the common, fully-unconstrained
-    // gaussian path keeps its fast exact fallback without building the design;
-    // the precise dispatch (and the authoritative `design.linear_constraints`
-    // check) happens after the design is assembled.
-    let needs_constraint_aware_sampler = model.resolved_termspec.as_ref().is_some_and(|ts| {
-        ts.linear_terms.iter().any(|term| {
-            !matches!(
-                term.coefficient_geometry,
-                LinearCoefficientGeometry::Unconstrained
-            ) || term.coefficient_min.is_some()
-                || term.coefficient_max.is_some()
-        }) || ts
+    let fit = fit_result_from_saved_model_for_prediction(model)?;
+    let saved_spec = model.resolved_termspec.as_ref().ok_or_else(|| {
+        "standard posterior sampling requires a frozen fitted term specification; refit"
+            .to_string()
+    })?;
+    let has_bounded = saved_spec.linear_terms.iter().any(|term| {
+        matches!(
+            term.coefficient_geometry,
+            LinearCoefficientGeometry::Bounded { .. }
+        )
+    });
+    let declares_linear_inequality = saved_spec
+        .linear_terms
+        .iter()
+        .any(|term| term.coefficient_min.is_some() || term.coefficient_max.is_some())
+        || saved_spec
             .smooth_terms
             .iter()
-            .any(|term| !matches!(term.shape, gam_terms::smooth::ShapeConstraint::None))
-    });
-    if likelihood.is_gaussian_identity() && !needs_constraint_aware_sampler {
-        return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
-    }
-    if model.has_link_wiggle() {
-        // A Gaussian-identity link-wiggle model is sampled from its saved
-        // closed-form joint Laplace posterior (the mean and wiggle coefficients
-        // are jointly Gaussian); only the non-Gaussian wiggle posterior needs
-        // the dedicated link-wiggle NUTS path. Preserved from the original
-        // dispatch, where the Gaussian-identity shortcut ran ahead of the
-        // wiggle branch and so claimed Gaussian wiggle models for the
-        // closed-form path.
-        if likelihood.is_gaussian_identity() {
-            return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
-        }
-        return sample_standard_link_wiggle(
-            model,
-            data,
-            col_map,
-            training_headers,
-            likelihood,
-            cfg,
+            .any(|term| !matches!(term.shape, gam_terms::smooth::ShapeConstraint::None));
+    let constrained_posterior = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref());
+
+    // The fitted posterior identity is the dispatch authority. Formula
+    // inspection is deliberately only a refusal check for a malformed/stale
+    // artifact: it must never manufacture constraints or let a model-level
+    // LinkWiggle block bypass the saved `Aθ ≥ b` cone (#2438).
+    if has_bounded && constrained_posterior.is_some() {
+        return Err(
+            "standard posterior sampling does not support a model that combines bounded() latent \
+             coordinates with linear inequality constraints"
+                .to_string(),
         );
     }
+    if constrained_posterior.is_some() {
+        return sample_standard_truncated(&fit, cfg);
+    }
+    if model.has_link_wiggle() || declares_linear_inequality {
+        return Err(
+            "standard constrained-coefficient posterior: the fitted model declares inequality \
+             constraints but has no persisted inequality-truncated posterior identity; refit with \
+             the current schema"
+                .to_string(),
+        );
+    }
+    if likelihood.is_gaussian_identity() && !has_bounded {
+        return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
+    }
+
     let parsed = parse_formula(&model.formula)?;
     let y_col = resolve_role_col(col_map, &parsed.response, "response")?;
     let y = data.column(y_col).to_owned();
@@ -806,45 +691,10 @@ fn sample_standard(
     let design = build_term_collection_design(data, &spec)
         .map_err(|e| format!("failed to build term collection design: {e}"))?;
 
-    // ---- Constraint-aware posterior dispatch -------------------------------
-    //
-    // A coefficient subject to an *active* constraint sits on the boundary of
-    // its feasible region, so a plain unconstrained draw `N(mode, φ·H⁻¹)`
-    // places ~half its mass on the forbidden side. The constrained geometry
-    // must therefore be reconstructed *here*, ahead of both the
-    // Gaussian-identity closed-form shortcut and the GLM-NUTS fallback —
-    // neither of which is aware of the feasible region (#1507/#1508/#1509).
-    // The fit pins the point estimate correctly; only the posterior was blind.
-
-    // (1) bounded() interval coefficients are not sampled by the GLM-NUTS path.
-    // That path runs the Hamiltonian over the *raw* linear design with the
-    // saved user-scale mode, treating every coefficient as an unconstrained,
-    // Gaussian-penalized parameter. Bounded terms are fit through a custom
-    // family that drives eta via an interval transform `beta = min + (max-min)·
-    // sigmoid(theta)` of an unconstrained latent `theta`. The posterior is
-    // Gaussian on that *latent* scale (which is exactly where the fit treats the
-    // coefficient as a locally-quadratic, unconstrained parameter), so the
-    // correct draws are `theta ~ N(theta_mode, H_latent^{-1})` pushed forward
-    // through the interval map — never a Gaussian on the user scale, which can
-    // place mass outside [min,max] and discards the boundary-induced skew. The
-    // saved fit exports the user-scale mode and user-scale penalized Hessian;
-    // `sample_bounded_latent_posterior_internal` reconstructs the latent
-    // geometry via the exact inverse delta-method (`H_latent = J H_user J`) and
-    // returns user-scale draws that always lie strictly inside the interval.
-    // This must precede the Gaussian-identity shortcut: a Gaussian `bounded()`
-    // model would otherwise take the closed-form path and emit a user-scale
-    // Gaussian that spills outside the interval (#1508).
-    let has_bounded = spec.linear_terms.iter().any(|term| {
-        matches!(
-            term.coefficient_geometry,
-            LinearCoefficientGeometry::Bounded { .. }
-        )
-    });
+    // bounded() coefficients live on a nonlinear latent-logit chart rather
+    // than in the linear inequality polytope above. Keep their exact
+    // push-forward sampler separate.
     if has_bounded {
-        // Mirror the fit-time layout: linear coefficient `j` lives at column
-        // `intercept_range.end + j` of the model's coefficient vector. Bounds
-        // are on the original (user/data) scale, which is also the scale the
-        // saved beta and penalized Hessian live on.
         let bounded_columns: Vec<gam_models::fit_orchestration::drivers::BoundedSampleColumn> =
             spec.linear_terms
                 .iter()
@@ -863,31 +713,14 @@ fn sample_standard(
         return sample_standard_bounded(model, cfg, &bounded_columns);
     }
 
-    // (2) box / shape *inequality* constraints — `nonnegative()` /
-    // `linear(min,max)` / `constrain()` box bounds on a parametric coefficient
-    // (#1507) and the monotone/convex/concave shape cone `γ_j ≥ 0` on a spline
-    // (#1509). The rebuilt term collection identifies this model class; the
-    // sampler itself consumes the exact `A β ≥ b`, mode, and ambient centre
-    // persisted by the fit rather than re-deriving posterior identity from the
-    // rebuilt design. Like `bounded()`,
-    // this must precede the Gaussian-identity shortcut so a constrained
-    // Gaussian model is sampled inside its feasible region rather than from the
-    // boundary-centred unconstrained Gaussian.
-    if design
-        .linear_constraints
-        .as_ref()
-        .is_some_and(|constraints| constraints.a.nrows() > 0)
-    {
-        return sample_standard_truncated(model, cfg);
-    }
-
-    // (3) unconstrained Gaussian identity — saved closed-form Laplace posterior.
+    // Every inequality-bearing standard fit returned above. The remaining
+    // Gaussian and NUTS paths are therefore provably unconstrained.
     if likelihood.is_gaussian_identity() {
         return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
     }
 
-    // (4) unconstrained non-Gaussian GLM — exact NUTS over the raw design,
-    // under the SAME prior weights the fit optimized (#2245 finding 16).
+    // Unconstrained non-Gaussian GLM — exact NUTS over the raw design, under
+    // the SAME prior weights the fit optimized (#2245 finding 16).
     let weights = saved_prior_weights(model, data, col_map)?;
     let dense_design_hmc = design
         .design
@@ -904,7 +737,6 @@ fn sample_standard(
             "saved standard model sampler design copy",
         )
         .map_err(|error| error.to_string())?;
-    let fit = fit_result_from_saved_model_for_prediction(model)?;
     // Refresh the NB overdispersion `theta` from the fit's jointly-estimated
     // `theta_hat` before sampling. The construction seed stored on the family
     // spec (`theta: 1.0`) only seeds the inner solve; the NUTS NB log-likelihood
@@ -950,13 +782,7 @@ fn sample_standard(
             mode: fit.beta.view(),
             hessian: explicit_fit_hessian_for_whitening(&fit, p, "saved standard model")?.view(),
             likelihood_scale: fit.likelihood_scale,
-            // Forward the saved training dispersion so NUTS whitening uses the
-            // posterior scale selected at fit time; fixed-scale families remain
-            // a no-op.
             dispersion: resolved_fit_dispersion(&fit, "standard saved-model NUTS")?,
-            // The fit's optimized target: dropping the Jeffreys term Φ(β)
-            // from a Firth fit samples a different posterior (#2245
-            // finding 16). Persisted on the fit artifacts at fit time.
             firth_bias_reduction: fit.artifacts.firth_bias_reduction,
             offset: Some(offset_vec.view()),
         }),
@@ -1048,11 +874,10 @@ fn sample_standard_bounded(
 /// consecutive draws are autocorrelated, so `rhat`/`ess` are MEASURED with the
 /// split-chain Gelman–Rubin diagnostic rather than asserted.
 fn sample_standard_truncated(
-    model: &SavedModel,
+    fit: &gam_solve::estimate::UnifiedFitResult,
     cfg: &NutsConfig,
 ) -> Result<NutsResult, String> {
     validate_nuts_config(cfg).map_err(String::from)?;
-    let fit = fit_result_from_saved_model_for_prediction(model)?;
     // Consume the persisted inequality-truncated posterior identity (#2417 /
     // #2419) rather than re-deriving it from the rebuilt design: the reported
     // coefficient vector is the feasible KKT mode, which is NOT the ambient
@@ -1090,7 +915,7 @@ fn sample_standard_truncated(
     let sqrt_cov_scale =
         sampling_sqrt_covariance_scale(&fit, "standard constrained-coefficient posterior")?;
 
-    let samples = crate::truncated_gaussian::sample_truncated_gaussian_posterior(
+    let active_samples = crate::truncated_gaussian::sample_truncated_gaussian_posterior(
         &center,
         &mode,
         &penalized_hessian,
@@ -1100,26 +925,42 @@ fn sample_standard_truncated(
         cfg.n_chains,
         chain_stream_seed(cfg.seed, 0, 0x7290_C047_5D6E_B14Du64),
     )?;
-    let posterior_mean = samples
-        .mean_axis(ndarray::Axis(0))
-        .unwrap_or_else(|| Array1::<f64>::zeros(p));
-    let posterior_std = samples.std_axis(ndarray::Axis(0), 1.0);
-
     // Reflective HMC draws are iid only while no wall is hit; an active
     // constraint at the mode makes every trajectory reflect, correlating
     // consecutive draws. Measure the diagnostics instead of asserting the
     // iid triple (the sampler stacks rows chain-major: chain*n_samples+draw).
+    // Diagnose the active Markov state before lifting: a rectangular gauge can
+    // add deterministic raw coordinates whose zero variance has no R-hat.
     let mut chains = ndarray::Array3::<f64>::zeros((cfg.n_chains, cfg.n_samples, p));
     for chain in 0..cfg.n_chains {
         for draw in 0..cfg.n_samples {
             let row = chain * cfg.n_samples + draw;
             for j in 0..p {
-                chains[(chain, draw, j)] = samples[(row, j)];
+                chains[(chain, draw, j)] = active_samples[(row, j)];
             }
         }
     }
     let (rhat, ess) = super::hmc_io::compute_split_rhat_and_ess(&chains);
     let converged = rhat < 1.1 && ess > 100.0;
+
+    // Public draws use the saved/raw coefficient order. The persisted
+    // inequalities and precision live in the gauge's active frame, so sample
+    // there and then apply the exact affine section β_saved = Tθ_active + a.
+    // Identity gauges move the allocation unchanged and remain bit-for-bit.
+    let samples =
+        lift_active_samples_to_saved(active_samples, &geometry.coefficient_gauge)?;
+    let raw_p = samples.ncols();
+    if raw_p != fit.beta.len() {
+        return Err(format!(
+            "standard constrained-coefficient posterior: gauge lifted {raw_p} coefficients but \
+             the saved fit reports {}",
+            fit.beta.len(),
+        ));
+    }
+    let posterior_mean = samples
+        .mean_axis(ndarray::Axis(0))
+        .unwrap_or_else(|| Array1::<f64>::zeros(raw_p));
+    let posterior_std = samples.std_axis(ndarray::Axis(0), 1.0);
 
     Ok(NutsResult {
         samples,
@@ -1131,202 +972,32 @@ fn sample_standard_truncated(
     })
 }
 
-fn sample_standard_link_wiggle(
-    model: &SavedModel,
-    data: ArrayView2<'_, f64>,
-    col_map: &HashMap<String, usize>,
-    training_headers: Option<&Vec<String>>,
-    likelihood: LikelihoodSpec,
-    cfg: &NutsConfig,
-) -> Result<NutsResult, String> {
-    let parsed = parse_formula(&model.formula)?;
-    let y_col = resolve_role_col(col_map, &parsed.response, "response")?;
-    let y = data.column(y_col).to_owned();
-
-    let spec = resolve_termspec_for_prediction(
-        &model.resolved_termspec,
-        training_headers,
-        col_map,
-        "resolved_termspec",
+fn lift_active_samples_to_saved(
+    active_samples: Array2<f64>,
+    gauge: &gam_problem::gauge::Gauge,
+) -> Result<Array2<f64>, String> {
+    gauge
+        .validate()
+        .map_err(|reason| format!("constrained posterior gauge is invalid: {reason}"))?;
+    if active_samples.ncols() != gauge.reduced_total() {
+        return Err(format!(
+            "constrained posterior produced {} active coefficients but the gauge expects {}",
+            active_samples.ncols(),
+            gauge.reduced_total(),
+        ));
+    }
+    if gauge.is_identity() {
+        return Ok(active_samples);
+    }
+    let mut saved = active_samples.dot(&gauge.t_full.t());
+    for mut draw in saved.rows_mut() {
+        draw += &gauge.affine_shift;
+    }
+    validate_all_finite(
+        "saved-coordinate constrained posterior draws",
+        saved.iter().copied(),
     )?;
-    let design = build_term_collection_design(data, &spec)
-        .map_err(|e| format!("failed to build term collection design: {e}"))?;
-    let p_main = design.design.ncols();
-
-    let fit = fit_result_from_saved_model_for_prediction(model)?;
-    let wiggle_runtime = model
-        .saved_prediction_runtime()?
-        .link_wiggle
-        .ok_or_else(|| "link-wiggle model is missing wiggle runtime metadata".to_string())?;
-    let mode_beta = fit
-        .block_by_role(BlockRole::Mean)
-        .ok_or_else(|| "standard link-wiggle model is missing Mean coefficient block".to_string())?
-        .beta
-        .clone();
-    let mode_theta = fit
-        .block_by_role(BlockRole::LinkWiggle)
-        .ok_or_else(|| {
-            "standard link-wiggle model is missing LinkWiggle coefficient block".to_string()
-        })?
-        .beta
-        .clone();
-    let p_wiggle = mode_theta.len();
-    let p_total = mode_beta.len() + p_wiggle;
-
-    if mode_beta.len() != p_main {
-        return Err(format!(
-            "link-wiggle sample: saved mean block has {} coefficients but rebuilt design has {} columns",
-            mode_beta.len(),
-            p_main,
-        ));
-    }
-    if fit.beta.len() != p_total {
-        return Err(format!(
-            "link-wiggle sample: saved beta has {} coefficients but design has {} main + {} wiggle = {} total",
-            fit.beta.len(),
-            p_main,
-            p_wiggle,
-            p_total,
-        ));
-    }
-
-    let hessian = &fit
-        .geometry
-        .as_ref()
-        .ok_or_else(|| {
-            "link-wiggle model is missing explicit joint Hessian geometry; refit with exact Hessian export"
-                .to_string()
-        })?
-        .penalized_hessian;
-    validate_explicit_link_wiggle_joint_hessian(hessian, p_total)?;
-
-    let n_base_penalties = design.penalties.len();
-    let base_lambdas = fit
-        .block_by_role(BlockRole::Mean)
-        .ok_or_else(|| "standard link-wiggle model is missing Mean block lambdas".to_string())?
-        .lambdas
-        .view();
-    if base_lambdas.len() != n_base_penalties {
-        return Err(format!(
-            "link-wiggle sample: mean block has {} lambdas but rebuilt design has {} base penalties",
-            base_lambdas.len(),
-            n_base_penalties,
-        ));
-    }
-
-    let penalty_base =
-        weighted_blockwise_penalty_sum(&design.penalties, base_lambdas.as_slice().unwrap(), p_main);
-
-    let wiggle_lambdas_owned = fit
-        .lambdas_linkwiggle()
-        .ok_or_else(|| "standard link-wiggle model is missing LinkWiggle lambdas".to_string())?;
-    let wiggle_lambdas = wiggle_lambdas_owned.view();
-    let degree = wiggle_runtime.degree;
-    let knot_arr = Array1::from_vec(wiggle_runtime.knots.clone());
-
-    let penalty_link = saved_link_wiggle_penalty_matrix(&wiggle_runtime, wiggle_lambdas, p_wiggle)?;
-
-    // Fitted prior weights and offset, so the sampled target is exactly the
-    // fitted model's posterior (#2245 finding 16). The offset also enters the
-    // wiggle abscissa q₀ = Xβ + offset below, matching the target's basis
-    // evaluation.
-    let weights = saved_prior_weights(model, data, col_map)?;
-    let saved_offset_vec = saved_offset(model, data, col_map)?;
-    let base_offset =
-        saved_offset_vec.unwrap_or_else(|| Array1::<f64>::zeros(design.design.nrows()));
-    let offset_vec = design
-        .compose_offset(base_offset.view(), "saved link-wiggle model sampling")
-        .map_err(|error| error.to_string())?;
-
-    let q0 = design.design.dot(&mode_beta) + &offset_vec;
-    let (q0_min, q0_max) = q0
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
-            (lo.min(v), hi.max(v))
-        });
-
-    let spline = LinkWiggleSplineArtifacts {
-        knot_range: (q0_min, q0_max),
-        knot_vector: knot_arr,
-        degree,
-    };
-
-    // Typed per-family likelihood parameters (#2245 finding 15): each family
-    // names exactly what its log-likelihood needs, read from the FITTED scale
-    // metadata. The historical single `scale` slot let Tweedie dispersion φ be
-    // consumed as the variance power p — a different posterior entirely.
-    let family = match (&likelihood.response, &likelihood.link) {
-        (ResponseFamily::Binomial, InverseLink::Standard(StandardLink::Logit)) => {
-            LinkWiggleFamilyParams::BinomialLogit
-        }
-        (ResponseFamily::Binomial, InverseLink::Standard(StandardLink::Probit)) => {
-            LinkWiggleFamilyParams::BinomialProbit
-        }
-        (ResponseFamily::Binomial, InverseLink::Standard(StandardLink::CLogLog)) => {
-            LinkWiggleFamilyParams::BinomialCLogLog
-        }
-        (ResponseFamily::Gaussian, _) => LinkWiggleFamilyParams::Gaussian {
-            sigma: fit.standard_deviation,
-        },
-        (ResponseFamily::Poisson, _) => LinkWiggleFamilyParams::PoissonLog,
-        (ResponseFamily::Tweedie { p }, _) => LinkWiggleFamilyParams::TweedieLog {
-            power: *p,
-            phi: fit.likelihood_scale.fixed_phi().ok_or_else(|| {
-                "link-wiggle Tweedie sampling requires resolved dispersion metadata".to_string()
-            })?,
-        },
-        (ResponseFamily::NegativeBinomial { .. }, _) => {
-            LinkWiggleFamilyParams::NegativeBinomialLog {
-                theta: fit.likelihood_scale.negbin_theta().ok_or_else(|| {
-                    "link-wiggle negative-binomial sampling requires resolved theta metadata"
-                        .to_string()
-                })?,
-            }
-        }
-        (ResponseFamily::Gamma, _) => LinkWiggleFamilyParams::GammaLog {
-            shape: fit.likelihood_scale.gamma_shape().ok_or_else(|| {
-                "link-wiggle Gamma sampling requires resolved shape metadata".to_string()
-            })?,
-        },
-        _ => {
-            return Err(format!(
-                "NUTS sampling with link wiggle is not supported for family {}",
-                likelihood.pretty_name()
-            ));
-        }
-    };
-
-    let wiggle_nuts_dense = design
-        .design
-        .try_to_dense_governed("saved link-wiggle HMC design")
-        .map_err(|error| error.to_string())?;
-    // LinkWigglePosterior owns one n×p copy for the duration of NUTS. Charge
-    // that simultaneous allocation before entering the sampler; the governed
-    // source matrix retains its own charge independently.
-    let sampler_design_copy_reservation = MemoryGovernor::global()
-        .try_reserve_dense_f64(
-            wiggle_nuts_dense.nrows(),
-            wiggle_nuts_dense.ncols(),
-            "saved link-wiggle sampler design copy",
-        )
-        .map_err(|error| error.to_string())?;
-    let result = run_link_wiggle_nuts_sampling(
-        wiggle_nuts_dense.view(),
-        y.view(),
-        weights.view(),
-        Some(offset_vec.view()),
-        penalty_base.view(),
-        penalty_link.view(),
-        mode_beta.view(),
-        mode_theta.view(),
-        hessian.view(),
-        spline,
-        family,
-        cfg,
-    )
-    .map_err(|e| format!("link-wiggle NUTS sampling failed: {e}"));
-    drop(sampler_design_copy_reservation);
-    result
+    Ok(saved)
 }
 
 fn sample_survival(
@@ -1736,96 +1407,21 @@ fn sample_survival(
 mod tests {
     use super::*;
     use gam_linalg::matrix::{DenseDesignMatrix, DenseDesignOperator, LinearOperator};
-    use gam_models::wiggle::WigglePenaltyBlockKind;
     use gam_problem::types::LikelihoodScaleMetadata;
 
-    /// #2306: fit and sampling must consume the same exact function-space
-    /// penalty, including order and lambda topology. The highly nonuniform knot
-    /// vector makes an unweighted coefficient-difference reconstruction
-    /// observably different. With primary order one the anchored I-spline
-    /// roughness is full rank, so `double_penalty=true` must not invent a ridge.
     #[test]
-    fn standard_link_wiggle_sampling_penalty_matches_fit_value_gradient_hessian_2306() {
-        let a = -1.3_f64;
-        let b = 2.6_f64;
-        let width = b - a;
-        let mut knot_values = vec![a; 4];
-        knot_values.extend([
-            a + 0.03 * width,
-            a + 0.21 * width,
-            a + 0.22 * width,
-            a + 0.68 * width,
-            a + 0.94 * width,
-        ]);
-        knot_values.extend(vec![b; 4]);
-        let knots = Array1::from_vec(knot_values);
-        let derivative_orders = [1usize, 2, 3];
-        let fit_penalties =
-            canonical_wiggle_function_penalties(&knots, 3, &derivative_orders, true)
-                .expect("fit-time canonical penalties");
+    fn constrained_draw_lift_uses_the_saved_affine_gauge() {
+        let active = ndarray::array![[1.0, 2.0], [-3.0, 4.0]];
+        let gauge = gam_problem::gauge::Gauge::from_block_transform_with_shift(
+            ndarray::array![[1.0, 0.0], [0.0, 2.0], [1.0, -1.0]],
+            ndarray::array![0.5, -1.0, 3.0],
+        );
+        let saved =
+            lift_active_samples_to_saved(active, &gauge).expect("valid affine sample lift");
         assert_eq!(
-            fit_penalties.metadata.blocks,
-            vec![
-                WigglePenaltyBlockKind::Roughness {
-                    derivative_order: 1,
-                },
-                WigglePenaltyBlockKind::Roughness {
-                    derivative_order: 2,
-                },
-                WigglePenaltyBlockKind::Roughness {
-                    derivative_order: 3,
-                },
-            ],
-            "order-one primary roughness has no null space, so double penalty emits no fake ridge",
+            saved,
+            ndarray::array![[1.5, 3.0, 2.0], [-2.5, 7.0, -4.0]]
         );
-        let p = fit_penalties.matrices[0].nrows();
-        let runtime = SavedLinkWiggleRuntime {
-            knots: knots.to_vec(),
-            degree: 3,
-            penalty_metadata: Some(fit_penalties.metadata.clone()),
-            beta: vec![0.0; p],
-            index_shift: None,
-        };
-        let lambdas = Array1::from_vec(vec![0.7, 1.3, 2.1]);
-        let sampled_hessian = saved_link_wiggle_penalty_matrix(&runtime, lambdas.view(), p)
-            .expect("sampling rebuilds the fit topology");
-        let mut fitted_hessian = Array2::<f64>::zeros((p, p));
-        for (matrix, &lambda) in fit_penalties.matrices.iter().zip(lambdas.iter()) {
-            fitted_hessian.scaled_add(lambda, matrix);
-        }
-
-        let theta = Array1::from_shape_fn(p, |index| 0.15 + 0.07 * index as f64);
-        let fitted_gradient = fitted_hessian.dot(&theta);
-        let sampled_gradient = sampled_hessian.dot(&theta);
-        let fitted_value = 0.5 * theta.dot(&fitted_gradient);
-        let sampled_value = 0.5 * theta.dot(&sampled_gradient);
-        let max_hessian_error = sampled_hessian
-            .iter()
-            .zip(fitted_hessian.iter())
-            .map(|(sampled, fitted)| (sampled - fitted).abs())
-            .fold(0.0_f64, f64::max);
-        let max_gradient_error = sampled_gradient
-            .iter()
-            .zip(fitted_gradient.iter())
-            .map(|(sampled, fitted)| (sampled - fitted).abs())
-            .fold(0.0_f64, f64::max);
-        assert!(
-            max_hessian_error < 1.0e-12,
-            "penalty Hessian drift: {max_hessian_error}"
-        );
-        assert!(
-            max_gradient_error < 1.0e-12,
-            "penalty gradient drift: {max_gradient_error}"
-        );
-        assert!(
-            (sampled_value - fitted_value).abs() < 1.0e-12,
-            "penalty target drift"
-        );
-
-        let mismatch_lambdas = Array1::from_vec(vec![0.7, 1.3]);
-        let mismatch = saved_link_wiggle_penalty_matrix(&runtime, mismatch_lambdas.view(), p)
-            .expect_err("lambda count mismatch must be rejected, never padded");
-        assert!(mismatch.contains("3 blocks but fit stores 2 lambdas"));
     }
 
     struct ChunkOnlySampleDesign {
