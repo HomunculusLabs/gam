@@ -687,7 +687,12 @@ def test_predict_can_passthrough_id_column() -> None:
     )
 
     assert pred["person_id"] == ["a", "b"]
-    assert set(pred) == {"person_id", "linear_predictor", "mean"}
+    assert set(pred) == {
+        "person_id",
+        "linear_predictor",
+        "mean",
+        "point_covariance_source",
+    }
 
 
 # ---------------------------------------------------------------------------
