@@ -143,14 +143,35 @@ fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
 }
 
 /// #2228 MEASUREMENT (zz_measure) — with the certify-at-best-seen fix (½λ²/scale-min
-/// keyed, band unchanged), run the criterion on ard_saddle_state. Ok ⇒ the best-seen
-/// certificate cleared the 1e-8 band and A is materialized at that certified mode
-/// (report min_eig — PD ⇒ genuine convergence, retires the #2336 escape). Err ⇒ the
-/// best-achievable ½λ²/scale plateaus above the band (a solver stall at a saddle-
-/// adjacent mode), honestly reported at the best-seen ‖g‖.
+/// keyed, band unchanged), run the criterion on ard_saddle_state.
+///
+/// **`min_eig` alone does not decide anything here, and reading it as if it did is
+/// how this probe misled two readers into filing a correctness alarm against
+/// designed behaviour.** Since #2330/#2336 the exact-`A` gate is not a PSD test: a
+/// negative eigendirection is refused only when the ARD concave clamp cannot
+/// account for its negativity. Per direction `v` with eigenvalue `λ < −floor`, the
+/// gate forms
+///
+/// ```text
+/// floor = SAE_EXACT_A_PD_FLOOR_REL · max(max_eig, 1)
+/// basin = λ + vᵀEv        (E = the ARD concave-clamp diagonal, zero on the β border)
+/// basin < −floor  ⇒  genuine saddle, typed IndefiniteObservedInformation refusal
+/// basin ≥ −floor  ⇒  clamp-attributable, PRICED at the basin curvature
+/// ```
+///
+/// So `A` being indefinite is expected and by itself proves nothing; the deciding
+/// quantity is `basin`, and `min_eig` and `basin` differ by exactly the `vᵀEv` this
+/// probe used to omit. Report all four — `λ`, `vᵀEv`, `basin`, `floor` — for every
+/// direction the gate actually examined, using the SAME `cluster_stable_eigh` the
+/// gate uses so degenerate clusters resolve identically rather than to whatever a
+/// plain decomposition happens to return.
+///
+/// `Ok` ⇒ every negative direction was clamp-attributable and priced at its basin
+/// curvature. `Err` ⇒ either a direction the clamp cannot explain (a genuine
+/// saddle) or the best-achievable ½λ²/scale plateauing above the band (a solver
+/// stall), honestly reported at the best-seen ‖g‖.
 #[test]
 fn zz_measure_best_seen_classification_2228() {
-    use super::{FaerEigh, Side};
     let (mut term, target, rho) = ard_saddle_state();
     let result = term.penalized_quasi_laplace_criterion_with_cache(
         target.view(),
@@ -166,12 +187,39 @@ fn zz_measure_best_seen_classification_2228() {
             let a = term
                 .materialize_exact_hessian_dense(&rho, target.view(), &cache)
                 .expect("materialize A at certified best-seen mode");
-            let (eigs, _) = a.eigh(Side::Lower).expect("A eigendecomposition");
+            let e_diag = term
+                .materialize_ard_concave_clamp_diagonal(&rho, &cache)
+                .expect("ARD concave-clamp diagonal at the certified mode");
+            let total_t = cache.delta_t_len();
+            let (eigs, vecs) = SaeManifoldTerm::cluster_stable_eigh(&a, &e_diag, total_t)
+                .expect("A eigendecomposition (gate-identical clustering)");
             let min_eig = eigs.iter().copied().fold(f64::INFINITY, f64::min);
             let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
             eprintln!(
-                "2228-MEASURE: Ok(value={value:.9e}) certified; min_eig={min_eig:.6e} max_eig={max_eig:.6e}"
+                "2228-MEASURE: Ok(value={value:.9e}) certified; min_eig={min_eig:.6e} \
+                 max_eig={max_eig:.6e} floor={floor:.6e}"
             );
+            // Every direction the gate examined, with the quantity it decided on.
+            for (idx, &lambda) in eigs.iter().enumerate() {
+                if lambda >= -floor {
+                    continue;
+                }
+                let v = vecs.column(idx);
+                let limit = total_t.min(v.len());
+                let e_v: f64 = (0..limit).map(|j| e_diag[j] * v[j] * v[j]).sum();
+                let basin = lambda + e_v;
+                eprintln!(
+                    "2228-MEASURE:   dir {idx}: lambda={lambda:.6e} vEv={e_v:.6e} \
+                     basin={basin:.6e} vs -floor={:.6e} => {}",
+                    -floor,
+                    if basin < -floor {
+                        "GENUINE SADDLE (would refuse)"
+                    } else {
+                        "clamp-attributable (priced at basin)"
+                    }
+                );
+            }
         }
         Err(err) => eprintln!("2228-MEASURE: Err({err:?}) => plateau above band (solver stall)"),
     }
