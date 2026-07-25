@@ -40,7 +40,23 @@ extern "C" __device__ __forceinline__ double erfcx_nonnegative(double x) {
     if (isnan(x) || x < 0.0) return nan("");
     if (isinf(x)) return 0.0;
     if (x < 26.0) {
-        return exp(x * x) * erfc(x);
+        // Carry x*x EXACTLY into exp. Rounding the square perturbs it by a
+        // relative eps/2, and exp converts a relative perturbation of its
+        // ARGUMENT into x^2 times that in its RESULT -- 5.7e-14 at the top of
+        // this branch, against the 3e-16 the asymptotic branch below already
+        // delivers, so the crossover at 26 was a 190x step DOWN in error into
+        // the interval every probit consumer lives in. `lo` is the whole of the
+        // discarded term and is itself exactly representable, so
+        // exp(x^2) = exp(hi)*exp(lo) with exp(lo) = 1 + lo to within 1e-27.
+        //
+        // `fma` is the IEEE fused operation (`fma.rn.f64`, one instruction).
+        // `--fmad=false` disables CONTRACTION of a separate `a*b+c`, not an
+        // explicit `fma` call, so this stays operation-for-operation identical
+        // to the host oracle's `f64::mul_add`.
+        double hi   = x * x;
+        double lo   = fma(x, x, -hi);
+        double head = exp(hi) * erfc(x);
+        return fma(head, lo, head);
     }
     // Six-correction asymptotic expansion of erfcx for large x. At x=26,
     // the first omitted term is below 2e-17 relative to the leading term.
@@ -88,7 +104,13 @@ log_ndtr_and_mills(double x, double *log_cdf, double *lambda) {
     } else {
         double upper_tail = 0.5 * erfc(x / SQRT_2);
         double cdf = 1.0 - upper_tail;
-        double pdf = INV_SQRT_2PI * exp(-0.5 * x * x);
+        // Same exact-square correction as `erfcx_nonnegative`: `exp(-0.5*x*x)`
+        // otherwise carries x^2*eps/2 relative error. `x` is finite and
+        // non-negative here (the isnan/isinf guards above returned), so the
+        // residual is always a finite number and needs no further defence.
+        double xx  = x * x;
+        double pdf = INV_SQRT_2PI * exp(-0.5 * xx);
+        pdf = fma(pdf, -0.5 * fma(x, x, -xx), pdf);
         *log_cdf = log1p(-upper_tail);
         *lambda  = pdf / cdf;
     }

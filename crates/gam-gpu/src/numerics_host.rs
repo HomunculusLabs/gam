@@ -63,6 +63,16 @@ pub const SQRT_2_OVER_PI: f64 = 0.7978845608028654;
 /// negative inputs and `NaN` return `NaN` because they violate the restricted
 /// domain. For `0 ≤ x < 26` evaluates `exp(x²)·erfc(x)` directly; beyond that
 /// it switches to the same six-correction asymptotic expansion as the kernel.
+///
+/// The direct branch carries `x²` exactly. Rounding the square perturbs it by
+/// a relative `ε/2`, and `exp` converts a relative perturbation of its ARGUMENT
+/// into `x²` times that in its RESULT — `5.7e-14` at the top of the branch,
+/// against the `3e-16` the asymptotic branch already delivers, so the seam at
+/// `26` was a 190x step DOWN in error into the interval every probit consumer
+/// lives in. `mul_add` is the IEEE fused operation, matching the kernel's
+/// explicit `fma` call, which `--fmad=false` does not touch (it disables
+/// CONTRACTION of a separate `a*b+c`). See `gam_math::probability` for the
+/// measurements; this branch is its line-for-line device-side twin.
 pub fn erfcx_nonnegative(x: f64) -> f64 {
     if x.is_nan() || x < 0.0 {
         return f64::NAN;
@@ -71,7 +81,10 @@ pub fn erfcx_nonnegative(x: f64) -> f64 {
         return 0.0;
     }
     if x < 26.0 {
-        return libm::exp(x * x) * erfc(x);
+        let hi = x * x;
+        let lo = x.mul_add(x, -hi);
+        let head = libm::exp(hi) * erfc(x);
+        return head.mul_add(lo, head);
     }
     let inv = 1.0 / x;
     let inv2 = inv * inv;
@@ -135,7 +148,11 @@ pub fn log_ndtr_and_mills(x: f64) -> (f64, f64) {
     } else {
         let upper_tail = 0.5 * erfc(x / SQRT_2);
         let cdf = 1.0 - upper_tail;
-        let pdf = INV_SQRT_2PI * libm::exp(-0.5 * x * x);
+        // Same exact-square correction as `erfcx_nonnegative`. `x` is finite
+        // and non-negative here, so the residual is always a finite number.
+        let xx = x * x;
+        let pdf = INV_SQRT_2PI * libm::exp(-0.5 * xx);
+        let pdf = pdf.mul_add(-0.5 * x.mul_add(x, -xx), pdf);
         let log_cdf = libm::log1p(-upper_tail);
         let lambda = pdf / cdf;
         (log_cdf, lambda)
@@ -292,6 +309,15 @@ mod probit_parity_tests {
 
     /// Defining identity `erfcx(x)·exp(-x²) = erfc(x)` to ≤ 4 ULP for
     /// `0 < x < 26` (the direct branch of the host oracle).
+    ///
+    /// The inverse factor has to undo the square the SAME way the branch built
+    /// it, or the identity cannot resolve anything finer than the error it is
+    /// supposed to be measuring. `exp(-fl(x*x))` is off by `x²·ε/2` — up to
+    /// `250` ULP at the top of this range — in the opposite direction from
+    /// `exp(fl(x*x))`, so writing the identity with a rounded square on both
+    /// sides makes the two errors CANCEL and the check passes identically well
+    /// whether or not the branch corrects for them. That is why this test, and
+    /// the ULP-tight one it looks like, said nothing about a 190x defect.
     #[test]
     fn erfcx_matches_definition() {
         assert_eq!(erfcx_nonnegative(0.0), 1.0);
@@ -300,20 +326,62 @@ mod probit_parity_tests {
         assert!(erfcx_nonnegative(f64::NAN).is_nan());
         assert_eq!(erfcx_nonnegative(f64::INFINITY), 0.0);
         let mut worst = 0.0_f64;
-        let mut x = 0.1;
+        let mut x = 0.1_f64;
         while x < 25.0 {
-            worst = worst.max(ulp(erfcx_nonnegative(x) * libm::exp(-x * x), erfc(x)));
+            let hi = x * x;
+            let lo = x.mul_add(x, -hi);
+            let inverse_exp = libm::exp(-hi);
+            let inverse_exp = inverse_exp.mul_add(-lo, inverse_exp);
+            worst = worst.max(ulp(erfcx_nonnegative(x) * inverse_exp, erfc(x)));
             x += 0.1;
         }
         assert!(worst <= 4.0, "erfcx definition drift {worst:.3} ULP > 4");
     }
 
+    /// The identity above is self-consistent by construction; this is the
+    /// accuracy pin. References are `mpmath` at `dps=60`, on arguments whose
+    /// squares are NOT representable in `f64` — the only ones where the
+    /// rounded-square error is non-zero, and precisely the ones the shared
+    /// erfcx grid (`0.1`, `0.2`, … stepping by `0.1`) mostly misses, since a
+    /// tenth-spaced grid lands on many exactly-squaring values and the identity
+    /// check cancels the defect at the rest.
+    ///
+    /// `1.5e-15` matches the bound the CPU kernel holds itself to in
+    /// `gam_math::probability::erfcx_matches_high_precision_reference`; the two
+    /// implementations are line-for-line twins and must not drift in accuracy
+    /// any more than they may drift in constants.
+    #[test]
+    fn erfcx_matches_high_precision_reference() {
+        const TOLERANCE: f64 = 1.5e-15;
+        let refs: &[(f64, f64)] = &[
+            (0.1, 0.8964569799691267),
+            (10.5, 0.05349189974656412),
+            (14.3, 0.0393580473372741),
+            (19.7, 0.028602309402825203),
+            (23.9, 0.023585649371803793),
+            (25.9999, 0.021683668126369115),
+        ];
+        for &(x, reference) in refs {
+            let got = erfcx_nonnegative(x);
+            let rel = (got - reference).abs() / reference.abs();
+            assert!(
+                rel < TOLERANCE,
+                "erfcx({x}) = {got:.17e}, reference {reference:.17e}, rel {rel:.3e}"
+            );
+        }
+    }
+
     #[test]
     fn erfcx_asymptotic_switch_and_subnormal_contract_match_device_source() {
+        // `26² = 676` is exactly representable, so the plain direct form has no
+        // square residual to lose and is a legitimate oracle AT THIS ARGUMENT
+        // (and, note, only here — which is why this check never saw the
+        // rounded-square defect the accuracy pin above catches).
         let switch = 26.0_f64;
+        assert_eq!(switch.mul_add(switch, -(switch * switch)), 0.0);
         let direct = libm::exp(switch * switch) * erfc(switch);
         assert!(
-            (erfcx_nonnegative(switch) / direct - 1.0).abs() < 5.0e-14,
+            (erfcx_nonnegative(switch) / direct - 1.0).abs() < 1.0e-15,
             "erfcx switch disagrees with direct finite identity"
         );
         let tail = erfcx_nonnegative(f64::MAX);
@@ -324,6 +392,11 @@ mod probit_parity_tests {
             "inv2 * 162.421875",
             "log1p(-upper_tail)",
             "log_ndtr_mills_curvature",
+            // The exact-square correction, on both the erfcx branch and the
+            // `log_ndtr_and_mills` pdf, must survive in the device source or
+            // the two sides stop describing one function.
+            "double lo   = fma(x, x, -hi);",
+            "fma(pdf, -0.5 * fma(x, x, -xx), pdf)",
         ] {
             assert!(
                 PROBIT_NUMERICS_CU.contains(required),
