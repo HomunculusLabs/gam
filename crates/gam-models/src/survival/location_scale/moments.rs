@@ -279,147 +279,6 @@ pub(crate) fn cone_clipped_coordinate_displacement(beta: f64, displacement: f64)
     }
 }
 
-/// `[0, ∞)`-truncated Gaussian expectation of a fallible pair integrand
-/// (#2390 layer 2): `E[f(w) | w ≥ 0]` for `w ~ N(mean, sd²)`.
-///
-/// The feasible image of the monotone I-spline cone under a non-negative basis
-/// row is exactly `w ≥ 0`, so the scalar link-wiggle integral must not spend
-/// mass on `w < 0` — predictor values no feasible model produces.
-///
-/// # The rule
-///
-/// Work in the standardized coordinate `y = (w − mean)/sd`, so with
-/// `r = mean/sd` the retained set is `y ≥ −r` and `w = sd·(y − (−r))` is the
-/// distance above the wall. The quadrature integrates the OFFSET ABOVE THE WALL
-/// `δ = y + r` on a finite interval, against the Gaussian weight, and divides by
-/// the same quadrature's own mass:
-///
-/// ```text
-///   E[f | w ≥ 0]  =  Σ ω_i f(sd·δ_i)  /  Σ ω_i ,
-///   ω_i = weight_i · exp(−½·(y_i² − y_ref²)),   y_i = −r + δ_i
-/// ```
-///
-/// Three properties this buys, each of which the previous formulation lacked:
-///
-/// * **No singularity.** The integrand is `f` against a Gaussian on a bounded
-///   interval — entire wherever `f` is. Gauss–Legendre converges geometrically.
-/// * **No cancellation.** The sample is `sd·δ` built from the offset directly,
-///   never `mean + sd·y`, which for a wall far below the mean is a difference of
-///   two large nearly-equal numbers.
-/// * **Exact measure.** Dividing by the quadrature's own mass makes a constant
-///   integrand integrate to itself bit-exactly and cancels the endpoint
-///   truncation, so no residual `1 − ε` bias is carried into the moments.
-///
-/// The scale `y_ref = clamp(0, y_lo, y_hi)` is where the Gaussian peaks on the
-/// interval; factoring it out of every weight keeps them `O(1)` even 100σ into
-/// the tail, where the unscaled `φ(y)` would underflow. It cancels in the ratio.
-///
-/// # Why the limits are taken in log space
-///
-/// `y_hi` is the point beyond which the CONDITIONAL survival is `ε`, obtained
-/// without ever forming a probability-space difference:
-/// `y_hi = −Φ⁻¹(exp(ln ε + ln Φ(r)))` through
-/// [`gam_math::probability::standard_normal_quantile_from_log_cdf`]. That is
-/// what keeps a deeply negative mean from collapsing: at `r = −10` the interval
-/// is the genuine sliver `[10, 13.2]`, not the point mass that `1 − Φ(10) = 0`
-/// would suggest. The lower limit is `max(−r, −y_hi)` — the wall, unless the
-/// wall sits so far below the mean that the Gaussian's own lower tail dies
-/// first, in which case extending to it would only stretch the interval and
-/// waste resolution on mass of size `ε`.
-///
-/// # What was wrong before
-///
-/// The previous rule integrated `∫₀^∞ f(w(s)) e^{−s} ds` in the log-survival
-/// coordinate `s`, with `w(s) = sd·(r − Φ⁻¹(exp(ln Φ(r) − s)))`. That removed
-/// the inverse-CDF endpoint singularity of a uniform-probability rule, but it
-/// introduced a worse one: `w(s)` grows like `sd·√(2(s − ln Φ(r)))`, a branch
-/// point at `s = ln Φ(r)`, which is just OUTSIDE `[0, s_max]` and approaches the
-/// endpoint as `r` grows. That collapses the Bernstein ellipse and with it
-/// Gauss–Legendre's convergence rate. Measured against the closed form at 32
-/// nodes: `1.9e-7` relative at `r = 0.43`, and `1.5e-3` at `r = 5` — the
-/// DEEP-INTERIOR case, which the old documentation claimed was "bit-identical to
-/// the current rule within f64" and which is the regime production actually
-/// lives in (a wiggle coefficient comfortably inside the cone). The rule above
-/// is at machine precision across the same cases at the same node count.
-pub(crate) fn truncated_nonnegative_normal_expectation_pair(
-    mean: f64,
-    sd: f64,
-    f: impl Fn(f64) -> Result<(f64, f64), String>,
-) -> Result<(f64, f64), String> {
-    if !mean.is_finite() {
-        return Err(format!(
-            "truncated-normal expectation requires a finite mean, got {mean}"
-        ));
-    }
-    if sd == 0.0 {
-        return f(mean.max(0.0));
-    }
-    if !(sd.is_finite() && sd > 0.0) {
-        return Err(format!(
-            "truncated-normal expectation requires a finite non-negative sd, got {sd}"
-        ));
-    }
-    let standardized_mean = mean / sd;
-    if standardized_mean == f64::INFINITY {
-        return f(mean);
-    }
-    if standardized_mean == f64::NEG_INFINITY {
-        return f(0.0);
-    }
-    let log_retained = gam_math::probability::normal_logcdf(standardized_mean);
-    let log_omitted = f64::EPSILON.ln() + log_retained;
-    let upper = -gam_math::probability::standard_normal_quantile_from_log_cdf(log_omitted)
-        .map_err(|e| format!("truncated-normal log-quantile at log_p={log_omitted}: {e}"))?;
-    if !upper.is_finite() {
-        return Err(format!(
-            "truncated-normal expectation could not locate its upper limit for \
-             mean={mean}, sd={sd} (log-quantile returned {upper})"
-        ));
-    }
-    let wall = -standardized_mean;
-    let lower = wall.max(-upper);
-    // A sliver narrower than the rounding of its own endpoints carries no
-    // information. `upper` solves a log-CDF equation whose residual is divided
-    // by a Mills ratio of order `|wall|`, so it is itself determined only to
-    // within an ulp or so of `wall`; integrating a width below that would be
-    // integrating the endpoint's own rounding error. There the conditional law
-    // IS the wall to everything f64 can represent — at `mean = −1e6, sd = 1e-3`
-    // the exact `E[w | w ≥ 0] = σ²/|μ|` is `1e-12` against a wall coordinate of
-    // `1e9`, whose ulp is `1.2e-7`. This is NOT the deep-tail collapse #2390
-    // removed: at `r = −10` the sliver is `[10, 13.2]`, wider than its rounding
-    // by fourteen orders, and is integrated rather than collapsed.
-    if upper - lower <= 4.0 * f64::EPSILON * wall.abs().max(1.0) {
-        return f(mean.max(0.0));
-    }
-    let reference = 0.0_f64.clamp(lower, upper);
-    let (nodes, weights) = gam_math::special::gauss_legendre(32);
-    let half_width = 0.5 * (upper - lower);
-    let midpoint = 0.5 * (upper + lower);
-    let mut first = 0.0;
-    let mut second = 0.0;
-    let mut mass = 0.0;
-    for (t, wgt) in nodes.iter().zip(weights.iter()) {
-        let y = half_width * t + midpoint;
-        // `(y − y_ref)(y + y_ref)` rather than `y² − y_ref²`: deep in the tail
-        // both squares are large and nearly equal, and the difference of the
-        // squares loses the exponent's leading digits. The factored form keeps
-        // it to full relative precision.
-        let weight =
-            half_width * wgt * (-0.5 * (y - reference) * (y + reference)).exp();
-        let (f1, f2) = f(sd * (y - wall))?;
-        first += weight * f1;
-        second += weight * f2;
-        mass += weight;
-    }
-    if !(mass.is_finite() && mass > 0.0) {
-        return Err(format!(
-            "truncated-normal expectation resolved no conditional mass on [{lower}, {upper}] \
-             for mean={mean}, sd={sd}"
-        ));
-    }
-    Ok((first / mass, second / mass))
-}
-
 // Exact response moments must stay in the original Gaussian coordinates:
 // [h, threshold, log_sigma] for non-wiggle predictions, with a nested
 // conditional Gaussian over the scalar link-wiggle contribution when present.
@@ -575,19 +434,24 @@ pub(crate) fn exact_survival_response_moments_row(
                 let b = basis.row(0).to_owned();
                 let w_mean = b.dot(&cond_mean);
                 let w_var = b.dot(&cov_cond.dot(&b)).max(0.0);
-                // #2390 layer 2: the wiggle contribution's feasible image is
-                // exactly `w ≥ 0` (non-negative I-spline basis row against the
-                // β_w ≥ 0 cone), so the scalar integral runs over the
-                // `[0, ∞)`-truncated conditional Gaussian — never over
-                // predictor values no feasible model produces.
-                truncated_nonnegative_normal_expectation_pair(
-                    w_mean,
-                    w_var.sqrt(),
-                    |w| {
-                        let p = inverse_link_survival_prob_checked(
-                            &input.inverse_link,
-                            x[0] + q0 + w,
-                        )?;
+                // #2446: the cone is accounted for ONCE, upstream. Since
+                // `0b8611a65` the covariance reaching here is `Σ_π` and
+                // `beta_link_wiggle` is `E_π[β_w]` — both already carry the
+                // `β_w ≥ 0` truncation — so `(w_mean, w_var)` are the moments
+                // of the constrained law. Truncating the scalar again would
+                // apply the same correction twice; measured, that costs a
+                // factor of 40 to 300 in `E[S]`, and the ordering does not flip
+                // out to thirty times the tolerance the upstream moments are
+                // converged to (`ORTHANT_MOMENT_RELATIVE_TOLERANCE = 1e-3`).
+                // See `artifacts/issue_2446_double_truncation_robustness.py`.
+                crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
+                    quadctx,
+                    [x[0] + q0 + w_mean],
+                    [[w_var]],
+                    21,
+                    |eta| {
+                        let p =
+                            inverse_link_survival_prob_checked(&input.inverse_link, eta[0])?;
                         Ok((p, p * p))
                     },
                 )

@@ -6047,25 +6047,36 @@ fn wiggle_posterior_mean_matches_exact_nested_4d_quadrature_small_case() {
             let w_mean = b.dot(&cond_beta_w);
             let sd_w = b.dot(&cov_cond.dot(&b)).max(0.0).sqrt();
             if sd_w <= 0.0 {
+                // Degenerate conditional law: a point mass at `w_mean`, which
+                // the cone clip above already leaves non-negative. No clamp —
+                // clamping here would be the same double-correction #2446
+                // removed, in its zero-variance corner.
                 let p = inverse_link_survival_prob_checked(
                     &input.inverse_link,
-                    x[0] + q0 + w_mean.max(0.0),
+                    x[0] + q0 + w_mean,
                 )?;
                 return Ok((p, p * p));
             }
-            // The `[0, ∞)`-truncated inner expectation, built here by DIRECT
-            // density integration. Deliberately not production's primitive: the
-            // point of this test is an independent construction of the same
-            // nested integral, so the inner rule must not be the one under
-            // test. Beyond `w_mean + 10·σ` the retained density is below 1e-22.
-            let upper = (w_mean + 10.0 * sd_w).max(10.0 * sd_w);
+            // The inner expectation, built here by DIRECT density integration.
+            // Deliberately not production's rule: the point of this test is an
+            // independent construction of the same nested integral, so the
+            // inner quadrature must not be the one under test.
+            //
+            // #2446: integrated over the WHOLE line, not `[0, ∞)`. The cone is
+            // accounted for once, upstream — `cov_cond` and `cond_beta_w` are
+            // already the constrained moments — so truncating here would apply
+            // the same correction twice, which is exactly the defect production
+            // stopped doing. Beyond `±10·σ` the density is below 1e-22.
+            let lower = w_mean - 10.0 * sd_w;
+            let upper = w_mean + 10.0 * sd_w;
             let (nodes, weights) = gam_math::special::gauss_legendre(64);
-            let half = 0.5 * upper;
+            let half = 0.5 * (upper - lower);
+            let midpoint = 0.5 * (upper + lower);
             let mut first = 0.0;
             let mut second = 0.0;
             let mut mass = 0.0;
             for (t, wgt) in nodes.iter().zip(weights.iter()) {
-                let w = half * (t + 1.0);
+                let w = half * t + midpoint;
                 let standardized = (w - w_mean) / sd_w;
                 let weight = half * wgt * (-0.5 * standardized * standardized).exp();
                 let p = inverse_link_survival_prob_checked(&input.inverse_link, x[0] + q0 + w)?;
@@ -8740,113 +8751,4 @@ pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390
             m1 * m1
         );
     }
-}
-
-/// #2390 layer 2: the `[0,∞)`-truncated Gaussian expectation matches the
-/// closed-form truncated-normal moments (E[w | w ≥ 0] = μ + σ·φ(α)/(1−Φ(α)),
-/// α = −μ/σ), normalizes the measure exactly, and degenerates to the wall
-/// when the unconstrained mass sits entirely below it.
-#[test]
-pub(crate) fn truncated_nonnegative_normal_expectation_matches_closed_form_2390() {
-    use gam_math::probability::normal_cdf;
-    let phi = |x: f64| (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    // Measure normalization: a constant integrand integrates to itself. The
-    // rule divides by its own quadrature mass, so this holds at EVERY
-    // parameter, not just near the wall — including 30 sigma into the tail,
-    // where the unscaled Gaussian weights are ~1e-196 and only the reference
-    // scaling keeps them representable.
-    for &(mu, sd) in &[
-        (0.3_f64, 0.7_f64),
-        (0.0, 1.3),
-        (2.5, 0.5),
-        (50.0, 1.0),
-        (-10.0, 1.0),
-        (-30.0, 1.0),
-    ] {
-        let (one, four) = super::moments::truncated_nonnegative_normal_expectation_pair(
-            mu,
-            sd,
-            |_| Ok((1.0, 4.0)),
-        )
-        .expect("constant integrand");
-        assert!(
-            (one - 1.0).abs() < 1e-12 && (four - 4.0).abs() < 1e-12,
-            "constant integrand must integrate to itself at mu={mu} sd={sd}: got {one}, {four}"
-        );
-    }
-    // #2390: the branch-point sweep. The rule this replaced integrated in the
-    // log-survival coordinate, where `w(s) ~ sd·√(2(s − ln Φ(r)))` puts a
-    // BRANCH POINT at `s = ln Φ(r)` — outside `[0, s_max]`, but sliding onto
-    // the endpoint as `r` grows (`ln Φ(5) = −2.9e-7`, `ln Φ(50) = 0` in f64).
-    // Its error therefore GREW with `r`: 1.9e-7 at `r = 0.43`, 1.5e-3 at
-    // `r = 5`, and 1.5e-4 at `r = 50` — worst in the deep interior, the regime
-    // production actually lives in, and the regime its own documentation called
-    // "bit-identical within f64". Scattered fixtures caught that only by luck of
-    // where they sat; this sweep walks `r` across the whole approach so any
-    // future rule with an endpoint singularity fails at the `r` that exposes it
-    // rather than at whichever points someone happened to list.
-    for &r in &[1.0_f64, 2.0, 5.0, 10.0, 30.0, 100.0, 500.0] {
-        let sd = 1.0_f64;
-        let mu = r * sd;
-        let (_, mills) = gam_math::probability::signed_probit_logcdf_and_mills_ratio(r);
-        let expected = mu + sd * mills;
-        let (m1, _) = super::moments::truncated_nonnegative_normal_expectation_pair(
-            mu,
-            sd,
-            |w| Ok((w, w * w)),
-        )
-        .expect("branch-point sweep integrand");
-        assert!(
-            (m1 - expected).abs() < 1e-9 * expected.abs().max(1.0),
-            "E[w | w>=0] must not degrade as the wall recedes: r={r}, got {m1}, want {expected}"
-        );
-    }
-    // First moment against the closed form, at a wall-adjacent mean.
-    for &(mu, sd) in &[(0.3_f64, 0.7_f64), (0.0, 1.3), (2.5, 0.5), (-0.4, 0.8)] {
-        let alpha = -mu / sd;
-        let expected = mu + sd * phi(alpha) / (1.0 - normal_cdf(alpha));
-        let (m1, _) = super::moments::truncated_nonnegative_normal_expectation_pair(
-            mu, sd, |w| Ok((w, w * w)),
-        )
-        .expect("identity integrand");
-        assert!(
-            (m1 - expected).abs() < 1e-9 * expected.abs().max(1.0),
-            "E[w | w>=0] mismatch at mu={mu} sd={sd}: got {m1}, want {expected}"
-        );
-    }
-    // Deep negative tail: direct `1 - Φ(-μ/σ)` is already zero in f64 at
-    // μ/σ=-10, but the conditional law is not a point mass. Its first two
-    // moments remain finite and are pinned through the stable Mills ratio.
-    let mu = -10.0;
-    let sd = 1.0;
-    let (_, mills) = gam_math::probability::signed_probit_logcdf_and_mills_ratio(mu / sd);
-    let expected_first = mu + sd * mills;
-    let expected_second = mu * mu + sd * sd + mu * sd * mills;
-    let (m1, m2) = super::moments::truncated_nonnegative_normal_expectation_pair(
-        mu,
-        sd,
-        |w| Ok((w, w * w)),
-    )
-    .expect("deep-tail integrand");
-    assert!(
-        (m1 - expected_first).abs() < 1.0e-9,
-        "deep-tail first moment collapsed: got {m1}, want {expected_first}"
-    );
-    assert!(
-        (m2 - expected_second).abs() < 1.0e-9,
-        "deep-tail second moment collapsed: got {m2}, want {expected_second}"
-    );
-    // Interior limit: the removed left-tail mass is negligible and the plain
-    // Gaussian mean is recovered.
-    let (m1, _) = super::moments::truncated_nonnegative_normal_expectation_pair(
-        50.0, 1.0, |w| Ok((w, w * w)),
-    )
-    .expect("interior integrand");
-    assert!((m1 - 50.0).abs() < 1e-9);
-    // All mass below the wall: the truncated law concentrates at the wall.
-    let (m1, m2) = super::moments::truncated_nonnegative_normal_expectation_pair(
-        -1.0e6, 1.0e-3, |w| Ok((w, 1.0 + w)),
-    )
-    .expect("wall integrand");
-    assert!(m1 == 0.0 && m2 == 1.0);
 }
