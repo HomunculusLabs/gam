@@ -159,6 +159,8 @@ fn capture_outer_gradient_fd_at_seed(
         Array1::from_iter(components.iter().map(|component| component.1));
     let logdet_s_psi_gradient =
         Array1::from_iter(components.iter().map(|component| component.2));
+    let kkt_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.3));
     let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
     let mut psi_steps = Array1::<f64>::zeros(psi_dim);
     for psi_j in 0..psi_dim {
@@ -229,6 +231,7 @@ fn capture_outer_gradient_fd_at_seed(
             fixed_beta_psi_gradient,
             logdet_h_psi_gradient,
             logdet_s_psi_gradient,
+            kkt_psi_gradient,
         },
     );
     Ok(())

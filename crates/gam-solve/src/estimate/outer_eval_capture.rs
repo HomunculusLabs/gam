@@ -46,6 +46,7 @@ pub struct OuterGradientFdRecord {
     pub fixed_beta_psi_gradient: Array1<f64>,
     pub logdet_h_psi_gradient: Array1<f64>,
     pub logdet_s_psi_gradient: Array1<f64>,
+    pub kkt_psi_gradient: Array1<f64>,
 }
 
 /// Maximum evaluations retained per capture window (opening iterates only).
@@ -56,7 +57,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 struct OuterGradientFdCapture {
     min_psi_dim: usize,
     record: Option<OuterGradientFdRecord>,
-    components: Vec<(f64, f64, f64)>,
+    components: Vec<(f64, f64, f64, f64)>,
 }
 
 thread_local! {
@@ -103,17 +104,20 @@ pub(crate) fn record_outer_gradient_component(
     fixed_beta: f64,
     logdet_h: f64,
     logdet_s: f64,
+    kkt: f64,
 ) {
     FD_CAPTURE.with(|capture| {
         if let Some(state) = capture.borrow_mut().as_mut()
             && state.record.is_none()
         {
-            state.components.push((fixed_beta, logdet_h, logdet_s));
+            state
+                .components
+                .push((fixed_beta, logdet_h, logdet_s, kkt));
         }
     });
 }
 
-pub(crate) fn take_outer_gradient_components() -> Vec<(f64, f64, f64)> {
+pub(crate) fn take_outer_gradient_components() -> Vec<(f64, f64, f64, f64)> {
     FD_CAPTURE.with(|capture| {
         capture
             .borrow_mut()

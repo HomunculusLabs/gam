@@ -1429,7 +1429,7 @@ pub fn reml_laml_evaluate(
     // All extended coordinates store canonical fixed-β stationarity
     // derivatives g_i = F_{βi}. IFT gives β_i = -H^{-1}g_i, exactly like
     // the ρ block.
-    let ext_grad_entries: Result<Vec<(usize, f64)>, String> = (0..ext_dim)
+    let ext_grad_entries: Result<Vec<(usize, f64, f64, f64, f64)>, String> = (0..ext_dim)
         .into_par_iter()
         .map(|ext_idx| {
             let coord = &solution.ext_coords[ext_idx];
@@ -1506,11 +1506,6 @@ pub fn reml_laml_evaluate(
             } else {
                 0.0
             };
-            crate::estimate::outer_eval_capture::record_outer_gradient_component(
-                fixed_beta_component,
-                logdet_h_component,
-                logdet_s_component,
-            );
             let value = outer_gradient_entry(
                 coord.a,
                 trace_logdet_i,
@@ -1530,10 +1525,16 @@ pub fn reml_laml_evaluate(
                 ext_idx,
                 ext_coord_start.elapsed().as_secs_f64(),
             );
-            Ok((grad_idx, value))
+            Ok((
+                grad_idx,
+                value,
+                fixed_beta_component,
+                logdet_h_component,
+                logdet_s_component,
+            ))
         })
         .collect();
-    for (idx, value) in ext_grad_entries? {
+    for (idx, value, fixed_beta, logdet_h, logdet_s) in ext_grad_entries? {
         // ACCUMULATE, do not overwrite: the unified `kkt_theta_corrections`
         // block above already folded the ψ/ext KKT-residual correction
         // `−coord.gᵀH⁻¹r + ½(H⁻¹r)ᵀB(H⁻¹r)` into `grad[k + ext_idx]`. A plain
@@ -1544,6 +1545,10 @@ pub fn reml_laml_evaluate(
         // from the true stationary ≈−9 to ≈−0.02 and stalling recovery (#1876).
         // `grad[k + ext_idx]` holds 0 when no correction is active (the fold is
         // skipped), so `+=` is byte-identical to the old assignment there.
+        let kkt = grad[idx];
+        crate::estimate::outer_eval_capture::record_outer_gradient_component(
+            fixed_beta, logdet_h, logdet_s, kkt,
+        );
         grad[idx] += value;
     }
 
