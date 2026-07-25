@@ -7289,12 +7289,35 @@ struct BimodalTerminalObjective {
 const BASIN_BUMP: f64 = 2.6; // ~ the observed terminal(9.1931e2) − certified(9.1671e2) gap
 
 impl BimodalTerminalObjective {
-    fn basin_eval(&self, rho: &Array1<f64>) -> OuterEval {
+    /// The objective in the CURRENTLY installed basin, without changing it.
+    ///
+    /// Reading the installed state is not a solve, so it must not flip the
+    /// parity — and, critically, every lane reading the same instant must see
+    /// the SAME basin. A mock whose value lane and derivative lane disagree at
+    /// one ρ is not a bimodal inner solve; it is a value/gradient desync, and
+    /// the terminal certificate's same-ρ value-agreement audit refuses it on
+    /// sight (measured: `value-only=0.0, analytic-sample=2.6,
+    /// disagreement=2.600e0, roundoff bound=3.874e-8`). That refusal is the
+    /// audit working correctly; it was the fixture that was modelling the wrong
+    /// thing.
+    fn basin_value(&self, rho: &Array1<f64>) -> f64 {
+        let bump = if *self.warm_bumped.lock().unwrap() {
+            BASIN_BUMP
+        } else {
+            0.0
+        };
+        0.5 * rho.dot(rho) + bump
+    }
+
+    /// A warm-started SOLVE: reads the current basin and lands the next one in
+    /// the other basin. This is what makes two consecutive installations
+    /// disagree unless a `reset()` re-baselines between them.
+    fn basin_solve(&self, rho: &Array1<f64>) -> OuterEval {
+        let cost = self.basin_value(rho);
         let mut warm = self.warm_bumped.lock().unwrap();
-        let bump = if *warm { BASIN_BUMP } else { 0.0 };
         *warm = !*warm; // consecutive warm-started solves alternate basins
         OuterEval {
-            cost: 0.5 * rho.dot(rho) + bump,
+            cost,
             gradient: rho.clone(),
             hessian: HessianValue::Unavailable,
             inner_beta_hint: None,
@@ -7316,21 +7339,35 @@ impl OuterObjective for BimodalTerminalObjective {
         }
     }
     fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
-        // The basin-independent value: keeps the search / diagnostic FD probes
-        // clean so convergence is driven purely by the (basin-independent)
-        // gradient. Only the derivative-bearing terminal installers carry the
-        // basin offset.
-        Ok(0.5 * rho.dot(rho))
+        // Reads the installed basin; does not solve, so it does not flip.
+        Ok(self.basin_value(rho))
     }
     fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
-        Ok(self.basin_eval(rho))
+        Ok(self.basin_solve(rho))
     }
     fn eval_with_order(
         &mut self,
         rho: &Array1<f64>,
-        _: OuterEvalOrder,
+        order: OuterEvalOrder,
     ) -> Result<OuterEval, EstimationError> {
-        Ok(self.basin_eval(rho))
+        match order {
+            // The value-only lane is the scalar authority sampling the state
+            // that is already installed — the same read `eval_cost` performs.
+            // It must agree with the derivative-bearing sample taken at the
+            // same ρ, or the fixture is a desync rather than a bimodal solve.
+            OuterEvalOrder::Value => Ok(OuterEval {
+                cost: self.basin_value(rho),
+                gradient: rho.clone(),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            }),
+            // Derivative-bearing orders are warm-started solves and DO advance
+            // the basin, which is what leaves `finalize` and the certifying
+            // re-eval one flip apart when no reset intervenes.
+            OuterEvalOrder::ValueAndGradient | OuterEvalOrder::ValueGradientHessian => {
+                Ok(self.basin_solve(rho))
+            }
+        }
     }
     fn finalize_outer_result(
         &mut self,
@@ -7339,7 +7376,7 @@ impl OuterObjective for BimodalTerminalObjective {
     ) -> Result<(), EstimationError> {
         // Install the owned coefficient mode: record the objective value the
         // mode carries, exactly as the custom-family evaluator does.
-        let installed = self.basin_eval(rho).cost;
+        let installed = self.basin_solve(rho).cost;
         *self.finalize_installed.lock().unwrap() = Some(installed);
         Ok(())
     }
