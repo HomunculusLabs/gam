@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn student_t_closed_form_matches_published_quantiles() {
         // Cauchy: F(t) = 1/2 + atan(t)/pi.
-        for &t in &[-3.0, -0.5, 0.0, 0.75, 4.0] {
+        for &t in &[-3.0_f64, -0.5, 0.0, 0.75, 4.0] {
             let closed = 0.5 + t.atan() / std::f64::consts::PI;
             assert!(
                 (student_t_cdf(t, 1) - closed).abs() < 1e-14,
@@ -607,7 +607,7 @@ mod tests {
             );
         }
         // df=2: F(t) = 1/2 + t / (2 sqrt(t^2 + 2)).
-        for &t in &[-2.5, -0.25, 0.0, 1.5, 6.0] {
+        for &t in &[-2.5_f64, -0.25, 0.0, 1.5, 6.0] {
             let closed = 0.5 + t / (2.0 * (t * t + 2.0).sqrt());
             assert!(
                 (student_t_cdf(t, 2) - closed).abs() < 1e-14,
