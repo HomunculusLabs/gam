@@ -1458,7 +1458,7 @@ mod tests {
     use crate::GpuPolicy;
     use crate::device_runtime::GpuRuntime;
 
-    fn available_runtime_or_skip(label: &str) -> Option<&'static GpuRuntime> {
+    fn available_runtime(label: &str) -> Option<&'static GpuRuntime> {
         match GpuRuntime::resolve(GpuPolicy::Auto) {
             Ok(runtime) => runtime,
             Err(error) => panic!("[{label}] GPU probe fault: {error}"),
@@ -1466,12 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn sae_shape_dispatch_ops_route_when_cuda_runtime_is_present() {
-        let Some(runtime) = available_runtime_or_skip("sae dispatch gate") else {
-            eprintln!("[sae dispatch gate] no CUDA runtime - skipping branch-admission check");
-            return;
-        };
-
+    fn sae_shape_dispatch_ops_decline_without_cuda_else_route_when_cuda_runtime_is_present() {
         let n = 2_000usize;
         let p = 2_048usize;
         let m = 12usize;
@@ -1490,6 +1485,20 @@ mod tests {
                 k: n * m,
             },
         ];
+        let batched_potrf = DispatchOp::SmallDenseBatchedPotrf { p: m, batch: n };
+        let Some(runtime) = available_runtime("sae dispatch gate") else {
+            for op in dense_reduction_ops
+                .iter()
+                .copied()
+                .chain(std::iter::once(batched_potrf))
+            {
+                assert!(
+                    route_through_gpu(op).is_none(),
+                    "no CUDA runtime is available, yet the SAE dispatch gate admitted {op:?}"
+                );
+            }
+            return;
+        };
 
         for op in dense_reduction_ops {
             assert!(
@@ -1504,7 +1513,6 @@ mod tests {
             );
         }
 
-        let batched_potrf = DispatchOp::SmallDenseBatchedPotrf { p: m, batch: n };
         assert!(
             route_through_gpu(batched_potrf).is_some(),
             "uniform SAE row blocks should reach the small-dense batched POTRF gate"
@@ -1518,11 +1526,15 @@ mod tests {
     /// where `CudaGemmDispatch` existed but `register_gpu_dispatch` was never
     /// called, leaving every engine GEMM silently on the CPU.
     #[test]
-    fn global_runtime_installs_fast_ab_hook_and_matches_cpu() {
+    fn global_runtime_declines_without_cuda_else_installs_fast_ab_hook_and_matches_cpu() {
         use ndarray::Array2;
 
-        let Some(_runtime) = available_runtime_or_skip("fast_ab hook") else {
-            eprintln!("[fast_ab hook] no CUDA runtime - skipping engagement check");
+        let (m, k, n) = (512usize, 512usize, 512usize);
+        let Some(_runtime) = available_runtime("fast_ab hook") else {
+            assert!(
+                route_through_gpu(DispatchOp::Gemm { m, n, k }).is_none(),
+                "no CUDA runtime is available, yet a profitable dense GEMM was admitted"
+            );
             return;
         };
         // After resolution returned an available device, the hook MUST be installed.
@@ -1535,7 +1547,6 @@ mod tests {
         // A profitable GEMM (m=n=k=512 → 2·512³ ≈ 268 MFLOP, above the
         // 100 MFLOP policy floor) must route to the device. Kept modest so
         // the debug-build CPU oracle below stays a few seconds, not a minute.
-        let (m, k, n) = (512usize, 512usize, 512usize);
         assert!(
             route_through_gpu(DispatchOp::Gemm { m, n, k }).is_some(),
             "a 268 MFLOP GEMM must clear the policy floor and route to GPU"
@@ -1585,12 +1596,20 @@ mod tests {
     /// derivation against silent index bugs.
     #[cfg(target_os = "linux")]
     #[test]
-    fn transpose_free_gemm_matches_cpu_all_trans_and_shapes() {
+    fn transpose_free_gemm_declines_without_cuda_else_matches_cpu_all_trans_and_shapes() {
         use crate::blas::gemm_cuda;
         use ndarray::Array2;
 
-        let Some(runtime) = available_runtime_or_skip("gemm transpose-free") else {
-            eprintln!("[gemm transpose-free] no CUDA runtime - skipping");
+        let Some(runtime) = available_runtime("gemm transpose-free") else {
+            assert!(
+                route_through_gpu(DispatchOp::Gemm {
+                    m: 512,
+                    n: 512,
+                    k: 512,
+                })
+                .is_none(),
+                "no CUDA runtime is available, yet the transpose-free GEMM seam admitted work"
+            );
             return;
         };
 
