@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use gam_models::inference::model::{FittedModel, PredictModelClass, SavedLinkWiggleRuntime};
 use gam_problem::{BlockRole, EstimationError};
-use gam_solve::model_types::UnifiedFitResult;
+use gam_solve::model_types::{FitGeometry, UnifiedFitResult};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
 use crate::binomial_location_scale::BinomialLocationScalePredictor;
@@ -124,6 +124,18 @@ pub enum PosteriorPredictError {
         coefficient: usize,
         value: f64,
     },
+    DrawOutsideCoefficientGauge {
+        draw: usize,
+        coefficient: usize,
+        residual: f64,
+        tolerance: f64,
+    },
+    InfeasibleDraw {
+        draw: usize,
+        constraint: usize,
+        violation: f64,
+        tolerance: f64,
+    },
     CoefficientCount {
         model_class: PredictModelClass,
         expected: usize,
@@ -186,6 +198,27 @@ impl std::fmt::Display for PosteriorPredictError {
             } => write!(
                 f,
                 "posterior draw {draw} coefficient {coefficient} is non-finite: {value}",
+            ),
+            Self::DrawOutsideCoefficientGauge {
+                draw,
+                coefficient,
+                residual,
+                tolerance,
+            } => write!(
+                f,
+                "posterior draw {draw} is outside the fitted coefficient gauge at raw coefficient \
+                 {coefficient}: reconstruction residual {residual:.3e} exceeds the \
+                 floating-point certificate {tolerance:.3e}",
+            ),
+            Self::InfeasibleDraw {
+                draw,
+                constraint,
+                violation,
+                tolerance,
+            } => write!(
+                f,
+                "posterior draw {draw} violates fitted inequality row {constraint}: scaled \
+                 violation {violation:.3e} exceeds {tolerance:.3e}",
             ),
             Self::CoefficientCount {
                 model_class,
@@ -274,6 +307,112 @@ fn validate_draw_values(draws: ArrayView2<'_, f64>) -> Result<(), PosteriorPredi
                 coefficient,
                 value,
             });
+        }
+    }
+    Ok(())
+}
+
+fn validate_saved_constraint_feasibility(
+    model: &FittedModel,
+    draws: ArrayView2<'_, f64>,
+) -> Result<(), PosteriorPredictError> {
+    let model_class = model.predict_model_class();
+    let Some(fit) = model.fit_result.as_ref() else {
+        return Ok(());
+    };
+    let Some(geometry) = fit.geometry.as_ref() else {
+        return Ok(());
+    };
+    validate_constraint_geometry(model_class, geometry, draws)
+}
+
+fn validate_constraint_geometry(
+    model_class: PredictModelClass,
+    geometry: &FitGeometry,
+    draws: ArrayView2<'_, f64>,
+) -> Result<(), PosteriorPredictError> {
+    let Some(posterior) = geometry.constrained_posterior.as_ref() else {
+        return Ok(());
+    };
+    geometry
+        .validate_numeric_finiteness()
+        .map_err(|error| inconsistent_state_error(model_class, error.to_string()))?;
+    let gauge = &geometry.coefficient_gauge;
+    validate_coefficient_count(model_class, gauge.raw_total(), draws)?;
+
+    // User-facing draws are in the saved/raw frame β = Tθ + a, while the
+    // persisted cone lives in the active θ frame. Recover θ through the unique
+    // least-squares inverse of the injective gauge. A strict SPD factorization
+    // of TᵀT refuses a malformed/rank-deficient gauge; no pseudoinverse, ridge,
+    // or guessed identity is allowed.
+    let active = if gauge.is_identity() {
+        draws.to_owned()
+    } else {
+        let mut centered = draws.to_owned();
+        for mut draw in centered.rows_mut() {
+            draw -= &gauge.affine_shift;
+        }
+        let gram = gauge.t_full.t().dot(&gauge.t_full);
+        let factor = gam_linalg::utils::certified_spd_factorize(
+            &gram,
+            "posterior prediction coefficient-gauge inverse",
+        )
+        .map_err(|error| inconsistent_state_error(model_class, error.to_string()))?;
+        let rhs = gauge.t_full.t().dot(&centered.t());
+        let (active_by_draw, _) = factor
+            .solve_matrix(&rhs)
+            .map_err(|error| inconsistent_state_error(model_class, error.to_string()))?;
+        let active = active_by_draw.reversed_axes();
+
+        // Solving the normal equations is only a coordinate candidate. Certify
+        // that every supplied raw draw actually belongs to the affine section
+        // by lifting it back and comparing in raw space. The band is an
+        // operation-count-scaled f64 roundoff envelope, not model slack.
+        let mut reconstructed = active.dot(&gauge.t_full.t());
+        for mut draw in reconstructed.rows_mut() {
+            draw += &gauge.affine_shift;
+        }
+        let operation_count = 64.0
+            * (gauge.raw_total() + gauge.reduced_total() + 1) as f64
+            * f64::EPSILON;
+        for ((draw, coefficient), &actual) in draws.indexed_iter() {
+            let rebuilt = reconstructed[[draw, coefficient]];
+            let residual = (rebuilt - actual).abs();
+            let tolerance = operation_count
+                * actual
+                    .abs()
+                    .max(rebuilt.abs())
+                    .max(gauge.affine_shift[coefficient].abs())
+                    .max(1.0);
+            if residual > tolerance {
+                return Err(PosteriorPredictError::DrawOutsideCoefficientGauge {
+                    draw,
+                    coefficient,
+                    residual,
+                    tolerance,
+                });
+            }
+        }
+        active
+    };
+
+    let constraints = posterior
+        .constraints
+        .canonicalized()
+        .map_err(|reason| inconsistent_state_error(model_class, reason))?;
+    let tolerance = gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+    for (draw, theta) in active.rows().into_iter().enumerate() {
+        for constraint in 0..constraints.a.nrows() {
+            let slack = constraints.a.row(constraint).dot(&theta) - constraints.b[constraint];
+            let violation = (-slack).max(0.0);
+            if violation > tolerance {
+                return Err(PosteriorPredictError::InfeasibleDraw {
+                    draw,
+                    constraint,
+                    violation,
+                    tolerance,
+                });
+            }
         }
     }
     Ok(())
@@ -867,6 +1006,7 @@ pub fn predict_posterior_draws(
     draws: ArrayView2<'_, f64>,
 ) -> Result<PosteriorDrawPrediction, PosteriorPredictError> {
     validate_draw_values(draws)?;
+    validate_saved_constraint_feasibility(model, draws)?;
     match model.predict_model_class() {
         PredictModelClass::Standard => {
             let input = build_non_survival_input(model, data, col_map, training_headers)?;
@@ -903,10 +1043,69 @@ pub fn predict_posterior_draws(
 #[cfg(test)]
 mod tests {
     use gam_linalg::matrix::DesignMatrix;
+    use gam_problem::LinearInequalityConstraints;
+    use gam_solve::constrained_posterior::ConstrainedPosteriorGeometry;
     use gam_spec::LikelihoodSpec;
     use ndarray::array;
 
     use super::*;
+
+    fn constrained_test_geometry() -> FitGeometry {
+        FitGeometry {
+            coefficient_gauge: gam_problem::Gauge::from_block_transform_with_shift(
+                array![[1.0, 0.0], [0.0, 2.0], [1.0, -1.0]],
+                array![0.5, -1.0, 3.0],
+            ),
+            penalized_hessian: Array2::<f64>::eye(2).into(),
+            constrained_posterior: Some(ConstrainedPosteriorGeometry {
+                constraints: LinearInequalityConstraints {
+                    a: Array2::<f64>::eye(2),
+                    b: Array1::<f64>::zeros(2),
+                },
+                mode: array![0.0, 0.0],
+                unconstrained_center: array![-1.0, -1.0],
+                correction: None,
+            }),
+            working: None,
+        }
+    }
+
+    #[test]
+    fn posterior_prediction_rejects_draws_outside_the_saved_cone_or_gauge() {
+        let geometry = constrained_test_geometry();
+        validate_constraint_geometry(
+            PredictModelClass::Standard,
+            &geometry,
+            array![[1.5, 3.0, 2.0]].view(),
+        )
+        .expect("theta=[1,2] is in the affine gauge and nonnegative cone");
+
+        let infeasible = validate_constraint_geometry(
+            PredictModelClass::Standard,
+            &geometry,
+            array![[0.25, 3.0, 0.75]].view(),
+        )
+        .expect_err("theta=[-0.25,2] violates the first cone row");
+        assert!(matches!(
+            infeasible,
+            PosteriorPredictError::InfeasibleDraw {
+                draw: 0,
+                constraint: 0,
+                ..
+            }
+        ));
+
+        let outside = validate_constraint_geometry(
+            PredictModelClass::Standard,
+            &geometry,
+            array![[1.5, 3.0, 2.01]].view(),
+        )
+        .expect_err("the perturbed raw point is outside beta=T theta+a");
+        assert!(matches!(
+            outside,
+            PosteriorPredictError::DrawOutsideCoefficientGauge { draw: 0, .. }
+        ));
+    }
 
     #[test]
     fn one_standard_mode_draw_equals_canonical_point_prediction() {
