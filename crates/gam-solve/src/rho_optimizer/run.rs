@@ -2228,38 +2228,43 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // finite-difference derivative: it catches a split value/gradient
     // implementation without violating the production no-FD contract.
     //
-    // MINT ONLY (#2359). Detecting a split value/gradient implementation is
-    // terminal proof work: it says nothing about which multistart candidate is
-    // better, so it is not part of the filter. Spending it per candidate buys
-    // no ranking information and costs one extra full objective evaluation per
-    // seed — the same economics that reserve order four for the mint.
-    let value_only = match fidelity {
-        CertificationFidelity::Screening => None,
-        CertificationFidelity::Mint => {
-            let sample = obj
-                .eval_with_order(&result.rho, OuterEvalOrder::Value)
-                .map_err(|err| {
-                    outer_nonconvergence_error(
-                        context,
-                        &format!("terminal value-only certificate evaluation failed: {err}"),
-                        result,
-                        result.final_grad_norm,
-                        outer_gradient_tolerance(config).abs,
-                    )
-                })?
-                .cost;
-            if !sample.is_finite() {
-                return Err(outer_nonconvergence_error(
-                    context,
-                    "terminal value-only certificate evaluation returned a non-finite objective value",
-                    result,
-                    result.final_grad_norm,
-                    outer_gradient_tolerance(config).abs,
-                ));
-            }
-            Some(sample)
-        }
-    };
+    // BOTH fidelities pay this, deliberately. It is tempting to reserve it for
+    // the mint the way order four is reserved (#2359), but the two are not
+    // alike: order four is evidence the filter does not consume, while the
+    // value-agreement audit is a REFUSAL GATE on the very number the
+    // multistart ranks by. `retain_best_outer_checkpoint` orders candidates on
+    // `final_value`; admitting a candidate whose value lane disagrees with its
+    // derivative lane lets a desynced candidate win the ranking on a number
+    // nothing has validated, and mint then refuses the whole fit instead of a
+    // runner-up carrying it. Pinned by
+    // `analytic_hessian_candidate_screening_requires_only_first_order_evidence_2414`,
+    // which asserts screening's orders are exactly [Value, ValueAndGradient].
+    //
+    // The EFS/fixed-point route is different and IS gated on fidelity — see
+    // `certify_fixed_point_optimality`. It returns above this block, and there
+    // screening and mint are otherwise identical work (no order-four ladder to
+    // reserve), so running the audit twice buys nothing at all.
+    let value_only = obj
+        .eval_with_order(&result.rho, OuterEvalOrder::Value)
+        .map_err(|err| {
+            outer_nonconvergence_error(
+                context,
+                &format!("terminal value-only certificate evaluation failed: {err}"),
+                result,
+                result.final_grad_norm,
+                outer_gradient_tolerance(config).abs,
+            )
+        })?
+        .cost;
+    if !value_only.is_finite() {
+        return Err(outer_nonconvergence_error(
+            context,
+            "terminal value-only certificate evaluation returned a non-finite objective value",
+            result,
+            result.final_grad_norm,
+            outer_gradient_tolerance(config).abs,
+        ));
+    }
 
     // Order four is reserved for the mint audit (#2359). A screening pass takes
     // the same first-order evidence the no-analytic-Hessian path already
@@ -2365,16 +2370,14 @@ fn certify_outer_optimality_at_terminal_fidelity(
     {
         stationarity_bound = stationarity_bound.max(noise_bound);
     }
-    if let Some(value_only) = value_only {
-        audit_outer_value_agreement(
-            context,
-            value_only,
-            evaluation.cost,
-            result,
-            Some(projected_grad_norm),
-            stationarity_bound,
-        )?;
-    }
+    audit_outer_value_agreement(
+        context,
+        value_only,
+        evaluation.cost,
+        result,
+        Some(projected_grad_norm),
+        stationarity_bound,
+    )?;
 
     // The optimizer's own recorded best-iterate evidence, captured before the
     // fresh certificate-time measurement overwrites it below. Together with
