@@ -386,7 +386,7 @@ fn spectral_absolute_value(block: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
     if !(max_abs.is_finite() && max_abs > 0.0) {
         return None;
     }
-    let floor = SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
+    let floor = gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
     let mut out = Array2::<f64>::zeros((d, d));
     for eig_idx in 0..d {
         let lambda = evals[eig_idx];
