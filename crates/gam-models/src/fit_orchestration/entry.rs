@@ -1,4 +1,5 @@
 use super::*;
+use gam_linalg::matrix::LinearOperator;
 
 /// Request-specific inputs to the canonical standard-fit `FitOptions`.
 ///
