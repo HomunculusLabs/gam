@@ -285,10 +285,14 @@ affine = model.design_matrix(test_df)
 fitted_eta = affine.offset + affine.matrix @ affine.coefficients
 ```
 
-The object has nine explicit fields:
+The object has ten explicit fields:
 
 - `offset`: one value per row;
-- `matrix`: the materialised matrix in the named coefficient frame;
+- `matrix`: the materialised VALUE operator in the named coefficient frame —
+  the matrix in the identity above;
+- `eta_gradient`: `d eta / d coefficients` in that same frame — the operator to
+  use with the covariances below. It is the same array object as `matrix`
+  whenever the fitted predictor is linear in its coefficients;
 - `coefficients`: the exact fitted vector multiplied by `matrix`;
 - `coefficient_frame`: `"full"` or `"link_wiggle_joint"`;
 - `coefficient_start` / `coefficient_stop`: the represented half-open slice in
@@ -305,21 +309,22 @@ and column per entry of `coefficients`. Definitions are never substituted: in
 particular, a missing smoothing-corrected covariance stays `None` rather than
 silently becoming the conditional covariance. Pointwise linear-predictor
 variance can therefore be computed without constructing the full row-by-row
-covariance:
+covariance — always through `eta_gradient`, never through `matrix`:
 
 ```python
 covariance = affine.covariance_smoothing_corrected
 if covariance is None:
     raise RuntimeError("this fit has no smoothing-corrected covariance")
 eta_variance = np.einsum(
-    "ij,jk,ik->i", affine.matrix, covariance, affine.matrix
+    "ij,jk,ik->i", affine.eta_gradient, covariance, affine.eta_gradient
 )
 ```
 
 For an ordinary GAM, `offset` is the model offset, `matrix` is the full saved
-design (including deployment extensions), and the coefficient frame is
-`"full"`. Posterior draws use that same frame, so custom fitted-linear-predictor
-draws are:
+design (including deployment extensions), the coefficient frame is `"full"`,
+and `eta_gradient` IS `matrix` (`eta` is linear in `beta`, so the design is its
+own derivative and no second buffer is allocated). Posterior draws use that same
+frame, so custom fitted-linear-predictor draws are:
 
 ```python
 affine = model.design_matrix(test_df)
@@ -338,6 +343,22 @@ mean--wiggle covariance in custom contrasts. The basis is frozen at the fitted
 state; this is an exact representation of the fitted predictor and its saved
 coefficient covariance, not a claim that `B` is globally independent of the
 coefficients away from that state.
+
+That last point is exactly why `matrix` and `eta_gradient` separate here. The
+warp index is `X @ beta_mean + offset + X @ shift`, so it moves with the mean
+coefficients and
+
+```text
+d eta / d beta_mean = diag(1 + B'(index) @ beta_w) @ X    (not X)
+d eta / d beta_w    = B(index)
+```
+
+`matrix` is `[X, B(index)]`, which reproduces the fitted `eta` exactly; the
+missing warp slope on its mean block makes it the wrong operator for variance.
+`eta_gradient` carries that slope and is built by the same code that produces
+the standard errors `predict` reports, so `eta_gradient @ V @ eta_gradient.T`
+and `predict` cannot disagree. `eta_gradient` is a distinct array only in this
+frame; the wiggle block is shared verbatim with `matrix`.
 
 Exact scan smoothers and coupled multi-surface model classes do not possess one
 finite affine coefficient frame; `design_matrix` rejects them with a typed,

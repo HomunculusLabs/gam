@@ -8998,6 +8998,11 @@ struct DenseAffineDesign {
     covariance_conditional: Option<Array2<f64>>,
     covariance_smoothing_corrected: Option<Array2<f64>>,
     covariance_frequentist: Option<Array2<f64>>,
+    /// `∂η/∂β` when it differs from `matrix`. `None` means the fitted predictor
+    /// is linear in its coefficients, so the value operator IS the derivative
+    /// and the Python surface binds the one array under both names rather than
+    /// shipping a duplicate `n x p` buffer.
+    eta_gradient: Option<Array2<f64>>,
 }
 
 fn affine_design_for_dataset(
@@ -9040,6 +9045,12 @@ fn affine_design_for_dataset(
     let matrix = affine
         .matrix
         .try_to_dense_by_chunks("public affine prediction design")?;
+    let eta_gradient = match &affine.eta_gradient {
+        gam_predict::AffineEtaGradient::Design => None,
+        gam_predict::AffineEtaGradient::Distinct(gradient) => {
+            Some(gradient.try_to_dense_by_chunks("public affine prediction eta gradient")?)
+        }
+    };
     Ok(DenseAffineDesign {
         offset: affine.offset,
         matrix,
@@ -9050,6 +9061,7 @@ fn affine_design_for_dataset(
         covariance_conditional: affine.covariances.conditional,
         covariance_smoothing_corrected: affine.covariances.smoothing_corrected,
         covariance_frequentist: affine.covariances.frequentist,
+        eta_gradient,
     })
 }
 

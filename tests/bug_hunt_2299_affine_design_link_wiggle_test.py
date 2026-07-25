@@ -8,10 +8,18 @@ critically, #2141 requires ``B`` to be evaluated at the saved frozen index, not
 at the de-aliased base. The joint frame is necessary for mean uncertainty and
 mean--wiggle cross-covariance to remain available to external contrasts.
 
+Value and derivative are two operators, not one. ``matrix`` reproduces the
+fitted ``eta``; ``eta_gradient`` is ``d eta / d beta`` and is the only operator
+that may be paired with the shipped covariances. They are the same array for an
+ordinary GAM (``eta`` is linear in ``beta``) and differ for a link-wiggle fit,
+whose warp index moves with the mean coefficients, so ``d eta / d beta_mean`` is
+``diag(dq/dq0) @ X`` rather than ``X``.
+
 The DESIGN-MATRIX CONTRACT (frame name, offset/matrix/coefficient shapes, the
 ``offset + matrix @ coefficients == linear_predictor`` identity, the frozen
-#2141 index, and all three covariance definitions) is a property of the exact
-affine representation, independent of which convergence lane produced the fit.
+#2141 index, the value/derivative split, and all three covariance definitions)
+is a property of the exact affine representation, independent of which
+convergence lane produced the fit.
 The GREEN contract tests -- ``test_ordinary_affine_design_exposes_model_offset``
 and ``test_design_matrix_array_returns_the_same_typed_affine_contract`` -- run
 on ordinary GAM fixtures that converge cleanly and are deterministic (their
@@ -91,11 +99,17 @@ def _assert_affine_identity(model, data, expected_frame: str) -> gamfit.AffineDe
         )
         assert np.all(np.isfinite(covariance))
 
+    # The covariances ship in the coefficient frame, so external variance math
+    # must use the DERIVATIVE operator, not the value operator. They are the
+    # same array only when the fitted predictor is linear in its coefficients.
+    assert affine.eta_gradient.shape == affine.matrix.shape
+    if expected_frame == "full":
+        assert affine.eta_gradient is affine.matrix
     eta_variance = np.einsum(
         "ij,jk,ik->i",
-        affine.matrix,
+        affine.eta_gradient,
         conditional,
-        affine.matrix,
+        affine.eta_gradient,
     )
     assert np.all(np.isfinite(eta_variance))
     assert float(np.min(eta_variance)) >= -1e-12
@@ -207,6 +221,17 @@ def test_link_wiggle_affine_design_covariance_and_identity_red_gate() -> None:
         affine.coefficients.shape[0],
     )
 
+    # The warp index moves with the mean coefficients, so the value operator is
+    # NOT d(eta)/d(beta): its mean block is missing the warp slope dq/dq0.
+    # Exporting one matrix for both jobs would hand external variance math an
+    # operator that silently disagrees with predict's own standard errors.
+    assert affine.eta_gradient is not affine.matrix
+    identical_columns = np.all(affine.eta_gradient == affine.matrix, axis=0)
+    # The wiggle block B(index) is shared verbatim by both operators...
+    assert bool(identical_columns.any())
+    # ...and the mean block is not: it carries the warp slope.
+    assert not bool(identical_columns.all())
+
 
 def test_link_wiggle_affine_design_offset_separation_red_gate() -> None:
     """RED GATE (#2358 link-wiggle + offset joint-Newton non-convergence).
@@ -305,7 +330,7 @@ def test_link_wiggle_affine_design_flex_link_joint_newton_blowup_red_gate() -> N
     so the affine design cannot be built. This is a convergence-lane defect
     ORTHOGONAL to the #2299 contract, which is exercised on an identifiable
     parametric-mean flexible-link fit in
-    ``test_link_wiggle_affine_design_uses_joint_frame_and_exact_2141_index``.
+    ``test_link_wiggle_affine_design_covariance_and_identity_red_gate``.
     On this geometry the de-alias shift is material: evaluating B at the base
     predictor instead of the saved frozen index produced a dramatically
     different fitted link. When the #979 / #1596 lane converges this gate passes

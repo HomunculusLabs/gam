@@ -51,6 +51,19 @@ class AffineDesign:
     that frame. The three covariance fields use that exact same frame. Each
     covariance definition remains separately optional: an unavailable
     smoothing-corrected covariance is never replaced by a conditional one.
+
+    ``eta_gradient`` is ``d eta / d coefficients`` in that same frame, and it --
+    not ``matrix`` -- is what pairs with the covariances::
+
+        eta_variance = np.einsum("ij,jk,ik->i", a.eta_gradient, V, a.eta_gradient)
+
+    The two are the SAME array whenever the fitted predictor is linear in its
+    coefficients (``coefficient_frame == "full"``). They differ for a
+    ``link_wiggle_joint`` fit: the warp basis is evaluated at an index that
+    itself moves with the mean coefficients, so ``matrix`` reproduces the
+    fitted ``eta`` exactly while ``eta_gradient`` carries the extra warp slope
+    on the mean block. Using ``matrix`` for variance there would silently
+    disagree with the standard errors :meth:`Model.predict` reports.
     """
 
     offset: NDArray[np.float64]
@@ -62,6 +75,7 @@ class AffineDesign:
     covariance_conditional: NDArray[np.float64] | None
     covariance_smoothing_corrected: NDArray[np.float64] | None
     covariance_frequentist: NDArray[np.float64] | None
+    eta_gradient: NDArray[np.float64]
 
     @property
     def coefficient_slice(self) -> slice:
@@ -83,6 +97,7 @@ def _affine_design_from_payload(payload: Any) -> AffineDesign:
             "covariance_smoothing_corrected"
         ],
         covariance_frequentist=payload["covariance_frequentist"],
+        eta_gradient=payload["eta_gradient"],
     )
 
 
@@ -846,10 +861,13 @@ class Model:
 
         In both cases, ``offset + matrix @ coefficients`` reproduces the fitted
         linear predictor. Available conditional, smoothing-corrected, and
-        frequentist covariances are returned separately in the same frame, so
-        ``matrix @ covariance @ matrix.T`` includes all cross-block terms.
-        Scan-routed and coupled multi-surface models have no finite single-frame
-        affine representation and are rejected explicitly.
+        frequentist covariances are returned separately in the same frame, and
+        ``eta_gradient @ covariance @ eta_gradient.T`` includes all cross-block
+        terms. ``eta_gradient`` is the same array as ``matrix`` for the
+        ``"full"`` frame and carries the extra warp slope for
+        ``"link_wiggle_joint"``; see :class:`AffineDesign`. Scan-routed and
+        coupled multi-surface models have no finite single-frame affine
+        representation and are rejected explicitly.
         """
         headers, rows, _ = normalize_table(data)
         try:

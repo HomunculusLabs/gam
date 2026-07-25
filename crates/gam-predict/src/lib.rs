@@ -767,6 +767,72 @@ struct LinkWiggleGradientLayout {
     wiggle_col_start: usize,
 }
 
+/// Rows of `∂η/∂β` for a fitted link-wiggle predictor, in the joint
+/// `[Mean, LinkWiggle]` coefficient frame.
+///
+/// The fitted predictor is `η = X·β_m + offset + B(u)·β_w`, and the warp index
+/// is `u = X·β_m + offset + X·s` (#2141) — so `u` itself moves with `β_m` and
+/// the chain rule gives
+///
+/// ```text
+/// ∂η/∂β_m = diag(1 + B'(u)·β_w) · X = diag(dq/dq0) · X
+/// ∂η/∂β_w = B(u)
+/// ```
+///
+/// The joint VALUE operator `[X, B(u)]` reproduces `η̂` exactly at the fitted
+/// coefficients but is NOT this derivative: its Mean block is missing the warp
+/// slope `dq/dq0`. Pairing the value operator with a coefficient covariance
+/// therefore mis-states `Var(η)` by exactly that factor, so the standard-error
+/// path and the public affine export must share ONE gradient authority — this
+/// function. `runtime.design` and `runtime.derivative_q0` are both evaluated at
+/// the frozen index, so the value block returned here is bit-identical to the
+/// `B(u)` the value operator carries.
+fn link_wiggle_eta_gradient_rows(
+    design_rows: &Array2<f64>,
+    warp_index_rows: &Array1<f64>,
+    runtime: &SavedLinkWiggleRuntime,
+    layout: LinkWiggleGradientLayout,
+) -> Result<Array2<f64>, String> {
+    let p_w = runtime.beta.len();
+    let rows_in_chunk = warp_index_rows.len();
+    if design_rows.nrows() != rows_in_chunk {
+        return Err(format!(
+            "link-wiggle eta gradient: mean design has {} rows but the warp index has {rows_in_chunk}",
+            design_rows.nrows()
+        ));
+    }
+    if design_rows.ncols() != layout.p_main {
+        return Err(format!(
+            "link-wiggle eta gradient: mean design has {} columns but the Mean block has {}",
+            design_rows.ncols(),
+            layout.p_main
+        ));
+    }
+    if layout.wiggle_col_start + p_w != layout.p_total {
+        return Err(format!(
+            "link-wiggle eta gradient: wiggle block [{}, {}) does not fill the {}-wide joint frame",
+            layout.wiggle_col_start,
+            layout.wiggle_col_start + p_w,
+            layout.p_total
+        ));
+    }
+    let wiggle_design = runtime.design(warp_index_rows)?;
+    let dq_dq0 = runtime.derivative_q0(warp_index_rows)?;
+    let mut grad = Array2::<f64>::zeros((rows_in_chunk, layout.p_total));
+    for i in 0..rows_in_chunk {
+        let dqi = dq_dq0[i];
+        for j in 0..layout.p_main {
+            grad[[i, j]] = dqi * design_rows[[i, j]];
+        }
+    }
+    grad.slice_mut(ndarray::s![
+        ..,
+        layout.wiggle_col_start..layout.wiggle_col_start + p_w
+    ])
+    .assign(&wiggle_design);
+    Ok(grad)
+}
+
 fn link_wiggle_eta_se_from_backend(
     backend: &PredictionCovarianceBackend<'_>,
     n_rows: usize,
@@ -783,26 +849,12 @@ fn link_wiggle_eta_se_from_backend(
             backend.nrows()
         )));
     }
-    let p_w = runtime.beta.len();
     linear_predictor_se_from_backend(backend, n_rows, |rows| {
         let q0_chunk = q0_base.slice(ndarray::s![rows.clone()]).to_owned();
-        let x_main = design_row_chunk(design, rows.clone())?;
-        let wiggle_design = runtime.design(&q0_chunk)?;
-        let dq_dq0 = runtime.derivative_q0(&q0_chunk)?;
-        let rows_in_chunk = q0_chunk.len();
-        let mut grad = Array2::<f64>::zeros((rows_in_chunk, layout.p_total));
-        for i in 0..rows_in_chunk {
-            let dqi = dq_dq0[i];
-            for j in 0..layout.p_main {
-                grad[[i, j]] = dqi * x_main[[i, j]];
-            }
-        }
-        grad.slice_mut(ndarray::s![
-            ..,
-            layout.wiggle_col_start..layout.wiggle_col_start + p_w
-        ])
-        .assign(&wiggle_design);
-        Ok(vec![grad])
+        let x_main = design_row_chunk(design, rows)?;
+        Ok(vec![link_wiggle_eta_gradient_rows(
+            &x_main, &q0_chunk, runtime, layout,
+        )?])
     })
 }
 

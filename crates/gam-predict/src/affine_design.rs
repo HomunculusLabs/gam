@@ -6,6 +6,12 @@
 //! frozen at the fitted index.  This module owns that distinction so frontends
 //! expose one shape-stable object instead of inferring coefficient coordinates
 //! or covariance frames from matrix dimensions.
+//!
+//! Value and derivative are also distinct concepts here.  Reproducing `η̂` and
+//! propagating a coefficient covariance are two different questions, and for a
+//! curved fitted link they have two different operators; the object therefore
+//! carries both rather than letting a caller pair the wrong one with the
+//! covariances it ships.
 
 use std::ops::Range;
 
@@ -15,7 +21,8 @@ use gam_models::survival::predict::fit_result_from_saved_model_for_prediction;
 use gam_problem::BlockRole;
 use ndarray::{Array1, Array2};
 
-use crate::PredictInput;
+use crate::linalg::design_row_chunk;
+use crate::{LinkWiggleGradientLayout, PredictInput, link_wiggle_eta_gradient_rows};
 
 /// Named coordinate frame containing the coefficients multiplied by an
 /// [`AffineDesign`].
@@ -54,6 +61,23 @@ pub struct AffineCovariances {
     pub frequentist: Option<Array2<f64>>,
 }
 
+/// How the derivative `∂η/∂β` relates to the value operator of an
+/// [`AffineDesign`].
+///
+/// These are the same matrix exactly when the fitted predictor is linear in its
+/// coefficients.  A fitted link wiggle breaks that: its warp index moves with
+/// the Mean coefficients, so the value operator and the derivative genuinely
+/// differ and both are needed — the first reproduces `η̂`, the second is the
+/// only one that may be combined with a coefficient covariance.
+#[derive(Clone, Debug)]
+pub enum AffineEtaGradient {
+    /// The predictor is linear in `coefficients`, so the value operator IS the
+    /// derivative and no second matrix exists.
+    Design,
+    /// A curved fitted link makes `∂η/∂β` differ from the value operator.
+    Distinct(DesignMatrix),
+}
+
 /// A self-contained fitted affine predictor `offset + matrix * coefficients`.
 #[derive(Clone, Debug)]
 pub struct AffineDesign {
@@ -66,6 +90,27 @@ pub struct AffineDesign {
     /// Covariances in exactly `coefficient_frame`; definitions are never
     /// silently substituted when one is unavailable.
     pub covariances: AffineCovariances,
+    /// Relationship of `∂η/∂β` to `matrix`; read it through
+    /// [`AffineDesign::eta_gradient_matrix`].
+    pub eta_gradient: AffineEtaGradient,
+}
+
+impl AffineDesign {
+    /// `∂η/∂β` at the fitted coefficients, in exactly `coefficient_frame`.
+    ///
+    /// This — not [`AffineDesign::matrix`] — is the operator that pairs with
+    /// `covariances`: `Var(η) = G · V · Gᵀ`, and a coefficient contrast `c`
+    /// moves the fitted predictor by `G · c`.  For a predictor that is linear
+    /// in its coefficients the two coincide; for a fitted link wiggle the
+    /// value operator's Mean block is missing the warp slope `dq/dq0`, so
+    /// using it for variance would silently disagree with the standard errors
+    /// `predict` reports.
+    pub fn eta_gradient_matrix(&self) -> &DesignMatrix {
+        match &self.eta_gradient {
+            AffineEtaGradient::Design => &self.matrix,
+            AffineEtaGradient::Distinct(gradient) => gradient,
+        }
+    }
 }
 
 fn fitted_covariances(fit: &gam_solve::estimate::UnifiedFitResult) -> AffineCovariances {
@@ -82,7 +127,20 @@ fn checked_affine_design(
     coefficients: Array1<f64>,
     coefficient_frame: AffineCoefficientFrame,
     covariances: AffineCovariances,
+    eta_gradient: AffineEtaGradient,
 ) -> Result<AffineDesign, String> {
+    if let AffineEtaGradient::Distinct(gradient) = &eta_gradient
+        && (gradient.nrows() != matrix.nrows() || gradient.ncols() != matrix.ncols())
+    {
+        return Err(format!(
+            "affine design eta gradient in '{}' frame is {}x{}, expected {}x{}",
+            coefficient_frame.name(),
+            gradient.nrows(),
+            gradient.ncols(),
+            matrix.nrows(),
+            matrix.ncols(),
+        ));
+    }
     if offset.len() != matrix.nrows() {
         return Err(format!(
             "affine design row mismatch: offset has {} rows but matrix has {}",
@@ -158,6 +216,7 @@ fn checked_affine_design(
         coefficient_frame,
         coefficient_range: 0..width,
         covariances,
+        eta_gradient,
     })
 }
 
@@ -170,6 +229,12 @@ fn checked_affine_design(
 /// shift and is fixed at the fitted state.  Keeping the mean block in the
 /// matrix is essential: it lets the returned same-frame covariances represent
 /// mean variance and mean--wiggle cross-covariance exactly.
+///
+/// The returned value operator satisfies `offset + matrix·β̂ == η̂` exactly, but
+/// for a link-wiggle fit it is NOT `∂η/∂β`: the warp index itself moves with
+/// the Mean coefficients. Variance and contrast math must use
+/// [`AffineDesign::eta_gradient_matrix`], which is built by the same authority
+/// the predict standard-error path uses.
 pub fn fitted_standard_affine_design(
     model: &FittedModel,
     input: &PredictInput,
@@ -203,6 +268,8 @@ pub fn fitted_standard_affine_design(
                 fit.beta.clone(),
                 AffineCoefficientFrame::Full,
                 fitted_covariances(&fit),
+                // η = offset + X·β is linear in β, so the design IS ∂η/∂β.
+                AffineEtaGradient::Design,
             )
         }
         Some(runtime) => {
@@ -249,9 +316,22 @@ pub fn fitted_standard_affine_design(
             let warp_index = runtime
                 .warp_index(&base, &input.design)
                 .map_err(|error| error.to_string())?;
-            let wiggle_design = runtime
-                .design(&warp_index)
-                .map_err(|error| error.to_string())?;
+            // One evaluation of the frozen-index warp basis serves both
+            // operators: the shared gradient authority builds
+            // `[diag(dq/dq0)·X, B(index)]`, and the joint VALUE operator reuses
+            // that exact `B(index)` block. Recomputing `B` separately would let
+            // the two representations drift.
+            let layout = LinkWiggleGradientLayout {
+                p_main: mean_beta.len(),
+                p_total: mean_beta.len() + wiggle_beta.len(),
+                wiggle_col_start: mean_beta.len(),
+            };
+            let mean_rows = design_row_chunk(&input.design, 0..input.design.nrows())?;
+            let gradient =
+                link_wiggle_eta_gradient_rows(&mean_rows, &warp_index, &runtime, layout)?;
+            let wiggle_design = gradient
+                .slice(ndarray::s![.., layout.wiggle_col_start..layout.p_total])
+                .to_owned();
             let joint_design = DesignMatrix::hstack(vec![
                 input.design.clone(),
                 DesignMatrix::from(wiggle_design),
@@ -262,6 +342,9 @@ pub fn fitted_standard_affine_design(
                 fit.beta.clone(),
                 AffineCoefficientFrame::LinkWiggleJoint,
                 fitted_covariances(&fit),
+                // The warp index `u = X·β_m + offset + X·s` moves with the Mean
+                // coefficients, so `∂η/∂β_m = diag(1 + B'(u)·β_w)·X`, not `X`.
+                AffineEtaGradient::Distinct(DesignMatrix::from(gradient)),
             )
         }
     }
@@ -270,7 +353,15 @@ pub fn fitted_standard_affine_design(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gam_models::inference::model::SavedLinkWiggleRuntime;
+    use gam_models::wiggle::monotone_wiggle_basis_with_derivative_order;
     use ndarray::array;
+
+    fn dense(matrix: &DesignMatrix) -> Array2<f64> {
+        matrix
+            .try_to_dense_by_chunks("affine design test")
+            .expect("dense affine design block")
+    }
 
     #[test]
     fn checked_affine_design_reproduces_offset_matrix_coefficient_sum() {
@@ -280,12 +371,20 @@ mod tests {
             array![0.4, -0.2],
             AffineCoefficientFrame::Full,
             AffineCovariances::default(),
+            AffineEtaGradient::Design,
         )
         .expect("valid affine design");
         let eta = result.matrix.dot(&result.coefficients) + &result.offset;
         assert_eq!(eta, array![0.5, -1.25]);
         assert_eq!(result.coefficient_frame, AffineCoefficientFrame::Full);
         assert_eq!(result.coefficient_range, 0..2);
+        // A linear predictor's design IS its derivative, so the exported
+        // gradient is that same matrix rather than a second copy.
+        assert_eq!(
+            dense(result.eta_gradient_matrix()),
+            dense(&result.matrix),
+            "a linear predictor's design is its own derivative"
+        );
     }
 
     #[test]
@@ -296,6 +395,7 @@ mod tests {
             array![0.5],
             AffineCoefficientFrame::LinkWiggleJoint,
             AffineCovariances::default(),
+            AffineEtaGradient::Design,
         )
         .expect_err("mismatched coefficient frame must fail");
         assert!(error.contains("matrix has 2 columns"));
@@ -314,9 +414,139 @@ mod tests {
                 smoothing_corrected: None,
                 frequentist: None,
             },
+            AffineEtaGradient::Design,
         )
         .expect_err("cross-frame covariance must fail");
         assert!(error.contains("conditional covariance"));
         assert!(error.contains("1x1, expected 2x2"));
+    }
+
+    #[test]
+    fn checked_affine_design_rejects_eta_gradient_of_another_shape() {
+        let error = checked_affine_design(
+            array![0.0, 0.0],
+            DesignMatrix::from(array![[1.0, 2.0], [0.5, -1.0]]),
+            array![0.5, -0.25],
+            AffineCoefficientFrame::LinkWiggleJoint,
+            AffineCovariances::default(),
+            AffineEtaGradient::Distinct(DesignMatrix::from(array![[1.0, 2.0]])),
+        )
+        .expect_err("an eta gradient outside the value operator's shape must fail");
+        assert!(error.contains("eta gradient"));
+        assert!(error.contains("1x2, expected 2x2"));
+    }
+
+    /// The whole point of the second operator: for a fitted link wiggle the
+    /// value operator is NOT `∂η/∂β`, so pairing it with the shipped covariance
+    /// would silently disagree with the standard errors `predict` reports.
+    ///
+    /// The fitted predictor is reconstructed end to end from the saved runtime
+    /// (`base` and the #2141 warp index are both recomputed at each perturbed
+    /// `β_m`, exactly as a refit would), and its central difference is compared
+    /// against the shared gradient authority. Finite differences are a test-only
+    /// instrument here: production uses the closed form.
+    #[test]
+    fn link_wiggle_eta_gradient_is_the_derivative_the_value_operator_is_not() {
+        let a = -1.6_f64;
+        let b = 2.4_f64;
+        let width = b - a;
+        let mut knot_values = vec![a; 4];
+        knot_values.extend([
+            a + 0.18 * width,
+            a + 0.41 * width,
+            a + 0.77 * width,
+        ]);
+        knot_values.extend(vec![b; 4]);
+        let knots = Array1::from_vec(knot_values);
+        let probe = array![-0.5, 0.0, 0.5];
+        let basis_width = monotone_wiggle_basis_with_derivative_order(probe.view(), &knots, 3, 0)
+            .expect("monotone warp basis")
+            .ncols();
+        // A materially curved, monotone (β_w ≥ 0) warp.
+        let wiggle_beta: Vec<f64> = (0..basis_width)
+            .map(|index| 0.35 + 0.11 * index as f64)
+            .collect();
+        let runtime = SavedLinkWiggleRuntime {
+            knots: knots.to_vec(),
+            degree: 3,
+            penalty_metadata: None,
+            beta: wiggle_beta,
+            // A nonzero #2141 frozen-index shift, so the index is not the base.
+            index_shift: Some(vec![0.12, -0.07]),
+        };
+        let x = array![
+            [1.0, -0.60],
+            [1.0, -0.20],
+            [1.0, 0.15],
+            [1.0, 0.55],
+            [1.0, 0.90],
+        ];
+        let design = DesignMatrix::from(x.clone());
+        let offset = array![0.05, -0.10, 0.00, 0.20, -0.15];
+        let mean_beta = array![0.30, 0.85];
+        let layout = LinkWiggleGradientLayout {
+            p_main: mean_beta.len(),
+            p_total: mean_beta.len() + runtime.beta.len(),
+            wiggle_col_start: mean_beta.len(),
+        };
+
+        // The fitted predictor as a function of the Mean coefficients, with the
+        // warp index rebuilt from scratch at every evaluation.
+        let eta_at = |beta_m: &Array1<f64>| -> Array1<f64> {
+            let base = design.dot(beta_m) + &offset;
+            let index = runtime
+                .warp_index(&base, &design)
+                .expect("warp index at the perturbed mean coefficients");
+            runtime
+                .apply_with_index(&base, &index)
+                .expect("warped predictor at the perturbed mean coefficients")
+        };
+
+        let warp_index = runtime
+            .warp_index(&(design.dot(&mean_beta) + &offset), &design)
+            .expect("fitted warp index");
+        let gradient = link_wiggle_eta_gradient_rows(&x, &warp_index, &runtime, layout)
+            .expect("shared eta gradient authority");
+
+        let h = 1e-6;
+        let mut max_gradient_error = 0.0_f64;
+        let mut max_value_operator_error = 0.0_f64;
+        for column in 0..layout.p_main {
+            let mut plus = mean_beta.clone();
+            plus[column] += h;
+            let mut minus = mean_beta.clone();
+            minus[column] -= h;
+            let central = (eta_at(&plus) - eta_at(&minus)) / (2.0 * h);
+            for row in 0..x.nrows() {
+                max_gradient_error =
+                    max_gradient_error.max((gradient[[row, column]] - central[row]).abs());
+                // `x` is the Mean block of the joint VALUE operator.
+                max_value_operator_error =
+                    max_value_operator_error.max((x[[row, column]] - central[row]).abs());
+            }
+        }
+        assert!(
+            max_gradient_error < 1e-6,
+            "shared gradient authority must reproduce the fitted predictor's derivative; \
+             max |analytic - central difference| = {max_gradient_error:.3e}"
+        );
+        assert!(
+            max_value_operator_error > 1e-2,
+            "the value operator's Mean block must be measurably NOT the derivative, otherwise \
+             this fixture cannot distinguish the two operators; max |X - dη/dβ_m| = \
+             {max_value_operator_error:.3e}"
+        );
+
+        // The wiggle block is shared verbatim between the two operators, so the
+        // value identity and the derivative agree exactly on `β_w`.
+        let value_wiggle = runtime.design(&warp_index).expect("frozen-index warp basis");
+        for row in 0..x.nrows() {
+            for column in 0..runtime.beta.len() {
+                assert_eq!(
+                    gradient[[row, layout.wiggle_col_start + column]],
+                    value_wiggle[[row, column]]
+                );
+            }
+        }
     }
 }

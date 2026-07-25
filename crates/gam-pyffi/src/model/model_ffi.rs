@@ -2414,7 +2414,15 @@ fn dense_affine_design_to_python(
 ) -> PyResult<Py<PyDict>> {
     let out = PyDict::new(py);
     out.set_item("offset", affine.offset.into_pyarray(py))?;
-    out.set_item("matrix", affine.matrix.into_pyarray(py))?;
+    let matrix = affine.matrix.into_pyarray(py);
+    match affine.eta_gradient {
+        Some(gradient) => out.set_item("eta_gradient", gradient.into_pyarray(py))?,
+        // The fitted predictor is linear in its coefficients here, so the value
+        // operator IS ∂η/∂β. Bind the same array under both names instead of
+        // duplicating an n x p buffer.
+        None => out.set_item("eta_gradient", &matrix)?,
+    }
+    out.set_item("matrix", &matrix)?;
     out.set_item("coefficients", affine.coefficients.into_pyarray(py))?;
     out.set_item("coefficient_frame", affine.coefficient_frame)?;
     out.set_item("coefficient_start", affine.coefficient_start)?;
