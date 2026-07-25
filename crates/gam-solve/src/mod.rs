@@ -1,6 +1,7 @@
 pub mod active_set;
 pub mod arrow_schur;
 pub mod constrained_gaussian_reml;
+pub mod constrained_posterior;
 pub mod continuation_path;
 pub mod cross_node;
 // The custom-family blockwise carrier (`custom_family` + its persistent
