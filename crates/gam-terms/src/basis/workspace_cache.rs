@@ -1056,38 +1056,6 @@ pub fn select_spherical_farthest_point_centers(
     })
 }
 
-/// The row indices [`select_spherical_farthest_point_centers`] selects, with the
-/// number of sorted dot profiles the selection had to build.
-#[cfg(test)]
-pub(crate) struct SphericalCenterRows {
-    pub(crate) rows: Vec<usize>,
-    /// Count of `O(n log n)` profile keys constructed. Zero unless the data hold
-    /// an EXACT tie in both `O(1)` invariant keys at some maximin extremum. The
-    /// asymptotic contract is stated in this count rather than in a wall clock,
-    /// and it is the tests that read it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) profile_builds: usize,
-}
-
-#[cfg(test)]
-fn select_spherical_farthest_point_center_rows(
-    data: ArrayView2<'_, f64>,
-    num_centers: usize,
-    radians: bool,
-) -> Result<SphericalCenterRows, BasisError> {
-    let mut profile_builds = 0usize;
-    let rows = select_spherical_farthest_point_center_rows_with_observer(
-        data,
-        num_centers,
-        radians,
-        |built| profile_builds += built,
-    )?;
-    Ok(SphericalCenterRows {
-        rows,
-        profile_builds,
-    })
-}
-
 fn select_spherical_farthest_point_center_rows_with_observer<F>(
     data: ArrayView2<'_, f64>,
     num_centers: usize,
@@ -1297,6 +1265,31 @@ where
 mod spherical_farthest_point_symmetry_tests {
     use super::*;
     use ndarray::{Array2, array};
+
+    /// The row indices [`select_spherical_farthest_point_centers`] selects, with
+    /// the number of sorted dot profiles the shared production algorithm built.
+    struct SphericalCenterRows {
+        rows: Vec<usize>,
+        profile_builds: usize,
+    }
+
+    fn select_spherical_farthest_point_center_rows(
+        data: ArrayView2<'_, f64>,
+        num_centers: usize,
+        radians: bool,
+    ) -> Result<SphericalCenterRows, BasisError> {
+        let mut profile_builds = 0usize;
+        let rows = select_spherical_farthest_point_center_rows_with_observer(
+            data,
+            num_centers,
+            radians,
+            |built| profile_builds += built,
+        )?;
+        Ok(SphericalCenterRows {
+            rows,
+            profile_builds,
+        })
+    }
 
     fn permute_rows(data: &Array2<f64>, order: &[usize]) -> Array2<f64> {
         Array2::from_shape_fn((order.len(), 2), |(row, col)| data[[order[row], col]])
