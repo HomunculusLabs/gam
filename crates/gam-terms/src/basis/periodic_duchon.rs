@@ -1864,6 +1864,55 @@ pub(crate) fn duchon_native_penalty_candidates(
             PenaltySource::DoublePenaltyNullspace,
         )?);
     }
+    // A frozen outer-identifiability chart must reproduce the collection
+    // builder's FINAL penalty topology, not merely congruence-transform the
+    // raw trend ridge. The chart can remove the last structural null direction
+    // of the primary penalty; in that case a carried raw ridge no longer
+    // represents `null(S_primary)` and must disappear. The collection path
+    // performs this same metric-consistent rebuild after applying its global
+    // gauge. Repeating it here is what makes frozen single-term κ rebuilds and
+    // n-free penalty re-keys share that authoritative topology (#2433).
+    if outer_identifiability.is_some() {
+        let primary_candidate = out
+            .iter()
+            .find(|candidate| matches!(candidate.source, PenaltySource::Primary))
+            .ok_or_else(|| {
+                BasisError::InvalidInput(
+                    "Duchon trend ridge has no primary penalty in the final coefficient chart"
+                        .to_string(),
+                )
+            })?;
+        let primary_physical = primary_candidate.matrix.scaled(
+            primary_candidate.normalization_scale,
+            "physical frozen-chart Duchon primary",
+        )?;
+        let width = primary_physical.nrows();
+        for candidate in &mut out {
+            if !matches!(candidate.source, PenaltySource::DoublePenaltyNullspace) {
+                continue;
+            }
+            let ridge_physical = candidate.matrix.scaled(
+                candidate.normalization_scale,
+                "physical frozen-chart Duchon trend ridge",
+            )?;
+            match rebuild_metric_consistent_ridge(&primary_physical, &ridge_physical)? {
+                Some(rebuilt) => {
+                    let normalized = normalize_constructive_penalty_candidate(
+                        rebuilt,
+                        PenaltySource::DoublePenaltyNullspace,
+                    )?;
+                    candidate.matrix = normalized.matrix;
+                    candidate.normalization_scale = normalized.normalization_scale;
+                }
+                None => {
+                    candidate.matrix = ConstructiveQuadratic::zero(width);
+                    candidate.normalization_scale = 1.0;
+                }
+            }
+            candidate.kronecker_factors = None;
+            candidate.op = None;
+        }
+    }
     Ok(out)
 }
 

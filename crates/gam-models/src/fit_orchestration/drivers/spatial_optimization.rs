@@ -4326,46 +4326,6 @@ struct SingleSmoothTermRealization {
     dropped_penaltyinfo: Vec<DroppedPenaltyBlockInfo>,
 }
 
-impl SingleSmoothTermRealization {
-    fn active_penalty_count(&self) -> usize {
-        self.term.active_penalties.len()
-    }
-}
-
-fn build_single_smooth_term_realization_with_policy(
-    data: ArrayView2<'_, f64>,
-    termspec: &SmoothTermSpec,
-    policy: &gam_runtime::resource::ResourcePolicy,
-) -> Result<SingleSmoothTermRealization, BasisError> {
-    let mut workspace = gam_terms::basis::BasisWorkspace::with_policy(policy.clone());
-    let raw =
-        build_smooth_design_withworkspace(data, std::slice::from_ref(termspec), &mut workspace)?;
-    finish_single_smooth_term_realization(raw)
-}
-
-fn finish_single_smooth_term_realization(
-    raw: RawSmoothDesign,
-) -> Result<SingleSmoothTermRealization, BasisError> {
-    let RawSmoothDesign {
-        term_designs,
-        dropped_penaltyinfo,
-        terms,
-        ..
-    } = raw;
-    let term = terms.into_iter().next().ok_or_else(|| {
-        BasisError::InvalidInput("single-term smooth build returned no term".to_string())
-    })?;
-    let design = term_designs.into_iter().next().ok_or_else(|| {
-        BasisError::InvalidInput("single-term smooth build returned no term design".to_string())
-    })?;
-
-    Ok(SingleSmoothTermRealization {
-        design_local: design,
-        term,
-        dropped_penaltyinfo,
-    })
-}
-
 /// Wrap a fresh `LocalSmoothTermBuild` (produced by `build_single_local_smooth_term`)
 /// into a `SingleSmoothTermRealization`. Mirrors the single-term portion of
 /// `build_smooth_design_withworkspace_unvalidated`, but skips the joint center
@@ -4882,40 +4842,34 @@ impl<'d> FrozenTermCollectionIncrementalRealizer<'d> {
         let fixed_blocks = build_term_collection_fixed_blocks(data, &spec)
             .map_err(|e| format!("failed to cache fixed term-collection blocks: {e}"))?;
 
-        let mut dropped_penaltyinfo_by_term = Vec::with_capacity(spec.smooth_terms.len());
-        for (term_idx, termspec) in spec.smooth_terms.iter().enumerate() {
-            let realization = build_single_smooth_term_realization_with_policy(
-                data, termspec, policy,
-            )
-            .map_err(|e| {
-                format!(
-                    "failed to build cached realization for smooth term '{}' (index {}): {e}",
-                    termspec.name, term_idx
-                )
-            })?;
-            let expected_cols = design.smooth.terms[term_idx].coeff_range.len();
-            if realization.design_local.ncols() != expected_cols {
-                return Err(SmoothError::dimension_mismatch(format!(
-                    "cached realization width mismatch for term '{}': cached_cols={}, design_cols={}",
-                    termspec.name,
-                    realization.design_local.ncols(),
-                    expected_cols
-                ))
-                .into());
-            }
-            if realization.active_penalty_count()
-                != design.smooth.terms[term_idx].active_penalties.len()
-            {
-                return Err(SmoothError::dimension_mismatch(format!(
-                    "cached realization penalty mismatch for term '{}': cached_penalties={}, design_penalties={}",
-                    termspec.name,
-                    realization.active_penalty_count(),
-                    design.smooth.terms[term_idx].active_penalties.len()
-                ))
-                .into());
-            }
-            dropped_penaltyinfo_by_term.push(realization.dropped_penaltyinfo);
-        }
+        // The collection design is the authority for the realized coefficient
+        // chart and penalty topology. Do not rebuild each source term in
+        // isolation here: that bypasses `apply_global_smooth_identifiability`,
+        // whose constrained-primary analysis can legitimately eliminate a
+        // double-penalty ridge. Re-deriving the term therefore manufactured a
+        // second, incompatible topology before the incremental realizer even
+        // received its first κ proposal (#2433).
+        //
+        // Carry the collection's certified dropped-penalty facts directly.
+        // Later κ rebuilds still pass through `replace_term_realization`, whose
+        // topology guard compares each new realization with the authoritative
+        // emitted penalty range and continues to hard-fail a genuine topology
+        // change.
+        let dropped_penaltyinfo_by_term: Vec<Vec<DroppedPenaltyBlockInfo>> = design
+            .smooth
+            .terms
+            .iter()
+            .map(|term| {
+                term.dropped_penalties
+                    .iter()
+                    .cloned()
+                    .map(|penalty| DroppedPenaltyBlockInfo {
+                        termname: Some(term.name.clone()),
+                        penalty,
+                    })
+                    .collect()
+            })
+            .collect();
 
         let geometry_slots = spec.smooth_terms.len();
         Ok(Self {
