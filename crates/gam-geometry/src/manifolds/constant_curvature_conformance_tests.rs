@@ -402,6 +402,46 @@ fn batched_distance_is_bit_identical_to_the_scalar_path() {
     assert!(verified > 0, "no batched distance was evaluated");
 }
 
+/// Relative tolerance for a jet component, plus an absolute floor set by what
+/// the finite-difference instrument can actually resolve.
+///
+/// The absolute term is the point of this function. These derivatives are
+/// *small*: `∂d/∂κ` spans `1e-7 … 0.17` over the fixtures below and `∂²d/∂κ²`
+/// reaches down to `6e-12` for near-coincident points, while the FD residual
+/// against a correct analytic derivative sits at `1e-9 … 2e-8` regardless.
+/// Below that floor the difference quotient carries no information, so no
+/// tolerance can be honest about the small cases — but the floor must be set
+/// from the *measured* noise and not, as this test first did, from a `max(…,
+/// 1.0)` guard. That guard made the bound `1e-6` absolute everywhere, which is
+/// fifty times looser than the instrument: a mutation perturbing `∂²d/∂κ²` by
+/// `1e-5` relative passed it. With the floor at the measured noise (5–10× over
+/// the worst residual observed across all 15 dim × κ fixtures) the same
+/// mutation fails, which is the property that makes this test worth running.
+fn jet_tolerance(analytic: f64, difference: f64, floor: f64) -> f64 {
+    1.0e-6 * analytic.abs().max(difference.abs()) + floor
+}
+
+/// Noise floor of the central first difference: worst residual measured 4.4e-9.
+const FIRST_FLOOR: f64 = 5.0e-8;
+/// Noise floor of the central second difference, which amplifies roundoff by
+/// `1/H²`: worst residual measured 1.9e-8.
+const SECOND_FLOOR: f64 = 1.0e-7;
+
+/// Largest componentwise gap between two vectors, against the same bound.
+fn assert_vector_close(
+    analytic: &Array1<f64>,
+    difference: &Array1<f64>,
+    floor: f64,
+    context: &str,
+) {
+    for (i, (a, d)) in analytic.iter().zip(difference.iter()).enumerate() {
+        assert!(
+            (a - d).abs() <= jet_tolerance(*a, *d, floor),
+            "{context}: component {i} analytic {a} vs finite difference {d}"
+        );
+    }
+}
+
 #[test]
 fn kappa_jets_match_central_differences_of_the_value_path() {
     // See the module docs for why H is 1e-3 and why the sample radius must not
@@ -409,7 +449,6 @@ fn kappa_jets_match_central_differences_of_the_value_path() {
     // `exp_map` — separately written value code — at κ ± H, so agreement is
     // evidence about the Tower2 program rather than about itself.
     const H: f64 = 1.0e-3;
-    const TOL: f64 = 1.0e-6;
     let mut verified = 0usize;
     for dim in [1usize, 2, 3] {
         for kappa in [1.0_f64, 0.3, 0.0, -0.3, -1.0] {
@@ -434,11 +473,11 @@ fn kappa_jets_match_central_differences_of_the_value_path() {
                 let fd_first = (above - below) / (2.0 * H);
                 let fd_second = (above - 2.0 * here + below) / (H * H);
                 assert!(
-                    (first - fd_first).abs() <= TOL * first.abs().max(fd_first.abs()).max(1.0),
+                    (first - fd_first).abs() <= jet_tolerance(first, fd_first, FIRST_FLOOR),
                     "dim {dim} kappa {kappa}: d/dkappa distance {first} vs FD {fd_first}"
                 );
                 assert!(
-                    (second - fd_second).abs() <= TOL * second.abs().max(fd_second.abs()).max(1.0),
+                    (second - fd_second).abs() <= jet_tolerance(second, fd_second, SECOND_FLOOR),
                     "dim {dim} kappa {kappa}: d2/dkappa2 distance {second} vs FD {fd_second}"
                 );
 
@@ -454,13 +493,17 @@ fn kappa_jets_match_central_differences_of_the_value_path() {
                 );
                 let fd_first = (&above - &below) / (2.0 * H);
                 let fd_second = (&above - &(&here * 2.0) + &below) / (H * H);
-                assert!(
-                    sup_diff(&first, &fd_first) <= TOL * joint_scale(&first, &fd_first),
-                    "dim {dim} kappa {kappa}: d/dkappa log disagrees with FD"
+                assert_vector_close(
+                    &first,
+                    &fd_first,
+                    FIRST_FLOOR,
+                    &format!("dim {dim} kappa {kappa}: d/dkappa log"),
                 );
-                assert!(
-                    sup_diff(&second, &fd_second) <= TOL * joint_scale(&second, &fd_second),
-                    "dim {dim} kappa {kappa}: d2/dkappa2 log disagrees with FD"
+                assert_vector_close(
+                    &second,
+                    &fd_second,
+                    SECOND_FLOOR,
+                    &format!("dim {dim} kappa {kappa}: d2/dkappa2 log"),
                 );
 
                 // ---- exponential ----
@@ -478,13 +521,17 @@ fn kappa_jets_match_central_differences_of_the_value_path() {
                 );
                 let fd_first = (&above - &below) / (2.0 * H);
                 let fd_second = (&above - &(&here * 2.0) + &below) / (H * H);
-                assert!(
-                    sup_diff(&first, &fd_first) <= TOL * joint_scale(&first, &fd_first),
-                    "dim {dim} kappa {kappa}: d/dkappa exp disagrees with FD"
+                assert_vector_close(
+                    &first,
+                    &fd_first,
+                    FIRST_FLOOR,
+                    &format!("dim {dim} kappa {kappa}: d/dkappa exp"),
                 );
-                assert!(
-                    sup_diff(&second, &fd_second) <= TOL * joint_scale(&second, &fd_second),
-                    "dim {dim} kappa {kappa}: d2/dkappa2 exp disagrees with FD"
+                assert_vector_close(
+                    &second,
+                    &fd_second,
+                    SECOND_FLOOR,
+                    &format!("dim {dim} kappa {kappa}: d2/dkappa2 exp"),
                 );
 
                 verified += 1;
