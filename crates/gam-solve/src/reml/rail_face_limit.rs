@@ -33,86 +33,26 @@
 //! this closed form is no longer the whole first-order story; the method
 //! returns `None` and the measured-tail certificate remains the authority.
 
-use faer::Side;
-use gam_linalg::faer_ndarray::FaerEigh;
-use ndarray::Axis;
-
 use super::*;
-use crate::rho_optimizer::rail_face::RailFaceLimit;
-
-/// Exactly symmetric copy (`f64` addition is commutative, so `(M+Mᵀ)/2` is
-/// bitwise symmetric), which the strict self-adjoint eigensolver requires.
-fn symmetrized(matrix: &Array2<f64>) -> Array2<f64> {
-    let n = matrix.nrows();
-    let mut out = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        for j in 0..n {
-            out[[i, j]] = 0.5 * (matrix[[i, j]] + matrix[[j, i]]);
-        }
-    }
-    out
-}
-
-fn symmetric_eigh(matrix: &Array2<f64>) -> Option<(Array1<f64>, Array2<f64>)> {
-    symmetrized(matrix).eigh(Side::Lower).ok()
-}
-
-/// The `√ε·‖A‖` split between a symmetric matrix's range and its null space —
-/// the level below which an eigenvalue is not distinguishable from zero by the
-/// solver's own backward error.
-fn range_null_split(values: &Array1<f64>) -> f64 {
-    let norm = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    f64::EPSILON.sqrt() * norm
-}
-
-/// Gather selected eigenvectors into a `p×m` orthonormal basis.
-fn basis_columns(vectors: &Array2<f64>, cols: &[usize]) -> Array2<f64> {
-    let rows = vectors.nrows();
-    let mut basis = Array2::<f64>::zeros((rows, cols.len()));
-    for (out, &src) in cols.iter().enumerate() {
-        for row in 0..rows {
-            basis[[row, out]] = vectors[[row, src]];
-        }
-    }
-    basis
-}
-
-/// Moore–Penrose inverse rebuilt from an already-computed spectrum, dropping
-/// everything at or below `cut`.
-fn spectral_pseudo_inverse(values: &Array1<f64>, vectors: &Array2<f64>, cut: f64) -> Array2<f64> {
-    let n = values.len();
-    let mut out = Array2::<f64>::zeros((n, n));
-    for i in 0..n {
-        if values[i] > cut {
-            let inv = 1.0 / values[i];
-            let v = vectors.column(i);
-            for a in 0..n {
-                let va = inv * v[a];
-                for b in 0..n {
-                    out[[a, b]] += va * v[b];
-                }
-            }
-        }
-    }
-    out
-}
+use crate::rho_optimizer::rail_face::{RailFaceLimit, gaussian_rail_face_limit};
 
 impl RemlState<'_> {
     /// Build the analytic λ→∞ limit data for the rail face `face` (ρ-block
     /// indices), at the smoothing parameters `rho`.
     ///
-    /// Returns `Ok(None)` — never an error — whenever the configuration is
-    /// outside the exact closed form, the face releases nothing, the limit
-    /// model is not identified, or a rank bookkeeping check fails. A refusal
-    /// is not a fit failure; it just means this certificate has nothing to
-    /// say and the caller keeps whatever authority it already had.
+    /// This is the gate; the algebra is [`gaussian_rail_face_limit`], which any
+    /// caller holding the same parts can use directly. `Ok(None)` — never an
+    /// error — whenever this fit's configuration is outside the exact closed
+    /// form, or the limit itself is not available. A refusal is not a fit
+    /// failure; it just means this certificate has nothing to say and the
+    /// caller keeps whatever authority it already had.
     pub(crate) fn rail_face_limit(
         &self,
         rho: &Array1<f64>,
         face: &[usize],
     ) -> Result<Option<RailFaceLimit>, EstimationError> {
-        // The closed form below is exact only where the working weights do not
-        // move with β̂ and the criterion is the plain profiled-Gaussian REML.
+        // The closed form is exact only where the working weights do not move
+        // with β̂ and the criterion is the plain profiled-Gaussian REML.
         if !reml_is_gaussian_identity(&self.config.likelihood)
             || self.linear_constraints.is_some()
             || self.coefficient_lower_bounds.is_some()
@@ -124,268 +64,26 @@ impl RemlState<'_> {
         {
             return Ok(None);
         }
-
-        let p = self.p;
-        let n_penalties = self.canonical_penalties.len();
-        if p == 0 || n_penalties == 0 || face.is_empty() || rho.len() < n_penalties {
-            return Ok(None);
-        }
-        let mut face_sorted = face.to_vec();
-        face_sorted.sort_unstable();
-        face_sorted.dedup();
-        if face_sorted.len() != face.len()
-            || face_sorted.last().copied().unwrap_or(usize::MAX) >= n_penalties
-        {
-            return Ok(None);
-        }
-
-        let x_dense = self
+        let design = self
             .x
             .try_to_dense_by_chunks("rail face limit")
             .map_err(EstimationError::RemlOptimizationFailed)?;
-        if x_dense.ncols() != p {
+        if design.ncols() != self.p {
             return Ok(None);
         }
-        let n = x_dense.nrows();
-        if n == 0 || self.weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
-            return Ok(None);
-        }
-
-        // ── penalties: the face at unit λ, the survivors at their own λ ──────
-        let mut s_face_unit = Array2::<f64>::zeros((p, p));
-        let mut s_rest = Array2::<f64>::zeros((p, p));
-        let mut s_unit_all = Array2::<f64>::zeros((p, p));
-        let mut face_penalties: Vec<Array2<f64>> = face_sorted
-            .iter()
-            .map(|_| Array2::<f64>::zeros((p, p)))
-            .collect();
-        for (j, penalty) in self.canonical_penalties.iter().enumerate() {
-            let lambda = rho[j].exp();
-            if !lambda.is_finite() || lambda <= 0.0 {
-                return Ok(None);
-            }
-            let cols = penalty.col_range.clone();
-            if cols.end > p {
-                return Ok(None);
-            }
-            let slot = face_sorted.iter().position(|&f| f == j);
-            for (li, gi) in cols.clone().enumerate() {
-                for (lj, gj) in cols.clone().enumerate() {
-                    let value = penalty.local[[li, lj]];
-                    s_unit_all[[gi, gj]] += value;
-                    match slot {
-                        Some(idx) => {
-                            s_face_unit[[gi, gj]] += value;
-                            face_penalties[idx][[gi, gj]] += value;
-                        }
-                        None => s_rest[[gi, gj]] += lambda * value,
-                    }
-                }
-            }
-        }
-
-        // ── the subspace the face releases, and the one it pins ─────────────
-        let (face_values, face_vectors) = match symmetric_eigh(&s_face_unit) {
-            Some(pair) => pair,
-            None => return Ok(None),
-        };
-        let face_cut = range_null_split(&face_values);
-        let released_cols: Vec<usize> = (0..face_values.len())
-            .filter(|&i| face_values[i] > face_cut)
-            .collect();
-        let pinned_cols: Vec<usize> = (0..face_values.len())
-            .filter(|&i| face_values[i] <= face_cut)
-            .collect();
-        let released = released_cols.len();
-        if released == 0 {
-            // The face penalizes nothing: λ=∞ there is not a statement about
-            // the model at all.
-            return Ok(None);
-        }
-        let q_basis = basis_columns(&face_vectors, &released_cols);
-        let z_basis = basis_columns(&face_vectors, &pinned_cols);
-        let pinned = pinned_cols.len();
-
-        // ── weighted design cross-products ──────────────────────────────────
-        let weight_sqrt: Array1<f64> = self.weights.iter().map(|w| w.sqrt()).collect();
-        let mut x_scaled = x_dense.clone();
-        for (i, mut row) in x_scaled.axis_iter_mut(Axis(0)).enumerate() {
-            let scale = weight_sqrt[i];
-            row.mapv_inplace(|v| v * scale);
-        }
+        // The builder wants the response already net of any offset.
         let mut response = self.y.to_owned();
         if self.offset.len() == response.len() {
             response -= &self.offset;
         }
-        let response_scaled = &response * &weight_sqrt;
-        let xtwx = x_scaled.t().dot(&x_scaled);
-        let xtwy = x_scaled.t().dot(&response_scaled);
-        let k_matrix = &xtwx + &s_rest;
-
-        // ── the limit fit: the model restricted to the pinned subspace ──────
-        let kzz = z_basis.t().dot(&k_matrix).dot(&z_basis);
-        let mut pinned_values = Array1::<f64>::zeros(0);
-        let mut pinned_vectors = Array2::<f64>::zeros((0, 0));
-        let mut conditioning = 1.0_f64;
-        let mut limit_beta = Array1::<f64>::zeros(p);
-        if pinned > 0 {
-            let (values, vectors) = match symmetric_eigh(&kzz) {
-                Some(pair) => pair,
-                None => return Ok(None),
-            };
-            let largest = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-            let smallest = values.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
-            if !(smallest > f64::EPSILON.sqrt() * largest) || !(largest > 0.0) {
-                // The λ=∞ model is not identified; there is no limit fit to
-                // certify against.
-                return Ok(None);
-            }
-            conditioning = largest / smallest;
-            let rhs = z_basis.t().dot(&xtwy);
-            let rotated = vectors.t().dot(&rhs);
-            let mut alpha = Array1::<f64>::zeros(pinned);
-            for i in 0..pinned {
-                alpha[i] = rotated[i] / values[i];
-            }
-            limit_beta = z_basis.dot(&vectors.dot(&alpha));
-            pinned_values = values;
-            pinned_vectors = vectors;
-        }
-
-        // ── the profiled dispersion at the limit fit ────────────────────────
-        let fitted = x_dense.dot(&limit_beta);
-        let mut weighted_rss = 0.0_f64;
-        for i in 0..n {
-            let residual = response[i] - fitted[i];
-            weighted_rss += self.weights[i] * residual * residual;
-        }
-        let penalty_energy = limit_beta.dot(&s_rest.dot(&limit_beta));
-        let penalized_deviance = weighted_rss + penalty_energy;
-        let (all_values, _) = match symmetric_eigh(&s_unit_all) {
-            Some(pair) => pair,
-            None => return Ok(None),
-        };
-        let all_cut = range_null_split(&all_values);
-        let penalty_rank = all_values.iter().filter(|v| **v > all_cut).count();
-        // The profiled scale's denominator must be the CRITERION's own
-        // degrees-of-freedom bookkeeping, which counts the SUM of the
-        // per-penalty ranks — not the rank of the summed penalty. The two agree
-        // when the penalties have disjoint ranges and differ exactly when they
-        // OVERLAP, which is the all-on Hilbert-scale case this certificate is
-        // for. Reproducing the criterion means reproducing its bookkeeping.
-        let criterion_penalty_rank: usize = self
-            .canonical_penalties
-            .iter()
-            .map(|penalty| penalty.positive_eigenvalues.len())
-            .sum();
-        let null_dim = p.saturating_sub(criterion_penalty_rank);
-        if n <= null_dim {
-            return Ok(None);
-        }
-        // The REML profiled scale, `D_p/(n − M_p)`, evaluated AT the limit fit.
-        // `M_p` does not move along the face, so the same denominator holds at
-        // ρ̂ and at λ=∞.
-        let dispersion = penalized_deviance / ((n - null_dim) as f64);
-        if !dispersion.is_finite() || dispersion <= 0.0 {
-            return Ok(None);
-        }
-
-        // ── the limit score, and its released component ─────────────────────
-        let limit_score = &xtwy - &k_matrix.dot(&limit_beta);
-        if pinned > 0 {
-            // The limit fit is stationary in the pinned directions by
-            // construction; a residual there means the reduced solve did not
-            // hold, so the rest of the algebra is not trustworthy either.
-            let pinned_residual = z_basis.t().dot(&limit_score);
-            let scale = xtwy
-                .dot(&xtwy)
-                .sqrt()
-                .max(limit_score.dot(&limit_score).sqrt())
-                .max(1.0);
-            if pinned_residual.dot(&pinned_residual).sqrt() > f64::EPSILON.sqrt() * scale {
-                return Ok(None);
-            }
-        }
-        let released_score = q_basis.t().dot(&limit_score);
-
-        // ── the two logdets' analytic first-order content ───────────────────
-        // `½log|H|` leaves `Schur_Z(K)` behind once its `log|QᵀS_FQ|`
-        // divergence is removed; `−½log|S_λ|₊` leaves `Schur_Z(S_R)`. Their
-        // divergences are the same matrix and cancel exactly.
-        let qkq = q_basis.t().dot(&k_matrix).dot(&q_basis);
-        let schur_k = if pinned == 0 {
-            qkq
-        } else {
-            let qkz = q_basis.t().dot(&k_matrix).dot(&z_basis);
-            let kzz_inverse = spectral_pseudo_inverse(
-                &pinned_values,
-                &pinned_vectors,
-                f64::EPSILON.sqrt()
-                    * pinned_values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())),
-            );
-            qkq - qkz.dot(&kzz_inverse).dot(&qkz.t())
-        };
-        let qsq = q_basis.t().dot(&s_rest).dot(&q_basis);
-        let (schur_s_rest, surviving_rank, survivor_conditioning) = if pinned == 0 {
-            (qsq, 0usize, 1.0_f64)
-        } else {
-            let zsz = z_basis.t().dot(&s_rest).dot(&z_basis);
-            let (values, vectors) = match symmetric_eigh(&zsz) {
-                Some(pair) => pair,
-                None => return Ok(None),
-            };
-            let cut = range_null_split(&values);
-            let kept: Vec<f64> = values.iter().copied().filter(|v| *v > cut).collect();
-            let cond = match (
-                kept.iter().fold(0.0_f64, |acc, v| acc.max(*v)),
-                kept.iter().fold(f64::INFINITY, |acc, v| acc.min(*v)),
-            ) {
-                (hi, lo) if lo > 0.0 && hi.is_finite() => hi / lo,
-                _ => 1.0,
-            };
-            let zsz_pseudo = spectral_pseudo_inverse(&values, &vectors, cut);
-            let qsz = q_basis.t().dot(&s_rest).dot(&z_basis);
-            (
-                qsq - qsz.dot(&zsz_pseudo).dot(&qsz.t()),
-                kept.len(),
-                cond,
-            )
-        };
-        // The pseudo-determinant split `log|S_λ|₊ = log|QᵀS_λQ| +
-        // log|Schur_Q(S_λ)|₊` needs the ranks to add up. That is an identity
-        // (`dim(range S_R + range S_F) = q + dim P_N range S_R`), so a
-        // mismatch means a rank determination is unreliable here.
-        if penalty_rank != released + surviving_rank {
-            return Ok(None);
-        }
-
-        // ── the first-order form ────────────────────────────────────────────
-        let mut first_order_form = &schur_k - &schur_s_rest;
-        for a in 0..released {
-            for b in 0..released {
-                first_order_form[[a, b]] -= released_score[a] * released_score[b] / dispersion;
-            }
-        }
-        if first_order_form.iter().any(|v| !v.is_finite()) {
-            return Ok(None);
-        }
-
-        let released_penalties: Vec<Array2<f64>> = face_penalties
-            .iter()
-            .map(|s| q_basis.t().dot(s).dot(&q_basis))
-            .collect();
-        let face_rho: Vec<f64> = face_sorted.iter().map(|&j| rho[j]).collect();
-
-        Ok(Some(RailFaceLimit {
-            face: face_sorted,
-            face_rho,
-            first_order_form,
-            released_penalties,
-            released_score,
-            form_conditioning: conditioning.max(survivor_conditioning).max(1.0),
-            limit_beta,
-            limit_dispersion: dispersion,
-        }))
+        Ok(gaussian_rail_face_limit(
+            design.view(),
+            response.view(),
+            self.weights,
+            self.canonical_penalties.as_slice(),
+            rho,
+            face,
+        ))
     }
 }
 
@@ -405,6 +103,22 @@ mod rail_face_limit_tests {
     /// The residual is a deterministic Nyquist alternation, which no cubic can
     /// chase, so the dispersion is real and `curvature` alone controls the
     /// score for releasing the face.
+    /// Self-adjoint eigendecomposition of the small design gram, used only to
+    /// project the fixture's residual out of the design's column space.
+    fn design_gram_eigh(gram: &Array2<f64>) -> (Array1<f64>, Array2<f64>) {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerEigh;
+        let n = gram.nrows();
+        let mut sym = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            for j in 0..n {
+                sym[[i, j]] = 0.5 * (gram[[i, j]] + gram[[j, i]]);
+            }
+        }
+        sym.eigh(Side::Lower)
+            .expect("the cubic design gram is well posed")
+    }
+
     fn cubic_fixture(curvature: f64) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
         cubic_fixture_sized(curvature, 96)
     }
@@ -435,8 +149,7 @@ mod rail_face_limit_tests {
         // against those directions' Occam cost.
         let gram = x.t().dot(&x);
         let rhs = x.t().dot(&raw_noise);
-        let (values, vectors) =
-            symmetric_eigh(&gram).expect("the cubic design gram is well posed");
+        let (values, vectors) = design_gram_eigh(&gram);
         let rotated = vectors.t().dot(&rhs);
         let mut scaled = Array1::<f64>::zeros(values.len());
         for i in 0..values.len() {
