@@ -27,15 +27,17 @@
 //!     the constant-mean predictor (R2=0); the bar is modest because earthquake
 //!     magnitude is noisy and only partly determined by location/depth.
 //!
-//!   BASELINE (match-or-beat): mgcv fits the SAME training rows and predicts the
-//!     SAME held-out rows of each partition; gam's AVERAGED held-out RMSE must be
-//!     no worse than `mgcv_rmse_avg * 1.10`. Averaging a lower-variance metric
-//!     against the same bar is strictly harder than the former single split.
+//!   BASELINE (match-or-beat, PAIRED): mgcv fits the SAME training rows and
+//!     predicts the SAME held-out rows of each partition, so the arms pair split
+//!     by split. gam may not be behind by more than the paired spread can explain,
+//!     and must still clear the pre-existing `mgcv_rmse_avg * 1.10` ceiling —
+//!     strictly stronger than that flat bar alone.
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, pad_to, paired_holdout_partition, r2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, pad_to,
+    paired_holdout_partition, r2, rmse, run_r,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -156,25 +158,23 @@ fn gam_spatial_smooth_predicts_quakes_better_than_baseline() {
     let mgcv_rmses = r.vector("mgcv_rmses");
     assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-split rmse count mismatch");
 
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-    let gam_test_rmse = mean(&gam_rmses);
-    let gam_test_r2 = mean(&gam_r2s);
-    let mgcv_test_rmse = mean(mgcv_rmses);
+    // Split `s` was the SAME split for both tools, so the comparison is paired.
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
+    let gam_test_r2 = gam_r2s.iter().sum::<f64>() / gam_r2s.len() as f64;
 
     eprintln!(
-        "quakes s(long,lat)+s(depth) #2395 K={K_SPLITS}-split avg: gam_edf(split0)={gam_edf_repr:.3} \
-         gam_test_R2_avg={gam_test_r2:.4} gam_test_rmse_avg={gam_test_rmse:.4} \
-         mgcv_test_rmse_avg={mgcv_test_rmse:.4}"
+        "quakes s(long,lat)+s(depth) #2395 K={K_SPLITS}-split paired: \
+         gam_edf(split0)={gam_edf_repr:.3} gam_test_R2_avg={gam_test_r2:.4}"
     );
+    eprintln!("{}", panel.report("quakes_spatial_smooth"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_quakes_spatial_smooth",
             "test_rmse",
-            gam_test_rmse,
             "mgcv",
-            mgcv_test_rmse,
+            &panel,
         )
         .line()
     );
@@ -185,11 +185,8 @@ fn gam_spatial_smooth_predicts_quakes_better_than_baseline() {
         "gam's averaged held-out predictive R2 too low: {gam_test_r2:.4} (< 0.08)"
     );
 
-    // ---- BASELINE (match-or-beat): no worse than mgcv on averaged held-out RMSE.
-    assert!(
-        gam_test_rmse <= mgcv_test_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_test_rmse:.4} exceeds mgcv {mgcv_test_rmse:.4} * 1.10"
-    );
+    // ---- BASELINE (match-or-beat), PAIRED across the K shared splits -------
+    assert_paired_match_or_beat("quakes_spatial_smooth", &panel, 1.10);
 
     // ---- complexity sanity: edf in a signal-appropriate range (not matched) -
     assert!(

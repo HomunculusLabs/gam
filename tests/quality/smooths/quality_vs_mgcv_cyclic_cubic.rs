@@ -25,7 +25,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, r2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, r2, rmse, run_r,
 };
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -155,23 +156,24 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine() {
     let mgcv_rmses = r.vector("mgcv_rmses");
     assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-seed rmse count mismatch");
 
-    let gam_truth_rmse = mean(&gam_rmses);
-    let mgcv_truth_rmse = mean(mgcv_rmses);
+    // Seed `s` drew the SAME response vector for both tools, so the truth-recovery
+    // comparison is paired seed by seed; the common noise draw cancels.
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
+    let gam_truth_rmse = panel.gam_mean;
 
     eprintln!(
-        "cyclic cc(t) #2395 K={K_SPLITS}-seed avg: n={n} sigma={sigma} gam_edf(split0)={gam_edf_repr:.3} \
-         rmse(gam,sin)_avg={gam_truth_rmse:.5} rmse(mgcv,sin)_avg={mgcv_truth_rmse:.5} \
-         wrap_gap(split0)={wrap_gap_repr:.3e}"
+        "cyclic cc(t) #2395 K={K_SPLITS}-seed paired: n={n} sigma={sigma} \
+         gam_edf(split0)={gam_edf_repr:.3} wrap_gap(split0)={wrap_gap_repr:.3e}"
     );
+    eprintln!("{}", panel.report("cyclic_cubic::truth"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_cyclic_cubic",
             "truth_rmse",
-            gam_truth_rmse,
             "mgcv",
-            mgcv_truth_rmse,
+            &panel,
         )
         .line()
     );
@@ -183,13 +185,8 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine() {
         0.5 * sigma
     );
 
-    // 2) MATCH-OR-BEAT (accuracy): gam at least as accurate as mgcv (10% slack).
-    assert!(
-        gam_truth_rmse <= mgcv_truth_rmse * 1.10,
-        "gam less accurate than mgcv at recovering sin(t): \
-         averaged rmse(gam,sin)={gam_truth_rmse:.5} > 1.10*rmse(mgcv,sin)={:.5}",
-        mgcv_truth_rmse * 1.10
-    );
+    // 2) MATCH-OR-BEAT (accuracy), PAIRED across the K shared noise draws.
+    assert_paired_match_or_beat("cyclic_cubic::truth", &panel, 1.10);
 
     // 3) STRUCTURE — periodic seam continuity: fit(0) must equal fit(2π).
     assert!(
@@ -206,9 +203,11 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine() {
 ///     seasonal cycle dominates the variance, so a competent periodic smoother
 ///     explains the vast majority of held-out variation.
 ///
-///   BASELINE (match-or-beat): mgcv `bs="cc"` fits the SAME training rows and
-///     predicts the SAME held-out rows of each partition; gam's AVERAGED held-out
-///     RMSE must be no worse than `mgcv_rmse_avg * 1.10`.
+///   BASELINE (match-or-beat, PAIRED): mgcv `bs="cc"` fits the SAME training rows
+///     and predicts the SAME held-out rows of each partition, so the arms pair
+///     split by split. gam may not be behind by more than the paired spread can
+///     explain, and must still clear the pre-existing `mgcv_rmse_avg * 1.10`
+///     ceiling.
 ///
 ///   STRUCTURE — periodic seam continuity: gam's fitted curve wraps exactly,
 ///     `fit(month=1) == fit(month=13)` to 1e-6 (split-invariant, on one fit).
@@ -315,24 +314,22 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
     let mgcv_rmses = r.vector("mgcv_rmses");
     assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-split rmse count mismatch");
 
-    let gam_test_rmse = mean(&gam_rmses);
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
     let gam_test_r2 = mean(&gam_r2s);
-    let mgcv_test_rmse = mean(mgcv_rmses);
 
     eprintln!(
-        "nottem cc(month) #2395 K={K_SPLITS}-split avg: gam_edf(split0)={gam_edf_repr:.3} \
-         gam_test_R2_avg={gam_test_r2:.4} gam_test_rmse_avg={gam_test_rmse:.4} \
-         mgcv_test_rmse_avg={mgcv_test_rmse:.4} wrap_gap(split0)={wrap_gap_repr:.3e}"
+        "nottem cc(month) #2395 K={K_SPLITS}-split paired: gam_edf(split0)={gam_edf_repr:.3} \
+         gam_test_R2_avg={gam_test_r2:.4} wrap_gap(split0)={wrap_gap_repr:.3e}"
     );
+    eprintln!("{}", panel.report("cyclic_cubic::test"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_cyclic_cubic::test",
             "test_rmse",
-            gam_test_rmse,
             "mgcv",
-            mgcv_test_rmse,
+            &panel,
         )
         .line()
     );
@@ -343,11 +340,8 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
         "gam's averaged held-out predictive R2 too low: {gam_test_r2:.4} (< 0.85)"
     );
 
-    // ---- BASELINE (match-or-beat): no worse than mgcv on averaged held-out RMSE.
-    assert!(
-        gam_test_rmse <= mgcv_test_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_test_rmse:.4} exceeds mgcv {mgcv_test_rmse:.4} * 1.10"
-    );
+    // ---- BASELINE (match-or-beat), PAIRED across the K shared splits -------
+    assert_paired_match_or_beat("cyclic_cubic::test", &panel, 1.10);
 
     // ---- STRUCTURE — periodic seam continuity on gam's OWN fit -------------
     assert!(

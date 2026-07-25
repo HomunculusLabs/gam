@@ -18,14 +18,18 @@
 //!     predictor (R2 = 0).
 //!
 //!   BASELINE (match-or-beat): mgcv fits the SAME training rows and predicts the
-//!     SAME held-out rows of each partition; gam's AVERAGED held-out RMSE must be
-//!     no worse than `mgcv_rmse_avg * 1.10`. Averaging a lower-variance metric
-//!     against the same bar is strictly harder than the former single split.
+//!     SAME held-out rows of each partition, so the two arms are PAIRED split by
+//!     split. The verdict comes from `assert_paired_match_or_beat`: gam may not
+//!     be behind by more than the paired split-to-split spread can explain, AND
+//!     its averaged held-out RMSE must still clear the pre-existing
+//!     `mgcv_rmse_avg * 1.10` ceiling. The first clause resolves gaps far inside
+//!     that ceiling, so this is strictly harder than the former single split.
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, r2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, r2, rmse, run_r,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -41,12 +45,18 @@ const K_SPLITS: usize = 10;
 const HOLDOUT: f64 = 0.20;
 
 /// Fit gam (`gam_formula`) + mgcv (`mgcv_formula`) on `K_SPLITS` random partitions
-/// of the lidar data and return averaged (gam_rmse, gam_r2, mgcv_rmse) plus a
-/// representative single-split edf (split 0). `seed_base` offsets the partition
-/// stream so the two arms average over INDEPENDENT partition families. mgcv scores
-/// the SAME K partitions: the per-row 0/1 masks are shipped as `fold0..fold{K-1}`
-/// columns and R loops over them, one subprocess.
-fn gs_kfold_lidar(gam_formula: &str, mgcv_formula: &str, seed_base: usize) -> (f64, f64, f64, f64) {
+/// of the lidar data and return the PAIRED per-split RMSE panel, gam's averaged
+/// held-out R^2, and a representative single-split edf (split 0). `seed_base`
+/// offsets the partition stream so the two arms average over INDEPENDENT
+/// partition families. mgcv scores the SAME K partitions: the per-row 0/1 masks
+/// are shipped as `fold0..fold{K-1}` columns and R loops over them, one
+/// subprocess. Split `k` is therefore the same split for both tools, and the
+/// panel keeps that pairing instead of collapsing each arm to its own mean.
+fn gs_kfold_lidar(
+    gam_formula: &str,
+    mgcv_formula: &str,
+    seed_base: usize,
+) -> (PairedFoldComparison, f64, f64) {
     let ds = load_csvwith_inferred_schema(Path::new(LIDAR_CSV)).expect("load lidar.csv");
     let col = ds.column_map();
     let range_idx = col["range"];
@@ -141,11 +151,10 @@ fn gs_kfold_lidar(gam_formula: &str, mgcv_formula: &str, seed_base: usize) -> (f
         "mgcv per-split rmse count mismatch"
     );
 
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let gam_r2 = gam_r2s.iter().sum::<f64>() / gam_r2s.len() as f64;
     (
-        mean(&gam_rmses),
-        mean(&gam_r2s),
-        mean(mgcv_rmses),
+        PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true),
+        gam_r2,
         gam_edf_repr,
     )
 }
@@ -154,21 +163,21 @@ fn gs_kfold_lidar(gam_formula: &str, mgcv_formula: &str, seed_base: usize) -> (f
 fn gam_smooth_predicts_lidar_better_than_baseline() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse, gam_edf) =
+    let (panel, gam_r2, gam_edf) =
         gs_kfold_lidar("logratio ~ s(range)", "logratio ~ s(range)", 0);
     eprintln!(
-        "lidar s(range) #2395 K={K_SPLITS}-split avg (seed base 0): gam_edf(split0)={gam_edf:.3} \
-         gam_test_R2_avg={gam_r2:.4} gam_test_rmse_avg={gam_rmse:.4} mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range) #2395 K={K_SPLITS}-split paired (seed base 0): \
+         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("gaussian_smooth::default_basis"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "families",
             "quality_vs_mgcv_gaussian_smooth::default_basis",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -177,10 +186,7 @@ fn gam_smooth_predicts_lidar_better_than_baseline() {
         gam_r2 >= 0.55,
         "gam's averaged held-out predictive R2 too low: {gam_r2:.4} (< 0.55)"
     );
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_rmse:.4} exceeds mgcv {mgcv_rmse:.4} * 1.10"
-    );
+    assert_paired_match_or_beat("gaussian_smooth::default_basis", &panel, 1.10);
     assert!(
         gam_edf > 1.0 && gam_edf < 30.0,
         "gam effective dof out of sane range: edf(split0)={gam_edf:.3}"
@@ -200,25 +206,24 @@ fn gam_smooth_predicts_lidar_better_than_baseline() {
 fn gam_smooth_predicts_lidar_better_than_baseline_on_real_data() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse, gam_edf) = gs_kfold_lidar(
+    let (panel, gam_r2, gam_edf) = gs_kfold_lidar(
         "logratio ~ s(range, bs=\"ps\")",
         "logratio ~ s(range, bs = \"ps\")",
         1000,
     );
     eprintln!(
-        "lidar s(range,bs=ps) #2395 K={K_SPLITS}-split avg (seed base 1000): \
-         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4} \
-         gam_test_rmse_avg={gam_rmse:.4} mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range,bs=ps) #2395 K={K_SPLITS}-split paired (seed base 1000): \
+         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("gaussian_smooth::ps_basis"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "families",
             "quality_vs_mgcv_gaussian_smooth::ps_basis",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -227,10 +232,7 @@ fn gam_smooth_predicts_lidar_better_than_baseline_on_real_data() {
         gam_r2 >= 0.55,
         "gam's averaged held-out predictive R2 too low: {gam_r2:.4} (< 0.55)"
     );
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_rmse:.4} exceeds mgcv {mgcv_rmse:.4} * 1.10"
-    );
+    assert_paired_match_or_beat("gaussian_smooth::ps_basis", &panel, 1.10);
     assert!(
         gam_edf > 1.0 && gam_edf < 30.0,
         "gam effective dof out of sane range: edf(split0)={gam_edf:.3}"

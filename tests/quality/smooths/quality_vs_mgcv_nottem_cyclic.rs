@@ -28,11 +28,13 @@
 //!      seasonal signal is strong and clean, so a competent cyclic smooth explains
 //!      the vast majority of held-out variance — far above the constant-mean
 //!      predictor (R2 = 0) and high enough to catch under/over-smoothing.
-//!   2. MATCH-OR-BEAT (accuracy): gam's AVERAGED held-out RMSE is no worse than
-//!      mgcv's by more than 10% — `gam_rmse_avg <= mgcv_rmse_avg * 1.10`. mgcv fits
-//!      the SAME training rows and predicts the SAME held-out months of each
-//!      partition; a lower-variance averaged metric against the same bar is
-//!      strictly harder than the former single split, never a weakening.
+//!   2. MATCH-OR-BEAT (accuracy), PAIRED: mgcv fits the SAME training rows and
+//!      predicts the SAME held-out months of each partition, so the two arms are
+//!      paired split by split. `assert_paired_match_or_beat` then requires BOTH
+//!      that gam is not behind by more than the paired split-to-split spread can
+//!      explain AND that its averaged held-out RMSE still clears the pre-existing
+//!      `mgcv_rmse_avg * 1.10` ceiling — strictly stronger than that flat bar
+//!      alone, never a weakening.
 //!   3. STRUCTURE — periodic seam continuity: gam genuinely enforces the wrap, so
 //!      its fitted cyclic smooth agrees at the period endpoints
 //!      `fit(month=1) == fit(month=13)` to 1e-6. This is a split-invariant property
@@ -41,7 +43,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, r2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, r2, rmse, run_r,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -183,25 +186,23 @@ fn gam_cyclic_predicts_nottem_seasonal_cycle_vs_mgcv() {
         "mgcv per-split rmse count mismatch"
     );
 
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-    let gam_rmse_avg = mean(&gam_rmses);
-    let gam_r2_avg = mean(&gam_r2s);
-    let mgcv_rmse_avg = mean(mgcv_rmses);
+    // Split `k` was the SAME split for both tools, so the comparison is paired.
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
+    let gam_r2_avg = gam_r2s.iter().sum::<f64>() / gam_r2s.len() as f64;
 
     eprintln!(
-        "nottem cc(month) #2395 K={K_SPLITS}-split avg: gam_edf(split0)={gam_edf_repr:.3} \
-         gam_test_R2_avg={gam_r2_avg:.4} gam_test_rmse_avg={gam_rmse_avg:.4} \
-         mgcv_test_rmse_avg={mgcv_rmse_avg:.4} wrap_gap(split0)={wrap_gap_repr:.3e}"
+        "nottem cc(month) #2395 K={K_SPLITS}-split paired: gam_edf(split0)={gam_edf_repr:.3} \
+         gam_test_R2_avg={gam_r2_avg:.4} wrap_gap(split0)={wrap_gap_repr:.3e}"
     );
+    eprintln!("{}", panel.report("nottem_cyclic"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_nottem_cyclic",
             "test_rmse",
-            gam_rmse_avg,
             "mgcv",
-            mgcv_rmse_avg,
+            &panel,
         )
         .line()
     );
@@ -212,11 +213,8 @@ fn gam_cyclic_predicts_nottem_seasonal_cycle_vs_mgcv() {
         "gam averaged held-out predictive R2 too low: {gam_r2_avg:.4} (< 0.85)"
     );
 
-    // 2) MATCH-OR-BEAT (accuracy): gam no worse than mgcv on averaged held-out RMSE.
-    assert!(
-        gam_rmse_avg <= mgcv_rmse_avg * 1.10,
-        "gam averaged held-out RMSE {gam_rmse_avg:.4} exceeds mgcv {mgcv_rmse_avg:.4} * 1.10"
-    );
+    // 2) MATCH-OR-BEAT (accuracy), PAIRED across the K shared splits.
+    assert_paired_match_or_beat("nottem_cyclic", &panel, 1.10);
 
     // 3) STRUCTURE — periodic seam continuity: fit(1) must equal fit(13).
     assert!(

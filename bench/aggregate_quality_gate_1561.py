@@ -20,6 +20,15 @@ Acceptance (matches the issue): one-sided Wilcoxon signed-rank on the effects,
 H1 = median effect < 0 (GAM better), reported overall and per category with a
 Benjamini-Hochberg-adjusted per-category view.
 
+#2395 power view: a pair emitted from a PAIRED fold panel carries its own
+uncertainty (`folds=`, `effect_sem=`, `verdict=` ...). Without those columns the
+rank test must weight a pair whose gap is a hundred times its own noise exactly
+like a pair whose gap IS its noise, which is how ~30 sign-flipping near-ties came
+to dilute this aggregate. The power section below reports, per pair, whether the
+gap is RESOLVED at all and how many standard errors the pairing itself bought.
+It is a diagnostic: the CLOSURE verdict is unchanged and still runs on every
+scored pair.
+
 Usage:
   python bench/aggregate_quality_gate_1561.py quality_run.log
   cargo nextest run -p gam --test quality --no-fail-fast \
@@ -44,6 +53,19 @@ _LINE = re.compile(
     r"lower_is_better=(?P<lower>true|false)"
 )
 
+# #2395 paired-panel columns, appended after `lower_is_better` so the historical
+# prefix stays byte-identical. Absent on single-shot (unpaired) pairs.
+_PAIRED = re.compile(
+    r"folds=(?P<folds>\d+)\s+"
+    r"effect_mean=(?P<effect_mean>\S+)\s+"
+    r"effect_sd=(?P<effect_sd>\S+)\s+"
+    r"effect_sem=(?P<effect_sem>\S+)\s+"
+    r"effect_size=(?P<effect_size>\S+)\s+"
+    r"unpaired_sem=(?P<unpaired_sem>\S+)\s+"
+    r"gam_wins=(?P<gam_wins>\d+)\s+"
+    r"verdict=(?P<verdict>\S+)"
+)
+
 
 def _parse(stream) -> list[dict]:
     rows: dict[tuple[str, str, str], dict] = {}
@@ -54,6 +76,19 @@ def _parse(stream) -> list[dict]:
         gam = float(m["gam"])
         ref = float(m["reference_value"])
         lower = m["lower"] == "true"
+        pm = _PAIRED.search(raw, m.end())
+        paired = None
+        if pm is not None:
+            paired = {
+                "folds": int(pm["folds"]),
+                "effect_mean": float(pm["effect_mean"]),
+                "effect_sd": float(pm["effect_sd"]),
+                "effect_sem": float(pm["effect_sem"]),
+                "effect_size": float(pm["effect_size"]),
+                "unpaired_sem": float(pm["unpaired_sem"]),
+                "gam_wins": int(pm["gam_wins"]),
+                "verdict": pm["verdict"],
+            }
         # de-dup: a retried/parametrized test may emit the same key twice; last wins.
         key = (m["category"], m["test"], m["metric"])
         rows[key] = {
@@ -64,6 +99,7 @@ def _parse(stream) -> list[dict]:
             "reference": m["reference"],
             "reference_value": ref,
             "lower_is_better": lower,
+            "paired": paired,
         }
     return list(rows.values())
 
@@ -284,6 +320,8 @@ def main() -> None:
             "so crashing tests are visible."
         )
 
+    _power_report(rows)
+
     # Worst offenders: the tests GAM loses by the most (largest positive effect).
     scored = [(r, _effect(r)) for r in rows]
     losers = sorted(
@@ -297,6 +335,103 @@ def main() -> None:
             print(
                 f"  {e:+.4f}  {r['category']}/{r['test']} "
                 f"[{r['metric']}] gam={r['gam']:.5g} vs {r['reference']}={r['reference_value']:.5g}"
+            )
+
+
+def _resolution(paired: dict) -> float:
+    """|effect_mean| / effect_sem: standard errors separating the two tools.
+
+    Below ~1 the pair carries essentially no information about which tool is
+    better; that is the near-tie regime #2395 diagnosed. An exactly-zero spread
+    (bit-identical folds) is infinitely resolved and reported as such.
+    """
+    sem = paired["effect_sem"]
+    if sem <= 0.0:
+        return float("inf") if paired["effect_mean"] != 0.0 else 0.0
+    return abs(paired["effect_mean"]) / sem
+
+
+def _power_report(rows: list[dict]) -> None:
+    """#2395: per-pair resolution, and how much the pairing itself bought."""
+    panels = [r for r in rows if r["paired"] is not None]
+    print("\n--- #2395 paired-panel power ---")
+    if not panels:
+        print(
+            "No pair carries fold telemetry. Every comparison here is a single "
+            "point estimate with no measured uncertainty, so the rank test cannot "
+            "distinguish a resolved gap from a coin flip. Route K-fold/K-seed "
+            "sites through QualityPair::paired."
+        )
+        return
+
+    buckets = defaultdict(list)
+    for r in panels:
+        buckets[r["paired"]["verdict"]].append(r)
+    print(
+        f"{len(panels)} of {len(rows)} pairs carry a paired fold panel: "
+        f"{len(buckets['gam_resolved_better'])} resolved BETTER, "
+        f"{len(buckets['gam_resolved_worse'])} resolved WORSE, "
+        f"{len(buckets['unresolved_tie'])} unresolved."
+    )
+
+    gains = sorted(
+        r["paired"]["unpaired_sem"] / r["paired"]["effect_sem"]
+        for r in panels
+        if r["paired"]["effect_sem"] > 0.0
+    )
+    if gains:
+        print(
+            "Pairing gain (unpaired SEM / paired SEM) over these panels: "
+            f"min {gains[0]:.2f}x, median {gains[len(gains) // 2]:.2f}x, "
+            f"max {gains[-1]:.2f}x. Values above 1 are the common fold-draw swing "
+            "that comparing two separately-averaged arms would have paid for."
+        )
+
+    print(
+        f"\n{'pair':<58} {'K':>3} {'effect%':>9} {'sem%':>7} {'|e|/sem':>8} "
+        f"{'d_z':>7} {'wins':>6}  verdict"
+    )
+    for r in sorted(panels, key=lambda r: -_resolution(r["paired"])):
+        pd = r["paired"]
+        label = f"{r['category']}/{r['test']}"
+        print(
+            f"{label[:58]:<58} {pd['folds']:>3} "
+            f"{100.0 * math.expm1(pd['effect_mean']):>+9.3f} "
+            f"{100.0 * math.expm1(pd['effect_sem']):>7.3f} "
+            f"{_resolution(pd):>8.2f} {pd['effect_size']:>+7.2f} "
+            f"{pd['gam_wins']:>3}/{pd['folds']:<2}  {pd['verdict']}"
+        )
+
+    worse = buckets["gam_resolved_worse"]
+    if worse:
+        print(
+            f"\nREAL FINDINGS: {len(worse)} pair(s) where gam is worse by more than "
+            "the paired fold spread can explain. These are systematic, not split "
+            "noise, and each deserves its own investigation:"
+        )
+        for r in worse:
+            pd = r["paired"]
+            print(
+                f"  {r['category']}/{r['test']} [{r['metric']}] vs {r['reference']}: "
+                f"{100.0 * math.expm1(pd['effect_mean']):+.3f}% over {pd['folds']} folds "
+                f"({_resolution(pd):.1f} SEM, gam won {pd['gam_wins']}/{pd['folds']})"
+            )
+
+    unresolved = buckets["unresolved_tie"]
+    if unresolved:
+        print(
+            f"\nDILUTION: {len(unresolved)} paired pair(s) remain unresolved — their "
+            "sign is not established even after fold averaging. They still enter the "
+            "rank test above with full weight. Raising K on these is the lever that "
+            "converts them into evidence:"
+        )
+        for r in sorted(unresolved, key=lambda r: _resolution(r["paired"])):
+            pd = r["paired"]
+            print(
+                f"  {r['category']}/{r['test']}: "
+                f"{100.0 * math.expm1(pd['effect_mean']):+.3f}% +- "
+                f"{100.0 * math.expm1(pd['effect_sem']):.3f}% "
+                f"({_resolution(pd):.2f} SEM over {pd['folds']} folds)"
             )
 
 

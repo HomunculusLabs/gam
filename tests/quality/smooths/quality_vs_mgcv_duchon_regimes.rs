@@ -25,7 +25,9 @@
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{Column, QualityPair, rmse, run_r};
+use gam::test_support::reference::{
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, rmse, run_r,
+};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
@@ -42,10 +44,6 @@ const K_SEEDS: usize = 10;
 
 /// Dense interior test grid length (truth-recovery grid, shared by every seed).
 const GRID_M: usize = 201;
-
-fn mean(v: &[f64]) -> f64 {
-    v.iter().sum::<f64>() / v.len() as f64
-}
 
 /// Fit gam's default 1-D Duchon at the given `k`, fit mgcv's `bs="ds"`,
 /// `m=c(2,0)` analogue on byte-identical data, over K noise seeds, and assert on
@@ -162,22 +160,23 @@ fn assert_gaussian_regime(
     let mgcv_rmses = r.vector("mgcv_rmses");
     assert_eq!(mgcv_rmses.len(), K_SEEDS, "mgcv per-seed rmse count mismatch");
 
-    let gam_rmse_avg = mean(&gam_rmses);
-    let mgcv_rmse_avg = mean(mgcv_rmses);
+    // Seed `s` drew the SAME response vector for both tools, so the truth-recovery
+    // comparison is paired seed by seed and the common noise draw cancels.
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
+    let gam_rmse_avg = panel.gam_mean;
 
     eprintln!(
-        "duchon-regime[{label}] #2395 K={K_SEEDS}-seed avg: n={n} k={k} sigma={sigma} \
-         gam_truth_rmse_avg={gam_rmse_avg:.4} mgcv_truth_rmse_avg={mgcv_rmse_avg:.4}"
+        "duchon-regime[{label}] #2395 K={K_SEEDS}-seed paired: n={n} k={k} sigma={sigma}"
     );
+    eprintln!("{}", panel.report(&format!("duchon_regimes::{label}")));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             &format!("quality_vs_mgcv_duchon_regimes::{label}"),
             "truth_rmse",
-            gam_rmse_avg,
             "mgcv",
-            mgcv_rmse_avg,
+            &panel,
         )
         .line()
     );
@@ -191,12 +190,8 @@ fn assert_gaussian_regime(
          averaged RMSE-vs-truth={gam_rmse_avg:.4} (bar {abs_bar})"
     );
 
-    // (2) MATCH-OR-BEAT mgcv ON ACCURACY VS THE TRUTH (within 10%, averaged).
-    assert!(
-        gam_rmse_avg <= mgcv_rmse_avg * 1.10,
-        "[{label}] gam recovers the truth worse than mgcv: \
-         averaged gam RMSE-vs-truth={gam_rmse_avg:.4} > 1.10 * mgcv={mgcv_rmse_avg:.4}"
-    );
+    // (2) MATCH-OR-BEAT mgcv ON TRUTH ACCURACY, PAIRED across the K shared draws.
+    assert_paired_match_or_beat(&format!("duchon_regimes::{label}"), &panel, 1.10);
 }
 
 /// REGIME A — heavy denoising. A SMOOTH low-frequency truth (a single broad
@@ -346,23 +341,23 @@ fn gam_duchon_1d_poisson_log_mean_recovery_matches_mgcv() {
     let mgcv_rmses = r.vector("mgcv_rmses");
     assert_eq!(mgcv_rmses.len(), K_SEEDS, "mgcv per-seed rmse count mismatch");
 
-    let gam_mu_rmse_avg = mean(&gam_rmses);
-    let mgcv_mu_rmse_avg = mean(mgcv_rmses);
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
+    let gam_mu_rmse_avg = panel.gam_mean;
     let rms_mu = (mu_truth.iter().map(|v| v * v).sum::<f64>() / mu_truth.len() as f64).sqrt();
 
     eprintln!(
-        "duchon-poisson-mean-recovery-1d #2395 K={K_SEEDS}-seed avg: n={n} grid={GRID_M} \
-         gam_mu_rmse_avg={gam_mu_rmse_avg:.4} mgcv_mu_rmse_avg={mgcv_mu_rmse_avg:.4} rms_mu={rms_mu:.4}"
+        "duchon-poisson-mean-recovery-1d #2395 K={K_SEEDS}-seed paired: n={n} grid={GRID_M} \
+         rms_mu={rms_mu:.4}"
     );
+    eprintln!("{}", panel.report("duchon_regimes::mu"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_duchon_regimes::mu",
             "mu_rmse",
-            gam_mu_rmse_avg,
             "mgcv",
-            mgcv_mu_rmse_avg,
+            &panel,
         )
         .line()
     );
@@ -376,10 +371,6 @@ fn gam_duchon_1d_poisson_log_mean_recovery_matches_mgcv() {
          averaged RMSE-vs-truth={gam_mu_rmse_avg:.4} (signal RMS≈{rms_mu:.4}, bar 1.0)"
     );
 
-    // (2) MATCH-OR-BEAT mgcv ON ACCURACY VS THE TRUTH (within 10%, averaged).
-    assert!(
-        gam_mu_rmse_avg <= mgcv_mu_rmse_avg * 1.10,
-        "gam recovers the Poisson mean worse than mgcv: \
-         averaged gam RMSE-vs-truth={gam_mu_rmse_avg:.4} > 1.10 * mgcv={mgcv_mu_rmse_avg:.4}"
-    );
+    // (2) MATCH-OR-BEAT mgcv ON TRUTH ACCURACY, PAIRED across the K shared draws.
+    assert_paired_match_or_beat("duchon_regimes::mu", &panel, 1.10);
 }

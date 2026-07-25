@@ -30,7 +30,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use gam_linalg::test_support::{PairedHoldout, paired_holdout_partition};
+pub use gam_linalg::test_support::{
+    PairedFoldComparison, PairedHoldout, RESOLUTION_TAIL, assert_paired_match_or_beat,
+    paired_holdout_partition,
+};
 
 /// Parsed results emitted by a reference-tool body via `emit(key, values)`.
 pub struct ReferenceResult {
@@ -419,6 +422,15 @@ pub struct QualityPair {
     /// Whether a smaller `metric` is better (true for RMSE/error; false for
     /// held-out log-likelihood / ELPD / coverage-style scores).
     pub lower_is_better: bool,
+    /// The paired fold panel behind `gam`/`reference_value`, when the test
+    /// scored both tools on the SAME folds (#2395).
+    ///
+    /// Without it the aggregate gate sees only two point estimates and must
+    /// weight a pair whose gap is a hundred times its own noise exactly like a
+    /// pair whose gap IS its noise — which is how ~30 sign-flipping near-ties
+    /// came to dilute the #1561 Wilcoxon. Carrying the panel lets the aggregator
+    /// state, per pair, whether the gap is resolved at all.
+    pub folds: Option<PairedFoldComparison>,
 }
 
 impl QualityPair {
@@ -440,6 +452,7 @@ impl QualityPair {
             reference: reference.into(),
             reference_value,
             lower_is_better: true,
+            folds: None,
         }
     }
 
@@ -458,10 +471,40 @@ impl QualityPair {
         }
     }
 
+    /// A quality pair whose two values are fold-averages of a PAIRED panel:
+    /// gam and the reference scored the same folds, in the same fold order.
+    ///
+    /// This is the constructor every K-fold / K-seed quality site should use.
+    /// It derives both reported values from the panel — so the emitted pair can
+    /// never drift from the numbers the assertion saw — and attaches the paired
+    /// spread the aggregator needs to tell a resolved gap from a coin flip.
+    pub fn paired(
+        category: impl Into<String>,
+        test: impl Into<String>,
+        metric: impl Into<String>,
+        reference: impl Into<String>,
+        folds: &PairedFoldComparison,
+    ) -> Self {
+        Self {
+            category: category.into(),
+            test: test.into(),
+            metric: metric.into(),
+            gam: folds.gam_mean,
+            reference: reference.into(),
+            reference_value: folds.reference_mean,
+            lower_is_better: folds.lower_is_better,
+            folds: Some(folds.clone()),
+        }
+    }
+
     /// The single stable line the aggregator consumes. Values use full `f64`
     /// precision so the log-ratio the Wilcoxon test needs is exact.
+    ///
+    /// A paired panel appends its power columns AFTER `lower_is_better`, which
+    /// keeps the historical prefix byte-identical: an aggregator that predates
+    /// #2395 still parses the line, and a newer one reads the extra fields.
     pub fn line(&self) -> String {
-        format!(
+        let head = format!(
             "[QUALITY_PAIR] category={} test={} metric={} gam={:.12e} reference={} reference_value={:.12e} lower_is_better={}",
             self.category,
             self.test,
@@ -470,7 +513,22 @@ impl QualityPair {
             self.reference,
             self.reference_value,
             self.lower_is_better,
-        )
+        );
+        match &self.folds {
+            None => head,
+            Some(f) => format!(
+                "{head} folds={} effect_mean={:.12e} effect_sd={:.12e} effect_sem={:.12e} \
+                 effect_size={:.12e} unpaired_sem={:.12e} gam_wins={} verdict={}",
+                f.folds,
+                f.effect_mean,
+                f.effect_sd,
+                f.effect_sem,
+                f.effect_size(),
+                f.unpaired_sem,
+                f.gam_wins,
+                f.verdict(),
+            ),
+        }
     }
 }
 

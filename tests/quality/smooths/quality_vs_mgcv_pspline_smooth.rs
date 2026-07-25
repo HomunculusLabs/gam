@@ -30,7 +30,8 @@ use gam::data::EncodedDataset;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, r2, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, r2, run_r,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -55,12 +56,13 @@ const K_SPLITS: usize = 10;
 const HOLDOUT: f64 = 0.20;
 
 /// Fit gam + mgcv on `K_SPLITS` random partitions of the lidar data and return
-/// averaged (gam_rmse, gam_r2, mgcv_rmse) over the K held-out sets plus a
+/// the PAIRED per-split RMSE panel, gam's averaged held-out R^2, and a
 /// representative single-split edf (split 0). `seed_base` offsets the partition
 /// stream so the two arms average over INDEPENDENT partition families. mgcv
 /// scores the SAME K partitions: the per-row 0/1 masks are shipped as
-/// `fold0..fold{K-1}` columns and R loops over them, one subprocess.
-fn ps_kfold_lidar(seed_base: usize) -> (f64, f64, f64, f64) {
+/// `fold0..fold{K-1}` columns and R loops over them, one subprocess — so split
+/// `k` is the same split for both tools and the panel can spend that pairing.
+fn ps_kfold_lidar(seed_base: usize) -> (PairedFoldComparison, f64, f64) {
     let ds = load_csvwith_inferred_schema(Path::new(LIDAR_CSV)).expect("load lidar.csv");
     let col = ds.column_map();
     let range_idx = col["range"];
@@ -156,11 +158,10 @@ fn ps_kfold_lidar(seed_base: usize) -> (f64, f64, f64, f64) {
         "mgcv per-split rmse count mismatch"
     );
 
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let gam_r2 = gam_r2s.iter().sum::<f64>() / gam_r2s.len() as f64;
     (
-        mean(&gam_rmses),
-        mean(&gam_r2s),
-        mean(mgcv_rmses),
+        PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true),
+        gam_r2,
         gam_edf_repr,
     )
 }
@@ -169,21 +170,20 @@ fn ps_kfold_lidar(seed_base: usize) -> (f64, f64, f64, f64) {
 fn gam_pspline_generalizes_on_lidar() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse, gam_edf) = ps_kfold_lidar(0);
+    let (panel, gam_r2, gam_edf) = ps_kfold_lidar(0);
     eprintln!(
-        "lidar s(range, bs='ps', k=15) #2395 K={K_SPLITS}-split avg (seed base 0): \
-         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4} \
-         gam_test_rmse_avg={gam_rmse:.4} mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range, bs='ps', k=15) #2395 K={K_SPLITS}-split paired (seed base 0): \
+         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("pspline_smooth"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_pspline_smooth",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -193,11 +193,8 @@ fn gam_pspline_generalizes_on_lidar() {
         gam_r2 >= 0.55,
         "gam p-spline does not generalize on held-out lidar: mean test R^2 = {gam_r2:.4} (need >= 0.55)"
     );
-    // (2) MATCH-OR-BEAT the mature baseline on averaged out-of-sample accuracy.
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_rmse:.4} exceeds mgcv {mgcv_rmse:.4} by > 10%"
-    );
+    // (2) MATCH-OR-BEAT the mature baseline, PAIRED across the K shared splits.
+    assert_paired_match_or_beat("pspline_smooth", &panel, 1.10);
     // (3) sane complexity (NOT edf-matching): more than a line, well under k=15.
     assert!(
         gam_edf > 1.0 && gam_edf < 15.0,
@@ -217,21 +214,20 @@ fn gam_pspline_generalizes_on_lidar() {
 fn gam_pspline_generalizes_on_lidar_on_real_data() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse, gam_edf) = ps_kfold_lidar(1000);
+    let (panel, gam_r2, gam_edf) = ps_kfold_lidar(1000);
     eprintln!(
-        "lidar s(range, bs='ps', k=15) #2395 K={K_SPLITS}-split avg (seed base 1000): \
-         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4} \
-         gam_test_rmse_avg={gam_rmse:.4} mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range, bs='ps', k=15) #2395 K={K_SPLITS}-split paired (seed base 1000): \
+         gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("pspline_smooth::real_data_alt"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_pspline_smooth::real_data_alt",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -240,19 +236,17 @@ fn gam_pspline_generalizes_on_lidar_on_real_data() {
     //     lidar noise floor. A flat-mean predictor scores ~0.18, so <= 0.08 is a
     //     strong, real generalization claim.
     assert!(
-        gam_rmse <= 0.08,
-        "gam averaged held-out RMSE {gam_rmse:.4} exceeds the absolute lidar accuracy bar (0.08)"
+        panel.gam_mean <= 0.08,
+        "gam averaged held-out RMSE {:.4} exceeds the absolute lidar accuracy bar (0.08)",
+        panel.gam_mean
     );
     // (2) generalization floor on averaged explained held-out variance.
     assert!(
         gam_r2 >= 0.55,
         "gam p-spline does not generalize on held-out lidar: mean test R^2 = {gam_r2:.4} (need >= 0.55)"
     );
-    // (3) MATCH-OR-BEAT the mature baseline on averaged out-of-sample RMSE.
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam averaged held-out RMSE {gam_rmse:.4} exceeds mgcv {mgcv_rmse:.4} by > 10%"
-    );
+    // (3) MATCH-OR-BEAT the mature baseline, PAIRED across the K shared splits.
+    assert_paired_match_or_beat("pspline_smooth::real_data_alt", &panel, 1.10);
     // (4) sane complexity (NOT edf-matching).
     assert!(
         gam_edf > 1.0 && gam_edf < 15.0,

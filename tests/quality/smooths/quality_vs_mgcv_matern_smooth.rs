@@ -29,7 +29,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, r2, relative_l2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, r2, relative_l2, rmse, run_r,
 };
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -195,10 +196,11 @@ const HOLDOUT: f64 = 0.20;
 ///     structured (mgcv itself reaches R²≈0.085), so an absolute R²≥0.10 bar would
 ///     measure the data, not gam — the match-or-beat philosophy is used instead.
 ///
-///   BASELINE (match-or-beat): mgcv fits the SAME 2-D GP smooth
+///   BASELINE (match-or-beat, PAIRED): mgcv fits the SAME 2-D GP smooth
 ///     (`s(long, lat, bs="gp", m=4)`, ν=5/2) on the SAME training rows and predicts
-///     the SAME held-out rows of each partition; gam's AVERAGED held-out RMSE must
-///     be no worse than `mgcv_rmse_avg * 1.10`.
+///     the SAME held-out rows of each partition, so the arms pair split by split.
+///     gam may not be behind by more than the paired spread can explain, and must
+///     still clear the pre-existing `mgcv_rmse_avg * 1.10` ceiling.
 #[test]
 fn gam_matern_smooth_recovers_truth_on_real_data() {
     init_parallelism();
@@ -306,26 +308,26 @@ fn gam_matern_smooth_recovers_truth_on_real_data() {
     assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-split rmse count mismatch");
     assert_eq!(mgcv_r2s.len(), K_SPLITS, "mgcv per-split r2 count mismatch");
 
+    // Split `s` was the SAME split for both tools, so the comparison is paired.
+    let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
     let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-    let gam_rmse_avg = mean(&gam_rmses);
     let gam_r2_avg = mean(&gam_r2s);
-    let mgcv_rmse_avg = mean(mgcv_rmses);
     let mgcv_r2_avg = mean(mgcv_r2s);
 
     eprintln!(
-        "quakes matern(long,lat,nu=2.5) #2395 K={K_SPLITS}-split avg: gam_edf(split0)={gam_edf_repr:.3} \
-         gam_test_R2_avg={gam_r2_avg:.4} mgcv_test_R2_avg={mgcv_r2_avg:.4} \
-         gam_test_rmse_avg={gam_rmse_avg:.4} mgcv_test_rmse_avg={mgcv_rmse_avg:.4}"
+        "quakes matern(long,lat,nu=2.5) #2395 K={K_SPLITS}-split paired: \
+         gam_edf(split0)={gam_edf_repr:.3} gam_test_R2_avg={gam_r2_avg:.4} \
+         mgcv_test_R2_avg={mgcv_r2_avg:.4}"
     );
+    eprintln!("{}", panel.report("matern_smooth::test"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "smooths",
             "quality_vs_mgcv_matern_smooth::test",
             "test_rmse",
-            gam_rmse_avg,
             "mgcv",
-            mgcv_rmse_avg,
+            &panel,
         )
         .line()
     );
@@ -337,11 +339,8 @@ fn gam_matern_smooth_recovers_truth_on_real_data() {
          {mgcv_r2_avg:.4} (the mature reference) by more than 0.02"
     );
 
-    // ---- BASELINE (match-or-beat): no worse than mgcv on averaged held-out RMSE.
-    assert!(
-        gam_rmse_avg <= mgcv_rmse_avg * 1.10,
-        "gam averaged held-out RMSE {gam_rmse_avg:.4} exceeds mgcv {mgcv_rmse_avg:.4} * 1.10"
-    );
+    // ---- BASELINE (match-or-beat), PAIRED across the K shared splits -------
+    assert_paired_match_or_beat("matern_smooth::test", &panel, 1.10);
 
     // ---- complexity sanity: spatial edf in a sane range (not matched) ------
     assert!(

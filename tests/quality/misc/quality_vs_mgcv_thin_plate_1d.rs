@@ -20,10 +20,12 @@
 //!   * MATCH-OR-BEAT baseline: mgcv (`mgcv::gam(..., method="REML")`), the mature
 //!     origin of the thin-plate-regression-spline construction, is fit on the
 //!     IDENTICAL train rows of each partition and asked to predict the IDENTICAL
-//!     test rows. gam's AVERAGED held-out RMSE must be `<= mgcv_rmse_avg * 1.10` —
-//!     gam may not be more than 10% worse than the reference on out-of-sample
-//!     error. Averaging a lower-variance metric against the same bar is strictly
-//!     harder than the former single-split test, never a weakening.
+//!     test rows, so the arms are PAIRED split by split.
+//!     `assert_paired_match_or_beat` requires BOTH that gam is not behind by more
+//!     than the paired split-to-split spread can explain AND that its averaged
+//!     held-out RMSE still clears the pre-existing `mgcv_rmse_avg * 1.10`
+//!     ceiling. The first clause resolves deficits far inside that ceiling, so
+//!     this is strictly stronger than the flat bar, never a weakening.
 //!
 //! mgcv is therefore a baseline to match-or-beat on a real predictive metric,
 //! not an oracle whose in-sample curve we copy. EDF agreement is deliberately
@@ -33,7 +35,8 @@
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::{
-    Column, QualityPair, paired_holdout_partition, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat,
+    paired_holdout_partition, rmse, run_r,
 };
 use gam::{FitConfig, FitResult, fit_from_formula, init_parallelism, load_csvwith_inferred_schema};
 use ndarray::Array2;
@@ -169,13 +172,15 @@ const K_SPLITS_TP: usize = 10;
 const HOLDOUT_TP: f64 = 0.20;
 
 /// Fit gam + mgcv on `K_SPLITS_TP` random partitions of the lidar data and return
-/// the averaged (gam_rmse, gam_r2, mgcv_rmse) over the K held-out test sets.
+/// the PAIRED per-split panel plus gam's averaged held-out R^2.
 /// `seed_base` offsets the partition stream so two call sites average over two
 /// INDEPENDENT families of K partitions (the corroboration the two former
 /// distinct deterministic cadences provided). mgcv scores the SAME K partitions:
 /// the per-row 0/1 masks are shipped as `fold0..fold{K-1}` columns and R loops
-/// over them, one subprocess.
-fn tp_kfold_lidar(seed_base: usize) -> (f64, f64, f64) {
+/// over them, one subprocess. Because split `k` is the same split for both arms,
+/// the panel is handed the two per-split vectors — NOT two separate averages —
+/// so the shared decision rule can cancel the common split-draw swing.
+fn tp_kfold_lidar(seed_base: usize) -> (PairedFoldComparison, f64) {
     let ds = load_csvwith_inferred_schema(Path::new(LIDAR_CSV)).expect("load lidar.csv");
     let col = ds.column_map();
     let range_idx = col["range"];
@@ -264,29 +269,31 @@ fn tp_kfold_lidar(seed_base: usize) -> (f64, f64, f64) {
         "mgcv per-split rmse count mismatch"
     );
 
-    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-    (mean(&gam_rmses), mean(&gam_r2s), mean(mgcv_rmses))
+    let gam_r2 = gam_r2s.iter().sum::<f64>() / gam_r2s.len() as f64;
+    (
+        PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true),
+        gam_r2,
+    )
 }
 
 #[test]
 fn gam_thin_plate_1d_predicts_heldout_lidar_at_least_as_well_as_mgcv() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse) = tp_kfold_lidar(0);
+    let (panel, gam_r2) = tp_kfold_lidar(0);
     eprintln!(
-        "lidar s(range, bs=tp, k=20) #2395 K={K_SPLITS_TP}-split avg (seed base 0): \
-         gam_test_R2_avg={gam_r2:.4} gam_test_rmse_avg={gam_rmse:.4} \
-         mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range, bs=tp, k=20) #2395 K={K_SPLITS_TP}-split paired (seed base 0): \
+         gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("thin_plate_1d::seeded_split"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "misc",
             "quality_vs_mgcv_thin_plate_1d::seeded_split",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -298,11 +305,9 @@ fn gam_thin_plate_1d_predicts_heldout_lidar_at_least_as_well_as_mgcv() {
         "gam thin-plate fails to generalize on held-out lidar: mean test R^2={gam_r2:.4} (need >= 0.55)"
     );
 
-    // MATCH-OR-BEAT: gam's averaged out-of-sample error must not exceed mgcv's by >10%.
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam held-out RMSE worse than mgcv by >10%: gam_avg={gam_rmse:.4} mgcv_avg={mgcv_rmse:.4}"
-    );
+    // MATCH-OR-BEAT, paired: gam may not be behind by more than the fold-to-fold
+    // spread can explain, and still may not exceed the pre-existing 10% ceiling.
+    assert_paired_match_or_beat("thin_plate_1d::seeded_split", &panel, 1.10);
 }
 
 /// Second, independent corroboration of the SAME thin-plate 1-D capability: an
@@ -319,21 +324,20 @@ fn gam_thin_plate_1d_predicts_heldout_lidar_at_least_as_well_as_mgcv() {
 fn gam_thin_plate_1d_predicts_heldout_lidar_at_least_as_well_as_mgcv_on_real_data() {
     init_parallelism();
 
-    let (gam_rmse, gam_r2, mgcv_rmse) = tp_kfold_lidar(1000);
+    let (panel, gam_r2) = tp_kfold_lidar(1000);
     eprintln!(
-        "lidar s(range, bs=tp, k=20) #2395 K={K_SPLITS_TP}-split avg (seed base 1000): \
-         gam_test_R2_avg={gam_r2:.4} gam_test_rmse_avg={gam_rmse:.4} \
-         mgcv_test_rmse_avg={mgcv_rmse:.4}"
+        "lidar s(range, bs=tp, k=20) #2395 K={K_SPLITS_TP}-split paired (seed base 1000): \
+         gam_test_R2_avg={gam_r2:.4}"
     );
+    eprintln!("{}", panel.report("thin_plate_1d::i_mod_4_split"));
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "misc",
             "quality_vs_mgcv_thin_plate_1d::i_mod_4_split",
             "test_rmse",
-            gam_rmse,
             "mgcv",
-            mgcv_rmse,
+            &panel,
         )
         .line()
     );
@@ -343,9 +347,5 @@ fn gam_thin_plate_1d_predicts_heldout_lidar_at_least_as_well_as_mgcv_on_real_dat
         "gam thin-plate fails to generalize on held-out lidar (independent partitions): \
          mean test R^2={gam_r2:.4} (need >= 0.55)"
     );
-    assert!(
-        gam_rmse <= mgcv_rmse * 1.10,
-        "gam held-out RMSE worse than mgcv by >10% (independent partitions): \
-         gam_avg={gam_rmse:.4} mgcv_avg={mgcv_rmse:.4}"
-    );
+    assert_paired_match_or_beat("thin_plate_1d::i_mod_4_split", &panel, 1.10);
 }
