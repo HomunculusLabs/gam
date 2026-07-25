@@ -5405,3 +5405,5 @@ pub(crate) fn returned_mode_finalizer_rejects_different_certified_objective() {
 mod inner_solver_numerics;
 
 mod effective_df_floor_box_2370;
+
+mod anchored_continuation_2366;

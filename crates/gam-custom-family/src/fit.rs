@@ -829,6 +829,227 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
     Ok(upper)
 }
 
+/// Seed the outer search with the mode the *definition* of `θ̂(ρ)` names, rather
+/// than with whatever mode the inner solver happens to reach from the caller's
+/// coefficients (#2366).
+///
+/// # Why a definition is needed at all
+///
+/// The outer criterion is profiled: `V(ρ) = ℓ_p(θ̂(ρ), ρ)` with
+/// `θ̂(ρ) ∈ argmin_θ ℓ_p(θ, ρ)`. `V` is a *function of ρ* only when that `argmin`
+/// is single-valued, or when a selection rule fixes which element is meant. For
+/// every family whose joint likelihood Hessian depends on β — link-wiggle (the
+/// warp basis is evaluated at the current index), transformation models with an
+/// `I`-spline cone, constrained PIRLS, locscale with a nonlinear warp —
+/// `ℓ_p(·, ρ)` is nonconvex and the `argmin` is a set. Without a selection rule,
+/// `θ̂` is a functional of the solver's trajectory and of the persistent cache,
+/// so `V` is not a function, and three things follow that this codebase has been
+/// treating as separate defects:
+///
+/// * the same data and model fit differently depending on cache state (#2363);
+/// * the envelope identity `dV/dρ = ∂ℓ_p/∂ρ|_θ̂` holds only along a branch that
+///   is continuous in ρ, so evaluations that land on different branches produce
+///   a gradient describing one branch and a value sequence walking another —
+///   the objective↔gradient desync class (#2349, #1561, #2298);
+/// * a gradient method cannot certify stationarity of an object that changes
+///   under it, so `‖Pg‖` stalls at `O(branch gap / step)` instead of `→ 0`.
+///
+/// # The selection rule
+///
+/// `θ̂(ρ)` is defined as the endpoint of the continuation that starts at the
+/// anchor `ρ_A` and follows the segment `ρ(t) = ρ_A + t·(ρ − ρ_A)`, `t: 0 → 1`.
+/// The anchor is [`effective_df_floor_rho_upper_bounds`] — the per-coordinate ρ
+/// at which each penalized term's structural unit-weight effective df reaches
+/// one. Three properties make it the canonical anchor rather than a chosen
+/// constant: it is bisected out of the design/penalty generalized eigenvalues so
+/// it is data-determined and carries no knob; at it each term sits on its
+/// penalty nullspace, where the surviving low-dimensional problem is the
+/// parametric fit and the mode is unique; and it is already the optimizer's own
+/// upper bound, so the whole path lies inside the admissible ρ-box.
+///
+/// The mathematical object is the limit of the exact continuation path, so the
+/// discretization is refined — 1, 2, 4, … uniform steps — until the endpoint
+/// stops moving. The stopping yardstick is the inner solver's own convergence
+/// tolerance: refinement halts once two successive discretizations agree to
+/// within what the corrector itself can resolve, which is the point past which
+/// a finer path cannot carry information. This is a self-consistency criterion,
+/// not a budget, so it introduces no tunable constant.
+///
+/// # Failure is not an error here
+///
+/// A corrector that does not converge means the path met a fold, and the
+/// continuation does not name a mode there. This returns `None` in that case and
+/// the caller keeps its existing seed: the definition improves the seed where it
+/// applies and never converts a fit that works today into a failure.
+pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync + 'static>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    layout: &PenaltyLabelLayout,
+    rho_prior: &gam_problem::RhoPrior,
+    rho_anchor: &Array1<f64>,
+    rho_target: &Array1<f64>,
+) -> Option<ConstrainedWarmStart> {
+    if rho_anchor.len() != rho_target.len() {
+        return None;
+    }
+    let mut coarser: Option<ConstrainedWarmStart> = None;
+    let mut previous_discrepancy: Option<f64> = None;
+    let mut steps = 1usize;
+    loop {
+        let endpoint = anchored_continuation_pass(
+            family, specs, options, layout, rho_prior, rho_anchor, rho_target, steps,
+        )?;
+        if let Some(previous) = coarser.as_ref() {
+            let discrepancy = continuation_endpoint_discrepancy(previous, &endpoint)?;
+            if discrepancy <= options.inner_tol {
+                log::info!(
+                    "[OUTER] #2366 anchored continuation seed accepted at {steps} steps \
+                     (endpoint invariant under refinement; discrepancy {discrepancy:.3e})"
+                );
+                return Some(endpoint);
+            }
+            // Halving the step must at least halve the discretization error of a
+            // convergent continuation. A discrepancy that stops contracting is
+            // not a discretization that needs to be finer — it is the signature
+            // of a fold or a bifurcation on the path, where the continuation does
+            // not name a mode at all. Diagnosing that is what terminates this
+            // loop; there is deliberately no iteration budget, because a budget
+            // would silently return the wrong mode instead of declining.
+            if matches!(previous_discrepancy, Some(previous) if discrepancy >= previous) {
+                log::info!(
+                    "[OUTER] #2366 anchored continuation abandoned at {steps} steps: endpoint \
+                     discrepancy stopped contracting ({discrepancy:.3e} vs {:.3e}), so the path \
+                     carries a fold rather than an under-resolved segment",
+                    previous_discrepancy.unwrap_or(f64::NAN)
+                );
+                return None;
+            }
+            previous_discrepancy = Some(discrepancy);
+        }
+        let refined = steps.checked_mul(2)?;
+        if !continuation_path_resolves_steps(rho_anchor, rho_target, refined) {
+            // Refinement has reached the floating-point resolution of the path
+            // itself; a finer discretization is not representable, so the
+            // continuation limit is not attainable here.
+            log::info!(
+                "[OUTER] #2366 anchored continuation seed abandoned: endpoint still moving at \
+                 {steps} steps, and {refined} steps are below the ρ-path's floating-point \
+                 resolution"
+            );
+            return None;
+        }
+        coarser = Some(endpoint);
+        steps = refined;
+    }
+}
+
+/// One continuation sweep at a fixed discretization: solve the inner problem at
+/// each waypoint, carrying the previous mode forward as the predictor.
+///
+/// The sweep starts AT the anchor (`step == 0`). That first solve is the one
+/// that makes the whole construction well defined: it is the only corrector that
+/// runs from the caller's coefficients, and at the anchor every penalized term
+/// sits on its penalty nullspace, so the surviving problem has a single mode and
+/// the caller's seed cannot select anything. Every later waypoint is warm-started
+/// from the previous one, so the branch is carried forward rather than
+/// rediscovered.
+///
+/// The final waypoint uses `rho_target` verbatim rather than the reconstructed
+/// `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the requested ρ*
+/// bitwise, because everything downstream binds the mode and its ρ as one
+/// identity.
+#[allow(clippy::too_many_arguments)]
+fn anchored_continuation_pass<F: CustomFamily + Clone + Send + Sync + 'static>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    layout: &PenaltyLabelLayout,
+    rho_prior: &gam_problem::RhoPrior,
+    rho_anchor: &Array1<f64>,
+    rho_target: &Array1<f64>,
+    steps: usize,
+) -> Option<ConstrainedWarmStart> {
+    let mut carried: Option<ConstrainedWarmStart> = None;
+    for step in 0..=steps {
+        let waypoint = if step == steps {
+            rho_target.clone()
+        } else if step == 0 {
+            rho_anchor.clone()
+        } else {
+            let t = step as f64 / steps as f64;
+            Array1::from_shape_fn(rho_target.len(), |j| {
+                rho_anchor[j] + t * (rho_target[j] - rho_anchor[j])
+            })
+        };
+        let eval = outerobjectivegradienthessian_labeled(
+            family,
+            specs,
+            options,
+            layout,
+            &waypoint,
+            carried.as_ref(),
+            rho_prior,
+            EvalMode::ValueOnly,
+        )
+        .ok()?;
+        if !eval.inner_converged || !eval.objective.is_finite() {
+            return None;
+        }
+        carried = Some(eval.warm_start);
+    }
+    carried
+}
+
+/// How far apart two continuation endpoints are, relative to each coefficient's
+/// own magnitude.
+///
+/// The measure is scale-free so it is invariant to the units of a block, and it
+/// is compared against the inner solve's own convergence tolerance rather than
+/// against a separate constant: two endpoints closer than what the corrector
+/// itself resolves are not evidence that the discretization still matters.
+/// `None` means the two endpoints do not even describe the same block structure,
+/// which is not a discrepancy but a broken comparison.
+fn continuation_endpoint_discrepancy(
+    coarser: &ConstrainedWarmStart,
+    finer: &ConstrainedWarmStart,
+) -> Option<f64> {
+    if coarser.block_beta.len() != finer.block_beta.len() {
+        return None;
+    }
+    let mut worst = 0.0_f64;
+    for (a, b) in coarser.block_beta.iter().zip(finer.block_beta.iter()) {
+        if a.len() != b.len() {
+            return None;
+        }
+        for (x, y) in a.iter().zip(b.iter()) {
+            worst = worst.max((x - y).abs() / (1.0 + x.abs().max(y.abs())));
+        }
+    }
+    Some(worst)
+}
+
+/// Whether a `steps`-way uniform split of the continuation path is still
+/// resolvable in floating point.
+///
+/// Once a step is smaller than the spacing of the ρ values it separates, the
+/// waypoints collapse onto each other and refining further cannot change the
+/// endpoint — the loop must stop rather than spin.
+fn continuation_path_resolves_steps(
+    rho_anchor: &Array1<f64>,
+    rho_target: &Array1<f64>,
+    steps: usize,
+) -> bool {
+    rho_anchor
+        .iter()
+        .zip(rho_target.iter())
+        .any(|(anchor, target)| {
+            let span = (target - anchor).abs();
+            let scale = anchor.abs().max(target.abs()).max(1.0);
+            span / steps as f64 > f64::EPSILON * scale
+        })
+}
+
 /// Bind one evaluator-owned coefficient mode to the optimizer-owned terminal
 /// certificate and consume the carrier on success.
 ///
@@ -1283,6 +1504,11 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         RhoLowerWall(options.rho_lower_bound),
         RhoCeiling(EFFECTIVE_DF_CEILING),
     )?;
+    // The per-coordinate ρ at which each penalized term's structural effective
+    // df reaches one. This is both the optimizer's upper bound and — because
+    // every term sits on its penalty nullspace there, leaving a unique
+    // parametric mode — the anchor of the #2366 continuation below.
+    let rho_upper_bounds = effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?;
     let problem = OuterProblem::new(n_rho)
         .with_stuck_stall_cold_reeval_signal(Arc::clone(&outer_force_cold))
         .with_gradient(cap_gradient)
@@ -1325,7 +1551,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // λ-upper-side dual of the #752 full-subspace logdet work.
         .with_bounds(
             Array1::<f64>::from_elem(n_rho, rho_box.lower()),
-            effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?,
+            rho_upper_bounds.clone(),
         );
     // Install the seed-screening cap only when initial-rho screening is
     // wanted. A caller that pins an already-identified `initial_rho` and
@@ -1597,9 +1823,31 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         })
     };
 
+    // #2366: for a family whose joint likelihood Hessian depends on β the inner
+    // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
+    // criterion is only a function of ρ once a selection rule is fixed. Seed the
+    // search with the mode the selection rule names — the endpoint of the
+    // continuation from the effective-df-floor anchor — instead of with whatever
+    // mode the caller's coefficients happen to reach. Where the family's inner
+    // problem is convex the mode is already unique and the continuation would be
+    // pure overhead, so it is not run. See [`anchored_continuation_seed`].
+    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent() {
+        anchored_continuation_seed(
+            family,
+            specs,
+            &outer_options,
+            &label_layout,
+            &rho_prior,
+            &rho_upper_bounds,
+            &rho0,
+        )
+        .or_else(|| persistent_warm_start.clone())
+    } else {
+        persistent_warm_start.clone()
+    };
     let mut obj = problem.build_objective_with_screening_proxy(
         CustomOuterState::new_with_cold_signal(
-            persistent_warm_start.clone(),
+            initial_warm_cache,
             Arc::clone(&outer_force_cold),
         )
         .with_inner_cap(
