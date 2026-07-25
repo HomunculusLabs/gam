@@ -3028,6 +3028,30 @@ pub(crate) fn rebuild_metric_consistent_ridge(
     )?))
 }
 
+/// The chart [`rebuild_metric_consistent_ridge`] lands in, as an orthogonal
+/// projector — the object an analytic ψ-jet of the ridge must be transported
+/// through.
+///
+/// Written out, the rebuild is `N (Nᵀ R N) Nᵀ = P R P` with `P = N Nᵀ` the
+/// orthogonal projector onto `null(S_c)`. In that form it is manifestly LINEAR
+/// in `R` and independent of which orthonormal basis of the null space `N`
+/// happens to be, and that is what makes a derivative transport exact: a
+/// basis's curvature seminorm has a STRUCTURAL null space (its polynomial
+/// block, not a κ-dependent numerical accident), so `P` does not move with the
+/// hyperparameter and
+///
+///   `d/dψ (P R(ψ) P) = P R'(ψ) P`.
+///
+/// A derivative builder that skips this ships the jet of the pre-rebuild ridge,
+/// leaving the outer REML objective and its analytic gradient describing
+/// different penalties. Returns `None` exactly when the rebuild would — the
+/// constrained primary is full rank, so the block is dropped and has no jet.
+pub(crate) fn constrained_ridge_projector(
+    primary_constrained: &ConstructiveQuadratic,
+) -> Result<Option<Array2<f64>>, BasisError> {
+    Ok(constructive_nullspace_basis(primary_constrained)?.map(|n| fast_abt(&n, &n)))
+}
+
 pub(crate) fn default_internal_knot_count_for_data(n: usize, degree: usize) -> usize {
     if n < 8 {
         return 0;

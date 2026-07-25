@@ -219,48 +219,113 @@ fn duchon_trend_ridge_annihilates_the_constrained_curvature_seminorm_2433() {
 /// dropping it (#2433), which is why this gate ships with that fix.
 #[test]
 fn duchon_trend_ridge_log_kappa_derivative_matches_finite_difference_2433() {
-    // Small, fully explicit fixture: the frozen `Z` is an orthonormal
-    // complement of a vector with support on the affine SLOPE column, which is
-    // what makes the rebuild non-trivial (a `Z` orthogonal to the trend frame
-    // would leave `P R P == R` and prove nothing).
-    let data = covariate(64);
-    let centers = Array2::from_shape_fn((6, 1), |(i, _)| -2.5 + i as f64);
-    let width = centers.nrows(); // kernel(k-2) + poly(2) for a 1-D Linear null space
-    let mut anchor = Array2::<f64>::zeros((width, 1));
-    for i in 0..width {
-        anchor[[i, 0]] = 1.0 + 0.5 * i as f64;
-    }
-    let (z, rank) = gam::linalg::faer_ndarray::rrqr_nullspace_basis(
-        &anchor,
-        gam::linalg::faer_ndarray::default_rrqr_rank_alpha(),
-    )
-    .expect("orthonormal complement of the anchor direction");
-    assert_eq!(rank, 1);
-    assert_eq!(z.dim(), (width, width - 1));
+    let data = covariate(1000);
+    let centers = Array2::from_shape_fn((12, 1), |(i, _)| -3.0 + (i as f64) * 6.0 / 11.0);
 
-    let spec_at = |length_scale: f64| DuchonBasisSpec {
+    let raw_spec_at = |length_scale: f64| DuchonBasisSpec {
         radial_reparam: None,
         center_strategy: CenterStrategy::UserProvided(centers.clone()),
         periodic: None,
         length_scale: Some(length_scale),
         power: 1.0,
         nullspace_order: DuchonNullspaceOrder::Linear,
-        identifiability: SpatialIdentifiability::FrozenTransform {
-            transform: z.clone(),
-        },
+        identifiability: SpatialIdentifiability::None,
         aniso_log_scales: None,
         operator_penalties: DuchonOperatorPenaltySpec::all_active(),
         boundary: OneDimensionalBoundary::Open,
     };
 
-    let base_length_scale = 0.9_f64;
-    let built = gam::basis::build_duchon_basis(data.view(), &spec_at(base_length_scale))
-        .expect("frozen-chart Duchon basis");
-    let trend_index = built
-        .active_penalties
-        .iter()
-        .position(|p| matches!(p.info.source, PenaltySource::DoublePenaltyNullspace))
-        .expect("the frozen chart must keep a trend ridge for this fixture");
+    // Build the frozen `Z` the way production does — the coefficient directions
+    // whose REALIZED design column is orthogonal to the intercept, i.e. the null
+    // space of `Bᵀ1`. An arbitrary orthonormal complement will not do: it is
+    // exactly how much of the affine trend survives the specific chart that
+    // decides whether the rebuild is non-trivial, and only the
+    // realized-intercept chart is the one fits actually take.
+    let chart_at = |length_scale: f64| {
+        let raw = gam::basis::build_duchon_basis(data.view(), &raw_spec_at(length_scale))
+            .expect("raw-chart Duchon basis");
+        let raw_design = raw.design.to_dense();
+        let width = raw_design.ncols();
+        let mut intercept_cross = Array2::<f64>::zeros((width, 1));
+        for j in 0..width {
+            intercept_cross[[j, 0]] = raw_design.column(j).sum();
+        }
+        let (z, rank) = gam::linalg::faer_ndarray::rrqr_nullspace_basis(
+            &intercept_cross,
+            gam::linalg::faer_ndarray::default_rrqr_rank_alpha(),
+        )
+        .expect("realized-intercept orthogonality chart");
+        assert_eq!(rank, 1);
+        assert_eq!(z.dim(), (width, width - 1));
+        z
+    };
+
+    // Whether the constrained curvature seminorm retains an affine null
+    // direction — and so whether the trend ridge survives at all — currently
+    // depends on where the machine-scale affine conditioning ridge (gam#1816)
+    // falls relative to `spectral_tolerance`, which moves with the Gram's
+    // conditioning. Rather than hand-tune one length scale into that regime and
+    // have the fixture silently stop exercising the rebuild later, scan and
+    // require that the regime exists at all.
+    let (base_length_scale, z, built, trend_index) = [1.0_f64, 2.0, 4.0, 8.0, 16.0, 32.0]
+        .into_iter()
+        .find_map(|length_scale| {
+            let z = chart_at(length_scale);
+            let spec = DuchonBasisSpec {
+                identifiability: SpatialIdentifiability::FrozenTransform {
+                    transform: z.clone(),
+                },
+                ..raw_spec_at(length_scale)
+            };
+            let built = gam::basis::build_duchon_basis(data.view(), &spec).ok()?;
+            let index = built
+                .active_penalties
+                .iter()
+                .position(|p| matches!(p.info.source, PenaltySource::DoublePenaltyNullspace))?;
+            Some((length_scale, z, built, index))
+        })
+        .expect(
+            "no length scale in the scan produced a constrained chart that keeps the \
+             trend ridge; the double penalty is then unreachable for every 1-D hybrid \
+             Duchon smooth and there is nothing left for this gate to check",
+        );
+
+    let spec_at = |length_scale: f64| DuchonBasisSpec {
+        identifiability: SpatialIdentifiability::FrozenTransform {
+            transform: z.clone(),
+        },
+        ..raw_spec_at(length_scale)
+    };
+
+    // Make the gate discriminating: if the rebuild were an identity here, the
+    // pre-rebuild jet would agree with the post-rebuild one and this test would
+    // pass on the defect it exists to catch. The shipped block must differ
+    // materially from the plain congruence of the raw-chart ridge.
+    {
+        let raw = gam::basis::build_duchon_basis(data.view(), &raw_spec_at(base_length_scale))
+            .expect("raw-chart Duchon basis");
+        let raw_ridge = raw
+            .active_penalties
+            .iter()
+            .find(|p| matches!(p.info.source, PenaltySource::DoublePenaltyNullspace))
+            .expect("the raw chart emits a trend ridge");
+        let congruence = z.t().dot(&raw_ridge.matrix).dot(&z);
+        let unit = |m: &Array2<f64>| {
+            let norm = m.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+            m.mapv(|v| v / norm)
+        };
+        let gap = (unit(&congruence) - unit(&built.active_penalties[trend_index].matrix))
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            gap > 1e-3,
+            "fixture is not discriminating: the constrained-chart rebuild is a no-op \
+             here (relative gap {gap:.3e}), so it cannot distinguish a jet taken \
+             before the rebuild from one taken after"
+        );
+    }
 
     // ψ = log κ = −log(length_scale).
     let eps = 2.0e-5_f64;

@@ -2341,9 +2341,46 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         &gram_psi,
         &gram_psi_psi,
     )?;
-    let trend_value = project_penalty_matrix(&trend_jet.value, identifiability_transform);
-    let trend_first = project_penalty_matrix(&trend_jet.first_a, identifiability_transform);
-    let trend_second = project_penalty_matrix(&trend_jet.mixed, identifiability_transform);
+    let mut trend_value = project_penalty_matrix(&trend_jet.value, identifiability_transform);
+    let mut trend_first = project_penalty_matrix(&trend_jet.first_a, identifiability_transform);
+    let mut trend_second = project_penalty_matrix(&trend_jet.mixed, identifiability_transform);
+    if identifiability_transform.is_some() {
+        // In a constrained chart the value builder does NOT ship the
+        // congruence-transported raw trend ridge: it rebuilds it onto
+        // `null(Zᵀ S Z)` (`duchon_native_penalty_candidates`, #1476/#2372), and
+        // that rebuild is not an identity — the trend frame's covector
+        // transport `Zᵀ N` is generally not the surviving null direction. So
+        // the jet has to be the jet of the REBUILT block, or the outer REML
+        // objective and its analytic ψ-gradient describe different penalties
+        // (which is invisible to every existing Duchon jet FD gate, since they
+        // all run with `SpatialIdentifiability::None`, where no rebuild
+        // happens). The rebuild is `P · R · P` with `P` the ψ-invariant
+        // projector onto the structural affine null space, so transporting the
+        // whole jet through `P` is exact rather than an approximation (#2433).
+        let primary_constrained = ConstructiveQuadratic::try_from_dense_psd(
+            primary.clone(),
+            "Duchon final-chart primary for trend-ridge jet transport",
+        )?;
+        match crate::basis::constrained_ridge_projector(&primary_constrained)? {
+            Some(projector) => {
+                let transport =
+                    |block: &Array2<f64>| symmetrize(&fast_ab(&fast_ab(&projector, block), &projector));
+                trend_value = transport(&trend_value);
+                trend_first = transport(&trend_first);
+                trend_second = transport(&trend_second);
+            }
+            None => {
+                // The constrained primary is full rank: the value builder zeroes
+                // the block and `filter_penalty_candidates` drops it, so this jet
+                // is never consumed. Zero it rather than shipping a derivative for
+                // a penalty the design does not carry.
+                let width = primary.nrows();
+                trend_value = Array2::<f64>::zeros((width, width));
+                trend_first = Array2::<f64>::zeros((width, width));
+                trend_second = Array2::<f64>::zeros((width, width));
+            }
+        }
+    }
     let (_, trend_psi_norm, trend_psi_psi_norm, _) =
         normalize_penaltywith_psi_derivatives(&trend_value, &trend_first, &trend_second);
     let candidates = duchon_native_penalty_candidates(
