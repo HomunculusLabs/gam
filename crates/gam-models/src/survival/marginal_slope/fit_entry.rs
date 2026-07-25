@@ -478,18 +478,6 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         ));
         seeds
     };
-    let tiny_fixed_kappa_options = if n < 1_000 && kappa_options.enabled {
-        let mut opts = kappa_options.clone();
-        opts.enabled = false;
-        log::info!(
-            "[survival-marginal-slope/kappa] fixed-bootstrap-kappa tiny-fit policy n={} threshold=1000",
-            n,
-        );
-        Some(opts)
-    } else {
-        None
-    };
-    let kappa_options_effective = tiny_fixed_kappa_options.as_ref().unwrap_or(kappa_options);
     let setup = joint_setup(
         data,
         time_penalties_len,
@@ -503,7 +491,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &baseline_lower_theta,
         &baseline_upper_theta,
         learned_log_sigma_coordinate,
-        kappa_options_effective,
+        kappa_options,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1164,7 +1152,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         analytic_joint_hessian_available,
         derivative_probe_started.elapsed().as_secs_f64(),
     );
-    let kappa_options_ref: &SpatialLengthScaleOptimizationOptions = kappa_options_effective;
+    let kappa_options_ref: &SpatialLengthScaleOptimizationOptions = kappa_options;
     let hyper_layout_cache = RefCell::new(
         None::<(
             Array1<f64>,
