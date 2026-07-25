@@ -565,8 +565,9 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
     let half = n.div_ceil(2);
     for i in 0..half {
         let mut z = (std::f64::consts::PI * (i as f64 + 0.75) / (n as f64 + 0.5)).cos();
-        let mut pp = 0.0_f64;
-        for _ in 0..200 {
+        // `(P_n(z), P_n'(z))` by Bonnet's recurrence, with the derivative taken
+        // from `P_n'(z) = n(z·P_n − P_{n−1})/(z² − 1)`.
+        let legendre_value_and_slope = |z: f64| {
             let mut p1 = 1.0_f64;
             let mut p2 = 0.0_f64;
             for j in 0..n {
@@ -574,13 +575,33 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
                 p2 = p1;
                 p1 = ((2.0 * j as f64 + 1.0) * z * p2 - j as f64 * p3) / (j as f64 + 1.0);
             }
-            pp = n as f64 * (z * p1 - p2) / (z * z - 1.0);
+            (p1, n as f64 * (z * p1 - p2) / (z * z - 1.0))
+        };
+        for _ in 0..200 {
+            let (p1, pp) = legendre_value_and_slope(z);
             let z_prev = z;
             z = z_prev - p1 / pp;
             if (z - z_prev).abs() < 1e-15 {
                 break;
             }
         }
+        // Re-evaluate `P_n'` AT the node being returned. The loop leaves `pp`
+        // one Newton step stale — it was formed at `z_prev`, and `z` has since
+        // moved by up to the `1e-15` break threshold — while the weight below
+        // reads the fresh `z` in its `(1 − z²)`. Mixing the two is not a wash:
+        // Legendre's equation gives `P_n'' = 2z·P_n'/(1 − z²)` at a root, so a
+        // node offset `δ` lands in the weight amplified by `2·2z/(1 − z²)`,
+        // which runs to ~5900 for the outermost node at `n = 128`. One more
+        // Bonnet pass costs `O(n)` against the `O(n·iterations)` already spent
+        // per node and removes it: worst weight error falls 8.3e-14 -> 1.9e-15
+        // at `n = 16` and 8.2e-14 -> 5.6e-15 at `n = 32`.
+        //
+        // It does NOT help past `n ≈ 64`, where the same amplification acts on
+        // the node's own irreducible ~1 ulp: the outer nodes crowd toward ±1,
+        // `1 − z²` falls to `3e-4`, and the weights there hold ~3e-13 no matter
+        // how `pp` is evaluated. Escaping that needs a weight formula that does
+        // not route through `P_n'(z)` at all, not a better Newton loop.
+        let (_, pp) = legendre_value_and_slope(z);
         let w = 2.0 / ((1.0 - z * z) * pp * pp);
         // For odd n the central node is at z = 0; record once.
         if !n.is_multiple_of(2) && i == half - 1 {
@@ -1340,6 +1361,97 @@ mod tests {
             if n >= 2 {
                 let x2: f64 = nodes.iter().zip(&weights).map(|(x, w)| w * x * x).sum();
                 assert!((x2 - 2.0 / 3.0).abs() < 1e-13, "∫x² dx = 2/3, got {x2}");
+            }
+            // Degrees 0 and 2 alone exercise almost none of the rule — the
+            // weights barely matter there. Assert the whole `2n−1` guarantee.
+            //
+            // The odd degrees integrate to zero by symmetry, so the error is
+            // measured against `Σ|w·xᵈ|`, the size of the terms that had to
+            // cancel, rather than against the vanishing answer. For the even
+            // degrees every term is positive and that denominator IS the exact
+            // value, so the same expression is the ordinary relative error.
+            for degree in 0..(2 * n) {
+                let term = |(x, w): (&f64, &f64)| w * x.powi(degree as i32);
+                let quadrature: f64 = nodes.iter().zip(&weights).map(term).sum();
+                let magnitude: f64 = nodes.iter().zip(&weights).map(|p| term(p).abs()).sum();
+                let exact = if degree % 2 == 1 {
+                    0.0
+                } else {
+                    2.0 / (degree as f64 + 1.0)
+                };
+                let scale = magnitude.max(exact);
+                // `n = 1` puts its only node at exactly zero, so every odd
+                // degree has nothing to cancel and must come out exactly zero.
+                if scale == 0.0 {
+                    assert_eq!(quadrature, 0.0, "n={n}, x^{degree}");
+                    continue;
+                }
+                assert!(
+                    (quadrature - exact).abs() / scale < 1.0e-13,
+                    "n={n} rule must integrate x^{degree} exactly: got {quadrature:.17e}, \
+                     want {exact:.17e}"
+                );
+            }
+        }
+    }
+
+    /// The nodes are Newton-converged to ~1 ulp, but the weights are read off
+    /// `P_n'` and were being evaluated one Newton step BEHIND the node they are
+    /// paired with. Legendre's equation turns that lag into `2·2z/(1−z²)` times
+    /// the node offset, so it is invisible in the nodes and plainly visible
+    /// here: at `n = 16` the weights carried `8.3e−14`, against the `1.9e−15`
+    /// they carry once `P_n'` is re-evaluated at the returned node.
+    #[test]
+    fn gauss_legendre_weights_match_independent_high_precision_reference() {
+        // (node, weight) over the positive half, from a 50-digit root solve;
+        // the rule is symmetric, so the negative half is the mirror image.
+        const GL8: [(f64, f64); 4] = [
+            (0.183434642495649805, 0.362683783378361983),
+            (0.525532409916328986, 0.313706645877887287),
+            (0.796666477413626740, 0.222381034453374471),
+            (0.960289856497536232, 0.101228536290376259),
+        ];
+        const GL16: [(f64, f64); 8] = [
+            (0.0950125098376374402, 0.189450610455068496),
+            (0.281603550779258913, 0.182603415044923589),
+            (0.458016777657227386, 0.169156519395002538),
+            (0.617876244402643748, 0.149595988816576732),
+            (0.755404408355003034, 0.124628971255533872),
+            (0.865631202387831744, 0.0951585116824927848),
+            (0.944575023073232576, 0.0622535239386478929),
+            (0.989400934991649933, 0.0271524594117540949),
+        ];
+
+        // The nodes are a Newton root to within a few ulp of 1. The weights sit
+        // an order looser because `2z/(1−z²)` amplifies whatever the node's
+        // residual is — but two orders TIGHTER than the stale-derivative form,
+        // which is what this pins.
+        const NODE_TOL: f64 = 4.0e-16;
+        const WEIGHT_TOL: f64 = 1.0e-14;
+
+        for (n, reference) in [(8usize, &GL8[..]), (16, &GL16[..])] {
+            let (nodes, weights) = gauss_legendre(n);
+            for (k, &(want_node, want_weight)) in reference.iter().enumerate() {
+                // Positive half, ascending, is the back half of the rule.
+                let index = n / 2 + k;
+                let (got_node, got_weight) = (nodes[index], weights[index]);
+                assert!(
+                    (got_node - want_node).abs() < NODE_TOL,
+                    "n={n} node {index}: got {got_node:.17e}, want {want_node:.17e}"
+                );
+                let relative = (got_weight - want_weight).abs() / want_weight.abs();
+                assert!(
+                    relative < WEIGHT_TOL,
+                    "n={n} weight {index}: got {got_weight:.17e}, want {want_weight:.17e}, \
+                     rel {relative:.3e}"
+                );
+                // Symmetry: the mirrored entry must be bit-identical.
+                let mirror = n / 2 - 1 - k;
+                assert_eq!(
+                    nodes[mirror], -got_node,
+                    "n={n} node {mirror} mirrors {index}"
+                );
+                assert_eq!(weights[mirror], got_weight, "n={n} weight {mirror} mirrors");
             }
         }
     }
