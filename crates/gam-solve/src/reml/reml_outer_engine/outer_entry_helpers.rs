@@ -5,6 +5,10 @@ use super::*;
 pub struct RemlLamlResult {
     /// The REML/LAML objective value (to be minimized).
     pub cost: f64,
+    /// Additive scalar decomposition of `cost`, retained through outer
+    /// correction atoms so structured finite-difference audits can compare
+    /// each analytic gradient atom with the derivative of the scalar it owns.
+    pub(crate) criterion_components: RemlCriterionComponents,
     /// Newton-decrement energy `½ rᵀH⁻¹r` of the converged inner KKT
     /// residual at this `ρ`, where `r = ∇_β L(β̂, ρ)` and `H` is the inner
     /// Hessian. Bounds the inner sub-optimality `|V(β̂) − V(β*)| ≤
@@ -42,6 +46,20 @@ pub struct RemlLamlResult {
     /// Extended-coordinate mode responses, one `K · g_j` vector per column,
     /// when extended derivative coordinates required them.
     pub ext_mode_response_cols: Option<Array2<f64>>,
+}
+
+/// Four additive scalar atoms of the unified criterion.
+///
+/// `fixed_beta` owns every scalar other than the two determinant terms and the
+/// accepted-inner-mode correction. This includes configured priors, barriers,
+/// Firth, Tierney–Kadane, and sampled-block corrections. The four values always
+/// sum to [`RemlLamlResult::cost`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RemlCriterionComponents {
+    pub(crate) fixed_beta: f64,
+    pub(crate) logdet_h: f64,
+    pub(crate) logdet_s: f64,
+    pub(crate) kkt: f64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -187,12 +187,9 @@ fn run_basis(basis_term: &str) {
     );
 
     for j in 0..audit.psi_dim {
-        let analytic = audit.analytic_psi_gradient[j];
-        let fd = audit.finite_difference_psi_gradient[j];
-        let gap = (analytic - fd).abs();
         eprintln!(
-            "[FD-DIAG] psi_i={j} fixed_beta={:+.6e} logdet_h={:+.6e} \
-             logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
+            "[FD-DIAG] psi_i={j} analytic atoms: fixed_beta={:+.6e} \
+             logdet_h={:+.6e} logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
             audit.fixed_beta_psi_gradient[j],
             audit.logdet_h_psi_gradient[j],
             audit.logdet_s_psi_gradient[j],
@@ -202,6 +199,24 @@ fn run_basis(basis_term: &str) {
                 + audit.logdet_s_psi_gradient[j]
                 + audit.kkt_psi_gradient[j],
         );
+        eprintln!(
+            "[FD-DIAG] psi_i={j} scalar-FD atoms: fixed_beta={:+.6e} \
+             logdet_h={:+.6e} logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
+            audit.finite_difference_fixed_beta_psi_gradient[j],
+            audit.finite_difference_logdet_h_psi_gradient[j],
+            audit.finite_difference_logdet_s_psi_gradient[j],
+            audit.finite_difference_kkt_psi_gradient[j],
+            audit.finite_difference_fixed_beta_psi_gradient[j]
+                + audit.finite_difference_logdet_h_psi_gradient[j]
+                + audit.finite_difference_logdet_s_psi_gradient[j]
+                + audit.finite_difference_kkt_psi_gradient[j],
+        );
+    }
+
+    for j in 0..audit.psi_dim {
+        let analytic = audit.analytic_psi_gradient[j];
+        let fd = audit.finite_difference_psi_gradient[j];
+        let gap = (analytic - fd).abs();
         assert!(
             analytic.is_finite() && fd.is_finite() && audit.psi_steps[j] > 0.0,
             "invalid gradient evidence for basis {basis_term:?}: i={j} \

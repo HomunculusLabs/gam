@@ -106,6 +106,32 @@ fn retain_best_outer_checkpoint(slot: &mut Option<OuterResult>, candidate: Outer
     }
 }
 
+fn evaluate_fd_cost_with_criterion_components(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    context: &str,
+    inner_seed: &Array1<f64>,
+    theta: &Array1<f64>,
+) -> Result<(f64, [f64; 4]), EstimationError> {
+    obj.reset();
+    install_matching_initial_inner_seed(obj, config, inner_seed, context)?;
+    crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
+    let cost = obj.eval_cost(theta)?;
+    let (component_cost, components) =
+        crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "outer-gradient FD capture received no scalar criterion components".to_string(),
+            )
+        })?;
+    if component_cost.to_bits() != cost.to_bits() {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD scalar-component cost mismatch: objective={cost:.17e} \
+             components={component_cost:.17e}"
+        )));
+    }
+    Ok((cost, components))
+}
+
 fn capture_outer_gradient_fd_at_seed(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
@@ -134,6 +160,7 @@ fn capture_outer_gradient_fd_at_seed(
     obj.reset();
     install_matching_initial_inner_seed(obj, config, seed, context)?;
     crate::estimate::outer_eval_capture::begin_outer_gradient_component_capture();
+    crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
     let analytic = obj.eval_with_order(seed, OuterEvalOrder::ValueAndGradient)?;
     if analytic.gradient.len() != seed.len() || !analytic.cost.is_finite() {
         return Err(EstimationError::InvalidInput(format!(
@@ -161,7 +188,23 @@ fn capture_outer_gradient_fd_at_seed(
         Array1::from_iter(components.iter().map(|component| component.2));
     let kkt_psi_gradient =
         Array1::from_iter(components.iter().map(|component| component.3));
+    let (analytic_component_cost, analytic_cost_components) =
+        crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "outer-gradient FD capture received no analytic scalar criterion components"
+                    .to_string(),
+            )
+        })?;
+    if analytic_component_cost.to_bits() != analytic.cost.to_bits() {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD analytic scalar-component cost mismatch: objective={:.17e} \
+             components={analytic_component_cost:.17e}",
+            analytic.cost
+        )));
+    }
     let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
+    let mut finite_difference_component_psi_gradients: [Array1<f64>; 4] =
+        std::array::from_fn(|_| Array1::<f64>::zeros(psi_dim));
     let mut psi_steps = Array1::<f64>::zeros(psi_dim);
     for psi_j in 0..psi_dim {
         let j = rho_dim + psi_j;
@@ -173,14 +216,16 @@ fn capture_outer_gradient_fd_at_seed(
             let mut minus = seed.clone();
             plus[j] += nominal_step;
             minus[j] -= nominal_step;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_plus = obj.eval_cost(&plus)?;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_minus = obj.eval_cost(&minus)?;
+            let (cost_plus, components_plus) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &plus)?;
+            let (cost_minus, components_minus) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &minus)?;
             finite_difference_psi_gradient[psi_j] =
                 (cost_plus - cost_minus) / (2.0 * nominal_step);
+            for atom in 0..4 {
+                finite_difference_component_psi_gradients[atom][psi_j] =
+                    (components_plus[atom] - components_minus[atom]) / (2.0 * nominal_step);
+            }
             psi_steps[psi_j] = nominal_step;
         } else if right_room >= left_room && right_room > 0.0 {
             let step = nominal_step.min(0.5 * right_room);
@@ -188,14 +233,18 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] += step;
             two[j] += 2.0 * step;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_one = obj.eval_cost(&one)?;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_two = obj.eval_cost(&two)?;
+            let (cost_one, components_one) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
+            let (cost_two, components_two) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
             finite_difference_psi_gradient[psi_j] =
                 (-3.0 * analytic.cost + 4.0 * cost_one - cost_two) / (2.0 * step);
+            for atom in 0..4 {
+                finite_difference_component_psi_gradients[atom][psi_j] =
+                    (-3.0 * analytic_cost_components[atom] + 4.0 * components_one[atom]
+                        - components_two[atom])
+                        / (2.0 * step);
+            }
             psi_steps[psi_j] = step;
         } else if left_room > 0.0 {
             let step = nominal_step.min(0.5 * left_room);
@@ -203,14 +252,18 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] -= step;
             two[j] -= 2.0 * step;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_one = obj.eval_cost(&one)?;
-            obj.reset();
-            install_matching_initial_inner_seed(obj, config, seed, context)?;
-            let cost_two = obj.eval_cost(&two)?;
+            let (cost_one, components_one) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
+            let (cost_two, components_two) =
+                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
             finite_difference_psi_gradient[psi_j] =
                 (3.0 * analytic.cost - 4.0 * cost_one + cost_two) / (2.0 * step);
+            for atom in 0..4 {
+                finite_difference_component_psi_gradients[atom][psi_j] =
+                    (3.0 * analytic_cost_components[atom] - 4.0 * components_one[atom]
+                        + components_two[atom])
+                        / (2.0 * step);
+            }
             psi_steps[psi_j] = step;
         } else {
             return Err(EstimationError::InvalidInput(format!(
@@ -232,6 +285,14 @@ fn capture_outer_gradient_fd_at_seed(
             logdet_h_psi_gradient,
             logdet_s_psi_gradient,
             kkt_psi_gradient,
+            finite_difference_fixed_beta_psi_gradient:
+                finite_difference_component_psi_gradients[0].clone(),
+            finite_difference_logdet_h_psi_gradient:
+                finite_difference_component_psi_gradients[1].clone(),
+            finite_difference_logdet_s_psi_gradient:
+                finite_difference_component_psi_gradients[2].clone(),
+            finite_difference_kkt_psi_gradient:
+                finite_difference_component_psi_gradients[3].clone(),
         },
     );
     Ok(())

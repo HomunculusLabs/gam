@@ -407,6 +407,23 @@ pub fn reml_laml_evaluate(
             ..
         } => (*include_logdet_h, *include_logdet_s),
     };
+    let logdet_h_component = if incl_logdet_h {
+        0.5 * log_det_h
+    } else {
+        0.0
+    };
+    let logdet_s_component = if incl_logdet_s {
+        -0.5 * log_det_s
+    } else {
+        0.0
+    };
+    let kkt_component = ift_residual_energy.map_or(0.0, |energy| -energy);
+    let criterion_components = RemlCriterionComponents {
+        fixed_beta: cost - logdet_h_component - logdet_s_component - kkt_component,
+        logdet_h: logdet_h_component,
+        logdet_s: logdet_s_component,
+        kkt: kkt_component,
+    };
 
     if !cost.is_finite() {
         return Err(RemlError::NonFiniteValue {
@@ -420,6 +437,7 @@ pub fn reml_laml_evaluate(
     if mode == EvalMode::ValueOnly {
         return Ok(RemlLamlResult {
             cost,
+            criterion_components,
             ift_residual_energy,
             inner_polish_step,
             gradient: None,
@@ -1689,6 +1707,7 @@ pub fn reml_laml_evaluate(
             );
             return Ok(RemlLamlResult {
                 cost,
+                criterion_components,
                 ift_residual_energy,
                 inner_polish_step,
                 gradient: Some(grad),
@@ -1914,6 +1933,7 @@ pub fn reml_laml_evaluate(
 
     Ok(RemlLamlResult {
         cost,
+        criterion_components,
         ift_residual_energy,
         inner_polish_step,
         gradient: gradient_out,

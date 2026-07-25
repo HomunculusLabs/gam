@@ -1996,6 +1996,15 @@ impl<'a> RemlState<'a> {
             block_terms,
         );
         let result = self.apply_theta_correction_atom_to_result(result, &block_atom)?;
+        crate::estimate::outer_eval_capture::record_outer_criterion_components(
+            result.cost,
+            [
+                result.criterion_components.fixed_beta,
+                result.criterion_components.logdet_h,
+                result.criterion_components.logdet_s,
+                result.criterion_components.kkt,
+            ],
+        );
         // This value/derivative tuple is the genuine REML/LAML criterion. An
         // optimizer-only diagnostic must never mutate it: a former hard-gated
         // ALO augmentation introduced a finite objective jump when leverage
@@ -2058,6 +2067,15 @@ impl<'a> RemlState<'a> {
             block_terms,
         );
         let cost_result = self.apply_theta_correction_atom_to_result(cost_result, &block_atom)?;
+        crate::estimate::outer_eval_capture::record_outer_criterion_components(
+            cost_result.cost,
+            [
+                cost_result.criterion_components.fixed_beta,
+                cost_result.criterion_components.logdet_h,
+                cost_result.criterion_components.logdet_s,
+                cost_result.criterion_components.kkt,
+            ],
+        );
         self.store_ift_mode_response_cache_from_result(rho, bundle, &cost_result);
         let gradient =
             cost_result

@@ -29,11 +29,11 @@ pub struct OuterEvalRecord {
 /// seed.
 ///
 /// `theta` retains the complete outer seed and `rho_dim` locates the ψ block in
-/// that seed. The three gradient/stencil arrays contain exactly `psi_dim`
-/// entries in ψ-local order. Smoothing-parameter ρ coordinates are deliberately
-/// excluded: the κ/geometry gates that request this record do not grade them,
-/// and each unnecessary finite-difference coordinate costs two complete inner
-/// profiles.
+/// that seed. Every gradient and scalar-stencil array contains exactly
+/// `psi_dim` entries in ψ-local order. Smoothing-parameter ρ coordinates are
+/// deliberately excluded: the κ/geometry gates that request this record do not
+/// grade them, and each unnecessary finite-difference coordinate costs two
+/// complete inner profiles.
 #[derive(Clone, Debug)]
 pub struct OuterGradientFdRecord {
     pub theta: Array1<f64>,
@@ -47,6 +47,10 @@ pub struct OuterGradientFdRecord {
     pub logdet_h_psi_gradient: Array1<f64>,
     pub logdet_s_psi_gradient: Array1<f64>,
     pub kkt_psi_gradient: Array1<f64>,
+    pub finite_difference_fixed_beta_psi_gradient: Array1<f64>,
+    pub finite_difference_logdet_h_psi_gradient: Array1<f64>,
+    pub finite_difference_logdet_s_psi_gradient: Array1<f64>,
+    pub finite_difference_kkt_psi_gradient: Array1<f64>,
 }
 
 /// Maximum evaluations retained per capture window (opening iterates only).
@@ -58,6 +62,7 @@ struct OuterGradientFdCapture {
     min_psi_dim: usize,
     record: Option<OuterGradientFdRecord>,
     components: Vec<(f64, f64, f64, f64)>,
+    criterion_components: Option<(f64, [f64; 4])>,
 }
 
 thread_local! {
@@ -88,6 +93,7 @@ pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
             min_psi_dim,
             record: None,
             components: Vec::new(),
+            criterion_components: None,
         });
     });
 }
@@ -123,6 +129,33 @@ pub(crate) fn take_outer_gradient_components() -> Vec<(f64, f64, f64, f64)> {
             .borrow_mut()
             .as_mut()
             .map_or_else(Vec::new, |state| std::mem::take(&mut state.components))
+    })
+}
+
+pub(crate) fn begin_outer_criterion_component_capture() {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut() {
+            state.criterion_components = None;
+        }
+    });
+}
+
+pub(crate) fn record_outer_criterion_components(cost: f64, components: [f64; 4]) {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+        {
+            state.criterion_components = Some((cost, components));
+        }
+    });
+}
+
+pub(crate) fn take_outer_criterion_components() -> Option<(f64, [f64; 4])> {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.criterion_components.take())
     })
 }
 

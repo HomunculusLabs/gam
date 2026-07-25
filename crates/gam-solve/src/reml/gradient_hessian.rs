@@ -2320,7 +2320,9 @@ impl<'a> RemlState<'a> {
     where
         A: super::atoms::ThetaCorrectionProjection + ?Sized,
     {
-        result.cost += correction.cost();
+        let correction_cost = correction.cost();
+        result.cost += correction_cost;
+        result.criterion_components.fixed_beta += correction_cost;
         if let Some(correction_hess) = correction.hessian() {
             crate::objective_base::add_rho_block_dense_to_hessian(
                 &mut result.hessian,
