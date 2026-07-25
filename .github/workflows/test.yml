@@ -172,6 +172,20 @@ jobs:
           free-disk-space: 'true'
           cache-targets: 'false'
 
+      # The archive step died at 48 MB free in run 30161941229: the full
+      # optimized+debuginfo target dir and the compressed archive coexist at
+      # peak, and setup-rust-ci's standard reclaim no longer clears enough
+      # headroom for 226 test binaries. Purge the large runner payloads the
+      # standard reclaim leaves behind (~8-12 GB) before the build starts.
+      - name: Purge unused runner payloads (archive headroom)
+        shell: bash
+        run: |
+          set -uo pipefail
+          df -h /
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          sudo rm -rf /usr/share/swift /usr/local/julia* /usr/lib/jvm             /usr/local/share/powershell /usr/share/miniconda || true
+          df -h /
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -644,6 +658,15 @@ jobs:
           run_fails = []; slow = []
           shard_logs = sorted(set(glob.glob('agg/shards/**/*.log', recursive=True) +
                                   glob.glob('agg/shards/*.log')))
+          # Numbered workspace shards write shard-<n>.log; the pyffi job's
+          # shard-logs-pyffi.log shares the shard-logs-* artifact namespace
+          # (inherited layout) but is NOT evidence the workspace matrix ran:
+          # in run 30161941229 a late cancellation killed every numbered shard
+          # before upload and the pyffi log alone made the workspace surface
+          # read as MEASURED. Failure PARSING still spans all logs; only the
+          # ran-at-all evidence is scoped to the numbered shards.
+          workspace_shard_logs = [p for p in shard_logs
+                                  if re.search(r'(^|/)shard-\d+\.log$', p)]
           all_text = []
           for path in shard_logs:
               try:
@@ -708,7 +731,12 @@ jobs:
           pyffi_test_result = os.environ.get('PYFFI_TEST_RESULT', '')
           python_tests_result = os.environ.get('PYTHON_TESTS_RESULT', '')
           build_did_not_succeed = build_result not in ('', 'success')
-          shards_never_ran = rust_test_result == 'skipped' or not shard_logs
+          # 'skipped' is absence, but so is any other non-success: a cancelled or
+          # failed matrix may have died mid-flight with partial logs, and a
+          # partial inventory read as complete is exactly the false green this
+          # ledger exists to kill.
+          shards_never_ran = (rust_test_result not in ('', 'success')
+                              or not workspace_shard_logs)
           pyffi_never_ran = pyffi_test_result == 'skipped'
           archive_missing = (
               shard_marker_missing or build_did_not_succeed
@@ -718,8 +746,8 @@ jobs:
               label
               for label, fired in (
                   (f'the archive build reported `{build_result}`', build_did_not_succeed),
-                  (f'the shard matrix reported `{rust_test_result}`', rust_test_result == 'skipped'),
-                  ('no shard log was collected at all', not shard_logs),
+                  (f'the shard matrix reported `{rust_test_result}`', rust_test_result not in ('', 'success')),
+                  ('no workspace shard log was collected at all', not workspace_shard_logs),
                   ('a shard reported ARCHIVE_MISSING', shard_marker_missing),
                   (f'the gam-pyffi unit job reported `{pyffi_test_result}`', pyffi_never_ran),
               )
