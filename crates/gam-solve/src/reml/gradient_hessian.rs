@@ -5081,6 +5081,41 @@ impl<'a> RemlState<'a> {
             .store(true, Ordering::Relaxed);
     }
 
+    /// Run one canonical computation without consulting or mutating the
+    /// cross-process warm-start store, then restore the caller's disk policy.
+    ///
+    /// A design-moving outer search uses this immediately after
+    /// `reset_surface`: the previous design's estimated nuisance is stale, but
+    /// the persistent session is already attached. Merely clearing the
+    /// in-memory predictor is insufficient because the inner solve would reload
+    /// a cached beta mid-anchor. Temporarily disengaging the per-state disk
+    /// layer suppresses both the load and store paths while leaving the ordinary
+    /// in-memory anchor result available to seed the requested evaluation.
+    pub(crate) fn without_persistent_warm_start_disk<T>(&self, f: impl FnOnce() -> T) -> T {
+        struct PersistentDiskGuard<'a> {
+            enabled: &'a AtomicBool,
+            restore_enabled: bool,
+        }
+
+        impl Drop for PersistentDiskGuard<'_> {
+            fn drop(&mut self) {
+                self.enabled
+                    .store(self.restore_enabled, Ordering::Relaxed);
+            }
+        }
+
+        let restore_enabled = self
+            .persistent_warm_start_disk_enabled
+            .swap(false, Ordering::Relaxed);
+        let guard = PersistentDiskGuard {
+            enabled: &self.persistent_warm_start_disk_enabled,
+            restore_enabled,
+        };
+        let out = f();
+        drop(guard);
+        out
+    }
+
     pub(crate) fn persistent_warm_start_cache_key(&self) -> Option<String> {
         if let Some(key) = self.persistent_warm_start_key.read().unwrap().clone() {
             return Some(key);

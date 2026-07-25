@@ -310,6 +310,47 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         };
     }
 
+    /// Re-establish an estimated Gamma/Tweedie/Beta nuisance canonically after
+    /// `reset_surface` invalidates the value from the previous design.
+    ///
+    /// The joint evaluator attaches persistent warm-start storage at
+    /// construction time, so the fixed-design precondition ("anchor before the
+    /// disk layer exists") is no longer available here. Suspend that layer for
+    /// the canonical `rho = 0` solve instead. The shared anchor clears every
+    /// in-memory predictor and adaptive signal before solving, which makes the
+    /// resulting nuisance and beta functions of this realized surface alone.
+    ///
+    /// Fast-path trials retain an already established freeze and return without
+    /// solving. A slow-path reset zeros the freeze, so the first requested
+    /// evaluation on that surface deterministically performs the anchor.
+    fn anchor_current_surface_nuisance(
+        &self,
+        external_hyper_count: usize,
+    ) -> Result<(), EstimationError> {
+        let resolved_likelihood_scale = self
+            .reml_state
+            .config
+            .likelihood
+            .resolved_scale()
+            .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
+        let k = self.reml_state.canonical_penalties.len();
+        let seed_config = super::optimizer::external_reml_seed_config(
+            k,
+            self.reml_state.config.link_function(),
+        );
+
+        self.reml_state.without_persistent_warm_start_disk(|| {
+            super::optimizer::freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
+                &self.reml_state,
+                &resolved_likelihood_scale,
+                k,
+                None,
+                &seed_config,
+                external_hyper_count,
+            )
+        })
+    }
+
     /// Stage (or clear) the frozen-weight GLM first-Fisher-step Gram for the
     /// next trial eval (#1111 / #1033 mechanism (c)). The staged Gram is
     /// installed onto the inner REML surface inside `prepare_eval_state` and
@@ -1126,6 +1167,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
+        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         crate::estimate::reml::RemlState::compute_joint_hyper_eval_with_order(
             &self.reml_state,
             theta,
@@ -1160,6 +1202,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
+        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         let rho = theta.slice(s![..rho_dim]).to_owned();
         self.reml_state
             .compute_efs_steps_with_psi_ext(&rho, &hyper_dirs)
@@ -1349,6 +1392,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             context,
             design_revision,
         )?;
+        self.anchor_current_surface_nuisance(theta.len() - rho_dim)?;
         let rho = theta.slice(s![..rho_dim]).to_owned();
         self.reml_state
             .compute_cost_with_ext_count(&rho, theta.len() - rho_dim)

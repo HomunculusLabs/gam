@@ -515,11 +515,13 @@ fn gaussian_identity_response_scale(
 /// cached ρ through `OuterConfig::initial_inner_seed`, which installs it at
 /// exactly the outer coordinate that owns it.
 ///
-/// The one precondition this function cannot enforce by clearing is that the
-/// on-disk session must not be open yet (the inner solve would reload the cached
-/// β mid-anchor), so that is checked and refused. The ρ-keyed eval/P-IRLS memos
-/// are kept: they cache a deterministic computation at a ρ the caller is about to
-/// evaluate again.
+/// The on-disk session must not be active while this computation runs (the inner
+/// solve would reload the cached β mid-anchor), so a direct call on an attached
+/// state is refused. The design-moving evaluator satisfies this precondition
+/// with `RemlState::without_persistent_warm_start_disk`; the standard evaluator
+/// calls before attaching persistence. The ρ-keyed eval/P-IRLS memos are kept:
+/// they cache a deterministic computation at a ρ the caller is about to evaluate
+/// again.
 ///
 /// Negative-Binomial θ is deliberately not handled here. It is seeded from the
 /// resolved family spec before the search and then driven to a certified joint
@@ -531,6 +533,31 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
     k: usize,
     heuristic_lambdas: Option<&[f64]>,
     seed_config: &SeedConfig,
+) -> Result<(), EstimationError> {
+    freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
+        reml_state,
+        resolved_likelihood_scale,
+        k,
+        heuristic_lambdas,
+        seed_config,
+        0,
+    )
+}
+
+/// Joint-design counterpart of
+/// [`freeze_lambda_search_nuisance_at_canonical_anchor`].
+///
+/// `external_hyper_count` preserves the objective-completeness policy of the
+/// joint surface while the anchor evaluates `rho = 0`. In particular, an
+/// anchor must not memoize a value under the fixed-design correction policy and
+/// then let a joint `[rho, psi]` evaluation reuse it.
+pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor_with_ext_count(
+    reml_state: &RemlState<'_>,
+    resolved_likelihood_scale: &gam_problem::ResolvedLikelihoodScale,
+    k: usize,
+    heuristic_lambdas: Option<&[f64]>,
+    seed_config: &SeedConfig,
+    external_hyper_count: usize,
 ) -> Result<(), EstimationError> {
     let (frozen, family) = match resolved_likelihood_scale {
         gam_problem::ResolvedLikelihoodScale::Gamma {
@@ -553,8 +580,9 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
     {
         crate::bail_invalid_estim!(
             "the {family} λ-search freeze must be anchored before the persistent warm-start \
-             layer is attached (#2363); with the on-disk session open the anchor solve would \
-             reload the cached β and the outer criterion would again depend on cache state"
+             layer is attached, or while it is scoped off (#2363/#2426); with the on-disk \
+             session open the anchor solve would reload the cached β and the outer criterion \
+             would again depend on cache state"
         );
     }
     // The anchor must see the same starting predictor on every machine, so an
@@ -569,7 +597,9 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
             .filter(|candidate| candidate.iter().any(|value| *value != 0.0)),
     );
     for anchor in &anchors {
-        if let Err(error) = reml_state.compute_cost(anchor) {
+        if let Err(error) =
+            reml_state.compute_cost_with_ext_count(anchor, external_hyper_count)
+        {
             log::debug!("[OUTER] nuisance anchor candidate rejected: {error:?}");
             continue;
         }
