@@ -617,16 +617,37 @@ jobs:
           out = []
           out.append('# MASTER_FAILURES')
           out.append('')
-          out.append(f'- Compile failures: **{len(compile_errs)}**')
-          out.append(f'- Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK): **{len(run_fails)}**')
-          out.append(f'- Forbidden runtime signatures seen: **{len(forbidden_hits)}**')
-          out.append(f'- Slow/timeout notices (#1393): **{len(slow)}**')
+          # When a shard never got an archive, the runtime counters below are
+          # not "how many tests failed" — they are "how many failed among the
+          # tests that ran", and some targets ran none. Emitting a bare number
+          # there produces a false green: five of the fourteen runs in
+          # 12–24 Jul 2026 published `Compile failures: 0` AND `Runtime test
+          # failures: 0` for a workspace that never built, and the only thing
+          # distinguishing them from an actually-clean run was a prose note
+          # under the numbers. Say NOT MEASURED in the counter itself, so the
+          # headline cannot be read as a result.
+          measured = 'NOT MEASURED' if archive_missing else None
+          def counter(label, n, affected_by_archive):
+              if affected_by_archive and measured:
+                  return f'- {label}: **{measured}** ({n} seen in the shards that did run)'
+              return f'- {label}: **{n}**'
+          out.append(counter('Compile failures', len(compile_errs), False))
+          out.append(counter('Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK)',
+                             len(run_fails), True))
+          out.append(counter('Forbidden runtime signatures seen', len(forbidden_hits), True))
+          out.append(counter('Slow/timeout notices (#1393)', len(slow), True))
           if archive_missing:
               out.append('')
               out.append('> NOTE: at least one shard found NO test archive — the workspace '
                          'test build did not fully compile, so runtime tests for the '
                          'affected targets could not run. Fix the compile failures below '
                          'first; the runtime surface will then be exercised.')
+              if not compile_errs:
+                  out.append('>')
+                  out.append('> The archive is missing and NO compile error was captured '
+                             'either, so this run reports nothing at all about the '
+                             'workspace — neither that it builds nor that it passes. '
+                             'Read the build-logs artifact.')
           out.append('')
 
           out.append('## Compile failures')
@@ -678,6 +699,11 @@ jobs:
           total_fail = len(compile_errs) + len(run_fails)
           if ghout:
               open(ghout, 'a').write(f'failures={total_fail}\n')
+              # A missing archive with no captured compile error scores zero on
+              # both counters, so this job would report "No failures collected"
+              # for a workspace that never built and never ran. An absent
+              # measurement is not a passing one — fail on it explicitly.
+              open(ghout, 'a').write(f'archive_missing={"1" if archive_missing else "0"}\n')
           PY
 
       - name: Upload MASTER_FAILURES.md
@@ -695,8 +721,14 @@ jobs:
           set -uo pipefail
           n="${{ steps.master.outputs.failures }}"
           n="${n:-0}"
+          missing="${{ steps.master.outputs.archive_missing }}"
+          missing="${missing:-0}"
           if [ "$n" -gt 0 ]; then
             echo "::error::${n} total failures (compile + runtime). See the MASTER_FAILURES.md artifact."
+            exit 1
+          fi
+          if [ "$missing" = "1" ]; then
+            echo "::error::At least one shard had no test archive, so the runtime surface was not measured. Zero collected failures here means 'not measured', not 'green'. See the MASTER_FAILURES.md and build-logs artifacts."
             exit 1
           fi
           echo "No failures collected."
