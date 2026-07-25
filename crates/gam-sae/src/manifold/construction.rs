@@ -722,6 +722,7 @@ impl SaeManifoldTerm {
             criterion_gauge_deflation_reanchors: 0,
             criterion_gauge_deflation_last_delta_sign: 0,
             dictionary_cocollapse_reseeds: 0,
+            inner_line_search_warm_step: None,
             best_cocollapse_incumbent: None,
             best_fit_incumbent: None,
             structural_cocollapse_reseeds: 0,

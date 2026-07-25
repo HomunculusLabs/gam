@@ -507,6 +507,25 @@ pub struct SaeManifoldTerm {
     /// ledger in [`Self::collapse_events`] because a co-collapse reseed is a
     /// whole-dictionary multi-start, not a per-atom second chance.
     pub(crate) dictionary_cocollapse_reseeds: usize,
+    /// #2267 — the inner line search's ACCEPTED trial length, carried across
+    /// re-entries of the joint fit.
+    ///
+    /// The backtracking search only ever contracts from its first trial, so the
+    /// trial length is a hard ceiling on the accepted `α`. Starting every call
+    /// from the caller's conservative `step_size` and ratcheting up on clean
+    /// acceptances is right WITHIN one call, but the evidence criterion re-enters
+    /// the joint fit in short windows (`inner_max_iter = 8` on the production
+    /// path), so a per-call ladder is re-climbed from scratch every window and
+    /// most iterations never reach the unit step at all — measured: 5 of every 8.
+    /// The globalization scale the previous window ESTABLISHED is exactly the
+    /// warm-start information a re-entry should keep, so it lives here rather
+    /// than dying with the call frame. `None` on a cold term.
+    ///
+    /// Not part of the fitted state: it is a search hint, never read by the
+    /// value, gradient, or certificate, and a stale hint only costs backtracking
+    /// halvings on one iterate. Transient like `best_cocollapse_incumbent`, so a
+    /// clone starts cold.
+    pub(crate) inner_line_search_warm_step: Option<f64>,
     /// #1026 co-collapse multi-start incumbent: the best (highest reconstruction
     /// EV) dictionary state seen across the full-dictionary co-collapse reseeds in
     /// the current optimization, with that EV. A blind reseed sequence can land in
@@ -761,6 +780,8 @@ impl Clone for SaeManifoldTerm {
             criterion_gauge_deflation_last_delta_sign: self
                 .criterion_gauge_deflation_last_delta_sign,
             dictionary_cocollapse_reseeds: self.dictionary_cocollapse_reseeds,
+            // Transient globalization hint — a fresh clone re-establishes it.
+            inner_line_search_warm_step: None,
             // Transient in-fit multi-start incumbent — not part of the persisted
             // term identity (like `border_hbb_workspace`); a fresh clone starts
             // with no incumbent and rebuilds it if it re-enters co-collapse.

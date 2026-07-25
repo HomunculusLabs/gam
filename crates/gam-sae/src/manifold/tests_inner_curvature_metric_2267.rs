@@ -173,6 +173,48 @@ fn zz_measure_inner_contraction_and_curvature_fidelity_2267() {
     );
 }
 
+/// PROBE (#2267 step acceptance). Runs ONE full criterion evaluation on the p=16
+/// rung with the solver's own per-iterate trace forwarded to stderr, so the
+/// crawl's cause is READ rather than inferred: an accepted `alpha` far below the
+/// warm start is curvature overshoot, a climbing `ridge_t`/`ridge_b` is the LM
+/// ladder bending the step toward steepest descent, and `rejected` is the
+/// proximal-correction route. The summary line counts each.
+#[test]
+fn zz_measure_inner_step_acceptance_trace_2267() {
+    struct ForwardingTestLogger;
+    impl log::Log for ForwardingTestLogger {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            eprintln!("[{}] {}", record.level(), record.args());
+        }
+        fn flush(&self) {}
+    }
+    static FORWARDING_TEST_LOGGER: ForwardingTestLogger = ForwardingTestLogger;
+    if log::set_logger(&FORWARDING_TEST_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
+
+    let (mut term, z, rho) = p16_circle_rung();
+    let started = std::time::Instant::now();
+    let evaluated = term.penalized_quasi_laplace_criterion_with_cache_refine_policy(
+        z.view(),
+        &rho,
+        None,
+        8,
+        0.04,
+        1.0e-6,
+        1.0e-6,
+        true,
+    );
+    let wall = started.elapsed().as_secs_f64();
+    match evaluated {
+        Ok(value) => eprintln!("[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s", value.0),
+        Err(err) => eprintln!("[2267-TRACE] criterion REFUSED in {wall:.2}s: {err}"),
+    }
+}
+
 /// The same curvature statement at the SEED, isolated from any trajectory: at
 /// the production cold seed of the p=16 rung the Gauss-Newton majorizer and the
 /// exact stationarity Jacobian disagree by orders of magnitude along the very

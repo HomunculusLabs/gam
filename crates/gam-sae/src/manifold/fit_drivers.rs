@@ -6034,7 +6034,12 @@ impl SaeManifoldTerm {
         // globalization — KKT convergence and typed exhaustion (#2235/#2241)
         // unchanged.
         let warm_growth = 1.0 / BacktrackConfig::default().contraction;
-        let mut warm_step = step_size;
+        // #2267 — resume the globalization ladder the previous re-entry
+        // established (see `inner_line_search_warm_step`), floored at the
+        // caller's conservative `step_size` so a cold term still starts damped.
+        let mut warm_step = self
+            .inner_line_search_warm_step
+            .map_or(step_size, |carried| carried.max(step_size));
         // #2015 Levenberg–Marquardt ridge, adapted across iterates. The primary
         // solve (`solve_with_lm_escalation_inner`) escalates the ridge only when
         // the factorization FAILS, so on a well-conditioned-but-nonlinear system
@@ -6604,21 +6609,66 @@ impl SaeManifoldTerm {
                 None
             };
             let accepted = accepted_step.is_some();
+            // #2267 — per-iteration STEP ACCEPTANCE trace. A crawling inner solve
+            // has exactly three distinguishable causes and they are told apart
+            // here, not by inference: an accepted step far below the warm start
+            // (`alpha ≪ warm`) is curvature overshoot the line search is
+            // absorbing; a growing `lm_ridge` is the damping ladder bending the
+            // step toward steepest descent; and a rejected step routes to the
+            // proximal correction. Together with `‖g‖`/`‖Δ‖`/`gᵀΔ` this is the
+            // whole per-iterate state of the globalization.
+            log::debug!(
+                "[SAE/inner] it={outer_iteration} ‖g‖={grad_norm:.6e} \
+                 ‖Π⊥g‖={quotient_grad_norm:.6e} ‖Δ‖={:.6e} gᵀΔ={directional_decrease:.6e} \
+                 alpha={} warm={warm_step:.4e} ridge_t={lm_ridge_t:.3e} ridge_b={lm_ridge_b:.3e} \
+                 obj={pre_step_total:.9e} metric_rows={}",
+                step_norm_sq.sqrt(),
+                match accepted_step.as_ref() {
+                    Some(step) => format!("{:.4e}", step.step),
+                    None => "rejected".to_string(),
+                },
+                assembled_row_blocks.iter().filter(|b| b.is_some()).count(),
+            );
             if let Some(step) = accepted_step {
                 state_moved = true;
-                // A CLEAN acceptance (the trial at the warm start itself passed
-                // Armijo, no backtracking) means the overshoot evidence is gone —
-                // reset to the caller's full `step_size` so one hard early
-                // iterate cannot throttle the whole budget (the multiblock EV
-                // regression). Only a BACKTRACKED acceptance carries overshoot
-                // evidence forward, warmed one contraction-step above the
-                // accepted length.
+                // #2267 — A NEWTON STEP'S NATURAL LENGTH IS ONE.
+                //
+                // `backtracking_line_search` only ever CONTRACTS from its initial
+                // step, so whatever `warm_step` holds is a hard ceiling on the
+                // accepted `α`. Capping it at the caller's `step_size` — a
+                // "learning rate", 0.04–0.1 on every production path — therefore
+                // caps the per-iteration KKT contraction at `1 − step_size ≥ 0.90`
+                // no matter how good the direction is: the superlinear tail of a
+                // Newton method is UNREACHABLE by construction, and the solve is
+                // pinned to a first-order rate. That is the measured ~0.997 crawl
+                // and the 10³-iteration criterion evaluations behind #2267/#2080;
+                // a rate that close to 1 is not a hard problem, it is an
+                // arithmetic consequence of the ceiling.
+                //
+                // `step_size` is the caller's CONSERVATIVE STARTING damping for a
+                // cold, strongly nonlinear seed, and it stays exactly that: the
+                // first trial of a fresh solve, and the reset after any rejection
+                // below. What changes is that a run of clean acceptances now
+                // RATCHETS the trial length geometrically toward the unit step,
+                // which is what buys quadratic convergence once the iterate is in
+                // its local basin. Nothing is loosened: every trial still has to
+                // clear the same Armijo bound against the same objective, and a
+                // trial that fails simply backtracks — a longer first trial can
+                // only cost extra halvings, never accept a step the old ceiling
+                // would have refused.
+                //
+                // This is the complement of the exact-curvature solve metric
+                // installed above: getting the curvature right is what makes the
+                // unit step SAFE to try, and lifting the ceiling is what lets the
+                // solve actually take it.
+                let unit_step_ceiling = step_size.max(1.0);
                 let clean_acceptance = step.step >= warm_step;
                 warm_step = if clean_acceptance {
-                    step_size
+                    (warm_step * warm_growth).min(unit_step_ceiling)
                 } else {
-                    (step.step * warm_growth).min(step_size)
+                    (step.step * warm_growth).min(unit_step_ceiling)
                 };
+                self.inner_line_search_warm_step = Some(warm_step);
                 // True Levenberg–Marquardt gain-ratio ridge adaptation (a
                 // trust-region on the RIDGE, not the step length). The gain ratio
                 //   ρ = actual decrease / model-predicted decrease
@@ -6663,8 +6713,11 @@ impl SaeManifoldTerm {
                 lm_ridge_b = ridge_beta;
                 // The proximal LM correction below re-solves with its own ridge
                 // escalation; the next line-search regime is unrelated to this
-                // iterate's accepted length, so reset the warm start.
+                // iterate's accepted length, so reset the warm start — and carry
+                // the reset, so a struggling fit does not resume a re-entry at a
+                // trial length its own line search just refused (#2267).
                 warm_step = step_size;
+                self.inner_line_search_warm_step = Some(warm_step);
                 self.restore_mutable_state(&snapshot)?;
                 let correction = ArrowProximalCorrectionOptions {
                     initial_ridge: ridge_ext_coord
