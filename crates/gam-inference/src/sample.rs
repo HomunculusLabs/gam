@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use faer::Side;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView2, s};
 use rand::{RngExt, SeedableRng};
 
 use super::hmc_io::{
