@@ -37,6 +37,37 @@ use gam::{
 use ndarray::{Array1, Array2};
 use std::time::Instant;
 
+/// Minimal phase logger for this diagnostic. The production evaluator already
+/// records exact inner-solve, objective-assembly, and total durations; surface
+/// only those records so a failed scaling gate identifies the row-proportional
+/// phase instead of inviting source-shape guesses.
+struct RhoPhaseLogger;
+
+impl log::Log for RhoPhaseLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Debug
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let message = format!("{}", record.args());
+        if message.starts_with("[REML] eval#") || message.starts_with("[STAGE] inner pirls") {
+            eprintln!("[rho-phase] {message}");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static RHO_PHASE_LOGGER: RhoPhaseLogger = RhoPhaseLogger;
+
+fn install_rho_phase_logger() {
+    log::set_logger(&RHO_PHASE_LOGGER).ok();
+    log::set_max_level(log::LevelFilter::Debug);
+}
+
 /// Two-feature Gaussian-identity fixture: a smooth additive signal on each of
 /// two columns, observed with light noise. Deterministic so this stays a
 /// timing/geometry check, not a stochastic power test.
@@ -209,6 +240,7 @@ fn run_rho_trials(n: usize) -> Result<RhoTrialTiming, String> {
 /// should stay roughly flat across an n-sweep, not grow with n.
 #[test]
 fn rho_outer_loop_is_n_independent() {
+    install_rho_phase_logger();
     let ns = [20_000usize, 80_000, 320_000];
 
     eprintln!(
