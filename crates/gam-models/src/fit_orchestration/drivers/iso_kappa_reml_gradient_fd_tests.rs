@@ -991,6 +991,49 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
     }
 }
 
+/// #2444: the executable form of what the probe above measures.
+///
+/// The analytic outer gradient must match a central finite difference **at the
+/// rails**, on both faces of the box. `zz_measure_iso_kappa_rail_gradient_fd_2425`
+/// has computed exactly this since #2425 and printed `pass=false` into a run the
+/// harness records as `ok`, so the violation has been visible and unenforced —
+/// the same shape as every other false green in #2422. A measurement nobody is
+/// obliged to read does not constrain anything.
+///
+/// Currently RED for Duchon and green for Matérn, which is the point: the
+/// separation is 64x through the same optimizer at the lower face, and
+/// `fd - analytic` is positive in every violation across both faces and both
+/// links. Matern is the control — its worst also rose ~20x when the lower probes
+/// were added and it still passes, so the lower face is harder for both families
+/// and only Duchon exceeds.
+#[test]
+fn iso_kappa_rail_gradient_matches_fd_at_both_faces_2444() {
+    let mut summary: Vec<String> = Vec::new();
+    let mut failing: Vec<String> = Vec::new();
+    for (label, n, family) in [
+        ("duchon_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
+        ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
+    ] {
+        let (pass, worst, violations, _) =
+            iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5, -11.5]);
+        summary.push(format!(
+            "{label}: pass={pass} worst_psi_rel={worst:.3e} violations={}",
+            violations.len()
+        ));
+        for violation in &violations {
+            failing.push(format!("{label}: {violation}"));
+        }
+    }
+    assert!(
+        failing.is_empty(),
+        "analytic outer gradient must match FD at both rails; {} violation(s)\n  {}\n  {}",
+        failing.len(),
+        summary.join("\n  "),
+        failing.join("\n  ")
+    );
+}
+
 /// #2425 MEASUREMENT (reports, never fails): does the iso-κ REML criterion
 /// SATURATE at a λ=∞ face, or is it asymptotically linear in ρ?
 ///
