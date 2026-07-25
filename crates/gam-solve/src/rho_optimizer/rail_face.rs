@@ -82,6 +82,58 @@
 //! — it must not be required to carry an outward derivative, and it must not
 //! block the face.
 //!
+//! # The LAML extension: families whose working weights move with `β̂`
+//!
+//! For a fixed-unit-dispersion LAML criterion (binomial, poisson)
+//!
+//! ```text
+//!     V(λ) = −ℓ(β̂) + ½ β̂ᵀS_λβ̂ + ½ log|H| − ½ log|S_λ|₊,   H = I(β̂) + S_λ,
+//!     I(β) = Xᵀ W(η) X,   W_i = −∂²ℓ_i/∂η_i²   (the criterion's observed weights),
+//! ```
+//!
+//! the same expansion goes through with `K = I(β̂_∞) + S_R`, plus exactly one
+//! new first-order term: the Laplace logdet's curvature moves with `β̂`, and
+//! the face's `O(λ⁻¹)` coefficient offset `δβ = S_F⁺g_c` carries that motion
+//! into first order,
+//!
+//! ```text
+//!     Δ(½log|H|) = Σ_r [∂(½log|H_∞|)/∂β_r]·δβ_r = dᵀ δβ,
+//!     d = ½ Xᵀ( c ⊙ a ),   c_i = dW_i/dη_i,   a_i = x_iᵀ Z (ZᵀKZ)⁻¹ Zᵀ x_i,
+//! ```
+//!
+//! `a` the LIMIT model's leverage — no large-λ object anywhere. One care is
+//! needed with `δβ = (K + S_F)⁻¹ g_c`: its PINNED component is `O(λ⁻¹)` too,
+//! `δ_Z = −(ZᵀKZ)⁻¹ZᵀKQ·(QᵀS_FQ)⁻¹g_Q` (the block inverse's off-diagonal),
+//! so `dᵀδβ` reads `d` through the K-OBLIQUE reduction onto the released
+//! subspace — the same reduction the Schur complement applies to `K` — and
+//! not the orthogonal compression:
+//!
+//! ```text
+//!     d̃ = d − K Z (ZᵀKZ)⁻¹ Zᵀ d,     dᵀδβ = d̃_Qᵀ (QᵀS_FQ)⁻¹ g_Q.
+//! ```
+//!
+//! (The Gaussian form never meets this subtlety: its only score-linear term
+//! carries `g_c`, and `Zᵀg_c = 0` kills the oblique part exactly. Dropping
+//! the reduction here is a FIRST-order error — measured at 1.7e-2 relative
+//! against the production LAML gradient before it was applied.) In trace
+//! form `dᵀδβ = ½tr((QᵀS_FQ)⁻¹(g_Q d̃_Qᵀ + d̃_Q g_Qᵀ))`, so the whole
+//! extension is a symmetric rank-2 correction to the form:
+//!
+//! ```text
+//!     C_LAML = Schur_Z(I(β̂_∞)+S_R) − Schur_Z(S_R) − g_Q g_Qᵀ + (g_Q d̃_Qᵀ + d̃_Q g_Qᵀ).
+//! ```
+//!
+//! (The fit term's `−g_Qg_Qᵀ` carries no dispersion divisor: for these
+//! families `−ℓ` and `H` are already in the same units, which is also why the
+//! profiled-Gaussian form divides by `φ̂` — there the fit term is
+//! `(n−M_p)/2·log D_p` and its first variation is `ΔD_p/(2φ̂)`.) The two
+//! penalty logdets have no `β̂`-dependence, so their Schur content is
+//! unchanged, and everything downstream — the `C ≻ 0` proof, per-coordinate
+//! `c_j`, the `Unidentified` typing, the value-domain falsification — is
+//! family-blind because none of it depends on how `C` was built. Gaussian
+//! identity is the `c ≡ 0` member: the rank-2 term vanishes identically and
+//! the form reduces to the REML one, which is the built-in exactness check.
+//!
 //! This module is pure linear algebra on the supplied [`RailFaceLimit`]; the
 //! objective that owns the design and the penalties builds that input.
 
@@ -144,6 +196,11 @@ pub struct RailFaceLimit {
     /// Profiled dispersion at the limit fit, the `φ̂` the first-order form's
     /// fit term is divided by.
     pub limit_dispersion: f64,
+    /// `Qᵀd`: the LAML curvature-drift vector in the released directions,
+    /// recorded so the proof object shows how much of `C` is the rank-2
+    /// `g_Q d_Qᵀ + d_Q g_Qᵀ` correction. `None` on the profiled-Gaussian
+    /// form, whose working weights do not move with the coefficients.
+    pub released_curvature_drift: Option<Array1<f64>>,
 }
 
 /// A proven rail face: the analytic first-order data behind the mint.
@@ -235,6 +292,14 @@ fn range_eigenpairs(matrix: &Array2<f64>) -> Result<(Array2<f64>, Array1<f64>), 
         }
     }
     Ok((basis, kept))
+}
+
+/// Rank of a PSD block above the `√ε` range/null split — the same split every
+/// other subspace decision in this module uses, exported so callers building
+/// a reduced (limit-model) penalty layout count exactly as the form does.
+pub(crate) fn released_rank(matrix: &Array2<f64>) -> Result<usize, String> {
+    let (_, values) = range_eigenpairs(matrix)?;
+    Ok(values.len())
 }
 
 /// `½·tr(A⁻¹C)` for a symmetric positive-definite `A`, computed on `A`'s own
@@ -528,53 +593,37 @@ impl RailFaceLimitOutcome {
     }
 }
 
-/// Build the analytic λ→∞ face-limit data from a model's parts.
-///
-/// This is the Gaussian-identity closed form derived at the top of this module,
-/// factored so any caller that owns a design, a response, prior weights and
-/// canonical penalties can obtain the λ=∞ limit — the null-space-restricted
-/// fit, its profiled dispersion, the limit score, and the first-order form —
-/// without going through a `RemlState`. A caller whose criterion is NOT the
-/// profiled-Gaussian REML must not use it: with `β̂`-dependent working weights
-/// the logdet terms gain a third-derivative contribution at the same order and
-/// this form is no longer the whole first-order story.
-///
-/// `response` must already be net of any offset. `penalties` are in ρ-block
-/// order, so `rho[j]` is `penalties[j]`'s log smoothing parameter, and `face`
-/// indexes the same order. Returns `None` — never an error — when the face
-/// releases nothing, the limit model is not identified, or a rank bookkeeping
-/// check fails; a refusal simply means this certificate has nothing to say.
-///
-/// The returned `limit_beta` is the λ=∞ fit itself, which is also the canonical
-/// maximal-smoothing anchor a continuation can start from (#2366) instead of
-/// solving at a large-but-finite ρ.
-pub fn gaussian_rail_face_limit(
-    design: ArrayView2<'_, f64>,
-    response: ArrayView1<'_, f64>,
-    weights: ArrayView1<'_, f64>,
+/// The per-face penalty geometry shared by every closed form: the face's
+/// penalties at unit strength, the survivors at their certified strengths,
+/// and the all-unit sum whose spectrum backs the rank bookkeeping. Factored
+/// out so the Gaussian and LAML forms can never disagree about what the face
+/// IS.
+pub(crate) struct FacePenaltySplit {
+    /// The face, ascending and deduplicated.
+    pub(crate) face_sorted: Vec<usize>,
+    /// `Σ_{j∈F} S_j` at unit strength.
+    pub(crate) s_face_unit: Array2<f64>,
+    /// `Σ_{j∉F} λ_j S_j` at the certified survivor strengths.
+    pub(crate) s_rest: Array2<f64>,
+    /// `Σ_j S_j` at unit strength, for the pseudo-determinant rank split.
+    pub(crate) s_unit_all: Array2<f64>,
+    /// Full-width unit `S_j` for each face coordinate, in `face_sorted` order.
+    pub(crate) face_penalties: Vec<Array2<f64>>,
+}
+
+/// Split the canonical penalties around a face. `Err` carries the typed
+/// decline the caller returns verbatim.
+pub(crate) fn split_face_penalties(
     penalties: &[CanonicalPenalty],
     rho: &Array1<f64>,
     face: &[usize],
-) -> RailFaceLimitOutcome {
-    let p = design.ncols();
-    let n = design.nrows();
+    p: usize,
+) -> Result<FacePenaltySplit, RailFaceLimitOutcome> {
     let n_penalties = penalties.len();
-    if p == 0
-        || n == 0
-        || n_penalties == 0
-        || face.is_empty()
-        || rho.len() < n_penalties
-        || response.len() != n
-        || weights.len() != n
-    {
-        return RailFaceLimitOutcome::OutsideClosedForm {
+    if p == 0 || n_penalties == 0 || face.is_empty() || rho.len() < n_penalties {
+        return Err(RailFaceLimitOutcome::OutsideClosedForm {
             reason: "face-limit inputs are shape-inconsistent or empty".to_string(),
-        };
-    }
-    if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
-        return RailFaceLimitOutcome::OutsideClosedForm {
-            reason: "prior weights are not finite and non-negative".to_string(),
-        };
+        });
     }
     let mut face_sorted = face.to_vec();
     face_sorted.sort_unstable();
@@ -582,12 +631,12 @@ pub fn gaussian_rail_face_limit(
     if face_sorted.len() != face.len()
         || face_sorted.last().copied().unwrap_or(usize::MAX) >= n_penalties
     {
-        return RailFaceLimitOutcome::FaceUnavailable {
-            reason: "the face repeats a coordinate or indexes outside the penalty layout".to_string(),
-        };
+        return Err(RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the face repeats a coordinate or indexes outside the penalty layout"
+                .to_string(),
+        });
     }
 
-    // ── penalties: the face at unit λ, the survivors at their own λ ──────
     let mut s_face_unit = Array2::<f64>::zeros((p, p));
     let mut s_rest = Array2::<f64>::zeros((p, p));
     let mut s_unit_all = Array2::<f64>::zeros((p, p));
@@ -598,15 +647,16 @@ pub fn gaussian_rail_face_limit(
     for (j, penalty) in penalties.iter().enumerate() {
         let lambda = rho[j].exp();
         if !lambda.is_finite() || lambda <= 0.0 {
-            return RailFaceLimitOutcome::OutsideClosedForm {
-            reason: "a smoothing parameter does not exponentiate to a usable lambda".to_string(),
-        };
+            return Err(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "a smoothing parameter does not exponentiate to a usable lambda"
+                    .to_string(),
+            });
         }
         let cols = penalty.col_range.clone();
         if cols.end > p {
-            return RailFaceLimitOutcome::OutsideClosedForm {
-            reason: "a penalty's column range runs past the coefficient layout".to_string(),
-        };
+            return Err(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "a penalty's column range runs past the coefficient layout".to_string(),
+            });
         }
         let slot = face_sorted.iter().position(|&f| f == j);
         for (li, gi) in cols.clone().enumerate() {
@@ -623,14 +673,31 @@ pub fn gaussian_rail_face_limit(
             }
         }
     }
+    Ok(FacePenaltySplit {
+        face_sorted,
+        s_face_unit,
+        s_rest,
+        s_unit_all,
+        face_penalties,
+    })
+}
 
-    // ── the subspace the face releases, and the one it pins ─────────────
-    let (face_values, face_vectors) = match symmetric_eigh(&s_face_unit) {
+/// Orthonormal bases of the subspace a face releases (`Q`) and the one it
+/// pins (`Z`), from the face's unit-strength penalty sum.
+pub(crate) struct FaceBases {
+    pub(crate) q_basis: Array2<f64>,
+    pub(crate) z_basis: Array2<f64>,
+}
+
+pub(crate) fn face_release_bases(
+    s_face_unit: &Array2<f64>,
+) -> Result<FaceBases, RailFaceLimitOutcome> {
+    let (face_values, face_vectors) = match symmetric_eigh(s_face_unit) {
         Some(pair) => pair,
         None => {
-            return RailFaceLimitOutcome::FaceUnavailable {
+            return Err(RailFaceLimitOutcome::FaceUnavailable {
                 reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
-            };
+            });
         }
     };
     let face_cut = range_null_split(&face_values);
@@ -640,17 +707,290 @@ pub fn gaussian_rail_face_limit(
     let pinned_cols: Vec<usize> = (0..face_values.len())
         .filter(|&i| face_values[i] <= face_cut)
         .collect();
-    let released = released_cols.len();
-    if released == 0 {
+    if released_cols.is_empty() {
         // The face penalizes nothing: λ=∞ there is not a statement about
         // the model at all.
-        return RailFaceLimitOutcome::FaceUnavailable {
+        return Err(RailFaceLimitOutcome::FaceUnavailable {
             reason: "the face's penalties release no direction: lambda=infinity there says nothing about the model".to_string(),
+        });
+    }
+    Ok(FaceBases {
+        q_basis: basis_columns(&face_vectors, &released_cols),
+        z_basis: basis_columns(&face_vectors, &pinned_cols),
+    })
+}
+
+/// Eigenpairs of the pinned block `ZᵀKZ` — the λ=∞ model's curvature — with
+/// the identification gate and the conditioning the certificate's margin is
+/// scaled by. `Ok(None)` when the face pins nothing.
+pub(crate) struct PinnedBlock {
+    pub(crate) values: Array1<f64>,
+    pub(crate) vectors: Array2<f64>,
+    pub(crate) conditioning: f64,
+}
+
+pub(crate) fn pinned_block_eigenpairs(
+    k_matrix: &Array2<f64>,
+    z_basis: &Array2<f64>,
+) -> Result<Option<PinnedBlock>, RailFaceLimitOutcome> {
+    if z_basis.ncols() == 0 {
+        return Ok(None);
+    }
+    let kzz = z_basis.t().dot(k_matrix).dot(z_basis);
+    let (values, vectors) = match symmetric_eigh(&kzz) {
+        Some(pair) => pair,
+        None => {
+            return Err(RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            });
+        }
+    };
+    let largest = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    let smallest = values.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
+    if !(smallest > f64::EPSILON.sqrt() * largest) || !(largest > 0.0) {
+        // The λ=∞ model is not identified; there is no limit fit to
+        // certify against.
+        return Err(RailFaceLimitOutcome::FaceUnavailable {
+            reason: format!(
+                "the lambda=infinity model is not identified: reduced Hessian spectrum spans {smallest:.3e}..{largest:.3e}"
+            ),
+        });
+    }
+    Ok(Some(PinnedBlock {
+        conditioning: largest / smallest,
+        values,
+        vectors,
+    }))
+}
+
+/// Everything the final assembly needs beyond the face geometry: the
+/// criterion's data curvature `K = I + S_R`, the limit fit and its score, and
+/// the two knobs that differ between closed forms — the dispersion the fit
+/// term is divided by (`φ̂` for profiled-Gaussian REML, exactly `1` for
+/// fixed-dispersion LAML) and the optional curvature-drift vector `d`, zero
+/// exactly when the working weights do not move with the coefficients.
+struct FaceLimitAssembly<'a> {
+    rho: &'a Array1<f64>,
+    split: FacePenaltySplit,
+    bases: FaceBases,
+    pinned: Option<PinnedBlock>,
+    k_matrix: Array2<f64>,
+    limit_beta: Array1<f64>,
+    limit_score: Array1<f64>,
+    /// Natural magnitude the pinned-stationarity residual is judged against.
+    score_scale: f64,
+    /// Absolute stationarity tolerance for the pinned residual: `√ε·scale`
+    /// when the limit fit is a direct linear solve (Gaussian), the inner
+    /// solver's own certified standard when it is an iterative P-IRLS mode —
+    /// judging an iterative fit by `√ε` would decline every converged limit.
+    stationarity_tolerance: f64,
+    dispersion: f64,
+    curvature_drift: Option<Array1<f64>>,
+}
+
+/// The shared tail of both closed forms: pinned-stationarity check, the two
+/// Schur complements, the pseudo-determinant rank bookkeeping, and the
+/// first-order form itself.
+fn assemble_face_limit(input: FaceLimitAssembly<'_>) -> RailFaceLimitOutcome {
+    let FaceLimitAssembly {
+        rho,
+        split,
+        bases,
+        pinned,
+        k_matrix,
+        limit_beta,
+        limit_score,
+        score_scale,
+        stationarity_tolerance,
+        dispersion,
+        curvature_drift,
+    } = input;
+    let FacePenaltySplit {
+        face_sorted,
+        s_face_unit: _,
+        s_rest,
+        s_unit_all,
+        face_penalties,
+    } = split;
+    let FaceBases { q_basis, z_basis } = bases;
+    let released = q_basis.ncols();
+    let pinned_count = z_basis.ncols();
+
+    if pinned_count > 0 {
+        // The limit fit is stationary in the pinned directions by
+        // construction; a residual there means the reduced solve did not
+        // hold, so the rest of the algebra is not trustworthy either.
+        let pinned_residual = z_basis.t().dot(&limit_score);
+        if pinned_residual.dot(&pinned_residual).sqrt() > stationarity_tolerance {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the limit fit is not stationary in the pinned directions: residual {:.3e} against tolerance {stationarity_tolerance:.3e} (scale {score_scale:.3e})",
+                    pinned_residual.dot(&pinned_residual).sqrt()
+                ),
+            };
+        }
+    }
+    let released_score = q_basis.t().dot(&limit_score);
+
+    // ── the two logdets' analytic first-order content ───────────────────
+    // `½log|H|` leaves `Schur_Z(K)` behind once its `log|QᵀS_FQ|`
+    // divergence is removed; `−½log|S_λ|₊` leaves `Schur_Z(S_R)`. Their
+    // divergences are the same matrix and cancel exactly.
+    let qkq = q_basis.t().dot(&k_matrix).dot(&q_basis);
+    let (schur_k, conditioning) = match pinned.as_ref() {
+        None => (qkq, 1.0_f64),
+        Some(block) => {
+            let qkz = q_basis.t().dot(&k_matrix).dot(&z_basis);
+            let kzz_inverse = spectral_pseudo_inverse(
+                &block.values,
+                &block.vectors,
+                f64::EPSILON.sqrt()
+                    * block.values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())),
+            );
+            (qkq - qkz.dot(&kzz_inverse).dot(&qkz.t()), block.conditioning)
+        }
+    };
+    let qsq = q_basis.t().dot(&s_rest).dot(&q_basis);
+    let (schur_s_rest, surviving_rank, survivor_conditioning) = if pinned_count == 0 {
+        (qsq, 0usize, 1.0_f64)
+    } else {
+        let zsz = z_basis.t().dot(&s_rest).dot(&z_basis);
+        let (values, vectors) = match symmetric_eigh(&zsz) {
+            Some(pair) => pair,
+            None => {
+                return RailFaceLimitOutcome::FaceUnavailable {
+                    reason: "a symmetric eigendecomposition of the face geometry failed"
+                        .to_string(),
+                };
+            }
+        };
+        let cut = range_null_split(&values);
+        let kept: Vec<f64> = values.iter().copied().filter(|v| *v > cut).collect();
+        let cond = match (
+            kept.iter().fold(0.0_f64, |acc, v| acc.max(*v)),
+            kept.iter().fold(f64::INFINITY, |acc, v| acc.min(*v)),
+        ) {
+            (hi, lo) if lo > 0.0 && hi.is_finite() => hi / lo,
+            _ => 1.0,
+        };
+        let zsz_pseudo = spectral_pseudo_inverse(&values, &vectors, cut);
+        let qsz = q_basis.t().dot(&s_rest).dot(&z_basis);
+        (qsq - qsz.dot(&zsz_pseudo).dot(&qsz.t()), kept.len(), cond)
+    };
+    // The pseudo-determinant split `log|S_λ|₊ = log|QᵀS_λQ| +
+    // log|Schur_Q(S_λ)|₊` needs the ranks to add up. That is an identity
+    // (`dim(range S_R + range S_F) = q + dim P_N range S_R`), so a
+    // mismatch means a rank determination is unreliable here.
+    let (all_values, _) = match symmetric_eigh(&s_unit_all) {
+        Some(pair) => pair,
+        None => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            };
+        }
+    };
+    let all_cut = range_null_split(&all_values);
+    let penalty_rank = all_values.iter().filter(|v| **v > all_cut).count();
+    if penalty_rank != released + surviving_rank {
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: format!(
+                "rank bookkeeping does not close: rank(S_lambda)={penalty_rank} but released={released} + surviving={surviving_rank}"
+            ),
         };
     }
-    let q_basis = basis_columns(&face_vectors, &released_cols);
-    let z_basis = basis_columns(&face_vectors, &pinned_cols);
-    let pinned = pinned_cols.len();
+
+    // ── the first-order form ────────────────────────────────────────────
+    let mut first_order_form = &schur_k - &schur_s_rest;
+    for a in 0..released {
+        for b in 0..released {
+            first_order_form[[a, b]] -= released_score[a] * released_score[b] / dispersion;
+        }
+    }
+    let released_curvature_drift = curvature_drift.map(|drift| q_basis.t().dot(&drift));
+    if let Some(drift_q) = released_curvature_drift.as_ref() {
+        // The LAML rank-2 correction: the Laplace logdet's curvature moves
+        // with β̂, and the face's O(λ⁻¹) coefficient offset carries that
+        // motion into first order (see the module derivation).
+        for a in 0..released {
+            for b in 0..released {
+                first_order_form[[a, b]] +=
+                    released_score[a] * drift_q[b] + drift_q[a] * released_score[b];
+            }
+        }
+    }
+    if first_order_form.iter().any(|v| !v.is_finite()) {
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the assembled first-order form is not finite".to_string(),
+        };
+    }
+
+    let released_penalties: Vec<Array2<f64>> = face_penalties
+        .iter()
+        .map(|s| q_basis.t().dot(s).dot(&q_basis))
+        .collect();
+    let face_rho: Vec<f64> = face_sorted.iter().map(|&j| rho[j]).collect();
+
+    RailFaceLimitOutcome::Available(Box::new(RailFaceLimit {
+        face: face_sorted,
+        face_rho,
+        first_order_form,
+        released_penalties,
+        released_score,
+        form_conditioning: conditioning.max(survivor_conditioning).max(1.0),
+        limit_beta,
+        limit_dispersion: dispersion,
+        released_curvature_drift,
+    }))
+}
+
+/// Build the analytic λ→∞ face-limit data from a model's parts.
+///
+/// This is the Gaussian-identity closed form derived at the top of this module,
+/// factored so any caller that owns a design, a response, prior weights and
+/// canonical penalties can obtain the λ=∞ limit — the null-space-restricted
+/// fit, its profiled dispersion, the limit score, and the first-order form —
+/// without going through a `RemlState`. A caller whose criterion is NOT the
+/// profiled-Gaussian REML must not use it: with `β̂`-dependent working weights
+/// the logdet terms gain a third-derivative contribution at the same order,
+/// which is [`laml_rail_face_limit`]'s rank-2 term.
+///
+/// `response` must already be net of any offset. `penalties` are in ρ-block
+/// order, so `rho[j]` is `penalties[j]`'s log smoothing parameter, and `face`
+/// indexes the same order. A decline is typed, never an error: this
+/// certificate simply has nothing to say there.
+///
+/// The returned `limit_beta` is the λ=∞ fit itself, which is also the canonical
+/// maximal-smoothing anchor a continuation can start from (#2366) instead of
+/// solving at a large-but-finite ρ.
+pub fn gaussian_rail_face_limit(
+    design: ArrayView2<'_, f64>,
+    response: ArrayView1<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+    penalties: &[CanonicalPenalty],
+    rho: &Array1<f64>,
+    face: &[usize],
+) -> RailFaceLimitOutcome {
+    let p = design.ncols();
+    let n = design.nrows();
+    if p == 0 || n == 0 || response.len() != n || weights.len() != n {
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "face-limit inputs are shape-inconsistent or empty".to_string(),
+        };
+    }
+    if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "prior weights are not finite and non-negative".to_string(),
+        };
+    }
+    let split = match split_face_penalties(penalties, rho, face, p) {
+        Ok(split) => split,
+        Err(outcome) => return outcome,
+    };
+    let bases = match face_release_bases(&split.s_face_unit) {
+        Ok(bases) => bases,
+        Err(outcome) => return outcome,
+    };
+    let pinned = bases.z_basis.ncols();
 
     // ── weighted design cross-products ──────────────────────────────────
     let weight_sqrt: Array1<f64> = weights.iter().map(|w| w.sqrt()).collect();
@@ -666,44 +1006,22 @@ pub fn gaussian_rail_face_limit(
         .collect();
     let xtwx = x_scaled.t().dot(&x_scaled);
     let xtwy = x_scaled.t().dot(&response_scaled);
-    let k_matrix = &xtwx + &s_rest;
+    let k_matrix = &xtwx + &split.s_rest;
 
     // ── the limit fit: the model restricted to the pinned subspace ──────
-    let kzz = z_basis.t().dot(&k_matrix).dot(&z_basis);
-    let mut pinned_values = Array1::<f64>::zeros(0);
-    let mut pinned_vectors = Array2::<f64>::zeros((0, 0));
-    let mut conditioning = 1.0_f64;
+    let pinned_block = match pinned_block_eigenpairs(&k_matrix, &bases.z_basis) {
+        Ok(block) => block,
+        Err(outcome) => return outcome,
+    };
     let mut limit_beta = Array1::<f64>::zeros(p);
-    if pinned > 0 {
-        let (values, vectors) = match symmetric_eigh(&kzz) {
-            Some(pair) => pair,
-            None => {
-            return RailFaceLimitOutcome::FaceUnavailable {
-                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
-            };
-        }
-        };
-        let largest = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-        let smallest = values.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
-        if !(smallest > f64::EPSILON.sqrt() * largest) || !(largest > 0.0) {
-            // The λ=∞ model is not identified; there is no limit fit to
-            // certify against.
-            return RailFaceLimitOutcome::FaceUnavailable {
-                reason: format!(
-                    "the lambda=infinity model is not identified: reduced Hessian spectrum spans {smallest:.3e}..{largest:.3e}"
-                ),
-            };
-        }
-        conditioning = largest / smallest;
-        let rhs = z_basis.t().dot(&xtwy);
-        let rotated = vectors.t().dot(&rhs);
+    if let Some(block) = pinned_block.as_ref() {
+        let rhs = bases.z_basis.t().dot(&xtwy);
+        let rotated = block.vectors.t().dot(&rhs);
         let mut alpha = Array1::<f64>::zeros(pinned);
         for i in 0..pinned {
-            alpha[i] = rotated[i] / values[i];
+            alpha[i] = rotated[i] / block.values[i];
         }
-        limit_beta = z_basis.dot(&vectors.dot(&alpha));
-        pinned_values = values;
-        pinned_vectors = vectors;
+        limit_beta = bases.z_basis.dot(&block.vectors.dot(&alpha));
     }
 
     // ── the profiled dispersion at the limit fit ────────────────────────
@@ -713,18 +1031,8 @@ pub fn gaussian_rail_face_limit(
         let residual = response[i] - fitted[i];
         weighted_rss += weights[i] * residual * residual;
     }
-    let penalty_energy = limit_beta.dot(&s_rest.dot(&limit_beta));
+    let penalty_energy = limit_beta.dot(&split.s_rest.dot(&limit_beta));
     let penalized_deviance = weighted_rss + penalty_energy;
-    let (all_values, _) = match symmetric_eigh(&s_unit_all) {
-        Some(pair) => pair,
-        None => {
-            return RailFaceLimitOutcome::FaceUnavailable {
-                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
-            };
-        }
-    };
-    let all_cut = range_null_split(&all_values);
-    let penalty_rank = all_values.iter().filter(|v| **v > all_cut).count();
     // The profiled scale's denominator must be the CRITERION's own
     // degrees-of-freedom bookkeeping, which counts the SUM of the
     // per-penalty ranks — not the rank of the summed penalty. The two agree
@@ -751,117 +1059,203 @@ pub fn gaussian_rail_face_limit(
         };
     }
 
-    // ── the limit score, and its released component ─────────────────────
+    // ── the limit score ─────────────────────────────────────────────────
     let limit_score = &xtwy - &k_matrix.dot(&limit_beta);
-    if pinned > 0 {
-        // The limit fit is stationary in the pinned directions by
-        // construction; a residual there means the reduced solve did not
-        // hold, so the rest of the algebra is not trustworthy either.
-        let pinned_residual = z_basis.t().dot(&limit_score);
-        let scale = xtwy
-            .dot(&xtwy)
-            .sqrt()
-            .max(limit_score.dot(&limit_score).sqrt())
-            .max(1.0);
-        if pinned_residual.dot(&pinned_residual).sqrt() > f64::EPSILON.sqrt() * scale {
-            return RailFaceLimitOutcome::FaceUnavailable {
-                reason: format!(
-                    "the limit fit is not stationary in the pinned directions: residual {:.3e} against scale {scale:.3e}",
-                    pinned_residual.dot(&pinned_residual).sqrt()
-                ),
-            };
-        }
-    }
-    let released_score = q_basis.t().dot(&limit_score);
+    let score_scale = xtwy
+        .dot(&xtwy)
+        .sqrt()
+        .max(limit_score.dot(&limit_score).sqrt())
+        .max(1.0);
 
-    // ── the two logdets' analytic first-order content ───────────────────
-    // `½log|H|` leaves `Schur_Z(K)` behind once its `log|QᵀS_FQ|`
-    // divergence is removed; `−½log|S_λ|₊` leaves `Schur_Z(S_R)`. Their
-    // divergences are the same matrix and cancel exactly.
-    let qkq = q_basis.t().dot(&k_matrix).dot(&q_basis);
-    let schur_k = if pinned == 0 {
-        qkq
-    } else {
-        let qkz = q_basis.t().dot(&k_matrix).dot(&z_basis);
-        let kzz_inverse = spectral_pseudo_inverse(
-            &pinned_values,
-            &pinned_vectors,
-            f64::EPSILON.sqrt()
-                * pinned_values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())),
-        );
-        qkq - qkz.dot(&kzz_inverse).dot(&qkz.t())
-    };
-    let qsq = q_basis.t().dot(&s_rest).dot(&q_basis);
-    let (schur_s_rest, surviving_rank, survivor_conditioning) = if pinned == 0 {
-        (qsq, 0usize, 1.0_f64)
-    } else {
-        let zsz = z_basis.t().dot(&s_rest).dot(&z_basis);
-        let (values, vectors) = match symmetric_eigh(&zsz) {
-            Some(pair) => pair,
-            None => {
-            return RailFaceLimitOutcome::FaceUnavailable {
-                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
-            };
-        }
-        };
-        let cut = range_null_split(&values);
-        let kept: Vec<f64> = values.iter().copied().filter(|v| *v > cut).collect();
-        let cond = match (
-            kept.iter().fold(0.0_f64, |acc, v| acc.max(*v)),
-            kept.iter().fold(f64::INFINITY, |acc, v| acc.min(*v)),
-        ) {
-            (hi, lo) if lo > 0.0 && hi.is_finite() => hi / lo,
-            _ => 1.0,
-        };
-        let zsz_pseudo = spectral_pseudo_inverse(&values, &vectors, cut);
-        let qsz = q_basis.t().dot(&s_rest).dot(&z_basis);
-        (
-            qsq - qsz.dot(&zsz_pseudo).dot(&qsz.t()),
-            kept.len(),
-            cond,
-        )
-    };
-    // The pseudo-determinant split `log|S_λ|₊ = log|QᵀS_λQ| +
-    // log|Schur_Q(S_λ)|₊` needs the ranks to add up. That is an identity
-    // (`dim(range S_R + range S_F) = q + dim P_N range S_R`), so a
-    // mismatch means a rank determination is unreliable here.
-    if penalty_rank != released + surviving_rank {
-        return RailFaceLimitOutcome::FaceUnavailable {
-            reason: format!(
-                "rank bookkeeping does not close: rank(S_lambda)={penalty_rank} but released={released} + surviving={surviving_rank}"
-            ),
-        };
-    }
-
-    // ── the first-order form ────────────────────────────────────────────
-    let mut first_order_form = &schur_k - &schur_s_rest;
-    for a in 0..released {
-        for b in 0..released {
-            first_order_form[[a, b]] -= released_score[a] * released_score[b] / dispersion;
-        }
-    }
-    if first_order_form.iter().any(|v| !v.is_finite()) {
-        return RailFaceLimitOutcome::FaceUnavailable {
-            reason: "the assembled first-order form is not finite".to_string(),
-        };
-    }
-
-    let released_penalties: Vec<Array2<f64>> = face_penalties
-        .iter()
-        .map(|s| q_basis.t().dot(s).dot(&q_basis))
-        .collect();
-    let face_rho: Vec<f64> = face_sorted.iter().map(|&j| rho[j]).collect();
-
-    RailFaceLimitOutcome::Available(Box::new(RailFaceLimit {
-        face: face_sorted,
-        face_rho,
-        first_order_form,
-        released_penalties,
-        released_score,
-        form_conditioning: conditioning.max(survivor_conditioning).max(1.0),
+    assemble_face_limit(FaceLimitAssembly {
+        rho,
+        split,
+        bases,
+        pinned: pinned_block,
+        k_matrix,
         limit_beta,
-        limit_dispersion: dispersion,
-    }))
+        limit_score,
+        score_scale,
+        // The Gaussian limit fit is a direct linear solve, so its pinned
+        // residual is roundoff-scale and `√ε` is the honest standard.
+        stationarity_tolerance: f64::EPSILON.sqrt() * score_scale,
+        dispersion,
+        curvature_drift: None,
+    })
+}
+
+/// Row bundle the LAML closed form reads off the CONVERGED λ=∞ limit fit.
+///
+/// All row vectors are length-`n` in design row order, in the criterion's own
+/// units — prior weights folded in, exactly as the inner solver reports them:
+///
+/// * `working_weights` — the observed-information diagonal
+///   `w_i = −∂²ℓ_i/∂η_i²` at the limit fit, the same `W` whose `XᵀWX` the
+///   criterion's `½log|H|` uses;
+/// * `score_residuals` — `u_i = ∂ℓ_i/∂η_i`, so `∇ℓ = Xᵀu`;
+/// * `weight_eta_derivatives` — `c_i = dW_i/dη_i`, the third-derivative array
+///   the exact LAML ρ-gradient already consumes (`solve_c_array`).
+pub struct LamlFaceParts<'a> {
+    /// The λ=∞ fit in the model's own coefficient basis (`Zα̂`).
+    pub limit_beta: Array1<f64>,
+    pub working_weights: ArrayView1<'a, f64>,
+    pub score_residuals: ArrayView1<'a, f64>,
+    pub weight_eta_derivatives: ArrayView1<'a, f64>,
+    /// The RELATIVE stationarity standard the limit fit's mode was certified
+    /// to by its own solver (the inner KKT tolerance). The pinned-direction
+    /// residual check applies this same scale-invariant standard in the model
+    /// basis — an iterative mode judged by the Gaussian path's `√ε` would be
+    /// declined every time, converged or not.
+    pub convergence_tolerance: f64,
+}
+
+/// Build the analytic λ→∞ face-limit data for a fixed-unit-dispersion LAML
+/// criterion (see the module derivation: `C_LAML` adds the symmetric rank-2
+/// curvature-drift term to the Gaussian form and drops the `1/φ̂` fit-term
+/// scale).
+///
+/// The caller supplies the converged limit fit — the model restricted to the
+/// face's null space, solved by the SAME inner engine the criterion itself
+/// uses — through [`LamlFaceParts`]. Everything here is then exact arithmetic
+/// on those outputs: no probe, no finite difference, and no evaluation at a
+/// large λ anywhere.
+pub fn laml_rail_face_limit(
+    design: ArrayView2<'_, f64>,
+    penalties: &[CanonicalPenalty],
+    rho: &Array1<f64>,
+    face: &[usize],
+    parts: LamlFaceParts<'_>,
+) -> RailFaceLimitOutcome {
+    let p = design.ncols();
+    let n = design.nrows();
+    if p == 0
+        || n == 0
+        || parts.limit_beta.len() != p
+        || parts.working_weights.len() != n
+        || parts.score_residuals.len() != n
+        || parts.weight_eta_derivatives.len() != n
+    {
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "face-limit inputs are shape-inconsistent or empty".to_string(),
+        };
+    }
+    if parts.limit_beta.iter().any(|v| !v.is_finite())
+        || parts.working_weights.iter().any(|v| !v.is_finite())
+        || parts.score_residuals.iter().any(|v| !v.is_finite())
+        || parts.weight_eta_derivatives.iter().any(|v| !v.is_finite())
+    {
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "the limit fit's row bundle is not finite".to_string(),
+        };
+    }
+    let split = match split_face_penalties(penalties, rho, face, p) {
+        Ok(split) => split,
+        Err(outcome) => return outcome,
+    };
+    let bases = match face_release_bases(&split.s_face_unit) {
+        Ok(bases) => bases,
+        Err(outcome) => return outcome,
+    };
+    if bases.z_basis.ncols() == 0 {
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the face releases every direction: the lambda=infinity limit model is empty"
+                .to_string(),
+        };
+    }
+
+    // I(β̂_∞) = Xᵀ·diag(w)·X, formed WITHOUT a square-root split: observed
+    // weights may be negative on non-canonical links, and `H ≻ 0` is a
+    // statement about the sum, not about the rows.
+    let mut x_by_w = design.to_owned();
+    for (i, mut row) in x_by_w.axis_iter_mut(Axis(0)).enumerate() {
+        let w = parts.working_weights[i];
+        row.mapv_inplace(|v| v * w);
+    }
+    let information = symmetrized(&design.t().dot(&x_by_w));
+    let k_matrix = &information + &split.s_rest;
+
+    let pinned_block = match pinned_block_eigenpairs(&k_matrix, &bases.z_basis) {
+        Ok(Some(block)) => block,
+        // `z_basis.ncols() > 0` was checked above, so this arm is dead — but
+        // a decline is the right dead-arm behavior for a certificate: never
+        // abort a fit over an internal expectation.
+        Ok(None) => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "the face releases every direction: the lambda=infinity limit model is empty"
+                    .to_string(),
+            };
+        }
+        Err(outcome) => return outcome,
+    };
+
+    // g_c = ∇ℓ(β̂_∞) − S_R β̂_∞: the Lagrange force the face carries.
+    let grad_ell = design.t().dot(&parts.score_residuals);
+    let penalty_pull = split.s_rest.dot(&parts.limit_beta);
+    let limit_score = &grad_ell - &penalty_pull;
+    let score_scale = grad_ell
+        .dot(&grad_ell)
+        .sqrt()
+        .max(limit_score.dot(&limit_score).sqrt())
+        .max(1.0);
+    if !(parts.convergence_tolerance.is_finite() && parts.convergence_tolerance > 0.0) {
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "the limit fit's convergence tolerance is not usable".to_string(),
+        };
+    }
+    // The inner solver certified `‖g‖ ≤ tol·(1 + natural scale)` in its own
+    // frame; apply the identical scale-invariant standard to the rebuilt
+    // gradient in this frame, floored by the Gaussian path's `√ε·scale` so a
+    // tolerance tighter than roundoff cannot decline an exact solve.
+    let natural_scale =
+        1.0 + grad_ell.dot(&grad_ell).sqrt() + penalty_pull.dot(&penalty_pull).sqrt();
+    let stationarity_tolerance = (parts.convergence_tolerance * natural_scale)
+        .max(f64::EPSILON.sqrt() * score_scale);
+
+    // The curvature-drift vector `d = ½Xᵀ(c ⊙ a)`, `a` the LIMIT model's
+    // leverage `a_i = x_iᵀ Z (ZᵀKZ)⁻¹ Zᵀ x_i` — assembled from the pinned
+    // block's own eigenpairs so it prices exactly the inverse the Schur
+    // complement uses.
+    let xz = design.dot(&bases.z_basis);
+    let rotated = xz.dot(&pinned_block.vectors);
+    let mut drift_rows = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mut leverage = 0.0_f64;
+        for k in 0..rotated.ncols() {
+            leverage += rotated[[i, k]] * rotated[[i, k]] / pinned_block.values[k];
+        }
+        drift_rows[i] = 0.5 * parts.weight_eta_derivatives[i] * leverage;
+    }
+    let raw_drift = design.t().dot(&drift_rows);
+    // The K-oblique reduction (module derivation): the face's coefficient
+    // offset has an O(λ⁻¹) pinned component, so the drift acts through
+    // `d̃ = d − KZ(ZᵀKZ)⁻¹Zᵀd` — the same reduction the Schur complement
+    // applies to K itself. The orthogonal compression alone is a
+    // first-order error.
+    let pinned_drift = bases.z_basis.t().dot(&raw_drift);
+    let rotated_pinned = pinned_block.vectors.t().dot(&pinned_drift);
+    let mut solved = Array1::<f64>::zeros(rotated_pinned.len());
+    for k in 0..rotated_pinned.len() {
+        solved[k] = rotated_pinned[k] / pinned_block.values[k];
+    }
+    let oblique = k_matrix.dot(&bases.z_basis.dot(&pinned_block.vectors.dot(&solved)));
+    let curvature_drift = &raw_drift - &oblique;
+
+    assemble_face_limit(FaceLimitAssembly {
+        rho,
+        split,
+        bases,
+        pinned: Some(pinned_block),
+        k_matrix,
+        limit_beta: parts.limit_beta,
+        limit_score,
+        score_scale,
+        stationarity_tolerance,
+        // The family's dispersion is exactly 1 for the gated families, so the
+        // fit term's `−g_Qg_Qᵀ` carries no divisor and the reported limit
+        // dispersion is the family's own.
+        dispersion: 1.0,
+        curvature_drift: Some(curvature_drift),
+    })
 }
 
 #[cfg(test)]
@@ -884,6 +1278,7 @@ mod rail_face_tests {
             form_conditioning: 1.0,
             limit_beta: Array1::zeros(0),
             limit_dispersion: 1.0,
+            released_curvature_drift: None,
         }
     }
 
@@ -1118,4 +1513,128 @@ mod rail_face_tests {
             RailFaceVerdict::Refused { .. }
         ));
     }
+
+    /// The LAML form against a fully hand-expanded 2-coefficient fixture:
+    /// `X = [[1,0],[1,1],[1,2]]`, one face penalty `diag(0,1)` (releases the
+    /// slope, pins the intercept), no survivors. Every quantity — the Schur
+    /// complement, the score term, the leverage, the rank-2 drift — is a
+    /// scalar identity here, so a sign error or a misplaced factor of two in
+    /// the assembly misses by a lot, not by rounding.
+    #[test]
+    fn laml_face_form_matches_the_hand_expansion() {
+        use crate::estimate::PenaltySpec;
+        let mut design = Array2::<f64>::zeros((3, 2));
+        for (i, t) in [0.0_f64, 1.0, 2.0].iter().enumerate() {
+            design[[i, 0]] = 1.0;
+            design[[i, 1]] = *t;
+        }
+        let w = Array1::from(vec![1.0_f64, 0.5, 2.0]);
+        // Pinned stationarity demands `Σu_i = 0` exactly (Z = intercept).
+        let u = Array1::from(vec![0.3_f64, -0.5, 0.2]);
+        let c = Array1::from(vec![0.4_f64, -0.2, 0.3]);
+        let beta_inf = Array1::from(vec![0.7_f64, 0.0]);
+        let mut bend = Array2::<f64>::zeros((2, 2));
+        bend[[1, 1]] = 1.0;
+        let (penalties, _) = gam_terms::construction::canonicalize_penalty_specs(
+            &[PenaltySpec::Dense(bend)],
+            &[1],
+            2,
+            "laml_face_hand_fixture",
+        )
+        .expect("canonicalize the hand fixture penalty");
+        let rho = Array1::from(vec![20.0_f64]);
+
+        // Hand expansion. K = XᵀWX with K00 = Σw, K01 = Σw·t, K11 = Σw·t²;
+        // g = Xᵀu = [0, −0.1]; a_i = 1/K00; d₀ = ½·Σc_i/K00,
+        // d₁ = ½·Σ(c_i·t_i)/K00. The drift acts through the K-oblique
+        // reduction `d̃₁ = d₁ − (K₀₁/K₀₀)·d₀` — the pinned component of the
+        // face's coefficient offset is first-order too, and this scalar case
+        // makes the correction visible by hand: d₀ ≠ 0 and K₀₁ ≠ 0, so the
+        // orthogonal compression alone would be measurably wrong.
+        let k00 = 3.5_f64;
+        let k01 = 4.5_f64;
+        let k11 = 8.5_f64;
+        let g1 = -0.1_f64;
+        let d0 = 0.5 * (0.4 + (-0.2) + 0.3) / k00;
+        let d1 = 0.5 * (0.0 * 0.4 + 1.0 * (-0.2) + 2.0 * 0.3) / k00;
+        let d1_oblique = d1 - (k01 / k00) * d0;
+        let c_hand = (k11 - k01 * k01 / k00) - g1 * g1 + 2.0 * g1 * d1_oblique;
+        let expected_constant = 0.5 * c_hand;
+
+        let limit = laml_rail_face_limit(
+            design.view(),
+            &penalties,
+            &rho,
+            &[0],
+            LamlFaceParts {
+                limit_beta: beta_inf.clone(),
+                working_weights: w.view(),
+                score_residuals: u.view(),
+                weight_eta_derivatives: c.view(),
+                convergence_tolerance: f64::EPSILON,
+            },
+        )
+        .available()
+        .expect("the hand fixture is inside the LAML closed form");
+        let drift = limit
+            .released_curvature_drift
+            .as_ref()
+            .expect("the LAML form must record its curvature drift");
+        assert!(
+            (drift[0].abs() - d1_oblique.abs()).abs() <= 1.0e-14,
+            "released drift |d̃_Q|={} should be the hand value {}",
+            drift[0].abs(),
+            d1_oblique.abs()
+        );
+        match certify_rail_face(&limit) {
+            RailFaceVerdict::Certified(proof) => {
+                assert!(
+                    (proof.tail_constants[0] - expected_constant).abs()
+                        <= 1.0e-12 * expected_constant,
+                    "analytic c_0={} should equal the hand expansion {expected_constant}",
+                    proof.tail_constants[0]
+                );
+            }
+            other => panic!("the hand fixture must certify, got {other:?}"),
+        }
+
+        // The `c ≡ 0` member is the Gaussian reduction: the drift is recorded
+        // as exactly zero and the constant loses exactly the rank-2 term.
+        let zeros = Array1::<f64>::zeros(3);
+        let reduced = laml_rail_face_limit(
+            design.view(),
+            &penalties,
+            &rho,
+            &[0],
+            LamlFaceParts {
+                limit_beta: beta_inf,
+                working_weights: w.view(),
+                score_residuals: u.view(),
+                weight_eta_derivatives: zeros.view(),
+                convergence_tolerance: f64::EPSILON,
+            },
+        )
+        .available()
+        .expect("the zero-drift fixture is inside the LAML closed form");
+        assert_eq!(
+            reduced
+                .released_curvature_drift
+                .as_ref()
+                .expect("drift recorded")[0],
+            0.0
+        );
+        match certify_rail_face(&reduced) {
+            RailFaceVerdict::Certified(proof) => {
+                let expected_no_drift = 0.5 * ((k11 - k01 * k01 / k00) - g1 * g1);
+                assert!(
+                    (proof.tail_constants[0] - expected_no_drift).abs()
+                        <= 1.0e-12 * expected_no_drift,
+                    "zero-drift c_0={} should drop exactly the rank-2 term ({expected_no_drift})",
+                    proof.tail_constants[0]
+                );
+            }
+            other => panic!("the zero-drift fixture must certify, got {other:?}"),
+        }
+    }
+
 }

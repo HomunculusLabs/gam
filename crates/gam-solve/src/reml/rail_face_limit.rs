@@ -1,4 +1,5 @@
-//! The λ→∞ limit of the REML criterion, built analytically (#2348 Inc 5).
+//! The λ→∞ limit of the REML/LAML criterion, built analytically (#2348 Inc 5;
+//! LAML extension per #2349 rounds 9–10b).
 //!
 //! [`RemlState::rail_face_limit`] answers one question exactly: *what is this
 //! fit when the smoothing parameters on a rail face are literally infinite?*
@@ -11,56 +12,61 @@
 //!   solved with the surviving penalties. This is the λ=∞ model, and its
 //!   criterion value is `V_∞` (the divergent `log|QᵀS_FQ|` cancels exactly
 //!   between the two logdets, so the limit is finite);
-//! * the **limit score** `g_c = XᵀW(y − Xβ̂_∞) − S_Rβ̂_∞`, the Lagrange force
-//!   the constraint carries, computed from `O(1)` quantities rather than read
-//!   off a `λ⁻¹`-scale coefficient tail;
-//! * the **first-order form** `C = Schur_Z(XᵀWX + S_R) − Schur_Z(S_R) −
-//!   g_Qg_Qᵀ/φ̂` on the released subspace, whose positive definiteness is the
-//!   whole face certificate (see [`crate::rho_optimizer::rail_face`] for the
-//!   derivation and what `C ≻ 0` proves).
+//! * the **limit score** `g_c = ∇ℓ(β̂_∞) − S_Rβ̂_∞`, the Lagrange force the
+//!   constraint carries, computed from `O(1)` quantities rather than read off
+//!   a `λ⁻¹`-scale coefficient tail;
+//! * the **first-order form** `C` on the released subspace, whose positive
+//!   definiteness is the whole face certificate (see
+//!   [`crate::rho_optimizer::rail_face`] for both derivations and what
+//!   `C ≻ 0` proves).
 //!
-//! The Schur complements ARE the analytic λ→∞ limits of the two logdet terms'
-//! first-order content: `tr((QᵀS_FQ)⁻¹·Schur_Z(K))` is what `½log|H|` leaves
-//! behind after its divergence is removed, and `tr((QᵀS_FQ)⁻¹·Schur_Z(S_R))`
-//! is what `−½log|S_λ|₊` leaves behind. Nothing here is differenced, probed,
-//! or extrapolated.
+//! # Scope: two closed forms, one dispatch
 //!
-//! # Scope
+//! *Profiled-Gaussian REML* (identity link, dense design): the working weights
+//! do not move with `β̂`, the limit fit is a linear solve, and
+//! `C = Schur_Z(K) − Schur_Z(S_R) − g_Qg_Qᵀ/φ̂`.
 //!
-//! Gaussian-identity, dense design, flat ρ-prior, no coefficient constraints.
-//! For every other configuration the working weights depend on `β̂`, so the
-//! logdet terms acquire a third-derivative contribution at the same order and
-//! this closed form is no longer the whole first-order story; the method
-//! returns `None` and the measured-tail certificate remains the authority.
+//! *Fixed-unit-dispersion LAML* (binomial, poisson; dense design): the working
+//! weights move with `β̂`, so the Laplace logdet contributes the symmetric
+//! rank-2 drift term `g_Q d_Qᵀ + d_Q g_Qᵀ` with `d = ½Xᵀ(c ⊙ a)` built from
+//! the limit fit's own third-derivative array and leverage. The limit fit is
+//! an ordinary P-IRLS solve of the null-space-restricted model, run by the
+//! same inner engine as every other fit, so the closed form expands exactly
+//! the criterion production minimizes.
+//!
+//! Everything else declines, TYPED: `OutsideClosedForm` says this fit's
+//! criterion is not one the forms model (a future form may still apply), while
+//! `FaceUnavailable` is a statement about the face that no other form rescues.
+//! Either way the caller keeps whatever authority it already had.
 
 use super::*;
-use crate::rho_optimizer::rail_face::{RailFaceLimitOutcome, gaussian_rail_face_limit};
+use crate::rho_optimizer::rail_face::{
+    LamlFaceParts, RailFaceLimitOutcome, face_release_bases, gaussian_rail_face_limit,
+    laml_rail_face_limit, released_rank, split_face_penalties,
+};
 
 impl RemlState<'_> {
     /// Build the analytic λ→∞ limit data for the rail face `face` (ρ-block
     /// indices), at the smoothing parameters `rho`.
     ///
-    /// This is the gate; the algebra is [`gaussian_rail_face_limit`], which any
-    /// caller holding the same parts can use directly. A decline is never an
-    /// error, and it is TYPED: `OutsideClosedForm` says this fit's criterion is
-    /// not the one the form models (another form may still apply), while
-    /// `FaceUnavailable` is a statement about the face that no other form
-    /// rescues. Either way the caller keeps whatever authority it already had.
+    /// This is the gate; the algebra lives in
+    /// [`crate::rho_optimizer::rail_face`], which any caller holding the same
+    /// parts can use directly. A decline is never an error, and it is TYPED
+    /// (see the module doc).
     pub(crate) fn rail_face_limit(
         &self,
         rho: &Array1<f64>,
         face: &[usize],
     ) -> Result<RailFaceLimitOutcome, EstimationError> {
-        // The closed form is exact only where the working weights do not move
-        // with β̂ and the criterion is the plain profiled-Gaussian REML.
-        let outside = if !reml_is_gaussian_identity(&self.config.likelihood) {
-            // The one that will stop mattering first: a family whose working
-            // weights move with β̂ has a LAML closed form of its own.
-            Some("the criterion is not profiled-Gaussian: the working weights move with the coefficients")
-        } else if self.linear_constraints.is_some() || self.coefficient_lower_bounds.is_some() {
+        // Scope clauses shared by BOTH closed forms: each names a criterion
+        // term (or a geometry) neither form models.
+        let outside = if self.linear_constraints.is_some()
+            || self.coefficient_lower_bounds.is_some()
+        {
             Some("the fit carries coefficient constraints, so the limit is a constrained optimum")
-        } else if self.runtime_mixture_link_state.is_some() || self.runtime_sas_link_state.is_some() {
-            Some("the link carries runtime state, so the criterion is not the plain profiled-Gaussian one")
+        } else if self.runtime_mixture_link_state.is_some() || self.runtime_sas_link_state.is_some()
+        {
+            Some("the link carries runtime state, so the criterion is not one the closed forms model")
         } else if self.penalty_shrinkage_floor.is_some() {
             Some("a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes")
         } else if !self
@@ -99,18 +105,236 @@ impl RemlState<'_> {
                 ),
             });
         }
-        // The builder wants the response already net of any offset.
-        let mut response = self.y.to_owned();
-        if self.offset.len() == response.len() {
-            response -= &self.offset;
+
+        if reml_is_gaussian_identity(&self.config.likelihood) {
+            // The builder wants the response already net of any offset.
+            let mut response = self.y.to_owned();
+            if self.offset.len() == response.len() {
+                response -= &self.offset;
+            }
+            return Ok(gaussian_rail_face_limit(
+                design.view(),
+                response.view(),
+                self.weights,
+                self.canonical_penalties.as_slice(),
+                rho,
+                face,
+            ));
         }
-        Ok(gaussian_rail_face_limit(
+
+        // ── the LAML closed form ────────────────────────────────────────
+        // Restricted to families whose dispersion is exactly 1, so the
+        // criterion is `−ℓ + ½β̂ᵀSβ̂ + ½log|H| − ½log|S|₊` with `−ℓ` and `H`
+        // in the same units and no profiled/estimated scale anywhere.
+        if !matches!(
+            self.config.likelihood.spec.response,
+            ResponseFamily::Binomial | ResponseFamily::Poisson
+        ) {
+            return Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "the LAML closed form is derived for fixed-unit-dispersion families \
+                         (binomial, poisson); this family's dispersion enters the criterion \
+                         through terms the form does not carry"
+                    .to_string(),
+            });
+        }
+        if self.config.firth_bias_reduction {
+            return Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "the Jeffreys/Firth term is armed: the criterion carries a logdet \
+                         prior this closed form does not model"
+                    .to_string(),
+            });
+        }
+        self.laml_rail_face_limit_via_limit_fit(&design, rho, face)
+    }
+
+    /// Solve the λ=∞ limit model — the fit restricted to the face's common
+    /// null space with the surviving penalties, through the SAME inner engine
+    /// as every production fit — and hand its converged row bundle to the
+    /// LAML face form.
+    fn laml_rail_face_limit_via_limit_fit(
+        &self,
+        design: &Array2<f64>,
+        rho: &Array1<f64>,
+        face: &[usize],
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
+        let split =
+            match split_face_penalties(self.canonical_penalties.as_slice(), rho, face, self.p) {
+                Ok(split) => split,
+                Err(outcome) => return Ok(outcome),
+            };
+        let bases = match face_release_bases(&split.s_face_unit) {
+            Ok(bases) => bases,
+            Err(outcome) => return Ok(outcome),
+        };
+        let pinned = bases.z_basis.ncols();
+        if pinned == 0 {
+            return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                reason:
+                    "the face releases every direction: the lambda=infinity limit model is empty"
+                        .to_string(),
+            });
+        }
+
+        // The limit model's penalties: `ZᵀS_jZ` for each survivor at its own
+        // λ. A survivor whose penalty vanishes on the null space constrains
+        // only released directions and drops out of the limit model.
+        let reduced_design = design.dot(&bases.z_basis);
+        let mut reduced_specs = Vec::new();
+        let mut reduced_null_dims = Vec::new();
+        let mut reduced_rho = Vec::new();
+        for (j, penalty) in self.canonical_penalties.iter().enumerate() {
+            if split.face_sorted.contains(&j) {
+                continue;
+            }
+            let mut full = Array2::<f64>::zeros((self.p, self.p));
+            let cols = penalty.col_range.clone();
+            for (li, gi) in cols.clone().enumerate() {
+                for (lj, gj) in cols.clone().enumerate() {
+                    full[[gi, gj]] += penalty.local[[li, lj]];
+                }
+            }
+            let reduced = bases.z_basis.t().dot(&full).dot(&bases.z_basis);
+            let rank = match released_rank(&reduced) {
+                Ok(rank) => rank,
+                Err(reason) => return Ok(RailFaceLimitOutcome::FaceUnavailable { reason }),
+            };
+            if rank == 0 {
+                continue;
+            }
+            reduced_specs.push(crate::estimate::PenaltySpec::Dense(reduced));
+            reduced_null_dims.push(pinned - rank);
+            reduced_rho.push(rho[j]);
+        }
+        let (reduced_penalties, _) = gam_terms::construction::canonicalize_penalty_specs(
+            &reduced_specs,
+            &reduced_null_dims,
+            pinned,
+            "laml rail-face limit fit",
+        )?;
+        if reduced_penalties.len() != reduced_rho.len() {
+            // We filtered rank-0 blocks ourselves, so canonicalization must
+            // keep every spec; a drop here means the two rank scans disagree
+            // and the reduced ρ vector would be misaligned.
+            return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                reason: "reduced-penalty canonicalization dropped a block the rank scan kept"
+                    .to_string(),
+            });
+        }
+
+        let mut pirls_config = self.config.as_pirls_config();
+        pirls_config.link_kind = self.runtime_inverse_link();
+        let problem = crate::pirls::PirlsProblem {
+            x: reduced_design,
+            offset: self.offset.view(),
+            y: self.y,
+            priorweights: self.weights,
+            covariate_se: None,
+            gaussian_fixed_cache: None,
+            glm_first_step_gram: None,
+        };
+        let penalty = crate::pirls::PenaltyConfig {
+            canonical_penalties: &reduced_penalties,
+            balanced_penalty_root: None,
+            reparam_invariant: None,
+            p: pinned,
+            coefficient_lower_bounds: None,
+            linear_constraints_original: None,
+            penalty_shrinkage_floor: None,
+            kronecker_factored: None,
+        };
+        let reduced_rho = Array1::from(reduced_rho);
+        let rho_view = gam_problem::LogSmoothingParamsView::new(reduced_rho.view())?;
+        let limit_fit = match crate::pirls::fit_model_for_fixed_rho(
+            rho_view,
+            problem,
+            penalty,
+            &pirls_config,
+            None,
+        ) {
+            Ok((result, _working)) => result,
+            Err(err) => {
+                // The λ=∞ model failing to solve is a statement about the
+                // face (LIMIT_INNER_DIVERGED in the design's taxonomy), not
+                // an error in the caller's fit: decline and leave the
+                // measured-tail path its authority.
+                return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                    reason: format!("the lambda=infinity limit fit did not solve: {err}"),
+                });
+            }
+        };
+        if !matches!(limit_fit.status, crate::pirls::PirlsStatus::Converged) {
+            return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the lambda=infinity limit fit did not converge: {:?}",
+                    limit_fit.status
+                ),
+            });
+        }
+        if limit_fit.ridge_passport.delta() != 0.0 {
+            return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the limit fit needed a stabilization ridge ({:.3e}), so its criterion is \
+                     not the plain LAML this form expands",
+                    limit_fit.ridge_passport.delta()
+                ),
+            });
+        }
+        if limit_fit.derivatives_unsupported {
+            return Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "this family does not expose the third-derivative curvature array the \
+                         LAML form's drift term needs"
+                    .to_string(),
+            });
+        }
+        // Both honest labels are inside the form. `ObservedExact` is the
+        // exact Laplace curvature; `ExpectedInformationSurrogate` on these
+        // families means either a canonical link (Observed ≡ Fisher, so the
+        // "surrogate" IS exact) or a by-design Fisher family — and in every
+        // case the criterion's `½log|H|` and this row bundle come from the
+        // SAME exported state, so the form expands the criterion as shipped.
+        // Only an indefinite observed Hessian is a real refusal: its logdet
+        // is not trustworthy by the exporter's own diagnosis.
+        if let crate::pirls::ExportedLaplaceCurvature::InvalidObservedCurvature { .. } =
+            limit_fit.exported_laplace_curvature
+        {
+            return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the limit fit's observed curvature is invalid ({:?}); its Laplace \
+                     logdet is not trustworthy",
+                    limit_fit.exported_laplace_curvature
+                ),
+            });
+        }
+
+        // Reduced coefficients back to the reduced-original basis, then to
+        // the model basis: `β̂_∞ = Z · (Qs · β_transformed)`.
+        let alpha = limit_fit
+            .reparam_result
+            .qs
+            .dot(limit_fit.beta_transformed.as_ref());
+        let limit_beta = bases.z_basis.dot(&alpha);
+        // `∇ℓ = XᵀW_s(z − η)`: the score-side identity, on the limit fit's
+        // own converged rows. Row order is the design's, so these arrays are
+        // valid against the FULL design too — the reduced model differs only
+        // in its coefficient basis.
+        let n = design.nrows();
+        let mut score_residuals = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            score_residuals[i] = limit_fit.solveweights[i]
+                * (limit_fit.solveworking_response[i] - limit_fit.final_eta[i]);
+        }
+        Ok(laml_rail_face_limit(
             design.view(),
-            response.view(),
-            self.weights,
             self.canonical_penalties.as_slice(),
             rho,
             face,
+            LamlFaceParts {
+                limit_beta,
+                working_weights: limit_fit.finalweights.view(),
+                score_residuals: score_residuals.view(),
+                weight_eta_derivatives: limit_fit.solve_c_array.view(),
+                convergence_tolerance: pirls_config.convergence_tolerance,
+            },
         ))
     }
 }
@@ -119,7 +343,16 @@ impl RemlState<'_> {
 mod rail_face_limit_tests {
     use super::*;
     use crate::rho_optimizer::OuterEvalOrder;
-    use crate::rho_optimizer::rail_face::{RailFaceVerdict, certify_rail_face};
+    use crate::rho_optimizer::rail_face::{RailFaceLimit, RailFaceVerdict, certify_rail_face};
+
+    /// Unwrap an outcome that the fixture guarantees is available, carrying
+    /// the TYPED decline reason into the panic instead of discarding it.
+    fn expect_available(outcome: RailFaceLimitOutcome, what: &str) -> RailFaceLimit {
+        match outcome {
+            RailFaceLimitOutcome::Available(limit) => *limit,
+            other => panic!("{what}: expected an available limit, got {other:?}"),
+        }
+    }
 
     /// A cubic design `[1, t, t², t³]` whose truth is linear. Penalty 0 hits the
     /// quadratic+cubic columns (the block that can rail to λ=∞), penalty 1 hits
@@ -443,17 +676,371 @@ mod rail_face_limit_tests {
         );
     }
 
-    /// The gate is a gate: a non-Gaussian configuration is outside the closed
-    /// form and must decline rather than return a wrong limit.
-    #[test]
-    fn non_gaussian_configuration_declines_the_closed_form() {
-        let (y01, weights, x) = cubic_fixture(NULL_CURVATURE);
-        let y: Array1<f64> = y01.mapv(|v| if v > 1.4 { 1.0 } else { 0.0 });
-        let offset = Array1::<f64>::zeros(y.len());
-        let config = RemlConfig::external(
+    // ═══════════════════ the LAML closed form (#2349) ═══════════════════
+
+    /// Binomial sibling of the cubic fixture: logistic truth `η = a + b·t +
+    /// c·t²`, responses produced by error-diffusion dithering, and — unlike
+    /// the Gaussian fixture — NO survivor penalty. Three deliberate choices:
+    ///
+    /// * **Error diffusion, not thresholding.** A quasi-random threshold
+    ///   leaves CLT-scale `O(√n)` noise in the released-direction score, and
+    ///   the score test genuinely rejects the face on it (measured:
+    ///   λ_min(C) = −8.0 against ‖C‖ = 8.0 on the thresholded ancestor of
+    ///   this fixture). The diffusion carry keeps every prefix sum of
+    ///   `y − μ` bounded by one, so the realized noise carries `O(1)` score
+    ///   in ANY smooth direction while the information grows like `n` — the
+    ///   binomial analogue of projecting the residual out of the design's
+    ///   column space.
+    /// * **No survivor penalty.** With nothing shrinking it, a real slope
+    ///   creates no shrinkage bias for the released directions to absorb —
+    ///   the trap the Gaussian fixture avoids by having no slope at all.
+    /// * **A real slope, so `μ` crosses ½.** The drift array
+    ///   `c_i = μ(1−μ)(1−2μ)` then CHANGES SIGN mid-domain. That texture is
+    ///   what the K-oblique reduction cannot absorb into the pinned
+    ///   directions, making the rank-2 drift term a measurable fraction of
+    ///   the face constant — which the discriminator arm of the validation
+    ///   requires. (A near-constant `μ` gives a near-smooth `c⊙a`, whose
+    ///   drift is almost entirely oblique shadow: measured at 0.14% of the
+    ///   constant, below the instrument's own 0.1% floor.)
+    fn binomial_cubic_fixture(
+        curvature: f64,
+        n: usize,
+    ) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+        let mut x = Array2::<f64>::zeros((n, 4));
+        let mut y = Array1::<f64>::zeros(n);
+        let mut carry = 0.0_f64;
+        for i in 0..n {
+            let t = i as f64 / (n as f64 - 1.0);
+            x[[i, 0]] = 1.0;
+            x[[i, 1]] = t;
+            x[[i, 2]] = t * t;
+            x[[i, 3]] = t * t * t;
+            let eta = -0.9 + 1.8 * t + curvature * t * t;
+            let mu = 1.0 / (1.0 + (-eta).exp());
+            carry += mu;
+            if carry >= 0.5 {
+                y[i] = 1.0;
+                carry -= 1.0;
+            } else {
+                y[i] = 0.0;
+            }
+        }
+        (y, Array1::<f64>::ones(n), x)
+    }
+
+    /// The bend block alone: the face penalty with no survivor, so the limit
+    /// model is the unpenalized `[1, t]` logistic fit.
+    fn bend_only_penalty() -> Vec<gam_terms::construction::CanonicalPenalty> {
+        let p = 4usize;
+        let mut bend = Array2::<f64>::zeros((p, p));
+        bend[[2, 2]] = 1.0;
+        bend[[3, 3]] = 2.0;
+        gam_terms::construction::canonicalize_penalty_specs(
+            &[crate::estimate::PenaltySpec::Dense(bend)],
+            &[2],
+            p,
+            "laml_rail_face_bend_only",
+        )
+        .map(|(canonical, _)| canonical)
+        .expect("canonicalize the bend-only penalty")
+    }
+
+    fn binomial_config(firth: bool) -> RemlConfig {
+        RemlConfig::external(
             GlmLikelihoodSpec::canonical(LikelihoodSpec::new(
                 ResponseFamily::Binomial,
                 InverseLink::Standard(StandardLink::Logit),
+            )),
+            1e-10,
+            firth,
+        )
+    }
+
+    fn binomial_state<'a>(
+        y: &'a Array1<f64>,
+        weights: &'a Array1<f64>,
+        x: &Array2<f64>,
+        offset: &Array1<f64>,
+        config: &'a RemlConfig,
+    ) -> RemlState<'a> {
+        RemlState::newwith_offset(
+            y.view(),
+            x.clone(),
+            weights.view(),
+            offset.view(),
+            bend_only_penalty(),
+            4,
+            config,
+            Some(vec![2]),
+            None,
+            None,
+        )
+        .expect("build the binomial rail-face fixture state")
+    }
+
+    /// `½·tr(A⁻¹C)` for the single-coordinate face with its 2×2 released
+    /// block, in closed form — the raw first-order constant of the expansion
+    /// `∂V/∂ρ → −c₀·e^{−ρ}`, which holds whether or not `C ≻ 0` (the sign of
+    /// `C` decides OPTIMALITY, not the validity of the expansion). Tied to
+    /// production's own computation by the certified null arm, where it must
+    /// agree with `proof.tail_constants[0]`.
+    fn face_constant_from(limit: &RailFaceLimit) -> f64 {
+        let a = &limit.released_penalties[0];
+        let c = &limit.first_order_form;
+        assert_eq!(a.nrows(), 2, "the bend face releases exactly two directions");
+        let det = a[[0, 0]] * a[[1, 1]] - a[[0, 1]] * a[[1, 0]];
+        0.5 * (a[[1, 1]] * c[[0, 0]] - a[[0, 1]] * c[[1, 0]] - a[[1, 0]] * c[[0, 1]]
+            + a[[0, 0]] * c[[1, 1]])
+            / det
+    }
+
+    /// The same limit with the rank-2 drift term subtracted — the Gaussian
+    /// form misapplied to a moving-weight criterion. The limit records `d̃_Q`
+    /// precisely so this subtraction is exact.
+    fn strip_drift(limit: &RailFaceLimit) -> RailFaceLimit {
+        let mut stripped = limit.clone();
+        let drift = stripped
+            .released_curvature_drift
+            .take()
+            .expect("the LAML form records its curvature drift");
+        for a in 0..stripped.first_order_form.nrows() {
+            for b in 0..stripped.first_order_form.ncols() {
+                stripped.first_order_form[[a, b]] -= stripped.released_score[a] * drift[b]
+                    + drift[a] * stripped.released_score[b];
+            }
+        }
+        stripped
+    }
+
+    /// One `(n, ρ_0)` row of the LAML validation: (analytic with drift,
+    /// analytic with the rank-2 drift term subtracted, measured pencil).
+    fn laml_measured_against_analytic(n: usize, rho_0: f64) -> (f64, f64, f64) {
+        let (y, weights, x) = binomial_cubic_fixture(0.02, n);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = binomial_config(false);
+        let state = binomial_state(&y, &weights, &x, &offset, &config);
+
+        let rho = Array1::from(vec![rho_0]);
+        let limit = state
+            .rail_face_limit(&rho, &[0])
+            .expect("the analytic face limit must not error");
+        let limit = expect_available(limit, "binomial LAML fixture");
+        let analytic = match certify_rail_face(&limit) {
+            RailFaceVerdict::Certified(proof) => proof.tail_constants[0],
+            RailFaceVerdict::Refused { reason } => {
+                panic!("the LAML fixture face should certify at n={n}, rho_0={rho_0}: {reason}")
+            }
+        };
+        // The closed-form helper must agree with production's own
+        // per-coordinate computation wherever the face certifies.
+        let direct = face_constant_from(&limit);
+        assert!(
+            (direct - analytic).abs() <= 1.0e-10 * analytic.abs(),
+            "face_constant_from must reproduce the certified constant: {direct} vs {analytic}"
+        );
+        let analytic_no_drift = face_constant_from(&strip_drift(&limit));
+        let eval = state
+            .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the production LAML gradient must evaluate");
+        (
+            analytic,
+            analytic_no_drift,
+            -(rho_0.exp()) * eval.gradient[0],
+        )
+    }
+
+    /// The LAML face constant against the production LAML ρ-gradient — the
+    /// same validation the Gaussian form landed with, on a criterion whose
+    /// working weights genuinely move with `β̂`.
+    #[test]
+    fn laml_face_constant_reproduces_the_production_rho_gradient() {
+        let (analytic_shallow, no_drift_shallow, measured_shallow) =
+            laml_measured_against_analytic(192, 9.0);
+        let (analytic_deep, _, _) = laml_measured_against_analytic(192, 12.0);
+        let (analytic_wide, _, measured_wide) = laml_measured_against_analytic(384, 9.0);
+
+        assert!(
+            measured_shallow > 0.0 && measured_wide > 0.0,
+            "the fixture must be on an upper tail: measured {measured_shallow:.6e} / {measured_wide:.6e}"
+        );
+
+        let shallow = (analytic_shallow - measured_shallow).abs() / measured_shallow;
+        let wide = (analytic_wide - measured_wide).abs() / measured_wide;
+        assert!(
+            shallow < 5.0e-3 && wide < 5.0e-3,
+            "the LAML face constant must reproduce the production tail law: \
+             n=192 analytic={analytic_shallow:.9e} measured={measured_shallow:.9e} \
+             rel={shallow:.4e}; n=384 analytic={analytic_wide:.9e} \
+             measured={measured_wide:.9e} rel={wide:.4e}"
+        );
+
+        // The constant is a property of the limit: bitwise ρ-independent.
+        assert_eq!(
+            analytic_shallow, analytic_deep,
+            "the analytic pencil constant must not depend on rho at all"
+        );
+
+        // On a comfortably-certifying null fixture the rank-2 drift term is
+        // structurally SMALL — it is `∝ g_Q`, and certification requires a
+        // small `g_Q`. Assert only that including it does not hurt; the
+        // load-bearing discrimination lives on the signal fixture below,
+        // where `g_Q` is large and the expansion is still falsifiable.
+        let no_drift_miss = (no_drift_shallow - measured_shallow).abs() / measured_shallow;
+        assert!(
+            shallow < no_drift_miss + 5.0e-3,
+            "the drift term must not degrade the null-arm match: with drift \
+             rel={shallow:.4e}, without rel={no_drift_miss:.4e}"
+        );
+    }
+
+    /// THE DRIFT TERM IS LOAD-BEARING — proven where it is visible. The
+    /// rank-2 term is `∝ g_Q`, so a comfortably-certifying face (small
+    /// `g_Q` by construction) cannot discriminate it from zero. The
+    /// curvature-bearing fixture can: `g_Q` is large there, and the
+    /// first-order law `∂V/∂ρ_0 → −c₀·e^{−ρ_0}` is valid — and measurable
+    /// against the production gradient — whether or not the face is optimal.
+    /// The certificate rightly refuses to MINT there; the expansion is still
+    /// a falsifiable prediction, and stripping the drift term must break it.
+    #[test]
+    fn laml_drift_term_is_load_bearing_on_the_curved_fixture() {
+        let (y, weights, x) = binomial_cubic_fixture(5.0, 192);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = binomial_config(false);
+        let state = binomial_state(&y, &weights, &x, &offset, &config);
+
+        let rho_0 = 9.0_f64;
+        let rho = Array1::from(vec![rho_0]);
+        let limit = expect_available(
+            state
+                .rail_face_limit(&rho, &[0])
+                .expect("the analytic face limit must not error"),
+            "curved binomial LAML fixture",
+        );
+        let c_with = face_constant_from(&limit);
+        let c_without = face_constant_from(&strip_drift(&limit));
+        let eval = state
+            .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the production LAML gradient must evaluate");
+        let measured = -(rho_0.exp()) * eval.gradient[0];
+        assert!(
+            measured < 0.0,
+            "on the curved fixture the descent runs INWARD, so the pencil is negative: {measured:.6e}"
+        );
+        let with_rel = ((c_with - measured) / measured).abs();
+        let without_rel = ((c_without - measured) / measured).abs();
+        assert!(
+            without_rel > 3.0 * with_rel,
+            "stripping the curvature-drift term must visibly break the match where g_Q \
+             is large: with drift rel={with_rel:.4e}, without rel={without_rel:.4e} \
+             (analytic {c_with:.9e} vs stripped {c_without:.9e} vs measured {measured:.9e})"
+        );
+        // The bound is looser than the null arm's 5e-3 for a reason worth
+        // keeping on record: on the curved fixture the constant sits near the
+        // form's own sign change (information ≈ score), and nothing carries
+        // relative precision across its own root — the ABSOLUTE miss here
+        // (9.0e-4) is the same instrument floor the null arm shows at 3.5e-3
+        // relative on a constant four times larger.
+        assert!(
+            with_rel < 2.5e-2,
+            "the full LAML constant must reproduce the production pencil on the curved \
+             fixture: analytic={c_with:.9e} measured={measured:.9e} rel={with_rel:.4e}"
+        );
+    }
+
+    /// Value-domain falsification for the LAML form: the predicted remaining
+    /// improvement from running the face out must match the measured
+    /// criterion drop between two depths. No derivative, no cancellation.
+    #[test]
+    fn laml_value_gap_predicts_the_measured_criterion_drop() {
+        let (y, weights, x) = binomial_cubic_fixture(0.02, 192);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = binomial_config(false);
+        let state = binomial_state(&y, &weights, &x, &offset, &config);
+
+        let near = Array1::from(vec![9.0]);
+        let far = Array1::from(vec![13.0]);
+        let near_gap = match certify_rail_face(&expect_available(
+            state.rail_face_limit(&near, &[0]).expect("no error"),
+            "binomial LAML near depth",
+        )) {
+            RailFaceVerdict::Certified(proof) => proof.value_gap,
+            RailFaceVerdict::Refused { reason } => panic!("face should certify: {reason}"),
+        };
+        let far_gap = match certify_rail_face(&expect_available(
+            state.rail_face_limit(&far, &[0]).expect("no error"),
+            "binomial LAML far depth",
+        )) {
+            RailFaceVerdict::Certified(proof) => proof.value_gap,
+            RailFaceVerdict::Refused { reason } => panic!("face should certify: {reason}"),
+        };
+
+        let near_value = state.compute_cost(&near).expect("criterion at rho_0=9");
+        let far_value = state.compute_cost(&far).expect("criterion at rho_0=13");
+        let measured_drop = near_value - far_value;
+        let predicted_drop = near_gap - far_gap;
+
+        assert!(
+            predicted_drop > 0.0,
+            "running the face outward must lower the criterion; predicted {predicted_drop:.6e}"
+        );
+        let relative = (predicted_drop - measured_drop).abs() / measured_drop.abs();
+        assert!(
+            relative < 2.0e-2,
+            "the LAML value gap must predict the measured criterion drop: \
+             predicted={predicted_drop:.9e} measured={measured_drop:.9e} rel={relative:.3e}"
+        );
+    }
+
+    /// A binomial truth with real curvature: the released directions earn
+    /// their Occam cost, `C_LAML` goes indefinite, the certificate refuses —
+    /// and the production criterion agrees (its gradient still runs inward).
+    #[test]
+    fn laml_face_refuses_when_the_released_directions_earn_their_cost() {
+        let (y, weights, x) = binomial_cubic_fixture(5.0, 192);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = binomial_config(false);
+        let state = binomial_state(&y, &weights, &x, &offset, &config);
+
+        let rho = Array1::from(vec![11.0]);
+        let limit = expect_available(
+            state
+                .rail_face_limit(&rho, &[0])
+                .expect("the analytic face limit must not error"),
+            "binomial LAML signal fixture",
+        );
+        match certify_rail_face(&limit) {
+            RailFaceVerdict::Refused { reason } => assert!(
+                reason.contains("not positive definite"),
+                "the refusal must name the failed curvature gate: {reason}"
+            ),
+            RailFaceVerdict::Certified(proof) => panic!(
+                "a face the data wants released must NOT certify; got λ_min(C)={:.3e}",
+                proof.min_curvature
+            ),
+        }
+        let eval = state
+            .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the production LAML gradient must evaluate");
+        assert!(
+            eval.gradient[0] > 0.0,
+            "the refusal must agree with the criterion: dV/drho_0={:.6e} should be POSITIVE",
+            eval.gradient[0]
+        );
+    }
+
+    /// The gates are gates: a family whose dispersion is estimated is outside
+    /// the LAML form, and an armed Firth term changes the criterion — both
+    /// must decline BY NAME rather than return a wrong limit.
+    #[test]
+    fn criteria_outside_both_closed_forms_decline_by_name() {
+        // Gamma: the dispersion enters the criterion.
+        let (y_raw, weights, x) = cubic_fixture(NULL_CURVATURE);
+        let y: Array1<f64> = y_raw.mapv(|v| v.abs() + 0.5);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = RemlConfig::external(
+            GlmLikelihoodSpec::canonical(LikelihoodSpec::new(
+                ResponseFamily::Gamma,
+                InverseLink::Standard(StandardLink::Log),
             )),
             1e-10,
             false,
@@ -470,20 +1057,34 @@ mod rail_face_limit_tests {
             None,
             None,
         )
-        .expect("build the binomial fixture state");
+        .expect("build the gamma fixture state");
         let rho = Array1::from(vec![12.0, 1.0]);
         match state
             .rail_face_limit(&rho, &[0])
             .expect("the gate must decline, not error")
         {
             RailFaceLimitOutcome::OutsideClosedForm { reason } => assert!(
-                reason.contains("working weights"),
-                "the decline must name the clause that failed, not collapse to a bare None: {reason}"
+                reason.contains("dispersion"),
+                "the decline must name the clause that failed: {reason}"
             ),
-            other => panic!(
-                "a binomial fit is outside the Gaussian closed form and must decline as such, \
-                 got {other:?}"
+            other => panic!("a gamma fit is outside both closed forms, got {other:?}"),
+        }
+
+        // Firth-armed binomial: the Jeffreys logdet is part of the criterion.
+        let (yb, wb, xb) = binomial_cubic_fixture(0.02, 96);
+        let offset_b = Array1::<f64>::zeros(yb.len());
+        let config_b = binomial_config(true);
+        let state_b = binomial_state(&yb, &wb, &xb, &offset_b, &config_b);
+        let rho_b = Array1::from(vec![12.0]);
+        match state_b
+            .rail_face_limit(&rho_b, &[0])
+            .expect("the gate must decline, not error")
+        {
+            RailFaceLimitOutcome::OutsideClosedForm { reason } => assert!(
+                reason.contains("Firth"),
+                "the decline must name the armed Jeffreys term: {reason}"
             ),
+            other => panic!("a Firth-armed criterion is outside the LAML form, got {other:?}"),
         }
     }
 }
