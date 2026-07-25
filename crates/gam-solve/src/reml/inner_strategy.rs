@@ -1,6 +1,23 @@
 use super::*;
 use crate::pirls::PirlsWorkspace;
 
+/// A small sparse design may use the dense fast path only while densification
+/// costs at most four times the sparse Gram arithmetic.  With density `d`,
+/// dense `X'WX` performs approximately `1 / d²` as much multiply-accumulate
+/// work as row-wise sparse assembly, so this is the `d >= 1/2` boundary.
+///
+/// This is deliberately separate from the dense byte budget: fitting in memory
+/// does not make multiplying structural zeroes computationally sensible.
+const DENSE_FAST_PATH_MIN_DESIGN_DENSITY: f64 = 0.5;
+
+fn dense_fast_path_is_compute_admissible(n_obs: usize, p: usize, nnz_x: usize) -> bool {
+    let dense_cells = n_obs.saturating_mul(p);
+    if dense_cells == 0 {
+        return false;
+    }
+    (nnz_x as f64) / (dense_cells as f64) >= DENSE_FAST_PATH_MIN_DESIGN_DENSITY
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GeometryBackendKind {
     DenseSpectral,
@@ -110,17 +127,23 @@ impl<'a> RemlState<'a> {
         let Some(block_count) = self.sparse_penalty_block_count else {
             return Ok(dense_backend("penalty_blocks_not_separable", None, None));
         };
-        // Small-problem dense fast-path: the previous heuristic densified
-        // unconditionally on `p < SMALL_P_DENSE_THRESHOLD`, which is wrong when
-        // `n` is large (a sparse 320k×101 design has the dense Gram path consume
-        // O(n p²) bytes per assembled block — exact-Hessian REML can
-        // accumulate many such blocks and OOM).  Restrict the early-out
-        // to truly small problems: `p` below threshold AND `n·p` small enough
-        // that one dense `n×p` block is in the few-tens-of-MB range.
+        // Small-problem dense fast-path.  Both memory and arithmetic must make
+        // densification admissible: the byte budget prevents an oversized
+        // materialization, while the density gate prevents a small but mostly
+        // structural-zero design from paying dense Gram work.  Sparse designs
+        // rejected by either gate continue to the Hessian-pattern authority
+        // below; the early-out never decides sparsity by allocation size alone.
         const SMALL_NP_DENSE_BUDGET: usize = 4_000_000;
         let n_obs = self.y.len();
-        if p < Self::SMALL_P_DENSE_THRESHOLD && n_obs.saturating_mul(p) < SMALL_NP_DENSE_BUDGET {
-            return Ok(dense_backend("p_below_threshold_and_small", None, None));
+        if p < Self::SMALL_P_DENSE_THRESHOLD
+            && n_obs.saturating_mul(p) < SMALL_NP_DENSE_BUDGET
+            && dense_fast_path_is_compute_admissible(n_obs, p, nnz_x)
+        {
+            return Ok(dense_backend(
+                "p_below_threshold_small_and_compute_dense",
+                None,
+                None,
+            ));
         }
 
         let mut s_lambda = Array2::<f64>::zeros((self.p, self.p));
@@ -153,5 +176,31 @@ impl<'a> RemlState<'a> {
                 Err(_) => dense_backend("sparse_stats_failed", None, None),
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dense_fast_path_is_compute_admissible;
+
+    #[test]
+    fn ancient_dna_shape_cannot_densify_merely_because_its_bytes_fit_2413() {
+        let n_obs = 13_897;
+        let p = 227;
+        let nnz_x = n_obs * 22;
+
+        assert!(n_obs * p < 4_000_000, "fixture must fit the old byte gate");
+        assert!(
+            !dense_fast_path_is_compute_admissible(n_obs, p, nnz_x),
+            "a 9.7%-dense design pays roughly 106x dense Gram arithmetic"
+        );
+    }
+
+    #[test]
+    fn dense_fast_path_compute_gate_has_an_explicit_four_x_work_boundary_2413() {
+        assert!(dense_fast_path_is_compute_admissible(100, 20, 1_000));
+        assert!(!dense_fast_path_is_compute_admissible(100, 20, 999));
+        assert!(!dense_fast_path_is_compute_admissible(0, 20, 0));
+        assert!(!dense_fast_path_is_compute_admissible(100, 0, 0));
     }
 }
