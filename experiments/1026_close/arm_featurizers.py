@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import numpy as np
 
 from bits_eq4 import make_fitted_featurizer
+from faithfulness_audit import flat_span_widths
 
 if TYPE_CHECKING:
     from gamfit._description_length import FittedFeaturizer
@@ -121,7 +122,8 @@ def build_external_topk(x_bits, *, W_enc, W_dec, b_dec, top_k) -> FittedFeaturiz
     return make_fitted_featurizer(
         name="external_topk", gate=gate, atom_contribution=contrib,
         code_dims=code_dims, dictionary_params=dparams,
-        recon=recon.astype(np.float64), fit_seconds=0.0)
+        recon=recon.astype(np.float64), fit_seconds=0.0,
+        extras={"atom_span_widths": flat_span_widths(k)})
 
 
 def build_gam_flat(x_bits, *, fit, score_mode: str) -> FittedFeaturizer:
@@ -134,7 +136,8 @@ def build_gam_flat(x_bits, *, fit, score_mode: str) -> FittedFeaturizer:
         name="gam_flat", gate=gate, atom_contribution=contrib,
         code_dims=code_dims, dictionary_params=dparams,
         recon=np.asarray(recon, dtype=np.float64), fit_seconds=0.0,
-        extras={"score_route_stats": tr.score_route_stats})
+        extras={"score_route_stats": tr.score_route_stats,
+                "atom_span_widths": flat_span_widths(np.asarray(fit.decoder).shape[0])})
 
 
 # --------------------------------------------------------------------------- #
@@ -166,18 +169,36 @@ def _curved_block_rust(r_bits, *, model):
     d_atoms = [c.shape[1] if c.ndim == 2 else 1 for c in coords]
     gate = np.abs(assignments)
     code_dims = np.asarray([d + 1 for d in d_atoms], dtype=int)
-    return gate, atom_contribution, code_dims, int(sum(b.size for b in blocks)), recon
+    # The linear span each atom's contribution can occupy: the decoder rows its
+    # evaluated basis actually reaches (2H+1 for an H-harmonic circle), which is
+    # wider than the d+1 scalars the chart transmits. The Eq-4 scorer charges the
+    # d+1 the theorem's ledger names; the audit re-prices at this span (#2283).
+    spans = []
+    for g in range(len(blocks)):
+        basis = model.basis_specs[g]
+        n_harm = model._n_harmonics[g] if g < len(model._n_harmonics) else 1
+        centers = model._duchon_centers[g] if g < len(model._duchon_centers) else None
+        phi_head = _basis_values(basis, coords[g][:1], n_harm, centers)
+        spans.append(min(phi_head.shape[1], blocks[g].shape[0]))
+    return (
+        gate,
+        atom_contribution,
+        code_dims,
+        int(sum(b.size for b in blocks)),
+        recon,
+        np.asarray(spans, dtype=np.int64),
+    )
 
 
 def _stack_blocks(flat, curved, recon_full) -> FittedFeaturizer:
     """Concatenate a flat block and a curved block into one FittedFeaturizer.
 
     ``flat`` = (gate_f, contrib_f, code_dims_f, dparams_f); ``curved`` =
-    (gate_c, contrib_c, code_dims_c, dparams_c, _recon_c). Atom index g < K_flat
-    routes to the flat contribution; g >= K_flat to the curved one.
+    (gate_c, contrib_c, code_dims_c, dparams_c, _recon_c, spans_c). Atom index
+    g < K_flat routes to the flat contribution; g >= K_flat to the curved one.
     """
     gate_f, contrib_f, cd_f, dp_f = flat
-    gate_c, contrib_c, cd_c, dp_c, _ = curved
+    gate_c, contrib_c, cd_c, dp_c, _, spans_c = curved
     k_flat = gate_f.shape[1]
     gate = np.concatenate([gate_f, gate_c.astype(np.float32)], axis=1)
     code_dims = np.concatenate([cd_f, cd_c])
@@ -188,7 +209,9 @@ def _stack_blocks(flat, curved, recon_full) -> FittedFeaturizer:
     return make_fitted_featurizer(
         name="hybrid", gate=gate, atom_contribution=atom_contribution,
         code_dims=code_dims, dictionary_params=dp_f + dp_c,
-        recon=np.asarray(recon_full, dtype=np.float64), fit_seconds=0.0)
+        recon=np.asarray(recon_full, dtype=np.float64), fit_seconds=0.0,
+        extras={"atom_span_widths": np.concatenate(
+            [flat_span_widths(k_flat), spans_c])})
 
 
 def build_hybrid_rust(

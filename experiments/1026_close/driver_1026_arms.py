@@ -40,6 +40,10 @@ import numpy as np
 # the horizon is part of the pair identity and v1 rows (whose dictionary bits
 # were computed with the confounded subsample N) are rejected on load.
 PAIR_SCHEMA = "gam.issue2283.eq4-pair.v2"
+# The R2 operating point the #2283 acceptance is stated at. Every bits row is
+# scored at all four standard targets; this is the one the faithfulness audit
+# brackets, so the audit and the acceptance speak about the same number.
+ACCEPTANCE_R2_TARGET = 0.99
 FLAT_CHECKPOINT_SCHEMA = "gam.issue2283.flat-checkpoint.v1"
 FLAT_CHECKPOINT_ARRAYS = {
     "decoder",
@@ -673,6 +677,7 @@ def score_bits_for_arm(
     # Local imports so a non-bits run never pays the sibling-module import.
     import bits_eq4
     import arm_featurizers as af
+    import faithfulness_audit
 
     x_bits = np.ascontiguousarray(x_te[bits_idx])
 
@@ -724,6 +729,18 @@ def score_bits_for_arm(
     if out["bits_dict_params_external_ref"] > 0:
         out["bits_dict_params_faithful"] = bool(
             out["bits_dict_params"] <= out["bits_dict_params_external_ref"])
+    # Every row states the size of every approximation it rests on, and brackets
+    # its own score between the theorem's d+1-scalar ledger and the pessimistic
+    # full-linear-span pricing (#2283). A row that only wins under the ledger is
+    # a different claim from one that wins under both, so the reader never has to
+    # take the scorer's surrogate on trust.
+    out["bits_faithfulness_audit"] = faithfulness_audit.audit_row(
+        fitted,
+        x_bits,
+        amortization_horizon=amortization_horizon,
+        span_widths=fitted.extras["atom_span_widths"],
+        r2_target=ACCEPTANCE_R2_TARGET,
+    )
     return out
 
 
