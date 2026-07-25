@@ -26,8 +26,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: cross-check-${{ github.ref }}
-  cancel-in-progress: true
+  # A per-commit verdict must be keyed on the COMMIT, not the branch (#2443).
+  # Keyed on the ref, every push to main cancelled the previous run's verdict:
+  # 28 of the last 40 runs died that way, 10 failed, and NONE succeeded -- so the
+  # only push gate on main was structurally incapable of reporting anything. It
+  # even correctly failed the commit that broke every build in the workspace
+  # (4ad2a6bda); nobody could act on that, because a gate whose completions are
+  # almost all `cancelled` carries no information when it says `failure`.
+  #
+  # Ref-keying with cancellation is right for "give me the newest answer about
+  # this branch". It is wrong for "is THIS commit good?", because the verdict's
+  # subject is the commit and superseding it destroys the only record of it.
+  group: cross-check-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   windows-gnu-check:
