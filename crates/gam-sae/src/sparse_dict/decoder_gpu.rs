@@ -727,7 +727,6 @@ mod tests {
                     }
                 });
         };
-        let (m, t) = rhs.dim();
         let initial = rhs.mapv(|value| 0.01 * value);
         let inverse_diagonal = diag.iter().map(|d| d.recip()).collect();
         let mut backend =
@@ -745,7 +744,6 @@ mod tests {
         rel_tol: f64,
         cap: usize,
     ) -> (Vec<gam_linalg::pcg::PcgCoreResult>, Array2<f64>) {
-        let (m, t) = rhs.dim();
         let initial = rhs.mapv(|value| 0.01 * value);
         let inverse_diagonal: Vec<f64> = diag.iter().map(|d| d.recip()).collect();
         let mut backend = DeviceBlockCgBackend::try_new(
