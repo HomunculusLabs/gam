@@ -424,19 +424,104 @@ fn monomial_second_derivative_value(
     value
 }
 
+/// Chebyshev coefficients for `√x·e^x·K₀(x)` on `x ≥ 2`, in ASCENDING powers of
+/// `y = 2/x ∈ (0, 1]`, and likewise for `K₁` below.
+///
+/// The scaled function is analytic on the closed interval (its only branch
+/// point, `x = 0`, sits at `y = ∞`), so a Chebyshev projection converges
+/// geometrically: 12 terms reach `2.5e−11`, 16 reach `1.1e−13`, 20 reach
+/// `8.3e−16`, and the 24 kept here reach `8.4e−18` — comfortably under `f64`,
+/// so the shipped error is the Horner evaluation's own `2.8e−16` and not the
+/// truncation. Every coefficient is `O(1)` (largest `1.33`, smallest `5.2e−4`),
+/// so the monomial-basis Horner is well conditioned despite the degree.
+///
+/// Regenerate with, at 40 digits:
+///
+/// ```text
+/// f = lambda y: sqrt(2/y) * e**(2/y) * besselk(nu, 2/y)   # f(0) := sqrt(pi/2)
+/// chebyfit(f, [0, 1], 24, error=False)                    # descending; reverse
+/// ```
+///
+/// These replace the Abramowitz & Stegun 9.8.6 / 9.8.8 seven-term polynomials,
+/// whose stated accuracy is `|ε| < 2e−7` and which measured `1.6e−7` relative
+/// here — against a small-`x` branch that is already accurate to `1e−15`, so
+/// the pair also had a `2.9e−9` STEP at their `x = 2` crossover. That step was
+/// a jump discontinuity in the Matérn/Duchon radial kernel, and therefore in
+/// every length-scale derivative taken through it.
+const SCALED_BESSEL_K0_CHEBYSHEV: [f64; 24] = [
+    1.2533141373155003,
+    -0.07833213358220663,
+    0.02203091256764185,
+    -0.011474433446088833,
+    0.008785105521551262,
+    -0.008894725254872692,
+    0.011207719358405647,
+    -0.01687069932280815,
+    0.0292835658778568,
+    -0.05619383717311583,
+    0.11288530340577708,
+    -0.22351971988707764,
+    0.4132521698842443,
+    -0.6841363697170683,
+    0.9837481719941347,
+    -1.2010795750851755,
+    1.2217566634595598,
+    -1.0164713197726316,
+    0.6772223712126879,
+    -0.3515643114800813,
+    0.13672561929586632,
+    -0.03741713905236645,
+    0.00641841764170551,
+    -0.0005187103462358833,
+];
+
+/// Chebyshev coefficients for `√x·e^x·K₁(x)` on `x ≥ 2`; see
+/// [`SCALED_BESSEL_K0_CHEBYSHEV`] for the derivation and the regeneration
+/// recipe (same call with `nu = 1`).
+const SCALED_BESSEL_K1_CHEBYSHEV: [f64; 24] = [
+    1.2533141373155003,
+    0.23499640074664313,
+    -0.03671818761410955,
+    0.01606420688270234,
+    -0.011295137230303733,
+    0.010871358854537931,
+    -0.01324584075315714,
+    0.019469483748136365,
+    -0.03321119404885756,
+    0.06293088720301371,
+    -0.12530769564341018,
+    0.24664898892370152,
+    -0.4542359642973804,
+    0.7500446332432126,
+    -1.0766417854892274,
+    1.3129047408768328,
+    -1.3343491820484357,
+    1.1094354121788925,
+    -0.7388012080869869,
+    0.38338722849862483,
+    -0.14905729821792707,
+    0.0407820842387012,
+    -0.006994249846147938,
+    0.000565154088568589,
+];
+
+/// `e^{−x}/√x · Σ_k c_k y^k` with `y = 2/x`, the common envelope of both
+/// large-argument branches. Kept in one place so `K₀` and `K₁` cannot drift
+/// apart in how they form it.
+#[inline(always)]
+fn scaled_bessel_k_large(x: f64, coefficients: &[f64; 24]) -> f64 {
+    let y = 2.0 / x;
+    let series = coefficients.iter().rev().fold(0.0, |acc, &c| acc * y + c);
+    (-x).exp() / x.sqrt() * series
+}
+
 #[inline(always)]
 pub(crate) fn bessel_k0_stable(x: f64) -> f64 {
     let x_pos = x.max(1e-300);
     if x_pos <= 2.0 {
         return bessel_k0_small_series(x_pos);
     }
-    let y = 2.0 / x_pos;
-    (-x_pos).exp() / x_pos.sqrt()
-        * (1.253_314_14
-            + y * (-0.078_323_58
-                + y * (0.021_895_68
-                    + y * (-0.010_624_46
-                        + y * (0.005_878_72 + y * (-0.002_515_40 + y * 0.000_532_08))))))
+    scaled_bessel_k_large(x_pos, &SCALED_BESSEL_K0_CHEBYSHEV)
 }
 
 #[inline(always)]
@@ -445,13 +530,7 @@ pub(crate) fn bessel_k1_stable(x: f64) -> f64 {
     if x_pos <= 2.0 {
         return bessel_k1_small_series(x_pos);
     }
-    let y = 2.0 / x_pos;
-    (-x_pos).exp() / x_pos.sqrt()
-        * (1.253_314_14
-            + y * (0.234_986_19
-                + y * (-0.036_556_20
-                    + y * (0.015_042_68
-                        + y * (-0.007_803_53 + y * (0.003_256_14 + y * -0.000_682_45))))))
+    scaled_bessel_k_large(x_pos, &SCALED_BESSEL_K1_CHEBYSHEV)
 }
 
 #[inline(always)]
@@ -2441,6 +2520,141 @@ pub(crate) fn pairwise_distance_bounds_sampled(points: ArrayView2<'_, f64>) -> O
         Some((r_min, r_max))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod bessel_k_accuracy_tests {
+    use super::*;
+
+    /// `K₀` and `K₁` against a 50-digit `mpmath.besselk`, across both branches.
+    ///
+    /// The small-argument branch (`x ≤ 2`) was always accurate — it sums a
+    /// convergent series to an `f64::EPSILON` break. The large-argument branch
+    /// was the A&S 9.8.6 / 9.8.8 minimax polynomials at `1.6e−7`, so the pair
+    /// disagreed by `2.9e−9` across their own crossover: a jump discontinuity
+    /// in a radial kernel that `duchon_matern_block_jet4` differentiates with
+    /// respect to the length scale.
+    #[test]
+    fn bessel_k_matches_independent_high_precision_reference() {
+        // (x, K₀(x), K₁(x))
+        const BESSEL_K_REFERENCE: [[f64; 3]; 20] = [
+            [1e-08, 18.536612259610777, 99999999.9999999],
+            [0.0001, 9.326271913450276, 9999.999508686404],
+            [0.01, 4.721244730161095, 99.97389411829624],
+            [0.1, 2.4270690247020164, 9.853844780870606],
+            [0.5, 0.9244190712276659, 1.656441120003301],
+            [1.0, 0.42102443824070834, 0.6019072301972346],
+            [1.5, 0.21380556264752573, 0.2773878004568438],
+            [1.99, 0.1153017675517768, 0.14171756162240132],
+            [2.0, 0.11389387274953344, 0.13986588181652243],
+            [2.01, 0.11250436099872804, 0.1380408773192077],
+            [2.5, 0.06234755320036619, 0.07389081634774707],
+            [3.0, 0.03473950438627925, 0.040156431128194184],
+            [5.0, 0.0036910983340425942, 0.004044613445452165],
+            [8.0, 0.0001464707052228154, 0.00015536921180500115],
+            [12.0, 2.2008253973114916e-06, 2.290757464767188e-06],
+            [20.0, 5.741237815336525e-10, 5.883057969557038e-10],
+            [50.0, 3.4101677497894956e-23, 3.4441022267175555e-23],
+            [150.0, 7.336371406107646e-67, 7.36078548876807e-67],
+            [400.0, 1.199780043200976e-175, 1.2012788332610325e-175],
+            [700.0, 4.669776431685377e-306, 4.6731107967079664e-306],
+        ];
+
+        // The ascending series carries `−[ln(x/2)+γ]·I₀(x)` against a positive
+        // sum, and both grow like `e^x` while `K` decays like `e^{−x}`, so it
+        // loses `~e^{2x}` — about 1.7 digits at the `x = 2` crossover and less
+        // below. The Chebyshev branch is limited only by its own Horner.
+        const TOLERANCE: f64 = 8e-15;
+        for [x, want_k0, want_k1] in BESSEL_K_REFERENCE {
+            for (order, got, want) in [
+                (0, bessel_k0_stable(x), want_k0),
+                (1, bessel_k1_stable(x), want_k1),
+            ] {
+                let error = (got - want).abs() / want.abs();
+                assert!(
+                    error < TOLERANCE,
+                    "K{order}({x}): got {got:.17e}, want {want:.17e} (rel {error:.3e})"
+                );
+            }
+        }
+    }
+
+    /// The two branches must not be distinguishable at their crossover. Before
+    /// the Chebyshev fit they stepped by `2.9e−9` (`K₀`) and `2.4e−9` (`K₁`).
+    #[test]
+    fn bessel_k_branch_crossover_has_no_step() {
+        // 1e-13 is ~230 ulp of 2.0, so the two sides land in different branches
+        // while the true functions have barely moved.
+        let delta = 1.0e-13;
+        // `dK₀/dx = −K₁` and `dK₁/dx = −K₀ − K₁/x`, so `K₀(2) + K₁(2)` bounds
+        // both slopes at the crossover.
+        let slope = bessel_k0_stable(2.0) + bessel_k1_stable(2.0);
+        for (order, f) in [
+            (0, bessel_k0_stable as fn(f64) -> f64),
+            (1, bessel_k1_stable),
+        ] {
+            let below = f(2.0 - delta);
+            let above = f(2.0 + delta);
+            let budget = 2.0 * delta * slope + 8.0 * f64::EPSILON * below.abs();
+            assert!(
+                (above - below).abs() < budget,
+                "K{order} steps at the x=2 crossover: {below:.17e} -> {above:.17e} \
+                 (change {:.3e} > budget {budget:.3e})",
+                (above - below).abs()
+            );
+        }
+    }
+
+    /// The crate carries a SECOND `K` — `closed_form_penalty::bessel_k`, a
+    /// Temme-series/Steed-continued-fraction evaluator for arbitrary real order.
+    /// It is full precision and always was, so before the Chebyshev fit the two
+    /// implementations of `K₀`/`K₁` in this crate disagreed by up to `1.6e−7`
+    /// depending on which one a caller happened to reach. They must not.
+    #[test]
+    fn the_two_bessel_k_implementations_in_this_crate_agree() {
+        use crate::basis::closed_form_penalty::bessel_k;
+        for x in [
+            0.01_f64, 0.1, 0.5, 1.0, 1.99, 2.0, 2.01, 2.5, 4.0, 7.0, 15.0, 40.0, 120.0,
+        ] {
+            for (order, fast) in [(0.0_f64, bessel_k0_stable(x)), (1.0, bessel_k1_stable(x))] {
+                let general = bessel_k(order, x);
+                let error = (fast - general).abs() / general.abs();
+                assert!(
+                    error < 1e-13,
+                    "K{order}({x}): fast path {fast:.17e} vs Temme/Steed {general:.17e} \
+                     (rel {error:.3e})"
+                );
+            }
+        }
+    }
+
+    /// `K` obeys `K_{ν−1}(x) − K_{ν+1}(x) = −(2ν/x)·K_ν(x)` and the Wronskian
+    /// `I₀(x)K₁(x) + I₁(x)K₀(x) = 1/x`. The Wronskian ties `K` to an evaluator
+    /// it shares no code with (`gam_math`'s modified Bessel `I`), so it is a
+    /// genuine cross-check rather than a restatement of either one.
+    #[test]
+    fn bessel_k_satisfies_the_wronskian_against_bessel_i() {
+        for x in [
+            0.05_f64, 0.5, 1.0, 1.99, 2.0, 2.01, 3.0, 6.0, 12.0, 30.0, 80.0,
+        ] {
+            let (centered_log_i0, ratio, _) = gam_math::special::bessel_i0_centered_terms(x);
+            // I₀ = exp(centered + x); I₁ = ratio·I₀. Both are formed here rather
+            // than cancelled against K, so the identity is checked on the values
+            // themselves.
+            let i0 = (centered_log_i0 + x).exp();
+            let i1 = ratio * i0;
+            let wronskian = i0 * bessel_k1_stable(x) + i1 * bessel_k0_stable(x);
+            let want = 1.0 / x;
+            let error = (wronskian - want).abs() / want;
+            // `I₀` reaches 1e34 by x = 80 while `K₀` is 1e-36, so the product is
+            // formed from numbers whose exponents differ by 70; the tolerance
+            // tracks that reconstruction, not the evaluators.
+            assert!(
+                error < 1e-13,
+                "Wronskian at x={x}: got {wronskian:.17e}, want {want:.17e} (rel {error:.3e})"
+            );
+        }
     }
 }
 
