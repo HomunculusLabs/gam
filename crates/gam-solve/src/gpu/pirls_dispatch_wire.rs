@@ -629,6 +629,7 @@ mod linux_impl {
         } else {
             input.offset.to_owned()
         };
+        let solve_c_nontrivial = final_c_arr.iter().any(|&value| value != 0.0);
 
         let pirls_result = PirlsResult {
             likelihood: input.likelihood.clone(),
@@ -658,6 +659,7 @@ mod linux_impl {
             solve_d2mu_deta2: final_d2mu_deta2.into_shared(),
             solve_d3mu_deta3: final_d3mu_deta3.into_shared(),
             solve_c_array: final_c_arr.into_shared(),
+            solve_c_nontrivial,
             solve_d_array: final_d_arr.into_shared(),
             derivatives_unsupported,
             status,
@@ -978,6 +980,7 @@ mod linux_impl {
             solve_d2mu_deta2: solve_d2mu_deta2.into_shared(),
             solve_d3mu_deta3: solve_d3mu_deta3.into_shared(),
             solve_c_array: solve_c_array.into_shared(),
+            solve_c_nontrivial: false,
             solve_d_array: solve_d_array.into_shared(),
             derivatives_unsupported: false,
             status: PirlsStatus::Converged,

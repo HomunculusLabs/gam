@@ -1172,7 +1172,7 @@ impl<'a> RemlState<'a> {
             PseudoLogdetMode::Smooth
         };
 
-        let c_nontrivial = pirls_result.solve_c_array.iter().any(|&c| c != 0.0);
+        let c_nontrivial = pirls_result.solve_c_nontrivial;
 
         // For ValueOnly evaluations on the SPD fast path (no Firth, no hard
         // linear constraints), use a Cholesky-backed operator.  LLT costs

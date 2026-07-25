@@ -412,6 +412,13 @@ pub struct PirlsResult {
     /// This carries 3rd-order likelihood information used in exact dH/dρ
     /// terms for outer LAML derivatives.
     pub solve_c_array: ArcArray1<f64>,
+    /// Exact certificate that at least one entry of `solve_c_array` is nonzero.
+    ///
+    /// Assembly uses this to choose the intrinsic-Hessian correction. Carrying
+    /// the fact from row finalization prevents every value-only REML probe from
+    /// rescanning all observations; Gaussian identity stamps `false`
+    /// analytically because its working curvature is eta-invariant (#2435).
+    pub solve_c_nontrivial: bool,
     /// Second eta-derivative of the diagonal Hessian curvature W_H(eta):
     /// d_i := d²W_i/deta_i² at the accepted PIRLS solution.
     ///
