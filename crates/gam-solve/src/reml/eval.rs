@@ -739,12 +739,13 @@ impl<'a> RemlState<'a> {
         base_covariance: Option<&Array2<f64>>,
         dispersion_phi: f64,
         finalgrad_norm: f64,
+        outer_gradient: &Array1<f64>,
     ) -> Result<SmoothingCorrectionOutcome, EstimationError> {
         use SmoothingCorrectionFallbackSeverity::{NumericalFailure, Routine};
 
         // Always compute the fast first-order correction first.
         let first_order =
-            super::compute_smoothing_correction(self, final_rho, final_lambdas, final_fit);
+            super::compute_smoothing_correction(self, final_rho, final_lambdas, final_fit, outer_gradient);
         let first_order_correction = first_order.correction.clone();
         let first_order_rho_covariance = first_order.rho_covariance.clone();
         let first_order_method = first_order.correction.as_ref().map(|_| {
@@ -2561,10 +2562,10 @@ mod smoothing_correction_outcome_tests {
 
             // Real outer-gradient norm at the forced ρ (finite, for the gate's
             // highgrad arm); near_boundary already guarantees cubature entry.
-            let finalgrad_norm = state
+            let finalgrad = state
                 .compute_gradient(&final_rho)
-                .map(|g| g.dot(&g).sqrt())
-                .unwrap_or(0.0);
+                .unwrap_or_else(|_| Array1::<f64>::zeros(0));
+            let finalgrad_norm = finalgrad.dot(&finalgrad).sqrt();
 
             let before = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);
             let final_lambdas = Array1::from_vec(
@@ -2579,6 +2580,7 @@ mod smoothing_correction_outcome_tests {
                     Some(&base_cov),
                     dispersion_phi,
                     finalgrad_norm,
+                    &finalgrad,
                 )
                 .expect("smoothing correction evaluation");
             let after = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);

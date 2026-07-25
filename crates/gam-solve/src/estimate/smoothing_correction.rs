@@ -293,6 +293,9 @@ pub(crate) struct InvertedRhoHessian {
     pub inverse: Array2<f64>,
     pub active_rank: usize,
     pub structural_zero: usize,
+    /// Directions dropped because their curvature sits under the outer loop's
+    /// own gradient noise floor (#2428). Distinct from `structural_zero`.
+    pub below_gradient_floor: usize,
     pub used_structural_pseudoinverse: bool,
     pub eigenvalue_backward_error_bound: f64,
     pub eigenvalues: Array1<f64>,
@@ -304,6 +307,15 @@ pub(crate) struct InvertedRhoHessian {
 pub(crate) enum EigenClassification {
     Active,
     StructuralZero,
+    /// Curvature indistinguishable from zero at the accuracy the OUTER LOOP
+    /// itself demonstrated when it accepted this ρ̂ (#2428).
+    ///
+    /// Not a structural zero of the penalty map: it is created dynamically by
+    /// a smoothing parameter running to its saturation limit, where the term
+    /// is numerically pinned to its own null space and the REML profile goes
+    /// flat in that coordinate. The count is therefore NOT knowable a priori
+    /// and is excluded from the structural-nullity identity below.
+    BelowGradientFloor,
 }
 
 fn eigenpair_backward_error_bound(
@@ -399,9 +411,34 @@ fn penalty_map_structural_nullity(
     Ok(k - rank)
 }
 
+/// Invert the ρ-Hessian on the subspace where its curvature is actually
+/// resolvable, judged by the SAME standard the outer certificate used to accept
+/// this ρ̂ (#2428).
+///
+/// `outer_gradient` is the outer loop's residual gradient at the certified
+/// point, per ρ coordinate; pass an empty array when it is unavailable. The
+/// outer certificate admits a point as a minimum by testing that
+/// `H + diag(|g|)` is PSD off the railed coordinates
+/// (`certificate_hessian_is_psd_off_railed_above_gradient_floor`): a curvature
+/// smaller than the residual gradient in that coordinate is below the noise
+/// floor of the very machinery that produced both numbers, so it cannot be
+/// called negative. Along eigenvector `v` that test is exactly
+/// `σ + Σ_k |g_k| v_k² ≥ 0`, so the per-direction floor is `Σ_k |g_k| v_k²`,
+/// evaluated here on the eigenvectors we already have.
+///
+/// Applying any WEAKER standard here than the certificate applied there lets the
+/// two subsystems reach opposite verdicts on one matrix at one converged point —
+/// which is exactly #2428: the outer loop certified the fit, and this inversion
+/// then destroyed it over an eigenvalue 19x below the residual gradient.
+///
+/// Directions under that floor are dropped from the inverse rather than
+/// regularized. That is the correct limit, not a convenience: they arise when a
+/// smoothing parameter saturates, and there `∂β̂/∂ρ → 0`, so the direction
+/// contributes nothing to `J·V_ρ·Jᵀ` however large `1/σ` would have been.
 pub(crate) fn invert_identified_rho_hessian(
     hessian_rho: &Array2<f64>,
     expected_structural_nullity: usize,
+    outer_gradient: &Array1<f64>,
 ) -> Result<InvertedRhoHessian, String> {
     let n = hessian_rho.nrows();
     if expected_structural_nullity > n {
@@ -409,34 +446,49 @@ pub(crate) fn invert_identified_rho_hessian(
             "structural nullity {expected_structural_nullity} exceeds rho dimension {n}"
         ));
     }
-    if expected_structural_nullity == 0 {
-        let certified = gam_linalg::utils::certified_spd_inverse(
-            hessian_rho,
-            "unperturbed rho Hessian",
-        )
-        .map_err(|error| error.to_string())?;
-        return Ok(InvertedRhoHessian {
-            inverse: certified.into_inverse(),
-            active_rank: n,
-            structural_zero: 0,
-            used_structural_pseudoinverse: false,
-            eigenvalue_backward_error_bound: 0.0,
-            eigenvalues: Array1::<f64>::zeros(0),
-            eigenvectors: Array2::<f64>::zeros((0, 0)),
-            classifications: Vec::new(),
-        });
+    if !outer_gradient.is_empty() && outer_gradient.len() != n {
+        return Err(format!(
+            "outer gradient has {} coordinate(s) but the rho Hessian is {n}x{n}",
+            outer_gradient.len()
+        ));
     }
+    // Reject a non-finite Hessian before the eigensolver sees it: a NaN spectrum
+    // would otherwise classify as "unresolvable" rather than as the hard input
+    // defect it is.
+    gam_linalg::utils::validate_finite_symmetric_matrix(hessian_rho, "rho Hessian")
+        .map_err(|error| error.to_string())?;
 
     let (eigenvalues, eigenvectors) = hessian_rho
         .eigh(faer::Side::Lower)
         .map_err(|error| format!("rho-Hessian eigendecomposition failed: {error}"))?;
     let zero_bound = eigenpair_backward_error_bound(hessian_rho, &eigenvalues, &eigenvectors)?;
-    let min_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
-    if min_eigenvalue < -zero_bound {
-        let neg_zero_bound = -zero_bound;
-        return Err(format!(
-            "rho Hessian has negative curvature {min_eigenvalue:.3e} below eigensolver backward-error bound {neg_zero_bound:.3e}"
-        ));
+
+    // Per-direction resolution floor: the eigensolver's own backward error, or
+    // the outer certificate's gradient floor along this eigenvector, whichever
+    // admits more. Both are measurements, not tolerances chosen by hand.
+    let direction_floor = |i: usize| -> f64 {
+        if outer_gradient.is_empty() {
+            return zero_bound;
+        }
+        let v = eigenvectors.column(i);
+        let mut floor = 0.0_f64;
+        for k in 0..n {
+            floor += outer_gradient[k].abs() * v[k] * v[k];
+        }
+        if floor.is_finite() { floor.max(zero_bound) } else { zero_bound }
+    };
+
+    for i in 0..n {
+        let sigma = eigenvalues[i];
+        let floor = direction_floor(i);
+        if sigma < -floor {
+            return Err(format!(
+                "rho Hessian has negative curvature {sigma:.3e} below the outer certificate's own \
+                 resolution floor {floor:.3e} on that direction (eigensolver backward error \
+                 {zero_bound:.3e}); the outer loop certified this point as a minimum, so this is a \
+                 genuine contradiction rather than an unresolvable direction"
+            ));
+        }
     }
 
     let mut inverse = Array2::<f64>::zeros((n, n));
@@ -444,13 +496,19 @@ pub(crate) fn invert_identified_rho_hessian(
     let mut classifications = Vec::with_capacity(n);
     let mut active_rank = 0usize;
     let mut structural_zero = 0usize;
+    let mut below_gradient_floor = 0usize;
 
     for i in 0..n {
         let sigma = eigenvalues[i];
-        let class = if sigma > zero_bound {
+        let floor = direction_floor(i);
+        let class = if sigma > floor {
             EigenClassification::Active
-        } else {
+        } else if sigma.abs() <= zero_bound {
+            // Zero to the eigensolver's own backward error: this is the
+            // structural kind the penalty map counts.
             EigenClassification::StructuralZero
+        } else {
+            EigenClassification::BelowGradientFloor
         };
         classifications.push(class);
         match class {
@@ -471,13 +529,46 @@ pub(crate) fn invert_identified_rho_hessian(
                 }
             }
             EigenClassification::StructuralZero => structural_zero += 1,
+            EigenClassification::BelowGradientFloor => below_gradient_floor += 1,
         }
     }
-    if structural_zero != expected_structural_nullity {
+    // The penalty map certifies HOW MANY directions must be null; it cannot say
+    // which eigenpair each one lands on, and once a rail saturates, a structural
+    // zero and a saturation null are indistinguishable by magnitude (both sit
+    // under the assembly noise, which is far above eigensolver backward error).
+    // So the identity to enforce is that the Hessian exhibits AT LEAST the
+    // certified number of null directions — finding fewer contradicts the
+    // penalty map and is a real defect. Finding more is a saturated rail, which
+    // is a property of this ρ̂, not of the penalty map, and is expected.
+    let identified_null = structural_zero + below_gradient_floor;
+    if identified_null < expected_structural_nullity {
         return Err(format!(
-            "rho Hessian has {structural_zero} zero direction(s) within eigensolver backward error, but the penalty map certifies {expected_structural_nullity}"
+            "rho Hessian has only {identified_null} null direction(s) ({structural_zero} within eigensolver backward error, {below_gradient_floor} under the outer gradient floor), but the penalty map certifies {expected_structural_nullity}"
         ));
     }
+
+    // Every direction resolvable: return the Cholesky-certified inverse, which
+    // is what this function has always returned for a strictly positive
+    // definite ρ-Hessian. Keeping that path verbatim means no fit that succeeds
+    // today moves by a single ulp — the eigen route below engages only where the
+    // old code aborted.
+    if active_rank == n {
+        let certified =
+            gam_linalg::utils::certified_spd_inverse(hessian_rho, "unperturbed rho Hessian")
+                .map_err(|error| error.to_string())?;
+        return Ok(InvertedRhoHessian {
+            inverse: certified.into_inverse(),
+            active_rank: n,
+            structural_zero: 0,
+            below_gradient_floor: 0,
+            used_structural_pseudoinverse: false,
+            eigenvalue_backward_error_bound: zero_bound,
+            eigenvalues,
+            eigenvectors,
+            classifications,
+        });
+    }
+
     gam_linalg::matrix::symmetrize_in_place(&mut inverse);
     let matrix_max_abs = gam_linalg::utils::validate_finite_symmetric_matrix(
         hessian_rho,
@@ -499,6 +590,7 @@ pub(crate) fn invert_identified_rho_hessian(
         inverse,
         active_rank,
         structural_zero,
+        below_gradient_floor,
         used_structural_pseudoinverse: true,
         eigenvalue_backward_error_bound: zero_bound,
         eigenvalues,
@@ -573,10 +665,11 @@ fn dump_indefinite_rho_hessian_diagnostic(
     );
     if let Some(inv) = inverted {
         log::warn!(
-            "[INDEF-HESS] active_rank={}/{} structural_zero={} eigenvalue_backward_error_bound={:.3e}",
+            "[INDEF-HESS] active_rank={}/{} structural_zero={} below_gradient_floor={} eigenvalue_backward_error_bound={:.3e}",
             inv.active_rank,
             k,
             inv.structural_zero,
+            inv.below_gradient_floor,
             inv.eigenvalue_backward_error_bound,
         );
         if !inv.classifications.is_empty() {
@@ -586,10 +679,12 @@ fn dump_indefinite_rho_hessian_diagnostic(
                 .map(|c| match c {
                     EigenClassification::Active => "A",
                     EigenClassification::StructuralZero => "Z",
+                    EigenClassification::BelowGradientFloor => "G",
                 })
                 .collect();
             log::warn!(
-                "[INDEF-HESS] classifications={:?} (A=active Z=structurally certified zero)",
+                "[INDEF-HESS] classifications={:?} (A=active Z=structurally certified zero \
+                 G=under the outer loop's own gradient floor, i.e. a saturation null)",
                 labels,
             );
         }
@@ -755,11 +850,16 @@ fn dump_indefinite_rho_hessian_diagnostic(
     }
 }
 
+/// `outer_gradient` is the outer loop's residual gradient at the certified ρ̂,
+/// per coordinate (empty when unavailable). It is the resolution floor the
+/// ρ-Hessian's definiteness must be judged against — see
+/// [`invert_identified_rho_hessian`] and #2428.
 pub(crate) fn compute_smoothing_correction(
     reml_state: &RemlState<'_>,
     final_rho: &Array1<f64>,
     lambdas: &Array1<f64>,
     final_fit: &pirls::PirlsResult,
+    outer_gradient: &Array1<f64>,
 ) -> SmoothingCorrectionComputation {
     use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh};
 
@@ -975,7 +1075,8 @@ pub(crate) fn compute_smoothing_correction(
     // Step 3: invert the exact, unperturbed Hessian on its explicitly
     // identified spectral subspace. A diagonal ridge would change V_rho and
     // therefore the covariance estimand while being invisible in the result.
-    let inverted = match invert_identified_rho_hessian(&hessian_rho, structural_nullity) {
+    let inverted =
+        match invert_identified_rho_hessian(&hessian_rho, structural_nullity, outer_gradient) {
         Ok(inverse) => inverse,
         Err(error) => {
             log::warn!("Exact LAML rho-Hessian inversion failed: {error}");
@@ -1024,10 +1125,11 @@ pub(crate) fn compute_smoothing_correction(
 
     if inverted.active_rank < n_rho_total {
         log::info!(
-            "LAML rho Hessian has independently certified structural redundancy (active_rank={}/{}, structural_zero={}, eigenvalue_backward_error_bound={:.3e}); using its certified structural pseudoinverse.",
+            "LAML rho Hessian is not fully identified (active_rank={}/{}, structural_zero={}, below_gradient_floor={}, eigenvalue_backward_error_bound={:.3e}); using its certified structural pseudoinverse. `below_gradient_floor` counts saturation nulls: directions whose curvature is under the outer loop\'s own residual gradient, so they carry no resolvable rho-variance (#2428).",
             inverted.active_rank,
             n_rho_total,
             inverted.structural_zero,
+            inverted.below_gradient_floor,
             inverted.eigenvalue_backward_error_bound,
         );
         dump_indefinite_rho_hessian_diagnostic(

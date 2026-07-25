@@ -2398,6 +2398,7 @@ where
         // (#582); the var_beta = Cov_ρ[β̂] block is already on that scale and
         // stays unscaled.
         if beta_covariance_unscaled.is_some() {
+            let no_outer_gradient = Array1::<f64>::zeros(0);
             let smoothing_outcome = reml_state.compute_smoothing_correction_auto(
                 &final_rho,
                 &lambdas,
@@ -2405,6 +2406,15 @@ where
                 beta_covariance_unscaled.as_ref(),
                 cov_scale,
                 finalgrad_norm,
+                // #2428: the residual gradient the outer certificate itself
+                // used to accept this ρ̂ is the resolution floor the ρ-Hessian's
+                // definiteness must be judged against. Without it the
+                // correction applies a strictly stronger standard than the
+                // certificate did and can reject a fit the outer loop passed.
+                outer_result
+                    .final_gradient
+                    .as_ref()
+                    .unwrap_or(&no_outer_gradient),
             )?;
             match smoothing_outcome {
                 super::reml::eval::SmoothingCorrectionOutcome::Unavailable { reason, .. } => {
