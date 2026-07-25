@@ -184,11 +184,21 @@ fn run_basis(basis_term: &str) {
     for j in 0..audit.psi_dim {
         let analytic = audit.analytic_psi_gradient[j];
         let fd = audit.finite_difference_psi_gradient[j];
+        let gap = (analytic - fd).abs();
         assert!(
             analytic.is_finite() && fd.is_finite() && audit.psi_steps[j] > 0.0,
             "invalid gradient evidence for basis {basis_term:?}: i={j} \
              analytic={analytic} fd={fd} step={}",
             audit.psi_steps[j]
+        );
+        let scale = analytic.abs().max(fd.abs()).max(1e-6);
+        assert!(
+            gap / scale < 5e-2,
+            "survival marginal-slope outer-gradient analytic!=FD for basis \
+             {basis_term:?} on psi coordinate {j}: analytic={analytic:.6e} \
+             fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+            gap / scale,
+            audit.psi_steps[j],
         );
     }
 }

@@ -513,12 +513,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     {
         hints.borrow_mut().logslope_beta = Some(pilot_logslope_beta.clone());
     }
-    let exact_warm_start = RefCell::new(None::<CustomFamilyWarmStart>);
+    let exact_mode_branch =
+        RefCell::new(crate::exact_mode_branch::ExactCoefficientModeBranch::default());
     // Outer ρ-cache β-seed staging slot. The spatial-joint optimizer fires
     // `seed_inner_beta_fn` on a cache hit before any eval has run at the
     // restored ρ. Per-block widths are only known once `build_blocks(rho,…)`
     // runs, so we stash the flat β here and the eval closures promote it
-    // into `exact_warm_start` on the first invocation.
+    // into the deterministic coefficient-mode branch on the first invocation.
     let pending_beta_seed = RefCell::new(None::<Array1<f64>>);
     // Monotonic per-outer-eval counter used to populate
     // `BlockwiseFitOptions::outer_eval_context` so downstream
@@ -1336,7 +1337,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 let widths: Vec<usize> = blocks.iter().map(|b| b.design.ncols()).collect();
                 match CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed) {
                     Ok(ws) => {
-                        exact_warm_start.replace(Some(ws));
+                        if !exact_mode_branch.borrow_mut().install_seed(ws) {
+                            log::debug!(
+                                "[SMS] ignored a late outer-cache coefficient seed after the exact mode branch froze"
+                            );
+                        }
                     }
                     Err(e) => {
                         log::warn!(
@@ -1374,30 +1379,40 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 eval_id,
                 scope: crate::custom_family::EvalScope::OuterDerivative,
             });
-            let owned = evaluate_custom_family_joint_hyper_owned_shared(
+            let (froze, candidates) = exact_mode_branch
+                .borrow_mut()
+                .candidates(effective_mode, &rho);
+            if froze {
+                log::info!(
+                    "[SMS] froze deterministic exact coefficient-mode branch at the first derivative-bearing outer evaluation"
+                );
+            }
+            let selection = evaluate_custom_family_joint_hyper_best_mode_shared(
                 &family,
                 &blocks,
                 &outer_options,
                 &rho,
                 hyper_layout,
-                exact_warm_start.borrow().as_ref(),
+                &candidates,
                 effective_mode,
             )?;
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
-            if !owned.result.inner_converged {
+            exact_mode_branch
+                .borrow_mut()
+                .record_value(eval_mode, selection.result.warm_start.clone());
+            if !selection.result.inner_converged {
                 return Err(
                     "exact survival marginal-slope inner solve did not converge".to_string()
                 );
             }
             log::info!(
                 "[survival-marginal-slope/outer-eval] end objective={:.6e} mode={:?} elapsed={:.3}s",
-                owned.result.objective,
+                selection.result.objective,
                 eval_mode,
                 eval_started.elapsed().as_secs_f64(),
             );
             if matches!(eval_mode, EvalMode::ValueGradientHessian)
                 && analytic_joint_hessian_available
-                && !owned.result.outer_hessian.is_analytic()
+                && !selection.result.outer_hessian.is_analytic()
             {
                 // The outer objective was requested WITH its Hessian on the STRICT
                 // analytic route (no finite-difference fallback permitted), and the
@@ -1424,94 +1439,27 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                      indefinite (not a Laplace mode); reporting the profiled objective as +∞ so \
                      the outer solver rejects this infeasible ρ and steps back toward the feasible \
                      region rather than aborting.",
-                    owned.result.objective,
+                    selection.result.objective,
                     eval_mode,
                 );
                 return Ok(ExactJointEvaluation {
                     objective: f64::INFINITY,
-                    gradient: owned.result.gradient,
-                    hessian: owned.result.outer_hessian,
-                    mode: owned.mode,
+                    gradient: selection.result.gradient.clone(),
+                    hessian: selection.result.outer_hessian.clone(),
+                    mode: selection,
                 });
             }
             Ok(ExactJointEvaluation {
-                objective: owned.result.objective,
-                gradient: owned.result.gradient,
-                hessian: owned.result.outer_hessian,
-                mode: owned.mode,
+                objective: selection.result.objective,
+                gradient: selection.result.gradient.clone(),
+                hessian: selection.result.outer_hessian.clone(),
+                mode: selection,
             })
         },
-        |theta,
-         specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign],
-         row_set: &crate::row_kernel::RowSet| {
-            let eval_started = std::time::Instant::now();
-            log::info!(
-                "[survival-marginal-slope/outer-efs] start theta_dim={}",
-                theta.len(),
-            );
-            let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
-            let blocks = build_blocks(
-                &rho,
-                &designs[0],
-                &designs[1],
-                FlexActivation::On,
-            )?;
-            if let Some(beta_seed) = pending_beta_seed.borrow_mut().take() {
-                let widths: Vec<usize> = blocks.iter().map(|b| b.design.ncols()).collect();
-                match CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed) {
-                    Ok(ws) => {
-                        exact_warm_start.replace(Some(ws));
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[SMS] outer ρ-cache β-warm-start rejected (efs): {e}; falling back to cold β"
-                        );
-                    }
-                }
-            }
-            let family = make_family(
-                &designs[0],
-                &designs[1],
-                theta,
-                FlexActivation::On,
-            )?;
-            let hyper_layout = get_hyper_layout(theta, specs, designs)?;
-            let eval_id = outer_eval_counter.get();
-            outer_eval_counter.set(eval_id.wrapping_add(1));
-            let tolerance_options =
-                joint_hyper_options_for_outer_tolerance(options, exact_spatial_outer_tol);
-            let mut outer_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &tolerance_options,
-                row_set,
-            );
-            outer_options.outer_eval_context = Some(crate::custom_family::OuterEvalContext {
-                rho: std::sync::Arc::new(rho.clone()),
-                eval_id,
-                scope: crate::custom_family::EvalScope::OuterDerivative,
-            });
-            let owned = evaluate_custom_family_joint_hyper_efs_owned_shared(
-                &family,
-                &blocks,
-                &outer_options,
-                &rho,
-                hyper_layout,
-                exact_warm_start.borrow().as_ref(),
-            )?;
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
-            if !owned.result.inner_converged {
-                return Err(
-                    "exact survival marginal-slope EFS inner solve did not converge".to_string(),
-                );
-            }
-            log::info!(
-                "[survival-marginal-slope/outer-efs] end elapsed={:.3}s",
-                eval_started.elapsed().as_secs_f64(),
-            );
-            Ok(ExactJointEfsEvaluation {
-                evaluation: owned.result.efs_eval,
-                mode: owned.mode,
-            })
+        |_theta, _specs, _designs, _row_set| {
+            Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
+                "survival marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
+            )
         },
         crate::marginal_slope_shared::make_beta_seed_validator(&pending_beta_seed),
     );
