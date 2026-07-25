@@ -1949,6 +1949,45 @@ fn cache_invariance_arm(
     })
 }
 
+/// Signed ulp distance between two finite `f64`s, using the standard
+/// monotone-ordering trick so the count is meaningful across zero.
+fn ulp_distance(left: f64, right: f64) -> i128 {
+    let order = |value: f64| -> i128 {
+        let bits = value.to_bits() as i64;
+        if bits < 0 {
+            (i64::MIN - bits) as i128
+        } else {
+            bits as i128
+        }
+    };
+    order(left) - order(right)
+}
+
+/// Describe the first coordinate at which two arms disagree BITWISE, or `None`
+/// when every coordinate is bit-identical. The description carries the ulp
+/// distance so a regression report says how far the value moved, not just that
+/// it moved.
+fn first_bitwise_gap(cold: &[f64], warm: &[f64]) -> Option<String> {
+    if cold.len() != warm.len() {
+        return Some(format!(
+            "layout differs: cold len={} warm len={}",
+            cold.len(),
+            warm.len()
+        ));
+    }
+    cold.iter()
+        .zip(warm.iter())
+        .enumerate()
+        .find(|(_, (a, b))| a.to_bits() != b.to_bits())
+        .map(|(index, (a, b))| {
+            format!(
+                "coordinate {index}: cold={a:.17e} warm={b:.17e} ulps={} |Δ|={:.3e}",
+                ulp_distance(*a, *b),
+                (a - b).abs()
+            )
+        })
+}
+
 /// Deterministic `n`-row covariate grid shared by the estimated-nuisance
 /// cache-invariance fixtures.
 fn nuisance_invariance_design(n: usize) -> (Array2<f64>, Vec<f64>) {
@@ -1981,7 +2020,16 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
     // Each family runs three arms in one process: a cold arm whose persistent
     // reads are STRUCTURALLY disabled (`persist_warm_start_disk = false`), a
     // priming arm that completes the same fit with persistence engaged, and a
-    // warm arm that therefore starts from a populated cache.
+    // warm arm that therefore starts from a populated cache. Disabling the reads
+    // is what makes the cold arm cold — the store root is resolved once per
+    // process and memoized, so repointing it cannot prove coldness from inside a
+    // running test binary.
+    //
+    // The comparison is BITWISE on the criterion, on β and on the certified
+    // log-λ. Approximate agreement is the wrong contract here: the defect this
+    // guards agreed to three or four digits on two of the three families and was
+    // still a different objective, so any tolerance wide enough to absorb solver
+    // wobble is also wide enough to absorb the next instance of the bug.
     let n = 160usize;
     let (x, grid) = nuisance_invariance_design(n);
     let w = Array1::<f64>::ones(n);
@@ -2043,45 +2091,35 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
                 cold.outer_converged, warm.outer_converged
             ));
         }
-        // Relative to the criterion magnitude: far above two-paths-to-one-optimum
-        // solver noise, far below the criterion gap a differently-frozen
-        // nuisance opens (measured at 16% of the criterion for Beta).
-        let criterion_tol = 1e-6 * cold.reml_score.abs().max(1.0);
-        let criterion_gap = (cold.reml_score - warm.reml_score).abs();
-        if criterion_gap > criterion_tol {
+        // BITWISE, not "close". Numerically close state is not interchangeable
+        // provenance for a profiled objective: the whole failure mode this issue
+        // documents is two runs that agreed to several digits and still sat on
+        // different criteria. An approximate bound would have to be set above
+        // whatever wobble the current solver happens to produce, and would then
+        // stop measuring the invariant and start measuring the wobble. The
+        // reports carry the ulp distance so a regression says how far it moved.
+        if let Some(gap) = first_bitwise_gap(
+            std::slice::from_ref(&cold.reml_score),
+            std::slice::from_ref(&warm.reml_score),
+        ) {
             failures.push(format!(
-                "[{name}] the outer criterion depends on cache state: cold={:.10e} warm={:.10e} \
-                 |Δ|={criterion_gap:.3e} > tol={criterion_tol:.3e}",
-                cold.reml_score, warm.reml_score
+                "[{name}] the outer criterion depends on cache state: {gap}"
             ));
         }
-        let beta_scale = cold
-            .beta
-            .iter()
-            .fold(0.0f64, |acc, value| acc.max(value.abs()))
-            .max(1.0);
-        let beta_gap = cold
-            .beta
-            .iter()
-            .zip(warm.beta.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-        if beta_gap > 1e-4 * beta_scale {
+        if let Some(gap) = first_bitwise_gap(
+            cold.beta.as_slice().expect("contiguous cold β"),
+            warm.beta.as_slice().expect("contiguous warm β"),
+        ) {
             failures.push(format!(
-                "[{name}] the coefficients depend on cache state: sup|Δβ|={beta_gap:.3e} > \
-                 tol={:.3e}",
-                1e-4 * beta_scale
+                "[{name}] the coefficients depend on cache state: {gap}"
             ));
         }
-        let rho_gap = cold
-            .log_lambdas
-            .iter()
-            .zip(warm.log_lambdas.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
-        if rho_gap > 1e-4 {
+        if let Some(gap) = first_bitwise_gap(
+            cold.log_lambdas.as_slice().expect("contiguous cold log-λ"),
+            warm.log_lambdas.as_slice().expect("contiguous warm log-λ"),
+        ) {
             failures.push(format!(
-                "[{name}] the selected log-λ depends on cache state: sup|Δρ|={rho_gap:.3e} > 1e-4"
+                "[{name}] the certified log-λ depends on cache state: {gap}"
             ));
         }
     }
