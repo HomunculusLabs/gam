@@ -6248,7 +6248,17 @@ fn run_arc_projects_seed_before_seed_validation_eval() {
         .with_bounds(array![0.0], array![1.0])
         .with_initial_rho(array![2.0])
         .with_seed_config(seed_config)
-        .with_max_iter(1);
+        // The subject is WHICH point the first evaluation sees, and that is
+        // settled before the optimizer takes any step — `seen.first()` proves
+        // the ordering on its own. The iteration budget is incidental here, and
+        // at `1` it was actively harmful: one ARC step from the projected seed
+        // `1.0` toward the optimum `0.25` lands at `0.2504` with
+        // `|Pg| = 8.541e-4` against a `6.325e-4` stationarity bound — 1.35×
+        // short — so the run refused ("claimed_converged=false after 1 outer
+        // iteration(s)") and the `expect` below fired on a convergence budget
+        // that has nothing to do with seed projection. Give the quadratic room
+        // to certify, so projection is the only thing that can fail here.
+        .with_max_iter(16);
     let mut obj = problem.build_objective(
         (),
         |_: &mut (), theta: &Array1<f64>| Ok((theta[0] - 0.25).powi(2)),
