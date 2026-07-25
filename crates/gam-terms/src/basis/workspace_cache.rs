@@ -923,20 +923,23 @@ fn spherical_dot_profile_cmp(a: &[f64], b: &[f64]) -> std::cmp::Ordering {
 /// every other, so which one a caller treats as the representative cannot change
 /// any subsequent key comparison.
 ///
-/// `profile_builds` is incremented by the number of `O(n log n)` profiles this
-/// actually constructed. That count — not a wall clock — is what the asymptotic
-/// contract is stated in, so it is what
-/// [`spherical_center_selection_costs_no_profile_without_an_exact_tie`] gates.
-fn resolve_spherical_profile_tie(
+/// `on_profile_builds` observes the number of `O(n log n)` profiles this actually
+/// constructs. The production caller passes a zero-sized no-op closure that
+/// optimizes away; tests use the same path to state the asymptotic contract in
+/// operation counts rather than wall-clock noise.
+fn resolve_spherical_profile_tie<F>(
     units: &[[f64; 3]],
     tied: &[usize],
-    profile_builds: &mut usize,
-) -> Vec<usize> {
+    on_profile_builds: &mut F,
+) -> Vec<usize>
+where
+    F: FnMut(usize),
+{
     use rayon::prelude::*;
     if tied.len() <= 1 {
         return tied.to_vec();
     }
-    *profile_builds += tied.len();
+    on_profile_builds(tied.len());
     // Spend the pool on whichever axis actually has work: across candidates once
     // there are enough of them to fill the pool, otherwise across each profile's
     // rows. Both forms produce bit-identical profiles, so this is a scheduling
@@ -1040,15 +1043,22 @@ pub fn select_spherical_farthest_point_centers(
     num_centers: usize,
     radians: bool,
 ) -> Result<Array2<f64>, BasisError> {
-    select_spherical_farthest_point_center_rows(data, num_centers, radians).map(|chosen| {
+    select_spherical_farthest_point_center_rows_with_observer(
+        data,
+        num_centers,
+        radians,
+        |_| {},
+    )
+    .map(|chosen| {
         // Return the selected rows VERBATIM (in the data's own lat/lon units), so
         // the centers ARE data points and carry the rotation exactly.
-        Array2::from_shape_fn((chosen.rows.len(), 2), |(r, c)| data[[chosen.rows[r], c]])
+        Array2::from_shape_fn((chosen.len(), 2), |(r, c)| data[[chosen[r], c]])
     })
 }
 
 /// The row indices [`select_spherical_farthest_point_centers`] selects, with the
 /// number of sorted dot profiles the selection had to build.
+#[cfg(test)]
 pub(crate) struct SphericalCenterRows {
     pub(crate) rows: Vec<usize>,
     /// Count of `O(n log n)` profile keys constructed. Zero unless the data hold
@@ -1056,13 +1066,35 @@ pub(crate) struct SphericalCenterRows {
     pub(crate) profile_builds: usize,
 }
 
+#[cfg(test)]
 fn select_spherical_farthest_point_center_rows(
     data: ArrayView2<'_, f64>,
     num_centers: usize,
     radians: bool,
 ) -> Result<SphericalCenterRows, BasisError> {
-    use rayon::prelude::*;
     let mut profile_builds = 0usize;
+    let rows = select_spherical_farthest_point_center_rows_with_observer(
+        data,
+        num_centers,
+        radians,
+        |built| profile_builds += built,
+    )?;
+    Ok(SphericalCenterRows {
+        rows,
+        profile_builds,
+    })
+}
+
+fn select_spherical_farthest_point_center_rows_with_observer<F>(
+    data: ArrayView2<'_, f64>,
+    num_centers: usize,
+    radians: bool,
+    mut on_profile_builds: F,
+) -> Result<Vec<usize>, BasisError>
+where
+    F: FnMut(usize),
+{
+    use rayon::prelude::*;
     validate_lat_lon_matrix(data, "spherical farthest-point centers", radians)?;
     if num_centers == 0 {
         crate::bail_invalid_basis!("spherical farthest-point center count must be positive");
@@ -1134,7 +1166,8 @@ fn select_spherical_farthest_point_center_rows(
         .collect();
 
     let target = num_centers;
-    let seed_class = resolve_spherical_profile_tie(&units, &seed_tied, &mut profile_builds);
+    let seed_class =
+        resolve_spherical_profile_tie(&units, &seed_tied, &mut on_profile_builds);
     let seed_orbit = distinct_spherical_orbit(&units, &seed_class, &[]);
     if seed_orbit.len() > target {
         crate::bail_invalid_basis!(
@@ -1210,7 +1243,8 @@ fn select_spherical_farthest_point_center_rows(
             break;
         }
 
-        let tied_class = resolve_spherical_profile_tie(&units, &cheap_tied, &mut profile_builds);
+        let tied_class =
+            resolve_spherical_profile_tie(&units, &cheap_tied, &mut on_profile_builds);
         let orbit = distinct_spherical_orbit(&units, &tied_class, &selected);
         let remaining = target - selected.len();
         if orbit.len() > remaining {
@@ -1253,10 +1287,7 @@ fn select_spherical_farthest_point_center_rows(
         });
     }
 
-    Ok(SphericalCenterRows {
-        rows: selected,
-        profile_builds,
-    })
+    Ok(selected)
 }
 
 #[cfg(test)]
