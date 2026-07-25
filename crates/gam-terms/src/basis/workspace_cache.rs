@@ -1062,7 +1062,10 @@ pub fn select_spherical_farthest_point_centers(
 pub(crate) struct SphericalCenterRows {
     pub(crate) rows: Vec<usize>,
     /// Count of `O(n log n)` profile keys constructed. Zero unless the data hold
-    /// an EXACT tie in both `O(1)` invariant keys at some maximin extremum.
+    /// an EXACT tie in both `O(1)` invariant keys at some maximin extremum. The
+    /// asymptotic contract is stated in this count rather than in a wall clock,
+    /// and it is the tests that read it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) profile_builds: usize,
 }
 
