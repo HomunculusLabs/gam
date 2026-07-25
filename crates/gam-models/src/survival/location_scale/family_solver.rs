@@ -2208,9 +2208,23 @@ impl SurvivalLocationScaleFamily {
 
         if dir.x_t_exit_action.is_some()
             || dir.x_t_entry_action.is_some()
+            || dir.x_t_deriv_action.is_some()
             || dir.x_ls_exit_action.is_some()
             || dir.x_ls_entry_action.is_some()
+            || dir.x_ls_deriv_action.is_some()
         {
+            if self.x_link_wiggle.is_none() {
+                return Ok(Some(ExactNewtonJointPsiTerms {
+                    objective_psi,
+                    score_psi,
+                    hessian_psi: Array2::zeros((0, 0)),
+                    hessian_psi_operator: Some(
+                        super::row_kernel::survival_ls_joint_psi_hessian_operator(
+                            self, &dynamic, &dir, row_mask,
+                        )?,
+                    ),
+                }));
+            }
             // HT-mask helper. Each per-row pair weight (h_*, dh_*, ±d3·q_psi)
             // is multiplied by the mask before being moved into the deferred
             // operator. `None` is a zero-cost passthrough.

@@ -2749,6 +2749,143 @@ pub(crate) fn survival_ls_joint_psi_hessian_directional_derivative_dense(
     )
 }
 
+/// Build `D_psi H` from the same nine-primary row program as `H` itself.
+///
+/// For each row,
+///
+/// ```text
+/// D_psi H = J_psiᵀ L₂ J + Jᵀ L₃[J_psi beta] J + Jᵀ L₂ J_psi .
+/// ```
+///
+/// [`CustomFamilyJointPsiOperator`] is exactly this factorization: its channel
+/// actions carry `J_psi`, `weights` carry `L₂`, and `drift_weights` carry
+/// `L₃[J_psi beta]`. Building those arrays from the canonical row jets keeps
+/// this first derivative definition identical to the mixed derivative above.
+pub(crate) fn survival_ls_joint_psi_hessian_operator(
+    family: &SurvivalLocationScaleFamily,
+    dynamic: &SurvivalDynamicGeometry,
+    direction: &SurvivalJointPsiDirection,
+    row_mask: Option<&Array1<f64>>,
+) -> Result<Arc<dyn HyperOperator>, String> {
+    if family.x_link_wiggle.is_some() {
+        return Err(
+            "survival joint psi Hessian operator uses the fixed-width row program; \
+             link-wiggle geometry requires its dynamic-width analogue"
+                .to_string(),
+        );
+    }
+    let kernel = family.survival_ls_row_kernel_rescaled(dynamic, 0.0);
+    let offsets = &kernel.offsets;
+    let p = *offsets
+        .last()
+        .ok_or_else(|| "missing survival joint coefficient offset".to_string())?;
+    let mut channels = Vec::new();
+    let mut channel_index = [None; SLS_ROW_K];
+
+    channel_index[0] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[0]..offsets[1],
+        shared_dense_arc(&dynamic.time_jac_entry),
+        None,
+    ));
+    channel_index[1] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[0]..offsets[1],
+        shared_dense_arc(&dynamic.time_jac_exit),
+        None,
+    ));
+    channel_index[2] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[0]..offsets[1],
+        shared_dense_arc(&dynamic.time_jac_deriv),
+        None,
+    ));
+    channel_index[3] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[1]..offsets[2],
+        family.x_threshold.clone(),
+        direction.x_t_exit_action.clone(),
+    ));
+    channel_index[4] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[1]..offsets[2],
+        SurvivalLsRowKernel::entry_design(&family.x_threshold_entry, &family.x_threshold).clone(),
+        direction.x_t_entry_action.clone(),
+    ));
+    if let Some(design) = family.x_threshold_deriv.as_ref() {
+        channel_index[5] = Some(channels.len());
+        channels.push(CustomFamilyJointDesignChannel::new(
+            offsets[1]..offsets[2],
+            design.clone(),
+            direction.x_t_deriv_action.clone(),
+        ));
+    }
+    channel_index[6] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[2]..offsets[3],
+        family.x_log_sigma.clone(),
+        direction.x_ls_exit_action.clone(),
+    ));
+    channel_index[7] = Some(channels.len());
+    channels.push(CustomFamilyJointDesignChannel::new(
+        offsets[2]..offsets[3],
+        SurvivalLsRowKernel::entry_design(&family.x_log_sigma_entry, &family.x_log_sigma).clone(),
+        direction.x_ls_entry_action.clone(),
+    ));
+    if let Some(design) = family.x_log_sigma_deriv.as_ref() {
+        channel_index[8] = Some(channels.len());
+        channels.push(CustomFamilyJointDesignChannel::new(
+            offsets[2]..offsets[3],
+            design.clone(),
+            direction.x_ls_deriv_action.clone(),
+        ));
+    }
+
+    let active_channels: Vec<usize> = channel_index
+        .iter()
+        .enumerate()
+        .filter_map(|(channel, index)| index.map(|_| channel))
+        .collect();
+    let m = active_channels.len();
+    let mut weights = vec![Array1::<f64>::zeros(family.n); m * m];
+    let mut drift_weights = vec![Array1::<f64>::zeros(family.n); m * m];
+    for row in 0..family.n {
+        let row_weight = row_mask.map_or(1.0, |mask| mask[row]);
+        if row_weight == 0.0 {
+            continue;
+        }
+        let (_, _, hessian) = crate::row_kernel::RowKernel::row_kernel(&kernel, row)?;
+        let psi_direction = direction.primary_direction(row);
+        let third = crate::row_kernel::RowKernel::row_third_contracted(
+            &kernel,
+            row,
+            &psi_direction,
+        )?;
+        for (left, &a) in active_channels.iter().enumerate() {
+            for (right, &b) in active_channels.iter().enumerate() {
+                let slot = left * m + right;
+                weights[slot][row] = row_weight * hessian[a][b];
+                drift_weights[slot][row] = row_weight * third[a][b];
+            }
+        }
+    }
+    let mut pairs = Vec::with_capacity(m * m);
+    for left in 0..m {
+        for right in 0..m {
+            let slot = left * m + right;
+            pairs.push(CustomFamilyJointDesignPairContribution::new(
+                left,
+                right,
+                std::mem::take(&mut weights[slot]),
+                std::mem::take(&mut drift_weights[slot]),
+            ));
+        }
+    }
+    Ok(Arc::new(CustomFamilyJointPsiOperator::new(
+        p, channels, pairs,
+    )))
+}
+
 fn require_fitted_block_geometry(
     block_states: &[ParameterBlockState],
     context: &'static str,
