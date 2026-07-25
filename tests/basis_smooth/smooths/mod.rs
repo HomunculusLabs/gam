@@ -16,6 +16,7 @@ mod bspline_partition_unity_degree_2;
 mod bspline_partition_unity_degree_3;
 mod bspline_partition_unity_degree_4;
 mod bspline_partition_unity_degree_5;
+mod configured_rho_prior_reaches_criterion_2463;
 mod cyclic_bspline_first_derivative_periodicity_breaks;
 mod cyclic_bspline_second_derivative_periodicity_breaks;
 mod cyclic_duchon_torus_containment;

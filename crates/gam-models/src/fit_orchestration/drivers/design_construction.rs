@@ -2711,28 +2711,36 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
     Ok(fitted)
 }
 
-/// Relax the per-coordinate ρ-prior for terms running in Marra–Wood
-/// double-penalty selection mode (#1266).
+/// Derive the per-coordinate ρ-prior for an UNSET `FitOptions::rho_prior`.
 ///
-/// The default ρ-prior is a `Normal { mean: 0, sd: 3 }` cap on each log-λ — a
-/// stabiliser that keeps ordinary smoothing parameters from drifting to
-/// degenerate extremes (gam#893/#1196). For a smooth carrying a
+/// **Scope, first, because the name predates it.** This function only ever runs
+/// on a prior the caller left unset (`RhoPrior::is_unset`); an explicitly
+/// configured one is handed straight back (#2463). So it does not "relax" a
+/// user's choice — it decides what the *default* criterion is on each ρ
+/// coordinate, which is a policy question the library does own.
+///
+/// Historically it was the other way round. The default ρ-prior used to be a
+/// `Normal { mean: 0, sd: 3 }` cap on each log-λ — a stabiliser keeping ordinary
+/// smoothing parameters off degenerate extremes (gam#893/#1196) — and the job
+/// here was to REMOVE that cap wherever it had been measured harmful, one family
+/// at a time (#1266, #1271, #1867). For a smooth carrying a
 /// `DoublePenaltyNullspace` block (`double_penalty = True`, the default `s(...)`
-/// — analogous to mgcv `select = TRUE`) that cap is actively wrong: the whole
+/// — analogous to mgcv `select = TRUE`) the cap is actively wrong: the whole
 /// purpose of the second penalty is to let REML drive an *unsupported* term to
 /// `EDF → 0`, which needs both the wiggliness and null-space log-λ to grow
 /// large. The `ρ²/(2·9)` cap pulls them back toward 0, so REML settles at a
 /// point that leaves the term under-shrunk — the smooth's EDF comes out ABOVE
 /// the single-penalty (`double_penalty = False`) EDF instead of at or below it,
 /// the exact contract violation in #1266. mgcv's `select = TRUE` applies no
-/// such cap to the selection coordinates, and the lower-level term-collection
-/// fits already converge correctly under a flat prior.
+/// such cap to the selection coordinates.
 ///
-/// We therefore rewrite the prior to `Independent`, holding the base prior on
-/// every ordinary coordinate but switching the coordinates of any
-/// double-penalty term to `Flat`. Single-penalty terms are byte-for-byte
-/// unchanged, and an already-`Flat`/already-`Independent` base prior, or a
-/// design with no double-penalty block, is returned untouched.
+/// #2450 made `RhoPrior::default()` `Flat`, which inverted the polarity: the
+/// base now carries no cap to lift, and what is left is to ADD the two
+/// stabilisers this function derives — the #1089/#1392 under-determined widening
+/// and the #1476 null-space degeneracy breaker — to an otherwise pure-REML
+/// criterion. The result is an `Independent` prior; a design with no relaxable
+/// term, or one whose ρ vector cannot be aligned 1:1 with `penaltyinfo`, is
+/// returned untouched.
 ///
 /// The relaxed per-coordinate prior is FAMILY-AGNOSTIC: the cap-lifting of the
 /// bending coordinate and the determinacy-gated null-space treatment apply
@@ -2778,6 +2786,36 @@ fn relax_smoothing_rho_prior(
     // machinery could not address them. A `Flat` base is length-agnostic, so
     // the bail now returns the right criterion instead of the wrong one.
     if matches!(base, gam_spec::RhoPrior::Independent(_)) {
+        return base.clone();
+    }
+    // AN EXPLICITLY CONFIGURED PRIOR IS HONOURED AS WRITTEN (#2463).
+    //
+    // Everything below this line derives a prior the CALLER did not ask for.
+    // That was unavoidable while `RhoPrior::default()` was `Normal { 0, 3 }`:
+    // "unset" arrived here wearing the same clothes as "I want a cap", so the
+    // rewrite could not tell the two apart and had to overwrite both. With the
+    // default now `Flat` they ARE distinguishable — an unset coordinate arrives
+    // flat, and anything else arrived because someone wrote it down — so the
+    // rewrite can finally do what its name says and relax the DEFAULT rather
+    // than the caller.
+    //
+    // Without this gate a configured prior is a silent no-op on exactly the
+    // families this function relaxes (`ps`/`cr`/`bs`, `tp`, `te`/`ti`, pure
+    // Duchon), which is the most common smooth in the library: measured under
+    // `Normal { mean: -6, sd: 0.25 }` — a prior pinning λ at e⁻⁶ to a quarter
+    // of a log unit — a `ps` fit returned a BITWISE identical ρ̂, edf and MISE
+    // in every cell (#2463). `CoefficientGroupPrior::{NormalLogPrecision,
+    // GammaPrecision, PenalizedComplexity}` are public API and `to_rho_prior`
+    // exists precisely to carry them into a fit; they landed nowhere.
+    //
+    // The #1089 termination requirement survives the hand-back. That gate needs
+    // strictly positive curvature in ρ so an under-determined outer loop can
+    // certify a stationary point, and every prior family that is not `is_unset`
+    // supplies some: `Normal` contributes `1/sd²`, `PenalizedComplexity`
+    // `(θ/4)e^{−ρ/2}`, `GammaPrecision` `rate·e^{ρ}`. So the caller who replaces
+    // our stabiliser necessarily brings one of their own; what they give up is
+    // our CHOICE of it, which is the thing they were overriding.
+    if !base.is_unset() {
         return base.clone();
     }
     // LENGTH SAFETY (load-bearing). The per-coordinate `Independent` prior is

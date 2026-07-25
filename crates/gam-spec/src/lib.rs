@@ -511,6 +511,36 @@ impl RhoPrior {
     pub fn upper_tail_gradient_vanishes_everywhere(&self, rho_dim: usize) -> bool {
         (0..rho_dim).all(|k| self.upper_tail_gradient_vanishes(k))
     }
+
+    /// Did the caller leave this prior UNSET, or did they configure it?
+    ///
+    /// `RhoPrior::default()` is `Flat`, so "unset" and "explicitly asked for a
+    /// flat coordinate" are the same value and deliberately indistinguishable —
+    /// both mean *the criterion is pure REML/LAML here*, which is what any
+    /// consumer of this predicate actually wants to know. What is NOT the same
+    /// is a configured `Normal` / `PenalizedComplexity` / non-trivial
+    /// `GammaPrecision`: that value is a modelling choice someone wrote down,
+    /// and a subsystem that rewrites it is discarding an instruction (#2463).
+    ///
+    /// Unset has more than one spelling. `GammaPrecision { shape: 1, rate: 0 }`
+    /// is "the explicit flat/default case" by this enum's own documentation —
+    /// its cost, gradient and Hessian all vanish under the MAP-in-λ convention —
+    /// so a `matches!(prior, Flat)` test silently misclassifies it as
+    /// configured. Carrying the answer here rather than re-deriving it at each
+    /// consumer is the point (#2427): the same question asked in three places
+    /// must not get three answers.
+    ///
+    /// An `Independent` prior is unset only when EVERY coordinate is, since a
+    /// single configured coordinate is still an instruction. An empty
+    /// `Independent` carries no instruction and is therefore unset.
+    pub fn is_unset(&self) -> bool {
+        match self {
+            RhoPrior::Flat => true,
+            RhoPrior::GammaPrecision { shape, rate } => *shape == 1.0 && *rate == 0.0,
+            RhoPrior::Normal { .. } | RhoPrior::PenalizedComplexity { .. } => false,
+            RhoPrior::Independent(priors) => priors.iter().all(RhoPrior::is_unset),
+        }
+    }
 }
 
 /// `Flat`, because the *deterministic* criterion is REML/LAML by contract.
