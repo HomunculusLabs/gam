@@ -1795,8 +1795,10 @@ mod assembly_inner_status_gate_tests {
         assert_eq!(
             fit.beta_covariance_corrected(),
             fit.beta_covariance(),
-            "with no smoothing coordinate Vp = Vb exactly; corrected prediction must consume \"
-             the persisted conditional covariance rather than refusing an algebraically complete fit"
+            concat!(
+                "with no smoothing coordinate Vp = Vb exactly; corrected prediction must consume ",
+                "the persisted conditional covariance rather than refusing an algebraically complete fit",
+            )
         );
     }
 }
