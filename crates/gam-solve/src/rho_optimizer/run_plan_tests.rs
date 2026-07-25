@@ -7844,3 +7844,138 @@ fn pinned_equal_rho_bounds_are_accepted_2370() {
         result.rho,
     );
 }
+
+// ─── #2425 — the certificate face must be the whole θ box, not the λ block ───
+//
+// A joint spatial-κ search optimizes θ = [ρ …, ψ …] over ONE box, and
+// `project_gradient_vector` already projects every coordinate against its own
+// bound. `certificate_railed_lambdas` scans only `0..layout.rho_dim()`, and
+// `rho_dim()` is `n_params − psi_dim` — so a ψ coordinate pinned on its
+// data-derived κ window was invisible to every certificate decision that takes
+// an active face: the off-railed PSD test, the interior curvature floor, the
+// asymptote-rail mint, tail-snap, the #2155 saddle escape, and the #2392
+// active-set reduction.
+//
+// The fixture is the shape of the `gam-models` Matérn refusals: two interior ρ
+// coordinates that are exactly stationary, and one ψ coordinate driven onto the
+// upper box bound whose curvature there is saturated NEGATIVE. The full Hessian
+// is diag(1, 1, −1) and indefinite; the feasible tangent subspace at the active
+// bound is {ρ₀, ρ₁}, where it is diag(1, 1) and positive definite. Second-order
+// admissibility at a box-constrained optimum is a statement about that tangent
+// subspace, so the certificate must judge the reduced block — which it could
+// not, because the ψ coordinate never reached `certificate_railed`.
+fn psi_rail_cost(theta: &Array1<f64>) -> f64 {
+    // ½ρ₀² + ½ρ₁² − 0.3ψ − ½ψ²: the ψ arm is concave and pushed outward, so the
+    // search rails it at +rho_bound and the curvature there is −1.
+    0.5 * theta[0] * theta[0] + 0.5 * theta[1] * theta[1] - 0.3 * theta[2]
+        - 0.5 * theta[2] * theta[2]
+}
+
+fn psi_rail_eval(theta: &Array1<f64>) -> OuterEval {
+    OuterEval {
+        cost: psi_rail_cost(theta),
+        gradient: array![theta[0], theta[1], -0.3 - theta[2]],
+        hessian: HessianValue::Dense(array![
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0],
+        ]),
+        inner_beta_hint: None,
+    }
+}
+
+#[test]
+fn railed_psi_coordinate_is_on_the_certificate_face_not_only_the_lambda_report_2425() {
+    // The two sets differ exactly as designed: the report stays λ-scoped, the
+    // face covers the whole θ box. `rho_dim = n_params − psi_dim = 2`, so index
+    // 2 is a ψ coordinate and can only appear in the θ-wide scan.
+    let config = OuterConfig::default();
+    let theta = array![0.0, 0.0, config.rho_bound];
+    assert_eq!(
+        certificate_railed_lambdas(&theta, 2, &config),
+        Vec::<usize>::new(),
+        "the λ-block report must stay λ-scoped: index 2 is a ψ coordinate"
+    );
+    assert_eq!(
+        certificate_railed_coordinates(&theta, &config),
+        vec![2],
+        "the θ-wide face must see the ψ coordinate pinned on the box"
+    );
+
+    // And the face is load-bearing: the same Hessian reads indefinite against
+    // the λ-only report and positive definite against the true active face.
+    let hessian = array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]];
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed(&hessian, &[]),
+        Some(false),
+        "control: judged against an empty face the saturated ψ row makes the \
+         full Hessian indefinite — this is what the λ-only scan produced"
+    );
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed(&hessian, &[2]),
+        Some(true),
+        "judged on the feasible tangent subspace at the active ψ bound, the \
+         curvature is admissible"
+    );
+}
+
+#[test]
+fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
+    // End-to-end: a point that is genuinely a constrained minimum — interior
+    // gradient exactly zero, ψ on its bound with the outward pull the projector
+    // discards — must certify. Before the face was widened this refused with
+    // `hessian_psd=NO` and `railed=[]`, which is the `gam-models` Matérn
+    // signature and #979's "the projector removed 99.2% of |g| but nothing is
+    // listed as railed".
+    let config = OuterConfig::default();
+    let problem = OuterProblem::new(3)
+        .with_psi_dim(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_initial_rho(array![0.0, 0.0, config.rho_bound])
+        .with_screen_initial_rho(false)
+        .with_seed_config(gam_problem::SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        });
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), theta: &Array1<f64>| Ok(psi_rail_cost(theta)),
+        |_: &mut (), theta: &Array1<f64>| Ok(psi_rail_eval(theta)),
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let result = audit_stationary_point(
+        &mut obj,
+        array![0.0, 0.0, config.rho_bound],
+        "railed-psi certificate face #2425",
+    )
+    .unwrap_or_else(|rejection| {
+        panic!(
+            "a constrained minimum whose only active bound is a psi coordinate must \
+             certify; refused with: {}",
+            rejection.source
+        )
+    });
+    let cert = result
+        .criterion_certificate
+        .as_ref()
+        .expect("a certified point records its certificate");
+    assert!(
+        cert.certifies(),
+        "certificate must accept the constrained minimum: {}",
+        cert.summary()
+    );
+    assert!(
+        cert.curvature_admissible(),
+        "curvature is admissible on the feasible tangent subspace: {}",
+        cert.summary()
+    );
+    assert_eq!(
+        cert.lambdas_railed,
+        Vec::<usize>::new(),
+        "no SMOOTHING coordinate railed here, so the λ report stays empty: {:?}",
+        cert.lambdas_railed
+    );
+}
