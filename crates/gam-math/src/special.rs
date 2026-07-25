@@ -638,6 +638,27 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
         // weights moving an ulp either way, which is the level the node residual
         // already sets.) Escaping that bound needs a weight formula that does
         // not route through `P_n'(z)` at all, not a better Newton loop.
+        //
+        // In particular it is NOT reachable by correcting for the node offset,
+        // which is the obvious thing to try next and was measured. Substituting
+        // Legendre's equation at a root collapses the weight's two sensitivities
+        // to a single `d(log w)/dz = −2z/(1 − z²)`, and the offset to the true
+        // root is one Newton step, `δ = −P_n(z)/P_n'(z)` — whose `P_n(z)` the
+        // Bonnet pass on the next line already computes and discards. So the
+        // first-order correction `w·(1 + 2z·(P_n/P_n')/(1 − z²))` is free, and
+        // it is exact: fed a `δ` from an 80-digit reference it drives the weight
+        // error to 1e-25 at every `n` tried. The derivation is not the problem.
+        //
+        // What kills it is `δ`'s own resolution. Bonnet evaluates a `P_n` that
+        // is sitting AT its root to an absolute `≈ n·ε`, so the correction
+        // carries noise `2z·(n·ε/P_n')/(1 − z²)` — and that noise is within an
+        // order of the term it is removing across the whole range (outermost
+        // node: `5.6e−16` term vs `2.8e−15` noise at `n = 16`, `1.5e−13` vs
+        // `4.6e−14` at `n = 256`). The net over `n ∈ {16..256}` is a coin flip
+        // decided by how close each node happened to land — 3.8x better at
+        // `n = 128`, 13x worse at `n = 200` — so the correction is not applied.
+        // Making it pay needs `P_n` evaluated wider than `f64`, at which point
+        // the node itself may as well be.
         let (_, pp) = legendre_value_and_slope(z);
         let w = 2.0 / ((1.0 - z * z) * pp * pp);
         // For odd n the central node is at z = 0; record once.
