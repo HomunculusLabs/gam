@@ -3909,12 +3909,130 @@ mod stream_device_parity_tests {
             .is_some()
     }
 
+    /// #2424 device-free half, shared by every test in this module: on a host
+    /// with no CUDA runtime the device-resident seam must REFUSE, loudly and
+    /// by returning `Err`. `upload_shared_pirls_gpu` routes through
+    /// `GpuRuntime::require()`, so the refusal carries the device-absence
+    /// reason — it never fabricates device state and never panics. This is the
+    /// #1551 class (a device entry that quietly produces *something* on a
+    /// device-free host), and it is exactly what a `return`-before-the-first-
+    /// assertion skip could never see.
+    fn assert_device_seam_declines_without_cuda() {
+        let x = arr2(&[[1.0, 0.0], [0.0, 1.0]]);
+        let y = ndarray::Array1::<f64>::zeros(2);
+        let prior_w = ndarray::Array1::<f64>::ones(2);
+        let offset = ndarray::Array1::<f64>::zeros(2);
+        let refusal =
+            match upload_shared_pirls_gpu(x.view(), y.view(), prior_w.view(), offset.view()) {
+                Ok(_) => panic!(
+                    "no CUDA runtime on this host, yet the device-resident PIRLS upload \
+                     returned Ok — the seam fabricated device state (#1551 class)"
+                ),
+                Err(reason) => reason,
+            };
+        assert!(
+            refusal.contains("cannot upload shared GPU PIRLS data"),
+            "the device-free refusal must name the device-absence reason, got: {refusal}"
+        );
+    }
+
+    /// `XᵀWX + S` by an explicit triple loop. Independent of the cuBLAS /
+    /// faer crossproduct the production path runs, so it pins the ANSWER
+    /// instead of replaying the algorithm.
+    fn xtwx_plus_penalty(
+        x: ndarray::ArrayView2<'_, f64>,
+        w: ndarray::ArrayView1<'_, f64>,
+        s: ndarray::ArrayView2<'_, f64>,
+    ) -> ndarray::Array2<f64> {
+        let (n, p) = x.dim();
+        let mut h = ndarray::Array2::<f64>::zeros((p, p));
+        for k in 0..n {
+            for i in 0..p {
+                for j in 0..p {
+                    h[[i, j]] += w[k] * x[[k, i]] * x[[k, j]];
+                }
+            }
+        }
+        h += &s;
+        h
+    }
+
+    /// `ln det(A)` for a 3×3 matrix via the cofactor expansion — no
+    /// factorization at all, so it is independent of the Cholesky whose
+    /// diagonal the production path sums to report `logdet`.
+    fn logdet_3x3(a: ndarray::ArrayView2<'_, f64>) -> f64 {
+        let det = a[[0, 0]] * (a[[1, 1]] * a[[2, 2]] - a[[1, 2]] * a[[2, 1]])
+            - a[[0, 1]] * (a[[1, 0]] * a[[2, 2]] - a[[1, 2]] * a[[2, 0]])
+            + a[[0, 2]] * (a[[1, 0]] * a[[2, 1]] - a[[1, 1]] * a[[2, 0]]);
+        det.ln()
+    }
+
+    /// #2424: assert the defining properties of one PIRLS Newton step against
+    /// an independent host oracle — `H = XᵀWX + S`, the Newton residual
+    /// `(H + λ_lm·I)·δ = rhs`, and `logdet = ln det(H + λ_lm·I)`. Runs on
+    /// every host: on a CUDA box `solve_pirls_step_gpu` executes the device
+    /// step, on a device-free box the documented CPU fallback, and both owe
+    /// the same triple.
+    fn assert_one_shot_step_matches_host_oracle(
+        x: ndarray::ArrayView2<'_, f64>,
+        weights: ndarray::ArrayView1<'_, f64>,
+        penalty: ndarray::ArrayView2<'_, f64>,
+        gradient: ndarray::ArrayView1<'_, f64>,
+        step_lm_lambda: f64,
+    ) -> PirlsGpuStep {
+        let p = x.ncols();
+        assert_eq!(p, 3, "the closed-form 3×3 logdet oracle fixes p = 3");
+        let step = solve_pirls_step_gpu(PirlsGpuInput {
+            x,
+            weights,
+            penalty_hessian: penalty,
+            gradient,
+            step_lm_lambda,
+            objective_ridge: 0.0,
+        })
+        .expect("the one-shot PIRLS step entry must succeed on every host");
+
+        let h_ref = xtwx_plus_penalty(x, weights, penalty);
+        let mut max_h = 0.0_f64;
+        for i in 0..p {
+            for j in 0..p {
+                max_h = max_h.max((step.penalized_hessian[[i, j]] - h_ref[[i, j]]).abs());
+            }
+        }
+        assert!(
+            max_h <= 1e-12,
+            "exported penalized Hessian must equal XᵀWX + S: max |Δ| = {max_h:.3e}"
+        );
+
+        let mut h_step = h_ref;
+        for i in 0..p {
+            h_step[[i, i]] += step_lm_lambda;
+        }
+        let residual = h_step.dot(&step.direction) - &gradient.to_owned();
+        let max_residual = residual.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        assert!(
+            max_residual <= 1e-11,
+            "Newton direction must solve (H + λ_lm·I)·δ = rhs: max |residual| = \
+             {max_residual:.3e}"
+        );
+
+        let logdet_ref = logdet_3x3(h_step.view());
+        assert!(
+            (step.logdet - logdet_ref).abs() <= 1e-11,
+            "logdet must equal ln det(H + λ_lm·I): got {} vs cofactor oracle {logdet_ref}",
+            step.logdet
+        );
+        step
+    }
+
+    /// Stage 3.2 device-input parity. The device-input-vs-host-input half is
+    /// genuinely device-only and runs in the CUDA branch; the step's defining
+    /// properties are asserted against a host oracle on every host, and a
+    /// device-free host additionally owes the decline contract (#2424 — this
+    /// test used to `return` before its first assertion on a CPU-only runner
+    /// and report a pass).
     #[test]
     fn device_input_step_matches_host_input_step_on_v100() {
-        if !device_available() {
-            eprintln!("[stream_device_parity] no CUDA runtime — skipping");
-            return;
-        }
         let x = arr2(&[
             [1.0, 0.5, 0.1],
             [0.2, -0.3, 1.4],
@@ -3930,6 +4048,25 @@ mod stream_device_parity_tests {
         let gradient: ndarray::Array1<f64> = x.t().dot(&g_eta);
         let penalty = arr2(&[[0.4, 0.0, 0.0], [0.0, 0.9, 0.0], [0.0, 0.0, 1.2]]);
         let lm_ridge = 0.1;
+
+        // EVERY HOST: the production one-shot step owes the host oracle its
+        // (H, direction, logdet) triple — the device path on a CUDA box, the
+        // documented CPU fallback otherwise.
+        drop(assert_one_shot_step_matches_host_oracle(
+            x.view(),
+            weights.view(),
+            penalty.view(),
+            gradient.view(),
+            lm_ridge,
+        ));
+
+        if !device_available() {
+            // Device-free host: the device-resident seam must decline loudly.
+            // The device-input form below has no host counterpart to compare
+            // against, so it is the CUDA branch's business.
+            assert_device_seam_declines_without_cuda();
+            return;
+        }
 
         let n = x.nrows();
         let y_dummy = ndarray::Array1::<f64>::zeros(n);
@@ -4013,27 +4150,20 @@ mod stream_device_parity_tests {
         }
     }
 
-    /// V100 hill-climb gate: at large-scale (n=80k, p=44,
-    /// BernoulliLogit/Fisher) the device-resident loop must be ≥10×
-    /// faster than the CPU reference. Marked `#[ignore]` so it only
-    /// runs when explicitly invoked (`cargo test -- --ignored
-    /// hill_climb_loop`); the CI/mac path can't host the GPU work
-    /// anyway. Uses CPU `row_reweight_cpu` + faer Cholesky as the
-    /// PIRLS reference loop to avoid dragging in `solver::pirls`'s
-    /// 13k-line state machine.
-    #[test]
-    fn hill_climb_loop_beats_cpu_10x_on_large_scale_logit() {
-        use crate::gpu_kernels::pirls_row::{
-            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu,
-        };
-        use std::time::Instant;
-        if !device_available() {
-            eprintln!("[hill_climb] no CUDA runtime — skipping");
-            return;
-        }
-        let n = 80_000_usize;
-        let p = 44_usize;
-        // Synthesise X (col-major dense) and y from a known β.
+    /// Deterministic BernoulliLogit hill-climb fixture: `X` from a fixed sine
+    /// pattern, `y` a deterministic Bernoulli draw from the true `β`, unit
+    /// prior weights, and a `1e-3` ridge penalty. Shared by the large-scale
+    /// device timing and the device-free baseline-convergence check so both
+    /// halves grade the same problem.
+    fn logit_hill_climb_fixture(
+        n: usize,
+        p: usize,
+    ) -> (
+        ndarray::Array2<f64>,
+        ndarray::Array1<f64>,
+        ndarray::Array1<f64>,
+        ndarray::Array2<f64>,
+    ) {
         let beta_true: ndarray::Array1<f64> = ndarray::Array1::from_iter(
             (0..p).map(|j| 0.05 * ((j as f64) - 0.5 * p as f64) / p as f64),
         );
@@ -4058,47 +4188,34 @@ mod stream_device_parity_tests {
             .collect();
         let prior_w = ndarray::Array1::<f64>::ones(n);
         let penalty = ndarray::Array2::<f64>::eye(p) * 1e-3;
-        let beta0 = ndarray::Array1::<f64>::zeros(p);
+        (x, y, prior_w, penalty)
+    }
 
-        // GPU timing.
-        let offset_bench = ndarray::Array1::<f64>::zeros(n);
-        let shared =
-            upload_shared_pirls_gpu(x.view(), y.view(), prior_w.view(), offset_bench.view())
-                .expect("upload shared design");
-        let mut ws = allocate_sigma_pirls_workspace(&shared).expect("alloc ws");
-        let mut loop_ws = allocate_pirls_loop_workspace(&shared, &ws).expect("alloc loop_ws");
-        let t0 = Instant::now();
-        // No prior-mean shift in this benchmark — penalty = ½βᵀSβ
-        // with `s_transformed = penalty`, `linear_shift = 0`,
-        // `constant_shift = 0`.
-        let linear_shift_zero = ndarray::Array1::<f64>::zeros(p);
-        drop(
-            pirls_loop_on_stream(
-                &shared,
-                &mut ws,
-                &mut loop_ws,
-                PirlsRowFamily::BernoulliLogit,
-                CurvatureMode::Fisher,
-                PirlsLoopLikelihoodScale::non_gamma(),
-                beta0.view(),
-                penalty.view(),
-                linear_shift_zero.view(),
-                0.0,
-                0.0,
-                0.0,
-                30,
-                1e-6,
-                None,
-            )
-            .expect("pirls loop"),
-        );
-        let gpu_secs = t0.elapsed().as_secs_f64();
-
-        // CPU reference: same PIRLS structure (eta = Xβ; row reweight;
-        // XᵀWX + Sλ; faer Cholesky; β update with α=1).
-        let t1 = Instant::now();
+    /// CPU PIRLS reference loop: `η = Xβ`; per-row reweight; `XᵀWX + Sλ`;
+    /// faer Cholesky; penalized Fisher-scoring update `β += H⁻¹(Xᵀg − Sβ)`
+    /// with `α = 1`. Same structure as the device-resident loop without
+    /// dragging in `solver::pirls`'s 13k-line state machine.
+    ///
+    /// #2424: lifted out of the hill-climb gate so the device-free half can
+    /// assert this BASELINE converges. A diverging baseline makes the
+    /// wall-clock ratio meaningless, and that is not hypothetical — the
+    /// original reference subtracted the step and dropped the `−Sβ` term, a
+    /// divergent iteration (η reached ~−1e5 by iteration 30) that no CPU-only
+    /// run ever executed because the gate returned before its first assertion.
+    fn cpu_pirls_reference_loop(
+        x: ndarray::ArrayView2<'_, f64>,
+        y: ndarray::ArrayView1<'_, f64>,
+        prior_w: ndarray::ArrayView1<'_, f64>,
+        penalty: ndarray::ArrayView2<'_, f64>,
+        iterations: usize,
+    ) -> ndarray::Array1<f64> {
+        use crate::gpu_kernels::pirls_row::{
+            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu,
+        };
+        use gam_linalg::faer_ndarray::FaerCholesky;
+        let (n, p) = x.dim();
         let mut beta = ndarray::Array1::<f64>::zeros(p);
-        for _ in 0..30 {
+        for _ in 0..iterations {
             let eta: ndarray::Array1<f64> = x.dot(&beta);
             let mut w = ndarray::Array1::<f64>::zeros(n);
             let mut g = ndarray::Array1::<f64>::zeros(n);
@@ -4117,7 +4234,7 @@ mod stream_device_parity_tests {
                 w[i] = out.w_solver;
                 g[i] = out.grad_eta;
             }
-            let mut wx_full = x.clone();
+            let mut wx_full = x.to_owned();
             for j in 0..p {
                 for i in 0..n {
                     wx_full[[i, j]] *= w[i];
@@ -4126,12 +4243,8 @@ mod stream_device_parity_tests {
             let h = x.t().dot(&wx_full) + &penalty;
             // Penalized Fisher-scoring step: `grad_eta` is the per-row
             // LIKELIHOOD score `w·(y−μ)` (ascent direction), so the penalized
-            // objective's ascent step is `β += H⁻¹(Xᵀg − Sβ)`. The original
-            // reference subtracted the step and dropped the `−Sβ` term — a
-            // divergent iteration (η reached ~−1e5 by iteration 30) that no
-            // CPU-only run ever executed because this test skips without CUDA.
+            // objective's ascent step is `β += H⁻¹(Xᵀg − Sβ)`.
             let rhs = x.t().dot(&g) - penalty.dot(&beta);
-            use gam_linalg::faer_ndarray::FaerCholesky;
             let chol = h
                 .cholesky(faer::Side::Lower)
                 .expect("CPU PIRLS reference Cholesky");
@@ -4140,12 +4253,187 @@ mod stream_device_parity_tests {
                 beta[i] += d[i];
             }
         }
+        beta
+    }
+
+    /// `‖Xᵀ·score(β) − S·β‖∞` — the penalized score, exactly zero at the
+    /// penalized MLE. This is the convergence certificate for
+    /// [`cpu_pirls_reference_loop`].
+    fn penalized_score_inf_norm(
+        x: ndarray::ArrayView2<'_, f64>,
+        y: ndarray::ArrayView1<'_, f64>,
+        prior_w: ndarray::ArrayView1<'_, f64>,
+        penalty: ndarray::ArrayView2<'_, f64>,
+        beta: ndarray::ArrayView1<'_, f64>,
+    ) -> f64 {
+        use crate::gpu_kernels::pirls_row::{
+            CurvatureMode, PirlsRowFamily, RowInput, row_reweight_cpu,
+        };
+        let eta: ndarray::Array1<f64> = x.dot(&beta);
+        let mut g = ndarray::Array1::<f64>::zeros(x.nrows());
+        for i in 0..x.nrows() {
+            g[i] = row_reweight_cpu(
+                PirlsRowFamily::BernoulliLogit,
+                CurvatureMode::Fisher,
+                RowInput {
+                    eta: eta[i],
+                    y: y[i],
+                    prior_weight: prior_w[i],
+                },
+                1.0,
+            )
+            .expect("penalized-score row must be representable")
+            .grad_eta;
+        }
+        let score = x.t().dot(&g) - penalty.dot(&beta.to_owned());
+        score.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+    }
+
+    /// Hill-climb gate: at large scale (n=80k, p=44, BernoulliLogit/Fisher)
+    /// the device-resident loop must clearly beat the same box's CPU
+    /// reference. The wall-clock ratio is genuinely device-only, so on a
+    /// device-free host this test instead grades what IS checkable there: the
+    /// CPU baseline of the ratio converges to the penalized MLE, and the
+    /// device-resident seam declines loudly (#2424 — the gate used to return
+    /// before its first assertion and report a pass on every CI runner).
+    #[test]
+    fn hill_climb_loop_declines_without_device_else_beats_cpu_on_large_scale_logit() {
+        use std::time::Instant;
+        let p = 44_usize;
+
+        // EVERY HOST: the CPU baseline must be a CONVERGED PIRLS loop, else
+        // the ratio below grades a divergent iteration. Small n keeps this
+        // affordable on a CPU-only runner; the large-scale baseline gets the
+        // same certificate in the device branch.
+        {
+            let (x_small, y_small, prior_w_small, penalty_small) =
+                logit_hill_climb_fixture(4_000, p);
+            let beta_small = cpu_pirls_reference_loop(
+                x_small.view(),
+                y_small.view(),
+                prior_w_small.view(),
+                penalty_small.view(),
+                30,
+            );
+            assert!(
+                beta_small.iter().all(|v| v.is_finite()),
+                "CPU PIRLS baseline diverged to a non-finite β at n=4000"
+            );
+            let score = penalized_score_inf_norm(
+                x_small.view(),
+                y_small.view(),
+                prior_w_small.view(),
+                penalty_small.view(),
+                beta_small.view(),
+            );
+            assert!(
+                score <= 1e-6,
+                "CPU PIRLS baseline did not reach the penalized MLE at n=4000: \
+                 ‖Xᵀg − Sβ‖∞ = {score:.3e}"
+            );
+        }
+
+        if !device_available() {
+            // The wall-clock claim needs a device; the decline contract does not.
+            assert_device_seam_declines_without_cuda();
+            return;
+        }
+
+        use crate::gpu_kernels::pirls_row::{CurvatureMode, PirlsRowFamily};
+        let n = 80_000_usize;
+        let (x, y, prior_w, penalty) = logit_hill_climb_fixture(n, p);
+        let beta0 = ndarray::Array1::<f64>::zeros(p);
+
+        // GPU timing.
+        let offset_bench = ndarray::Array1::<f64>::zeros(n);
+        let shared =
+            upload_shared_pirls_gpu(x.view(), y.view(), prior_w.view(), offset_bench.view())
+                .expect("upload shared design");
+        let mut ws = allocate_sigma_pirls_workspace(&shared).expect("alloc ws");
+        let mut loop_ws = allocate_pirls_loop_workspace(&shared, &ws).expect("alloc loop_ws");
+        let t0 = Instant::now();
+        // No prior-mean shift in this benchmark — penalty = ½βᵀSβ
+        // with `s_transformed = penalty`, `linear_shift = 0`,
+        // `constant_shift = 0`.
+        let linear_shift_zero = ndarray::Array1::<f64>::zeros(p);
+        let gpu_outcome = pirls_loop_on_stream(
+            &shared,
+            &mut ws,
+            &mut loop_ws,
+            PirlsRowFamily::BernoulliLogit,
+            CurvatureMode::Fisher,
+            PirlsLoopLikelihoodScale::non_gamma(),
+            beta0.view(),
+            penalty.view(),
+            linear_shift_zero.view(),
+            0.0,
+            0.0,
+            0.0,
+            30,
+            1e-6,
+            None,
+        )
+        .expect("pirls loop");
+        let gpu_secs = t0.elapsed().as_secs_f64();
+
+        // #2424: the two sides of a wall-clock ratio must time the SAME work.
+        // The device loop stops as soon as its `tol = 1e-6` criterion is met,
+        // so the CPU baseline runs exactly the iteration count the device
+        // actually spent — a fixed 30 CPU iterations against a device run that
+        // exits early inflates the ratio by the iteration mismatch rather than
+        // by device throughput. (Upload/alloc of the shared design sits
+        // outside BOTH timed regions: production uploads once per model and
+        // reuses it across the whole REML outer loop, so the loop is the
+        // steady state being graded.)
+        let iterations = gpu_outcome.iterations.max(1);
+
+        // CPU reference: same PIRLS structure (eta = Xβ; row reweight;
+        // XᵀWX + Sλ; faer Cholesky; β update with α=1).
+        let t1 = Instant::now();
+        let beta_cpu = cpu_pirls_reference_loop(
+            x.view(),
+            y.view(),
+            prior_w.view(),
+            penalty.view(),
+            iterations,
+        );
         let cpu_secs = t1.elapsed().as_secs_f64();
+
+        // The device loop's ANSWER, not just its clock: iteration-matched to
+        // the CPU reference from the same β₀ under the same update rule, the
+        // two must land on the same coefficients.
+        assert!(
+            gpu_outcome.beta.iter().all(|v| v.is_finite()),
+            "device PIRLS loop returned a non-finite β at n={n}"
+        );
+        let mut max_beta_delta = 0.0_f64;
+        for i in 0..p {
+            max_beta_delta = max_beta_delta.max((gpu_outcome.beta[i] - beta_cpu[i]).abs());
+        }
+        let gpu_score = penalized_score_inf_norm(
+            x.view(),
+            y.view(),
+            prior_w.view(),
+            penalty.view(),
+            gpu_outcome.beta.view(),
+        );
 
         let speedup = cpu_secs / gpu_secs;
         eprintln!(
-            "[hill_climb] n={n} p={p} BernoulliLogit/Fisher: gpu={:.3}s cpu={:.3}s speedup={:.2}×",
-            gpu_secs, cpu_secs, speedup
+            "[hill_climb] n={n} p={p} BernoulliLogit/Fisher: gpu={:.3}s cpu={:.3}s \
+             speedup={:.2}× iters={iterations} converged={} max|Δβ|={max_beta_delta:.3e} \
+             gpu ‖Xᵀg − Sβ‖∞={gpu_score:.3e}",
+            gpu_secs, cpu_secs, speedup, gpu_outcome.converged
+        );
+        assert!(
+            max_beta_delta <= 1e-8,
+            "iteration-matched device-vs-CPU PIRLS β parity at n={n}: max |Δβ| = \
+             {max_beta_delta:.3e} after {iterations} shared iterations"
+        );
+        assert!(
+            gpu_score <= 1e-6,
+            "device PIRLS loop did not reach the penalized MLE at n={n}: \
+             ‖Xᵀg − Sβ‖∞ = {gpu_score:.3e}"
         );
         // Dispatch-worthiness gate, not a hardware bet (#2313 hardware
         // sweep): a fixed 10× floor asserts the calibration box's CPU/GPU
@@ -4155,8 +4443,11 @@ mod stream_device_parity_tests {
         assert!(
             speedup >= 2.0,
             "GPU PIRLS loop dispatch-worthiness: got speedup={speedup:.2}× \
-             (gpu={gpu_secs:.3}s cpu={cpu_secs:.3}s) — the resident loop must \
-             clearly beat the same-box CPU"
+             (gpu={gpu_secs:.3}s cpu={cpu_secs:.3}s, both over {iterations} iterations) \
+             — the resident loop must clearly beat the same-box CPU. #2424: this ratio \
+             is iteration-matched. The previous form timed a fixed 30 CPU iterations \
+             against a device loop that converges in 3, so it reported ~4× where the \
+             per-iteration truth is below 1×"
         );
     }
 
@@ -4164,12 +4455,14 @@ mod stream_device_parity_tests {
     /// Gaussian-identity fit reaches OLS β to high precision in a
     /// handful of iterations and matches the closed-form
     /// `(XᵀX + Sλ)⁻¹·Xᵀy` solution.
+    ///
+    /// #2424: the same OLS claim is checkable without a device through the
+    /// one-shot production entry — Gaussian identity has `W = I` and score
+    /// `y − Xβ₀ = y` at `β₀ = 0`, so a SINGLE Newton step from zero IS the
+    /// ridge-OLS solution. That half runs on every host; the device-resident
+    /// loop's own convergence stays in the CUDA branch.
     #[test]
     fn pirls_loop_converges_to_ols_solution_on_gaussian_identity() {
-        if !device_available() {
-            eprintln!("[stage_3_3] no CUDA runtime — skipping");
-            return;
-        }
         let x = arr2(&[
             [1.0, 0.5, 0.1],
             [0.2, -0.3, 1.4],
@@ -4188,6 +4481,46 @@ mod stream_device_parity_tests {
         let prior_w = ndarray::Array1::<f64>::ones(n);
         let penalty = ndarray::Array2::<f64>::eye(p) * 1e-4; // tiny ridge
         let beta0 = ndarray::Array1::<f64>::zeros(p);
+
+        // Closed-form OLS (with tiny ridge). Shared by both halves.
+        let xtx = x.t().dot(&x);
+        let xty = x.t().dot(&y);
+        let h_ref = xtx + &penalty;
+        // Solve via the crate's faer/ndarray bridge.
+        use gam_linalg::faer_ndarray::FaerCholesky;
+        let chol = h_ref
+            .cholesky(faer::Side::Lower)
+            .expect("OLS reference Cholesky");
+        let beta_ref: ndarray::Array1<f64> = chol.solvevec(&xty);
+
+        // EVERY HOST: one Newton step from β₀ = 0 under Gaussian identity has
+        // W = I and RHS = Xᵀy, so `direction` IS the ridge-OLS solution. The
+        // one-shot production entry runs the device step on a CUDA box and the
+        // documented CPU fallback otherwise; both owe this β and the host
+        // oracle's (H, residual, logdet) triple.
+        let one_shot = assert_one_shot_step_matches_host_oracle(
+            x.view(),
+            prior_w.view(),
+            penalty.view(),
+            xty.view(),
+            0.0,
+        );
+        let mut max_beta_delta = 0.0_f64;
+        for i in 0..p {
+            max_beta_delta = max_beta_delta.max((one_shot.direction[i] - beta_ref[i]).abs());
+        }
+        assert!(
+            max_beta_delta <= 1e-9,
+            "one-shot Gaussian-identity step must equal the closed-form ridge OLS \
+             solution: max |Δβ| = {max_beta_delta:.3e}"
+        );
+
+        if !device_available() {
+            // The device-resident LOOP needs a device; the decline contract
+            // and the OLS identity above do not.
+            assert_device_seam_declines_without_cuda();
+            return;
+        }
 
         let offset_ols = ndarray::Array1::<f64>::zeros(n);
         let shared = upload_shared_pirls_gpu(x.view(), y.view(), prior_w.view(), offset_ols.view())
@@ -4217,17 +4550,6 @@ mod stream_device_parity_tests {
             None,
         )
         .expect("pirls loop");
-
-        // Closed-form OLS (with tiny ridge).
-        let xtx = x.t().dot(&x);
-        let xty = x.t().dot(&y);
-        let h_ref = xtx + &penalty;
-        // Solve via the crate's faer/ndarray bridge.
-        use gam_linalg::faer_ndarray::FaerCholesky;
-        let chol = h_ref
-            .cholesky(faer::Side::Lower)
-            .expect("OLS reference Cholesky");
-        let beta_ref: ndarray::Array1<f64> = chol.solvevec(&xty);
 
         // Gaussian-identity PIRLS converges in one Newton iter (linear
         // problem); the loop may take a few iters because the line

@@ -1619,6 +1619,65 @@ mod sphere_gpu_tests {
         }
     }
 
+    /// #2424 device-free half: with no CUDA runtime the dispatch decision must
+    /// DECLINE at `(n, m, lmax)`. Where `n·m` clears the device-work threshold
+    /// this is a strictly device-dependent claim — only the missing runtime can
+    /// hold the dispatch back — and below the threshold it additionally pins
+    /// the size gate. Either way, admitting a device this host does not have is
+    /// the #1551 silent-device class, and it is exactly what a
+    /// `return`-before-the-first-assertion skip could never see.
+    fn assert_sphere_decision_declines_without_device(n: usize, m: usize, lmax: usize) {
+        let decision = sphere_kernel_decision(n, m, lmax)
+            .expect("the sphere GPU decision must not fault on a device-free host");
+        assert!(
+            !decision.use_gpu,
+            "no CUDA runtime on this host, yet the sphere dispatch decision admitted the \
+             device for (n={n}, m={m}, lmax={lmax}) — reason={}",
+            decision.reason
+        );
+    }
+
+    /// #2424 device-free half: the admitted-only device entries must REFUSE
+    /// with an `Err` rather than fabricate a host-side answer. `build_*_device`
+    /// is reached only after the decision admits the device, so on a host with
+    /// no runtime every call owes an error — never `Ok`, never a panic.
+    fn assert_device_kernel_entry_refuses(inputs: S2KernelBuildInputs<'_>) {
+        assert!(
+            build_kernel_matrix_device(inputs).is_err(),
+            "no CUDA runtime on this host, yet the device kernel entry returned a matrix \
+             — the admitted-only device path fabricated a host answer (#1551 class)"
+        );
+    }
+
+    /// #2424: the truncated-spectral kernel is defined elementwise as
+    /// `K(x, c) = Σ_ℓ c_ℓ · P_ℓ(x·c)`. This grades the production CPU matrix
+    /// against that definition evaluated point-by-point through the Legendre
+    /// recurrence — the same definition the device kernel implements, so it
+    /// pins the ORACLE the GPU is compared against, on every host.
+    fn assert_cpu_kernel_matches_spectral_definition(
+        kernel_matrix: &Array2<f64>,
+        data_xyz: &[f64],
+        centers_xyz: &[f64],
+        coeffs: &[f64],
+    ) {
+        let (n, m) = kernel_matrix.dim();
+        let mut max_abs = 0.0_f64;
+        for i in 0..n {
+            for j in 0..m {
+                let dot = data_xyz[3 * i] * centers_xyz[3 * j]
+                    + data_xyz[3 * i + 1] * centers_xyz[3 * j + 1]
+                    + data_xyz[3 * i + 2] * centers_xyz[3 * j + 2];
+                let expected = sphere_truncated_spectral_eval(dot.clamp(-1.0, 1.0), coeffs);
+                max_abs = max_abs.max((kernel_matrix[(i, j)] - expected).abs());
+            }
+        }
+        assert!(
+            max_abs < 1e-12,
+            "CPU truncated-spectral kernel matrix departs from its elementwise definition \
+             Σ_ℓ c_ℓ P_ℓ(x·c): max |Δ| = {max_abs:.3e}"
+        );
+    }
+
     #[test]
     fn sum_finite_guard_accepts_finite_rejects_nonfinite() {
         // The admitted device path guards its output with `!out.sum().is_finite()`
@@ -1864,18 +1923,13 @@ mod sphere_gpu_tests {
         assert!(hw[0].abs() > 0.0);
     }
 
-    /// V100-only: probe + raw kernel parity vs CPU truncated-spectral on
-    /// a small grid. Skips cleanly on hosts with no CUDA runtime.
+    /// Raw kernel parity vs the CPU truncated-spectral path. The device build
+    /// is device-only, but the CPU oracle it is graded against owes its own
+    /// elementwise definition on every host, and a device-free host owes the
+    /// decline contract (#2424 — this test used to `return` before its first
+    /// assertion and report a pass on every CI runner).
     #[test]
     fn sphere_gpu_raw_kernel_parity_vs_cpu_truncated() {
-        if !cuda_available_for_test("raw-kernel parity") {
-            return;
-        }
-        // Past the runtime Some-gate: a probe failure is a real device fault on a
-        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
-        SphereGpuBackend::probe()
-            .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
-
         let data_ll = small_latlon_grid(7, 9);
         let centers_ll = small_latlon_grid(5, 7);
         let data_xyz = latlon_to_xyz_host(data_ll.view(), false).unwrap();
@@ -1896,8 +1950,6 @@ mod sphere_gpu_tests {
             kind: SphereSpectralKernelKind::Sobolev,
             layout: DeviceMatrixLayout::ColumnMajor,
         };
-        let dev_mat = build_kernel_matrix_device(inputs).expect("device kernel matrix");
-        let gpu = dev_mat.to_host_array().expect("dtoh kernel matrix");
 
         let cpu = spherical_wahba_kernel_matrix_with_kind(
             data_ll.view(),
@@ -1907,6 +1959,22 @@ mod sphere_gpu_tests {
             SphereWahbaKernel::SobolevTruncated { lmax: lmax as u16 },
         )
         .expect("cpu kernel matrix");
+
+        // EVERY HOST: the oracle the device is graded against must itself
+        // equal the elementwise truncated-spectral definition.
+        assert_cpu_kernel_matches_spectral_definition(&cpu, &data_xyz, &centers_xyz, &coeffs);
+
+        if !cuda_available_for_test("raw-kernel parity") {
+            assert_sphere_decision_declines_without_device(n, m, lmax);
+            assert_device_kernel_entry_refuses(inputs);
+            return;
+        }
+        // Past the runtime Some-gate: a probe failure is a real device fault on a
+        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
+        SphereGpuBackend::probe()
+            .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
+        let dev_mat = build_kernel_matrix_device(inputs).expect("device kernel matrix");
+        let gpu = dev_mat.to_host_array().expect("dtoh kernel matrix");
 
         let mut max_abs = 0.0_f64;
         for i in 0..n {
@@ -1938,19 +2006,19 @@ mod sphere_gpu_tests {
     /// raw-kernel parity at ≤ 1e-9 implies full-design + fit parity.
     #[test]
     fn sphere_gpu_end_to_end_dispatch_parity_vs_cpu_truncated() {
-        if !cuda_available_for_test("end-to-end dispatch parity") {
-            return;
-        }
-        // Past the runtime Some-gate: a backend probe failure is a real device
-        // fault on a CUDA host, not a no-CUDA skip — fail loud (device-PCG
-        // skip-pass class, eee12f6b2) instead of masking it as a pass.
-        SphereGpuBackend::probe()
-            .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
         use crate::basis::{
             CenterStrategy, SphereMethod, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
             build_spherical_spline_basis, spherical_wahba_kernel_matrix_cpu,
             spherical_wahba_kernel_matrix_with_kind,
         };
+        let on_cuda = cuda_available_for_test("end-to-end dispatch parity");
+        if on_cuda {
+            // Past the runtime Some-gate: a backend probe failure is a real device
+            // fault on a CUDA host, not a no-CUDA skip — fail loud (device-PCG
+            // skip-pass class, eee12f6b2) instead of masking it as a pass.
+            SphereGpuBackend::probe()
+                .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
+        }
 
         // (n=10_000, m=200) → n·m = 2_000_000 ≥ 1_000_000 → GPU eligible.
         let data = small_latlon_grid(100, 100);
@@ -1962,20 +2030,40 @@ mod sphere_gpu_tests {
         let n = data.nrows();
         let m = centers.nrows();
 
-        // The device MUST be admitted for this shape, otherwise this test would
-        // silently exercise the CPU path on both sides and prove nothing about
-        // engagement. Fail loud if the dispatch decision declines the GPU.
-        let decision = sphere_kernel_decision(n, m, lmax as usize)
-            .expect("GPU decision must preserve CUDA resolution faults");
-        assert!(
-            decision.use_gpu,
-            "expected GPU dispatch for (n={n}, m={m}, lmax={lmax}); decision said CPU \
-             (reason={}); the engagement gate regressed",
-            decision.reason
-        );
+        // ENGAGEMENT (CUDA host) / DECLINE (device-free host). This shape's
+        // `n·m = 2·10⁶` clears the device-work threshold, so on a CUDA box only
+        // a regression can keep the work on the host, and on a device-free box
+        // only the missing runtime can hold it back — either way the decision
+        // is checkable here, and a wrong answer is the #1551 silent-device class.
+        if on_cuda {
+            let decision = sphere_kernel_decision(n, m, lmax as usize)
+                .expect("GPU decision must preserve CUDA resolution faults");
+            assert!(
+                decision.use_gpu,
+                "expected GPU dispatch for (n={n}, m={m}, lmax={lmax}); decision said CPU \
+                 (reason={}); the engagement gate regressed",
+                decision.reason
+            );
+        } else {
+            assert_sphere_decision_declines_without_device(n, m, lmax as usize);
+            assert!(
+                try_build_truncated_kernel_matrix_gpu(
+                    data.view(),
+                    centers.view(),
+                    penalty_order,
+                    false,
+                    SphereWahbaKernel::SobolevTruncated { lmax },
+                )
+                .is_none(),
+                "no CUDA runtime on this host, yet the production sphere seam did not take \
+                 the quiet CPU route at the device-eligible shape (n={n}, m={m}, lmax={lmax})"
+            );
+        }
 
-        // Production dispatcher: engages the device for this admitted shape.
-        let gpu_kernel = spherical_wahba_kernel_matrix_with_kind(
+        // Production dispatcher: engages the device for this admitted shape on
+        // a CUDA host, runs the CPU path on a device-free host. Either way it
+        // owes the CPU oracle's answer.
+        let dispatched_kernel = spherical_wahba_kernel_matrix_with_kind(
             data.view(),
             centers.view(),
             penalty_order,
@@ -1994,10 +2082,10 @@ mod sphere_gpu_tests {
         )
         .expect("cpu oracle kernel build succeeds");
 
-        assert_eq!(gpu_kernel.dim(), cpu_kernel.dim());
+        assert_eq!(dispatched_kernel.dim(), cpu_kernel.dim());
         let mut max_abs = 0.0_f64;
         let mut max_rel = 0.0_f64;
-        for (g, c) in gpu_kernel.iter().zip(cpu_kernel.iter()) {
+        for (g, c) in dispatched_kernel.iter().zip(cpu_kernel.iter()) {
             let d = (g - c).abs();
             if d > max_abs {
                 max_abs = d;
@@ -2013,6 +2101,18 @@ mod sphere_gpu_tests {
             "GPU-dispatch vs CPU-oracle kernel parity max relative |Δ| = {max_rel:.3e} \
              >= 1e-9 (abs {max_abs:.3e})"
         );
+        if !on_cuda {
+            // Device-free: both sides are the host path, so the dispatcher owes
+            // the oracle BIT-for-BIT. A dispatcher that quietly re-routes to a
+            // different host formula shows up here and nowhere else.
+            for (a, b) in dispatched_kernel.iter().zip(cpu_kernel.iter()) {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "device-free dispatcher must equal the CPU oracle bit-for-bit"
+                );
+            }
+        }
 
         // End-to-end smoke: the full design build (which routes its large
         // data×centers kernel through the engaged device) produces a finite,
@@ -2037,17 +2137,54 @@ mod sphere_gpu_tests {
         );
     }
 
-    /// V100-only: parity of Householder-constrained kernel against
-    /// (raw kernel) · Z evaluated on host.
+    /// Apply the Householder reflector `H = I − β·v·vᵀ` to a raw kernel matrix
+    /// on the host and drop the first column — the fused expression the device
+    /// kernel implements in one pass.
+    fn householder_apply_host(b: &Array2<f64>, v: &[f64], beta: f64) -> Array2<f64> {
+        let (n, m) = b.dim();
+        let mut xs = Array2::<f64>::zeros((n, m - 1));
+        for i in 0..n {
+            let d_i: f64 = (0..m).map(|j| v[j] * b[(i, j)]).sum();
+            for j_out in 0..(m - 1) {
+                xs[(i, j_out)] = b[(i, j_out + 1)] - beta * d_i * v[j_out + 1];
+            }
+        }
+        xs
+    }
+
+    /// #2424: grade the fused host expression against explicit matrix algebra
+    /// `(B · (I − β·v·vᵀ))` with column 0 dropped. The fused form is the
+    /// ORACLE the device kernel is compared against, so it owes its own proof
+    /// — and that proof needs no device.
+    fn assert_householder_fused_matches_explicit_product(b: &Array2<f64>, v: &[f64], beta: f64) {
+        let (n, m) = b.dim();
+        let mut reflector = Array2::<f64>::eye(m);
+        for i in 0..m {
+            for j in 0..m {
+                reflector[(i, j)] -= beta * v[i] * v[j];
+            }
+        }
+        let full = b.dot(&reflector);
+        let fused = householder_apply_host(b, v, beta);
+        let mut max_abs = 0.0_f64;
+        for i in 0..n {
+            for j in 0..(m - 1) {
+                max_abs = max_abs.max((fused[(i, j)] - full[(i, j + 1)]).abs());
+            }
+        }
+        assert!(
+            max_abs < 1e-13,
+            "fused Householder host expression departs from B·(I − β·v·vᵀ): \
+             max |Δ| = {max_abs:.3e}"
+        );
+    }
+
+    /// Parity of the fused Householder-constrained kernel against
+    /// (raw kernel) · Z evaluated on host. The device build is device-only;
+    /// the host oracle it is graded against, and the decline contract, are
+    /// checked on every host (#2424).
     #[test]
     fn sphere_gpu_householder_parity_vs_raw_dot_z() {
-        if !cuda_available_for_test("householder parity") {
-            return;
-        }
-        // Past the runtime Some-gate: a probe failure is a real device fault on a
-        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
-        SphereGpuBackend::probe()
-            .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
         let data_ll = small_latlon_grid(6, 8);
         let centers_ll = small_latlon_grid(4, 5);
         let data_xyz = latlon_to_xyz_host(data_ll.view(), false).unwrap();
@@ -2069,22 +2206,44 @@ mod sphere_gpu_tests {
             kind: SphereSpectralKernelKind::Sobolev,
             layout: DeviceMatrixLayout::ColumnMajor,
         };
-        let b_dev = build_kernel_matrix_device(inputs_raw.clone()).expect("raw kernel");
-        let b = b_dev.to_host_array().expect("dtoh raw");
-
         // Construct a Householder reflector from a uniform weight vector
         // (the "weighted sum-to-zero" constraint when weights are all 1).
         let w = vec![1.0_f64; m];
         let (v, beta) = householder_reflector_from_weights(&w);
 
-        // Apply on host: X_s_host[i, j_out] = B[i, j_out+1] - beta * (B[i,:] · v) * v[j_out+1]
-        let mut xs_host = Array2::<f64>::zeros((n, m - 1));
-        for i in 0..n {
-            let d_i: f64 = (0..m).map(|j| v[j] * b[(i, j)]).sum();
-            for j_out in 0..(m - 1) {
-                xs_host[(i, j_out)] = b[(i, j_out + 1)] - beta * d_i * v[j_out + 1];
-            }
+        // EVERY HOST: the CPU kernel matrix equals its elementwise spectral
+        // definition, and the fused host expression the device is graded
+        // against equals the explicit reflector product.
+        let b_cpu = spherical_wahba_kernel_matrix_with_kind(
+            data_ll.view(),
+            centers_ll.view(),
+            penalty,
+            false,
+            SphereWahbaKernel::SobolevTruncated { lmax: lmax as u16 },
+        )
+        .expect("cpu kernel matrix");
+        assert_cpu_kernel_matches_spectral_definition(&b_cpu, &data_xyz, &centers_xyz, &coeffs);
+        assert_householder_fused_matches_explicit_product(&b_cpu, &v, beta);
+
+        if !cuda_available_for_test("householder parity") {
+            assert_sphere_decision_declines_without_device(n, m, lmax);
+            assert!(
+                build_householder_constrained_design_device(inputs_raw, &v, beta).is_err(),
+                "no CUDA runtime on this host, yet the fused Householder device entry \
+                 returned a design — the admitted-only device path fabricated a host \
+                 answer (#1551 class)"
+            );
+            return;
         }
+        // Past the runtime Some-gate: a probe failure is a real device fault on a
+        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
+        SphereGpuBackend::probe()
+            .expect("[sphere_gpu test] backend probe must succeed on a CUDA host");
+        let b_dev = build_kernel_matrix_device(inputs_raw.clone()).expect("raw kernel");
+        let b = b_dev.to_host_array().expect("dtoh raw");
+
+        // Apply on host: X_s_host[i, j_out] = B[i, j_out+1] - beta * (B[i,:] · v) * v[j_out+1]
+        let xs_host = householder_apply_host(&b, &v, beta);
 
         let xs_dev =
             build_householder_constrained_design_device(inputs_raw, &v, beta).expect("hh design");
@@ -2105,12 +2264,28 @@ mod sphere_gpu_tests {
         );
     }
 
-    /// V100 hill-climb: GPU truncated-spectral kernel matrix build at
-    /// (n=200_000, m=200, L=50) must beat CPU by ≥ 20× wall-clock.
-    /// Skips silently when no CUDA runtime is available.
+    /// Hill-climb: the GPU truncated-spectral kernel matrix build at
+    /// (n=200_000, m=200, L=50) must clearly beat the same box's CPU.
+    ///
+    /// #2424: a wall-clock ratio is genuinely device-only — no host-side
+    /// stand-in for it would be honest. What IS checkable without a device is
+    /// the dispatch decision at this exact shape: `n·m = 4·10⁷` clears the
+    /// device-work threshold by 40×, so only the missing runtime can hold the
+    /// dispatch back, and a decision that admits a device this host does not
+    /// have is the #1551 silent-device class. The device-free half asserts
+    /// that and stops before building the 200k-row fixture, which would cost a
+    /// CPU-only runner ~8 s to prove nothing.
     #[test]
-    fn sphere_gpu_kernel_matrix_hill_climb_20x_vs_cpu() {
+    fn sphere_gpu_kernel_matrix_hill_climb_declines_without_device_else_20x_vs_cpu() {
+        // (n=200_000, m=200, lmax=50). n·m = 4·10^7 ≫ 1e6 → GPU eligible.
+        let n_lat = 500usize;
+        let n_lon = 400usize;
+        assert_eq!(n_lat * n_lon, 200_000);
+        let m = 200usize;
+        let lmax = 50usize;
+
         if !cuda_available_for_test("kernel-matrix hill climb") {
+            assert_sphere_decision_declines_without_device(n_lat * n_lon, m, lmax);
             return;
         }
         // A CUDA runtime is present, so a probe failure is a real device/
@@ -2118,13 +2293,8 @@ mod sphere_gpu_tests {
         SphereGpuBackend::probe()
             .expect("[sphere_gpu hill-climb] backend probe must succeed on a CUDA host");
 
-        // (n=200_000, m=200, lmax=50). n·m = 4·10^7 ≫ 1e6 → GPU eligible.
         // Build a 200_000-row deterministic lat/lon grid.
-        let n_lat = 500usize;
-        let n_lon = 400usize;
-        assert_eq!(n_lat * n_lon, 200_000);
         let data_ll = small_latlon_grid(n_lat, n_lon);
-        let m = 200usize;
         let centers_ll =
             crate::basis::select_spherical_farthest_point_centers(data_ll.view(), m, false)
                 .expect("centers");
@@ -2132,7 +2302,6 @@ mod sphere_gpu_tests {
         let data_xyz = latlon_to_xyz_host(data_ll.view(), false).unwrap();
         let centers_xyz = latlon_to_xyz_host(centers_ll.view(), false).unwrap();
         let penalty_order = 2usize;
-        let lmax = 50usize;
         let coeffs = sobolev_s2_truncated_coefficients(lmax, penalty_order);
 
         // Warm up GPU (NVRTC compile + first-touch alloc).
@@ -2195,19 +2364,21 @@ mod sphere_gpu_tests {
         );
     }
 
-    /// V100 hill-climb: end-to-end Gaussian fit through
-    /// `build_spherical_spline_basis` (GPU-dispatched) must beat the
-    /// CPU-only fit by ≥ 10× wall-clock at a workload where the GPU
-    /// kernel build dominates PIRLS.
+    /// Hill-climb: an end-to-end Gaussian fit through
+    /// `build_spherical_spline_basis` (GPU-dispatched) against the CPU-only
+    /// build at a workload where the kernel build dominates PIRLS.
+    ///
+    /// #2424: as for the kernel-matrix hill climb, the wall-clock ratio is
+    /// device-only and gets no host-side stand-in; the device-free half
+    /// asserts the dispatch decision declines at this exact shape and stops
+    /// before building the 200k-row fixture.
+    ///
+    /// The ratio arm is a KNOWN RED on a real A10 (#2372 / #2420): the fit
+    /// side pays farthest-point center selection that the kernel-only CPU
+    /// baseline does not, so the two sides do not time the same work and the
+    /// implied Amdahl ceiling is ~1.4×, far under the ≥10× target.
     #[test]
-    fn sphere_gpu_end_to_end_fit_hill_climb_10x_vs_cpu() {
-        if !cuda_available_for_test("end-to-end fit hill climb") {
-            return;
-        }
-        // A CUDA runtime is present, so a probe failure is a real device/
-        // dispatch fault — fail the gate loudly rather than skip-passing.
-        SphereGpuBackend::probe()
-            .expect("[sphere_gpu hill-climb fit] backend probe must succeed on a CUDA host");
+    fn sphere_gpu_end_to_end_fit_hill_climb_declines_without_device_else_10x_vs_cpu() {
         use crate::basis::{
             CenterStrategy, SphereMethod, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
             build_spherical_spline_basis,
@@ -2215,9 +2386,19 @@ mod sphere_gpu_tests {
 
         let n_lat = 500usize;
         let n_lon = 400usize;
-        let data_ll = small_latlon_grid(n_lat, n_lon);
         let m: usize = 200;
         let lmax: u16 = 50;
+
+        if !cuda_available_for_test("end-to-end fit hill climb") {
+            assert_sphere_decision_declines_without_device(n_lat * n_lon, m, lmax as usize);
+            return;
+        }
+        // A CUDA runtime is present, so a probe failure is a real device/
+        // dispatch fault — fail the gate loudly rather than skip-passing.
+        SphereGpuBackend::probe()
+            .expect("[sphere_gpu hill-climb fit] backend probe must succeed on a CUDA host");
+
+        let data_ll = small_latlon_grid(n_lat, n_lon);
         let spec_gpu = SphericalSplineBasisSpec {
             center_strategy: CenterStrategy::FarthestPoint { num_centers: m },
             penalty_order: 2,
@@ -2303,14 +2484,6 @@ mod sphere_gpu_tests {
         use faer::Side;
         use gam_linalg::faer_ndarray::FaerCholesky;
 
-        if !cuda_available_for_test("end-to-end fit parity") {
-            return;
-        }
-        // Past the runtime Some-gate: a probe failure is a real device fault on a
-        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
-        SphereGpuBackend::probe()
-            .expect("[sphere gpu parity] sphere GPU backend probe must succeed on a CUDA host");
-
         // Fixture: 25 × 40 lat/lon grid → n = 1000.
         let data_ll = small_latlon_grid(25, 40);
         assert_eq!(data_ll.nrows(), 1000);
@@ -2372,11 +2545,89 @@ mod sphere_gpu_tests {
             kind: SphereSpectralKernelKind::Sobolev,
             layout: DeviceMatrixLayout::ColumnMajor,
         };
+        // Deterministic synthetic response. The intent is to give the
+        // penalised LS solve a non-trivial right-hand side; any smooth
+        // function of the lat/lon is fine. Use a fixed-seed pseudo-
+        // random walk derived from coordinates so the fixture has no
+        // RNG dependency.
+        let mut y = ndarray::Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let lat_rad = data_ll[(i, 0)].to_radians();
+            let lon_rad = data_ll[(i, 1)].to_radians();
+            // Smooth ground truth + a tiny deterministic high-freq jitter.
+            y[i] = (2.0 * lat_rad).sin() * (3.0 * lon_rad).cos()
+                + 0.25 * lat_rad.cos() * (5.0 * lon_rad).sin();
+        }
+
+        // Penalised normal-equation solve via faer LLT for each path:
+        //   (X_sᵀ X_s + λ S) β = X_sᵀ y
+        // S is symmetric positive semi-definite; λ S makes the system
+        // strictly positive definite once added to X_sᵀ X_s.
+        let solve_penalised = |x_s: &ndarray::Array2<f64>| -> ndarray::Array1<f64> {
+            let xtx = x_s.t().dot(x_s);
+            let mut a = xtx;
+            for i in 0..p {
+                for j in 0..p {
+                    a[(i, j)] += lambda * s_full[(i, j)];
+                }
+            }
+            let rhs = x_s.t().dot(&y);
+            let factor = a
+                .cholesky(Side::Lower)
+                .expect("penalised normal equations are SPD under λ > 0");
+            factor.solvevec(&rhs)
+        };
+
+        let beta_cpu = solve_penalised(&x_s_cpu);
+        assert_eq!(beta_cpu.len(), p);
+        let yhat_cpu = x_s_cpu.dot(&beta_cpu);
+        assert_eq!(x_s_cpu.dim(), (n, p));
+
+        // EVERY HOST: the CPU side of this comparison owes its own contracts —
+        // the kernel matrix equals its elementwise spectral definition, and the
+        // fitted coefficients solve the penalised normal equations. Both are
+        // the oracle the device output is graded against.
+        assert_cpu_kernel_matches_spectral_definition(
+            &raw_design_cpu,
+            &data_xyz,
+            &centers_xyz,
+            &coeffs,
+        );
+        {
+            let mut a = x_s_cpu.t().dot(&x_s_cpu);
+            for i in 0..p {
+                for j in 0..p {
+                    a[(i, j)] += lambda * s_full[(i, j)];
+                }
+            }
+            let residual = a.dot(&beta_cpu) - x_s_cpu.t().dot(&y);
+            let rhs_scale = x_s_cpu
+                .t()
+                .dot(&y)
+                .iter()
+                .fold(0.0_f64, |acc, v| acc.max(v.abs()))
+                .max(1.0);
+            let max_residual = residual.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            assert!(
+                max_residual <= 1e-9 * rhs_scale,
+                "CPU penalised normal equations not solved: ‖(XᵀX + λS)β − Xᵀy‖∞ = \
+                 {max_residual:.3e} (rhs scale {rhs_scale:.3e})"
+            );
+        }
+
+        if !cuda_available_for_test("end-to-end fit parity") {
+            assert_sphere_decision_declines_without_device(n, m, lmax);
+            assert_device_kernel_entry_refuses(inputs);
+            return;
+        }
+        // Past the runtime Some-gate: a probe failure is a real device fault on a
+        // CUDA host — fail loud (device-PCG skip-pass class, eee12f6b2).
+        SphereGpuBackend::probe()
+            .expect("[sphere gpu parity] sphere GPU backend probe must succeed on a CUDA host");
         let raw_dev = build_kernel_matrix_device(inputs).expect("GPU raw design");
         let raw_design_gpu = raw_dev.to_host_array().expect("dtoh GPU raw design");
         let x_s_gpu = raw_design_gpu.dot(&z);
 
-        assert_eq!(x_s_cpu.dim(), (n, p));
         assert_eq!(x_s_gpu.dim(), (n, p));
 
         // PRIMARY GPU-OUTPUT PARITY (#1175): the only path-dependent quantity is
@@ -2426,48 +2677,12 @@ mod sphere_gpu_tests {
             1e-12 * xs_scale.max(1.0)
         );
 
-        // Deterministic synthetic response. The intent is to give the
-        // penalised LS solve a non-trivial right-hand side; any smooth
-        // function of the lat/lon is fine. Use a fixed-seed pseudo-
-        // random walk derived from coordinates so the fixture has no
-        // RNG dependency.
-        let mut y = ndarray::Array1::<f64>::zeros(n);
-        for i in 0..n {
-            let lat_rad = data_ll[(i, 0)].to_radians();
-            let lon_rad = data_ll[(i, 1)].to_radians();
-            // Smooth ground truth + a tiny deterministic high-freq jitter.
-            y[i] = (2.0 * lat_rad).sin() * (3.0 * lon_rad).cos()
-                + 0.25 * lat_rad.cos() * (5.0 * lon_rad).sin();
-        }
-
-        // Penalised normal-equation solve via faer LLT for each path:
-        //   (X_sᵀ X_s + λ S) β = X_sᵀ y
-        // S is symmetric positive semi-definite; λ S makes the system
-        // strictly positive definite once added to X_sᵀ X_s.
-        let solve_penalised = |x_s: &ndarray::Array2<f64>| -> ndarray::Array1<f64> {
-            let xtx = x_s.t().dot(x_s);
-            let mut a = xtx;
-            for i in 0..p {
-                for j in 0..p {
-                    a[(i, j)] += lambda * s_full[(i, j)];
-                }
-            }
-            let rhs = x_s.t().dot(&y);
-            let factor = a
-                .cholesky(Side::Lower)
-                .expect("penalised normal equations are SPD under λ > 0");
-            factor.solvevec(&rhs)
-        };
-
-        let beta_cpu = solve_penalised(&x_s_cpu);
         let beta_gpu = solve_penalised(&x_s_gpu);
-        assert_eq!(beta_cpu.len(), p);
         assert_eq!(beta_gpu.len(), p);
 
         // Fitted values for both paths use their own design matrices —
         // this is the customer-visible quantity (prediction at training
         // points).
-        let yhat_cpu = x_s_cpu.dot(&beta_cpu);
         let yhat_gpu = x_s_gpu.dot(&beta_gpu);
 
         let mut max_beta_delta = 0.0_f64;
