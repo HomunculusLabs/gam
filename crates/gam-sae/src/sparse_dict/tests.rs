@@ -549,6 +549,34 @@ fn over_complete_trainer_returns_best_effort_open_certificate_2275() {
     );
 }
 
+/// `N` distinct unit directions spread over the sphere in `P` dimensions, from a
+/// deterministic integer hash (no RNG, no float seeds). Unlike [`planted`] — whose
+/// rows collapse onto `rank` distinct directions, so any `K ≥ rank` dictionary
+/// interpolates them exactly — every row here needs its own direction, so a
+/// dictionary with `K < N` leaves residual on every row no matter how it routes.
+fn spread_directions(n: usize, p: usize) -> Array2<f32> {
+    let mut x = Array2::<f32>::zeros((n, p));
+    for row in 0..n {
+        let mut norm2 = 0.0f32;
+        for col in 0..p {
+            // The `row·col` cross term keeps the per-row pattern from being a
+            // pure arithmetic progression, so directions stay distinct well past
+            // the modulus rather than repeating every 1009 rows.
+            let hash = (row * 131 + col * 71 + row * col * 17) % 1009;
+            let value = (hash as f32) / 504.0 - 1.0;
+            x[[row, col]] = value;
+            norm2 += value * value;
+        }
+        let norm = norm2.sqrt();
+        if norm > 0.0 {
+            for col in 0..p {
+                x[[row, col]] /= norm;
+            }
+        }
+    }
+    x
+}
+
 /// #2400 — the saturated-support birth-swap arm, at the production entry.
 ///
 /// The open arm admits a fit whose final transition still accepted residual-row
@@ -566,21 +594,24 @@ fn over_complete_trainer_returns_best_effort_open_certificate_2275() {
 /// rather than guessed at.
 #[test]
 fn open_fit_with_positive_births_is_certified_only_by_saturated_support_2400() {
-    // (K, s, N, P, planted rank, second share). Spread across the regimes that
-    // produce dead atoms: K far above the row-capacity N·s, K just above it, and
-    // K below it with a rank far below K (the shape the real-activation sweep
-    // that opened #2400 runs at).
+    // (K, s, N, P). The rows are `N` distinct directions spread over the sphere
+    // (see `spread_directions`), so with `K < N` the dictionary cannot interpolate
+    // and no atom's cluster is ever fully explained: atoms keep emptying, get
+    // re-seeded onto the worst-reconstructed rows, and the re-seed keeps winning
+    // those rows back. That is the churn regime — a `planted` mixture, by
+    // contrast, has only `rank` distinct directions and every one of these shapes
+    // interpolates it to EV = 1 in four epochs with no births at all.
     let shapes = [
-        (2000usize, 1usize, 240usize, 10usize, 8usize, 0.6f32),
-        (512, 2, 256, 16, 8, 0.5),
-        (1024, 8, 128, 12, 4, 0.5),
-        (64, 2, 768, 24, 8, 0.35),
+        (96usize, 1usize, 600usize, 12usize),
+        (64, 2, 600, 12),
+        (200, 1, 900, 16),
+        (128, 4, 512, 20),
     ];
 
     let mut observed = String::new();
     let mut saturated_swap_arms = 0usize;
-    for (k, s, n, p, planted_k, second_share) in shapes {
-        let (x, _atoms) = planted(planted_k, p, n, second_share);
+    for (k, s, n, p) in shapes {
+        let x = spread_directions(n, p);
         let config = SparseDictConfig {
             n_atoms: k,
             active: s,

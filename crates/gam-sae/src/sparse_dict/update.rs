@@ -425,29 +425,32 @@ const LINEAR_SUPPORT_SATURATION_ROUNDS: usize = LINEAR_EV_PLATEAU_WINDOW;
 
 /// Captured-fraction EV-plateau detector for the best-effort/open arm (#2396).
 ///
-/// A plateau is the statement that the objective has STOPPED MOVING. The size of
-/// a round's move is scored against the climb the fit has achieved since entry,
-/// which makes the test scale-free — it fires wherever the achievable plateau
-/// happens to sit (~1e-6 well-posed, ~1e-4 over-complete) with no absolute
-/// threshold to tune.
+/// At `K >> rank` the alternation need not converge at all: the discrete routing
+/// puts it in a LIMIT CYCLE whose objective oscillates at a fixed amplitude
+/// forever, so `|ΔEV|` does not tend to zero and no round-to-round smallness test
+/// can hold. What is nevertheless true, and is what the open arm certifies, is
+/// that the ACHIEVABLE objective has stopped improving: the running best over the
+/// returnable iterates sets no further high. That statement is about a monotone
+/// non-decreasing sequence, so it cannot be confused by the sign of any
+/// individual round — and it is scored against the climb achieved since entry,
+/// which keeps it scale-free (it fires wherever the plateau sits, ~1e-6
+/// well-posed, ~1e-4 over-complete) with no absolute threshold to tune.
 ///
-/// Both halves of that ratio are load-bearing, and the obvious spellings of each
-/// are unsound:
+/// Reading it off the round-to-round change instead is what made the earlier form
+/// unsound. It scored the UPWARD share `max(ΔEV, 0)` against `next_ev − entry_ev`,
+/// and both halves fail on a descent: the numerator is identically zero for any
+/// round that moved downhill, and the denominator is `≤ 0` for any round sitting
+/// below where the fit entered, which took the "no climb to divide by" branch.
+/// A fit that was monotonically getting WORSE therefore reported a plateau on
+/// every round and was returned on the first window it filled.
 ///
-/// * the numerator is `|ΔEV|`, not the round's UPWARD share `max(ΔEV, 0)`. A
-///   round that moved downhill contributes exactly zero upward share, so scoring
-///   only the climb reads a FALLING objective as a settled one. Since the return
-///   hands back the pre-map state, that mints a model from a point of a
-///   trajectory that is actively getting worse.
-/// * the denominator is `best_ev − entry_ev`, not `next_ev − entry_ev`. The
-///   latter is `≤ 0` for any round sitting below where the fit entered, which
-///   collapses to the "no climb to divide by" branch and marks the round
-///   stationary — so a fit that never rose above its entry EV would confirm a
-///   plateau on the first window it filled, however hard it was still moving.
-///   The best EV seen is non-decreasing, so it is a stable scale.
-///
-/// With no climb to measure against, only a genuine numerical standstill is a
-/// plateau: `|ΔEV|` at the fixed-point floor, which is arm 1's own test.
+/// The other half of making this honest is [`BestOpenIterate`]: certifying that
+/// the achievable objective stopped improving obliges the return to hand back the
+/// iterate that ATTAINS it, not whichever point of the cycle the confirming round
+/// happened to land on. With no climb at all to measure against — the fit never
+/// once beat the state it entered with — only a genuine numerical standstill
+/// counts, which is arm 1's own test; a fit still moving below its entry EV has
+/// nothing to hand back and stays a typed non-convergence.
 #[derive(Clone, Copy, Debug)]
 struct EvPlateau {
     entry_ev: f64,
@@ -462,19 +465,42 @@ impl EvPlateau {
         }
     }
 
-    /// Record the post-map EV of one round and report whether the objective has
-    /// plateaued there. `ev_residual` is `|EV(T(z)) − EV(z)|`, the magnitude of
-    /// the move this round made in either direction.
-    fn observe(&mut self, next_ev: f64, ev_residual: f64, fixed_point_tol: f64) -> bool {
-        if next_ev > self.best_ev {
-            self.best_ev = next_ev;
+    /// Record the EV of this round's returnable iterate and report whether the
+    /// achievable objective has stopped improving at it. `ev_residual` is
+    /// `|EV(T(z)) − EV(z)|`, the magnitude of the move the round made.
+    fn observe(&mut self, candidate_ev: f64, ev_residual: f64, fixed_point_tol: f64) -> bool {
+        let improvement = (candidate_ev - self.best_ev).max(0.0);
+        if candidate_ev > self.best_ev {
+            self.best_ev = candidate_ev;
         }
         if ev_residual <= fixed_point_tol {
             return true;
         }
         let climb = self.best_ev - self.entry_ev;
-        climb > f64::MIN_POSITIVE && ev_residual / climb < LINEAR_EV_PLATEAU_FRACTION
+        climb > f64::MIN_POSITIVE && improvement / climb < LINEAR_EV_PLATEAU_FRACTION
     }
+}
+
+/// The best returnable iterate seen so far, and the fixed-point evidence measured
+/// AT it (#2396).
+///
+/// [`EvPlateau`] certifies that the achievable objective stopped improving. That
+/// is a claim about the running maximum, so the object handed back has to be the
+/// one attaining that maximum: returning the confirming round's own iterate would
+/// certify a level the returned model does not have, and on a descending
+/// trajectory it would hand back a strictly degraded state. Each field is the
+/// evidence recorded for THIS state's own transition, so the certificate travels
+/// with the model rather than describing some later round.
+struct BestOpenIterate {
+    decoder: Array2<f32>,
+    codes: Vec<SparseCode>,
+    explained_variance: f64,
+    ev_residual: f64,
+    decoder_residual: f64,
+    routing_residual: f64,
+    accepted_births: usize,
+    support_saturated: bool,
+    decoder_solve_stats: DecoderSolveStats,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -596,6 +622,10 @@ pub(super) fn run(
     // cycle (#2396). See [`LINEAR_EV_PLATEAU_WINDOW`].
     let mut plateau_flags: std::collections::VecDeque<bool> =
         std::collections::VecDeque::with_capacity(LINEAR_EV_PLATEAU_WINDOW);
+    // The iterate the open arm will hand back if it confirms a plateau: the best
+    // returnable state seen, carrying the evidence measured at it (see
+    // [`BestOpenIterate`]).
+    let mut best_open: Option<BestOpenIterate> = None;
 
     for epoch in 0..config.max_epochs {
         epochs_run = epoch + 1;
@@ -773,33 +803,9 @@ pub(super) fn run(
             && decoder_residual <= fixed_point_tol
             && routing_residual <= fixed_point_tol;
 
-        // Arm 2 book-keeping: captured-fraction EV plateau. A round is stationary
-        // when its move was a negligible fraction of the EV climb achieved since
-        // entry (scale-free, so it fires wherever the achievable plateau sits, and
-        // symmetric in sign so a falling objective is never read as a settled one
-        // — see [`EvPlateau`]). The gauge-invariant OBJECTIVE is the convergence
-        // criterion; the decoder-gauge and routing residuals are recorded, not
-        // gated on — at K >> rank the spurious support directions rotate freely
-        // and the routing residual legitimately cannot close. A still-moving
-        // objective, in either direction, can never be laundered as a plateau.
-        let objective_plateaued = ev_plateau.observe(next_ev, ev_residual, fixed_point_tol);
-        // A round is STATIONARY when the structure is settled, the subsolve sound,
-        // and the objective plateaued. Confirm a best-effort plateau on MIN_ROUNDS
-        // stationary rounds within the trailing window (tolerating one up-swing of
-        // the routing limit cycle; see LINEAR_EV_PLATEAU_WINDOW). `epoch > 0` skips
-        // the first post-entry round, whose captured fraction is against a
-        // still-forming denominator.
-        let structure_stationary = structure_settled || support_saturated;
-        let stationary =
-            epoch > 0 && structure_stationary && numerically_sound && objective_plateaued;
-        plateau_flags.push_back(stationary);
-        while plateau_flags.len() > LINEAR_EV_PLATEAU_WINDOW {
-            plateau_flags.pop_front();
-        }
-        let best_effort_open =
-            plateau_flags.iter().filter(|&&s| s).count() >= LINEAR_EV_PLATEAU_MIN_ROUNDS;
-
-        if certified_fixed_point || best_effort_open {
+        // Arm 1 returns the state it just certified: every residual closed, so it
+        // IS the fixed point and there is nothing better to look for.
+        if certified_fixed_point {
             let (indices, code_mat) = pack_codes(&certified_codes, n, s);
             return Ok(SparseDictIterate {
                 decoder: certified_decoder,
@@ -816,7 +822,70 @@ pub(super) fn run(
                 accepted_births,
                 live_atom_high_water: live_support.high_water,
                 support_saturated,
-                certified: certified_fixed_point,
+                certified: true,
+            });
+        }
+
+        // Arm 2 book-keeping. The state whose transition was just measured is the
+        // candidate the open arm would hand back, so record it whenever it is the
+        // best one seen and score the plateau on that running best (see
+        // [`EvPlateau`] / [`BestOpenIterate`]). The gauge-invariant OBJECTIVE is
+        // the convergence criterion; the decoder-gauge and routing residuals are
+        // recorded, not gated on — at K >> rank the spurious support directions
+        // rotate freely and the routing residual legitimately cannot close.
+        if best_open
+            .as_ref()
+            .is_none_or(|best| certified_ev > best.explained_variance)
+        {
+            best_open = Some(BestOpenIterate {
+                decoder: certified_decoder,
+                codes: certified_codes,
+                explained_variance: certified_ev,
+                ev_residual,
+                decoder_residual,
+                routing_residual,
+                accepted_births,
+                support_saturated,
+                decoder_solve_stats,
+            });
+        }
+        let objective_plateaued = ev_plateau.observe(certified_ev, ev_residual, fixed_point_tol);
+        // A round is STATIONARY when the structure is settled, the subsolve sound,
+        // and the achievable objective stopped improving. Confirm a best-effort
+        // plateau on MIN_ROUNDS stationary rounds within the trailing window
+        // (tolerating one up-swing of the routing limit cycle; see
+        // LINEAR_EV_PLATEAU_WINDOW). `epoch > 0` skips the first post-entry round,
+        // whose climb denominator is still forming.
+        let structure_stationary = structure_settled || support_saturated;
+        let stationary =
+            epoch > 0 && structure_stationary && numerically_sound && objective_plateaued;
+        plateau_flags.push_back(stationary);
+        while plateau_flags.len() > LINEAR_EV_PLATEAU_WINDOW {
+            plateau_flags.pop_front();
+        }
+        let best_effort_open =
+            plateau_flags.iter().filter(|&&s| s).count() >= LINEAR_EV_PLATEAU_MIN_ROUNDS;
+
+        if best_effort_open {
+            let best = best_open
+                .expect("a confirmed plateau has observed at least one returnable round");
+            let (indices, code_mat) = pack_codes(&best.codes, n, s);
+            return Ok(SparseDictIterate {
+                decoder: best.decoder,
+                indices,
+                codes: code_mat,
+                epochs: epochs_run,
+                active: s,
+                score_route_stats,
+                decoder_solve_stats: best.decoder_solve_stats,
+                inner_ev_residual: best.ev_residual,
+                decoder_fixed_point_residual: best.decoder_residual,
+                routing_residual: best.routing_residual,
+                inner_tolerance: config.tolerance,
+                accepted_births: best.accepted_births,
+                live_atom_high_water: live_support.high_water,
+                support_saturated: best.support_saturated,
+                certified: false,
             });
         }
         codes = std::mem::take(&mut next_codes);
@@ -2921,9 +2990,9 @@ fn pack_codes(codes: &[SparseCode], n: usize, s: usize) -> (Array2<u32>, Array2<
 mod exact_solve_tests {
     use super::{
         CgStop, DecoderNormalEq, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
-        LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, cg_solve, explained_variance,
-        kappa_from_cg_tridiagonal, pcg_multi_core, route_and_code_all, solve_decoder,
-        solve_decoder_with_routability_gate,
+        LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, SparseDictionaryError, cg_solve,
+        explained_variance, kappa_from_cg_tridiagonal, pcg_multi_core, route_and_code_all, run,
+        solve_decoder, solve_decoder_with_routability_gate,
     };
     use crate::sparse_dict::codes::SparseCode;
     use crate::sparse_dict::scoring::TileScorer;
@@ -2933,45 +3002,49 @@ mod exact_solve_tests {
 
     /// The plateau detector decides whether a still-open fit may be returned at
     /// all, so its failure mode is a model minted from a non-converged iterate.
-    /// Drive it directly over the trajectory shapes that separate "the objective
-    /// stopped moving" from "the objective is moving, downward".
+    /// Drive it directly over the trajectory shapes that separate "the achievable
+    /// objective stopped improving" from "the objective is still moving".
+    ///
+    /// The detector is only half the contract: because it certifies the running
+    /// MAXIMUM, `run` must hand back the iterate attaining that maximum. That
+    /// coupling is what makes the limit-cycle case below sound rather than a
+    /// licence to return an arbitrary cycle point.
     #[test]
-    fn ev_plateau_is_a_standstill_test_not_a_climb_test_2396() {
-        // A plateau is symmetric in sign. Give the detector no climb at all and a
-        // trajectory that falls hard every round: the upward share of each round is
-        // zero and the current EV is below entry, which is exactly the pair of
-        // conditions a climb-only ratio reads as "settled". It is not settled.
+    fn ev_plateau_certifies_the_achievable_objective_not_a_round_2396() {
+        // No climb at all and a trajectory that falls hard every round. This is
+        // exactly the pair of conditions a per-round upward-share ratio reads as
+        // "settled" — the upward share is identically zero and the current EV sits
+        // below entry — and it is the one case where there is nothing better than
+        // the entry state to hand back, so it must stay a non-convergence.
         let mut falling = EvPlateau::new(0.90);
-        for next_ev in [0.85_f64, 0.80, 0.75, 0.70] {
+        for candidate_ev in [0.85_f64, 0.80, 0.75, 0.70] {
             assert!(
-                !falling.observe(next_ev, 0.05, 1.0e-12),
-                "a falling objective is moving, not plateaued (ev={next_ev})"
+                !falling.observe(candidate_ev, 0.05, 1.0e-12),
+                "a fit that never beat its entry EV and is still moving has nothing \
+                 to return (ev={candidate_ev})"
             );
         }
 
-        // A round that gives back a large fraction of the climb is likewise still
-        // moving, even though it moved DOWN. This is the case a climb-only
-        // numerator cannot see: the fit rose 0.4, then handed a quarter of it back.
-        let mut relapse = EvPlateau::new(0.50);
-        assert!(!relapse.observe(0.90, 0.40, 1.0e-12), "the climb itself");
+        // The limit cycle: the fit climbs, then oscillates. The down-swing IS a
+        // plateau of the achievable objective — no further high is being set — and
+        // the iterate handed back is the 0.90 one that attained it, not the 0.80
+        // the confirming round happens to sit on.
+        let mut cycling = EvPlateau::new(0.50);
+        assert!(!cycling.observe(0.90, 0.40, 1.0e-12), "the climb itself");
         assert!(
-            !relapse.observe(0.80, 0.10, 1.0e-12),
-            "handing back a quarter of the climb in one round is not a plateau"
+            cycling.observe(0.80, 0.10, 1.0e-12),
+            "a cycle that sets no new high has exhausted the achievable objective"
         );
+        assert_eq!(cycling.best_ev, 0.90, "the running max never regresses");
 
-        // The complement: after the same climb, jitter that is negligible against
-        // it IS a plateau in both directions. The fix must not turn every downhill
-        // round into a refusal — only ones that are large on the climb's own scale.
+        // A new high that is negligible against the climb already achieved is a
+        // plateau; the detector is scale-free, not thresholded on an absolute EV.
         let mut settled = EvPlateau::new(0.50);
         assert!(!settled.observe(0.90, 0.40, 1.0e-12), "the climb itself");
         let negligible = 0.40 * LINEAR_EV_PLATEAU_FRACTION / 10.0;
         assert!(
             settled.observe(0.90 + negligible, negligible, 1.0e-12),
-            "an upward move negligible against the climb is a plateau"
-        );
-        assert!(
-            settled.observe(0.90 - negligible, negligible, 1.0e-12),
-            "a downward move negligible against the climb is equally a plateau"
+            "a new high negligible against the climb is a plateau"
         );
 
         // A still-climbing fit is never a plateau, which is the property the
@@ -2990,6 +3063,100 @@ mod exact_solve_tests {
             !flat.observe(0.29, 1.0e-2, 1.0e-12),
             "no climb to compare against means a moving round is not a plateau"
         );
+    }
+
+    /// Over-complete rows that no finite unit-atom dictionary reproduces exactly:
+    /// each row mixes two of the `p` axes at a ratio that advances deterministically
+    /// row to row, so the top-`s` routing keeps re-partitioning a continuum of
+    /// directions and the alternation churns instead of landing on a fixed point.
+    fn over_complete_rows(n: usize, p: usize) -> Array2<f32> {
+        let mut x = Array2::<f32>::zeros((n, p));
+        for row in 0..n {
+            let first = row % p;
+            let second = (row * 5 + 3) % p;
+            let share = ((row * 37) % 101) as f32 / 101.0;
+            x[[row, first]] += 1.0 - share;
+            x[[row, second]] += share;
+        }
+        x
+    }
+
+    /// #2396 — the other half of the open-arm contract. [`EvPlateau`] certifies
+    /// that the ACHIEVABLE objective stopped improving, which is a claim about the
+    /// running maximum, so the model returned has to ATTAIN that maximum.
+    ///
+    /// Sweep the epoch budget on an over-complete fit. Every budget too short to
+    /// confirm a plateau reports, in its typed non-convergence, the EV its
+    /// trajectory had reached — so the sweep enumerates points the trajectory
+    /// actually passed through. The budget that does confirm must then return a
+    /// model no worse than any of them. Handing back the confirming round's own
+    /// iterate fails this exactly when the limit cycle confirms on a down-swing,
+    /// which is the case the plateau rule is there to admit.
+    #[test]
+    fn open_arm_returns_the_best_iterate_its_trajectory_reached_2396() {
+        let (k, p, n, s) = (64usize, 16usize, 400usize, 2usize);
+        let x = over_complete_rows(n, p);
+        let mut trajectory: Vec<(usize, f64)> = Vec::new();
+        let mut returned: Option<(usize, f64, bool)> = None;
+
+        for max_epochs in 2..=14usize {
+            let config = SparseDictConfig {
+                n_atoms: k,
+                active: s,
+                minibatch: 128,
+                max_epochs,
+                score_tile: 16,
+                code_ridge: 1.0e-6,
+                decoder_ridge: 1.0e-6,
+                tolerance: 1.0e-9,
+                score_mode: gam_gpu::GpuPolicy::Off,
+            };
+            match run(x.view(), &config) {
+                Err(SparseDictionaryError::InnerNonConvergence {
+                    explained_variance: reached,
+                    ..
+                }) => trajectory.push((max_epochs, reached)),
+                Err(other) => panic!("unexpected typed failure at budget {max_epochs}: {other}"),
+                Ok(iterate) => {
+                    // Re-route against the returned decoder, exactly as the public
+                    // entry scores a fit, so this is the EV of the returned MODEL
+                    // rather than a number the optimizer carried along.
+                    let scorer = TileScorer::new(iterate.active, config.score_tile);
+                    let codes = route_and_code_all(
+                        x.view(),
+                        iterate.decoder.view(),
+                        &scorer,
+                        iterate.active,
+                        config.code_ridge,
+                        config.minibatch,
+                        config.score_mode,
+                        None,
+                    )
+                    .expect("re-route the returned decoder");
+                    let ev = explained_variance(x.view(), &codes, iterate.decoder.view());
+                    returned = Some((max_epochs, ev, iterate.certified));
+                    break;
+                }
+            }
+        }
+
+        let (budget, returned_ev, certified) =
+            returned.expect("the over-complete fit must confirm a plateau within the sweep");
+        assert!(
+            !trajectory.is_empty(),
+            "no budget was too short to confirm, so the sweep never observed the \
+             trajectory it is comparing against (returned at budget {budget})"
+        );
+        for &(short_budget, reached) in &trajectory {
+            assert!(
+                returned_ev >= reached,
+                "the returned model (EV {returned_ev:.9}, budget {budget}, \
+                 certified={certified}) is worse than a state its own trajectory \
+                 passed through (EV {reached:.9} at budget {short_budget}); a \
+                 plateau certified on the running maximum must return the iterate \
+                 that attains it"
+            );
+        }
     }
 
     #[test]
