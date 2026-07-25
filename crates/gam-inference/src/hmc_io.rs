@@ -26,7 +26,7 @@
 use crate::gpu_polya_gamma::{PgSeed, PolyaGammaBatchInput};
 use faer::Side;
 use gam_linalg::faer_ndarray::{
-    FaerCholesky, FaerEigh, fast_ata_into, fast_atv, fast_av, fast_av_into,
+    FaerCholesky, FaerEigh, fast_ab, fast_ata_into, fast_atv, fast_av, fast_av_into,
 };
 use gam_linalg::matrix::DesignMatrix;
 use gam_linalg::triangular::back_substitution_lower_transpose_guarded_into;
@@ -3161,6 +3161,65 @@ mod tests {
                 base_abs[i],
                 rot_abs[i]
             );
+        }
+    }
+
+    /// The batched contraction must return, direction for direction, what the
+    /// single-direction contraction returns.
+    ///
+    /// Batching is a pure performance change, so the only thing that can go
+    /// wrong is arithmetic: a transposed direction matrix, a row panel that
+    /// drops or double-counts observations, or a sparse scatter that misroutes
+    /// a nonzero. Each of those produces a WRONG cubic rather than a slow one,
+    /// and the caller only compares it against a threshold — so a silent error
+    /// here shows up as a correction that engages when it should not, or vice
+    /// versa. Both storage arms are checked against the same reference, on a
+    /// design tall enough to cross the row-panel boundary.
+    #[test]
+    fn batched_directional_cubics_match_the_single_direction_contraction() {
+        use super::{directional_cubic_contraction, directional_cubic_contractions};
+        use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix};
+
+        let n = 37;
+        let p = 5;
+        // Deterministic, well-conditioned, and NOT symmetric in any way that
+        // would let a transposition slip through unnoticed.
+        let x = Array2::from_shape_fn((n, p), |(i, j)| {
+            ((i as f64) * 0.37 + (j as f64) * 1.13).sin() * (1.0 + j as f64 * 0.25)
+        });
+        let c = Array1::from_shape_fn(n, |i| 0.6 - 0.05 * (i as f64) + ((i % 3) as f64) * 0.4);
+        let directions = Array2::from_shape_fn((p, 4), |(j, r)| {
+            ((j as f64) * 0.91 - (r as f64) * 0.44).cos()
+        });
+
+        // A sparse twin of the same matrix: identical entries, different
+        // storage, so both arms must land on the same numbers.
+        use faer::sparse::{SparseColMat, Triplet};
+        let mut triplets = Vec::new();
+        for i in 0..n {
+            for j in 0..p {
+                if x[[i, j]] != 0.0 {
+                    triplets.push(Triplet::new(i, j, x[[i, j]]));
+                }
+            }
+        }
+        let dense = DesignMatrix::Dense(DenseDesignMatrix::from(x.clone()));
+        let sparse = DesignMatrix::Sparse(gam_linalg::matrix::SparseDesignMatrix::new(
+            SparseColMat::try_new_from_triplets(n, p, &triplets).expect("sparse twin"),
+        ));
+
+        for (label, design) in [("dense", &dense), ("sparse", &sparse)] {
+            let batched = directional_cubic_contractions(design, &c, &directions.view());
+            for r in 0..directions.ncols() {
+                let reference =
+                    directional_cubic_contraction(design, &c, &directions.column(r).view());
+                assert!(
+                    (batched[r] - reference).abs() <= 1.0e-9 * reference.abs().max(1.0),
+                    "{label} arm disagreed on direction {r}: batched {} vs reference {}",
+                    batched[r],
+                    reference
+                );
+            }
         }
     }
 
@@ -6448,15 +6507,24 @@ pub fn laplace_directional_cubic_diagnostic(
     // appropriate normalization), so gamma_r = T[v_r,v_r,v_r] / lambda_r^{3/2}.
 
     // Phase 1: evaluate gamma_r for all positive-curvature eigenvectors.
-    for r in 0..p {
-        let lambda = evals[r];
-        if lambda <= tol {
-            continue;
+    //
+    // Every direction here contracts the SAME design against a different
+    // eigenvector, so the whole phase is one `X V` product. Issuing it as p
+    // independent GEMVs re-streamed `X` from memory p times and made this the
+    // single largest cost in a fit profile; batching it hands faer a GEMM that
+    // reuses each row of `X` across all directions at once.
+    let positive: Vec<usize> = (0..p).filter(|&r| evals[r] > tol).collect();
+    if !positive.is_empty() {
+        let mut directions = Array2::<f64>::zeros((p, positive.len()));
+        for (slot, &r) in positive.iter().enumerate() {
+            directions.column_mut(slot).assign(&evecs.column(r));
         }
-        let v = evecs.column(r);
-        let gamma = directional_cubic_contraction(design, c_weights, &v) / lambda.powf(1.5);
-        directional[r] = if gamma.is_finite() { gamma } else { 0.0 };
-        max_abs = max_abs.max(directional[r].abs());
+        let cubics = directional_cubic_contractions(design, c_weights, &directions.view());
+        for (slot, &r) in positive.iter().enumerate() {
+            let gamma = cubics[slot] / evals[r].powf(1.5);
+            directional[r] = if gamma.is_finite() { gamma } else { 0.0 };
+            max_abs = max_abs.max(directional[r].abs());
+        }
     }
 
     // Phase 2: power-iteration refinement in whitened space.
@@ -6492,6 +6560,106 @@ pub fn laplace_directional_cubic_diagnostic(
     }
 
     Ok((max_abs, directional))
+}
+
+/// Row-panel height for the batched contraction, chosen so one panel of
+/// projections stays inside a few MiB regardless of how many directions are
+/// batched: `rows × k ≲ 2^21` doubles (16 MiB).
+const CUBIC_PANEL_DOUBLES: usize = 1 << 21;
+
+/// Compute `T[v_r,v_r,v_r] = Σ_i c_i (x_iᵀ v_r)³` for EVERY column `v_r` of
+/// `directions` (p × k) in one pass.
+///
+/// The single-direction [`directional_cubic_contraction`] forms `X v`, so
+/// calling it once per direction forms `X v_1, …, X v_k` — which is the GEMM
+/// `X V` spelled as k separate GEMVs. The diagnostic's phase 1 does exactly
+/// that over every positive-curvature eigenvector, so the whole O(n·p²) step
+/// was running at BLAS-2 intensity: each GEMV re-streams all of `X` from
+/// memory to reuse a single vector. Forming the product once lets the rows of
+/// `X` be reused across all k directions while they are in cache, which is the
+/// entire difference between a memory-bound and a compute-bound kernel.
+///
+/// Rows are processed in panels so the intermediate never scales with `n·k`.
+fn directional_cubic_contractions(
+    design: &DesignMatrix,
+    c_weights: &Array1<f64>,
+    directions: &ArrayView2<f64>,
+) -> Array1<f64> {
+    let k = directions.ncols();
+    let mut cubics = Array1::<f64>::zeros(k);
+    if k == 0 {
+        return cubics;
+    }
+    match design.as_sparse() {
+        Some(x_sparse) => {
+            // One structural pass over the CSC nonzeros scatters into all k
+            // projection columns at once, instead of k passes that each walk
+            // the same index arrays.
+            let (symbolic, values) = x_sparse.as_ref().parts();
+            let col_ptr = symbolic.col_ptr();
+            let row_idx = symbolic.row_idx();
+            let rows = x_sparse.nrows().min(c_weights.len());
+            if rows == 0 {
+                return cubics;
+            }
+            let panel = (CUBIC_PANEL_DOUBLES / k).clamp(1, rows);
+            let mut start = 0;
+            while start < rows {
+                let stop = (start + panel).min(rows);
+                let mut projections = Array2::<f64>::zeros((stop - start, k));
+                for col in 0..x_sparse.ncols() {
+                    let coeffs = directions.row(col);
+                    for ptr in col_ptr[col]..col_ptr[col + 1] {
+                        let row = row_idx[ptr];
+                        if row < start || row >= stop {
+                            continue;
+                        }
+                        let value = values[ptr];
+                        let mut target = projections.row_mut(row - start);
+                        for r in 0..k {
+                            target[r] += value * coeffs[r];
+                        }
+                    }
+                }
+                for (offset, i) in (start..stop).enumerate() {
+                    let weight = c_weights[i];
+                    let row = projections.row(offset);
+                    for r in 0..k {
+                        cubics[r] += weight * row[r].powi(3);
+                    }
+                }
+                start = stop;
+            }
+        }
+        None => {
+            let x_dense = design.to_dense_cow();
+            let x_dense = x_dense.as_ref();
+            let rows = x_dense.nrows().min(c_weights.len());
+            if rows == 0 {
+                return cubics;
+            }
+            let panel = (CUBIC_PANEL_DOUBLES / k).clamp(1, rows);
+            let mut start = 0;
+            while start < rows {
+                let stop = (start + panel).min(rows);
+                let projections = fast_ab(&x_dense.slice(s![start..stop, ..]), directions);
+                for (offset, i) in (start..stop).enumerate() {
+                    let weight = c_weights[i];
+                    let row = projections.row(offset);
+                    for r in 0..k {
+                        cubics[r] += weight * row[r].powi(3);
+                    }
+                }
+                start = stop;
+            }
+        }
+    }
+    for value in cubics.iter_mut() {
+        if !value.is_finite() {
+            *value = 0.0;
+        }
+    }
+    cubics
 }
 
 /// Compute T[v,v,v] = Σ_i c_i (x_i^T v)^3 for a given direction v.
