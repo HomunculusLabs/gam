@@ -3108,6 +3108,77 @@ mod exact_solve_tests {
         x
     }
 
+    /// #2396 instrument: the production budget→EV trace of the over-complete inner
+    /// alternation, which is the data behind the trajectory plot on the issue.
+    ///
+    /// Each epoch budget too short to confirm a plateau reports, in its typed
+    /// non-convergence, the EV its trajectory had reached and the three
+    /// fixed-point residuals at that point — so sweeping the budget enumerates the
+    /// trajectory itself. The budget that confirms reports the EV of the model
+    /// actually returned. The contract this data supports is asserted by
+    /// `open_arm_returns_the_best_iterate_its_trajectory_reached_2396`; this test
+    /// only prints, so the numbers in the write-up can be reproduced exactly.
+    #[test]
+    fn zz_measure_2396_open_arm_budget_ev_trace() {
+        let (k, p, n, s) = (64usize, 16usize, 400usize, 2usize);
+        let x = over_complete_rows(n, p);
+        for max_epochs in 2..=14usize {
+            let config = SparseDictConfig {
+                n_atoms: k,
+                active: s,
+                minibatch: 128,
+                max_epochs,
+                score_tile: 16,
+                code_ridge: 1.0e-6,
+                decoder_ridge: 1.0e-6,
+                tolerance: 1.0e-9,
+                score_mode: gam_gpu::GpuPolicy::Off,
+            };
+            match run(x.view(), &config) {
+                Err(SparseDictionaryError::InnerNonConvergence {
+                    explained_variance,
+                    ev_residual,
+                    decoder_fixed_point_residual,
+                    routing_residual,
+                    ..
+                }) => eprintln!(
+                    "[#2396 trace] budget={max_epochs} status=open_unconfirmed \
+                     ev={explained_variance:.12} ev_resid={ev_residual:.6e} \
+                     decoder_resid={decoder_fixed_point_residual:.6e} \
+                     routing_resid={routing_residual:.6e}"
+                ),
+                Err(other) => panic!("unexpected typed failure at budget {max_epochs}: {other}"),
+                Ok(iterate) => {
+                    let scorer = TileScorer::new(iterate.active, config.score_tile);
+                    let codes = route_and_code_all(
+                        x.view(),
+                        iterate.decoder.view(),
+                        &scorer,
+                        iterate.active,
+                        config.code_ridge,
+                        config.minibatch,
+                        config.score_mode,
+                        None,
+                    )
+                    .expect("re-route the returned decoder");
+                    eprintln!(
+                        "[#2396 trace] budget={max_epochs} status=returned certified={} \
+                         ev={:.12} ev_resid={:.6e} decoder_resid={:.6e} routing_resid={:.6e} \
+                         births={} saturated={}",
+                        iterate.certified,
+                        explained_variance(x.view(), &codes, iterate.decoder.view()),
+                        iterate.inner_ev_residual,
+                        iterate.decoder_fixed_point_residual,
+                        iterate.routing_residual,
+                        iterate.accepted_births,
+                        iterate.support_saturated,
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     /// #2396 — the other half of the open-arm contract. [`EvPlateau`] certifies
     /// that the ACHIEVABLE objective stopped improving, which is a claim about the
     /// running maximum, so the model returned has to ATTAIN that maximum.
