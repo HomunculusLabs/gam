@@ -464,6 +464,61 @@ fn subspace_spectral_distance(m: &Array2<f64>) -> Option<f64> {
     Some(evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs())))
 }
 
+/// A range projector together with the error bar it was computed to (#2448).
+struct RangeProjector {
+    /// `P = U_r U_rᵀ`, the orthogonal projector onto the kept eigenspace.
+    proj: Array2<f64>,
+    /// Number of eigenvalues above the rank cutoff.
+    rank: usize,
+    /// Certified upper bound on `‖P̂ − P‖₂` — how far the COMPUTED projector can
+    /// sit from the projector of the exact Gram, given the eigensolver's own
+    /// backward error and the eigen-gap that defines the kept/dropped split. See
+    /// [`projector_error_bar`]. Zero at full rank (`P` is the identity exactly);
+    /// `f64::INFINITY` when the gap is not wide enough to determine the subspace
+    /// at all.
+    err_bar: f64,
+}
+
+/// Davis–Kahan `sinΘ` bar on a spectral projector (#2448).
+///
+/// A rank decision and a SUBSPACE decision are not the same decision, and they
+/// are conditioned by different quantities. The rank of `XᵀWX(ψ)` is decided on
+/// where `λ_r` sits relative to the CUTOFF, and [`PsiGramTensor::rank_guard_gap`]
+/// already gives that decision a margin. The reduced-basis witness
+/// [`PsiGramTensor::reduced_basis_equal`] decides something else — whether two
+/// range SUBSPACES coincide — and a subspace is conditioned by the GAP between
+/// the eigenvalues it keeps and the ones it drops, not by their distance from a
+/// cutoff. Two Grams can both carry a comfortably certified rank `r` while their
+/// rank-`r` eigenspaces are individually undetermined.
+///
+/// Davis–Kahan: for symmetric `A` perturbed to `A + E`, if the kept block's
+/// eigenvalues are separated from the dropped block's by `δ`, the spectral
+/// projectors satisfy `‖P̂ − P‖₂ = ‖sinΘ‖₂ ≤ ‖E‖₂ / (δ − ‖E‖₂)` (the `−‖E‖₂` is
+/// the conservative form: it charges the perturbation for closing the gap from
+/// both sides before it starts rotating the eigenvectors). With `‖E‖₂` the
+/// eigensolver's backward-error bar `p(k)·ε·λ_max`, this is exactly the
+/// resolution limit of the instrument the witness gates on.
+///
+/// When `δ ≤ ‖E‖₂` the kept and dropped blocks are not separated at all: the
+/// computed eigenvectors are an arbitrary rotation within a numerically
+/// degenerate cluster and NO subspace claim can be made. Reported as
+/// `f64::INFINITY`, which every consumer of this bar must read as "refuse".
+///
+/// `gap` is passed as the raw eigenvalue separation `λ_min(kept) − λ_max(dropped)`;
+/// `backward_error` as the absolute bar on those eigenvalues. Both are in the
+/// Gram's own units, so the returned bar is dimensionless — the same currency as
+/// [`PSI_GRAM_SKIP_PROJ_ATOL`], which is what makes them comparable.
+fn projector_error_bar(gap: f64, backward_error: f64) -> f64 {
+    if !(gap.is_finite() && backward_error.is_finite()) {
+        return f64::INFINITY;
+    }
+    let separation = gap - backward_error;
+    if !(separation > 0.0) {
+        return f64::INFINITY;
+    }
+    backward_error / separation
+}
+
 impl PsiGramTensor {
     /// Build and certify the tensor over `psi ∈ [psi_lo, psi_hi]`.
     ///
@@ -771,7 +826,11 @@ impl PsiGramTensor {
     /// it isolates exactly the subspace identity the skip needs, not an arbitrary
     /// eigenvector rotation). Returns `None` if the Gram is non-finite or its
     /// symmetric eigendecomposition fails.
-    fn range_projector(&self, psi: f64, rank_rtol: f64) -> Option<(Array2<f64>, usize)> {
+    ///
+    /// The returned [`RangeProjector`] carries the Davis–Kahan error bar on
+    /// `proj` alongside it, because a projector is only as meaningful as the
+    /// eigen-gap that defines it — see [`RangeProjector::err_bar`] and #2448.
+    fn range_projector(&self, psi: f64, rank_rtol: f64) -> Option<RangeProjector> {
         use gam_linalg::faer_ndarray::FaerEigh;
         let g = self.gram_at(psi);
         if g.iter().any(|v| !v.is_finite()) {
@@ -789,6 +848,11 @@ impl PsiGramTensor {
         let cutoff = rank_rtol * lambda_max;
         let mut proj = Array2::<f64>::zeros((self.k, self.k));
         let mut rank = 0usize;
+        // Ascending order, so the kept block is the trailing `rank` entries and
+        // the Davis–Kahan separation is between `evals[n-rank]` (smallest kept)
+        // and `evals[n-rank-1]` (largest dropped).
+        let mut smallest_kept = f64::INFINITY;
+        let mut largest_dropped = f64::NEG_INFINITY;
         for (col, &lam) in evals.iter().enumerate() {
             if lam > cutoff {
                 let u = evecs.column(col);
@@ -799,9 +863,38 @@ impl PsiGramTensor {
                     }
                 }
                 rank += 1;
+                smallest_kept = smallest_kept.min(lam);
+            } else {
+                largest_dropped = largest_dropped.max(lam);
             }
         }
-        Some((proj, rank))
+        let err_bar = if rank == evals.len() {
+            // Nothing was dropped: `P` is the identity, exactly, on every host.
+            // There is no eigenvector to rotate and no gap to divide by.
+            0.0
+        } else {
+            projector_error_bar(
+                smallest_kept - largest_dropped,
+                Self::eig_backward_error(evals.len(), lambda_max),
+            )
+        };
+        Some(RangeProjector {
+            proj,
+            rank,
+            err_bar,
+        })
+    }
+
+    /// Absolute backward-error bar `p(k)·ε·‖G‖₂` a backward-stable symmetric
+    /// eigensolver commits on the eigenvalues of an order-`k` Gram, with
+    /// `p(k) ≤ PSI_BAND_RANK_GUARD_SLACK·k`. This is the SAME instrument constant
+    /// [`Self::rank_guard_gap`] sizes the rank guard band from — see
+    /// [`PSI_BAND_RANK_GUARD_SLACK`] for the derivation. The rank guard divides it
+    /// by the rank CUTOFF (turning it into a relative bar on the decided
+    /// eigenvalue); the projector bar divides it by the eigen-GAP (turning it into
+    /// a bar on the decided subspace). Same error, two different decisions.
+    fn eig_backward_error(order: usize, lambda_max: f64) -> f64 {
+        PSI_BAND_RANK_GUARD_SLACK * (order as f64) * f64::EPSILON * lambda_max
     }
 
     /// True when the realized reduced basis the design-revision fast path freezes
@@ -842,21 +935,35 @@ impl PsiGramTensor {
     /// already the tightest correct subspace metric, and loosening it past a true
     /// principal-angle separation reintroduces the ~7.8e-2 β̂ regression this
     /// witness exists to prevent.
+    ///
+    /// ADMISSIBILITY OF THE WITNESS ITSELF (#2448). The gate above compares a
+    /// MEASURED subspace distance to a 1e-7 tolerance, and a measurement is only a
+    /// decision when the instrument resolves the tolerance. Both projectors are
+    /// eigenvectors of a Gram the eigensolver only knows to `p(k)·ε·λ_max`, so by
+    /// Davis–Kahan each carries its own rotation bar `‖E‖/(gap − ‖E‖)` set by the
+    /// kept/dropped eigen-GAP (see [`projector_error_bar`]). On production radial
+    /// geometry that gap can be ~1e-10·λ_max — the measured value on this module's
+    /// own floor fixture — which puts the bar at ~1e-4, THREE ORDERS ABOVE the
+    /// tolerance being gated on. The comparison then decides on roundoff: measured
+    /// `sinθ` there is non-monotone in `Δψ` (2.9e-7 at 1e-8, 8.6e-9 at 1e-7,
+    /// 1.6e-7 at 1.8e-7), so the witness accepts and refuses in alternation and
+    /// [`Self::rank_stable_psi_floor`]'s monotone-step precondition is false.
+    ///
+    /// So the gate is not `measured ≤ ATOL` but the CERTIFIED BOUND on the true
+    /// distance, `measured + err_ref + err_new ≤ ATOL` — the triangle inequality
+    /// applied to the two error bars. This is the same rule the rank decision
+    /// already follows ([`Self::rank_guard_gap`]): decide with a margin wider than
+    /// the backward error committed forming the quantity decided on. Where the
+    /// eigen-gap is wide (in particular at FULL rank, where `P` is the identity
+    /// exactly and both bars are 0) the bound is the measurement and nothing
+    /// changes; where the gap collapses the bound is `+∞` and the witness refuses
+    /// — the sound fallback, at the price of the O(n) exact path.
     pub fn reduced_basis_equal(&self, psi_ref: f64, psi_new: f64) -> bool {
         if !(self.contains(psi_ref) && self.contains(psi_new)) {
             return false;
         }
         if psi_ref == psi_new {
             return true;
-        }
-        let Some((p_ref, r_ref)) = self.range_projector(psi_ref, PSI_GRAM_SKIP_RANK_RTOL) else {
-            return false;
-        };
-        let Some((p_new, r_new)) = self.range_projector(psi_new, PSI_GRAM_SKIP_RANK_RTOL) else {
-            return false;
-        };
-        if r_ref != r_new {
-            return false;
         }
         // Subspace-distance certificate (#1033). The two reduced bases span the
         // SAME subspace iff their orthogonal range projectors coincide. The
@@ -868,27 +975,30 @@ impl PsiGramTensor {
         // rotation wall this skip kept tripping on) the projector entries can
         // each drift while the spanned subspace is numerically identical, so the
         // entrywise max could exceed tolerance and FALSELY refuse a sound skip.
-        // P_ref − P_new is symmetric, so its spectral norm is max|eigenvalue|;
-        // compute it via the symmetric eigensolver and gate on the principal
-        // angle directly. This certifies subspace identity across the rotation,
-        // letting the n-free skip fire whenever the range genuinely coincides,
-        // while still refusing (the SOUND fallback) the instant the subspaces
-        // separate by more than PSI_GRAM_SKIP_PROJ_ATOL in true subspace
-        // distance. An eigendecomp failure on the (small k×k) difference refuses.
-        let diff = &p_ref - &p_new;
-        subspace_spectral_distance(&diff)
+        // This certifies subspace identity across the rotation, letting the n-free
+        // skip fire whenever the range genuinely coincides, while still refusing
+        // (the SOUND fallback) the instant the subspaces separate by more than
+        // PSI_GRAM_SKIP_PROJ_ATOL in true subspace distance — or the instant the
+        // instrument stops being able to tell (#2448).
+        self.reduced_basis_subspace_distance_bound(psi_ref, psi_new)
             .map(|d| d <= PSI_GRAM_SKIP_PROJ_ATOL)
             .unwrap_or(false)
     }
 
     /// The gauge-invariant subspace distance `‖P(ψ_ref) − P(ψ_new)‖₂ = sin θ_max`
-    /// between the two conditioned-Gram range subspaces — the exact quantity
-    /// [`Self::reduced_basis_equal`] thresholds against `PSI_GRAM_SKIP_PROJ_ATOL`.
-    /// Exposed for #1033 frontier instrumentation so a refused n-free skip can be
-    /// attributed to a genuine in-window basis ROTATION (this distance exceeds the
-    /// tolerance at equal rank) versus a rank change. Returns `None` for an
-    /// off-window ψ, an equal-ψ pair, a rank mismatch, or an eigendecomp failure.
-    /// Purely k-space (O(k³)) — independent of n.
+    /// between the two conditioned-Gram range subspaces, AS MEASURED from the
+    /// computed projectors. Exposed for #1033 frontier instrumentation so a
+    /// refused n-free skip can be attributed to a genuine in-window basis ROTATION
+    /// versus a rank change. Returns `None` for an off-window ψ, an equal-ψ pair,
+    /// a rank mismatch, or an eigendecomp failure. Purely k-space (O(k³)) —
+    /// independent of n.
+    ///
+    /// This is the measurement, NOT the quantity [`Self::reduced_basis_equal`]
+    /// gates on: that gate uses [`Self::reduced_basis_subspace_distance_bound`],
+    /// which adds each projector's own Davis–Kahan error bar (#2448). Reading a
+    /// small value here as "the subspaces coincide" is exactly the mistake the
+    /// bound exists to stop — compare the two to attribute a refusal to a real
+    /// rotation rather than to an unresolvable eigen-gap.
     pub fn reduced_basis_subspace_distance(&self, psi_ref: f64, psi_new: f64) -> Option<f64> {
         if !(self.contains(psi_ref) && self.contains(psi_new)) {
             return None;
@@ -896,13 +1006,70 @@ impl PsiGramTensor {
         if psi_ref == psi_new {
             return Some(0.0);
         }
-        let (p_ref, r_ref) = self.range_projector(psi_ref, PSI_GRAM_SKIP_RANK_RTOL)?;
-        let (p_new, r_new) = self.range_projector(psi_new, PSI_GRAM_SKIP_RANK_RTOL)?;
-        if r_ref != r_new {
+        let p_ref = self.range_projector(psi_ref, PSI_GRAM_SKIP_RANK_RTOL)?;
+        let p_new = self.range_projector(psi_new, PSI_GRAM_SKIP_RANK_RTOL)?;
+        if p_ref.rank != p_new.rank {
             return None;
         }
-        let diff = &p_ref - &p_new;
+        let diff = &p_ref.proj - &p_new.proj;
         subspace_spectral_distance(&diff)
+    }
+
+    /// CERTIFIED UPPER BOUND on the true subspace distance between the two
+    /// conditioned-Gram ranges — the quantity [`Self::reduced_basis_equal`]
+    /// actually thresholds against `PSI_GRAM_SKIP_PROJ_ATOL` (#2448).
+    ///
+    /// `‖P_ref − P_new‖₂ ≤ ‖P̂_ref − P̂_new‖₂ + ‖P̂_ref − P_ref‖₂ + ‖P̂_new − P_new‖₂`
+    /// — the measurement plus each computed projector's own Davis–Kahan bar. A
+    /// bound at or below the tolerance certifies the two reduced bases span the
+    /// same subspace no matter how the eigensolver's last bits fell; a bound above
+    /// it means EITHER the subspaces genuinely separated OR the instrument cannot
+    /// resolve the question, and both must refuse the skip.
+    ///
+    /// Returns `f64::INFINITY` when either projector's eigen-gap is closed at the
+    /// backward-error scale (the eigenvectors are an arbitrary rotation inside a
+    /// numerically degenerate cluster). `None` for an off-window ψ, a rank
+    /// mismatch, or an eigendecomp failure. `Some(0.0)` for an equal-ψ pair, which
+    /// is trivially and exactly sound. Purely k-space (O(k³)) — independent of n.
+    pub fn reduced_basis_subspace_distance_bound(
+        &self,
+        psi_ref: f64,
+        psi_new: f64,
+    ) -> Option<f64> {
+        if !(self.contains(psi_ref) && self.contains(psi_new)) {
+            return None;
+        }
+        if psi_ref == psi_new {
+            return Some(0.0);
+        }
+        let p_ref = self.range_projector(psi_ref, PSI_GRAM_SKIP_RANK_RTOL)?;
+        let p_new = self.range_projector(psi_new, PSI_GRAM_SKIP_RANK_RTOL)?;
+        if p_ref.rank != p_new.rank {
+            return None;
+        }
+        let diff = &p_ref.proj - &p_new.proj;
+        let measured = subspace_spectral_distance(&diff)?;
+        Some(measured + p_ref.err_bar + p_new.err_bar)
+    }
+
+    /// The Davis–Kahan error bar `‖P̂(ψ) − P(ψ)‖₂` on the range projector at `psi`
+    /// alone — how much of [`Self::reduced_basis_subspace_distance_bound`] is this
+    /// endpoint's instrument rather than a real subspace move (#2448).
+    ///
+    /// Exposed so a refused skip, or a band edge that collapsed onto its anchor,
+    /// can be ATTRIBUTED: a bar far under `PSI_GRAM_SKIP_PROJ_ATOL` means the
+    /// refusal is a genuine rotation and the ψ-window is the thing to look at; a
+    /// bar above it means the conditioned Gram has no resolvable kept/dropped
+    /// eigen-gap at this ψ and the reduced-basis question is unanswerable there at
+    /// double precision — a property of the geometry and the rank cutoff, not of
+    /// the trial. `f64::INFINITY` when the gap is fully closed, `0.0` at full rank.
+    /// `None` for an off-window / non-finite / all-zero Gram. Purely k-space.
+    pub fn range_projector_error_bar(&self, psi: f64) -> Option<f64> {
+        if !self.contains(psi) {
+            return None;
+        }
+        self.range_projector(psi, PSI_GRAM_SKIP_RANK_RTOL)
+            .map(|p| p.err_bar)
     }
 
     /// Numerical rank of the conditioned Gram `XᵀWX(ψ)` at `psi`, under the same
@@ -914,7 +1081,7 @@ impl PsiGramTensor {
             return None;
         }
         self.range_projector(psi, PSI_GRAM_SKIP_RANK_RTOL)
-            .map(|(_, rank)| rank)
+            .map(|p| p.rank)
     }
 
     /// Descending eigenvalues of the conditioned Gram `XᵀWX(ψ)` — the spectrum
@@ -1629,22 +1796,35 @@ mod tests {
         }
     }
 
-    /// #1033 rank-stable κ-floor: the conditioned radial Gram goes numerically
-    /// rank-deficient at the LARGE-length-scale (small-ψ) window edge — the
-    /// `synth_design` Matérn columns over a narrow `r`-range collapse toward the
-    /// polynomial nullspace there. `rank_stable_psi_floor` must (a) detect that the
-    /// maximal-rank band does NOT reach `psi_lo` and return a floor strictly inside
-    /// the window, (b) report that floor as the lower edge of the maximal-rank band
-    /// containing the seed, and (c) agree across row counts. Unlike the ceiling
-    /// fixture — whose band sits at FULL rank, making the projector witness the
-    /// identity and the edge a rank-margin root — this fixture's band sits at rank
-    /// 6 of k=7, so the binding gate is the projector ROTATION horizon and both
-    /// builds pin the edge to within ~1e-7 of the anchor. The (c) bound below is
-    /// therefore loose by construction; the sharp n-transport statement for a
-    /// rank-root edge is derived in the ceiling test (#2408). A design that is
-    /// full-rank across the whole window must return `None` (no lift needed).
+    /// #2448 — the `synth_design` fixture is the case where the projector witness
+    /// CANNOT ANSWER, and `rank_stable_psi_floor` must degrade to "no lift" rather
+    /// than invent a band edge out of roundoff.
+    ///
+    /// The Matérn-shaped columns over a narrow `r`-range give the conditioned Gram
+    /// a smooth GEOMETRIC spectral decay — measured relative spectrum at the seed
+    /// `[1, 1.3e-2, 4.4e-4, 5.1e-6, 3.6e-8, 1.2e-10, 3.0e-13]` — with no cliff
+    /// anywhere. The `PSI_GRAM_SKIP_RANK_RTOL = 1e-10` cutoff slices through the
+    /// middle of that decay, so the kept/dropped eigen-GAP is only `1.2e-10·λ_max`
+    /// and the range projector's own Davis–Kahan bar is `~1e-4` — THREE ORDERS
+    /// ABOVE the `1e-7` tolerance the witness gates on. Before #2448 the gate
+    /// compared a measured `sinθ` to that tolerance anyway, and the measurement is
+    /// pure roundoff at this scale: it is NON-MONOTONE in `Δψ` (asserted below),
+    /// so the bisection's monotone-step precondition was false and the returned
+    /// floor was a coin flip within `~1e-7` of the anchor.
+    ///
+    /// With the admissibility check the witness refuses every non-trivial pair
+    /// here, the bisection collapses the band onto the anchor EXACTLY, and the
+    /// κ-caller's `floor < psi_anchor` filter reads that as "no lift" — the sound
+    /// fallback (every trial takes the exact O(n) path). That collapse is now
+    /// bit-identical across row counts, because it is a structural refusal rather
+    /// than a noise-decided edge.
+    ///
+    /// The genuine floor-search claim — a real interior edge, n-transportable —
+    /// lives in `rank_stable_psi_floor_finds_a_real_edge_when_the_witness_is_admissible_2448`,
+    /// on a fixture whose witness can actually resolve the question. A design that
+    /// is full-rank across the whole window must still return `None`.
     #[test]
-    fn rank_stable_psi_floor_is_inside_window_and_n_independent() {
+    fn rank_stable_psi_floor_refuses_to_invent_an_edge_from_roundoff_2448() {
         let k = 7usize;
         // Window spanning the small-ψ rank cliff. Kept moderate so the Chebyshev
         // ladder certifies at a low rung (the build is the only n-pass; a wide
@@ -1664,67 +1844,72 @@ mod tests {
         };
 
         let t_small = build_at(120);
+        let t_big = build_at(1000);
         // Seed at the well-conditioned (small-length-scale) window end — the
-        // κ-optimum's neighbourhood, guaranteed to be at the window-maximal rank
-        // (the synthetic radial design's rank rises toward large ψ). The floor is
-        // the lower edge of the maximal-rank band reaching this seed.
+        // κ-optimum's neighbourhood, and the window-maximal rank (the synthetic
+        // radial design's rank rises toward large ψ).
         let seed = psi_hi;
-        let floor_small = t_small.rank_stable_psi_floor(seed);
 
-        // (a) the band does not reach psi_lo → a floor is returned, strictly inside.
-        let floor = floor_small.expect("collapsing-rank design must lift the floor off psi_lo");
-        assert!(
-            floor > psi_lo && floor <= seed,
-            "floor {floor} must lie in (psi_lo {psi_lo}, seed {seed}]"
-        );
-
-        // (b) below the floor the Gram is rank-deficient relative to the seed; at/
-        // above the floor it holds the window-maximal rank. Verify the rank at the
-        // floor equals the rank at the seed, and the rank just below the floor is
-        // strictly lower (the floor is a genuine rank edge, not an interior node).
-        let rank_at = |psi: f64| t_small.gram_numerical_rank(psi).unwrap();
-        let max_rank = rank_at(seed);
-        assert_eq!(
-            rank_at(floor),
-            max_rank,
-            "the floor must sit at the window-maximal rank"
-        );
-        let probe_below = floor - 0.25;
-        if t_small.contains(probe_below) {
+        // (a) THE INSTRUMENT CANNOT RESOLVE THE TOLERANCE. The anchor's own range
+        // projector carries a Davis–Kahan bar orders of magnitude above the
+        // subspace tolerance the witness gates on, on BOTH row counts — this is a
+        // property of the geometry and the rank cutoff, not of the sample.
+        for (label, t) in [("n=120", &t_small), ("n=1000", &t_big)] {
+            let bar = t
+                .range_projector_error_bar(seed)
+                .expect("the seed Gram is finite and non-degenerate");
             assert!(
-                rank_at(probe_below) < max_rank,
-                "rank just below the floor ({}) must drop under the band rank {max_rank}",
-                rank_at(probe_below)
+                bar > 100.0 * PSI_GRAM_SKIP_PROJ_ATOL,
+                "{label}: the geometric-decay spectrum leaves the seed's range \
+                 projector unresolved (measured bar ~1e-4 vs a {PSI_GRAM_SKIP_PROJ_ATOL:e} \
+                 tolerance); got {bar:e}, which would mean the fixture changed and \
+                 this test no longer exercises #2448"
             );
         }
 
-        // (c) the floor must not WANDER with the row count. This is a coarse guard,
-        // not an invariance certificate, and #2408 measured why it cannot be more
-        // than that here: at this seed the Gram's kept/dropped eigen-gap is only
-        // ~1.2e-10·λ_max, so the range projector carries a roundoff error of
-        // ~ε·λ_max/gap ≈ 1.8e-6 — an order of magnitude ABOVE the 1e-7 subspace
-        // tolerance the witness thresholds. The witness is therefore deciding on
-        // its own noise within ~1e-6 of the anchor (measured sinθ is non-monotone
-        // there: 3.1e-7 at Δψ=1e-8, 4.5e-8 at Δψ=1.8e-7), and both builds return a
-        // floor pinned ~1e-7 below the anchor by that noise rather than by a
-        // subspace rotation. The bound below is sized to the WINDOW, so it catches
-        // a genuinely wandering edge while making no claim the measurement cannot
-        // support. The sharp, derived n-transport statement is available only where
-        // the edge is a rank-margin root — see the ceiling test.
-        let t_big = build_at(1000);
+        // (b) THE OLD GATE'S MEASUREMENT IS NOISE. `sinθ` is not monotone in Δψ
+        // anywhere near the anchor, so `measured ≤ ATOL` is not a step function and
+        // the bisection has no crossing to find. Assert the non-monotonicity
+        // directly rather than restating it in prose: over this ladder of Δψ the
+        // measured distance must go DOWN at least once while Δψ goes up.
+        let ladder = [1e-8_f64, 1e-7, 1.8e-7, 3e-7];
+        let measured: Vec<f64> = ladder
+            .iter()
+            .map(|&d| {
+                t_small
+                    .reduced_basis_subspace_distance(seed, seed - d)
+                    .expect("equal rank at these tiny offsets")
+            })
+            .collect();
+        assert!(
+            measured.windows(2).any(|w| w[1] < w[0]),
+            "the pre-#2448 accept predicate was claimed to be a monotone step in \
+             Δψ; measured sinθ over Δψ={ladder:?} is {measured:?}, which must be \
+             non-monotone for this fixture to be the #2448 witness"
+        );
+
+        // (c) THE WITNESS REFUSES, and the band therefore collapses onto the anchor
+        // EXACTLY — not to within a noise floor. The κ-caller filters on
+        // `floor < psi_anchor`, so this reads as "no lift": every trial takes the
+        // exact O(n) path, which is the sound fallback.
+        assert!(
+            !t_small.reduced_basis_equal(seed, seed - 1e-6),
+            "an unresolved projector must refuse the skip, not certify it on roundoff"
+        );
+        let floor_small = t_small
+            .rank_stable_psi_floor(seed)
+            .expect("the band does not reach psi_lo, so an edge is reported");
         let floor_big = t_big
             .rank_stable_psi_floor(seed)
-            .expect("the rank band is a k-space property; the big build must also lift");
-        // Bound kept at its historical value (1.5× the pre-#2054 node spacing the
-        // edge search used to snap to) — the measured displacement is ~1.4e-7, five
-        // orders of magnitude under it, so tightening it would only encode this
-        // fixture's noise floor as a contract.
-        let edge_wander_atol = 1.5 * (psi_hi - psi_lo) / 95.0;
-        assert!(
-            (floor_small.unwrap() - floor_big).abs() <= edge_wander_atol,
-            "rank-stable floor must not wander with the row count: n=120 → {}, \
-             n=1000 → {floor_big} (wander tolerance {edge_wander_atol})",
-            floor_small.unwrap()
+            .expect("the band does not reach psi_lo, so an edge is reported");
+        assert_eq!(
+            floor_small, seed,
+            "with no admissible witness the band is exactly the anchor"
+        );
+        assert_eq!(
+            floor_big, floor_small,
+            "a structural refusal is bit-identical across row counts, unlike the \
+             pre-#2448 noise-decided edge (which moved ~1.4e-7 between these builds)"
         );
 
         // A genuinely full-rank, well-conditioned design across the window needs no
@@ -2585,7 +2770,7 @@ mod tests {
         let grid: Vec<f64> = (0..=12).map(|i| psi_lo + 0.05 + 0.06 * i as f64).collect();
         let identity = Array2::<f64>::eye(k);
         for &psi in &grid {
-            let (proj, rank) = tensor
+            let RangeProjector { proj, rank, .. } = tensor
                 .range_projector(psi, PSI_GRAM_SKIP_RANK_RTOL)
                 .expect("full-rank Gram must yield a range projector");
             assert_eq!(
@@ -2701,7 +2886,7 @@ mod tests {
         let rank_at = |psi: f64| -> usize {
             tensor
                 .range_projector(psi, PSI_GRAM_SKIP_RANK_RTOL)
-                .map(|(_, r)| r)
+                .map(|p| p.rank)
                 .unwrap_or(0)
         };
         let lo_rank = rank_at(psi_lo + 0.02);
@@ -2802,11 +2987,24 @@ mod tests {
         let rank_at = |psi: f64| -> usize {
             tensor
                 .range_projector(psi, PSI_GRAM_SKIP_RANK_RTOL)
-                .map(|(_, r)| r)
+                .map(|p| p.rank)
                 .unwrap_or(0)
         };
         for &psi in &[-0.95, -0.4, 0.0, 0.4, 0.95] {
             assert_eq!(rank_at(psi), 2, "rotation keeps rank 2 at psi={psi}");
+            // #2448 — the kept 2-plane is separated from the empty third direction
+            // by an O(λ_max) gap, so the admissibility check is far from binding
+            // here. This is the guard that the check did not buy soundness by
+            // refusing everything: a witness that always refuses would also pass a
+            // refusal test, but it would fail the certification sweep below.
+            let bar = tensor
+                .range_projector_error_bar(psi)
+                .expect("finite rank-2 Gram");
+            assert!(
+                bar < 1e-3 * PSI_GRAM_SKIP_PROJ_ATOL,
+                "a wide-gap projector must be resolved orders inside the tolerance \
+                 at psi={psi}, else the skip witness could never certify; got {bar:e}"
+            );
         }
 
         // Every in-window pair spans the SAME 2-plane (only the basis rotates),
@@ -2823,5 +3021,215 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #2448 — [`projector_error_bar`] must be a TRUE upper bound on the rotation
+    /// a perturbation induces in a spectral projector, graded against the one case
+    /// where that rotation is known in closed form.
+    ///
+    /// For `A = diag(a, b)` with `a > b` and the symmetric off-diagonal
+    /// perturbation `E = [[0, e], [e, 0]]`, the eigenvectors of `A + E` are those
+    /// of `A` turned by exactly `θ = ½·atan(2e / (a−b))`, so the distance between
+    /// the rank-1 leading projectors is `sinθ` in closed form. `‖E‖₂ = |e|` and the
+    /// gap is `δ = a − b`, so the Davis–Kahan bar `e / (δ − e)` must dominate
+    /// `sinθ` at every ratio `e/δ` — including ratios far outside the small-`e`
+    /// regime the asymptotic form `e/δ` is derived in.
+    ///
+    /// Also pinned: the bar is not vacuous where it is meant to bite (it stays
+    /// within a small factor of the truth for `e ≪ δ`), and it REFUSES — reports
+    /// `+∞` — exactly when the perturbation is wide enough to close the gap, where
+    /// the eigenvectors of a numerically degenerate pair carry no information at
+    /// all.
+    #[test]
+    fn projector_error_bar_bounds_the_true_projector_rotation_2448() {
+        use gam_linalg::faer_ndarray::FaerEigh;
+        let gap = 1.0_f64;
+        let (a, b) = (2.0_f64, 2.0 - gap);
+        // Leading-eigenvector projector of the symmetric 2×2 [[a, e], [e, b]].
+        let leading_projector = |e: f64| -> Array2<f64> {
+            let m = ndarray::arr2(&[[a, e], [e, b]]);
+            let (evals, evecs) = m.eigh(faer::Side::Lower).expect("2x2 eigh");
+            let top = evals
+                .iter()
+                .enumerate()
+                .max_by(|(_, x), (_, y)| x.total_cmp(y))
+                .map(|(i, _)| i)
+                .expect("non-empty spectrum");
+            let u = evecs.column(top);
+            let mut p = Array2::<f64>::zeros((2, 2));
+            for i in 0..2 {
+                for j in 0..2 {
+                    p[[i, j]] = u[i] * u[j];
+                }
+            }
+            p
+        };
+        let unperturbed = leading_projector(0.0);
+        for &e in &[1e-12_f64, 1e-8, 1e-4, 1e-2, 0.1, 0.4, 0.9] {
+            let diff = &leading_projector(e) - &unperturbed;
+            let measured = subspace_spectral_distance(&diff).expect("finite 2x2 difference");
+            // Closed form: the rotation angle is exactly ½·atan(2e/δ).
+            let exact = (0.5 * (2.0 * e / gap).atan()).sin();
+            assert!(
+                (measured - exact).abs() <= 1e-12 + 1e-9 * exact,
+                "the 2×2 oracle disagrees with the measured projector distance at \
+                 e={e}: measured={measured}, closed form={exact} — the oracle, not \
+                 the bound, is what is wrong here"
+            );
+            let bar = projector_error_bar(gap, e);
+            assert!(
+                bar >= measured,
+                "Davis–Kahan bar must DOMINATE the true rotation at e={e} \
+                 (gap={gap}): bar={bar}, measured={measured}"
+            );
+            if e <= 1e-2 {
+                // Not vacuous in the regime that decides the witness: the bar is
+                // `e/(δ−e)` and the truth is `≈ e/δ`, so it may exceed it by a
+                // factor of at most `δ/(δ−e)`, here ≤ 1.02.
+                assert!(
+                    bar <= 1.05 * measured.max(f64::MIN_POSITIVE),
+                    "bar must stay tight for e ≪ δ, else it would refuse sound \
+                     skips: e={e}, bar={bar}, measured={measured}"
+                );
+            }
+        }
+        // The perturbation closes the gap → no subspace claim is possible.
+        for &(g, e) in &[(1.0_f64, 1.0_f64), (1.0, 2.0), (0.0, 1e-30)] {
+            assert!(
+                projector_error_bar(g, e).is_infinite(),
+                "a perturbation that spans the gap (gap={g}, ‖E‖={e}) leaves the \
+                 kept/dropped split undetermined; the bar must refuse, not report \
+                 a finite rotation"
+            );
+        }
+        // Non-finite inputs refuse rather than propagating a NaN into a `<=`
+        // comparison, which would silently read as "certified".
+        assert!(projector_error_bar(f64::NAN, 1.0).is_infinite());
+        assert!(projector_error_bar(1.0, f64::NAN).is_infinite());
+        assert!(projector_error_bar(f64::INFINITY, f64::INFINITY).is_infinite());
+    }
+
+    /// #2448 — the floor search still finds a REAL interior band edge, and
+    /// transports it across row counts, whenever the witness can actually resolve
+    /// the question. The companion to
+    /// `rank_stable_psi_floor_refuses_to_invent_an_edge_from_roundoff_2448`: that
+    /// one pins the refusal, this one pins that the refusal is not universal.
+    ///
+    /// The fixture is the `reduced_basis_witness_refuses_across_subspace_change`
+    /// geometry — two ψ-invariant profiles plus a third whose amplitude
+    /// `ε(ψ) = e^{10ψ}` sweeps its eigenvalue `∝ ε²` across the rank cutoff at
+    /// `ψ* = ln(√(2·rtol)) / 10 ≈ −1.118`. This is a genuine CLIFF, not a
+    /// geometric decay: above `ψ*` the Gram is FULL rank (`P` is the identity, so
+    /// its Davis–Kahan bar is exactly 0), and below it the third direction is
+    /// orders of magnitude under the second, so the gap is `O(λ_max)` and that bar
+    /// is `~1e-14`. The witness is admissible on both sides and the band edge is
+    /// decided by the rank change alone.
+    ///
+    /// `ψ*` is n-FREE by construction: both the cutoff (`rtol·λ_max`) and the
+    /// third eigenvalue (`ε²·‖c₃‖²`) scale linearly in n, so the crossing does not
+    /// move. That is what makes the transport assertion below sharp rather than
+    /// window-sized.
+    #[test]
+    fn rank_stable_psi_floor_finds_a_real_edge_when_the_witness_is_admissible_2448() {
+        let k = 3usize;
+        let (psi_lo, psi_hi) = (-1.6_f64, -0.8_f64);
+        let alpha = 10.0_f64;
+        let build_at = |n: usize| {
+            let base = move |i: usize, j: usize| -> f64 {
+                let t = (i as f64 + 0.5) / n as f64;
+                match j {
+                    0 => 1.0,
+                    1 => (2.0 * std::f64::consts::PI * t).sin(),
+                    _ => (4.0 * std::f64::consts::PI * t).cos(),
+                }
+            };
+            let design = move |psi: f64| -> Result<Array2<f64>, String> {
+                let eps = (alpha * psi).exp();
+                let mut x = Array2::<f64>::zeros((n, k));
+                for i in 0..n {
+                    x[[i, 0]] = base(i, 0);
+                    x[[i, 1]] = base(i, 1);
+                    x[[i, 2]] = eps * base(i, 2);
+                }
+                Ok(x)
+            };
+            let w = Array1::from_elem(n, 1.0);
+            let z = Array1::from_iter((0..n).map(|i| ((i as f64) * 0.13).sin()));
+            PsiGramTensor::build(design, w.view(), z.view(), psi_lo, psi_hi)
+                .expect("smooth ε(ψ) design must certify (analytic, no kink)")
+        };
+
+        let anchor = psi_hi - 0.02;
+        let mut floors = Vec::new();
+        for n in [200usize, 800] {
+            let t = build_at(n);
+
+            // The anchor sits at FULL rank, so its projector is the identity and
+            // carries no error at all — the admissibility check is inert here, which
+            // is precisely why this fixture can still resolve an edge.
+            assert_eq!(
+                t.gram_numerical_rank(anchor),
+                Some(k),
+                "n={n}: the anchor must be full rank for the premise to hold"
+            );
+            assert_eq!(
+                t.range_projector_error_bar(anchor),
+                Some(0.0),
+                "n={n}: a full-rank range projector is the identity exactly, on \
+                 every host — its Davis–Kahan bar is 0, not merely small"
+            );
+
+            let floor = t
+                .rank_stable_psi_floor(anchor)
+                .expect("the rank cliff is inside the window, so a floor is reported");
+            assert!(
+                floor > psi_lo && floor < anchor,
+                "n={n}: an admissible witness must return an INTERIOR edge, not \
+                 collapse onto the anchor: floor={floor} in ({psi_lo}, {anchor})"
+            );
+
+            // The edge is the rank cliff: full rank at it, deficient just below.
+            assert_eq!(
+                t.gram_numerical_rank(floor),
+                Some(k),
+                "n={n}: the floor itself must still hold the band rank"
+            );
+            assert_eq!(
+                t.gram_numerical_rank(floor - 1e-3),
+                Some(k - 1),
+                "n={n}: the rank must drop immediately below the floor — otherwise \
+                 the edge is an interior artefact, not the cliff"
+            );
+
+            // Below the cliff the surviving 2-D range is separated from the third
+            // direction by an O(λ_max) gap, so the witness is admissible THERE too;
+            // the refusal across the cliff is a rank change, not an unresolved
+            // projector.
+            let below = t
+                .range_projector_error_bar(floor - 1e-3)
+                .expect("finite Gram below the cliff");
+            assert!(
+                below < PSI_GRAM_SKIP_PROJ_ATOL,
+                "n={n}: below the cliff the kept/dropped gap is O(λ_max), so the \
+                 projector must be resolved far inside the tolerance; got {below:e}"
+            );
+            floors.push(floor);
+        }
+
+        // n-TRANSPORT. The crossing is n-free in exact arithmetic (cutoff and the
+        // third eigenvalue both scale linearly in n), so the two builds must agree
+        // to the bisection's own resolution, not to a window-sized slop. The
+        // bisection stops at `PSI_BAND_BISECTION_ATOL·(1+|ψ|)`; allow a few of
+        // those plus the O(1/n) Ostrowski excursion of the crossing itself,
+        // converted through the margin slope `d/dψ ln(ε²) = 2α`.
+        let bisection_resolution = PSI_BAND_BISECTION_ATOL * (1.0 + psi_hi.abs());
+        let transport = 8.0 * bisection_resolution + (1.0 / 200.0) / (2.0 * alpha);
+        assert!(
+            (floors[0] - floors[1]).abs() <= transport,
+            "an admissible band edge must transport across row counts: n=200 → {}, \
+             n=800 → {} (bound {transport:e})",
+            floors[0],
+            floors[1]
+        );
     }
 }
