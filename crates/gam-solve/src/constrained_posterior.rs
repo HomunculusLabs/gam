@@ -1445,6 +1445,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn equal_tailed_projection_sweep_has_exact_mass_and_repairs_the_short_symmetric_band() {
+        let covariance = array![[1.0]];
+        let constraints =
+            LinearInequalityConstraints::new(array![[1.0]], array![0.0]).expect("constraint");
+        let alpha = 0.025;
+        let ambient_width =
+            2.0 * standard_normal_quantile(1.0 - alpha).expect("ambient quantile");
+        let mut saw_repaired_short_symmetric_band = false;
+
+        for center_value in [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0] {
+            let center = array![center_value];
+            let correction = constrained_posterior_correction_from_covariance(
+                &covariance,
+                &center,
+                &constraints,
+            )
+            .expect("correction")
+            .expect("finite lower truncation");
+            let posterior_variance =
+                1.0 - correction.removed_variance_diagonal()[0];
+            let geometry = ConstrainedPosteriorGeometry {
+                constraints: constraints.clone(),
+                mode: array![center_value.max(0.0)],
+                unconstrained_center: center,
+                correction: Some(correction),
+            };
+            let (lower, upper) = constrained_projection_equal_tailed_interval(
+                &covariance,
+                &geometry,
+                &array![1.0],
+                0.95,
+            )
+            .expect("equal-tailed interval");
+
+            let mass_below_bound = normal_cdf(-center_value);
+            let retained_mass = 1.0 - mass_below_bound;
+            let truncated_cdf = |value: f64| {
+                (normal_cdf(value - center_value) - mass_below_bound) / retained_mass
+            };
+            assert!(
+                (truncated_cdf(lower) - alpha).abs() < 2e-8
+                    && (truncated_cdf(upper) - (1.0 - alpha)).abs() < 2e-8,
+                "centre {center_value}: endpoints [{lower}, {upper}] do not enclose exact \
+                 posterior mass 0.95"
+            );
+            assert!(
+                lower >= 0.0,
+                "centre {center_value}: lower endpoint {lower} escaped the saved cone"
+            );
+            assert!(
+                upper - lower <= ambient_width + 1e-10,
+                "centre {center_value}: truncation widened [{lower}, {upper}] beyond the \
+                 ambient Gaussian interval"
+            );
+
+            if center_value == 3.0 {
+                let symmetric_width = 2.0
+                    * standard_normal_quantile(1.0 - alpha).expect("symmetric quantile")
+                    * posterior_variance.sqrt();
+                assert!(
+                    upper - lower > symmetric_width,
+                    "the exact 3-SE interval must repair the moment-matched symmetric interval's \
+                     short, under-covering band: exact width {}, symmetric width {symmetric_width}",
+                    upper - lower
+                );
+                saw_repaired_short_symmetric_band = true;
+            }
+        }
+
+        assert!(
+            saw_repaired_short_symmetric_band,
+            "the sweep must include its 3-SE regression cell"
+        );
+    }
+
     /// The cubature must reproduce the closed form when the orthant factorizes
     /// into independent coordinates, which is the only multivariate case with
     /// an exact answer to check against. The bound is the module's own
