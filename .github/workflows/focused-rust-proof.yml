@@ -48,12 +48,33 @@ env:
   # the focused and complete lanes.
   RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
   SCCACHE_GHA_ENABLED: "true"
+  # The two budgets below replace ONE bound that covered codegen, link AND
+  # execution together (#2429).
+  #
+  # The compile allowance is UNCHANGED at the 1200s it already was. This split
+  # exists to make an exhausted budget legible, not to buy more time: a budget
+  # that has to keep growing is bounding the wrong thing, and the reachability
+  # half of #2429 is fixed by changing the build's shape, not its allowance.
+  BUILD_BUDGET_SECONDS: "1200"
+  # Execution only, per filter, on an already-built target. This is not a new
+  # restriction — under the old single bound a slow fit was racing whatever the
+  # compile had left over, so a legitimately long solver test could be killed by
+  # a bound meant for compilation. That conflation is exactly what this issue is
+  # about, so execution gets its own allowance, set to the 600s per-test kill
+  # the nextest lanes already use as the "this is a hang" threshold.
+  RUN_BUDGET_SECONDS: "600"
 
 jobs:
   prove:
     name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Must exceed BUILD_BUDGET_SECONDS + RUN_BUDGET_SECONDS plus checkout and
+    # toolchain setup, so the LEGIBLE inner bounds always fire before the job
+    # cap does. A job cancelled at the cap is the opaque outcome #2429 exists to
+    # eliminate — it names no phase, writes no summary, and looks like a
+    # failure of the code under test. This is not a larger compile allowance;
+    # that is fixed at BUILD_BUDGET_SECONDS.
+    timeout-minutes: 35
     steps:
       - name: Checkout exact requested SHA
         uses: actions/checkout@v5
@@ -81,7 +102,7 @@ jobs:
           # Attribute every subsequent request and hit to this proof only.
           sccache --zero-stats
 
-      - name: Run package-scoped tests
+      - name: Validate inputs
         shell: bash
         env:
           FILTERS: ${{ github.event.inputs.filters }}
@@ -95,21 +116,20 @@ jobs:
             exit 1
           fi
 
-          target_args=()
           case "$TARGET" in
             lib)
               if [[ -n "$TEST_BINARY" ]]; then
                 echo "::error::test_binary must be empty when target=lib."
                 exit 1
               fi
-              target_args=(--lib)
+              printf 'TARGET_ARGS=--lib\n' >> "$GITHUB_ENV"
               ;;
             integration)
               if [[ ! "$TEST_BINARY" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]]; then
                 echo "::error::target=integration requires a safe, non-empty test_binary."
                 exit 1
               fi
-              target_args=(--test "$TEST_BINARY")
+              printf 'TARGET_ARGS=--test %s\n' "$TEST_BINARY" >> "$GITHUB_ENV"
               ;;
             *)
               echo "::error::unsupported target: ${TARGET}"
@@ -122,31 +142,127 @@ jobs:
             echo "::error::filters must contain at least one test-name substring."
             exit 1
           fi
-
-          mkdir -p focused-rust-logs
           for filter in "${filters[@]}"; do
             if [[ ! "$filter" =~ ^[A-Za-z0-9_][A-Za-z0-9_:.-]*$ ]]; then
               echo "::error::filter '${filter}' is not a bare Rust test-name substring."
               exit 1
             fi
+          done
 
+      # Compilation is a SEPARATE step from execution, with its own budget, so
+      # that "could not build in the budget" is a distinct and visible outcome
+      # from "the test failed" (#2429). Previously one step covered codegen,
+      # link and execution under a single bound, and exceeding it surfaced only
+      # as `##[error]Process completed with exit code 124` under a heading
+      # naming the issue — indistinguishable at a glance from a real assertion
+      # failure, so lanes debugged their own change against a run that had never
+      # reached a test. That is the mirror of #2424: there a run reports SUCCESS
+      # having verified nothing, here it reports FAILURE having verified
+      # nothing. In both cases the defect is the same one — the run record does
+      # not distinguish VERIFIED from NOT ATTEMPTED — so this step's job is to
+      # make NOT ATTEMPTED say so, in the step name, in the annotation, and in
+      # the job summary that is visible without opening a log.
+      - name: Build focused test target (infrastructure step — not a test result)
+        id: build
+        shell: bash
+        env:
+          PACKAGE: ${{ github.event.inputs.package }}
+        run: |
+          set -euo pipefail
+          read -r -a target_args <<< "$TARGET_ARGS"
+          mkdir -p focused-rust-logs
+          log_file="focused-rust-logs/00-build.log"
+
+          # Budget for compiling the package's test target ONCE. It is not the
+          # cold-build guard: that job belongs entirely to the sccache gates,
+          # which refuse an unreachable cache and refuse a proof that reused
+          # zero compiler objects. Splitting it out of the per-filter loop also
+          # fixes the accounting — the old single bound was charged afresh to
+          # every filter even though only the first one compiled anything.
+          echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} --no-run"
+          started=$(date +%s)
+          set +e
+          timeout --signal=TERM --kill-after=15s "$BUILD_BUDGET_SECONDS" \
+            cargo test -p "$PACKAGE" --all-features "${target_args[@]}" --no-run \
+            2>&1 | tee "$log_file"
+          status=${PIPESTATUS[0]}
+          set -e
+          elapsed=$(( $(date +%s) - started ))
+          echo "build step exit=${status} elapsed=${elapsed}s budget=${BUILD_BUDGET_SECONDS}s"
+
+          # `timeout` reports 124 when its TERM landed, or 137 when the process
+          # had to be SIGKILLed after `--kill-after`. Both mean the same thing:
+          # the budget ran out, so nothing about the code under test was
+          # measured.
+          if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+            last_unit=$(grep -E '^\s+(Compiling|Building|Linking) ' "$log_file" | tail -1 || true)
+            {
+              echo "### NOT ATTEMPTED — build budget exceeded"
+              echo
+              echo "\`${PACKAGE}\` did not finish compiling within \`${BUILD_BUDGET_SECONDS}s\`,"
+              echo "so **no test ran and nothing was verified**."
+              echo "This is an infrastructure outcome (#2429), *not* a result about the code"
+              echo "under test — do not debug your change against this run."
+              echo
+              echo "- last build activity: \`${last_unit:-<none recorded>}\`"
+              echo "- elapsed: \`${elapsed}s\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: build budget exceeded (#2429)::${PACKAGE} did not finish compiling within ${BUILD_BUDGET_SECONDS}s. No test ran and nothing was verified; this is an infrastructure outcome, not a result about the code under test. Last build activity: ${last_unit:-<none recorded>}"
+            exit 1
+          fi
+          if [[ "$status" -ne 0 ]]; then
+            {
+              echo "### NOT ATTEMPTED — the test target did not compile"
+              echo
+              echo "\`${PACKAGE}\` failed to build, so **no test ran**. A compile error is a"
+              echo "real result about the code, but it is not a test outcome."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=NOT ATTEMPTED: test target did not compile::${PACKAGE} failed to build (exit ${status}); no test ran."
+            exit "$status"
+          fi
+          echo "build completed in ${elapsed}s of a ${BUILD_BUDGET_SECONDS}s budget."
+
+      # Execution only — the target is already built, so a bound exceeded here
+      # really is a statement about the tests (a hang or a runaway fit), which
+      # is why it carries a different budget and a different annotation.
+      - name: Run focused filters
+        shell: bash
+        env:
+          FILTERS: ${{ github.event.inputs.filters }}
+          PACKAGE: ${{ github.event.inputs.package }}
+        run: |
+          set -euo pipefail
+          read -r -a target_args <<< "$TARGET_ARGS"
+          read -r -a filters <<< "$FILTERS"
+          mkdir -p focused-rust-logs
+          total_ran=0
+          for filter in "${filters[@]}"; do
             log_file="focused-rust-logs/${filter//[:.]/_}.log"
             echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} ${filter}"
-            # The bound below covers the package-scoped codegen, link and
-            # execution of ONE filter. It is not the cold-build guard: that job
-            # belongs entirely to the sccache gates above and below, which
-            # refuse an unreachable cache and refuse a proof that reused zero
-            # compiler objects. A measured-warm `gam-sae --lib` link alone
-            # exceeded 600s at a 71% sccache hit rate (run 30138247639), so a
-            # ten-minute bound rejected warm proofs it was never meant to
-            # police. Twenty minutes covers the largest leaf crate in the
-            # workspace while still failing fast on a genuinely cold tree,
-            # which the zero-hit gate catches independently.
-            timeout --signal=TERM --kill-after=15s 1200 \
+            set +e
+            timeout --signal=TERM --kill-after=15s "$RUN_BUDGET_SECONDS" \
               cargo test -p "$PACKAGE" --all-features \
                 "${target_args[@]}" "$filter" \
                 -- --nocapture --test-threads=1 2>&1 | tee "$log_file"
+            status=${PIPESTATUS[0]}
+            set -e
 
+            if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+              {
+                echo "### Test execution budget exceeded"
+                echo
+                echo "Filter \`${filter}\` was built successfully but did not finish running"
+                echo "within \`${RUN_BUDGET_SECONDS}s\`. Unlike a build timeout this IS a"
+                echo "statement about the tests — a hang or a non-terminating fit."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=Test execution budget exceeded::filter '${filter}' built but did not finish running within ${RUN_BUDGET_SECONDS}s; the target compiled, so this is a test-side hang, not an infrastructure timeout."
+              exit 1
+            fi
+
+            # A filter matching nothing makes `cargo test` exit 0 having verified
+            # nothing — the #2424 defect. Count what actually ran and refuse the
+            # phantom green. Checked BEFORE the exit status so a zero-match
+            # filter is reported as such rather than as a pass.
             ran=$(awk '/test result:/ {
               for (i = 1; i < NF; i++) {
                 if ($(i + 1) == "passed;") passed += $i;
@@ -154,11 +270,21 @@ jobs:
               }
             } END { print passed + failed + 0 }' "$log_file")
             if [[ "${ran:-0}" -eq 0 ]]; then
-              echo "::error::filter '${filter}' executed zero tests."
+              echo "::error title=NOT ATTEMPTED: filter matched zero tests::filter '${filter}' executed zero tests; a filter that matches nothing verifies nothing."
               exit 1
             fi
+            if [[ "$status" -ne 0 ]]; then
+              echo "filter '${filter}' executed ${ran} test(s) and FAILED."
+              exit "$status"
+            fi
             echo "filter '${filter}' executed ${ran} test(s)."
+            total_ran=$(( total_ran + ran ))
           done
+          {
+            echo "### VERIFIED — ${total_ran} test(s) executed"
+            echo
+            echo "Package \`${PACKAGE}\`, filters: \`${FILTERS}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Require measured compiler-cache reuse
         shell: bash
