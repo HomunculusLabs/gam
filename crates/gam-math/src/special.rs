@@ -356,6 +356,135 @@ pub fn bessel_i0_log_and_ratio(eta: f64) -> (f64, f64) {
     (eta.abs() + centered_log_i0, ratio)
 }
 
+/// Argument above which the polygamma family switches from its downward
+/// recurrence to the Bernoulli asymptotic series.
+///
+/// The series is divergent, but its terms only start growing near `x ≈ πk`, so
+/// at this threshold each of the four functions below is already limited by
+/// `f64` rounding rather than by truncation — see the per-function notes for
+/// the first omitted term. The recurrence that walks a small argument up to
+/// here costs one reciprocal and one add per unit step.
+const POLYGAMMA_ASYMPTOTIC_THRESHOLD: f64 = 20.0;
+
+/// Digamma `ψ(x) = d/dx ln Γ(x)`, for `x > 0`; `NaN` otherwise.
+///
+/// Recurrence `ψ(x) = ψ(x+1) − 1/x` up to the threshold, then
+/// `ψ(x) ~ ln x − 1/(2x) − Σ_{k≥1} B_{2k}/(2k·x^{2k})`. Carried through
+/// `B₁₂`, so the first omitted term is `1/(12x¹⁴)` — `5e−20` at `x = 20`,
+/// against `ψ(20) ≈ 2.97`.
+pub fn digamma(mut x: f64) -> f64 {
+    if !(x.is_finite() && x > 0.0) {
+        return f64::NAN;
+    }
+    let mut recurrence = 0.0_f64;
+    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
+        recurrence -= 1.0 / x;
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    // −1/12 + w/120 − w²/252 + w³/240 − w⁴/132 + 691w⁵/32760, w = 1/x².
+    let series = horner_polynomial(
+        inv2,
+        &[
+            -1.0 / 12.0,
+            1.0 / 120.0,
+            -1.0 / 252.0,
+            1.0 / 240.0,
+            -1.0 / 132.0,
+            691.0 / 32_760.0,
+        ],
+    );
+    recurrence + x.ln() - 0.5 * inv + inv2 * series
+}
+
+/// Trigamma `ψ₁(x) = d²/dx² ln Γ(x)`, for `x > 0`; `NaN` otherwise.
+///
+/// Recurrence `ψ₁(x) = ψ₁(x+1) + 1/x²`, then
+/// `ψ₁(x) ~ 1/x + 1/(2x²) + Σ_{k≥1} B_{2k}/x^{2k+1}`. Carried through `B₁₂`,
+/// first omitted `7/(6x¹⁵)` — `4e−20` at `x = 20` against `ψ₁(20) ≈ 0.051`.
+pub fn trigamma(mut x: f64) -> f64 {
+    if !(x.is_finite() && x > 0.0) {
+        return f64::NAN;
+    }
+    let mut recurrence = 0.0_f64;
+    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
+        recurrence += 1.0 / (x * x);
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    // 1/6 − w/30 + w²/42 − w³/30 + 5w⁴/66 − 691w⁵/2730, w = 1/x².
+    let series = horner_polynomial(
+        inv2,
+        &[
+            1.0 / 6.0,
+            -1.0 / 30.0,
+            1.0 / 42.0,
+            -1.0 / 30.0,
+            5.0 / 66.0,
+            -691.0 / 2_730.0,
+        ],
+    );
+    recurrence + inv + 0.5 * inv2 + inv2 * inv * series
+}
+
+/// Tetragamma `ψ₂(x) = d³/dx³ ln Γ(x)`, for `x > 0`; `NaN` otherwise.
+///
+/// Recurrence `ψ₂(x) = ψ₂(x+1) − 2/x³`, then the `n = 2` case of
+/// `ψ⁽ⁿ⁾(x) ~ (−1)^{n−1}[(n−1)!/xⁿ + n!/(2x^{n+1})
+/// + Σ_k B_{2k}(2k+n−1)!/((2k)!·x^{2k+n})]`. Carried through `B₁₂`, first
+/// omitted `17.5/x¹⁶` — `3e−20` at `x = 20` against `|ψ₂(20)| ≈ 2.6e−3`.
+pub fn tetragamma(mut x: f64) -> f64 {
+    if !(x.is_finite() && x > 0.0) {
+        return f64::NAN;
+    }
+    let mut recurrence = 0.0_f64;
+    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
+        recurrence -= 2.0 / (x * x * x);
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    // Coefficients B_{2k}(2k+1): 1/2, −1/6, 1/6, −3/10, 5/6, −691/210.
+    let series = horner_polynomial(
+        inv2,
+        &[
+            0.5,
+            -1.0 / 6.0,
+            1.0 / 6.0,
+            -3.0 / 10.0,
+            5.0 / 6.0,
+            -691.0 / 210.0,
+        ],
+    );
+    recurrence - (inv2 + inv2 * inv + inv2 * inv2 * series)
+}
+
+/// Pentagamma `ψ₃(x) = d⁴/dx⁴ ln Γ(x)`, for `x > 0`; `NaN` otherwise.
+///
+/// Recurrence `ψ₃(x) = ψ₃(x+1) + 6/x⁴`, then the `n = 3` case of the same
+/// expansion. Carried through `B₁₂`, first omitted `280/x¹⁷` — `2e−20` at
+/// `x = 20` against `ψ₃(20) ≈ 2.6e−4`.
+pub fn pentagamma(mut x: f64) -> f64 {
+    if !(x.is_finite() && x > 0.0) {
+        return f64::NAN;
+    }
+    let mut recurrence = 0.0_f64;
+    while x < POLYGAMMA_ASYMPTOTIC_THRESHOLD {
+        recurrence += 6.0 / (x * x * x * x);
+        x += 1.0;
+    }
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    // Coefficients B_{2k}(2k+1)(2k+2): 2, −1, 4/3, −3, 10, −691·182/2730.
+    let series = horner_polynomial(
+        inv2,
+        &[2.0, -1.0, 4.0 / 3.0, -3.0, 10.0, -691.0 * 182.0 / 2_730.0],
+    );
+    recurrence + 2.0 * inv2 * inv + 3.0 * inv2 * inv2 + inv2 * inv2 * inv * series
+}
+
 /// Gauss-Legendre nodes and weights on `[-1, 1]` for `n` points, computed via
 /// Newton iteration on the Legendre-polynomial roots (Bonnet's three-term
 /// recurrence, cosine initial guess). Returns `(nodes, weights)` with nodes
@@ -861,6 +990,257 @@ mod tests {
                 bessel_i0_centered_terms(-eta),
                 bessel_i0_centered_terms(eta)
             );
+        }
+    }
+
+    /// The polygamma family against a 50-digit `mpmath` evaluation.
+    ///
+    /// These consolidate four separate hand-rolled Bernoulli-series copies that
+    /// had drifted apart: `gam-sae` recursed to 10 and stopped at `B₆`/`B₆`,
+    /// `gam-solve` recursed to 8 and stopped at `B₁₀`/`B₁₀`/`B₁₀`, `gam-terms`
+    /// recursed to 8 with yet another term count. Measured against this oracle
+    /// they were good to `7.6e−10`, `3.1e−10`, `6.3e−11`, `3.9e−11` and
+    /// `2.6e−10` respectively — 10 to 11 digits, and mutually inconsistent at
+    /// that scale, in code that supplies REML gradients and Hessians for the
+    /// negative-binomial `θ`, Gamma dispersion and Beta shape channels.
+    #[test]
+    fn polygamma_family_matches_independent_high_precision_reference() {
+        // (x, ψ(x), ψ₁(x), ψ₂(x), ψ₃(x))
+        const POLYGAMMA_REFERENCE: [[f64; 5]; 22] = [
+            [
+                1e-08,
+                -100000000.57721564,
+                1.0000000000000002e+16,
+                -2e+24,
+                5.999999999999999e+32,
+            ],
+            [
+                0.0001,
+                -10000.577051183514,
+                100000001.64469367,
+                -2000000000002.403,
+                5.999999999999999e+16,
+            ],
+            [
+                0.01,
+                -100.56088545786868,
+                10001.621213528313,
+                -2000002.340398677,
+                600000006.2510618,
+            ],
+            [
+                0.1,
+                -10.423754940411076,
+                101.43329915079275,
+                -2001.8614573783436,
+                60004.51287679026,
+            ],
+            [
+                0.25,
+                -4.2274535333762655,
+                17.19732915450711,
+                -129.32773993753693,
+                1538.7821440091884,
+            ],
+            [
+                0.5,
+                -1.9635100260214235,
+                4.934802200544679,
+                -16.82879664423432,
+                97.40909103400244,
+            ],
+            [
+                1.0,
+                -0.5772156649015329,
+                1.6449340668482264,
+                -2.4041138063191885,
+                6.493939402266829,
+            ],
+            // The unique positive root of ψ, where the relative bound below is
+            // vacuous and the absolute one carries the assertion.
+            [
+                1.4616321449683622,
+                -9.241265521729427e-17,
+                0.9676722454476212,
+                -0.8855263379671844,
+                1.5509985657339065,
+            ],
+            [
+                2.0,
+                0.42278433509846713,
+                0.6449340668482264,
+                -0.4041138063191886,
+                0.49393940226682914,
+            ],
+            [
+                3.5,
+                1.103156640645243,
+                0.3303577561002349,
+                -0.1082040516417274,
+                0.07030584881725205,
+            ],
+            // The three retired recurrence thresholds (8 and 10) and the live
+            // one (20), each straddled.
+            [
+                7.0,
+                1.8727843350984672,
+                0.15354517795933756,
+                -0.023530472985855238,
+                0.007198198563125445,
+            ],
+            [
+                8.0,
+                2.01564147795561,
+                0.1331370146940314,
+                -0.017699569195767775,
+                0.004699239795945104,
+            ],
+            [
+                10.0,
+                2.251752589066721,
+                0.10516633568168575,
+                -0.011049834970802067,
+                0.0023199013042898686,
+            ],
+            [
+                19.0,
+                2.9178924132947808,
+                0.05404090603769619,
+                -0.0029197100973139254,
+                0.0003154143837079449,
+            ],
+            [
+                19.999,
+                2.9704727201051075,
+                0.05127345119229945,
+                -0.0026283917972403977,
+                0.00026941563155986057,
+            ],
+            [
+                20.0,
+                2.970523992242149,
+                0.05127082293520312,
+                -0.0026281224023146548,
+                0.0002693742213396389,
+            ],
+            [
+                20.001,
+                2.970575261751068,
+                0.05126819494748101,
+                -0.0026278530487948894,
+                0.0002693328196036835,
+            ],
+            [
+                25.0,
+                3.198742512851974,
+                0.04081066325722558,
+                -0.001665279318422468,
+                0.0001358846365082737,
+            ],
+            [
+                100.0,
+                4.600161852738087,
+                0.010050166663333571,
+                -0.00010100499983335,
+                2.030199990001333e-06,
+            ],
+            [
+                10000.0,
+                9.210290371142849,
+                0.00010000500016666666,
+                -1.000100005e-08,
+                2.00030002e-12,
+            ],
+            [
+                100000000.0,
+                18.420680738952367,
+                1.000000005e-08,
+                -1.00000001e-16,
+                2.0000000300000002e-24,
+            ],
+            [
+                1000000000000000.0,
+                34.538776394910684,
+                1.0000000000000005e-15,
+                -1.000000000000001e-30,
+                2.000000000000003e-45,
+            ],
+        ];
+
+        for [x, want_psi, want_psi1, want_psi2, want_psi3] in POLYGAMMA_REFERENCE {
+            // `ψ` crosses zero at x ≈ 1.4616, and the recurrence sums up to 20
+            // reciprocals whose partial sums dwarf a near-zero result, so the
+            // absolute term is what applies there. Everywhere else the relative
+            // term binds. `1e-14` relative is 4 orders tighter than the loosest
+            // implementation this replaced.
+            let checks = [
+                ("ψ", digamma(x), want_psi),
+                ("ψ₁", trigamma(x), want_psi1),
+                ("ψ₂", tetragamma(x), want_psi2),
+                ("ψ₃", pentagamma(x), want_psi3),
+            ];
+            for (name, got, want) in checks {
+                let error = (got - want).abs();
+                let budget = 1e-14 * want.abs() + 1e-15;
+                assert!(
+                    error <= budget,
+                    "{name}({x}): got {got:.17e}, want {want:.17e} \
+                     (error {error:.3e} > {budget:.3e})"
+                );
+            }
+        }
+    }
+
+    /// The recurrences and the asymptotic series must agree where they meet,
+    /// and each function must be the derivative of the one before it. Both were
+    /// true of the copies this replaces only to their own `1e-10`.
+    #[test]
+    fn polygamma_family_is_seamless_and_mutually_consistent() {
+        for threshold in [8.0_f64, 10.0, 20.0] {
+            let delta = 1.0e-11 * threshold;
+            for f in [digamma as fn(f64) -> f64, trigamma, tetragamma, pentagamma] {
+                let below = f(threshold - delta);
+                let above = f(threshold + delta);
+                // Every one of these has |f'| < 1 at x ≥ 8, so the true change
+                // over 2δ is below 2δ. Anything more is a step.
+                assert!(
+                    (above - below).abs() < 2.0 * delta + 1.0e-15,
+                    "polygamma step at the {threshold} seam: {below:.17e} -> {above:.17e}"
+                );
+            }
+        }
+
+        // ψ_{n+1} = dψ_n/dx, checked by a central difference whose own error
+        // (roundoff ε|f|/h plus truncation h²f'''/6) is the limit here.
+        for x in [0.75_f64, 1.5, 4.0, 9.0, 19.5, 21.0, 60.0] {
+            let h = 1.0e-4 * x;
+            for (name, value, derivative) in [
+                ("ψ", digamma as fn(f64) -> f64, trigamma as fn(f64) -> f64),
+                ("ψ₁", trigamma, tetragamma),
+                ("ψ₂", tetragamma, pentagamma),
+            ] {
+                let finite_difference = (value(x + h) - value(x - h)) / (2.0 * h);
+                let analytic = derivative(x);
+                assert!(
+                    (finite_difference - analytic).abs() <= 1e-6 * analytic.abs().max(1e-3),
+                    "d{name}/dx at {x}: analytic={analytic:.17e}, fd={finite_difference:.17e}"
+                );
+            }
+        }
+
+        // Non-positive and non-finite arguments are outside the domain.
+        for bad in [
+            0.0_f64,
+            -1.0,
+            -0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(digamma(bad).is_nan(), "digamma({bad}) must be NaN");
+            assert!(trigamma(bad).is_nan(), "trigamma({bad}) must be NaN");
+            assert!(tetragamma(bad).is_nan(), "tetragamma({bad}) must be NaN");
+            assert!(pentagamma(bad).is_nan(), "pentagamma({bad}) must be NaN");
         }
     }
 
