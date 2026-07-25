@@ -502,9 +502,19 @@ fn gaussian_identity_response_scale(
 /// the deterministic seed candidates are walked in their generated order, so the
 /// anchor stays a pure function of the problem in every branch.
 ///
-/// The warm-start slots are emptied on the way in and on the way out, so the
-/// anchor solve cannot inherit a caller-supplied β and the search — including the
-/// persistent restore that runs inside it — sees exactly the state it saw before.
+/// The warm-start slots are emptied on the way IN, so the anchor solve cannot
+/// inherit a caller-supplied β. They are deliberately NOT emptied on the way out:
+/// the β the anchor leaves behind is itself a function of (data, model spec), so
+/// letting the search start from it keeps both a cold and a warm run entering the
+/// search from the same predictor — and it is the same β the ρ = 0 reference solve
+/// used to leave there before this function existed, so the cold path is
+/// unchanged. It does mean `load_persistent_warm_start_once` finds an occupied
+/// slot and skips its restore, which is the point: that restore would hand the
+/// warm run a different starting β and a different set of adaptive LM/tolerance
+/// signals. Nothing is lost — the cached β still reaches the inner solve at the
+/// cached ρ through `OuterConfig::initial_inner_seed`, which installs it at
+/// exactly the outer coordinate that owns it.
+///
 /// The one precondition this function cannot enforce by clearing is that the
 /// on-disk session must not be open yet (the inner solve would reload the cached
 /// β mid-anchor), so that is checked and refused. The ρ-keyed eval/P-IRLS memos
@@ -589,13 +599,6 @@ pub(crate) fn freeze_lambda_search_nuisance_at_canonical_anchor(
              the outer criterion cannot be pinned before the seed cascade"
         );
     }
-    // Return the warm-start layer to the empty state the caller left it in. In
-    // particular `warm_start_beta` must be clear: `load_persistent_warm_start_once`
-    // skips the restore whenever a warm β is already present, so an anchor
-    // residue here would silently disable the persistent warm start it is this
-    // function's whole purpose to make harmless.
-    reml_state.clear_warm_start_predictor_state();
-    reml_state.clear_warm_start_adaptive_signals();
     Ok(())
 }
 

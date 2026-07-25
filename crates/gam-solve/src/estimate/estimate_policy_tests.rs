@@ -1851,13 +1851,25 @@ fn lambda_search_nuisance_freeze_is_a_function_of_data_and_spec_alone_2363() {
          state is the #2363 defect"
     );
 
-    // The anchor must also leave the warm-start slot empty:
-    // `load_persistent_warm_start_once` skips its restore whenever a warm β is
-    // already present, so an anchor residue would silently disable the very
-    // cache this function exists to make harmless.
-    assert!(
-        seeded.current_original_basis_beta().is_none(),
-        "the anchor must hand the search an empty warm-start slot"
+    // The predictor the anchor hands the search must be invariant too. It is
+    // deliberately left in place (it is what suppresses the cache-dependent
+    // persistent β restore), so it has to be the SAME β on both machines.
+    let pristine_seed = pristine
+        .current_original_basis_beta()
+        .expect("the anchor leaves its own β as the search's warm start");
+    let seeded_seed = seeded
+        .current_original_basis_beta()
+        .expect("the anchor leaves its own β as the search's warm start");
+    assert_eq!(
+        pristine_seed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        seeded_seed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        "the predictor the anchor hands the search must not depend on the donated warm β either"
     );
 
     // And it must refuse to run at all once the on-disk session is open: from
