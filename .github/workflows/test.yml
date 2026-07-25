@@ -547,7 +547,7 @@ jobs:
   # ---------------------------------------------------------------------------
   aggregate:
     name: Aggregate failures (MASTER_FAILURES.md)
-    needs: [build, rust-test, pyffi-test]
+    needs: [build, rust-test, pyffi-test, python-tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -566,6 +566,16 @@ jobs:
           path: agg/shards
           merge-multiple: true
 
+      # Kept OUT of `agg/shards` on purpose: `shard_logs` being non-empty is the
+      # aggregate's evidence that the Rust shard matrix ran, and a Python log
+      # mixed into that set would mask a skipped matrix.
+      - name: Download Python test logs
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: python-logs
+          path: agg/python
+
       - name: Build MASTER_FAILURES.md
         id: master
         shell: bash
@@ -580,6 +590,14 @@ jobs:
           # skipped job could never emit.
           BUILD_RESULT: ${{ needs.build.result }}
           RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          # The gam-pyffi unit job writes its own ARCHIVE_MISSING marker, but a
+          # job that never ran cannot write one — same hole, same fix.
+          PYFFI_TEST_RESULT: ${{ needs.pyffi-test.result }}
+          # The Python surface has no archive to be missing; its not-measured
+          # signal is "the job went red but produced no failure identity", which
+          # is what a failed wheel build or a step that died before pytest wrote
+          # a report looks like from here.
+          PYTHON_TESTS_RESULT: ${{ needs.python-tests.result }}
         run: |
           set -uo pipefail
           python3 - <<'PY'
@@ -640,6 +658,28 @@ jobs:
               s = set(); return [x for x in xs if not (x in s or s.add(x))]
           run_fails = dedup(run_fails); slow = dedup(slow)
 
+          # ---- Python API failures (from the python-tests job) ---------------
+          # Same row grammar as a nextest shard, so one regex serves both. Held
+          # in its own list because the two surfaces are measured independently:
+          # the Rust archive can be missing while Python ran fine, and vice
+          # versa, so one shared NOT MEASURED qualifier would lie about one of
+          # them.
+          python_fails = []
+          python_logs = sorted(set(glob.glob('agg/python/**/*.log', recursive=True) +
+                                   glob.glob('agg/python/*.log')))
+          python_text = []
+          for path in python_logs:
+              try:
+                  txt = open(path, errors='replace').read()
+              except OSError:
+                  continue
+              python_text.append(txt)
+              for raw in txt.splitlines():
+                  m = FAILRE.match(strip(raw))
+                  if m and m.group(1) != 'SLOW':
+                      python_fails.append((m.group(1), m.group(2), m.group(3)))
+          python_fails = dedup(python_fails)
+
           # ---- forbidden runtime-error signatures (preserved grep) -----------
           forbidden = [
               'P-IRLS INNER LOOP FAILED',
@@ -649,17 +689,25 @@ jobs:
               'seed candidates failed',
               'no candidate seeds passed outer startup validation',
           ]
+          # The forbidden-signature grep covers BOTH surfaces — these are engine
+          # errors and the Python suite drives the same engine. The
+          # ARCHIVE_MISSING marker check stays scoped to shard text, since that
+          # marker is a shard-authored token.
           joined = '\n'.join(all_text)
-          forbidden_hits = [p for p in forbidden if p in joined]
+          forbidden_hits = [p for p in forbidden if p in '\n'.join(all_text + python_text)]
           shard_marker_missing = 'ARCHIVE_MISSING' in joined
           # A skipped or failed archive build means the runtime surface was not
           # exercised, whether or not any shard lived long enough to say so.
           build_result = os.environ.get('BUILD_RESULT', '')
           rust_test_result = os.environ.get('RUST_TEST_RESULT', '')
+          pyffi_test_result = os.environ.get('PYFFI_TEST_RESULT', '')
+          python_tests_result = os.environ.get('PYTHON_TESTS_RESULT', '')
           build_did_not_succeed = build_result not in ('', 'success')
           shards_never_ran = rust_test_result == 'skipped' or not shard_logs
+          pyffi_never_ran = pyffi_test_result == 'skipped'
           archive_missing = (
-              shard_marker_missing or build_did_not_succeed or shards_never_ran
+              shard_marker_missing or build_did_not_succeed
+              or shards_never_ran or pyffi_never_ran
           )
           not_measured_reasons = [
               label
@@ -668,6 +716,32 @@ jobs:
                   (f'the shard matrix reported `{rust_test_result}`', rust_test_result == 'skipped'),
                   ('no shard log was collected at all', not shard_logs),
                   ('a shard reported ARCHIVE_MISSING', shard_marker_missing),
+                  (f'the gam-pyffi unit job reported `{pyffi_test_result}`', pyffi_never_ran),
+              )
+              if fired
+          ]
+
+          # The Python surface cannot report a missing archive — it builds its
+          # own wheel. Its false-green shape is different: the wheel step (or a
+          # bare `python tests/integration_*.py` step) fails, every later step is
+          # skipped, no report is ever written, and a naive reader sees zero
+          # Python failures. So: a red job that produced no identity means we
+          # know something broke and cannot say what. That is NOT MEASURED, not
+          # zero. A red job WITH identities is a genuine measurement.
+          python_ran = python_tests_result not in ('', 'skipped')
+          python_not_measured = (
+              not python_ran
+              or (python_tests_result != 'success' and not python_fails)
+          )
+          python_not_measured_reasons = [
+              label
+              for label, fired in (
+                  (f'the Python job reported `{python_tests_result}`', not python_ran),
+                  ('the Python job went red without recording a single failing test — '
+                   'a step before pytest (wheel build, CLI integration script) most '
+                   'likely died; read the job log',
+                   python_ran and python_tests_result != 'success' and not python_fails),
+                  ('no Python log was collected at all', python_ran and not python_logs),
               )
               if fired
           ]
@@ -693,8 +767,33 @@ jobs:
           out.append(counter('Compile failures', len(compile_errs), False))
           out.append(counter('Runtime test failures (FAIL/TIMEOUT/TERMINATING/LEAK)',
                              len(run_fails), True))
+          if python_not_measured:
+              out.append(f'- Python API test failures: **NOT MEASURED** '
+                         f'({len(python_fails)} recorded before the job stopped)')
+          else:
+              out.append(f'- Python API test failures: **{len(python_fails)}**')
           out.append(counter('Forbidden runtime signatures seen', len(forbidden_hits), True))
           out.append(counter('Slow/timeout notices (#1393)', len(slow), True))
+          out.append('')
+          # Per-surface coverage. Three jobs measure three disjoint surfaces and
+          # any one of them can go dark independently; a single headline number
+          # cannot say which. The Python row existed as a job status for months
+          # while its failures never reached this ledger — that is how the #1251
+          # FFI parity test stayed red and invisible from 2026-07-09 to 07-24.
+          def coverage(label, ok, detail):
+              return f'- {label}: **{"MEASURED" if ok else "NOT MEASURED"}** ({detail})'
+          out.append('Coverage:')
+          out.append(coverage('workspace shards', not archive_missing,
+                              f'build `{build_result or "?"}`, matrix `{rust_test_result or "?"}`'))
+          out.append(coverage('gam-pyffi unit tests', not pyffi_never_ran,
+                              f'job `{pyffi_test_result or "?"}`'))
+          out.append(coverage('Python API tests', not python_not_measured,
+                              f'job `{python_tests_result or "?"}`'))
+          if python_not_measured:
+              out.append('')
+              out.append('> NOTE: the Python surface was NOT measured — '
+                         + '; '.join(python_not_measured_reasons)
+                         + '. The Python counter above is not a result.')
           if archive_missing:
               out.append('')
               out.append('> NOTE: the runtime surface was NOT measured — '
@@ -728,6 +827,17 @@ jobs:
               out.append('_None._')
           out.append('')
 
+          out.append('## Python API test failures')
+          out.append('')
+          if python_fails:
+              for status, binid, test in python_fails:
+                  out.append(f'- **{status}** `{binid}` :: `{test}`')
+          elif python_not_measured:
+              out.append('_Not measured — see the note above._')
+          else:
+              out.append('_None._')
+          out.append('')
+
           out.append('## Forbidden runtime-error signatures')
           out.append('')
           if forbidden_hits:
@@ -755,7 +865,7 @@ jobs:
               open(summary, 'a').write(md)
 
           ghout = os.environ.get('GITHUB_OUTPUT')
-          total_fail = len(compile_errs) + len(run_fails)
+          total_fail = len(compile_errs) + len(run_fails) + len(python_fails)
           if ghout:
               open(ghout, 'a').write(f'failures={total_fail}\n')
               # A missing archive with no captured compile error scores zero on
@@ -763,6 +873,8 @@ jobs:
               # for a workspace that never built and never ran. An absent
               # measurement is not a passing one — fail on it explicitly.
               open(ghout, 'a').write(f'archive_missing={"1" if archive_missing else "0"}\n')
+              open(ghout, 'a').write(
+                  f'python_not_measured={"1" if python_not_measured else "0"}\n')
           PY
 
       - name: Upload MASTER_FAILURES.md
@@ -782,12 +894,18 @@ jobs:
           n="${n:-0}"
           missing="${{ steps.master.outputs.archive_missing }}"
           missing="${missing:-0}"
+          py_missing="${{ steps.master.outputs.python_not_measured }}"
+          py_missing="${py_missing:-0}"
           if [ "$n" -gt 0 ]; then
-            echo "::error::${n} total failures (compile + runtime). See the MASTER_FAILURES.md artifact."
+            echo "::error::${n} total failures (compile + runtime + Python). See the MASTER_FAILURES.md artifact."
             exit 1
           fi
           if [ "$missing" = "1" ]; then
-            echo "::error::At least one shard had no test archive, so the runtime surface was not measured. Zero collected failures here means 'not measured', not 'green'. See the MASTER_FAILURES.md and build-logs artifacts."
+            echo "::error::The runtime surface was not measured. Zero collected failures here means 'not measured', not 'green'. MASTER_FAILURES.md lists which condition fired (archive build, shard matrix, a shard's ARCHIVE_MISSING marker, or the gam-pyffi job); see it and the build-logs artifact."
+            exit 1
+          fi
+          if [ "$py_missing" = "1" ]; then
+            echo "::error::The Python surface was not measured (the python-tests job did not run, or went red without recording a failing test). Zero Python failures here means 'not measured', not 'green'. See MASTER_FAILURES.md and the python-tests job log."
             exit 1
           fi
           echo "No failures collected."
@@ -858,35 +976,50 @@ jobs:
         # gamfit"` and compares Rust-engine vs Python-binding fit output. It
         # requires the maturin-built `gamfit._rust` extension installed above,
         # so it is excluded from the Rust-only shards and run here (#1251).
+        #
+        # `tee`d into python-logs/ so the aggregate job can list this test's
+        # failure identity like any other. `set -o pipefail` is REQUIRED: the
+        # default shell is `bash -e` with no pipefail, so a bare `cmd | tee`
+        # would report tee's status and turn a red parity test green — the exact
+        # false-green class this instrumentation exists to remove.
+        shell: bash
         run: |
+          set -uo pipefail
+          mkdir -p python-logs
+          status=0
           cargo nextest run --all-features \
             --test pyffi \
-            -E 'test(python_rust_ffi_parity_gaussian_linear_case)'
+            -E 'test(python_rust_ffi_parity_gaussian_linear_case)' \
+            2>&1 | tee python-logs/parity.log || status="${PIPESTATUS[0]}"
+          exit "$status"
 
+      # Every pytest step below writes a JUnit report. This is purely additive
+      # (no pipe, so no exit-status change) and gives the aggregate per-test
+      # identities instead of a job-level pass/fail bit.
       - name: Run Python API + pipeline smoke tests
-        run: python -m pytest tests/test_python_api.py -v --tb=short
+        run: python -m pytest tests/test_python_api.py -v --tb=short --junitxml=python-reports/api.xml
 
       - name: Run Python tables tests
-        run: python -m pytest tests/test_tables.py -v --tb=short
+        run: python -m pytest tests/test_tables.py -v --tb=short --junitxml=python-reports/tables.xml
 
       - name: Run numeric by-variable predict-clip contract
-        run: python -m pytest tests/test_bug_hunt_numeric_by_variable_clamped_to_training_range_at_predict.py -v --tb=short
+        run: python -m pytest tests/test_bug_hunt_numeric_by_variable_clamped_to_training_range_at_predict.py -v --tb=short --junitxml=python-reports/predict_clip.xml
 
       - name: Run curv() constant-curvature sign-recovery contract (#1464)
-        run: python -m pytest tests/test_bug_hunt_curv_smooth_hyperbolic_recovered_as_spherical.py -v --tb=short
+        run: python -m pytest tests/test_bug_hunt_curv_smooth_hyperbolic_recovered_as_spherical.py -v --tb=short --junitxml=python-reports/curv.xml
 
       - name: Run weighted sample_replicates weight-column contract (#2033)
-        run: python -m pytest tests/test_bug_hunt_2033_sample_replicates_weighted_model_drops_weight_column.py -v --tb=short
+        run: python -m pytest tests/test_bug_hunt_2033_sample_replicates_weighted_model_drops_weight_column.py -v --tb=short --junitxml=python-reports/sample_replicates.xml
 
       - name: Run Tweedie estimated-power conditional coverage contract (#2026)
-        run: python -m pytest tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage.py -v --tb=short
+        run: python -m pytest tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage.py -v --tb=short --junitxml=python-reports/tweedie.xml
 
       - name: Run survival API regression + save/load roundtrip tests
         run: |
           python -m pytest \
             tests/test_survival_api_regressions.py \
             tests/test_survival_save_load_roundtrip.py \
-            -v --tb=short
+            -v --tb=short --junitxml=python-reports/survival.xml
 
       - name: Run benchmark configuration / mapping tests
         run: |
@@ -895,11 +1028,11 @@ jobs:
             tests/bench_run_suite_optional_imports_test.py \
             tests/bench_fuzz_vs_mgcv_test.py \
             tests/bench_large_scale_runner_test.py \
-            -v --tb=short
+            -v --tb=short --junitxml=python-reports/bench.xml
 
       - name: Guard against orphaned Python tests (#1512)
         run: |
-          python -m pytest tests/test_ci_no_orphan_python_tests_1512.py -v --tb=short
+          python -m pytest tests/test_ci_no_orphan_python_tests_1512.py -v --tb=short --junitxml=python-reports/orphan_guard.xml
 
       - name: Build gam release binary
         run: cargo build --release -p gam-cli
@@ -923,4 +1056,65 @@ jobs:
           python -m pytest tests/ \
             -m "not slow" \
             -n auto \
-            --tb=short -q
+            --tb=short -q --junitxml=python-reports/full_suite.xml
+
+      # Turn this job's measurements into ONE log in the same row format the
+      # aggregate already parses for nextest shards, so Python failures become
+      # first-class entries in MASTER_FAILURES.md instead of a job status nobody
+      # reads. `always()`: a job that died mid-suite still publishes whatever it
+      # managed to measure, and the aggregate distinguishes "measured, N red"
+      # from "nothing measured" by whether this log carries any row at all.
+      - name: Collect Python failure identities
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p python-logs
+          python3 - <<'PY'
+          import glob, os, xml.etree.ElementTree as ET
+
+          rows = []
+          for path in sorted(glob.glob('python-reports/*.xml')):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception:
+                  # Deliberately broad: this step exists so measurements are
+                  # never lost, so ONE odd report must not take the rest of the
+                  # ledger down with it (a truncated write, an unreadable file,
+                  # a parser that cannot load its C extension). A report we
+                  # cannot read is a measurement we do not have — say so as a
+                  # row rather than dropping it silently.
+                  rows.append(f'        FAIL [   0.000s] python::{path} report-unreadable')
+                  continue
+              for case in root.iter('testcase'):
+                  bad = [c for c in case if c.tag in ('failure', 'error')]
+                  if not bad:
+                      continue
+                  # `file` is pytest's source path; `classname` is the dotted
+                  # fallback for reports that omit it.
+                  binid = case.get('file') or (case.get('classname') or '?').replace('.', '/')
+                  name = case.get('name') or '?'
+                  status = 'FAIL' if bad[0].tag == 'failure' else 'ABORT'
+                  seconds = case.get('time') or '0'
+                  try:
+                      stamp = f'{float(seconds):8.3f}s'
+                  except ValueError:
+                      stamp = '   0.000s'
+                  rows.append(f'        {status} [{stamp}] python::{binid} {name}')
+
+          with open('python-logs/pytest.log', 'w') as fh:
+              fh.write('\n'.join(rows) + ('\n' if rows else ''))
+          print(f'collected {len(rows)} Python failure row(s)')
+          PY
+
+      - name: Upload Python test logs
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          # Deliberately NOT named `shard-logs-*`: the aggregate treats the
+          # presence of a shard log as evidence the Rust shard matrix ran, and
+          # a Python log landing in that set would mask a skipped matrix.
+          name: python-logs
+          path: python-logs/
+          retention-days: 7
+          if-no-files-found: warn
