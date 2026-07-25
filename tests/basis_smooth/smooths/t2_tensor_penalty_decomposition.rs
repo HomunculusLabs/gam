@@ -55,49 +55,67 @@ fn t2_uses_separable_penalty_decomposition_not_te_marginal_alias() {
     let te_term = &te.design.smooth.terms[0];
     let t2_term = &t2.design.smooth.terms[0];
 
-    assert_eq!(
-        te_term.active_penalties.len(),
-        2,
-        "te has one penalty per margin"
-    );
-    assert_eq!(
-        t2_term.active_penalties.len(),
-        3,
-        "2D t2 with one marginal penalty per axis has range-null, null-range, and range-range components"
-    );
-    assert_ne!(
-        te_term.active_penalties.len(),
-        t2_term.active_penalties.len(),
-        "t2 must not be a te penalty alias"
-    );
+    // Classify by SOURCE rather than counting an undifferentiated total. Both
+    // term types also carry one shared `TensorGlobalRidge` block, so a bare
+    // `active_penalties.len()` no longer measures the decomposition: this test
+    // read te as 3 and expected 2 purely because of that shared block, while
+    // the #1185 structure it exists to guard was intact the whole time.
+    fn classify(penalties: &[gam::basis::ActivePenalty]) -> (Vec<usize>, Vec<Vec<usize>>, usize) {
+        let mut marginal: Vec<usize> = Vec::new();
+        let mut separable: Vec<Vec<usize>> = Vec::new();
+        let mut global_ridge = 0usize;
+        for penalty in penalties {
+            match &penalty.info.source {
+                PenaltySource::TensorMarginal { dim } => marginal.push(*dim),
+                PenaltySource::TensorSeparable { penalized_margins } => {
+                    separable.push(penalized_margins.clone())
+                }
+                PenaltySource::TensorGlobalRidge => global_ridge += 1,
+                other => panic!("unexpected tensor penalty source: {other:?}"),
+            }
+        }
+        marginal.sort_unstable();
+        separable.sort();
+        (marginal, separable, global_ridge)
+    }
 
+    let (te_marginal, te_separable, te_ridge) = classify(&te_term.active_penalties);
+    let (t2_marginal, t2_separable, t2_ridge) = classify(&t2_term.active_penalties);
+
+    // `te`: one overlapping Kronecker-sum penalty per margin, and no separable
+    // block at all.
+    assert_eq!(te_marginal, vec![0, 1], "te has one penalty per margin");
     assert!(
-        te_term
-            .active_penalties
-            .iter()
-            .all(|penalty| {
-                matches!(
-                    &penalty.info.source,
-                    PenaltySource::TensorMarginal { .. }
-                )
-            }),
-        "te penalties should retain marginal Kronecker-sum sources"
+        te_separable.is_empty(),
+        "te must not emit separable tensor-subspace penalties: {te_separable:?}"
     );
 
-    let mut separable_components = t2_term
-        .active_penalties
-        .iter()
-        .map(|penalty| match &penalty.info.source {
-            PenaltySource::TensorSeparable { penalized_margins } => penalized_margins.clone(),
-            other => panic!("unexpected t2 penalty source: {other:?}"),
-        })
-        .collect::<Vec<_>>();
-    separable_components.sort();
+    // `t2`: the marginal range/null tensor subspaces, and no marginal
+    // Kronecker-sum block at all.
     assert_eq!(
-        separable_components,
+        t2_separable,
         vec![vec![0], vec![0, 1], vec![1]],
         "t2 should split the coefficient space by marginal range/null tensor subspaces"
     );
+    assert!(
+        t2_marginal.is_empty(),
+        "t2 must not emit marginal Kronecker-sum penalties: {t2_marginal:?}"
+    );
+
+    // The alias guard, stated on KIND rather than on a count. Comparing the two
+    // lengths -- what this test used to do -- passes vacuously the moment the
+    // two happen to agree, which is exactly the position `te` drifted into when
+    // it picked up the shared ridge. Disjointness of the structural sources
+    // cannot be satisfied by an aliased implementation at any count.
+    assert!(
+        te_separable.is_empty() && t2_marginal.is_empty(),
+        "t2 must not be a te penalty alias: te={te_separable:?}, t2={t2_marginal:?}"
+    );
+
+    // The shared block is shared: exactly one on each, so neither term type is
+    // quietly accumulating extra global shrinkage.
+    assert_eq!(te_ridge, 1, "te carries exactly one global tensor ridge");
+    assert_eq!(t2_ridge, 1, "t2 carries exactly one global tensor ridge");
 
     let t2_width = t2_term.coeff_range.len();
     assert!(
