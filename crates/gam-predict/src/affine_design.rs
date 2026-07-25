@@ -220,6 +220,39 @@ fn checked_affine_design(
     })
 }
 
+/// Why a saved model has no affine coefficient-frame design at all, or `None`
+/// when [`fitted_standard_affine_design`] can serve it.
+///
+/// This is a property of the fitted model alone, not of any prediction rows, so
+/// a frontend that must materialise those rows before it can call
+/// [`fitted_standard_affine_design`] can decline first — with these words, not
+/// its own. The decision and its wording live here so the Rust API, the CLI,
+/// and the Python surface cannot drift apart on which models are refusable or
+/// why (SPEC: one source of truth, behaviour parity).
+pub fn affine_design_unavailable_reason(model: &FittedModel) -> Result<Option<String>, String> {
+    // A scan-routed model intentionally owns no finite B-spline coefficient
+    // frame: its exact O(n) state-space predictor has no coefficient vector to
+    // multiply, so the refusal is structural rather than a missing feature
+    // (#1046). Checked before the model class because a scan fit is otherwise
+    // an ordinary standard model.
+    if let Some((feature_column, _)) = model.saved_spline_scan().map_err(|error| error.to_string())?
+    {
+        return Ok(Some(format!(
+            "s({feature_column}) is fit by the exact O(n) state-space spline scan, which does not \
+             have a finite coefficient-frame design; design_matrix() is unavailable for this \
+             fitted model."
+        )));
+    }
+    if model.predict_model_class() != PredictModelClass::Standard {
+        return Ok(Some(format!(
+            "design_matrix supports standard GAM models; got '{}'. For other classes use \
+             Model.predict, whose saved predictor can contain multiple coupled parameter surfaces.",
+            model.predict_model_class().name()
+        )));
+    }
+    Ok(None)
+}
+
 /// Build the exact fitted affine predictor for a standard saved model.
 ///
 /// Ordinary standard GAMs return their model offset, full design, and full
@@ -239,11 +272,8 @@ pub fn fitted_standard_affine_design(
     model: &FittedModel,
     input: &PredictInput,
 ) -> Result<AffineDesign, String> {
-    if model.predict_model_class() != PredictModelClass::Standard {
-        return Err(format!(
-            "affine design supports standard GAM models; got '{}'",
-            model.predict_model_class().name()
-        ));
+    if let Some(reason) = affine_design_unavailable_reason(model)? {
+        return Err(reason);
     }
     let fit =
         fit_result_from_saved_model_for_prediction(model).map_err(|error| error.to_string())?;

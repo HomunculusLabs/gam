@@ -9009,24 +9009,12 @@ fn affine_design_for_dataset(
     model: &FittedModel,
     dataset: EncodedDataset,
 ) -> Result<DenseAffineDesign, String> {
-    // A scan-routed model intentionally owns no finite B-spline coefficient
-    // frame.  Its exact state-space predictor therefore has no affine design to
-    // expose; keep the refusal structural and actionable (#1046).
-    if let Some(scan) = scan_introspection(model)? {
-        return Err(format!(
-            "{} is fit by the exact O(n) state-space spline scan, which does not \
-             have a finite coefficient-frame design; design_matrix() is unavailable \
-             for this fitted model.",
-            scan_smooth_label(&scan)
-        ));
-    }
-    if model.predict_model_class() != PredictModelClass::Standard {
-        return Err(format!(
-            "design_matrix supports standard GAM models; got '{}'. For other \
-             classes use Model.predict, whose saved predictor can contain \
-             multiple coupled parameter surfaces.",
-            prediction_model_class_label(model)
-        ));
+    // Which fitted models have no affine coefficient frame — and the wording of
+    // that refusal — is the core's decision, not this boundary's. Ask before
+    // materialising prediction rows so a scan-routed model declines with the
+    // structural reason instead of a row-building error (#1046, SPEC parity).
+    if let Some(reason) = gam_predict::affine_design_unavailable_reason(model)? {
+        return Err(reason);
     }
 
     let col_map = dataset.column_map();
