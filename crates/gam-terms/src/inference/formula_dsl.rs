@@ -2598,7 +2598,7 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
             }
             return Ok(ParsedTerm::Interaction {
                 vars: sorted,
-                double_penalty: true,
+                double_penalty: false,
             });
         }
     }
@@ -2636,7 +2636,8 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
                 return Ok(ParsedTerm::Linear {
                     name: vars[0].clone(),
                     explicit: true,
-                    double_penalty: option_bool_strict(&options, "double_penalty")?.unwrap_or(true),
+                    double_penalty: option_bool_strict(&options, "double_penalty")?
+                        .unwrap_or(false),
                     coefficient_min,
                     coefficient_max,
                 });
@@ -2652,7 +2653,8 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
                 return Ok(ParsedTerm::Linear {
                     name: vars[0].clone(),
                     explicit: true,
-                    double_penalty: option_bool_strict(&options, "double_penalty")?.unwrap_or(true),
+                    double_penalty: option_bool_strict(&options, "double_penalty")?
+                        .unwrap_or(false),
                     coefficient_min: Some(0.0),
                     coefficient_max: None,
                 });
@@ -2668,7 +2670,8 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
                 return Ok(ParsedTerm::Linear {
                     name: vars[0].clone(),
                     explicit: true,
-                    double_penalty: option_bool_strict(&options, "double_penalty")?.unwrap_or(true),
+                    double_penalty: option_bool_strict(&options, "double_penalty")?
+                        .unwrap_or(false),
                     coefficient_min: None,
                     coefficient_max: Some(0.0),
                 });
@@ -3075,7 +3078,7 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
                 let (coefficient_min, coefficient_max) =
                     parse_linear_constraint_bounds(&options, raw)?;
                 let double_penalty =
-                    option_bool_strict(&options, "double_penalty")?.unwrap_or(true);
+                    option_bool_strict(&options, "double_penalty")?.unwrap_or(false);
                 if vars[0].contains(':') {
                     if coefficient_min.is_some() || coefficient_max.is_some() {
                         return Err(FormulaDslError::IncompatibleTerm {
@@ -3143,7 +3146,7 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
     Ok(ParsedTerm::Linear {
         name: ident.to_string(),
         explicit: false,
-        double_penalty: true,
+        double_penalty: false,
         coefficient_min: None,
         coefficient_max: None,
     })

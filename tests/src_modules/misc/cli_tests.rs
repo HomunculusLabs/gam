@@ -2995,7 +2995,7 @@ fn parse_bounded_linear_term_defaults_to_no_prior() {
                 BoundedCoefficientPriorSpec::None => {}
                 other => panic!("unexpected prior: {other:?}"),
             }
-            assert!(*double_penalty);
+            assert!(!*double_penalty);
         }
         other => panic!("expected bounded linear term, got {other:?}"),
     }
@@ -3022,7 +3022,7 @@ fn parse_bounded_linear_termwith_center_pull() {
                 }
                 other => panic!("unexpected prior: {other:?}"),
             }
-            assert!(*double_penalty);
+            assert!(!*double_penalty);
         }
         other => panic!("expected bounded linear term, got {other:?}"),
     }
@@ -3048,7 +3048,7 @@ fn parse_bounded_linear_termwith_uniform_prior() {
                 BoundedCoefficientPriorSpec::Uniform => {}
                 other => panic!("unexpected prior: {other:?}"),
             }
-            assert!(*double_penalty);
+            assert!(!*double_penalty);
         }
         other => panic!("unexpected term: {other:?}"),
     }
@@ -3363,7 +3363,7 @@ fn parse_linear_termwith_box_constraints() {
         } => {
             assert_eq!(name, "mu_hat");
             assert!(*explicit);
-            assert!(*double_penalty);
+            assert!(!*double_penalty);
             assert_eq!(*coefficient_min, Some(0.0));
             assert_eq!(*coefficient_max, Some(1.0));
         }
@@ -3385,7 +3385,7 @@ fn parse_linear_termwith_box_constraints() {
 }
 
 #[test]
-fn build_termspec_makes_parametric_linear_terms_recoverable_by_default() {
+fn build_termspec_leaves_parametric_linear_terms_unpenalized_by_default() {
     let parsed = parse_formula("y ~ x + linear(z) + nonnegative(w)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "formula", e));
     let ds = Dataset {
@@ -3433,13 +3433,28 @@ fn build_termspec_makes_parametric_linear_terms_recoverable_by_default() {
 
     assert_eq!(spec.linear_terms.len(), 3);
     assert!(
-        spec.linear_terms.iter().all(|term| term.double_penalty),
-        "non-intercept linear terms should recover zero by default: {:?}",
+        spec.linear_terms.iter().all(|term| !term.double_penalty),
+        "parametric linear terms should be unpenalized by default: {:?}",
         spec.linear_terms
             .iter()
             .map(|term| (&term.name, term.double_penalty))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn parametric_double_penalty_is_an_explicit_opt_in() {
+    let parsed = parse_formula("y ~ linear(x, double_penalty=true) + z:w")
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "formula", e));
+    assert_eq!(parsed.terms.len(), 2);
+    match &parsed.terms[0] {
+        ParsedTerm::Linear { double_penalty, .. } => assert!(*double_penalty),
+        other => panic!("expected explicit linear term, got {other:?}"),
+    }
+    match &parsed.terms[1] {
+        ParsedTerm::Interaction { double_penalty, .. } => assert!(!*double_penalty),
+        other => panic!("expected bare interaction term, got {other:?}"),
+    }
 }
 
 #[test]
