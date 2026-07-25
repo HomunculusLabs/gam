@@ -315,4 +315,96 @@ mod spatial_length_scale_monotone_tests {
             &fit_opts,
         );
     }
+
+    /// #2454 MEASUREMENT (reports, never fails): is a penalty block INDEFINITE?
+    ///
+    /// #2454 measures `∂V/∂ρ = −c·λ` exactly on this fixture family (c = 2.87e-9,
+    /// ratio → e over eight e-folds), i.e. `∂V/∂λ = −c` is a CONSTANT NEGATIVE
+    /// derivative, so `V` is linear in λ and unbounded below.
+    ///
+    /// The only term in a REML criterion that is linear in λ is the penalty
+    /// term `½·λ·βᵀSₖβ/φ`, whose slope is `+½βᵀSₖβ/φ`. That slope is
+    /// non-negative **iff `Sₖ` is positive semidefinite**. A constant NEGATIVE
+    /// slope therefore requires `βᵀSₖβ < 0`, which requires an INDEFINITE
+    /// penalty block — there is no other source.
+    ///
+    /// This fixture is where that is most likely: `length_scale = 12.0` against
+    /// data spanning `x0 ∈ [0,1]`, `x1 ∈ [−1,1]`, so every pair of points lies
+    /// within ~0.17 length-scales and the Matérn kernel matrix is nearly
+    /// rank-1. A penalty assembled as a difference of operators loses PSD-ness
+    /// to rounding in exactly that regime.
+    ///
+    /// Reports the extreme eigenvalues of every canonical penalty block, and
+    /// the ratio `|λ_min| / λ_max` so a merely tiny-but-negative eigenvalue is
+    /// distinguishable from a structurally indefinite one. If any `λ_min` is
+    /// negative beyond symmetric-eigensolver round-off, #2454's mechanism is
+    /// identified.
+    #[test]
+    fn zz_measure_penalty_block_definiteness_2454() {
+        use gam_linalg::faer_ndarray::FaerEigh;
+        let n = 60usize;
+        let d = 2usize;
+        let mut data = Array2::<f64>::zeros((n, d));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x0 = i as f64 / (n as f64 - 1.0);
+            let x1 = (i as f64 * 0.17).sin();
+            data[[i, 0]] = x0;
+            data[[i, 1]] = x1;
+            y[i] = (3.0 * x0).cos() + 0.35 * x1;
+        }
+        let spec = TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                name: "matern".to_string(),
+                basis: SmoothBasisSpec::Matern {
+                    feature_cols: vec![0, 1],
+                    spec: MaternBasisSpec {
+                        periodic: None,
+                        center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                        length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                        nu: MaternNu::FiveHalves,
+                        include_intercept: false,
+                        double_penalty: true,
+                        identifiability: MaternIdentifiability::CenterSumToZero,
+                        aniso_log_scales: None,
+                    },
+                    input_scale: None,
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        };
+        let _ = &y;
+        let design = build_term_collection_design(data.view(), &spec)
+            .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+        eprintln!(
+            "[zz-psd-2454] penalties={} design={}x{}",
+            design.penalties.len(),
+            design.design.nrows(),
+            design.design.ncols()
+        );
+        for (k, cp) in design.penalties.iter().enumerate() {
+            let local = &cp.local;
+            let (evals, _evecs): (Array1<f64>, Array2<f64>) = local
+                .eigh(faer::Side::Lower)
+                .unwrap_or_else(|e| panic!("penalty {k} eigh failed: {e:?}"));
+            let lo = evals.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = evals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let negatives = evals.iter().filter(|v| **v < 0.0).count();
+            eprintln!(
+                "[zz-psd-2454] penalty {k} cols={:?} dim={} lmin={:+.6e} lmax={:+.6e} \
+                 |lmin|/lmax={:.3e} negatives={} INDEFINITE={}",
+                cp.col_range,
+                local.nrows(),
+                lo,
+                hi,
+                if hi > 0.0 { lo.abs() / hi } else { f64::NAN },
+                negatives,
+                lo < 0.0
+            );
+        }
+    }
+
 }
