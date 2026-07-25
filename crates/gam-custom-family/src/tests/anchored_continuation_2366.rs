@@ -237,22 +237,40 @@ fn production_fit_is_independent_of_the_caller_seed_2366() {
     let family = TiltedDoubleWellFamily { tilt: TILT };
     let options = double_well_options();
     let fit = |seed: f64| {
-        fit_custom_family(&family, &[double_well_spec(seed)], &options)
-            .expect("double-well fit")
-            .block_states[0]
-            .beta[0]
+        let result = fit_custom_family(&family, &[double_well_spec(seed)], &options)
+            .expect("double-well fit");
+        (result.block_states[0].beta[0], result.log_lambdas[0])
     };
 
-    // CONTROL: two runs from the SAME seed. Whatever this run-to-run difference
-    // is, it is not caused by the seed, so it is the floor against which the
-    // cross-seed difference has to be read.
-    let repeat_a = fit(2.0);
-    let repeat_b = fit(2.0);
-    let repeat_gap = (repeat_a - repeat_b).abs();
+    // CONTROL: two runs from the SAME seed must be bitwise identical. Without
+    // this, a cross-seed bound stated at a tolerance could be satisfied by a
+    // run-to-run wobble that has nothing to do with the seed, and the test would
+    // stop measuring what it claims to measure.
+    let (repeat_a, _) = fit(2.0);
+    let (repeat_b, _) = fit(2.0);
+    assert_eq!(
+        repeat_a.to_bits(),
+        repeat_b.to_bits(),
+        "two fits of the same problem from the same seed disagree ({repeat_a} vs \
+         {repeat_b}), so this fixture cannot attribute any difference to the seed"
+    );
 
-    let from_positive = fit(2.0);
-    let from_negative = fit(-2.0);
+    let (from_positive, rho_positive) = fit(2.0);
+    let (from_negative, rho_negative) = fit(-2.0);
     let cross_seed_gap = (from_positive - from_negative).abs();
+    // MEASURED (#2366 increment 3): the same-seed control above is bitwise
+    // identical, so the run is deterministic — yet the certified ρ still moves
+    // with the seed by ≈1.3e-13 (1.6240302769989847 vs 1.6240302769991115).
+    // That localizes the residual INSIDE the outer search rather than below it:
+    // some evaluation on the search path still reaches the caller's coefficients
+    // instead of the anchored seed. Bounding ρ here as well as β keeps that
+    // channel measured rather than merely assumed closed.
+    let rho_gap = (rho_positive - rho_negative).abs();
+    assert!(
+        rho_gap <= options.outer_tol * (1.0 + rho_positive.abs()),
+        "the certified smoothing parameter depends on the caller's seed beyond \
+         the outer tolerance: {rho_positive} vs {rho_negative} (gap {rho_gap:.3e})"
+    );
 
     // The qualitative property: both seeds select the SAME branch. Before the
     // anchored continuation these two seeds converged into opposite wells, so
@@ -267,7 +285,7 @@ fn production_fit_is_independent_of_the_caller_seed_2366() {
         cross_seed_gap <= options.inner_tol * (1.0 + from_positive.abs()),
         "the fitted coefficient still depends on the caller's seed beyond the \
          inner solve's own resolution: {from_positive} vs {from_negative} \
-         (gap {cross_seed_gap:.3e}, same-seed repeat gap {repeat_gap:.3e})"
+         (gap {cross_seed_gap:.3e})"
     );
 }
 

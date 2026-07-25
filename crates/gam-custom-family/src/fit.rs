@@ -893,13 +893,20 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
     if rho_anchor.len() != rho_target.len() {
         return None;
     }
+    let path = ContinuationPath {
+        family,
+        specs,
+        options,
+        layout,
+        rho_prior,
+        rho_anchor,
+        rho_target,
+    };
     let mut coarser: Option<ConstrainedWarmStart> = None;
     let mut previous_discrepancy: Option<f64> = None;
     let mut steps = 1usize;
     loop {
-        let endpoint = anchored_continuation_pass(
-            family, specs, options, layout, rho_prior, rho_anchor, rho_target, steps,
-        )?;
+        let endpoint = path.sweep(steps)?;
         if let Some(previous) = coarser.as_ref() {
             let discrepancy = continuation_endpoint_discrepancy(previous, &endpoint)?;
             if discrepancy <= options.inner_tol {
@@ -944,60 +951,69 @@ pub(crate) fn anchored_continuation_seed<F: CustomFamily + Clone + Send + Sync +
     }
 }
 
-/// One continuation sweep at a fixed discretization: solve the inner problem at
-/// each waypoint, carrying the previous mode forward as the predictor.
+/// The segment in ρ that the continuation follows, together with everything
+/// needed to solve at a point on it.
 ///
-/// The sweep starts AT the anchor (`step == 0`). That first solve is the one
-/// that makes the whole construction well defined: it is the only corrector that
-/// runs from the caller's coefficients, and at the anchor every penalized term
-/// sits on its penalty nullspace, so the surviving problem has a single mode and
-/// the caller's seed cannot select anything. Every later waypoint is warm-started
-/// from the previous one, so the branch is carried forward rather than
-/// rediscovered.
-///
-/// The final waypoint uses `rho_target` verbatim rather than the reconstructed
-/// `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the requested ρ*
-/// bitwise, because everything downstream binds the mode and its ρ as one
-/// identity.
-fn anchored_continuation_pass<F: CustomFamily + Clone + Send + Sync + 'static>(
-    family: &F,
-    specs: &[ParameterBlockSpec],
-    options: &BlockwiseFitOptions,
-    layout: &PenaltyLabelLayout,
-    rho_prior: &gam_problem::RhoPrior,
-    rho_anchor: &Array1<f64>,
-    rho_target: &Array1<f64>,
-    steps: usize,
-) -> Option<ConstrainedWarmStart> {
-    let mut carried: Option<ConstrainedWarmStart> = None;
-    for step in 0..=steps {
-        let waypoint = if step == steps {
-            rho_target.clone()
-        } else if step == 0 {
-            rho_anchor.clone()
-        } else {
-            let t = step as f64 / steps as f64;
-            Array1::from_shape_fn(rho_target.len(), |j| {
-                rho_anchor[j] + t * (rho_target[j] - rho_anchor[j])
-            })
-        };
-        let eval = outerobjectivegradienthessian_labeled(
-            family,
-            specs,
-            options,
-            layout,
-            &waypoint,
-            carried.as_ref(),
-            rho_prior,
-            EvalMode::ValueOnly,
-        )
-        .ok()?;
-        if !eval.inner_converged || !eval.objective.is_finite() {
-            return None;
+/// This exists so a sweep is `path.sweep(steps)` rather than an eight-argument
+/// call: the seven parts are one object — a path — not seven independent knobs,
+/// and naming it that way keeps the endpoints from being transposed.
+struct ContinuationPath<'a, F> {
+    family: &'a F,
+    specs: &'a [ParameterBlockSpec],
+    options: &'a BlockwiseFitOptions,
+    layout: &'a PenaltyLabelLayout,
+    rho_prior: &'a gam_problem::RhoPrior,
+    rho_anchor: &'a Array1<f64>,
+    rho_target: &'a Array1<f64>,
+}
+
+impl<F: CustomFamily + Clone + Send + Sync + 'static> ContinuationPath<'_, F> {
+    /// One continuation sweep at a fixed discretization: solve the inner problem
+    /// at each waypoint, carrying the previous mode forward as the predictor.
+    ///
+    /// The sweep starts AT the anchor (`step == 0`). That first solve is the one
+    /// that makes the whole construction well defined: it is the only corrector
+    /// that runs from the caller's coefficients, and at the anchor every
+    /// penalized term sits on its penalty nullspace, so the surviving problem
+    /// has a single mode and the caller's seed cannot select anything. Every
+    /// later waypoint is warm-started from the previous one, so the branch is
+    /// carried forward rather than rediscovered.
+    ///
+    /// The final waypoint uses `rho_target` verbatim rather than the
+    /// reconstructed `ρ_A + 1·(ρ − ρ_A)`: the endpoint must be the mode *at the
+    /// requested ρ* bitwise, because everything downstream binds the mode and
+    /// its ρ as one identity.
+    fn sweep(&self, steps: usize) -> Option<ConstrainedWarmStart> {
+        let mut carried: Option<ConstrainedWarmStart> = None;
+        for step in 0..=steps {
+            let waypoint = if step == steps {
+                self.rho_target.clone()
+            } else if step == 0 {
+                self.rho_anchor.clone()
+            } else {
+                let t = step as f64 / steps as f64;
+                Array1::from_shape_fn(self.rho_target.len(), |j| {
+                    self.rho_anchor[j] + t * (self.rho_target[j] - self.rho_anchor[j])
+                })
+            };
+            let eval = outerobjectivegradienthessian_labeled(
+                self.family,
+                self.specs,
+                self.options,
+                self.layout,
+                &waypoint,
+                carried.as_ref(),
+                self.rho_prior,
+                EvalMode::ValueOnly,
+            )
+            .ok()?;
+            if !eval.inner_converged || !eval.objective.is_finite() {
+                return None;
+            }
+            carried = Some(eval.warm_start);
         }
-        carried = Some(eval.warm_start);
+        carried
     }
-    carried
 }
 
 /// How far apart two continuation endpoints are, relative to each coefficient's
