@@ -57,6 +57,7 @@ use gam_models::inference::model::{
 };
 use gam_problem::{BlockRole, EstimationError};
 use gam_runtime::resource::prediction_chunk_rows;
+use gam_solve::constrained_posterior::constrained_projection_equal_tailed_interval;
 use gam_solve::mixture_link::{
     InverseLinkJet, beta_logistic_inverse_link_jetwith_param_partials,
     mixture_inverse_link_jetwith_rho_partials_into, sas_inverse_link_jetwith_param_partials,
@@ -3227,6 +3228,70 @@ pub fn coefficient_uncertaintywith_mode(
             fit.beta.len(),
             se.len()
         )));
+    }
+
+    if let Some(geometry) = fit.geometry.as_ref()
+        && let Some(posterior) = geometry.constrained_posterior.as_ref()
+    {
+        if covariance_mode != InferenceCovarianceMode::Conditional {
+            return Err(EstimationError::InvalidInput(
+                "smoothing-corrected intervals for an inequality-truncated posterior are \
+                 undefined: the fit retains a conditional truncated law but no joint \
+                 smoothing-parameter/truncation law"
+                    .to_string(),
+            ));
+        }
+        geometry
+            .coefficient_gauge
+            .validate()
+            .map_err(EstimationError::InvalidInput)?;
+        let active_dimension = geometry.coefficient_gauge.reduced_total();
+        if geometry.coefficient_gauge.raw_total() != fit.beta.len() {
+            return Err(EstimationError::InvalidInput(format!(
+                "coefficient interval gauge has {} raw rows but the fit reports {} coefficients",
+                geometry.coefficient_gauge.raw_total(),
+                fit.beta.len()
+            )));
+        }
+        posterior
+            .validate_for_dimension(active_dimension)
+            .map_err(EstimationError::InvalidInput)?;
+        let scale = fit.coefficient_covariance_scale()?;
+        let ambient_backend = PredictionCovarianceBackend::from_factorized_hessian_scaled(
+            SymmetricMatrix::Dense(geometry.penalized_hessian.as_array().clone()),
+            scale,
+        )
+        .map_err(EstimationError::InvalidInput)?;
+        let ambient_covariance = ambient_backend
+            .apply_columns(&Array2::eye(active_dimension))
+            .map_err(EstimationError::InvalidInput)?;
+        let mut lower = Array1::<f64>::zeros(fit.beta.len());
+        let mut upper = Array1::<f64>::zeros(fit.beta.len());
+        for coefficient in 0..fit.beta.len() {
+            let contrast = geometry
+                .coefficient_gauge
+                .t_full
+                .row(coefficient)
+                .to_owned();
+            let (active_lower, active_upper) =
+                constrained_projection_equal_tailed_interval(
+                    &ambient_covariance,
+                    posterior,
+                    &contrast,
+                    confidence_level,
+                )
+                .map_err(EstimationError::InvalidInput)?;
+            let shift = geometry.coefficient_gauge.affine_shift[coefficient];
+            lower[coefficient] = active_lower + shift;
+            upper[coefficient] = active_upper + shift;
+        }
+        return Ok(CoefficientUncertaintyResult {
+            estimate: fit.beta.clone(),
+            standard_error: se,
+            lower,
+            upper,
+            covariance_source: covariance_mode,
+        });
     }
 
     let z = standard_normal_quantile(0.5 + 0.5 * confidence_level)
