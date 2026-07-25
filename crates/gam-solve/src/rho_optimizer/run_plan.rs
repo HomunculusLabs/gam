@@ -1872,34 +1872,30 @@ pub(crate) fn run_outer_with_plan(
     }
 
     if let Some(certified) = best {
-        let mut result = certified.into_result();
-        // THE mint audit (#2359). Every candidate above was screened at order
-        // three; the winner — and only the winner — now pays the order-four
-        // derivative-ladder evaluation, and its verdict is the one that mints.
-        // A refusal here is terminal by design: the run does not fall back to a
-        // runner-up, because that would spend order four a second time and the
-        // contract is that a failed mint audit is still one-shot.
+        let result = certified.into_result();
+        // NO mint audit here (#2359). Every candidate above was screened at
+        // order three, and the winner's order-four audit is paid EXACTLY ONCE —
+        // but it is paid by `run_outer`, not here.
         //
-        // …but ONLY when there is an order to escalate to. The screening pass
-        // and the mint pass differ in exactly one respect — whether the terminal
-        // evaluation is allowed to request `ValueGradientHessian` — so when the
-        // objective declares no analytic Hessian the two are the SAME
-        // computation, and re-running it is pure duplication: a second terminal
-        // re-evaluation of the same ρ, a second same-ρ value-agreement audit,
-        // and on the EFS route a second `certify_fixed_point_optimality`. The
-        // screening certificate already IS the mint certificate there, so keep
-        // it. Measured: without this guard the EFS mock's terminal value audits
-        // went from 2 to 3.
-        if cap.hessian.is_analytic() {
-            let mint_certificate = certify_outer_optimality_with_fidelity(
-                obj,
-                config,
-                context,
-                &mut result,
-                CertificationFidelity::Mint,
-            )?;
-            result.criterion_certificate = Some(mint_certificate);
-        }
+        // The three production paths into this function
+        // (`run.rs:5034`, and the two retries at `:1962`/`:1993` below) are all
+        // reached from `run_outer_uncertified`, whose only callers are inside
+        // `run_outer` — and `run_outer` finishes with
+        // `certify_diagnose_and_install`, a `CertificationFidelity::Mint`
+        // certification that must run LAST so the certificate's own evaluation
+        // is the final objective-state installer (that is what makes the sealed
+        // terminal fit bind bitwise on a bimodal inner solve). Minting here as
+        // well spent the order-four derivative tower TWICE on every
+        // analytic-Hessian fit, and on the sampled-pilot path three times —
+        // which is exactly what #2359 exists to prevent. Measured on
+        // `optimize_three_certify_four_exactly_once_at_mint_2359`:
+        // `ValueGradientHessian` calls 2 → 1, and the last order seen is the
+        // mint's, by construction.
+        //
+        // The winner therefore leaves this function carrying its SCREENING
+        // certificate, which is first-order evidence only. That is the correct
+        // provenance: nothing downstream of here treats a plan result as minted
+        // until `run_outer` replaces the certificate with its own.
         // The finalize evaluation re-installs the selected outer result by
         // re-running the inner P-IRLS at θ̂. During the outer search the ARC /
         // BFGS bridge schedule throttles `RemlState::outer_inner_cap` down to a
