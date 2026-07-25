@@ -10,11 +10,29 @@ fn close(got: f64, expected: f64, rel: f64) {
 }
 
 #[cfg(target_os = "linux")]
-fn backend_when_cuda_is_available() -> Option<&'static PirlsRowBackend> {
-    match PirlsRowBackend::probe() {
-        Ok(backend) => Some(backend),
-        Err(GpuError::DriverLibraryUnavailable { .. }) => None,
-        Err(error) => panic!("PIRLS-row CUDA probe failed on an available driver: {error}"),
+fn backend_or_assert_runtime_decline() -> Option<&'static PirlsRowBackend> {
+    match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+        Ok(Some(_)) => Some(
+            PirlsRowBackend::probe()
+                .unwrap_or_else(|error| panic!("PIRLS-row CUDA backend probe failed: {error}")),
+        ),
+        Ok(None) => match PirlsRowBackend::probe() {
+            Err(GpuError::DriverLibraryUnavailable { reason }) => {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "a device-free PIRLS-row backend refusal must explain why CUDA is unavailable"
+                );
+                None
+            }
+            Ok(_) => panic!(
+                "the process-wide CUDA runtime declined, but the PIRLS-row backend admitted a device"
+            ),
+            Err(error) => panic!(
+                "the process-wide CUDA runtime declined cleanly, but the PIRLS-row backend faulted: \
+                 {error}"
+            ),
+        },
+        Err(error) => panic!("PIRLS-row CUDA runtime resolution failed: {error}"),
     }
 }
 
@@ -363,8 +381,8 @@ fn generated_sources_have_one_exact_unprojected_contract() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn nvrtc_compiles_every_exact_builtin_mode_when_cuda_is_present() -> Result<(), GpuError> {
-    let Some(backend) = backend_when_cuda_is_available() else {
+fn nvrtc_declines_without_cuda_else_compiles_every_exact_builtin_mode() -> Result<(), GpuError> {
+    let Some(backend) = backend_or_assert_runtime_decline() else {
         return Ok(());
     };
     for family in PirlsRowFamily::ALL {
@@ -379,8 +397,8 @@ fn nvrtc_compiles_every_exact_builtin_mode_when_cuda_is_present() -> Result<(), 
 
 #[cfg(target_os = "linux")]
 #[test]
-fn device_rows_match_cpu_at_log_endpoints_tails_and_tiny_weights() {
-    let Some(backend) = backend_when_cuda_is_available() else {
+fn device_rows_decline_without_cuda_else_match_cpu_at_log_endpoints_tails_and_tiny_weights() {
+    let Some(backend) = backend_or_assert_runtime_decline() else {
         return;
     };
     let stream = backend.inner.ctx.default_stream();
@@ -463,8 +481,8 @@ fn device_rows_match_cpu_at_log_endpoints_tails_and_tiny_weights() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn failed_device_row_writes_only_its_status() {
-    let Some(backend) = backend_when_cuda_is_available() else {
+fn failed_device_row_declines_without_cuda_else_writes_only_its_status() {
+    let Some(backend) = backend_or_assert_runtime_decline() else {
         return;
     };
     let stream = backend.inner.ctx.default_stream();
