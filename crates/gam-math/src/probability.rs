@@ -294,7 +294,6 @@ pub fn normal_logcdf_derivatives(x: f64) -> [f64; 5] {
         return [f64::NEG_INFINITY, f64::INFINITY, -1.0, 0.0, 0.0];
     }
 
-    const LEFT_CONTINUED_FRACTION_SWITCH: f64 = -4.0;
     const RIGHT_LOG_MAGNITUDE_SWITCH: f64 = 8.0;
     if x <= LEFT_CONTINUED_FRACTION_SWITCH {
         return normal_logcdf_derivatives_left_tail(x);
@@ -325,10 +324,37 @@ struct MillsCorrectionDerivatives {
     third: f64,
 }
 
+/// `x` at or below which the left-tail Mills ratio is taken from the Laplace
+/// continued fraction rather than from `erfcx`. Equivalently `t = −x ≥ 4`.
+const LEFT_CONTINUED_FRACTION_SWITCH: f64 = -4.0;
+
+/// The Laplace continued-fraction **correction** to the left-tail Mills ratio,
+///
+/// `q(t) = λ(−t) − t = 1/(t + 2/(t + 3/(...)))`,   `λ(x) = φ(x)/Φ(x)`,
+///
+/// together with its first three derivatives in `t`. Requires `t ≥ 4`.
+///
+/// `q` is the whole content of the left tail that is NOT the leading `t`: it
+/// decays like `1/t − 2/t³ + 10/t⁵ − ...`, and every operation building it is
+/// a division or an addition of positive quantities, so it carries full
+/// relative precision no matter how small it gets. That is the property its
+/// two consumers need, and it is why the correction is returned separately
+/// instead of pre-added to `t`:
+///
+/// * [`normal_logcdf_derivatives_left_tail`] needs `f'' = −(1 + q')` and the
+///   higher derivatives, which tend to `−1` and `0` and would be destroyed by
+///   differencing nearly equal `f64`s.
+/// * [`cone_boundary_log_factor_and_derivatives`] needs `∂corr/∂a = b − q(t)`,
+///   which is the same statement one substitution away (#2306 §4).
+///
+/// Recovering `q` from a separately computed `λ` — `q = λ − t` — is exactly the
+/// cancellation this exists to avoid, and it is not a small effect: at `t = 1e8`
+/// it costs every significant digit, and past `t ≈ 2e8` it returns the wrong
+/// SIGN. The reference itself has to be carried at ~120 decimal digits before it
+/// reproduces what this recursion gives in binary64.
 #[inline]
-fn normal_logcdf_derivatives_left_tail(x: f64) -> [f64; 5] {
-    assert!(x.is_finite() && x <= -4.0);
-    let t = -x;
+fn mills_correction_continued_fraction(t: f64) -> MillsCorrectionDerivatives {
+    debug_assert!(t.is_finite() && t >= 4.0);
     let mut q = MillsCorrectionDerivatives {
         value: 0.0,
         first: 0.0,
@@ -353,6 +379,14 @@ fn normal_logcdf_derivatives_left_tail(x: f64) -> [f64; 5] {
             third: value * (-6.0 * a * a * a + 6.0 * a * b - c),
         };
     }
+    q
+}
+
+#[inline]
+fn normal_logcdf_derivatives_left_tail(x: f64) -> [f64; 5] {
+    assert!(x.is_finite() && x <= LEFT_CONTINUED_FRACTION_SWITCH);
+    let t = -x;
+    let q = mills_correction_continued_fraction(t);
     [
         normal_logcdf(x),
         t + q.value,
@@ -601,17 +635,64 @@ pub fn cone_boundary_log_factor(mu_over_sqrt_h: f64, slack_times_sqrt_h: f64) ->
 ///   ∂corr/∂a = a − λ(ξ),      ∂corr/∂b = λ(ξ).
 /// ```
 ///
-/// Both are cancellation-free: `λ` comes from the shared `erfcx` evaluation,
-/// and at the linear-decay limit `a − λ(−a) → −1/a` exactly.
+/// `∂corr/∂b = λ(ξ)` is a single `erfcx` evaluation and needs nothing further.
+///
+/// `∂corr/∂a` does. Written literally as `a − λ(ξ)` it is a subtraction of two
+/// quantities that both grow like `a`, because `λ(−t) = t + q(t)` with
+/// `q(t) ~ 1/t`: the answer is the SMALL correction `q`, and forming it by
+/// subtraction destroys `log₁₀(a²·ε)` digits of it. The value
+/// [`cone_boundary_log_factor`] is fused precisely to dodge the twin of this
+/// cancellation, and the gradient has to be fused the same way rather than
+/// re-derived from a `λ` that has already lost the digits.
+///
+/// So on the active branch the correction is taken directly from the Laplace
+/// continued fraction ([`mills_correction_continued_fraction`]), the same one
+/// the left-tail log-CDF derivatives use, under the substitution
+///
+/// ```text
+///   ξ = b − a,  t = −ξ = a − b  ⇒  ∂corr/∂a = a − λ(ξ) = a − (t + q(t)) = b − q(t),
+/// ```
+///
+/// which is cancellation-free for every `a`: `b ≥ 0` and `q(t) ∈ (0, ¼]`. The
+/// deep-active limit `∂corr/∂a → −1/a` then holds to full relative precision
+/// instead of to none, and the sign is right (the factor is strictly decreasing
+/// in `a`, so `∂corr/∂a < 0` whenever `b = 0`).
+///
+/// Measured on `a ∈ [10⁻², 10¹⁴] × b ∈ {0, …, 10³}` against a 250-digit
+/// reference: the subtractive form reaches `6.1e6` relative error and turns
+/// positive past `a ≈ 2e8`; this form is within `7.5e-16` — about 3 ulp — of
+/// the truth, measured against the magnitudes entering the subtraction rather
+/// than against the result. That is the right denominator because `∂corr/∂a`
+/// genuinely passes through ZERO along the curve `b = q(a − b)` (the factor is
+/// increasing in `a` for slack rows and decreasing for active ones), and no
+/// representation carries relative precision across its own root; near it the
+/// error is bounded in absolute terms by `ε·b`, which is what a gradient
+/// consumer needs.
 #[must_use]
 pub fn cone_boundary_log_factor_and_derivatives(
     mu_over_sqrt_h: f64,
     slack_times_sqrt_h: f64,
 ) -> (f64, f64, f64) {
-    let value = cone_boundary_log_factor(mu_over_sqrt_h, slack_times_sqrt_h);
-    let xi = slack_times_sqrt_h - mu_over_sqrt_h;
+    let a = mu_over_sqrt_h;
+    let b = slack_times_sqrt_h;
+    let value = cone_boundary_log_factor(a, b);
+    if value.is_nan() {
+        // The value's domain guard (finite, non-negative `a` and `b`) is the
+        // function's domain; a gradient off it is not defined either, and
+        // returning a finite one next to a NaN value would read as usable.
+        return (value, f64::NAN, f64::NAN);
+    }
+    let xi = b - a;
     let (_, mills) = signed_probit_logcdf_and_mills_ratio(xi);
-    (value, mu_over_sqrt_h - mills, mills)
+    let d_a = if xi <= LEFT_CONTINUED_FRACTION_SWITCH {
+        b - mills_correction_continued_fraction(-xi).value
+    } else {
+        // `|ξ| < 4`, so `λ(ξ) < λ(−4) ≈ 4.26` and `a = b − ξ` is bounded by it:
+        // the subtraction is between two `O(1)` quantities and loses nothing
+        // that matters.
+        a - mills
+    };
+    (value, d_a, mills)
 }
 
 #[cfg(test)]
@@ -684,6 +765,115 @@ mod cone_boundary_factor_tests {
             interior.abs() < 1e-300 || interior > -1e-12,
             "deep-interior must vanish; got {interior}"
         );
+    }
+
+    /// The deep-active GRADIENT has to survive as far as the deep-active VALUE
+    /// does. `∂corr/∂a = a − λ(−a)` is the small residual left by two terms
+    /// that both grow like `a`, so writing it as that subtraction loses
+    /// `log₁₀(a²·ε)` digits: at `a = 1e6` it was already 4 digits down, at
+    /// `a = 2e8` it came back POSITIVE, and past `a = 5e8` it was flat zero
+    /// while the true value is `−2e-9`. The value alongside it was correct to
+    /// 15 digits the whole way, which is what made the defect quiet.
+    ///
+    /// The reference here is the asymptotic series of the Mills correction,
+    /// `λ(−a) = a + 1/a − 2/a³ + 10/a⁵ − 74/a⁷ + …` (so `∂corr/∂a = −1/a +
+    /// 2/a³ − …`), which is the cheapest exact statement of the limit and is
+    /// good to well past f64 from `a = 100` up. Finite differences cannot gate
+    /// this: the quantity under test is smaller than any usable FD step's own
+    /// truncation error.
+    #[test]
+    fn boundary_factor_active_gradient_holds_to_the_representable_limit() {
+        let mut a = 100.0_f64;
+        while a <= 1.0e14 {
+            let (_, d_a, _) = cone_boundary_log_factor_and_derivatives(a, 0.0);
+            let inv = 1.0 / a;
+            let expected = -inv + 2.0 * inv.powi(3) - 10.0 * inv.powi(5) + 74.0 * inv.powi(7);
+            assert!(
+                d_a < 0.0,
+                "corr is strictly decreasing in a at b=0, so ∂a must stay negative; \
+                 got {d_a} at a={a}"
+            );
+            assert!(
+                (d_a - expected).abs() <= 1.0e-13 * expected.abs(),
+                "deep-active ∂a at a={a}: got {d_a}, expected {expected} \
+                 (rel {:.3e})",
+                (d_a - expected).abs() / expected.abs()
+            );
+            a *= 10.0;
+        }
+    }
+
+    /// `∂corr/∂a + ∂corr/∂b = a` identically, since the two partials are
+    /// `a − λ(ξ)` and `λ(ξ)` for the same `ξ`. The two are now computed by
+    /// different routes in the active branch — a continued fraction and an
+    /// `erfcx` — so this is the gate that they still describe one function.
+    #[test]
+    fn boundary_factor_partials_sum_to_a() {
+        for &a in &[0.0_f64, 0.5, 3.0, 4.0, 12.0, 1.0e3, 1.0e7, 1.0e12] {
+            for &b in &[0.0_f64, 1.0e-3, 0.9, 5.0, 1.0e3] {
+                let (_, d_a, d_b) = cone_boundary_log_factor_and_derivatives(a, b);
+                assert!(
+                    (d_a + d_b - a).abs() <= 1.0e-14 * a.max(d_b).max(1.0),
+                    "(a={a}, b={b}): ∂a {d_a} + ∂b {d_b} = {} ≠ a",
+                    d_a + d_b
+                );
+            }
+        }
+    }
+
+    /// The continued-fraction branch and the direct `a − λ` form must agree
+    /// just inside the `ξ ≤ −4` switch, where the subtraction still has most of
+    /// its digits. Without this, the branch could be precise and WRONG — the
+    /// accuracy gate above pins a limit the continued fraction could hit while
+    /// disagreeing with the function it is supposed to be differentiating.
+    ///
+    /// The band is set by the instrument being compared against, not by taste.
+    /// `direct` is `a − λ` with `λ` from the `erfcx` route, whose measured
+    /// relative accuracy is `~5e-14` (libm `erfc` plus the `exp(x²)` multiply);
+    /// its absolute error is therefore `~5e-14·λ`, and the subtraction cannot
+    /// remove it. Note how little room that leaves already: the amplification
+    /// `λ/|a−λ|` is 18x at `a = 4` and 403x at `a = 20`, so at the top of this
+    /// range the direct form is down to ~11 correct digits — five short — while
+    /// the continued fraction still matches a 250-digit reference to 16. This
+    /// test is deliberately capped at `a = 20` for that reason; it is the last
+    /// place the two CAN be compared.
+    #[test]
+    fn boundary_factor_active_branch_agrees_with_the_direct_form_where_both_are_valid() {
+        const LAMBDA_REL_ACCURACY: f64 = 5.0e-14;
+        for &a in &[4.0_f64, 4.5, 6.0, 9.0, 20.0] {
+            for &b in &[0.0_f64, 0.25, 1.5] {
+                if b - a > LEFT_CONTINUED_FRACTION_SWITCH {
+                    continue; // not on the continued-fraction branch
+                }
+                let (_, d_a, _) = cone_boundary_log_factor_and_derivatives(a, b);
+                let (_, mills) = signed_probit_logcdf_and_mills_ratio(b - a);
+                let direct = a - mills;
+                assert!(
+                    (d_a - direct).abs() <= LAMBDA_REL_ACCURACY * mills,
+                    "(a={a}, b={b}): continued fraction {d_a} vs direct {direct} \
+                     (gap {:.3e}, budget {:.3e})",
+                    (d_a - direct).abs(),
+                    LAMBDA_REL_ACCURACY * mills
+                );
+            }
+        }
+    }
+
+    /// A gradient off the domain must not read as usable next to a NaN value.
+    #[test]
+    fn boundary_factor_derivatives_are_nan_off_the_domain() {
+        for &(a, b) in &[
+            (-1.0_f64, 0.0_f64),
+            (1.0, -1.0),
+            (f64::NAN, 1.0),
+            (f64::INFINITY, 0.0),
+        ] {
+            let (v, d_a, d_b) = cone_boundary_log_factor_and_derivatives(a, b);
+            assert!(
+                v.is_nan() && d_a.is_nan() && d_b.is_nan(),
+                "(a={a}, b={b}) is off-domain: got value {v}, ∂a {d_a}, ∂b {d_b}"
+            );
+        }
     }
 
     /// Closed-form partials against finite differences of the value
