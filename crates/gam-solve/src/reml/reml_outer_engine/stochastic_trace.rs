@@ -114,6 +114,33 @@ pub(crate) enum StochasticTraceTargets<'a> {
 /// Disjoint penalty supports own independent reduced charts; a block-local
 /// matrix-free fit therefore never acquires a global dense `p × p` penalty
 /// allocation.
+///
+/// # Estimator properties (#2354)
+///
+/// With Rademacher probes (`E[z_i z_j] = δ_ij`, `E[z_i⁴] = 1`) the per-probe
+/// statistic is `q_k(z) = zᵀ M_k z` for `M_k = A_k H⁻¹ − S_λ⁺ A_k`.
+///
+/// * **Bias — exactly zero.** `E[zᵀMz] = Σ_{i,j} M_ij E[z_i z_j] = tr(M)`, and
+///   expectation is linear, so subtracting the control INSIDE the probe gives
+///   `E[q_k] = tr(H⁻¹Ḣ_k) − tr(S_λ⁺A_k)` — the fused target — at ANY probe
+///   count. Common random numbers between the two legs move variance, never the
+///   mean. The unfused route (average `zᵀA_kH⁻¹z`, then subtract the exact
+///   `det1[k]`) has the SAME expectation; it is a higher-variance,
+///   cancellation-prone estimator of the same scalar, which is why it stays a
+///   sound fallback rather than a wrong answer.
+/// * **Variance — closed form.** Writing `M_s = ½(M + Mᵀ)`,
+///   `q = Σ_i M_s,ii + Σ_{i≠j} M_s,ij z_i z_j` and `E[z_iz_jz_kz_l] = 1` iff
+///   `{i,j} = {k,l}` (for `i≠j`, `k≠l`), hence
+///   `Var(zᵀMz) = 2(‖M_s‖_F² − Σ_i M_s,ii²)`.
+///   At the over-smoothing rail `H⁻¹A_k → S_λ⁺A_k = P_{range(S_k)}`, so the
+///   control removes the rail-sized part of `M` and the variance ratio against
+///   the unfused route falls as `O(λ_k⁻²)`.
+/// * **Range-selection rule.** Each connected penalty support is factored on
+///   its own, with the range rank taken as `Σ_{k ∈ block} det1[k]` — which is
+///   `tr(S_λ⁺ S_λ) = rank(S_{λ,block})` by the same telescoping identity that
+///   defines `det1`, hence an integer certified by the cost's own penalty-logdet
+///   vector rather than by a threshold choice. `verify_trace` then refuses any
+///   chart whose `tr(S_λ⁺A_k)` does not reproduce that `det1[k]`.
 pub(crate) struct StochasticTraceControlVariates {
     controls: Vec<Option<PenaltyTraceControl>>,
 }
@@ -370,7 +397,11 @@ impl StochasticTraceControlVariates {
         Ok(())
     }
 
-    fn subtract_from_probe(&self, z: &Array1<f64>, probe_values: &mut [f64]) {
+    /// Fold the penalty-side control into one probe's raw `zᵀA_kH⁻¹z` values,
+    /// in the estimator's target permutation, BEFORE any Welford accumulation —
+    /// so the mean, the running variance, and the adaptive stopping rule all see
+    /// the fused difference rather than two rank-sized traces.
+    pub(crate) fn subtract_from_probe(&self, z: &Array1<f64>, probe_values: &mut [f64]) {
         assert_eq!(self.controls.len(), probe_values.len());
         for (value, control) in probe_values.iter_mut().zip(&self.controls) {
             if let Some(control) = control {

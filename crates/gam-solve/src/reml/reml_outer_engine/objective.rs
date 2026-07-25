@@ -721,6 +721,13 @@ pub fn reml_laml_evaluate(
     // assembled drift (base coordinate plus SCOP/family correction) before
     // deciding dense vs operator; checking only the base coordinate misses
     // matrix-free derivative corrections and silently densifies them.
+    //
+    // Set when every ρ target in the stochastic batch carries its penalty-logdet
+    // control variate, i.e. when each probe already averages the FUSED difference
+    // `zᵀ(H⁻¹Ḣ_k − S_λ⁺A_k)z`. Only then may the gradient loop drop the separate
+    // `−first[idx]` subtraction; when the chart is unavailable the batch estimates
+    // the unfused `tr(H⁻¹Ḣ_k)` and the exact det derivative must still be paired.
+    let mut stochastic_rho_det_fused = false;
     let stochastic_trace_values: Option<Vec<f64>> = if use_stochastic_traces {
         let mut dense_matrices: Vec<Array2<f64>> = Vec::with_capacity(k + ext_dim);
         let mut operators: Vec<Arc<dyn HyperOperator>> = Vec::new();
@@ -778,17 +785,39 @@ pub fn reml_laml_evaluate(
                 dense_cursor += 1;
             }
         }
+        // Same-probe penalty-logdet control variates (#2354 Gap 1). Both routes
+        // are UNBIASED estimators of the same fused target — `E[zᵀMz] = tr(M)`
+        // for Rademacher probes, and expectation is linear, so subtracting
+        // `zᵀS_λ⁺A_k z` inside the probe changes the VARIANCE and the
+        // floating-point cancellation, never the mean. A chart that cannot be
+        // built, or whose `tr(S_λ⁺A_k)` disagrees with the cost's own `det1[k]`,
+        // is therefore a variance problem and not a correctness one: keep the
+        // retained naive backstop for this evaluation rather than failing the
+        // whole outer objective. This mirrors the exact-dense fused path's own
+        // precedent (`weight_sum` self-consistency mismatch ⇒ `None` ⇒ naive
+        // pairing) instead of introducing a second, harder failure mode.
         let control_variates = if incl_logdet_s {
-            Some(StochasticTraceControlVariates::from_penalty_coordinates(
+            match StochasticTraceControlVariates::from_penalty_coordinates(
                 &solution.penalty_coords,
                 &curvature_lambdas,
                 &solution.penalty_logdet.first,
                 k + ext_dim,
                 &original_to_raw[..k],
-            )?)
+            ) {
+                Ok(controls) => Some(controls),
+                Err(reason) => {
+                    log::warn!(
+                        "[RHO-GRAD] stochastic penalty control chart unavailable ({reason}); \
+                         falling back to the unfused trace − det pairing (same expectation, \
+                         higher variance) for this evaluation"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
+        stochastic_rho_det_fused = control_variates.is_some();
 
         // ── Block 2.5: GPU-adaptive Hutchinson bypass.
         //
@@ -1240,7 +1269,11 @@ pub fn reml_laml_evaluate(
                     )
                     .trace_logdet(hop)
                 };
-                let penalty_logdet_trace = if stochastic_trace_values.is_some() && incl_logdet_s {
+                // The stochastic batch already averaged the fused per-probe
+                // difference ONLY when its control chart was built; otherwise it
+                // estimated the unfused `tr(H⁻¹Ḣ_k)` and still owes the exact
+                // det derivative (both routes share the same expectation).
+                let penalty_logdet_trace = if stochastic_rho_det_fused && incl_logdet_s {
                     0.0
                 } else {
                     solution.penalty_logdet.first[idx]

@@ -5065,6 +5065,289 @@ pub(crate) fn stochastic_rho_control_cancels_rank_inside_each_probe_2354() {
     );
 }
 
+// ─── #2354 Gap 1: the same-probe penalty control variate is an UNBIASED
+// estimator of the fused ρ-gradient trace, with the variance its own derivation
+// predicts in advance ───
+//
+// The ρ_k-gradient of the stochastic branch needs
+//   `T_k = tr(H⁻¹Ḣ_k) − ∂_{ρ_k} log|S_λ|₊ = tr(A_kH⁻¹) − tr(S_λ⁺A_k)`,  `A_k = λ_kS_k`.
+// The estimator draws Rademacher `z` (`E[z_iz_j] = δ_ij`, `E[z_i⁴] = 1`) and
+// averages the SAME-PROBE difference `q_k(z) = zᵀM_k z`, `M_k = A_kH⁻¹ − S_λ⁺A_k`.
+//
+//   BIAS.      `E[zᵀMz] = Σ_{i,j} M_ij E[z_iz_j] = tr(M)`, and expectation is
+//              linear, so `E[q_k] = T_k` EXACTLY, at any probe count. The
+//              unfused route (average `zᵀA_kH⁻¹z`, then subtract the exact
+//              `det1[k]`) has the SAME expectation — it is a higher-variance
+//              estimator of the same scalar, never a wrong one, which is why
+//              `objective.rs` may fall back to it when the chart is unavailable.
+//   VARIANCE.  With `M_s = ½(M + Mᵀ)`, `q = Σ_i M_s,ii + Σ_{i≠j} M_s,ij z_iz_j`
+//              and `E[z_iz_jz_kz_l] = 1` iff `{i,j} = {k,l}` (`i≠j`, `k≠l`), so
+//                  `Var(zᵀMz) = 2(‖M_s‖_F² − Σ_i M_s,ii²)`  — closed form.
+//   RAIL.      Splitting on `R = range(S_λ)`, `N = null(S_λ)`: `A_k` kills `N`,
+//              `S_λ⁺A_k = P_{range(S_k)}`, and `(H⁻¹)_{RN} = −(H⁻¹)_{RR}M_{RN}M_{NN}⁻¹`,
+//              so `A_kH⁻¹ − S_λ⁺A_k → −P_kM_{RN}M_{NN}⁻¹` as `λ_k → ∞`. The
+//              residual variance is therefore governed by the coupling `M_{RN}`
+//              between penalized and unpenalized directions; it collapses as
+//              `O(λ_k⁻²)` exactly when that coupling vanishes. This fixture sets
+//              `M_{RN} = 0` by construction (`M = c₀I + P G P`), so the predicted
+//              ratio is that clean rail limit — while the bias and closed-form
+//              variance identities below hold for ANY `M`.
+//
+// The gate is EXHAUSTIVE, not sampled: over the complete Rademacher ensemble
+// (all `2⁶` sign vectors) the empirical mean IS `E[·]` and the empirical
+// population variance IS `Var(·)`, so both predictions are checked as identities
+// with no seed sensitivity and no fitted tolerance. The residual tolerance is
+// the fixture's own arithmetic floor: the spectral solve carries
+// `ε·‖H⁻¹‖·‖A_k‖·p ≈ 1e-11` of absolute rounding into a per-probe statistic
+// whose fused scale is `O(‖M‖/λ) ≈ 1e-2`, i.e. `≈1e-9` relative — the `1e-6`
+// used below leaves three decades over that floor. A second arm runs the
+// PRODUCTION estimator entry point at a fixed seed and certifies each route
+// against its OWN predicted standard error, with Chebyshev's distribution-free
+// coverage factor rather than a tuned bound.
+#[test]
+pub(crate) fn stochastic_rho_control_variate_is_unbiased_with_predicted_variance_2354() {
+    let p = 6usize;
+    let width = 3usize;
+    let starts = [0usize, 3];
+    let lambdas = [8.0e2_f64, 3.0e2];
+    let det1 = array![2.0_f64, 2.0];
+
+    // First-difference root `D` (2×3): `S = DᵀD` has rank 2 and null space
+    // `span(1₃)`, so `range(S) = 1₃^⊥` and its orthogonal projector is
+    // `I₃ − J₃/3` — the HAND-DERIVED operand the production chart is pinned to.
+    let d_root = array![[-1.0_f64, 1.0, 0.0], [0.0, -1.0, 1.0]];
+    let s_local = d_root.t().dot(&d_root);
+    let coordinates: Vec<PenaltyCoordinate> = starts
+        .iter()
+        .map(|&start| PenaltyCoordinate::from_block_root(d_root.clone(), start, start + width, p))
+        .collect();
+
+    let mut a_full: Vec<Array2<f64>> = Vec::with_capacity(starts.len());
+    let mut projector: Vec<Array2<f64>> = Vec::with_capacity(starts.len());
+    for (idx, &start) in starts.iter().enumerate() {
+        let mut a = Array2::<f64>::zeros((p, p));
+        let mut proj = Array2::<f64>::zeros((p, p));
+        for row in 0..width {
+            for col in 0..width {
+                a[[start + row, start + col]] = lambdas[idx] * s_local[[row, col]];
+                let identity = if row == col { 1.0 } else { 0.0 };
+                proj[[start + row, start + col]] = identity - 1.0 / width as f64;
+            }
+        }
+        a_full.push(a);
+        projector.push(proj);
+    }
+
+    // `P_k` is the orthogonal projector onto `range(S_k)`: symmetric, idempotent,
+    // `A_kP_k = A_k`, `tr(P_k) = rank = det1[k]`. With disjoint supports
+    // `S_λ⁺A_k = (λ_kS_k)⁺(λ_kS_k) = P_k`, so this is the exact control operand.
+    for (idx, proj) in projector.iter().enumerate() {
+        let trace: f64 = (0..p).map(|i| proj[[i, i]]).sum();
+        assert!(
+            (trace - det1[idx]).abs() < 1e-12,
+            "P_{idx} trace {trace:.16e} must be the penalty rank {:.1}",
+            det1[idx]
+        );
+        let idempotent = proj.dot(proj) - proj;
+        assert!(
+            idempotent.iter().all(|value| value.abs() < 1e-12),
+            "P_{idx} must be idempotent"
+        );
+        let fixes_range = a_full[idx].dot(proj) - &a_full[idx];
+        assert!(
+            fixes_range.iter().all(|value| value.abs() < 1e-10),
+            "P_{idx} must act as the identity on range(S_k)"
+        );
+    }
+
+    // Data curvature with ZERO range/null coupling: `M = c₀I + P G P`, `P` the
+    // projector onto `range(S_λ)`. `M_{RN} = 0`, so the rail limit is the clean
+    // `A_kH⁻¹ → P_k` and the predicted variance ratio is `O(λ⁻²)`.
+    let p_range = &projector[0] + &projector[1];
+    let design = Array2::from_shape_fn((9, p), |(i, j)| {
+        ((i as f64 + 1.0) * 0.37 + (j as f64 + 1.0) * 0.61).sin()
+    });
+    let gram = design.t().dot(&design) / 9.0;
+    let mut m_data = p_range.dot(&gram).dot(&p_range);
+    for i in 0..p {
+        m_data[[i, i]] += 0.25;
+    }
+    let mut h = m_data.clone();
+    for a in &a_full {
+        h += a;
+    }
+    let hop = DenseSpectralOperator::from_symmetric(&h).expect("SPD fixture");
+
+    // `H⁻¹` through the SAME production solve the probes use.
+    let mut h_inv = Array2::<f64>::zeros((p, p));
+    for i in 0..p {
+        let mut unit = Array1::<f64>::zeros(p);
+        unit[i] = 1.0;
+        h_inv.column_mut(i).assign(&hop.solve(&unit));
+    }
+
+    // Predicted per-probe matrices and their exact Rademacher moments.
+    let m_naive: Vec<Array2<f64>> = a_full.iter().map(|a| a.dot(&h_inv)).collect();
+    let m_fused: Vec<Array2<f64>> = m_naive
+        .iter()
+        .zip(&projector)
+        .map(|(matrix, proj)| matrix - proj)
+        .collect();
+    let trace_hinv: Vec<f64> = m_naive
+        .iter()
+        .map(|matrix| (0..p).map(|i| matrix[[i, i]]).sum())
+        .collect();
+    let target: Vec<f64> = trace_hinv
+        .iter()
+        .zip(det1.iter())
+        .map(|(trace, det)| trace - det)
+        .collect();
+    let rademacher_variance = |matrix: &Array2<f64>| -> f64 {
+        let mut total = 0.0;
+        for i in 0..p {
+            for j in 0..p {
+                if i == j {
+                    continue;
+                }
+                let sym = 0.5 * (matrix[[i, j]] + matrix[[j, i]]);
+                total += 2.0 * sym * sym;
+            }
+        }
+        total
+    };
+    let var_naive: Vec<f64> = m_naive.iter().map(rademacher_variance).collect();
+    let var_fused: Vec<f64> = m_fused.iter().map(rademacher_variance).collect();
+
+    let controls = StochasticTraceControlVariates::from_penalty_coordinates(
+        &coordinates,
+        &lambdas,
+        &det1,
+        starts.len(),
+        &[0, 1],
+    )
+    .expect("disjoint block supports own independent reduced charts");
+
+    // ── Arm 1: the complete Rademacher ensemble (2⁶ sign vectors). ──
+    let ensemble = 1usize << p;
+    let mut naive_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ensemble); starts.len()];
+    let mut fused_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ensemble); starts.len()];
+    for pattern in 0..ensemble {
+        let z = Array1::from_shape_fn(p, |i| if (pattern >> i) & 1 == 1 { 1.0 } else { -1.0 });
+        let w = hop.stochastic_trace_solve_for_probe(&z, 1e-12, pattern as u64, None);
+        let mut probe = vec![0.0_f64; starts.len()];
+        for (k, a) in a_full.iter().enumerate() {
+            probe[k] = z.dot(&a.dot(&w));
+        }
+        let raw = probe.clone();
+        controls.subtract_from_probe(&z, &mut probe);
+        for k in 0..starts.len() {
+            // The chart removed exactly `zᵀP_k z` — the hand-derived `zᵀS_λ⁺A_kz`.
+            let hand = z.dot(&projector[k].dot(&z));
+            let removed = raw[k] - probe[k];
+            assert!(
+                (removed - hand).abs() <= 1e-9 * (1.0 + hand.abs()),
+                "coord {k}: chart removed {removed:.16e}, hand-derived zᵀP_kz = {hand:.16e}"
+            );
+            naive_samples[k].push(raw[k]);
+            fused_samples[k].push(probe[k]);
+        }
+    }
+    let moments = |samples: &[f64]| -> (f64, f64) {
+        let count = samples.len() as f64;
+        let mean = samples.iter().sum::<f64>() / count;
+        let variance = samples
+            .iter()
+            .map(|value| (value - mean) * (value - mean))
+            .sum::<f64>()
+            / count;
+        (mean, variance)
+    };
+
+    for k in 0..starts.len() {
+        let (mean_fused, measured_var_fused) = moments(&fused_samples[k]);
+        let (mean_naive, measured_var_naive) = moments(&naive_samples[k]);
+
+        // (1) ZERO BIAS: the fused ensemble mean is the fused target exactly.
+        assert!(
+            (mean_fused - target[k]).abs() <= 1e-8 * (1.0 + target[k].abs()),
+            "coord {k}: E[fused probe] = {mean_fused:.16e}, target tr(A_kH⁻¹) − det1 = {:.16e}",
+            target[k]
+        );
+        // (2) The unfused route has the SAME expectation — so the retained
+        //     `−first[idx]` fallback in `objective.rs` is unbiased too.
+        assert!(
+            (mean_naive - trace_hinv[k]).abs() <= 1e-8 * (1.0 + trace_hinv[k].abs()),
+            "coord {k}: E[unfused probe] = {mean_naive:.16e}, tr(A_kH⁻¹) = {:.16e}",
+            trace_hinv[k]
+        );
+        // (3) CLOSED-FORM VARIANCE, both routes.
+        assert!(
+            (measured_var_fused - var_fused[k]).abs() <= 1e-6 * var_fused[k],
+            "coord {k}: Var[fused] measured {measured_var_fused:.16e} vs predicted {:.16e}",
+            var_fused[k]
+        );
+        assert!(
+            (measured_var_naive - var_naive[k]).abs() <= 1e-6 * var_naive[k],
+            "coord {k}: Var[unfused] measured {measured_var_naive:.16e} vs predicted {:.16e}",
+            var_naive[k]
+        );
+        // (4) The rail collapse the derivation predicts for `M_{RN} = 0`.
+        let ratio = var_fused[k] / var_naive[k];
+        assert!(
+            ratio < 1.0e-2,
+            "coord {k}: predicted variance ratio {ratio:.3e} must show the rail collapse"
+        );
+    }
+
+    // ── Arm 2: the production estimator, fixed seed, fixed probe count. ──
+    //
+    // Each route is certified against ITS OWN predicted standard error with
+    // Chebyshev's distribution-free coverage factor (`P(|X̄−μ| ≥ 5σ/√n) ≤ 1/25`),
+    // so the bound is derived from the closed form above, not fitted to the run.
+    let n_probes = 64usize;
+    let config = StochasticTraceConfig {
+        n_probes_min: n_probes,
+        n_probes_max: n_probes,
+        relative_tol: 0.0,
+        tau_rel: 1e-12,
+        solve_rel_tol: 1e-12,
+        seed: 0x2354,
+        hutchpp_sketch_dim: None,
+    };
+    let estimator = StochasticTraceEstimator::new(config);
+    let target_refs: Vec<&Array2<f64>> = a_full.iter().collect();
+    let fused_estimate = estimator.estimate_hinv_traces_with_control_variates(
+        &hop,
+        StochasticTraceTargets::Dense(&target_refs),
+        Some(&controls),
+    );
+    let naive_estimate = estimator.estimate_traces(&hop, &target_refs);
+    let coverage = 5.0_f64;
+    for k in 0..starts.len() {
+        let se_fused = (var_fused[k] / n_probes as f64).sqrt();
+        let se_naive = (var_naive[k] / n_probes as f64).sqrt();
+        assert!(
+            (fused_estimate[k] - target[k]).abs() <= coverage * se_fused,
+            "coord {k}: fused estimate {:.16e} outside {coverage}·SE = {:.3e} of target {:.16e}",
+            fused_estimate[k],
+            coverage * se_fused,
+            target[k]
+        );
+        assert!(
+            (naive_estimate[k] - det1[k] - target[k]).abs() <= coverage * se_naive,
+            "coord {k}: unfused estimate {:.16e} outside {coverage}·SE = {:.3e} of target {:.16e}",
+            naive_estimate[k] - det1[k],
+            coverage * se_naive,
+            target[k]
+        );
+        // The fused certificate is tighter by `√ratio`, i.e. at least 10×.
+        assert!(
+            se_fused * 10.0 < se_naive,
+            "coord {k}: fused SE {se_fused:.3e} must be ≥10× tighter than unfused {se_naive:.3e}"
+        );
+    }
+}
+
 #[test]
 pub(crate) fn modified_gram_schmidt_orthonormalizes_well_conditioned_input() {
     let y = array![
