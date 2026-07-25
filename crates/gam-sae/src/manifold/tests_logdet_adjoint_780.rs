@@ -950,24 +950,20 @@ pub(crate) fn end_to_end_dual_vs_analytic_logdet_parity_battery_2156_2144() {
     ordered_beta_bernoulli_term.assignment.mode =
         AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
     install_low_rank_ordered_beta_bernoulli_metric_2156(&mut ordered_beta_bernoulli_term);
-    ordered_beta_bernoulli_rho.log_lambda_sparse = 0.6;
     ordered_beta_bernoulli_rho.log_lambda_smooth = vec![-1.6, -1.1];
-    let (ordered_beta_bernoulli_value, ordered_beta_bernoulli_loss, ordered_beta_bernoulli_cache) =
-        ordered_beta_bernoulli_term
-            .penalized_quasi_laplace_criterion_with_cache(
-                ordered_beta_bernoulli_target.view(),
-                &ordered_beta_bernoulli_rho,
-                None,
-                200,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("converged low-rank-metric ordered Beta--Bernoulli parity cache");
-    assert!(
-        ordered_beta_bernoulli_value.is_finite() && ordered_beta_bernoulli_loss.total().is_finite(),
-        "ordered Beta--Bernoulli parity fixture must produce a finite cache"
+    let ordered_beta_bernoulli_anchor = certified_fd_anchor(
+        "gam#2144 low-rank-metric parity battery",
+        &ordered_beta_bernoulli_target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(
+            &ordered_beta_bernoulli_term,
+            sparse_lift_ladder(&ordered_beta_bernoulli_rho, &[0.6, 1.0, 1.4, 1.9, 2.5, 0.3, -0.1]),
+            200,
+        ),
     );
+    let ordered_beta_bernoulli_term = ordered_beta_bernoulli_anchor.term;
+    let ordered_beta_bernoulli_rho = ordered_beta_bernoulli_anchor.rho;
+    let ordered_beta_bernoulli_cache = ordered_beta_bernoulli_anchor.cache;
     let low_rank_certificate = BranchCertificate::from_arrow_cache(
         &ordered_beta_bernoulli_cache,
         MajorizerAnchorMode::FrozenAnchor,
@@ -1564,7 +1560,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli()
     // row-local direct-z channel and the global `M_k` channel that
     // `logdet_theta_adjoint` accumulates column-wise. lambda_sparse is the
     // active prior weight (fixed alpha), so the channel is genuinely live.
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
     // Same #1625 setup fix as the sibling `..._on_tiny_fixture`: the ordered Beta--Bernoulli prior
     // Hessian is genuinely indefinite in the low-`ρ_sparse` basin, so at the old
@@ -1575,24 +1571,21 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli()
     // FD to tolerance once a PD stationary cache exists). Lift `ρ_sparse` into the
     // PD region and converge the inner solve so the comparison point EXISTS; no
     // tolerance is weakened.
-    rho.log_lambda_sparse = 0.5;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged cache");
+    let anchor = certified_fd_anchor(
+        "ordered Beta--Bernoulli theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &PD_BASIN_SPARSE_LIFTS), 200),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     // Probe both atoms across distinct rows so the shared-mass derivative is
     // exercised on both columns, and probe coordinate channels so the whole
     // theta adjoint remains on the same assembled curvature operator.
@@ -1644,20 +1637,17 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli()
 
 #[test]
 pub(crate) fn exact_stationarity_a_minus_b_includes_ordered_beta_bernoulli_shared_mass_hvp() {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
-    rho.log_lambda_sparse = 0.5;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged ordered Beta--Bernoulli exact-stationarity cache");
+    let anchor = certified_fd_anchor(
+        "ordered Beta--Bernoulli exact-stationarity a-minus-b",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &PD_BASIN_SPARSE_LIFTS), 200),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
 
     let mut vector = SaeArrowVector {
         t: Array1::<f64>::zeros(cache.delta_t_len()),
@@ -1740,7 +1730,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
  {
     use gam_problem::{RowMetric, pack_probe_factors};
     use std::sync::Arc;
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
     let n = term.n_obs();
     let p = term.output_dim();
@@ -1769,24 +1759,21 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
             .is_some_and(|m| m.whitens_likelihood() && m.metric_rank() < p),
         "rank-{s} metric on p={p} must be a genuinely rank-deficient whitening metric"
     );
-    rho.log_lambda_sparse = 0.5;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged majorized cache");
+    let anchor = certified_fd_anchor(
+        "#2144 low-rank-metric ordered Beta--Bernoulli theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &PD_BASIN_SPARSE_LIFTS), 200),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -2165,6 +2152,14 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
 /// conditions the over-parametrized chart out of the deflating regime, so the
 /// ladder climbs.
 const UNDEFLATED_SPARSE_LIFTS: [f64; 9] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
+
+/// The declared `log λ_sparse` ladder for gates that need any state the
+/// criterion will price as a maximum. `0.5` is the level these gates hard-coded
+/// after the #1625 indefinite-basin diagnosis, so a tree on which that level
+/// still works reproduces the historical anchor exactly; the rest climbs out of
+/// the low-`ρ_sparse` basin the same diagnosis identified, then drops below it
+/// for the fixtures whose maximum lies the other way.
+const PD_BASIN_SPARSE_LIFTS: [f64; 8] = [0.5, 0.9, 1.3, 1.8, 2.4, 0.2, -0.2, -0.6];
 
 /// The ordered Beta--Bernoulli majorizer is row-local, so the full-basis probe
 /// bundle must reproduce the dense theta adjoint exactly.
