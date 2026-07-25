@@ -1607,17 +1607,58 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // Invariant: the line-search Value lane prices the SAME fixed point the
     // analytic gradient lane differentiates, within the certification roundoff
     // bound (the exact gate `rho_optimizer::run` enforces at fit end).
-    let mut obj_v =
+    // ONE objective, value probe first — production's ordering. The outer search
+    // always evaluates the gradient lane at the ρ of the line search's last
+    // successful value probe on the same objective, which lets the `#2080 (a)`
+    // hand-off install that probe's converged inner state before the gradient
+    // lane's criterion loop ("same converged optimum ⇒ identical criterion value").
+    //
+    // A fresh objective per lane instead would assert this invariant against a
+    // construction production never uses, and would fail for a reason that says
+    // nothing about the Value lane: measured (#2439,
+    // `zz_measure_2439_value_vs_gradient_inner_mode`), evaluating the two lanes on
+    // SEPARATE objectives lands them on genuinely different inner modes
+    // (`max|Δβ| = 4.394e-2` over 240 coordinates) whose criterion values differ by
+    // 3.842e-1 — because the inner solve stops at a tolerance rather than at a
+    // unique fixed point, so θ̂ depends on where it started. On one objective the
+    // two lanes agree to 3.6e-12 at a BITWISE-identical β.
+    let mut obj =
         SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
-    let value_lane = OuterObjective::eval_with_order(&mut obj_v, &rho_flat, OuterEvalOrder::Value)
-        .expect("value lane evaluates")
-        .cost;
-    let mut obj_g =
-        SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
-    let analytic =
-        OuterObjective::eval_with_order(&mut obj_g, &rho_flat, OuterEvalOrder::ValueAndGradient)
-            .expect("gradient lane evaluates")
-            .cost;
+    let value_eval = OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::Value)
+        .expect("value lane evaluates");
+    let value_lane = value_eval.cost;
+    let value_beta = value_eval
+        .inner_beta_hint
+        .clone()
+        .expect("the Value lane publishes its converged inner state for the hand-off");
+    let gradient_eval =
+        OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::ValueAndGradient)
+            .expect("gradient lane evaluates");
+    let analytic = gradient_eval.cost;
+
+    // The hand-off is what makes the agreement below hold, and it is load-bearing:
+    // without it the lanes converge to different modes. Pin it directly, so a
+    // refactor that drops it fails here saying so, instead of silently degrading
+    // the value-agreement assertion into a statement about two unrelated modes.
+    let gradient_beta = gradient_eval
+        .inner_beta_hint
+        .as_ref()
+        .expect("the gradient lane publishes the inner state it differentiated at");
+    assert_eq!(
+        value_beta.len(),
+        gradient_beta.len(),
+        "the two lanes must describe the same inner coordinate system"
+    );
+    let beta_gap = value_beta
+        .iter()
+        .zip(gradient_beta.iter())
+        .map(|(v, g)| (v - g).abs())
+        .fold(0.0_f64, f64::max);
+    assert_eq!(
+        beta_gap, 0.0,
+        "#2228/#2439: the gradient lane must differentiate AT the mode the Value lane priced,          not at one it re-solved for itself; max|Δβ|={beta_gap:.6e} over {} coordinates",
+        value_beta.len()
+    );
     let cert_bound = f64::EPSILON.sqrt() * value_lane.abs().max(analytic.abs()).max(1.0);
     eprintln!(
         "[#2228] value_lane={value_lane:.16e} analytic={analytic:.16e} diff={:.3e} \
