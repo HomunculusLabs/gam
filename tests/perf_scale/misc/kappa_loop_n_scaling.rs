@@ -947,20 +947,12 @@ fn run_fit_poisson(n: usize, bounds: (f64, f64)) -> Result<FitTiming, String> {
 #[test]
 fn kappa_glm_poisson_loop_n_scaling_report() {
     let bounds = (1e-2, 1e2);
-    let warm = run_fit_poisson(1000, bounds);
-    match &warm {
-        Ok(t) => eprintln!(
-            "[kappa-glm] warm Poisson κ fit primed caches in {:.4}s",
-            t.wall_s
-        ),
-        Err(reason) => {
-            // The GLM frozen-W lane is a best-effort accelerator; if this fixture
-            // does not converge in the CI budget, report and return rather than
-            // fail (the Gaussian ladders are the close gate, not this one).
-            eprintln!("[kappa-glm] warm Poisson κ fit did not converge ({reason}); skipping");
-            return;
-        }
-    }
+    let warm = run_fit_poisson(1000, bounds)
+        .unwrap_or_else(|reason| panic!("[kappa-glm] warm Poisson κ fit failed: {reason}"));
+    eprintln!(
+        "[kappa-glm] warm Poisson κ fit primed caches in {:.4}s",
+        warm.wall_s
+    );
 
     let ns = [1_000usize, 4_000, 16_000];
     let mut callback_avg = Vec::with_capacity(ns.len());
@@ -969,18 +961,13 @@ fn kappa_glm_poisson_loop_n_scaling_report() {
         "n", "t_kappa_s", "callback_s", "resets", "calls"
     );
     for &n in &ns {
-        let kappa = match run_fit_poisson(n, bounds) {
-            Ok(k) if k.kappa_timing.is_some() => k,
-            Ok(_) => {
-                eprintln!("[kappa-glm] n={n}: κ optimizer reported no internal timing; skipping");
-                return;
-            }
-            Err(reason) => {
-                eprintln!("[kappa-glm] n={n}: fit failed ({reason}); skipping ladder");
-                return;
-            }
-        };
-        let timing = kappa.kappa_timing.unwrap();
+        let kappa = run_fit_poisson(n, bounds)
+            .unwrap_or_else(|reason| panic!("[kappa-glm] n={n}: fit failed: {reason}"));
+        let timing = kappa
+            .kappa_timing
+            .unwrap_or_else(|| {
+                panic!("[kappa-glm] n={n}: κ optimizer reported no internal timing")
+            });
         let calls = (timing.cost_calls + timing.eval_calls + timing.efs_calls).max(1);
         let per_cb = (timing.trial_total_s().max(0.0)) / calls as f64;
         callback_avg.push(per_cb.max(1e-6));

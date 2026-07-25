@@ -299,13 +299,8 @@ fn probe_1561_gamma_dispersion_logshape_recovery() {
         noise_formula: Some("s(x, k=6)".to_string()),
         ..FitConfig::default()
     };
-    let result = match fit_from_formula("y ~ s(x, k=6)", &ds, &cfg) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[gamma_disp] FIT ERROR: {e}");
-            return;
-        }
-    };
+    let result = fit_from_formula("y ~ s(x, k=6)", &ds, &cfg)
+        .unwrap_or_else(|error| panic!("[gamma_disp] prerequisite fit failed: {error}"));
     let FitResult::DispersionLocationScale(gam::DispersionLocationScaleFitResult { fit, .. }) =
         result
     else {

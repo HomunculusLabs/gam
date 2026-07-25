@@ -186,20 +186,12 @@ fn rho_outer_loop_is_n_independent() {
     );
     let mut rho_phase = Vec::with_capacity(ns.len());
     for &n in &ns {
-        let t_full = match run_fit(n, full_outer) {
-            Ok(t) => t,
-            Err(reason) => {
-                eprintln!("[rho-n-scaling] n={n}: full-outer fit failed — {reason}");
-                return; // measurement aborts cleanly; do not fail on a fit defect
-            }
-        };
-        let t_single = match run_fit(n, 1) {
-            Ok(t) => t,
-            Err(reason) => {
-                eprintln!("[rho-n-scaling] n={n}: single-eval fit failed — {reason}");
-                return;
-            }
-        };
+        let t_full = run_fit(n, full_outer).unwrap_or_else(|reason| {
+            panic!("[rho-n-scaling] n={n}: full-outer fit failed — {reason}")
+        });
+        let t_single = run_fit(n, 1).unwrap_or_else(|reason| {
+            panic!("[rho-n-scaling] n={n}: single-eval fit failed — {reason}")
+        });
         // ρ-phase = cost of the full penalty search above one inner solve. The
         // one-time O(n·p²) Gram build is paid inside BOTH t_full and t_single
         // (each fit builds its own cache once), so it cancels out of the

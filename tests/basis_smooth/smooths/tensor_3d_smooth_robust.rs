@@ -153,15 +153,10 @@ fn tensor_3d_seam_continuity_one_periodic_margin() {
     };
     let formula =
         "y ~ te(u, v, w, bc=['periodic', 'natural', 'natural'], period=[2*pi, None, None], k=4)";
-    let result = match fit_from_formula(formula, &data, &cfg) {
-        Ok(r) => r,
-        Err(_) => {
-            eprintln!("[te3d-seam] fit failed, skipping seam check");
-            return;
-        }
-    };
+    let result = fit_from_formula(formula, &data, &cfg)
+        .unwrap_or_else(|error| panic!("[te3d-seam] prerequisite fit failed: {error}"));
     let FitResult::Standard(fit) = result else {
-        return;
+        panic!("[te3d-seam] expected the standard Gaussian fit variant");
     };
     let probes = [
         (0.0_f64, 1.0_f64, 0.5_f64),
