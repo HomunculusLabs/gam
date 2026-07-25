@@ -13,6 +13,7 @@
 use ndarray::{Array2, ArrayView1, ArrayView2};
 
 use super::SaeBasisEvaluator;
+use gam_math::special::{digamma, trigamma};
 use opt::{BacktrackConfig, backtracking_line_search};
 
 pub fn sample_decoded_curve(
@@ -491,34 +492,10 @@ fn beta_loglik_avg(alpha: f64, beta: f64, s_ln: f64, s_ln1m: f64) -> f64 {
         - (ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta))
 }
 
-/// Digamma `ψ(x) = d/dx ln Γ(x)` for `x > 0`: recurrence up to `x ≥ 6` then the
-/// standard asymptotic (Bernoulli) series. Hand-derived closed form.
-fn digamma(mut x: f64) -> f64 {
-    let mut result = 0.0_f64;
-    // Recurse up to x ≥ 10 so the truncated Bernoulli tail is ~1e-11 (the x ≥ 6
-    // cutoff leaves ~1e-6, too coarse for the Beta Newton and its own test).
-    while x < 10.0 {
-        result -= 1.0 / x;
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    result + x.ln() - 0.5 * inv - inv2 * (1.0 / 12.0 - inv2 * (1.0 / 120.0 - inv2 / 252.0))
-}
-
-/// Trigamma `ψ₁(x) = d²/dx² ln Γ(x)` for `x > 0`: recurrence up to `x ≥ 6` then
-/// the asymptotic series `1/x + 1/(2x²) + Σ B₂ₖ/x^{2k+1}`.
-fn trigamma(mut x: f64) -> f64 {
-    let mut result = 0.0_f64;
-    // Same x ≥ 10 recurrence cutoff as `digamma` for ~1e-11 accuracy.
-    while x < 10.0 {
-        result += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    result + inv * (1.0 + inv * (0.5 + inv * (1.0 / 6.0 - inv2 * (1.0 / 30.0 - inv2 / 42.0))))
-}
+// `ψ` and `ψ₁` come from the workspace's single polygamma implementation. The
+// local copies they replace recursed only to `x ≥ 10` and stopped at `B₆`,
+// which left `7.6e−10` / `3.1e−10` relative error — enough to matter to the
+// Beta Newton below, whose own convergence test is `|g| < 1e−12`.
 
 /// `ln Γ(x)` for `x > 0` via the Lanczos approximation (g = 7). Hand-derived
 /// closed form; used only to report the Beta log-likelihood.
@@ -568,14 +545,18 @@ mod tests {
 
     #[test]
     fn digamma_trigamma_match_known_values() {
-        // ψ(1) = −γ ≈ −0.5772156649; ψ(2) = 1 − γ; ψ₁(1) = π²/6.
+        // ψ(1) = −γ, ψ(2) = 1 − γ, ψ₁(1) = π²/6 — closed forms, so the bar is
+        // `f64` rounding of the constants themselves, not the evaluator's own
+        // accuracy. The former 1e-9/1e-8 bars were sized to the local Bernoulli
+        // series (~4e-11 absolute) that `gam_math::special` now replaces.
         let gamma = 0.577_215_664_901_532_9_f64;
-        assert!((digamma(1.0) + gamma).abs() < 1.0e-9);
-        assert!((digamma(2.0) - (1.0 - gamma)).abs() < 1.0e-9);
+        assert!((digamma(1.0) + gamma).abs() < 1.0e-15);
+        assert!((digamma(2.0) - (1.0 - gamma)).abs() < 1.0e-15);
         let pi2_6 = std::f64::consts::PI * std::f64::consts::PI / 6.0;
-        assert!((trigamma(1.0) - pi2_6).abs() < 1.0e-8);
-        // ln Γ(5) = ln 24.
-        assert!((ln_gamma(5.0) - 24.0_f64.ln()).abs() < 1.0e-9);
+        assert!((trigamma(1.0) - pi2_6).abs() < 1.0e-15);
+        // ln Γ(5) = ln 24. The Lanczos g=7 form here is a separate primitive and
+        // measures 1.6e-14 relative at worst, so it keeps a wider bar.
+        assert!((ln_gamma(5.0) - 24.0_f64.ln()).abs() < 1.0e-13);
     }
 
     #[test]

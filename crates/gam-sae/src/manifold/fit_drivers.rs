@@ -8501,7 +8501,12 @@ fn union_output_frame_basis(frames: &[Array2<f64>], p: usize) -> Array2<f64> {
         return Array2::<f64>::zeros((p, 0));
     }
     let tol = crate::frames::SAE_FRAME_RANK_CUTOFF * max_sv;
-    let rank = sv.iter().filter(|&&v| v > tol).count().min(p).min(u.ncols());
+    let rank = sv
+        .iter()
+        .filter(|&&v| v > tol)
+        .count()
+        .min(p)
+        .min(u.ncols());
     let mut basis = Array2::<f64>::zeros((p, rank));
     for c in 0..rank {
         for row in 0..p {

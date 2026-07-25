@@ -1811,8 +1811,7 @@ pub(crate) fn hybrid_collapse_verdict_accessor_reports_collapsed_slots_2394() {
     let k = term.k_atoms();
     let p = term.output_dim();
     // Explicit, nonzero, row-varying masses over both atoms.
-    let amps =
-        Array2::<f64>::from_shape_fn((n, k), |(i, j)| 0.5 + 0.1 * i as f64 + 0.2 * j as f64);
+    let amps = Array2::<f64>::from_shape_fn((n, k), |(i, j)| 0.5 + 0.1 * i as f64 + 0.2 * j as f64);
 
     // (1) No collapse policy and genuinely curved atoms (nonzero sin AND cos
     // decoder rows) → the fit-free adjudication declines: empty verdict.
@@ -1847,7 +1846,9 @@ pub(crate) fn hybrid_collapse_verdict_accessor_reports_collapsed_slots_2394() {
 
     // The reconstruction substitutes exactly slot 0: collapsed and uncollapsed
     // differ by a real amount (a sloped image is not the curve).
-    let collapsed = term.reconstruct_from_assignments(amps.view(), true).unwrap();
+    let collapsed = term
+        .reconstruct_from_assignments(amps.view(), true)
+        .unwrap();
     let uncollapsed = term
         .reconstruct_from_assignments(amps.view(), false)
         .unwrap();
@@ -2222,7 +2223,11 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
     // Zero target so the data-fit gradient on the ≈0 decoder is itself O(ε): the
     // dominant radial force on atom 1's block is the collapse-prevention stack.
     let target = Array2::<f64>::zeros(target0.raw_dim());
-    let rho = SaeManifoldRho::new((1.0e-4_f64).ln(), (1.0e-4_f64).ln(), vec![array![0.0], array![0.0]]);
+    let rho = SaeManifoldRho::new(
+        (1.0e-4_f64).ln(),
+        (1.0e-4_f64).ln(),
+        vec![array![0.0], array![0.0]],
+    );
     let sys = term
         .assemble_arrow_schur(target.view(), &rho, None)
         .expect("assembly must succeed at the collapse point");
@@ -2256,7 +2261,10 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
         .collect();
     let f = SaeManifoldTerm::barrier_norm_floor_sq(&norm_sq);
     let mu = SAE_AMPLITUDE_BARRIER_STRENGTH;
-    assert!(u < f, "atom 1 must sit inside the barrier turn-on radius: u={u:e} f={f:e}");
+    assert!(
+        u < f,
+        "atom 1 must sit inside the barrier turn-on radius: u={u:e} f={f:e}"
+    );
     let g_coef = -2.0 * mu * f / (u * (u + f));
     let expected = g_coef * s; // barrier radial force (outward, < 0)
     assert!(expected < 0.0, "barrier radial force must be outward");
@@ -2297,7 +2305,6 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
     );
 }
 
-
 // #2253 co-collapse instrumentation (diagnostic; zz_measure). Sweep the 2-atom
 // alignment c2 toward collapse and report the separation-barrier restoring force
 // (grad norm) + value. If the force PLATEAUS at O(1) as c2->1, the tiny fixture
@@ -2312,7 +2319,6 @@ fn zz_measure_separation_force_vs_c2_2253() {
         eprintln!("SEPFORCE c2={c2:.6} value={v:.6e} force_gradnorm={fnorm:.6e}");
     }
 }
-
 
 // #2253 co-collapse — confirm the gate-inside defect on the REAL failing
 // fixtures: report the co-firing weight q, the decoder coherence o=c2, and the
@@ -2365,9 +2371,9 @@ fn zz_measure_real_fixture_barrier_q_2253() {
 // barrier or solver failure.
 #[test]
 fn zz_measure_tiny_fixture_target_rank_2253() {
-    use gam_linalg::faer_ndarray::FaerSvd;
     use crate::manifold::tests::small_two_atom_periodic_term;
     use crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture;
+    use gam_linalg::faer_ndarray::FaerSvd;
     let svd_report = |tag: &str, target: &Array2<f64>| {
         let (_u, sv, _vt) = target.svd(false, false).expect("svd");
         let s: Vec<f64> = sv.iter().copied().collect();

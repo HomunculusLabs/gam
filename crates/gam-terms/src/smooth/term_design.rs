@@ -496,12 +496,11 @@ fn smooth_basis_has_anchored_bspline(basis: &SmoothBasisSpec) -> bool {
         SmoothBasisSpec::BSpline1D { spec, .. } => {
             bspline_conditions_have_anchor(&spec.boundary_conditions)
         }
-        SmoothBasisSpec::BySmooth { smooth, .. } => {
-            smooth_basis_has_anchored_bspline(smooth)
-        }
-        SmoothBasisSpec::TensorBSpline { spec, .. } => spec.marginalspecs.iter().any(|marginal| {
-            bspline_conditions_have_anchor(&marginal.boundary_conditions)
-        }),
+        SmoothBasisSpec::BySmooth { smooth, .. } => smooth_basis_has_anchored_bspline(smooth),
+        SmoothBasisSpec::TensorBSpline { spec, .. } => spec
+            .marginalspecs
+            .iter()
+            .any(|marginal| bspline_conditions_have_anchor(&marginal.boundary_conditions)),
         SmoothBasisSpec::FactorSmooth { .. }
         | SmoothBasisSpec::ThinPlate { .. }
         | SmoothBasisSpec::Sphere { .. }
@@ -513,9 +512,7 @@ fn smooth_basis_has_anchored_bspline(basis: &SmoothBasisSpec) -> bool {
     }
 }
 
-fn bspline_conditions_have_anchor(
-    conditions: &crate::basis::BSplineBoundaryConditions,
-) -> bool {
+fn bspline_conditions_have_anchor(conditions: &crate::basis::BSplineBoundaryConditions) -> bool {
     conditions.has_anchor()
 }
 
@@ -1247,12 +1244,8 @@ fn apply_global_smooth_identifiability(
                 } else {
                     raw
                 };
-                let (_, c_new) =
-                    normalize_penalty_in_constrained_space(restricted.dense());
-                let matrix = restricted.scaled(
-                    1.0 / c_new,
-                    "normalized global smooth penalty",
-                )?;
+                let (_, c_new) = normalize_penalty_in_constrained_space(restricted.dense());
+                let matrix = restricted.scaled(1.0 / c_new, "normalized global smooth penalty")?;
                 Ok(PenaltyCandidate {
                     matrix,
                     source: penalty.info.source.clone(),
@@ -1317,10 +1310,8 @@ fn apply_global_smooth_identifiability(
                 .map(|c| -> Result<_, BasisError> {
                     Ok((
                         support_rows(&c.matrix),
-                        c.matrix.scaled(
-                            c.normalization_scale,
-                            "physical global smooth primary",
-                        )?,
+                        c.matrix
+                            .scaled(c.normalization_scale, "physical global smooth primary")?,
                     ))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1358,20 +1349,15 @@ fn apply_global_smooth_identifiability(
                     "physical global smooth null ridge",
                 )?;
                 let ridge_block = ConstructiveQuadratic::from_energy_factor(
-                    ridge_full
-                        .factor()
-                        .slice(s![.., *plo..*phi])
-                        .to_owned(),
+                    ridge_full.factor().slice(s![.., *plo..*phi]).to_owned(),
                     "owned global smooth null-ridge block",
                 )?;
                 let rebuilt_block =
                     crate::basis::rebuild_metric_consistent_ridge(&block, &ridge_block)?;
                 match rebuilt_block {
                     Some(ridge_block) => {
-                        let mut full_factor = Array2::<f64>::zeros((
-                            ridge_block.factor().nrows(),
-                            q,
-                        ));
+                        let mut full_factor =
+                            Array2::<f64>::zeros((ridge_block.factor().nrows(), q));
                         full_factor
                             .slice_mut(s![.., *plo..*phi])
                             .assign(ridge_block.factor());
@@ -1379,12 +1365,9 @@ fn apply_global_smooth_identifiability(
                             full_factor,
                             "embedded global smooth null ridge",
                         )?;
-                        let (_, scale) =
-                            normalize_penalty_in_constrained_space(full.dense());
-                        candidate.matrix = full.scaled(
-                            1.0 / scale,
-                            "normalized embedded global smooth null ridge",
-                        )?;
+                        let (_, scale) = normalize_penalty_in_constrained_space(full.dense());
+                        candidate.matrix = full
+                            .scaled(1.0 / scale, "normalized embedded global smooth null ridge")?;
                         candidate.normalization_scale = scale;
                         candidate.kronecker_factors = None;
                         candidate.op = None;
@@ -2333,7 +2316,11 @@ mod frozen_linear_term_mass_rebuild_tests {
                  succeed — the training-time mass is reused, never recomputed from these rows",
             );
         assert_eq!(
-            rebuilt_design.linear_function_masses.first().copied().flatten(),
+            rebuilt_design
+                .linear_function_masses
+                .first()
+                .copied()
+                .flatten(),
             Some(training_mass),
             "the rebuilt design must carry the REUSED training-time mass, not a value \
              recomputed from the (all-zero) evaluation rows"

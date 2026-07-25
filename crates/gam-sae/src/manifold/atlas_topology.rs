@@ -789,7 +789,11 @@ mod tests_2280 {
             );
             let inv = readout.invariants();
             assert_eq!(inv.euler_characteristic, 2, "n={n}: {readout}");
-            assert_eq!((inv.betti.b1, inv.betti.b2), (0, Some(1)), "n={n}: {readout}");
+            assert_eq!(
+                (inv.betti.b1, inv.betti.b2),
+                (0, Some(1)),
+                "n={n}: {readout}"
+            );
         }
     }
 
@@ -805,13 +809,27 @@ mod tests_2280 {
 
         let (ci, mi) = (cyl.invariants(), mob.invariants());
         assert_eq!(
-            (ci.betti.b0, ci.betti.b1, ci.betti.b2, ci.euler_characteristic),
-            (mi.betti.b0, mi.betti.b1, mi.betti.b2, mi.euler_characteristic),
+            (
+                ci.betti.b0,
+                ci.betti.b1,
+                ci.betti.b2,
+                ci.euler_characteristic
+            ),
+            (
+                mi.betti.b0,
+                mi.betti.b1,
+                mi.betti.b2,
+                mi.euler_characteristic
+            ),
             "the cylinder and the Möbius band must be homologically indistinguishable: \
              cyl={cyl} mob={mob}"
         );
         assert!(ci.orientation_cocycle_closes && mi.orientation_cocycle_closes);
-        assert_eq!(ci.orientation_class, AtlasOrientability::Orientable, "{cyl}");
+        assert_eq!(
+            ci.orientation_class,
+            AtlasOrientability::Orientable,
+            "{cyl}"
+        );
         assert_eq!(
             mi.orientation_class,
             AtlasOrientability::NonOrientable,

@@ -15,11 +15,10 @@ use crate::basis::{
     ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, DuchonBasisSpec,
     DuchonNullspaceOrder, DuchonOperatorPenaltySpec, MaternBasisSpec, MaternIdentifiability,
     MaternLengthScale, MaternNu, MeasureJetBasisSpec, MeasureJetIdentifiability,
-    OneDimensionalBoundary,
-    SpatialIdentifiability, SphereMethod, SphereWahbaKernel, SphericalSplineBasisSpec,
-    SphericalSplineIdentifiability, ThinPlateBasisSpec, auto_spatial_center_strategy,
-    default_num_centers, default_spatial_center_strategy, default_spherical_harmonic_degree,
-    plan_spatial_basis, thin_plate_penalty_order,
+    OneDimensionalBoundary, SpatialIdentifiability, SphereMethod, SphereWahbaKernel,
+    SphericalSplineBasisSpec, SphericalSplineIdentifiability, ThinPlateBasisSpec,
+    auto_spatial_center_strategy, default_num_centers, default_spatial_center_strategy,
+    default_spherical_harmonic_degree, plan_spatial_basis, thin_plate_penalty_order,
 };
 use crate::inference::formula_dsl::{
     ParsedTerm, SmoothKind, option_bool, option_f64, option_f64_strict, option_usize,
@@ -5182,7 +5181,9 @@ mod tests {
             .expect_err("a constant-longitude sphere smooth must be rejected as degenerate");
         let lower = err.to_lowercase();
         assert!(
-            (lower.contains("constant") || lower.contains("degenerate") || lower.contains("unique"))
+            (lower.contains("constant")
+                || lower.contains("degenerate")
+                || lower.contains("unique"))
                 && lower.contains("lon"),
             "rejection must flag degeneracy and name the constant longitude coordinate: {err}"
         );
@@ -5492,10 +5493,7 @@ mod tests {
             !crate::smooth::all_spatial_terms_kappa_fixed(&auto),
             "BMS pre-design query must enroll omitted Matérn κ"
         );
-        crate::smooth::auto_init_length_scale_in_place(
-            ds.values.view(),
-            &mut auto.smooth_terms[0],
-        );
+        crate::smooth::auto_init_length_scale_in_place(ds.values.view(), &mut auto.smooth_terms[0]);
         assert!(matches!(
             &auto.smooth_terms[0].basis,
             SmoothBasisSpec::Matern {

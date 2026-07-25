@@ -65,8 +65,8 @@ pub mod terms {
 /// Re-export of the neutral estimation error so crate-local macros
 /// (`bail_invalid_estim!`) and call sites can reference `crate::EstimationError`.
 pub use gam_problem::EstimationError;
-pub use penalty_spec::{PenaltySpec, validate_penalty_spec_shape};
 pub use isotropic_scale::{IsotropicScale, IsotropicScaleError};
+pub use penalty_spec::{PenaltySpec, validate_penalty_spec_shape};
 
 pub use analytic_penalties::{
     ARDPenalty, AnalyticPenalty, AnalyticPenaltyKind, AnalyticPenaltyOp, AnalyticPenaltyRegistry,

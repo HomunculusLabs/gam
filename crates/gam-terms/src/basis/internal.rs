@@ -74,8 +74,7 @@ pub(crate) fn evaluate_splines_at_point_full_support_into(
     let last_knot = knots[num_knots - 1];
     let terminal_multiplicity = degree + 1;
     let right_clamped = terminal_multiplicity <= num_knots
-        && (num_knots - terminal_multiplicity..num_knots)
-            .all(|index| knots[index] == last_knot);
+        && (num_knots - terminal_multiplicity..num_knots).all(|index| knots[index] == last_knot);
     if x == last_knot && right_clamped {
         basisvalues[num_basis - 1] = 1.0;
         return;

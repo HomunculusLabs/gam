@@ -494,59 +494,14 @@ pub(crate) fn validate_tweedie_responses(
     Ok(())
 }
 
-#[inline]
-pub(crate) fn trigamma(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut acc = 0.0;
-    while x < 8.0 {
-        acc += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    acc + inv + 0.5 * inv2 + inv2 * inv / 6.0 - inv2 * inv2 * inv / 30.0
-        + inv2 * inv2 * inv2 * inv / 42.0
-        - inv2 * inv2 * inv2 * inv2 * inv / 30.0
-}
-
-#[inline]
-pub(crate) fn polygamma2(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut acc = 0.0;
-    while x < 8.0 {
-        acc -= 2.0 / (x * x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    let inv3 = inv2 * inv;
-    acc - inv2 - inv3 - 0.5 * inv2 * inv2 + inv3 * inv3 / 6.0 - inv2 * inv3 * inv3 / 6.0
-        + 0.3 * inv2 * inv2 * inv3 * inv3
-        - 5.0 * inv2 * inv2 * inv2 * inv3 * inv3 / 6.0
-}
-
-#[inline]
-pub(crate) fn polygamma3(mut x: f64) -> f64 {
-    if !(x.is_finite() && x > 0.0) {
-        return f64::NAN;
-    }
-    let mut acc = 0.0;
-    while x < 8.0 {
-        acc += 6.0 / (x * x * x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    let inv3 = inv2 * inv;
-    let inv4 = inv2 * inv2;
-    acc + 2.0 * inv3 + 3.0 * inv4 + 2.0 * inv4 * inv - inv4 * inv3 + 4.0 * inv4 * inv3 * inv2 / 3.0
-        - 3.0 * inv4 * inv3 * inv4
-        + 10.0 * inv4 * inv4 * inv4 * inv
-}
+// `ψ₁`, `ψ₂` and `ψ₃` — the negative-binomial `θ`, Gamma dispersion and Beta
+// shape channels' curvature — come from the workspace's single polygamma
+// implementation. The local copies they replace recursed only to `x ≥ 8` and
+// stopped at `B₁₀`, leaving 6.3e−11 / 3.9e−11 / 2.6e−10 relative error, and
+// they disagreed with the copies in `gam-sae` and `gam-terms` at that scale.
+// The aliases keep `polygamma2`/`polygamma3` naming at the ~26 call sites.
+pub(crate) use gam_math::special::trigamma;
+pub(crate) use gam_math::special::{pentagamma as polygamma3, tetragamma as polygamma2};
 
 #[inline]
 pub(crate) fn beta_logit_working_curvature_eta_derivatives(

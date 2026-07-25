@@ -530,8 +530,7 @@ mod fit_tests {
         assert!(
             !report.tier1.convergence.certified,
             "an over-complete linear-bulk fit is BEST-EFFORT (certified=false); got certified=true, frame_residual={} tol={}",
-            report.tier1.convergence.frame_residual,
-            report.tier1.convergence.tolerance
+            report.tier1.convergence.frame_residual, report.tier1.convergence.tolerance
         );
         assert!(
             report.tier1.convergence.frame_residual.is_finite(),
@@ -575,8 +574,7 @@ mod fit_tests {
         assert!(
             !report.tier1.convergence.certified,
             "K ≫ rank fit must carry an OPEN certificate; got certified=true              (frame_residual={}, tol={})",
-            report.tier1.convergence.frame_residual,
-            report.tier1.convergence.tolerance
+            report.tier1.convergence.frame_residual, report.tier1.convergence.tolerance
         );
         assert!(
             report.tier1.convergence.frame_residual > report.tier1.convergence.tolerance,
@@ -655,7 +653,8 @@ mod fit_tests {
         assert!(
             c.frame_residual > c.tolerance,
             "an open certificate must report frame_residual above tolerance; got {} <= {}",
-            c.frame_residual, c.tolerance
+            c.frame_residual,
+            c.tolerance
         );
         assert!(
             c.ev_residual.is_finite(),
@@ -663,7 +662,10 @@ mod fit_tests {
             c.ev_residual
         );
         // No tolerance softening: the certificate is measured against the configured tol.
-        assert_eq!(c.tolerance, config.tolerance, "#2275 must NOT soften tolerance");
+        assert_eq!(
+            c.tolerance, config.tolerance,
+            "#2275 must NOT soften tolerance"
+        );
     }
 
     /// Planted 6-circle + linear-bulk mixture (#2023 acceptance): the tiered fit

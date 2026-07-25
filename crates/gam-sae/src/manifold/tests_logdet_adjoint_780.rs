@@ -958,7 +958,10 @@ pub(crate) fn end_to_end_dual_vs_analytic_logdet_parity_battery_2156_2144() {
         FdAnchorRegime::any_maximum(),
         rho_ladder_family(
             &ordered_beta_bernoulli_term,
-            sparse_lift_ladder(&ordered_beta_bernoulli_rho, &[0.6, 1.0, 1.4, 1.9, 2.5, 0.3, -0.1]),
+            sparse_lift_ladder(
+                &ordered_beta_bernoulli_rho,
+                &[0.6, 1.0, 1.4, 1.9, 2.5, 0.3, -0.1],
+            ),
             200,
         ),
     );
@@ -1531,9 +1534,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
             // is likeliest, so this gate carries the value-free branch guard on
             // top of the structural stratum certificate (#2366).
             let (fd, branch) = certified_branch_stable_central_difference(
-                &format!(
-                    "deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis}"
-                ),
+                &format!("deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis}"),
                 &fd_stratum,
                 h,
                 at,
@@ -1833,9 +1834,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
             }
         }
         let fd = certified_central_logdet_difference(
-            &format!(
-                "majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"
-            ),
+            &format!("majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"),
             &fd_stratum,
             fixed_state_logdet_sample(plus, &target, &rho),
             fixed_state_logdet_sample(minus, &target, &rho),
@@ -2355,8 +2354,9 @@ pub(crate) fn obb_patchd_fixture(
     let mut atoms = Vec::with_capacity(k_atoms);
     for atom in 0..k_atoms {
         let (phi, jet) = evaluator.evaluate(coords[atom].view()).unwrap();
-        let decoder =
-            Array2::from_shape_fn((m, p), |(basis_col, out_col)| weights[atom][basis_col][out_col]);
+        let decoder = Array2::from_shape_fn((m, p), |(basis_col, out_col)| {
+            weights[atom][basis_col][out_col]
+        });
         atoms.push(
             SaeManifoldAtom::new_with_provided_function_gram(
                 format!("patchd_{atom}"),
@@ -2513,12 +2513,8 @@ fn sae_exact_a_theta_adjoint_gap_measure_2330_patchd() {
                     let rel = abs_err / (1.0 + fd.abs().max(analytic.abs()));
                     if h == 1.0e-5 {
                         match var {
-                            SaeLocalRowVar::Coord { .. } => {
-                                max_coord_rel = max_coord_rel.max(rel)
-                            }
-                            SaeLocalRowVar::Logit { .. } => {
-                                max_logit_rel = max_logit_rel.max(rel)
-                            }
+                            SaeLocalRowVar::Coord { .. } => max_coord_rel = max_coord_rel.max(rel),
+                            SaeLocalRowVar::Logit { .. } => max_logit_rel = max_logit_rel.max(rel),
                         }
                     }
                     eprintln!(
@@ -2546,7 +2542,6 @@ fn sae_exact_a_theta_adjoint_gap_measure_2330_patchd() {
     );
 }
 
-
 // #2330 Patch D — channel-2 exercise gate. The main arbiter fixture sets
 // log_lambda_sparse=-6 (OBB prior weight e^{-6}≈0.0025), so the ordered-BB prior
 // curvature channel-2 (∂ΔC_obb/∂logit) is nearly inert there — correct-in-form
@@ -2557,10 +2552,21 @@ fn sae_exact_a_theta_adjoint_gap_measure_2330_patchd() {
 fn sae_exact_a_theta_adjoint_gap_measure_2330_patchd_weighted() {
     // Scan a few sparse weights at residual_scale 0; report PD + the logit gaps so
     // a channel-2 sign error shows up as a blown logit slot.
-    for &(rs, lls) in &[(0.005_f64, -4.0_f64), (0.005, -3.0), (0.01, -3.0), (0.02, -2.0)] {
+    for &(rs, lls) in &[
+        (0.005_f64, -4.0_f64),
+        (0.005, -3.0),
+        (0.01, -3.0),
+        (0.02, -2.0),
+    ] {
         let (mut term, target, rho) = obb_patchd_fixture(rs, lls);
         let built = term.penalized_quasi_laplace_criterion_with_cache(
-            target.view(), &rho, None, 200, 0.4, 1.0e-6, 1.0e-6,
+            target.view(),
+            &rho,
+            None,
+            200,
+            0.4,
+            1.0e-6,
+            1.0e-6,
         );
         let cache = match built {
             Ok((_v, _l, c)) => c,
@@ -2610,7 +2616,9 @@ fn sae_exact_a_theta_adjoint_gap_measure_2330_patchd_weighted() {
                              analytic={analytic:.6e} rel={rel:.3e}"
                         );
                     }
-                    _ => eprintln!("PATCHD_W rs={rs:.3} lls={lls:.2} row={row} var={var:?} refused"),
+                    _ => {
+                        eprintln!("PATCHD_W rs={rs:.3} lls={lls:.2} row={row} var={var:?} refused")
+                    }
                 }
             }
         }

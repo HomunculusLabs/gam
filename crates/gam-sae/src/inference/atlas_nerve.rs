@@ -1657,8 +1657,7 @@ mod tests {
             "the same F2 homology becomes a different surface only through certified orientation"
         );
         assert!(
-            super::surface_from_invariants(rp2_betti, 1, AtlasOrientability::Orientable)
-                .is_none(),
+            super::surface_from_invariants(rp2_betti, 1, AtlasOrientability::Orientable).is_none(),
             "an impossible orientable RP2 signature must not earn any name"
         );
     }

@@ -3320,9 +3320,13 @@ mod tests {
             inv_vbeta: &inv_vbeta,
             beta_inv: &beta_inv,
         };
-        let cpu =
-            execute_softmax_row_jet_tile_contracted(&rows, inv_tau, SaeRowJetPath::Cpu, contraction)
-                .expect("CPU trace oracle");
+        let cpu = execute_softmax_row_jet_tile_contracted(
+            &rows,
+            inv_tau,
+            SaeRowJetPath::Cpu,
+            contraction,
+        )
+        .expect("CPU trace oracle");
         execute_softmax_row_jet_tile_contracted(&rows, inv_tau, SaeRowJetPath::Device, contraction)
             .expect("admitted trace device warm-up must execute without a host retry");
         let mut max_error = 0.0_f64;

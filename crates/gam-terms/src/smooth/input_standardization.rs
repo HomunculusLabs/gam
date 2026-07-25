@@ -60,9 +60,7 @@ impl CompensatedSum {
 /// A scale cannot be inferred from an empty, singleton, non-finite, or
 /// zero-spread cloud. Those are invalid geometries, not an identity-scale
 /// fallback.
-pub fn estimate_isotropic_scale(
-    x: ArrayView2<'_, f64>,
-) -> Result<IsotropicScale, BasisError> {
+pub fn estimate_isotropic_scale(x: ArrayView2<'_, f64>) -> Result<IsotropicScale, BasisError> {
     let d = x.ncols();
     if d == 0 {
         return Err(BasisError::InvalidInput(
@@ -178,11 +176,7 @@ mod tests {
             let dilation = 2.0_f64.powi(exponent);
             let dilated = source.mapv(|value| value * dilation);
             let dilated_scale = estimate_isotropic_scale(dilated.view()).unwrap().get();
-            assert_relative_eq(
-                dilated_scale,
-                source_scale * dilation,
-                8.0 * f64::EPSILON,
-            );
+            assert_relative_eq(dilated_scale, source_scale * dilation, 8.0 * f64::EPSILON);
         }
     }
 

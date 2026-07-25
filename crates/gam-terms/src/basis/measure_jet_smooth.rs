@@ -2771,10 +2771,9 @@ mod tests {
             ((i + 2 * j + 1) as f64).sin() + 0.15 * (i * (j + 1)) as f64
         });
         let reparameterization = array![[1.7, 0.2, -0.1], [0.0, 0.6, 0.3], [0.0, 0.0, 1.3]];
-        let base =
-            affine_function_nullspace_quadratic(&evaluation, centers.view(), masses.view())
-                .expect("base function-space penalty")
-                .into_dense();
+        let base = affine_function_nullspace_quadratic(&evaluation, centers.view(), masses.view())
+            .expect("base function-space penalty")
+            .into_dense();
         let transformed_evaluation = evaluation.dot(&reparameterization);
         let transformed = affine_function_nullspace_quadratic(
             &transformed_evaluation,

@@ -67,9 +67,9 @@ use gam_geometry::constant_curvature::{ConstantCurvature, distance_kappa_jet};
 
 use super::{
     ActivePenalty, BasisBuildResult, BasisError, BasisMetadata, BasisPsiDerivativeBundle,
-    BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult, CenterStrategy, ConstructiveQuadratic,
-    PenaltyCandidate, PenaltySource, filter_penalty_candidates, normalize_penalty,
-    select_centers_by_strategy, weighted_coefficient_sum_to_zero_transform,
+    BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult, CenterStrategy,
+    ConstructiveQuadratic, PenaltyCandidate, PenaltySource, filter_penalty_candidates,
+    normalize_penalty, select_centers_by_strategy, weighted_coefficient_sum_to_zero_transform,
 };
 
 /// Realized-design identifiability policy for the constant-curvature smooth.
@@ -712,10 +712,8 @@ pub fn build_constant_curvature_basis(
         (&raw_penalty + &raw_penalty.t()) * 0.5,
         "constant-curvature raw RKHS penalty",
     )?;
-    let penalty = raw_penalty.restricted(
-        &gauge,
-        "constant-curvature identifiability restriction",
-    )?;
+    let penalty =
+        raw_penalty.restricted(&gauge, "constant-curvature identifiability restriction")?;
     let raw_design = constant_curvature_kernel_matrix(data, centers.view(), spec.kappa, ell_eff)?;
     let design = gam_linalg::matrix::DesignMatrix::Dense(
         gam_linalg::matrix::DenseDesignMatrix::from(gauge.restrict_design(&raw_design)),

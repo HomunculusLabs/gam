@@ -86,11 +86,10 @@ use crate::description_length::{BirthMdlPrescreen, predicted_birth_dl_bits};
 use crate::frames::GrassmannFrame;
 use crate::manifold::{
     AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, GraphCompressionKind,
-    GraphStructureSelection, LearnedGraphAtom, OccupancyLaw,
-    SAE_MAX_PERIODIC_HARMONICS, SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution,
-    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, SaeReferenceMetricPlan,
-    SphereChartTransition, UnitSpeedChartTransition, amplitude_concentration_certificate,
-    anisotropic_flat_product_torus_penalty,
+    GraphStructureSelection, LearnedGraphAtom, OccupancyLaw, SAE_MAX_PERIODIC_HARMONICS,
+    SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeManifoldAtom, SaeManifoldRho,
+    SaeManifoldTerm, SaeReferenceMetricPlan, SphereChartTransition, UnitSpeedChartTransition,
+    amplitude_concentration_certificate, anisotropic_flat_product_torus_penalty,
     anisotropic_flat_product_torus_penalty_aspect_derivative, classify_occupancy_interval,
     embedded_donut_torus_reference_penalty,
     embedded_donut_torus_reference_penalty_aspect_derivative,
@@ -6811,7 +6810,9 @@ mod tests;
 #[cfg(test)]
 mod tests_atlas_prior_2280 {
     use super::*;
-    use crate::manifold::tests_topology_fixtures::{circle, cylinder_strip, mobius_strip, trefoil_knot};
+    use crate::manifold::tests_topology_fixtures::{
+        circle, cylinder_strip, mobius_strip, trefoil_knot,
+    };
     use ndarray::Array2;
 
     /// A Möbius strip in R³ (a half-twist over one revolution): the canonical
@@ -6838,8 +6839,8 @@ mod tests_atlas_prior_2280 {
     #[test]
     fn atlas_prior_names_mobius_and_cylinder_apart_2280() {
         let (mob, _) = mobius_with_coords(60, 5);
-        let mob_prior = atlas_prior_for_coords(mob.view(), 2)
-            .expect("the Möbius residual must build an atlas");
+        let mob_prior =
+            atlas_prior_for_coords(mob.view(), 2).expect("the Möbius residual must build an atlas");
         assert!(
             mob_prior.observes_non_orientable(),
             "a Möbius residual must be measured non-orientable: {mob_prior}"
@@ -6903,8 +6904,8 @@ mod tests_atlas_prior_2280 {
     fn trefoil_and_circle_receive_the_same_verdict_2280() {
         let knot = atlas_prior_for_coords(trefoil_knot(600, 1.0).view(), 1)
             .expect("trefoil atlas must build");
-        let round = atlas_prior_for_coords(circle(400, 2.0).view(), 1)
-            .expect("circle atlas must build");
+        let round =
+            atlas_prior_for_coords(circle(400, 2.0).view(), 1).expect("circle atlas must build");
         assert_eq!(
             knot.observed_manifold(),
             round.observed_manifold(),
@@ -6976,7 +6977,10 @@ mod tests_atlas_prior_2280 {
                 GraphCompressionKind::Interval,
                 Some(AutoTopologyKind::Euclidean),
             ),
-            (GraphCompressionKind::Disk, Some(AutoTopologyKind::Euclidean)),
+            (
+                GraphCompressionKind::Disk,
+                Some(AutoTopologyKind::Euclidean),
+            ),
             (
                 GraphCompressionKind::Cylinder,
                 Some(AutoTopologyKind::Cylinder),

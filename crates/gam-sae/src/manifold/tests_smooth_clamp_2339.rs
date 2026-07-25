@@ -96,7 +96,10 @@ fn majorizer_is_positive_semidefinite() {
             // On the convex half the majorizer is strictly positive (it is at least
             // the hard clamp `α·cos > 0`).
             if cos > 1e-4 {
-                assert!(b > 0.0, "convex-half majorizer must be positive; got {b} at t={t}");
+                assert!(
+                    b > 0.0,
+                    "convex-half majorizer must be positive; got {b} at t={t}"
+                );
             }
         }
     }
@@ -150,7 +153,10 @@ fn deviation_from_hard_clamp_within_floor() {
             (seam - ceiling).abs() <= 1e-12 * ceiling.max(f64::MIN_POSITIVE),
             "seam value {seam} must equal the deviation ceiling {ceiling}"
         );
-        assert!(max_dev > 0.5 * ceiling, "the smoothing must actually engage");
+        assert!(
+            max_dev > 0.5 * ceiling,
+            "the smoothing must actually engage"
+        );
     }
 }
 

@@ -216,7 +216,10 @@ fn zz_measure_inner_step_acceptance_trace_2267() {
     );
     let wall = started.elapsed().as_secs_f64();
     match evaluated {
-        Ok(value) => eprintln!("[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s", value.0),
+        Ok(value) => eprintln!(
+            "[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s",
+            value.0
+        ),
         Err(err) => eprintln!("[2267-TRACE] criterion REFUSED in {wall:.2}s: {err}"),
     }
 }

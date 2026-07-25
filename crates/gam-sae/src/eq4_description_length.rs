@@ -327,8 +327,7 @@ where
         .iter()
         .filter(|&&probability| probability > 0.0 && probability < 1.0)
         .map(|&probability| {
-            -(probability * probability.log2()
-                + (1.0 - probability) * (1.0 - probability).log2())
+            -(probability * probability.log2() + (1.0 - probability) * (1.0 - probability).log2())
         })
         .sum();
 

@@ -2282,8 +2282,8 @@ fn fit_block_sparse_dictionary_with_seed_inner(
         } else {
             0.0
         };
-        let objective_plateaued = ev_residual <= config.tolerance
-            || captured_fraction < BLOCK_EV_PLATEAU_FRACTION;
+        let objective_plateaued =
+            ev_residual <= config.tolerance || captured_fraction < BLOCK_EV_PLATEAU_FRACTION;
         if objective_plateaued {
             plateau_rounds += 1;
         } else {

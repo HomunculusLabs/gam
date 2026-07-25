@@ -3694,7 +3694,9 @@ mod range_floor_psi_jet_tests {
     fn omega_at(psi: f64) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
         let n = 5usize;
         let seed = sym_from(
-            &[1.0, 0.3, 0.9, -0.2, 0.4, 1.1, 0.15, -0.25, 0.35, 0.8, 0.05, 0.2, -0.1, 0.3, 0.95],
+            &[
+                1.0, 0.3, 0.9, -0.2, 0.4, 1.1, 0.15, -0.25, 0.35, 0.8, 0.05, 0.2, -0.1, 0.3, 0.95,
+            ],
             n,
         );
         let (_evals, u) = FaerEigh::eigh(&seed, Side::Lower).expect("seed eigh");
@@ -3713,12 +3715,18 @@ mod range_floor_psi_jet_tests {
         }
         let scale = 1.0e-3;
         let b = sym_from(
-            &[0.7, -0.2, 0.5, 0.1, -0.3, 0.4, 0.05, 0.2, -0.1, 0.6, 0.02, -0.04, 0.03, 0.08, -0.05],
+            &[
+                0.7, -0.2, 0.5, 0.1, -0.3, 0.4, 0.05, 0.2, -0.1, 0.6, 0.02, -0.04, 0.03, 0.08,
+                -0.05,
+            ],
             n,
         )
         .mapv(|v| v * scale);
         let c = sym_from(
-            &[0.2, 0.1, -0.15, 0.05, 0.2, -0.1, 0.03, -0.02, 0.04, 0.1, 0.01, 0.02, -0.03, 0.05, 0.02],
+            &[
+                0.2, 0.1, -0.15, 0.05, 0.2, -0.1, 0.03, -0.02, 0.04, 0.1, 0.01, 0.02, -0.03, 0.05,
+                0.02,
+            ],
             n,
         )
         .mapv(|v| v * scale);
@@ -3731,12 +3739,16 @@ mod range_floor_psi_jet_tests {
     fn range_floor_psi_jet_matches_central_differences() {
         let dim = 8usize; // embedded_penalty_dim > n so the floor is active
         let (o0, b0, c0) = omega_at(0.0);
-        let jet = duchon_range_floor_curvature_psi_jet(&o0, &b0, &c0, dim)
-            .expect("range-floor psi jet");
+        let jet =
+            duchon_range_floor_curvature_psi_jet(&o0, &b0, &c0, dim).expect("range-floor psi jet");
 
         // The floored value must equal the standalone range-floor.
         let direct = duchon_range_floor_curvature(&o0, dim).expect("range floor");
-        let val_err = (&jet.value - &direct).iter().map(|v| v * v).sum::<f64>().sqrt();
+        let val_err = (&jet.value - &direct)
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
         assert!(
             val_err < 1e-10,
             "range-floor value mismatch vs standalone: {val_err:.3e}"
@@ -3746,16 +3758,33 @@ mod range_floor_psi_jet_tests {
             .iter()
             .map(|v| v.abs())
             .fold(0.0_f64, f64::max);
-        assert!(floor_gap > 0.0, "range floor is not active — test is vacuous");
+        assert!(
+            floor_gap > 0.0,
+            "range floor is not active — test is vacuous"
+        );
 
         let eps = 1e-6;
         let (op, _, _) = omega_at(eps);
         let (om, _, _) = omega_at(-eps);
-        let vp = duchon_range_floor_curvature_psi_jet(&op, &b0, &c0, dim).unwrap().value;
-        let vm = duchon_range_floor_curvature_psi_jet(&om, &b0, &c0, dim).unwrap().value;
+        let vp = duchon_range_floor_curvature_psi_jet(&op, &b0, &c0, dim)
+            .unwrap()
+            .value;
+        let vm = duchon_range_floor_curvature_psi_jet(&om, &b0, &c0, dim)
+            .unwrap()
+            .value;
         let fd_first = (&vp - &vm).mapv(|v| v / (2.0 * eps));
-        let first_err = (&jet.first - &fd_first).iter().map(|v| v * v).sum::<f64>().sqrt();
-        let first_scale = jet.first.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-9);
+        let first_err = (&jet.first - &fd_first)
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        let first_scale = jet
+            .first
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt()
+            .max(1e-9);
         assert!(
             first_err / first_scale < 1e-4,
             "range-floor first derivative mismatch: rel={:.3e} (err={first_err:.3e})",
@@ -3765,11 +3794,25 @@ mod range_floor_psi_jet_tests {
         // FD of the analytic FIRST derivative gives the second.
         let (op2, bp2, cp2) = omega_at(eps);
         let (om2, bm2, cm2) = omega_at(-eps);
-        let fp = duchon_range_floor_curvature_psi_jet(&op2, &bp2, &cp2, dim).unwrap().first;
-        let fm = duchon_range_floor_curvature_psi_jet(&om2, &bm2, &cm2, dim).unwrap().first;
+        let fp = duchon_range_floor_curvature_psi_jet(&op2, &bp2, &cp2, dim)
+            .unwrap()
+            .first;
+        let fm = duchon_range_floor_curvature_psi_jet(&om2, &bm2, &cm2, dim)
+            .unwrap()
+            .first;
         let fd_second = (&fp - &fm).mapv(|v| v / (2.0 * eps));
-        let second_err = (&jet.second - &fd_second).iter().map(|v| v * v).sum::<f64>().sqrt();
-        let second_scale = jet.second.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-9);
+        let second_err = (&jet.second - &fd_second)
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt();
+        let second_scale = jet
+            .second
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>()
+            .sqrt()
+            .max(1e-9);
         assert!(
             second_err / second_scale < 1e-3,
             "range-floor second derivative mismatch: rel={:.3e} (err={second_err:.3e})",

@@ -1868,8 +1868,12 @@ impl SaeManifoldTerm {
         // #2343 — amplitude barrier FIRST: its radial ridge lands in the SAME
         // shared `sep_atom_curv` the separation barrier's `lev` uses, folded once
         // below regardless of which barrier(s) engaged.
-        let amplitude_wrote =
-            self.add_sae_amplitude_barrier(&mut sys, penalty_scale, dense_beta_curvature, &mut sep_atom_curv);
+        let amplitude_wrote = self.add_sae_amplitude_barrier(
+            &mut sys,
+            penalty_scale,
+            dense_beta_curvature,
+            &mut sep_atom_curv,
+        );
         let separation_wrote = self.add_sae_separation_barrier(
             &mut sys,
             penalty_scale,

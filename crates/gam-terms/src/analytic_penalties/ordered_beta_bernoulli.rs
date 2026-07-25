@@ -666,33 +666,12 @@ impl AnalyticPenalty for OrderedBetaBernoulliPenalty {
     }
 }
 
-/// Trigamma `psi_1(x)` for positive `x`.
-fn trigamma(mut x: f64) -> f64 {
-    assert!(x > 0.0);
-    let mut acc = 0.0;
-    while x < 8.0 {
-        acc += 1.0 / (x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    acc + inv + 0.5 * inv2 + inv2 * inv / 6.0 - inv2 * inv2 * inv / 30.0
-        + inv2 * inv2 * inv2 * inv / 42.0
-        - inv2.powi(4) * inv / 30.0
-        + 5.0 * inv2.powi(5) * inv / 66.0
-}
-
-/// Tetragamma `psi_2(x)`, the derivative of [`trigamma`], for positive `x`.
-fn tetragamma(mut x: f64) -> f64 {
-    assert!(x > 0.0);
-    let mut acc = 0.0;
-    while x < 8.0 {
-        acc -= 2.0 / (x * x * x);
-        x += 1.0;
-    }
-    let inv = 1.0 / x;
-    let inv2 = inv * inv;
-    acc - inv2 - inv2 * inv - 0.5 * inv2 * inv2 + inv2.powi(3) / 6.0 - inv2.powi(4) / 6.0
-        + 3.0 * inv2.powi(5) / 10.0
-        - 5.0 * inv2.powi(6) / 6.0
-}
+// `ψ₁` and `ψ₂` come from the workspace's single polygamma implementation. The
+// local copies they replace recursed only to `x ≥ 8` and stopped at `B₁₀`,
+// leaving 6.3e−11 / 3.9e−11 relative error, and they were a THIRD independent
+// transcription of the same series — `gam-sae` and `gam-solve` each had their
+// own, agreeing with this one only to ten digits.
+//
+// The local copies asserted `x > 0`; `gam_math` returns `NaN` off-domain
+// instead, which is the same contract the `gam-solve` copy already used.
+use gam_math::special::{tetragamma, trigamma};

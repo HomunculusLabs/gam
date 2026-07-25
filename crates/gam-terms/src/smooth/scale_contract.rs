@@ -1691,10 +1691,7 @@ mod tests {
             .and_then(serde_json::Value::as_object_mut)
             .unwrap();
         fields.remove("input_scale");
-        fields.insert(
-            "input_scales".to_string(),
-            serde_json::json!([1.0, 2.0]),
-        );
+        fields.insert("input_scales".to_string(), serde_json::json!([1.0, 2.0]));
         assert!(serde_json::from_value::<SmoothBasisSpec>(legacy).is_err());
 
         let mut vector = serde_json::to_value(&basis).unwrap();

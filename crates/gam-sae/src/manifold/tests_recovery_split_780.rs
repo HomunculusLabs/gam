@@ -1,11 +1,11 @@
 // Split from tests.rs under the #780 oversized-file gate: recovery-suite +
 // registry/assignment tests from line ~6560 onward. Shared fixtures come via
 // the parent-module glob below.
-use super::*;
 use super::derivative_oracle::{
     BranchCertificate, EigenDerivativeRoute, MajorizerAnchorMode, PivotBranch,
 };
 use super::dual::DualKinkBranch;
+use super::*;
 use approx::assert_abs_diff_eq;
 use gam_solve::arrow_schur::{
     ArrowFactorSlab, ArrowHtbetaCache, ArrowPcgDiagnostics, ArrowSolverMode, ArrowUndampedFactors,
@@ -1640,8 +1640,7 @@ pub(crate) fn fixed_state_logdet_sample(
             1.0e-6,
         )
         .expect("fixed-state cache");
-    let value =
-        arrow_log_det_from_cache(&cache).expect("fixed-state authoritative joint logdet");
+    let value = arrow_log_det_from_cache(&cache).expect("fixed-state authoritative joint logdet");
     let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
     FixedStateLogdetSample { value, stratum }
 }
@@ -1894,8 +1893,7 @@ fn classify_fd_anchor_candidate(
                 term.assignment.logits.dim()
             ));
         }
-        term.assignment.logits =
-            &term.assignment.logits * (1.0 - weight) + &decisive * weight;
+        term.assignment.logits = &term.assignment.logits * (1.0 - weight) + &decisive * weight;
     }
     // `inner_max_iter = 0` freezes θ̂ at the candidate state: the anchor is the
     // point the test declares, not whatever the inner solve would wander to.
@@ -1923,7 +1921,9 @@ fn classify_fd_anchor_candidate(
         .count();
     match regime.deflation {
         FdAnchorDeflation::NoRowDeflates if deflated_rows > 0 => {
-            return Err(format!("{deflated_rows} row(s) deflate; regime requires none"));
+            return Err(format!(
+                "{deflated_rows} row(s) deflate; regime requires none"
+            ));
         }
         FdAnchorDeflation::SomeRowDeflates if deflated_rows == 0 => {
             return Err("no row deflates; regime requires at least one".to_string());

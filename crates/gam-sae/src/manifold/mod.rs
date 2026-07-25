@@ -303,9 +303,9 @@ mod tests_collateral_e2_2234;
 mod tests_collateral_noncyclic_2234;
 
 #[cfg(test)]
-mod tests_schur_seed_refusal_1782;
-#[cfg(test)]
 mod tests_indefinite_a_refusal_2336;
+#[cfg(test)]
+mod tests_schur_seed_refusal_1782;
 #[cfg(test)]
 mod tests_smooth_clamp_2339;
 

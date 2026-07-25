@@ -381,10 +381,8 @@ pub fn build_thin_plate_basiswithworkspace(
                         match &rebuilt {
                             Some(ridge) => {
                                 let (_, scale) = normalize_penalty(ridge.dense());
-                                candidate.matrix = ridge.scaled(
-                                    1.0 / scale,
-                                    "normalized thin-plate null ridge",
-                                )?;
+                                candidate.matrix = ridge
+                                    .scaled(1.0 / scale, "normalized thin-plate null ridge")?;
                                 candidate.normalization_scale = scale;
                                 candidate.kronecker_factors = None;
                                 candidate.op = None;

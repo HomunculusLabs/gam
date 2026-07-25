@@ -494,8 +494,7 @@ impl SaeManifoldTerm {
         let value = mu * (f / u).ln_1p();
         let g_coef = -2.0 * mu * f / (u * upf);
         let prr = 2.0 * mu * f * (3.0 * u + f) / (u * upf * upf);
-        (value.is_finite() && g_coef.is_finite() && prr.is_finite())
-            .then_some((value, g_coef, prr))
+        (value.is_finite() && g_coef.is_finite() && prr.is_finite()).then_some((value, g_coef, prr))
     }
 
     /// #2343 — freeze the AMPLITUDE barrier's turn-on radius `ε² = floor²` at the

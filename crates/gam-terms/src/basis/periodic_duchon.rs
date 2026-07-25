@@ -1117,7 +1117,10 @@ pub(crate) fn build_periodic_duchon_basis_1d(
         // exact Fourier-series periodization of the spectral density, which is
         // PSD by construction. `kappa` is well defined here because this branch
         // runs iff `length_scale` is `Some`.
-        let kappa = 1.0 / len_scale.expect("hybrid branch requires length_scale").max(1e-300);
+        let kappa = 1.0
+            / len_scale
+                .expect("hybrid branch requires length_scale")
+                .max(1e-300);
         raw_kernel
             .axis_chunks_iter_mut(ndarray::Axis(0), 1024)
             .into_par_iter()
@@ -1162,9 +1165,15 @@ pub(crate) fn build_periodic_duchon_basis_1d(
         } else {
             // Same exact circular periodization the design uses, so
             // ``ω = z' K_centers z`` is the PSD Gram of the periodic smoother.
-            let kappa =
-                1.0 / spec.length_scale.expect("hybrid branch requires length_scale").max(1e-300);
-            Ok(periodic_hybrid_duchon_kernel_value(r, kappa, p_order, s_order, period)? * kernel_amp)
+            let kappa = 1.0
+                / spec
+                    .length_scale
+                    .expect("hybrid branch requires length_scale")
+                    .max(1e-300);
+            Ok(
+                periodic_hybrid_duchon_kernel_value(r, kappa, p_order, s_order, period)?
+                    * kernel_amp,
+            )
         }
     })?;
     let omega = fast_ab(&fast_atb(&z, &center_kernel), &z);
@@ -1172,10 +1181,8 @@ pub(crate) fn build_periodic_duchon_basis_1d(
     penalty
         .slice_mut(s![0..kernel_cols, 0..kernel_cols])
         .assign(&omega);
-    let raw_primary = ConstructiveQuadratic::try_from_dense_psd(
-        penalty,
-        "periodic Duchon raw primary penalty",
-    )?;
+    let raw_primary =
+        ConstructiveQuadratic::try_from_dense_psd(penalty, "periodic Duchon raw primary penalty")?;
     let base_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(basis));
     let identifiability_transform = spatial_identifiability_transform_from_design_matrix(
         data,
@@ -1186,10 +1193,8 @@ pub(crate) fn build_periodic_duchon_basis_1d(
     let (design, primary) = if let Some(transform) = identifiability_transform.as_ref() {
         let design = wrap_dense_design_with_transform(base_design, transform, "periodic Duchon")?;
         let gauge = gam_problem::Gauge::from_block_transforms(&[transform.clone()]);
-        let transformed = raw_primary.restricted(
-            &gauge,
-            "periodic Duchon identified primary penalty",
-        )?;
+        let transformed =
+            raw_primary.restricted(&gauge, "periodic Duchon identified primary penalty")?;
         (design, transformed)
     } else {
         (base_design, raw_primary)
@@ -1831,10 +1836,7 @@ pub(crate) fn duchon_native_penalty_candidates(
         // Complementary metric ridge `N(NᵀGN)Nᵀ` (range = span(trend frame)),
         // NOT the leaky metric projector `GN(NᵀGN)⁻¹NᵀG` (range = span(GN)),
         // so the constant stays in the joint null space (gam#2372).
-        let raw = function_space_subspace_trend_ridge(
-            &trend_frame,
-            &function_gram,
-        )?;
+        let raw = function_space_subspace_trend_ridge(&trend_frame, &function_gram)?;
         Some(project_penalty_matrix(&raw, outer_identifiability))
     } else {
         None
@@ -2230,8 +2232,10 @@ mod mixed_periodicity_psd_tests {
         // (1) The shipped block is exactly the complementary metric ridge
         // `R = N(NᵀGN)Nᵀ`.
         let trend_metric = trend_frame.t().dot(&gram).dot(&trend_frame);
-        let reference =
-            symmetrize_penalty(&fast_abt(&fast_ab(&trend_frame, &trend_metric), &trend_frame));
+        let reference = symmetrize_penalty(&fast_abt(
+            &fast_ab(&trend_frame, &trend_metric),
+            &trend_frame,
+        ));
         let ridge_scale = reference
             .iter()
             .map(|value| value.abs())

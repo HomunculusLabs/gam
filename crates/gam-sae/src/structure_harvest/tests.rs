@@ -391,8 +391,8 @@ fn klein_r4_embedding_beats_the_unrestricted_torus_cover() {
     )
     .unwrap();
     let weights = Array1::<f64>::ones(n);
-    let klein_fit = fit_topology_candidate(&klein, target.view(), weights.view())
-        .expect("Klein quotient fit");
+    let klein_fit =
+        fit_topology_candidate(&klein, target.view(), weights.view()).expect("Klein quotient fit");
     let torus_fit = fit_topology_candidate(&torus, target.view(), weights.view())
         .expect("unrestricted torus-cover fit");
     assert!(
@@ -1247,9 +1247,9 @@ fn planted_shatter_harvests_fusion_not_fission() {
         max_births: 0,
     };
     let report = harvest_move_proposals(&term, &rho, residuals.view(), &params).unwrap();
-    let has_fusion_01 = report.proposals.iter().any(|p| {
-        matches!(p.mv, StructureMove::Fusion { a, b } if (a, b) == (0, 1) || (a, b) == (1, 0))
-    });
+    let has_fusion_01 = report.proposals.iter().any(
+        |p| matches!(p.mv, StructureMove::Fusion { a, b } if (a, b) == (0, 1) || (a, b) == (1, 0)),
+    );
     assert!(
         has_fusion_01,
         "shattered duplicate pair (0,1) must yield a fusion proposal; got {:?}",
@@ -1473,9 +1473,7 @@ fn sphere_polar_factor_requires_identifiable_full_rank_alignment() {
     let recovered = nearest_orthogonal_3x3(proper).unwrap();
     for row in 0..3 {
         for column in 0..3 {
-            assert!(
-                (recovered[row][column] - proper[row][column]).abs() <= 16.0 * f64::EPSILON
-            );
+            assert!((recovered[row][column] - proper[row][column]).abs() <= 16.0 * f64::EPSILON);
         }
     }
 }
@@ -2159,10 +2157,9 @@ fn birth_topology_race_assigns_circle_vs_line_by_evidence() {
 
     let weights = Array1::<f64>::ones(n);
 
-    let circle_fit =
-        race_birth_topology(coords.view(), circle_target.view(), weights.view(), 1)
-            .expect("circle race runs")
-            .expect("circle race has a realizable candidate");
+    let circle_fit = race_birth_topology(coords.view(), circle_target.view(), weights.view(), 1)
+        .expect("circle race runs")
+        .expect("circle race has a realizable candidate");
     let line_fit = race_birth_topology(coords.view(), line_target.view(), weights.view(), 1)
         .expect("line race runs")
         .expect("line race has a realizable candidate");
@@ -2404,8 +2401,7 @@ fn fission_breaks_symmetry_so_children_can_separate() {
     // on every row (each gets half the parent's softmax mass).
     for row in 0..child.assignment.logits.nrows() {
         assert!(
-            (child.assignment.logits[[row, 0]] - child.assignment.logits[[row, 1]]).abs()
-                < 1e-12,
+            (child.assignment.logits[[row, 0]] - child.assignment.logits[[row, 1]]).abs() < 1e-12,
             "fission must split routing mass 50/50 (equal child logits)"
         );
     }

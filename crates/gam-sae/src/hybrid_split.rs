@@ -1411,30 +1411,32 @@ where
             // be adjudicated at all — there is no degenerate curve to rescue, and
             // minting a target-dependent rescue image there is exactly the
             // misclassification #2362 removes. Such a slot is left curved (skip).
-            Err(AtomCandidateRefusal::CoordinateCollapse) => match build_collapse_rescue_linear_image(
-                atom_idx,
-                assign.view(),
-                target_resid.view(),
-            ) {
-                Some((linear, image)) => {
-                    let delta = slot_delta(&coords, &assign, &decoded, &target_resid, &image)?;
-                    if r0.is_none() {
-                        r0 = Some(slot_r0(&assign, &decoded, &target_resid));
+            Err(AtomCandidateRefusal::CoordinateCollapse) => {
+                match build_collapse_rescue_linear_image(
+                    atom_idx,
+                    assign.view(),
+                    target_resid.view(),
+                ) {
+                    Some((linear, image)) => {
+                        let delta = slot_delta(&coords, &assign, &decoded, &target_resid, &image)?;
+                        if r0.is_none() {
+                            r0 = Some(slot_r0(&assign, &decoded, &target_resid));
+                        }
+                        slots.push(vec![linear]);
+                        // Forced-linear rescue: the curve was degenerate, so there is no
+                        // curved alternative to roll back to and no recoverable EV loss.
+                        collapse_loss.push(None);
+                        names.push(atom.name.clone());
+                        manifolds.push(manifold);
+                        turnings.push(fitted_turning);
+                        delta_evs.push(delta_ev_for(atom_idx));
+                        envelope_metrics.push(envelope);
+                        deltas.push(delta);
+                        linear_images.push(image);
                     }
-                    slots.push(vec![linear]);
-                    // Forced-linear rescue: the curve was degenerate, so there is no
-                    // curved alternative to roll back to and no recoverable EV loss.
-                    collapse_loss.push(None);
-                    names.push(atom.name.clone());
-                    manifolds.push(manifold);
-                    turnings.push(fitted_turning);
-                    delta_evs.push(delta_ev_for(atom_idx));
-                    envelope_metrics.push(envelope);
-                    deltas.push(delta);
-                    linear_images.push(image);
+                    None => continue,
                 }
-                None => continue,
-            },
+            }
             // #2362 — non-collapse refusal: the slot cannot be adjudicated, so it
             // keeps its curved decoder (no rescue image, no verdict entry).
             Err(AtomCandidateRefusal::Unadjudicable) => continue,
@@ -1952,7 +1954,7 @@ mod tests {
                 coords.len(),
                 0.0,
             )
-                        .map(|_| ())
+            .map(|_| ())
             .unwrap_err()
                 == AtomCandidateRefusal::CoordinateCollapse,
             "a degenerate coordinate span must be refused as a coordinate collapse (#2362)"

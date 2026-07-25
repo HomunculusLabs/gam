@@ -338,20 +338,17 @@ fn fit_multi_atom_dictionary(
         let this_delta = prev_atoms.as_ref().map(|previous| &atoms - previous);
         let mut jumped = false;
         if births == 0 {
-            if let (Some(delta), Some(previous_delta)) =
-                (this_delta.as_ref(), prev_delta.as_ref())
+            if let (Some(delta), Some(previous_delta)) = (this_delta.as_ref(), prev_delta.as_ref())
             {
-                if let Some((cand_atoms, cand_route, cand_fitted)) =
-                    try_geometric_extrapolation(
-                        atoms.view(),
-                        delta.view(),
-                        previous_delta.view(),
-                        x,
-                        top_k,
-                        config,
-                        rerouted_ev,
-                    )
-                {
+                if let Some((cand_atoms, cand_route, cand_fitted)) = try_geometric_extrapolation(
+                    atoms.view(),
+                    delta.view(),
+                    previous_delta.view(),
+                    x,
+                    top_k,
+                    config,
+                    rerouted_ev,
+                ) {
                     atoms = cand_atoms;
                     assignments = cand_route;
                     fitted = cand_fitted;
@@ -479,7 +476,11 @@ fn try_geometric_extrapolation(
     config: &LinearDictionaryConfig,
     current_ev: f64,
 ) -> Option<(Array2<f64>, Array2<f64>, Array2<f64>)> {
-    let cross: f64 = delta.iter().zip(prev_delta.iter()).map(|(a, b)| a * b).sum();
+    let cross: f64 = delta
+        .iter()
+        .zip(prev_delta.iter())
+        .map(|(a, b)| a * b)
+        .sum();
     let prev_norm2: f64 = prev_delta.iter().map(|v| v * v).sum();
     let delta_norm2: f64 = delta.iter().map(|v| v * v).sum();
     if !(prev_norm2 > 0.0 && delta_norm2 > 0.0) {
@@ -1804,5 +1805,4 @@ mod tests {
 
         (x, config)
     }
-
 }

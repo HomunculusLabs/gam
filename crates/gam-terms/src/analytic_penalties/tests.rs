@@ -2040,21 +2040,35 @@ fn decoder_incoherence_exact_hvp_matches_fd_of_grad() {
     let p = 3usize;
     let block_sizes = vec![2usize, 2usize];
     let total: usize = block_sizes.iter().map(|m| m * p).sum();
-    let target = PsiSlice { range: 0..total, latent_dim: Some(total / p) };
+    let target = PsiSlice {
+        range: 0..total,
+        latent_dim: Some(total / p),
+    };
     let mut coact = Array2::<f64>::zeros((2, 2));
     coact[[0, 1]] = 0.6;
     coact[[1, 0]] = 0.6;
     let pen = DecoderIncoherencePenalty::new(target, block_sizes, p, coact, 0.7, false).unwrap();
-    let t = array![0.5_f64, -0.3, 0.2, 0.8, -0.1, 0.4, -0.6, 0.7, 0.1, -0.2, 0.9, 0.3];
-    let v = array![0.2_f64, 0.5, -0.4, 0.3, 0.6, -0.1, 0.7, -0.2, -0.3, 0.15, -0.05, 0.25];
+    let t = array![
+        0.5_f64, -0.3, 0.2, 0.8, -0.1, 0.4, -0.6, 0.7, 0.1, -0.2, 0.9, 0.3
+    ];
+    let v = array![
+        0.2_f64, 0.5, -0.4, 0.3, 0.6, -0.1, 0.7, -0.2, -0.3, 0.15, -0.05, 0.25
+    ];
     let rho = Array1::<f64>::zeros(0);
     let analytic = pen.hvp(t.view(), rho.view(), v.view());
     let h = 1e-6_f64;
     let gp = pen.grad_target((&t + &(&v * h)).view(), rho.view());
     let gm = pen.grad_target((&t - &(&v * h)).view(), rho.view());
     let fd = (&gp - &gm) / (2.0 * h);
-    let worst = analytic.iter().zip(fd.iter()).map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
-    assert!(worst <= 1.0e-5, "degree-0 exact hvp vs FD(grad) max abs error = {worst:.3e}");
+    let worst = analytic
+        .iter()
+        .zip(fd.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        worst <= 1.0e-5,
+        "degree-0 exact hvp vs FD(grad) max abs error = {worst:.3e}"
+    );
 }
 
 #[test]
@@ -2067,20 +2081,31 @@ fn decoder_incoherence_repulsion_is_radially_free_euler() {
     let p = 3usize;
     let block_sizes = vec![2usize, 2usize];
     let total: usize = block_sizes.iter().map(|m| m * p).sum();
-    let target = PsiSlice { range: 0..total, latent_dim: Some(total / p) };
+    let target = PsiSlice {
+        range: 0..total,
+        latent_dim: Some(total / p),
+    };
     let mut coact = Array2::<f64>::zeros((2, 2));
     coact[[0, 1]] = 0.55;
     coact[[1, 0]] = 0.55;
     let pen = DecoderIncoherencePenalty::new(target, block_sizes, p, coact, 1.3, false).unwrap();
-    let t = array![0.5_f64, -0.3, 0.2, 0.8, -0.1, 0.4, -0.6, 0.7, 0.1, -0.2, 0.9, 0.3];
+    let t = array![
+        0.5_f64, -0.3, 0.2, 0.8, -0.1, 0.4, -0.6, 0.7, 0.1, -0.2, 0.9, 0.3
+    ];
     let rho = Array1::<f64>::zeros(0);
     let g = pen.grad_target(t.view(), rho.view());
     // Block 0 = indices 0..6, block 1 = 6..12.
     let radial0: f64 = (0..6).map(|i| t[i] * g[i]).sum();
     let radial1: f64 = (6..12).map(|i| t[i] * g[i]).sum();
     let scale = pen.value(t.view(), rho.view()).abs().max(1.0);
-    assert!(radial0.abs() <= 1.0e-12 * scale, "block-0 radial gradient = {radial0:.3e} (must be ~0 by Euler)");
-    assert!(radial1.abs() <= 1.0e-12 * scale, "block-1 radial gradient = {radial1:.3e} (must be ~0 by Euler)");
+    assert!(
+        radial0.abs() <= 1.0e-12 * scale,
+        "block-0 radial gradient = {radial0:.3e} (must be ~0 by Euler)"
+    );
+    assert!(
+        radial1.abs() <= 1.0e-12 * scale,
+        "block-1 radial gradient = {radial1:.3e} (must be ~0 by Euler)"
+    );
 }
 
 #[test]

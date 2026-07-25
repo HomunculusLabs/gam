@@ -1,6 +1,6 @@
 use super::*;
-use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 use gam_linalg::faer_ndarray::FaerEigh;
+use gam_math::special::bessel_i0_centered_terms_from_log_abs;
 
 // ── Theorem K: the rank charge is a RUNNING COMPLEXITY λ(n) ──────────────────
 //
@@ -138,7 +138,9 @@ pub enum SaeCriterionError {
     /// (the majorized surrogate `B` stays PD by construction; this is the exact
     /// observed information declining to certify a non-max). `block` names the
     /// factorized block that failed (`"joint"` or `"coordinate"`).
-    IndefiniteObservedInformation { block: &'static str },
+    IndefiniteObservedInformation {
+        block: &'static str,
+    },
 }
 
 impl SaeCriterionError {
@@ -5501,12 +5503,10 @@ impl SaeManifoldTerm {
             Some(reg) => self.analytic_penalty_value_total(reg, 1.0)?,
             None => 0.0,
         };
-        Ok(
-            registry_energy
-                + self.decoder_repulsion_value(1.0)
-                + self.amplitude_barrier_value(1.0)
-                + self.separation_barrier_value(1.0),
-        )
+        Ok(registry_energy
+            + self.decoder_repulsion_value(1.0)
+            + self.amplitude_barrier_value(1.0)
+            + self.separation_barrier_value(1.0))
     }
 
     pub fn penalized_objective_total(

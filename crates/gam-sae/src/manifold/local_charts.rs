@@ -1559,8 +1559,7 @@ mod tests {
         // line, not an opaque index buried in an internal list.
         let rendered = format!("{}", atlas.rejected_centers()[0]);
         assert!(
-            rendered.contains("dropped center at row")
-                && rendered.contains("does not span"),
+            rendered.contains("dropped center at row") && rendered.contains("does not span"),
             "a dropped center must render a legible reason; got {rendered:?}"
         );
         assert!(
@@ -1622,7 +1621,9 @@ mod tests {
                     "coverage {covered_rows}/{total_rows} must be below the floor to refuse"
                 );
             }
-            other => panic!("a minority-coverage sub-atlas must refuse via AtlasCoverageTooLow; got {other}"),
+            other => panic!(
+                "a minority-coverage sub-atlas must refuse via AtlasCoverageTooLow; got {other}"
+            ),
         }
     }
 
@@ -1631,8 +1632,7 @@ mod tests {
     #[test]
     fn clean_atlas_drops_no_centers_2280() {
         let z = embedded_plane(10, 10);
-        let atlas =
-            LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2)).unwrap();
+        let atlas = LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2)).unwrap();
         assert!(
             atlas.rejected_centers().is_empty(),
             "a clean plane certifies every center; nothing should be dropped"

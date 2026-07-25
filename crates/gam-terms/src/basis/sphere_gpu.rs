@@ -668,11 +668,7 @@ pub const fn sphere_gpu_compiled() -> bool {
 ///   * device memory budget admits at least one `(ld × m)` design at
 ///     `ld = ((n + 31) / 32) * 32`.
 #[must_use]
-pub fn sphere_kernel_decision(
-    n: usize,
-    m: usize,
-    lmax: usize,
-) -> Result<GpuDecision, GpuError> {
+pub fn sphere_kernel_decision(n: usize, m: usize, lmax: usize) -> Result<GpuDecision, GpuError> {
     let large_enough = match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())?
     {
         Some(runtime) => {

@@ -129,7 +129,10 @@ fn olmo_l18_l19_pair_crosscoder_fits_with_measured_drift() {
                 && transport.law_gap.is_finite(),
             "atom {}: transport-law diagnostics must be finite \
              (phase_r2 = {}, smooth_r2 = {}, law_gap = {})",
-            transport.atom, transport.phase_r2, transport.smooth_r2, transport.law_gap
+            transport.atom,
+            transport.phase_r2,
+            transport.smooth_r2,
+            transport.law_gap
         );
         assert!(
             transport.law_holds.is_some(),
@@ -143,14 +146,16 @@ fn olmo_l18_l19_pair_crosscoder_fits_with_measured_drift() {
         assert!(
             transport.law_gap > -1e-6,
             "atom {}: smooth alternative must nest the phase law (law_gap = {})",
-            transport.atom, transport.law_gap
+            transport.atom,
+            transport.law_gap
         );
         // OBJECTIVE: the atom is on-manifold, not noise.
         assert!(
             transport.smooth_r2 > 0.5,
             "atom {}: transport must be a genuine smooth map; smooth_r2 = {} <= 0.5 \
              would be noise, not manifold structure",
-            transport.atom, transport.smooth_r2
+            transport.atom,
+            transport.smooth_r2
         );
         best_law_gap = best_law_gap.min(transport.law_gap);
         best_phase_r2 = best_phase_r2.max(transport.phase_r2);

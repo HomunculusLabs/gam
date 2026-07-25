@@ -540,7 +540,8 @@ fn over_complete_trainer_returns_best_effort_open_certificate_2275() {
     assert!(
         fit.convergence.routing_residual > fit.convergence.routing_tolerance,
         "an open certificate must record routing_residual above tolerance; got {} <= {}",
-        fit.convergence.routing_residual, fit.convergence.routing_tolerance
+        fit.convergence.routing_residual,
+        fit.convergence.routing_tolerance
     );
     assert!(
         fit.convergence.inner_ev_residual.is_finite(),

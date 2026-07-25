@@ -1251,7 +1251,15 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
         let mut tb = term.clone();
         let f0 = std::time::Instant::now();
         let (_cost, _loss, cache) = tb
-            .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 8, 0.04, 1.0e-6, 1.0e-6)
+            .penalized_quasi_laplace_criterion_with_cache(
+                z.view(),
+                &rho,
+                None,
+                8,
+                0.04,
+                1.0e-6,
+                1.0e-6,
+            )
             .expect("full criterion");
         let dt_full = f0.elapsed().as_secs_f64();
         let total_t = cache.delta_t_len();
@@ -1303,12 +1311,18 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     {
         struct FwdLog;
         impl log::Log for FwdLog {
-            fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
-            fn log(&self, r: &log::Record<'_>) { eprintln!("[{}] {}", r.level(), r.args()); }
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, r: &log::Record<'_>) {
+                eprintln!("[{}] {}", r.level(), r.args());
+            }
             fn flush(&self) {}
         }
         static L: FwdLog = FwdLog;
-        if log::set_logger(&L).is_ok() { log::set_max_level(log::LevelFilter::Debug); }
+        if log::set_logger(&L).is_ok() {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
     }
     let n = 96usize;
     let p = 48usize;

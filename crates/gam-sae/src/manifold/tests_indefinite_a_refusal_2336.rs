@@ -7,7 +7,7 @@
 use super::tests::*;
 use super::*;
 use gam_solve::rho_optimizer::OuterObjective;
-use ndarray::{s, Array1, Array2};
+use ndarray::{Array1, Array2, s};
 
 /// Reproduce the off-manifold, fixed-stratum state whose `B`-converged mode is an
 /// exact-`A` SADDLE. This is the excitation the #2253/#2330 shared fixture uses:
@@ -74,7 +74,10 @@ pub(crate) fn e_attributable_ard_saddle_prices_finite_2336() {
     assert!(
         matches!(&priced, Ok((value, _, _)) if value.is_finite()),
         "post E-attributability fix the ARD-wrinkle saddle must PRICE FINITE, not refuse; got: {:?}",
-        priced.as_ref().map(|(value, _, _)| *value).map_err(|e| format!("{e:?}"))
+        priced
+            .as_ref()
+            .map(|(value, _, _)| *value)
+            .map_err(|e| format!("{e:?}"))
     );
 
     let (term, target, rho) = ard_saddle_state();
@@ -228,8 +231,7 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
 /// half is `e_attributable_ard_saddle_prices_finite_2336`.
 #[test]
 fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
-    let (mut term, target, rho) =
-        super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
+    let (mut term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
     let refusal = term.penalized_quasi_laplace_criterion_with_cache(
         target.view(),
         &rho,
@@ -248,8 +250,7 @@ fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
         refusal.map(|(value, _, _)| value)
     );
 
-    let (term, target, rho) =
-        super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
+    let (term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(0.02, -6.0);
     let rho_flat = rho.to_flat();
     let mut objective =
         SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
@@ -436,7 +437,9 @@ fn zz_measure_saddle_escape_linesearch_reconverge_2336() {
         );
         let floor = 1.0e-9 * max_eig.max(1.0);
         if min_eig >= -floor {
-            eprintln!("2336-ITER{iter}: ACCEPTED — exact A is PD within the criterion floor; escaped");
+            eprintln!(
+                "2336-ITER{iter}: ACCEPTED — exact A is PD within the criterion floor; escaped"
+            );
             break;
         }
 
@@ -553,7 +556,13 @@ fn zz_measure_saddle_gate_desync_2336() {
     let reach_saddle = |term: &mut SaeManifoldTerm,
                         target: &Array2<f64>,
                         rho: &SaeManifoldRho|
-     -> (ArrowFactorCache, SaeManifoldRho, SaeManifoldLoss, bool, ArrowSolveOptions) {
+     -> (
+        ArrowFactorCache,
+        SaeManifoldRho,
+        SaeManifoldLoss,
+        bool,
+        ArrowSolveOptions,
+    ) {
         let mut rho_fixed = rho.clone();
         let initial = term
             .run_joint_fit_arrow_schur_for_quasi_laplace(
@@ -632,7 +641,8 @@ fn zz_measure_saddle_gate_desync_2336() {
             let db = if negate { -dir_beta } else { dir_beta.clone() };
             let mut s = 1.0e-3;
             while s <= 0.6 {
-                term.apply_newton_step(dt.view(), db.view(), s).expect("trial");
+                term.apply_newton_step(dt.view(), db.view(), s)
+                    .expect("trial");
                 let cand = term
                     .penalized_objective_total(target.view(), rho, None, 1.0)
                     .expect("trial obj");
@@ -658,10 +668,12 @@ fn zz_measure_saddle_gate_desync_2336() {
         let obj_saddle = term
             .penalized_objective_total(target.view(), &rho, None, 1.0)
             .expect("obj saddle frozen");
-        let (obj_min, s_min, negate) = line_search(&mut term, &target, &rho, &dir_t, &dir_beta, obj_saddle);
+        let (obj_min, s_min, negate) =
+            line_search(&mut term, &target, &rho, &dir_t, &dir_beta, obj_saddle);
         let dt = if negate { -&dir_t } else { dir_t.clone() };
         let db = if negate { -&dir_beta } else { dir_beta.clone() };
-        term.apply_newton_step(dt.view(), db.view(), s_min).expect("step");
+        term.apply_newton_step(dt.view(), db.view(), s_min)
+            .expect("step");
         // Objective at the stepped point under the SADDLE-frozen gates (probe view).
         let obj_stepped_frozen = term
             .penalized_objective_total(target.view(), &rho, None, 1.0)
@@ -696,10 +708,12 @@ fn zz_measure_saddle_gate_desync_2336() {
         let obj_saddle = term
             .penalized_objective_total(target.view(), &rho, None, 1.0)
             .expect("obj saddle frozen B");
-        let (_om, s_min, negate) = line_search(&mut term, &target, &rho, &dir_t, &dir_beta, obj_saddle);
+        let (_om, s_min, negate) =
+            line_search(&mut term, &target, &rho, &dir_t, &dir_beta, obj_saddle);
         let dt = if negate { -&dir_t } else { dir_t.clone() };
         let db = if negate { -&dir_beta } else { dir_beta.clone() };
-        term.apply_newton_step(dt.view(), db.view(), s_min).expect("step B");
+        term.apply_newton_step(dt.view(), db.view(), s_min)
+            .expect("step B");
         let obj_stepped = term
             .penalized_objective_total(target.view(), &rho, None, 1.0)
             .expect("obj stepped B");
@@ -842,7 +856,10 @@ fn zz_measure_e_attributability_2336() {
                 &rho,
                 target.view(),
                 &cache,
-                &SaeArrowVector { t: v_t.clone(), beta: v_beta.clone() },
+                &SaeArrowVector {
+                    t: v_t.clone(),
+                    beta: v_beta.clone(),
+                },
             )
             .expect("apply ΔC");
         let vt_dc = v_t.dot(&dc.t) + v_beta.dot(&dc.beta);
@@ -863,6 +880,10 @@ fn zz_measure_e_attributability_2336() {
     eprintln!(
         "2336-EATTR: VERDICT n_neg={n_neg} all_attributable={all_attributable} \
          => fixture criterion would be {}",
-        if all_attributable { "FINITE (priced)" } else { "STILL REFUSED (genuine saddle remains)" }
+        if all_attributable {
+            "FINITE (priced)"
+        } else {
+            "STILL REFUSED (genuine saddle remains)"
+        }
     );
 }

@@ -488,12 +488,8 @@ fn rescale_derivative_factor(
             "order-{order} roughness factor over domain width {domain_scale} is not representable"
         )));
     }
-    let preserves_all_basis_energies = (0..factor.ncols()).all(|column| {
-        factor
-            .column(column)
-            .iter()
-            .any(|value| *value != 0.0)
-    });
+    let preserves_all_basis_energies =
+        (0..factor.ncols()).all(|column| factor.column(column).iter().any(|value| *value != 0.0));
     if !preserves_all_basis_energies {
         return Err(BasisError::InvalidInput(format!(
             "order-{order} roughness factor over domain width {domain_scale} lost a basis-function energy"
@@ -1466,8 +1462,7 @@ mod tests {
                     / s2[[i, j]].abs().max((s1[[i, j]] * factor).abs()).max(1.0),
                 f1[[i, j]],
                 f2[[i, j]],
-                (f1[[i, j]] * factor.sqrt() - f2[[i, j]]).abs()
-                    / f2[[i, j]].abs().max(1e-300),
+                (f1[[i, j]] * factor.sqrt() - f2[[i, j]]).abs() / f2[[i, j]].abs().max(1e-300),
             );
         }
     }

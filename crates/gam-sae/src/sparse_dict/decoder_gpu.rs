@@ -250,18 +250,15 @@ impl DeviceBlockCgBackend {
                 }
             }
             gam_gpu::GpuPolicy::Required => {
-                gam_gpu::GpuRuntime::require().map_err(|err| {
-                    format!("sparse_dict decoder block-CG gpu=required: {err}")
-                })?;
+                gam_gpu::GpuRuntime::require()
+                    .map_err(|err| format!("sparse_dict decoder block-CG gpu=required: {err}"))?;
             }
         }
 
-        let b = backend().map_err(|err| {
-            format!("sparse_dict decoder block-CG backend probe failed: {err}")
-        })?;
-        let module = module_for(b).map_err(|err| {
-            format!("sparse_dict decoder block-CG module build failed: {err}")
-        })?;
+        let b = backend()
+            .map_err(|err| format!("sparse_dict decoder block-CG backend probe failed: {err}"))?;
+        let module = module_for(b)
+            .map_err(|err| format!("sparse_dict decoder block-CG module build failed: {err}"))?;
         let stream = b.stream.clone();
 
         let rhs_host = rhs_block
@@ -315,7 +312,9 @@ impl DeviceBlockCgBackend {
                     .synchronize()
                     .gpu_ctx("sparse_dict decoder block-CG solution synchronize")
             })
-            .map_err(|err| format!("sparse_dict decoder block-CG solution download failed: {err}"))?;
+            .map_err(|err| {
+                format!("sparse_dict decoder block-CG solution download failed: {err}")
+            })?;
         Array2::from_shape_vec((self.m, self.t), host)
             .map_err(|err| format!("sparse_dict decoder block-CG solution shape: {err}"))
     }
@@ -364,7 +363,10 @@ impl DeviceBlockCgBackend {
             // SAFETY: geometry covers exactly `t` columns; the kernel reads the
             // two `m*t` blocks and writes only `dot_out[0..t]`, all live
             // allocations on this stream.
-            complete("dot launch", unsafe { builder.launch(cfg) }.gpu_ctx("launch dot"));
+            complete(
+                "dot launch",
+                unsafe { builder.launch(cfg) }.gpu_ctx("launch dot"),
+            );
         }
         complete(
             "dot download",
@@ -431,7 +433,10 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
         // row_ptr[m] bounds, and p[0..m*t]; it writes only ap[0..m*t]. All are
         // live allocations on this stream and the grid covers every (row,
         // column) exactly once via the row-stride loop.
-        complete("spmm launch", unsafe { builder.launch(cfg) }.gpu_ctx("launch spmm"));
+        complete(
+            "spmm launch",
+            unsafe { builder.launch(cfg) }.gpu_ctx("launch spmm"),
+        );
     }
 
     fn dot_p_ap(&mut self, out: &mut [f64]) {
@@ -518,7 +523,11 @@ mod tests {
     /// plus pseudo-random chords, diagonally dominant, with a heterogeneous
     /// right-hand-side block (including a zero column, which the recurrence
     /// must freeze at zero on both backends).
-    fn fixture(m: usize, t: usize, seed: u64) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>, Array2<f64>) {
+    fn fixture(
+        m: usize,
+        t: usize,
+        seed: u64,
+    ) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>, Array2<f64>) {
         let mut state = seed.max(1);
         let mut next = move || {
             state ^= state << 13;
@@ -664,14 +673,21 @@ mod tests {
             }
             let dc = cpu.diagnostics.as_ref().expect("cpu diagnostics");
             let dd = dev.diagnostics.as_ref().expect("device diagnostics");
-            assert_eq!(dc.alpha.len(), dd.alpha.len(), "column {c} alpha trace length");
+            assert_eq!(
+                dc.alpha.len(),
+                dd.alpha.len(),
+                "column {c} alpha trace length"
+            );
             for (k, (a, b)) in dc.alpha.iter().zip(dd.alpha.iter()).enumerate() {
                 assert_eq!(a.to_bits(), b.to_bits(), "column {c} alpha[{k}]");
             }
             for (k, (a, b)) in dc.beta.iter().zip(dd.beta.iter()).enumerate() {
                 assert_eq!(a.to_bits(), b.to_bits(), "column {c} beta[{k}]");
             }
-            assert_eq!(dev2_results[c].iterations, dev.iterations, "column {c} rerun");
+            assert_eq!(
+                dev2_results[c].iterations, dev.iterations,
+                "column {c} rerun"
+            );
         }
         assert!(
             converged >= t - 1,

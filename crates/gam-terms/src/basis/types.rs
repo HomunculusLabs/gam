@@ -311,7 +311,10 @@ impl BSplineBoundaryConditions {
     /// one endpoint) silently dropped both pins for the two-sided case (#2297).
     pub const fn has_anchor(&self) -> bool {
         matches!(self.left, BSplineEndpointBoundaryCondition::Anchored { .. })
-            || matches!(self.right, BSplineEndpointBoundaryCondition::Anchored { .. })
+            || matches!(
+                self.right,
+                BSplineEndpointBoundaryCondition::Anchored { .. }
+            )
     }
 
     /// Whether either endpoint carries an inhomogeneous value constraint.
@@ -1837,10 +1840,7 @@ pub struct ConstructiveQuadratic {
 
 impl ConstructiveQuadratic {
     /// Construct directly from an energy factor `A`, representing `AᵀA`.
-    pub fn from_energy_factor(
-        factor: Array2<f64>,
-        context: &str,
-    ) -> Result<Self, BasisError> {
+    pub fn from_energy_factor(factor: Array2<f64>, context: &str) -> Result<Self, BasisError> {
         if factor.iter().any(|value| !value.is_finite()) {
             crate::bail_invalid_basis!(
                 "{context}: constructive penalty factor contains a non-finite value"
@@ -1848,9 +1848,7 @@ impl ConstructiveQuadratic {
         }
         let matrix = fast_ata(&factor);
         if matrix.iter().any(|value| !value.is_finite()) {
-            crate::bail_invalid_basis!(
-                "{context}: constructive penalty Gram is not representable"
-            );
+            crate::bail_invalid_basis!("{context}: constructive penalty Gram is not representable");
         }
         Ok(Self { factor, matrix })
     }
@@ -1864,10 +1862,7 @@ impl ConstructiveQuadratic {
     /// [`PenaltyCandidate`]. New factories should use
     /// [`Self::from_energy_factor`] so PSD is true by construction rather than
     /// inferred after dense assembly.
-    pub fn try_from_dense_psd(
-        dense: Array2<f64>,
-        context: &str,
-    ) -> Result<Self, BasisError> {
+    pub fn try_from_dense_psd(dense: Array2<f64>, context: &str) -> Result<Self, BasisError> {
         if dense.nrows() != dense.ncols() {
             crate::bail_dim_basis!(
                 "{context}: dense penalty must be square, got {}x{}",
@@ -1882,8 +1877,7 @@ impl ConstructiveQuadratic {
             return Self::from_energy_factor(Array2::zeros((0, 0)), context);
         }
         let sym = symmetrize_penalty(&dense);
-        let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower)
-            .map_err(BasisError::LinalgError)?;
+        let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower).map_err(BasisError::LinalgError)?;
         let tolerance = spectral_tolerance(&sym, &evals);
         if let Some(&negative) = evals.iter().find(|&&value| value < -tolerance) {
             return Err(BasisError::IndefinitePenalty {
@@ -1946,10 +1940,7 @@ impl ConstructiveQuadratic {
 
     /// Sum PSD quadratics by vertically concatenating their energy factors.
     pub fn sum(terms: &[Self], context: &str) -> Result<Self, BasisError> {
-        let coefficient_dim = terms
-            .first()
-            .map(|term| term.factor.ncols())
-            .unwrap_or(0);
+        let coefficient_dim = terms.first().map(|term| term.factor.ncols()).unwrap_or(0);
         if terms
             .iter()
             .any(|term| term.factor.ncols() != coefficient_dim)

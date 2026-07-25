@@ -117,9 +117,7 @@ pub fn build_spherical_spline_basis(
         op: None,
     }];
     if spec.double_penalty {
-        if let Some(ridge) =
-            function_space_nullspace_shrinkage(penalty.dense(), &function_gram)?
-        {
+        if let Some(ridge) = function_space_nullspace_shrinkage(penalty.dense(), &function_gram)? {
             let (ridge_norm, c_ridge) = normalize_penalty(&ridge);
             candidates.push(PenaltyCandidate {
                 matrix: ConstructiveQuadratic::try_from_dense_psd(
@@ -709,10 +707,7 @@ pub(crate) fn build_spherical_harmonic_basis(
     }];
     if spec.double_penalty {
         let (_, c_ridge) = normalize_penalty(ridge.dense());
-        let ridge_norm = ridge.scaled(
-            1.0 / c_ridge,
-            "normalized spherical-harmonic null ridge",
-        )?;
+        let ridge_norm = ridge.scaled(1.0 / c_ridge, "normalized spherical-harmonic null ridge")?;
         candidates.push(PenaltyCandidate {
             matrix: ridge_norm,
             source: PenaltySource::DoublePenaltyNullspace,
@@ -2238,7 +2233,8 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     // is already in scope from the design assembly above.
     let embed = |block: &Array2<f64>, ridge: f64| {
         let mut out = Array2::<f64>::zeros((total_cols, total_cols));
-        out.slice_mut(s![..kernel_cols, ..kernel_cols]).assign(block);
+        out.slice_mut(s![..kernel_cols, ..kernel_cols])
+            .assign(block);
         if poly_cols > 1 {
             for col in (kernel_cols + 1)..total_cols {
                 out[[col, col]] = ridge;
