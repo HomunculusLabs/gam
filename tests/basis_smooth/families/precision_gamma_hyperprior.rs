@@ -31,6 +31,18 @@ fn fit_options() -> FitOptions {
     }
 }
 
+/// The penalty-block key for the fixture's single `LinearTermRidge` block.
+///
+/// This is the linear term's NAME. There is no term-KIND vocabulary: the label
+/// candidates a block answers to are built from its own identity -- the global
+/// penalty index (`0`, `penalty:0`), the term name (`x`, `x:0`), and the
+/// penalty source (`LinearTermRidge`). These tests previously keyed `"linear"`,
+/// which is none of those, so every one of them failed at
+/// `realize_keyed_penalty_block_gamma_priors` before reaching its real
+/// assertion. `every_documented_alias_selects_the_same_penalty_block` below
+/// pins the whole alias set so a rename cannot reintroduce that silently.
+const LINEAR_TERM_BLOCK: &str = "x";
+
 fn linear_fixture() -> (
     Array2<f64>,
     Array1<f64>,
@@ -90,7 +102,7 @@ fn flat_gamma_precision_prior_matches_uninformed_fit_bitwise() {
         weights.view(),
         offset.view(),
         &spec,
-        &[("linear".to_string(), 1.0, 0.0)],
+        &[(LINEAR_TERM_BLOCK.to_string(), 1.0, 0.0)],
         likelihood,
         &opts,
     )
@@ -115,7 +127,7 @@ fn informative_gamma_precision_prior_shrinks_by_map_update() {
         weights.view(),
         offset.view(),
         &spec,
-        &[("linear".to_string(), 100_001.0, 100.0)],
+        &[(LINEAR_TERM_BLOCK.to_string(), 100_001.0, 100.0)],
         likelihood,
         &opts,
     )
@@ -128,17 +140,32 @@ fn informative_gamma_precision_prior_shrinks_by_map_update() {
         "lambda={lambda}, expected near {target_lambda}"
     );
 
-    let sxx = (0..41)
-        .map(|i| {
-            let x = i as f64 - 20.0;
-            x * x
-        })
-        .sum::<f64>();
-    let expected_beta = 5.0 * sxx / (sxx + target_lambda);
+    // The ridge acts on the term's STANDARDIZED column, not on raw `x`, so the
+    // shrinkage denominator is that column's cross-product and not `Sxx`.
+    // `x` here is already mean-zero, and the standardization divides by the
+    // POPULATION sd (`sd^2 = Sxx/n`), so `z = x/sd` has `sum z^2 = n` exactly,
+    // whatever `Sxx` happens to be:
+    //
+    //     beta_raw = beta_unpenalized * n / (n + lambda)
+    //
+    // The superseded form used `Sxx = 5740` in place of `n = 41` and expected
+    // 4.258 where the estimator gives 0.1969 -- a factor of 21.6. It had never
+    // run: every test in this file died at the penalty-block label before
+    // reaching an assertion, so the closed form was never checked against the
+    // estimator it claims to describe.
+    //
+    // Feeding the OBSERVED lambda into the identity leaves the shrinkage law
+    // itself as the only claim under test, which is what lets the tolerance be
+    // 1e-4 instead of the 8% slop the old form needed. That also pins the
+    // standardization convention: the sample-sd reading (`sum z^2 = n - 1`)
+    // sits 2.3e-2 away and no longer passes.
+    let n = 41.0_f64;
+    let unpenalized_beta = 5.0_f64;
+    let expected_beta = unpenalized_beta * n / (n + lambda);
     let observed_beta = fit.fit.beta[1];
     assert!(
-        ((observed_beta - expected_beta) / expected_beta).abs() < 0.08,
-        "beta={observed_beta}, expected shrinkage near {expected_beta}"
+        ((observed_beta - expected_beta) / expected_beta).abs() < 1e-4,
+        "beta={observed_beta}, expected ridge shrinkage {expected_beta} at lambda={lambda}"
     );
 }
 
@@ -175,13 +202,18 @@ fn gamma_precision_prior_callback_is_invoked_once_per_penalty_block() {
         weights.view(),
         offset.view(),
         &spec,
-        &[("linear".to_string(), 13.0, 0.25)],
+        &[(LINEAR_TERM_BLOCK.to_string(), 13.0, 0.25)],
         likelihood,
         &opts,
     )
     .expect("keyed gamma fit");
 
-    assert_eq!(seen, vec![("linear".to_string(), 0, 1)]);
+    assert_eq!(
+        seen,
+        vec![(LINEAR_TERM_BLOCK.to_string(), 0, 1)],
+        "the callback's `label` is the TERM NAME (`penalty_block_metadata` reads \
+         `info.termname`), so it must agree with the key the keyed API accepts"
+    );
     assert_eq!(
         callback_fit.fit.lambdas.as_slice(),
         keyed_fit.fit.lambdas.as_slice()
@@ -189,5 +221,82 @@ fn gamma_precision_prior_callback_is_invoked_once_per_penalty_block() {
     assert_eq!(
         callback_fit.fit.beta.as_slice(),
         keyed_fit.fit.beta.as_slice()
+    );
+}
+
+/// Every alias a penalty block answers to must select the SAME block, and a
+/// label outside that set must be refused loudly rather than silently ignored.
+///
+/// This is the guard whose absence let all three tests above ship keyed on
+/// `"linear"` -- a label the API has never emitted. Nothing exercised the
+/// vocabulary, so the mistake could only surface as an opaque runtime refusal
+/// inside an unrelated assertion. Pinning the alias set through the public API
+/// makes a rename of the term-name routing, the global-index spelling, or the
+/// `LinearTermRidge` source fail here, at the vocabulary, with the offending
+/// alias named.
+#[test]
+fn every_documented_alias_selects_the_same_penalty_block() {
+    let (data, y, weights, offset, spec) = linear_fixture();
+    let opts = fit_options();
+    let likelihood = LikelihoodSpec::new(
+        ResponseFamily::Gaussian,
+        InverseLink::Standard(StandardLink::Identity),
+    );
+
+    // A prior informative enough that selecting the block visibly moves lambda,
+    // so an alias that quietly matched NOTHING could not pass by coincidence.
+    let shape = 100_001.0;
+    let rate = 100.0;
+    let mut reference: Option<(Vec<f64>, Vec<f64>)> = None;
+    for alias in ["x", "x:0", "penalty:0", "0", "LinearTermRidge"] {
+        let fit = fit_term_collection_with_penalty_block_gamma_priors(
+            data.view(),
+            y.view(),
+            weights.view(),
+            offset.view(),
+            &spec,
+            &[(alias.to_string(), shape, rate)],
+            likelihood.clone(),
+            &opts,
+        )
+        .unwrap_or_else(|error| panic!("alias `{alias}` must select the block: {error}"));
+        let observed = (fit.fit.lambdas.to_vec(), fit.fit.beta.to_vec());
+        match &reference {
+            None => {
+                assert!(
+                    (observed.0[0] - 1_000.0).abs() / 1_000.0 < 0.05,
+                    "alias `{alias}` did not actually apply the prior: lambda={}",
+                    observed.0[0]
+                );
+                reference = Some(observed);
+            }
+            Some(expected) => assert_eq!(
+                &observed, expected,
+                "alias `{alias}` selected a different block than `x`"
+            ),
+        }
+    }
+
+    let rejected = fit_term_collection_with_penalty_block_gamma_priors(
+        data.view(),
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &spec,
+        &[("linear".to_string(), shape, rate)],
+        likelihood,
+        &opts,
+    );
+    let message = rejected
+        .err()
+        .map(|error| error.to_string())
+        .expect("a label outside the block's alias set must be an error, never a silent no-op");
+    assert!(
+        message.contains("unknown Gamma precision hyperprior penalty block label(s): linear"),
+        "the refusal must name the offending label: {message}"
+    );
+    assert!(
+        message.contains("LinearTermRidge") && message.contains('x'),
+        "the refusal must list the labels that WOULD have worked: {message}"
     );
 }
