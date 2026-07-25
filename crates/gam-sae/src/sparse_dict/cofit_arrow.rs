@@ -361,6 +361,50 @@ pub fn cofit_composed_via_arrow(
     gamma: f32,
     config: &ArrowCofitConfig,
 ) -> Result<ArrowCofitReport, String> {
+    let composed = build_composed_cofit_term(target, decoder, blocks, codes, gamma, config)?;
+    let ComposedCofitTerm {
+        term,
+        rho,
+        n_curved_atoms,
+        curved_charge,
+    } = composed;
+
+    let (reconstructed, explained_variance) = fit_to_idempotent_reentry_and_read_back(
+        term,
+        rho,
+        target,
+        config,
+        "cofit_composed_via_arrow",
+    )?;
+
+    Ok(ArrowCofitReport {
+        reconstructed,
+        explained_variance,
+        n_curved_atoms,
+        curved_charge,
+    })
+}
+
+/// The mixed linear + curved atom set, its cold ARD seed, and the curved-birth
+/// ledger entries — everything [`cofit_composed_via_arrow`] assembles BEFORE the
+/// joint solve. Split out so the idempotence gate drives the exact production
+/// term rather than a re-implementation of it (the same split
+/// [`build_linear_cofit_term`] gives the linear tier).
+struct ComposedCofitTerm {
+    term: SaeManifoldTerm,
+    rho: SaeManifoldRho,
+    n_curved_atoms: usize,
+    curved_charge: f64,
+}
+
+fn build_composed_cofit_term(
+    target: ArrayView2<'_, f32>,
+    decoder: ArrayView2<'_, f32>,
+    blocks: ArrayView2<'_, u32>,
+    codes: ArrayView3<'_, f32>,
+    gamma: f32,
+    config: &ArrowCofitConfig,
+) -> Result<ComposedCofitTerm, String> {
     require_fitting_iteration("cofit_composed_via_arrow", config.max_iter)?;
     let (n, k_active) = blocks.dim();
     let b = codes.shape()[2];
@@ -477,17 +521,9 @@ pub fn cofit_composed_via_arrow(
         .collect();
     let rho = SaeManifoldRho::new(config.log_lambda_sparse, config.log_lambda_smooth, log_ard);
 
-    let (reconstructed, explained_variance) = fit_to_idempotent_reentry_and_read_back(
+    Ok(ComposedCofitTerm {
         term,
         rho,
-        target,
-        config,
-        "cofit_composed_via_arrow",
-    )?;
-
-    Ok(ArrowCofitReport {
-        reconstructed,
-        explained_variance,
         n_curved_atoms,
         curved_charge,
     })
@@ -889,6 +925,113 @@ mod tests {
         assert!(
             error.contains("not an idempotent fitted fixed point"),
             "unexpected non-convergence error: {error}"
+        );
+    }
+
+    /// #2397 measurement — WHICH state does the composed (curved) tier's
+    /// idempotency certificate actually recur?
+    ///
+    /// The certificate is `matches_mutable_state`: byte identity of the raw
+    /// model coordinates. #2397 asserts that a framed/curved tier can never
+    /// satisfy it, because the class-(c) re-gauge transactions (unit-speed
+    /// chart retraction, decoder-scale re-gauge, frame re-polar) walk the gauge
+    /// orbit at fixed objective. This measures the claim on the exact
+    /// production term: per re-entry it reports `fixed_point`, whether the raw
+    /// state recurred, and the penalized objective; then it drives the
+    /// unit-speed retraction STANDALONE at the certified state to see whether
+    /// the circle atom's arc-length slice is a genuine no-op there or an
+    /// ε-reslide that the byte certificate would resolve as a state move.
+    #[test]
+    fn zz_measure_composed_arrow_gauge_orbit_walk_2397() {
+        let n = 240usize;
+        let b = 2usize;
+        let decoder = planted_decoder();
+        let x = planted_data(n);
+        let (blocks, codes) = tied_routing(&x, &decoder, b);
+        let cfg = ArrowCofitConfig {
+            max_iter: 256,
+            chart: parity_chart_cfg(),
+            ..ArrowCofitConfig::default()
+        };
+        let ComposedCofitTerm {
+            mut term,
+            mut rho,
+            n_curved_atoms,
+            ..
+        } = build_composed_cofit_term(
+            x.view(),
+            decoder.view(),
+            blocks.view(),
+            codes.view(),
+            1.0,
+            &cfg,
+        )
+        .expect("build the composed cofit term");
+        assert!(
+            n_curved_atoms >= 1,
+            "the measurement needs a curved atom; got {n_curved_atoms}"
+        );
+        term.set_guards_enabled(false);
+        let target = x.mapv(|v| v as f64);
+        eprintln!(
+            "[#2397] n_curved={n_curved_atoms} frames_active={}",
+            term.frames_active()
+        );
+
+        let mut certified_at: Option<usize> = None;
+        for pass in 0..8usize {
+            let entry = term.snapshot_mutable_state();
+            let outcome = term
+                .run_joint_fit_arrow_schur_for_quasi_laplace(
+                    target.view(),
+                    &mut rho,
+                    None,
+                    cfg.max_iter,
+                    cfg.step_size,
+                    cfg.ridge_ext_coord,
+                    cfg.ridge_beta,
+                )
+                .expect("composed joint pass runs");
+            let raw_recurred = term.matches_mutable_state(&entry);
+            let obj = term
+                .penalized_objective_total(target.view(), &rho, None, 1.0)
+                .expect("objective at the pass exit");
+            eprintln!(
+                "[#2397] pass={pass} fixed_point={} raw_state_recurred={raw_recurred} obj={obj:.12e}",
+                outcome.fixed_point
+            );
+            if outcome.fixed_point {
+                certified_at = Some(pass);
+                break;
+            }
+        }
+        eprintln!("[#2397] certified_at={certified_at:?}");
+
+        // Standalone class-(c) probe at whatever state the loop reached: does
+        // the circle atom's arc-length slice move the raw bytes?
+        let before = term.snapshot_mutable_state();
+        let obj_before = term
+            .penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("objective before the standalone retraction");
+        let retracted = term
+            .retract_unit_speed_charts_in_loop()
+            .expect("standalone unit-speed retraction runs");
+        let obj_after = term
+            .penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("objective after the standalone retraction");
+        let raw_recurred = term.matches_mutable_state(&before);
+        eprintln!(
+            "[#2397] standalone retraction: atoms_retracted={retracted} \
+             raw_state_recurred={raw_recurred} obj {obj_before:.12e} -> {obj_after:.12e} \
+             (delta {:.3e})",
+            obj_after - obj_before
+        );
+        term.restore_mutable_state(&before)
+            .expect("restore the probed state");
+
+        assert!(
+            certified_at.is_some(),
+            "#2397: the composed cofit must reach a certified idempotent fixed point"
         );
     }
 
