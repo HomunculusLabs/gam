@@ -1251,15 +1251,7 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
         let mut tb = term.clone();
         let f0 = std::time::Instant::now();
         let (_cost, _loss, cache) = tb
-            .penalized_quasi_laplace_criterion_with_cache(
-                z.view(),
-                &rho,
-                None,
-                8,
-                0.04,
-                1.0e-6,
-                1.0e-6,
-            )
+            .penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 8, 0.04, 1.0e-6, 1.0e-6)
             .expect("full criterion");
         let dt_full = f0.elapsed().as_secs_f64();
         let total_t = cache.delta_t_len();
@@ -1290,6 +1282,57 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
     }
 }
 
+/// #2228 MEASUREMENT (zz_measure) — is the value-lane fixture's inner solve at a
+/// FLOOR, or is it still converging and merely out of budget?
+///
+/// This is the question the #2267 ratchet left open. That work took one criterion
+/// evaluation on this fixture from 808 inner iterations / 52 s to 272 / 4.36 s,
+/// and ‖g‖ moved only 1.522323e-1 → 1.100073e-1 against an unchanged tolerance of
+/// 1.435797e-3 — still 77× above. Iteration budget is therefore no longer what
+/// stands between this fixture and its tolerance, but "no longer the BINDING
+/// constraint" is not the same claim as "more budget cannot help", and the two
+/// have opposite fixes:
+///
+/// * still converging (some budget succeeds) ⇒ a RATE problem, and rate belongs to
+///   the step rule and its accept rule (#2267), not to the refusal contract;
+/// * floored (no budget succeeds) ⇒ the inner solve cannot reach `1e-5 ·
+///   inner_iterate_scale()` on this problem at all, and a contract that demands it
+///   is asking for something unattainable — which is #2228's own question.
+///
+/// The sweep answers it without parsing anything out of an error message: sweep
+/// the refine budget and record only whether the criterion returns. A binary
+/// outcome per budget is all the question needs, and it is exactly the acceptance
+/// bar this issue is written against ("the fit must converge, not refuse").
+#[test]
+fn zz_measure_2228_value_lane_budget_sweep() {
+    let n = 96usize;
+    let p = 48usize;
+    let z = one_circle_wide_target(n, p, 0.05);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
+
+    for imi in [8usize, 16, 32, 64, 128] {
+        // Rebuild the term and rho per budget: the criterion mutates inner state,
+        // so a shared term would make each budget start where the previous one
+        // stopped and the sweep would measure a warm continuation instead of the
+        // budget.
+        let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
+        let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
+            .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+            .unwrap();
+        let mut t = term.clone();
+        let started = std::time::Instant::now();
+        let outcome = t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb);
+        let elapsed = started.elapsed().as_secs_f64();
+        match outcome {
+            Ok((value, _, _)) => eprintln!(
+                "[#2228 sweep] imi={imi:>4} CONVERGED value={value:.9e} ({elapsed:.2}s)"
+            ),
+            Err(err) => eprintln!("[#2228 sweep] imi={imi:>4} REFUSED ({elapsed:.2}s): {err:?}"),
+        }
+    }
+}
+
 /// #2228 regression — the line-search Value lane must price the shared inner
 /// fixed point. The BFGS/ARC cost probe (`OuterEvalOrder::Value`) ranks steps
 /// whose direction came from the gradient lane's exact implicit `∇f`, computed
@@ -1311,18 +1354,12 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     {
         struct FwdLog;
         impl log::Log for FwdLog {
-            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-                true
-            }
-            fn log(&self, r: &log::Record<'_>) {
-                eprintln!("[{}] {}", r.level(), r.args());
-            }
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool { true }
+            fn log(&self, r: &log::Record<'_>) { eprintln!("[{}] {}", r.level(), r.args()); }
             fn flush(&self) {}
         }
         static L: FwdLog = FwdLog;
-        if log::set_logger(&L).is_ok() {
-            log::set_max_level(log::LevelFilter::Debug);
-        }
+        if log::set_logger(&L).is_ok() { log::set_max_level(log::LevelFilter::Debug); }
     }
     let n = 96usize;
     let p = 48usize;
