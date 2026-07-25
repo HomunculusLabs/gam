@@ -1955,32 +1955,30 @@ fn constrained_linear_predictor_intervals(
     for start in (0..n_rows).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(n_rows);
         let rows = design_row_chunk(design, start..end).map_err(EstimationError::InvalidInput)?;
-        let intervals = (0..rows.nrows())
-            .into_par_iter()
-            .map(|local_row| {
-                let contrast = geometry
-                    .coefficient_gauge
-                    .t_full
-                    .t()
-                    .dot(&rows.row(local_row));
-                let (row_lower, row_upper) =
-                    constrained_projection_equal_tailed_interval(
-                        &ambient_covariance,
-                        posterior,
-                        &contrast,
-                        level,
-                    )
-                    .map_err(EstimationError::InvalidInput)?;
-                let shift = offset[start + local_row]
-                    + rows
-                        .row(local_row)
-                        .dot(&geometry.coefficient_gauge.affine_shift);
-                Ok((row_lower + shift, row_upper + shift))
-            })
-            .collect::<Result<Vec<_>, EstimationError>>()?;
-        for (local_row, (row_lower, row_upper)) in intervals.into_iter().enumerate() {
-            lower[start + local_row] = row_lower;
-            upper[start + local_row] = row_upper;
+        // One projection can retain up to ORTHANT_MOMENT_MAXIMUM_POINTS scalar
+        // node/weight pairs. Evaluate rows serially so peak cubature storage is
+        // O(nodes), independent of prediction batch and chunk size. Parallel
+        // rows would multiply that allocation by the Rayon worker count and
+        // violate the library's bounded-memory contract on hard faces.
+        for local_row in 0..rows.nrows() {
+            let contrast = geometry
+                .coefficient_gauge
+                .t_full
+                .t()
+                .dot(&rows.row(local_row));
+            let (row_lower, row_upper) = constrained_projection_equal_tailed_interval(
+                &ambient_covariance,
+                posterior,
+                &contrast,
+                level,
+            )
+            .map_err(EstimationError::InvalidInput)?;
+            let shift = offset[start + local_row]
+                + rows
+                    .row(local_row)
+                    .dot(&geometry.coefficient_gauge.affine_shift);
+            lower[start + local_row] = row_lower + shift;
+            upper[start + local_row] = row_upper + shift;
         }
     }
     Ok((lower, upper))
