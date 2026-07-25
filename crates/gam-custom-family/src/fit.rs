@@ -1524,6 +1524,36 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // every term sits on its penalty nullspace there, leaving a unique
     // parametric mode — the anchor of the #2366 continuation below.
     let rho_upper_bounds = effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?;
+
+    // #2366: for a family whose joint likelihood Hessian depends on β the inner
+    // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
+    // criterion is only a function of ρ once a selection rule is fixed. Seed the
+    // search with the mode the selection rule names — the endpoint of the
+    // continuation from the effective-df-floor anchor — instead of with whatever
+    // mode the caller's coefficients happen to reach. Where the family's inner
+    // problem is convex the mode is already unique and the continuation would be
+    // pure overhead, so it is not run. See [`anchored_continuation_seed`].
+    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent() {
+        anchored_continuation_seed(
+            family,
+            specs,
+            &outer_options,
+            &label_layout,
+            &rho_prior,
+            &rho_upper_bounds,
+            &rho0,
+        )
+        .or_else(|| persistent_warm_start.clone())
+    } else {
+        persistent_warm_start.clone()
+    };
+    // What "cold" means when the stall guard drops the warm cache. Dropping it
+    // to `None` sends the inner solve back to whatever coefficients the caller
+    // supplied — trajectory-independent, but arbitrary, and for a nonconvex
+    // family that is a seed selecting a branch. The point of the pulse is to
+    // re-solve on a surface that does not depend on the path taken, so the
+    // fallback is the anchored mode: cold means CANONICAL, not arbitrary.
+    let canonical_seed = initial_warm_cache.clone();
     let problem = OuterProblem::new(n_rho)
         .with_stuck_stall_cold_reeval_signal(Arc::clone(&outer_force_cold))
         .with_gradient(cap_gradient)
@@ -1675,7 +1705,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // k²·n·p² coupled-joint LAML gradient assembly.
         if matches!(order, OuterEvalOrder::Value) {
             let warm_ref = if force_cold {
-                None
+                canonical_seed.as_ref()
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };
@@ -1726,7 +1756,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         // leave an older mode available for accidental substitution.
         outer.begin_terminal_evaluation();
         let warm_ref = if force_cold {
-            None
+            canonical_seed.as_ref()
         } else {
             screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
         };
@@ -1838,28 +1868,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         })
     };
 
-    // #2366: for a family whose joint likelihood Hessian depends on β the inner
-    // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
-    // criterion is only a function of ρ once a selection rule is fixed. Seed the
-    // search with the mode the selection rule names — the endpoint of the
-    // continuation from the effective-df-floor anchor — instead of with whatever
-    // mode the caller's coefficients happen to reach. Where the family's inner
-    // problem is convex the mode is already unique and the continuation would be
-    // pure overhead, so it is not run. See [`anchored_continuation_seed`].
-    let initial_warm_cache = if family.exact_newton_joint_hessian_beta_dependent() {
-        anchored_continuation_seed(
-            family,
-            specs,
-            &outer_options,
-            &label_layout,
-            &rho_prior,
-            &rho_upper_bounds,
-            &rho0,
-        )
-        .or_else(|| persistent_warm_start.clone())
-    } else {
-        persistent_warm_start.clone()
-    };
     let mut obj = problem.build_objective_with_screening_proxy(
         CustomOuterState::new_with_cold_signal(
             initial_warm_cache,
@@ -1886,7 +1894,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     .outer_inner_max_iterations
                     .as_ref()
                     .map(|cap| cap.store(0, Ordering::Relaxed));
-                None
+                canonical_seed.as_ref()
             } else {
                 screened_outer_warm_start(outer.warm_cache.as_ref(), rho)
             };

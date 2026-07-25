@@ -258,18 +258,17 @@ fn production_fit_is_independent_of_the_caller_seed_2366() {
     let (from_positive, rho_positive) = fit(2.0);
     let (from_negative, rho_negative) = fit(-2.0);
     let cross_seed_gap = (from_positive - from_negative).abs();
-    // MEASURED (#2366 increment 3): the same-seed control above is bitwise
-    // identical, so the run is deterministic — yet the certified ρ still moves
-    // with the seed by ≈1.3e-13 (1.6240302769989847 vs 1.6240302769991115).
-    // That localizes the residual INSIDE the outer search rather than below it:
-    // some evaluation on the search path still reaches the caller's coefficients
-    // instead of the anchored seed. Bounding ρ here as well as β keeps that
-    // channel measured rather than merely assumed closed.
-    let rho_gap = (rho_positive - rho_negative).abs();
-    assert!(
-        rho_gap <= options.outer_tol * (1.0 + rho_positive.abs()),
-        "the certified smoothing parameter depends on the caller's seed beyond \
-         the outer tolerance: {rho_positive} vs {rho_negative} (gap {rho_gap:.3e})"
+    // The certified smoothing parameter is asserted alongside the coefficient
+    // because they fail separately: an earlier revision of this fix left β
+    // agreeing to 3.4e-14 while ρ still moved by 1.3e-13, which is how the
+    // remaining leak (the stall guard's cold pulse falling back to the caller's
+    // coefficients) was found. Both are bitwise now, and both are checked so
+    // that channel cannot silently reopen.
+    assert_eq!(
+        rho_positive.to_bits(),
+        rho_negative.to_bits(),
+        "the certified smoothing parameter depends on the caller's seed: \
+         {rho_positive} vs {rho_negative}"
     );
 
     // The qualitative property: both seeds select the SAME branch. Before the
@@ -281,11 +280,11 @@ fn production_fit_is_independent_of_the_caller_seed_2366() {
         "both fits should land on the anchor's branch (beta < 0); got \
          {from_positive} and {from_negative}"
     );
-    assert!(
-        cross_seed_gap <= options.inner_tol * (1.0 + from_positive.abs()),
-        "the fitted coefficient still depends on the caller's seed beyond the \
-         inner solve's own resolution: {from_positive} vs {from_negative} \
-         (gap {cross_seed_gap:.3e})"
+    assert_eq!(
+        from_positive.to_bits(),
+        from_negative.to_bits(),
+        "the fitted coefficient depends on the caller's seed: {from_positive} \
+         vs {from_negative} (gap {cross_seed_gap:.3e})"
     );
 }
 
