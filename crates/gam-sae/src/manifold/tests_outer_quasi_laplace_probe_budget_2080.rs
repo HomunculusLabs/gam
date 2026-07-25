@@ -1352,24 +1352,16 @@ fn zz_measure_2228_value_lane_budget_sweep() {
             false,
         );
         let coarse_secs = started.elapsed().as_secs_f64();
-        let render = |outcome: &Result<_, SaeCriterionError>, secs: f64| -> String {
-            match outcome {
-                Ok(_) => format!("CONVERGED ({secs:.2}s)"),
-                Err(_) => format!("REFUSED ({secs:.2}s)"),
-            }
+        let full_report = match &full {
+            Ok((value, _, _)) => format!("CONVERGED value={value:.9e} ({full_secs:.2}s)"),
+            Err(err) => format!("REFUSED ({full_secs:.2}s): {err:?}"),
         };
-        eprintln!(
-            "[#2228 sweep] imi={imi:>4} full={} coarse={}{}",
-            match &full {
-                Ok((value, _, _)) => format!("CONVERGED value={value:.9e} ({full_secs:.2}s)"),
-                Err(err) => format!("REFUSED ({full_secs:.2}s): {err:?}"),
-            },
-            render(&coarse.as_ref().map(|_| ()), coarse_secs),
-            match &coarse {
-                Ok(evaluated) => format!(" coarse_value={:.9e}", evaluated.0),
-                Err(_) => String::new(),
-            }
-        );
+        let coarse_report = match &coarse {
+            Ok(evaluated) => format!("CONVERGED value={:.9e} ({coarse_secs:.2}s)", evaluated.0),
+            Err(err) => format!("REFUSED ({coarse_secs:.2}s): {err:?}"),
+        };
+        eprintln!("[#2228 sweep] imi={imi:>4} full={full_report}");
+        eprintln!("[#2228 sweep] imi={imi:>4} coarse={coarse_report}");
     }
 }
 
