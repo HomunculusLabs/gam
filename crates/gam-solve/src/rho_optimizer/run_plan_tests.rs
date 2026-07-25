@@ -106,6 +106,82 @@ fn closure_objective_default_order_dispatch_preserves_value_lane() {
     assert_eq!(derivative_calls.load(Ordering::Relaxed), 1);
 }
 
+/// #2414: multi-start screening deliberately stops at first order even when
+/// the objective can supply analytic curvature.  The screening certificate
+/// must therefore require exactly the order it requested, while the eventual
+/// mint remains the sole order-four consumer.
+#[test]
+fn analytic_hessian_candidate_screening_requires_only_first_order_evidence_2414() {
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense);
+    let mut objective = problem.build_objective_with_eval_order(
+        Vec::<OuterEvalOrder>::new(),
+        |_, _: &Array1<f64>| Ok(0.0),
+        |_, _: &Array1<f64>| {
+            panic!("screening must use the order-aware evaluator")
+        },
+        |orders: &mut Vec<OuterEvalOrder>, _: &Array1<f64>, order: OuterEvalOrder| {
+            orders.push(order);
+            Ok(match order {
+                OuterEvalOrder::Value => OuterEval::value_only(0.0, 1, None),
+                OuterEvalOrder::ValueAndGradient => OuterEval {
+                    cost: 0.0,
+                    gradient: array![0.0],
+                    hessian: HessianValue::Unavailable,
+                    inner_beta_hint: None,
+                },
+                OuterEvalOrder::ValueGradientHessian => OuterEval {
+                    cost: 0.0,
+                    gradient: array![0.0],
+                    hessian: HessianValue::Dense(array![[1.0]]),
+                    inner_beta_hint: None,
+                },
+            })
+        },
+        None::<fn(&mut Vec<OuterEvalOrder>)>,
+        None::<fn(&mut Vec<OuterEvalOrder>, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let candidate = OuterResult::new(
+        array![0.0],
+        0.0,
+        1,
+        true,
+        OuterPlan {
+            solver: Solver::Arc,
+            hessian_source: HessianSource::Analytic,
+        },
+    );
+
+    let certified = match CertifiedOuterCandidate::from_solver_claim(
+        &mut objective,
+        &OuterConfig::default(),
+        "analytic-Hessian screening #2414",
+        candidate,
+    ) {
+        Ok(candidate) => candidate,
+        Err((_, error)) => panic!("first-order screening evidence must certify: {error}"),
+    };
+
+    assert!(
+        certified
+            .result()
+            .criterion_certificate
+            .as_ref()
+            .is_some_and(OuterCriterionCertificate::certifies),
+        "the stationary screened candidate must retain its certificate",
+    );
+    assert_eq!(
+        objective.state,
+        vec![
+            OuterEvalOrder::Value,
+            OuterEvalOrder::ValueAndGradient
+        ],
+        "screening must audit the scalar value and first-order evidence without \
+         spending the mint-only analytic Hessian",
+    );
+}
+
 /// #979: a solver may finish before a family's nominal sampled-derivative
 /// budget. The sampled optimum is useful as a checkpoint, but the runner must
 /// then optimize the exact objective rather than merely re-evaluating and
