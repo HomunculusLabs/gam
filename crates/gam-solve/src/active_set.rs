@@ -4271,7 +4271,7 @@ fn solve_homogeneous_operator_metric_projection_by_moreau(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
     unconstrained: &Array1<f64>,
-    factor: &gam_linalg::faer_ndarray::FaerLlt<f64>,
+    factor: &gam_linalg::faer_ndarray::FaerCholeskyFactor,
     ops: &ConstraintSetOps<'_>,
 ) -> Result<(Array1<f64>, Vec<usize>), EstimationError> {
     use gam_linalg::triangular::{
