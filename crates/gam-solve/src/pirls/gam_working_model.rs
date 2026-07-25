@@ -223,6 +223,29 @@ impl<'a> GamWorkingModel<'a> {
         }
     }
 
+    fn current_deviance(&self) -> Result<f64, EstimationError> {
+        if self.covariate_se.is_some() {
+            if !matches!(self.likelihood.spec.response, ResponseFamily::Binomial) {
+                crate::bail_invalid_estim!(
+                    "integrated PIRLS objective requires a binomial response"
+                );
+            }
+            binomial_deviance_and_log_kernel_from_mean(
+                self.y,
+                &self.lastmu,
+                self.priorweights,
+            )
+            .map(|objective| objective.0)
+        } else {
+            self.likelihood.loglik_deviance(
+                self.y,
+                &self.workspace.eta_buf,
+                &self.link_kind,
+                self.priorweights,
+            )
+        }
+    }
+
     pub(crate) fn new(
         x_transformed: Option<DesignMatrix>,
         x_original: DesignMatrix,
@@ -1103,7 +1126,7 @@ impl<'a> GamWorkingModel<'a> {
             }
         }
 
-        let (deviance, _) = self.current_data_objective()?;
+        let deviance = self.current_deviance()?;
         let penalty_term = self.penalty.shifted_quadratic(beta.as_ref());
         // Finiteness is a property of the (deviance, penalty) pair regardless of
         // the family dispersion scale `k` applied later in the gain ratio, so the
