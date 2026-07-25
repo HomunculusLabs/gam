@@ -104,6 +104,42 @@ extern "C" __global__ void sae_decoder_cg_dot(
     out[c] = acc;
 }
 
+extern "C" __global__ void sae_decoder_cg_initialize(
+    double* __restrict__ r_blk,
+    double* __restrict__ z_blk,
+    double* __restrict__ p_blk,
+    const double* __restrict__ ax_blk,
+    const double* __restrict__ inverse_diagonal,
+    int m,
+    int t)
+{
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= t) return;
+    for (int i = blockIdx.y; i < m; i += gridDim.y) {
+        size_t idx = (size_t)i * t + c;
+        double residual = __dadd_rn(r_blk[idx], -ax_blk[idx]);
+        double preconditioned = __dmul_rn(inverse_diagonal[i], residual);
+        r_blk[idx] = residual;
+        z_blk[idx] = preconditioned;
+        p_blk[idx] = preconditioned;
+    }
+}
+
+extern "C" __global__ void sae_decoder_cg_precondition(
+    const double* __restrict__ r_blk,
+    double* __restrict__ z_blk,
+    const double* __restrict__ inverse_diagonal,
+    int m,
+    int t)
+{
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= t) return;
+    for (int i = blockIdx.y; i < m; i += gridDim.y) {
+        size_t idx = (size_t)i * t + c;
+        z_blk[idx] = __dmul_rn(inverse_diagonal[i], r_blk[idx]);
+    }
+}
+
 extern "C" __global__ void sae_decoder_cg_update_xr(
     double* __restrict__ x_blk,
     double* __restrict__ r_blk,
@@ -127,7 +163,7 @@ extern "C" __global__ void sae_decoder_cg_update_xr(
 
 extern "C" __global__ void sae_decoder_cg_update_p(
     double* __restrict__ p_blk,
-    const double* __restrict__ r_blk,
+    const double* __restrict__ z_blk,
     const double* __restrict__ beta,
     const unsigned int* __restrict__ active,
     int m,
@@ -138,7 +174,7 @@ extern "C" __global__ void sae_decoder_cg_update_p(
     double be = beta[c];
     for (int i = blockIdx.y; i < m; i += gridDim.y) {
         size_t idx = (size_t)i * t + c;
-        p_blk[idx] = __dadd_rn(r_blk[idx], __dmul_rn(be, p_blk[idx]));
+        p_blk[idx] = __dadd_rn(z_blk[idx], __dmul_rn(be, p_blk[idx]));
     }
 }
 "#;
@@ -208,14 +244,17 @@ pub(super) struct DeviceBlockCgBackend {
     row_ptr: CudaSlice<u32>,
     cols: CudaSlice<u32>,
     vals: CudaSlice<f64>,
+    inverse_diagonal: CudaSlice<f64>,
     x: CudaSlice<f64>,
     r: CudaSlice<f64>,
+    z: CudaSlice<f64>,
     p: CudaSlice<f64>,
     ap: CudaSlice<f64>,
     dot_out: CudaSlice<f64>,
     scalars: CudaSlice<f64>,
     active: CudaSlice<u32>,
     dot_host: Vec<f64>,
+    rhs_norm_squared: Vec<f64>,
     active_host: Vec<u32>,
 }
 
@@ -223,7 +262,8 @@ impl DeviceBlockCgBackend {
     /// Build the resident backend when platform, policy, and workload admit
     /// it. `Ok(None)` is an ordinary Auto decline (absent device or a block
     /// below the break-even); `Err` is a Required-policy failure. The CG
-    /// entry state is uploaded here: `X = 0`, `R = P = rhs_block`.
+    /// entry state is formed here: `X = initial_solution`,
+    /// `R = B - A·X`, `Z = D⁻¹R`, `P = Z`.
     pub(super) fn try_new(
         gpu: gam_gpu::GpuPolicy,
         row_ptr: &[u32],
@@ -231,8 +271,12 @@ impl DeviceBlockCgBackend {
         csr_vals: &[f64],
         diag_ridge: &[f64],
         rhs_block: &Array2<f64>,
+        initial_solution: &Array2<f64>,
+        inverse_diagonal: &[f64],
     ) -> Result<Option<Self>, String> {
         let (m, t) = rhs_block.dim();
+        assert_eq!(initial_solution.dim(), (m, t));
+        assert_eq!(inverse_diagonal.len(), m);
         match gpu {
             gam_gpu::GpuPolicy::Off => return Ok(None),
             gam_gpu::GpuPolicy::Auto => {
@@ -250,28 +294,45 @@ impl DeviceBlockCgBackend {
                 }
             }
             gam_gpu::GpuPolicy::Required => {
-                gam_gpu::GpuRuntime::require()
-                    .map_err(|err| format!("sparse_dict decoder block-CG gpu=required: {err}"))?;
+                gam_gpu::GpuRuntime::require().map_err(|err| {
+                    format!("sparse_dict decoder block-CG gpu=required: {err}")
+                })?;
             }
         }
 
-        let b = backend()
-            .map_err(|err| format!("sparse_dict decoder block-CG backend probe failed: {err}"))?;
-        let module = module_for(b)
-            .map_err(|err| format!("sparse_dict decoder block-CG module build failed: {err}"))?;
+        let b = backend().map_err(|err| {
+            format!("sparse_dict decoder block-CG backend probe failed: {err}")
+        })?;
+        let module = module_for(b).map_err(|err| {
+            format!("sparse_dict decoder block-CG module build failed: {err}")
+        })?;
         let stream = b.stream.clone();
 
         let rhs_host = rhs_block
             .as_slice()
             .expect("decoder block-CG rhs block is standard layout");
+        let initial_host = initial_solution
+            .as_slice()
+            .expect("decoder block-CG initial solution is standard layout");
+        let mut rhs_norm_squared = vec![0.0f64; t];
+        for i in 0..m {
+            let base = i * t;
+            for c in 0..t {
+                rhs_norm_squared[c] += rhs_host[base + c] * rhs_host[base + c];
+            }
+        }
         let upload = || -> Result<Self, GpuError> {
             let diag = stream.clone_htod(diag_ridge).gpu_ctx("htod diag")?;
             let row_ptr = stream.clone_htod(row_ptr).gpu_ctx("htod row_ptr")?;
             let cols = stream.clone_htod(csr_cols).gpu_ctx("htod cols")?;
             let vals = stream.clone_htod(csr_vals).gpu_ctx("htod vals")?;
-            let x = stream.alloc_zeros::<f64>(m * t).gpu_ctx("alloc x")?;
+            let inverse_diagonal = stream
+                .clone_htod(inverse_diagonal)
+                .gpu_ctx("htod inverse diagonal")?;
+            let x = stream.clone_htod(initial_host).gpu_ctx("htod x")?;
             let r = stream.clone_htod(rhs_host).gpu_ctx("htod r")?;
-            let p = stream.clone_htod(rhs_host).gpu_ctx("htod p")?;
+            let z = stream.alloc_zeros::<f64>(m * t).gpu_ctx("alloc z")?;
+            let p = stream.clone_htod(initial_host).gpu_ctx("htod p")?;
             let ap = stream.alloc_zeros::<f64>(m * t).gpu_ctx("alloc ap")?;
             let dot_out = stream.alloc_zeros::<f64>(t).gpu_ctx("alloc dot_out")?;
             let scalars = stream.alloc_zeros::<f64>(t).gpu_ctx("alloc scalars")?;
@@ -285,20 +346,25 @@ impl DeviceBlockCgBackend {
                 row_ptr,
                 cols,
                 vals,
+                inverse_diagonal,
                 x,
                 r,
+                z,
                 p,
                 ap,
                 dot_out,
                 scalars,
                 active,
                 dot_host: vec![0.0; t],
+                rhs_norm_squared,
                 active_host: vec![0; t],
             })
         };
-        upload()
-            .map(Some)
-            .map_err(|err| format!("sparse_dict decoder block-CG operand upload failed: {err}"))
+        let mut resident = upload()
+            .map_err(|err| format!("sparse_dict decoder block-CG operand upload failed: {err}"))?;
+        resident.apply_block();
+        resident.initialize_preconditioned_state();
+        Ok(Some(resident))
     }
 
     /// Download the solution block once, at the end of the solve.
@@ -312,9 +378,7 @@ impl DeviceBlockCgBackend {
                     .synchronize()
                     .gpu_ctx("sparse_dict decoder block-CG solution synchronize")
             })
-            .map_err(|err| {
-                format!("sparse_dict decoder block-CG solution download failed: {err}")
-            })?;
+            .map_err(|err| format!("sparse_dict decoder block-CG solution download failed: {err}"))?;
         Array2::from_shape_vec((self.m, self.t), host)
             .map_err(|err| format!("sparse_dict decoder block-CG solution shape: {err}"))
     }
@@ -342,6 +406,30 @@ impl DeviceBlockCgBackend {
         )
     }
 
+    fn initialize_preconditioned_state(&mut self) {
+        let func = complete(
+            "initialize load_function",
+            self.module
+                .load_function("sae_decoder_cg_initialize")
+                .gpu_ctx("load sae_decoder_cg_initialize"),
+        );
+        let (m_i32, t_i32) = self.dims_i32();
+        let cfg = self.launch_grid(true);
+        let mut builder = self.stream.launch_builder(&func);
+        builder
+            .arg(&mut self.r)
+            .arg(&mut self.z)
+            .arg(&mut self.p)
+            .arg(&self.ap)
+            .arg(&self.inverse_diagonal)
+            .arg(&m_i32)
+            .arg(&t_i32);
+        complete(
+            "initialize launch",
+            unsafe { builder.launch(cfg) }.gpu_ctx("launch initialize"),
+        );
+    }
+
     fn run_dot(&mut self, which: DotOperands, out: &mut [f64]) {
         let func = complete(
             "dot load_function",
@@ -356,6 +444,7 @@ impl DeviceBlockCgBackend {
             match which {
                 DotOperands::PAp => builder.arg(&self.p).arg(&self.ap),
                 DotOperands::RR => builder.arg(&self.r).arg(&self.r),
+                DotOperands::RZ => builder.arg(&self.r).arg(&self.z),
             }
             .arg(&mut self.dot_out)
             .arg(&m_i32)
@@ -363,10 +452,7 @@ impl DeviceBlockCgBackend {
             // SAFETY: geometry covers exactly `t` columns; the kernel reads the
             // two `m*t` blocks and writes only `dot_out[0..t]`, all live
             // allocations on this stream.
-            complete(
-                "dot launch",
-                unsafe { builder.launch(cfg) }.gpu_ctx("launch dot"),
-            );
+            complete("dot launch", unsafe { builder.launch(cfg) }.gpu_ctx("launch dot"));
         }
         complete(
             "dot download",
@@ -399,6 +485,7 @@ impl DeviceBlockCgBackend {
 enum DotOperands {
     PAp,
     RR,
+    RZ,
 }
 
 impl PcgBlockBackend for DeviceBlockCgBackend {
@@ -408,6 +495,10 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
 
     fn columns(&self) -> usize {
         self.t
+    }
+
+    fn rhs_norm_squared(&mut self, out: &mut [f64]) {
+        out.copy_from_slice(&self.rhs_norm_squared);
     }
 
     fn apply_block(&mut self) {
@@ -433,10 +524,7 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
         // row_ptr[m] bounds, and p[0..m*t]; it writes only ap[0..m*t]. All are
         // live allocations on this stream and the grid covers every (row,
         // column) exactly once via the row-stride loop.
-        complete(
-            "spmm launch",
-            unsafe { builder.launch(cfg) }.gpu_ctx("launch spmm"),
-        );
+        complete("spmm launch", unsafe { builder.launch(cfg) }.gpu_ctx("launch spmm"));
     }
 
     fn dot_p_ap(&mut self, out: &mut [f64]) {
@@ -445,6 +533,10 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
 
     fn dot_r_r(&mut self, out: &mut [f64]) {
         self.run_dot(DotOperands::RR, out);
+    }
+
+    fn dot_r_z(&mut self, out: &mut [f64]) {
+        self.run_dot(DotOperands::RZ, out);
     }
 
     fn update_x_r(&mut self, alpha: &[f64], active: &[bool]) {
@@ -475,6 +567,28 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
         );
     }
 
+    fn refresh_preconditioned_residual(&mut self) {
+        let func = complete(
+            "precondition load_function",
+            self.module
+                .load_function("sae_decoder_cg_precondition")
+                .gpu_ctx("load sae_decoder_cg_precondition"),
+        );
+        let (m_i32, t_i32) = self.dims_i32();
+        let cfg = self.launch_grid(true);
+        let mut builder = self.stream.launch_builder(&func);
+        builder
+            .arg(&self.r)
+            .arg(&mut self.z)
+            .arg(&self.inverse_diagonal)
+            .arg(&m_i32)
+            .arg(&t_i32);
+        complete(
+            "precondition launch",
+            unsafe { builder.launch(cfg) }.gpu_ctx("launch precondition"),
+        );
+    }
+
     fn update_p(&mut self, beta: &[f64], active: &[bool]) {
         self.upload_scalars(beta, active);
         let func = complete(
@@ -488,12 +602,12 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
         let mut builder = self.stream.launch_builder(&func);
         builder
             .arg(&mut self.p)
-            .arg(&self.r)
+            .arg(&self.z)
             .arg(&self.scalars)
             .arg(&self.active)
             .arg(&m_i32)
             .arg(&t_i32);
-        // SAFETY: reads r/scalars/active within bounds, writes p within m*t;
+        // SAFETY: reads z/scalars/active within bounds, writes p within m*t;
         // masked columns are untouched, matching the CPU backend.
         complete(
             "update_p launch",
@@ -523,11 +637,7 @@ mod tests {
     /// plus pseudo-random chords, diagonally dominant, with a heterogeneous
     /// right-hand-side block (including a zero column, which the recurrence
     /// must freeze at zero on both backends).
-    fn fixture(
-        m: usize,
-        t: usize,
-        seed: u64,
-    ) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>, Array2<f64>) {
+    fn fixture(m: usize, t: usize, seed: u64) -> (Vec<u32>, Vec<u32>, Vec<f64>, Vec<f64>, Array2<f64>) {
         let mut state = seed.max(1);
         let mut next = move || {
             state ^= state << 13;
@@ -608,7 +718,11 @@ mod tests {
                     }
                 });
         };
-        let mut backend = CpuPcgBlockBackend::new(rhs.clone(), apply);
+        let (m, t) = rhs.dim();
+        let initial = rhs.mapv(|value| 0.01 * value);
+        let inverse_diagonal = diag.iter().map(|d| d.recip()).collect();
+        let mut backend =
+            CpuPcgBlockBackend::new(rhs.clone(), initial, inverse_diagonal, apply);
         let results = pcg_multi_core(&mut backend, rel_tol, cap, true);
         (results, backend.into_solution())
     }
@@ -622,6 +736,9 @@ mod tests {
         rel_tol: f64,
         cap: usize,
     ) -> (Vec<gam_linalg::pcg::PcgCoreResult>, Array2<f64>) {
+        let (m, t) = rhs.dim();
+        let initial = rhs.mapv(|value| 0.01 * value);
+        let inverse_diagonal: Vec<f64> = diag.iter().map(|d| d.recip()).collect();
         let mut backend = DeviceBlockCgBackend::try_new(
             gam_gpu::GpuPolicy::Required,
             row_ptr,
@@ -629,6 +746,8 @@ mod tests {
             vals,
             diag,
             rhs,
+            &initial,
+            &inverse_diagonal,
         )
         .expect("device backend build")
         .expect("device backend admitted under Required");
@@ -639,7 +758,8 @@ mod tests {
 
     /// The device-resident block CG must reproduce the CPU backend BIT-FOR-BIT:
     /// same per-column stop/iterations, same alpha/beta traces, same solution
-    /// bits — and a second device run must reproduce itself exactly.
+    /// bits from a nonzero initial solution — and a second device run must
+    /// reproduce itself exactly.
     #[test]
     fn device_block_cg_matches_cpu_bitwise() {
         if !cuda_available_for_test("decoder_gpu::device_block_cg_matches_cpu_bitwise") {
@@ -673,21 +793,14 @@ mod tests {
             }
             let dc = cpu.diagnostics.as_ref().expect("cpu diagnostics");
             let dd = dev.diagnostics.as_ref().expect("device diagnostics");
-            assert_eq!(
-                dc.alpha.len(),
-                dd.alpha.len(),
-                "column {c} alpha trace length"
-            );
+            assert_eq!(dc.alpha.len(), dd.alpha.len(), "column {c} alpha trace length");
             for (k, (a, b)) in dc.alpha.iter().zip(dd.alpha.iter()).enumerate() {
                 assert_eq!(a.to_bits(), b.to_bits(), "column {c} alpha[{k}]");
             }
             for (k, (a, b)) in dc.beta.iter().zip(dd.beta.iter()).enumerate() {
                 assert_eq!(a.to_bits(), b.to_bits(), "column {c} beta[{k}]");
             }
-            assert_eq!(
-                dev2_results[c].iterations, dev.iterations,
-                "column {c} rerun"
-            );
+            assert_eq!(dev2_results[c].iterations, dev.iterations, "column {c} rerun");
         }
         assert!(
             converged >= t - 1,

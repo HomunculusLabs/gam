@@ -632,9 +632,8 @@ pub(super) fn run(
     // arithmetic can express (#2396). A `config.tolerance` of `0.0` asks for the
     // tightest achievable fixed point, which in floating point is the rounding
     // floor of the residual reductions, not literal zero.
-    let fixed_point_tol = config
-        .tolerance
-        .max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
+    let fixed_point_tol =
+        config.tolerance.max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
     // Captured-fraction EV-plateau detector (arm 2 best-effort): "how big was
     // this round's move against the climb achieved since entry". Stationary
     // rounds within a trailing window mark the achievable plateau; the window
@@ -895,8 +894,8 @@ pub(super) fn run(
             plateau_flags.iter().filter(|&&s| s).count() >= LINEAR_EV_PLATEAU_MIN_ROUNDS;
 
         if best_effort_open {
-            let best =
-                best_open.expect("a confirmed plateau has observed at least one returnable round");
+            let best = best_open
+                .expect("a confirmed plateau has observed at least one returnable round");
             let (indices, code_mat) = pack_codes(&best.codes, n, s);
             return Ok(SparseDictIterate {
                 decoder: best.decoder,
@@ -2500,27 +2499,32 @@ fn solve_component(
     let diag_ridge: Vec<f64> = comp.iter().map(|&a| eq.diag[a] + ridge).collect();
     let residual_tolerance = decoder_solve_relative_tolerance();
 
-    // A-priori spectral bounds of the component operator M = A_sub + ρI via
-    // Gershgorin discs over the stored (in-component) co-firing entries. M is SPD
-    // with M ⪰ ρI, so the true smallest eigenvalue is at least the regularisation
-    // floor; Gershgorin caps the largest. Their ratio is a rigorous condition
-    // bound κ̂ ≥ κ(M) that sets a DERIVED iteration cap, so CG cannot spin
-    // unbounded on a near-singular giant block (near-duplicate atoms in an
-    // overcomplete dictionary over a low-dim post-peel space).
+    // A-priori spectral bounds of the symmetrically Jacobi-scaled operator
+    // D⁻¹/² M D⁻¹/², where M = A_sub + ρI and D = diag(M). This is the SPD
+    // operator whose spectrum controls the PCG recurrence below. Gershgorin
+    // bounds its largest eigenvalue. The smallest eigenvalue is bounded both
+    // by Gershgorin and by M ⪰ ρI ⇒ D⁻¹/²MD⁻¹/² ⪰ ρ/max(D) I. Their ratio is
+    // therefore a genuine upper condition bound for the actual recurrence,
+    // not the stale unpreconditioned bound.
     let mut lambda_max_bound = 0.0f64;
     let mut lambda_min_bound = f64::INFINITY;
-    for &a in comp {
+    let max_diagonal = diag_ridge.iter().copied().fold(0.0f64, f64::max);
+    for (i, &a) in comp.iter().enumerate() {
         let mut off_abs = 0.0f64;
         for &(nb, val) in &neigh[a] {
-            if local.contains_key(&(nb as usize)) {
-                off_abs += val.abs();
+            if let Some(&j) = local.get(&(nb as usize)) {
+                off_abs += val.abs() / (diag_ridge[i] * diag_ridge[j]).sqrt();
             }
         }
-        let center = eq.diag[a] + ridge;
-        lambda_max_bound = lambda_max_bound.max(center + off_abs);
-        lambda_min_bound = lambda_min_bound.min(center - off_abs);
+        lambda_max_bound = lambda_max_bound.max(1.0 + off_abs);
+        lambda_min_bound = lambda_min_bound.min(1.0 - off_abs);
     }
-    let lambda_min = lambda_min_bound.max(ridge).max(DEAD_DENOM);
+    let ridge_floor = if max_diagonal > 0.0 {
+        ridge / max_diagonal
+    } else {
+        0.0
+    };
+    let lambda_min = lambda_min_bound.max(ridge_floor).max(DEAD_DENOM);
     let kappa_bound = (lambda_max_bound / lambda_min).max(1.0);
     stats.record_kappa_bound(kappa_bound);
     let root = kappa_bound.sqrt();
@@ -2541,14 +2545,17 @@ fn solve_component(
     // exactly as before — never enter CG or the solve statistics.
     let live_columns: Vec<usize> = {
         let mut live_flags = vec![false; p];
-        live_flags.par_iter_mut().enumerate().for_each(|(c, live)| {
-            let mut bnorm2 = 0.0f64;
-            for &a in comp {
-                let b = eq.b[[a, c]];
-                bnorm2 += b * b;
-            }
-            *live = bnorm2.sqrt() > DEAD_DENOM;
-        });
+        live_flags
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(c, live)| {
+                let mut bnorm2 = 0.0f64;
+                for &a in comp {
+                    let b = eq.b[[a, c]];
+                    bnorm2 += b * b;
+                }
+                *live = bnorm2.sqrt() > DEAD_DENOM;
+            });
         for (c, &live) in live_flags.iter().enumerate() {
             if !live {
                 for &a in comp {
@@ -2574,17 +2581,23 @@ fn solve_component(
     for tile in live_columns.chunks(tile_columns) {
         let t = tile.len();
         let mut rhs_block = Array2::<f64>::zeros((m, t));
+        let mut initial_block = Array2::<f64>::zeros((m, t));
         {
             let rhs_slice = rhs_block
                 .as_slice_mut()
                 .expect("freshly allocated block is standard layout");
+            let initial_slice = initial_block
+                .as_slice_mut()
+                .expect("freshly allocated block is standard layout");
             rhs_slice
                 .par_chunks_mut(t)
+                .zip(initial_slice.par_chunks_mut(t))
                 .enumerate()
-                .for_each(|(i, row)| {
+                .for_each(|(i, (rhs_row, initial_row))| {
                     let a = comp[i];
                     for (j, &c) in tile.iter().enumerate() {
-                        row[j] = eq.b[[a, c]];
+                        rhs_row[j] = eq.b[[a, c]];
+                        initial_row[j] = decoder[[a, c]] as f64;
                     }
                 });
         }
@@ -2596,6 +2609,7 @@ fn solve_component(
             &csr_vals,
             &diag_ridge,
             rhs_block,
+            initial_block,
             residual_tolerance,
             cap,
         )?;
@@ -2656,13 +2670,22 @@ fn solve_block_cg(
     csr_vals: &[f64],
     diag_ridge: &[f64],
     rhs_block: Array2<f64>,
+    initial_block: Array2<f64>,
     residual_tolerance: f64,
     cap: usize,
 ) -> Result<(Vec<PcgCoreResult>, Array2<f64>, bool), String> {
+    let inverse_diagonal: Vec<f64> = diag_ridge.iter().map(|&d| d.recip()).collect();
     #[cfg(target_os = "linux")]
     {
         if let Some(mut device) = super::decoder_gpu::DeviceBlockCgBackend::try_new(
-            gpu, row_ptr, csr_cols, csr_vals, diag_ridge, &rhs_block,
+            gpu,
+            row_ptr,
+            csr_cols,
+            csr_vals,
+            diag_ridge,
+            &rhs_block,
+            &initial_block,
+            &inverse_diagonal,
         )? {
             let results = pcg_multi_core(&mut device, residual_tolerance, cap, true);
             let solution = device.take_solution()?;
@@ -2680,7 +2703,9 @@ fn solve_block_cg(
 
     let apply = |pblk: &Array2<f64>, apblk: &mut Array2<f64>| {
         let t = pblk.ncols();
-        let ps = pblk.as_slice().expect("block CG state is standard layout");
+        let ps = pblk
+            .as_slice()
+            .expect("block CG state is standard layout");
         let out = apblk
             .as_slice_mut()
             .expect("block CG state is standard layout");
@@ -2699,7 +2724,8 @@ fn solve_block_cg(
             }
         });
     };
-    let mut backend = CpuPcgBlockBackend::new(rhs_block, apply);
+    let mut backend =
+        CpuPcgBlockBackend::new(rhs_block, initial_block, inverse_diagonal, apply);
     let results = pcg_multi_core(&mut backend, residual_tolerance, cap, true);
     let solution = backend.into_solution();
     Ok((results, solution, false))
@@ -3521,14 +3547,9 @@ mod exact_solve_tests {
         let mut decoder = Array2::<f32>::zeros((2, 2));
         decoder[[0, 1]] = 1.0;
         decoder[[1, 0]] = 1.0;
-        let (_stats, gate) = solve_decoder_with_routability_gate(
-            &mut decoder,
-            &eq,
-            0.0,
-            1.0,
-            gam_gpu::GpuPolicy::Auto,
-        )
-        .expect("decoder refresh");
+        let (_stats, gate) =
+            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
+                .expect("decoder refresh");
 
         assert!(gate[0].refresh, "well-fired atom must refresh");
         assert!(
@@ -3557,14 +3578,9 @@ mod exact_solve_tests {
         decoder[[0, 1]] = 1.0;
 
         accumulate_constant_rows(&mut eq, 0, 1, 1.0, [3.0, 0.0]);
-        let (_stats_first, first_gate) = solve_decoder_with_routability_gate(
-            &mut decoder,
-            &eq,
-            0.0,
-            1.0,
-            gam_gpu::GpuPolicy::Auto,
-        )
-        .expect("decoder refresh");
+        let (_stats_first, first_gate) =
+            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
+                .expect("decoder refresh");
         eq.clear_refreshed_atoms(&first_gate);
 
         assert!(!first_gate[0].refresh, "single firing should defer");
@@ -3578,14 +3594,9 @@ mod exact_solve_tests {
         );
 
         accumulate_constant_rows(&mut eq, 0, 63, 1.0, [3.0, 0.0]);
-        let (_stats_second, second_gate) = solve_decoder_with_routability_gate(
-            &mut decoder,
-            &eq,
-            0.0,
-            1.0,
-            gam_gpu::GpuPolicy::Auto,
-        )
-        .expect("decoder refresh");
+        let (_stats_second, second_gate) =
+            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
+                .expect("decoder refresh");
         eq.clear_refreshed_atoms(&second_gate);
 
         assert!(
@@ -3642,7 +3653,8 @@ mod exact_solve_tests {
         );
 
         let mut decoder = Array2::<f32>::zeros((k, p));
-        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto).expect("decoder refresh");
+        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto)
+            .expect("decoder refresh");
 
         // The internal solve is f64 (Cholesky residual ~1e-15), but the returned
         // decoder is f32, so the measurable relative residual bottoms out at the f32
@@ -3671,7 +3683,8 @@ mod exact_solve_tests {
         let eq = assemble_normal_eq(x.view(), &codes, k, p);
 
         let mut decoder = Array2::<f32>::zeros((k, p));
-        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto).expect("decoder refresh");
+        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto)
+            .expect("decoder refresh");
 
         // Dense full system (A + ρI) D = B, solved independently.
         let mut mat = Array2::<f64>::zeros((k, k));
@@ -3789,6 +3802,8 @@ mod exact_solve_tests {
         }
         let mut backend = gam_linalg::pcg::CpuPcgBlockBackend::new(
             rhs,
+            Array2::<f64>::zeros((eigenvalues.len(), 1)),
+            vec![1.0; eigenvalues.len()],
             |pblk: &Array2<f64>, apblk: &mut Array2<f64>| {
                 let out = matvec(pblk.column(0).to_owned().as_slice().expect("contiguous"));
                 for (i, slot) in apblk.column_mut(0).iter_mut().enumerate() {
@@ -3923,8 +3938,7 @@ mod exact_solve_tests {
         assert!(
             stats.cg_relative_residual <= stats.cg_residual_stop,
             "the resolved block's relative residual {:.3e} must sit at/below the √ε stop {:.3e}",
-            stats.cg_relative_residual,
-            stats.cg_residual_stop
+            stats.cg_relative_residual, stats.cg_residual_stop
         );
         assert!(
             decoder.iter().all(|v| v.is_finite()),
@@ -4299,9 +4313,8 @@ mod exact_solve_tests {
             score_mode: gam_gpu::GpuPolicy::Off,
         };
 
-        let fit = run_linear_reml_schedule(x.view(), &config).expect(
-            "the schedule must terminate (return), not loop, on a noise-floored interior ρ",
-        );
+        let fit = run_linear_reml_schedule(x.view(), &config)
+            .expect("the schedule must terminate (return), not loop, on a noise-floored interior ρ");
         assert!(
             fit.convergence.outer_iterations >= 1
                 && fit.convergence.outer_iterations <= super::REML_SCHEDULE_MAX_OUTER_ITERS,
@@ -4327,7 +4340,8 @@ mod exact_solve_tests {
             "a K >> rank best-effort inner solve yields an OPEN schedule certificate"
         );
         assert!(
-            fit.convergence.outer_tolerance >= super::reml_schedule_rho_log_tol(config.tolerance),
+            fit.convergence.outer_tolerance
+                >= super::reml_schedule_rho_log_tol(config.tolerance),
             "the best-effort band must be at least the machine-precision √tolerance band"
         );
     }
@@ -4662,7 +4676,8 @@ mod exact_solve_tests {
         // exact property that an absolute `tolerance == 0.0` could never satisfy
         // before the machine-precision floor.
         assert!(
-            fit.convergence.inner_ev_residual < 1.0e-9 && fit.convergence.inner_ev_residual >= 0.0,
+            fit.convergence.inner_ev_residual < 1.0e-9
+                && fit.convergence.inner_ev_residual >= 0.0,
             "certified EV residual must be finite and at the rounding floor; got {:.3e}",
             fit.convergence.inner_ev_residual
         );
@@ -4691,11 +4706,7 @@ mod exact_solve_tests {
         // to the target.
         for a in 0..k {
             let b = (a + 1) % k;
-            let key = if a < b {
-                (a as u32, b as u32)
-            } else {
-                (b as u32, a as u32)
-            };
+            let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
             let v = 0.25 * next();
             off.insert(key, v);
             row_abs[a] += v.abs();
@@ -4716,11 +4727,7 @@ mod exact_solve_tests {
             if a == b {
                 continue;
             }
-            let key = if a < b {
-                (a as u32, b as u32)
-            } else {
-                (b as u32, a as u32)
-            };
+            let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
             if off.contains_key(&key) {
                 continue;
             }
@@ -4783,10 +4790,7 @@ mod exact_solve_tests {
             cpu_stats.max_component_size, k,
             "fixture must percolate into one giant component"
         );
-        assert_eq!(
-            cpu_stats.cg_nonconverged_columns, 0,
-            "cpu block CG must converge"
-        );
+        assert_eq!(cpu_stats.cg_nonconverged_columns, 0, "cpu block CG must converge");
         assert!(cpu_stats.cg_relative_residual <= cpu_stats.cg_residual_stop);
 
         let device_present = cfg!(target_os = "linux")
@@ -4810,10 +4814,7 @@ mod exact_solve_tests {
             dev_stats.cg_iterations,
             cpu_secs / dev_secs.max(1e-9),
         );
-        assert_eq!(
-            dev_stats.cg_nonconverged_columns, 0,
-            "device block CG must converge"
-        );
+        assert_eq!(dev_stats.cg_nonconverged_columns, 0, "device block CG must converge");
         assert_eq!(
             dev_stats.device_refresh_columns, dev_stats.cg_columns,
             "Required refresh must run every live column on the device"

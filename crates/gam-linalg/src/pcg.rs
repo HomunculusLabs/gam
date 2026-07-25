@@ -432,18 +432,16 @@ where
 // columns together off ONE operator application per iteration, so the operator
 // is streamed once per iteration regardless of the column count.
 //
-// ## Contract: per-column equivalence with `pcg_core`
+// ## Contract: one mathematically exact preconditioned recurrence
 //
-// [`pcg_multi_core`] is `pcg_core` with the all-ones (identity Jacobi)
-// preconditioner, `refresh_period = 0`, and [`DotReduction::Serial`], applied
-// independently to each column — BIT-FOR-BIT. Every per-column inner product
-// is a strict ascending-row fold, every per-column vector update performs the
-// same multiply-then-add sequence in the same order, and each column carries
-// its own `alpha`/`beta`/convergence state, so a column's iterates never
-// depend on which other columns share the block or on how work is tiled
-// across threads. A converged (or broken-down) column freezes: its iterate
-// stops updating while the remaining active columns continue. The equivalence
-// is pinned by `pcg_multi_matches_pcg_core_bitwise_per_column` below.
+// [`pcg_multi_core`] advances independently preconditioned columns from an
+// arbitrary exact initial state `X`, `R = B - A·X`, `Z = M⁻¹R`, `P = Z`.
+// Every per-column inner product is a strict ascending-row fold, every vector
+// update performs the same multiply-then-add sequence in the same order, and
+// each column carries its own `alpha`/`beta`/convergence state. A converged (or
+// broken-down) column freezes while the remaining columns continue. Backend
+// parity is therefore a primitive-by-primitive contract rather than an
+// accident of a zero initial guess.
 
 /// Fixed column-tile width for the deterministic block inner products: one
 /// cache line of `f64`s. Each tile's accumulators are private to one task and
@@ -452,21 +450,23 @@ where
 const BLOCK_DOT_COLUMN_TILE: usize = 8;
 
 /// Backend contract for [`pcg_multi_core`]: owns the block iterate state
-/// `X` (solution), `R` (residual), `P` (search direction), `AP` (operator
-/// image), each logically `rows × columns`, plus the operator itself.
+/// `X` (solution), `R` (residual), `Z = M⁻¹R` (preconditioned residual), `P`
+/// (search direction), and `AP` (operator image), each logically
+/// `rows × columns`, plus the operator itself.
 ///
 /// Numerical obligations (what makes a backend admissible):
 /// * `apply_block` sets `AP ← A·P` where column `c` of `AP` is EXACTLY the
 ///   operator applied to column `c` of `P` — same summation order as the
 ///   scalar operator the backend claims to represent. Frozen columns may be
 ///   recomputed (their values are never read back into the recurrence).
-/// * `dot_p_ap` / `dot_r_r` write, per column, a STRICT ascending-row fold
-///   `acc = fold(acc + a[i]·b[i])` — the [`DotReduction::Serial`] contract.
+/// * every dot primitive writes, per column, a STRICT ascending-row fold
+///   `acc = fold(acc + a[i]·b[i])` — the [`DotReduction::Serial`] contract;
 /// * `update_x_r` performs, for each active column `c`,
 ///   `X[·][c] += alpha[c]·P[·][c]` then `R[·][c] += (-alpha[c])·AP[·][c]`
 ///   as separate multiply-then-add per element (no FMA contraction).
+/// * `refresh_preconditioned_residual` sets `Z ← M⁻¹R`.
 /// * `update_p` performs, for each active column `c`,
-///   `P[·][c] = R[·][c] + beta[c]·P[·][c]` (multiply-then-add, no FMA).
+///   `P[·][c] = Z[·][c] + beta[c]·P[·][c]` (multiply-then-add, no FMA).
 ///
 /// The recurrence itself (scalar `alpha`/`beta` math, convergence and
 /// breakdown decisions, diagnostics) lives in [`pcg_multi_core`] and is shared
@@ -474,27 +474,31 @@ const BLOCK_DOT_COLUMN_TILE: usize = 8;
 pub trait PcgBlockBackend {
     fn rows(&self) -> usize;
     fn columns(&self) -> usize;
+    /// Squared norm of the original right-hand side, not the initial residual.
+    fn rhs_norm_squared(&mut self, out: &mut [f64]);
     /// `AP ← A·P` for all columns.
     fn apply_block(&mut self);
     /// `out[c] ← Σ_i P[i][c]·AP[i][c]`, strict ascending-`i` fold per column.
     fn dot_p_ap(&mut self, out: &mut [f64]);
     /// `out[c] ← Σ_i R[i][c]²`, strict ascending-`i` fold per column.
     fn dot_r_r(&mut self, out: &mut [f64]);
+    /// `out[c] ← Σ_i R[i][c]·Z[i][c]`, strict ascending-`i` fold per column.
+    fn dot_r_z(&mut self, out: &mut [f64]);
     /// Per active column: `X += alpha·P`, then `R += (-alpha)·AP`.
     fn update_x_r(&mut self, alpha: &[f64], active: &[bool]);
-    /// Per active column: `P = R + beta·P`.
+    /// Refresh `Z = M⁻¹R`.
+    fn refresh_preconditioned_residual(&mut self);
+    /// Per active column: `P = Z + beta·P`.
     fn update_p(&mut self, beta: &[f64], active: &[bool]);
 }
 
 /// Drive the shared CG recurrence over a block backend. Returns one
-/// [`PcgCoreResult`] per column, bit-identical to running [`pcg_core`] on that
-/// column alone (all-ones preconditioner, `refresh_period = 0`, Serial dots).
+/// [`PcgCoreResult`] per column.
 ///
-/// The backend must enter with `X = 0`, `R = P = B` (the right-hand-side
-/// block) and `AP` arbitrary. On return, the backend's `X` holds each
+/// The backend must enter with `R = B - A·X`, `Z = M⁻¹R`, `P = Z`, and `AP`
+/// arbitrary. On return, the backend's `X` holds each
 /// column's final iterate: the converged solution for `Converged` columns, the
-/// last numerically valid iterate for `Breakdown`/`MaxIters` columns, and the
-/// zero vector for columns whose right-hand side was zero or non-finite.
+/// last numerically valid iterate for `Breakdown`/`MaxIters` columns.
 pub fn pcg_multi_core<B: PcgBlockBackend>(
     backend: &mut B,
     rel_tol: f64,
@@ -502,11 +506,13 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
     record_diagnostics: bool,
 ) -> Vec<PcgCoreResult> {
     let t = backend.columns();
+    let mut rhs_squared = vec![0.0f64; t];
+    let mut residual_squared = vec![0.0f64; t];
+    let mut rz = vec![0.0f64; t];
     let mut scratch = vec![0.0f64; t];
-
-    // R = B on entry, so this is the per-column ‖rhs‖² in the same strict
-    // ascending fold `pcg_core`'s Serial `dot(rhs, rhs)` performs.
-    backend.dot_r_r(&mut scratch);
+    backend.rhs_norm_squared(&mut rhs_squared);
+    backend.dot_r_r(&mut residual_squared);
+    backend.dot_r_z(&mut rz);
 
     let mut done: Vec<Option<PcgCoreResult>> = vec![None; t];
     let mut active = vec![false; t];
@@ -517,45 +523,44 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
     let mut diagnostics: Vec<Option<PcgDiagnostics>> = (0..t).map(|_| None).collect();
 
     for c in 0..t {
-        let norm = scratch[c].sqrt();
-        rhs_norm[c] = norm;
-        last_r_norm[c] = norm;
-        let diag = record_diagnostics.then(|| PcgDiagnostics::new(norm));
-        if !norm.is_finite() {
+        let b_norm = rhs_squared[c].sqrt();
+        let r_norm = residual_squared[c].sqrt();
+        rhs_norm[c] = b_norm;
+        last_r_norm[c] = r_norm;
+        let diag = record_diagnostics.then(|| PcgDiagnostics::new(r_norm));
+        if !b_norm.is_finite() || !r_norm.is_finite() {
             done[c] = Some(PcgCoreResult {
                 stop: PcgStop::Breakdown,
                 iterations: 0,
-                rhs_norm: norm,
-                final_residual_norm: norm,
+                rhs_norm: b_norm,
+                final_residual_norm: r_norm,
                 diagnostics: diag,
             });
             continue;
         }
-        if norm == 0.0 {
+        tol[c] = (rel_tol.max(PCG_REL_TOL_FLOOR) * b_norm).max(PCG_REL_TOL_FLOOR);
+        if r_norm <= tol[c] {
             done[c] = Some(PcgCoreResult {
                 stop: PcgStop::Converged,
                 iterations: 0,
-                rhs_norm: 0.0,
-                final_residual_norm: 0.0,
+                rhs_norm: b_norm,
+                final_residual_norm: r_norm,
                 diagnostics: diag,
             });
             continue;
         }
-        // Identity preconditioner: z ≡ r, so the initial rᵀz is the same
-        // strict fold that produced ‖rhs‖² above.
-        let rz = scratch[c];
-        if !rz.is_finite() || rz <= 0.0 {
+        let initial_rz = rz[c];
+        if !initial_rz.is_finite() || initial_rz <= 0.0 {
             done[c] = Some(PcgCoreResult {
                 stop: PcgStop::Breakdown,
                 iterations: 0,
-                rhs_norm: norm,
-                final_residual_norm: norm,
+                rhs_norm: b_norm,
+                final_residual_norm: r_norm,
                 diagnostics: diag,
             });
             continue;
         }
-        tol[c] = (rel_tol.max(PCG_REL_TOL_FLOOR) * norm).max(PCG_REL_TOL_FLOOR);
-        rz_old[c] = rz;
+        rz_old[c] = initial_rz;
         active[c] = true;
         diagnostics[c] = diag;
     }
@@ -603,13 +608,15 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
             alpha[c] = a;
         }
         backend.update_x_r(&alpha, &active);
-        backend.dot_r_r(&mut scratch);
+        backend.dot_r_r(&mut residual_squared);
+        backend.refresh_preconditioned_residual();
+        backend.dot_r_z(&mut rz);
         for c in 0..t {
             if !active[c] {
                 beta[c] = 0.0;
                 continue;
             }
-            let rr = scratch[c];
+            let rr = residual_squared[c];
             let r_norm = rr.sqrt();
             last_r_norm[c] = r_norm;
             if r_norm.is_finite() && r_norm <= tol[c] {
@@ -627,8 +634,7 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
                 });
                 continue;
             }
-            // Identity preconditioner: rᵀz is the same fold as ‖r‖².
-            let rz_new = rr;
+            let rz_new = rz[c];
             if !rz_new.is_finite() || rz_new <= 0.0 {
                 active[c] = false;
                 beta[c] = 0.0;
@@ -662,7 +668,7 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
         backend.update_p(&beta, &active);
         for c in 0..t {
             if active[c] {
-                rz_old[c] = scratch[c];
+                rz_old[c] = rz[c];
             }
         }
     }
@@ -697,8 +703,11 @@ where
 {
     x: ndarray::Array2<f64>,
     r: ndarray::Array2<f64>,
+    z: ndarray::Array2<f64>,
     p: ndarray::Array2<f64>,
     ap: ndarray::Array2<f64>,
+    inverse_diagonal: Vec<f64>,
+    rhs_norm_squared: Vec<f64>,
     apply: F,
 }
 
@@ -706,15 +715,57 @@ impl<F> CpuPcgBlockBackend<F>
 where
     F: Fn(&ndarray::Array2<f64>, &mut ndarray::Array2<f64>) + Sync,
 {
-    /// Enter the CG initial state: `X = 0`, `R = P = rhs_block`.
-    pub fn new(rhs_block: ndarray::Array2<f64>, apply: F) -> Self {
+    /// Enter the exact PCG initial state from an arbitrary solution seed.
+    pub fn new(
+        rhs_block: ndarray::Array2<f64>,
+        initial_solution: ndarray::Array2<f64>,
+        inverse_diagonal: Vec<f64>,
+        apply: F,
+    ) -> Self {
         let (m, t) = rhs_block.dim();
-        let p = rhs_block.clone();
+        assert_eq!(initial_solution.dim(), (m, t));
+        assert_eq!(inverse_diagonal.len(), m);
+        assert!(
+            inverse_diagonal.iter().all(|d| d.is_finite() && *d > 0.0),
+            "PCG inverse diagonal must be finite and positive"
+        );
+        let mut rhs_norm_squared = vec![0.0; t];
+        Self::column_dots(&rhs_block, &rhs_block, &mut rhs_norm_squared);
+        let mut ap = ndarray::Array2::zeros((m, t));
+        apply(&initial_solution, &mut ap);
+        let mut r = rhs_block;
+        r.as_slice_mut()
+            .expect("block backend state is standard layout")
+            .par_chunks_mut(t)
+            .zip(
+                ap.as_slice()
+                    .expect("block backend state is standard layout")
+                    .par_chunks(t),
+            )
+            .for_each(|(rrow, aprow)| {
+                for c in 0..t {
+                    rrow[c] += -aprow[c];
+                }
+            });
+        let mut z = r.clone();
+        z.as_slice_mut()
+            .expect("block backend state is standard layout")
+            .par_chunks_mut(t)
+            .zip(inverse_diagonal.par_iter())
+            .for_each(|(zrow, &scale)| {
+                for value in zrow {
+                    *value *= scale;
+                }
+            });
+        let p = z.clone();
         Self {
-            x: ndarray::Array2::zeros((m, t)),
-            r: rhs_block,
+            x: initial_solution,
+            r,
+            z,
             p,
-            ap: ndarray::Array2::zeros((m, t)),
+            ap,
+            inverse_diagonal,
+            rhs_norm_squared,
             apply,
         }
     }
@@ -763,6 +814,10 @@ where
         self.x.ncols()
     }
 
+    fn rhs_norm_squared(&mut self, out: &mut [f64]) {
+        out.copy_from_slice(&self.rhs_norm_squared);
+    }
+
     fn apply_block(&mut self) {
         (self.apply)(&self.p, &mut self.ap);
     }
@@ -773,6 +828,10 @@ where
 
     fn dot_r_r(&mut self, out: &mut [f64]) {
         Self::column_dots(&self.r, &self.r, out);
+    }
+
+    fn dot_r_z(&mut self, out: &mut [f64]) {
+        Self::column_dots(&self.r, &self.z, out);
     }
 
     fn update_x_r(&mut self, alpha: &[f64], active: &[bool]) {
@@ -803,19 +862,39 @@ where
             });
     }
 
+    fn refresh_preconditioned_residual(&mut self) {
+        let t = self.r.ncols();
+        self.z
+            .as_slice_mut()
+            .expect("block backend state is standard layout")
+            .par_chunks_mut(t)
+            .zip(
+                self.r
+                    .as_slice()
+                    .expect("block backend state is standard layout")
+                    .par_chunks(t),
+            )
+            .zip(self.inverse_diagonal.par_iter())
+            .for_each(|((zrow, rrow), &scale)| {
+                for c in 0..t {
+                    zrow[c] = rrow[c] * scale;
+                }
+            });
+    }
+
     fn update_p(&mut self, beta: &[f64], active: &[bool]) {
         let t = self.p.ncols();
         let ps = self
             .p
             .as_slice_mut()
             .expect("block backend state is standard layout");
-        let rs = self.r.as_slice().expect("block backend state is standard layout");
+        let zs = self.z.as_slice().expect("block backend state is standard layout");
         ps.par_chunks_mut(t)
-            .zip(rs.par_chunks(t))
-            .for_each(|(prow, rrow)| {
+            .zip(zs.par_chunks(t))
+            .for_each(|(prow, zrow)| {
                 for c in 0..t {
                     if active[c] {
-                        prow[c] = rrow[c] + beta[c] * prow[c];
+                        prow[c] = zrow[c] + beta[c] * prow[c];
                     }
                 }
             });
@@ -1069,10 +1148,14 @@ mod tests {
     /// in stop reason, iteration count, norms, iterate, and diagnostics trace.
     fn assert_multi_matches_core(op: &SparseSpd, rhs: &Array2<f64>, rel_tol: f64, max_iters: usize) {
         let (m, t) = rhs.dim();
-        let mut backend =
-            CpuPcgBlockBackend::new(rhs.clone(), |p: &Array2<f64>, ap: &mut Array2<f64>| {
+        let mut backend = CpuPcgBlockBackend::new(
+            rhs.clone(),
+            Array2::zeros((m, t)),
+            vec![1.0; m],
+            |p: &Array2<f64>, ap: &mut Array2<f64>| {
                 op.apply_block(p, ap)
-            });
+            },
+        );
         let multi = pcg_multi_core(&mut backend, rel_tol, max_iters, true);
         assert_eq!(multi.len(), t);
 
@@ -1184,6 +1267,91 @@ mod tests {
             }
         }
         assert_multi_matches_core(&op, &rhs, 1e-12, 200);
+    }
+
+    #[test]
+    fn pcg_multi_accepts_an_exact_nonzero_seed_without_an_iteration() {
+        let op = SparseSpd::seeded(37, 0x2441);
+        let (m, t) = (op.n, 5);
+        let mut exact = Array2::<f64>::zeros((m, t));
+        for i in 0..m {
+            for c in 0..t {
+                exact[[i, c]] = ((i * 17 + c * 23 + 1) as f64).sin();
+            }
+        }
+        let mut rhs = Array2::<f64>::zeros((m, t));
+        op.apply_block(&exact, &mut rhs);
+        let inverse_diagonal = op.diag.iter().map(|d| d.recip()).collect();
+        let mut backend = CpuPcgBlockBackend::new(
+            rhs,
+            exact.clone(),
+            inverse_diagonal,
+            |p: &Array2<f64>, ap: &mut Array2<f64>| op.apply_block(p, ap),
+        );
+
+        let results = pcg_multi_core(&mut backend, 1.0e-12, m, true);
+
+        assert!(
+            results
+                .iter()
+                .all(|result| result.stop == PcgStop::Converged && result.iterations == 0),
+            "an exact cached solution must satisfy the unchanged residual certificate before CG"
+        );
+        for i in 0..m {
+            for c in 0..t {
+                assert_eq!(
+                    backend.solution()[[i, c]].to_bits(),
+                    exact[[i, c]].to_bits(),
+                    "a zero-iteration solve must retain the seed [{i},{c}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jacobi_block_pcg_removes_diagonal_condition_growth() {
+        let m = 32;
+        let diagonal: Vec<f64> = (0..m)
+            .map(|i| {
+                let scale = (i + 1) as f64;
+                scale * scale
+            })
+            .collect();
+        let mut rhs = Array2::<f64>::zeros((m, 1));
+        for i in 0..m {
+            rhs[[i, 0]] = diagonal[i] * ((i * 11 + 3) as f64).sin();
+        }
+        let apply = |p: &Array2<f64>, ap: &mut Array2<f64>| {
+            for i in 0..m {
+                ap[[i, 0]] = diagonal[i] * p[[i, 0]];
+            }
+        };
+        let mut identity = CpuPcgBlockBackend::new(
+            rhs.clone(),
+            Array2::zeros((m, 1)),
+            vec![1.0; m],
+            apply,
+        );
+        let identity_result = pcg_multi_core(&mut identity, 1.0e-10, m, false);
+
+        let inverse_diagonal = diagonal.iter().map(|d| d.recip()).collect();
+        let mut jacobi = CpuPcgBlockBackend::new(
+            rhs,
+            Array2::zeros((m, 1)),
+            inverse_diagonal,
+            apply,
+        );
+        let jacobi_result = pcg_multi_core(&mut jacobi, 1.0e-10, m, false);
+
+        assert_eq!(jacobi_result[0].stop, PcgStop::Converged);
+        assert_eq!(
+            jacobi_result[0].iterations, 1,
+            "the exact diagonal preconditioner must collapse a diagonal system to one step"
+        );
+        assert!(
+            identity_result[0].iterations > jacobi_result[0].iterations,
+            "the cold identity recurrence must expose the diagonal condition spread"
+        );
     }
 
     /// Convergence target is RELATIVE for sub-unit rhs.
