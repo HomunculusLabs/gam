@@ -8,7 +8,11 @@
 //!
 //! * **support** bits — the combinatorial `log₂ C(G, ⌊L0⌉)` cost of naming which
 //!   of the `G` atoms fired, at the mean per-token support cardinality `L0`
-//!   (formed from `lgamma`, so it never overflows a factorial);
+//!   (formed from `lgamma`, so it never overflows a factorial). That is the
+//!   WORST CASE: it assumes every `⌊L0⌉`-subset is equally likely. The exact
+//!   independent-support cost `Σ_g H₂(p_g)` at the measured firing rates is
+//!   reported alongside it and never charged, so a comparison whose whole margin
+//!   lives in the support term can be read in both currencies (#2283);
 //! * **code** bits — a JOINT reverse-water-filling of every atom's per-firing
 //!   coordinate spectrum, each spectrum weighted by that atom's firing
 //!   probability `p_g`, sharing ONE water level across all components with the
@@ -84,8 +88,24 @@ pub struct Eq4TargetBits {
 #[derive(Clone, Debug)]
 pub struct Eq4DescriptionLength {
     /// Combinatorial support cost `log₂ C(G, ⌊L0⌉)` (bits) — independent of the
-    /// distortion target.
+    /// distortion target. This is the CHARGED price and the worst case: it assumes
+    /// every `⌊L0⌉`-subset of the `G` atoms is equally likely.
     pub support_bits: f64,
+    /// The exact cost `Σ_g H₂(p_g)` of naming an INDEPENDENT support with the
+    /// measured per-atom firing rates. Reported alongside [`Self::support_bits`],
+    /// never charged — the same discipline
+    /// [`crate::description_length::ScoreRow`] already applies, where the
+    /// combinatorial line is reported next to the empirical support-entropy price
+    /// so a dictionary with predictable firing is not silently overpaid.
+    ///
+    /// It upper-bounds the true support entropy `H(S)` (dependence between
+    /// firings only lowers it) and, being maximised at uniform firing rates,
+    /// tracks the combinatorial line only while the dictionary fires evenly; dead
+    /// and dominant atoms pull it strictly below. That gap is not a detail when a
+    /// comparison's dictionary and code terms are matched by construction and the
+    /// whole predicted margin sits in the support term (#2283): on a real K=32768
+    /// TopK dictionary it measured 46.0 bits, against a predicted margin of 20.1.
+    pub independent_support_bits: f64,
     /// Achieved mean per-token support cardinality `L0` (mean active atoms per
     /// row), the un-rounded value that the support cardinality rounds.
     pub achieved_block_l0: f64,
@@ -300,6 +320,17 @@ where
     // Python `round(L0)` rounds half to even; clamp to `[0, G]`.
     let support_cardinality = (l0.round_ties_even() as i64).clamp(0, n_atoms as i64);
     let support_bits = selection_bits(n_atoms as i64, support_cardinality);
+    // The same support, priced as an independent Bernoulli field at the measured
+    // rates. Never charged; reported so the combinatorial worst case can be read
+    // against the cost a receiver would actually pay for THIS firing distribution.
+    let independent_support_bits: f64 = p_g
+        .iter()
+        .filter(|&&probability| probability > 0.0 && probability < 1.0)
+        .map(|&probability| {
+            -(probability * probability.log2()
+                + (1.0 - probability) * (1.0 - probability).log2())
+        })
+        .sum();
 
     // Residual covariance spectrum and the reference variance the targets scale.
     let mut residual = test_x.to_owned();
@@ -373,6 +404,7 @@ where
 
     Ok(Eq4DescriptionLength {
         support_bits,
+        independent_support_bits,
         achieved_block_l0: l0,
         dictionary_bits,
         estimation_rows: n as i64,
@@ -560,6 +592,12 @@ mod tests {
         for run in [&small, &medium, &large] {
             assert_eq!(run.amortization_horizon, horizon);
             assert_eq!(run.achieved_block_l0, 0.5);
+            // One atom firing on exactly half the rows: the combinatorial price of
+            // naming a 1-of-1 support is zero, while an independent support at
+            // p = 1/2 costs exactly one bit. The two currencies are genuinely
+            // different quantities, and this fixture pins both (#2283).
+            assert_eq!(run.support_bits, 0.0);
+            assert_eq!(run.independent_support_bits, 1.0);
         }
         assert_eq!(small.estimation_rows, 256);
         assert_eq!(medium.estimation_rows, 1024);

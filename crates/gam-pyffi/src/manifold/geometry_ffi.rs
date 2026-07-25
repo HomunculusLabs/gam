@@ -398,7 +398,7 @@ fn format_g(x: f64) -> String {
 /// deployment / training horizon), passed separately from the `test_x` row count
 /// so the dictionary term is invariant to the estimation subsample (#2283).
 /// Returns the same dict shape the NumPy scorer returned (`support_bits`,
-/// `achieved_block_l0`, `dictionary_bits`, `estimation_rows`,
+/// `independent_support_bits`, `achieved_block_l0`, `dictionary_bits`, `estimation_rows`,
 /// `amortization_horizon`, `bits_at_r2_{g}` / `code_bits_at_r2_{g}` /
 /// `resid_bits_at_r2_{g}` per target, and `native_bits_per_token` when given).
 #[pyfunction]
@@ -470,6 +470,7 @@ fn sae_eq4_description_length<'py>(
 
     let out = PyDict::new(py);
     out.set_item("support_bits", dl.support_bits)?;
+    out.set_item("independent_support_bits", dl.independent_support_bits)?;
     out.set_item("achieved_block_l0", dl.achieved_block_l0)?;
     out.set_item("dictionary_bits", dl.dictionary_bits)?;
     out.set_item("estimation_rows", dl.estimation_rows)?;
