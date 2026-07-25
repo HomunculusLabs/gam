@@ -811,10 +811,11 @@ pub struct GaussianMixtureConfig {
     pub max_iter: usize,
     /// Relative mean-log-likelihood improvement tolerance for EM stopping.
     pub loglik_tol: f64,
-    /// Relative max-norm tolerance for the EM map in identifiable
-    /// predictive-density coordinates. Free mixtures use labeled component
-    /// measures `(w, w μ, w(Σ + μμᵀ))`; ring mixtures use mass-weighted,
-    /// noise-standardized component means plus their shared variance.
+    /// Max-norm tolerance for the EM map in empirical predictive-density
+    /// coordinates: the largest absolute change in any training row's log
+    /// density. This quotients component permutations, duplicate-component
+    /// mass exchange, and non-identifiable ring factorizations while retaining
+    /// sensitivity to likelihood changes that cancel in the mean objective.
     pub parameter_tol: f64,
     /// Lower eigenvalue constraint for every component covariance. The M-step
     /// solves this constrained likelihood problem exactly by spectral clipping;
@@ -1434,14 +1435,14 @@ fn run_gaussian_mixture_em(
             .max(1.0);
         let objective_step = next.mean_log_likelihood - current.mean_log_likelihood;
         let objective_residual = objective_step.abs() / objective_scale;
-        let parameter_residual = mixture_parameter_residual(
-            &checkpoint.weights,
-            &checkpoint.means,
-            &checkpoint.covariances,
-            &next_weights,
-            &next_means,
-            &next_covariances,
-        );
+        let parameter_residual = empirical_predictive_density_residual(
+            &current.row_log_likelihoods,
+            &next.row_log_likelihoods,
+        )
+        .map_err(|message| GaussianMixtureError::NumericalFailure {
+            message,
+            checkpoint: Some(checkpoint.clone()),
+        })?;
         let monotonicity_uncertainty = gaussian_mixture_monotonicity_uncertainty(
             objective_scale,
             current.mean_log_likelihood_roundoff,
@@ -1514,6 +1515,7 @@ fn run_gaussian_mixture_em(
 
 struct GaussianMixtureEStep {
     responsibilities: Array2<f64>,
+    row_log_likelihoods: Vec<f64>,
     mean_log_likelihood: f64,
     mean_log_likelihood_roundoff: f64,
 }
@@ -1553,15 +1555,13 @@ fn pairwise_sum_max_depth(term_count: usize) -> usize {
     within_block.saturating_add(tree_levels)
 }
 
-fn pairwise_mean_with_roundoff(mut values: Vec<f64>) -> Result<(f64, f64), String> {
+fn pairwise_mean_with_roundoff(values: &[f64]) -> Result<(f64, f64), String> {
     if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
         return Err("mean log-likelihood terms must be nonempty and finite".to_string());
     }
-    let sum = pairwise_sum(&values);
-    for value in &mut values {
-        *value = value.abs();
-    }
-    let magnitude_sum = pairwise_sum(&values);
+    let sum = pairwise_sum(values);
+    let magnitudes: Vec<f64> = values.iter().map(|value| value.abs()).collect();
+    let magnitude_sum = pairwise_sum(&magnitudes);
     let unit_roundoff = 0.5 * f64::EPSILON;
     let accumulated = pairwise_sum_max_depth(values.len()) as f64 * unit_roundoff;
     let addition_bound = if accumulated < 1.0 {
@@ -1626,9 +1626,10 @@ fn mixture_e_step(
         }
     }
     let (mean_log_likelihood, mean_log_likelihood_roundoff) =
-        pairwise_mean_with_roundoff(row_log_likelihoods)?;
+        pairwise_mean_with_roundoff(&row_log_likelihoods)?;
     Ok(GaussianMixtureEStep {
         responsibilities,
+        row_log_likelihoods,
         mean_log_likelihood,
         mean_log_likelihood_roundoff,
     })
@@ -1695,69 +1696,39 @@ fn relative_parameter_step(previous: f64, next: f64) -> f64 {
     (next - previous).abs() / previous.abs().max(next.abs()).max(1.0)
 }
 
-/// Distance between two label-aligned Gaussian-mixture states in identifiable
-/// component-measure coordinates.
+/// Distance between two EM states in the quotient space the empirical
+/// likelihood can identify.
 ///
-/// Raw `(μ, Σ)` coordinates cease to identify the density as a component mass
-/// tends to zero: an arbitrarily large raw update can then have arbitrarily
-/// small predictive effect. The finite measures
-///
-/// `w`, `w μ`, and `w (Σ + μμᵀ)`
-///
-/// are respectively each labeled component's mass and first two raw moments.
-/// For positive mass they are a bijection with `(w, μ, Σ)`; at zero mass they
-/// correctly collapse all inert component parameters to the same zero measure.
-/// EM preserves responsibility-column labels, so no relabeling alignment is
-/// needed between consecutive states.
-fn labeled_gaussian_component_measure_residual(
-    previous_weights: &Array1<f64>,
-    previous_means: &Array2<f64>,
-    previous_covariance: impl Fn(usize, usize, usize) -> f64,
-    next_weights: &Array1<f64>,
-    next_means: &Array2<f64>,
-    next_covariance: impl Fn(usize, usize, usize) -> f64,
-) -> f64 {
-    let k = previous_weights.len();
-    let d = previous_means.ncols();
-    let mut residual = 0.0_f64;
-    for component in 0..k {
-        let previous_weight = previous_weights[component];
-        let next_weight = next_weights[component];
-        residual = residual.max(relative_parameter_step(previous_weight, next_weight));
-        for left in 0..d {
-            let previous_first = previous_weight * previous_means[[component, left]];
-            let next_first = next_weight * next_means[[component, left]];
-            residual = residual.max(relative_parameter_step(previous_first, next_first));
-            for right in 0..d {
-                let previous_second = previous_weight
-                    * (previous_covariance(component, left, right)
-                        + previous_means[[component, left]] * previous_means[[component, right]]);
-                let next_second = next_weight
-                    * (next_covariance(component, left, right)
-                        + next_means[[component, left]] * next_means[[component, right]]);
-                residual = residual.max(relative_parameter_step(previous_second, next_second));
-            }
-        }
+/// A finite mixture density is invariant to component relabeling and to
+/// exchanging mass among duplicate components. Ring center/radius/direction
+/// tuples have additional factorizations of the same component means. No
+/// component-coordinate norm can therefore be a necessary convergence
+/// condition. The likelihood sees the vector `(log p(y_i))`; its max-norm
+/// change is the exact empirical predictive-density residual. Taking the
+/// maximum (rather than only the mean objective gain) detects row-wise changes
+/// that cancel, while identical fitted densities have residual zero regardless
+/// of their internal representation.
+fn empirical_predictive_density_residual(
+    previous_row_log_density: &[f64],
+    next_row_log_density: &[f64],
+) -> Result<f64, String> {
+    if previous_row_log_density.is_empty()
+        || previous_row_log_density.len() != next_row_log_density.len()
+        || previous_row_log_density
+            .iter()
+            .chain(next_row_log_density)
+            .any(|value| !value.is_finite())
+    {
+        return Err(
+            "predictive-density residual requires equal, nonempty, finite log-density vectors"
+                .to_string(),
+        );
     }
-    residual
-}
-
-fn mixture_parameter_residual(
-    previous_weights: &Array1<f64>,
-    previous_means: &Array2<f64>,
-    previous_covariances: &[Array2<f64>],
-    next_weights: &Array1<f64>,
-    next_means: &Array2<f64>,
-    next_covariances: &[Array2<f64>],
-) -> f64 {
-    labeled_gaussian_component_measure_residual(
-        previous_weights,
-        previous_means,
-        |component, left, right| previous_covariances[component][[left, right]],
-        next_weights,
-        next_means,
-        |component, left, right| next_covariances[component][[left, right]],
-    )
+    Ok(previous_row_log_density
+        .iter()
+        .zip(next_row_log_density)
+        .map(|(&previous, &next)| (next - previous).abs())
+        .fold(0.0_f64, f64::max))
 }
 
 fn constrain_covariance(covariance: Array2<f64>, floor: f64) -> Result<Array2<f64>, String> {
@@ -1974,7 +1945,7 @@ fn ring_mixture_log_terms(
 fn ring_mixture_e_step(
     data: ArrayView2<'_, f64>,
     state: &RingMixtureState,
-) -> Result<(Array2<f64>, f64, f64), String> {
+) -> Result<GaussianMixtureEStep, String> {
     let (terms, row_log_likelihoods) = ring_mixture_log_terms(
         data,
         &state.weights,
@@ -1990,8 +1961,14 @@ fn ring_mixture_e_step(
                 (terms[[row, component]] - row_log_likelihoods[row]).exp();
         }
     }
-    let (mean, roundoff) = pairwise_mean_with_roundoff(row_log_likelihoods)?;
-    Ok((responsibilities, mean, roundoff))
+    let (mean_log_likelihood, mean_log_likelihood_roundoff) =
+        pairwise_mean_with_roundoff(&row_log_likelihoods)?;
+    Ok(GaussianMixtureEStep {
+        responsibilities,
+        row_log_likelihoods,
+        mean_log_likelihood,
+        mean_log_likelihood_roundoff,
+    })
 }
 
 fn ring_mixture_log_density(
@@ -2005,48 +1982,6 @@ fn ring_mixture_log_density(
     let (_, row_log_likelihoods) =
         ring_mixture_log_terms(data, weights, center, radius, directions, variance)?;
     Ok(Array1::from_vec(row_log_likelihoods))
-}
-
-/// Distance between two ring-mixture states in identifiable density space.
-///
-/// `center`, `radius`, and `directions` are only a factorization of the actual
-/// component means `m_j = center + radius * direction_j`. We map those means
-/// and the shared isotropic variance into density coordinates. Component-mean
-/// movement is standardized by the common noise scale and weighted by the
-/// component's predictive mass; the shared variance remains unweighted because
-/// it changes every component. Thus factorization drift and vanishing-component
-/// motion cannot block certification, while a resolved change in the fitted
-/// density still does.
-fn ring_identifiable_parameter_residual(
-    previous: &RingMixtureState,
-    next: &RingMixtureState,
-) -> f64 {
-    let previous_means =
-        ring_component_means(&previous.center, previous.radius, &previous.directions);
-    let next_means = ring_component_means(&next.center, next.radius, &next.directions);
-    let noise_scale = previous
-        .variance
-        .sqrt()
-        .max(next.variance.sqrt())
-        .max(f64::MIN_POSITIVE);
-    let weight_residual = previous
-        .weights
-        .iter()
-        .zip(next.weights.iter())
-        .map(|(&left, &right)| (right - left).abs())
-        .fold(0.0, f64::max);
-    let mean_residual = previous_means
-        .rows()
-        .into_iter()
-        .zip(next_means.rows())
-        .zip(previous.weights.iter().zip(next.weights.iter()))
-        .map(|((left, right), (&previous_weight, &next_weight))| {
-            previous_weight.max(next_weight) * (right[0] - left[0]).hypot(right[1] - left[1])
-                / noise_scale
-        })
-        .fold(0.0, f64::max);
-    let variance_residual = (next.variance / previous.variance).ln().abs();
-    weight_residual.max(mean_residual).max(variance_residual)
 }
 
 fn fit_weighted_component_circle(
@@ -2292,19 +2227,25 @@ pub fn fit_ring_gaussian_mixture(
         completed_iterations: 0,
     };
     for additional_updates in 0..=config.max_iter {
-        let (responsibilities, current_mean, current_roundoff) = ring_mixture_e_step(data, &state)?;
-        state.mean_log_likelihood = current_mean;
-        let mut next = ring_mixture_m_step(data, responsibilities.view(), &state, config)?;
-        let (_, next_mean, next_roundoff) = ring_mixture_e_step(data, &next)?;
-        next.mean_log_likelihood = next_mean;
+        let current = ring_mixture_e_step(data, &state)?;
+        state.mean_log_likelihood = current.mean_log_likelihood;
+        let mut next =
+            ring_mixture_m_step(data, current.responsibilities.view(), &state, config)?;
+        let next_e_step = ring_mixture_e_step(data, &next)?;
+        next.mean_log_likelihood = next_e_step.mean_log_likelihood;
+        let current_mean = current.mean_log_likelihood;
+        let next_mean = next_e_step.mean_log_likelihood;
         let objective_scale = current_mean.abs().max(next_mean.abs()).max(1.0);
         let objective_step = next_mean - current_mean;
         let objective_residual = objective_step.abs() / objective_scale;
-        let parameter_residual = ring_identifiable_parameter_residual(&state, &next);
+        let parameter_residual = empirical_predictive_density_residual(
+            &current.row_log_likelihoods,
+            &next_e_step.row_log_likelihoods,
+        )?;
         let monotonicity_uncertainty = gaussian_mixture_monotonicity_uncertainty(
             objective_scale,
-            current_roundoff,
-            next_roundoff,
+            current.mean_log_likelihood_roundoff,
+            next_e_step.mean_log_likelihood_roundoff,
         );
         let certificate = GaussianMixtureCertificate {
             mean_log_likelihood: current_mean,
@@ -5777,45 +5718,37 @@ mod tests {
     }
 
     #[test]
-    fn gaussian_mixture_parameter_map_uses_component_measure_geometry_2324() {
-        // Recorded #2324 scale: a raw mean-coordinate update of 4.6e-8 sat
-        // just above sqrt(epsilon) and refused every adjudication even though
-        // the component carries only one quarter of the predictive measure.
-        // The stopping rule must measure the density parameter, not an inert
-        // conditional coordinate whose meaning disappears with component mass.
-        let tolerance = f64::EPSILON.sqrt();
-        let raw_coordinate_step: f64 = 4.6e-8;
-        assert!(raw_coordinate_step > tolerance);
-        let weights = array![0.25, 0.75];
-        let previous_means = array![[0.0], [2.0]];
-        let next_means = array![[raw_coordinate_step], [2.0]];
+    fn gaussian_mixture_certificate_quotients_duplicate_component_mass_exchange_2324() {
+        // Two identical components can exchange arbitrary mass without
+        // changing the mixture density. Labeled component measures are
+        // therefore not identifiable even when every component has positive
+        // mass; the empirical predictive-density certificate must quotient
+        // this singular direction exactly.
+        let data = array![[-1.0], [0.0], [2.0]];
+        let means = array![[0.0], [0.0]];
         let covariance = vec![array![[1.0]], array![[1.0]]];
-        let residual = mixture_parameter_residual(
-            &weights,
-            &previous_means,
-            &covariance,
-            &weights,
-            &next_means,
-            &covariance,
-        );
-        assert_eq!(residual, weights[0] * raw_coordinate_step);
-        assert!(residual <= tolerance);
+        let weights = array![0.25, 0.75];
+        let redistributed_weights = array![0.5, 0.5];
+        let previous = mixture_e_step(data.view(), &weights, &means, &covariance).unwrap();
+        let redistributed =
+            mixture_e_step(data.view(), &redistributed_weights, &means, &covariance).unwrap();
+        let residual = empirical_predictive_density_residual(
+            &previous.row_log_likelihoods,
+            &redistributed.row_log_likelihoods,
+        )
+        .unwrap();
+        assert!(residual <= 4.0 * f64::EPSILON);
 
-        // Component mass itself is an identifiable density coordinate and is
-        // therefore never discounted by the component's old mass.
-        let next_weights = array![
-            weights[0] + raw_coordinate_step,
-            weights[1] - raw_coordinate_step
-        ];
-        let mass_residual = mixture_parameter_residual(
-            &weights,
-            &previous_means,
-            &covariance,
-            &next_weights,
-            &previous_means,
-            &covariance,
-        );
-        assert!(mass_residual > tolerance);
+        // A resolved change in the represented density remains visible.
+        let shifted_means = array![[0.01], [0.0]];
+        let shifted =
+            mixture_e_step(data.view(), &weights, &shifted_means, &covariance).unwrap();
+        let shifted_residual = empirical_predictive_density_residual(
+            &previous.row_log_likelihoods,
+            &shifted.row_log_likelihoods,
+        )
+        .unwrap();
+        assert!(shifted_residual > f64::EPSILON.sqrt());
     }
 
     #[test]
@@ -5849,15 +5782,12 @@ mod tests {
             config.covariance_floor,
         )
         .unwrap();
-        let residual = mixture_parameter_residual(
-            &checkpoint.weights,
-            &checkpoint.means,
-            &checkpoint.covariances,
-            &weights,
-            &means,
-            &covariances,
-        );
         let next = mixture_e_step(data.view(), &weights, &means, &covariances).unwrap();
+        let residual = empirical_predictive_density_residual(
+            &current.row_log_likelihoods,
+            &next.row_log_likelihoods,
+        )
+        .unwrap();
         assert!(residual <= config.parameter_tol);
         assert_eq!(certificate.mean_log_likelihood, current.mean_log_likelihood);
         assert_eq!(
@@ -6315,34 +6245,46 @@ mod tests {
             completed_iterations: 11,
         };
         assert!(relative_parameter_step(previous.center[0], next.center[0]) > 0.5);
-        assert_eq!(ring_identifiable_parameter_residual(&previous, &next), 0.0);
+        let data = array![[0.3, y], [0.3, -y], [1.0, 0.0]];
+        let previous_e_step = ring_mixture_e_step(data.view(), &previous).unwrap();
+        let next_e_step = ring_mixture_e_step(data.view(), &next).unwrap();
+        let residual = empirical_predictive_density_residual(
+            &previous_e_step.row_log_likelihoods,
+            &next_e_step.row_log_likelihoods,
+        )
+        .unwrap();
+        assert_eq!(residual, 0.0);
     }
 
     #[test]
-    fn ring_parameter_map_weights_component_motion_by_predictive_mass_2324() {
-        let raw_coordinate_step: f64 = 4.6e-8;
-        let (next_y, next_x) = raw_coordinate_step.sin_cos();
+    fn ring_certificate_quotients_duplicate_component_mass_exchange_2324() {
         let previous = RingMixtureState {
-            weights: array![0.25, 0.75],
+            weights: array![0.2, 0.3, 0.5],
             center: array![0.0, 0.0],
             radius: 1.0,
-            directions: array![[1.0, 0.0], [0.0, 1.0]],
+            directions: array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             variance: 1.0,
             mean_log_likelihood: -1.0,
             completed_iterations: 10,
         };
         let next = RingMixtureState {
-            weights: previous.weights.clone(),
+            weights: array![0.4, 0.1, 0.5],
             center: previous.center.clone(),
             radius: previous.radius,
-            directions: array![[next_x, next_y], [0.0, 1.0]],
+            directions: previous.directions.clone(),
             variance: previous.variance,
             mean_log_likelihood: -1.0,
             completed_iterations: 11,
         };
-        let raw_mean_step = (next_x - 1.0).hypot(next_y);
-        assert!(raw_mean_step > f64::EPSILON.sqrt());
-        assert!(ring_identifiable_parameter_residual(&previous, &next) <= f64::EPSILON.sqrt());
+        let data = array![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]];
+        let previous_e_step = ring_mixture_e_step(data.view(), &previous).unwrap();
+        let next_e_step = ring_mixture_e_step(data.view(), &next).unwrap();
+        let residual = empirical_predictive_density_residual(
+            &previous_e_step.row_log_likelihoods,
+            &next_e_step.row_log_likelihoods,
+        )
+        .unwrap();
+        assert!(residual <= 4.0 * f64::EPSILON);
     }
 
     #[test]
