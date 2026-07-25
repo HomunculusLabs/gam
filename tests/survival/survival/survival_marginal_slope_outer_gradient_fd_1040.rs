@@ -11,9 +11,9 @@
 //! analytic gradient, finite-difference gradient, and stencil steps. This test
 //! drives a small survival-MS fit and consumes that typed evidence directly.
 //!
-//! The audit runs at θ₀ BEFORE the (potentially non-terminating) outer loop, so
-//! `outer_max_iter` is capped low to keep the test cheap regardless of whether
-//! the underlying loop would converge.
+//! The audit runs at θ₀ before the potentially long joint spatial loop. Its own
+//! `max_outer_iter` is capped, while prerequisite rho-only profiles retain the
+//! production budget required to reach that joint problem.
 
 use csv::StringRecord;
 use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism};
@@ -142,7 +142,13 @@ fn run_basis(basis_term: &str) {
         z_column: Some("prs_z".to_string()),
         logslope_formula: Some(basis_term.to_string()),
         baseline_target: "linear".to_string(),
-        outer_max_iter: Some(2),
+        // The marginal-slope baseline must certify before the n-block joint
+        // spatial problem exists. Cap only that joint problem after its seed
+        // audit, not every prerequisite outer profile.
+        spatial_optimization: gam::smooth::SpatialLengthScaleOptimizationOptions {
+            max_outer_iter: 2,
+            ..gam::smooth::SpatialLengthScaleOptimizationOptions::default()
+        },
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
         } else {

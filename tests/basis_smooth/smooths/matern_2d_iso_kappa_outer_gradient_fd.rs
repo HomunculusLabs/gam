@@ -111,10 +111,15 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
     let formula = "y ~ matern(x1, x2)";
     let config = FitConfig {
         family: Some("gaussian".to_string()),
-        // The outer FD audit fires at θ₀ during the fit, before the (capped)
-        // outer loop; cap the loop so the test stays fast — the gate we assert
-        // is the captured audit, independent of the fit's eventual outcome.
-        outer_max_iter: Some(2),
+        // Keep the prerequisite rho-only REML profile on its production
+        // budget. Capping `outer_max_iter` here prevents that profile from
+        // certifying, so the intended joint [rho, log-kappa] problem is never
+        // constructed. Only the spatial loop may be capped: its structured
+        // audit fires at the first bounded joint seed.
+        spatial_optimization: SpatialLengthScaleOptimizationOptions {
+            max_outer_iter: 2,
+            ..SpatialLengthScaleOptimizationOptions::default()
+        },
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
         } else {
@@ -207,7 +212,10 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
             optimize_sas: false,
             compute_inference: false,
             skip_rho_posterior_inference: false,
-            max_iter: 2,
+            // The baseline rho profile must certify before the joint
+            // anisotropy problem exists. The separate kappa option below caps
+            // only that joint loop after its seed audit.
+            max_iter: 200,
             tol: 1e-6,
             nullspace_dims: vec![],
             linear_constraints: None,
