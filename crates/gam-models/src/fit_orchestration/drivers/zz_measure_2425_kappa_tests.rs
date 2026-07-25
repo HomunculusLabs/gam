@@ -143,7 +143,7 @@ mod zz_measure_2425_kappa_tests {
         )
         .expect("evaluator");
 
-        let mut cost_at = |theta: &Array1<f64>,
+        let cost_at = |theta: &Array1<f64>,
                            cache: &mut SingleBlockExactJointDesignCache<'_>,
                            evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<
             '_,
@@ -426,7 +426,7 @@ mod zz_measure_2425_kappa_tests {
         )
         .expect("evaluator");
 
-        let mut cost_at = |theta: &Array1<f64>,
+        let cost_at = |theta: &Array1<f64>,
                            cache: &mut SingleBlockExactJointDesignCache<'_>,
                            evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<
             '_,
