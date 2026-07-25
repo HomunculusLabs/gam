@@ -5,9 +5,8 @@
 //! the [`ManifoldSpec`](crate::manifold::ManifoldSpec) builder live one level
 //! up in [`crate::manifold`]; these are the structs it instantiates.
 //!
-//! For backwards compatibility every submodule and its primary public items are
-//! re-exported at the crate root, so `gam_geometry::sphere::SphereManifold` and
-//! `gam_geometry::SphereManifold` both continue to resolve.
+//! Primary manifold types are re-exported at the crate root so callers use one
+//! canonical import surface.
 
 pub mod aitchison_ilr;
 pub mod circle;
@@ -15,7 +14,7 @@ pub mod circle;
 /// implementation must satisfy, checked against one shared inventory keyed off
 /// [`ManifoldSpec`](crate::manifold::ManifoldSpec).
 #[cfg(test)]
-mod conformance;
+mod conformance_tests;
 pub mod constant_curvature;
 pub mod euclidean;
 pub mod grassmann;
