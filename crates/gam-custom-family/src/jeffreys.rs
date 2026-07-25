@@ -522,7 +522,6 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
-    eval_mode: EvalMode,
 ) -> Result<Option<(f64, Array2<f64>, Option<Array2<f64>>)>, String> {
     if !family.joint_jeffreys_term_required() {
         return Ok(None);
@@ -563,15 +562,15 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     // divided-difference solve, preserving the value/gradient contract.
     let total_p = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     let mut completion: Option<Array2<f64>> = None;
-    // A caller passes `ValueOnly` only after proving the scalar does not consume
-    // the mode-response operator. When a non-negligible inner KKT residual
-    // activates the one-step profile correction, the scalar *does* consume
-    // that operator and the caller promotes this geometry request to a
-    // derivative-bearing mode. Thus the completion stays off for exact-mode
-    // line-search probes without making value-only and derivative lanes price
-    // different corrected objectives.
-    let completion_requested = eval_mode != EvalMode::ValueOnly
-        && family.joint_jeffreys_information_contracted_trace_hessian_available();
+    // Objective geometry is independent of the requested derivative order.
+    // The one-step profile correction consumes the mode-response operator, and
+    // whether that correction is numerically visible is governed by the solved
+    // displacement H⁻¹r—not by a raw-residual threshold known at this layer.
+    // Always form the available true-Hessian completion for an active Jeffreys
+    // profile so value screening, finite differences, and analytic derivatives
+    // price one canonical objective (#2460).
+    let completion_requested =
+        family.joint_jeffreys_information_contracted_trace_hessian_available();
     if completion_requested
         && let Some(h_joint) = family.joint_jeffreys_information_with_specs(states, specs)?
         && h_joint.nrows() == total_p
@@ -617,24 +616,13 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
     ranges: &[(usize, usize)],
-    eval_mode: EvalMode,
-    // `true` when a value-only evaluation must still fold the `D_β H_Φ` drift.
-    // Ignored for derivative-bearing modes (they always build it).
-    value_only_requires_drift: bool,
 ) -> Result<Option<JeffreysHphiDriftBatchFn>, String> {
-    // The drift closure feeds the derivative provider. A derivative-bearing eval
-    // always consumes it; a value-only eval consumes it ONLY through the
-    // moving-Hessian KKT cost correction `−½ g_ldᵀ H⁻¹ r` (gam#1395), which fires
-    // when the inner β̂ exits with a non-negligible KKT residual (`w = H⁻¹r ≠ 0`).
-    // In that regime `D_β H_Φ[w]` is a real part of the *corrected cost*, so the
-    // value-only lane must fold it too or it prices a DIFFERENT objective than the
-    // gradient lane and the terminal value-agreement audit refuses the fit
-    // (#2387). When the residual is negligible the correction is provably ~0, so
-    // the drift is skipped and no information matrix/eigensystem is materialized —
-    // preserving the value-only line-search fast path.
-    if eval_mode == EvalMode::ValueOnly && !value_only_requires_drift {
-        return Ok(None);
-    }
+    // Install one canonical lazy drift provider for every active Jeffreys
+    // profile. Value-only evaluation can consume it through the moving-Hessian
+    // KKT correction just as derivative evaluation consumes it through trace
+    // derivatives. The expensive row-streamed base remains lazy inside the
+    // returned closure, so an evaluation that never requests a correction does
+    // not perform that work.
     if !family.joint_jeffreys_term_required() {
         return Ok(None);
     }

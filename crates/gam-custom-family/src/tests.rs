@@ -3382,7 +3382,7 @@ impl CustomFamily for OuterJeffreysModeCountingFamily {
 }
 
 #[test]
-fn value_only_outer_jeffreys_gates_completion_and_drift_construction() {
+fn outer_jeffreys_geometry_is_derivative_order_invariant() {
     let information_calls = Arc::new(AtomicUsize::new(0));
     let axis_batch_calls = Arc::new(AtomicUsize::new(0));
     let completion_calls = Arc::new(AtomicUsize::new(0));
@@ -3395,88 +3395,30 @@ fn value_only_outer_jeffreys_gates_completion_and_drift_construction() {
     let states = vec![jeffreys_seam_state(array![0.0])];
     let ranges = block_param_ranges(&specs);
 
-    let (_, _, value_only_completion) =
-        custom_family_outer_jeffreys_hphi(&family, &states, &specs, &ranges, EvalMode::ValueOnly)
-            .expect("value-only Jeffreys term")
-            .expect("active value-only Jeffreys term");
-    assert!(value_only_completion.is_none());
-    assert_eq!(information_calls.load(Ordering::Relaxed), 1);
+    let (_, _, completion) =
+        custom_family_outer_jeffreys_hphi(&family, &states, &specs, &ranges)
+            .expect("Jeffreys term")
+            .expect("active Jeffreys term");
+    assert!(completion.is_some());
+    assert_eq!(information_calls.load(Ordering::Relaxed), 2);
     assert_eq!(axis_batch_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(completion_calls.load(Ordering::Relaxed), 0);
-
-    let value_only_drift = custom_family_outer_jeffreys_hphi_drift_batched(
-        &family,
-        &states,
-        &specs,
-        &ranges,
-        EvalMode::ValueOnly,
-        // Negligible inner residual ⇒ the moving-Hessian correction is ~0, so the
-        // value-only lane needs no drift and stays on the fast path.
-        false,
-    )
-    .expect("value-only drift gate");
-    assert!(value_only_drift.is_none());
-    assert_eq!(
-        information_calls.load(Ordering::Relaxed),
-        1,
-        "value-only drift gating must happen before information construction",
-    );
-
-    // #2387: when the inner β̂ carries a non-negligible KKT residual, the
-    // value-only lane's moving-Hessian cost correction DOES consume the drift, so
-    // it must be built there too (matching the derivative lane) or the two lanes
-    // price different objectives and the terminal value-agreement audit refuses.
-    let value_only_drift_required = custom_family_outer_jeffreys_hphi_drift_batched(
-        &family,
-        &states,
-        &specs,
-        &ranges,
-        EvalMode::ValueOnly,
-        true,
-    )
-    .expect("value-only drift construction when the correction is active");
-    assert!(
-        value_only_drift_required.is_some(),
-        "a value-only eval with a non-negligible inner residual must fold the Jeffreys drift",
-    );
-    assert_eq!(
-        information_calls.load(Ordering::Relaxed),
-        2,
-        "the required value-only drift must materialize the information matrix exactly once",
-    );
-
-    let (_, _, derivative_completion) = custom_family_outer_jeffreys_hphi(
-        &family,
-        &states,
-        &specs,
-        &ranges,
-        EvalMode::ValueAndGradient,
-    )
-    .expect("derivative-bearing Jeffreys term")
-    .expect("active derivative-bearing Jeffreys term");
-    assert!(derivative_completion.is_some());
-    // +2 over the running total: the derivative hphi builds its own information
-    // matrix and the second-order completion's. (The running total already
-    // includes the +1 from the required value-only drift above.)
-    assert_eq!(information_calls.load(Ordering::Relaxed), 4);
-    assert_eq!(axis_batch_calls.load(Ordering::Relaxed), 2);
     assert_eq!(completion_calls.load(Ordering::Relaxed), 1);
 
-    let derivative_drift = custom_family_outer_jeffreys_hphi_drift_batched(
-        &family,
-        &states,
-        &specs,
-        &ranges,
-        EvalMode::ValueAndGradient,
-        // Derivative-bearing modes always build the drift; the flag is ignored.
-        false,
-    )
-    .expect("derivative-bearing drift construction");
-    assert!(derivative_drift.is_some());
-    assert_eq!(information_calls.load(Ordering::Relaxed), 5);
+    let drift =
+        custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
+            .expect("Jeffreys drift construction");
+    assert!(
+        drift.is_some(),
+        "active Jeffreys geometry must expose one lazy drift independent of derivative order",
+    );
+    assert_eq!(
+        information_calls.load(Ordering::Relaxed),
+        3,
+        "lazy drift construction must materialize the information matrix exactly once",
+    );
     assert_eq!(
         axis_batch_calls.load(Ordering::Relaxed),
-        2,
+        1,
         "drift axes stay lazy until the derivative provider consumes the closure",
     );
 }
@@ -5223,7 +5165,6 @@ pub(crate) fn owned_mode_finalizer_preserves_prior_and_active_jeffreys_without_r
         &states,
         &specs,
         &block_param_ranges(&specs),
-        EvalMode::ValueOnly,
     )
     .expect("Jeffreys profile probe")
     .expect("absolute curvature below one must arm the Jeffreys profile");

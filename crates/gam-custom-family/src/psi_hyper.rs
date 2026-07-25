@@ -1377,33 +1377,6 @@ pub fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 's
     )))
 }
 
-/// Whether a value-only outer evaluation must still fold the Jeffreys `D_β H_Φ`
-/// mode-response drift into its moving-Hessian KKT cost correction.
-///
-/// The one-step-Newton profile correction to the LAML cost (`−½ rᵀH⁻¹r
-/// − g_ldᵀH⁻¹r`, gam#1395) fires whenever the inner β̂ exits with a
-/// non-negligible KKT residual `r` (so `w = H⁻¹r ≠ 0`). For a Jeffreys-active
-/// family the `g_ldᵀH⁻¹r` term carries `½ tr[(H+S+H_Φ)⁻¹ D_β H_Φ[w]]`, which is
-/// part of the *corrected cost* — it must be present in BOTH the value-only lane
-/// and the derivative lane or the two price different objectives and the terminal
-/// value-agreement audit refuses the fit (#2387). When `r` is at the inner
-/// solver's own stationarity floor the correction is provably ~0, so the drift is
-/// unnecessary and the value-only line-search fast path is preserved.
-fn value_only_requires_jeffreys_drift(inner: &BlockwiseInnerResult) -> bool {
-    match inner.kkt_residual.as_ref() {
-        None => false,
-        Some(residual) => {
-            let r = residual.as_array();
-            let r_inf = r.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
-            // Same negligibility floor the batched-gradient override uses: treat
-            // the residual as exact only at the inner solve's own KKT tolerance
-            // (defaulting to a tight `1e-8` when the producer attached none).
-            let tol = residual.residual_tol().unwrap_or(1.0e-8).max(1.0e-12);
-            r_inf > tol
-        }
-    }
-}
-
 pub(crate) fn evaluate_custom_family_hyper_internal<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -1546,22 +1519,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, e)| *e).unwrap_or(0);
-    // The Jeffreys second-order completion normally exists only for
-    // derivative geometry. A value-only pass also needs it when the inner mode
-    // retains a non-negligible KKT residual: the one-step profile correction
-    // then evaluates through the mode-response operator, so omitting the
-    // completion changes the scalar criterion itself. Use a derivative-bearing
-    // geometry mode in exactly those two cases while leaving derivative output
-    // controlled independently by `eval_mode`.
-    let value_requires_jeffreys_completion = value_only_requires_jeffreys_drift(&inner);
-    let jeffreys_geometry_mode = if inner_quality_mode != EvalMode::ValueOnly
-        || value_requires_jeffreys_completion
-    {
-        EvalMode::ValueAndGradient
-    } else {
-        EvalMode::ValueOnly
-    };
-
     // ── Try to obtain a joint Hessian and route through the unified evaluator ──
     //
     // When psi_dim > 0, exact Newton is required because the ψ derivative
@@ -1688,13 +1645,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         };
 
         let robust_jeffreys_hphi =
-            custom_family_outer_jeffreys_hphi(
-                family,
-                &inner.block_states,
-                specs,
-                &ranges,
-                jeffreys_geometry_mode,
-            )?;
+            custom_family_outer_jeffreys_hphi(family, &inner.block_states, specs, &ranges)?;
         let has_configured_rho_prior = !matches!(rho_prior, gam_problem::RhoPrior::Flat);
         let batched_gradient_contract_allows_override =
             batched_outer_gradient_contract_allows_override(
@@ -2081,8 +2032,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 &inner.block_states,
                 specs,
                 &ranges,
-                eval_mode,
-                value_requires_jeffreys_completion,
             )?,
         )?;
         if let Some(gradient) = batched_gradient_override {
@@ -2114,13 +2063,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     // curvature is nonzero, the unified H_phi-aware evaluator owns the gradient.
     let has_configured_rho_prior = !matches!(rho_prior, gam_problem::RhoPrior::Flat);
     let robust_jeffreys_hphi =
-        custom_family_outer_jeffreys_hphi(
-            family,
-            &inner.block_states,
-            specs,
-            &ranges,
-            jeffreys_geometry_mode,
-        )?;
+        custom_family_outer_jeffreys_hphi(family, &inner.block_states, specs, &ranges)?;
     let batched_gradient_contract_allows_override = batched_outer_gradient_contract_allows_override(
         robust_jeffreys_hphi
             .as_ref()
@@ -2362,8 +2305,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 &inner.block_states,
                 specs,
                 &ranges,
-                eval_mode,
-                value_requires_jeffreys_completion,
             )?,
         )?;
 
@@ -2682,8 +2623,6 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             &inner.block_states,
             specs,
             &ranges,
-            eval_mode,
-            value_only_requires_jeffreys_drift(&inner),
         )?,
     )?;
 
