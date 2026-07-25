@@ -413,7 +413,7 @@ pub fn constrained_projection_equal_tailed_interval(
     let posterior_mean =
         ambient_mean + projection_lift.dot(&correction.normal_mean_shift);
     if q == 1 && residual_variance == 0.0 && projection_lift[0] != 0.0 {
-        let scalar_quantile = |probability: f64| {
+        let scalar_quantile = |probability: f64| -> Result<f64, String> {
             let normal_probability = if projection_lift[0] > 0.0 {
                 probability
             } else {
