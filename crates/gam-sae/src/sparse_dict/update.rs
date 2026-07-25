@@ -503,6 +503,29 @@ struct BestOpenIterate {
     decoder_solve_stats: DecoderSolveStats,
 }
 
+/// Arm-2 verdict for one round: may the open arm count this round toward a
+/// confirmed plateau? (#2396/#2400)
+///
+/// An ABSOLUTE certificate still requires zero accepted births — that is arm 1's
+/// own test and this predicate is not consulted for it. The open arm additionally
+/// admits fixed-cardinality birth SWAPS, but only once live support has stopped
+/// setting new highs for a full confirmation window: a residual-row proposal that
+/// fires on the same row that seeded it says nothing about structural progress,
+/// whereas a support cardinality that is still growing says the fit has not
+/// finished recruiting. Saturation alone never admits anything — the independent
+/// objective test must plateau too — and `epoch > 0` skips the first post-entry
+/// round, whose climb denominator is still forming.
+fn open_round_is_stationary(
+    epoch: usize,
+    accepted_births: usize,
+    support_saturated: bool,
+    numerically_sound: bool,
+    objective_plateaued: bool,
+) -> bool {
+    let structure_stationary = accepted_births == 0 || support_saturated;
+    epoch > 0 && structure_stationary && numerically_sound && objective_plateaued
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LiveSupportGrowth {
     high_water: usize,
@@ -856,9 +879,13 @@ pub(super) fn run(
         // (tolerating one up-swing of the routing limit cycle; see
         // LINEAR_EV_PLATEAU_WINDOW). `epoch > 0` skips the first post-entry round,
         // whose climb denominator is still forming.
-        let structure_stationary = structure_settled || support_saturated;
-        let stationary =
-            epoch > 0 && structure_stationary && numerically_sound && objective_plateaued;
+        let stationary = open_round_is_stationary(
+            epoch,
+            accepted_births,
+            support_saturated,
+            numerically_sound,
+            objective_plateaued,
+        );
         plateau_flags.push_back(stationary);
         while plateau_flags.len() > LINEAR_EV_PLATEAU_WINDOW {
             plateau_flags.pop_front();
@@ -2991,8 +3018,8 @@ mod exact_solve_tests {
     use super::{
         CgStop, DecoderNormalEq, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
         LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, SparseDictionaryError, cg_solve,
-        explained_variance, kappa_from_cg_tridiagonal, pcg_multi_core, route_and_code_all, run,
-        solve_decoder, solve_decoder_with_routability_gate,
+        explained_variance, kappa_from_cg_tridiagonal, open_round_is_stationary, pcg_multi_core,
+        route_and_code_all, run, solve_decoder, solve_decoder_with_routability_gate,
     };
     use crate::sparse_dict::codes::SparseCode;
     use crate::sparse_dict::scoring::TileScorer;
@@ -3157,6 +3184,82 @@ mod exact_solve_tests {
                  that attains it"
             );
         }
+    }
+
+    /// #2400 — the churning-structure arm, driven through the production decision
+    /// rather than replayed. A dictionary at `K ≫ N·s` accepts residual-row births
+    /// every single round forever, so `accepted_births == 0` never arrives and the
+    /// open arm would otherwise be unreachable no matter how settled the objective
+    /// is. `LiveSupportGrowth` is what separates that from real recruitment, and
+    /// `open_round_is_stationary` is where the two meet.
+    ///
+    /// Feed it a fixed-cardinality swap sequence — positive births, constant live
+    /// support, objective plateaued — and require that the round is refused for the
+    /// entire confirmation window and admitted only after it, and that a single
+    /// genuinely new live atom withdraws the admission again.
+    #[test]
+    fn churning_births_are_admitted_only_after_the_support_saturates_2400() {
+        const LIVE: usize = 40;
+        let mut support = LiveSupportGrowth::new(LIVE);
+
+        // Fixed-cardinality swaps: three proposals fire every round, live support
+        // never moves. Structure is NOT settled, so admission rests entirely on
+        // saturation — and saturation must take the full window.
+        for round in 1..LINEAR_SUPPORT_SATURATION_ROUNDS {
+            let saturated = support.observe(LIVE);
+            assert!(
+                !open_round_is_stationary(round, 3, saturated, true, true),
+                "births are still churning and support has not saturated at round \
+                 {round}; admitting here would mint a model from structure the fit \
+                 has not finished recruiting"
+            );
+        }
+        let saturated = support.observe(LIVE);
+        assert!(
+            saturated,
+            "the full window of fixed-cardinality swaps must saturate the support"
+        );
+        assert!(
+            open_round_is_stationary(LINEAR_SUPPORT_SATURATION_ROUNDS, 3, saturated, true, true),
+            "once support has set no new high for the full window the swaps are \
+             replacements on a fixed support, and a plateaued objective is admissible"
+        );
+
+        // Real recruitment withdraws it immediately: one new live atom resets the
+        // window, so the very next churning round is refused again.
+        let after_growth = support.observe(LIVE + 1);
+        assert!(
+            !after_growth,
+            "a genuinely new live atom resets saturation immediately"
+        );
+        assert!(
+            !open_round_is_stationary(
+                LINEAR_SUPPORT_SATURATION_ROUNDS + 1,
+                3,
+                after_growth,
+                true,
+                true
+            ),
+            "recruitment restarts the confirmation window; the open arm must refuse \
+             until the support has been quiet for a full window again"
+        );
+
+        // Saturation alone is never enough: the objective test and the subsolve
+        // are independent and each can veto on its own.
+        assert!(
+            !open_round_is_stationary(9, 3, true, true, false),
+            "a still-improving objective is never stationary, saturated or not"
+        );
+        assert!(
+            !open_round_is_stationary(9, 3, true, false, true),
+            "an unsound linear subsolve is never stationary"
+        );
+        // ...and the first post-entry round is skipped regardless, since its climb
+        // denominator has not formed yet.
+        assert!(
+            !open_round_is_stationary(0, 0, true, true, true),
+            "the entry round cannot be evidence of a plateau"
+        );
     }
 
     #[test]
