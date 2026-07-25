@@ -8473,51 +8473,225 @@ fn reduced_parametric_aft_stopping_criterion_is_weight_scale_invariant() {
 // ---------------------------------------------------------------------------
 
 /// Interior coefficients far from every wall admit the full displacement: the
-/// unconstrained rule is recovered verbatim (α = 1).
+/// unconstrained rule is recovered bit-for-bit.
 #[test]
-pub(crate) fn cone_fraction_to_boundary_is_identity_in_the_interior_2390() {
+pub(crate) fn cone_clip_is_identity_in_the_interior_2390() {
     let beta = array![2.0, 3.0, 1.5];
     let d = array![0.5, -1.0, 0.75];
-    let alpha =
-        super::moments::symmetric_cone_fraction_to_boundary(beta.view(), d.view());
-    assert_eq!(alpha, 1.0, "interior β̂ with sub-wall displacement must keep α = 1");
+    for (idx, (&b, &dv)) in beta.iter().zip(d.iter()).enumerate() {
+        let clipped = super::moments::cone_clipped_coordinate_displacement(b, dv);
+        assert_eq!(
+            clipped, dv,
+            "interior coordinate {idx} with |d| <= β̂ must pass through unchanged"
+        );
+    }
 }
 
-/// A coordinate pinned exactly at its wall with a nonzero displacement
-/// collapses the whole displacement: no realized vector may leave the cone.
+/// A coordinate pinned exactly at its wall with a nonzero displacement freezes
+/// — but ONLY itself. The `β ≥ 0` cone is a product of independent half-lines,
+/// so one coordinate's wall must never speak for another (the global-`min`
+/// rule this replaces froze the whole block, see
+/// `cone_clipped_coordinate_displacement`).
 #[test]
-pub(crate) fn cone_fraction_to_boundary_freezes_pinned_wall_coordinates_2390() {
+pub(crate) fn cone_clip_freezes_only_the_pinned_coordinate_2390() {
     let beta = array![1.0, 0.0, 2.0];
     let d = array![0.3, 0.2, -0.1];
-    let alpha =
-        super::moments::symmetric_cone_fraction_to_boundary(beta.view(), d.view());
-    assert_eq!(alpha, 0.0, "a pinned cone coordinate with |d| > 0 must freeze the step");
+    let clipped: Vec<f64> = beta
+        .iter()
+        .zip(d.iter())
+        .map(|(&b, &dv)| super::moments::cone_clipped_coordinate_displacement(b, dv))
+        .collect();
+    assert_eq!(
+        clipped[1], 0.0,
+        "a pinned cone coordinate with |d| > 0 must freeze its own displacement"
+    );
+    assert_eq!(
+        clipped[0], d[0],
+        "an interior coordinate must keep its full displacement beside a pinned one"
+    );
+    assert_eq!(
+        clipped[2], d[2],
+        "an interior coordinate must keep its full displacement beside a pinned one"
+    );
     // Round-off guard: a slightly negative β̂ (numerical wall overshoot) is
     // clamped to the wall, never allowed to licence a negative-direction step.
-    let beta_neg = array![1.0, -1.0e-14, 2.0];
-    let alpha_neg =
-        super::moments::symmetric_cone_fraction_to_boundary(beta_neg.view(), d.view());
-    assert_eq!(alpha_neg, 0.0);
+    for &dv in d.iter() {
+        assert_eq!(
+            super::moments::cone_clipped_coordinate_displacement(-1.0e-14, dv),
+            0.0_f64.copysign(dv)
+        );
+    }
 }
 
-/// The factor depends only on |d|: α(d) = α(−d), so symmetric quadrature
-/// nodes stay symmetric about β̂ and linear functionals stay unbiased; and the
-/// clipped vectors β̂ ± α·d are feasible componentwise.
+/// The clip depends only on |d|, so it is exactly odd in the displacement:
+/// symmetric quadrature nodes stay symmetric about β̂ and linear functionals
+/// stay unbiased. Each realized coordinate β̂_j ± clip_j is feasible, and at a
+/// binding wall the realized value is EXACTLY 0 or 2·β̂_j — no rounding can put
+/// it below the wall.
 #[test]
-pub(crate) fn cone_fraction_to_boundary_is_sign_symmetric_and_feasible_2390() {
+pub(crate) fn cone_clip_is_sign_symmetric_and_exactly_feasible_2390() {
     let beta = array![0.25, 1.0, 0.05, 3.0];
     let d = array![0.5, -0.4, 0.2, 0.0];
-    let alpha =
-        super::moments::symmetric_cone_fraction_to_boundary(beta.view(), d.view());
-    let alpha_flip = super::moments::symmetric_cone_fraction_to_boundary(
-        beta.view(),
-        d.mapv(|v| -v).view(),
+    // Per-coordinate walls: 0.25/0.5 binds, 0.4 <= 1 free, 0.05/0.2 binds,
+    // d = 0 free.
+    let expected = array![0.25, -0.4, 0.05, 0.0];
+    for (idx, ((&b, &dv), &want)) in beta.iter().zip(d.iter()).zip(expected.iter()).enumerate() {
+        let clipped = super::moments::cone_clipped_coordinate_displacement(b, dv);
+        assert_eq!(clipped, want, "coordinate {idx} clipped to {clipped}, want {want}");
+        let flipped = super::moments::cone_clipped_coordinate_displacement(b, -dv);
+        assert_eq!(clipped, -flipped, "the clip must be exactly odd in d");
+        assert!(
+            b + clipped >= 0.0 && b - clipped >= 0.0,
+            "both ± nodes must stay in the cone at coordinate {idx}"
+        );
+    }
+    // A non-finite displacement is passed through rather than silently
+    // sanitized to the wall, so it fails loudly at the truncated-normal gate.
+    assert!(super::moments::cone_clipped_coordinate_displacement(0.25, f64::NAN).is_nan());
+}
+
+/// #2390 (#2385 instance 1), production path: one NEAR-wall link-wiggle
+/// coordinate must not erase the block's cross-covariance with
+/// `(h, threshold, log σ)` from the exact response moments.
+///
+/// The terminal covariance is already computed on the ACTIVE FACE, so a
+/// genuinely PINNED coordinate arrives with an exactly-zero covariance row and
+/// contributes no displacement at all. The coordinates that actually bind the
+/// feasibility clip are the near-wall but still-SLACK ones just outside the
+/// `1e-10` tightness band — routinely occupied, since the inner constrained
+/// solve's own KKT band is `1e-6·scale + 1e-10`. A single global
+/// fraction-to-boundary factor multiplies EVERY coordinate's displacement by
+/// that coordinate's ~`1e-8` ratio, freezing the conditional mean at `β̂_w` for
+/// every latent node.
+///
+/// Observable signature, with no reference to any hand-computed moment: negate
+/// the whole link-wiggle ↔ `(h, threshold, log σ)` cross block. That is the
+/// congruence `Σ' = D Σ D` with `D = diag(I, −I)`, so `Σ'` is PSD, its
+/// `(h, threshold, log σ)` projection is unchanged, and the conditional
+/// covariance `cov_ww − R Rᵀ` is unchanged (`R → −R`). The ONLY thing that
+/// changes is the SIGN of the conditional-mean displacement — i.e. the sign of
+/// the correlation between the realized warp and the realized predictor. If the
+/// displacement has been frozen, both covariances give the same moments.
+#[test]
+pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390() {
+    // Coordinate 1 sits just OUTSIDE the 1e-10 active-face tightness band:
+    // slack, so it keeps a full-width covariance row, but max(β̂,0)/|d| ~ 1e-8.
+    let fit = test_survival_fit(
+        array![0.4, -0.1],
+        array![0.2, 0.3],
+        array![-0.5, 0.1],
+        Some(array![0.30, 1.0e-9]),
     );
-    assert_eq!(alpha, alpha_flip, "α must be invariant to the displacement sign");
-    // Tightest wall here is β̂[2]/|d[2]| = 0.05/0.2 = 0.25.
-    assert!((alpha - 0.25).abs() < 1e-15, "α must bind at the tightest wall, got {alpha}");
-    for (b, dv) in beta.iter().zip(d.iter()) {
-        assert!(b + alpha * dv >= 0.0 && b - alpha * dv >= 0.0, "both ± nodes must stay in the cone");
+    let x_threshold_dense = array![[1.0, -0.2]];
+    let x_log_sigma_dense = array![[1.0, 0.3]];
+    let eta_threshold_offset = array![0.7];
+    let eta_log_sigma_offset = array![0.4];
+    let eta_t = x_threshold_dense.dot(&fit.beta_threshold()) + &eta_threshold_offset;
+    let eta_ls = x_log_sigma_dense.dot(&fit.beta_log_sigma()) + &eta_log_sigma_offset;
+    let q0 = Array1::from_iter(
+        eta_t
+            .iter()
+            .zip(eta_ls.iter())
+            .map(|(&t, &ls)| -t * exp_sigma_inverse_from_eta_scalar(ls)),
+    );
+    let degree = fit
+        .artifacts
+        .survival_link_wiggle_degree
+        .expect("fit wiggle degree");
+    let base_knots = fit
+        .artifacts
+        .survival_link_wiggle_knots
+        .clone()
+        .expect("fit wiggle knots");
+    // Re-center the wiggle knots on the realized q0 so both I-spline columns
+    // carry weight there. A basis row of zeros would make the whole comparison
+    // vacuous, so the centering is asserted below rather than assumed.
+    let lo = base_knots.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = base_knots.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let shift = q0[0] - 0.5 * (lo + hi);
+    let knots = base_knots.mapv(|k| k + shift);
+    let basis = survival_wiggle_basis_with_options(q0.view(), &knots, degree, BasisOptions::value())
+        .expect("link wiggle basis");
+    assert!(
+        basis[[0, 0]] > 1.0e-3,
+        "the interior wiggle coordinate must carry basis weight at q0, got {}",
+        basis[[0, 0]]
+    );
+
+    let input = SurvivalLocationScalePredictInput {
+        x_time_exit: array![[1.0, 0.5]],
+        eta_time_offset_exit: array![0.2],
+        time_wiggle_knots: None,
+        time_wiggle_degree: None,
+        time_wiggle_ncols: 0,
+        x_threshold: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_threshold_dense.clone(),
+        )),
+        eta_threshold_offset,
+        x_log_sigma: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_log_sigma_dense.clone(),
+        )),
+        eta_log_sigma_offset,
+        x_link_wiggle: Some(DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(basis.clone()),
+        )),
+        link_wiggle_knots: Some(knots.clone()),
+        link_wiggle_degree: Some(degree),
+        inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
+    };
+
+    // Σ = G Gᵀ is PSD by construction, and both link-wiggle rows load on the
+    // same latent factors as the time / threshold / log-sigma rows, so the
+    // wiggle block carries a substantial cross-covariance with them.
+    let g = array![
+        [0.18, 0.00, 0.00, 0.00],
+        [0.05, 0.16, 0.00, 0.00],
+        [0.00, 0.07, 0.15, 0.00],
+        [0.04, 0.00, 0.13, 0.00],
+        [0.00, 0.06, 0.00, 0.14],
+        [0.03, 0.00, 0.05, 0.12],
+        [0.12, 0.10, 0.09, 0.08],
+        [0.09, 0.11, 0.07, 0.10],
+    ];
+    let covariance = g.dot(&g.t());
+    let mut flipped = covariance.clone();
+    for j in 0..6 {
+        for w in 6..8 {
+            flipped[[j, w]] = -covariance[[j, w]];
+            flipped[[w, j]] = -covariance[[w, j]];
+        }
+    }
+
+    let (mean, second) =
+        exact_survival_response_moments(&input, &fit, &covariance).expect("response moments");
+    let (mean_flipped, second_flipped) =
+        exact_survival_response_moments(&input, &fit, &flipped).expect("flipped response moments");
+
+    let mean_gap = (mean[0] - mean_flipped[0]).abs();
+    let second_gap = (second[0] - second_flipped[0]).abs();
+    assert!(
+        mean_gap > 1.0e-8,
+        "the near-wall wiggle coordinate erased the cross-covariance from E[S]: \
+         {} vs {} (gap {mean_gap:.3e})",
+        mean[0],
+        mean_flipped[0]
+    );
+    assert!(
+        second_gap > 1.0e-8,
+        "the near-wall wiggle coordinate erased the cross-covariance from E[S^2]: \
+         {} vs {} (gap {second_gap:.3e})",
+        second[0],
+        second_flipped[0]
+    );
+    // The moments are still probabilities, and the second moment still respects
+    // Jensen against the first.
+    for (m1, m2) in [(mean[0], second[0]), (mean_flipped[0], second_flipped[0])] {
+        assert!((0.0..=1.0).contains(&m1) && (0.0..=1.0).contains(&m2));
+        assert!(
+            m2 + 1.0e-9 >= m1 * m1,
+            "E[S^2]={m2} must dominate E[S]^2={}",
+            m1 * m1
+        );
     }
 }
 
