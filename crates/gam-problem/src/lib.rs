@@ -101,7 +101,8 @@ use gam_linalg::dense;
 pub use gam_linalg::faer_ndarray::{in_nested_parallel_region, with_nested_parallel};
 pub use gauge::Gauge;
 pub use identifiability_audit::{
-    AliasedPair, BlockIdentity, DroppedColumn, IdentifiabilityAudit, MapUniquenessError,
+    AliasedPair, BlockIdentity, DroppedColumn, IdentifiabilityAudit, JointRankCertificate,
+    MapUniquenessError,
 };
 pub use joint_penalty::{JointPenaltyBundle, JointPenaltyError, JointPenaltySpec};
 pub use constraint_set::{

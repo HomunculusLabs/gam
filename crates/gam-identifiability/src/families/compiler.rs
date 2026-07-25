@@ -39,7 +39,7 @@ const RANK_REVEAL_EPS_SLACK: f64 = 64.0;
 /// band on each side) is used purely to *observe* Ambiguous frequency in this
 /// stage-1, observe-only rollout; the actual retained rank still comes from the
 /// unchanged threshold count.
-const RANK_DECISION_GAP: f64 = 1.0;
+pub(crate) const RANK_DECISION_GAP: f64 = 1.0;
 
 /// Maps a coefficient perturbation `δβ ∈ R^p` for one parameter block into
 /// its contribution to the per-row primary state `u_i ∈ R^K`.

@@ -135,6 +135,37 @@ fn audit_converged_identifiability<F: CustomFamily + ?Sized>(
             ),
         });
     }
+    // #2360 (#2337 §8 Thm 8.3) — say WHY this accepted.
+    //
+    // Agreeing endpoint ranks is a statement about two points, and the fit
+    // lives on the path between them: the pilot verdict can hold at both ends
+    // while the interior went somewhere else entirely. When the pilot's
+    // certificate transported, the agreement is a genuine path guarantee. When
+    // its margin was provably exhausted, the agreement is a coincidence that
+    // happens to be the right answer, and the record should not read as more
+    // than that. The verdict stays as-is either way — this is the honest
+    // provenance of an acceptance, not a new refusal.
+    match drift.pilot_certificate_transported {
+        Some(false) => {
+            let (excursion, radius) = drift.excursion_vs_radius.unwrap_or((f64::NAN, f64::NAN));
+            log::info!(
+                "[AUDIT-TRANSPORT] converged identifiability accepted on ENDPOINT AGREEMENT \
+                 ONLY (rank={}): the pilot certificate's transport radius {radius:.3e} was \
+                 exhausted by an excursion of at least {excursion:.3e}, so the pilot verdict is \
+                 not certified along the path it travelled",
+                drift.current_rank
+            );
+        }
+        Some(true) => {
+            let (excursion, radius) = drift.excursion_vs_radius.unwrap_or((f64::NAN, f64::NAN));
+            log::debug!(
+                "[AUDIT-TRANSPORT] converged identifiability rank={} TRANSPORTED from the pilot \
+                 (excursion {excursion:.3e} within radius {radius:.3e})",
+                drift.current_rank
+            );
+        }
+        None => {}
+    }
     Ok(())
 }
 

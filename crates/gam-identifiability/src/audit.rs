@@ -91,7 +91,10 @@ use ndarray::{Array1, Array2};
 use gam_linalg::faer_ndarray::{
     FaerEigh, default_rrqr_rank_alpha, fast_atb, rrqr_with_permutation,
 };
-use gam_problem::{EstimationError, FamilyLinearizationState, ParameterBlockSpec};
+use crate::families::compiler::RANK_DECISION_GAP;
+use gam_problem::{
+    EstimationError, FamilyLinearizationState, JointRankCertificate, ParameterBlockSpec,
+};
 use gam_runtime::loop_progress::LoopProgress;
 
 const DEFAULT_GAUGE_PRIORITY: u8 = 100;
@@ -777,6 +780,7 @@ fn audit_identifiability_impl(
             dropped_columns: Vec::new(),
             fatal: false,
             summary: "identifiability audit: no blocks supplied".to_string(),
+            joint_rank_certificate: None,
         });
     }
 
@@ -956,6 +960,7 @@ fn audit_identifiability_impl(
             dropped_columns: Vec::new(),
             fatal: false,
             summary: "identifiability audit: every block is empty".to_string(),
+            joint_rank_certificate: None,
         });
     }
 
@@ -1909,6 +1914,10 @@ fn audit_identifiability_impl(
         dropped_columns,
         fatal,
         summary,
+        // The flat path decides rank by per-block QR + joint RRQR, not by a
+        // two-sided cut on an equilibrated joint spectrum, so it has no margin
+        // to publish. `None` says exactly that.
+        joint_rank_certificate: None,
     })
 }
 
@@ -2092,6 +2101,7 @@ pub fn audit_identifiability_channel_aware(
             dropped_columns: Vec::new(),
             fatal: false,
             summary: "identifiability audit (channel-aware): no blocks supplied".to_string(),
+            joint_rank_certificate: None,
         });
     }
     if specs.len() != operators.len() {
@@ -2390,7 +2400,7 @@ pub fn audit_identifiability_channel_aware(
     // `check_map_uniqueness` (run in `canonicalize_for_identifiability_inner`)
     // remains the precise gate for the genuinely fatal `ker(JᵀWJ) ∩ ker(S) ≠ {0}`
     // case; this only stops the structural-rank gate from shadowing it.
-    let penalty_aware_joint_rank =
+    let (penalty_aware_joint_rank, joint_rank_certificate) =
         channel_aware_penalty_aware_joint_rank(&geometry.gram_struct, &col_offsets, specs, n * k)?;
     let penalty_covers_rank_deficiency =
         joint_rank_deficient && penalty_aware_joint_rank >= p_total;
@@ -2655,6 +2665,7 @@ pub fn audit_identifiability_channel_aware(
         dropped_columns,
         fatal,
         summary,
+        joint_rank_certificate: Some(joint_rank_certificate),
     })
 }
 
@@ -2769,10 +2780,17 @@ fn channel_aware_penalty_aware_joint_rank(
     col_offsets: &[usize],
     specs: &[ParameterBlockSpec],
     n_design_rows: usize,
-) -> Result<usize, EstimationError> {
+) -> Result<(usize, JointRankCertificate), EstimationError> {
     let p_total = *col_offsets.last().unwrap_or(&0);
     if p_total == 0 || n_design_rows == 0 {
-        return Ok(0);
+        return Ok((
+            0,
+            JointRankCertificate {
+                spectrum: Vec::new(),
+                tol: 0.0,
+                gap: RANK_DECISION_GAP,
+            },
+        ));
     }
 
     // Per-block structural penalties, parallel to `specs` (None ⇒ no penalty
@@ -2828,7 +2846,54 @@ fn channel_aware_penalty_aware_joint_rank(
     // check; reuses `gam_linalg::decision::equilibrate_gram`, whose own test
     // certifies exactly this strand-vs-equilibrate case (#2337 §3.2).
     let (equilibrated, _) = gam_linalg::decision::equilibrate_gram(&aug_gram);
-    rank_of_gram(&equilibrated, n_design_rows + n_penalty_rows)
+    let rank = rank_of_gram(&equilibrated, n_design_rows + n_penalty_rows)?;
+
+    // #2360 (#2337 §8 Thm 8.3) — take the SAME decision a second way, two-sided,
+    // and keep its margin.
+    //
+    // `rank_of_gram` decides against a one-sided cutoff, which is a decision on
+    // a POINT: it yields an integer and no indication of how far the operating
+    // point may move before that integer changes. The audit's operating point
+    // DOES move — the pilot linearizes at the family's warm-start scalars and
+    // the fit walks away from them — so a later audit comparing bare integers
+    // can only ever report that two endpoints agreed, never that the verdict
+    // held along the path between them.
+    //
+    // `certified_rank` on the same equilibrated spectrum at the same tolerance
+    // returns the same rank whenever the guard band is clean (no σ in
+    // `(τ/(1+gap), τ(1+gap))` ⇒ `#{σ ≥ high} = #{σ > τ}`), so this adds a
+    // margin without touching the decision the pipeline acts on: `rank` above
+    // is still what is returned and still what gates the fit. `Ambiguous`
+    // reports honestly that there is no margin to carry.
+    let spectrum = descending_singular_values_of_gram(&equilibrated)?;
+    let sigma_max = spectrum.first().copied().unwrap_or(0.0);
+    let tol = default_rrqr_rank_alpha()
+        * f64::EPSILON
+        * ((n_design_rows + n_penalty_rows).max(equilibrated.ncols()).max(1) as f64)
+        * sigma_max.max(1.0);
+    Ok((
+        rank,
+        JointRankCertificate {
+            spectrum,
+            tol,
+            gap: RANK_DECISION_GAP,
+        },
+    ))
+}
+
+/// Descending singular values of a design given its Gram — the spectrum
+/// [`rank_of_gram`] counts, exposed so the two-sided certificate is taken on
+/// exactly the same numbers as the one-sided count.
+fn descending_singular_values_of_gram(gram: &Array2<f64>) -> Result<Vec<f64>, EstimationError> {
+    if gram.ncols() == 0 {
+        return Ok(Vec::new());
+    }
+    let (evals, _evecs) = gram
+        .eigh(Side::Lower)
+        .map_err(EstimationError::EigendecompositionFailed)?;
+    let mut singular: Vec<f64> = evals.iter().map(|&lambda| lambda.max(0.0).sqrt()).collect();
+    singular.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(singular)
 }
 
 /// Pairwise overlap scan on the channel-weighted joint design
@@ -2947,6 +3012,29 @@ pub struct AuditDriftSummary {
     pub newly_dropped: Vec<DroppedColumn>,
     /// Columns dropped in the pilot that are no longer dropped (recovered).
     pub recovered: Vec<String>,
+    /// #2360 (#2337 §8 Thm 8.3) — did the PILOT's rank certificate survive the
+    /// move to this operating point, or did the path exhaust its margin?
+    ///
+    /// `Some(true)`: the realized spectral excursion is inside the pilot's
+    /// transport radius, so the pilot verdict provably still holds here — the
+    /// endpoints do not merely coincide, the certificate carried.
+    /// `Some(false)`: the excursion has PROVABLY exhausted the pilot's margin
+    /// (the Weyl lower bound alone already exceeds the radius), so the pilot
+    /// certificate is void at this point and the current-state verdict is the
+    /// only one standing, whatever the two ranks happen to be.
+    /// `None`: no certificate to transport — the pilot was `Ambiguous`, or ran
+    /// on an audit path that publishes no joint-rank margin.
+    ///
+    /// NOTE the asymmetry. `spectral_excursion_lower_bound` is a LOWER bound on
+    /// `‖ΔA‖₂`, so `Some(false)` is a proof and `Some(true)` is the honest
+    /// reading of "no evidence the margin was spent" — spectra cannot upper-
+    /// bound an operator excursion, and pretending otherwise would be the one
+    /// way this could report a false reassurance.
+    pub pilot_certificate_transported: Option<bool>,
+    /// Realized Weyl lower bound on the operator excursion between the pilot
+    /// and current joint spectra, and the pilot's transport radius it is priced
+    /// against. `None` alongside a `None` verdict.
+    pub excursion_vs_radius: Option<(f64, f64)>,
 }
 
 /// Run the structural audit at `beta_current`, refreshing each effective
@@ -3130,6 +3218,46 @@ pub fn maybe_log_audit_drift(
         );
     }
 
+    // #2360 — price the realized path against the PILOT's margin, not against
+    // the other endpoint's integer. Both audits already computed their joint
+    // spectra, so this costs a max-abs sweep and nothing else.
+    let (pilot_certificate_transported, excursion_vs_radius) = match (
+        pilot_audit.joint_rank_certificate.as_ref(),
+        current_audit.joint_rank_certificate.as_ref(),
+    ) {
+        (Some(pilot_cert), Some(current_cert)) => {
+            let decision = gam_linalg::decision::certified_rank(
+                &pilot_cert.spectrum,
+                pilot_cert.tol,
+                pilot_cert.gap,
+            );
+            match gam_linalg::decision::rank_transport_radius(&decision) {
+                Some(radius) => {
+                    let excursion = gam_linalg::decision::spectral_excursion_lower_bound(
+                        &pilot_cert.spectrum,
+                        &current_cert.spectrum,
+                    );
+                    let transported = matches!(
+                        gam_linalg::decision::transport_certified_rank(&decision, excursion),
+                        gam_linalg::decision::RankTransport::Transported { .. }
+                    );
+                    if !transported {
+                        log::info!(
+                            "[AUDIT-TRANSPORT] pilot rank certificate VOID at the current \
+                             operating point: excursion lower bound {excursion:.3e} exceeds the \
+                             pilot transport radius {radius:.3e} (outer_iter={outer_iter}); the \
+                             endpoint ranks agreeing is not a path guarantee here"
+                        );
+                    }
+                    (Some(transported), Some((excursion, radius)))
+                }
+                // Ambiguous pilot: no margin exists to transport.
+                None => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+
     Ok(Some(AuditDriftSummary {
         pilot_rank,
         current_rank,
@@ -3138,6 +3266,8 @@ pub fn maybe_log_audit_drift(
         beta_relative_change,
         newly_dropped,
         recovered,
+        pilot_certificate_transported,
+        excursion_vs_radius,
     }))
 }
 

@@ -72,6 +72,35 @@ pub struct DroppedColumn {
     pub reason: String,
 }
 
+/// The joint-rank decision an audit took, kept with the margin that makes it
+/// transportable (#2337 §8 Thm 8.3).
+///
+/// An identifiability audit ranks the design at ONE operating point, but the
+/// fit then moves that point. A bare rank cannot say whether it still holds
+/// after the move; a rank plus its certified gap can, because the gap converts
+/// into a radius (`gam_linalg::decision::rank_transport_radius`) inside which
+/// no operator perturbation can change the decision. Recorded here so a later
+/// audit can price its own excursion against the earlier one's margin instead
+/// of comparing two bare integers.
+/// Held as the raw ingredients of the decision rather than a decision object,
+/// so this stays plain data per the module contract AND so there is one source
+/// of truth: a consumer re-derives the verdict with
+/// `gam_linalg::decision::certified_rank(&spectrum, tol, gap)` instead of
+/// trusting a stored copy that could drift from the spectrum beside it.
+#[derive(Debug, Clone)]
+pub struct JointRankCertificate {
+    /// The equilibrated penalty-augmented joint spectrum, descending. Two
+    /// spectra of the same operator family give a Weyl LOWER bound on the
+    /// operator excursion between their operating points
+    /// (`gam_linalg::decision::spectral_excursion_lower_bound`) — enough to
+    /// prove an earlier certificate VOID, never enough to prove it carries.
+    pub spectrum: Vec<f64>,
+    /// Tolerance the decision was posed at.
+    pub tol: f64,
+    /// Multiplicative half-gap the decision was posed with.
+    pub gap: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct IdentifiabilityAudit {
     pub blocks: Vec<BlockIdentity>,
@@ -84,6 +113,11 @@ pub struct IdentifiabilityAudit {
     /// case rather than silently proceed with a different model.
     pub fatal: bool,
     pub summary: String,
+    /// The transportable joint-rank certificate, when this audit path took a
+    /// two-sided decision it could certify. `None` on the paths that return
+    /// early (empty design, structural refusal) — an honest "no certificate
+    /// here" rather than a default that would read as a wide margin.
+    pub joint_rank_certificate: Option<JointRankCertificate>,
 }
 
 /// Error produced when the MAP uniqueness condition
@@ -153,6 +187,7 @@ mod tests {
             dropped_columns: vec![],
             fatal: true,
             summary: "summary text".to_string(),
+            joint_rank_certificate: None,
         };
         assert!(audit.fatal);
         assert_eq!(audit.summary, "summary text");

@@ -73,6 +73,9 @@ fn fake_audit(effective_dims: &[usize], original_dims: &[usize]) -> Identifiabil
         dropped_columns,
         fatal: false,
         summary: "test audit".to_string(),
+        // Hand-built fixture, not the product of a ranked audit path, so there
+        // is no joint-rank margin to publish.
+        joint_rank_certificate: None,
     }
 }
 
