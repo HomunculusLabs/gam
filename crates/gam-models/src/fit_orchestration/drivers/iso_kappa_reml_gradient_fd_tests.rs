@@ -46,7 +46,7 @@ fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
         LikelihoodSpec::binomial_probit(),
         false,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -77,19 +77,19 @@ fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
 /// the same n=20 Duchon-probit config matches FD to 6e-7 under balanced labels
 /// vs 8e-3 under the separated labels (and ρ matches to 1e-5 in both).
 ///
-/// `probe_rail` appends probes near the joint optimizer's UPPER ρ box bound
-/// (`JOINT_RHO_BOUND = 12`) in addition to the historical near-origin probes.
-/// Every probe above sits at ‖ρ‖ ≤ 1, but the asymptote-rail certificate
-/// (#2348) that decides whether a railed joint fit may be minted reads the
-/// gradient AT the rail — so the analytic gradient in the only region the
-/// certificate consults has never been FD-checked by any gate. `#2425`.
+/// `extra_rho_probes` appends probes at large ρ in addition to the historical
+/// near-origin probes. Every historical probe sits at ‖ρ‖ ≤ 1, but the
+/// asymptote-rail certificate (#2348) that decides whether a railed joint fit
+/// may be minted reads the gradient AT the rail — so the analytic gradient in
+/// the only region the certificate consults had never been FD-checked by any
+/// gate. Pass `&[]` for the historical probe set. `#2425`.
 fn iso_kappa_fd_variant_driver(
     label: &str,
     n: usize,
     family: LikelihoodSpec,
     skip_psi: bool,
     well_conditioned: bool,
-    probe_rail: bool,
+    extra_rho_probes: &[f64],
 ) -> (bool, f64, Vec<String>) {
     // A `"*_2d"` label builds an ordinary 2-D feature cloud (the production
     // `matern(x1, x2)` regime: operator triplet {mass, tension, stiffness}, with
@@ -307,24 +307,24 @@ fn iso_kappa_fd_variant_driver(
         theta_alt[rho_dim + k] = 0.4;
     }
 
-    // Rail probes (#2425): one per ρ coordinate held at 11.5 — a half e-fold
-    // inside `JOINT_RHO_BOUND = 12` so the centered stencil stays in the box —
-    // plus an all-ρ-railed probe. This is the region the asymptote-rail
-    // certificate reads when it decides whether a railed joint fit is
-    // stationary-at-infinity, and no historical probe reaches it.
-    const RAIL_PROBE_RHO: f64 = 11.5;
+    // Rail / ladder probes (#2425). For each requested ρ value the driver emits
+    // one probe per ρ coordinate holding that coordinate at the value, plus an
+    // all-ρ probe. `&[11.5]` sits a half e-fold inside `JOINT_RHO_BOUND = 12` so
+    // the centered stencil stays in the box; a longer ladder deliberately walks
+    // PAST the box, because the evaluator is defined on all of θ and the question
+    // "does V saturate at a λ=∞ face" is only answerable outside 12.
     let mut rail_probes: Vec<(String, Array1<f64>)> = Vec::new();
-    if probe_rail {
+    for &value in extra_rho_probes {
         for j in 0..rho_dim {
             let mut theta_rail = theta_base.clone();
-            theta_rail[j] = RAIL_PROBE_RHO;
-            rail_probes.push((format!("rail_rho{j}"), theta_rail));
+            theta_rail[j] = value;
+            rail_probes.push((format!("rho{j}@{value}"), theta_rail));
         }
         let mut theta_all_rail = theta_base.clone();
         for j in 0..rho_dim {
-            theta_all_rail[j] = RAIL_PROBE_RHO;
+            theta_all_rail[j] = value;
         }
-        rail_probes.push(("rail_all".to_string(), theta_all_rail));
+        rail_probes.push((format!("rhoALL@{value}"), theta_all_rail));
     }
 
     let h = 1e-5_f64;
@@ -404,7 +404,7 @@ fn iso_kappa_duchon_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -431,7 +431,7 @@ fn iso_kappa_matern_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -456,7 +456,7 @@ fn iso_kappa_matern_2d_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -845,7 +845,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -858,7 +858,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
 #[test]
 fn iso_kappa_duchon_binomial_logit_fd() {
     let (pass, worst, violations) =
-        iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false, false);
+        iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false, &[]);
     assert!(
         pass,
         "BinomialLogit FD failed; worst_psi_rel={worst:.3e}\n  {}",
@@ -885,7 +885,7 @@ fn iso_kappa_duchon_n_smaller_fd() {
         // analytic-vs-FD gap that is a conditioning artifact of BOTH sides, not
         // a gradient error (#901 kernel is exact: balanced labels match to 6e-7).
         true,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -902,7 +902,7 @@ fn iso_kappa_duchon_no_psi_fd() {
         LikelihoodSpec::binomial_probit(),
         true,
         false,
-        false,
+        &[],
     );
     assert!(
         pass,
@@ -941,7 +941,7 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
         ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
     ] {
         let (pass, worst, violations) =
-            iso_kappa_fd_variant_driver(label, n, family, false, false, true);
+            iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5]);
         eprintln!(
             "[zz-rail-2425] {label}: pass={pass} worst_psi_rel={worst:.3e} \
              violations={}",
@@ -949,6 +949,53 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
         );
         for v in &violations {
             eprintln!("[zz-rail-2425] {label}: {v}");
+        }
+    }
+}
+
+/// #2425 MEASUREMENT (reports, never fails): does the iso-κ REML criterion
+/// SATURATE at a λ=∞ face, or is it asymptotically linear in ρ?
+///
+/// `zz_measure_iso_kappa_rail_gradient_fd_2425` establishes that the analytic
+/// gradient is FD-correct at ρ=11.5, so the monotone fixtures' refusal is not a
+/// derivative defect: the criterion really is descending at the rail with
+/// `∂V/∂ρ ≈ −0.3` and `ĉ = −e^ρ ∂V/∂ρ` growing like `e^ρ` instead of settling.
+/// Two explanations survive and they demand opposite fixes.
+///
+///   1. The λ=∞ tail exists but begins OUTSIDE `JOINT_RHO_BOUND = 12`. The
+///      asymptote certificate's own `ASYMPTOTE_PROBE_COUNT` comment says its
+///      window was sized against rails at `RHO_BOUND = 30`, so a box that stops
+///      at 12 can be 18 e-folds short of the region the certificate needs. Then
+///      `V` saturates somewhere past 12 and the box is the bug.
+///   2. There is no λ=∞ face at all, because the `½log|H| − ½log|S|₊`
+///      cancellation leaves a residual linear term `(r_H − r_S)/2 · ρ`. Then `V`
+///      keeps falling linearly forever and no box width can help; the rank
+///      bookkeeping is the bug.
+///
+/// The discriminator is simply `V` far outside the box, which nothing forbids —
+/// the evaluator is a function of θ and the ±12 clamp lives in the optimizer's
+/// bound vectors, not in the criterion. Walking ρ out to 30 separates the two:
+/// saturating `V` with `ĉ → const` is (1); `V` linear in ρ with `∂V/∂ρ → const`
+/// is (2). Reported per ρ coordinate, so a per-block rank defect is visible as
+/// a per-block slope.
+#[test]
+fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
+    // Out to `RHO_BOUND = 30` — the bound the asymptote certificate was
+    // calibrated against — well past `JOINT_RHO_BOUND = 12`.
+    const LADDER: [f64; 9] = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0, 30.0];
+    for (label, n, family) in [
+        ("matern_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
+        ("duchon_gaussian", 80, LikelihoodSpec::gaussian_identity()),
+    ] {
+        let (pass, worst, violations) =
+            iso_kappa_fd_variant_driver(label, n, family, false, false, &LADDER);
+        eprintln!(
+            "[zz-ladder-2425] {label}: fd_pass={pass} worst_psi_rel={worst:.3e} \
+             violations={}",
+            violations.len()
+        );
+        for v in &violations {
+            eprintln!("[zz-ladder-2425] {label}: {v}");
         }
     }
 }
