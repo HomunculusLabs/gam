@@ -958,7 +958,12 @@ mod tests {
             covariance_conditional: Some(array![[1.0, 0.1], [0.1, 2.0]]),
             covariance_corrected: None,
             inference: Some(FitInference {
-                edf_by_block: vec![0.6, 0.9],
+                // One fitted smoothing parameter means one retained EDF
+                // contribution. The previous two-entry vector disagreed with
+                // both `lambdas` and the sole fitted block, so the typed fit
+                // constructor correctly rejected the fixture before the
+                // corrected-EDF path under test could run.
+                edf_by_block: vec![1.5],
                 penalty_block_trace: vec![],
                 edf_total: 1.5,
                 // PRIMARY: escalated to a cubature upgrade.
