@@ -2027,10 +2027,13 @@ mod tests {
         let y = array![0.0, 1.0, 1.0];
         let weights = Array1::ones(3);
         let penalty_base = Array2::zeros((1, 1));
-        let penalty_link = Array2::zeros((1, 1));
+        let penalty_link = Array2::zeros((2, 2));
         let mode_beta = array![0.2];
-        let mode_theta = array![0.05];
-        let hessian = array![[4.0, 1.0], [1.0, 3.0]];
+        // A clamped quadratic spline with this six-knot vector has three
+        // B-spline functions. The monotone-wiggle construction removes the
+        // anchored first function, so its coefficient block has width two.
+        let mode_theta = array![0.05, -0.02];
+        let hessian = array![[4.0, 1.0, 0.2], [1.0, 3.0, 0.1], [0.2, 0.1, 2.0]];
         let spline = LinkWiggleSplineArtifacts {
             knot_range: (-1.0, 1.0),
             knot_vector: Array1::from_vec(vec![-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]),
@@ -2054,8 +2057,8 @@ mod tests {
 
         let reconstructed_cov = posterior.chol().dot(&posterior.chol().t());
         let eye_from_hessian = hessian.dot(&reconstructed_cov);
-        for r in 0..2 {
-            for c in 0..2 {
+        for r in 0..hessian.nrows() {
+            for c in 0..hessian.ncols() {
                 let expected = if r == c { 1.0 } else { 0.0 };
                 assert!(
                     (eye_from_hessian[[r, c]] - expected).abs() < 1e-10,
@@ -2073,10 +2076,10 @@ mod tests {
         let y = array![1.0, 0.0, 1.0, 0.0];
         let weights = array![1.0, 1.2, 0.8, 1.4];
         let penalty_base = Array2::zeros((1, 1));
-        let penalty_link = Array2::zeros((1, 1));
+        let penalty_link = Array2::zeros((2, 2));
         let mode_beta = array![-0.8];
-        let mode_theta = array![0.04];
-        let hessian = Array2::eye(2);
+        let mode_theta = array![0.04, -0.015];
+        let hessian = Array2::eye(3);
         let spline = LinkWiggleSplineArtifacts {
             knot_range: (-1.5, 0.5),
             knot_vector: Array1::from_vec(vec![-1.5, -1.5, -1.5, 0.5, 0.5, 0.5]),
@@ -2098,7 +2101,7 @@ mod tests {
         )
         .expect("cloglog link-wiggle posterior");
 
-        let z = array![0.2, -0.03];
+        let z = array![0.2, -0.03, 0.01];
         let (_, grad) = posterior.compute_logp_and_grad(&z);
         let eps = 1e-6;
         for j in 0..z.len() {
@@ -3261,7 +3264,19 @@ mod tests {
             weights: Arc::new(array![1.0, 1.0]),
             mode: Arc::new(Array1::zeros(1)),
             offset: None,
-            likelihood: GlmLikelihoodSpec::canonical(spec.clone()),
+            // `joint_family_logp_and_grad` is the already-resolved row
+            // oracle, not the fit-to-posterior scale resolver. A fitted
+            // profiled Gaussian is concretized to its fitted phi before it
+            // reaches this function; use that same target representation here
+            // instead of asking the row oracle to invent a dispersion.
+            likelihood: if matches!(&spec.response, ResponseFamily::Gaussian) {
+                GlmLikelihoodSpec {
+                    spec: spec.clone(),
+                    scale: LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 },
+                }
+            } else {
+                GlmLikelihoodSpec::canonical(spec.clone())
+            },
             n_samples: 2,
             dim: 1,
         };
