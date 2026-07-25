@@ -106,6 +106,7 @@ mod spatial_length_scale_monotone_tests {
         let n = 120usize;
         let num_centers = 20usize;
         let mut data = Array2::<f64>::zeros((n, 1));
+        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x = i as f64 / (n - 1) as f64;
             data[[i, 0]] = x;

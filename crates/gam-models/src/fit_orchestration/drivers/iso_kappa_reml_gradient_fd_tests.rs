@@ -1849,7 +1849,7 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
             let an = grad[j];
             let denom = fd.abs().max(an.abs()).max(1e-12);
             eprintln!(
-                "[zz-mono-2454] rho={value:5.1f} j={j} COST={cost:+.10e} an={an:+.6e} \
+                "[zz-mono-2454] rho={value:5.1} j={j} COST={cost:+.10e} an={an:+.6e} \
                  fd={fd:+.6e} rel={:.3e} chat_an={:+.6e}",
                 (an - fd).abs() / denom,
                 -value.exp() * an
