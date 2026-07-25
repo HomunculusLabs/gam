@@ -6411,7 +6411,28 @@ impl SaeManifoldTerm {
                     &lambda_smooth,
                 )?;
                 quotient_step_norm = quotient_step_norm_sq.sqrt();
-                let trust_radius = solve_options.trust_region.radius;
+                // #2267 — the trust region the unit step needs.
+                //
+                // Lifting the step ceiling lets the line search reach `α = 1`, which
+                // is what buys the superlinear tail — but a Newton step is only
+                // credible over the region where its LOCAL MODEL is, and Armijo
+                // alone does not bound that: a monotone objective decrease is
+                // compatible with a single long step crossing into a different
+                // basin (measured: a K=2 fixture whose decoders walk to
+                // ‖B‖ ≈ 0.2 and trip the co-collapse guard). Step length and
+                // model credibility are two different controls and the code had
+                // only been using one of them, with `step_size` accidentally
+                // standing in for both.
+                //
+                // The scale-free statement of "where the model is credible" is the
+                // state's own magnitude: one iterate may not move the iterate
+                // further than the iterate itself. That is `inner_iterate_scale`,
+                // already the scale the KKT tolerance is measured against, so no
+                // new constant enters. Near convergence the Newton step is far
+                // inside this region and `α = 1` is untouched — exactly where it
+                // matters — while a wild early step is clipped instead of taken.
+                // Any caller-supplied radius still applies on top.
+                let trust_radius = solve_options.trust_region.radius.min(iterate_scale);
                 if quotient_step_norm > trust_radius
                     && trust_radius.is_finite()
                     && trust_radius > 0.0

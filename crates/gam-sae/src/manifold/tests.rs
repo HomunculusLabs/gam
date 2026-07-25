@@ -3874,6 +3874,19 @@ pub(crate) fn streaming_plan_routes_by_memory_budget_with_identical_logdet() {
     assert!(!streaming_plan.direct_admitted);
 
     let mut full = term0.clone();
+    // #2267 — this test's subject is the ROUTING invariant (streaming vs dense
+    // log-det of the SAME assembled system), not dictionary health, and this
+    // fixture cannot supply both. It carries 5 observations of a 1-dimensional
+    // output against a K=2 dictionary with 6 decoder coefficients, so its
+    // penalized optimum IS a null dictionary and the co-collapse guard is
+    // correct to refuse it. Before the inner solve could take a real Newton
+    // step, two iterations at `α ≤ 0.25` never got near that optimum, so the
+    // guard never fired and the test passed on solver slowness rather than on
+    // its own premise. Disarm the guards for this convergence only — the same
+    // per-fit switch the stagewise K=1 path uses — so the routing assertion
+    // below is measured against the state the fixture actually has, and stays
+    // at full strength instead of depending on how far the solver got.
+    full.guards_enabled = false;
     // The undamped (`ridge_t = 0`) log-det is only well-defined at the inner
     // optimum, where the per-row `H_tt^(i)` blocks are PD. At the initial
     // (non-stationary) iterate a `p_out = 1` rank-1 `JᵀJ` row block plus the

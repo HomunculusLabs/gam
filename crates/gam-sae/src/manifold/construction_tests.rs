@@ -1428,7 +1428,7 @@ mod amortized_encoder_tests {
             }
         }
         let sym = (&a + &a.t()) * 0.5;
-        let (eigs, _vecs) = sym.eigh(Side::Lower).expect("A eigendecomposition");
+        let (eigs, vecs) = sym.eigh(Side::Lower).expect("A eigendecomposition");
         let min_eig = eigs.iter().copied().fold(f64::INFINITY, f64::min);
         let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let n_nonpos = eigs.iter().filter(|&&l| l <= 0.0).count();
@@ -1463,21 +1463,68 @@ mod amortized_encoder_tests {
         } else {
             // A is non-PD. Under #2336 value-side E-attributability the classification
             // is three-way: an indefinite direction attributable to the bounded ARD
-            // concave-clamp (λ+e_v ≥ −floor) is PRICED finite, only a genuinely
-            // indefinite one (λ+e_v < −floor) REFUSES. This fixture is PD on the gauge
-            // quotient at the current head so this branch is unreached; if a future
-            // fixture lands here the assertion must split by attributability (see
-            // e_attributable_ard_saddle_prices_finite_2336 /
-            // genuine_saddle_is_infeasible_probe_not_fatal_2336). Kept as the refusal
-            // guard for a genuinely-indefinite specimen.
-            match result {
-                Err(SaeCriterionError::IndefiniteObservedInformation { block }) => {
-                    assert_eq!(block, "joint", "refusal fired on the wrong block: {block}");
+            // concave-clamp (λ+e_v ≥ −floor) is PRICED at its basin curvature, only a
+            // genuinely indefinite one (λ+e_v < −floor) REFUSES. The earlier version of
+            // this branch asserted unconditional refusal and said so in a comment: the
+            // fixture was PD on the gauge quotient then, so the branch was unreached and
+            // the assertion was left as a placeholder to be "split by attributability"
+            // if a future fixture ever landed here. #2267's inner-solve step fix moves
+            // this fixture's converged state, so it lands here now — and the split is
+            // written out rather than assumed.
+            //
+            // The oracle reads the SAME clamp diagonal the value path reads
+            // (`materialize_ard_concave_clamp_diagonal`) and applies the same
+            // predicate, so the two cannot drift; the assertion is STRICTER than the
+            // placeholder, because it pins WHICH way each negative direction is
+            // classified and what the priced log-det then has to equal.
+            let e_diag = term
+                .materialize_ard_concave_clamp_diagonal(&rho, &cache)
+                .expect("ARD concave-clamp diagonal");
+            let mut all_attributable = true;
+            let mut priced_log_a = 0.0_f64;
+            for (idx, &lambda) in eigs.iter().enumerate() {
+                let priced = if lambda < -floor {
+                    let v = vecs.column(idx);
+                    let mut e_v = 0.0_f64;
+                    for j in 0..total_t {
+                        e_v += e_diag[j] * v[j] * v[j];
+                    }
+                    let basin = lambda + e_v;
+                    if basin < -floor {
+                        all_attributable = false;
+                    }
+                    basin
+                } else {
+                    lambda
+                };
+                if priced > floor {
+                    priced_log_a += priced.ln();
                 }
-                other => panic!(
-                    "A is non-PD (min_eig={min_eig:.3e}) but exact_observed_information_log_dets \
-                     did not refuse: {other:?}"
-                ),
+            }
+            eprintln!(
+                "A non-PD: min_eig={min_eig:.6e} all_attributable={all_attributable} \
+                 priced_log|A|={priced_log_a:.9e}"
+            );
+            if all_attributable {
+                let (log_a, _log_a_tt) = result.expect(
+                    "every sub-floor negative direction is ARD-clamp attributable, so the \
+                     value path must PRICE the basin curvature instead of refusing",
+                );
+                assert!(
+                    (log_a - priced_log_a).abs() <= 1.0e-9 * (1.0 + priced_log_a.abs()),
+                    "priced log|A| {log_a} != attributability oracle {priced_log_a}"
+                );
+            } else {
+                match result {
+                    Err(SaeCriterionError::IndefiniteObservedInformation { block }) => {
+                        assert_eq!(block, "joint", "refusal fired on the wrong block: {block}");
+                    }
+                    other => panic!(
+                        "A has a genuinely indefinite direction (min_eig={min_eig:.3e}, not \
+                         clamp-attributable) but exact_observed_information_log_dets did not \
+                         refuse: {other:?}"
+                    ),
+                }
             }
         }
     }
