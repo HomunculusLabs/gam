@@ -16,6 +16,11 @@ pub mod circle;
 #[cfg(test)]
 mod conformance_tests;
 pub mod constant_curvature;
+/// Independent-oracle checks for the κ-stereographic family, which carries a
+/// continuous parameter and so is not a
+/// [`ManifoldSpec`](crate::manifold::ManifoldSpec) variant.
+#[cfg(test)]
+mod constant_curvature_conformance;
 pub mod euclidean;
 pub mod grassmann;
 pub mod lie_so;
