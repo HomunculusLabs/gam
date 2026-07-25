@@ -1191,6 +1191,16 @@ where
                     state.compute_screening_proxy(rho)
                 },
             );
+            // #2348 Inc 5: standard REML can form its own λ→∞ face limit
+            // exactly (the null-space-restricted fit plus the analytic
+            // first-order form of the logdet/trace terms there), so the outer
+            // certificate can PROVE an infinite-smoothing face instead of
+            // measuring a tail beside the box.
+            let obj = obj.with_rail_face_limit(
+                |state: &mut &mut crate::estimate::reml::RemlState<'_>,
+                 rho: &Array1<f64>,
+                 face: &[usize]| { state.rail_face_limit(rho, face) },
+            );
             // Standard REML publishes its current original-basis coefficients
             // and consumes a cached coefficient vector through the symmetric
             // hook below. The runner calls it only after reset and only for the

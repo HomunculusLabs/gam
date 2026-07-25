@@ -1,4 +1,5 @@
 use super::*;
+use super::rail_face::RailFaceLimit;
 
 // Re-exported here while the shared EFS contract lives in `gam-problem`.
 pub use gam_problem::{EfsEval, FixedPointCertificateEval, FixedPointCoordinateCertificate};
@@ -175,6 +176,32 @@ pub trait OuterObjective {
             "fixed-point certification not implemented for this objective at rho_dim={}",
             rho.len()
         )))
+    }
+
+    /// Analytic λ→∞ limit data for a rail face (#2348 Inc 5).
+    ///
+    /// `face` lists the ρ-coordinates sitting at their infinite-smoothing
+    /// bound. An objective that can form the limit EXACTLY — the fit
+    /// restricted to the railed penalties' common null space, together with
+    /// the analytic first-order form of the criterion's logdet and trace terms
+    /// there — returns it here, and the outer certificate proves the face from
+    /// it instead of probing a tail at finite λ.
+    ///
+    /// `Ok(None)` is the correct answer whenever the objective cannot form the
+    /// limit exactly; it is not a failure, and the caller keeps whatever
+    /// evidence it already had. The default says exactly that.
+    fn rail_face_limit(
+        &mut self,
+        rho: &Array1<f64>,
+        face: &[usize],
+    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+        if face.iter().any(|&k| k >= rho.len()) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "rail face {face:?} is outside the rho layout of dimension {}",
+                rho.len()
+            )));
+        }
+        Ok(None)
     }
 
     /// Restore to a clean baseline for the next multi-start candidate.
@@ -790,6 +817,14 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         Ok(r)
     }
 
+    fn rail_face_limit(
+        &mut self,
+        rho: &Array1<f64>,
+        face: &[usize],
+    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+        self.inner.rail_face_limit(rho, face)
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Forward to the wrapped objective, then prime our last-inner-beta
         // cache so a subsequent finalize-write encodes the seeded β if no
@@ -899,6 +934,19 @@ pub struct ClosureObjective<
     /// Optional single-shot transition from an approximate derivative pilot to
     /// the exact objective measure.
     pub(crate) exact_polish_fn: Option<Box<dyn FnMut(&mut S) -> bool>>,
+    /// Optional analytic λ→∞ rail-face limit hook (#2348 Inc 5). Installed by
+    /// objectives whose criterion has an exact closed-form limit at an
+    /// infinite-smoothing face; `None` means the outer certificate falls back
+    /// to measuring the tail.
+    pub(crate) rail_face_limit_fn: Option<
+        Box<
+            dyn FnMut(
+                &mut S,
+                &Array1<f64>,
+                &[usize],
+            ) -> Result<Option<RailFaceLimit>, EstimationError>,
+        >,
+    >,
     /// Optional seed-screening ranking proxy closure. When `None`,
     /// `eval_screening_proxy()` falls back to `eval_cost()` (the trait
     /// default), preserving legacy behavior for non-REML objectives.
@@ -987,6 +1035,23 @@ where
         }
     }
 
+    fn rail_face_limit(
+        &mut self,
+        rho: &Array1<f64>,
+        face: &[usize],
+    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+        if face.iter().any(|&k| k >= rho.len()) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "rail face {face:?} is outside the rho layout of dimension {}",
+                rho.len()
+            )));
+        }
+        match self.rail_face_limit_fn.as_mut() {
+            Some(f) => f(&mut self.state, rho, face),
+            None => Ok(None),
+        }
+    }
+
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // Empty β: by convention, "no warm-start available" — treat as a
         // no-op install. Distinct from `NoSlot` because the objective may
@@ -1050,6 +1115,20 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
         self.terminal_eval_order = Some(order);
         self
     }
+
+    /// Install the analytic λ→∞ rail-face limit hook (#2348 Inc 5).
+    pub fn with_rail_face_limit<Fface>(mut self, limit: Fface) -> Self
+    where
+        Fface: FnMut(
+                &mut S,
+                &Array1<f64>,
+                &[usize],
+            ) -> Result<Option<RailFaceLimit>, EstimationError>
+            + 'static,
+    {
+        self.rail_face_limit_fn = Some(Box::new(limit));
+        self
+    }
 }
 
 impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp> ClosureObjective<S, Fc, Fe, Fr, Fefs, Feo, Fsp>
@@ -1087,6 +1166,7 @@ where
             efs_fn: self.efs_fn,
             fixed_point_certificate_fn: self.fixed_point_certificate_fn,
             exact_polish_fn: self.exact_polish_fn,
+            rail_face_limit_fn: self.rail_face_limit_fn,
             screening_proxy_fn: self.screening_proxy_fn,
             seed_fn: Some(seed_fn),
             terminal_eval_order: self.terminal_eval_order,
@@ -1455,6 +1535,42 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
                 .collect();
         }
         Ok(evaluation)
+    }
+
+    fn rail_face_limit(
+        &mut self,
+        rho: &Array1<f64>,
+        face: &[usize],
+    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+        // The face is a set of ρ-coordinates, so it permutes exactly like ρ.
+        let native_rho = self.to_native(rho);
+        let mut native_face = Vec::with_capacity(face.len());
+        for &canonical in face.iter() {
+            match self.perm.get(canonical).copied() {
+                Some(native) => native_face.push(native),
+                None => return Ok(None),
+            }
+        }
+        let mut limit = match self.inner.rail_face_limit(&native_rho, &native_face)? {
+            Some(limit) => limit,
+            None => return Ok(None),
+        };
+        // The inner objective reports its face in NATIVE indices (and may have
+        // reordered it); map back so the certificate names canonical
+        // coordinates, keeping every per-coordinate array aligned with it.
+        let mut canonical_of_native = vec![usize::MAX; self.perm.len()];
+        for (canonical, &native) in self.perm.iter().enumerate() {
+            canonical_of_native[native] = canonical;
+        }
+        let mut canonical_face = Vec::with_capacity(limit.face.len());
+        for &native in limit.face.iter() {
+            match canonical_of_native.get(native).copied() {
+                Some(canonical) if canonical != usize::MAX => canonical_face.push(canonical),
+                _ => return Ok(None),
+            }
+        }
+        limit.face = canonical_face;
+        Ok(Some(limit))
     }
 
     fn reset(&mut self) {

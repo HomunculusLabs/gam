@@ -4,6 +4,7 @@ use super::asymptote_certificate::{
     AsymptoteSample, AsymptoteSide, AsymptoteTolerances, AsymptoteVerdict, AsymptoteWindow,
     MIN_TAIL_SAMPLES, assess_coordinate,
 };
+use super::rail_face::{RailFaceLimit, RailFaceProof, RailFaceVerdict, certify_rail_face};
 
 pub(crate) const OPERATOR_TRUST_RESTART_RADIUS_FLOOR: f64 = 1.0e-6;
 
@@ -660,6 +661,7 @@ impl OuterProblem {
             efs_fn,
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
+            rail_face_limit_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -698,6 +700,7 @@ impl OuterProblem {
             efs_fn,
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
+            rail_face_limit_fn: None,
             screening_proxy_fn: None::<fn(&mut S, &Array1<f64>) -> Result<f64, EstimationError>>,
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -738,6 +741,7 @@ impl OuterProblem {
             efs_fn,
             fixed_point_certificate_fn: None,
             exact_polish_fn: None,
+            rail_face_limit_fn: None,
             screening_proxy_fn: Some(screening_proxy_fn),
             seed_fn: None::<fn(&mut S, &Array1<f64>) -> Result<SeedOutcome, EstimationError>>,
             terminal_eval_order: None,
@@ -3292,6 +3296,43 @@ fn try_certify_asymptote_rail(
     tol.tail_drift_rel = TAIL_SNAP_DRIFT_REL;
     let (lower, upper) = inputs.bounds;
 
+    // #2348 Inc 5 — the ANALYTIC face proof, first resort.
+    //
+    // Measuring a tail beside the ρ box asks the criterion for derivative
+    // information exactly where its logdet pair cancels; and even when it
+    // succeeds it speaks for ONE coordinate along ONE ray. The analytic route
+    // forms the λ=∞ limit itself — the null-space-restricted fit, and the
+    // exact first-order form of the logdet and trace terms there — and its
+    // positive definiteness proves the whole face against every way of coming
+    // off it. When the objective cannot form that limit, or the proof does not
+    // hold, the measured-tail path below is unchanged.
+    match try_certify_face_analytically(obj, inputs, estimand_tol)? {
+        Ok((rails, proof)) => {
+            log::info!(
+                "[CERTIFICATE] {}: analytic λ=∞ face proof on {} coordinate(s): λ_min(C)={:.6e} \
+                 > margin {:.3e}, joint pencil ĉ={:.6e}, remaining value gap {:.3e}, estimand \
+                 travel {:.3e}",
+                inputs.context,
+                rails.len(),
+                proof.min_curvature,
+                proof.curvature_margin,
+                proof.joint_tail_constant,
+                proof.value_gap,
+                proof.estimand_travel,
+            );
+            return Ok(Ok((
+                interior_projected_grad_norm,
+                effective_interior_bound,
+                rails,
+            )));
+        }
+        Err(reason) => log::info!(
+            "[CERTIFICATE] {}: analytic λ=∞ face proof declined ({reason}); measuring the tail \
+             instead",
+            inputs.context,
+        ),
+    }
+
     let mut rails: Vec<RailCoordinate> = Vec::new();
     let mut decline: Option<String> = None;
     let mut probed_any = false;
@@ -3343,6 +3384,193 @@ fn try_certify_asymptote_rail(
         effective_interior_bound,
         rails,
     )))
+}
+
+/// The analytic face law is falsified against production criterion VALUES, so
+/// the admissible discrepancy is exactly the error sources the comparison is
+/// made of: the run's own cost resolution (absolute, once per evaluation), the
+/// law's `O(e^{−ρ})` second-order remainder (relative), and the digits the
+/// Gram/Schur assembly loses. `FACE_LAW_ERROR_SLACK` widens that budget by the
+/// factor a two-point difference accumulates — each evaluation carries its own
+/// resolution error and the remainder enters both the predicted and the
+/// measured side — so a CORRECT law is never refused by its own error bars,
+/// while a wrong one (which misses by orders of magnitude, not by slack) still
+/// is. The falsification only runs where the budget leaves a discriminating
+/// band; where it does not, the analytic route declines rather than minting
+/// unfalsifiable evidence.
+const FACE_LAW_ERROR_SLACK: f64 = 4.0;
+
+/// Floor on the falsification band.
+///
+/// The derived numerical budget can land many orders below the honest fidelity
+/// of a closed form that deliberately does not model the criterion's
+/// stabilization ridge or its reparameterization; holding the law to that
+/// budget would reject a CORRECT law over a difference that changes no
+/// decision. What the falsification exists to catch is a structurally wrong law
+/// — a missing Schur term, the wrong dispersion convention, a sign error — and
+/// those miss by orders of magnitude, not by slack (measured on a fixture whose
+/// released directions genuinely earned their cost: 100%). Half the predicted
+/// drop is the coarsest band that still separates those two worlds.
+const FACE_LAW_ORDER_BAND: f64 = 0.5;
+
+/// Prove the rail face analytically (#2348 Inc 5): ask the objective for the
+/// exact λ→∞ limit, test the first-order form, and falsify the resulting law
+/// against the production criterion before minting anything from it.
+///
+/// Returns the minted rail coordinates plus the proof, or a human-readable
+/// decline that the caller logs before falling back to the measured tail.
+fn try_certify_face_analytically(
+    obj: &mut dyn OuterObjective,
+    inputs: &AsymptoteRailInputs<'_>,
+    estimand_tol: f64,
+) -> Result<Result<(Vec<RailCoordinate>, RailFaceProof), String>, EstimationError> {
+    let rho = inputs.rho;
+    let (lower, upper) = inputs.bounds;
+    // The analytic limit is the INFINITE-smoothing face. A coordinate railed at
+    // the zero-smoothing bound is the opposite limit (the penalty leaves the
+    // model rather than pinning it) and belongs to the measured-tail path.
+    for &k in inputs.railed.iter() {
+        if k >= rho.len() || k >= lower.len() || k >= upper.len() {
+            return Ok(Err("railed coordinate outside the box layout".to_string()));
+        }
+        if (upper[k] - rho[k]).abs() > (rho[k] - lower[k]).abs() {
+            return Ok(Err(format!(
+                "coordinate {k} rails at the zero-smoothing bound; the analytic face limit \
+                 covers λ→∞ only"
+            )));
+        }
+    }
+    let limit = match obj.rail_face_limit(rho, inputs.railed)? {
+        Some(limit) => limit,
+        None => {
+            return Ok(Err(
+                "this objective cannot form its λ=∞ face limit exactly".to_string()
+            ));
+        }
+    };
+    let proof = match certify_rail_face(&limit) {
+        RailFaceVerdict::Certified(proof) => proof,
+        RailFaceVerdict::Refused { reason } => return Ok(Err(reason)),
+    };
+    // The face being optimal does not by itself mean the SHIPPED fit is the
+    // limit fit; the estimand gate is the same one the measured path applies,
+    // now answered by the exact first-order coefficient offset rather than a
+    // geometric extrapolation of observed steps.
+    if !(proof.estimand_travel <= estimand_tol) {
+        return Ok(Err(format!(
+            "λ=∞ face proven, but the shipped fit has not reached it: coefficient travel \
+             {:.3e} > estimand tolerance {estimand_tol:.3e}",
+            proof.estimand_travel
+        )));
+    }
+    if let Err(reason) = falsify_face_law(obj, inputs, &limit, &proof)? {
+        return Ok(Err(reason));
+    }
+    let rails: Vec<RailCoordinate> = limit
+        .face
+        .iter()
+        .zip(limit.face_rho.iter())
+        .zip(proof.tail_constants.iter())
+        .map(|((&index, &rho_k), &tail_constant)| RailCoordinate {
+            index,
+            side: AsymptoteSide::Upper,
+            tail_constant,
+            // On the tail law the remaining value gap of one coordinate is
+            // exactly `c_k·e^{−ρ_k}`; a coordinate the rest of the face has
+            // already pinned reports `c_k = 0` because releasing it does not
+            // move the criterion at all.
+            value_gap: tail_constant * (-rho_k).exp(),
+            estimand_travel_bound: proof.estimand_travel,
+            // The analytic proof's floor is the eigen-backward-error margin it
+            // cleared, not a finite-difference noise floor.
+            noise_margin: proof.curvature_margin,
+        })
+        .collect();
+    Ok(Ok((rails, proof)))
+}
+
+/// Falsify the analytic face law against the production criterion.
+///
+/// The law predicts `V(ρ) − V_∞ = ½tr((Σλ_kQᵀS_kQ)⁻¹C)`, so pulling every face
+/// coordinate back by `Δ` must raise the criterion by exactly
+/// `gap·(e^{Δ} − 1)`. That is a VALUE comparison — no derivative, no
+/// cancellation — and it costs two evaluations instead of a probe ladder.
+///
+/// `Δ` is not a knob: the measurement error is `resolution/(gap·(e^Δ−1))` and
+/// the law's own remainder is `O(e^{Δ−ρ})`, so their sum is minimized at
+/// `Δ* = ½(ln(resolution/gap) + ρ)`, where both equal `√(resolution·e^{−ρ}/gap)`.
+fn falsify_face_law(
+    obj: &mut dyn OuterObjective,
+    inputs: &AsymptoteRailInputs<'_>,
+    limit: &RailFaceLimit,
+    proof: &RailFaceProof,
+) -> Result<Result<(), String>, EstimationError> {
+    const FACE_LAW_DOMAIN_MARGIN: f64 = 1.0e-6;
+    let rho = inputs.rho;
+    let (lower, _) = inputs.bounds;
+    let gap = proof.value_gap;
+    let resolution = inputs.objective_tol;
+    if !(gap > 0.0) || !(resolution > 0.0) {
+        return Ok(Err(format!(
+            "the face law carries no resolvable value gap: gap={gap:.3e}, cost resolution \
+             {resolution:.3e}"
+        )));
+    }
+    let deepest = limit
+        .face_rho
+        .iter()
+        .fold(f64::INFINITY, |acc, v| acc.min(*v));
+    let ideal = 0.5 * ((resolution / gap).ln() + deepest);
+    let room = limit
+        .face
+        .iter()
+        .zip(limit.face_rho.iter())
+        .map(|(&k, &rho_k)| rho_k - lower[k] - FACE_LAW_DOMAIN_MARGIN)
+        .fold(f64::INFINITY, f64::min);
+    let delta = ideal.min(room);
+    // One e-fold is the natural unit of the law being tested; below that the
+    // predicted change is not a statement about a tail.
+    if !(delta >= 1.0) || !delta.is_finite() {
+        return Ok(Err(format!(
+            "no room inside the box to falsify the face law: Δ={delta:.3e} e-folds"
+        )));
+    }
+    let predicted = gap * (delta.exp() - 1.0);
+    let measurement_error = resolution / predicted;
+    let remainder_error = (delta - deepest).exp();
+    let assembly_error = f64::EPSILON.sqrt() * limit.form_conditioning.sqrt();
+    let budget = measurement_error + remainder_error + assembly_error;
+    let admissible = (FACE_LAW_ERROR_SLACK * budget).max(FACE_LAW_ORDER_BAND);
+    if !(admissible < 1.0) {
+        return Ok(Err(format!(
+            "the face law cannot be falsified here: error budget {budget:.3e} (measurement \
+             {measurement_error:.3e}, remainder {remainder_error:.3e}, assembly \
+             {assembly_error:.3e}) leaves no discriminating band"
+        )));
+    }
+    let baseline = obj.eval_cost(rho)?;
+    let mut pulled_back = rho.clone();
+    for &k in limit.face.iter() {
+        pulled_back[k] -= delta;
+    }
+    let pulled_value = obj.eval_cost(&pulled_back)?;
+    // Every exit below ships the certified point, so restore it before judging.
+    obj.eval_cost(rho)?;
+    if !baseline.is_finite() || !pulled_value.is_finite() {
+        return Ok(Err(
+            "the criterion is not finite at the falsification points".to_string()
+        ));
+    }
+    let measured = pulled_value - baseline;
+    let discrepancy = (predicted - measured).abs() / predicted;
+    if discrepancy > admissible {
+        return Ok(Err(format!(
+            "the analytic face law does not reproduce the criterion: pulling the face back \
+             {delta:.2} e-folds should raise V by {predicted:.6e}, measured {measured:.6e} \
+             (relative {discrepancy:.3e} > admissible {admissible:.3e})"
+        )));
+    }
+    Ok(Ok(()))
 }
 
 /// Two-stage interior stationarity judgment shared by the Inc 1 railed mint

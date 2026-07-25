@@ -49,6 +49,8 @@ pub(crate) use std::sync::{Arc, Mutex};
 mod gradient_hessian;
 #[path = "objective.rs"]
 mod objective;
+#[path = "rail_face_limit.rs"]
+mod rail_face_limit;
 #[path = "state_caches.rs"]
 mod state_caches;
 

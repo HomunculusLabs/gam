@@ -135,6 +135,14 @@ pub struct RailFaceLimit {
     /// certificate's curvature margin is scaled by it rather than by a bare
     /// `ε‖C‖`.
     pub form_conditioning: f64,
+    /// The λ=∞ fit itself: coefficients of the null-space-restricted model, in
+    /// the model's own coefficient basis. This is the limit the certificate is
+    /// about — the fit a face-certified optimum reports — and the same object a
+    /// continuation anchored at maximal smoothing starts from.
+    pub limit_beta: Array1<f64>,
+    /// Profiled dispersion at the limit fit, the `φ̂` the first-order form's
+    /// fit term is divided by.
+    pub limit_dispersion: f64,
 }
 
 /// A proven rail face: the analytic first-order data behind the mint.
@@ -446,6 +454,8 @@ mod rail_face_tests {
             released_penalties: penalties,
             released_score: score,
             form_conditioning: 1.0,
+            limit_beta: Array1::zeros(0),
+            limit_dispersion: 1.0,
         }
     }
 

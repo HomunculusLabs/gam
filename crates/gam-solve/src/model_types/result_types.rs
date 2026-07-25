@@ -639,14 +639,21 @@ pub struct RailCoordinate {
     pub index: usize,
     /// Which rail (`λ → ∞` upper, `λ → 0` lower) it is approaching.
     pub side: crate::rho_optimizer::asymptote_certificate::AsymptoteSide,
-    /// The observed pencil constant `ĉ` (window mean) confirming the tail.
+    /// The pencil constant `ĉ` of the tail law `∂V/∂ρ = −ĉ·e^{−ρ}`: either the
+    /// window mean measured by probing back from the rail, or — when the
+    /// objective can form its λ=∞ limit exactly — the analytic constant
+    /// `½tr((QᵀS_kQ)⁻¹QᵀCQ)` of the face proof (#2348 Inc 5). A face
+    /// coordinate the rest of the face has already pinned reports `0`: the
+    /// criterion does not depend on its smoothing parameter at all.
     pub tail_constant: f64,
-    /// The exact remaining criterion value-gap to the rail, `|∂V/∂ρ|`.
+    /// The exact remaining criterion value-gap to the rail, `|∂V/∂ρ| = ĉ·e^{−ρ}`.
     pub value_gap: f64,
     /// The bound on remaining coefficient travel to the rail limit.
     pub estimand_travel_bound: f64,
-    /// The pencil-constant noise floor the tail cleared to be confirmed (the
-    /// `ĉ > noise_margin` self-protection against the finite-difference floor).
+    /// The floor the evidence cleared: the pencil-constant noise floor for a
+    /// measured tail (`ĉ > noise_margin`, the self-protection against the
+    /// finite-difference floor), or the eigen-backward-error margin the
+    /// analytic face form's smallest curvature cleared.
     pub noise_margin: f64,
 }
 
