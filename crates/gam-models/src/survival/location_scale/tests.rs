@@ -8774,6 +8774,33 @@ pub(crate) fn truncated_nonnegative_normal_expectation_matches_closed_form_2390(
             "constant integrand must integrate to itself at mu={mu} sd={sd}: got {one}, {four}"
         );
     }
+    // #2390: the branch-point sweep. The rule this replaced integrated in the
+    // log-survival coordinate, where `w(s) ~ sd·√(2(s − ln Φ(r)))` puts a
+    // BRANCH POINT at `s = ln Φ(r)` — outside `[0, s_max]`, but sliding onto
+    // the endpoint as `r` grows (`ln Φ(5) = −2.9e-7`, `ln Φ(50) = 0` in f64).
+    // Its error therefore GREW with `r`: 1.9e-7 at `r = 0.43`, 1.5e-3 at
+    // `r = 5`, and 1.5e-4 at `r = 50` — worst in the deep interior, the regime
+    // production actually lives in, and the regime its own documentation called
+    // "bit-identical within f64". Scattered fixtures caught that only by luck of
+    // where they sat; this sweep walks `r` across the whole approach so any
+    // future rule with an endpoint singularity fails at the `r` that exposes it
+    // rather than at whichever points someone happened to list.
+    for &r in &[1.0_f64, 2.0, 5.0, 10.0, 30.0, 100.0, 500.0] {
+        let sd = 1.0_f64;
+        let mu = r * sd;
+        let (_, mills) = gam_math::probability::signed_probit_logcdf_and_mills_ratio(r);
+        let expected = mu + sd * mills;
+        let (m1, _) = super::moments::truncated_nonnegative_normal_expectation_pair(
+            mu,
+            sd,
+            |w| Ok((w, w * w)),
+        )
+        .expect("branch-point sweep integrand");
+        assert!(
+            (m1 - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "E[w | w>=0] must not degrade as the wall recedes: r={r}, got {m1}, want {expected}"
+        );
+    }
     // First moment against the closed form, at a wall-adjacent mean.
     for &(mu, sd) in &[(0.3_f64, 0.7_f64), (0.0, 1.3), (2.5, 0.5), (-0.4, 0.8)] {
         let alpha = -mu / sd;
