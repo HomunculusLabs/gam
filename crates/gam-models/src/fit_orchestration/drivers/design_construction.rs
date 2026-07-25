@@ -8015,8 +8015,19 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             input_scale,
         } => {
             let mut x = select_columns(data, feature_cols).map_err(EstimationError::from)?;
+            let mut spec_operator = spec.clone();
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
+                let length_scale = spec.length_scale.resolved().ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "anisotropic Matérn Auto length_scale reached derivative construction \
+                         unresolved"
+                            .to_string(),
+                    )
+                })?;
+                spec_operator
+                    .length_scale
+                    .set_resolved(scale.to_standardized_units(length_scale));
             }
             // #1122: the realized Matérn design always carries the operator
             // {mass, tension, stiffness} penalty triplet (`build_term` overrides
@@ -8026,7 +8037,6 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             // double-penalty blocks, or the analytic `tr(S⁺ Ṡ)` desyncs from the
             // FD of the criterion's operator-triplet `log|Sλ|₊` (the iso-axis
             // analogue is handled in `try_build_spatial_term_log_kappa_derivative`).
-            let mut spec_operator = spec.clone();
             spec_operator.double_penalty = false;
             build_matern_basis_log_kappa_aniso_derivatives(x.view(), &spec_operator)
                 .map_err(EstimationError::from)?
