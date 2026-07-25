@@ -133,6 +133,7 @@ fn capture_outer_gradient_fd_at_seed(
     }
     obj.reset();
     install_matching_initial_inner_seed(obj, config, seed, context)?;
+    crate::estimate::outer_eval_capture::begin_outer_gradient_component_capture();
     let analytic = obj.eval_with_order(seed, OuterEvalOrder::ValueAndGradient)?;
     if analytic.gradient.len() != seed.len() || !analytic.cost.is_finite() {
         return Err(EstimationError::InvalidInput(format!(
@@ -145,6 +146,19 @@ fn capture_outer_gradient_fd_at_seed(
     }
     let analytic_psi_gradient =
         Array1::from_iter((0..psi_dim).map(|psi_j| analytic.gradient[rho_dim + psi_j]));
+    let components = crate::estimate::outer_eval_capture::take_outer_gradient_components();
+    if components.len() != psi_dim {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD capture received {} ψ component rows, expected {psi_dim}",
+            components.len()
+        )));
+    }
+    let fixed_beta_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.0));
+    let logdet_h_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.1));
+    let logdet_s_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.2));
     let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
     let mut psi_steps = Array1::<f64>::zeros(psi_dim);
     for psi_j in 0..psi_dim {
@@ -212,6 +226,9 @@ fn capture_outer_gradient_fd_at_seed(
             analytic_psi_gradient,
             finite_difference_psi_gradient,
             psi_steps,
+            fixed_beta_psi_gradient,
+            logdet_h_psi_gradient,
+            logdet_s_psi_gradient,
         },
     );
     Ok(())

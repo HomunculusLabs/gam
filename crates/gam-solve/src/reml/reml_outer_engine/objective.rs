@@ -1486,6 +1486,31 @@ pub fn reml_laml_evaluate(
                 }
             };
 
+            let fixed_beta_component = outer_gradient_entry(
+                coord.a,
+                0.0,
+                0.0,
+                &solution.dispersion,
+                dp_cgrad,
+                profiled_scale,
+                false,
+                false,
+            );
+            let logdet_h_component = if incl_logdet_h {
+                0.5 * trace_logdet_i
+            } else {
+                0.0
+            };
+            let logdet_s_component = if incl_logdet_s {
+                -0.5 * coord.ld_s
+            } else {
+                0.0
+            };
+            crate::estimate::outer_eval_capture::record_outer_gradient_component(
+                fixed_beta_component,
+                logdet_h_component,
+                logdet_s_component,
+            );
             let value = outer_gradient_entry(
                 coord.a,
                 trace_logdet_i,

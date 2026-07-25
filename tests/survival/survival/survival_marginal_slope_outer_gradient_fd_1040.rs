@@ -190,6 +190,16 @@ fn run_basis(basis_term: &str) {
         let analytic = audit.analytic_psi_gradient[j];
         let fd = audit.finite_difference_psi_gradient[j];
         let gap = (analytic - fd).abs();
+        eprintln!(
+            "[FD-DIAG] psi_i={j} fixed_beta={:+.6e} logdet_h={:+.6e} \
+             logdet_s={:+.6e} sum={:+.6e}",
+            audit.fixed_beta_psi_gradient[j],
+            audit.logdet_h_psi_gradient[j],
+            audit.logdet_s_psi_gradient[j],
+            audit.fixed_beta_psi_gradient[j]
+                + audit.logdet_h_psi_gradient[j]
+                + audit.logdet_s_psi_gradient[j],
+        );
         assert!(
             analytic.is_finite() && fd.is_finite() && audit.psi_steps[j] > 0.0,
             "invalid gradient evidence for basis {basis_term:?}: i={j} \
