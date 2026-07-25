@@ -1562,10 +1562,6 @@ struct SingleBlockLatentCoordDesignCache {
     analytic_penalties: Option<std::sync::Arc<gam_terms::AnalyticPenaltyRegistry>>,
     analytic_rho_count: usize,
     design_revision: u64,
-    // Stamp the outer-iter the cached cost/eval was computed under; analytic
-    // penalty weight schedules advance with this counter, so a stale stamp
-    // invalidates the memo even at unchanged θ.
-    last_outer_iter: Option<u64>,
 }
 
 impl SingleBlockLatentCoordDesignCache {
@@ -1627,7 +1623,6 @@ impl SingleBlockLatentCoordDesignCache {
             analytic_penalties: latent.analytic_penalties.clone(),
             analytic_rho_count,
             design_revision: 0,
-            last_outer_iter: None,
         })
     }
 
@@ -1941,7 +1936,6 @@ impl SingleBlockLatentCoordDesignCache {
         self.current_theta = Some(theta.clone());
         self.last_cost = None;
         self.last_eval = None;
-        self.last_outer_iter = None;
         if !latent_values_changed && self.current_design_cache_id != Some(lookup.entry_id) {
             self.design_revision = self.design_revision.wrapping_add(1);
         }
@@ -1954,8 +1948,6 @@ impl SingleBlockLatentCoordDesignCache {
             .current_theta
             .as_ref()
             .is_some_and(|cached| theta_values_match(cached, theta))
-            && self.last_outer_iter
-                == Some(gam_solve::estimate::reml::outer_eval::current_outer_iter())
         {
             self.last_eval
                 .as_ref()
@@ -1974,8 +1966,6 @@ impl SingleBlockLatentCoordDesignCache {
             .current_theta
             .as_ref()
             .is_some_and(|cached| theta_values_match(cached, theta))
-            && self.last_outer_iter
-                == Some(gam_solve::estimate::reml::outer_eval::current_outer_iter())
         {
             self.last_eval.clone()
         } else {
@@ -1986,12 +1976,10 @@ impl SingleBlockLatentCoordDesignCache {
     fn store_eval(&mut self, eval: (f64, Array1<f64>, gam_problem::HessianValue)) {
         self.last_cost = Some(eval.0);
         self.last_eval = Some(eval);
-        self.last_outer_iter = Some(gam_solve::estimate::reml::outer_eval::current_outer_iter());
     }
 
     fn store_cost(&mut self, cost: f64) {
         self.last_cost = Some(cost);
-        self.last_outer_iter = Some(gam_solve::estimate::reml::outer_eval::current_outer_iter());
     }
 
     fn reset(&mut self) {
@@ -2002,7 +1990,6 @@ impl SingleBlockLatentCoordDesignCache {
         self.latent_design_cache.invalidate();
         self.last_cost = None;
         self.last_eval = None;
-        self.last_outer_iter = None;
     }
 }
 
@@ -7293,15 +7280,11 @@ fn try_exact_joint_latent_coord_optimization(
             )?;
             let latent = self.cache.latent().map_err(EstimationError::InvalidInput)?;
             if let Some(registry) = registry_for_key {
-                let mut registry = registry.as_ref().clone();
-                registry.apply_weight_schedules(
-                    gam_solve::estimate::reml::outer_eval::current_outer_iter() as usize,
-                );
                 add_analytic_penalty_objective_to_eval(
                     theta,
                     self.rho_dim,
                     latent.as_ref(),
-                    &registry,
+                    registry.as_ref(),
                     &mut eval,
                 )?;
             }
@@ -7340,16 +7323,12 @@ fn try_exact_joint_latent_coord_optimization(
                 Some(self.cache.design_revision()),
             )?;
             if let Some(registry) = registry_for_key {
-                let mut registry = registry.as_ref().clone();
-                registry.apply_weight_schedules(
-                    gam_solve::estimate::reml::outer_eval::current_outer_iter() as usize,
-                );
                 let latent = self.cache.latent().map_err(EstimationError::InvalidInput)?;
                 let contribution = analytic_penalty_objective_contribution(
                     theta,
                     self.rho_dim,
                     latent.as_ref(),
-                    &registry,
+                    registry.as_ref(),
                 )?;
                 efs.cost += contribution.cost;
                 if let (Some(psi_gradient), Some(psi_indices)) =
@@ -7412,15 +7391,11 @@ fn try_exact_joint_latent_coord_optimization(
                     };
                     let cost = cost + contribution.cost;
                     let cost = if let Some(registry) = registry_for_key {
-                        let mut registry = registry.as_ref().clone();
-                        registry.apply_weight_schedules(
-                            gam_solve::estimate::reml::outer_eval::current_outer_iter() as usize,
-                        );
                         match analytic_penalty_objective_contribution(
                             theta,
                             self.rho_dim,
                             latent.as_ref(),
-                            &registry,
+                            registry.as_ref(),
                         ) {
                             Ok(contribution) => cost + contribution.cost,
                             Err(_) => return f64::INFINITY,

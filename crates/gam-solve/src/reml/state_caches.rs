@@ -146,24 +146,6 @@ impl EvalShared {
     }
 }
 
-pub(crate) static OUTER_IFT_RESIDUAL_ENERGY_ITER: AtomicU64 = AtomicU64::new(0);
-
-// `pub` (paired with `current_outer_iter` below) so the IFT design-cache
-// memo-invalidation regression guard re-homed into gam-models by #1601 can drive
-// the outer-iteration counter through the canonical `outer_eval` module path.
-// Test-harness-only writer; the production caller is the in-crate outer loop.
-pub fn record_current_outer_iter_for_ift(iter: u64) {
-    OUTER_IFT_RESIDUAL_ENERGY_ITER.store(iter, Ordering::Relaxed);
-}
-
-pub fn current_outer_iter() -> u64 {
-    OUTER_IFT_RESIDUAL_ENERGY_ITER.load(Ordering::Relaxed)
-}
-
-pub(crate) fn reset_current_outer_iter_for_fit() {
-    OUTER_IFT_RESIDUAL_ENERGY_ITER.store(0, Ordering::Relaxed);
-}
-
 pub(crate) struct PenaltySubspace {
     pub(crate) evals: Array1<f64>,
     pub(crate) rank: usize,

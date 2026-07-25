@@ -321,7 +321,6 @@ pub(crate) fn run_outer_with_plan(
                 break;
             }
         }
-        crate::estimate::reml::outer_eval::record_current_outer_iter_for_ift(0);
         obj.reset();
         // Certified curvature-homotopy entry leg (#1007). When the objective
         // has a certified anchor (the SAE-manifold `η = 0` Eckart-Young

@@ -39,12 +39,6 @@ macro_rules! define_analytic_penalty_kind {
         }
 
         impl AnalyticPenaltyKind {
-            pub fn apply_schedule(&mut self, iter: usize) {
-                match self {
-                    $(AnalyticPenaltyKind::$variant(p) => Arc::make_mut(p).apply_schedule(iter),)*
-                }
-            }
-
             pub fn tier(&self) -> PenaltyTier {
                 match self {
                     $(AnalyticPenaltyKind::$variant(p) => p.dispatch_tier(),)*
@@ -217,12 +211,6 @@ impl AnalyticPenaltyRegistry {
 
     pub fn total_rho_count(&self) -> usize {
         self.penalties.iter().map(|p| p.rho_count()).sum()
-    }
-
-    pub fn apply_weight_schedules(&mut self, iter: usize) {
-        for penalty in &mut self.penalties {
-            penalty.apply_schedule(iter);
-        }
     }
 
     pub fn isometry_scalar_weights(&self) -> Vec<f64> {
