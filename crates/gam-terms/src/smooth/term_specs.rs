@@ -1078,10 +1078,9 @@ pub struct LinearTermSpec {
     /// in which case the realized column is exactly the numeric product.
     #[serde(default)]
     pub categorical_levels: Vec<(usize, u64)>,
-    /// Zero-centered shrinkage ridge with a REML-selected `λ`. It is enabled
-    /// by default so an unsupported non-intercept effect can be recovered as
-    /// zero; `linear(x, double_penalty=false)` requests an explicit
-    /// unpenalized/MLE effect.
+    /// Optional zero-centered shrinkage ridge with a REML-selected `λ`.
+    /// Parametric effects are unpenalized/MLE by default;
+    /// `linear(x, double_penalty=true)` opts into shrinkage.
     #[serde(default = "default_linear_term_double_penalty")]
     pub double_penalty: bool,
     #[serde(default)]
@@ -1192,7 +1191,7 @@ impl LinearTermSpec {
 }
 
 pub const fn default_linear_term_double_penalty() -> bool {
-    true
+    false
 }
 
 pub const fn default_pca_smooth_penalty() -> f64 {
@@ -9603,6 +9602,22 @@ mod factor_smooth_heldout_group_tests {
         assert!(
             err.to_string().contains("unseen grouping level"),
             "fs unseen-level refusal must name the defect, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod linear_term_contract_tests {
+    use super::LinearTermSpec;
+
+    #[test]
+    fn missing_linear_double_penalty_deserializes_to_unpenalized_mle() {
+        let term: LinearTermSpec =
+            serde_json::from_str(r#"{"name":"x","feature_col":0}"#)
+                .expect("minimal saved linear term");
+        assert!(
+            !term.double_penalty,
+            "descriptor and formula defaults must both preserve parametric MLE semantics"
         );
     }
 }
