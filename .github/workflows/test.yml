@@ -59,9 +59,38 @@ on:
         default: "10"
         required: false
 
+# The two triggers of this workflow want OPPOSITE concurrency semantics, and one
+# group cannot express both (#2437):
+#
+#   * DISPATCHED runs should supersede each other. A lane re-dispatching wants the
+#     newest answer, and a ref-keyed group with `cancel-in-progress` is right.
+#   * SCHEDULED runs must never be cancelled. The nightly IS the red ledger —
+#     `aggregate` is what writes `MASTER_FAILURES` — and there is no later run
+#     that recreates it.
+#
+# Keyed on `github.ref` alone, both triggers landed in the SAME group, because
+# `github.ref` is `refs/heads/main` for the cron and for every dispatch. So any
+# lane's dispatch cancelled the nightly, and a workflow-level group cancels EVERY
+# job in the run including `aggregate`. The measured consequence: the last five
+# runs were all cancelled — 30145478392, 30141465131, 30141248301, 30135536531,
+# and the 07-24 cron nightly 30069250206 — and nothing completed after
+# 29982196128 on 07-23, so the project went two days with no full test signal, by
+# construction and with nobody's behaviour at fault.
+#
+# Splitting the triggers into different groups fixes it without touching the
+# shard fan-out: a scheduled run sits in `rust-ci-<sha>` with cancellation OFF,
+# dispatches stay in `rust-ci-<ref>` with cancellation ON. A dispatch can no
+# longer cancel the nightly because they are no longer the same group, and
+# dispatches still supersede one another exactly as before.
+#
+# Cost: the nightly and one dispatch may now run concurrently — bounded at two
+# matrices, because dispatches still collapse among themselves. That is the whole
+# increase, and the "saving" it gives up was destroying the ledger. Note this is
+# NOT the same as SHA-keying the workflow unconditionally, which was rejected in
+# #2429 precisely because N distinct SHAs would then mean N concurrent matrices.
 concurrency:
-  group: rust-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: rust-ci-${{ github.event_name == 'schedule' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   actions: read
