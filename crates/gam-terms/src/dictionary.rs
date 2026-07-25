@@ -1496,14 +1496,118 @@ mod tests {
 
     #[test]
     fn nonconverged_multi_atom_fit_is_an_error_not_a_model() {
-        // SPEC 20: this problem moves on its first full sweep, so a one-sweep
-        // budget cannot satisfy the canonical fixed-point certificate. The solver
-        // must return finite numerical evidence instead of a partial model.
+        // SPEC 20: an iterate that has not closed the fixed-point certificate is
+        // numerical evidence, never a model.
+        //
+        // The fixture is the coupled cyclic-pair geometry of
+        // `coupled_topk_dictionary_reaches_fixed_point_under_small_budget_2372`:
+        // every row loads two shared atoms, so the sweep+reroute map has a dominant
+        // slow mode (ratio ~0.99) that needs thousands of plain sweeps to close the
+        // residual contract. The budget is two sweeps — the smallest budget the
+        // two-sweep sequence rule can evaluate at all, and one short of the first
+        // iteration at which the safeguarded geometric acceleration has a collinear
+        // step pair to extrapolate along (it needs both `prev_delta` and
+        // `this_delta`, which first coexist at iteration 2). The fit is therefore
+        // still genuinely MOVING when the budget ends, which is what makes the
+        // refusal residual-driven rather than an artifact of the budget: the
+        // returned evidence must itself violate the fixed-point contract. The
+        // independent sequence-rule law — that one agreeing pair is not a plateau
+        // even when the residuals are zero — is pinned by
+        // `single_sweep_cannot_certify_an_initialization_already_at_the_fixed_point`.
+        let truth = array![
+            [
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+            ],
+            [
+                std::f64::consts::FRAC_1_SQRT_2,
+                -std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+            ],
+            [
+                0.0,
+                0.0,
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0
+            ],
+        ];
+        let mut codes = Array2::<f64>::zeros((120, 3));
+        for row in 0..120 {
+            let atom = row % 3;
+            codes[[row, atom]] = 0.6 + 0.02 * ((row / 3) as f64);
+            codes[[row, (atom + 1) % 3]] = 0.3;
+        }
+        let x = codes.dot(&truth);
+        let config = LinearDictionaryConfig {
+            n_atoms: 3,
+            max_iter: 2,
+            top_k: 2,
+            assignment: LinearDictionaryAssignment::TopK,
+            temperature: DEFAULT_TEMPERATURE,
+            code_ridge: DEFAULT_CODE_RIDGE,
+            tolerance: DEFAULT_TOLERANCE,
+            center_rank_one: false,
+        };
+        let err = fit_linear_dictionary(x.view(), &config)
+            .expect_err("a still-moving iterate cannot certify an EV plateau");
+        match err {
+            LinearDictionaryError::NonConvergence {
+                iterations,
+                explained_variance,
+                ev_residual,
+                routing_residual,
+                accepted_births,
+                tolerance,
+            } => {
+                assert_eq!(iterations, 2);
+                assert!(explained_variance.is_finite());
+                assert!(ev_residual.is_finite());
+                assert!(routing_residual.is_finite());
+                // The premise: this fixture is genuinely non-converged at its
+                // budget end, so the refusal is attributable to the numerical
+                // evidence the error carries and not to the budget alone.
+                assert!(
+                    ev_residual > tolerance || routing_residual > tolerance || accepted_births > 0,
+                    "fixture must still be moving: ev_residual {ev_residual:.3e}, \
+                     routing_residual {routing_residual:.3e}, births {accepted_births} \
+                     against tolerance {tolerance:.3e}"
+                );
+                assert_eq!(tolerance, DEFAULT_TOLERANCE);
+            }
+            other => panic!("expected typed non-convergence evidence, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn single_sweep_cannot_certify_an_initialization_already_at_the_fixed_point() {
+        // The complement of the test above: a plateau is a SEQUENCE property, so a
+        // one-sweep budget must be refused EVEN WHEN that single sweep's residual
+        // pair already agrees to machine precision. An initialization that happens
+        // to sit at the fixed point must not self-certify without the solver ever
+        // demonstrating stability.
+        //
+        // The fixture makes that situation exact rather than incidental. Rows are
+        // the axis directions e_{i mod 3} scaled by 1 + 0.01·i, so `initialize_atoms`
+        // seeds atom 0 from the max-norm row (row 23, direction e2) and atom 1 from
+        // the row farthest from it (row 22, direction e1). Under top-1 routing each
+        // e1/e2 row carries its own norm into its own atom and the e0 rows project
+        // to zero, so the per-atom penalized-LS sweep reproduces {e2, e1} exactly:
+        // the seeded dictionary IS a fixed point of the sweep+reroute map, and both
+        // residuals are zero on the only sweep the budget allows.
         let mut x = Array2::<f64>::zeros((24, 3));
         for row in 0..24 {
             x[[row, row % 3]] = 1.0 + 0.01 * row as f64;
         }
-        let config = LinearDictionaryConfig {
+        let mut config = LinearDictionaryConfig {
             n_atoms: 2,
             max_iter: 1,
             top_k: 1,
@@ -1514,7 +1618,7 @@ mod tests {
             center_rank_one: false,
         };
         let err = fit_linear_dictionary(x.view(), &config)
-            .expect_err("one sweep cannot certify an EV plateau");
+            .expect_err("a single sweep is one data point, not a plateau");
         match err {
             LinearDictionaryError::NonConvergence {
                 iterations,
@@ -1526,15 +1630,36 @@ mod tests {
             } => {
                 assert_eq!(iterations, 1);
                 assert!(explained_variance.is_finite());
-                assert!(ev_residual.is_finite());
-                assert!(routing_residual.is_finite());
+                // The point of this fixture: the residual contract is ALREADY met on
+                // the one sweep, and the fit is refused anyway. If these ever start
+                // exceeding the tolerance the fixture has stopped witnessing the
+                // sequence rule and this test would silently become a duplicate of
+                // `nonconverged_multi_atom_fit_is_an_error_not_a_model`.
                 assert!(
-                    ev_residual > tolerance || routing_residual > tolerance || accepted_births > 0
+                    ev_residual <= tolerance,
+                    "seeded fixed point must agree on the first sweep, got ev_residual \
+                     {ev_residual:.3e} against tolerance {tolerance:.3e}"
                 );
+                assert!(
+                    routing_residual <= tolerance,
+                    "seeded fixed point must survive its own reroute, got routing_residual \
+                     {routing_residual:.3e} against tolerance {tolerance:.3e}"
+                );
+                assert_eq!(accepted_births, 0);
                 assert_eq!(tolerance, DEFAULT_TOLERANCE);
             }
             other => panic!("expected typed non-convergence evidence, got: {other}"),
         }
+
+        // The same problem with a budget that can complete the second sweep does
+        // certify — so the refusal above is the sequence rule and nothing else.
+        config.max_iter = 2;
+        let fit = fit_linear_dictionary(x.view(), &config)
+            .expect("two agreeing sweeps certify the plateau");
+        assert_eq!(fit.iterations, 2);
+        assert!(fit.convergence.ev_residual <= fit.convergence.tolerance);
+        assert!(fit.convergence.routing_residual <= fit.convergence.tolerance);
+        assert_eq!(fit.convergence.accepted_births, 0);
     }
 
     #[test]
