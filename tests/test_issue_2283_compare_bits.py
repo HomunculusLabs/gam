@@ -34,7 +34,12 @@ def _pair(compare):
             "bits_test_positions_sha256": "d" * 64,
             "bits_row_ids_sha256": "e" * 64,
         },
-        "config": {"K": 32768, "top_k": 32},
+        # The v2 pair schema this fixture declares carries the DECLARED
+        # amortization horizon, separately from the bits estimation subsample, and
+        # the comparator rejects any row without it as pre-#2283 currency. A
+        # fixture that claims v2 has to supply it, or the pairing assertions below
+        # never reach the pairing logic they are about.
+        "config": {"K": 32768, "top_k": 32, "amortization_horizon": 120_000},
     }
 
     def record(arm):
@@ -48,6 +53,7 @@ def _pair(compare):
             "bits_test_positions_sha256": identity["data"]["bits_test_positions_sha256"],
             "bits_row_ids_sha256": identity["data"]["bits_row_ids_sha256"],
             "bits_dict_params_faithful": True,
+            "bits_amortization_horizon": identity["config"]["amortization_horizon"],
             "hybrid_phase": "curved-resume" if arm == "hybrid_rust" else None,
             "flat_checkpoint_sha256": "f" * 64 if arm == "hybrid_rust" else None,
         }

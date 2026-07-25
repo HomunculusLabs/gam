@@ -14,6 +14,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import sys
 
 
 # v2 (#2283): dictionary bits are charged against a DECLARED amortization_horizon
@@ -120,6 +122,32 @@ def _components(record, target):
     return total, components
 
 
+def _predicted_support_margin(hybrid) -> float:
+    """`log2 C(G, L0)` of the external config minus that of the hybrid config.
+
+    Uses the same overflow-safe product form the Rust scorer's `selection_bits`
+    uses, so this is the scorer's own arithmetic rather than an approximation of
+    it. A chart firing spends `1 + d` of the active-scalar budget where a flat
+    firing spends one, so the hybrid names fewer atoms per token while
+    transmitting the same number of scalars; that is the whole predicted effect.
+    """
+    # Imported here, against this file's own directory: the comparator's
+    # regression test loads this module by path with `spec_from_file_location`
+    # and never puts the experiment directory on `sys.path`.
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from crossover_theorem_check import selection_bits
+
+    flat_actives = int(hybrid["top_k"]) - int(hybrid["curved_k"]) * (1 + int(hybrid["d_atom"]))
+    external = selection_bits(int(hybrid["K"]), int(hybrid["top_k"]))
+    paired = selection_bits(
+        int(hybrid["k_flat"]) + int(hybrid["curved_atoms"]),
+        flat_actives + int(hybrid["curved_k"]),
+    )
+    return external - paired
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("results")
@@ -150,8 +178,35 @@ def main():
             f"{delta['residual']:+.1f}/{delta['dictionary']:+.1f})"
         )
 
-    external_099, _ = _components(external, "0.99")
-    hybrid_099, _ = _components(hybrid, "0.99")
+    external_099, external_099_parts = _components(external, "0.99")
+    hybrid_099, hybrid_099_parts = _components(hybrid, "0.99")
+
+    # The theorem's claim for this configuration, in closed form and with no
+    # fitted quantity in it: the faithful k_flat config equalises the decoder
+    # scalar counts exactly, so Ddict = 0; a circle-class chart has span
+    # s = d + 1, so the crossover code term (s - d - 1)/2 * log2(lambda/delta) is
+    # identically zero. What is left is the support term of the two
+    # CONFIGURATIONS. Printing it next to the measured margin is what makes the
+    # verdict readable: a margin that is not the support term is some other
+    # effect wearing the theorem's name.
+    predicted = _predicted_support_margin(hybrid)
+    print(
+        f"theorem @R2=0.99: Ddict 0.000 (measured {external_099_parts['dictionary'] - hybrid_099_parts['dictionary']:+.3f})"
+        f" · Dcode 0.000 (measured {external_099_parts['code'] - hybrid_099_parts['code']:+.3f})"
+        f" · Dsupport {predicted:+.3f} (measured {external_099_parts['support'] - hybrid_099_parts['support']:+.3f})"
+    )
+    for row in (external, hybrid):
+        audit = row.get("bits_faithfulness_audit")
+        currency = None if audit is None else audit.get("support_currency")
+        if currency is not None:
+            print(
+                f"  {row['arm']:>13} support currency: combinatorial "
+                f"{currency['combinatorial_bits']:.3f} vs independent "
+                f"{currency['independent_support_bits']:.3f} "
+                f"(gap {currency['combinatorial_bits'] - currency['independent_support_bits']:+.3f}, "
+                f"{currency['atoms_that_ever_fire']}/{currency['atoms']} atoms ever fire)"
+            )
+
     if hybrid_099 >= external_099:
         raise ValueError(
             f"#2283 failed: hybrid {hybrid_099:.6f} does not beat paired external "
