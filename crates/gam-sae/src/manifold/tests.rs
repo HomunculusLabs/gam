@@ -1,9 +1,12 @@
 use gam_linalg::faer_ndarray::fast_ata;
 
 pub(crate) use super::tests_recovery_split_780::{
-    FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
-    diagonal_latent_cache, fixed_state_logdet_sample, gamma_fd_tiny_fixture,
-    warmstart_test_objective, warmstart_test_objective_with_evaluator,
+    FdAnchorRegime, FiniteDifferenceStratumCertificate,
+    certified_central_logdet_difference, certified_fd_anchor, decisive_logit_homotopy,
+    decisive_logit_pattern, diagonal_latent_cache, fixed_state_logdet_sample,
+    gamma_fd_tiny_fixture, rho_ladder_family, rho_ladder_family_with_tolerance,
+    smoothing_and_decisive_family,
+    sparse_lift_ladder, warmstart_test_objective, warmstart_test_objective_with_evaluator,
 };
 use super::*;
 use approx::assert_abs_diff_eq;

@@ -11,8 +11,10 @@ use super::derivative_oracle::{
 };
 use super::dual::{Dual, DualKinkBranch};
 use super::tests::{
-    FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
-    fixed_state_logdet_sample, gamma_fd_tiny_fixture,
+    FdAnchorRegime, FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
+    certified_fd_anchor, decisive_logit_homotopy, decisive_logit_pattern,
+    fixed_state_logdet_sample, gamma_fd_tiny_fixture, rho_ladder_family,
+    rho_ladder_family_with_tolerance, smoothing_and_decisive_family, sparse_lift_ladder,
 };
 use super::*;
 use approx::assert_abs_diff_eq;
@@ -707,20 +709,6 @@ fn dense_trace_hinv_dh_2156(h: &Array2<f64>, dh: &Array2<f64>) -> f64 {
     trace
 }
 
-fn configure_decisive_softmax_logits_2156(term: &mut SaeManifoldTerm) {
-    for r in 0..term.n_obs() {
-        let center = 0.05 * (r as f64);
-        let margin = 1.55 + 0.04 * (r as f64);
-        if r % 2 == 0 {
-            term.assignment.logits[[r, 0]] = center + margin;
-            term.assignment.logits[[r, 1]] = center - margin;
-        } else {
-            term.assignment.logits[[r, 0]] = center - 0.85 * margin;
-            term.assignment.logits[[r, 1]] = center + 0.85 * margin;
-        }
-    }
-}
-
 fn assert_branch_certificate_green_2156(label: &str, certificate: &BranchCertificate) {
     certificate
         .assert_derivative_reportable()
@@ -910,36 +898,36 @@ fn assert_dual_ard_logdet_parity_2156(
 
 #[test]
 pub(crate) fn end_to_end_dual_vs_analytic_logdet_parity_battery_2156_2144() {
-    let (mut softmax_term, target, mut softmax_rho) = gamma_fd_tiny_fixture();
-    softmax_rho.log_lambda_sparse = 0.5;
-    softmax_rho.log_lambda_smooth = vec![-1.7, -1.2];
-    softmax_term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &softmax_rho,
-            None,
+    let (_, target, _) = gamma_fd_tiny_fixture();
+    // The declared smoothing ladder brackets the historical `[-1.7, -1.2]` pair
+    // from both sides. That pair named a converged mode whose exact
+    // observed information has since left its positive-definite face on the
+    // ARD axis (measured: `α·tr(H⁻¹) = 27.3` against `n_active = 10`, i.e.
+    // coordinate curvature ≈ `−0.77·α`), so the level is now a saddle rather
+    // than the maximum this parity battery differentiates.
+    let softmax_anchor = certified_fd_anchor(
+        "gam#2156 softmax parity battery",
+        &target,
+        FdAnchorRegime::smooth_majorizer_branch(),
+        smoothing_and_decisive_family(
+            || {
+                let (term, _, mut rho) = gamma_fd_tiny_fixture();
+                rho.log_lambda_sparse = 0.5;
+                (term, rho)
+            },
+            &[
+                (-1.7, -1.2),
+                (-1.2, -0.7),
+                (-0.7, -0.2),
+                (-2.2, -1.7),
+                (-0.2, 0.3),
+            ],
             200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged softmax parity cache");
-    configure_decisive_softmax_logits_2156(&mut softmax_term);
-    let (softmax_value, softmax_loss, softmax_cache) = softmax_term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &softmax_rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("fixed-branch softmax parity cache");
-    assert!(
-        softmax_value.is_finite() && softmax_loss.total().is_finite(),
-        "softmax parity fixture must produce a finite cache"
+        ),
     );
+    let softmax_term = softmax_anchor.term;
+    let softmax_rho = softmax_anchor.rho;
+    let softmax_cache = softmax_anchor.cache;
     let softmax_theta_probes: Vec<(usize, usize)> = (0..softmax_cache.n_rows())
         .flat_map(|row| (0..softmax_cache.row_dims[row]).map(move |local| (row, local)))
         .collect();
@@ -1083,22 +1071,15 @@ pub(crate) fn branch_guarded_dual_oracle_pins_live_softmax_channels_2156() {
             1.0e-6,
         )
         .expect("converged softmax cache");
-    configure_decisive_softmax_logits_2156(&mut softmax_term);
-    let (softmax_value, softmax_loss, softmax_cache) = softmax_term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &softmax_rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("fixed-state softmax cache");
-    assert!(
-        softmax_value.is_finite() && softmax_loss.total().is_finite(),
-        "softmax guard fixture must produce a finite fixed-state cache"
+    let decisive = decisive_logit_pattern(&softmax_term);
+    let anchor = certified_fd_anchor(
+        "gam#2156 branch-guarded dual oracle",
+        &target,
+        FdAnchorRegime::smooth_majorizer_branch(),
+        decisive_logit_homotopy(&softmax_term, &softmax_rho, &decisive),
     );
+    let softmax_term = anchor.term;
+    let softmax_cache = anchor.cache;
     let softmax_solver = DeflatedArrowSolver::plain(&softmax_cache);
     let softmax_gamma = softmax_term
         .logdet_theta_adjoint(&softmax_rho, &softmax_cache, &softmax_solver)
@@ -1189,18 +1170,15 @@ pub(crate) fn sae_logdet_theta_adjoint_logit0_dense_trace_localization_2156() {
         1.0e-6,
     )
     .expect("converged cache");
-    configure_decisive_softmax_logits_2156(&mut term);
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("off-kink fixed-state cache");
+    let decisive = decisive_logit_pattern(&term);
+    let anchor = certified_fd_anchor(
+        "gam#2156 logit0 dense trace localization",
+        &target,
+        FdAnchorRegime::smooth_majorizer_branch(),
+        decisive_logit_homotopy(&term, &rho, &decisive),
+    );
+    let term = anchor.term;
+    let cache = anchor.cache;
 
     let row = 0usize;
     let local_w = 0usize;
@@ -1366,34 +1344,21 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_on_tiny_fixture() {
         1.0e-6,
     )
     .expect("converged cache");
-    for r in 0..term.n_obs() {
-        let center = 0.05 * (r as f64);
-        let margin = 1.55 + 0.04 * (r as f64);
-        if r % 2 == 0 {
-            term.assignment.logits[[r, 0]] = center + margin;
-            term.assignment.logits[[r, 1]] = center - margin;
-        } else {
-            term.assignment.logits[[r, 0]] = center - 0.85 * margin;
-            term.assignment.logits[[r, 1]] = center + 0.85 * margin;
-        }
-    }
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("off-kink fixed-state cache");
+    let decisive = decisive_logit_pattern(&term);
+    let anchor = certified_fd_anchor(
+        "gam#2156 tiny-fixture theta adjoint",
+        &target,
+        FdAnchorRegime::smooth_majorizer_branch(),
+        decisive_logit_homotopy(&term, &rho, &decisive),
+    );
+    let term = anchor.term;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     let probes = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (3usize, 1usize, SaeLocalRowVar::Coord { atom: 0, axis: 0 }),
@@ -1486,39 +1451,53 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
     )
     .expect("off-manifold fixture converges with both atoms alive");
 
-    // Evaluation ρ (lifted off the floor so the deflated legs are well above FD
-    // noise), θ̂ frozen.
-    rho.log_lambda_sparse = 0.5;
-    for value in rho.log_lambda_smooth.iter_mut() {
-        *value = -2.0;
-    }
-    rho.log_ard = vec![ndarray::array![-1.2_f64], ndarray::array![-1.0_f64]];
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
+    // Evaluation ρ, θ̂ frozen: lifted off the floor so the deflated legs sit
+    // above finite-difference noise, and certified to be a MAXIMUM there. The
+    // historical `(0.5, −2.0, [−1.2, −1.0])` lift is the ladder's first member;
+    // #2398 measured that it now lands on a genuine exact-`A` saddle, where the
+    // deflated-PD state this gate differentiates does not exist at all. The
+    // ladder walks the lift down until a deflated maximum is certified.
+    let eval_rho_ladder: Vec<(String, SaeManifoldRho)> = [
+        (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
+        (0.5, -1.5, -1.2, -1.0),
+        (0.2, -2.0, -1.2, -1.0),
+        (0.2, -1.5, -1.0, -0.8),
+        (0.0, -1.5, -1.0, -0.8),
+        (-0.2, -1.2, -0.8, -0.6),
+        (-0.5, -1.0, -0.5, -0.5),
+    ]
+    .iter()
+    .map(|&(sparse, smooth, ard0, ard1)| {
+        let mut candidate = rho.clone();
+        candidate.log_lambda_sparse = sparse;
+        for value in candidate.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        candidate.log_ard = vec![ndarray::array![ard0], ndarray::array![ard1]];
+        (
+            format!(
+                "eval rho (sparse={sparse:.1}, smooth={smooth:.1}, ard=[{ard0:.1}, {ard1:.1}])"
+            ),
+            candidate,
         )
-        .expect("deflated fixed-state cache");
-    // PRECONDITION: this test only has teeth if the DK path actually fires.
-    assert!(
-        cache
-            .deflated_row_directions
-            .iter()
-            .any(|dirs| !dirs.is_empty()),
-        "deflated-fixture adjoint test requires per-row deflation to be present"
+    })
+    .collect();
+    let anchor = certified_fd_anchor(
+        "#2330 deflated-fixture theta adjoint",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, eval_rho_ladder, 0),
     );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma_joint");
 
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     let mut checked = 0usize;
     let mut worst = 0.0_f64;
     for row in 0..term.n_obs() {
@@ -1866,7 +1845,7 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_l
 pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144() {
     use gam_problem::RowMetric;
     use std::sync::Arc;
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
     let n = term.n_obs();
     let p = term.output_dim();
@@ -1901,24 +1880,25 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
     // discriminating property of this test is unchanged either way:
     // `Jᵀ U Uᵀ J ≠ JᵀJ` separates whitened row jets from raw ones, which is
     // what the fixed-state FD comparison pins).
-    rho.log_lambda_sparse = -0.8;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    let anchor = certified_fd_anchor(
+        "#2144 full-rank whitened theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &[-0.8, -0.4, 0.0, 0.4, 0.8, 1.2]),
             200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged full-rank whitened cache");
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     let probes_idx = [
         (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
         (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
@@ -2032,28 +2012,31 @@ pub(crate) fn ordered_beta_bernoulli_sparse_strength_trace_matches_dense_fd() {
 #[test]
 pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_learnable_alpha_1625()
  {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
-    // ρ₀ = 0.6 drives a PD learnable-α cache on this fixture (a sweep shows the
-    // default 0.1 and rho0 <= -0.8 were poorly conditioned on this fixture).
-    rho.log_lambda_sparse = 0.6;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    // The historical `ρ₀ = 0.6` was itself the result of a hand sweep for a
+    // level that drives a PD learnable-α cache. The sweep is the ladder; the
+    // certificate is what the sweep was looking for.
+    let anchor = certified_fd_anchor(
+        "#1625 learnable-alpha ordered Beta--Bernoulli theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family_with_tolerance(
+            &term,
+            sparse_lift_ladder(&rho, &[0.6, 0.9, 1.2, 0.3, 0.0, 1.5]),
             200,
-            0.4,
             1.0e-8,
-            1.0e-8,
-        )
-        .expect("converged learnable-α cache");
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let gamma = term
         .logdet_theta_adjoint(&rho, &cache, &solver)
         .expect("Gamma");
     let h = 1.0e-5;
-    let fd_stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    let fd_stratum = anchor.stratum;
     // Probe both atoms across distinct rows so the shared-mass channel is
     // exercised on both columns under learnable alpha.
     let probes = [
@@ -2162,41 +2145,44 @@ fn assert_theta_adjoint_from_probes_matches_dense(
 /// dense off-diagonal channel + the core t–t / t–β / β–β selected-inverse folds.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
-    rho.log_lambda_sparse = 0.5;
-    let (_v, _l, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    let (term, target, rho) = gamma_fd_tiny_fixture();
+    let anchor = certified_fd_anchor(
+        "#2080 from-probes softmax parity",
+        &target,
+        FdAnchorRegime::undeflated(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &UNDEFLATED_SPARSE_LIFTS),
             200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged softmax cache");
-    assert_theta_adjoint_from_probes_matches_dense(&term, &rho, &cache);
+        ),
+    );
+    assert_theta_adjoint_from_probes_matches_dense(&anchor.term, &anchor.rho, &anchor.cache);
 }
+
+/// The declared `log λ_sparse` ladder for the from-probes parity gates. The
+/// bundle they compare against carries no Daleckii–Krein correction, so the
+/// gate is only defined where no row deflates; a stronger assignment penalty
+/// conditions the over-parametrized chart out of the deflating regime, so the
+/// ladder climbs.
+const UNDEFLATED_SPARSE_LIFTS: [f64; 6] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0];
 
 /// The ordered Beta--Bernoulli majorizer is row-local, so the full-basis probe
 /// bundle must reproduce the dense theta adjoint exactly.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_ordered_beta_bernoulli() {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
-    rho.log_lambda_sparse = 0.5;
-    let (_v, _l, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    let anchor = certified_fd_anchor(
+        "#2080 from-probes ordered Beta--Bernoulli parity",
+        &target,
+        FdAnchorRegime::undeflated(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &UNDEFLATED_SPARSE_LIFTS),
             200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged ordered Beta--Bernoulli cache");
-    assert_theta_adjoint_from_probes_matches_dense(&term, &rho, &cache);
+        ),
+    );
+    assert_theta_adjoint_from_probes_matches_dense(&anchor.term, &anchor.rho, &anchor.cache);
 }
 
 /// #2080 θ-adjoint from-probes — DEFLATION hard-refuse. On the known-deflating
@@ -2205,24 +2191,25 @@ fn sae_logdet_theta_adjoint_from_probes_matches_ordered_beta_bernoulli() {
 /// silently drop the Daleckii–Krein correction the plain-S⁻¹ bundle cannot rebuild.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
-    rho.log_lambda_sparse = 0.5;
-    let (_v, _l, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    // The hard-refuse only has teeth on a state that genuinely deflates, so the
+    // deflating regime IS the gate's premise. Declaring the ladder and
+    // certifying the accepted member replaces the "re-pick ρ if not" note the
+    // old inline assertion could only ever print.
+    let anchor = certified_fd_anchor(
+        "#2080 from-probes deflation hard-refuse",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &[0.5, 0.2, 0.0, -0.3, -0.6, -1.0]),
             5,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged learnable ordered Beta--Bernoulli cache");
-    assert!(
-        cache.deflated_row_directions.iter().any(|d| !d.is_empty()),
-        "fixture must genuinely deflate to exercise the hard-refuse (re-pick ρ if not)"
+        ),
     );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let k = cache.k;
     let sqrt_k = (k as f64).sqrt();
     let probes: Vec<ndarray::Array1<f64>> = (0..k)

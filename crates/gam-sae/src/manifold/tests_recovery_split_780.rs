@@ -5,6 +5,7 @@ use super::*;
 use super::derivative_oracle::{
     BranchCertificate, EigenDerivativeRoute, MajorizerAnchorMode, PivotBranch,
 };
+use super::dual::DualKinkBranch;
 use approx::assert_abs_diff_eq;
 use gam_solve::arrow_schur::{
     ArrowFactorSlab, ArrowHtbetaCache, ArrowPcgDiagnostics, ArrowSolverMode, ArrowUndampedFactors,
@@ -1659,6 +1660,453 @@ pub(crate) fn certified_central_logdet_difference(
     center.assert_same_stratum(&format!("{label} (+h)"), &plus.stratum);
     center.assert_same_stratum(&format!("{label} (-h)"), &minus.stratum);
     (plus.value - minus.value) / (2.0 * step)
+}
+
+/// Row-deflation regime a finite-difference anchor must PROVE.
+///
+/// The deflation state is not a detail of the fixture: it decides which
+/// analytic object even exists at the point. The plain-`S⁻¹` probe bundle
+/// cannot reconstruct the Daleckii–Krein correction, so a from-probes parity
+/// gate is only defined on an undeflated cache; conversely a test whose whole
+/// subject is the deflated correction is vacuous on an undeflated one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FdAnchorDeflation {
+    /// No row may deflate.
+    NoRowDeflates,
+    /// At least one row must deflate.
+    SomeRowDeflates,
+    /// Deflation does not change the object under test.
+    Unconstrained,
+}
+
+/// The regime a finite-difference evaluation point must certify before it may
+/// be used as a derivative-verification anchor.
+///
+/// Every field is a property of the STATE, never of the comparison the test
+/// goes on to make. A search that accepted candidates by how well the analytic
+/// value matched its finite difference would be fitting the oracle to the
+/// answer; a search that accepts by these predicates only is choosing a point
+/// at which the asserted derivative is defined.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FdAnchorRegime {
+    pub(crate) deflation: FdAnchorDeflation,
+    /// Require the production branch classifier to report one resolved smooth
+    /// branch: no tied majorizer kink, no unresolved invariant-subspace block,
+    /// and strictly positive Cholesky pivots. This is the classifier's OWN
+    /// decision, not a numeric margin re-derived by the test.
+    pub(crate) reportable_derivative_branch: bool,
+}
+
+impl FdAnchorRegime {
+    /// The regime a `∂log|H|/∂θ` majorizer-channel finite difference needs: one
+    /// resolved smooth branch, deflation irrelevant.
+    pub(crate) fn smooth_majorizer_branch() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::Unconstrained,
+            reportable_derivative_branch: true,
+        }
+    }
+
+    /// The regime the from-probes parity gate needs: an undeflated cache, since
+    /// the plain-`S⁻¹` bundle carries no Daleckii–Krein correction to compare.
+    pub(crate) fn undeflated() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::NoRowDeflates,
+            reportable_derivative_branch: false,
+        }
+    }
+
+    /// The weakest regime: the frozen state must merely BE a maximum the
+    /// criterion will price. Everything the gate then differentiates is defined
+    /// there; nothing further is asserted about the state.
+    pub(crate) fn any_maximum() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::Unconstrained,
+            reportable_derivative_branch: false,
+        }
+    }
+
+    /// The regime a deflated-correction test needs: the Daleckii–Krein path
+    /// must actually fire, or the gate is vacuous.
+    pub(crate) fn deflated() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::SomeRowDeflates,
+            reportable_derivative_branch: false,
+        }
+    }
+}
+
+/// A frozen-θ̂ evaluation state whose regime has been PROVED rather than hoped
+/// for, together with the structural stratum its finite differences must stay
+/// inside.
+pub(crate) struct CertifiedFdAnchor {
+    pub(crate) term: SaeManifoldTerm,
+    pub(crate) rho: SaeManifoldRho,
+    pub(crate) cache: ArrowFactorCache,
+    pub(crate) stratum: FiniteDifferenceStratumCertificate,
+}
+
+/// One declared member of an anchor family.
+pub(crate) struct FdAnchorCandidate {
+    /// What this member is, in the family's own terms. Reported on acceptance
+    /// and on rejection.
+    pub(crate) description: String,
+    pub(crate) rho: SaeManifoldRho,
+    pub(crate) term: SaeManifoldTerm,
+    /// Inner-solve budget spent BEFORE the state is frozen. Zero anchors the
+    /// candidate exactly where the caller put it; a positive budget declares
+    /// that the candidate is "wherever the inner solve converges from here",
+    /// and a solve that refuses is a rejection of this member, not a panic.
+    pub(crate) converge_iters: usize,
+    /// Inner-solve gradient/objective tolerance used by that budget. The
+    /// frozen build below never solves, so this governs only how tightly the
+    /// candidate's own mode is reached.
+    pub(crate) converge_tolerance: f64,
+    /// Assignment-logit pattern this member homotopes toward AFTER its
+    /// convergence budget, with its homotopy weight. `None` freezes the
+    /// converged logits unchanged.
+    pub(crate) decisive_mix: Option<(Array2<f64>, f64)>,
+}
+
+/// Reject-or-accept one candidate state against a regime.
+fn classify_fd_anchor_candidate(
+    target: &Array2<f64>,
+    regime: FdAnchorRegime,
+    candidate: FdAnchorCandidate,
+) -> Result<CertifiedFdAnchor, String> {
+    let FdAnchorCandidate {
+        rho,
+        mut term,
+        converge_iters,
+        converge_tolerance,
+        decisive_mix,
+        ..
+    } = candidate;
+    if converge_iters > 0 {
+        term.penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            converge_iters,
+            0.4,
+            converge_tolerance,
+            converge_tolerance,
+        )
+        .map_err(|error| format!("inner solve refused to converge: {error}"))?;
+    }
+    if let Some((decisive, weight)) = decisive_mix {
+        if decisive.dim() != term.assignment.logits.dim() {
+            return Err(format!(
+                "decisive logit pattern {:?} does not match the assignment layout {:?}",
+                decisive.dim(),
+                term.assignment.logits.dim()
+            ));
+        }
+        term.assignment.logits =
+            &term.assignment.logits * (1.0 - weight) + &decisive * weight;
+    }
+    // `inner_max_iter = 0` freezes θ̂ at the candidate state: the anchor is the
+    // point the test declares, not whatever the inner solve would wander to.
+    let (value, loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .map_err(|error| format!("criterion refused the frozen state: {error}"))?;
+    if !(value.is_finite() && loss.total().is_finite()) {
+        return Err(format!(
+            "frozen state priced non-finitely (value={value}, loss={})",
+            loss.total()
+        ));
+    }
+    let deflated_rows = cache
+        .deflated_row_directions
+        .iter()
+        .filter(|directions| !directions.is_empty())
+        .count();
+    match regime.deflation {
+        FdAnchorDeflation::NoRowDeflates if deflated_rows > 0 => {
+            return Err(format!("{deflated_rows} row(s) deflate; regime requires none"));
+        }
+        FdAnchorDeflation::SomeRowDeflates if deflated_rows == 0 => {
+            return Err("no row deflates; regime requires at least one".to_string());
+        }
+        FdAnchorDeflation::NoRowDeflates
+        | FdAnchorDeflation::SomeRowDeflates
+        | FdAnchorDeflation::Unconstrained => {}
+    }
+    if regime.reportable_derivative_branch {
+        let certificate =
+            BranchCertificate::from_arrow_cache(&cache, MajorizerAnchorMode::FrozenAnchor);
+        certificate
+            .assert_derivative_reportable()
+            .map_err(|error| format!("derivative branch is not reportable: {error}"))?;
+        if let Some(record) = certificate
+            .kink_branches
+            .iter()
+            .find(|record| record.branch == DualKinkBranch::Tie)
+        {
+            return Err(format!("majorizer kink branch is tied: {record:?}"));
+        }
+        for (name, branch) in [
+            ("min row pivot", certificate.min_row_pivot_branch),
+            ("min pivot", certificate.min_pivot_branch),
+            ("max pivot", certificate.max_pivot_branch),
+        ] {
+            if branch != PivotBranch::Positive {
+                return Err(format!("{name} branch is {branch:?}, not Positive"));
+            }
+        }
+        if certificate.beta_dim > 0 && certificate.min_schur_pivot_branch != PivotBranch::Positive {
+            return Err(format!(
+                "min Schur pivot branch is {:?}, not Positive",
+                certificate.min_schur_pivot_branch
+            ));
+        }
+    }
+    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    Ok(CertifiedFdAnchor {
+        term,
+        rho,
+        cache,
+        stratum,
+    })
+}
+
+/// Accept the FIRST member of a declared, ordered, finite candidate family
+/// whose frozen state certifies `regime`.
+///
+/// # Why a family and not a constant
+///
+/// The states that exercise the interesting θ-adjoint paths sit next to the
+/// boundaries that make those paths interesting: the majorizer's `sign(H_kj)`
+/// kink, the row-deflation floor, and the exact observed information's
+/// positive-definite face. A hand-written constant that lands between them is
+/// correct only for the production code it was measured against; the same
+/// constant is a refusal — not a weaker test, an ABSENT one — as soon as the
+/// boundaries move. Every such constant in this module had in fact become a
+/// refusal.
+///
+/// A declared family plus a state predicate is the stable form of the same
+/// intent. The family is ordered by how strongly it expresses the test's
+/// purpose (most decisive first), the predicate is the regime the asserted
+/// derivative needs to exist, and the accepted member is reported. Nothing in
+/// the predicate can see the finite difference or the analytic value, so this
+/// cannot converge on "whatever agrees".
+pub(crate) fn certified_fd_anchor(
+    label: &str,
+    target: &Array2<f64>,
+    regime: FdAnchorRegime,
+    candidates: Vec<FdAnchorCandidate>,
+) -> CertifiedFdAnchor {
+    assert!(
+        !candidates.is_empty(),
+        "{label}: an anchor family must declare at least one candidate"
+    );
+    let mut rejections = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let description = candidate.description.clone();
+        match classify_fd_anchor_candidate(target, regime, candidate) {
+            Ok(anchor) => {
+                eprintln!("{label}: anchor certified at {description} ({regime:?})");
+                return anchor;
+            }
+            Err(reason) => rejections.push(format!("  {description}: {reason}")),
+        }
+    }
+    panic!(
+        "{label}: no member of the declared anchor family certifies {regime:?}. \
+         The regime the asserted derivative needs does not exist anywhere on this \
+         family, so widening the family is a fixture decision and weakening the \
+         regime would change what is proved. Rejections:\n{}",
+        rejections.join("\n")
+    );
+}
+
+/// The declared homotopy between a state that is positive definite BY
+/// CONSTRUCTION and a state that is off the majorizer's sign kink BY
+/// CONSTRUCTION.
+///
+/// `converged` is the inner mode the criterion just reached, so its exact
+/// observed information is positive definite; but at a fitted optimum an
+/// entropy-Hessian off-diagonal can sit exactly on the Gershgorin `|H_kj|`
+/// sign flip, where no finite-difference stencil validates a subgradient.
+/// `decisive` is a deterministic assignment pattern with margins far from that
+/// flip, but far enough from the mode that the exact observed information can
+/// leave its positive-definite face.
+///
+/// Neither endpoint is usable alone; the segment between them is where both
+/// hold. Walking it from the decisive end takes the strongest off-kink state
+/// that is still a maximum, which is exactly the anchor these gates always
+/// meant to name.
+pub(crate) fn decisive_logit_homotopy(
+    converged: &SaeManifoldTerm,
+    rho: &SaeManifoldRho,
+    decisive: &Array2<f64>,
+) -> Vec<FdAnchorCandidate> {
+    let base = converged.assignment.logits.clone();
+    assert_eq!(
+        base.dim(),
+        decisive.dim(),
+        "decisive logit pattern must match the fixture's assignment layout"
+    );
+    DECISIVE_HOMOTOPY_WEIGHTS
+        .into_iter()
+        .map(|s| {
+            let mut term = converged.clone();
+            term.assignment.logits = &base * (1.0 - s) + decisive * s;
+            FdAnchorCandidate {
+                description: format!("decisive-logit homotopy s={s:.2}"),
+                rho: rho.clone(),
+                term,
+                converge_iters: 0,
+                converge_tolerance: DEFAULT_ANCHOR_CONVERGE_TOLERANCE,
+                decisive_mix: None,
+            }
+        })
+        .collect()
+}
+
+/// The declared homotopy ladder, walked from the fully decisive end toward the
+/// inner mode. `s = 1` is the state these gates used to hard-code, so a run in
+/// which the first member certifies reproduces the historical anchor exactly;
+/// every later member is a strictly weaker departure from the mode. The ladder
+/// stops at `s = 0.1` rather than `0`: at the mode itself the majorizer kink
+/// the departure exists to avoid is back, so an anchor there would certify a
+/// regime and still be the wrong point.
+const DECISIVE_HOMOTOPY_WEIGHTS: [f64; 7] = [1.0, 0.85, 0.7, 0.55, 0.4, 0.25, 0.1];
+
+/// Freeze one already-converged state across a declared ladder of evaluation
+/// `ρ`, ordered by how strongly each member expresses the gate's intent.
+///
+/// An evaluation `ρ` is the other hand-written constant these gates carry: a
+/// lift chosen to put the deflated legs above finite-difference noise while
+/// keeping the frozen state a maximum. Both halves of that requirement are
+/// properties of production, and the second half is exactly what fails when a
+/// gate's `ρ` drifts onto an exact-`A` saddle. Declaring the ladder and
+/// certifying the accepted member states the intent without pinning the
+/// answer.
+pub(crate) fn rho_ladder_family(
+    term: &SaeManifoldTerm,
+    rhos: Vec<(String, SaeManifoldRho)>,
+    converge_iters: usize,
+) -> Vec<FdAnchorCandidate> {
+    rho_ladder_family_with_tolerance(
+        term,
+        rhos,
+        converge_iters,
+        DEFAULT_ANCHOR_CONVERGE_TOLERANCE,
+    )
+}
+
+/// [`rho_ladder_family`] for a gate whose declared mode is reached at a
+/// tolerance other than the shared default.
+pub(crate) fn rho_ladder_family_with_tolerance(
+    term: &SaeManifoldTerm,
+    rhos: Vec<(String, SaeManifoldRho)>,
+    converge_iters: usize,
+    converge_tolerance: f64,
+) -> Vec<FdAnchorCandidate> {
+    rhos.into_iter()
+        .map(|(description, rho)| FdAnchorCandidate {
+            description,
+            rho,
+            term: term.clone(),
+            converge_iters,
+            converge_tolerance,
+            decisive_mix: None,
+        })
+        .collect()
+}
+
+/// The inner-solve tolerance the θ-adjoint gates converge their declared mode
+/// at. These gates differentiate a FROZEN state, so the mode only has to exist;
+/// the shared value keeps every anchor family reaching one under the same
+/// contract.
+const DEFAULT_ANCHOR_CONVERGE_TOLERANCE: f64 = 1.0e-6;
+
+/// A declared `log λ_sparse` lift ladder over one base `ρ`, ordered by lift.
+///
+/// The assignment-strength penalty is the dial these gates use to move a state
+/// between the deflating and non-deflating regimes, so it is the natural
+/// declared axis for a regime the gate needs but cannot control directly.
+pub(crate) fn sparse_lift_ladder(
+    base: &SaeManifoldRho,
+    lifts: &[f64],
+) -> Vec<(String, SaeManifoldRho)> {
+    lifts
+        .iter()
+        .map(|&lift| {
+            let mut rho = base.clone();
+            rho.log_lambda_sparse = lift;
+            (format!("log_lambda_sparse={lift:.2}"), rho)
+        })
+        .collect()
+}
+
+/// The two-dimensional declared family for gates whose anchor must ALSO name a
+/// smoothing level: the cross of a declared `log λ_smooth` ladder with the
+/// decisive-logit homotopy, each member converging its own inner mode first.
+///
+/// A gate that hard-codes one `log λ_smooth` pair is asserting that a specific
+/// smoothing level admits a converged mode with a resolved derivative branch.
+/// That is a property of production, not of the gate, so it belongs in the
+/// search space rather than in a constant.
+pub(crate) fn smoothing_and_decisive_family(
+    fixture: impl Fn() -> (SaeManifoldTerm, SaeManifoldRho),
+    smooth_levels: &[(f64, f64)],
+    converge_iters: usize,
+) -> Vec<FdAnchorCandidate> {
+    let mut candidates = Vec::with_capacity(smooth_levels.len() * DECISIVE_HOMOTOPY_WEIGHTS.len());
+    for &(first, second) in smooth_levels {
+        for s in DECISIVE_HOMOTOPY_WEIGHTS {
+            let (term, mut rho) = fixture();
+            assert_eq!(
+                rho.log_lambda_smooth.len(),
+                2,
+                "the declared smoothing ladder is written for two smooth blocks"
+            );
+            rho.log_lambda_smooth = vec![first, second];
+            let decisive = decisive_logit_pattern(&term);
+            candidates.push(FdAnchorCandidate {
+                description: format!(
+                    "log_lambda_smooth=[{first:.2}, {second:.2}], decisive-logit homotopy s={s:.2}"
+                ),
+                rho,
+                term,
+                converge_iters,
+                converge_tolerance: DEFAULT_ANCHOR_CONVERGE_TOLERANCE,
+                decisive_mix: Some((decisive, s)),
+            });
+        }
+    }
+    candidates
+}
+
+/// The deterministic decisive-assignment pattern the θ-adjoint gates drive
+/// toward: alternating row-varying margins around a slow drift, so no row is
+/// symmetric and no two rows share a margin.
+pub(crate) fn decisive_logit_pattern(term: &SaeManifoldTerm) -> Array2<f64> {
+    let mut logits = term.assignment.logits.clone();
+    for row in 0..term.n_obs() {
+        let center = 0.05 * (row as f64);
+        let margin = 1.55 + 0.04 * (row as f64);
+        let (first, second) = if row % 2 == 0 {
+            (center + margin, center - margin)
+        } else {
+            (center - 0.85 * margin, center + 0.85 * margin)
+        };
+        logits[[row, 0]] = first;
+        if logits.ncols() > 1 {
+            logits[[row, 1]] = second;
+        }
+    }
+    logits
 }
 
 // [#780 line-count gate] The #1557 arrow-Schur parallelism-invariance
