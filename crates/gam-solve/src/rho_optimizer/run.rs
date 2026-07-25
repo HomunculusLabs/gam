@@ -1490,14 +1490,44 @@ pub(crate) fn certificate_hessian_is_psd_off_railed(
 /// sub-resolution entry was the entire `interior Hessian sub-block not PSD`
 /// refusal — the full 6×6 spectrum was `[−1.02e-3, 0.135, …, 0.904]`.
 ///
-/// The residue is `O(|g_k|)`, and every coordinate judged here has already
-/// passed gradient stationarity (`|g_k|` at or below the stationarity bound),
-/// so flooring the diagonal by `|g_k|` bounds the judgment at exactly the
-/// instrument's resolution: it can absorb only negative curvature whose
-/// exploitable improvement (`≲ g²/2|H|`, sub-resolution by construction at a
-/// stationary point) is below the run's own cost tolerance, and can never mask
-/// a genuine interior saddle (`λ_min ≪ −bound` dwarfs the bound-scale floor —
-/// the #2357 trace's saddle had `λ_min ≈ −0.5` against `|g| ≈ 1e-3`).
+/// # Why the floor is safe — instrument resolution, not step economics
+///
+/// The residue is `O(|g_k|)`, and the sub-block is extracted AFTER flooring, so
+/// only the *judged* (un-excluded) coordinates' gradients ever enter: a railed
+/// coordinate's large `|g|` (measured 1.40 on the #2349 checkpoint) cannot
+/// inflate the floor. Weyl bounds what remains exactly:
+///
+/// ```text
+///     λ_min(H) + min|g| ≤ λ_min(H + diag|g|) ≤ λ_min(H) + max|g|
+/// ```
+///
+/// so the floor absorbs **at most `max_k |g_k|` over the judged coordinates**.
+/// Where this verdict can mint, those coordinates have passed gradient
+/// stationarity, so that is at most the stationarity bound. A negative
+/// eigenvalue smaller than that is not distinguishable from zero *by the
+/// instrument that produced it* — the assembled tail entry IS `λV_λ = g`
+/// (ratio 0.999 as measured) — while a genuine saddle survives untouched: the
+/// #2357 trace's `λ_min ≈ −0.5` against `|g| ≈ 1e-3` floors to `−0.4973`, and a
+/// `−1.50e-2` direction still refuses at a `1e-2` bound.
+///
+/// ## Do not widen this floor beyond `diag(|g|)`
+///
+/// Earlier revisions of this argument (and #2349 rounds 6/7) justified the
+/// floor by an "exploitable improvement `≲ g²/2|H| ≈ 5e-7`". Both halves are
+/// wrong and the pair is misleading in the permissive direction:
+///
+/// * the quoted number is `g²/2 = 5.23e-7`; the quoted formula evaluates to
+///   `g²/(2|H|) = 5.12e-4` on the same measured `g = 1.0228e-3`,
+///   `|H| = 1.0216e-3` — a 979× discrepancy. Since `|H| ≈ g` at exactly the
+///   point this floor serves, that formula collapses to `≈ g/2`;
+/// * and `g²/2|H|` is the Newton decrement, which bounds the improvement along
+///   a direction of POSITIVE curvature. Along curvature `−ε` the model
+///   `−g·t − ½εt²` is unbounded below, so the quantity it purports to bound
+///   does not exist in the regime this floor exists for; the step is limited by
+///   the trust radius, not the curvature.
+///
+/// The Weyl bound above is the correct and checkable statement. Anything that
+/// widens the floor must re-derive against it, not against `g²/2|H|`.
 pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
     hessian: &Array2<f64>,
     excluded: &[usize],
