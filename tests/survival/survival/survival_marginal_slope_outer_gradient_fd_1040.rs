@@ -158,7 +158,12 @@ fn run_basis(basis_term: &str) {
     };
 
     eprintln!("[FD-DIAG] starting survival-MS fit: n={N} formula={formula:?}");
-    fit_from_formula(&formula, &data, &config).ok();
+    match fit_from_formula(&formula, &data, &config) {
+        Ok(_) => eprintln!("[FD-DIAG] survival-MS fit returned Ok"),
+        Err(error) => {
+            eprintln!("[FD-DIAG] survival-MS fit returned Err after/before audit: {error}")
+        }
+    }
 
     let audit = gam::estimate::take_outer_gradient_fd_capture().unwrap_or_else(|| {
         panic!("expected structured outer-gradient evidence for basis {basis_term:?}")
