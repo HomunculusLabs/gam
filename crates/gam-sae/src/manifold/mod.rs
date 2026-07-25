@@ -179,6 +179,7 @@ pub use crate::frames::*;
 
 mod amortized_routing;
 mod arrow_solver;
+mod atlas_topology;
 mod atom;
 mod atom_build;
 mod basin_bundle;
@@ -245,6 +246,10 @@ mod support_seed;
 mod support_term;
 mod term;
 mod terracini;
+/// Point clouds of known topology, shared by every test that needs a manifold
+/// whose answer is decided in advance (#2280).
+#[cfg(test)]
+pub(crate) mod topology_fixtures;
 mod transport_law;
 mod wbic_audit;
 mod wbic_dynamics;
@@ -522,6 +527,7 @@ pub fn rank_charge_dof(
 pub use construction::{SaeCriterionError, VanishedAtoms};
 
 pub use crate::inference::atlas_nerve::AtlasCoveringSide;
+pub use atlas_topology::*;
 pub use atom_build::*;
 pub use coordinate_fidelity::*;
 pub use cross_fit::*;

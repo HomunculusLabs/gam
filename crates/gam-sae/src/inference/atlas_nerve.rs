@@ -363,13 +363,9 @@ impl AtlasNerveDiagram {
             return GraphCompressionReport::unnamed(generic);
         }
         let log_vertices = (self.n_vertices.max(2) as f64).log2();
-        let named = certified_surface_name(
-            self.betti,
-            self.euler_characteristic,
-            orientability,
-            log_vertices,
-        );
-        if let Some((kind, name, named_bits)) = named {
+        let named = surface_from_invariants(self.betti, self.euler_characteristic, orientability);
+        if let Some((kind, name)) = named {
+            let named_bits = surface_name_bits(kind, log_vertices);
             let report = GraphCompressionReport::certified(kind, name, generic, named_bits);
             if report.bits_saved > 0.0 {
                 return report;
@@ -379,12 +375,40 @@ impl AtlasNerveDiagram {
     }
 }
 
-fn certified_surface_name(
+/// MDL cost of naming a certified surface: one vertex address per independent
+/// generator of its fundamental group (two for the handle/twist pairs, one for
+/// the simply-connected forms).
+fn surface_name_bits(kind: GraphCompressionKind, log_vertices: f64) -> f64 {
+    match kind {
+        GraphCompressionKind::Torus
+        | GraphCompressionKind::Cylinder
+        | GraphCompressionKind::MobiusStrip
+        | GraphCompressionKind::KleinBottle => 2.0 * log_vertices,
+        _ => log_vertices,
+    }
+}
+
+/// The closed-form classification of compact surfaces, read off the exact
+/// `GF(2)` homology of the full nerve plus the orientation class.
+///
+/// `(χ, orientability, boundary)` is a COMPLETE invariant of a compact surface,
+/// so this is a table lookup on measured invariants — not a search over a
+/// candidate menu. It is the single surface table in the crate: the certified
+/// nerve stack reaches it through [`AtlasNerveDiagram::certified_compression`],
+/// and the observed local-chart stack reaches it through
+/// `manifold::atlas_topology`, so the two can never drift apart on what a given
+/// invariant signature is called.
+///
+/// It deliberately does NOT cover the one-manifolds. A circle and a cylinder are
+/// homotopy equivalent, hence share `(b₀, b₁, b₂, χ) = (1, 1, 0, 0)` with a
+/// trivial orientation class: the nerve alone cannot separate them, and only the
+/// LOCAL CHART RANK `d` can. Callers that know `d` dispatch on it before
+/// consulting this table.
+pub(crate) fn surface_from_invariants(
     betti: BettiSignature,
     euler_characteristic: i128,
     orientability: AtlasOrientability,
-    log_vertices: f64,
-) -> Option<(GraphCompressionKind, &'static str, f64)> {
+) -> Option<(GraphCompressionKind, &'static str)> {
     match (
         betti.b0,
         betti.b1,
@@ -393,15 +417,13 @@ fn certified_surface_name(
         orientability,
     ) {
         (1, 2, Some(1), 0, AtlasOrientability::Orientable) => {
-            Some((GraphCompressionKind::Torus, "torus", 2.0 * log_vertices))
+            Some((GraphCompressionKind::Torus, "torus"))
         }
-        (1, 1, Some(0), 0, AtlasOrientability::Orientable) => Some((
-            GraphCompressionKind::Cylinder,
-            "cylinder",
-            2.0 * log_vertices,
-        )),
+        (1, 1, Some(0), 0, AtlasOrientability::Orientable) => {
+            Some((GraphCompressionKind::Cylinder, "cylinder"))
+        }
         (1, 0, Some(1), 2, AtlasOrientability::Orientable) => {
-            Some((GraphCompressionKind::Sphere, "sphere", log_vertices))
+            Some((GraphCompressionKind::Sphere, "sphere"))
         }
         // A contractible bounded surface: orientable, no handle (b₁ = 0), no
         // closed 2-cycle (b₂ = 0), χ = 1. This is the sheet a swiss roll glues to
@@ -409,27 +431,21 @@ fn certified_surface_name(
         // b₂, exactly the robust simply-connected discriminant the geometry
         // review endorsed (#2280).
         (1, 0, Some(0), 1, AtlasOrientability::Orientable) => {
-            Some((GraphCompressionKind::Disk, "disk", log_vertices))
+            Some((GraphCompressionKind::Disk, "disk"))
         }
         // The Möbius strip: the non-orientable counterpart of the cylinder (same
         // F₂ homology b₁ = 1, b₂ = 0, χ = 0), separated ONLY by the certified
         // orientation cocycle — the half-twist read as a discrete sign, the
         // orientability review's reliable core (#2280).
-        (1, 1, Some(0), 0, AtlasOrientability::NonOrientable) => Some((
-            GraphCompressionKind::MobiusStrip,
-            "mobius_strip",
-            2.0 * log_vertices,
-        )),
-        (1, 1, Some(1), 1, AtlasOrientability::NonOrientable) => Some((
-            GraphCompressionKind::ProjectivePlane,
-            "projective_plane",
-            log_vertices,
-        )),
-        (1, 2, Some(1), 0, AtlasOrientability::NonOrientable) => Some((
-            GraphCompressionKind::KleinBottle,
-            "klein_bottle",
-            2.0 * log_vertices,
-        )),
+        (1, 1, Some(0), 0, AtlasOrientability::NonOrientable) => {
+            Some((GraphCompressionKind::MobiusStrip, "mobius_strip"))
+        }
+        (1, 1, Some(1), 1, AtlasOrientability::NonOrientable) => {
+            Some((GraphCompressionKind::ProjectivePlane, "projective_plane"))
+        }
+        (1, 2, Some(1), 0, AtlasOrientability::NonOrientable) => {
+            Some((GraphCompressionKind::KleinBottle, "klein_bottle"))
+        }
         _ => None,
     }
 }
@@ -736,7 +752,9 @@ fn boundary_rank(lower: &[Vec<usize>], upper: &[Vec<usize>]) -> usize {
     gf2_rank(columns)
 }
 
-fn compute_betti(
+/// Exact `GF(2)` Betti numbers `b0, b1, b2` of the retained low-dimensional
+/// skeleton, from the ranks of the three boundary matrices.
+pub(crate) fn compute_betti(
     vertices: &[Vec<usize>],
     edges: &[Vec<usize>],
     triangles: &[Vec<usize>],
@@ -755,14 +773,17 @@ fn compute_betti(
     }
 }
 
+/// Streamed inventory of an enumerated nerve: exact counts and alternating sum
+/// at every cardinality, with the boundary-matrix inputs retained only through
+/// dimension three (the homology this stack reads).
 #[derive(Debug)]
-struct SimplexInventory {
-    counts: Vec<usize>,
-    vertices: Vec<Vec<usize>>,
-    edges: Vec<Vec<usize>>,
-    triangles: Vec<Vec<usize>>,
-    tetrahedra: Vec<Vec<usize>>,
-    euler_characteristic: i128,
+pub(crate) struct SimplexInventory {
+    pub(crate) counts: Vec<usize>,
+    pub(crate) vertices: Vec<Vec<usize>>,
+    pub(crate) edges: Vec<Vec<usize>>,
+    pub(crate) triangles: Vec<Vec<usize>>,
+    pub(crate) tetrahedra: Vec<Vec<usize>>,
+    pub(crate) euler_characteristic: i128,
 }
 
 fn record_simplex(
@@ -802,7 +823,7 @@ fn record_simplex(
 }
 
 fn enumerate_simplices_from(
-    charts: &[AtlasChart],
+    nonempty_intersection: &dyn Fn(&[usize]) -> bool,
     adjacency: &[BTreeSet<usize>],
     prefix: &mut Vec<usize>,
     candidates: &[usize],
@@ -811,10 +832,7 @@ fn enumerate_simplices_from(
 ) -> Result<(), String> {
     for (position, &vertex) in candidates.iter().enumerate() {
         prefix.push(vertex);
-        let nonempty = prefix.len() == 1 || {
-            let (mass, _) = mutual_row_mass(charts, prefix);
-            mass.is_finite() && mass > 0.0
-        };
+        let nonempty = prefix.len() == 1 || nonempty_intersection(prefix);
         if nonempty {
             record_simplex(prefix, inventory, unmatched_proofs)?;
             let next: Vec<usize> = candidates[(position + 1)..]
@@ -823,7 +841,7 @@ fn enumerate_simplices_from(
                 .filter(|candidate| adjacency[vertex].contains(candidate))
                 .collect();
             enumerate_simplices_from(
-                charts,
+                nonempty_intersection,
                 adjacency,
                 prefix,
                 &next,
@@ -836,33 +854,49 @@ fn enumerate_simplices_from(
     Ok(())
 }
 
-fn enumerate_full_nerve(
-    charts: &[AtlasChart],
+/// Enumerate the FULL nerve of a cover: every set of charts whose common
+/// intersection is non-empty, at every cardinality, not a truncation at triples.
+///
+/// The cover enters only through `nonempty_intersection`, the predicate deciding
+/// whether a candidate chart set co-fires, and through `adjacency`, the admitted
+/// pairwise 1-skeleton the cliques are grown inside. Keeping the geometry behind
+/// that predicate is what lets the weighted dictionary cover
+/// ([`build_atlas_nerve`], where co-firing is a positive mutual row MASS) and the
+/// local-chart cover (`manifold::atlas_topology`, where it is a non-empty
+/// intersection of patch memberships) share one exact enumerator instead of two
+/// drifting copies of the same recursion.
+///
+/// Truncating at triples is wrong for any data cover — 4-, 5-, and 6-way overlaps
+/// are routinely non-empty and each carries its own sign in
+/// `χ = Σ_k (−1)^k N_{k+1}` — so the alternating sum is streamed over ALL
+/// cardinalities while only the dimension ≤ 3 boundary inputs are retained.
+pub(crate) fn enumerate_full_nerve(
+    chart_count: usize,
+    nonempty_intersection: &dyn Fn(&[usize]) -> bool,
     adjacency: &[BTreeSet<usize>],
     certificate: Option<&AtlasGoodCoverCertificate>,
 ) -> Result<SimplexInventory, String> {
     if let Some(certificate) = certificate {
-        if certificate.chart_count != charts.len() {
+        if certificate.chart_count != chart_count {
             return Err(format!(
-                "good-cover certificate is for {} charts but the atlas has {}",
+                "good-cover certificate is for {} charts but the atlas has {chart_count}",
                 certificate.chart_count,
-                charts.len()
             ));
         }
     }
     let mut unmatched_proofs =
         certificate.map(|certificate| certificate.proofs.keys().cloned().collect::<BTreeSet<_>>());
     let mut inventory = SimplexInventory {
-        counts: vec![0; charts.len()],
-        vertices: Vec::with_capacity(charts.len()),
+        counts: vec![0; chart_count],
+        vertices: Vec::with_capacity(chart_count),
         edges: Vec::new(),
         triangles: Vec::new(),
         tetrahedra: Vec::new(),
         euler_characteristic: 0,
     };
-    let candidates: Vec<usize> = (0..charts.len()).collect();
+    let candidates: Vec<usize> = (0..chart_count).collect();
     enumerate_simplices_from(
-        charts,
+        nonempty_intersection,
         adjacency,
         &mut Vec::new(),
         &candidates,
@@ -1027,7 +1061,15 @@ pub fn build_atlas_nerve(
     // matrices through dimension three are retained; higher simplices are
     // streamed into their exact counts and alternating sum, so working memory
     // does not scale with the potentially exponential full nerve.
-    let inventory = enumerate_full_nerve(charts, &adjacency, good_cover)?;
+    let inventory = enumerate_full_nerve(
+        n,
+        &|simplex: &[usize]| {
+            let (mass, _) = mutual_row_mass(charts, simplex);
+            mass.is_finite() && mass > 0.0
+        },
+        &adjacency,
+        good_cover,
+    )?;
     let admitted_edge_inventory: BTreeSet<AtlasHolonomyEdgeId> = edge_reports
         .iter()
         .filter(|edge| edge.admitted)
@@ -1579,8 +1621,10 @@ mod tests {
         );
         assert_eq!(
             mobius.certified_compression().kind,
-            GraphCompressionKind::Graph,
-            "GF(2) Betti numbers alone cannot call a Möbius cover a cylinder"
+            GraphCompressionKind::MobiusStrip,
+            "the half-twisted cover has the cylinder's GF(2) Betti numbers exactly, so only the \
+             certified orientation cocycle can separate them — and it must, rather than leaving \
+             the surface unnamed"
         );
     }
 
@@ -1597,23 +1641,23 @@ mod tests {
             b2: Some(1),
         };
         assert_eq!(
-            super::certified_surface_name(rp2_betti, 1, AtlasOrientability::NonOrientable, 8.0,)
+            super::surface_from_invariants(rp2_betti, 1, AtlasOrientability::NonOrientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::ProjectivePlane)
         );
         assert_eq!(
-            super::certified_surface_name(klein_betti, 0, AtlasOrientability::NonOrientable, 8.0,)
+            super::surface_from_invariants(klein_betti, 0, AtlasOrientability::NonOrientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::KleinBottle)
         );
         assert_eq!(
-            super::certified_surface_name(klein_betti, 0, AtlasOrientability::Orientable, 8.0,)
+            super::surface_from_invariants(klein_betti, 0, AtlasOrientability::Orientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::Torus),
             "the same F2 homology becomes a different surface only through certified orientation"
         );
         assert!(
-            super::certified_surface_name(rp2_betti, 1, AtlasOrientability::Orientable, 8.0,)
+            super::surface_from_invariants(rp2_betti, 1, AtlasOrientability::Orientable)
                 .is_none(),
             "an impossible orientable RP2 signature must not earn any name"
         );
@@ -1637,7 +1681,7 @@ mod tests {
         };
         // Sheet: orientable, no handle, no closed 2-cycle, χ = 1.
         assert_eq!(
-            super::certified_surface_name(disk_betti, 1, AtlasOrientability::Orientable, 8.0)
+            super::surface_from_invariants(disk_betti, 1, AtlasOrientability::Orientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::Disk)
         );
@@ -1649,26 +1693,26 @@ mod tests {
             b2: Some(1),
         };
         assert_eq!(
-            super::certified_surface_name(sphere_betti, 2, AtlasOrientability::Orientable, 8.0)
+            super::surface_from_invariants(sphere_betti, 2, AtlasOrientability::Orientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::Sphere)
         );
         // Möbius strip vs cylinder: identical F₂ homology (b₁ = 1, b₂ = 0, χ = 0),
         // separated ONLY by the certified orientation.
         assert_eq!(
-            super::certified_surface_name(strip_betti, 0, AtlasOrientability::NonOrientable, 8.0)
+            super::surface_from_invariants(strip_betti, 0, AtlasOrientability::NonOrientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::MobiusStrip)
         );
         assert_eq!(
-            super::certified_surface_name(strip_betti, 0, AtlasOrientability::Orientable, 8.0)
+            super::surface_from_invariants(strip_betti, 0, AtlasOrientability::Orientable)
                 .map(|row| row.0),
             Some(GraphCompressionKind::Cylinder),
             "the same F₂ homology becomes cylinder vs Möbius only through certified orientation"
         );
         // An orientable disk with a spurious non-orientable label is impossible.
         assert!(
-            super::certified_surface_name(disk_betti, 1, AtlasOrientability::NonOrientable, 8.0)
+            super::surface_from_invariants(disk_betti, 1, AtlasOrientability::NonOrientable)
                 .is_none(),
             "a non-orientable contractible surface is not a named type in this table"
         );

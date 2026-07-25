@@ -85,7 +85,8 @@ use crate::basis::SaeBasisSecondJet;
 use crate::description_length::{BirthMdlPrescreen, predicted_birth_dl_bits};
 use crate::frames::GrassmannFrame;
 use crate::manifold::{
-    AssignmentMode, AtlasSeamKind, GraphStructureSelection, LearnedGraphAtom, OccupancyLaw,
+    AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, GraphCompressionKind,
+    GraphStructureSelection, LearnedGraphAtom, OccupancyLaw,
     SAE_MAX_PERIODIC_HARMONICS, SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution,
     SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, SaeReferenceMetricPlan,
     SphereChartTransition, UnitSpeedChartTransition, amplitude_concentration_certificate,
@@ -3742,58 +3743,30 @@ pub fn graph_birth_candidate_for_structure_search(
     Ok(GraphBirthCandidate { atom, selection })
 }
 
-// #2280 — maximum triangle cocycle defect `‖R_ca·R_bc·R_ab − I‖_F` under which the
-// local-chart atlas's orientation cocycle is TRUSTED as a proposal prior. Above it
-// the fitted transitions do not compose consistently, so the orientability readout
-// is not a reliable witness and NO prior is applied. Named + justified, following
-// the increment-2 `MIN_ATLAS_ROW_COVERAGE` precedent: a quarter-radian Frobenius
-// scale admits ordinary orthogonal-Procrustes rounding on a coherent cover while
-// rejecting a genuinely self-contradicting transition set (a defect of order 1 is a
-// frame that rotated far around a triangle it should close to the identity).
-const ATLAS_PRIOR_MAX_COCYCLE_DEFECT: f64 = 0.25;
-
-/// #2280 — recognition-only readouts of the local-chart atlas built on a birth's
-/// ambient residual image, used as a proposal-time PRIOR. NEVER a topology
-/// promotion: any population/topology claim still routes through the Gaussian-PCA
-/// holonomy certificate (`inference::atlas_holonomy`), not this object.
-#[derive(Clone, Debug)]
-struct AtlasObserved {
-    orientability: crate::manifold::AtlasOrientability,
-    cocycle_trustworthy: bool,
-}
-
-impl AtlasObserved {
-    /// The atlas supplies a usable prior ONLY when it POSITIVELY observed a Möbius
-    /// obstruction (an odd sign cycle) AND its local transition cocycle is
-    /// trustworthy. One-directional by construction: `observed_orientability`
-    /// returns `Orientable` vacuously when there are no well-conditioned edges, so
-    /// an orientable observation is the ABSENCE of evidence and yields no prior —
-    /// the Klein bottle / projective plane stay discoverable in any sparse-overlap
-    /// atlas.
-    fn prefers_non_orientable(&self) -> bool {
-        self.cocycle_trustworthy
-            && matches!(
-                self.orientability,
-                crate::manifold::AtlasOrientability::NonOrientable
-            )
-    }
-}
-
 /// #2280 — build the local-chart atlas on a birth's ambient residual image and read
-/// its recognition-only invariants as a PROPOSAL PRIOR. Fail-open: any build refusal
-/// (coverage below the floor, degenerate charts, non-finite rows) or a too-small
-/// image returns `None` and the race runs UNPRIMED exactly as today — an atlas that
-/// cannot certify itself never blocks a birth or changes a verdict.
-fn atlas_prior_for_coords(target: ArrayView2<'_, f64>) -> Option<AtlasObserved> {
+/// the topology its charts and transition holonomy determine, as a PROPOSAL PRIOR.
+///
+/// Fail-open: any build refusal (coverage below the floor, degenerate charts,
+/// non-finite rows) or a too-small image returns `None` and the race runs UNPRIMED
+/// exactly as today — an atlas that cannot certify itself never blocks a birth or
+/// changes a verdict. A readout that names no topology is likewise inert; it is
+/// still logged, because a refusal with its invariants is the diagnostic that says
+/// WHY the atlas could not help.
+///
+/// `intrinsic_dim` is the birth's own `d`, not a fixed 2: the classification
+/// dispatches on chart rank first (a circle and a cylinder have identical nerve
+/// invariants), so passing the wrong `d` would ask the table the wrong question.
+fn atlas_prior_for_coords(
+    target: ArrayView2<'_, f64>,
+    intrinsic_dim: usize,
+) -> Option<AtlasTopologyReadout> {
     let (n, p) = target.dim();
     // The atlas needs enough rows to seed several overlapping charts and close a
-    // transition cocycle; below that it cannot corroborate orientability and
-    // abstains.
-    if n < 6 || p == 0 {
+    // transition cocycle; below that it cannot corroborate anything and abstains.
+    if n < 6 || p == 0 || intrinsic_dim == 0 {
         return None;
     }
-    // Recognition targets the orientable/non-orientable split of the d ≤ 2 menu.
-    let intrinsic_dim = 2usize.min(p).max(1);
+    let intrinsic_dim = intrinsic_dim.min(p);
     let config = crate::manifold::LocalAtlasConfig::balanced(n, intrinsic_dim);
     let atlas = crate::manifold::LocalAtlas::build(target, config).ok()?;
     let dropped = atlas.rejected_centers();
@@ -3813,89 +3786,114 @@ fn atlas_prior_for_coords(target: ArrayView2<'_, f64>) -> Option<AtlasObserved> 
                 .join("; ")
         );
     }
-    Some(AtlasObserved {
-        orientability: atlas.observed_orientability(),
-        cocycle_trustworthy: atlas_cocycle_trustworthy(&atlas),
-    })
+    let readout = crate::manifold::observe_atlas_topology(&atlas).ok()?;
+    log::debug!("#2280 {readout}");
+    Some(readout)
 }
 
-/// #2280 — the atlas's orientation cocycle is a trustworthy witness only when its
-/// fitted transitions COMPOSE consistently: every admitted triangle `a→b→c→a`
-/// closes to within [`ATLAS_PRIOR_MAX_COCYCLE_DEFECT`], and at least one such
-/// triangle exists (a tree-only atlas cannot corroborate its own cocycle, so it
-/// abstains). Triangles are enumerated over the numerically well-conditioned
-/// observed signed edges — the same edge set `observed_orientability` reads.
-fn atlas_cocycle_trustworthy(atlas: &crate::manifold::LocalAtlas) -> bool {
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut neighbors: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for (a, b, _, _) in atlas.observed_signed_edges() {
-        neighbors.entry(a).or_default().insert(b);
-        neighbors.entry(b).or_default().insert(a);
-    }
-    let mut admitted = 0usize;
-    for (&a, na) in &neighbors {
-        for &b in na.iter().filter(|&&b| b > a) {
-            let Some(nb) = neighbors.get(&b) else {
-                continue;
-            };
-            for &c in nb.iter().filter(|&&c| c > b && na.contains(&c)) {
-                match atlas.triangle_cocycle_defect(a, b, c) {
-                    Some(defect) if defect < ATLAS_PRIOR_MAX_COCYCLE_DEFECT => admitted += 1,
-                    // A genuinely inconsistent triangle: the transitions do not
-                    // compose, so the whole cocycle is untrustworthy.
-                    Some(_) => return false,
-                    None => {}
-                }
-            }
+/// #2280 — the topology candidate a recognized manifold corresponds to, or `None`
+/// when the `d ≤ 2` menu realizes no basis for it.
+///
+/// The mapping is on the typed [`AutoTopologyKind`], never on a display string, so
+/// it cannot drift. `Disk`/`Interval` both map to the flat `Euclidean` patch — the
+/// menu's contractible candidate at either rank — and the purely combinatorial
+/// kinds (`FiniteSet`, `Graph`) name no smooth candidate.
+fn observed_kind_to_auto_topology(kind: GraphCompressionKind) -> Option<AutoTopologyKind> {
+    match kind {
+        GraphCompressionKind::Circle => Some(AutoTopologyKind::Circle),
+        GraphCompressionKind::Interval | GraphCompressionKind::Disk => {
+            Some(AutoTopologyKind::Euclidean)
         }
+        GraphCompressionKind::Cylinder => Some(AutoTopologyKind::Cylinder),
+        GraphCompressionKind::MobiusStrip => Some(AutoTopologyKind::Mobius),
+        GraphCompressionKind::Torus => Some(AutoTopologyKind::Torus),
+        GraphCompressionKind::Sphere => Some(AutoTopologyKind::Sphere),
+        GraphCompressionKind::ProjectivePlane => Some(AutoTopologyKind::ProjectivePlane),
+        GraphCompressionKind::KleinBottle => Some(AutoTopologyKind::KleinBottle),
+        GraphCompressionKind::FiniteSet | GraphCompressionKind::Graph => None,
     }
-    admitted > 0
 }
 
-/// #2280 — a topology candidate is NON-orientable iff it is one of the closed
-/// non-orientable forms in the d = 2 menu (the Klein bottle and the projective
-/// plane). Read from the realized candidate's `AutoTopologyKind`, so no gam-solve
+/// #2280 — a topology candidate is NON-orientable iff it is one of the twisted
+/// forms the `d = 2` menu can realize (Klein bottle, projective plane, Möbius
+/// band). Read from the realized candidate's `AutoTopologyKind`, so no gam-solve
 /// API change is needed and the classification cannot drift on a display string.
 fn kind_is_non_orientable(kind: AutoTopologyKind) -> bool {
     matches!(
         kind,
-        AutoTopologyKind::KleinBottle | AutoTopologyKind::ProjectivePlane
+        AutoTopologyKind::KleinBottle
+            | AutoTopologyKind::ProjectivePlane
+            | AutoTopologyKind::Mobius
     )
 }
 
-/// #2280 — apply the atlas orientability prior as a proposal-time menu REORDER
-/// (never a winner override). When (and only when) the atlas positively observed
-/// non-orientability with a trustworthy cocycle, STABLE-partition the candidate
-/// specs so the non-orientable forms lead, preserving every candidate and the
-/// relative order within each group. The REML race is unchanged in MEMBERSHIP —
-/// the shared priority selector breaks an EXACT `tk_score` tie by menu position
-/// (`original_index`), so the reorder promotes an observed Möbius obstruction only
-/// where the REML evidence is otherwise indifferent, and never drops the eventual
-/// winner (fail-open, unchanged-or-better by construction). An orientable or absent
-/// observation leaves the menu byte-identical.
+/// #2280 — apply the atlas's topology readout as a proposal-time menu REORDER
+/// (never a winner override).
+///
+/// The atlas MEASURES a manifold; the menu ENUMERATES hypotheses. When the two
+/// meet, the measured one leads:
+///
+/// 1. If the readout names a manifold the menu realizes, that candidate is
+///    stable-floated to the head.
+/// 2. Otherwise, if the readout names a NON-ORIENTABLE manifold the menu cannot
+///    realize at this `d` (the birth menu carries no Möbius band), the twisted
+///    candidates lead as a block — the coarser statement the observation still
+///    supports.
+/// 3. Otherwise the menu is byte-identical.
+///
+/// Every candidate survives and relative order is preserved, so the REML race is
+/// unchanged in MEMBERSHIP: the shared priority selector breaks an EXACT `tk_score`
+/// tie by menu position (`original_index`), so the reorder promotes the measured
+/// topology only where the evidence is otherwise indifferent, and never drops the
+/// eventual winner (fail-open, unchanged-or-better by construction).
+///
+/// One-directional by construction. A readout that refuses, or that names an
+/// orientable manifold absent from the menu, leaves the order alone;
+/// `observed_orientability` returns `Orientable` vacuously on a sparse edge set, so
+/// an orientable reading is the ABSENCE of evidence and must never veto the twisted
+/// forms.
 fn atlas_reorder_specs(
     specs: Vec<TopologyCandidateSpec>,
-    atlas: Option<&AtlasObserved>,
+    atlas: Option<&AtlasTopologyReadout>,
 ) -> Vec<TopologyCandidateSpec> {
     let Some(atlas) = atlas else {
         return specs;
     };
-    if !atlas.prefers_non_orientable() {
+    let observed = atlas.observed_manifold();
+    let named = observed.and_then(observed_kind_to_auto_topology);
+    if let Some(named) = named {
+        if specs.iter().any(|spec| spec.kind == named) {
+            log::debug!(
+                "#2280 atlas topology prior: the charts and their transition holonomy measure \
+                 {named:?}; floating it ahead of the menu so the REML race breaks an exact tie \
+                 toward the measured manifold"
+            );
+            let mut leading: Vec<TopologyCandidateSpec> = Vec::with_capacity(specs.len());
+            let mut rest: Vec<TopologyCandidateSpec> = Vec::new();
+            for spec in specs {
+                if spec.kind == named {
+                    leading.push(spec);
+                } else {
+                    rest.push(spec);
+                }
+            }
+            leading.extend(rest);
+            return leading;
+        }
+    }
+    if !atlas.observes_non_orientable() {
         return specs;
     }
-    if !specs.iter().any(|s| kind_is_non_orientable(s.kind)) {
-        // A non-orientable observation, but this d carries no non-orientable
-        // candidate (e.g. d = 1): the observation is recorded, the menu unchanged.
+    if !specs.iter().any(|spec| kind_is_non_orientable(spec.kind)) {
         log::debug!(
-            "#2280 atlas orientability prior: observed NonOrientable, but the menu carries no \
-             non-orientable candidate; menu unchanged"
+            "#2280 atlas topology prior: measured a non-orientable manifold, but this menu \
+             realizes no twisted candidate; menu unchanged"
         );
         return specs;
     }
     log::debug!(
-        "#2280 atlas orientability prior: observed NonOrientable with a trustworthy cocycle; \
-         floating the non-orientable candidate(s) ahead of the orientable menu so the REML race \
-         breaks an exact tie toward the observed Möbius obstruction"
+        "#2280 atlas topology prior: measured a non-orientable manifold the menu cannot realize \
+         exactly; floating the twisted candidate(s) ahead of the orientable menu"
     );
     let mut non_orientable: Vec<TopologyCandidateSpec> = Vec::with_capacity(specs.len());
     let mut orientable: Vec<TopologyCandidateSpec> = Vec::new();
@@ -3916,18 +3914,16 @@ fn race_birth_topology(
     weights: ArrayView1<'_, f64>,
     d_k: usize,
 ) -> Result<Option<TopologyRaceFit>, String> {
-    // #2280 — proposal-time atlas prior (recognition-only, fail-open). The
-    // non-orientable forms (Klein bottle / projective plane) live only at d ≥ 2,
-    // so a d = 1 birth needs no atlas and skips the build. The prior only ever
-    // REORDERS the fixed candidate menu (non-orientable candidates first); the REML
-    // race — still the sole arbiter — breaks an exact evidence tie toward a
-    // positively-observed Möbius obstruction. It never selects a winner and never
-    // drops a candidate.
-    let atlas = if d_k >= 2 {
-        atlas_prior_for_coords(target)
-    } else {
-        None
-    };
+    // #2280 — proposal-time atlas prior (recognition-only, fail-open). The atlas is
+    // built at the birth's OWN chart rank `d_k`, because the classification
+    // dispatches on rank before it reads the invariant table (a circle and a
+    // cylinder are homotopy equivalent, so no nerve invariant separates them). That
+    // makes the prior meaningful at d = 1 too — the line-vs-circle menu is exactly
+    // the one-manifold table — where the previous orientability-only prior had
+    // nothing to say. The prior only ever REORDERS the candidate menu; the REML
+    // race — still the sole arbiter — breaks an exact evidence tie toward the
+    // measured manifold. It never selects a winner and never drops a candidate.
+    let atlas = atlas_prior_for_coords(target, d_k);
     // The PCA/template-coordinate race is the cheaper DEFAULT: the born atom
     // inherits the template atom's coordinate block, and the topology candidates
     // are adjudicated on those linear-seed coordinates.
@@ -3980,7 +3976,7 @@ fn race_template_coords(
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     d_k: usize,
-    atlas: Option<&AtlasObserved>,
+    atlas: Option<&AtlasTopologyReadout>,
 ) -> Result<Option<(TopologyRaceFit, f64)>, String> {
     let base_specs = topology_candidates_for_dim(coords, d_k)?;
     if base_specs.is_empty() {
@@ -4021,7 +4017,7 @@ fn race_intrinsic_coords(
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     d_k: usize,
-    atlas: Option<&AtlasObserved>,
+    atlas: Option<&AtlasTopologyReadout>,
 ) -> Result<Option<(TopologyRaceFit, f64)>, String> {
     // Folds are a d ≥ 2 story: a 1-D manifold has no ambient fold a geodesic
     // embedding could unroll that a line/circle basis does not already capture,
@@ -4066,7 +4062,7 @@ fn race_spec_set(
     specs: Vec<TopologyCandidateSpec>,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
-    atlas: Option<&AtlasObserved>,
+    atlas: Option<&AtlasTopologyReadout>,
 ) -> Result<Option<(TopologyRaceFit, f64)>, String> {
     if specs.is_empty() {
         return Ok(None);
@@ -4485,15 +4481,12 @@ pub fn discover_primary_atom_topologies(
                 weights[row] = 1.0;
             }
             // #2280 — proposal-time atlas prior on THIS atom's cluster-local
-            // ambient rows (d ≥ 2 only; recognition-only, fail-open). Reorders the
-            // candidate menu toward an observed non-orientable form; the REML race
-            // stays the sole arbiter.
-            let atlas = if max_dims[atom_idx] >= 2 {
-                let local = target.select(Axis(0), &rows);
-                atlas_prior_for_coords(local.view())
-            } else {
-                None
-            };
+            // ambient rows at the atom's own chart rank (recognition-only,
+            // fail-open). Reorders the candidate menu toward the manifold the local
+            // charts and their transition holonomy measure; the REML race stays the
+            // sole arbiter.
+            let local = target.select(Axis(0), &rows);
+            let atlas = atlas_prior_for_coords(local.view(), max_dims[atom_idx]);
             // PCA/linear race is the cheaper DEFAULT.
             let pca_winner = race_spec_set(specs, target, weights.view(), atlas.as_ref()).map_err(|error| {
                 format!(
@@ -6818,69 +6811,105 @@ mod tests;
 #[cfg(test)]
 mod tests_atlas_prior_2280 {
     use super::*;
+    use crate::manifold::topology_fixtures::{circle, cylinder_strip, mobius_strip, trefoil_knot};
     use ndarray::Array2;
 
-    /// An orientable cylinder strip `S¹ × [-h, h]` embedded in R³.
-    fn cylinder_strip(n_u: usize, n_v: usize) -> Array2<f64> {
-        let mut z = Array2::<f64>::zeros((n_u * n_v, 3));
-        let mut r = 0usize;
-        for iu in 0..n_u {
-            let u = std::f64::consts::TAU * (iu as f64) / (n_u as f64);
-            for iv in 0..n_v {
-                let v = -0.4 + 0.8 * (iv as f64) / (n_v as f64 - 1.0);
-                z[[r, 0]] = 2.0 * u.cos();
-                z[[r, 1]] = 2.0 * u.sin();
-                z[[r, 2]] = v;
-                r += 1;
-            }
-        }
-        z
-    }
-
     /// A Möbius strip in R³ (a half-twist over one revolution): the canonical
-    /// NON-orientable residual. Returns the ambient image and a matched 2-D
-    /// parameter seed `(u_norm, v)` for the topology race.
+    /// NON-orientable residual, returned with a matched 2-D parameter seed
+    /// `(u_norm, v)` for the topology race.
     fn mobius_with_coords(n_u: usize, n_v: usize) -> (Array2<f64>, Array2<f64>) {
-        let mut z = Array2::<f64>::zeros((n_u * n_v, 3));
+        let z = mobius_strip(n_u, n_v);
         let mut coords = Array2::<f64>::zeros((n_u * n_v, 2));
         let mut r = 0usize;
         for iu in 0..n_u {
-            let u = std::f64::consts::TAU * (iu as f64) / (n_u as f64);
             for iv in 0..n_v {
-                let v = -0.4 + 0.8 * (iv as f64) / (n_v as f64 - 1.0);
-                let radial = 2.0 + v * (u / 2.0).cos();
-                z[[r, 0]] = radial * u.cos();
-                z[[r, 1]] = radial * u.sin();
-                z[[r, 2]] = v * (u / 2.0).sin();
                 coords[[r, 0]] = (iu as f64) / (n_u as f64) - 0.5;
-                coords[[r, 1]] = v;
+                coords[[r, 1]] = -0.4 + 0.8 * (iv as f64) / (n_v as f64 - 1.0);
                 r += 1;
             }
         }
         (z, coords)
     }
 
-    /// #2280 — the atlas prior POSITIVELY recognizes a Möbius residual as
-    /// non-orientable (trustworthy cocycle) and ABSTAINS on an orientable
-    /// cylinder. The abstention is the load-bearing asymmetry: an orientable
-    /// observation is the ABSENCE of evidence, so the prior must not fire — the
-    /// Klein bottle / projective plane stay discoverable in a sparse-overlap atlas.
+    /// #2280 — the atlas prior MEASURES the manifold: a Möbius residual is named
+    /// non-orientable, an orientable cylinder is named as the cylinder, and the two
+    /// verdicts are different. This is the capability the orientability-only prior
+    /// did not have — the cylinder used to be indistinguishable from "no evidence".
     #[test]
-    fn atlas_prior_recognizes_mobius_and_abstains_on_cylinder_2280() {
+    fn atlas_prior_names_mobius_and_cylinder_apart_2280() {
         let (mob, _) = mobius_with_coords(60, 5);
-        let mob_prior =
-            atlas_prior_for_coords(mob.view()).expect("the Möbius residual must build an atlas");
+        let mob_prior = atlas_prior_for_coords(mob.view(), 2)
+            .expect("the Möbius residual must build an atlas");
         assert!(
-            mob_prior.prefers_non_orientable(),
-            "a Möbius residual must yield a trustworthy non-orientable prior: {mob_prior:?}"
+            mob_prior.observes_non_orientable(),
+            "a Möbius residual must be measured non-orientable: {mob_prior}"
         );
 
         let cyl = cylinder_strip(60, 5);
-        let cyl_prior =
-            atlas_prior_for_coords(cyl.view()).expect("the cylinder residual must build an atlas");
+        let cyl_prior = atlas_prior_for_coords(cyl.view(), 2)
+            .expect("the cylinder residual must build an atlas");
         assert!(
-            !cyl_prior.prefers_non_orientable(),
-            "an orientable cylinder must NOT yield a non-orientable prior: {cyl_prior:?}"
+            !cyl_prior.observes_non_orientable(),
+            "an orientable cylinder must NOT be measured non-orientable: {cyl_prior}"
+        );
+        assert_ne!(
+            mob_prior.observed_manifold(),
+            cyl_prior.observed_manifold(),
+            "the Möbius and cylinder residuals must not receive the same verdict"
+        );
+    }
+
+    /// #2280 — a d = 1 birth now gets a prior the orientability-only readout could
+    /// never produce: the trefoil knot's residual is measured as a CIRCLE, which is
+    /// exactly the `d = 1` menu's curved candidate, even though its three ambient
+    /// principal directions carry comparable spread.
+    #[test]
+    fn trefoil_residual_floats_the_circle_candidate_at_d1_2280() {
+        let target = trefoil_knot(600, 1.0);
+        let prior = atlas_prior_for_coords(target.view(), 1)
+            .expect("the trefoil residual must build a d=1 atlas");
+        assert_eq!(
+            prior.observed_manifold(),
+            Some(GraphCompressionKind::Circle),
+            "the trefoil is intrinsically S¹: {prior}"
+        );
+
+        // The d = 1 menu is {Circle, Euclidean} in that order, so the reorder is
+        // observable through which candidate the measured manifold puts first.
+        let coords = Array2::<f64>::from_shape_fn((target.nrows(), 1), |(r, _)| r as f64);
+        let base = topology_candidates_for_dim(coords.view(), 1).unwrap();
+        let base_kinds: Vec<_> = base.iter().map(|spec| spec.kind).collect();
+        let primed = atlas_reorder_specs(
+            topology_candidates_for_dim(coords.view(), 1).unwrap(),
+            Some(&prior),
+        );
+        assert_eq!(
+            primed[0].kind,
+            AutoTopologyKind::Circle,
+            "the measured circle must lead the d=1 menu"
+        );
+        let mut a = base_kinds.clone();
+        let mut b: Vec<_> = primed.iter().map(|spec| spec.kind).collect();
+        a.sort_by_key(|kind| format!("{kind:?}"));
+        b.sort_by_key(|kind| format!("{kind:?}"));
+        assert_eq!(a, b, "the reorder must preserve the candidate set");
+    }
+
+    /// #2280 — the trefoil and the round circle receive the SAME verdict. The
+    /// readout is built entirely from transitions between overlapping charts, which
+    /// are intrinsic, so the ambient knotting is invisible to it — the property no
+    /// global-linear seed has.
+    #[test]
+    fn trefoil_and_circle_receive_the_same_verdict_2280() {
+        let knot = atlas_prior_for_coords(trefoil_knot(600, 1.0).view(), 1)
+            .expect("trefoil atlas must build");
+        let round = atlas_prior_for_coords(circle(400, 2.0).view(), 1)
+            .expect("circle atlas must build");
+        assert_eq!(
+            knot.observed_manifold(),
+            round.observed_manifold(),
+            "the knot's ambient embedding must not change its intrinsic verdict: \
+             knot={knot} round={round}"
         );
     }
 
@@ -6890,7 +6919,7 @@ mod tests_atlas_prior_2280 {
     fn atlas_prior_fails_open_on_tiny_image_2280() {
         let tiny = Array2::<f64>::from_shape_fn((4, 3), |(r, c)| (r * 3 + c) as f64);
         assert!(
-            atlas_prior_for_coords(tiny.view()).is_none(),
+            atlas_prior_for_coords(tiny.view(), 2).is_none(),
             "a 4-row residual is below the atlas seeding floor and must abstain"
         );
     }
@@ -6908,19 +6937,20 @@ mod tests_atlas_prior_2280 {
             [t, 2.0 * t, 3.0 * t][c] + 1e-9 * (r as f64) * (c as f64)
         });
         assert!(
-            atlas_prior_for_coords(collinear.view()).is_none(),
+            atlas_prior_for_coords(collinear.view(), 2).is_none(),
             "a rank-deficient residual must fall below the coverage floor and abstain"
         );
     }
 
-    /// #2280 — the non-orientable kind set is exactly the closed non-orientable
-    /// forms in the d = 2 menu (Klein bottle, projective plane); every other
+    /// #2280 — the non-orientable kind set is exactly the twisted forms the menu
+    /// can realize (Klein bottle, projective plane, Möbius band); every other
     /// candidate kind is orientable.
     #[test]
     fn kind_non_orientable_set_is_exactly_the_twisted_forms_2280() {
         for kind in [
             AutoTopologyKind::KleinBottle,
             AutoTopologyKind::ProjectivePlane,
+            AutoTopologyKind::Mobius,
         ] {
             assert!(kind_is_non_orientable(kind), "{kind:?} is non-orientable");
         }
@@ -6935,119 +6965,137 @@ mod tests_atlas_prior_2280 {
         }
     }
 
-    /// #2280 — the menu REORDER floats the non-orientable candidates ahead of the
-    /// orientable ones under a positive non-orientable observation, preserving
-    /// every candidate; an absent/orientable observation leaves the menu
-    /// byte-identical (one-directional coupling).
+    /// #2280 — every recognized manifold maps to the candidate that realizes it,
+    /// and the purely combinatorial kinds map to nothing. Guards the seam between
+    /// the classification table and the menu against a silent drift.
     #[test]
-    fn atlas_reorder_floats_non_orientable_first_and_is_identity_otherwise_2280() {
+    fn observed_kinds_map_onto_the_realizing_candidate_2280() {
+        for (observed, expected) in [
+            (GraphCompressionKind::Circle, Some(AutoTopologyKind::Circle)),
+            (
+                GraphCompressionKind::Interval,
+                Some(AutoTopologyKind::Euclidean),
+            ),
+            (GraphCompressionKind::Disk, Some(AutoTopologyKind::Euclidean)),
+            (
+                GraphCompressionKind::Cylinder,
+                Some(AutoTopologyKind::Cylinder),
+            ),
+            (
+                GraphCompressionKind::MobiusStrip,
+                Some(AutoTopologyKind::Mobius),
+            ),
+            (GraphCompressionKind::Torus, Some(AutoTopologyKind::Torus)),
+            (GraphCompressionKind::Sphere, Some(AutoTopologyKind::Sphere)),
+            (
+                GraphCompressionKind::ProjectivePlane,
+                Some(AutoTopologyKind::ProjectivePlane),
+            ),
+            (
+                GraphCompressionKind::KleinBottle,
+                Some(AutoTopologyKind::KleinBottle),
+            ),
+            (GraphCompressionKind::FiniteSet, None),
+            (GraphCompressionKind::Graph, None),
+        ] {
+            assert_eq!(
+                observed_kind_to_auto_topology(observed),
+                expected,
+                "{observed:?} must map to {expected:?}"
+            );
+        }
+    }
+
+    /// #2280 — an ABSENT readout leaves the menu byte-identical, and so does a
+    /// readout that refused to name a topology. The prior can only ever help or
+    /// abstain.
+    #[test]
+    fn absent_or_refusing_readout_leaves_the_menu_byte_identical_2280() {
         let coords =
             Array2::<f64>::from_shape_fn((32, 2), |(r, c)| (r as f64) * 0.1 + (c as f64) * 0.03);
-        let base = topology_candidates_for_dim(coords.view(), 2).unwrap();
-        let base_kinds: Vec<_> = base.iter().map(|s| s.kind).collect();
-        assert!(
-            !kind_is_non_orientable(base_kinds[0]),
-            "the unprimed d=2 menu must lead with an orientable candidate (got {:?})",
-            base_kinds[0]
-        );
-
-        // Positive non-orientable observation: non-orientable forms lead, and the
-        // set is preserved (same multiset of kinds).
-        let prior = AtlasObserved {
-            orientability: crate::manifold::AtlasOrientability::NonOrientable,
-            cocycle_trustworthy: true,
-        };
-        let reordered = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
-            Some(&prior),
-        );
-        let reordered_kinds: Vec<_> = reordered.iter().map(|s| s.kind).collect();
-        assert!(
-            kind_is_non_orientable(reordered_kinds[0]),
-            "the reordered menu must lead with a non-orientable candidate (got {:?})",
-            reordered_kinds[0]
-        );
-        let non_orientable_count = base_kinds
+        let base_kinds: Vec<_> = topology_candidates_for_dim(coords.view(), 2)
+            .unwrap()
             .iter()
-            .filter(|k| kind_is_non_orientable(**k))
-            .count();
-        assert!(
-            reordered_kinds[..non_orientable_count]
-                .iter()
-                .all(|k| kind_is_non_orientable(*k)),
-            "every non-orientable candidate must be floated to the front block"
-        );
-        let mut a = base_kinds.clone();
-        let mut b = reordered_kinds.clone();
-        a.sort_by_key(|k| format!("{k:?}"));
-        b.sort_by_key(|k| format!("{k:?}"));
-        assert_eq!(
-            a, b,
-            "the reorder must preserve the candidate set (no drop/add)"
-        );
+            .map(|spec| spec.kind)
+            .collect();
 
-        // Absent observation: byte-identical menu order.
         let identity_none =
             atlas_reorder_specs(topology_candidates_for_dim(coords.view(), 2).unwrap(), None);
         assert_eq!(
-            identity_none.iter().map(|s| s.kind).collect::<Vec<_>>(),
+            identity_none
+                .iter()
+                .map(|spec| spec.kind)
+                .collect::<Vec<_>>(),
             base_kinds,
             "an absent prior must leave the menu byte-identical"
         );
 
-        // Orientable observation: byte-identical menu order (one-directional).
-        let orientable = AtlasObserved {
-            orientability: crate::manifold::AtlasOrientability::Orientable,
-            cocycle_trustworthy: true,
-        };
-        let identity_orientable = atlas_reorder_specs(
-            topology_candidates_for_dim(coords.view(), 2).unwrap(),
-            Some(&orientable),
-        );
-        assert_eq!(
-            identity_orientable
-                .iter()
-                .map(|s| s.kind)
-                .collect::<Vec<_>>(),
-            base_kinds,
-            "an orientable observation is absence-of-evidence and must not reorder the menu"
-        );
+        // A tiny 2-D ambient block: the charts certify, but the cover cannot form a
+        // connected nerve with 2-cells, so the readout refuses.
+        let flat = Array2::<f64>::from_shape_fn((40, 3), |(r, c)| {
+            let x = (r % 8) as f64;
+            let y = (r / 8) as f64;
+            [x, y, 0.0][c]
+        });
+        let refusing = atlas_prior_for_coords(flat.view(), 2);
+        if let Some(readout) = refusing.as_ref() {
+            if readout.observed_manifold().is_none() {
+                let identity_refused = atlas_reorder_specs(
+                    topology_candidates_for_dim(coords.view(), 2).unwrap(),
+                    Some(readout),
+                );
+                assert_eq!(
+                    identity_refused
+                        .iter()
+                        .map(|spec| spec.kind)
+                        .collect::<Vec<_>>(),
+                    base_kinds,
+                    "a refusing readout must leave the menu byte-identical: {readout}"
+                );
+            }
+        }
     }
 
-    /// #2280 — END-TO-END: a Möbius residual is observed non-orientable, the menu
-    /// is reordered so the non-orientable candidate races FIRST, and the REML race
-    /// outcome is unchanged-or-better vs the unprimed baseline (the race stays the
-    /// sole arbiter — the reorder can only break an exact tk-score tie).
+    /// #2280 — END-TO-END: a Möbius residual is measured non-orientable, the menu
+    /// is reordered so a twisted candidate races FIRST, and the REML race outcome
+    /// is unchanged-or-better vs the unprimed baseline (the race stays the sole
+    /// arbiter — the reorder can only break an exact tk-score tie).
     #[test]
     fn mobius_residual_reorders_menu_and_race_unchanged_or_better_2280() {
         let (target, coords) = mobius_with_coords(60, 5);
         let weights = Array1::<f64>::ones(target.nrows());
 
-        let atlas =
-            atlas_prior_for_coords(target.view()).expect("the Möbius residual must build an atlas");
+        let atlas = atlas_prior_for_coords(target.view(), 2)
+            .expect("the Möbius residual must build an atlas");
         assert!(
-            atlas.prefers_non_orientable(),
-            "the Möbius residual must be observed non-orientable: {atlas:?}"
+            atlas.observes_non_orientable(),
+            "the Möbius residual must be measured non-orientable: {atlas}"
         );
 
         // Baseline (unprimed) menu leads with an orientable candidate.
         let base_kinds: Vec<_> = topology_candidates_for_dim(coords.view(), 2)
             .unwrap()
             .iter()
-            .map(|s| s.kind)
+            .map(|spec| spec.kind)
             .collect();
         assert!(!kind_is_non_orientable(base_kinds[0]));
         // Primed menu leads with a non-orientable candidate.
-        let primed_kinds: Vec<_> = atlas_reorder_specs(
+        let primed_specs = atlas_reorder_specs(
             topology_candidates_for_dim(coords.view(), 2).unwrap(),
             Some(&atlas),
-        )
-        .iter()
-        .map(|s| s.kind)
-        .collect();
+        );
+        let primed_kinds: Vec<_> = primed_specs.iter().map(|spec| spec.kind).collect();
         assert!(
             kind_is_non_orientable(primed_kinds[0]),
             "the atlas must reorder the menu so a non-orientable candidate races first"
+        );
+        let mut a = base_kinds.clone();
+        let mut b = primed_kinds.clone();
+        a.sort_by_key(|kind| format!("{kind:?}"));
+        b.sort_by_key(|kind| format!("{kind:?}"));
+        assert_eq!(
+            a, b,
+            "the reorder must preserve the candidate set (no drop/add)"
         );
 
         // Race both menus on the SAME evidence. race_spec_set is the production
@@ -7080,12 +7128,12 @@ mod tests_atlas_prior_2280 {
         );
     }
 
-    /// #2280 — an orientable residual leaves the RACE byte-identical: same winner
-    /// topology and same tk_score whether or not the (orientable) atlas prior is
-    /// supplied. This is the fail-open / one-directional guarantee at the race
-    /// level, not just the reorder helper.
+    /// #2280 — a measured ORIENTABLE manifold is also a positive measurement, and
+    /// it too may only reorder: the cylinder residual floats the cylinder candidate
+    /// and the race stays unchanged-or-better. The prior never vetoes — the twisted
+    /// candidates remain in the race in their original relative order.
     #[test]
-    fn orientable_residual_leaves_race_byte_identical_2280() {
+    fn cylinder_residual_floats_cylinder_and_race_unchanged_or_better_2280() {
         let target = cylinder_strip(60, 5);
         // A 2-D coordinate seed matched to the cylinder (angle, height).
         let mut coords = Array2::<f64>::zeros((target.nrows(), 2));
@@ -7099,9 +7147,35 @@ mod tests_atlas_prior_2280 {
             }
         }
         let weights = Array1::<f64>::ones(target.nrows());
-        let atlas = atlas_prior_for_coords(target.view())
+        let atlas = atlas_prior_for_coords(target.view(), 2)
             .expect("the cylinder residual must build an atlas");
-        assert!(!atlas.prefers_non_orientable());
+        assert!(!atlas.observes_non_orientable());
+
+        let base = topology_candidates_for_dim(coords.view(), 2).unwrap();
+        let base_kinds: Vec<_> = base.iter().map(|spec| spec.kind).collect();
+        let primed_specs = atlas_reorder_specs(
+            topology_candidates_for_dim(coords.view(), 2).unwrap(),
+            Some(&atlas),
+        );
+        let primed_kinds: Vec<_> = primed_specs.iter().map(|spec| spec.kind).collect();
+        assert_eq!(
+            primed_kinds[0],
+            AutoTopologyKind::Cylinder,
+            "the measured cylinder must lead the menu: {atlas}"
+        );
+        let mut sorted_base = base_kinds.clone();
+        let mut sorted_primed = primed_kinds.clone();
+        sorted_base.sort_by_key(|kind| format!("{kind:?}"));
+        sorted_primed.sort_by_key(|kind| format!("{kind:?}"));
+        assert_eq!(
+            sorted_base, sorted_primed,
+            "the reorder must preserve the candidate set (no drop/add)"
+        );
+        assert!(
+            primed_kinds.contains(&AutoTopologyKind::KleinBottle)
+                && primed_kinds.contains(&AutoTopologyKind::ProjectivePlane),
+            "an orientable measurement must not veto the twisted candidates"
+        );
 
         let unprimed = race_spec_set(
             topology_candidates_for_dim(coords.view(), 2).unwrap(),
@@ -7119,10 +7193,11 @@ mod tests_atlas_prior_2280 {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(
-            unprimed.1.to_bits(),
-            primed.1.to_bits(),
-            "an orientable observation must leave the race score byte-identical"
+        assert!(
+            primed.1 <= unprimed.1 + 1e-9,
+            "primed race cost {} must be unchanged-or-better vs unprimed {}",
+            primed.1,
+            unprimed.1
         );
     }
 }

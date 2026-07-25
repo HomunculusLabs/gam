@@ -125,12 +125,32 @@ const FRAME_OVERLAP_DETERMINANT_FLOOR: f64 = 1.0e-6;
 /// that the atlas stays sublinear in `n`.
 const PATCH_COUNT_COVERAGE_MULTIPLIER: f64 = 2.0;
 
-/// Overlap multiplier for the default patch size, `⌈c·n/patch_count⌉`. `n/count`
-/// is the average Voronoi-cell occupancy of one center; growing each patch to `c`
-/// times that occupancy forces neighboring cells to share rows, which is what
-/// produces the overlaps a transition cocycle needs. `3` gives a robust overlap
-/// without the patches degenerating into the whole sample.
-const PATCH_SIZE_OVERLAP_MULTIPLIER: f64 = 3.0;
+/// Floor on the overlap multiplier for the default patch size, `⌈c·n/patch_count⌉`.
+/// `n/count` is the average Voronoi-cell occupancy of one center; growing each
+/// patch to `c` times that occupancy forces neighboring cells to share rows, which
+/// is what produces the overlaps a transition cocycle needs. `3` gives a robust
+/// overlap — over-determining both the chart's local PCA and every overlap's
+/// Procrustes — without the patches degenerating into the whole sample.
+const PATCH_SIZE_OVERLAP_FLOOR: f64 = 3.0;
+
+/// The mean cover multiplicity a `d`-dimensional atlas needs, `max(3, 2^d)`.
+///
+/// The fitting floor above is not the only requirement. For the NERVE of the cover
+/// to carry the manifold's homology (#2280), every `d`-simplex of the centers'
+/// Delaunay complex must be witnessed by a row shared by all its patches, and that
+/// requires each patch to reach the vertices of its neighbors' cells — roughly
+/// twice its own cell radius. Doubling a radius multiplies the covered volume by
+/// `2^d`, so the cover's mean multiplicity must be at least `2^d`. Both are floors
+/// on the same quantity, so the larger wins: `d = 1 → 3` (fitting binds),
+/// `d = 2 → 4`, `d = 3 → 8`.
+///
+/// Measured on a flat lattice: at mean multiplicity 3 the nerve of the sheet
+/// carries two spurious 1-cycles and `χ = −1`; at 4 it is exactly a disk
+/// (`b₁ = 0`, `b₂ = 0`, `χ = 1`).
+fn patch_size_overlap_multiplier(intrinsic_dim: usize) -> f64 {
+    let doubling = 2.0_f64.powi(i32::try_from(intrinsic_dim.max(1)).unwrap_or(i32::MAX));
+    PATCH_SIZE_OVERLAP_FLOOR.max(doubling)
+}
 
 /// Minimum fraction of the ambient rows that certified charts must cover for the
 /// atlas to be built at all. On real, noisy activations a handful of centers can
@@ -173,8 +193,10 @@ pub struct LocalAtlasConfig {
 
 impl LocalAtlasConfig {
     /// Principled defaults for `n` rows and chart dimension `d`: `⌈2√n⌉` centers,
-    /// each grown to `⌈3·n/count⌉` (floored at `2(d+1)` so a chart's PCA and every
-    /// overlap's Procrustes are over-determined), with `min_overlap = d + 2`.
+    /// each grown to `⌈max(3, 2^d)·n/count⌉` (floored at `2(d+1)` so a chart's PCA
+    /// and every overlap's Procrustes are over-determined), with
+    /// `min_overlap = d + 2`. See [`patch_size_overlap_multiplier`] for why the
+    /// overlap multiplier depends on `d`.
     #[must_use]
     pub fn balanced(n_points: usize, intrinsic_dim: usize) -> Self {
         let d = intrinsic_dim.max(1);
@@ -183,7 +205,7 @@ impl LocalAtlasConfig {
             .max(d + 2)
             .min(n);
         let occupancy = (n as f64 / patch_count as f64).max(1.0);
-        let patch_size = ((PATCH_SIZE_OVERLAP_MULTIPLIER * occupancy).ceil() as usize)
+        let patch_size = ((patch_size_overlap_multiplier(d) * occupancy).ceil() as usize)
             .max(2 * (d + 1))
             .min(n);
         Self {
@@ -1300,110 +1322,9 @@ fn determinant(m: &Array2<f64>) -> f64 {
 mod tests {
     use super::*;
 
-    // --- fixtures ---------------------------------------------------------
-
-    /// A swiss roll: a flat 2-D sheet `(t, h)` rolled into ambient 3-D. Folded in
-    /// the ambient metric (ambient-near points can be geodesically far), yet
-    /// intrinsically flat, so the transition cocycle around a contractible triangle
-    /// must close.
-    fn swiss_roll(n_t: usize, n_h: usize) -> Array2<f64> {
-        let n = n_t * n_h;
-        let mut z = Array2::<f64>::zeros((n, 3));
-        let mut r = 0usize;
-        for it in 0..n_t {
-            // t over ~1.5 turns.
-            let t = 1.0 + 3.0 * std::f64::consts::PI * (it as f64) / (n_t as f64 - 1.0);
-            for ih in 0..n_h {
-                let h = 2.0 * (ih as f64) / (n_h as f64 - 1.0);
-                z[[r, 0]] = t * t.cos();
-                z[[r, 1]] = t * t.sin();
-                z[[r, 2]] = h;
-                r += 1;
-            }
-        }
-        z
-    }
-
-    /// A flat 2-D lattice embedded isometrically into 4-D by a fixed orthonormal
-    /// pair of ambient directions. Local PCA recovers the exact plane, so every
-    /// transition is an exact isometry and the cocycle closes to rounding — the
-    /// sharp cocycle-closure fixture.
-    fn embedded_plane(n_x: usize, n_y: usize) -> Array2<f64> {
-        // Two orthonormal ambient directions in R^4.
-        let u = [0.5, 0.5, 0.5, 0.5];
-        let v = [0.5, -0.5, 0.5, -0.5];
-        let n = n_x * n_y;
-        let mut z = Array2::<f64>::zeros((n, 4));
-        let mut r = 0usize;
-        for ix in 0..n_x {
-            for iy in 0..n_y {
-                let a = ix as f64;
-                let b = iy as f64;
-                for c in 0..4 {
-                    z[[r, c]] = a * u[c] + b * v[c];
-                }
-                r += 1;
-            }
-        }
-        z
-    }
-
-    /// Points on the unit 2-sphere on a lat/lon grid (poles excluded).
-    fn sphere(n_lat: usize, n_lon: usize) -> Array2<f64> {
-        let n = n_lat * n_lon;
-        let mut z = Array2::<f64>::zeros((n, 3));
-        let mut r = 0usize;
-        for i in 0..n_lat {
-            let lat = -1.2 + 2.4 * (i as f64) / (n_lat as f64 - 1.0); // in (−π/2, π/2)
-            for j in 0..n_lon {
-                let lon = std::f64::consts::TAU * (j as f64) / (n_lon as f64);
-                z[[r, 0]] = lat.cos() * lon.cos();
-                z[[r, 1]] = lat.cos() * lon.sin();
-                z[[r, 2]] = lat.sin();
-                r += 1;
-            }
-        }
-        z
-    }
-
-    /// A cylinder strip: loop coordinate `u`, width `v` on a FIXED ambient axis, so
-    /// the width frame never flips — orientable.
-    fn cylinder_strip(n_u: usize, n_v: usize) -> Array2<f64> {
-        let n = n_u * n_v;
-        let mut z = Array2::<f64>::zeros((n, 3));
-        let mut r = 0usize;
-        for iu in 0..n_u {
-            let u = std::f64::consts::TAU * (iu as f64) / (n_u as f64);
-            for iv in 0..n_v {
-                let v = -0.4 + 0.8 * (iv as f64) / (n_v as f64 - 1.0);
-                z[[r, 0]] = 2.0 * u.cos();
-                z[[r, 1]] = 2.0 * u.sin();
-                z[[r, 2]] = v;
-                r += 1;
-            }
-        }
-        z
-    }
-
-    /// A Möbius strip: the standard half-twist embedding, so the width frame
-    /// reverses once around the loop — non-orientable.
-    fn mobius_strip(n_u: usize, n_v: usize) -> Array2<f64> {
-        let n = n_u * n_v;
-        let mut z = Array2::<f64>::zeros((n, 3));
-        let mut r = 0usize;
-        for iu in 0..n_u {
-            let u = std::f64::consts::TAU * (iu as f64) / (n_u as f64);
-            for iv in 0..n_v {
-                let v = -0.4 + 0.8 * (iv as f64) / (n_v as f64 - 1.0);
-                let radial = 2.0 + v * (u / 2.0).cos();
-                z[[r, 0]] = radial * u.cos();
-                z[[r, 1]] = radial * u.sin();
-                z[[r, 2]] = v * (u / 2.0).sin();
-                r += 1;
-            }
-        }
-        z
-    }
+    use crate::manifold::topology_fixtures::{
+        cylinder_strip, embedded_plane, mobius_strip, spherical_band, swiss_roll,
+    };
 
     /// Find any triple of patches that pairwise share a registered transition and
     /// have a non-empty triple intersection (a genuine triple overlap).
@@ -1503,7 +1424,7 @@ mod tests {
     /// orientable with a closing triple cocycle.
     #[test]
     fn sphere_charts_injective_and_orientable_2280() {
-        let z = sphere(14, 20);
+        let z = spherical_band(14, 20);
         let config = LocalAtlasConfig::balanced(z.nrows(), 2);
         let atlas = LocalAtlas::build(z.view(), config).expect("sphere atlas must build");
         for chart in atlas.charts() {
@@ -1590,9 +1511,13 @@ mod tests {
         // Healthy bulk: a clean 12×12 embedded plane (144 rows).
         let plane = embedded_plane(12, 12);
         let plane_n = plane.nrows();
-        // A far collinear blob (25 rows > patch_size) along ambient axis 0, isolated
-        // at x ≈ 200, so a center inside it charts only its own rank-1 neighborhood.
-        let blob_n = 25usize;
+        // A far collinear blob along ambient axis 0, isolated at x ≈ 200, so a
+        // center inside it charts only its own rank-1 neighborhood. The blob must
+        // hold MORE rows than one patch, or the blob center's neighborhood would
+        // reach back into the plane and certify; the premise is asserted below
+        // rather than assumed, so a change to the derived patch size fails loudly
+        // instead of silently voiding the test.
+        let blob_n = 40usize;
         let n = plane_n + blob_n;
         let mut z = Array2::<f64>::zeros((n, 4));
         for r in 0..plane_n {
@@ -1605,6 +1530,12 @@ mod tests {
         }
 
         let config = LocalAtlasConfig::balanced(n, 2);
+        assert!(
+            config.patch_size < blob_n,
+            "the fixture's premise: one patch ({}) must fit inside the blob ({blob_n}), or the \
+             blob center's neighborhood reaches the plane and certifies",
+            config.patch_size
+        );
         let atlas =
             LocalAtlas::build(z.view(), config).expect("a mostly-healthy sample must still build");
 
@@ -1723,7 +1654,7 @@ mod tests {
     /// or finite-sample provenance.
     #[test]
     fn observed_signed_edges_are_canonical_but_not_certificates_2280() {
-        let z = sphere(12, 16);
+        let z = spherical_band(12, 16);
         let atlas = LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2)).unwrap();
         let edges = atlas.observed_signed_edges();
         assert!(!edges.is_empty(), "a covered sphere has overlaps");
