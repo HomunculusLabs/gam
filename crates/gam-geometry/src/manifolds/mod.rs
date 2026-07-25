@@ -20,7 +20,7 @@ pub mod constant_curvature;
 /// continuous parameter and so is not a
 /// [`ManifoldSpec`](crate::manifold::ManifoldSpec) variant.
 #[cfg(test)]
-mod constant_curvature_conformance;
+mod constant_curvature_conformance_tests;
 pub mod euclidean;
 pub mod grassmann;
 pub mod lie_so;

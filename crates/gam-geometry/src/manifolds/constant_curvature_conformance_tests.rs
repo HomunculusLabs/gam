@@ -2,7 +2,7 @@
 //!
 //! [`ConstantCurvature`] is deliberately **not** a [`ManifoldSpec`] variant — it
 //! carries a continuous parameter rather than a fixed shape — so the shared
-//! inventory in [`super::conformance`] does not reach it. It needs its own
+//! inventory in [`super::conformance_tests`] does not reach it. It needs its own
 //! coverage, and it needs a different *kind* of coverage, because the thing
 //! worth checking is not that a formula is self-consistent but that this one
 //! chart reproduces three classical geometries it was never told about.
