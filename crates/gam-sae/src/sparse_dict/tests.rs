@@ -549,6 +549,96 @@ fn over_complete_trainer_returns_best_effort_open_certificate_2275() {
     );
 }
 
+/// #2400 — the saturated-support birth-swap arm, at the production entry.
+///
+/// The open arm admits a fit whose final transition still accepted residual-row
+/// births, but ONLY when live-support cardinality has stopped setting new highs:
+/// those births are replacements on a fixed-cardinality support manifold, not
+/// structure the fit is still recruiting. `LiveSupportGrowth`'s own unit test
+/// pins the state machine in isolation; this pins that `run` actually reaches
+/// that branch and that nothing else can mint a model while births are live.
+///
+/// The invariant is asserted for every shape (it is premise-free — a certified
+/// fit or a growing support with live births would be a model minted from
+/// churning structure). The sweep then requires that at least one shape actually
+/// took the branch, so the arm cannot quietly become unexercised; the failure
+/// message reports the whole sweep so a shape that stops churning is diagnosed
+/// rather than guessed at.
+#[test]
+fn open_fit_with_positive_births_is_certified_only_by_saturated_support_2400() {
+    // (K, s, N, P, planted rank, second share). Spread across the regimes that
+    // produce dead atoms: K far above the row-capacity N·s, K just above it, and
+    // K below it with a rank far below K (the shape the real-activation sweep
+    // that opened #2400 runs at).
+    let shapes = [
+        (2000usize, 1usize, 240usize, 10usize, 8usize, 0.6f32),
+        (512, 2, 256, 16, 8, 0.5),
+        (1024, 8, 128, 12, 4, 0.5),
+        (64, 2, 768, 24, 8, 0.35),
+    ];
+
+    let mut observed = String::new();
+    let mut saturated_swap_arms = 0usize;
+    for (k, s, n, p, planted_k, second_share) in shapes {
+        let (x, _atoms) = planted(planted_k, p, n, second_share);
+        let config = SparseDictConfig {
+            n_atoms: k,
+            active: s,
+            minibatch: 256,
+            max_epochs: 12,
+            score_tile: 256,
+            tolerance: 1.0e-9,
+            score_mode: gam_gpu::GpuPolicy::Off,
+            ..SparseDictConfig::new(k)
+        };
+        let Ok(fit) = fit_sparse_dictionary(x.view(), &config) else {
+            // A shape that never confirms a plateau inside its budget is a typed
+            // non-convergence, which is the honest outcome and not this test's
+            // subject. Record it and move on.
+            observed.push_str(&format!("K={k} s={s}: typed non-convergence\n"));
+            continue;
+        };
+        let convergence = fit.convergence;
+        observed.push_str(&format!(
+            "K={k} s={s}: births={} live_high_water={} saturated={} certified={} \
+             epochs={} ev={:.6}\n",
+            convergence.accepted_births,
+            convergence.live_atom_high_water,
+            convergence.support_saturated,
+            convergence.certified,
+            fit.epochs,
+            fit.explained_variance,
+        ));
+
+        assert!(
+            convergence.live_atom_high_water <= k,
+            "live support cannot exceed the dictionary width: {} > {k}",
+            convergence.live_atom_high_water
+        );
+        if convergence.accepted_births > 0 {
+            assert!(
+                convergence.support_saturated,
+                "a fit returned with {} live births must have saturated its support \
+                 (K={k}, s={s}); returning one whose support is still growing mints a \
+                 model from structure the fit has not finished recruiting",
+                convergence.accepted_births
+            );
+            assert!(
+                !convergence.certified,
+                "births in the final transition are incompatible with an ABSOLUTE \
+                 fixed-point certificate (K={k}, s={s}); only the open arm admits them"
+            );
+            saturated_swap_arms += 1;
+        }
+    }
+
+    assert!(
+        saturated_swap_arms > 0,
+        "no shape exercised the saturated-support birth-swap arm, so this sweep \
+         proves only the non-regression; observed:\n{observed}"
+    );
+}
+
 /// #2275 no-weakening guard: best-effort is NOT handed out on a whim. Genuine
 /// non-convergence — the objective plateau never CONFIRMED within the epoch budget
 /// — must still surface the typed `InnerNonConvergence` error. With a budget below

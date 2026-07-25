@@ -423,6 +423,60 @@ const LINEAR_EV_PLATEAU_WINDOW: usize = LINEAR_EV_PLATEAU_MIN_ROUNDS + 1;
 /// observation horizon and avoids any guessed `K/N` capacity threshold (#2400).
 const LINEAR_SUPPORT_SATURATION_ROUNDS: usize = LINEAR_EV_PLATEAU_WINDOW;
 
+/// Captured-fraction EV-plateau detector for the best-effort/open arm (#2396).
+///
+/// A plateau is the statement that the objective has STOPPED MOVING. The size of
+/// a round's move is scored against the climb the fit has achieved since entry,
+/// which makes the test scale-free — it fires wherever the achievable plateau
+/// happens to sit (~1e-6 well-posed, ~1e-4 over-complete) with no absolute
+/// threshold to tune.
+///
+/// Both halves of that ratio are load-bearing, and the obvious spellings of each
+/// are unsound:
+///
+/// * the numerator is `|ΔEV|`, not the round's UPWARD share `max(ΔEV, 0)`. A
+///   round that moved downhill contributes exactly zero upward share, so scoring
+///   only the climb reads a FALLING objective as a settled one. Since the return
+///   hands back the pre-map state, that mints a model from a point of a
+///   trajectory that is actively getting worse.
+/// * the denominator is `best_ev − entry_ev`, not `next_ev − entry_ev`. The
+///   latter is `≤ 0` for any round sitting below where the fit entered, which
+///   collapses to the "no climb to divide by" branch and marks the round
+///   stationary — so a fit that never rose above its entry EV would confirm a
+///   plateau on the first window it filled, however hard it was still moving.
+///   The best EV seen is non-decreasing, so it is a stable scale.
+///
+/// With no climb to measure against, only a genuine numerical standstill is a
+/// plateau: `|ΔEV|` at the fixed-point floor, which is arm 1's own test.
+#[derive(Clone, Copy, Debug)]
+struct EvPlateau {
+    entry_ev: f64,
+    best_ev: f64,
+}
+
+impl EvPlateau {
+    fn new(entry_ev: f64) -> Self {
+        Self {
+            entry_ev,
+            best_ev: entry_ev,
+        }
+    }
+
+    /// Record the post-map EV of one round and report whether the objective has
+    /// plateaued there. `ev_residual` is `|EV(T(z)) − EV(z)|`, the magnitude of
+    /// the move this round made in either direction.
+    fn observe(&mut self, next_ev: f64, ev_residual: f64, fixed_point_tol: f64) -> bool {
+        if next_ev > self.best_ev {
+            self.best_ev = next_ev;
+        }
+        if ev_residual <= fixed_point_tol {
+            return true;
+        }
+        let climb = self.best_ev - self.entry_ev;
+        climb > f64::MIN_POSITIVE && ev_residual / climb < LINEAR_EV_PLATEAU_FRACTION
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LiveSupportGrowth {
     high_water: usize,
@@ -531,12 +585,12 @@ pub(super) fn run(
     // floor of the residual reductions, not literal zero.
     let fixed_point_tol =
         config.tolerance.max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
-    // Anchor for the captured-fraction EV-plateau detector (arm 2 best-effort):
-    // the denominator of "how much of the total climb since entry did this round
-    // capture". Stationary rounds within a trailing window mark the achievable
-    // plateau; the window (not a strict consecutive run) is what makes the signal
-    // robust to the K>>rank routing limit cycle (#2396).
-    let entry_ev = current_ev;
+    // Captured-fraction EV-plateau detector (arm 2 best-effort): "how big was
+    // this round's move against the climb achieved since entry". Stationary
+    // rounds within a trailing window mark the achievable plateau; the window
+    // (not a strict consecutive run) is what makes the signal robust to the
+    // K>>rank routing limit cycle (#2396).
+    let mut ev_plateau = EvPlateau::new(current_ev);
     // Trailing window of per-round stationary flags; a majority-with-one-tolerance
     // of these confirms a best-effort plateau, robust to the K>>rank routing limit
     // cycle (#2396). See [`LINEAR_EV_PLATEAU_WINDOW`].
@@ -720,23 +774,15 @@ pub(super) fn run(
             && routing_residual <= fixed_point_tol;
 
         // Arm 2 book-keeping: captured-fraction EV plateau. A round is stationary
-        // when it captured a negligible fraction of the total EV climb since entry
-        // (scale-free, so it fires wherever the achievable plateau sits). The
-        // gauge-invariant OBJECTIVE is the convergence criterion; the decoder-gauge
-        // and routing residuals are recorded, not gated on — at K >> rank the
-        // spurious support directions rotate freely and the routing residual
-        // legitimately cannot close. Reset on any non-stationary / unsettled /
-        // numerically-unsound round so a still-climbing objective can never be
-        // laundered as a plateau.
-        let round_improvement = improve.max(0.0);
-        let total_improvement = (next_ev - entry_ev).max(0.0);
-        let captured_fraction = if total_improvement > f64::MIN_POSITIVE {
-            round_improvement / total_improvement
-        } else {
-            0.0
-        };
-        let objective_plateaued = ev_residual <= fixed_point_tol
-            || captured_fraction < LINEAR_EV_PLATEAU_FRACTION;
+        // when its move was a negligible fraction of the EV climb achieved since
+        // entry (scale-free, so it fires wherever the achievable plateau sits, and
+        // symmetric in sign so a falling objective is never read as a settled one
+        // — see [`EvPlateau`]). The gauge-invariant OBJECTIVE is the convergence
+        // criterion; the decoder-gauge and routing residuals are recorded, not
+        // gated on — at K >> rank the spurious support directions rotate freely
+        // and the routing residual legitimately cannot close. A still-moving
+        // objective, in either direction, can never be laundered as a plateau.
+        let objective_plateaued = ev_plateau.observe(next_ev, ev_residual, fixed_point_tol);
         // A round is STATIONARY when the structure is settled, the subsolve sound,
         // and the objective plateaued. Confirm a best-effort plateau on MIN_ROUNDS
         // stationary rounds within the trailing window (tolerating one up-swing of
@@ -2874,15 +2920,77 @@ fn pack_codes(codes: &[SparseCode], n: usize, s: usize) -> (Array2<u32>, Array2<
 #[cfg(test)]
 mod exact_solve_tests {
     use super::{
-        CgStop, DecoderNormalEq, LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, cg_solve,
-        explained_variance, kappa_from_cg_tridiagonal, pcg_multi_core, route_and_code_all,
-        solve_decoder, solve_decoder_with_routability_gate,
+        CgStop, DecoderNormalEq, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
+        LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, cg_solve, explained_variance,
+        kappa_from_cg_tridiagonal, pcg_multi_core, route_and_code_all, solve_decoder,
+        solve_decoder_with_routability_gate,
     };
     use crate::sparse_dict::codes::SparseCode;
     use crate::sparse_dict::scoring::TileScorer;
     use crate::sparse_dict::{SparseDictConfig, fit_sparse_dictionary};
     use ndarray::{Array2, ArrayView2};
     use std::collections::HashMap;
+
+    /// The plateau detector decides whether a still-open fit may be returned at
+    /// all, so its failure mode is a model minted from a non-converged iterate.
+    /// Drive it directly over the trajectory shapes that separate "the objective
+    /// stopped moving" from "the objective is moving, downward".
+    #[test]
+    fn ev_plateau_is_a_standstill_test_not_a_climb_test_2396() {
+        // A plateau is symmetric in sign. Give the detector no climb at all and a
+        // trajectory that falls hard every round: the upward share of each round is
+        // zero and the current EV is below entry, which is exactly the pair of
+        // conditions a climb-only ratio reads as "settled". It is not settled.
+        let mut falling = EvPlateau::new(0.90);
+        for next_ev in [0.85_f64, 0.80, 0.75, 0.70] {
+            assert!(
+                !falling.observe(next_ev, 0.05, 1.0e-12),
+                "a falling objective is moving, not plateaued (ev={next_ev})"
+            );
+        }
+
+        // A round that gives back a large fraction of the climb is likewise still
+        // moving, even though it moved DOWN. This is the case a climb-only
+        // numerator cannot see: the fit rose 0.4, then handed a quarter of it back.
+        let mut relapse = EvPlateau::new(0.50);
+        assert!(!relapse.observe(0.90, 0.40, 1.0e-12), "the climb itself");
+        assert!(
+            !relapse.observe(0.80, 0.10, 1.0e-12),
+            "handing back a quarter of the climb in one round is not a plateau"
+        );
+
+        // The complement: after the same climb, jitter that is negligible against
+        // it IS a plateau in both directions. The fix must not turn every downhill
+        // round into a refusal — only ones that are large on the climb's own scale.
+        let mut settled = EvPlateau::new(0.50);
+        assert!(!settled.observe(0.90, 0.40, 1.0e-12), "the climb itself");
+        let negligible = 0.40 * LINEAR_EV_PLATEAU_FRACTION / 10.0;
+        assert!(
+            settled.observe(0.90 + negligible, negligible, 1.0e-12),
+            "an upward move negligible against the climb is a plateau"
+        );
+        assert!(
+            settled.observe(0.90 - negligible, negligible, 1.0e-12),
+            "a downward move negligible against the climb is equally a plateau"
+        );
+
+        // A still-climbing fit is never a plateau, which is the property the
+        // detector existed for in the first place.
+        let mut climbing = EvPlateau::new(0.10);
+        assert!(!climbing.observe(0.40, 0.30, 1.0e-12));
+        assert!(!climbing.observe(0.60, 0.20, 1.0e-12));
+        assert!(!climbing.observe(0.75, 0.15, 1.0e-12));
+
+        // With no climb to divide by, only a genuine numerical standstill counts —
+        // and that standstill is arm 1's own test, so the open arm adds nothing
+        // unsound there.
+        let mut flat = EvPlateau::new(0.30);
+        assert!(flat.observe(0.30, 0.0, 1.0e-12), "an exact standstill");
+        assert!(
+            !flat.observe(0.29, 1.0e-2, 1.0e-12),
+            "no climb to compare against means a moving round is not a plateau"
+        );
+    }
 
     #[test]
     fn live_support_growth_distinguishes_recruitment_from_fixed_cardinality_swaps_2400() {
