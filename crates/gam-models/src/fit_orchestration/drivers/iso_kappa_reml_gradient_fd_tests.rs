@@ -1163,6 +1163,161 @@ fn build_duchon_probit_setup() -> DuchonProbitSetup {
     }
 }
 
+/// #2425 MEASUREMENT (reports, never fails): is the marginal `psi_only` ρ₁
+/// analytic-vs-FD gap central-difference TRUNCATION or a noise floor?
+#[test]
+fn zz_measure_psi_only_rho1_fd_step_law_2425() {
+    // The one component that fails `iso_kappa_duchon_n_smaller_fd`, and it is
+    // near-zero and marginal in EVERY config, not just at n=20:
+    //
+    //   duchon_probit_n20      an=-1.9454e-5 fd=-1.4377e-5  rel=5.077e-3  FAIL
+    //   duchon_probit_rho_only an=-1.9108e-5 fd=-1.5746e-5  rel=3.362e-3  pass
+    //   duchon_logit           an=+9.1413e-6 fd=+6.5455e-6  rel=2.596e-3  pass
+    //   duchon_gaussian        an=+1.7330e-5 fd=+1.6750e-5  rel=5.799e-4  pass
+    //
+    // The driver's `denom = max(|fd|, |an|, 1e-3)` floors the denominator at
+    // 1e-3, so on a component of size ~1.5e-5 the 5e-3 relative gate is really
+    // an ABSOLUTE 5e-6 gate, and every config sits within a factor of two of it.
+    // Before anyone moves that number, the h-law decides which side is wrong:
+    //
+    //   gap ∝ h²   → central-difference TRUNCATION. The analytic gradient is
+    //                right and the ORACLE's fixed h=1e-5 is too coarse for a
+    //                component with large third derivative; Richardson (or a
+    //                smaller h) fixes it and no tolerance needs to move.
+    //   gap flat, or growing as h shrinks → a noise floor (the inner PIRLS
+    //                stationarity residual propagating into both sides). Then
+    //                the absolute floor must be DERIVED from that residual
+    //                rather than left at a magic 1e-3 denominator.
+    //
+    // Reports only. `ratio` is gap/h²: constant ⇒ truncation.
+    let DuchonProbitSetup {
+        data,
+        y,
+        weights,
+        offset,
+        frozen,
+        frozen_design,
+        spatial_terms,
+        dims_per_term,
+        rho_dim,
+        psi_dim,
+    } = build_duchon_probit_setup();
+    let fit_opts = FitOptions {
+        compute_inference: false,
+        max_iter: 200,
+        tol: 1e-12,
+        penalty_shrinkage_floor: None,
+        ..FitOptions::default()
+    };
+    let external_opts = external_opts_for_design(
+        &LikelihoodSpec::binomial_probit(),
+        &frozen_design,
+        &fit_opts,
+    );
+    let mut cache = SingleBlockExactJointDesignCache::new(
+        data.view(),
+        frozen.clone(),
+        frozen_design.clone(),
+        spatial_terms.clone(),
+        rho_dim,
+        dims_per_term.clone(),
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "cache", e));
+    let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
+        y.view(),
+        weights.view(),
+        &frozen_design.design,
+        offset.view(),
+        &frozen_design.penalties,
+        &external_opts,
+        "psi_only rho1 FD step law",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "evaluator", e));
+
+    // The driver's `psi_only` probe: every ρ at 0, ψ at 0.4.
+    let theta_dim = rho_dim + psi_dim;
+    let mut theta = Array1::<f64>::zeros(theta_dim);
+    for k in 0..psi_dim {
+        theta[rho_dim + k] = 0.4;
+    }
+    const COORD: usize = 1;
+
+    let eval_at = |theta: &Array1<f64>,
+                   order: gam_solve::rho_optimizer::OuterEvalOrder,
+                   cache: &mut SingleBlockExactJointDesignCache<'_>,
+                   evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>| {
+        cache.ensure_theta(theta).unwrap_or_else(|e| panic!("{} failed: {:?}", "ensure_theta", e));
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data.view(),
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "hyper dirs build", e))
+        .expect("hyper dirs present");
+        evaluate_joint_reml_outer_eval_at_theta(
+            evaluator,
+            cache.design(),
+            theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            order,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "outer eval", e))
+    };
+
+    let (cost, grad, _h) = eval_at(
+        &theta,
+        gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+        &mut cache,
+        &mut evaluator,
+    );
+    let analytic = grad[COORD];
+    eprintln!(
+        "[zz-steplaw-2425] cost={cost:.12e} analytic_rho{COORD}={analytic:+.10e}"
+    );
+    let mut previous: Option<(f64, f64)> = None;
+    for h in [
+        1.0e-3, 3.0e-4, 1.0e-4, 3.0e-5, 1.0e-5, 3.0e-6, 1.0e-6, 3.0e-7, 1.0e-7,
+    ] {
+        let mut plus = theta.clone();
+        plus[COORD] += h;
+        let mut minus = theta.clone();
+        minus[COORD] -= h;
+        let (cp, _, _) = eval_at(
+            &plus,
+            gam_solve::rho_optimizer::OuterEvalOrder::Value,
+            &mut cache,
+            &mut evaluator,
+        );
+        let (cm, _, _) = eval_at(
+            &minus,
+            gam_solve::rho_optimizer::OuterEvalOrder::Value,
+            &mut cache,
+            &mut evaluator,
+        );
+        let fd = (cp - cm) / (2.0 * h);
+        let gap = analytic - fd;
+        // Richardson against the previous (3x coarser) rung: for a clean
+        // O(h²) stencil this cancels the leading truncation term.
+        let richardson = previous.map(|(hc, fdc)| {
+            let ratio = (hc / h).powi(2);
+            (ratio * fd - fdc) / (ratio - 1.0)
+        });
+        eprintln!(
+            "[zz-steplaw-2425] h={h:.1e} fd={fd:+.10e} gap={gap:+.4e} \
+             gap/h2={:.4e} richardson={}",
+            gap / (h * h),
+            richardson
+                .map(|r| format!("{r:+.10e} (gap {:+.4e})", analytic - r))
+                .unwrap_or_else(|| "-".to_string())
+        );
+        previous = Some((h, fd));
+    }
+}
+
 /// Behavioral pin for the iso-κ Duchon ψ-axis under BinomialProbit: the
 /// analytic outer gradient must agree with a centered finite difference of the
 /// production objective.
