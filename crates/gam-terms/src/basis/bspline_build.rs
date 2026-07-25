@@ -3467,6 +3467,112 @@ mod function_space_null_shrinkage_tests {
         );
     }
 
+    /// gam#2433: the constructive rank revelation and `analyze_penalty_block`
+    /// are two views of ONE object — a candidate is filtered (and its `nullity`
+    /// reported) by the second, while its double-penalty ridge is rebuilt from
+    /// the first — so a private cutoff in either makes a single built term
+    /// self-contradictory: `nullity = 1` and "full rank, nothing to shrink" at
+    /// once. That is what dropped the Duchon trend ridge from the collection
+    /// design while the frozen replay kept it.
+    #[test]
+    fn constructive_null_space_uses_the_canonical_penalty_spectrum_cutoff_2433() {
+        // λ = (1, 1e-12). Canonically that second direction is UNPENALIZED
+        // (`spectral_tolerance` = 2·1e-10·1 = 2e-10, two decades above it), but
+        // in singular-value units it is 1e-6 — eight decades above RRQR's
+        // machine-precision cutoff (100·ε·2 ≈ 4.4e-14), which is what the
+        // constructive path used to ask.
+        let quadratic = ConstructiveQuadratic::from_energy_factor(
+            array![[1.0, 0.0], [0.0, 1.0e-6]],
+            "#2433 canonical-cutoff fixture",
+        )
+        .expect("finite factor");
+        let block =
+            analyze_penalty_block(quadratic.dense()).expect("canonical spectral classification");
+        assert_eq!(
+            block.nullity, 1,
+            "fixture must be rank-deficient under the canonical convention"
+        );
+        let null = constructive_nullspace_basis(&quadratic)
+            .expect("constructive null revelation")
+            .expect("the sub-tolerance direction is a null direction");
+        assert_eq!(
+            null.ncols(),
+            block.nullity,
+            "the constructive null space must have the dimension the canonical \
+             classifier reports for the same block"
+        );
+        assert!(
+            null[[0, 0]].abs() < 1.0e-12,
+            "the null direction must be the sub-tolerance coordinate, not the \
+             penalized one; got {null:?}"
+        );
+    }
+
+    /// The #2433 shape itself: one penalty, two routes into the same
+    /// constrained chart, which must not disagree about its null space.
+    ///
+    /// `try_from_dense_psd` applies the canonical tolerance and DROPS
+    /// sub-tolerance modes from the energy factor, so *where* it sits relative
+    /// to the identifiability restriction decides whether a mode that only
+    /// falls below tolerance under `Z` is still present when rank is revealed.
+    /// The term collection factors the RAW penalty and then restricts it; the
+    /// frozen single-term replay projects first and factors the CONSTRAINED
+    /// penalty. With a machine-precision cutoff those two answered differently.
+    #[test]
+    fn constructive_null_space_is_independent_of_where_the_chart_is_applied_2433() {
+        // A raw penalty whose second direction is 30× ABOVE the raw chart's
+        // tolerance (3·1e-10) and, after an orthonormal restriction that keeps
+        // only a 1e-2 component of it, 200× BELOW the constrained chart's
+        // (2·1e-10).
+        let component = 1.0e-2_f64;
+        let z = array![
+            [1.0, 0.0],
+            [0.0, (1.0 - component * component).sqrt()],
+            [0.0, -component]
+        ];
+        let raw_dense = array![
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0e-8]
+        ];
+        let raw = ConstructiveQuadratic::try_from_dense_psd(raw_dense.clone(), "#2433 raw penalty")
+            .expect("PSD raw penalty");
+
+        // Route A — the term collection: restrict an already-factored penalty.
+        let by_restriction = ConstructiveQuadratic::from_energy_factor(
+            raw.factor().dot(&z),
+            "#2433 restricted-factor route",
+        )
+        .expect("finite restricted factor");
+        // Route B — the frozen replay: re-factor the dense congruence.
+        let by_refactoring = ConstructiveQuadratic::try_from_dense_psd(
+            congruence(&raw_dense, &z),
+            "#2433 dense-congruence route",
+        )
+        .expect("PSD dense congruence");
+
+        assert!(
+            max_abs_difference(by_restriction.dense(), by_refactoring.dense()) < 1.0e-18,
+            "the two routes must produce the same constrained penalty; the point of \
+             this fixture is that they did NOT produce the same null space"
+        );
+        for (label, quadratic) in [
+            ("restricted factor", &by_restriction),
+            ("dense congruence", &by_refactoring),
+        ] {
+            let null = constructive_nullspace_basis(quadratic)
+                .expect("constructive null revelation")
+                .unwrap_or_else(|| {
+                    panic!("{label}: the constrained penalty has a null direction")
+                });
+            assert_eq!(
+                null.ncols(),
+                1,
+                "{label}: exactly one direction is unpenalized in the constrained chart"
+            );
+        }
+    }
+
     #[test]
     fn metric_ridge_rebuild_adjudicates_whitening_amplified_roundoff_2318() {
         // This is the rounded dense artifact that triggered #2318.  A tiny

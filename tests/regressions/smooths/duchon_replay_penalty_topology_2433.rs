@@ -202,3 +202,99 @@ fn duchon_trend_ridge_annihilates_the_constrained_curvature_seminorm_2433() {
          parametric orthogonalization has removed the intercept"
     );
 }
+
+/// The trend block's analytic log-κ derivative must differentiate the block the
+/// value builder actually ships.
+///
+/// In a constrained chart the shipped `DoublePenaltyNullspace` block is not the
+/// congruence-transported raw trend ridge: it is that ridge rebuilt onto
+/// `null(Zᵀ S Z)` (`P R P`, #1476/#2372), and `P` is not the identity because
+/// the trend frame's covector transport `Zᵀ N` is not the surviving null
+/// direction. Differentiating the pre-rebuild object leaves the outer REML
+/// objective and its ψ-gradient describing different penalties — a desync the
+/// existing Duchon jet FD gates cannot see, because they all run with
+/// `SpatialIdentifiability::None`, where no rebuild happens.
+///
+/// Note the ridge only became load-bearing here once the collection stopped
+/// dropping it (#2433), which is why this gate ships with that fix.
+#[test]
+fn duchon_trend_ridge_log_kappa_derivative_matches_finite_difference_2433() {
+    // Small, fully explicit fixture: the frozen `Z` is an orthonormal
+    // complement of a vector with support on the affine SLOPE column, which is
+    // what makes the rebuild non-trivial (a `Z` orthogonal to the trend frame
+    // would leave `P R P == R` and prove nothing).
+    let data = covariate(64);
+    let centers = Array2::from_shape_fn((6, 1), |(i, _)| -2.5 + i as f64);
+    let width = centers.nrows(); // kernel(k-2) + poly(2) for a 1-D Linear null space
+    let mut anchor = Array2::<f64>::zeros((width, 1));
+    for i in 0..width {
+        anchor[[i, 0]] = 1.0 + 0.5 * i as f64;
+    }
+    let (z, rank) = gam::linalg::faer_ndarray::rrqr_nullspace_basis(
+        &anchor,
+        gam::linalg::faer_ndarray::default_rrqr_rank_alpha(),
+    )
+    .expect("orthonormal complement of the anchor direction");
+    assert_eq!(rank, 1);
+    assert_eq!(z.dim(), (width, width - 1));
+
+    let spec_at = |length_scale: f64| DuchonBasisSpec {
+        radial_reparam: None,
+        center_strategy: CenterStrategy::UserProvided(centers.clone()),
+        periodic: None,
+        length_scale: Some(length_scale),
+        power: 1.0,
+        nullspace_order: DuchonNullspaceOrder::Linear,
+        identifiability: SpatialIdentifiability::FrozenTransform {
+            transform: z.clone(),
+        },
+        aniso_log_scales: None,
+        operator_penalties: DuchonOperatorPenaltySpec::all_active(),
+        boundary: OneDimensionalBoundary::Open,
+    };
+
+    let base_length_scale = 0.9_f64;
+    let built = gam::basis::build_duchon_basis(data.view(), &spec_at(base_length_scale))
+        .expect("frozen-chart Duchon basis");
+    let trend_index = built
+        .active_penalties
+        .iter()
+        .position(|p| matches!(p.info.source, PenaltySource::DoublePenaltyNullspace))
+        .expect("the frozen chart must keep a trend ridge for this fixture");
+
+    // ψ = log κ = −log(length_scale).
+    let eps = 2.0e-5_f64;
+    let kappa = 1.0 / base_length_scale;
+    let plus = gam::basis::build_duchon_basis(data.view(), &spec_at(1.0 / (kappa * eps.exp())))
+        .expect("value at ψ+ε");
+    let minus = gam::basis::build_duchon_basis(data.view(), &spec_at(1.0 / (kappa * (-eps).exp())))
+        .expect("value at ψ−ε");
+    assert_eq!(
+        plus.active_penalties.len(),
+        built.active_penalties.len(),
+        "the FD stencil must stay on one penalty topology"
+    );
+    assert_eq!(minus.active_penalties.len(), built.active_penalties.len());
+    let fd = (&plus.active_penalties[trend_index].matrix
+        - &minus.active_penalties[trend_index].matrix)
+        / (2.0 * eps);
+
+    let analytic =
+        gam::basis::build_duchon_basis_log_kappa_derivative(data.view(), &spec_at(base_length_scale))
+            .expect("analytic ψ-derivative");
+    let analytic_trend = &analytic.penalties_derivative[trend_index];
+
+    let frob = |m: &Array2<f64>| m.iter().map(|v| v * v).sum::<f64>().sqrt();
+    let scale = frob(&fd).max(frob(analytic_trend));
+    assert!(
+        scale > 1.0e-6,
+        "fixture must have a resolved trend-ridge ψ-derivative; got {scale:.3e}"
+    );
+    let err = frob(&(analytic_trend - &fd)) / scale;
+    assert!(
+        err < 1.0e-4,
+        "the analytic trend-ridge log-κ derivative must differentiate the block the \
+         value builder ships (relative error {err:.3e}); a mismatch here means the \
+         outer REML gradient and objective describe different penalties"
+    );
+}
