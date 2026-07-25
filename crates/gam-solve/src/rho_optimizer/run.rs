@@ -1802,9 +1802,34 @@ fn outer_nonconvergence_error(
     projected_grad_norm: Option<f64>,
     stationarity_bound: f64,
 ) -> EstimationError {
+    // Solver provenance, appended to every outer non-convergence.
+    //
+    // The certificate answers "is this point stationary" — and when it is not,
+    // the next question is always "then why did the search STOP here", which
+    // the message did not answer. A binomial/logit P-spline (#1575/#1561)
+    // refuses with `|Pg|=7.5e-1` against a `1.0e-2` bound, PSD Hessian, nothing
+    // railed, all coordinates 18 e-folds inside the box, "after 7 outer
+    // iteration(s)" — and the 7 is the whole mystery. `converged` distinguishes
+    // a solver that CLAIMED convergence (a tolerance desync, and the only case
+    // the #2273/#2374 resume will retry) from one that ran out of budget;
+    // `operator_stop_reason` separates a trust-region reject floor from a
+    // flat-valley cost stall from an iteration budget. All three are already on
+    // the result and cost nothing to print.
+    let reason = format!(
+        "{reason}; solver provenance: claimed_converged={}{}{}",
+        result.converged,
+        result
+            .operator_stop_reason
+            .map(|stop| format!(", stop_reason={stop:?}"))
+            .unwrap_or_default(),
+        result
+            .converged_via
+            .map(|via| format!(", converged_via={via:?}"))
+            .unwrap_or_default(),
+    );
     EstimationError::RemlDidNotConverge {
         context: context.to_string(),
-        reason: reason.to_string(),
+        reason,
         iterations: result.iterations,
         final_value: result.final_value,
         projected_grad_norm,
