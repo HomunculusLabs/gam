@@ -621,6 +621,48 @@ fn sample_standard_normal<R: rand::Rng + ?Sized>(rng: &mut R) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StandardPosteriorRoute {
+    BoundedLatent,
+    InequalityTruncated,
+    GaussianClosedForm,
+    UnconstrainedNuts,
+}
+
+fn standard_posterior_route(
+    has_bounded: bool,
+    declares_linear_inequality: bool,
+    has_link_wiggle: bool,
+    has_persisted_inequality: bool,
+    gaussian_identity: bool,
+) -> Result<StandardPosteriorRoute, String> {
+    if has_bounded && has_persisted_inequality {
+        return Err(
+            "standard posterior sampling does not support a model that combines bounded() latent \
+             coordinates with linear inequality constraints"
+                .to_string(),
+        );
+    }
+    if has_persisted_inequality {
+        return Ok(StandardPosteriorRoute::InequalityTruncated);
+    }
+    if has_link_wiggle || declares_linear_inequality {
+        return Err(
+            "standard constrained-coefficient posterior: the fitted model declares inequality \
+             constraints but has no persisted inequality-truncated posterior identity; refit with \
+             the current schema"
+                .to_string(),
+        );
+    }
+    if has_bounded {
+        return Ok(StandardPosteriorRoute::BoundedLatent);
+    }
+    if gaussian_identity {
+        return Ok(StandardPosteriorRoute::GaussianClosedForm);
+    }
+    Ok(StandardPosteriorRoute::UnconstrainedNuts)
+}
+
 fn sample_standard(
     model: &SavedModel,
     data: ArrayView2<'_, f64>,
@@ -657,26 +699,21 @@ fn sample_standard(
     // inspection is deliberately only a refusal check for a malformed/stale
     // artifact: it must never manufacture constraints or let a model-level
     // LinkWiggle block bypass the saved `Aθ ≥ b` cone (#2438).
-    if has_bounded && constrained_posterior.is_some() {
-        return Err(
-            "standard posterior sampling does not support a model that combines bounded() latent \
-             coordinates with linear inequality constraints"
-                .to_string(),
-        );
-    }
-    if constrained_posterior.is_some() {
-        return sample_standard_truncated(&fit, cfg);
-    }
-    if model.has_link_wiggle() || declares_linear_inequality {
-        return Err(
-            "standard constrained-coefficient posterior: the fitted model declares inequality \
-             constraints but has no persisted inequality-truncated posterior identity; refit with \
-             the current schema"
-                .to_string(),
-        );
-    }
-    if likelihood.is_gaussian_identity() && !has_bounded {
-        return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
+    let route = standard_posterior_route(
+        has_bounded,
+        declares_linear_inequality,
+        model.has_link_wiggle(),
+        constrained_posterior.is_some(),
+        likelihood.is_gaussian_identity(),
+    )?;
+    match route {
+        StandardPosteriorRoute::InequalityTruncated => {
+            return sample_standard_truncated(&fit, cfg);
+        }
+        StandardPosteriorRoute::GaussianClosedForm => {
+            return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
+        }
+        StandardPosteriorRoute::BoundedLatent | StandardPosteriorRoute::UnconstrainedNuts => {}
     }
 
     let parsed = parse_formula(&model.formula)?;
@@ -694,7 +731,7 @@ fn sample_standard(
     // bounded() coefficients live on a nonlinear latent-logit chart rather
     // than in the linear inequality polytope above. Keep their exact
     // push-forward sampler separate.
-    if has_bounded {
+    if route == StandardPosteriorRoute::BoundedLatent {
         let bounded_columns: Vec<gam_models::fit_orchestration::drivers::BoundedSampleColumn> =
             spec.linear_terms
                 .iter()
@@ -711,12 +748,6 @@ fn sample_standard(
                 })
                 .collect();
         return sample_standard_bounded(model, cfg, &bounded_columns);
-    }
-
-    // Every inequality-bearing standard fit returned above. The remaining
-    // Gaussian and NUTS paths are therefore provably unconstrained.
-    if likelihood.is_gaussian_identity() {
-        return laplace_gaussian_fallback(model, cfg, "standard gaussian posterior");
     }
 
     // Unconstrained non-Gaussian GLM — exact NUTS over the raw design, under
@@ -1408,6 +1439,31 @@ mod tests {
     use super::*;
     use gam_linalg::matrix::{DenseDesignMatrix, DenseDesignOperator, LinearOperator};
     use gam_problem::types::LikelihoodScaleMetadata;
+
+    #[test]
+    fn link_wiggle_dispatch_requires_and_consumes_the_persisted_cone() {
+        assert_eq!(
+            standard_posterior_route(false, false, true, true, true)
+                .expect("saved link-wiggle cone"),
+            StandardPosteriorRoute::InequalityTruncated,
+            "a Gaussian link wiggle must reach the cone before the closed-form shortcut",
+        );
+        assert_eq!(
+            standard_posterior_route(false, false, true, true, false)
+                .expect("saved link-wiggle cone"),
+            StandardPosteriorRoute::InequalityTruncated,
+            "a non-Gaussian link wiggle consumes the same fitted Laplace posterior",
+        );
+        let missing = standard_posterior_route(false, false, true, false, true)
+            .expect_err("a link wiggle without persisted constraint geometry must refuse");
+        assert!(missing.contains("no persisted inequality-truncated posterior identity"));
+        assert_eq!(
+            standard_posterior_route(false, false, false, false, true)
+                .expect("unconstrained Gaussian"),
+            StandardPosteriorRoute::GaussianClosedForm,
+            "the unconstrained Gaussian fast path must remain unchanged",
+        );
+    }
 
     #[test]
     fn constrained_draw_lift_uses_the_saved_affine_gauge() {
