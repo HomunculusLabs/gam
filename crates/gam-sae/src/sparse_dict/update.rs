@@ -774,7 +774,8 @@ pub(super) fn run(
             "[SAE epoch {}/{}] ev={:.6} improve={:.3e} ev_resid={:.3e} decoder_resid={:.3e} \
              routing_resid={:.3e} births={} revived={} live={}/{} no_growth={} \
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
-             max_component={} cg_columns={} device_cols={} \
+             mean_degree={:.1} giant_fraction={:.4} max_component={} \
+             cg_columns={} cg_iterations={} device_cols={} \
              cg_nonconverged={} cg_kappa_bound={:?} cg_relative_residual={:.3e}",
             epochs_run,
             config.max_epochs,
@@ -792,8 +793,11 @@ pub(super) fn run(
             refresh_secs,
             route_secs,
             fit_start.elapsed().as_secs_f64(),
+            decoder_solve_stats.mean_cofiring_degree,
+            decoder_solve_stats.giant_component_fraction,
             decoder_solve_stats.max_component_size,
             decoder_solve_stats.cg_columns,
+            decoder_solve_stats.cg_iterations,
             decoder_solve_stats.device_refresh_columns,
             decoder_solve_stats.cg_nonconverged_columns,
             decoder_solve_stats.cg_kappa_bound,
@@ -2423,9 +2427,9 @@ pub(super) fn solve_decoder(
 /// serial refresh next to 13.9 s of routed device compute, #1017). The block
 /// solve advances all columns together off one CSR traversal per iteration
 /// ([`pcg_multi_core`]), each column keeping its own `alpha`/`beta`/stopping
-/// state, and each column's iterates are BIT-IDENTICAL to the historical
-/// per-column `cg_solve` (same summation order everywhere; pinned in
-/// `gam_linalg::pcg` and by the block tests below).
+/// state. The CPU and device backends are bit-identical to one another from the
+/// same cached decoder seed; both use the same Jacobi-preconditioned recurrence
+/// and unchanged residual certificate.
 fn solve_component(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
@@ -2570,13 +2574,13 @@ fn solve_component(
             .collect()
     };
 
-    // Column-tile width: the block CG holds four dense `m × tile` f64 buffers
-    // (`X`, `R`, `P`, `AP`), so cap the tile at the footprint of the caller's
+    // Column-tile width: the block PCG holds five dense `m × tile` f64 buffers
+    // (`X`, `R`, `Z`, `P`, `AP`), so cap the tile at the footprint of the caller's
     // own `K × P` normal-equation right-hand side — the refresh never
     // allocates beyond the memory scale the accumulated normal equations
     // already committed to (SPEC: never OOM on reasonably-resourced machines).
     let k_total = eq.diag.len();
-    let tile_columns = ((k_total * p) / (4 * m)).max(1);
+    let tile_columns = ((k_total * p) / (5 * m)).max(1);
 
     for tile in live_columns.chunks(tile_columns) {
         let t = tile.len();
@@ -3760,6 +3764,34 @@ mod exact_solve_tests {
         assert!(
             stats.cg_kappa_hat.is_some(),
             "CG path must report a Lanczos condition estimate"
+        );
+    }
+
+    #[test]
+    fn retained_decoder_seed_removes_repeated_refresh_work() {
+        let (k, p) = (64usize, 8usize);
+        let ridge = 1.0e-5f64;
+        let eq = connected_tridiagonal_eq(k, p);
+        let mut decoder = Array2::<f32>::zeros((k, p));
+
+        let cold = solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Off)
+            .expect("cold decoder refresh");
+        let warm = solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Off)
+            .expect("warm decoder refresh");
+
+        assert_eq!(cold.cg_nonconverged_columns, 0);
+        assert_eq!(warm.cg_nonconverged_columns, 0);
+        assert!(
+            warm.cg_iterations < cold.cg_iterations,
+            "the retained decoder must reduce exact repeated-system work: cold={} warm={}",
+            cold.cg_iterations,
+            warm.cg_iterations
+        );
+        assert!(
+            warm.cg_relative_residual <= warm.cg_residual_stop,
+            "the warm solve must satisfy the same residual certificate: residual={:.3e} stop={:.3e}",
+            warm.cg_relative_residual,
+            warm.cg_residual_stop
         );
     }
 

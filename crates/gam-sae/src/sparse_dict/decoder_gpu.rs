@@ -5,16 +5,16 @@
 //! operator against every decoder column. [`super::update`] runs that solve
 //! through the shared multi-RHS recurrence `gam_linalg::pcg::pcg_multi_core`;
 //! this module supplies the CUDA implementation of its block backend: the CSR
-//! operator, the right-hand-side block, and ALL CG iterate state (`X`, `R`,
-//! `P`, `AP`) are uploaded once and stay resident on the device for the whole
-//! solve. Per iteration the host exchanges only the per-column scalars the
-//! recurrence itself needs (`alpha`/`beta` up, the two column-dot vectors
-//! down) — never a block. The solution block is downloaded once at the end.
+//! operator, the right-hand-side block, and ALL PCG iterate state (`X`, `R`,
+//! `Z`, `P`, `AP`) are uploaded once and stay resident on the device for the
+//! whole solve. Per iteration the host exchanges only the per-column scalars
+//! the recurrence itself needs (`alpha`/`beta` up, the dot vectors down) —
+//! never a block. The solution block is downloaded once at the end.
 //!
 //! # Bit parity with the CPU backend (a gate, not a tolerance)
 //!
 //! The recurrence's scalar decisions live in `pcg_multi_core` and are shared
-//! verbatim with the CPU path, so parity reduces to the four block primitives.
+//! verbatim with the CPU path, so parity reduces to the block primitives.
 //! Each is implemented with EXACTLY the CPU backend's per-column arithmetic:
 //!
 //! * the CSR application accumulates `diag·x` first, then the stored
@@ -25,8 +25,9 @@
 //! * the per-column inner products are strict ascending-row folds in ONE
 //!   thread per column (adjacent threads read adjacent addresses at each row,
 //!   so the walk is coalesced despite being sequential per column);
-//! * the `X`/`R` and `P` updates perform the same multiply-then-add per
-//!   element, gated by the same per-column active mask.
+//! * initial residual formation, Jacobi scaling, and the `X`/`R` and `P`
+//!   updates perform the same separately rounded arithmetic per element,
+//!   gated by the same per-column active mask.
 //!
 //! The `device_block_cg_matches_cpu_bitwise` test pins `to_bits` equality of
 //! the full solve against the CPU backend on a giant-scale fixture, so a CUDA
@@ -62,7 +63,7 @@ const COLUMN_BLOCK_THREADS: u32 = 128;
 /// row-stride loops.
 const MAX_GRID_Y: usize = 65_535;
 
-/// The four block primitives, in one NVRTC module. All arithmetic is f64 with
+/// The block primitives, in one NVRTC module. All arithmetic is f64 with
 /// separate roundings (`__dmul_rn`/`__dadd_rn`); see the module docs for why
 /// contraction must be suppressed.
 const BLOCK_CG_KERNELS: &str = r#"
@@ -362,7 +363,9 @@ impl DeviceBlockCgBackend {
         };
         let mut resident = upload()
             .map_err(|err| format!("sparse_dict decoder block-CG operand upload failed: {err}"))?;
-        resident.apply_block();
+        if initial_host.iter().any(|&value| value != 0.0) {
+            resident.apply_block();
+        }
         resident.initialize_preconditioned_state();
         Ok(Some(resident))
     }
@@ -424,6 +427,9 @@ impl DeviceBlockCgBackend {
             .arg(&self.inverse_diagonal)
             .arg(&m_i32)
             .arg(&t_i32);
+        // SAFETY: the grid covers exactly the `m × t` state. The kernel reads
+        // `ap` and `inverse_diagonal` within those dimensions and initializes
+        // only the equally sized resident `r`, `z`, and `p` allocations.
         complete(
             "initialize launch",
             unsafe { builder.launch(cfg) }.gpu_ctx("launch initialize"),
@@ -583,6 +589,9 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
             .arg(&self.inverse_diagonal)
             .arg(&m_i32)
             .arg(&t_i32);
+        // SAFETY: the grid covers exactly `m × t`; the kernel reads the
+        // matching residual block and `m` diagonal scales and writes only the
+        // equally sized resident preconditioned-residual block.
         complete(
             "precondition launch",
             unsafe { builder.launch(cfg) }.gpu_ctx("launch precondition"),

@@ -732,7 +732,9 @@ where
         let mut rhs_norm_squared = vec![0.0; t];
         Self::column_dots(&rhs_block, &rhs_block, &mut rhs_norm_squared);
         let mut ap = ndarray::Array2::zeros((m, t));
-        apply(&initial_solution, &mut ap);
+        if initial_solution.iter().any(|&value| value != 0.0) {
+            apply(&initial_solution, &mut ap);
+        }
         let mut r = rhs_block;
         r.as_slice_mut()
             .expect("block backend state is standard layout")
