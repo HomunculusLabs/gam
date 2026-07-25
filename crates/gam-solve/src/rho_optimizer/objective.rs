@@ -1,5 +1,5 @@
 use super::*;
-use super::rail_face::RailFaceLimit;
+use super::rail_face::RailFaceLimitOutcome;
 
 // Re-exported here while the shared EFS contract lives in `gam-problem`.
 pub use gam_problem::{EfsEval, FixedPointCertificateEval, FixedPointCoordinateCertificate};
@@ -187,21 +187,25 @@ pub trait OuterObjective {
     /// there — returns it here, and the outer certificate proves the face from
     /// it instead of probing a tail at finite λ.
     ///
-    /// `Ok(None)` is the correct answer whenever the objective cannot form the
-    /// limit exactly; it is not a failure, and the caller keeps whatever
-    /// evidence it already had. The default says exactly that.
+    /// A decline is not a failure, and it is typed: `OutsideClosedForm` leaves
+    /// room for a different closed form to apply, while `FaceUnavailable` is a
+    /// statement about the face itself. Either way the caller keeps whatever
+    /// evidence it already had. The default declines for every objective that
+    /// has no analytic limit at all.
     fn rail_face_limit(
         &mut self,
         rho: &Array1<f64>,
         face: &[usize],
-    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
         if face.iter().any(|&k| k >= rho.len()) {
             return Err(EstimationError::RemlOptimizationFailed(format!(
                 "rail face {face:?} is outside the rho layout of dimension {}",
                 rho.len()
             )));
         }
-        Ok(None)
+        Ok(RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "this objective has no analytic face limit".to_string(),
+        })
     }
 
     /// Restore to a clean baseline for the next multi-start candidate.
@@ -821,7 +825,7 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         &mut self,
         rho: &Array1<f64>,
         face: &[usize],
-    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
         self.inner.rail_face_limit(rho, face)
     }
 
@@ -944,7 +948,7 @@ pub struct ClosureObjective<
                 &mut S,
                 &Array1<f64>,
                 &[usize],
-            ) -> Result<Option<RailFaceLimit>, EstimationError>,
+            ) -> Result<RailFaceLimitOutcome, EstimationError>,
         >,
     >,
     /// Optional seed-screening ranking proxy closure. When `None`,
@@ -1039,7 +1043,7 @@ where
         &mut self,
         rho: &Array1<f64>,
         face: &[usize],
-    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
         if face.iter().any(|&k| k >= rho.len()) {
             return Err(EstimationError::RemlOptimizationFailed(format!(
                 "rail face {face:?} is outside the rho layout of dimension {}",
@@ -1048,7 +1052,9 @@ where
         }
         match self.rail_face_limit_fn.as_mut() {
             Some(f) => f(&mut self.state, rho, face),
-            None => Ok(None),
+            None => Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: "this objective does not implement an analytic face limit".to_string(),
+            }),
         }
     }
 
@@ -1123,7 +1129,7 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
                 &mut S,
                 &Array1<f64>,
                 &[usize],
-            ) -> Result<Option<RailFaceLimit>, EstimationError>
+            ) -> Result<RailFaceLimitOutcome, EstimationError>
             + 'static,
     {
         self.rail_face_limit_fn = Some(Box::new(limit));
@@ -1541,19 +1547,25 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         &mut self,
         rho: &Array1<f64>,
         face: &[usize],
-    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
         // The face is a set of ρ-coordinates, so it permutes exactly like ρ.
         let native_rho = self.to_native(rho);
         let mut native_face = Vec::with_capacity(face.len());
         for &canonical in face.iter() {
             match self.perm.get(canonical).copied() {
                 Some(native) => native_face.push(native),
-                None => return Ok(None),
+                None => {
+                    return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                        reason: format!(
+                            "face coordinate {canonical} is outside the canonical permutation"
+                        ),
+                    });
+                }
             }
         }
         let mut limit = match self.inner.rail_face_limit(&native_rho, &native_face)? {
-            Some(limit) => limit,
-            None => return Ok(None),
+            RailFaceLimitOutcome::Available(limit) => limit,
+            declined => return Ok(declined),
         };
         // The inner objective reports its face in NATIVE indices (and may have
         // reordered it); map back so the certificate names canonical
@@ -1566,11 +1578,18 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         for &native in limit.face.iter() {
             match canonical_of_native.get(native).copied() {
                 Some(canonical) if canonical != usize::MAX => canonical_face.push(canonical),
-                _ => return Ok(None),
+                _ => {
+                    return Ok(RailFaceLimitOutcome::FaceUnavailable {
+                        reason: format!(
+                            "the reported face names native coordinate {native}, which the \
+                             permutation does not cover"
+                        ),
+                    });
+                }
             }
         }
         limit.face = canonical_face;
-        Ok(Some(limit))
+        Ok(RailFaceLimitOutcome::Available(limit))
     }
 
     fn reset(&mut self) {

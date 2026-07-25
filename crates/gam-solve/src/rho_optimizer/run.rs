@@ -4,7 +4,9 @@ use super::asymptote_certificate::{
     AsymptoteSample, AsymptoteSide, AsymptoteTolerances, AsymptoteVerdict, AsymptoteWindow,
     MIN_TAIL_SAMPLES, assess_coordinate,
 };
-use super::rail_face::{RailFaceLimit, RailFaceProof, RailFaceVerdict, certify_rail_face};
+use super::rail_face::{
+    RailFaceLimit, RailFaceLimitOutcome, RailFaceProof, RailFaceVerdict, certify_rail_face,
+};
 
 pub(crate) const OPERATOR_TRUST_RESTART_RADIUS_FLOOR: f64 = 1.0e-6;
 
@@ -3441,11 +3443,15 @@ fn try_certify_face_analytically(
         }
     }
     let limit = match obj.rail_face_limit(rho, inputs.railed)? {
-        Some(limit) => limit,
-        None => {
-            return Ok(Err(
-                "this objective cannot form its λ=∞ face limit exactly".to_string()
-            ));
+        RailFaceLimitOutcome::Available(limit) => *limit,
+        // The decline is typed, and the distinction is worth carrying into the
+        // refusal: "outside this closed form" invites a different one, while
+        // "the face is unavailable" is a statement about the face.
+        RailFaceLimitOutcome::OutsideClosedForm { reason } => {
+            return Ok(Err(format!("outside the analytic closed form: {reason}")));
+        }
+        RailFaceLimitOutcome::FaceUnavailable { reason } => {
+            return Ok(Err(format!("the λ=∞ face is unavailable: {reason}")));
         }
     };
     let proof = match certify_rail_face(&limit) {

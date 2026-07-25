@@ -480,6 +480,54 @@ fn spectral_pseudo_inverse(values: &Array1<f64>, vectors: &Array2<f64>, cut: f64
     out
 }
 
+/// Why a rail-face limit is or is not available.
+///
+/// This is deliberately not an `Option`. There is more than one closed form for
+/// the criterion (the profiled-Gaussian one here; a LAML one for families whose
+/// working weights move with `β̂`), and a bare `None` would collapse two
+/// statements that call for opposite responses: *"this criterion is outside the
+/// closed form you asked"* — where a DIFFERENT form may still apply — and
+/// *"the closed form applies but this face is unusable"*, which is a statement
+/// about the face itself and which no other form will rescue.
+#[derive(Clone, Debug)]
+pub enum RailFaceLimitOutcome {
+    /// The limit was formed.
+    Available(Box<RailFaceLimit>),
+    /// The criterion is outside the closed form that was asked for. Says
+    /// nothing about the face; another closed form may still apply.
+    OutsideClosedForm {
+        /// Which clause of the form's scope failed.
+        reason: String,
+    },
+    /// The closed form applies, but the face cannot be used: it releases no
+    /// direction, the limit model is not identified, or a rank bookkeeping
+    /// check did not hold. No other closed form changes this.
+    FaceUnavailable {
+        /// The measured evidence behind the refusal.
+        reason: String,
+    },
+}
+
+impl RailFaceLimitOutcome {
+    /// The limit, when one was formed.
+    pub fn available(self) -> Option<RailFaceLimit> {
+        match self {
+            Self::Available(limit) => Some(*limit),
+            _ => None,
+        }
+    }
+
+    /// A human-readable account of a decline, for the certificate's log.
+    pub fn decline_reason(&self) -> Option<&str> {
+        match self {
+            Self::Available(_) => None,
+            Self::OutsideClosedForm { reason } | Self::FaceUnavailable { reason } => {
+                Some(reason.as_str())
+            }
+        }
+    }
+}
+
 /// Build the analytic λ→∞ face-limit data from a model's parts.
 ///
 /// This is the Gaussian-identity closed form derived at the top of this module,
@@ -507,7 +555,7 @@ pub fn gaussian_rail_face_limit(
     penalties: &[CanonicalPenalty],
     rho: &Array1<f64>,
     face: &[usize],
-) -> Option<RailFaceLimit> {
+) -> RailFaceLimitOutcome {
     let p = design.ncols();
     let n = design.nrows();
     let n_penalties = penalties.len();
@@ -519,10 +567,14 @@ pub fn gaussian_rail_face_limit(
         || response.len() != n
         || weights.len() != n
     {
-        return None;
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "face-limit inputs are shape-inconsistent or empty".to_string(),
+        };
     }
     if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
-        return None;
+        return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "prior weights are not finite and non-negative".to_string(),
+        };
     }
     let mut face_sorted = face.to_vec();
     face_sorted.sort_unstable();
@@ -530,7 +582,9 @@ pub fn gaussian_rail_face_limit(
     if face_sorted.len() != face.len()
         || face_sorted.last().copied().unwrap_or(usize::MAX) >= n_penalties
     {
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the face repeats a coordinate or indexes outside the penalty layout".to_string(),
+        };
     }
 
     // ── penalties: the face at unit λ, the survivors at their own λ ──────
@@ -544,11 +598,15 @@ pub fn gaussian_rail_face_limit(
     for (j, penalty) in penalties.iter().enumerate() {
         let lambda = rho[j].exp();
         if !lambda.is_finite() || lambda <= 0.0 {
-            return None;
+            return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "a smoothing parameter does not exponentiate to a usable lambda".to_string(),
+        };
         }
         let cols = penalty.col_range.clone();
         if cols.end > p {
-            return None;
+            return RailFaceLimitOutcome::OutsideClosedForm {
+            reason: "a penalty's column range runs past the coefficient layout".to_string(),
+        };
         }
         let slot = face_sorted.iter().position(|&f| f == j);
         for (li, gi) in cols.clone().enumerate() {
@@ -569,7 +627,11 @@ pub fn gaussian_rail_face_limit(
     // ── the subspace the face releases, and the one it pins ─────────────
     let (face_values, face_vectors) = match symmetric_eigh(&s_face_unit) {
         Some(pair) => pair,
-        None => return None,
+        None => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            };
+        }
     };
     let face_cut = range_null_split(&face_values);
     let released_cols: Vec<usize> = (0..face_values.len())
@@ -582,7 +644,9 @@ pub fn gaussian_rail_face_limit(
     if released == 0 {
         // The face penalizes nothing: λ=∞ there is not a statement about
         // the model at all.
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the face's penalties release no direction: lambda=infinity there says nothing about the model".to_string(),
+        };
     }
     let q_basis = basis_columns(&face_vectors, &released_cols);
     let z_basis = basis_columns(&face_vectors, &pinned_cols);
@@ -613,14 +677,22 @@ pub fn gaussian_rail_face_limit(
     if pinned > 0 {
         let (values, vectors) = match symmetric_eigh(&kzz) {
             Some(pair) => pair,
-            None => return None,
+            None => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            };
+        }
         };
         let largest = values.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
         let smallest = values.iter().fold(f64::INFINITY, |acc, v| acc.min(*v));
         if !(smallest > f64::EPSILON.sqrt() * largest) || !(largest > 0.0) {
             // The λ=∞ model is not identified; there is no limit fit to
             // certify against.
-            return None;
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the lambda=infinity model is not identified: reduced Hessian spectrum spans {smallest:.3e}..{largest:.3e}"
+                ),
+            };
         }
         conditioning = largest / smallest;
         let rhs = z_basis.t().dot(&xtwy);
@@ -645,7 +717,11 @@ pub fn gaussian_rail_face_limit(
     let penalized_deviance = weighted_rss + penalty_energy;
     let (all_values, _) = match symmetric_eigh(&s_unit_all) {
         Some(pair) => pair,
-        None => return None,
+        None => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            };
+        }
     };
     let all_cut = range_null_split(&all_values);
     let penalty_rank = all_values.iter().filter(|v| **v > all_cut).count();
@@ -661,14 +737,18 @@ pub fn gaussian_rail_face_limit(
         .sum();
     let null_dim = p.saturating_sub(criterion_penalty_rank);
     if n <= null_dim {
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: format!("no residual degrees of freedom at the limit: n={n} <= M_p={null_dim}"),
+        };
     }
     // The REML profiled scale, `D_p/(n − M_p)`, evaluated AT the limit fit.
     // `M_p` does not move along the face, so the same denominator holds at
     // ρ̂ and at λ=∞.
     let dispersion = penalized_deviance / ((n - null_dim) as f64);
     if !dispersion.is_finite() || dispersion <= 0.0 {
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: format!("the limit fit's profiled dispersion is unusable: {dispersion:.3e}"),
+        };
     }
 
     // ── the limit score, and its released component ─────────────────────
@@ -684,7 +764,12 @@ pub fn gaussian_rail_face_limit(
             .max(limit_score.dot(&limit_score).sqrt())
             .max(1.0);
         if pinned_residual.dot(&pinned_residual).sqrt() > f64::EPSILON.sqrt() * scale {
-            return None;
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: format!(
+                    "the limit fit is not stationary in the pinned directions: residual {:.3e} against scale {scale:.3e}",
+                    pinned_residual.dot(&pinned_residual).sqrt()
+                ),
+            };
         }
     }
     let released_score = q_basis.t().dot(&limit_score);
@@ -713,7 +798,11 @@ pub fn gaussian_rail_face_limit(
         let zsz = z_basis.t().dot(&s_rest).dot(&z_basis);
         let (values, vectors) = match symmetric_eigh(&zsz) {
             Some(pair) => pair,
-            None => return None,
+            None => {
+            return RailFaceLimitOutcome::FaceUnavailable {
+                reason: "a symmetric eigendecomposition of the face geometry failed".to_string(),
+            };
+        }
         };
         let cut = range_null_split(&values);
         let kept: Vec<f64> = values.iter().copied().filter(|v| *v > cut).collect();
@@ -737,7 +826,11 @@ pub fn gaussian_rail_face_limit(
     // (`dim(range S_R + range S_F) = q + dim P_N range S_R`), so a
     // mismatch means a rank determination is unreliable here.
     if penalty_rank != released + surviving_rank {
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: format!(
+                "rank bookkeeping does not close: rank(S_lambda)={penalty_rank} but released={released} + surviving={surviving_rank}"
+            ),
+        };
     }
 
     // ── the first-order form ────────────────────────────────────────────
@@ -748,7 +841,9 @@ pub fn gaussian_rail_face_limit(
         }
     }
     if first_order_form.iter().any(|v| !v.is_finite()) {
-        return None;
+        return RailFaceLimitOutcome::FaceUnavailable {
+            reason: "the assembled first-order form is not finite".to_string(),
+        };
     }
 
     let released_penalties: Vec<Array2<f64>> = face_penalties
@@ -757,7 +852,7 @@ pub fn gaussian_rail_face_limit(
         .collect();
     let face_rho: Vec<f64> = face_sorted.iter().map(|&j| rho[j]).collect();
 
-    Some(RailFaceLimit {
+    RailFaceLimitOutcome::Available(Box::new(RailFaceLimit {
         face: face_sorted,
         face_rho,
         first_order_form,
@@ -766,7 +861,7 @@ pub fn gaussian_rail_face_limit(
         form_conditioning: conditioning.max(survivor_conditioning).max(1.0),
         limit_beta,
         limit_dispersion: dispersion,
-    })
+    }))
 }
 
 #[cfg(test)]

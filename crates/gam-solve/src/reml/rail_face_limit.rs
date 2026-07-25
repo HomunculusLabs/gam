@@ -34,42 +34,59 @@
 //! returns `None` and the measured-tail certificate remains the authority.
 
 use super::*;
-use crate::rho_optimizer::rail_face::{RailFaceLimit, gaussian_rail_face_limit};
+use crate::rho_optimizer::rail_face::{RailFaceLimitOutcome, gaussian_rail_face_limit};
 
 impl RemlState<'_> {
     /// Build the analytic λ→∞ limit data for the rail face `face` (ρ-block
     /// indices), at the smoothing parameters `rho`.
     ///
     /// This is the gate; the algebra is [`gaussian_rail_face_limit`], which any
-    /// caller holding the same parts can use directly. `Ok(None)` — never an
-    /// error — whenever this fit's configuration is outside the exact closed
-    /// form, or the limit itself is not available. A refusal is not a fit
-    /// failure; it just means this certificate has nothing to say and the
-    /// caller keeps whatever authority it already had.
+    /// caller holding the same parts can use directly. A decline is never an
+    /// error, and it is TYPED: `OutsideClosedForm` says this fit's criterion is
+    /// not the one the form models (another form may still apply), while
+    /// `FaceUnavailable` is a statement about the face that no other form
+    /// rescues. Either way the caller keeps whatever authority it already had.
     pub(crate) fn rail_face_limit(
         &self,
         rho: &Array1<f64>,
         face: &[usize],
-    ) -> Result<Option<RailFaceLimit>, EstimationError> {
+    ) -> Result<RailFaceLimitOutcome, EstimationError> {
         // The closed form is exact only where the working weights do not move
         // with β̂ and the criterion is the plain profiled-Gaussian REML.
-        if !reml_is_gaussian_identity(&self.config.likelihood)
-            || self.linear_constraints.is_some()
-            || self.coefficient_lower_bounds.is_some()
-            || self.runtime_mixture_link_state.is_some()
-            || self.runtime_sas_link_state.is_some()
-            || self.penalty_shrinkage_floor.is_some()
-            || !matches!(self.rho_prior, RhoPrior::Flat)
-            || !matches!(self.x, DesignMatrix::Dense(_))
-        {
-            return Ok(None);
+        let outside = if !reml_is_gaussian_identity(&self.config.likelihood) {
+            // The one that will stop mattering first: a family whose working
+            // weights move with β̂ has a LAML closed form of its own.
+            Some("the criterion is not profiled-Gaussian: the working weights move with the coefficients")
+        } else if self.linear_constraints.is_some() || self.coefficient_lower_bounds.is_some() {
+            Some("the fit carries coefficient constraints, so the limit is a constrained optimum")
+        } else if self.runtime_mixture_link_state.is_some() || self.runtime_sas_link_state.is_some() {
+            Some("the link carries runtime state, so the criterion is not the plain profiled-Gaussian one")
+        } else if self.penalty_shrinkage_floor.is_some() {
+            Some("a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes")
+        } else if !matches!(self.rho_prior, RhoPrior::Flat) {
+            Some("a non-flat rho-prior adds a term this closed form does not model")
+        } else if !matches!(self.x, DesignMatrix::Dense(_)) {
+            Some("the design is not dense")
+        } else {
+            None
+        };
+        if let Some(reason) = outside {
+            return Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: reason.to_string(),
+            });
         }
         let design = self
             .x
             .try_to_dense_by_chunks("rail face limit")
             .map_err(EstimationError::RemlOptimizationFailed)?;
         if design.ncols() != self.p {
-            return Ok(None);
+            return Ok(RailFaceLimitOutcome::OutsideClosedForm {
+                reason: format!(
+                    "the densified design has {} columns against a coefficient layout of {}",
+                    design.ncols(),
+                    self.p
+                ),
+            });
         }
         // The builder wants the response already net of any offset.
         let mut response = self.y.to_owned();
@@ -235,6 +252,7 @@ mod rail_face_limit_tests {
         let limit = state
             .rail_face_limit(&rho, &[0])
             .expect("the analytic face limit must not error")
+            .available()
             .expect("a Gaussian dense fixture is inside the closed form");
         let analytic = match certify_rail_face(&limit) {
             RailFaceVerdict::Certified(proof) => proof.tail_constants[0],
@@ -328,6 +346,7 @@ mod rail_face_limit_tests {
         let limit = state
             .rail_face_limit(&near, &[0])
             .expect("the analytic face limit must not error")
+            .available()
             .expect("a Gaussian dense fixture is inside the closed form");
         let near_gap = match certify_rail_face(&limit) {
             RailFaceVerdict::Certified(proof) => proof.value_gap,
@@ -336,6 +355,7 @@ mod rail_face_limit_tests {
         let far_limit = state
             .rail_face_limit(&far, &[0])
             .expect("the analytic face limit must not error")
+            .available()
             .expect("a Gaussian dense fixture is inside the closed form");
         let far_gap = match certify_rail_face(&far_limit) {
             RailFaceVerdict::Certified(proof) => proof.value_gap,
@@ -388,6 +408,7 @@ mod rail_face_limit_tests {
         let limit = state
             .rail_face_limit(&rho, &[0])
             .expect("the analytic face limit must not error")
+            .available()
             .expect("a Gaussian dense fixture is inside the closed form");
         match certify_rail_face(&limit) {
             RailFaceVerdict::Refused { reason } => assert!(
@@ -440,12 +461,18 @@ mod rail_face_limit_tests {
         )
         .expect("build the binomial fixture state");
         let rho = Array1::from(vec![12.0, 1.0]);
-        assert!(
-            state
-                .rail_face_limit(&rho, &[0])
-                .expect("the gate must decline, not error")
-                .is_none(),
-            "a binomial fit is outside the Gaussian closed form and must decline"
-        );
+        match state
+            .rail_face_limit(&rho, &[0])
+            .expect("the gate must decline, not error")
+        {
+            RailFaceLimitOutcome::OutsideClosedForm { reason } => assert!(
+                reason.contains("working weights"),
+                "the decline must name the clause that failed, not collapse to a bare None: {reason}"
+            ),
+            other => panic!(
+                "a binomial fit is outside the Gaussian closed form and must decline as such, \
+                 got {other:?}"
+            ),
+        }
     }
 }
