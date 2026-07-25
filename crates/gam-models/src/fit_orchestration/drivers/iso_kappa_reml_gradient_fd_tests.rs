@@ -1687,4 +1687,175 @@ fn iso_kappa_duchon_dx_dpsi_matches_fd() {
     );
     assert!(max_diff < 5e-3 * max_abs.max(1e-3), "dX/dψ mismatch");
 }
+
+/// #2454 MEASUREMENT (reports, never fails): put the MONOTONE fixture's own spec
+/// through an evaluator whose gradient can be finite-difference-checked.
+///
+/// Everything claiming `∂V/∂ρ = −c·λ` on #2454 came from the standard-REML
+/// certificate's printed probe gradients, which have never been FD-verified.
+/// Every ladder that HAS been FD-verified runs the joint iso-κ evaluator and
+/// saturates correctly. The two disagree, so the discriminator is to run the
+/// SAME fixture — `length_scale = 12.0`, 12 centers, n=60, d=2,
+/// `double_penalty: true`, `CenterSumToZero` — through the checkable evaluator.
+///
+///   `|g|` decaying, FD agreeing ⇒ the criterion is bounded for this fixture and
+///        the standard-REML path's printed gradient is the defect;
+///   `|g| ∝ e^ρ` reproduced AND FD-confirmed ⇒ the criterion really is unbounded
+///        and both of my mechanism hypotheses were wrong.
+///
+/// `ĉ = −e^ρ·∂V/∂ρ` is reported alongside so the tail law is directly readable.
+#[test]
+fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
+    let n = 60usize;
+    let d = 2usize;
+    let mut data = Array2::<f64>::zeros((n, d));
+    let mut y = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let x0 = i as f64 / (n as f64 - 1.0);
+        let x1 = (i as f64 * 0.17).sin();
+        data[[i, 0]] = x0;
+        data[[i, 1]] = x1;
+        y[i] = (3.0 * x0).cos() + 0.35 * x1;
+    }
+    let weights = Array1::ones(n);
+    let offset = Array1::zeros(n);
+    let spec = TermCollectionSpec {
+        linear_terms: vec![],
+        random_effect_terms: vec![],
+        smooth_terms: vec![SmoothTermSpec {
+            name: "matern".to_string(),
+            basis: SmoothBasisSpec::Matern {
+                feature_cols: vec![0, 1],
+                spec: MaternBasisSpec {
+                    periodic: None,
+                    center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                    length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                    nu: MaternNu::FiveHalves,
+                    include_intercept: false,
+                    double_penalty: true,
+                    identifiability: MaternIdentifiability::CenterSumToZero,
+                    aniso_log_scales: None,
+                },
+                input_scale: None,
+            },
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }],
+    };
+    let fit_opts = FitOptions {
+        compute_inference: false,
+        max_iter: 200,
+        tol: 1e-12,
+        penalty_shrinkage_floor: None,
+        ..FitOptions::default()
+    };
+    let family = LikelihoodSpec::gaussian_identity();
+
+    let design = build_term_collection_design(data.view(), &spec)
+        .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+    let frozen = freeze_term_collection_from_design(&spec, &design)
+        .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
+    let frozen_design = build_term_collection_design(data.view(), &frozen)
+        .unwrap_or_else(|e| panic!("frozen design failed: {e:?}"));
+    let spatial_terms = spatial_length_scale_term_indices(&frozen);
+    let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
+    let rho_dim = frozen_design.penalties.len();
+    let psi_dim: usize = dims_per_term.iter().sum();
+    eprintln!("[zz-mono-2454] rho_dim={rho_dim} psi_dim={psi_dim} p={}", frozen_design.design.ncols());
+
+    let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
+    let mut cache = SingleBlockExactJointDesignCache::new(
+        data.view(),
+        frozen.clone(),
+        frozen_design.clone(),
+        spatial_terms.clone(),
+        rho_dim,
+        dims_per_term.clone(),
+    )
+    .unwrap_or_else(|e| panic!("cache failed: {e:?}"));
+    let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
+        y.view(),
+        weights.view(),
+        &frozen_design.design,
+        offset.view(),
+        &frozen_design.penalties,
+        &external_opts,
+        "#2454 monotone fixture evaluator",
+    )
+    .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
+
+    let cost_at = |theta: &Array1<f64>,
+                   cache: &mut SingleBlockExactJointDesignCache<'_>,
+                   evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> f64 {
+        cache.ensure_theta(theta).unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+        let design = cache.design();
+        evaluator
+            .evaluate_cost_only(
+                &design.design,
+                &design.penalties,
+                &design.nullspace_dims,
+                design.linear_constraints.clone(),
+                theta,
+                rho_dim,
+                None,
+                "#2454 cost-only",
+                None,
+            )
+            .unwrap_or_else(|e| panic!("cost-only: {e:?}"))
+    };
+    let analytic_at = |theta: &Array1<f64>,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> (f64, Array1<f64>) {
+        cache.ensure_theta(theta).expect("ensure_theta");
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data.view(),
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
+        .expect("hyper dirs present");
+        let (cost, grad, _h) = evaluate_joint_reml_outer_eval_at_theta(
+            evaluator,
+            cache.design(),
+            theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
+        (cost, grad)
+    };
+
+    let h = 3e-4_f64;
+    for value in [6.0_f64, 9.0, 12.0, 15.0, 18.0, 21.0] {
+        let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
+        for j in 0..rho_dim {
+            theta[j] = value;
+        }
+        let (cost, grad) = analytic_at(&theta, &mut cache, &mut evaluator);
+        for j in 0..rho_dim {
+            let mut plus = theta.clone();
+            plus[j] += h;
+            let mut minus = theta.clone();
+            minus[j] -= h;
+            let cp = cost_at(&plus, &mut cache, &mut evaluator);
+            let cm = cost_at(&minus, &mut cache, &mut evaluator);
+            let fd = (cp - cm) / (2.0 * h);
+            let an = grad[j];
+            let denom = fd.abs().max(an.abs()).max(1e-12);
+            eprintln!(
+                "[zz-mono-2454] rho={value:5.1f} j={j} COST={cost:+.10e} an={an:+.6e} \
+                 fd={fd:+.6e} rel={:.3e} chat_an={:+.6e}",
+                (an - fd).abs() / denom,
+                -value.exp() * an
+            );
+        }
+    }
+}
+
 }
