@@ -2665,6 +2665,30 @@ fn constructive_ridge_from_null_metric_action(
 /// Rank revelation acts on `A`, not on `AᵀA`: this avoids squaring the
 /// condition number and, critically, there is no negative-eigenvalue class to
 /// adjudicate because PSD is encoded by the type.
+///
+/// The null/range CUTOFF, however, is the canonical penalty-spectrum
+/// convention — [`spectral_tolerance`] — not machine epsilon. This is the
+/// #1425 single-classifier rule applied to the constructive representation: a
+/// direction is unpenalized exactly when its penalty eigenvalue is at or below
+/// `p · 1e-10 · λ_max`, which is what [`analyze_penalty_block_with_op`] reports
+/// as `nullity` for the very same block. The energy factor's singular values
+/// are `√λ`, so the cutoff transfers as `√tol`.
+///
+/// Using RRQR's machine-precision `rank_alpha` here instead made this the one
+/// penalty-spectrum consumer with its own convention, five decades tighter than
+/// every other. The observable consequence (gam#2433) is that whether a block
+/// has a null space depended on whether a `try_from_dense_psd` — which applies
+/// the loose canonical tolerance and DROPS sub-tolerance modes from the factor
+/// — happened to be interposed before a gauge restriction. The term collection
+/// restricts an already-factored raw penalty (`try_from_dense_psd` in the RAW
+/// chart, then `.restricted(Z)`), so a mode that collapses to `6.9e-13·λ_max`
+/// under `Z` stayed in the factor and read as full rank; the frozen single-term
+/// replay factors the dense constrained penalty (`try_from_dense_psd` in the
+/// CONSTRAINED chart), so the same mode was dropped and read as nullity 1. Both
+/// blocks then reported `nullity = 1` from `analyze_penalty_block`, while this
+/// function told the double-penalty rebuild there was nothing to shrink in one
+/// of them — a self-contradiction inside a single built term, and the origin of
+/// the realized 5-vs-4 Duchon penalty-topology split.
 fn constructive_nullspace_basis(
     quadratic: &ConstructiveQuadratic,
 ) -> Result<Option<Array2<f64>>, BasisError> {
@@ -2675,8 +2699,14 @@ fn constructive_nullspace_basis(
     if quadratic.factor().nrows() == 0 {
         return Ok(Some(Array2::eye(coefficient_dim)));
     }
+    // Canonical eigenvalue-unit cutoff, read off the same dense Gram and with
+    // the same helper `analyze_penalty_block_with_op` uses, so the two can
+    // never disagree about this block's nullity.
+    let sym = symmetrize_penalty(quadratic.dense());
+    let (evals, _) = FaerEigh::eigh(&sym, Side::Lower).map_err(BasisError::LinalgError)?;
+    let singular_cutoff = spectral_tolerance(&sym, &evals).sqrt();
     let factor_transpose = quadratic.factor().t().to_owned();
-    let (null, rank) = rrqr_nullspace_basis(&factor_transpose, default_rrqr_rank_alpha())
+    let (null, rank) = rrqr_nullspace_basis_with_cutoff(&factor_transpose, singular_cutoff)
         .map_err(BasisError::LinalgError)?;
     if rank >= coefficient_dim || null.ncols() == 0 {
         Ok(None)

@@ -2159,15 +2159,62 @@ pub fn rrqr_nullspace_basis<S: Data<Elem = f64>>(
     a: &ArrayBase<S, Ix2>,
     rank_alpha: f64,
 ) -> Result<(Array2<f64>, usize), FaerLinalgError> {
+    rrqr_nullspace_basis_inner(a, RrqrRankCutoff::RelativeAlpha(rank_alpha))
+}
+
+/// Which absolute cutoff on `|R_ii|` separates rank from null in
+/// [`rrqr_nullspace_basis_with_cutoff`] / [`rrqr_nullspace_basis`].
+#[derive(Debug, Clone, Copy)]
+enum RrqrRankCutoff {
+    /// `rank_alpha · ε · max(m, n) · max(|R₀₀|, 1)` — a machine-precision
+    /// cutoff derived from the factorization's own leading pivot. This asks
+    /// "is this direction numerically distinguishable from zero at all?".
+    RelativeAlpha(f64),
+    /// A caller-supplied absolute cutoff in the units of `a`'s singular
+    /// values. Use this when the null/range partition is fixed by an external
+    /// convention (e.g. a penalty spectrum's `spectral_tolerance`) rather than
+    /// by float representability, so that two consumers of the same object
+    /// cannot disagree about which directions are unpenalized.
+    Absolute(f64),
+}
+
+/// [`rrqr_nullspace_basis`] with an explicit absolute cutoff on the pivoted
+/// `|R_ii|` (i.e. in the units of `a`'s singular values) instead of the
+/// machine-precision `rank_alpha` heuristic.
+///
+/// A rank decision is a *convention*, not a fact about floats: the same matrix
+/// has a different null space depending on the scale below which a direction
+/// counts as unpenalized. When one consumer answers that question with
+/// machine-epsilon and another with a penalty-spectrum tolerance five decades
+/// looser, they silently describe different models of the same block (gam#2433:
+/// a Duchon smooth's realized penalty topology changed between two builders for
+/// exactly this reason). Callers that already own such a convention pass it
+/// here rather than re-deriving one.
+pub fn rrqr_nullspace_basis_with_cutoff<S: Data<Elem = f64>>(
+    a: &ArrayBase<S, Ix2>,
+    cutoff: f64,
+) -> Result<(Array2<f64>, usize), FaerLinalgError> {
+    rrqr_nullspace_basis_inner(a, RrqrRankCutoff::Absolute(cutoff))
+}
+
+fn rrqr_nullspace_basis_inner<S: Data<Elem = f64>>(
+    a: &ArrayBase<S, Ix2>,
+    cutoff: RrqrRankCutoff,
+) -> Result<(Array2<f64>, usize), FaerLinalgError> {
     let faerview = FaerArrayView::new(a);
     let qr = faerview.as_ref().col_piv_qr();
     let r = qr.thin_R();
     let diag_len = r.nrows().min(r.ncols());
     let leading_diag = if diag_len > 0 { r[(0, 0)].abs() } else { 0.0 };
-    let tol = rank_alpha
-        * f64::EPSILON
-        * (a.nrows().max(a.ncols()).max(1) as f64)
-        * leading_diag.max(1.0);
+    let tol = match cutoff {
+        RrqrRankCutoff::RelativeAlpha(rank_alpha) => {
+            rank_alpha
+                * f64::EPSILON
+                * (a.nrows().max(a.ncols()).max(1) as f64)
+                * leading_diag.max(1.0)
+        }
+        RrqrRankCutoff::Absolute(tol) => tol,
+    };
     let rank = (0..diag_len).filter(|&i| r[(i, i)].abs() > tol).count();
     let z = if rank >= a.nrows() {
         Array2::<f64>::zeros((a.nrows(), 0))
