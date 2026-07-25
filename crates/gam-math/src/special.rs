@@ -596,10 +596,13 @@ pub fn gauss_legendre(n: usize) -> (Vec<f64>, Vec<f64>) {
         // per node and removes it: worst weight error falls 8.3e-14 -> 1.9e-15
         // at `n = 16` and 8.2e-14 -> 5.6e-15 at `n = 32`.
         //
-        // It does NOT help past `n ≈ 64`, where the same amplification acts on
-        // the node's own irreducible ~1 ulp: the outer nodes crowd toward ±1,
-        // `1 − z²` falls to `3e-4`, and the weights there hold ~3e-13 no matter
-        // how `pp` is evaluated. Escaping that needs a weight formula that does
+        // It does NOT move the WORST case past `n ≈ 64`, where the same
+        // amplification acts instead on the node's own irreducible ~1 ulp: the
+        // outer nodes crowd toward ±1, `1 − z²` falls to `3e-4`, and the
+        // weights there hold ~3e-13 however `pp` is evaluated. (The mean still
+        // improves — 1.2e-14 -> 8.2e-15 at `n = 128` — with a handful of outer
+        // weights moving an ulp either way, which is the level the node residual
+        // already sets.) Escaping that bound needs a weight formula that does
         // not route through `P_n'(z)` at all, not a better Newton loop.
         let (_, pp) = legendre_value_and_slope(z);
         let w = 2.0 / ((1.0 - z * z) * pp * pp);
