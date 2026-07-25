@@ -326,6 +326,85 @@ struct PatchDResidualCtx<'a> {
     inv_tau: f64,
 }
 
+/// The row-local residual-curvature block `ΔC_tt^(i)[a,b] = ⟨√w·M_n r_n, ∂²f_ab⟩`
+/// — block (1a) of [`SaeManifoldTerm::apply_exact_hessian_minus_b`], the piece of
+/// the true Hessian `A = B + ΔC` that the Gauss-Newton assembly DROPS.
+///
+/// This is the single source both the exact-`A` HVP and the solve-side curvature
+/// metric (#2267) read: the HVP contracts the returned block against its
+/// direction in the same `b`-major order it used when the entries were computed
+/// inline, so routing it here is value- and bit-preserving.
+///
+/// Materializing `q × q` costs exactly what contracting it cost — `q²` length-`p`
+/// dots either way — so there is no arithmetic penalty for having the block.
+fn row_residual_curvature_block(error_metric: &[f64], jets: &SaeRowJets, q: usize) -> Array2<f64> {
+    let mut block = Array2::<f64>::zeros((q, q));
+    for a in 0..q {
+        for b in 0..q {
+            block[[a, b]] = sae_dot(error_metric, jets.second(a, b));
+        }
+    }
+    block
+}
+
+/// `Q·diag(max(|λ|, floor))·Qᵀ` for a symmetric block — the SoftAbs metric
+/// (Betancourt): keep the block's own eigenBASIS, replace each curvature
+/// MAGNITUDE for the direction it belongs to, and floor it relatively so the
+/// result is strictly positive definite.
+///
+/// Absolute value, not a clamp-to-zero: a concave direction of the true Hessian
+/// is a direction whose curvature the step must RESPECT (a step of `g/|λ|`),
+/// not one it should treat as flat (`g/ε`, an unbounded excursion) nor one it
+/// should treat as stiff-by-fiat. The floor is the codebase's existing relative
+/// spectral-deflation floor, the same `SPECTRAL_DEFLATION_REL_FLOOR × max|λ|`
+/// convention `row_sub_floor_null_directions` and
+/// `factor_spectral_deflated_criterion_row` use to decide a direction carries no
+/// information, so no new tolerance enters the solver.
+///
+/// Returns `None` when the block is not finite or its eigendecomposition fails
+/// — the caller then keeps the assembled operator untouched.
+fn spectral_absolute_value(block: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
+    let d = block.nrows();
+    if d == 0 || block.ncols() != d {
+        return None;
+    }
+    let mut sym = Array2::<f64>::zeros((d, d));
+    for i in 0..d {
+        for j in 0..d {
+            let v = 0.5 * (block[[i, j]] + block[[j, i]]);
+            if !v.is_finite() {
+                return None;
+            }
+            sym[[i, j]] = v;
+        }
+    }
+    let (evals, evecs) = sym.eigh(Side::Lower).ok()?;
+    let max_abs = evals.iter().fold(
+        0.0_f64,
+        |acc, &v| if v.is_finite() { acc.max(v.abs()) } else { acc },
+    );
+    if !(max_abs.is_finite() && max_abs > 0.0) {
+        return None;
+    }
+    let floor = SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
+    let mut out = Array2::<f64>::zeros((d, d));
+    for eig_idx in 0..d {
+        let lambda = evals[eig_idx];
+        if !lambda.is_finite() {
+            return None;
+        }
+        let magnitude = lambda.abs().max(floor);
+        let column = evecs.column(eig_idx);
+        for i in 0..d {
+            let scaled = magnitude * column[i];
+            for j in 0..d {
+                out[[i, j]] += scaled * column[j];
+            }
+        }
+    }
+    Some(out)
+}
+
 impl SaeManifoldTerm {
     /// #1418: apply the EXACT stationarity-Jacobian correction `ΔC·v = (A − B)·v`
     /// to a joint `(t, β)` vector, matrix-free via row-local work and ordered
@@ -624,12 +703,14 @@ impl SaeManifoldTerm {
                 }
             }
 
-            // (1a) residual curvature, t–t: ΔC_tt[a,b] = ⟨r, ∂²f_ab⟩.
+            // (1a) residual curvature, t–t: ΔC_tt[a,b] = ⟨r, ∂²f_ab⟩. Built by
+            // the shared row primitive so the solve-side curvature metric
+            // (#2267) and this HVP can never drift apart.
+            let dc_tt = row_residual_curvature_block(&error_metric, &jets, q);
             for a in 0..q {
                 let mut acc = 0.0_f64;
                 for b in 0..q {
-                    let r_ab = sae_dot(&error_metric, jets.second(a, b));
-                    acc += r_ab * v_t[b];
+                    acc += dc_tt[[a, b]] * v_t[b];
                 }
                 out.t[base + a] += acc;
             }
@@ -698,6 +779,180 @@ impl SaeManifoldTerm {
             }
         }
         Ok(out)
+    }
+
+    /// #2267/#2080 — the per-row SOLVE metric `M^(i) = SoftAbs(A_tt^(i))`, the
+    /// curvature the inner Newton step should actually be measured in.
+    ///
+    /// ## Why the assembled operator is the wrong metric to step in
+    ///
+    /// The assembly writes the Gauss-Newton block `B_tt = J̃J̃ᵀ` and drops the
+    /// residual curvature `ΔC_tt[a,b] = ⟨r, ∂²f/∂t_a∂t_b⟩`. Those two terms scale
+    /// DIFFERENTLY in the decoder amplitude: with `f = φ(t)ᵀB`, `J = φ'(t)ᵀB` so
+    /// `B_tt ~ ‖B‖²·φ'²` is QUADRATIC in `B`, while `ΔC_tt ~ ‖r‖·‖B‖·φ''` is
+    /// LINEAR in it. On a curved chart basis — the periodic harmonics of a circle
+    /// atom, where `φ''` carries the `(2πh)²` harmonic factor — any state with a
+    /// material residual and a modest decoder therefore has `ΔC_tt ≫ B_tt`, and
+    /// the operator the step is solved in under-states the true curvature along
+    /// its own direction by orders of magnitude (measured `vᵀBv/vᵀAv ≈ 3e-3` on
+    /// the #2080 p=16 rung). The step overshoots by that factor, Armijo truncates
+    /// it, and the "Newton" solve degrades to preconditioned steepest descent
+    /// with `κ(B⁻¹A) ≈ 1/3e-3`: the measured ~0.997-per-iteration crawl, ~10³
+    /// iterations per criterion evaluation.
+    ///
+    /// Note this is not fixable by step length. A uniform curvature error is
+    /// pure scale and a line search absorbs it; what actually bites is the
+    /// SPREAD of `vᵀAv/vᵀBv` across directions, which no scalar can correct.
+    ///
+    /// ## What this returns
+    ///
+    /// Per row, `Some(SoftAbs(B_tt + ΔC_tt))` — the true row-local curvature with
+    /// each eigenvalue replaced by its floored magnitude
+    /// ([`spectral_absolute_value`]), which is SPD by construction, so the step it
+    /// defines is a descent direction and the arrow factorization stays valid.
+    /// The dropped curvature is the SAME object the exact-`A` HVP contracts
+    /// ([`row_residual_curvature_block`], plus the ARD concave-half remainder that
+    /// is block (3) there), so the metric cannot drift from the Hessian it
+    /// approximates.
+    ///
+    /// `None` for a row whose dropped curvature is EXACTLY zero — a linear /
+    /// straight chart basis, or an atom with no analytic second jet. The caller
+    /// then leaves the assembled block untouched, so a fit whose basis has no
+    /// second-order curvature is bit-for-bit what it was: the correction is
+    /// auto-undone exactly where there is nothing to correct.
+    ///
+    /// Only the DATA block is corrected. The assembly's other three curvature
+    /// substitutions (softmax Gershgorin, ordered Beta--Bernoulli diagonal, and
+    /// the smoothing penalty) are genuine MAJORIZERS — `B ⪰ A` there — so they
+    /// over-damp rather than overshoot, and a majorized direction is already
+    /// safe to step in. The Gauss-Newton data substitution is the only one that
+    /// is not a majorizer, and it is the one this repairs.
+    pub(crate) fn row_local_solve_curvature_metric(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        sys: &ArrowSchurSystem,
+    ) -> Result<Vec<Option<Array2<f64>>>, String> {
+        let n = self.n_obs();
+        let none_metric = vec![None; sys.rows.len()];
+        if self.k_atoms() == 0 || sys.rows.len() != n || sys.row_dims.len() < n {
+            return Ok(none_metric);
+        }
+        self.assignment.validate_rho_domain(rho)?;
+        // A basis with no analytic second jet exposes no residual curvature to
+        // restore; the Gauss-Newton block is then the best metric available and
+        // the solve is left exactly as it was.
+        let Ok(second_jets) = self.atom_second_jets() else {
+            log::debug!(
+                "SAE inner solve metric: no analytic second jets; stepping in the assembled operator"
+            );
+            return Ok(none_metric);
+        };
+        let border = self.border_channels_for_border_dim(sys.k)?;
+        let p = self.output_dim();
+        let k_atoms = self.k_atoms();
+        let row_loss_w = self.row_loss_weights.as_deref();
+        let ard_axis_periods: Vec<Vec<Option<f64>>> = self
+            .assignment
+            .coords
+            .iter()
+            .map(|coord| coord.effective_axis_periods())
+            .collect();
+        let ard_precisions = self.validated_ard_precisions(rho)?;
+        let whitens = self
+            .row_metric
+            .as_ref()
+            .is_some_and(|metric| metric.whitens_likelihood());
+        let mut decoded = vec![0.0_f64; p];
+        let mut fitted = Array1::<f64>::zeros(p);
+        let mut error = Array1::<f64>::zeros(p);
+        let mut assignments = Array1::<f64>::zeros(k_atoms);
+        let mut jet_window: std::collections::VecDeque<SaeRowJets> =
+            std::collections::VecDeque::new();
+        let mut jet_window_next = 0usize;
+        let mut metrics: Vec<Option<Array2<f64>>> = Vec::with_capacity(n);
+        for row in 0..n {
+            let q = sys.row_dims[row];
+            if sys.rows[row].htt.nrows() != q || sys.rows[row].htt.ncols() != q {
+                return Err(format!(
+                    "row_local_solve_curvature_metric: row {row} block is {}x{}, expected {q}x{q}",
+                    sys.rows[row].htt.nrows(),
+                    sys.rows[row].htt.ncols(),
+                ));
+            }
+            self.assignment.try_assignments_row_into(
+                row,
+                assignments.as_slice_mut().ok_or_else(|| {
+                    "row_local_solve_curvature_metric: assignment scratch is not contiguous"
+                        .to_string()
+                })?,
+            )?;
+            if jet_window.is_empty() {
+                jet_window_next = self.refill_jet_window_for_row_dims(
+                    jet_window_next,
+                    &sys.row_dims,
+                    &second_jets,
+                    &border,
+                    &mut jet_window,
+                )?;
+            }
+            let jets = jet_window
+                .pop_front()
+                .expect("jet window must be non-empty after a refill");
+            // The SAME `√w`-scaled metric-applied residual the exact-`A` HVP
+            // contracts against the raw second jets.
+            fitted.fill(0.0);
+            let active_atoms = self
+                .last_row_layout
+                .as_ref()
+                .map(|layout| layout.active_atoms[row].as_slice());
+            for k in 0..k_atoms {
+                if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
+                    continue;
+                }
+                self.atoms[k].fill_decoded_row(row, &mut decoded);
+                let a_k = assignments[k];
+                for out_col in 0..p {
+                    fitted[out_col] += a_k * decoded[out_col];
+                }
+            }
+            let sqrt_row_w = row_loss_w.map_or(1.0, |w| w[row].sqrt());
+            for out_col in 0..p {
+                error[out_col] = sqrt_row_w * (fitted[out_col] - target[[row, out_col]]);
+            }
+            let error_metric: Vec<f64> = match self.row_metric.as_ref() {
+                Some(metric) if whitens => metric.apply_metric_row(row, error.view()),
+                _ => error.to_vec(),
+            };
+
+            let mut dropped = row_residual_curvature_block(&error_metric, &jets, q);
+            // Block (3): the periodic-ARD concave-half remainder the majorizer
+            // clamps away, on the coordinate diagonal, carrying the same `w_row`
+            // design weight the assembly wrote the clamped half with.
+            let w_row = row_loss_w.map_or(1.0, |w| w[row]);
+            for (a, va) in jets.vars.iter().enumerate() {
+                let SaeLocalRowVar::Coord { atom, axis } = *va else {
+                    continue;
+                };
+                if rho.log_ard[atom].is_empty() {
+                    continue;
+                }
+                let alpha = ard_precisions[atom][axis];
+                let t_val = self.assignment.coords[atom].row(row)[axis];
+                let prior = ArdAxisPrior::eval(alpha, t_val, ard_axis_periods[atom][axis]);
+                let neg = prior.negative_hessian_remainder();
+                if neg != 0.0 {
+                    dropped[[a, a]] += w_row * neg;
+                }
+            }
+            if dropped.iter().all(|&value| value == 0.0) {
+                metrics.push(None);
+                continue;
+            }
+            let exact = &sys.rows[row].htt + &dropped;
+            metrics.push(spectral_absolute_value(exact.view()));
+        }
+        Ok(metrics)
     }
 
     /// #2336 — the diagonal of `E = B − A` restricted to the ARD periodic

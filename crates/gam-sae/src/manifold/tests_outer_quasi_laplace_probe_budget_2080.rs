@@ -178,7 +178,7 @@ fn two_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
 /// is the cheap K=1 #2153 regression target; unlike the two-circle fixture, the
 /// model is correctly specified, so any long Strong-Wolfe probe train is solver
 /// pathology rather than target mismatch.
-fn one_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
+pub(super) fn one_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
     let mut frame = Array2::<f64>::zeros((2, p));
     for j in 0..p {
         frame[[0, j]] = deterministic_circle_noise(j, 0);
@@ -227,7 +227,7 @@ fn one_circle_wide_target(n: usize, p: usize, sigma: f64) -> Array2<f64> {
 /// ordered Beta--Bernoulli assignment. Returns the term and the seed reconstruction dispersion the
 /// outer cascade scales its ρ seed by. `harmonics` sets the basis size `m = 1 +
 /// 2·harmonics`.
-fn two_circle_periodic_term(
+pub(super) fn two_circle_periodic_term(
     z: ArrayView2<'_, f64>,
     k: usize,
     harmonics: usize,

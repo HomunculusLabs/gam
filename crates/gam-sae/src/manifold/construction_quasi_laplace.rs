@@ -3953,14 +3953,27 @@ impl SaeManifoldTerm {
         &self,
         cache: &ArrowFactorCache,
     ) -> Result<Vec<SaeBorderChannel>, String> {
+        self.border_channels_for_border_dim(cache.k)
+    }
+
+    /// The border-channel layout keyed on the border WIDTH alone.
+    ///
+    /// A factor cache is only ever consulted for that one number, so the
+    /// assembled system (`ArrowSchurSystem::k`) selects the identical layout
+    /// without a factorization — which is what lets the solve-side curvature
+    /// metric (#2267) read the same channels the evidence lanes read.
+    pub(crate) fn border_channels_for_border_dim(
+        &self,
+        border_dim: usize,
+    ) -> Result<Vec<SaeBorderChannel>, String> {
         let p = self.output_dim();
-        let frames_active = self.last_frames_active && cache.k == self.factored_border_dim();
+        let frames_active = self.last_frames_active && border_dim == self.factored_border_dim();
         let offsets = if frames_active {
             self.factored_beta_offsets()
         } else {
             self.beta_offsets()
         };
-        let mut channels = Vec::with_capacity(cache.k);
+        let mut channels = Vec::with_capacity(border_dim);
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
             let m = atom.basis_size();
             let frame = if frames_active {
@@ -3984,11 +3997,10 @@ impl SaeManifoldTerm {
                 }
             }
         }
-        if channels.len() != cache.k {
+        if channels.len() != border_dim {
             return Err(format!(
-                "border channel layout has {} entries but cache border has {}",
+                "border channel layout has {} entries but the border has {border_dim}",
                 channels.len(),
-                cache.k
             ));
         }
         Ok(channels)
@@ -3999,7 +4011,17 @@ impl SaeManifoldTerm {
         row: usize,
         cache: &ArrowFactorCache,
     ) -> Result<Vec<SaeLocalRowVar>, String> {
-        let q_row = cache.row_dims[row];
+        self.row_vars_for_row_dim(row, cache.row_dims[row])
+    }
+
+    /// The row-local variable layout keyed on the row's WIDTH alone — the only
+    /// thing a factor cache contributes here (#2267, same motivation as
+    /// [`Self::border_channels_for_border_dim`]).
+    pub(crate) fn row_vars_for_row_dim(
+        &self,
+        row: usize,
+        q_row: usize,
+    ) -> Result<Vec<SaeLocalRowVar>, String> {
         let mut vars: Vec<Option<SaeLocalRowVar>> = vec![None; q_row];
         match self.last_row_layout {
             Some(ref layout) => {
@@ -4030,7 +4052,7 @@ impl SaeManifoldTerm {
             .enumerate()
             .map(|(idx, v)| {
                 v.ok_or_else(|| {
-                    format!("row_vars_for_cache_row: row {row} position {idx} was not mapped")
+                    format!("row_vars_for_row_dim: row {row} position {idx} was not mapped")
                 })
             })
             .collect()
