@@ -1,19 +1,30 @@
-//! GPU PIRLS gating tests — issue #273.
+//! PIRLS gating tests — issue #273.
 //!
-//! Eight tests that document the correctness contracts the GPU PIRLS loop
+//! Eight tests that document the correctness contracts the PIRLS loop
 //! must satisfy before it can be enabled on any user-facing default.
 //!
+//! Seven of the eight assert a mathematical invariant of the PIRLS loop against
+//! an INDEPENDENT oracle — the closed-form OLS solution, a gradient-stationarity
+//! residual, the offset identity, a penalized-deviance ordering, the `Qs` basis
+//! semantics, the stabilized Hessian's PSD-ness, and the status/weight domain.
+//! None of them names a device entry point: each drives the unified
+//! `fit_model_for_fixed_rho` path, which routes to CUDA on a device host and to
+//! the host implementation otherwise. The invariant is what the GPU lane must
+//! preserve, so it has to hold on BOTH routes — and gating it behind
+//! `cuda_selected()` meant it was verified on NEITHER, since every CI runner is
+//! CPU-only and the gate turned each test into a zero-assertion pass (#2422).
+//! They therefore run unconditionally.
+//!
+//! `gpu_pirls_gating_8_benchmark_baseline_uses_cpu_oracle` keeps its
+//! `gpu_gate(..)` guard, and must: it compares two routed fits against each
+//! other, so on a CPU-only host both sides are the same code and the comparison
+//! is vacuous rather than merely unexercised.
+//!
 //! Every test:
-//!   - Skips gracefully when CUDA is not present: calls `gpu_gate(name)` at
-//!     the test top, emitting a visible `SKIP` line to stderr and returning
-//!     early.  Does NOT use `#[ignore]`, so the test always appears in
-//!     `cargo test` output.
 //!   - Is deterministic via seeded RNG.
 //!   - Uses n ≤ 500, p ≤ 32 to stay CI-laptop safe.
-//!   - Compiles on Linux (the GPU dispatch surface is Linux-only; on other
-//!     platforms the tests skip because `cuda_selected()` is always false).
 //!
-//! If a test fails because the underlying GPU PIRLS fix has not yet landed,
+//! If a test fails because the underlying PIRLS fix has not yet landed,
 //! leave it as-is — it documents the gating contract.
 
 use crate::gpu_gate::{GpuGate, gpu_gate};
@@ -102,10 +113,6 @@ fn allclose(a: &Array1<f64>, b: &Array1<f64>, tol: f64) -> bool {
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_1_newton_sign_gaussian_direction() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_1_newton_sign_gaussian_direction") {
-        return;
-    }
-
     let n = 50_usize;
     let p = 4_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0001);
@@ -157,7 +164,7 @@ fn gpu_pirls_gating_1_newton_sign_gaussian_direction() {
     // Must match OLS (Gaussian identity is a one-step solve).
     assert!(
         allclose(&beta, &ols_beta, 1e-6),
-        "GPU PIRLS β must equal (XᵀX)⁻¹ Xᵀy, not its negative. \
+        "PIRLS β must equal (XᵀX)⁻¹ Xᵀy, not its negative. \
          beta={beta:?}, ols_beta={ols_beta:?}"
     );
 
@@ -167,8 +174,8 @@ fn gpu_pirls_gating_1_newton_sign_gaussian_direction() {
             assert_eq!(
                 beta[k].signum(),
                 ols_beta[k].signum(),
-                "Sign of beta[{k}] must match OLS: GPU={}, OLS={}. \
-                 A flipped sign means the GPU gradient convention is wrong.",
+                "Sign of beta[{k}] must match OLS: fit={}, OLS={}. \
+                 A flipped sign means the gradient convention is wrong.",
                 beta[k],
                 ols_beta[k]
             );
@@ -186,10 +193,6 @@ fn gpu_pirls_gating_1_newton_sign_gaussian_direction() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_2_penalty_gradient_sign_and_shift() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_2_penalty_gradient_sign_and_shift") {
-        return;
-    }
-
     let n = 80_usize;
     let p = 6_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0002);
@@ -245,7 +248,7 @@ fn gpu_pirls_gating_2_penalty_gradient_sign_and_shift() {
 
     assert!(
         relative_grad < 1e-6,
-        "GPU PIRLS must reach a gradient-stationary solution under ridge \
+        "PIRLS must reach a gradient-stationary solution under ridge \
          penalty.  Relative gradient norm = {relative_grad:.3e} (tol 1e-6). \
          If large, the penalty gradient sign or linear_shift is wrong."
     );
@@ -254,15 +257,11 @@ fn gpu_pirls_gating_2_penalty_gradient_sign_and_shift() {
 // ---------------------------------------------------------------------------
 // Test 3 — Offset parity
 //
-// Contract: when a non-zero offset is supplied, η = offset + X·β.  The GPU
+// Contract: when a non-zero offset is supplied, η = offset + X·β.  The PIRLS
 // fit must reproduce fit.final_eta == offset + X · beta_original.
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_3_offset_parity() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_3_offset_parity") {
-        return;
-    }
-
     let n = 100_usize;
     let p = 5_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0003);
@@ -318,7 +317,7 @@ fn gpu_pirls_gating_3_offset_parity() {
 
     assert!(
         max_abs_diff < 1e-8,
-        "GPU PIRLS: offset + X · beta_original must equal final_eta. \
+        "PIRLS: offset + X · beta_original must equal final_eta. \
          Max abs diff = {max_abs_diff:.3e}"
     );
 
@@ -328,7 +327,7 @@ fn gpu_pirls_gating_3_offset_parity() {
         .fold(0.0_f64, f64::max);
     assert!(
         beta_err < 1.0,
-        "GPU PIRLS with offset: beta_original too far from truth. \
+        "PIRLS with offset: beta_original too far from truth. \
          err = {beta_err:.3e}"
     );
 }
@@ -347,12 +346,6 @@ fn gpu_pirls_gating_3_offset_parity() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_4_penalized_line_search_rejects_unpenalized_step() {
-    if let GpuGate::Skip =
-        gpu_gate("gpu_pirls_gating_4_penalized_line_search_rejects_unpenalized_step")
-    {
-        return;
-    }
-
     let n = 60_usize;
     let p = 3_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0004);
@@ -402,7 +395,7 @@ fn gpu_pirls_gating_4_penalized_line_search_rejects_unpenalized_step() {
     // With λ = 10⁴ the ridge must shrink β to near 0.
     assert!(
         beta_norm < 0.1,
-        "GPU PIRLS: strong ridge (λ=1e4) must shrink β to near 0. \
+        "PIRLS: strong ridge (λ=1e4) must shrink β to near 0. \
          beta_norm = {beta_norm:.4e} (expected < 0.1).  A large norm means \
          the penalized line search accepted the unpenalized gradient step."
     );
@@ -422,7 +415,7 @@ fn gpu_pirls_gating_4_penalized_line_search_rejects_unpenalized_step() {
 
     assert!(
         pendev_accepted <= pendev_ols + 1.0,
-        "GPU PIRLS must converge to penalized deviance ≤ unpenalized OLS \
+        "PIRLS must converge to penalized deviance ≤ unpenalized OLS \
          penalized deviance.  pendev(accepted)={pendev_accepted:.4e}, \
          pendev(ols)={pendev_ols:.4e}"
     );
@@ -438,10 +431,6 @@ fn gpu_pirls_gating_4_penalized_line_search_rejects_unpenalized_step() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_5_qs_basis_semantics() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_5_qs_basis_semantics") {
-        return;
-    }
-
     let n = 80_usize;
     let p = 8_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0005);
@@ -531,10 +520,6 @@ fn gpu_pirls_gating_5_qs_basis_semantics() {
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_6_final_hessian_at_accepted_eta() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_6_final_hessian_at_accepted_eta") {
-        return;
-    }
-
     let n = 100_usize;
     let p = 6_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0006);
@@ -595,7 +580,7 @@ fn gpu_pirls_gating_6_final_hessian_at_accepted_eta() {
     let factor = factorize_symmetricwith_fallback(hv.as_ref(), Side::Lower);
     assert!(
         factor.is_ok(),
-        "GPU PIRLS final stabilized Hessian must be PSD.  Factorization \
+        "PIRLS final stabilized Hessian must be PSD.  Factorization \
          failed, indicating the Hessian was assembled at a stale η."
     );
 }
@@ -607,15 +592,11 @@ fn gpu_pirls_gating_6_final_hessian_at_accepted_eta() {
 //   (a) A well-conditioned Binomial fit must reach Converged or
 //       StalledAtValidMinimum (never Unstable or MaxIterationsReached).
 //   (b) All finalweights and final_eta entries must be finite and
-//       non-negative at convergence — the GPU OR-reduce must not silently
+//       non-negative at convergence — the The status OR-reduce must not silently
 //       accept steps that contain non-finite per-row values.
 // ---------------------------------------------------------------------------
 #[test]
 fn gpu_pirls_gating_7_status_or_reduce() {
-    if let GpuGate::Skip = gpu_gate("gpu_pirls_gating_7_status_or_reduce") {
-        return;
-    }
-
     let n = 120_usize;
     let p = 6_usize;
     let mut rng = StdRng::seed_from_u64(0xDEAD_BEEF_0007);
@@ -675,7 +656,7 @@ fn gpu_pirls_gating_7_status_or_reduce() {
         ),
         "Well-conditioned Binomial PIRLS must converge.  Got {:?}. \
          Unstable or MaxIterationsReached on a simple problem indicates the \
-         GPU OR-reduce is incorrectly escalating per-row clamping to a global \
+         The status OR-reduce is incorrectly escalating per-row clamping to a global \
          rejection.",
         fit.status
     );
@@ -683,7 +664,7 @@ fn gpu_pirls_gating_7_status_or_reduce() {
     for (i, &w) in fit.finalweights.iter().enumerate() {
         assert!(
             w.is_finite() && w >= 0.0,
-            "finalweights[{i}] = {w} is non-finite or negative.  The GPU \
+            "finalweights[{i}] = {w} is non-finite or negative.  The PIRLS \
              OR-reduce must not accept a step with bad per-row weights."
         );
     }
@@ -691,7 +672,7 @@ fn gpu_pirls_gating_7_status_or_reduce() {
     for (i, &e) in fit.final_eta.iter().enumerate() {
         assert!(
             e.is_finite(),
-            "final_eta[{i}] = {e} is not finite.  The GPU loop must reject \
+            "final_eta[{i}] = {e} is not finite.  The PIRLS loop must reject \
              steps that produce non-finite η."
         );
     }
@@ -700,7 +681,7 @@ fn gpu_pirls_gating_7_status_or_reduce() {
 // ---------------------------------------------------------------------------
 // Test 8 — Benchmark baseline harness contract
 //
-// Contract: any GPU PIRLS benchmark must compare against an independent oracle
+// Contract: any PIRLS benchmark must compare against an independent oracle
 // path, NOT a synthetic GPU loop
 // that shares the same sign convention.  We enforce this by running both
 // paths on the same problem and asserting agreement to 1e-5.
