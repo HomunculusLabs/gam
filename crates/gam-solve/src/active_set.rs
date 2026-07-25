@@ -4248,6 +4248,94 @@ fn refine_operator_metric_face(
     }
 }
 
+/// Exact row norms after whitening by a positive-definite metric:
+/// `||a L^-T|| = sqrt(a H^-1 a^T)` for `H = L L^T`.
+///
+/// The operator-native NNLS normalizes every generator before applying its
+/// scale-relative polar certificate. Reusing the original Euclidean row norm
+/// after metric whitening would violate that contract whenever `H != I`.
+/// Structured carriers compute the diagonal quadratic forms without
+/// materializing their complete row matrix.
+fn constraint_set_inverse_metric_row_norms(
+    set: &ConstraintSet,
+    inverse_metric: &Array2<f64>,
+) -> Result<Vec<f64>, EstimationError> {
+    if inverse_metric.nrows() != set.ncols() || inverse_metric.ncols() != set.ncols() {
+        crate::bail_invalid_estim!(
+            "constraint inverse-metric norm dimension mismatch: metric={}x{}, constraints={} cols",
+            inverse_metric.nrows(),
+            inverse_metric.ncols(),
+            set.ncols(),
+        );
+    }
+    let checked_norm = |quadratic: f64, scale: f64| -> Result<f64, EstimationError> {
+        let roundoff = 100.0 * f64::EPSILON * scale.max(1.0);
+        if !quadratic.is_finite() || quadratic < -roundoff {
+            return Err(EstimationError::ParameterConstraintViolation(format!(
+                "constraint inverse-metric row norm is not nonnegative: \
+                 quadratic={quadratic:.6e}, roundoff_bound={roundoff:.6e}"
+            )));
+        }
+        Ok(quadratic.max(0.0).sqrt())
+    };
+
+    match set {
+        ConstraintSet::Dense(dense) => {
+            let transformed = dense.a.dot(inverse_metric);
+            (0..dense.a.nrows())
+                .map(|row| {
+                    let quadratic = dense.a.row(row).dot(&transformed.row(row));
+                    let scale = dense.a.row(row).dot(&dense.a.row(row))
+                        * inverse_metric
+                            .iter()
+                            .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+                    checked_norm(quadratic, scale)
+                })
+                .collect()
+        }
+        ConstraintSet::KhatriRaoCone(cone) => {
+            let factor = cone.factor();
+            let p_cov = factor.ncols();
+            let metric_scale = inverse_metric
+                .iter()
+                .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+            let mut norms = Vec::with_capacity(cone.nrows());
+            for &coefficient_row in cone.coupled_rows() {
+                let start = coefficient_row * p_cov;
+                let end = start + p_cov;
+                let block = inverse_metric.slice(s![start..end, start..end]);
+                let transformed = factor.dot(&block);
+                for row in 0..factor.nrows() {
+                    let quadratic = factor.row(row).dot(&transformed.row(row));
+                    let scale = factor.row(row).dot(&factor.row(row)) * metric_scale;
+                    norms.push(checked_norm(quadratic, scale)?);
+                }
+            }
+            Ok(norms)
+        }
+        ConstraintSet::BlockDiagonal { blocks, total_cols } => {
+            if *total_cols != inverse_metric.nrows() {
+                crate::bail_invalid_estim!(
+                    "block constraint inverse-metric width {} != joint width {}",
+                    inverse_metric.nrows(),
+                    total_cols,
+                );
+            }
+            let mut norms = Vec::with_capacity(set.nrows());
+            for block in blocks {
+                let start = block.col_start;
+                let end = start + block.set.ncols();
+                let local_metric = inverse_metric.slice(s![start..end, start..end]).to_owned();
+                norms.extend(constraint_set_inverse_metric_row_norms(
+                    &block.set,
+                    &local_metric,
+                )?);
+            }
+            Ok(norms)
+        }
+    }
+}
+
 /// Solve a homogeneous operator-cone QP by Moreau decomposition in the exact
 /// Hessian metric.
 ///
@@ -4281,8 +4369,10 @@ fn solve_homogeneous_operator_metric_projection_by_moreau(
     let lower = factor.lower_triangular();
     let z_unconstrained = lower.t().dot(unconstrained);
     let target = -&z_unconstrained;
+    let inverse_metric = factor.solve_mat(&Array2::<f64>::eye(hessian.nrows()));
+    let metric_row_norms = constraint_set_inverse_metric_row_norms(ops.set, &inverse_metric)?;
     let Some((positive_multipliers, polar_residual)) = nonnegative_cone_projection_by_rows(
-        &ops.norms,
+        &metric_row_norms,
         &target,
         |whitened_vector| {
             let coefficient_vector =
