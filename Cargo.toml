@@ -303,6 +303,39 @@ opt-level = 2
 # measures in favor of runtime (solver-bound tests are the per-test-cap risk).
 codegen-units = 1
 
+# …but that measurement was taken on gam_sae, and the bill for it is paid as
+# COMPILE time by every crate in the workspace — most of all by the largest one,
+# which is not the crate that asked for the setting (#2429). `gam-models` is
+# 304,847 lines across 225 files with 169 `#[cfg(test)]` modules, so collapsing
+# its LLVM phase into a single unit made its test target the only one in the
+# workspace that cannot be compiled inside CI's focused-proof budget at all:
+#
+#     issue 2422    112s      issue 2399 (gam-sae)   455s
+#     issue 2429    181s      issue 2280             545s
+#     gam-models   >1200s — times out, so that crate had NO fast validation path
+#
+# MEASURED 2026-07-25 on the 30-vCPU A10, paired interleaved A,B,A,B (contention
+# inflates both arms multiplicatively, so adjacent-pair ratios survive noise that
+# absolute wall-clock cannot), each arm timing BOTH the compile and the runtime of
+# the `marginal_slope` fits — the #979 survival family this profile's `opt-level`
+# note names as the per-test-cap risk:
+#
+#     cgu= 1   compile 1258s / 1120s     runtime 182s / 181s
+#     cgu=16   compile  319s /  300s     runtime 181s / 180s
+#
+# Compile 3.94x and 3.73x faster, consistent across a 2.5x swing in box load.
+# Runtime IDENTICAL to 1.1% with no ordering by codegen-units, and all four arms
+# produced the same 190 passed / 4 failed with the same named failures — so the
+# outlined-`index_mut` effect that motivates `codegen-units = 1` is simply not hot
+# in this crate. That is consistent with the pattern's density: gam-sae carries
+# 16.50 `[[i, j]]` sites per KLOC, gam-models only 7.58.
+#
+# So restore parallel codegen HERE and nowhere else. The setting stays at 1 for
+# every crate whose runtime was actually measured to need it; this override is
+# scoped to the one crate where the cost was measured and the benefit was not.
+[profile.test.package.gam-models]
+codegen-units = 16
+
 # Dev/`maturin develop` profile — same rationale as [profile.test]. Cargo's
 # default dev profile emits full DWARF (`debug = 2`), which is what lets
 # `target/` balloon to ~30 GB (the dep + crate object files carry the bulk of
