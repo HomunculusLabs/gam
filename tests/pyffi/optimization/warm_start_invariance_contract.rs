@@ -415,6 +415,12 @@ fn fits_are_invariant_to_warm_start_cache_state_across_families() {
             data: gamma_data,
         },
         InvarianceCase {
+            name: "gamma_matern",
+            family: "gamma",
+            formula: "y ~ matern(x, k=8)",
+            data: gamma_data,
+        },
+        InvarianceCase {
             name: "tweedie_smooth",
             family: "tweedie",
             formula: "y ~ s(x, k=8)",
