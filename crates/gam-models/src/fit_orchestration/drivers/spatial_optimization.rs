@@ -3720,14 +3720,22 @@ fn run_exact_joint_spatial_optimization(
             // ψ — the seed is the geometric-mean midpoint and is well clear of the
             // degenerate band), so the optimizer never starts outside its bounds.
             let psi_anchor = theta0[rho_dim];
-            psi_rank_stable_floor = evaluator
-                .psi_gram_rank_stable_floor(psi_anchor)
+            // #2448: the band search and the skip witness both decide on the
+            // anchor's range projector, so its Davis–Kahan bar is what says whether
+            // an edge that came back AT the anchor means "the band is that narrow"
+            // or "the instrument could not resolve the question and everything
+            // soundly refused". Read once and log it alongside the edge.
+            let psi_projector_bar = evaluator.psi_gram_projector_error_bar(psi_anchor);
+            // One bisection, not two: each `rank_stable_psi_floor` call is a
+            // 64-step search with an O(k³) eigendecomposition per step.
+            let psi_rank_stable_floor_raw = evaluator.psi_gram_rank_stable_floor(psi_anchor);
+            psi_rank_stable_floor = psi_rank_stable_floor_raw
                 .filter(|&f| f.is_finite() && f > psi_lo && f < psi_anchor);
             log::info!(
                 "[KAPPA-PHASE-FLOOR] n_rows={} psi_lo={psi_lo:.6} psi_anchor={psi_anchor:.6} \
-                 rank_stable_floor={:?} lifted={}",
+                 rank_stable_floor={psi_rank_stable_floor_raw:?} lifted={} \
+                 projector_error_bar={psi_projector_bar:?}",
                 data.nrows(),
-                evaluator.psi_gram_rank_stable_floor(psi_anchor),
                 psi_rank_stable_floor.is_some(),
             );
             if let Some(floor) = psi_rank_stable_floor {
@@ -3737,8 +3745,14 @@ fn run_exact_joint_spatial_optimization(
                      in-window trial on the n-free design-realization skip (#1033). The \
                      conditioned Gram is rank-deficient below ψ_floor (longest-length-scale \
                      radial mode collapses into the nullspace), where the skip is soundly \
-                     refused; that band drifts with n via the sample-std standardization, \
-                     so this n-free k-space floor is the n-independent fix."
+                     refused. The SEARCH is n-free — O(iters·k³) off the k-space tensor, \
+                     zero row access — but the EDGE IS NOT AN n-INVARIANT CONSTANT of the \
+                     design (#2408): the tensor is built from n rows, so its Gram is an \
+                     O(1/n) relative perturbation of the continuum Gram, which moves the \
+                     rank margin additively and displaces this root by \
+                     sup|δ margin| / inf|d margin/dψ|. A steep cliff pins it to machine \
+                     precision; a grazing crossing does not. Treat it as a clamp carrying \
+                     that transport bound, not as the n-independent answer."
                 );
             }
             // #1033: read the n-free rank-stable κ-CEILING (symmetric twin of the
@@ -3749,14 +3763,14 @@ fn run_exact_joint_spatial_optimization(
             // line search overshot to ψ≈1.0 (rank 11→10 at the high edge), tripping
             // two O(n) reset_surface calls; clamping the upper bound keeps the
             // search inside the band where the n-free skip stays sound.
-            psi_rank_stable_ceiling = evaluator
-                .psi_gram_rank_stable_ceiling(psi_anchor)
+            let psi_rank_stable_ceiling_raw = evaluator.psi_gram_rank_stable_ceiling(psi_anchor);
+            psi_rank_stable_ceiling = psi_rank_stable_ceiling_raw
                 .filter(|&c| c.is_finite() && c < psi_hi && c > psi_anchor);
             log::info!(
                 "[KAPPA-PHASE-CEIL] n_rows={} psi_hi={psi_hi:.6} psi_anchor={psi_anchor:.6} \
-                 rank_stable_ceiling={:?} clamped={}",
+                 rank_stable_ceiling={psi_rank_stable_ceiling_raw:?} clamped={} \
+                 projector_error_bar={psi_projector_bar:?}",
                 data.nrows(),
-                evaluator.psi_gram_rank_stable_ceiling(psi_anchor),
                 psi_rank_stable_ceiling.is_some(),
             );
             if let Some(ceiling) = psi_rank_stable_ceiling {
@@ -3768,6 +3782,31 @@ fn run_exact_joint_spatial_optimization(
                      radial mode goes collinear), where the skip is soundly refused; a \
                      line-search overshoot there trips the O(n) reset_surface lane (and the \
                      deficient pinning ψ it records resets the next in-band trial too)."
+                );
+            }
+            // #2448: when the anchor's range projector is not resolved to the
+            // subspace tolerance, `reduced_basis_equal` refuses EVERY non-trivial
+            // pair, so both band edges collapse onto the anchor and get filtered
+            // out above — indistinguishable in the log from "the band already
+            // covers the window". It is not the same thing at all: the n-free
+            // design-realization skip is dead for the whole fit and every trial
+            // falls to the O(n) exact path. Say so once, loudly, so the resulting
+            // wall-clock is attributable to the geometry rather than mysterious.
+            if let Some(bar) = psi_projector_bar
+                && bar > gam_solve::psi_gram_tensor::PSI_GRAM_SKIP_PROJ_ATOL
+            {
+                log::warn!(
+                    "[{label}] ψ-gram range projector at the anchor ψ={psi_anchor:.6} is \
+                     UNRESOLVED: Davis–Kahan bar {bar:.3e} exceeds the {:.3e} subspace \
+                     tolerance the design-revision skip gates on (#2448). The conditioned \
+                     Gram has no kept/dropped eigen-gap wide enough to decide subspace \
+                     identity at double precision here — its spectrum decays smoothly \
+                     through the rank cutoff instead of cliffing — so the skip witness \
+                     soundly refuses every trial and the n-free fast path will not fire \
+                     at all. Results are unaffected (the exact O(n) path runs); the cost \
+                     is the fast path. The lever is the geometry (basis size / centers) \
+                     or the rank cutoff, not this clamp.",
+                    gam_solve::psi_gram_tensor::PSI_GRAM_SKIP_PROJ_ATOL
                 );
             }
             let gradient_covers_full_window = evaluator.psi_gram_tensor_covers_gradient(psi_lo)

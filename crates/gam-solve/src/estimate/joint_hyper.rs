@@ -675,6 +675,21 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             .and_then(|t| t.rank_stable_psi_ceiling(psi_anchor))
     }
 
+    /// Davis–Kahan error bar on the installed tensor's range projector at `psi` —
+    /// the resolution of the instrument the band search and the design-revision
+    /// skip both decide on (#2448). Above `PSI_GRAM_SKIP_PROJ_ATOL` the
+    /// reduced-basis question is unanswerable at this ψ and both soundly refuse,
+    /// which is what turns a band edge into a collapse onto its own anchor. Logged
+    /// by the κ driver so that collapse is attributable rather than indistinguishable
+    /// from "no clamp needed". `None` when no tensor is installed or `psi` is
+    /// off-window. See
+    /// [`crate::psi_gram_tensor::PsiGramTensor::range_projector_error_bar`].
+    pub fn psi_gram_projector_error_bar(&self, psi: f64) -> Option<f64> {
+        self.psi_gram_tensor
+            .as_ref()
+            .and_then(|t| t.range_projector_error_bar(psi))
+    }
+
     /// Return the most-recently converged inner β from the last PIRLS solve, if
     /// it is finite and the right dimension. Used by `SpatialJointContext` to
     /// warm-start successive outer evaluations instead of cold-starting PIRLS
