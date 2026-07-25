@@ -3020,22 +3020,42 @@ mod refinement_decision_tests {
 
             // Finite differences are confined to this oracle test. The
             // production optimizer consumes the hand-derived score jet above.
+            //
+            // A single central difference at the roundoff-optimal step
+            // `h = eps^(1/3)` carries truncation error `(h²/6)·S'''`, which is
+            // ~3.7e-11·S''' — not negligible for this profile, and it is charged
+            // against a `sqrt(eps)` bound of ~9e-8. Measured at HEAD the bare
+            // stencil missed by 1.1e-7, i.e. the *comparator* was outside the
+            // bound the comparison is held to, so the assertion was testing the
+            // stencil rather than the analytic slope.
+            //
+            // Richardson-extrapolate instead: `(4·D(h/2) − D(h))/3` cancels the
+            // h² term exactly, leaving O(h⁴) ≈ 1e-21 — far below roundoff — so
+            // what remains is a genuine measurement of the derivative. This
+            // makes the test STRICTER, not looser: the bound is unchanged and
+            // the comparator got better.
+            let central = |step: f64| -> f64 {
+                let right = profile
+                    .evaluate(log_lambda + step)
+                    .expect("right score")
+                    .jet
+                    .value;
+                let left = profile
+                    .evaluate(log_lambda - step)
+                    .expect("left score")
+                    .jet
+                    .value;
+                (right - left) / (2.0 * step)
+            };
             let step = f64::EPSILON.cbrt();
-            let right = profile
-                .evaluate(log_lambda + step)
-                .expect("right score")
-                .jet
-                .value;
-            let left = profile
-                .evaluate(log_lambda - step)
-                .expect("left score")
-                .jet
-                .value;
-            let numerical_slope = (right - left) / (2.0 * step);
+            let coarse = central(step);
+            let fine = central(0.5 * step);
+            let numerical_slope = (4.0 * fine - coarse) / 3.0;
             assert!(
                 (evaluation.jet.derivative - numerical_slope).abs()
                     <= f64::EPSILON.sqrt() * (1.0 + numerical_slope.abs()),
-                "analytic slope mismatch at {log_lambda}: {} versus {numerical_slope}",
+                "analytic slope mismatch at {log_lambda}: {} versus {numerical_slope} \
+                 (Richardson of h={step:e} → {coarse}, h/2 → {fine})",
                 evaluation.jet.derivative,
             );
         }
