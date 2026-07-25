@@ -1874,81 +1874,22 @@ pub(crate) fn newton_predicted_decrease(hessian: &Array2<f64>, grad: &Array1<f64
     Some(0.5 * quad)
 }
 
-/// Is outer coordinate `k` pinned within [`CERTIFICATE_RAIL_MARGIN`] of either
-/// of its own box bounds?
-///
-/// Factored out so the λ-block REPORT and the θ-wide certificate FACE below
-/// cannot drift apart about what "railed" means for the same coordinate: they
-/// differ only in which coordinates they scan, never in the test.
-fn outer_coordinate_is_railed(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> bool {
-    let (lo, hi) = match config.bounds.as_ref() {
-        Some((lo, hi)) if k < lo.len() && k < hi.len() => (lo[k], hi[k]),
-        Some(_) => return false,
-        None => (-config.rho_bound, config.rho_bound),
-    };
-    (theta[k] - lo).abs() <= CERTIFICATE_RAIL_MARGIN
-        || (hi - theta[k]).abs() <= CERTIFICATE_RAIL_MARGIN
-}
-
 /// Smoothing coordinates (leading ρ block) railed against the outer box.
-///
-/// This is the **report**. `OuterCriterionCertificate::lambdas_railed` indexes
-/// *smoothing parameters*, and every consumer reads it that way — gam-report's
-/// "λ railed" warning, the pyffi certificate surface, `is_clean`. It is
-/// deliberately NOT the set the certificate reasons with; see
-/// [`certificate_railed_coordinates`].
 pub(crate) fn certificate_railed_lambdas(
     rho: &Array1<f64>,
     rho_dim: usize,
     config: &OuterConfig,
 ) -> Vec<usize> {
     (0..rho_dim.min(rho.len()))
-        .filter(|&k| outer_coordinate_is_railed(rho, k, config))
-        .collect()
-}
-
-/// **Every** outer coordinate railed against its own box bound — the ρ block
-/// *and* the trailing non-ρ blocks that a joint search carries in the same θ
-/// vector under the same box: the spatial log-κ ψ coordinates and the
-/// auxiliary coordinates.
-///
-/// This is the set every *decision* in [`certify_outer_optimality`] must use,
-/// and using the λ-only report there instead was a real defect. The active-set
-/// reasoning at a box-constrained optimum is a statement about coordinates, not
-/// about what a coordinate happens to parameterize:
-///
-/// * the second-order condition only has to hold on the **feasible tangent
-///   subspace**, so `certificate_hessian_is_psd_off_railed` deletes the railed
-///   rows and columns. `layout.rho_dim()` is `n_params − psi_dim`, so a ψ
-///   coordinate pinned on its data-derived κ window stayed *inside* that
-///   sub-block and its saturated (and, near a window edge, routinely negative)
-///   curvature row decided `hessian_psd = false` for the whole fit. That is
-///   precisely the failure the block's own comment says must not happen — "a
-///   rail-caused indefiniteness would disable the very certificate that exists
-///   to certify a railed optimum (#2299)" — it was simply never extended past
-///   the ρ block;
-/// * the same omission hid the coordinate from the asymptote-rail mint
-///   (#2348 Inc 1), from tail-snap, from `interior_curvature_floor_clearance`,
-///   from the #2155 saddle escape, and from the #2392 wrong-rail pull-back and
-///   active-set reduction. A κ search whose rail is a ψ coordinate could
-///   therefore never be certified *by construction*, no matter how correct its
-///   gradient was;
-/// * and it made the refusal message actively misleading, because
-///   `project_gradient_vector` DOES project every coordinate against its own
-///   bound. So `|g|` could collapse to a small `|Pg|` while `railed=[]`
-///   reported nothing responsible for the collapse — the exact disagreement
-///   #979 measured from the other side and could not explain.
-///
-/// Relaxing nothing: a coordinate near a bound whose gradient still points
-/// *into* the box keeps its feasible-descent component in `|Pg|`
-/// ([`project_gradient_vector`] zeros only the outward half), so a genuinely
-/// unconverged interior direction is still refused.
-pub(crate) fn certificate_railed_coordinates(
-    theta: &Array1<f64>,
-    config: &OuterConfig,
-) -> Vec<usize> {
-    (0..theta.len())
-        .filter(|&k| outer_coordinate_is_railed(theta, k, config))
+        .filter(|&k| {
+            let (lo, hi) = match config.bounds.as_ref() {
+                Some((lo, hi)) if k < lo.len() && k < hi.len() => (lo[k], hi[k]),
+                Some(_) => return false,
+                None => (-config.rho_bound, config.rho_bound),
+            };
+            (rho[k] - lo).abs() <= CERTIFICATE_RAIL_MARGIN
+                || (hi - rho[k]).abs() <= CERTIFICATE_RAIL_MARGIN
+        })
         .collect()
 }
 
@@ -2738,13 +2679,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // flatness certificate below — and the final curvature gate — judge PSD on the
     // interior (un-railed) sub-block instead, or a rail-caused indefiniteness would
     // disable the very certificate that exists to certify a railed optimum (#2299).
-    // The FACE the certificate reasons on: every θ coordinate against its own
-    // bound, ρ and non-ρ alike. See `certificate_railed_coordinates` for why
-    // the λ-block report cannot be used here.
-    let certificate_railed = certificate_railed_coordinates(&result.rho, config);
-    // The λ-block REPORT that ships on the certificate. Same predicate,
-    // narrower scan, because `lambdas_railed` indexes smoothing parameters.
-    let railed_lambda_block = certificate_railed_lambdas(&result.rho, layout.rho_dim(), config);
+    let certificate_railed = certificate_railed_lambdas(&result.rho, layout.rho_dim(), config);
 
     // Typed stationary-at-asymptote rail certificate (#2348 Inc 1, #2299 layer 3,
     // #2337 Thm 2.1). Before falling through to the generic gradient/criterion-flat
@@ -2838,7 +2773,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         rails,
                     },
                     hessian_psd: Some(true),
-                    lambdas_railed: railed_lambda_block.clone(),
+                    lambdas_railed: certificate_railed.clone(),
                     curvature_floor: None,
                 };
                 // Move the certified curvature onto the result; the mint path returns
@@ -2987,7 +2922,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         hessian_psd: analytic_hessian.as_ref().and_then(|hessian| {
             certificate_hessian_is_psd_off_railed(hessian, &certificate_railed)
         }),
-        lambdas_railed: railed_lambda_block.clone(),
+        lambdas_railed: certificate_railed.clone(),
         // The floor's verdict on that same curvature, recorded beside it.
         curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
             interior_curvature_floor_clearance(hessian, &certificate_railed, &projected_gradient)
@@ -3075,7 +3010,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         rails,
                     },
                     hessian_psd: Some(true),
-                    lambdas_railed: railed_lambda_block.clone(),
+                    lambdas_railed: certificate_railed.clone(),
                     curvature_floor: None,
                 };
                 result.final_hessian = analytic_hessian;
@@ -3157,16 +3092,13 @@ fn certify_outer_optimality_at_terminal_fidelity(
             // `curvature_admissible()` is `false` exactly when the REDUCED
             // (off-railed) Hessian is indefinite, so a railed coordinate no
             // longer waives the escape: it is passed through and held fixed while
-            // the step descends the free-direction saddle (#2155). It must be
-            // held fixed on the SAME face the reduction was taken on — the
-            // certificate's λ-block report would leave a railed ψ free to be
-            // stepped out of its box.
+            // the step descends the free-direction saddle (#2155).
             result.saddle_escape_reseed = negative_curvature_escape_point(
                 obj,
                 &saddle_rho,
                 &gradient,
                 &hessian,
-                &certificate_railed,
+                &certificate.lambdas_railed,
                 baseline_cost,
                 &bounds,
                 context,
@@ -3278,18 +3210,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // refusal so a railed or budget-exhausted crawl explains which
         // certificate gate refused instead of failing silently.
         let mut summary = certificate.summary();
-        // `summary()` prints `lambdas_railed`, which is the λ-block report. When
-        // the face the certificate actually reasoned on is wider — a joint
-        // [ρ, ψ] search with a κ coordinate on its data-derived window — say so,
-        // or the refusal reads as `railed=[]` while the projector has already
-        // discarded that coordinate's outward pull and nothing explains where
-        // `|g|` went (#979).
-        if certificate_railed.len() != railed_lambda_block.len() {
-            summary = format!(
-                "{summary}; outer coordinates railed (theta-wide, incl. non-rho blocks): \
-                 {certificate_railed:?}"
-            );
-        }
         if let Some(note) = asymptote_rail_note {
             summary = format!("{summary}; asymptote-rail declined: {note}");
         }
