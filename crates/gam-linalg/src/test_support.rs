@@ -591,6 +591,35 @@ mod tests {
         assert!(memberships.into_iter().all(|count| count == 1));
     }
 
+    /// A quality verdict must be a function of the DATA, never of the path the
+    /// run took to reach it. `paired_holdout_partition` therefore has to be a
+    /// pure function of `(n, holdout_fraction, split_key)`: no process-global
+    /// counter, no RNG state threaded between calls, no dependence on how many
+    /// partitions were drawn first. Interleaving unrelated draws of every shape
+    /// — different `n`, different fraction, different key — must not perturb a
+    /// repeat of the original, so a failure reproduces from its three arguments
+    /// alone and cannot move with test-execution order.
+    #[test]
+    fn paired_holdout_ignores_call_order_and_carries_no_hidden_state() {
+        let reference = paired_holdout_partition(221, 0.20, 17);
+        for (n, fraction, key) in [
+            (240_usize, 0.25_f64, 3_u64),
+            (1000, 0.20, 17),
+            (221, 0.35, 17),
+            (221, 0.20, 18),
+            (17, 0.5, 221),
+        ] {
+            let intervening = paired_holdout_partition(n, fraction, key);
+            assert_eq!(intervening.mask.len(), n);
+            assert_eq!(
+                paired_holdout_partition(221, 0.20, 17),
+                reference,
+                "an intervening ({n}, {fraction}, {key}) draw perturbed a repeat \
+                 of (221, 0.20, 17); the partition is carrying hidden state"
+            );
+        }
+    }
+
     /// The closed-form integer-df Student-t CDF must reproduce published
     /// quantiles. These are the two df the quality panels actually use (K=10 and
     /// the expensive 2-D K=5 panels) plus the Cauchy and df=2 edge cases whose
