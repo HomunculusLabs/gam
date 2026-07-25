@@ -46,6 +46,7 @@ fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
         LikelihoodSpec::binomial_probit(),
         false,
         false,
+        false,
     );
     assert!(
         pass,
@@ -75,12 +76,20 @@ fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
 /// verifies the *gradient formula* rather than the *conditioning floor*. Proof:
 /// the same n=20 Duchon-probit config matches FD to 6e-7 under balanced labels
 /// vs 8e-3 under the separated labels (and ρ matches to 1e-5 in both).
+///
+/// `probe_rail` appends probes near the joint optimizer's UPPER ρ box bound
+/// (`JOINT_RHO_BOUND = 12`) in addition to the historical near-origin probes.
+/// Every probe above sits at ‖ρ‖ ≤ 1, but the asymptote-rail certificate
+/// (#2348) that decides whether a railed joint fit may be minted reads the
+/// gradient AT the rail — so the analytic gradient in the only region the
+/// certificate consults has never been FD-checked by any gate. `#2425`.
 fn iso_kappa_fd_variant_driver(
     label: &str,
     n: usize,
     family: LikelihoodSpec,
     skip_psi: bool,
     well_conditioned: bool,
+    probe_rail: bool,
 ) -> (bool, f64, Vec<String>) {
     // A `"*_2d"` label builds an ordinary 2-D feature cloud (the production
     // `matern(x1, x2)` regime: operator triplet {mass, tension, stiffness}, with
@@ -298,16 +307,41 @@ fn iso_kappa_fd_variant_driver(
         theta_alt[rho_dim + k] = 0.4;
     }
 
+    // Rail probes (#2425): one per ρ coordinate held at 11.5 — a half e-fold
+    // inside `JOINT_RHO_BOUND = 12` so the centered stencil stays in the box —
+    // plus an all-ρ-railed probe. This is the region the asymptote-rail
+    // certificate reads when it decides whether a railed joint fit is
+    // stationary-at-infinity, and no historical probe reaches it.
+    const RAIL_PROBE_RHO: f64 = 11.5;
+    let mut rail_probes: Vec<(String, Array1<f64>)> = Vec::new();
+    if probe_rail {
+        for j in 0..rho_dim {
+            let mut theta_rail = theta_base.clone();
+            theta_rail[j] = RAIL_PROBE_RHO;
+            rail_probes.push((format!("rail_rho{j}"), theta_rail));
+        }
+        let mut theta_all_rail = theta_base.clone();
+        for j in 0..rho_dim {
+            theta_all_rail[j] = RAIL_PROBE_RHO;
+        }
+        rail_probes.push(("rail_all".to_string(), theta_all_rail));
+    }
+
     let h = 1e-5_f64;
     let rel_tol = 5e-3_f64;
     let mut violations: Vec<String> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
-    for (probe, theta) in [
+    let base_probes: [(&str, &Array1<f64>); 4] = [
         ("zero", &theta_zero),
         ("psi_only", &theta_psi_only),
         ("base", &theta_base),
         ("alt", &theta_alt),
-    ] {
+    ];
+    let all_probes: Vec<(&str, &Array1<f64>)> = base_probes
+        .into_iter()
+        .chain(rail_probes.iter().map(|(n, t)| (n.as_str(), t)))
+        .collect();
+    for (probe, theta) in all_probes {
         let (cost_an, grad_an) = analytic_at(theta, &mut cache, &mut evaluator);
         assert!(cost_an.is_finite(), "{label} {probe}: cost not finite");
         // Objective↔gradient desync probe: the analytic gradient path
@@ -370,6 +404,7 @@ fn iso_kappa_duchon_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
+        false,
     );
     assert!(
         pass,
@@ -396,6 +431,7 @@ fn iso_kappa_matern_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
+        false,
     );
     assert!(
         pass,
@@ -418,6 +454,7 @@ fn iso_kappa_matern_2d_gaussian_identity_fd() {
         "matern_gaussian_2d",
         120,
         LikelihoodSpec::gaussian_identity(),
+        false,
         false,
         false,
     );
@@ -808,6 +845,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
         LikelihoodSpec::gaussian_identity(),
         false,
         false,
+        false,
     );
     assert!(
         pass,
@@ -820,7 +858,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
 #[test]
 fn iso_kappa_duchon_binomial_logit_fd() {
     let (pass, worst, violations) =
-        iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false);
+        iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false, false);
     assert!(
         pass,
         "BinomialLogit FD failed; worst_psi_rel={worst:.3e}\n  {}",
@@ -847,6 +885,7 @@ fn iso_kappa_duchon_n_smaller_fd() {
         // analytic-vs-FD gap that is a conditioning artifact of BOTH sides, not
         // a gradient error (#901 kernel is exact: balanced labels match to 6e-7).
         true,
+        false,
     );
     assert!(
         pass,
@@ -863,12 +902,55 @@ fn iso_kappa_duchon_no_psi_fd() {
         LikelihoodSpec::binomial_probit(),
         true,
         false,
+        false,
     );
     assert!(
         pass,
         "Duchon Probit ρ-only FD failed:\n  {}",
         violations.join("\n  ")
     );
+}
+
+/// #2425 MEASUREMENT (reports, never fails): is the analytic iso-κ outer
+/// gradient still FD-correct NEAR THE RAIL?
+///
+/// Motivation. `spatial_length_scale_optimization_monotone_*` never reaches its
+/// monotonicity assertion — the joint fit refuses to mint because the outer
+/// certificate finds the railed coordinates non-stationary. The declining
+/// certificate printed an 18-e-fold probe ladder in which
+/// `ĉ = −e^ρ·∂V/∂ρ` — the quantity that is CONSTANT on a genuine λ→∞ tail —
+/// instead tracks `e^ρ` across the whole box, i.e. `∂V/∂ρ ≈ const ≈ −0.3`, and
+/// then GROWS to −1.9 at the ρ=11.5 rail rather than decaying to zero.
+///
+/// Two readings are possible and they demand opposite fixes:
+///   1. the analytic gradient is right, the joint box `JOINT_RHO_BOUND = 12`
+///      simply stops 18 e-folds short of the `RHO_BOUND = 30` rail the
+///      asymptote certificate (#2348) was calibrated against, so the tail has
+///      not begun and the certificate correctly declines; or
+///   2. the analytic gradient is WRONG out there, and every railed joint fit
+///      has been judged against a gradient no gate has ever checked.
+///
+/// Every historical FD probe in this file sits at ‖ρ‖ ≤ 1. The rail is the only
+/// region the certificate consults and the only region never measured. This
+/// test measures it on both bases and both link classes.
+#[test]
+fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
+    for (label, n, family) in [
+        ("duchon_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
+        ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
+    ] {
+        let (pass, worst, violations) =
+            iso_kappa_fd_variant_driver(label, n, family, false, false, true);
+        eprintln!(
+            "[zz-rail-2425] {label}: pass={pass} worst_psi_rel={worst:.3e} \
+             violations={}",
+            violations.len()
+        );
+        for v in &violations {
+            eprintln!("[zz-rail-2425] {label}: {v}");
+        }
+    }
 }
 
 /// Owned 1-D Duchon BinomialProbit setup shared verbatim across the
