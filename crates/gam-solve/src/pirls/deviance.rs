@@ -162,6 +162,25 @@ fn finite_signed_from_log(
     }
 }
 
+/// A directly-computed half-deviance, or `None` when it is not representable.
+///
+/// The half-deviance branches assemble their value in log space and hand it to
+/// [`finite_signed_from_log`], which exponentiates. That is the right shape when
+/// an intermediate would overflow, and the wrong one when it would not:
+/// `exp(ln x)` does not round-trip, and at the top of the f64 range the two
+/// roundings cost up to ~1.4e-14 relative — six times the 2e-15 bound the
+/// extreme-value contracts hold these channels to. Families that can name their
+/// half-deviance as a plain product of finite factors compute it and pass it
+/// here first.
+///
+/// On every branch that uses this, the exact value is strictly positive, so a
+/// non-finite or zero product means an overflowing intermediate or an
+/// underflowing weight — precisely the case the log assembly exists for, and
+/// the caller falls back to it.
+fn representable_half(direct: f64) -> Option<f64> {
+    (direct.is_finite() && direct > 0.0).then_some(direct)
+}
+
 /// Deterministic signed reduction that cannot overflow on an intermediate
 /// partial sum when the final sum is representable.  Scaling by the largest
 /// magnitude keeps every add bounded; Neumaier compensation retains small
@@ -678,6 +697,13 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
         ));
     }
     let log_weight = prior_weight.ln() + log_measure_scale;
+    // `exp(ln x)` does not round-trip at the top of the f64 range: the two
+    // roundings cost up to ~1.4e-14 relative, six times the 2e-15 bound the
+    // extreme-value channel contracts hold this function to. Where a family can
+    // name its half-deviance as a plain product of finite factors, take the
+    // product — one rounding instead of three. This is `log_weight`'s
+    // exponentiated twin, the first of those factors.
+    let weight = prior_weight * log_measure_scale.exp();
     let (half_deviance, eta_score) = match &likelihood.spec.response {
         ResponseFamily::Gaussian => {
             if !y.is_finite() {
@@ -733,29 +759,15 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
             } else {
                 log_weight + eta + log_poisson_ratio_deviance(log_r)
             };
-            // Prefer the DIRECT form whenever it is representable. The
-            // `log_r >= 1.0` branch above builds
-            // `log(w·[y·(log_r − 1) + exp(η)])`, and `finite_signed_from_log`
-            // then exponentiates it — so a value that is perfectly
-            // representable makes a round trip through `ln` and `exp`, and
-            // `exp(ln(x))` does not round-trip at the top of the range. At
-            // `y = 1, η = −1e308` the exact half-deviance is `1e308 − 1`, which
-            // rounds to exactly `1e308`; the log route returns it 61 ulps high.
-            //
-            // The direct form costs one rounding. The log form stays as the
-            // fallback for precisely the regime it was written for: overflow of
-            // the product, or of the weight when `log_measure_scale` is large.
-            // The acceptance test is strictly positive rather than non-negative
-            // because on this branch (`y > 0`, `log_r >= 1`) the exact
-            // half-deviance is `y·(log_r − 1) + exp(η) >= exp(η) > 0`, so a
-            // direct zero can only be underflow — of the weight, or of the
-            // whole product — and the log route is the one that resolves it.
+            // The `log_r >= 1.0` branch above builds
+            // `log(w·[y·(log_r − 1) + exp(η)])` and then exponentiates it, so a
+            // perfectly representable value makes a round trip through `ln` and
+            // `exp`. At `y = 1, η = −1e308` the exact half-deviance is
+            // `1e308 − 1`, which rounds to exactly `1e308`; the log route
+            // returns it 61 ulps (1.4e-14 relative) high.
             let direct_half = (y > 0.0 && log_r >= 1.0)
-                .then(|| {
-                    let weight = prior_weight * log_measure_scale.exp();
-                    weight * (y * (log_r - 1.0) + eta.exp())
-                })
-                .filter(|value| value.is_finite() && *value > 0.0);
+                .then(|| weight * (y * (log_r - 1.0) + eta.exp()))
+                .and_then(representable_half);
             let half = match direct_half {
                 Some(value) => value,
                 None => {
@@ -859,16 +871,25 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
             } else {
                 logaddexp(y.ln(), log_theta)
             };
+            // `w · (y + θ) · KL` is a product of three finite factors; the log
+            // assembly's `exp(log_weight + log_total + ln KL)` costs three
+            // roundings to reach the same number. At `y = 2, θ = 1,
+            // η = −1e308, w = 0.5` the exact half-deviance is `1e308` and the
+            // log route lands 1.4e-14 above it.
+            let total = if y == 0.0 { *theta } else { y + *theta };
             let half = if kl == 0.0 {
                 0.0
             } else {
-                finite_signed_from_log(
-                    row,
-                    "negative-binomial half-deviance",
-                    eta,
-                    1.0,
-                    log_weight + log_total + kl.ln(),
-                )?
+                match representable_half(weight * total * kl) {
+                    Some(value) => value,
+                    None => finite_signed_from_log(
+                        row,
+                        "negative-binomial half-deviance",
+                        eta,
+                        1.0,
+                        log_weight + log_total + kl.ln(),
+                    )?,
+                }
             };
             let log_y = if y == 0.0 { f64::NEG_INFINITY } else { y.ln() };
             let score_sign = if eta >= log_y { 1.0 } else { -1.0 };
@@ -976,16 +997,23 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
                     half_unit,
                 ));
             }
+            // Two finite factors, so `w · half_unit` is one rounding against
+            // the log route's three. At `y = 0.5, η = −1e308, w = 1` the unit
+            // half-deviance is exactly `5e307` and the weight is exactly one,
+            // yet the round trip through `ln`/`exp` still moves the answer.
             let half = if half_unit == 0.0 {
                 0.0
             } else {
-                finite_signed_from_log(
-                    row,
-                    "binomial half-deviance",
-                    eta,
-                    1.0,
-                    log_weight + half_unit.ln(),
-                )?
+                match representable_half(weight * half_unit) {
+                    Some(value) => value,
+                    None => finite_signed_from_log(
+                        row,
+                        "binomial half-deviance",
+                        eta,
+                        1.0,
+                        log_weight + half_unit.ln(),
+                    )?,
+                }
             };
             let (score_sign, score_log_abs) = if is_logit {
                 let (mu, one_minus_mu) = logit_probability_pair(eta);
