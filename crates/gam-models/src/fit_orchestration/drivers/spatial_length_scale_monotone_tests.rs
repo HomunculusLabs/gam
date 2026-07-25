@@ -106,7 +106,6 @@ mod spatial_length_scale_monotone_tests {
         let n = 120usize;
         let num_centers = 20usize;
         let mut data = Array2::<f64>::zeros((n, 1));
-        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x = i as f64 / (n - 1) as f64;
             data[[i, 0]] = x;
@@ -210,7 +209,6 @@ mod spatial_length_scale_monotone_tests {
         let n = 60usize;
         let d = 3usize;
         let mut data = Array2::<f64>::zeros((n, d));
-        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x0 = i as f64 / (n as f64 - 1.0);
             let x1 = (i as f64 * 0.13).sin();
@@ -266,13 +264,11 @@ mod spatial_length_scale_monotone_tests {
         let n = 60usize;
         let d = 2usize;
         let mut data = Array2::<f64>::zeros((n, d));
-        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x0 = i as f64 / (n as f64 - 1.0);
             let x1 = (i as f64 * 0.17).sin();
             data[[i, 0]] = x0;
             data[[i, 1]] = x1;
-            y[i] = (3.0 * x0).cos() + 0.35 * x1;
         }
 
         let spec = TermCollectionSpec {
@@ -345,13 +341,11 @@ mod spatial_length_scale_monotone_tests {
         let n = 60usize;
         let d = 2usize;
         let mut data = Array2::<f64>::zeros((n, d));
-        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x0 = i as f64 / (n as f64 - 1.0);
             let x1 = (i as f64 * 0.17).sin();
             data[[i, 0]] = x0;
             data[[i, 1]] = x1;
-            y[i] = (3.0 * x0).cos() + 0.35 * x1;
         }
         let spec = TermCollectionSpec {
             linear_terms: vec![],
@@ -376,7 +370,6 @@ mod spatial_length_scale_monotone_tests {
                 joint_null_rotation: None,
             }],
         };
-        let _ = &y;
         let design = build_term_collection_design(data.view(), &spec)
             .unwrap_or_else(|e| panic!("design failed: {e:?}"));
         eprintln!(
