@@ -30,7 +30,7 @@ pub(crate) fn exact_ctn_mode_branch_freezes_derivative_input() {
             .expect("one CTN coefficient")[0]
     };
 
-    let mut state = TransformationExactModeBranch::default();
+    let mut state = ExactCoefficientModeBranch::default();
     let (froze, candidates) = state.candidates(gam_problem::EvalMode::ValueOnly, &Array1::zeros(0));
     assert!(!froze);
     assert_eq!(candidates.len(), 1);
@@ -58,6 +58,10 @@ pub(crate) fn exact_ctn_mode_branch_freezes_derivative_input() {
 
     state.record_value(gam_problem::EvalMode::ValueOnly, warm(4.0));
     state.record_value(gam_problem::EvalMode::ValueAndGradient, warm(5.0));
+    assert!(
+        !state.install_seed(warm(6.0)),
+        "an outer-cache seed must not mutate a frozen profile branch"
+    );
     assert!(!state.prepare(gam_problem::EvalMode::ValueAndGradient));
     let (froze, candidates) = state.candidates(gam_problem::EvalMode::ValueOnly, &Array1::zeros(0));
     assert!(!froze);
@@ -69,7 +73,7 @@ pub(crate) fn exact_ctn_mode_branch_freezes_derivative_input() {
         "outer trial history must not replace the CTN branch anchor"
     );
 
-    let mut cold = TransformationExactModeBranch::default();
+    let mut cold = ExactCoefficientModeBranch::default();
     let (froze, candidates) =
         cold.candidates(gam_problem::EvalMode::ValueAndGradient, &Array1::zeros(0));
     assert!(froze);

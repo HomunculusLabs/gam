@@ -1,14 +1,14 @@
 use crate::cubic_cell_kernel as exact_kernel;
 use crate::custom_family::{
     BatchedOuterGradientTerms, BlockEffectiveJacobian, BlockWorkingSet, BlockwiseFitOptions,
-    CustomFamily, CustomFamilyWarmStart, EvalMode, ExactNewtonJointGradientEvaluation,
-    ExactNewtonJointHessianWorkspace, FamilyEvaluation, FamilyLinearizationState,
-    ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, custom_family_outer_derivatives,
-    evaluate_custom_family_joint_hyper_efs_owned_shared,
-    evaluate_custom_family_joint_hyper_owned_shared, fit_custom_family,
-    fit_custom_family_fixed_log_lambdas_from_owned_mode,
+    CustomFamily, CustomFamilyJointHyperModeSelection, CustomFamilyWarmStart, EvalMode,
+    ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace, FamilyEvaluation,
+    FamilyLinearizationState, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
+    custom_family_outer_derivatives, evaluate_custom_family_joint_hyper_best_mode_shared,
+    fit_custom_family, fit_custom_family_fixed_log_lambdas_from_mode_selection,
     joint_hyper_options_for_outer_tolerance,
 };
+use crate::exact_mode_branch::ExactCoefficientModeBranch;
 use crate::fit_orchestration::drivers::{
     ExactJointEfsEvaluation, ExactJointEvaluation, ExactJointHyperSetup, SpatialFitProvenance,
     apply_spatial_anisotropy_pilot_initializer, build_term_collection_designs_and_freeze_joint,

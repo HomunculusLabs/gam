@@ -10,64 +10,6 @@ pub(crate) struct TransformationExactGeometryCache {
     pub(crate) hyper_layout: SharedCustomFamilyHyperLayout,
 }
 
-#[derive(Default)]
-pub(crate) struct TransformationExactModeBranch {
-    carried_mode: Option<CustomFamilyWarmStart>,
-    anchor: Option<CustomFamilyWarmStart>,
-    frozen: bool,
-}
-
-impl TransformationExactModeBranch {
-    /// Before the branch is frozen, compare a cold solve with the carried mode
-    /// at every value-only objective trial. This is a deterministic
-    /// mode-selection rule based on the profiled criterion, not coefficient
-    /// magnitude or cache distance. Freezing makes the carried candidate
-    /// immutable; cold remains a candidate so a worse anchor can never define
-    /// the profiled surface.
-    pub(crate) fn candidates(
-        &mut self,
-        eval_mode: gam_problem::EvalMode,
-        rho: &Array1<f64>,
-    ) -> (bool, Vec<Option<CustomFamilyWarmStart>>) {
-        let froze = self.prepare(eval_mode);
-        let carried = self
-            .frozen
-            .then_some(&self.anchor)
-            .unwrap_or(&self.carried_mode)
-            .as_ref()
-            .filter(|warm| warm.compatible_with_rho(rho))
-            .cloned();
-        match carried {
-            Some(warm) => (froze, vec![None, Some(warm)]),
-            None => (froze, vec![None]),
-        }
-    }
-
-    /// Freeze the INPUT mode for the first derivative-bearing seed evaluation.
-    /// Freezing before the solve makes that seed evaluation and every later
-    /// evaluation at the same theta restart from bit-identical coefficients.
-    pub(crate) fn prepare(&mut self, eval_mode: gam_problem::EvalMode) -> bool {
-        if self.frozen || matches!(eval_mode, gam_problem::EvalMode::ValueOnly) {
-            return false;
-        }
-        self.anchor = self.carried_mode.take();
-        self.frozen = true;
-        true
-    }
-
-    /// Value-only objective trials are the sole phase allowed to advance the
-    /// carried mode.
-    pub(crate) fn record_value(
-        &mut self,
-        eval_mode: gam_problem::EvalMode,
-        warm_start: CustomFamilyWarmStart,
-    ) {
-        if !self.frozen && matches!(eval_mode, gam_problem::EvalMode::ValueOnly) {
-            self.carried_mode = Some(warm_start);
-        }
-    }
-}
-
 impl TransformationExactGeometryCache {
     pub(crate) fn update_block_log_lambdas(
         &mut self,
@@ -394,8 +336,8 @@ pub fn fit_transformation_normal(
     // the first derivative-bearing evaluation freezes the selected mode's
     // INPUT as the branch anchor. Every later trial restarts from that fixed
     // anchor, making the profile independent of rejected-trial cache history.
-    let exact_mode_branch: RefCell<TransformationExactModeBranch> =
-        RefCell::new(TransformationExactModeBranch::default());
+    let exact_mode_branch: RefCell<ExactCoefficientModeBranch> =
+        RefCell::new(ExactCoefficientModeBranch::default());
 
     let joint_setup =
         ExactJointHyperSetup::new(rho0, rho_lower, rho_upper, kappa0, kappa_lower, kappa_upper);

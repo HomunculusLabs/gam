@@ -1937,7 +1937,7 @@ fn inner_fit_from_certified_outer(
     family: &BernoulliMarginalSlopeFamily,
     blocks: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
-    mode: crate::custom_family::CustomFamilyOwnedMode,
+    mode: CustomFamilyJointHyperModeSelection,
     theta: &Array1<f64>,
     outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
 ) -> Result<UnifiedFitResult, String> {
@@ -1947,7 +1947,7 @@ fn inner_fit_from_certified_outer(
     );
     options.use_outer_hessian = false;
     options.outer_tol = options.outer_tol.max(2.0e-5);
-    fit_custom_family_fixed_log_lambdas_from_owned_mode(
+    fit_custom_family_fixed_log_lambdas_from_mode_selection(
         family, blocks, &options, mode, theta, outer,
     )
     .map_err(|error| error.to_string())
@@ -2507,14 +2507,14 @@ pub fn fit_bernoulli_marginal_slope_terms(
         setup
     };
     let final_sigma_cell = std::cell::Cell::new(initial_sigma);
-    let exact_warm_start = RefCell::new(None::<CustomFamilyWarmStart>);
+    let exact_mode_branch = RefCell::new(ExactCoefficientModeBranch::default());
     let runaway_error = RefCell::new(None::<String>);
     // Outer ρ-cache β-seed staging slot. On a cache hit the spatial-joint
     // optimizer invokes `seed_inner_beta_fn` before the first eval at the
     // restored ρ: per-block column widths aren't known until the first
     // `build_blocks(rho, …)` runs, so we stash the flat β here and the eval
-    // closures promote it into `exact_warm_start` (the slot the inner
-    // PIRLS / Newton solve actually consumes) on their first invocation.
+    // closures promote it into the deterministic coefficient-mode branch on
+    // their first invocation.
     let pending_beta_seed = RefCell::new(None::<Array1<f64>>);
     let hints = RefCell::new(ThetaHints::default());
     let score_warp_runtime = score_warp_prepared.as_ref().map(|p| p.runtime.clone());
@@ -2861,13 +2861,17 @@ pub fn fit_bernoulli_marginal_slope_terms(
             let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
             let blocks = build_blocks(&rho, &designs[0], &designs[1])?;
             // Promote a staged β seed (deposited by the outer ρ-cache hit
-            // before any eval ran) into the family warm-start slot now that
+            // before any eval ran) into the deterministic mode branch now that
             // we know the per-block widths from the freshly built blocks.
             if let Some(beta_seed) = pending_beta_seed.borrow_mut().take() {
                 let widths: Vec<usize> = blocks.iter().map(|b| b.design.ncols()).collect();
                 match CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed) {
                     Ok(ws) => {
-                        exact_warm_start.replace(Some(ws));
+                        if !exact_mode_branch.borrow_mut().install_seed(ws) {
+                            log::debug!(
+                                "[BMS] ignored a late outer-cache coefficient seed after the exact mode branch froze"
+                            );
+                        }
                     }
                     Err(e) => {
                         log::warn!(
@@ -2895,105 +2899,59 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 &tolerance_options,
                 row_set,
             );
-            let owned = evaluate_custom_family_joint_hyper_owned_shared(
+            let (froze, candidates) = exact_mode_branch
+                .borrow_mut()
+                .candidates(effective_mode, &rho);
+            if froze {
+                log::info!(
+                    "[BMS] froze deterministic exact coefficient-mode branch at the first derivative-bearing outer evaluation"
+                );
+            }
+            let selection = evaluate_custom_family_joint_hyper_best_mode_shared(
                 &family,
                 &blocks,
                 &eval_options,
                 &rho,
                 hyper_layout,
-                exact_warm_start.borrow().as_ref(),
+                &candidates,
                 effective_mode,
             )?;
             if let Some(err) = bernoulli_marginal_slope_runaway_error(
-                &owned.result.warm_start,
+                &selection.result.warm_start,
                 &designs[0],
                 &specs[0],
-                owned.result.inner_converged,
+                selection.result.inner_converged,
                 "exact outer evaluation",
             ) {
                 runaway_error.replace(Some(err.clone()));
                 return Err(err);
             }
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
-            if !owned.result.inner_converged {
+            exact_mode_branch
+                .borrow_mut()
+                .record_value(eval_mode, selection.result.warm_start.clone());
+            if !selection.result.inner_converged {
                 return Err(
                     "exact bernoulli marginal-slope inner solve did not converge".to_string(),
                 );
             }
             if matches!(eval_mode, EvalMode::ValueGradientHessian)
                 && analytic_joint_hessian_available
-                && !owned.result.outer_hessian.is_analytic()
+                && !selection.result.outer_hessian.is_analytic()
             {
                 return Err("exact bernoulli marginal-slope joint [rho, psi] objective did not return an outer Hessian"
                             .to_string());
             }
             Ok(ExactJointEvaluation {
-                objective: owned.result.objective,
-                gradient: owned.result.gradient,
-                hessian: owned.result.outer_hessian,
-                mode: owned.mode,
+                objective: selection.result.objective,
+                gradient: selection.result.gradient.clone(),
+                hessian: selection.result.outer_hessian.clone(),
+                mode: selection,
             })
         },
-        |theta,
-         specs: &[TermCollectionSpec],
-         designs: &[TermCollectionDesign],
-         row_set: &crate::row_kernel::RowSet| {
-            if let Some(err) = runaway_error.borrow().as_ref().cloned() {
-                return Err(err);
-            }
-            let rho = theta.slice(s![..setup.rho_dim()]).to_owned();
-            let blocks = build_blocks(&rho, &designs[0], &designs[1])?;
-            if let Some(beta_seed) = pending_beta_seed.borrow_mut().take() {
-                let widths: Vec<usize> = blocks.iter().map(|b| b.design.ncols()).collect();
-                match CustomFamilyWarmStart::from_cached_beta(&widths, &beta_seed) {
-                    Ok(ws) => {
-                        exact_warm_start.replace(Some(ws));
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[BMS] outer ρ-cache β-warm-start rejected (efs): {e}; falling back to cold β"
-                        );
-                    }
-                }
-            }
-            let sigma = sigma_from_theta(theta);
-            final_sigma_cell.set(sigma);
-            let family = make_family(&designs[0], &designs[1], sigma);
-            let hyper_layout = get_hyper_layout(theta, specs, designs)?;
-            let tolerance_options =
-                joint_hyper_options_for_outer_tolerance(options, exact_spatial_outer_tol);
-            let eval_options = crate::outer_subsample::exact_outer_options_for_row_set(
-                &tolerance_options,
-                row_set,
-            );
-            let owned = evaluate_custom_family_joint_hyper_efs_owned_shared(
-                &family,
-                &blocks,
-                &eval_options,
-                &rho,
-                hyper_layout,
-                exact_warm_start.borrow().as_ref(),
-            )?;
-            if let Some(err) = bernoulli_marginal_slope_runaway_error(
-                &owned.result.warm_start,
-                &designs[0],
-                &specs[0],
-                owned.result.inner_converged,
-                "EFS outer evaluation",
-            ) {
-                runaway_error.replace(Some(err.clone()));
-                return Err(err);
-            }
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
-            if !owned.result.inner_converged {
-                return Err(
-                    "exact bernoulli marginal-slope EFS inner solve did not converge".to_string(),
-                );
-            }
-            Ok(ExactJointEfsEvaluation {
-                evaluation: owned.result.efs_eval,
-                mode: owned.mode,
-            })
+        |_theta, _specs, _designs, _row_set| {
+            Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
+                "bernoulli marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
+            )
         },
         crate::marginal_slope_shared::make_beta_seed_validator(&pending_beta_seed),
     )?;

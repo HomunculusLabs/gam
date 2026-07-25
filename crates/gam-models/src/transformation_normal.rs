@@ -55,6 +55,7 @@ pub(crate) use crate::fit_orchestration::drivers::{
     freeze_term_collection_from_design, optimize_spatial_length_scale_exact_joint,
     spatial_length_scale_term_indices,
 };
+pub(crate) use crate::exact_mode_branch::ExactCoefficientModeBranch;
 pub(crate) use crate::inference::model::{
     TRANSFORMATION_SCORE_PIT_CLIP_EPS, TransformationScoreCalibration,
 };
