@@ -312,6 +312,24 @@ fn selected_uncertainty_backend<'a>(
                 })
         }
         InferenceCovarianceMode::SmoothingCorrected => {
+            // With no smoothing coordinates the correction J Var(rho) Jᵀ is
+            // the unique zero-dimensional zero matrix, so Vp = Vb exactly.
+            // The conditional backend can consume either the dense covariance
+            // or the storage-efficient factorized Hessian. This is an identity,
+            // not a fallback to a weaker uncertainty definition.
+            if fit.lambdas.is_empty() {
+                return conditional_prediction_backend(fit, expected_dim, label)?
+                    .map(|backend| (backend, InferenceCovarianceMode::SmoothingCorrected))
+                    .ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            concat!(
+                                "fit result contains neither the covariance nor penalized Hessian ",
+                                "required for coefficient uncertainty",
+                            )
+                            .to_string(),
+                        )
+                    });
+            }
             let covariance = fit.beta_covariance_corrected().ok_or_else(|| {
                 EstimationError::InvalidInput(
                     "fit result does not contain smoothing-corrected covariance".to_string(),
@@ -4353,7 +4371,7 @@ mod tests {
     }
 
     #[test]
-    fn gaussian_location_scale_required_corrected_covariance_uses_corrected_backend() {
+    fn gaussian_location_scale_corrected_covariance_is_exact_for_fixed_outer_problem() {
         let predictor = GaussianLocationScalePredictor {
             beta_mu: array![0.0],
             beta_noise: array![0.0],
@@ -4396,18 +4414,24 @@ mod tests {
             InferenceCovarianceMode::SmoothingCorrected
         );
 
-        let missing_fit = gaussian_location_scale_fit_with_covariance(
+        // No smoothing coordinate exists in this helper fit, hence there is no
+        // rho uncertainty to correct. The conditional matrix is already Vp
+        // exactly and remains usable without a duplicated corrected matrix.
+        let fixed_outer_fit = gaussian_location_scale_fit_with_covariance(
             array![0.0],
             array![0.0],
             array![[1.0, 0.0], [0.0, 0.0]],
         );
-        let err = match predictor.predict_full_uncertainty(&input, &missing_fit, &options) {
-            Ok(_) => panic!("required corrected covariance must error when unavailable"),
-            Err(err) => err.to_string(),
-        };
+        let fixed_outer = predictor
+            .predict_full_uncertainty(&input, &fixed_outer_fit, &options)
+            .expect("zero-dimensional smoothing correction is exactly available");
         assert!(
-            err.contains("smoothing-corrected covariance"),
-            "unexpected required-covariance error: {err}"
+            (fixed_outer.eta_standard_error[0] - 1.0).abs() <= 1e-12,
+            "Vp must equal Vb when Var(rho) has dimension zero"
+        );
+        assert_eq!(
+            fixed_outer.covariance_source,
+            InferenceCovarianceMode::SmoothingCorrected
         );
     }
 
