@@ -4248,6 +4248,124 @@ fn refine_operator_metric_face(
     }
 }
 
+/// Solve a homogeneous operator-cone QP by Moreau decomposition in the exact
+/// Hessian metric.
+///
+/// For `H = L Lᵀ`, `u = H⁻¹ rhs`, and homogeneous constraints `A beta >= 0`,
+/// introduce `z = Lᵀ beta` and `C = A L⁻ᵀ`. The QP becomes the Euclidean
+/// projection of `z_u = Lᵀu` onto `{z : C z >= 0}`. Its polar is the finitely
+/// generated cone `cone(-Cᵀ)`, so one operator-native nonnegative least-squares
+/// solve gives
+///
+/// ```text
+/// -z_u = Cᵀ mu + residual,  mu >= 0
+/// z*   = -residual = z_u + Cᵀ mu.
+/// ```
+///
+/// This representation has no working-face history and therefore no
+/// degenerate add/drop cycle. Only selected rows are materialized by the
+/// Lawson--Hanson solve; full constraint scans remain carrier-native. Failure
+/// of its polar certificate is a typed refusal, never a request to retry the
+/// history-dependent active-set path.
+fn solve_homogeneous_operator_metric_projection_by_moreau(
+    hessian: &Array2<f64>,
+    rhs: &Array1<f64>,
+    unconstrained: &Array1<f64>,
+    factor: &gam_linalg::faer_ndarray::FaerLlt<f64>,
+    ops: &ConstraintSetOps<'_>,
+) -> Result<(Array1<f64>, Vec<usize>), EstimationError> {
+    use gam_linalg::triangular::{
+        back_substitution_lower_transpose, forward_substitution_lower_matrix,
+    };
+
+    let lower = factor.lower_triangular();
+    let z_unconstrained = lower.t().dot(unconstrained);
+    let target = -&z_unconstrained;
+    let Some((positive_multipliers, polar_residual)) = nonnegative_cone_projection_by_rows(
+        &ops.norms,
+        &target,
+        |whitened_vector| {
+            let coefficient_vector =
+                back_substitution_lower_transpose(lower.view(), whitened_vector.view());
+            ops.values(&coefficient_vector).ok()
+        },
+        |rows| {
+            let gathered = ops.set.gather_rows(rows).ok()?;
+            let whitened_transpose =
+                forward_substitution_lower_matrix(lower.view(), gathered.a.t());
+            Some(whitened_transpose.t().to_owned())
+        },
+    ) else {
+        return Err(EstimationError::ParameterConstraintViolation(
+            "homogeneous operator metric projection did not certify its Moreau polar decomposition"
+                .to_string(),
+        ));
+    };
+
+    let z_projected = -polar_residual;
+    let candidate = back_substitution_lower_transpose(lower.view(), z_projected.view());
+    if !array_is_finite(&candidate) {
+        crate::bail_invalid_estim!(
+            "homogeneous operator metric projection produced non-finite coefficients"
+        );
+    }
+
+    let values = ops.values(&candidate)?;
+    let (primal_violation, primal_row) = ops.max_violation(&values);
+    if primal_violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+        return Err(EstimationError::ParameterConstraintViolation(format!(
+            "homogeneous operator metric projection failed primal certification: \
+             scaled violation={primal_violation:.3e} at row {primal_row}"
+        )));
+    }
+
+    let active = positive_multipliers
+        .iter()
+        .map(|(row, _)| *row)
+        .collect::<Vec<_>>();
+    let gradient = hessian.dot(&candidate) - rhs;
+    let (stationarity, complementarity) = if active.is_empty() {
+        (gradient_inf_norm(&gradient), 0.0)
+    } else {
+        let rows = ops.set.gather_rows(&active).map_err(|error| {
+            EstimationError::ParameterConstraintViolation(format!(
+                "homogeneous operator metric projection KKT gather failed: {error}"
+            ))
+        })?;
+        let multipliers =
+            Array1::from_iter(positive_multipliers.iter().map(|(_, multiplier)| *multiplier));
+        let residual = &gradient - &rows.a.t().dot(&multipliers);
+        let complementarity = positive_multipliers
+            .iter()
+            .enumerate()
+            .map(|(position, (row, multiplier))| {
+                let slack = values[*row] - rows.b[position];
+                (multiplier * slack).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        (gradient_inf_norm(&residual), complementarity)
+    };
+    let gradient_scale = gradient_inf_norm(&gradient).max(1.0);
+    if stationarity > ACTIVE_SET_KKT_STATIONARITY_TOL
+        && stationarity / gradient_scale > ACTIVE_SET_KKT_STATIONARITY_TOL
+    {
+        return Err(EstimationError::ParameterConstraintViolation(format!(
+            "homogeneous operator metric projection failed stationarity certification: \
+             residual={stationarity:.3e}, relative={:.3e}, active={}",
+            stationarity / gradient_scale,
+            active.len(),
+        )));
+    }
+    if complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL {
+        return Err(EstimationError::ParameterConstraintViolation(format!(
+            "homogeneous operator metric projection failed complementarity certification: \
+             residual={complementarity:.3e}, active={}",
+            active.len(),
+        )));
+    }
+    Ok((candidate, active))
+}
+
 /// Operator-carrier constrained quadratic solve: minimize
 /// `½ βᵀHβ − rhsᵀβ` subject to the [`ConstraintSet`]. Dense sets take the
 /// existing dense path byte-identically; factored carriers use metric-dual row
@@ -4303,6 +4421,15 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
 
     let ops = ConstraintSetOps::new(set, 0.0)?;
     let m = ops.nrows();
+    if ops.bounds.iter().all(|bound| *bound == 0.0) {
+        return solve_homogeneous_operator_metric_projection_by_moreau(
+            hessian,
+            rhs,
+            &unconstrained,
+            &factor,
+            &ops,
+        );
+    }
     // Warm faces are point-local: globalization may accept only part of the
     // previous QP chord, so retain only cached rows that remain tight at this
     // cycle's accepted `beta_start`. Compress them to an independent basis
