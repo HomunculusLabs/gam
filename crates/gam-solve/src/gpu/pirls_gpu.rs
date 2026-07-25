@@ -4497,6 +4497,40 @@ mod stream_device_parity_tests {
                 .expect("upload shared design");
         let mut ws = allocate_sigma_pirls_workspace(&shared).expect("alloc ws");
         let mut loop_ws = allocate_pirls_loop_workspace(&shared, &ws).expect("alloc loop_ws");
+
+        // #2430: warm the device loop before timing it. The first
+        // `pirls_loop_on_stream` call in a process pays the NVRTC compile of
+        // the loop module plus first-touch device allocation — a one-time cost
+        // production amortizes across the whole REML outer loop, and one the
+        // CPU baseline has no equivalent of. Timing it made the device side
+        // ~0.65 s more expensive than its steady state and inverted this gate's
+        // verdict. The sphere kernel hill-climb warms for exactly this reason;
+        // this gate did not, which is the THIRD way its two sides were timing
+        // different work (after the 30-vs-3 iteration mismatch).
+        {
+            let warm_shift = ndarray::Array1::<f64>::zeros(p);
+            drop(
+                pirls_loop_on_stream(
+                    &shared,
+                    &mut ws,
+                    &mut loop_ws,
+                    PirlsRowFamily::BernoulliLogit,
+                    CurvatureMode::Fisher,
+                    PirlsLoopLikelihoodScale::non_gamma(),
+                    beta0.view(),
+                    penalty.view(),
+                    warm_shift.view(),
+                    0.0,
+                    0.0,
+                    0.0,
+                    30,
+                    1e-6,
+                    None,
+                )
+                .expect("warmup pirls loop"),
+            );
+        }
+
         let t0 = Instant::now();
         // No prior-mean shift in this benchmark — penalty = ½βᵀSβ
         // with `s_transformed = penalty`, `linear_shift = 0`,
