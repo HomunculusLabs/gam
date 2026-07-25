@@ -1246,13 +1246,13 @@ impl DeviceResidentArrowWorkspace {
     /// downgrade.
     fn apply_operator(
         &self,
-        on_device: bool,
+        _on_device: bool,
         t: &[f64],
         beta: &[f64],
     ) -> (ArrowOperatorApply, OperatorApplyCost) {
         #[cfg(target_os = "linux")]
         {
-            if on_device && self.device.is_some() {
+            if _on_device && self.device.is_some() {
                 match self.apply_operator_device(t, beta) {
                     Some(apply) => {
                         let moved = (t.len() + beta.len()) * std::mem::size_of::<f64>();
