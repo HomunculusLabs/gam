@@ -733,7 +733,35 @@ pub(crate) fn deviance_eta_row_with_log_measure_scale(
             } else {
                 log_weight + eta + log_poisson_ratio_deviance(log_r)
             };
-            let half = finite_signed_from_log(row, "Poisson half-deviance", eta, 1.0, log_half)?;
+            // Prefer the DIRECT form whenever it is representable. The
+            // `log_r >= 1.0` branch above builds
+            // `log(w·[y·(log_r − 1) + exp(η)])`, and `finite_signed_from_log`
+            // then exponentiates it — so a value that is perfectly
+            // representable makes a round trip through `ln` and `exp`, and
+            // `exp(ln(x))` does not round-trip at the top of the range. At
+            // `y = 1, η = −1e308` the exact half-deviance is `1e308 − 1`, which
+            // rounds to exactly `1e308`; the log route returns it 61 ulps high.
+            //
+            // The direct form costs one rounding. The log form stays as the
+            // fallback for precisely the regime it was written for: overflow of
+            // the product, or of the weight when `log_measure_scale` is large.
+            // The acceptance test is strictly positive rather than non-negative
+            // because on this branch (`y > 0`, `log_r >= 1`) the exact
+            // half-deviance is `y·(log_r − 1) + exp(η) >= exp(η) > 0`, so a
+            // direct zero can only be underflow — of the weight, or of the
+            // whole product — and the log route is the one that resolves it.
+            let direct_half = (y > 0.0 && log_r >= 1.0)
+                .then(|| {
+                    let weight = prior_weight * log_measure_scale.exp();
+                    weight * (y * (log_r - 1.0) + eta.exp())
+                })
+                .filter(|value| value.is_finite() && *value > 0.0);
+            let half = match direct_half {
+                Some(value) => value,
+                None => {
+                    finite_signed_from_log(row, "Poisson half-deviance", eta, 1.0, log_half)?
+                }
+            };
             let (score_sign, score_log_abs) = if y == 0.0 {
                 (1.0, eta)
             } else {
