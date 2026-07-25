@@ -6,7 +6,14 @@
 //! Row-count note. FarthestPoint center selection is NOT the bottleneck:
 //! `select_thin_plate_knots` keeps a maintained min-distance array, so each
 //! added center costs one rayon-parallel O(n·d) sweep — O(n·m·d) total,
-//! linear in n. What forces the drop from the charter's 10⁶ rows to
+//! linear in n. That claim only became true with the #2420 tie-break
+//! accounting: until then the selector ALSO built two serial length-n sorted
+//! support-distance profiles per added center — an unconditional
+//! `2·m · O(n·d + n log n)` on top of the maintained sweeps, and ~3e9
+//! operations at this fixture's `n = 200_000, d = 8, m = 300` — because its
+//! invariant tie-break was written as a two-argument comparator that rebuilt
+//! both profiles on every call, including the call that compares the sole
+//! surviving candidate against itself. What forces the drop from the charter's 10⁶ rows to
 //! n = 200_000 is the constraint-transform GEMM inside the build
 //! (`raw_design · z`, an (n×m)·(m×(m−1)) product): it is O(n·m²) — already
 //! the asymptotically dominant term over the documented O(n·m·d) passes —

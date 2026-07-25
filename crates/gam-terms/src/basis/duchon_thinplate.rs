@@ -3193,6 +3193,159 @@ pub fn auto_centers_1d_equal_mass(
 }
 
 #[cfg(test)]
+mod knot_selection_tie_break_cost_tests {
+    use super::{select_thin_plate_knot_rows_with_observer, select_thin_plate_knots};
+    use ndarray::Array2;
+
+    /// The knot rows the production selector picks, together with the number of
+    /// `O(n·d + n log n)` support-distance profiles the shared invariant
+    /// tie-break built getting there.
+    struct KnotSelection {
+        rows: Vec<usize>,
+        profile_builds: usize,
+    }
+
+    fn select_with_profile_count(data: &Array2<f64>, num_knots: usize) -> KnotSelection {
+        let mut profile_builds = 0usize;
+        let rows = select_thin_plate_knot_rows_with_observer(data.view(), num_knots, |built| {
+            profile_builds += built
+        })
+        .expect("fixture admits the requested knot budget");
+        KnotSelection {
+            rows,
+            profile_builds,
+        }
+    }
+
+    /// Deterministic unit draws (SplitMix64 finalizer): no RNG state, no seed
+    /// coupling between rows.
+    fn hashed_unit(index: u64) -> f64 {
+        let mut z = index.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// A cloud with no exact symmetry: no two rows can tie the maximin key.
+    fn asymmetric_cloud(n: usize, d: usize) -> Array2<f64> {
+        Array2::from_shape_fn((n, d), |(row, col)| hashed_unit((row * d + col) as u64))
+    }
+
+    /// An exactly-representable integer lattice — the canonical gridded spatial
+    /// input, whose corner and edge classes tie every `O(1)` key exactly.
+    fn integer_grid(side: usize) -> Array2<f64> {
+        Array2::from_shape_fn((side * side, 2), |(row, col)| {
+            if col == 0 {
+                (row / side) as f64
+            } else {
+                (row % side) as f64
+            }
+        })
+    }
+
+    /// The sorted support-distance profile is a tie-break, and a tie-break must
+    /// only be paid for where something is actually tied. A cloud with no exact
+    /// symmetry has a unique maximin winner at every step, so the selection must
+    /// complete having built NO profile at all — at any `n`, any dimension, and
+    /// any knot budget.
+    ///
+    /// The two-profile comparator scan this replaced (#2420) built exactly
+    /// `2·num_knots` profiles on precisely this input: the `reduce` over a
+    /// one-element candidate list compares nothing, and the `retain` that follows
+    /// it still sorted two length-`n` profiles to establish that a row equals
+    /// itself. At `n = 200_000`, `d = 8`, `k = 300` that is ~3e9 wasted
+    /// single-threaded operations before any knot is chosen.
+    #[test]
+    fn thin_plate_knots_cost_no_profile_without_an_exact_tie() {
+        for (n, d) in [(2_000_usize, 2_usize), (2_000, 8), (8_000, 3)] {
+            for k in [20_usize, 100] {
+                let data = asymmetric_cloud(n, d);
+                let chosen = select_with_profile_count(&data, k);
+                assert_eq!(chosen.rows.len(), k, "knot budget (n={n}, d={d}, k={k})");
+                assert_eq!(
+                    chosen.profile_builds, 0,
+                    "no row ties the maximin key on an asymmetric cloud, so the profile \
+                     tie-break must never be built (n={n}, d={d}, k={k}); the replaced \
+                     comparator scan built {}",
+                    2 * k
+                );
+            }
+        }
+    }
+
+    /// On an exact integer lattice the tie-break IS reached — a corner class is
+    /// genuinely related by a symmetry of the square. The cost of reaching it
+    /// must still be a property of the symmetry, not of the row count: the
+    /// profile key may only be built for rows that tie every `O(1)` key at the
+    /// maximin extremum, so the count stays at one profile per selected knot even
+    /// as `n` grows nine-fold.
+    #[test]
+    fn thin_plate_knot_profile_cost_does_not_scale_with_the_row_count() {
+        for side in [20_usize, 60] {
+            for k in [20_usize, 100] {
+                let data = integer_grid(side);
+                let n = data.nrows();
+                let chosen = select_with_profile_count(&data, k);
+                assert_eq!(chosen.rows.len(), k, "knot budget (n={n}, k={k})");
+                assert!(
+                    chosen.profile_builds <= 2 * k,
+                    "profile-key builds must stay proportional to the knot budget, not to \
+                     the row count; got {} at n={n} k={k}",
+                    chosen.profile_builds
+                );
+            }
+        }
+    }
+
+    /// The gate above must not be satisfiable by deleting the tie-break. On a
+    /// square's four corners plus its center, the corner class is an indivisible
+    /// symmetry orbit, and the profile key is what proves it — so it must
+    /// genuinely be built there.
+    #[test]
+    fn thin_plate_knot_profile_key_is_still_built_where_it_decides_an_orbit() {
+        let data = ndarray::array![
+            [-1.0_f64, -1.0],
+            [-1.0, 1.0],
+            [1.0, -1.0],
+            [1.0, 1.0],
+            [0.0, 0.0]
+        ];
+        let chosen = select_with_profile_count(&data, 5);
+        assert_eq!(chosen.rows.len(), 5);
+        assert!(
+            chosen.profile_builds > 0,
+            "the four-corner orbit is only provable through the invariant profile key"
+        );
+    }
+
+    /// The public `Array2` surface must be exactly the rows the observer-carrying
+    /// path selects, in the same order — the observer variant is the production
+    /// code, not a parallel implementation.
+    #[test]
+    fn the_public_knot_matrix_is_the_selected_rows_verbatim() {
+        for (n, d, k) in [(500_usize, 2_usize, 17_usize), (441, 2, 40)] {
+            let data = if d == 2 && n == 441 {
+                integer_grid(21)
+            } else {
+                asymmetric_cloud(n, d)
+            };
+            let chosen = select_with_profile_count(&data, k);
+            let knots = select_thin_plate_knots(data.view(), k).expect("same budget");
+            assert_eq!(knots.nrows(), chosen.rows.len());
+            for (r, &row) in chosen.rows.iter().enumerate() {
+                for c in 0..d {
+                    assert_eq!(
+                        knots[[r, c]].to_bits(),
+                        data[[row, c]].to_bits(),
+                        "knot {r} column {c} is not data row {row} verbatim"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod knot_selection_invariance_tests {
     // Regression tests for the knot-selector invariance defects fixed by the
     // rotation-equivariant maximin seed (gam#1456 rotation, gam#1378 row
