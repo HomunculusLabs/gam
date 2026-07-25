@@ -16,6 +16,7 @@ use super::{
     ExportedLaplaceCurvature,
     FirthDiagnostics,
     GamWorkingModel,
+    GaussianFrozenRows,
     HessianCurvatureKind,
     // penalty types
     KroneckerQsTransform,
@@ -823,12 +824,12 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     warm_start_beta: Option<&Coefficients>,
     adaptive_kkt_tolerance: Option<AdaptiveKktTolerance>,
     refine_dispersion_at_converged_eta: bool,
-    /// Shared invariant row carrier for a Gaussian value-only evaluation.
-    ///
-    /// `Some` requests sufficient-statistic-only result synthesis: beta,
-    /// deviance, gradient, and curvature remain exact, while observation-scale
-    /// fields share these placeholders instead of recomputing `X beta`.
-    /// Full gradients and accepted fits always pass `None`.
+    // Shared invariant row carrier for a Gaussian value-only evaluation.
+    //
+    // `Some` requests sufficient-statistic-only result synthesis: beta,
+    // deviance, gradient, and curvature remain exact, while observation-scale
+    // fields share these placeholders instead of recomputing `X beta`.
+    // Full gradients and accepted fits always pass `None`.
     cost_only_gaussian_rows: Option<&Arc<GaussianFrozenRows>>,
 ) -> Result<(PirlsResult, WorkingModelPirlsResult), EstimationError> {
     let PirlsProblem {
