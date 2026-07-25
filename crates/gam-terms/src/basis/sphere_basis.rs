@@ -2344,6 +2344,24 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     let mut trend_value = project_penalty_matrix(&trend_jet.value, identifiability_transform);
     let mut trend_first = project_penalty_matrix(&trend_jet.first_a, identifiability_transform);
     let mut trend_second = project_penalty_matrix(&trend_jet.mixed, identifiability_transform);
+    // THE authoritative penalty set for this term at this ψ. It is built here,
+    // before the jet is finished, because the jet has to be the derivative of
+    // exactly these blocks — including which of them exist. Re-deriving the
+    // primary locally would reintroduce the #2433 failure mode one level down:
+    // this function's `omega` skips the forward builder's PSD clamp, so a
+    // locally-rebuilt primary can disagree with the shipped one about the last
+    // null direction, and then the jet is transported through a chart the value
+    // is not in.
+    let candidates = duchon_native_penalty_candidates(
+        centers,
+        spec.length_scale,
+        spec.power,
+        effective_nullspace_order,
+        spec.aniso_log_scales.as_deref(),
+        &z,
+        identifiability_transform,
+    )?;
+    let filtered = filter_penalty_candidates(candidates)?;
     if identifiability_transform.is_some() {
         // In a constrained chart the value builder does NOT ship the
         // congruence-transported raw trend ridge: it rebuilds it onto
@@ -2357,17 +2375,48 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         // happens). The rebuild is `P · R · P` with `P` the ψ-invariant
         // projector onto the structural affine null space, so transporting the
         // whole jet through `P` is exact rather than an approximation (#2433).
-        let primary_constrained = ConstructiveQuadratic::try_from_dense_psd(
-            primary.clone(),
-            "Duchon final-chart primary for trend-ridge jet transport",
-        )?;
-        match crate::basis::constrained_ridge_projector(&primary_constrained)? {
+        let shipped_primary = filtered
+            .active
+            .iter()
+            .find(|penalty| matches!(penalty.info.source, PenaltySource::Primary))
+            .map(|penalty| {
+                ConstructiveQuadratic::try_from_dense_psd(
+                    penalty.matrix.clone(),
+                    "shipped Duchon primary for trend-ridge jet transport",
+                )
+            })
+            .transpose()?;
+        let projector = match shipped_primary.as_ref() {
+            Some(primary_constrained) => {
+                crate::basis::constrained_ridge_projector(primary_constrained)?
+            }
+            None => None,
+        };
+        match projector {
             Some(projector) => {
-                let transport =
-                    |block: &Array2<f64>| symmetrize(&fast_ab(&fast_ab(&projector, block), &projector));
+                let transport = |block: &Array2<f64>| {
+                    symmetrize(&fast_ab(&fast_ab(&projector, block), &projector))
+                };
                 trend_value = transport(&trend_value);
                 trend_first = transport(&trend_first);
                 trend_second = transport(&trend_second);
+                // Restore a unit working scale before normalization. The
+                // rebuilt ridge is physically tiny whenever the projector keeps
+                // only a direction the raw ridge barely charges, and
+                // `normalize_penaltywith_psi_derivatives` treats an ABSOLUTE
+                // Frobenius norm below 1e-12 as "no penalty here" and returns
+                // zero derivatives — a threshold the value path does not share,
+                // so the two would disagree about a block the design really
+                // carries. The normalization is homogeneous of degree zero in a
+                // common factor (both `S/c` and `S'/c − (c'/c²)S` are invariant
+                // under `S ↦ αS`), so rescaling the whole jet is exact.
+                let scale = trend_value.iter().map(|v| v * v).sum::<f64>().sqrt();
+                if scale.is_finite() && scale > 0.0 {
+                    let inv = 1.0 / scale;
+                    trend_value.mapv_inplace(|v| v * inv);
+                    trend_first.mapv_inplace(|v| v * inv);
+                    trend_second.mapv_inplace(|v| v * inv);
+                }
             }
             None => {
                 // The constrained primary is full rank: the value builder zeroes
@@ -2383,16 +2432,6 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     }
     let (_, trend_psi_norm, trend_psi_psi_norm, _) =
         normalize_penaltywith_psi_derivatives(&trend_value, &trend_first, &trend_second);
-    let candidates = duchon_native_penalty_candidates(
-        centers,
-        spec.length_scale,
-        spec.power,
-        effective_nullspace_order,
-        spec.aniso_log_scales.as_deref(),
-        &z,
-        identifiability_transform,
-    )?;
-    let filtered = filter_penalty_candidates(candidates)?;
     let mut sources = Vec::new();
     let mut first = Vec::new();
     let mut second = Vec::new();

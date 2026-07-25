@@ -2639,11 +2639,34 @@ fn constructive_ridge_from_null_metric_action(
     let c_raw = n.t().dot(w);
     let (c_sym, evals, evecs) = spectral_summary(&c_raw)?;
     let tol = generalized_spectral_tolerance(&evals, &c_sym);
-    if let Some(&invalid) = evals.iter().find(|&&value| value <= tol) {
+    // A materially NEGATIVE metric eigenvalue is a construction failure: `M` is
+    // a Gram of the function metric restricted to a subspace and cannot be
+    // indefinite, so this means the supplied `W` is not that metric's action.
+    if let Some(&invalid) = evals.iter().find(|&&value| value < -tol) {
         crate::bail_invalid_basis!(
-            "{context}: null-function metric is not strictly positive definite; eigenvalue {invalid:.6e} is at or below tolerance {tol:.6e}"
+            "{context}: null-function metric is indefinite; eigenvalue {invalid:.6e} is below tolerance -{tol:.6e}"
         );
     }
+    // A SINGULAR one is not. The double penalty is not obliged to cover every
+    // unpenalized direction: Duchon deliberately leaves the model intercept
+    // free while shrinking only the affine trend, so a null space that is
+    // larger than the ridge's own subspace is the designed state, not a defect.
+    // `N M Nᵀ` with PSD `M` is identically `Ñ M̃ Ñᵀ` on `M`'s positive part, so
+    // dropping the null part is an identity rather than an approximation, and
+    // an all-zero `M` correctly yields a zero block that the candidate filter
+    // then drops. Rejecting this instead made the shipped topology depend on
+    // whether the primary's numerical null space happened to coincide with the
+    // ridge's support (gam#2433).
+    let kept: Vec<usize> = evals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &value)| (value > tol).then_some(index))
+        .collect();
+    if kept.is_empty() {
+        return ConstructiveQuadratic::from_energy_factor(Array2::zeros((0, n.nrows())), context);
+    }
+    let evecs = evecs.select(Axis(1), &kept);
+    let evals = Array1::from_iter(kept.iter().map(|&index| evals[index]));
     // The double-penalty ridge is `R = N M Nᵀ`, NOT the metric projector
     // `W M⁻¹ Wᵀ = G_c N (Nᵀ G_c N)⁻¹ Nᵀ G_c`. Both weight the null directions by the
     // function metric `M`, but `R`'s range is `span(N) = null(S_c)` (so `S_c·R = 0`
