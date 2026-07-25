@@ -42,6 +42,21 @@ fn latlon_grid(n: usize) -> Array2<f64> {
     })
 }
 
+/// The exact fixture grid the `sphere_gpu` hill-climb gates build on
+/// (`small_latlon_grid`): latitude spanning the closed range (-85, 85) and
+/// longitude the closed range [-180, 180], so the first and last meridian are
+/// the same physical column. This is the layout the #2420 measurement timed.
+fn fixture_latlon_grid(n_lat: usize, n_lon: usize) -> Array2<f64> {
+    Array2::from_shape_fn((n_lat * n_lon, 2), |(row, col)| {
+        let (i, j) = (row / n_lon, row % n_lon);
+        if col == 0 {
+            -85.0 + (170.0 * i as f64) / (n_lat.saturating_sub(1).max(1) as f64)
+        } else {
+            -180.0 + (360.0 * j as f64) / (n_lon.saturating_sub(1).max(1) as f64)
+        }
+    })
+}
+
 /// An area-uniform cloud on the same support, with no exact spherical symmetry.
 fn latlon_cloud(n: usize) -> Array2<f64> {
     Array2::from_shape_fn((n, 2), |(row, col)| {
@@ -82,8 +97,10 @@ fn main() {
     println!("rayon threads: {}", rayon::current_num_threads());
 
     println!("sphere: select_spherical_farthest_point_centers");
+    let side = (n as f64).sqrt().round().max(2.0) as usize;
     for (label, data) in [
         ("regular lat/lon grid", latlon_grid(n)),
+        ("sphere_gpu fixture grid", fixture_latlon_grid(side, n / side.max(1))),
         ("irregular cloud", latlon_cloud(n)),
     ] {
         let start = Instant::now();
