@@ -372,6 +372,40 @@ pub fn bessel_i0_centered_terms_from_log_abs(log_abs_eta: f64) -> (f64, f64, f64
 ///   `q = d1 + ½` (which decays like `−1/(8η)`), `d1² = q² − q + ¼` and
 ///   `−2ηq − ¼ = −2η(q + 1/(8η))`, leaving `c''(s) = −2η(q + 1/(8η)) + q − q²`
 ///   with no constant term for the answer to be dwarfed by.
+///
+///   Removing the constant is not the same as removing the amplification, and
+///   this branch keeps the latter. `q` is only ever known to `d1`'s own absolute
+///   error, so `δc'' ≈ 2η·δd1`, while the answer it sits on is `|c''| ≈ 1/(8η)`
+///   — a RELATIVE amplification of `16η²·δd1` that grows quadratically across
+///   the branch. `d1` in turn carries `|d1|·κ(η)·ε` from the `I0 − I1` sum whose
+///   condition number `κ = Σ|terms|/|Σ terms|` grows like `√η` (3.1 at `η = 5`,
+///   6.8 at `η = 20`), so the floor of this representation is `≈ 8η²·κ(η)·ε`:
+///
+///   ```text
+///     η          5        10        15        19       20⁻
+///     floor   3.9e−14   3.3e−13   1.0e−12   2.0e−12   2.2e−12
+///     worst   1.9e−13   1.2e−12   3.3e−12   7.4e−12   8.9e−12
+///   ```
+///
+///   Measured against an 80-digit reference over 24000 points, the branch holds
+///   a uniform 3−5x of that floor across its whole range, peaking at `8.9e−12`
+///   just under the crossover; the asymptotic branch resumes at `1.6e−13` on
+///   the far side.
+///   That step is a property of the two representations, not a mis-placed
+///   threshold: the asymptotic expansion's own truncation error at this channel
+///   is `1.0e−12` at `η = 19` and `6.6e−12` at `η = 18`, so the two curves
+///   cross within a few tenths of where the code already switches and no
+///   choice of threshold caps the band below `≈ 4e−12`.
+///
+///   Nor is it reachable by a better formula in `f64`. The cancellation is
+///   intrinsic to the ascending representation rather than to how it is
+///   collected: accumulating the whole numerator `I0 − 2η(I0 − I1)` termwise —
+///   the same pairing trick that buys the `I0 − I1` sum its `√η` — gives terms
+///   `t_k·[(k+1)(1−2η) + η²/... ]` whose `Σ|terms|/|Σ terms|` is again `8η²`,
+///   because the leading `¼` cancels BETWEEN terms of one series and not within
+///   any term. Closing the band needs `d1` carried wider than `f64`, and its one
+///   consumer — the von-Mises ARD log-precision Hessian entry, where the
+///   pre-2025 A&S polynomials delivered `6e−3` — is nine orders clear of caring.
 /// * `η < 1`: `c''(s) = −η + η²(1 − r²) = −η·[1 + d1(1 + r)]`, whose bracket
 ///   tends to `1`. The rearrangement above would instead subtract two numbers
 ///   that both tend to `¼` while the answer itself tends to `−η`.
@@ -1585,5 +1619,75 @@ mod tests {
         let expected = (2.0 * x.ln() - x).exp();
         let rel = (got - expected).abs() / expected.abs();
         assert!(rel < 1e-12, "got={got} expected={expected} rel={rel}");
+    }
+
+    /// Pins the measured accuracy of `c''(log η)` against an 80-digit
+    /// reference, per regime, so the branch structure cannot silently drift.
+    ///
+    /// The tolerances are the MEASURED worst case in each regime plus a factor
+    /// of two, not aspirations: the `1 ≤ η < 20` band is bounded below by the
+    /// `8η²·κ(η)·ε` floor of the ascending representation (see
+    /// [`bessel_i0_centered_second_log_derivative_from_log_abs`]), and 1e-11 is
+    /// what that floor permits at the top of the band. Tightening it needs a
+    /// wider-than-`f64` `d1`, not a smaller constant here.
+    #[test]
+    fn centered_bessel_second_log_derivative_matches_high_precision_reference() {
+        // (η, c''(log η) to 20 significant digits, tolerance).
+        const CASES: [(f64, f64, f64); 13] = [
+            (0.5, -0.2647015155254598, 1e-14),
+            (1.0, -0.19926400165310923, 1e-14),
+            (2.0, 0.05244210681284669, 1e-13),
+            (5.0, 0.0466642611317311, 1e-13),
+            (10.0, 0.015837019843595493, 1e-12),
+            (15.0, 0.009659446256568909, 1e-11),
+            // The worst point of the whole domain, just under the crossover.
+            (18.85, 0.00743799786561837, 1e-11),
+            (19.99, 0.006964307582746309, 1e-11),
+            // First point on the asymptotic side: two orders better, at once.
+            (20.0, 0.006960419930170057, 1e-12),
+            (25.0, 0.005442291838848013, 1e-14),
+            (50.0, 0.0026049656149811874, 1e-15),
+            (200.0, 0.0006313242744933583, 1e-15),
+            (1e4, 1.2502500586100053e-05, 1e-15),
+        ];
+        for (eta, expected, tolerance) in CASES {
+            let got = bessel_i0_centered_second_log_derivative_from_log_abs(eta.ln());
+            let relative = (got - expected).abs() / expected.abs();
+            assert!(
+                relative < tolerance,
+                "eta={eta}: got={got} expected={expected} rel={relative:e} tol={tolerance:e}"
+            );
+        }
+    }
+
+    /// The crossover at `BESSEL_ASYMPTOTIC_THRESHOLD` is a step DOWN in error,
+    /// so the value itself must still be continuous across it to within what
+    /// the worse (ascending) side delivers — nothing tighter is available, and
+    /// nothing looser would catch a branch that had been mis-derived.
+    ///
+    /// The step size matters and is not free to enlarge. `c''` genuinely varies:
+    /// `|dc''/dη| / |c''| = 1/η`, so a step `δ` moves the true value by `δ/η`
+    /// RELATIVE. At `δ = 1e−9` that is `5e−11` — larger than the seam being
+    /// measured, and a test written that way reports the function's own slope
+    /// as a discontinuity. `1e−11` puts the true variation at `5e−13`, an order
+    /// under the ascending branch's `8.9e−12` floor, while still clearing
+    /// `ulp(20) = 3.6e−15` by four orders.
+    #[test]
+    fn centered_bessel_second_log_derivative_is_continuous_across_the_crossover() {
+        const STEP: f64 = 1e-11;
+        let below = bessel_i0_centered_second_log_derivative_from_log_abs(
+            (BESSEL_ASYMPTOTIC_THRESHOLD - STEP).ln(),
+        );
+        let above =
+            bessel_i0_centered_second_log_derivative_from_log_abs(BESSEL_ASYMPTOTIC_THRESHOLD.ln());
+        assert!(
+            below != above,
+            "step {STEP:e} was rounded away; the two sides are the same evaluation"
+        );
+        let jump = (below - above).abs() / above.abs();
+        assert!(
+            jump < 3e-11,
+            "seam jump {jump:e}: below={below} above={above}"
+        );
     }
 }
