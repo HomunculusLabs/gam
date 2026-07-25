@@ -1021,9 +1021,16 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
     // Out to `RHO_BOUND = 30` — the bound the asymptote certificate was
     // calibrated against — well past `JOINT_RHO_BOUND = 12`.
     const LADDER: [f64; 9] = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0, 30.0];
+    // `matern_gaussian_2d` vs `matern_gaussian_2d_dp` differ ONLY in
+    // `double_penalty` (the driver reads `label.contains("_dp")`), so the pair
+    // is a one-variable test of whether the double-penalty assembly is what
+    // carries the spurious λ-linear term measured in #2454
+    // (`∂V/∂ρ = −c·λ`, c = 2.87e-9, on the double-penalty monotone fixture).
     for (label, n, family) in [
         ("matern_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
         ("duchon_gaussian", 80, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian_2d", 120, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian_2d_dp", 120, LikelihoodSpec::gaussian_identity()),
     ] {
         let (pass, worst, violations, _) =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &LADDER);
