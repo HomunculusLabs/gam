@@ -50,6 +50,7 @@ mod capability;
 mod hessian_operator;
 pub mod kl_certificate;
 mod objective;
+pub mod rail_face;
 #[cfg(test)]
 #[path = "rho_optimizer/rail_projection_tests.rs"]
 mod rail_projection_tests;
