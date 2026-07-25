@@ -55,18 +55,43 @@ use crate::manifolds::constant_curvature::{ConstantCurvature, log_map_kappa_jet}
 
 use super::closure_family::inv_std_normal;
 
-/// Standard-normal upper-tail / two-sided CDF: `Φ(x)`.
-fn std_normal_cdf(x: f64) -> f64 {
-    0.5 * libm::erfc(-x / std::f64::consts::SQRT_2)
-}
-
-/// χ²₁ survival function `P(χ²₁ > t) = 2(1 − Φ(√t))` for `t ≥ 0` — the p-value
-/// of an interior-point likelihood-ratio statistic on one degree of freedom.
+/// χ²₁ survival function `P(χ²₁ > t)` for `t ≥ 0` — the p-value of an
+/// interior-point likelihood-ratio statistic on one degree of freedom.
+///
+/// Evaluated as the identity `P(χ²₁ > t) = P(|Z| > √t) = 2Φ(−√t) = erfc(√(t/2))`
+/// rather than as the `2(1 − Φ(√t))` the definition is usually written in.
+/// Those are the same function on paper and nothing alike in `f64`: `Φ(√t)`
+/// closes on `1`, so the subtraction throws away every digit the answer is made
+/// of. Measured against a 40-digit reference, it passed 1% relative error at
+/// `t = 59.7`, reached 18% at `t = 67`, and returned **exactly zero** for every
+/// `t ≥ 68.764` — the point where the true tail `1.11e−16` falls under
+/// `ulp(1)/2` and `Φ(√t)` rounds to `1.0`. An LR statistic of 100 reported
+/// `p = 0` where the truth is `1.5e−23`. That is not a rounding difference in a
+/// diagnostic; it is a p-value of zero, and `flatness_lr_test` publishes it
+/// through `FlatnessTest::p_value` into the Python `summary()`.
+///
+/// The `erfc` form subtracts nothing, so it holds full relative precision for
+/// as long as its own result is representable: `t ≤ 1409` in the normal range,
+/// and non-zero (subnormal, so with digits falling away) out to `t = 1482`.
+/// That is 21x further out in `t` than the subtractive form reached, and the
+/// range it gains is entirely the range where a p-value is worth computing at
+/// all — below `t ≈ 60` the two forms agree to 14 digits.
+///
+/// The argument is routed through `erfcx` so the square is carried exactly:
+/// `erfc(u) = erfcx(u)·exp(−u²)` with `u² = t/2`, and halving is exact in
+/// binary. Handing `√(t/2)` to `erfc` directly instead would re-round the
+/// square, and `erfc` converts a relative perturbation of its argument into
+/// `2u²= t` times as much relative error in its result — `5.5e−14` at
+/// `t = 1000`, against the `~ε` this form holds. It is the same correction
+/// `probability::square_residual` exists for, available here for free because
+/// `t/2` is exact and never has to be recovered.
 fn chi2_1_sf(t: f64) -> f64 {
-    if t <= 0.0 {
-        return 1.0;
+    if !(t > 0.0) {
+        // Also catches NaN, for which no tail probability is defined.
+        return if t.is_nan() { f64::NAN } else { 1.0 };
     }
-    2.0 * (1.0 - std_normal_cdf(t.sqrt()))
+    let half = 0.5 * t;
+    gam_math::probability::erfcx_nonnegative(half.sqrt()) * (-half).exp()
 }
 
 /// `χ²₁(level)` two-sided quantile: `(Φ⁻¹((1+level)/2))²`.
@@ -480,6 +505,59 @@ mod tests {
         assert!((q - 3.841_458_820_694_124).abs() < 1e-6, "q {}", q);
         assert!((chi2_1_sf(q) - 0.05).abs() < 1e-9);
         assert!((chi2_1_sf(chi2_1_quantile(0.99)) - 0.01).abs() < 1e-9);
+    }
+
+    /// The tail is where an LR test actually reports, and it is the half of the
+    /// domain the quantile check above cannot see: both of its probes sit at
+    /// `t < 7`, where the discarded `2(1 − Φ(√t))` form was still correct to 16
+    /// digits. References are `mpmath.erfc(sqrt(t/2))` at 40 digits.
+    ///
+    /// `t = 70` and beyond are the cases that used to return exactly `0.0`.
+    #[test]
+    fn chi2_1_sf_holds_relative_precision_into_the_deep_tail() {
+        const CASES: [(f64, f64); 8] = [
+            (4.0, 0.045_500_263_896_358_414),
+            (25.0, 5.733_031_437_583_878_2e-7),
+            (50.0, 1.537_459_794_428_034_9e-12),
+            (67.0, 2.715_071_321_942_525_9e-16),
+            (70.0, 5.930_445_850_082_486_8e-17),
+            (100.0, 1.523_970_604_832_105_2e-23),
+            (200.0, 2.088_487_583_762_544_8e-45),
+            (1000.0, 1.795_832_784_800_726_2e-219),
+        ];
+        for (t, expected) in CASES {
+            let got = chi2_1_sf(t);
+            let relative = (got - expected).abs() / expected;
+            assert!(
+                relative < 1e-14,
+                "chi2_1_sf({t}) = {got:e}, expected {expected:e}, rel {relative:e}"
+            );
+        }
+    }
+
+    /// A p-value is a probability: it must be finite, in `[0, 1]`, and
+    /// monotonically non-increasing in the statistic. The subtractive form
+    /// violated the last of these in the tail, where it quantized to a staircase
+    /// of multiples of `2·ε` before flattening onto zero.
+    #[test]
+    fn chi2_1_sf_is_a_monotone_probability_across_the_whole_domain() {
+        assert_eq!(chi2_1_sf(0.0), 1.0);
+        assert_eq!(chi2_1_sf(-1.0), 1.0);
+        assert!(chi2_1_sf(f64::NAN).is_nan());
+        assert_eq!(chi2_1_sf(f64::INFINITY), 0.0);
+
+        let mut previous = 1.0_f64;
+        for step in 0..=14_000 {
+            let t = 0.1 * f64::from(step);
+            let p = chi2_1_sf(t);
+            assert!(
+                (0.0..=1.0).contains(&p),
+                "chi2_1_sf({t}) = {p} is not a probability"
+            );
+            assert!(p <= previous, "chi2_1_sf rose at t={t}: {previous} -> {p}");
+            assert!(p > 0.0, "chi2_1_sf({t}) underflowed to zero");
+            previous = p;
+        }
     }
 
     // The κ-derivative API must echo `log_map_kappa_jet` exactly (it is a thin,
