@@ -29,6 +29,10 @@ name: Validate One
 on:
   workflow_dispatch:
     inputs:
+      evidence_sha:
+        description: "Exact 40-character commit whose prebuilt artifacts should be tested. Empty = dispatch SHA."
+        default: ""
+        required: false
       rust_filter:
         description: "Rust test-name substring(s), whitespace-separated. Empty = skip Rust."
         default: ""
@@ -69,8 +73,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Resolve immutable evidence commit
+        id: evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ github.event.inputs.evidence_sha }}
+        run: |
+          set -euo pipefail
+          evidence_sha="${REQUESTED_SHA:-$GITHUB_SHA}"
+          if [[ ! "$evidence_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::evidence_sha must be one full lowercase 40-character commit SHA; got '${evidence_sha}'."
+            exit 1
+          fi
+          resolved_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${evidence_sha}" --jq .sha)
+          if [[ "$resolved_sha" != "$evidence_sha" ]]; then
+            echo "::error::Requested evidence commit ${evidence_sha} resolved to ${resolved_sha}."
+            exit 1
+          fi
+          printf 'sha=%s\n' "$evidence_sha" >> "$GITHUB_OUTPUT"
+          printf 'TARGET_SHA=%s\n' "$evidence_sha" >> "$GITHUB_ENV"
+          echo "Validate One will consume only artifacts recorded for ${evidence_sha}."
+
+      - name: Checkout immutable evidence commit
         uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.evidence.outputs.sha }}
 
       - name: Install cargo-nextest
         if: ${{ github.event.inputs.rust_filter != '' }}
@@ -104,24 +132,24 @@ jobs:
           set -euo pipefail
           run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow wheel-nightly.yml \
-            --commit "$GITHUB_SHA" \
+            --commit "$TARGET_SHA" \
             --limit 20 \
             --json databaseId,conclusion \
             --jq 'map(select(.conclusion == "success"))[0].databaseId // empty')
           if [[ -z "$run_id" ]]; then
-            echo "::error::No successful rolling-wheel run exists for exact commit ${GITHUB_SHA}. Wait for wheel-nightly.yml; Validate One never builds an extension."
+            echo "::error::No successful rolling-wheel run exists for exact commit ${TARGET_SHA}. Wait for wheel-nightly.yml; Validate One never builds an extension."
             exit 1
           fi
           runtime_sha=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
             --json headSha --jq .headSha)
-          if [[ "$runtime_sha" != "$GITHUB_SHA" ]]; then
-            echo "::error::Rolling-wheel provenance mismatch: requested ${GITHUB_SHA}, run ${run_id} is ${runtime_sha}."
+          if [[ "$runtime_sha" != "$TARGET_SHA" ]]; then
+            echo "::error::Rolling-wheel provenance mismatch: requested ${TARGET_SHA}, run ${run_id} is ${runtime_sha}."
             exit 1
           fi
-          artifact_name="gamfit-runtime-${GITHUB_SHA}"
+          artifact_name="gamfit-runtime-${TARGET_SHA}"
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
             --name "$artifact_name" --dir python-runtime
-          grep -Fx "commit=${GITHUB_SHA}" python-runtime/RUNTIME_PROVENANCE.txt
+          grep -Fx "commit=${TARGET_SHA}" python-runtime/RUNTIME_PROVENANCE.txt
           wheel=$(find python-runtime -maxdepth 1 -type f -name 'gamfit-*.whl' -print -quit)
           if [[ -z "$wheel" || ! -s "$wheel" ]]; then
             echo "::error::Runtime artifact ${artifact_name} contains no non-empty gamfit wheel."
@@ -169,18 +197,18 @@ jobs:
           for workflow_file in rust-archive.yml test.yml; do
             candidate=$(gh run list --repo "$GITHUB_REPOSITORY" \
               --workflow "$workflow_file" \
-              --commit "$GITHUB_SHA" \
+              --commit "$TARGET_SHA" \
               --limit 20 \
               --json databaseId,status,conclusion \
               --jq 'map(select(.status == "in_progress" or .conclusion == "success"))[0].databaseId // empty')
             if [[ -z "$candidate" ]]; then
-              echo "no run for ${GITHUB_SHA} in ${workflow_file}"
+              echo "no run for ${TARGET_SHA} in ${workflow_file}"
               continue
             fi
             candidate_sha=$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" \
               --json headSha --jq .headSha)
-            if [[ "$candidate_sha" != "$GITHUB_SHA" ]]; then
-              echo "::warning::${workflow_file} run ${candidate} reports ${candidate_sha}, not ${GITHUB_SHA}; skipping."
+            if [[ "$candidate_sha" != "$TARGET_SHA" ]]; then
+              echo "::warning::${workflow_file} run ${candidate} reports ${candidate_sha}, not ${TARGET_SHA}; skipping."
               continue
             fi
             if gh run download "$candidate" --repo "$GITHUB_REPOSITORY" \
@@ -192,12 +220,12 @@ jobs:
             echo "${workflow_file} run ${candidate} has not produced ${archive_name} yet."
           done
           if [[ -z "$run_id" ]]; then
-            echo "::error::No exact-SHA ${archive_name} exists for ${GITHUB_SHA} from rust-archive.yml or test.yml. Dispatch 'Rust Test Archive' for this SHA and wait for its archive step; Validate One never performs a source-build fallback."
+            echo "::error::No exact-SHA ${archive_name} exists for ${TARGET_SHA} from rust-archive.yml or test.yml. Dispatch 'Rust Test Archive' for this SHA and wait for its archive step; Validate One never performs a source-build fallback."
             exit 1
           fi
           test -s "rust-archive/${archive_file}"
           printf 'run_id=%s\ncommit=%s\nartifact=%s\nsource_workflow=%s\n' \
-            "$run_id" "$GITHUB_SHA" "$archive_name" "$archive_source" \
+            "$run_id" "$TARGET_SHA" "$archive_name" "$archive_source" \
             | tee rust-archive/PROVENANCE.txt
 
       - name: Run Rust tests from exact-SHA archive
