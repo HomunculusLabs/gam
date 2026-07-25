@@ -11,6 +11,11 @@
 
 pub mod aitchison_ilr;
 pub mod circle;
+/// Axioms every [`RiemannianManifold`](crate::manifold::RiemannianManifold)
+/// implementation must satisfy, checked against one shared inventory keyed off
+/// [`ManifoldSpec`](crate::manifold::ManifoldSpec).
+#[cfg(test)]
+mod conformance;
 pub mod constant_curvature;
 pub mod euclidean;
 pub mod grassmann;
