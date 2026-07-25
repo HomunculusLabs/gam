@@ -62,7 +62,7 @@ use gam_solve::mixture_link::{
     InverseLinkJet, beta_logistic_inverse_link_jetwith_param_partials,
     mixture_inverse_link_jetwith_rho_partials_into, sas_inverse_link_jetwith_param_partials,
 };
-use gam_solve::model_types::{FittedLinkState, UnifiedFitResult};
+use gam_solve::model_types::{FitGeometry, FittedLinkState, UnifiedFitResult};
 use gam_solve::quadrature::QuadratureContext;
 use gam_spec::{InverseLink, LikelihoodScaleMetadata, LikelihoodSpec, ResponseFamily};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -388,6 +388,12 @@ pub trait UncertaintyCovarianceSource {
     fn observation_theta(&self) -> Option<f64> {
         None
     }
+    /// Full fitted result when this source owns a persisted constrained
+    /// posterior. Raw covariance carriers cannot answer this because moments
+    /// alone do not identify a truncated law.
+    fn constrained_fit_result(&self) -> Option<&UnifiedFitResult> {
+        None
+    }
 }
 
 impl UncertaintyCovarianceSource for UnifiedFitResult {
@@ -416,6 +422,12 @@ impl UncertaintyCovarianceSource for UnifiedFitResult {
     }
     fn observation_theta(&self) -> Option<f64> {
         self.likelihood_scale.negbin_theta()
+    }
+    fn constrained_fit_result(&self) -> Option<&UnifiedFitResult> {
+        self.geometry
+            .as_ref()
+            .and_then(|geometry| geometry.constrained_posterior.as_ref())
+            .map(|_| self)
     }
 }
 
@@ -1874,6 +1886,106 @@ pub struct CoefficientUncertaintyResult {
     pub covariance_source: InferenceCovarianceMode,
 }
 
+fn constrained_ambient_covariance(
+    fit: &UnifiedFitResult,
+    geometry: &FitGeometry,
+) -> Result<Array2<f64>, EstimationError> {
+    geometry
+        .coefficient_gauge
+        .validate()
+        .map_err(EstimationError::InvalidInput)?;
+    let active_dimension = geometry.coefficient_gauge.reduced_total();
+    let posterior = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "constrained ambient covariance requested without a persisted constrained posterior"
+                .to_string(),
+        )
+    })?;
+    posterior
+        .validate_for_dimension(active_dimension)
+        .map_err(EstimationError::InvalidInput)?;
+    let scale = fit.coefficient_covariance_scale()?;
+    let ambient_backend = PredictionCovarianceBackend::from_factorized_hessian_scaled(
+        SymmetricMatrix::Dense(geometry.penalized_hessian.as_array().clone()),
+        scale,
+    )
+    .map_err(EstimationError::InvalidInput)?;
+    ambient_backend
+        .apply_columns(&Array2::eye(active_dimension))
+        .map_err(EstimationError::InvalidInput)
+}
+
+fn constrained_linear_predictor_intervals(
+    fit: &UnifiedFitResult,
+    design: &DesignMatrix,
+    offset: ArrayView1<'_, f64>,
+    level: f64,
+) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
+    let geometry = fit.geometry.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "constrained prediction interval requires saved coefficient geometry".to_string(),
+        )
+    })?;
+    let posterior = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "constrained prediction interval requires a persisted constrained posterior"
+                .to_string(),
+        )
+    })?;
+    if geometry.coefficient_gauge.raw_total() != design.ncols() {
+        return Err(EstimationError::InvalidInput(format!(
+            "constrained prediction design has {} columns but the coefficient gauge has {} raw rows",
+            design.ncols(),
+            geometry.coefficient_gauge.raw_total()
+        )));
+    }
+    if offset.len() != design.nrows() {
+        return Err(EstimationError::InvalidInput(format!(
+            "constrained prediction offset has {} rows but the design has {}",
+            offset.len(),
+            design.nrows()
+        )));
+    }
+    let ambient_covariance = constrained_ambient_covariance(fit, geometry)?;
+    let n_rows = design.nrows();
+    let mut lower = Array1::<f64>::zeros(n_rows);
+    let mut upper = Array1::<f64>::zeros(n_rows);
+    let chunk_rows =
+        prediction_chunk_rows(geometry.coefficient_gauge.reduced_total(), 1, n_rows);
+    for start in (0..n_rows).step_by(chunk_rows) {
+        let end = (start + chunk_rows).min(n_rows);
+        let rows = design_row_chunk(design, start..end).map_err(EstimationError::InvalidInput)?;
+        let intervals = (0..rows.nrows())
+            .into_par_iter()
+            .map(|local_row| {
+                let contrast = geometry
+                    .coefficient_gauge
+                    .t_full
+                    .t()
+                    .dot(&rows.row(local_row));
+                let (row_lower, row_upper) =
+                    constrained_projection_equal_tailed_interval(
+                        &ambient_covariance,
+                        posterior,
+                        &contrast,
+                        level,
+                    )
+                    .map_err(EstimationError::InvalidInput)?;
+                let shift = offset[start + local_row]
+                    + rows
+                        .row(local_row)
+                        .dot(&geometry.coefficient_gauge.affine_shift);
+                Ok((row_lower + shift, row_upper + shift))
+            })
+            .collect::<Result<Vec<_>, EstimationError>>()?;
+        for (local_row, (row_lower, row_upper)) in intervals.into_iter().enumerate() {
+            lower[start + local_row] = row_lower;
+            upper[start + local_row] = row_upper;
+        }
+    }
+    Ok((lower, upper))
+}
+
 /// Generic engine prediction for external designs.
 /// This API is domain-agnostic: callers provide only design matrix, coefficients, offset, and family.
 ///
@@ -2614,6 +2726,48 @@ where
     }
 
     let requested_mode = options.covariance_mode;
+    let constrained_fit = source.constrained_fit_result();
+    if constrained_fit.is_some() {
+        if requested_mode != InferenceCovarianceMode::Conditional {
+            return Err(EstimationError::InvalidInput(
+                "inequality-truncated credible intervals require the persisted conditional \
+                 posterior; smoothing-corrected covariance does not define a truncated law"
+                    .to_string(),
+            ));
+        }
+        if options.mean_interval_method != MeanIntervalMethod::TransformEta {
+            return Err(EstimationError::InvalidInput(
+                "inequality-truncated credible intervals require TransformEta response bounds; \
+                 a delta interval is not a quantile of the persisted posterior"
+                    .to_string(),
+            ));
+        }
+        if options.apply_bias_correction && source.resolved_bias_correction_beta().is_some() {
+            return Err(EstimationError::InvalidInput(
+                "inequality-truncated credible intervals cannot be centred on the frequentist \
+                 bias-corrected coefficient shift; disable apply_bias_correction to use the \
+                 persisted posterior law"
+                    .to_string(),
+            ));
+        }
+        let support_inflation_requested = (options.boundary_correction || options.ood_inflation)
+            && options.predictor_x_for_corrections.is_some()
+            && options.training_support.is_some();
+        if support_inflation_requested || options.extrapolation_variance.is_some() {
+            return Err(EstimationError::InvalidInput(
+                "inequality-truncated credible intervals cannot combine the persisted posterior \
+                 with boundary, OOD, or extrapolation variance inflation"
+                    .to_string(),
+            ));
+        }
+        if options.eta_skewness_for_corrections.is_some() {
+            return Err(EstimationError::InvalidInput(
+                "inequality-truncated credible intervals already integrate the exact Laplace \
+                 skew law and cannot also apply an Edgeworth skewness correction"
+                    .to_string(),
+            ));
+        }
+    }
     let (backend, covariance_source) = source.select_uncertainty_backend(
         beta.len(),
         requested_mode,
@@ -2784,18 +2938,30 @@ where
             z_upper_per_row[i] = adj.z_upper;
         }
     }
-    let eta_lower = Array1::from_iter(
-        eta.iter()
-            .zip(eta_standard_error.iter())
-            .zip(z_lower_per_row.iter())
-            .map(|((&e, &s), &zl)| e - zl * s),
-    );
-    let eta_upper = Array1::from_iter(
-        eta.iter()
-            .zip(eta_standard_error.iter())
-            .zip(z_upper_per_row.iter())
-            .map(|((&e, &s), &zu)| e + zu * s),
-    );
+    let (eta_lower, eta_upper) = if let Some(fit) = constrained_fit {
+        let interval_level = if options.multi_point_joint {
+            let count = options.joint_query_count.unwrap_or(n_rows).max(1) as f64;
+            1.0 - (1.0 - level) / count
+        } else {
+            level
+        };
+        constrained_linear_predictor_intervals(fit, &x, offset, interval_level)?
+    } else {
+        (
+            Array1::from_iter(
+                eta.iter()
+                    .zip(eta_standard_error.iter())
+                    .zip(z_lower_per_row.iter())
+                    .map(|((&e, &s), &zl)| e - zl * s),
+            ),
+            Array1::from_iter(
+                eta.iter()
+                    .zip(eta_standard_error.iter())
+                    .zip(z_upper_per_row.iter())
+                    .map(|((&e, &s), &zu)| e + zu * s),
+            ),
+        )
+    };
     let quadctx = gam_solve::quadrature::QuadratureContext::new();
 
     // Derivative of inverse link g^{-1}(η) used for delta-method:
@@ -3241,11 +3407,6 @@ pub fn coefficient_uncertaintywith_mode(
                     .to_string(),
             ));
         }
-        geometry
-            .coefficient_gauge
-            .validate()
-            .map_err(EstimationError::InvalidInput)?;
-        let active_dimension = geometry.coefficient_gauge.reduced_total();
         if geometry.coefficient_gauge.raw_total() != fit.beta.len() {
             return Err(EstimationError::InvalidInput(format!(
                 "coefficient interval gauge has {} raw rows but the fit reports {} coefficients",
@@ -3253,18 +3414,7 @@ pub fn coefficient_uncertaintywith_mode(
                 fit.beta.len()
             )));
         }
-        posterior
-            .validate_for_dimension(active_dimension)
-            .map_err(EstimationError::InvalidInput)?;
-        let scale = fit.coefficient_covariance_scale()?;
-        let ambient_backend = PredictionCovarianceBackend::from_factorized_hessian_scaled(
-            SymmetricMatrix::Dense(geometry.penalized_hessian.as_array().clone()),
-            scale,
-        )
-        .map_err(EstimationError::InvalidInput)?;
-        let ambient_covariance = ambient_backend
-            .apply_columns(&Array2::eye(active_dimension))
-            .map_err(EstimationError::InvalidInput)?;
+        let ambient_covariance = constrained_ambient_covariance(fit, geometry)?;
         let mut lower = Array1::<f64>::zeros(fit.beta.len());
         let mut upper = Array1::<f64>::zeros(fit.beta.len());
         for coefficient in 0..fit.beta.len() {
@@ -3522,6 +3672,75 @@ mod tests {
             inner_cycles: 0,
         })
         .expect("test fit")
+    }
+
+    fn half_normal_constrained_fit() -> UnifiedFitResult {
+        let ambient_covariance = array![[1.0]];
+        let constraints = gam_problem::LinearInequalityConstraints::new(
+            array![[1.0]],
+            array![0.0],
+        )
+        .expect("constraint");
+        let correction =
+            gam_solve::constrained_posterior::constrained_posterior_correction_from_covariance(
+                &ambient_covariance,
+                &array![0.0],
+                &constraints,
+            )
+            .expect("correction")
+            .expect("active half-space");
+        let posterior_mean = (2.0 / std::f64::consts::PI).sqrt();
+        let posterior_variance = 1.0 - 2.0 / std::f64::consts::PI;
+        let mut fit =
+            test_fit_with_covariance(array![posterior_mean], array![[posterior_variance]]);
+        fit.geometry = Some(FitGeometry {
+            coefficient_gauge: gam_problem::gauge::Gauge::identity(&[1]),
+            penalized_hessian: array![[1.0]].into(),
+            constrained_posterior: Some(
+                gam_solve::constrained_posterior::ConstrainedPosteriorGeometry {
+                    constraints,
+                    mode: array![0.0],
+                    unconstrained_center: array![0.0],
+                    correction: Some(correction),
+                },
+            ),
+            working: None,
+        });
+        fit
+    }
+
+    #[test]
+    fn constrained_prediction_uses_projection_quantiles_not_symmetric_widths() {
+        let fit = half_normal_constrained_fit();
+        let design = array![[1.0]];
+        let offset = array![0.0];
+        let options = PredictUncertaintyOptions {
+            confidence_level: 0.95,
+            covariance_mode: InferenceCovarianceMode::Conditional,
+            mean_interval_method: MeanIntervalMethod::TransformEta,
+            includeobservation_interval: false,
+            apply_bias_correction: false,
+            edgeworth_one_sided: false,
+            boundary_correction: false,
+            ood_inflation: false,
+            multi_point_joint: false,
+            ..PredictUncertaintyOptions::default()
+        };
+        let result = predict_gamwith_uncertainty(
+            design.view(),
+            fit.beta.view(),
+            offset.view(),
+            gam_spec::LikelihoodSpec::gaussian_identity(),
+            &fit,
+            &options,
+        )
+        .expect("constrained prediction interval");
+        let expected_lower = standard_normal_quantile(0.5125).expect("lower quantile");
+        let expected_upper = standard_normal_quantile(0.9875).expect("upper quantile");
+        assert!((result.eta_lower[0] - expected_lower).abs() < 1e-12);
+        assert!((result.eta_upper[0] - expected_upper).abs() < 1e-12);
+        assert_eq!(result.mean_lower, result.eta_lower);
+        assert_eq!(result.mean_upper, result.eta_upper);
     }
 
     fn gaussian_location_scale_fit_with_covariance(
