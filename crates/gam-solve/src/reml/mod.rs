@@ -784,6 +784,90 @@ mod tests {
         );
     }
 
+    /// The adaptive IFT step-cap controller belongs to the `RemlState` that
+    /// produced it, not to the ADDRESS that state happened to occupy.
+    ///
+    /// It used to live in a process-global `HashMap` keyed by
+    /// `self as *const _ as usize`. Every constructing caller makes the state a
+    /// stack local, so two fits reached from the same call site land on the
+    /// same frame slot — and with no `Drop` to evict the entry, the second fit
+    /// read the first fit's quality history and shrunken step cap. That is a
+    /// silent cross-fit dependence: the same data fitted twice in one process
+    /// takes a different IFT step schedule the second time.
+    ///
+    /// The probe builds a state, drives the controller off its defaults, drops
+    /// it, and builds a second state in the same slot. The second state must
+    /// see the documented defaults — the caller-supplied cap, and no flat
+    /// fallback.
+    #[test]
+    fn adaptive_ift_controller_does_not_survive_into_the_next_state_in_the_same_slot() {
+        // `default_cap` is deliberately a value the controller can never
+        // produce on its own, so reading it back is proof of a fresh slot
+        // rather than a coincidence.
+        const DEFAULT_CAP: f64 = 7.5;
+
+        fn probe(record: bool) -> (usize, f64, bool) {
+            let y = array![0.2, -0.1, 0.3, 0.0];
+            let w = Array1::<f64>::ones(y.len());
+            let x = array![[1.0, -0.7], [1.0, -0.2], [1.0, 0.3], [1.0, 0.9]];
+            let offset = Array1::<f64>::zeros(y.len());
+            let cfg = RemlConfig::external(gaussian_identity_glm_spec(), 1e-10, false);
+            let p = x.ncols();
+            let canonical = vec![gam_terms::construction::CanonicalPenalty::from_dense_root(
+                array![[0.0, 1.0]],
+                p,
+            )];
+            let state = RemlState::newwith_offset(
+                y.view(),
+                x,
+                w.view(),
+                offset.view(),
+                canonical,
+                p,
+                &cfg,
+                Some(vec![1]),
+                None,
+                None,
+            )
+            .expect("state");
+            let address = &state as *const RemlState<'_> as usize;
+            if record {
+                // A prediction quality far above the flat-fallback band: the
+                // controller shrinks the cap and arms the flat fallback. This
+                // is precisely the state that used to be inherited.
+                let shrunk = state
+                    .record_ift_prediction_quality(1.0e3, 0.25)
+                    .expect("a finite quality and a positive cap must update the controller");
+                assert!(
+                    shrunk < 0.25,
+                    "a quality above the flat-fallback band must shrink the step cap; got {shrunk}"
+                );
+                return (address, shrunk, true);
+            }
+            let cap = state.ift_quality_step_cap(DEFAULT_CAP);
+            let flat = state.take_ift_quality_flat_override();
+            (address, cap, flat)
+        }
+
+        let (first_address, _, _) = probe(true);
+        let (second_address, cap, flat) = probe(false);
+
+        assert_eq!(
+            first_address, second_address,
+            "the probe only exercises the defect when the second state reuses the first's slot; \
+             both calls are to the same fn at the same depth, so the frame offsets must coincide"
+        );
+        assert_eq!(
+            cap, DEFAULT_CAP,
+            "a freshly built state must return the caller's default step cap, not the cap the \
+             previous state at this address shrank to"
+        );
+        assert!(
+            !flat,
+            "a freshly built state must not inherit the previous state's armed flat fallback"
+        );
+    }
+
     /// #2379: the Gaussian profiled-diagonal seed helper honors its (validated)
     /// ρ-box by CLAMPING into it — never silently swapping or escaping it. The
     /// helper now takes an `OrderedRhoBounds`, so an inverted box is impossible
@@ -5484,6 +5568,32 @@ pub(crate) struct RemlState<'a> {
     pub(crate) warm_start_rho: RwLock<Option<Array1<f64>>>,
     pub(crate) prev_warm_start_beta: RwLock<Option<Coefficients>>,
     pub(crate) prev_warm_start_rho: RwLock<Option<Array1<f64>>>,
+    /// Adaptive IFT step-cap controller, the hypergradient budget controller,
+    /// and the two mode-response caches.
+    ///
+    /// These four lived in process-global `HashMap`s keyed by
+    /// `self as *const _ as usize` — the state's own ADDRESS. An address is not
+    /// an identity: it is reused the moment the state is dropped, so a fit
+    /// whose `RemlState` landed on a recycled slot inherited the previous
+    /// fit's quality history, budget history, and cached mode-response
+    /// columns. `RemlState` is a stack local in every constructing caller
+    /// (`estimate/evaluation.rs`, `estimate/optimizer.rs`, …), so consecutive
+    /// fits on one thread reuse the same frame address near-deterministically,
+    /// and there is no `Drop` to evict the dead entry. Two fits running
+    /// concurrently in one process shared the tables outright.
+    ///
+    /// Holding them as fields makes the lifetime exactly right by
+    /// construction: the state dies with its owner, concurrent fits cannot
+    /// see each other, and no key can alias. They sit beside
+    /// `ift_warm_start_cache` / `ift_cached_factor`, which were already
+    /// per-state interior-mutability fields — these were the odd ones out.
+    pub(crate) ift_quality_runtime: std::sync::Mutex<outer_eval::IftQualityRuntimeState>,
+    pub(crate) hypergradient_runtime:
+        std::sync::Mutex<Option<outer_eval::HyperGradientRuntimeState>>,
+    pub(crate) ift_mode_response_slot:
+        std::sync::Mutex<Option<outer_eval::IftModeResponseRuntimeCache>>,
+    pub(crate) ift_joint_mode_response_slot:
+        std::sync::Mutex<Option<outer_eval::IftJointModeResponseRuntimeCache>>,
     pub(crate) warm_start_enabled: AtomicBool,
     pub(crate) screening_max_inner_iterations: Arc<AtomicUsize>,
     /// Outer-aware inner-PIRLS iteration cap for the main descent loop.

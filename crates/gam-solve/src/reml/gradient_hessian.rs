@@ -5,32 +5,24 @@ use std::sync::RwLock;
 impl<'a> RemlState<'a> {
     pub(crate) const POLISH_NORM_RATIO: f64 = 0.25;
 
-    pub(crate) fn hypergradient_owner_key(&self) -> usize {
-        self as *const _ as usize
-    }
-
     pub(crate) fn ift_quality_step_cap(&self, default_cap: f64) -> f64 {
-        let states = ift_quality_states().lock().unwrap();
-        states
-            .get(&self.hypergradient_owner_key())
-            .and_then(|state| state.next_step_cap)
+        self.ift_quality_runtime
+            .lock()
+            .unwrap()
+            .next_step_cap
             .filter(|cap| cap.is_finite() && *cap > 0.0)
             .unwrap_or(default_cap)
     }
 
     pub(crate) fn take_ift_quality_flat_override(&self) -> bool {
-        let mut states = ift_quality_states().lock().unwrap();
-        let Some(state) = states.get_mut(&self.hypergradient_owner_key()) else {
-            return false;
-        };
+        let mut state = self.ift_quality_runtime.lock().unwrap();
         let fallback = state.fallback_next_flat;
         state.fallback_next_flat = false;
         fallback
     }
 
     pub(crate) fn clear_ift_quality_runtime_state(&self) {
-        let mut states = ift_quality_states().lock().unwrap();
-        states.remove(&self.hypergradient_owner_key());
+        *self.ift_quality_runtime.lock().unwrap() = Default::default();
     }
 
     pub(crate) fn record_ift_prediction_quality(
@@ -41,8 +33,7 @@ impl<'a> RemlState<'a> {
         if !quality.is_finite() || quality < 0.0 || !current_cap.is_finite() || current_cap <= 0.0 {
             return None;
         }
-        let mut states = ift_quality_states().lock().unwrap();
-        let state = states.entry(self.hypergradient_owner_key()).or_default();
+        let mut state = self.ift_quality_runtime.lock().unwrap();
         state.quality_history.push(quality);
         while state.quality_history.len() > IFT_QUALITY_HISTORY_CAP {
             state.quality_history.remove(0);
@@ -62,17 +53,14 @@ impl<'a> RemlState<'a> {
     }
 
     pub(crate) fn reset_hypergradient_budget_controller(&self) {
-        let mut budgets = hypergradient_budgets().lock().unwrap();
-        budgets.remove(&self.hypergradient_owner_key());
+        *self.hypergradient_runtime.lock().unwrap() = None;
     }
 
     pub(crate) fn hypergradient_trace_state(
         &self,
     ) -> Arc<Mutex<super::reml_outer_engine::StochasticTraceState>> {
-        let mut budgets = hypergradient_budgets().lock().unwrap();
-        let state = budgets
-            .entry(self.hypergradient_owner_key())
-            .or_insert_with(HyperGradientRuntimeState::new);
+        let mut slot = self.hypergradient_runtime.lock().unwrap();
+        let state = slot.get_or_insert_with(HyperGradientRuntimeState::new);
         Arc::clone(&state.trace_state)
     }
 
@@ -92,9 +80,11 @@ impl<'a> RemlState<'a> {
         &self,
         pirls_config: &pirls::PirlsConfig,
     ) -> Option<pirls::AdaptiveKktTolerance> {
-        let budgets = hypergradient_budgets().lock().unwrap();
-        let tau = budgets
-            .get(&self.hypergradient_owner_key())?
+        let tau = self
+            .hypergradient_runtime
+            .lock()
+            .unwrap()
+            .as_ref()?
             .adaptive_kkt_override?;
         if !tau.is_finite() || tau <= 0.0 {
             return None;
@@ -124,10 +114,8 @@ impl<'a> RemlState<'a> {
             return;
         }
 
-        let mut budgets = hypergradient_budgets().lock().unwrap();
-        let state = budgets
-            .entry(self.hypergradient_owner_key())
-            .or_insert_with(HyperGradientRuntimeState::new);
+        let mut slot = self.hypergradient_runtime.lock().unwrap();
+        let state = slot.get_or_insert_with(HyperGradientRuntimeState::new);
         let (e_linear, sigma_sq, k, current_floor) = {
             let trace = match state.trace_state.lock() {
                 Ok(guard) => guard,
@@ -2923,30 +2911,16 @@ impl<'a> RemlState<'a> {
         self.clear_ift_mode_response_cache();
     }
 
-    pub(crate) fn ift_mode_response_cache_key(&self) -> usize {
-        self as *const Self as usize
-    }
-
     pub(crate) fn pending_joint_ift_theta(&self) -> Option<Array1<f64>> {
         latest_outer_theta_for_ift()
     }
 
     pub(crate) fn clear_joint_ift_mode_response_cache(&self) {
-        if let Some(caches) = IFT_JOINT_MODE_RESPONSE_CACHES.get() {
-            caches
-                .lock()
-                .unwrap()
-                .remove(&self.ift_mode_response_cache_key());
-        }
+        *self.ift_joint_mode_response_slot.lock().unwrap() = None;
     }
 
     pub(crate) fn clear_ift_mode_response_cache(&self) {
-        if let Some(caches) = IFT_MODE_RESPONSE_CACHES.get() {
-            caches
-                .lock()
-                .unwrap()
-                .remove(&self.ift_mode_response_cache_key());
-        }
+        *self.ift_mode_response_slot.lock().unwrap() = None;
     }
 
     pub(crate) fn mode_response_cols_for_warm_start(
@@ -3000,14 +2974,11 @@ impl<'a> RemlState<'a> {
         }
         let rho_col_count = rho_cols.as_ref().map_or(0, Array2::ncols);
         let ext_col_count = ext_cols.as_ref().map_or(0, Array2::ncols);
-        ift_mode_response_caches().lock().unwrap().insert(
-            self.ift_mode_response_cache_key(),
-            IftModeResponseRuntimeCache {
-                rho: rho.clone(),
-                rho_mode_response_cols: rho_cols.clone(),
-                ext_mode_response_cols: ext_cols.clone(),
-            },
-        );
+        *self.ift_mode_response_slot.lock().unwrap() = Some(IftModeResponseRuntimeCache {
+            rho: rho.clone(),
+            rho_mode_response_cols: rho_cols.clone(),
+            ext_mode_response_cols: ext_cols.clone(),
+        });
         log::debug!(
             "[IFT-CACHE] outcome=mode_response_store rho_cols={} ext_cols={} p={}",
             rho_col_count,
@@ -3075,16 +3046,14 @@ impl<'a> RemlState<'a> {
             self.clear_joint_ift_mode_response_cache();
             return;
         }
-        ift_joint_mode_response_caches().lock().unwrap().insert(
-            self.ift_mode_response_cache_key(),
-            IftJointModeResponseRuntimeCache {
+        *self.ift_joint_mode_response_slot.lock().unwrap() =
+            Some(IftJointModeResponseRuntimeCache {
                 theta,
                 rho_dim: rho.len(),
                 beta_original,
                 mode_response_cols,
                 active_constraints,
-            },
-        );
+            });
         log::debug!(
             "[IFT-CACHE] outcome=joint_mode_response_store rho_cols={} ext_cols={} p={}",
             rho_col_count,
@@ -3097,8 +3066,8 @@ impl<'a> RemlState<'a> {
         &self,
         cache: &super::IftWarmStartCache,
     ) -> Option<Array2<f64>> {
-        let guard = ift_mode_response_caches().lock().unwrap();
-        let cached = guard.get(&self.ift_mode_response_cache_key())?;
+        let guard = self.ift_mode_response_slot.lock().unwrap();
+        let cached = guard.as_ref()?;
         if cached.rho.len() != cache.rho.len()
             || cached
                 .rho
@@ -3129,8 +3098,8 @@ impl<'a> RemlState<'a> {
     ) -> Option<(Coefficients, IftPredictionOutcome)> {
         let theta = self.pending_joint_ift_theta()?;
         let cache = {
-            let guard = ift_joint_mode_response_caches().lock().unwrap();
-            guard.get(&self.ift_mode_response_cache_key())?.clone()
+            let guard = self.ift_joint_mode_response_slot.lock().unwrap();
+            guard.as_ref()?.clone()
         };
         if cache.active_constraints {
             log::info!(
@@ -3226,8 +3195,8 @@ impl<'a> RemlState<'a> {
         let Some(theta) = self.pending_joint_ift_theta() else {
             return false;
         };
-        let guard = ift_joint_mode_response_caches().lock().unwrap();
-        let Some(cache) = guard.get(&self.ift_mode_response_cache_key()) else {
+        let guard = self.ift_joint_mode_response_slot.lock().unwrap();
+        let Some(cache) = guard.as_ref() else {
             return false;
         };
         joint_ift_cache_matches_theta(cache, &theta, new_rho)
@@ -4125,6 +4094,10 @@ impl<'a> RemlState<'a> {
             warm_start_rho: RwLock::new(None),
             prev_warm_start_beta: RwLock::new(None),
             prev_warm_start_rho: RwLock::new(None),
+            ift_quality_runtime: std::sync::Mutex::new(Default::default()),
+            hypergradient_runtime: std::sync::Mutex::new(None),
+            ift_mode_response_slot: std::sync::Mutex::new(None),
+            ift_joint_mode_response_slot: std::sync::Mutex::new(None),
             warm_start_enabled: AtomicBool::new(true),
             screening_max_inner_iterations: Arc::new(AtomicUsize::new(0)),
             outer_inner_cap: Arc::new(AtomicUsize::new(0)),
