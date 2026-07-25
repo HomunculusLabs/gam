@@ -48,6 +48,7 @@
 //! Trials outside `[psi_lo, psi_hi]` are the caller's signal to fall back to
 //! the exact path ([`PsiGramTensor::contains`]).
 
+use gam_linalg::decision::{RankDecision, certified_rank};
 use ndarray::{Array1, Array2, ArrayView1};
 
 /// Relative ceiling on the per-column Chebyshev coefficient tail (#1216).
@@ -118,6 +119,21 @@ pub const PSI_GRAM_SKIP_PROJ_ATOL: f64 = 1.0e-7;
 /// never allowed, #2054); each witness eval is O(k³), independent of n.
 const PSI_BAND_BISECTION_ITERS: usize = 64;
 const PSI_BAND_BISECTION_ATOL: f64 = 1.0e-10;
+
+/// Slack on the symmetric eigensolver's backward-error bound, used to size the
+/// band-edge rank guard ([`PsiGramTensor::rank_guard_gap`]).
+///
+/// DERIVATION. A backward-stable symmetric eigensolver returns eigenvalues with
+/// an ABSOLUTE error bar `|λ̂_i − λ_i| ≤ p(k)·ε·‖G‖₂ = p(k)·ε·λ_max`, `p(k)` a
+/// low-degree polynomial in the order. `p(k) ≤ SLACK·k` with `SLACK = 8` covers
+/// the measured LAPACK-class constant together with the few extra ulps of
+/// `λ_max` the tensor's own `D·(Chebyshev sum)·D` reassembly contributes. The
+/// band edges of [`PSI_GRAM_SKIP_RANK_RTOL`] are decided on `λ_r ≈ rtol·λ_max`,
+/// so that absolute bar is a RELATIVE bar of `SLACK·k·ε/rtol ≈ 1.2e-4` on the
+/// decided quantity — the margin any trustworthy rank claim here must clear
+/// (theory master §9-step-6: decide with a margin wider than the backward error
+/// committed forming the quantity decided on).
+const PSI_BAND_RANK_GUARD_SLACK: f64 = 8.0;
 
 /// Certified Chebyshev-in-ψ expansion of a design-moving Gram (#1033b).
 ///
@@ -901,14 +917,159 @@ impl PsiGramTensor {
             .map(|(_, rank)| rank)
     }
 
+    /// Descending eigenvalues of the conditioned Gram `XᵀWX(ψ)` — the spectrum
+    /// every rank decision in this module is taken on. `None` for an off-window
+    /// / non-finite Gram, an eigendecomposition failure, or an all-zero Gram.
+    /// Purely k-space (O(k³)) — independent of n.
+    fn gram_spectrum(&self, psi: f64) -> Option<Vec<f64>> {
+        use gam_linalg::faer_ndarray::FaerEigh;
+        if !self.contains(psi) {
+            return None;
+        }
+        let g = self.gram_at(psi);
+        if g.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let gsym = 0.5 * (&g + &g.t());
+        let (evals, _evecs) = gsym.eigh(faer::Side::Lower).ok()?;
+        let mut spectrum: Vec<f64> = evals.to_vec();
+        spectrum.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        (spectrum.first().copied().unwrap_or(0.0) > 0.0).then_some(spectrum)
+    }
+
+    /// Multiplicative guard gap the band-edge search certifies its rank claims
+    /// with — the relative width of the two-sided band around the rank cutoff
+    /// inside which the eigensolver's own backward error makes the integer rank
+    /// undecidable. See [`PSI_BAND_RANK_GUARD_SLACK`] for the derivation
+    /// (`SLACK·k·ε / PSI_GRAM_SKIP_RANK_RTOL`).
+    fn rank_guard_gap(&self) -> f64 {
+        PSI_BAND_RANK_GUARD_SLACK * (self.k as f64) * f64::EPSILON / PSI_GRAM_SKIP_RANK_RTOL
+    }
+
+    /// The conditioned Gram's rank decision at `psi` in the theory-master
+    /// decision currency (`gam_linalg::decision`): the same partition
+    /// [`Self::gram_numerical_rank`] reports, but posed against a two-sided guard
+    /// band so the answer comes with a MARGIN. `Certified` means every kept
+    /// eigenvalue clears the cutoff — and every dropped one falls below it — by
+    /// the guard gap, which is `PSI_BAND_RANK_GUARD_SLACK` times the
+    /// eigensolver's own error bar on those eigenvalues; the integer rank is
+    /// therefore host-stable, and [`gam_linalg::decision::rank_transport_radius`]
+    /// converts the same certificate into an operator-norm neighbourhood.
+    /// `Ambiguous` is the honest report that an eigenvalue sits inside the band
+    /// and the integer would be decided by the eigensolver's last bit.
+    ///
+    /// The decision is taken on the Gram spectrum rather than on design singular
+    /// values — the squared currency `certified_rank` warns about — because the
+    /// tensor retains ONLY the k×k sufficient statistic by construction (the
+    /// n×k design rows are streamed and discarded at build). The guard band is
+    /// sized to that squared currency's own backward error accordingly, which is
+    /// what keeps the decision honest.
+    ///
+    /// `None` for an off-window / non-finite / all-zero Gram. Purely k-space.
+    pub fn rank_decision(&self, psi: f64) -> Option<RankDecision> {
+        let spectrum = self.gram_spectrum(psi)?;
+        let lambda_max = spectrum[0];
+        Some(certified_rank(
+            &spectrum,
+            PSI_GRAM_SKIP_RANK_RTOL * lambda_max,
+            self.rank_guard_gap(),
+        ))
+    }
+
+    /// Signed log-margin of the rank-`rank` claim at `psi`:
+    /// `ln(λ_rank / (PSI_GRAM_SKIP_RANK_RTOL·λ_max))`, positive exactly when the
+    /// Gram carries at least `rank` eigendirections above the rank cutoff.
+    ///
+    /// This is the CURRENCY THE BAND EDGES LIVE IN (#2408). Where the maximal-rank
+    /// band ends at a rank cliff, [`Self::rank_stable_psi_floor`] /
+    /// [`Self::rank_stable_psi_ceiling`] return a ROOT of this function, so the
+    /// edge's sensitivity to any perturbation of the tensor is
+    /// `|δψ*| ≤ sup|δ margin| / inf|d margin/dψ|` — the implicit-function bound.
+    /// It is the relative (Ostrowski/congruence) currency, not the absolute
+    /// (Weyl) one: a Gram assembled from a different number of rows is a
+    /// congruence-scale perturbation of the same continuum object, which moves
+    /// `λ_r` by a RELATIVE `O(1/n)` and therefore moves this margin additively.
+    ///
+    /// `None` for an off-window / non-finite / all-zero Gram, `rank == 0`, or
+    /// `rank` beyond the Gram order. Purely k-space (O(k³)) — independent of n.
+    pub fn rank_margin(&self, psi: f64, rank: usize) -> Option<f64> {
+        let spectrum = self.gram_spectrum(psi)?;
+        if rank == 0 || rank > spectrum.len() {
+            return None;
+        }
+        let lambda_r = spectrum[rank - 1];
+        if !(lambda_r > 0.0) {
+            return None;
+        }
+        Some((lambda_r / (PSI_GRAM_SKIP_RANK_RTOL * spectrum[0])).ln())
+    }
+
+    /// Certified rank at the band-search anchor, or `None` when the anchor's own
+    /// rank decision carries no margin. In the latter case there is nothing to
+    /// transport, so [`Self::band_accepts`] falls back to the witness-only
+    /// predicate rather than collapsing the band onto the anchor.
+    fn anchor_certified_rank(&self, psi_anchor: f64) -> Option<usize> {
+        match self.rank_decision(psi_anchor) {
+            Some(RankDecision::Certified { rank, .. }) => Some(rank),
+            _ => None,
+        }
+    }
+
+    /// Band-edge acceptance predicate shared by [`Self::rank_stable_psi_floor`]
+    /// and [`Self::rank_stable_psi_ceiling`].
+    ///
+    /// It is the production skip witness [`Self::reduced_basis_equal`] AND — when
+    /// the anchor's own rank decision has a margin — a CERTIFIED rank claim equal
+    /// to the anchor's. The conjunct is what makes the returned edge mean
+    /// something: bisecting on the bare witness returns the ψ where `λ_r` sits
+    /// exactly ON the rank cutoff, i.e. the one ψ in the whole window whose rank
+    /// is undecidable at the eigensolver's own error bar. Clamping the κ line
+    /// search to that ψ places its extreme trial on a coin-flip rank, and a flip
+    /// to the deficient side is precisely the refused skip → O(n) `reset_surface`
+    /// → rank-deficient pinning ψ → SECOND reset that the clamp exists to
+    /// prevent. Requiring the guard band instead returns the last ψ whose rank
+    /// COUNT clears the cutoff by a multiple of the eigensolver's error bar (the
+    /// certification predicate is necessarily marginal at its own edge; the
+    /// integer it decides is not); the edge moves down by only
+    /// `ln(1+gap)/|d margin/dψ|` (≈1e-4 in ψ on the #2408 fixture), so the search
+    /// interval is untouched for practical purposes while the clamp becomes
+    /// host-stable. The band is a SUBSET of the witness-only band, so the skip
+    /// still fires on every in-band trial — soundness is unchanged.
+    fn band_accepts(&self, psi_anchor: f64, anchor_rank: Option<usize>, psi: f64) -> bool {
+        if !self.reduced_basis_equal(psi_anchor, psi) {
+            return false;
+        }
+        match anchor_rank {
+            None => true,
+            Some(anchor) => matches!(
+                self.rank_decision(psi),
+                Some(RankDecision::Certified { rank, .. }) if rank == anchor
+            ),
+        }
+    }
+
     /// Lower edge of the contiguous ψ-band, ANCHORED at `psi_anchor`, over which
     /// the conditioned Gram `XᵀWX(ψ)` has the SAME reduced range projector as the
     /// anchor — i.e. the ψ-floor below which the design-revision skip's
     /// `reduced_basis_equal` witness must (soundly) refuse, because the range
     /// subspace either collapses or rotates away from the pinned slow-path basis.
     /// Lifting the κ-optimizer's lower bound to this floor keeps every in-window
-    /// trial on the n-free fast path and is inherently n-INDEPENDENT: the witness
-    /// is computed from the k×k tensor, not from sample rows (#1033).
+    /// trial on the n-free fast path: the search is computed from the k×k tensor
+    /// and never touches a sample row (#1033).
+    ///
+    /// N-FREE COST IS NOT N-INVARIANT LOCATION (#2408). The search costs
+    /// `O(iters·k³)` with zero row access — that is the property the outer loop
+    /// buys. The edge's LOCATION is a different claim: the tensor is BUILT from n
+    /// rows, so its Gram is a row-sample of the underlying continuum Gram with a
+    /// relative `O(1/n)` sampling error, which by Ostrowski moves every eigenvalue
+    /// by a relative `O(1/n)` and hence moves [`Self::rank_margin`] additively.
+    /// Where the edge is a root of that margin, the implicit-function bound
+    /// `|δψ*| ≤ sup|δ margin| / inf|d margin/dψ|` is the whole truth: the edge is
+    /// n-invariant only in the limit, at a rate set by the CROSSING SLOPE. A steep
+    /// cliff pins the edge to machine precision; a grazing crossing (measured
+    /// 1.5 nats per unit ψ on the #2408 fixture) lets an `O(1/n)` margin excursion
+    /// displace the edge by `O(0.05)`. Callers must treat the edge as a clamp with
+    /// that transport bound, never as an n-free constant of the design.
     ///
     /// Anchoring at `psi_anchor` (the optimizer's ψ seed) is essential: the
     /// conditioned Gram is rank-deficient at BOTH window ends on production radial
@@ -929,15 +1090,16 @@ impl PsiGramTensor {
         if !self.contains(psi_anchor) {
             return None;
         }
-        // The anchor always accepts (`reduced_basis_equal(x, x) == true`) and, per
-        // the window geometry, sits inside the contiguous skip-acceptable middle
-        // band, so `accepts` is a monotone step on `[psi_lo, psi_anchor]`: true
-        // from the anchor down to the band's lower edge, false below it. Find that
-        // edge by BISECTION on the projector witness — it converges continuously
-        // to the true crossing instead of snapping to one of a fixed grid of nodes
-        // (#2054; SPEC forbids grid search). Purely k-space (O(iters·k³)),
-        // independent of n; the witness is a property of the k×k tensor.
-        let accepts = |psi: f64| self.reduced_basis_equal(psi_anchor, psi);
+        // The anchor always accepts (its own rank decision is trivially equal to
+        // itself and `reduced_basis_equal(x, x) == true`) and, per the window
+        // geometry, sits inside the contiguous skip-acceptable middle band, so
+        // `accepts` is a monotone step on `[psi_lo, psi_anchor]`: true from the
+        // anchor down to the band's lower edge, false below it. Find that edge by
+        // BISECTION on the witness — it converges continuously to the true
+        // crossing instead of snapping to one of a fixed grid of nodes (#2054;
+        // SPEC forbids grid search). Purely k-space (O(iters·k³)), no row access.
+        let anchor_rank = self.anchor_certified_rank(psi_anchor);
+        let accepts = |psi: f64| self.band_accepts(psi_anchor, anchor_rank, psi);
         let mut lo = self.psi_lo; // refusing endpoint (to be established)
         if accepts(lo) {
             // The skip-acceptable band already reaches `psi_lo` — no lift needed.
@@ -974,11 +1136,16 @@ impl PsiGramTensor {
     /// resets vanish once the optimizer's UPPER bound is clamped down to this
     /// n-free k-space ceiling, keeping every trial inside the skip-acceptable band.
     ///
-    /// Bisects UP from the anchor on the projector witness (the mirror of the
-    /// floor) and returns the highest ψ still accepted by `reduced_basis_equal`
-    /// against the anchor — the true upper band edge, resolved continuously rather
-    /// than snapped to a fixed grid (#2054). Purely O(iters·k³) — no row access,
-    /// inherently n-INDEPENDENT (the projector is a property of the k×k tensor).
+    /// Bisects UP from the anchor on the band witness (the mirror of the floor)
+    /// and returns the highest ψ still accepted against the anchor — the true
+    /// upper band edge, resolved continuously rather than snapped to a fixed grid
+    /// (#2054). Purely O(iters·k³) — no row access.
+    ///
+    /// The edge is n-FREE IN COST but not n-INVARIANT IN LOCATION; see
+    /// [`Self::rank_stable_psi_floor`] for the transport bound that replaces the
+    /// former (false) invariance claim, and the `band_accepts` predicate for why
+    /// the returned edge is the last CERTIFIED-rank ψ rather than the ψ sitting
+    /// exactly on the cutoff.
     ///
     /// Returns `None` when the band already reaches `psi_hi` (no clamp needed),
     /// when the anchor is off-window / projector-indeterminate, or when the window is
@@ -987,15 +1154,16 @@ impl PsiGramTensor {
         // Bisection mirror of `rank_stable_psi_floor` (#2054): the anchor always
         // accepts and sits inside the contiguous band, so `accepts` is a monotone
         // step on `[psi_anchor, psi_hi]` (true up to the upper edge, false above).
-        // Locate the edge by bisection on the projector witness rather than a
-        // fixed grid scan. Purely k-space (O(iters·k³)), independent of n.
+        // Locate the edge by bisection on the band witness rather than a fixed
+        // grid scan. Purely k-space (O(iters·k³)), no row access.
         if !(self.psi_hi > self.psi_lo) {
             return None;
         }
         if !self.contains(psi_anchor) {
             return None;
         }
-        let accepts = |psi: f64| self.reduced_basis_equal(psi_anchor, psi);
+        let anchor_rank = self.anchor_certified_rank(psi_anchor);
+        let accepts = |psi: f64| self.band_accepts(psi_anchor, anchor_rank, psi);
         let mut hi = self.psi_hi; // refusing endpoint (to be established)
         if accepts(hi) {
             // The skip-acceptable band already reaches `psi_hi` — no clamp needed.
@@ -1467,10 +1635,14 @@ mod tests {
     /// polynomial nullspace there. `rank_stable_psi_floor` must (a) detect that the
     /// maximal-rank band does NOT reach `psi_lo` and return a floor strictly inside
     /// the window, (b) report that floor as the lower edge of the maximal-rank band
-    /// containing the seed, and (c) be a pure k-space property — IDENTICAL whether
-    /// the tensor was built from n=200 or n=4000 rows (the n-independence the κ
-    /// outer loop relies on). A design that is full-rank across the whole window
-    /// must return `None` (no lift needed).
+    /// containing the seed, and (c) agree across row counts. Unlike the ceiling
+    /// fixture — whose band sits at FULL rank, making the projector witness the
+    /// identity and the edge a rank-margin root — this fixture's band sits at rank
+    /// 6 of k=7, so the binding gate is the projector ROTATION horizon and both
+    /// builds pin the edge to within ~1e-7 of the anchor. The (c) bound below is
+    /// therefore loose by construction; the sharp n-transport statement for a
+    /// rank-root edge is derived in the ceiling test (#2408). A design that is
+    /// full-rank across the whole window must return `None` (no lift needed).
     #[test]
     fn rank_stable_psi_floor_is_inside_window_and_n_independent() {
         let k = 7usize;
@@ -1526,18 +1698,32 @@ mod tests {
             );
         }
 
-        // (c) n-independence: the floor from a 5× larger build must match to grid
-        // resolution. The tensor is certified to the same Chebyshev tolerance, so
-        // the k-space rank structure — hence the floor — is the same object.
+        // (c) the floor must not WANDER with the row count. This is a coarse guard,
+        // not an invariance certificate, and #2408 measured why it cannot be more
+        // than that here: at this seed the Gram's kept/dropped eigen-gap is only
+        // ~1.2e-10·λ_max, so the range projector carries a roundoff error of
+        // ~ε·λ_max/gap ≈ 1.8e-6 — an order of magnitude ABOVE the 1e-7 subspace
+        // tolerance the witness thresholds. The witness is therefore deciding on
+        // its own noise within ~1e-6 of the anchor (measured sinθ is non-monotone
+        // there: 3.1e-7 at Δψ=1e-8, 4.5e-8 at Δψ=1.8e-7), and both builds return a
+        // floor pinned ~1e-7 below the anchor by that noise rather than by a
+        // subspace rotation. The bound below is sized to the WINDOW, so it catches
+        // a genuinely wandering edge while making no claim the measurement cannot
+        // support. The sharp, derived n-transport statement is available only where
+        // the edge is a rank-margin root — see the ceiling test.
         let t_big = build_at(1000);
         let floor_big = t_big
             .rank_stable_psi_floor(seed)
-            .expect("the rank cliff is an n-free property; the big build must also lift");
-        let grid_step = (psi_hi - psi_lo) / 95.0; // NODES - 1 = 95
+            .expect("the rank band is a k-space property; the big build must also lift");
+        // Bound kept at its historical value (1.5× the pre-#2054 node spacing the
+        // edge search used to snap to) — the measured displacement is ~1.4e-7, five
+        // orders of magnitude under it, so tightening it would only encode this
+        // fixture's noise floor as a contract.
+        let edge_wander_atol = 1.5 * (psi_hi - psi_lo) / 95.0;
         assert!(
-            (floor_small.unwrap() - floor_big).abs() <= 1.5 * grid_step,
-            "rank-stable floor must be n-independent: n=200 → {}, n=4000 → {floor_big} \
-             (grid step {grid_step})",
+            (floor_small.unwrap() - floor_big).abs() <= edge_wander_atol,
+            "rank-stable floor must not wander with the row count: n=120 → {}, \
+             n=1000 → {floor_big} (wander tolerance {edge_wander_atol})",
             floor_small.unwrap()
         );
 
@@ -1568,13 +1754,20 @@ mod tests {
     /// the maximal-rank band does NOT reach `psi_hi` and return a ceiling strictly
     /// inside the window, (b) report that ceiling as the upper edge of the band
     /// containing the seed (rank at the ceiling = window-maximal, rank just above it
-    /// strictly lower), and (c) be a pure k-space property — IDENTICAL whether built
-    /// from few or many rows (the n-independence the κ outer loop relies on). A
-    /// design full-rank up to `psi_hi` must return `None` (no clamp needed). This is
-    /// the regression guard for the n=16000 fast-ladder resets: the κ line search
-    /// overshot above the band to a rank-deficient ψ and tripped two O(n) resets.
+    /// strictly lower), and (c) TRANSPORT across row counts: a ceiling built from
+    /// few rows must still clamp the many-row build inside the maximal-rank band,
+    /// must carry a certified (host-stable) rank decision, and must sit within the
+    /// derived implicit-function bound of the many-row ceiling. (c) replaces a
+    /// former claim that the two ceilings are IDENTICAL, which #2408 showed is not
+    /// a theorem: the edge is a root of the rank margin, the build's Gram is an
+    /// `O(1/n)` row-sample of the continuum Gram, and a root moves by the margin
+    /// excursion divided by the crossing slope — negligible at a steep cliff, ~0.06
+    /// at this fixture's grazing crossing. A design full-rank up to `psi_hi` must
+    /// return `None` (no clamp needed). This is the regression guard for the
+    /// n=16000 fast-ladder resets: the κ line search overshot above the band to a
+    /// rank-deficient ψ and tripped two O(n) resets.
     #[test]
-    fn rank_stable_psi_ceiling_is_inside_window_and_n_independent() {
+    fn rank_stable_psi_ceiling_is_inside_window_and_n_transportable() {
         let k = 7usize;
         // `synth_design`'s radial Gram rank RISES with ψ (the columns separate as
         // s = r·e^ψ grows), so it collapses at the LOW edge — the floor's setting.
@@ -1643,18 +1836,138 @@ mod tests {
             );
         }
 
-        // (c) n-independence: the ceiling from a larger build matches to grid
-        // resolution — the rank cliff is an n-free k-space property.
+        // (c) n-TRANSPORT of the edge (#2408). The old assertion here demanded the
+        // two builds return the SAME ψ to within 1.5 grid steps of a grid that no
+        // longer exists (the search became a bisection in #2054), and that demand
+        // is not a theorem. DERIVATION. The edge is a root of the rank margin
+        // `m(ψ) = ln(λ_r(ψ) / (rtol·λ_max(ψ)))` (`PsiGramTensor::rank_margin`).
+        // Building from n rows samples the underlying continuum Gram with a
+        // relative `O(1/n)` quadrature error; by Ostrowski a relative congruence
+        // perturbation moves every eigenvalue by a relative `O(1/n)`, i.e. moves
+        // `m` ADDITIVELY by `O(1/n)`. Let the two builds' margins be `m_A`, `m_B`
+        // with roots `ψ*_A ≤ ψ*_B`, and let `S = inf|m'|`, `D = sup|m_A − m_B|`
+        // over `[ψ*_A, ψ*_B]`. Then `m_B(ψ*_A) = m_B(ψ*_A) − m_A(ψ*_A) ≤ D`, and
+        // since `m_B` falls monotonically to its own root, `m_B(ψ*_A) ≥ S·(ψ*_B −
+        // ψ*_A)`. Hence the implicit-function transport bound
+        //
+        //     |ψ*_A − ψ*_B| ≤ D / S.
+        //
+        // n-invariance of the LOCATION is therefore the special case of a STEEP
+        // crossing; this fixture's crossing is grazing (≈1.5 nats per unit ψ), so
+        // an `O(1/n)` margin excursion legitimately displaces the edge by ~0.06.
+        // What the κ loop actually needs is not invariance but TRANSPORT, gated
+        // below: the conservative clamp must hold the maximal rank on both builds,
+        // the displacement must be within the derived bound, and the transport
+        // uncertainty must not swallow the band the clamp delimits.
         let t_big = build_at(1000);
         let ceil_big = t_big
             .rank_stable_psi_ceiling(seed)
-            .expect("the rank cliff is an n-free property; the big build must also clamp");
-        let grid_step = (psi_hi - psi_lo) / 95.0; // NODES - 1 = 95
+            .expect("the rank band is a k-space property; the big build must also clamp");
+        let (edge_lo, edge_hi) = if ceiling <= ceil_big {
+            (ceiling, ceil_big)
+        } else {
+            (ceil_big, ceiling)
+        };
+        let span = edge_hi - edge_lo;
+
+        // Both edges are genuine band edges on their OWN build: maximal rank at
+        // the edge, deficient above it. A displacement that landed on a different
+        // cliff would break here, not be absorbed by the bound.
+        let rank_on = |t: &PsiGramTensor, psi: f64| {
+            t.gram_numerical_rank(psi)
+                .expect("in-window Gram has a numerical rank")
+        };
+        assert_eq!(
+            rank_on(&t_big, ceil_big),
+            max_rank,
+            "the big build's ceiling must sit at the window-maximal rank"
+        );
+        let probe_above_big = ceil_big + 0.25;
+        if t_big.contains(probe_above_big) {
+            assert!(
+                rank_on(&t_big, probe_above_big) < max_rank,
+                "rank just above the big build's ceiling ({}) must drop under {max_rank}",
+                rank_on(&t_big, probe_above_big)
+            );
+        }
+
+        // OPERATIONAL transport: the conservative of the two clamps keeps the
+        // maximal rank on BOTH builds, so a ceiling computed at one row count is
+        // still a valid clamp for the other — the property the κ line search
+        // consumes (never leave the maximal-rank band), stated without reference
+        // to any resolution constant.
+        for (label, t) in [("n=120", &t_small), ("n=1000", &t_big)] {
+            assert_eq!(
+                rank_on(t, edge_lo),
+                max_rank,
+                "the conservative clamp {edge_lo} must hold the maximal rank on the {label} build"
+            );
+        }
+
+        // Both edges carry a CERTIFIED rank decision: the clamp is not parked on a
+        // ψ whose rank flips with the eigensolver's last bit. Bisecting the bare
+        // witness used to return exactly such a ψ — `Ambiguous` at both row counts
+        // on this fixture, i.e. a clamp whose own rank was host-dependent.
+        for (label, t, edge) in [("n=120", &t_small, ceiling), ("n=1000", &t_big, ceil_big)] {
+            match t.rank_decision(edge) {
+                Some(RankDecision::Certified { rank, .. }) => assert_eq!(
+                    rank, max_rank,
+                    "the {label} ceiling must certify the window-maximal rank"
+                ),
+                other => panic!(
+                    "the {label} ceiling {edge} must carry a certified rank decision \
+                     (a clamp on an undecidable rank is the coin flip the clamp exists \
+                     to remove), got {other:?}"
+                ),
+            }
+        }
+
+        // The derived transport bound `D / S`, both terms MEASURED from the two
+        // tensors' own margin functions.
+        let margin_of = |t: &PsiGramTensor, psi: f64| {
+            t.rank_margin(psi, max_rank)
+                .expect("the bracketing interval is in-window on both builds")
+        };
+        let excursion = (0..=64)
+            .map(|i| {
+                let psi = edge_lo + span * (i as f64) / 64.0;
+                (margin_of(&t_small, psi) - margin_of(&t_big, psi)).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        // Central-difference step for the slope floor. The margin's own noise is
+        // the eigensolver's backward-error bar on `λ_r`, `≈ SLACK·k·ε/rtol ≈ 1e-4`
+        // nats (the same quantity `rank_guard_gap` is derived from), so a quotient
+        // at step `h` carries `≈ 1e-4/h` nats/ψ of noise; `h ≥ 1e-3` keeps that a
+        // few percent of the ≈1.5 nats/ψ slope, and any residual noise can only
+        // LOWER `slope_min`, i.e. widen the bound — it can never manufacture a red.
+        let h = (span / 32.0).max(1.0e-3);
+        let slope_min = (0..=32)
+            .flat_map(|i| {
+                let psi = edge_lo + span * (i as f64) / 32.0;
+                [&t_small, &t_big]
+                    .map(|t| ((margin_of(t, psi + h) - margin_of(t, psi - h)) / (2.0 * h)).abs())
+            })
+            .fold(f64::INFINITY, f64::min);
         assert!(
-            (ceil_small.unwrap() - ceil_big).abs() <= 1.5 * grid_step,
-            "rank-stable ceiling must be n-independent: n=120 → {}, n=1000 → {ceil_big} \
-             (grid step {grid_step})",
-            ceil_small.unwrap()
+            slope_min > 0.0,
+            "the rank margin must cross the cutoff transversally for the edge to be defined"
+        );
+        let transport_bound = excursion / slope_min;
+        assert!(
+            span <= transport_bound,
+            "ceiling displacement {span} exceeds its derived n-transport bound \
+             {transport_bound} (margin excursion {excursion} nats / crossing slope \
+             {slope_min} nats per unit ψ): n=120 → {ceiling}, n=1000 → {ceil_big}. \
+             The edge moved further than the builds' O(1/n) margin difference can \
+             explain, so this is a band-search defect, not sampling error."
+        );
+        // Non-vacuity: the transport uncertainty must stay well inside the band the
+        // clamp delimits, otherwise the ceiling carries no usable information.
+        let band_width = ceiling - seed;
+        assert!(
+            transport_bound < band_width,
+            "the n-transport bound {transport_bound} must be smaller than the \
+             maximal-rank band it clamps ({band_width} wide)"
         );
 
         // A genuinely full-rank design across the window needs no clamp → None.
