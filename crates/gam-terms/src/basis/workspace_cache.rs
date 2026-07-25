@@ -858,22 +858,42 @@ fn spherical_center_dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Lexicographic comparison of the sorted intrinsic distance profiles of two
-/// spherical data rows. `Equal` means the unordered geometry cannot distinguish
-/// the two candidates: choosing one by row index would violate permutation
-/// invariance, so the selector must treat their whole class atomically.
-fn spherical_dot_profile_cmp(units: &[[f64; 3]], i: usize, j: usize) -> std::cmp::Ordering {
-    let mut pi: Vec<f64> = units
-        .iter()
-        .map(|u| spherical_center_dot(&units[i], u))
+/// The sorted intrinsic distance profile of one spherical data row: the multiset
+/// `{uᵢ·u_j : j}` in ascending total order. Rows related by a rotation that maps
+/// the point cloud to itself have the SAME profile, which is what makes it a
+/// legal tie-break key — it depends on neither the frame nor the row order.
+///
+/// Building one costs `O(n log n)`. A caller comparing MANY candidates against
+/// ONE pivot must therefore build the pivot's profile once and reuse it via
+/// [`spherical_dot_profile_cmp_against`]; rebuilding it per candidate is what
+/// made farthest-point selection quadratic on symmetric clouds (#2420).
+fn spherical_dot_profile(units: &[[f64; 3]], i: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    // `total_cmp` is a total order and the elements are plain values, so an
+    // unstable parallel sort produces the identical sequence a sequential
+    // `sort_by` would; only the order of equal-comparing bit patterns could
+    // differ, and equal bit patterns are indistinguishable to every consumer.
+    let anchor = units[i];
+    let mut profile: Vec<f64> = units
+        .par_iter()
+        .map(|u| spherical_center_dot(&anchor, u))
         .collect();
-    let mut pj: Vec<f64> = units
-        .iter()
-        .map(|u| spherical_center_dot(&units[j], u))
-        .collect();
-    pi.sort_by(f64::total_cmp);
-    pj.sort_by(f64::total_cmp);
-    for (a, b) in pi.iter().zip(pj.iter()) {
+    profile.par_sort_by(f64::total_cmp);
+    profile
+}
+
+/// Lexicographic comparison of row `i`'s sorted distance profile against an
+/// already-built `pivot` profile. `Equal` means the unordered geometry cannot
+/// distinguish the two candidates: choosing one by row index would violate
+/// permutation invariance, so the selector must treat their whole class
+/// atomically.
+fn spherical_dot_profile_cmp_against(
+    units: &[[f64; 3]],
+    i: usize,
+    pivot: &[f64],
+) -> std::cmp::Ordering {
+    let profile = spherical_dot_profile(units, i);
+    for (a, b) in profile.iter().zip(pivot.iter()) {
         let ordering = a.total_cmp(b);
         if !ordering.is_eq() {
             return ordering;
@@ -950,6 +970,7 @@ pub fn select_spherical_farthest_point_centers(
     num_centers: usize,
     radians: bool,
 ) -> Result<Array2<f64>, BasisError> {
+    use rayon::prelude::*;
     validate_lat_lon_matrix(data, "spherical farthest-point centers", radians)?;
     if num_centers == 0 {
         crate::bail_invalid_basis!("spherical farthest-point center count must be positive");
@@ -974,6 +995,7 @@ pub fn select_spherical_farthest_point_centers(
     // "distance" comparison below is phrased directly in dot products — each of
     // which is exactly rotation invariant.
     let units: Vec<[f64; 3]> = (0..n)
+        .into_par_iter()
         .map(|i| {
             let lat = data[[i, 0]] * to_rad;
             let lon = data[[i, 1]] * to_rad;
@@ -992,35 +1014,47 @@ pub fn select_spherical_farthest_point_centers(
     // `select_thin_plate_knots`).
     let mut sum = [0.0_f64; 3];
     for (c, sum_c) in sum.iter_mut().enumerate() {
-        let mut col: Vec<f64> = units.iter().map(|u| u[c]).collect();
-        col.sort_by(|a, b| a.total_cmp(b));
+        let mut col: Vec<f64> = units.par_iter().map(|u| u[c]).collect();
+        // Sorted in parallel but summed sequentially: the value-sorted ORDER is
+        // what makes the key permutation invariant, and the accumulation must
+        // stay left-to-right over that order to keep the sum bit-reproducible.
+        col.par_sort_by(|a, b| a.total_cmp(b));
         *sum_c = col.iter().sum();
     }
     let dot_to_sum: Vec<f64> = units
-        .iter()
+        .par_iter()
         .map(|u| spherical_center_dot(u, &sum))
         .collect();
 
     // Seed class = rows nearest the mean direction (largest `dot_to_sum`), then
     // lexicographically smallest intrinsic dot profile. If that complete key is
     // tied, retain the whole symmetry orbit; a row-index tie-break is forbidden.
+    // The incumbent's profile is built at most once per incumbent and dropped
+    // when the incumbent changes, so a run of `dot_to_sum` ties costs one profile
+    // per candidate instead of two (#2420).
     let mut seed = 0usize;
+    let mut seed_profile: Option<Vec<f64>> = None;
     for i in 1..n {
         let take = match dot_to_sum[i].total_cmp(&dot_to_sum[seed]) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => spherical_dot_profile_cmp(&units, i, seed).is_lt(),
+            std::cmp::Ordering::Equal => {
+                let pivot = seed_profile.get_or_insert_with(|| spherical_dot_profile(&units, seed));
+                spherical_dot_profile_cmp_against(&units, i, pivot).is_lt()
+            }
         };
         if take {
             seed = i;
+            seed_profile = None;
         }
     }
+    let seed_profile = seed_profile.unwrap_or_else(|| spherical_dot_profile(&units, seed));
 
     let target = num_centers;
     let seed_class: Vec<usize> = (0..n)
         .filter(|&i| {
             dot_to_sum[i].total_cmp(&dot_to_sum[seed]).is_eq()
-                && spherical_dot_profile_cmp(&units, i, seed).is_eq()
+                && spherical_dot_profile_cmp_against(&units, i, &seed_profile).is_eq()
         })
         .collect();
     let seed_orbit = distinct_spherical_orbit(&units, &seed_class, &[]);
@@ -1041,12 +1075,12 @@ pub fn select_spherical_farthest_point_centers(
         chosen[i] = true;
     }
     selected.extend(seed_orbit);
-    for i in 0..n {
-        max_dot[i] = selected
+    max_dot.par_iter_mut().enumerate().for_each(|(i, slot)| {
+        *slot = selected
             .iter()
             .map(|&center| spherical_center_dot(&units[i], &units[center]))
             .fold(f64::NEG_INFINITY, f64::max);
-    }
+    });
 
     // A dot `≥ 1 − SPHERICAL_CENTER_COINCIDENT_TOL` is a geodesic angle
     // `≲ 1.4e-6` rad: the
@@ -1055,6 +1089,8 @@ pub fn select_spherical_farthest_point_centers(
     // center set at the number of DISTINCT data directions.
     while selected.len() < target {
         let mut best: Option<usize> = None;
+        // As in the seed scan: one profile per incumbent, not one per comparison.
+        let mut best_profile: Option<Vec<f64>> = None;
         for i in 0..n {
             if chosen[i] {
                 continue;
@@ -1077,13 +1113,16 @@ pub fn select_spherical_farthest_point_centers(
                                 std::cmp::Ordering::Less => true,
                                 std::cmp::Ordering::Greater => false,
                                 std::cmp::Ordering::Equal => {
-                                    spherical_dot_profile_cmp(&units, i, b).is_lt()
+                                    let pivot = best_profile
+                                        .get_or_insert_with(|| spherical_dot_profile(&units, b));
+                                    spherical_dot_profile_cmp_against(&units, i, pivot).is_lt()
                                 }
                             }
                         }
                     };
                     if take {
                         best = Some(i);
+                        best_profile = None;
                     }
                 }
             }
@@ -1096,12 +1135,17 @@ pub fn select_spherical_farthest_point_centers(
             break;
         }
 
+        // The pivot for this whole filter is the single row `next`, so its profile
+        // is built once here rather than rebuilt for every candidate that reaches
+        // the third key. On a regular lat/lon grid an entire longitude ring
+        // reaches it, which is what made this the dominant cost (#2420).
+        let next_profile = spherical_dot_profile(&units, next);
         let tied_class: Vec<usize> = (0..n)
             .filter(|&i| {
                 !chosen[i]
                     && max_dot[i].total_cmp(&max_dot[next]).is_eq()
                     && dot_to_sum[i].total_cmp(&dot_to_sum[next]).is_eq()
-                    && spherical_dot_profile_cmp(&units, i, next).is_eq()
+                    && spherical_dot_profile_cmp_against(&units, i, &next_profile).is_eq()
             })
             .collect();
         let orbit = distinct_spherical_orbit(&units, &tied_class, &selected);
@@ -1119,17 +1163,19 @@ pub fn select_spherical_farthest_point_centers(
             continue;
         }
         selected.extend(orbit.iter().copied());
-        for i in 0..n {
-            if chosen[i] {
-                continue;
+        let chosen_ref = &chosen;
+        let orbit_ref = &orbit;
+        max_dot.par_iter_mut().enumerate().for_each(|(i, slot)| {
+            if chosen_ref[i] {
+                return;
             }
-            for &center in &orbit {
+            for &center in orbit_ref {
                 let d = spherical_center_dot(&units[i], &units[center]);
-                if d > max_dot[i] {
-                    max_dot[i] = d;
+                if d > *slot {
+                    *slot = d;
                 }
             }
-        }
+        });
     }
 
     if selected.len() < target {
