@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Plot the #2283 paired Eq-4 bits-at-R2 rows against the theorem's prediction.
+"""Plot the #2283 paired Eq-4 rows against the crossover theorem's prediction.
 
-Two panels, both read from the SAME authoritative JSONL the comparator accepts:
+The absolute score is thousands of bits per token and the theorem predicts a
+margin of a few tens, so a plot of the two totals shows two indistinguishable
+lines. The figure is therefore built around the MARGIN, which is the quantity the
+theorem actually makes a claim about:
 
-* **left** — bits/token at each fixed-distortion R2 operating point for the
-  external TopK bar and the theorem-faithful hybrid, with the CROSSOVER
-  THEOREM's closed-form prediction for the hybrid drawn alongside. The
-  prediction is a-priori: it takes the external row's measured code and residual
-  terms (the theorem says a circle-class chart moves neither: the code delta
-  ``(s-d-1)/2*log2(lambda/delta)`` vanishes at ``s = d+1 = 2`` and the
-  matched-recon residual delta is zero) and swaps ONLY the support term, which
-  the two configurations fix in closed form as ``log2 C(G, L0)``. The dictionary
-  term cannot move at all: the faithful ``k_flat`` config equalises the decoder
-  scalar counts exactly.
-* **right** — the four-term decomposition at the acceptance target, so the
-  reader can see which term the contest is actually decided on.
-
-The hybrid's full-linear-span bracket (from each row's own faithfulness audit)
-is drawn as the pessimistic end of the measurement: the score with every atom
-charged its whole decoder span rather than the ``d+1`` scalars the theorem's
-ledger names.
+* **left** — the two arms' bits at each fixed-distortion R2 operating point, for
+  scale and for the shape of the distortion sweep.
+* **middle** — ``external - hybrid`` at each target against the theorem's
+  closed-form prediction. That prediction is a-priori and flat in R2: the
+  faithful ``k_flat`` config equalises the decoder scalar counts exactly, so
+  ``Ddict = 0``; a circle-class chart has span ``s = d + 1 = 2``, so the
+  theorem's code term ``(s-d-1)*0.5*log2(lambda/delta)`` is identically zero and
+  its matched-recon residual delta is zero; what remains is the support term,
+  which is ``log2 C(G, L0)`` of the two CONFIGURATIONS and contains no fitted
+  quantity. The hybrid's full-linear-span re-score (every atom charged its whole
+  decoder span rather than the ``d+1`` scalars the theorem's ledger names) is
+  drawn as the pessimistic end of the measurement at the acceptance target.
+* **right** — the four-term delta at the acceptance target, so it is visible
+  which term the contest was decided on and whether ``Dcode`` really vanished.
 """
 from __future__ import annotations
 
@@ -35,22 +35,41 @@ from crossover_theorem_check import selection_bits  # noqa: E402
 
 TARGETS = (0.80, 0.90, 0.95, 0.99)
 ACCEPTANCE_TARGET = 0.99
+EXTERNAL_COLOR = "#B4413C"
+HYBRID_COLOR = "#1F5C8B"
+THEOREM_COLOR = "#1D7874"
 
 
-def _rows(path: str, run_id: str) -> dict:
+def _rows(path: str, run_id: str) -> tuple[dict, dict | None]:
+    """Return the arm results plus the flat-checkpoint record, if any.
+
+    The checkpoint record carries the hybrid CONFIGURATION (`k_flat`,
+    `curved_atoms`, `curved_k`, `d_atom`) even when the curved-resume stage has
+    not produced its row yet, which is exactly what the theorem's closed-form
+    prediction needs: the prediction is a function of the two configurations and
+    the external arm's measurement, never of the hybrid fit.
+    """
     found: dict[str, dict] = {}
+    checkpoint: dict | None = None
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             record = json.loads(line)
-            if record.get("run_id") != run_id or record.get("record_type") != "result":
+            if record.get("run_id") != run_id:
                 continue
-            found[record["arm"]] = record
-    missing = {"external_topk", "hybrid_rust"} - set(found)
-    if missing:
-        raise SystemExit(f"{path}: run {run_id!r} is missing rows for {sorted(missing)}")
-    return found
+            if record.get("record_type") == "result":
+                found[record["arm"]] = record
+            elif record.get("record_type") == "flat_checkpoint":
+                checkpoint = record
+    if "external_topk" not in found:
+        raise SystemExit(f"{path}: run {run_id!r} has no external_topk result")
+    if "hybrid_rust" not in found and checkpoint is None:
+        raise SystemExit(
+            f"{path}: run {run_id!r} has neither a hybrid_rust result nor a flat "
+            "checkpoint, so the hybrid configuration is unknown"
+        )
+    return found, checkpoint
 
 
 def _series(record: dict, key: str) -> list[float]:
@@ -58,23 +77,30 @@ def _series(record: dict, key: str) -> list[float]:
 
 
 def _theorem_support_bits(record: dict) -> tuple[float, float]:
-    """Closed-form support cost of the two CONFIGURATIONS (not of the fits).
+    """Support cost of the two CONFIGURATIONS in closed form (no fitted input).
 
-    External: ``G = K`` atoms, ``L0 = top_k`` actives. Hybrid: the faithful
-    config replaces ``curved_atoms`` flat atoms' worth of decoder rows with
-    charts, and each chart firing spends ``1 + d`` of the active-scalar budget
-    where a flat firing spends one -- so the hybrid names fewer atoms per token.
+    External: ``G = K`` atoms named ``L0 = top_k`` at a time. Hybrid: the faithful
+    config spends ``curved_atoms * m`` decoder rows on charts instead of flat
+    atoms, and each chart firing consumes ``1 + d`` of the active-scalar budget
+    where a flat firing consumes one -- so the hybrid names fewer atoms per token
+    while transmitting the same number of scalars.
     """
-    k_external = int(record["K"])
-    top_k = int(record["top_k"])
-    curved_atoms = int(record["curved_atoms"])
-    curved_k = int(record["curved_k"])
-    d_atom = int(record["d_atom"])
-    k_flat = int(record["k_flat"])
-    flat_actives = top_k - curved_k * (1 + d_atom)
-    external = selection_bits(k_external, top_k)
-    hybrid = selection_bits(k_flat + curved_atoms, flat_actives + curved_k)
+    flat_actives = int(record["top_k"]) - int(record["curved_k"]) * (1 + int(record["d_atom"]))
+    external = selection_bits(int(record["K"]), int(record["top_k"]))
+    hybrid = selection_bits(
+        int(record["k_flat"]) + int(record["curved_atoms"]),
+        flat_actives + int(record["curved_k"]),
+    )
     return external, hybrid
+
+
+def _terms(record: dict, target: float) -> dict[str, float]:
+    return {
+        "dictionary": float(record["bits_dictionary_bits"]),
+        "support": float(record["bits_support_bits"]),
+        "code": float(record[f"bits_code_bits_at_r2_{target:g}"]),
+        "residual": float(record[f"bits_resid_bits_at_r2_{target:g}"]),
+    }
 
 
 def main() -> int:
@@ -84,70 +110,102 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
-    rows = _rows(args.results, args.run_id)
-    external, hybrid = rows["external_topk"], rows["hybrid_rust"]
+    rows, checkpoint = _rows(args.results, args.run_id)
+    external = rows["external_topk"]
+    hybrid = rows.get("hybrid_rust")
+    config = hybrid if hybrid is not None else checkpoint
     external_bits = _series(external, "bits")
-    hybrid_bits = _series(hybrid, "bits")
-    support_external, support_hybrid = _theorem_support_bits(hybrid)
-    predicted = [value - (support_external - support_hybrid) for value in external_bits]
+    support_external, support_hybrid = _theorem_support_bits(config)
+    predicted_margin = support_external - support_hybrid
+    predicted_bits = [value - predicted_margin for value in external_bits]
+    hybrid_bits = _series(hybrid, "bits") if hybrid is not None else None
+    margin = (
+        None if hybrid_bits is None
+        else [e - h for e, h in zip(external_bits, hybrid_bits, strict=True)]
+    )
+    full_span = (
+        None if hybrid is None
+        else hybrid.get("bits_faithfulness_audit", {}).get("bracket", {}).get("full_span_bits")
+    )
 
-    audit = hybrid.get("bits_faithfulness_audit", {}).get("bracket", {})
-    full_span = audit.get("full_span_bits")
+    figure, (curve, gap, split) = plt.subplots(1, 3, figsize=(16.5, 5.2))
 
-    figure, (curve, split) = plt.subplots(1, 2, figsize=(13.5, 5.4))
-
-    curve.plot(TARGETS, external_bits, "o-", color="#B4413C", linewidth=2,
-               label=f"external TopK (K={external['K']}), measured")
-    curve.plot(TARGETS, hybrid_bits, "s-", color="#1F5C8B", linewidth=2,
-               label=f"theorem-faithful hybrid (k_flat={hybrid['k_flat']}"
-                     f"+{hybrid['curved_atoms']} charts), measured")
-    curve.plot(TARGETS, predicted, "--", color="#1F5C8B", linewidth=1.4, alpha=0.75,
-               label="crossover theorem prediction for the hybrid")
-    if full_span is not None:
-        curve.plot([ACCEPTANCE_TARGET], [full_span], "v", color="#1F5C8B",
-                   markersize=9, markerfacecolor="none",
-                   label="hybrid, every atom charged its full decoder span")
+    curve.plot(TARGETS, external_bits, "o-", color=EXTERNAL_COLOR, linewidth=2,
+               label=f"external TopK, K={external['K']}   (EV {external['ev']:.4f})")
+    chart_label = f"{config['k_flat']} flat + {config['curved_atoms']} charts"
+    if hybrid_bits is not None:
+        curve.plot(TARGETS, hybrid_bits, "s--", color=HYBRID_COLOR, linewidth=2,
+                   label=f"hybrid, {chart_label}   (EV {hybrid['ev']:.4f})")
+    else:
+        curve.plot(TARGETS, predicted_bits, ":", color=THEOREM_COLOR, linewidth=2,
+                   label=f"hybrid PREDICTED by the theorem, {chart_label}")
     curve.set_xlabel("fixed-distortion operating point  $R^2$")
     curve.set_ylabel("Eq-4 description length (bits / token)")
-    curve.set_title(
-        f"creditscope L30 residual_post, N={external['N']}, p={external['p']}, "
-        f"horizon={external['amortization_horizon']}")
+    curve.set_title("held-out bits at $R^2$")
     curve.grid(alpha=0.25)
     curve.legend(fontsize=8, loc="upper left")
 
-    names = ("dictionary", "support", "code", "residual")
-    def parts(record):
-        return [
-            float(record["bits_dictionary_bits"]),
-            float(record["bits_support_bits"]),
-            float(record[f"bits_code_bits_at_r2_{ACCEPTANCE_TARGET:g}"]),
-            float(record[f"bits_resid_bits_at_r2_{ACCEPTANCE_TARGET:g}"]),
-        ]
+    gap.axhline(predicted_margin, color=THEOREM_COLOR, linestyle="--", linewidth=1.8,
+                label=f"crossover theorem: $\\Delta$support = {predicted_margin:.2f} bits")
+    gap.axhline(0.0, color="#777777", linewidth=0.9)
+    if margin is not None:
+        gap.plot(TARGETS, margin, "s-", color=HYBRID_COLOR, linewidth=2,
+                 label="measured  external $-$ hybrid")
+    if full_span is not None:
+        gap.plot([ACCEPTANCE_TARGET], [external_bits[-1] - full_span], "v",
+                 color=HYBRID_COLOR, markersize=10, markerfacecolor="none",
+                 label="measured, charts paid at full decoder span")
+    gap.set_xlim(min(TARGETS) - 0.01, max(TARGETS) + 0.01)
+    gap.set_xlabel("fixed-distortion operating point  $R^2$")
+    gap.set_ylabel("bits / token the hybrid saves")
+    gap.set_title("the margin, against the theorem's closed form")
+    gap.grid(alpha=0.25)
+    gap.legend(fontsize=8, loc="best")
 
-    external_parts, hybrid_parts = parts(external), parts(hybrid)
+    names = ("dictionary", "support", "code", "residual")
+    external_terms = _terms(external, ACCEPTANCE_TARGET)
     positions = range(len(names))
-    width = 0.38
-    split.bar([p - width / 2 for p in positions], external_parts, width,
-              color="#B4413C", label="external TopK")
-    split.bar([p + width / 2 for p in positions], hybrid_parts, width,
-              color="#1F5C8B", label="hybrid")
-    for index, (left, right) in enumerate(zip(external_parts, hybrid_parts, strict=True)):
-        split.annotate(f"{left - right:+.1f}", (index, max(left, right)),
-                       textcoords="offset points", xytext=(0, 4),
-                       ha="center", fontsize=9)
+    if hybrid is not None:
+        hybrid_terms = _terms(hybrid, ACCEPTANCE_TARGET)
+        deltas = [external_terms[name] - hybrid_terms[name] for name in names]
+        bars = split.bar(
+            list(positions), deltas, 0.55,
+            color=[HYBRID_COLOR if value >= 0 else EXTERNAL_COLOR for value in deltas])
+    else:
+        deltas = [0.0, predicted_margin, 0.0, 0.0]
+        bars = split.bar(list(positions), deltas, 0.55, color=THEOREM_COLOR, alpha=0.35,
+                         hatch="//", edgecolor=THEOREM_COLOR)
+    split.axhline(0.0, color="#333333", linewidth=1.0)
+    # The theorem predicts each term's delta exactly: 0 for dictionary (equal
+    # decoder scalars by construction), the closed-form support gap, 0 for code
+    # (circle class), and no claim for residual (a fit outcome, not a prediction).
+    split.plot([0, 1, 2], [0.0, predicted_margin, 0.0], "_", color=THEOREM_COLOR,
+               markersize=30, markeredgewidth=2.5, linestyle="none",
+               label="theorem's predicted delta")
+    for bar, value in zip(bars, deltas, strict=True):
+        split.annotate(f"{value:+.2f}", (bar.get_x() + bar.get_width() / 2, value),
+                       textcoords="offset points",
+                       xytext=(0, 5 if value >= 0 else -13), ha="center", fontsize=9)
     split.set_xticks(list(positions))
     split.set_xticklabels(names)
-    split.set_yscale("symlog")
-    split.set_ylabel(f"bits / token at $R^2$={ACCEPTANCE_TARGET}")
-    split.set_title("term-by-term (annotation = external - hybrid)")
+    split.set_ylabel(f"external $-$ hybrid, bits / token at $R^2$={ACCEPTANCE_TARGET}")
+    split.set_title("which term carries the margin"
+                    + ("" if hybrid is not None else "  (prediction only)"), pad=12)
     split.grid(alpha=0.25, axis="y")
-    split.legend(fontsize=9)
+    split.legend(fontsize=8, loc="best")
 
+    verdict = (
+        f"external {external_bits[-1]:.1f} vs hybrid {hybrid_bits[-1]:.1f} bits/token"
+        if hybrid_bits is not None
+        else f"external {external_bits[-1]:.1f} bits/token measured; hybrid "
+             f"{predicted_bits[-1]:.1f} predicted (curved tier not yet run)"
+    )
     figure.suptitle(
-        f"gam #2283 - authoritative Eq-4 bits at $R^2$ = {ACCEPTANCE_TARGET}: "
-        f"external {external_bits[-1]:.1f} vs hybrid {hybrid_bits[-1]:.1f} bits/token",
-        fontsize=12)
-    figure.tight_layout()
+        f"gam #2283 — Eq-4 bits at $R^2$={ACCEPTANCE_TARGET} on creditscope L30 residual_post "
+        f"(N={external['N']}, p={external['p']}, horizon={external['amortization_horizon']}): "
+        + verdict,
+        fontsize=11)
+    figure.tight_layout(rect=(0, 0, 1, 0.95))
     figure.savefig(args.out, dpi=160)
     print(f"wrote {args.out}")
     return 0
