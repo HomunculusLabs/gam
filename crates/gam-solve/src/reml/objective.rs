@@ -1623,7 +1623,7 @@ impl<'a> RemlState<'a> {
         } else {
             PseudoLogdetMode::Smooth
         };
-        let c_nontrivial = pirls_result.solve_c_array.iter().any(|&c| c != 0.0);
+        let c_nontrivial = pirls_result.solve_c_nontrivial;
 
         // Same Cholesky fast path as `build_dense_assembly`: for ValueOnly
         // evaluations with `Smooth` mode (no Firth and no beta-dependent
