@@ -1475,7 +1475,7 @@ fn terminal_score_from_working_sets(
             states.len(),
         ));
     }
-    let total = specs.iter().map(|spec| spec.design.ncols()).sum();
+    let total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
     let mut score = Array1::<f64>::zeros(total);
     let mut offset = 0usize;
     for (block_idx, ((work, spec), state)) in working_sets

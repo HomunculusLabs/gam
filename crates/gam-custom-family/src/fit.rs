@@ -2175,7 +2175,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         objective: penalized_objective,
         rho: mode_rho,
         hyper_values: mode_hyper_values,
-        inner,
+        mut inner,
     } = mode;
     if !mode_hyper_values.is_empty() {
         return Err(CustomFamilyError::Optimization {
@@ -2709,7 +2709,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
         objective: selected_objective,
         rho,
         hyper_values,
-        inner,
+        mut inner,
     } = mode;
     if !inner.converged {
         return Err(CustomFamilyError::Optimization {
