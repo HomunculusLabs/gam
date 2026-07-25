@@ -890,6 +890,71 @@ pub(crate) fn fused_rank_deficient_logdet_gradient_masked_null_matches_central_d
         (fused - fd).abs() <= 1e-6 * (1.0 + fd.abs()),
         "masked fused {fused:.12e} vs central difference {fd:.12e}"
     );
+
+    // (3) BRANCH GUARD (#2366). A difference quotient is a derivative only if the
+    // stencil stays on ONE branch. On this fixture the branch is not a
+    // solver-selected mode — `H(ρ) = M + exp(ρ)S` is a closed-form function of ρ,
+    // with no inner solve and no `θ̂(ρ)` — but the failure has the same shape: the
+    // discrete choice is the HardPseudo ACTIVE MASK, and an eigenvalue crossing ε
+    // makes `log|H(ρ)|₊` jump while both endpoints still decompose and certify
+    // happily. Two guards, one direct and one indirect, because neither alone is
+    // sufficient:
+    //
+    //   (a) the masked eigenPAIR is fixed across the stencil — not merely the same
+    //       COUNT (which `active_rank()` above pins) but the same DIRECTION, so a
+    //       mask that swaps which near-null pair it hides is caught. This is the
+    //       "mode slides along a near-null direction" case.
+    //   (b) Richardson consistency: for a `C⁴` target the central difference obeys
+    //       `CD(h) − f′ = f‴·h²/6 + O(h⁴)`, so halving `h` must QUARTER the error.
+    //       Any branch event inside the stencil degrades that to `O(h)` (kink) or
+    //       `O(1)` (jump) — including a crossing that leaves and returns between
+    //       sample points, which (a) cannot see. Predicted ratio 1/4; asserted
+    //       ≤ 0.35, the headroom covering the roundoff floor `ε·|cost|/h ≈ 1e-13`
+    //       against a truncation term `|f‴|·2.7e-6` at `h = 4e-3`.
+    let masked_direction = |rho: f64| -> Array1<f64> {
+        let op_probe = op_at(rho);
+        let masked = (0..op_probe.n_dim)
+            .find(|&j| !op_probe.active_mask[j])
+            .expect("fixture masks exactly one eigenpair");
+        op_probe.eigenvectors.column(masked).to_owned()
+    };
+    let h_coarse = 4.0e-3_f64;
+    let h_fine = 0.5 * h_coarse;
+    for probe in [
+        rho0 - h_coarse,
+        rho0 - h_fine,
+        rho0 + h_fine,
+        rho0 + h_coarse,
+    ] {
+        assert_eq!(
+            op_at(probe).active_rank(),
+            p - 1,
+            "active set must stay stable across the Richardson stencil"
+        );
+        let overlap = masked_direction(probe).dot(&v).abs();
+        assert!(
+            overlap > 0.99,
+            "the masked eigenpair must be the SAME branch across the stencil: \
+             |⟨u_masked(ρ), v⟩| = {overlap:.6} at ρ = {probe:.6}"
+        );
+    }
+    let central = |h: f64| (cost_at(rho0 + h) - cost_at(rho0 - h)) / (2.0 * h);
+    let error_coarse = (central(h_coarse) - fused).abs();
+    let error_fine = (central(h_fine) - fused).abs();
+    // Only meaningful while truncation dominates; below the roundoff floor the
+    // ratio measures rounding, not the branch.
+    assert!(
+        error_coarse > 1e-10,
+        "the coarse stencil must sit in the truncation regime for the h² test to \
+         mean anything: error {error_coarse:.3e}"
+    );
+    assert!(
+        error_fine <= 0.35 * error_coarse,
+        "central-difference error must fall as h² across a branch-stable stencil: \
+         coarse(h={h_coarse:.1e}) {error_coarse:.6e}, fine(h={h_fine:.1e}) \
+         {error_fine:.6e}, ratio {:.4} (predicted 0.25)",
+        error_fine / error_coarse
+    );
 }
 
 // ─── #2354: fused logdet-gradient reductions stay exact under a masked
