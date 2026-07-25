@@ -1546,6 +1546,21 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, e)| *e).unwrap_or(0);
+    // The Jeffreys second-order completion normally exists only for
+    // derivative geometry. A value-only pass also needs it when the inner mode
+    // retains a non-negligible KKT residual: the one-step profile correction
+    // then evaluates through the mode-response operator, so omitting the
+    // completion changes the scalar criterion itself. Use a derivative-bearing
+    // geometry mode in exactly those two cases while leaving derivative output
+    // controlled independently by `eval_mode`.
+    let value_requires_jeffreys_completion = value_only_requires_jeffreys_drift(&inner);
+    let jeffreys_geometry_mode = if inner_quality_mode != EvalMode::ValueOnly
+        || value_requires_jeffreys_completion
+    {
+        EvalMode::ValueAndGradient
+    } else {
+        EvalMode::ValueOnly
+    };
 
     // ── Try to obtain a joint Hessian and route through the unified evaluator ──
     //
@@ -1678,13 +1693,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 &inner.block_states,
                 specs,
                 &ranges,
-                // Atomic mode screening emits only a scalar, but it solves the
-                // inner mode at the derivative quality requested by its caller.
-                // The Jeffreys completion changes the mode-response operator
-                // used by the KKT cost correction, so objective geometry must
-                // follow that requested quality too; otherwise screening and
-                // derivative assembly price different scalar criteria.
-                inner_quality_mode,
+                jeffreys_geometry_mode,
             )?;
         let has_configured_rho_prior = !matches!(rho_prior, gam_problem::RhoPrior::Flat);
         let batched_gradient_contract_allows_override =
@@ -2073,7 +2082,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 specs,
                 &ranges,
                 eval_mode,
-                value_only_requires_jeffreys_drift(&inner),
+                value_requires_jeffreys_completion,
             )?,
         )?;
         if let Some(gradient) = batched_gradient_override {
@@ -2110,9 +2119,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             &inner.block_states,
             specs,
             &ranges,
-            // Keep the scalar criterion on the requested derivative-quality
-            // geometry even when this particular pass emits value only.
-            inner_quality_mode,
+            jeffreys_geometry_mode,
         )?;
     let batched_gradient_contract_allows_override = batched_outer_gradient_contract_allows_override(
         robust_jeffreys_hphi
@@ -2356,7 +2363,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 specs,
                 &ranges,
                 eval_mode,
-                value_only_requires_jeffreys_drift(&inner),
+                value_requires_jeffreys_completion,
             )?,
         )?;
 

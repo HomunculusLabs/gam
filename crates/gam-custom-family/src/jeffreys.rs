@@ -563,10 +563,13 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     // divided-difference solve, preserving the value/gradient contract.
     let total_p = ranges.last().map(|(_, e)| *e).unwrap_or(0);
     let mut completion: Option<Array2<f64>> = None;
-    // Value-only probes consume only `Phi` and the divided-difference `H_Phi`
-    // in the outer logdet.  The completion exists solely to refine the
-    // derivative-bearing mode-response operator, so constructing it here would
-    // perform an unused fourth-order family pass on every line-search probe.
+    // A caller passes `ValueOnly` only after proving the scalar does not consume
+    // the mode-response operator. When a non-negligible inner KKT residual
+    // activates the one-step profile correction, the scalar *does* consume
+    // that operator and the caller promotes this geometry request to a
+    // derivative-bearing mode. Thus the completion stays off for exact-mode
+    // line-search probes without making value-only and derivative lanes price
+    // different corrected objectives.
     let completion_requested = eval_mode != EvalMode::ValueOnly
         && family.joint_jeffreys_information_contracted_trace_hessian_available();
     if completion_requested
