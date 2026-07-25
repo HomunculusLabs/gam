@@ -133,4 +133,4 @@ pub use workspace_cache::*;
 mod tests;
 
 #[cfg(test)]
-mod zz_measure_2445;
+mod zz_measure_2445_tests;
