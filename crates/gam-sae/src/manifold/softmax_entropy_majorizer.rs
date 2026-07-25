@@ -61,16 +61,39 @@ fn softmax_dense_entropy_hessian_entry(a: &[f64], kk: usize, jj: usize, m: f64, 
     scale * a[kk] * (indicator * (m - l_kk - 1.0) + a[jj] * (l_kk + l_jj + 1.0 - 2.0 * m))
 }
 
-/// Active-atom diagonal `D_kk` of the softmax-entropy Gershgorin majorizer; see
+/// Active-atom diagonal `D̃_kk` of the softmax-entropy Gershgorin majorizer; see
 /// [`softmax_majorizer_log_mean`]. `a` is the per-row softmax assignment vector,
 /// `kk` the (global) atom index, `m` the precomputed `Σ_j a_j l_j`, and `scale`
 /// the `λ/τ²` penalty scale. `O(K)` time, zero allocation.
+///
+/// The `|·|` is the soft-abs envelope `σ_{ε_k}(x) = sqrt(x² + ε₀²‖H_k·‖₂²)` of
+/// #2339, so this needs TWO passes over the row: one to accumulate the row's own
+/// curvature scale `‖H_k·‖₂²`, one to sum the envelope at that scale. Both walk
+/// the row diagonal-first, then `j ≠ k` ascending — the same order (and the same
+/// arithmetic) as `psd_majorizer_abs_row_sums`, which is what keeps the
+/// bit-for-bit oracle green. Still `O(K)` and still allocation-free.
 #[inline]
 pub(crate) fn active_softmax_gershgorin_majorizer_entry(a: &[f64], kk: usize, m: f64, scale: f64) -> f64 {
     let l_kk = softmax_entropy_log_plus_one(a[kk]);
     // Diagonal entry H_kk.
     let h_kk = scale * a[kk] * ((m - l_kk - 1.0) + a[kk] * (2.0 * l_kk + 1.0 - 2.0 * m));
-    let mut acc = h_kk.abs();
+    // Pass 1: the row's own squared curvature scale ‖H_k·‖₂².
+    let mut sum_sq = h_kk * h_kk;
+    for (jj, &a_jj) in a.iter().enumerate() {
+        if jj == kk {
+            continue;
+        }
+        let l_jj = softmax_entropy_log_plus_one(a_jj);
+        let h_kj = scale * a[kk] * a_jj * (l_kk + l_jj + 1.0 - 2.0 * m);
+        sum_sq += h_kj * h_kj;
+    }
+    // Pass 2: the soft-abs row sum at that scale, ε_k² = ε₀²·‖H_k·‖₂².
+    let eps0 =
+        gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::soft_abs_temperature(
+            a.len(),
+        );
+    let eps_sq = eps0 * eps0 * sum_sq;
+    let mut acc = gam_terms::analytic_penalties::soft_abs_squared_scale(h_kk, eps_sq);
     // Off-diagonal entries H_kj, j ≠ k.
     for (jj, &a_jj) in a.iter().enumerate() {
         if jj == kk {
@@ -78,13 +101,13 @@ pub(crate) fn active_softmax_gershgorin_majorizer_entry(a: &[f64], kk: usize, m:
         }
         let l_jj = softmax_entropy_log_plus_one(a_jj);
         let h_kj = scale * a[kk] * a_jj * (l_kk + l_jj + 1.0 - 2.0 * m);
-        acc += h_kj.abs();
+        acc += gam_terms::analytic_penalties::soft_abs_squared_scale(h_kj, eps_sq);
     }
     acc
 }
 
-/// Active-atom diagonal entry `∂D_kk/∂z_w = Σ_j sign(H_kj)·∂H_kj/∂z_w` of the
-/// softmax-entropy Gershgorin majorizer derivative (mirrors
+/// Active-atom diagonal entry `∂D̃_kk/∂z_w` of the softmax-entropy Gershgorin
+/// majorizer derivative (mirrors
 /// [`SoftmaxAssignmentSparsityPenalty::row_psd_majorizer_logit_derivative`]'s
 /// `out[[kk, kk]]` entry-for-entry — that operator's output is DIAGONAL, so only
 /// `kk == kk` entries are nonzero). The compact #1006 θ-adjoint needs this only
@@ -99,6 +122,19 @@ pub(crate) fn active_softmax_gershgorin_majorizer_entry(a: &[f64], kk: usize, m:
 /// adjoint stay on one operator (pinned by
 /// `active_softmax_majorizer_logit_derivative_matches_dense_1410`). `O(K)` time,
 /// zero allocation.
+///
+/// Since #2339 the majorized radius is the soft-abs envelope
+/// `D̃_kk = Σ_j sqrt(H_kj² + ε₀²‖H_k·‖₂²)`, so the derivative carries the exact
+/// row-scale chain term (full derivation on the dense twin):
+///
+/// ```text
+///   ∂D̃_kk/∂z_w = Σ_j (H_kj/s_kj)·Ḣ_kj + ε₀²·(Σ_l H_kl·Ḣ_kl)·Σ_j (1/s_kj),
+///   s_kj = sqrt(H_kj² + ε₀²‖H_k·‖₂²).
+/// ```
+///
+/// Two passes over the row (scale, then contraction), diagonal-first then
+/// `j ≠ k` ascending — the SAME traversal and arithmetic as the value helper and
+/// as the dense twin, which is what keeps the bit-for-bit oracle green.
 #[inline]
 fn active_softmax_majorizer_logit_derivative_entry(
     a: &[f64],
@@ -118,21 +154,58 @@ fn active_softmax_majorizer_logit_derivative_entry(
     let l_kk = l(kk);
     let da_kk = da(kk);
     let dl_kk = dl(kk);
-    let mut acc = 0.0_f64;
-    for jj in 0..a.len() {
+    // `(H_kj, ∂H_kj/∂z_w)` for one column of the row, built from the SAME
+    // `(a, l, m)` algebra the dense `row_dense_hessian` /
+    // `row_dense_hessian_logit_derivative` pair uses.
+    let hessian_entry = |jj: usize| -> (f64, f64) {
         let indicator = if kk == jj { 1.0 } else { 0.0 };
         let l_jj = l(jj);
-        // H_kj = scale·a_k·bracket ; only its SIGN is used.
         let bracket = indicator * (m - l_kk - 1.0) + a[jj] * (l_kk + l_jj + 1.0 - 2.0 * m);
-        let h_kj = scale * a[kk] * bracket;
-        if h_kj == 0.0 {
-            continue;
-        }
         let dbracket = indicator * (dm - dl_kk)
             + da(jj) * (l_kk + l_jj + 1.0 - 2.0 * m)
             + a[jj] * (dl_kk + dl(jj) - 2.0 * dm);
-        let dh_kj = scale * (da_kk * bracket + a[kk] * dbracket);
-        acc += h_kj.signum() * dh_kj;
+        (
+            scale * a[kk] * bracket,
+            scale * (da_kk * bracket + a[kk] * dbracket),
+        )
+    };
+    // Pass 1: ‖H_k·‖₂² and the cross term Σ_l H_kl·Ḣ_kl = ½ ∂‖H_k·‖₂²/∂z_w.
+    let (h_kk, dh_kk) = hessian_entry(kk);
+    let mut sum_sq = h_kk * h_kk;
+    let mut cross = h_kk * dh_kk;
+    for jj in 0..a.len() {
+        if jj == kk {
+            continue;
+        }
+        let (h_kj, dh_kj) = hessian_entry(jj);
+        sum_sq += h_kj * h_kj;
+        cross += h_kj * dh_kj;
     }
-    acc
+    // Pass 2: the soft-sign contraction and the reciprocal-scale sum.
+    let eps0 =
+        gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::soft_abs_temperature(
+            a.len(),
+        );
+    let eps0_sq = eps0 * eps0;
+    let eps_sq = eps0_sq * sum_sq;
+    let mut acc = 0.0_f64;
+    let mut inv_envelope_sum = 0.0_f64;
+    let s_kk = gam_terms::analytic_penalties::soft_abs_squared_scale(h_kk, eps_sq);
+    if s_kk != 0.0 {
+        acc += (h_kk / s_kk) * dh_kk;
+        inv_envelope_sum += 1.0 / s_kk;
+    }
+    for jj in 0..a.len() {
+        if jj == kk {
+            continue;
+        }
+        let (h_kj, dh_kj) = hessian_entry(jj);
+        let s_kj = gam_terms::analytic_penalties::soft_abs_squared_scale(h_kj, eps_sq);
+        if s_kj == 0.0 {
+            continue;
+        }
+        acc += (h_kj / s_kj) * dh_kj;
+        inv_envelope_sum += 1.0 / s_kj;
+    }
+    acc + eps0_sq * cross * inv_envelope_sum
 }

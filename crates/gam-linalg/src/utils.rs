@@ -11,6 +11,33 @@ use ndarray::{
     Array1, Array2, Array3, ArrayBase, ArrayView1, ArrayView2, ArrayView3, Data, Dimension, s,
 };
 
+/// Relative spectral floor (against a block's largest-magnitude eigenvalue)
+/// below which an eigen-direction is treated as non-identified — deflated as a
+/// null direction rather than ridge-damped.
+///
+/// This is the finest RELATIVE curvature contrast the engine resolves at all: a
+/// direction carrying less than `floor·max|λ|` of curvature is declared flat, so
+/// no modelling decision may depend on structure finer than this. It is
+/// therefore also the budget every smooth-surrogate perturbation is derived
+/// against — a surrogate that moves an operator by less than this RELATIVE
+/// amount cannot change a deflation decision or the retained spectrum's relative
+/// accuracy. Two independent consumers derive from it and must not drift:
+///
+/// * `gam-solve` arrow-Schur deflation — the original consumer; the per-row
+///   `H_tt` eigen-cutoff, matched to the gauge Rayleigh qualifier and the
+///   `SAE_MANIFOLD_SPECTRAL_RANK_CUTOFF` data-null detection so the deflation
+///   paths agree on what "flat" means.
+/// * `gam-terms` / `gam-sae` smooth curvature majorizers (#2339) — the softplus
+///   ARD clamp temperature `τ₀ = floor/ln2` and the soft-abs Gershgorin
+///   temperature `ε₀ = floor/K` are both fixed by requiring their majorization
+///   gap to sit AT this floor, relative to the majorized operator's own scale.
+///
+/// It lives in the linear-algebra layer rather than beside the factorization
+/// that first consumed it because the penalty layer is BELOW `gam-solve` in the
+/// crate graph and cannot import from it; a second literal would be an
+/// unanchored magic constant in the layer that needs it most.
+pub const SPECTRAL_DEFLATION_REL_FLOOR: f64 = 1.0e-8;
+
 /// SplitMix64: deterministic 64-bit hash / streaming RNG step.
 ///
 /// Canonical home for the implementation that previously lived as eight

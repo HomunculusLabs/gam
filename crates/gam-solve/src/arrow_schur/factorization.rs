@@ -406,12 +406,15 @@ pub(crate) fn factor_gauge_deflated_evidence_row(
     })
 }
 
-/// Relative spectral floor (vs the block's largest-magnitude eigenvalue) below
-/// which a per-row `H_tt` eigen-direction is treated as non-identified and
-/// unit-stiffness deflated rather than ridge-damped. Matches the magnitude of
-/// the gauge Rayleigh qualifier and the `SAE_MANIFOLD_SPECTRAL_RANK_CUTOFF`
-/// data-null detection so the three deflation paths agree on what "flat" means.
-pub const SPECTRAL_DEFLATION_REL_FLOOR: f64 = 1.0e-8;
+// The relative spectral floor — vs the block's largest-magnitude eigenvalue,
+// below which a per-row `H_tt` eigen-direction is non-identified and
+// unit-stiffness deflated rather than ridge-damped — is DEFINED in `gam-linalg`.
+// The smooth curvature majorizers in `gam-terms`/`gam-sae` derive their
+// smoothing budgets from the identical number (#2339) and sit BELOW `gam-solve`
+// in the crate graph, so a single definition has to live in a crate both can
+// see. Re-exported here so `gam_solve::arrow_schur` stays the consumer-facing
+// path this crate and `gam-sae` already read.
+pub use gam_linalg::utils::SPECTRAL_DEFLATION_REL_FLOOR;
 
 /// Hysteresis half-width (as a fraction of `SPECTRAL_DEFLATION_REL_FLOOR`)
 /// applied to the spectral-deflation decision for *positive* near-floor

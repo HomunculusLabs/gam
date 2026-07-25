@@ -1,4 +1,5 @@
 use super::*;
+use gam_linalg::utils::SPECTRAL_DEFLATION_REL_FLOOR;
 use gam_problem::{LOG_STRENGTH_MAX, LOG_STRENGTH_MIN, checked_exp_log_strength};
 
 /// Exact floating-point continuation of `log(p) + 1` on the support of a
@@ -8,6 +9,40 @@ use gam_problem::{LOG_STRENGTH_MAX, LOG_STRENGTH_MIN, checked_exp_log_strength};
 #[inline]
 fn entropy_log_plus_one(p: f64) -> f64 {
     if p > 0.0 { p.ln() + 1.0 } else { 0.0 }
+}
+
+/// Smooth upper envelope of `|x|` — the soft-abs (pseudo-Huber) magnitude
+///
+/// ```text
+///   σ_ε(x) = sqrt(x² + ε²)
+/// ```
+///
+/// used in place of `|·|` wherever a Gershgorin radius `Σ_j|H_kj|` is
+/// differentiated (#2339). Takes the SQUARED smoothing scale `eps_sq = ε²`
+/// because every caller derives it as `ε₀²·‖H_k·‖₂²` and never needs `ε` itself;
+/// passing the square also keeps the degenerate `‖H_k·‖₂² = 0` row on the exact
+/// `σ_0 = |·|` branch instead of routing it through a `sqrt` that would have to
+/// be undone.
+///
+/// **Majorization (`σ_ε(x) ≥ |x|`) is the whole point** and is a hard guarantee,
+/// not an asymptotic one: the Gershgorin diagonal `D` is a Loewner majorizer of
+/// the indefinite entropy Hessian ONLY because each term dominates `|H_kj|`, so a
+/// smoothing that dips below `|x|` — `x·tanh(x/ε)` and `ε·ln cosh(x/ε)` both do —
+/// silently invalidates `D ⪰ H` and lets the assembled evidence block go
+/// indefinite. In exact arithmetic `sqrt(x² + ε²) ≥ sqrt(x²) = |x|`; in `f64`
+/// the sum can round BELOW `x²` when `ε² < ulp(x²)/2` and land up to ~1.5 ulp
+/// under `|x|`, so the rounding direction is pinned with `max(·, |x|)`. That max
+/// binds only where its two arguments agree to within one ulp, so it is a
+/// rounding-direction guard on an identity — not a clamp on a signed quantity,
+/// and not a reintroduced kink.
+///
+/// Gap: `0 ≤ σ_ε(x) − |x| = ε²/(σ_ε(x) + |x|) ≤ ε`, attained at `x = 0` where
+/// `σ_ε(0) = ε` — the envelope is strictly above `|·|` exactly at the seam it
+/// exists to smooth, and collapses onto `|·|` like `ε²/(2|x|)` away from it.
+#[inline]
+#[must_use]
+pub fn soft_abs_squared_scale(x: f64, eps_sq: f64) -> f64 {
+    (x * x + eps_sq).sqrt().max(x.abs())
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +185,48 @@ impl SoftmaxAssignmentSparsityPenalty {
         out
     }
 
-    /// Absolute row sums of the exact per-row dense entropy Hessian, used as a
-    /// Gershgorin / diagonal-dominance PSD majorizer.
+    /// Dimensionless soft-abs temperature `ε₀` for the smooth Gershgorin
+    /// majorizer (#2339). NOT a tunable knob — derived below, and derived from
+    /// the problem's own dictionary size `k_atoms`.
+    ///
+    /// [`Self::psd_majorizer_abs_row_sums`] smooths the DIMENSIONLESS normalized
+    /// row entries `u_kj = H_kj/‖H_k·‖₂` (which satisfy `Σ_j u_kj² = 1`, hence
+    /// `|u_kj| ≤ 1` — a quantity whose natural scale is exactly unity, the direct
+    /// analogue of the ARD half's `cos κt`) and multiplies back by the row's own
+    /// curvature scale `‖H_k·‖₂`. The per-entry envelope gap is at most `ε₀` in
+    /// those units, so over the `K` terms of a row sum
+    ///
+    /// ```text
+    ///   0 ≤ D̃_kk − D_kk ≤ K·ε₀·‖H_k·‖₂ ≤ K·ε₀·D_kk        (‖·‖₂ ≤ ‖·‖₁ = D_kk)
+    /// ```
+    ///
+    /// — a purely RELATIVE gap. The criterion resolves relative curvature only
+    /// down to the spectral-deflation floor [`SPECTRAL_DEFLATION_REL_FLOOR`]
+    /// (`λ < floor·λ_max` is deflated as null), so requiring the majorization gap
+    /// to sit at that floor,
+    ///
+    /// ```text
+    ///   K·ε₀ ≤ SPECTRAL_DEFLATION_REL_FLOOR
+    /// ```
+    ///
+    /// and taking the binding (largest-admissible, hence smoothest) value gives
+    ///
+    /// ```text
+    ///   ε₀ = SPECTRAL_DEFLATION_REL_FLOOR / K.
+    /// ```
+    ///
+    /// The absolute smoothing scale actually applied, `ε_k = ε₀·‖H_k·‖₂`, is read
+    /// entirely off the row's own curvature; the only constant involved is the
+    /// floor the rest of the engine already resolves against. This is the same
+    /// statement the ARD half proves for its softplus clamp
+    /// (`α·τ₀·ln2 = α·floor`).
+    #[must_use]
+    pub fn soft_abs_temperature(k_atoms: usize) -> f64 {
+        SPECTRAL_DEFLATION_REL_FLOOR / (k_atoms as f64)
+    }
+
+    /// Smoothed absolute row sums of the exact per-row dense entropy Hessian,
+    /// used as a Gershgorin / diagonal-dominance PSD majorizer.
     ///
     /// The exact per-row Hessian wrt logits (symmetric, dense) is
     ///
@@ -169,23 +244,86 @@ impl SoftmaxAssignmentSparsityPenalty {
     /// operator that dominates the dense Hessian's quadratic form — unlike the
     /// raw indefinite diagonal, which is neither PSD nor a faithful stand-in for
     /// the dense operator.
+    ///
+    /// # The `|·|` is smoothed (#2339)
+    ///
+    /// Every off-diagonal `H_kj` crosses zero on the codimension-1 surface
+    /// `L_k + L_j + 1 = 2m`, so the raw radius `Σ_j|H_kj|` carries a kink through
+    /// generic logit space and its θ-adjoint `Σ_j sign(H_kj)·Ḣ_kj` JUMPS across
+    /// it — the objective↔gradient desync that stalls any outer method
+    /// differentiating the streaming criterion `½log|B̃|`. This returns instead
+    ///
+    /// ```text
+    ///   D̃_kk = Σ_j σ_{ε_k}(H_kj) = Σ_j sqrt(H_kj² + ε₀²·‖H_k·‖₂²),
+    /// ```
+    ///
+    /// the soft-abs envelope [`soft_abs_squared_scale`] applied at the row's own
+    /// scale, with `ε₀` from [`Self::soft_abs_temperature`]. Four properties, all
+    /// gated by `soft_abs_gershgorin_2339_tests`:
+    ///
+    /// 1. **Majorizer.** `σ_ε(x) ≥ |x|` entrywise ⇒ `D̃_kk ≥ D_kk ≥ 0`, so
+    ///    `D̃ − D` is a nonnegative diagonal and `D̃ − H = (D̃ − D) + (D − H)` is a
+    ///    sum of two PSD matrices. `D̃ ⪰ D ⪰ H` and `D̃ ⪰ D ⪰ 0` are INHERITED,
+    ///    never re-argued: smoothing can only move the bound in the safe
+    ///    direction.
+    /// 2. **Smooth.** `H_kj² + ε₀²Σ_l H_kl²` is a polynomial in the (analytic)
+    ///    entries of `H_k·` and is `≥ ε₀²‖H_k·‖₂² > 0` whenever the row is
+    ///    nonzero, and `sqrt` is analytic on `(0,∞)`, so `D̃_kk` is real-analytic
+    ///    (C^ω) wherever `H_k· ≠ 0` — in particular across every individual
+    ///    zero crossing. The only surviving non-smooth point is the SIMULTANEOUS
+    ///    vanishing `H_k· = 0` (codimension `K`), which here happens exactly when
+    ///    `a_k` underflows to 0; there `H_k· ≡ 0` and `Ḣ_k· ≡ 0`, so value and
+    ///    derivative are identically zero and the exact-zero continuation that
+    ///    [`entropy_log_plus_one`] already uses carries through.
+    /// 3. **Tight.** `0 ≤ D̃_kk − D_kk ≤ K·ε₀·‖H_k·‖₂ ≤ SPECTRAL_DEFLATION_REL_FLOOR·D_kk`
+    ///    (derivation in [`Self::soft_abs_temperature`]) — below the relative
+    ///    resolution at which the factorization declares a direction null.
+    /// 4. **Scale-derived.** `σ` is applied at `ε_k = ε₀‖H_k·‖₂`, read off the
+    ///    row itself, so `D̃_kk` is a positively-homogeneous degree-1 function of
+    ///    `H_k·` exactly as `D_kk` is. `D̃` therefore stays EXACTLY degree-one
+    ///    homogeneous in `scale = λ/τ²` (and in the #991 row weight), which is
+    ///    what keeps `∂B/∂ρ_sparse` on its existing seam. A fixed absolute
+    ///    `sqrt(H² + ε²)` would break that homogeneity AND inject curvature into
+    ///    dead atoms whose true row is ~0.
+    ///
+    /// `‖H_k·‖₂²` is accumulated, and never square-rooted, in the SAME
+    /// diagonal-first traversal order the envelope sum uses, so the value and its
+    /// θ-adjoint differentiate one floating-point expression. If the row is so
+    /// deeply underflowed that `Σ_l H_kl²` flushes to zero while the entries do
+    /// not, `ε_k` is exactly 0 and the sum degrades gracefully to the exact hard
+    /// `Σ_j|H_kj|` — the majorization guarantee is unconditional, and smoothing
+    /// switches itself off only where the row's curvature is below the square
+    /// root of the subnormal range and therefore invisible to `log|B|` anyway.
     pub fn psd_majorizer_abs_row_sums(&self, row: &[f64], scale: f64) -> Vec<f64> {
         let a = self.softmax_row(row);
         let k = self.k_atoms;
         let l: Vec<f64> = (0..k).map(|i| entropy_log_plus_one(a[i])).collect();
         let m: f64 = (0..k).map(|i| a[i] * l[i]).sum();
+        let eps0 = Self::soft_abs_temperature(k);
+        let eps0_sq = eps0 * eps0;
         let mut d = vec![0.0_f64; k];
         for kk in 0..k {
             // Diagonal entry H_kk.
             let h_kk = scale * a[kk] * ((m - l[kk] - 1.0) + a[kk] * (2.0 * l[kk] + 1.0 - 2.0 * m));
-            let mut acc = h_kk.abs();
+            // Pass 1: the row's own squared curvature scale ‖H_k·‖₂².
+            let mut sum_sq = h_kk * h_kk;
+            for jj in 0..k {
+                if jj == kk {
+                    continue;
+                }
+                let h_kj = scale * a[kk] * a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m);
+                sum_sq += h_kj * h_kj;
+            }
+            // Pass 2: the soft-abs row sum at that scale, ε_k² = ε₀²·‖H_k·‖₂².
+            let eps_sq = eps0_sq * sum_sq;
+            let mut acc = soft_abs_squared_scale(h_kk, eps_sq);
             // Off-diagonal entries H_kj, j ≠ k.
             for jj in 0..k {
                 if jj == kk {
                     continue;
                 }
                 let h_kj = scale * a[kk] * a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m);
-                acc += h_kj.abs();
+                acc += soft_abs_squared_scale(h_kj, eps_sq);
             }
             d[kk] = acc;
         }
@@ -268,22 +406,26 @@ impl SoftmaxAssignmentSparsityPenalty {
         dh
     }
 
-    /// Per-row **Gershgorin diagonal majorizer** `D` of the exact softmax-entropy
+    /// Per-row **Gershgorin diagonal majorizer** `D̃` of the exact softmax-entropy
     /// Hessian [`Self::row_dense_hessian`], scaled by `scale = λ/τ²`. Returns the
-    /// `K×K` diagonal block `diag(D_0, …, D_{K−1})` with
-    /// `D_kk = Σ_j |H_kj|` (#1419).
+    /// `K×K` diagonal block `diag(D̃_0, …, D̃_{K−1})` with
+    /// `D̃_kk = Σ_j σ_{ε_k}(H_kj) ≥ Σ_j |H_kj|` — the smooth soft-abs envelope of
+    /// the Gershgorin radius (#1419 majorizer, #2339 smoothing; the derivation
+    /// and its four guarantees are on [`Self::psd_majorizer_abs_row_sums`]).
     ///
     /// Unlike the Fisher metric [`Self::row_fisher_metric`] — which is PSD but
     /// does NOT satisfy `G ⪰ H_entropy` (counterexample `a=(0.95,0.05)`,
-    /// `λ=τ=1`: `G₁₁=0.0475 < H₁₁=0.0784`) — this `D` is a genuine Loewner
-    /// majorizer: it is diagonally dominant over `H` (`D_kk − H_kk =
-    /// |H_kk|−H_kk + Σ_{j≠k}|H_kj| ≥ Σ_{j≠k}|(D−H)_kj|`), so `D − H ⪰ 0`, and
-    /// every `D_kk ≥ 0`, so `D ⪰ 0`. It therefore both keeps the assembled
-    /// evidence block PD (the property the entropy block needs so the
+    /// `λ=τ=1`: `G₁₁=0.0475 < H₁₁=0.0784`) — this `D̃` is a genuine Loewner
+    /// majorizer. The hard radius `D_kk = Σ_j|H_kj|` is diagonally dominant over
+    /// `H` (`D_kk − H_kk = |H_kk|−H_kk + Σ_{j≠k}|H_kj| ≥ Σ_{j≠k}|(D−H)_kj|`), so
+    /// `D − H ⪰ 0` and `D ⪰ 0`; the envelope only ever raises each term
+    /// (`σ_ε ≥ |·|`), so `D̃ − H = (D̃ − D) + (D − H)` is a sum of two PSD
+    /// matrices and `D̃ ⪰ D ⪰ H`, `D̃ ⪰ D ⪰ 0`. It therefore both keeps the
+    /// assembled evidence block PD (the property the entropy block needs so the
     /// Faddeev–Popov deflation never fires) AND actually majorizes the entropy
     /// curvature, which the Fisher surrogate did not. The criterion's `log|H|`,
     /// its θ-adjoint [`Self::row_psd_majorizer_logit_derivative`], and the
-    /// assembled Hessian all differentiate this SAME operator `D`, keeping value
+    /// assembled Hessian all differentiate this SAME operator `D̃`, keeping value
     /// and adjoint on one exact branch.
     #[must_use]
     pub fn row_psd_majorizer(&self, row_logits: &[f64], scale: f64) -> Array2<f64> {
@@ -298,13 +440,36 @@ impl SoftmaxAssignmentSparsityPenalty {
 
     /// Derivative of the per-row Gershgorin majorizer [`Self::row_psd_majorizer`]
     /// with respect to a single row logit `z_w`, scaled by `scale = λ/τ²`.
-    /// Returns the `K×K` diagonal block `diag(∂D_0/∂z_w, …)` with
-    /// `∂D_kk/∂z_w = Σ_j sign(H_kj)·(∂H_kj/∂z_w)` (#1419), where `H` is the exact
-    /// entropy Hessian [`Self::row_dense_hessian`] and `∂H_kj/∂z_w` is
-    /// [`Self::row_dense_hessian_logit_derivative`]. `sign(0)=0` (a zero entry
-    /// contributes no first-order change to its own magnitude). Built from the
-    /// SAME `(a, L, m)` derivative convention as the dense Hessian derivative, so
-    /// the θ-adjoint differentiates the SAME `D` the assembly added.
+    /// Returns the `K×K` diagonal block `diag(∂D̃_0/∂z_w, …)`, where `H` is the
+    /// exact entropy Hessian [`Self::row_dense_hessian`] and `Ḣ_kj = ∂H_kj/∂z_w`
+    /// is [`Self::row_dense_hessian_logit_derivative`]. Built from the SAME
+    /// `(a, L, m)` derivative convention as the dense Hessian derivative, so the
+    /// θ-adjoint differentiates the SAME `D̃` the assembly added.
+    ///
+    /// # Derivation (#2339)
+    ///
+    /// The majorized radius is `D̃_kk = Σ_j s_kj` with
+    /// `s_kj = sqrt(H_kj² + ε₀²·r_k²)` and `r_k² = Σ_l H_kl²`
+    /// ([`Self::psd_majorizer_abs_row_sums`]). Differentiating the square root
+    /// once, and using `½·∂r_k²/∂z_w = Σ_l H_kl·Ḣ_kl`:
+    ///
+    /// ```text
+    ///   ∂s_kj/∂z_w = [ H_kj·Ḣ_kj + ε₀²·Σ_l H_kl·Ḣ_kl ] / s_kj
+    ///   ∂D̃_kk/∂z_w = Σ_j (H_kj/s_kj)·Ḣ_kj  +  ε₀²·G·Σ_j (1/s_kj),
+    ///   G = Σ_l H_kl·Ḣ_kl.
+    /// ```
+    ///
+    /// The soft sign `H_kj/s_kj ∈ (−1,1)` replaces the discontinuous `sign(H_kj)`
+    /// of the hard radius (`ε₀ → 0` recovers it, term by term); the second term
+    /// is the chain contribution of the row's OWN scale `r_k` and is what makes
+    /// this the exact derivative of the operator actually installed — dropping it
+    /// would reintroduce precisely the objective↔gradient desync the smoothing
+    /// exists to remove. `s_kj` is evaluated through the same
+    /// [`soft_abs_squared_scale`] seam as the value, so where that seam's
+    /// rounding-direction guard binds this returns `sign(H_kj)·Ḣ_kj` — exactly
+    /// the derivative of the value as implemented. `s_kj = 0` occurs only for a
+    /// numerically zero row (`H_k· ≡ 0`, hence `Ḣ_k· ≡ 0`) and contributes
+    /// nothing, the same exact-zero continuation the value uses.
     #[must_use]
     pub fn row_psd_majorizer_logit_derivative(
         &self,
@@ -315,16 +480,43 @@ impl SoftmaxAssignmentSparsityPenalty {
         let k = self.k_atoms;
         let h = self.row_dense_hessian(row_logits, scale);
         let dh = self.row_dense_hessian_logit_derivative(row_logits, scale, w);
+        let eps0 = Self::soft_abs_temperature(k);
+        let eps0_sq = eps0 * eps0;
         let mut out = Array2::<f64>::zeros((k, k));
         for kk in 0..k {
-            let mut acc = 0.0_f64;
+            // Pass 1: ‖H_k·‖₂² and G = Σ_l H_kl·Ḣ_kl, accumulated in the same
+            // diagonal-first order the value uses so both differentiate one
+            // floating-point expression.
+            let mut sum_sq = h[[kk, kk]] * h[[kk, kk]];
+            let mut cross = h[[kk, kk]] * dh[[kk, kk]];
             for jj in 0..k {
-                let s = h[[kk, jj]].signum();
-                if h[[kk, jj]] != 0.0 {
-                    acc += s * dh[[kk, jj]];
+                if jj == kk {
+                    continue;
                 }
+                sum_sq += h[[kk, jj]] * h[[kk, jj]];
+                cross += h[[kk, jj]] * dh[[kk, jj]];
             }
-            out[[kk, kk]] = acc;
+            // Pass 2: the soft-sign contraction and the reciprocal-scale sum.
+            let eps_sq = eps0_sq * sum_sq;
+            let mut acc = 0.0_f64;
+            let mut inv_envelope_sum = 0.0_f64;
+            let s_kk = soft_abs_squared_scale(h[[kk, kk]], eps_sq);
+            if s_kk != 0.0 {
+                acc += (h[[kk, kk]] / s_kk) * dh[[kk, kk]];
+                inv_envelope_sum += 1.0 / s_kk;
+            }
+            for jj in 0..k {
+                if jj == kk {
+                    continue;
+                }
+                let s_kj = soft_abs_squared_scale(h[[kk, jj]], eps_sq);
+                if s_kj == 0.0 {
+                    continue;
+                }
+                acc += (h[[kk, jj]] / s_kj) * dh[[kk, jj]];
+                inv_envelope_sum += 1.0 / s_kj;
+            }
+            out[[kk, kk]] = acc + eps0_sq * cross * inv_envelope_sum;
         }
         out
     }
@@ -343,10 +535,11 @@ impl SoftmaxAssignmentSparsityPenalty {
     /// indefinite (#1419: `K=2`, `a=(0.95,0.05)`, `λ=τ=1` gives `G₁₁=0.0475 <
     /// H₁₁=0.0784`, so `G ⋡ H`). The genuine Loewner majorizer the assembled
     /// evidence block now uses is [`Self::row_psd_majorizer`]
-    /// (`D_kk = Σ_j|H_kj|`, which DOES satisfy `D ⪰ H` and `D ⪰ 0`); this
-    /// Fisher metric is retained only as a smooth PSD conditioning reference and
-    /// its derivative [`Self::row_fisher_metric_logit_derivative`], and must not
-    /// be presented or used as a curvature majorizer.
+    /// (`D̃_kk = Σ_j σ_ε(H_kj) ≥ Σ_j|H_kj|`, which DOES satisfy `D̃ ⪰ H` and
+    /// `D̃ ⪰ 0`); this Fisher metric is retained only as a smooth PSD
+    /// conditioning reference and its derivative
+    /// [`Self::row_fisher_metric_logit_derivative`], and must not be presented or
+    /// used as a curvature majorizer.
     #[must_use]
     pub fn row_fisher_metric(&self, row_logits: &[f64], scale: f64) -> Array2<f64> {
         let k = self.k_atoms;
@@ -1475,10 +1668,25 @@ mod fisher_majorizer_1419_tests {
         assert_abs_diff_eq!(h[[0, 0]], 0.0783747664, epsilon = 1e-9);
         assert_abs_diff_eq!(g[[0, 0]], 0.95 * 0.05, epsilon = 1e-12);
 
-        // The genuine majorizer's diagonal is the abs-row-sum D_kk = Σ_j|H_kj|.
+        // The genuine majorizer's diagonal is the abs-row-sum D_kk = Σ_j|H_kj|,
+        // raised by the #2339 soft-abs envelope: it must DOMINATE the hard radius
+        // (that domination is what carries D̃ ⪰ D ⪰ H) and must sit within the
+        // derived relative budget of it.
         for kk in 0..2 {
             let row_sum: f64 = (0..2).map(|jj| h[[kk, jj]].abs()).sum();
-            assert_abs_diff_eq!(m[[kk, kk]], row_sum, epsilon = 1e-12);
+            assert!(
+                m[[kk, kk]] >= row_sum,
+                "smooth Gershgorin radius must DOMINATE the hard radius (#2339); \
+                 D̃_{kk} = {} < Σ_j|H_{kk}j| = {row_sum}",
+                m[[kk, kk]]
+            );
+            assert!(
+                m[[kk, kk]] - row_sum <= SPECTRAL_DEFLATION_REL_FLOOR * row_sum,
+                "smooth Gershgorin radius must stay within the deflation-floor \
+                 budget of the hard radius (#2339); D̃_{kk} − D_{kk} = {} > {}",
+                m[[kk, kk]] - row_sum,
+                SPECTRAL_DEFLATION_REL_FLOOR * row_sum
+            );
         }
         // M is a nonnegative diagonal (PSD by inspection) — off-diagonals zero.
         assert_abs_diff_eq!(m[[0, 1]], 0.0, epsilon = 1e-15);
@@ -1528,12 +1736,11 @@ mod fisher_majorizer_1419_tests {
         );
     }
 
-    /// #1419 — the majorizer's θ-derivative `∂D_kk/∂z_w = Σ_j sign(H_kj)∂H_kj/∂z_w`
-    /// is the exact derivative of the operator the assembly installs, so value and
-    /// log-det adjoint differentiate the SAME `D`. Oracle: a central finite
-    /// difference of `row_psd_majorizer` itself (away from any sign change, the
-    /// abs-row-sum is smooth). FD is permitted ONLY inside this test as an
-    /// independent check of the closed-form derivative.
+    /// #1419 — the majorizer's θ-derivative is the exact derivative of the
+    /// operator the assembly installs, so value and log-det adjoint differentiate
+    /// the SAME `D̃`. Oracle: a central finite difference of `row_psd_majorizer`
+    /// itself. FD is permitted ONLY inside this test as an independent check of
+    /// the closed-form derivative.
     #[test]
     fn gershgorin_majorizer_logit_derivative_matches_fd_1419() {
         let pen = SoftmaxAssignmentSparsityPenalty::new(4, 0.8);
@@ -1560,6 +1767,456 @@ mod fisher_majorizer_1419_tests {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod soft_abs_gershgorin_2339_tests {
+    //! #2339 (Gershgorin half of #2337 step 1) — the Gershgorin curvature bound
+    //! `D_kk = Σ_j|H_kj|` is replaced by the soft-abs envelope
+    //! `D̃_kk = Σ_j sqrt(H_kj² + ε₀²‖H_k·‖₂²)`. These gate the four properties the
+    //! replacement has to have, each in a form that FAILS if the property is lost:
+    //!
+    //! 1. MAJORIZATION — `σ_ε ≥ |·|` entrywise and `D̃ ⪰ D ⪰ H`, `D̃ ⪰ 0`. A
+    //!    smoothing that dips below `|x|` (the popular `x·tanh(x/ε)` /
+    //!    `ε·ln cosh(x/ε)` forms do) breaks the Loewner bound the assembled
+    //!    evidence block depends on; the first test pins both directions.
+    //! 2. SMOOTHNESS — the θ-adjoint is continuous across a zero crossing of an
+    //!    off-diagonal, where the hard `sign(H_kj)` jumps by `2|Ḣ_kj|`. The test
+    //!    measures BOTH so the smooth bound cannot pass vacuously.
+    //! 3. TIGHTNESS — `0 ≤ D̃_kk − D_kk ≤ SPECTRAL_DEFLATION_REL_FLOOR·D_kk`, the
+    //!    derived gap, checked on rows that actually straddle a crossing (where
+    //!    the gap is largest and strictly positive).
+    //! 4. SCALE DERIVATION — smoothing at the row's OWN `‖H_k·‖₂` keeps `D̃`
+    //!    exactly degree-one homogeneous in `scale = λ/τ²`, which is what keeps
+    //!    `∂B/∂ρ_sparse` on its existing seam. A fixed absolute `ε` would fail
+    //!    this test.
+    //!
+    //! Finite differences appear ONLY here, as an independent oracle for the
+    //! hand-derived closed forms.
+    use super::*;
+    use approx::assert_abs_diff_eq;
+    use gam_linalg::faer_ndarray::FaerEigh;
+    use gam_linalg::utils::splitmix64;
+    use ndarray::Array2;
+
+    /// Deterministic logit rows spanning the regimes the majorizer sees: a
+    /// near-uniform row (where the entropy Hessian is indefinite and the
+    /// majorizer earns its keep), a sharply peaked row, and seeded pseudo-random
+    /// rows. `splitmix64` keeps this reproducible without a RNG dependency.
+    fn seeded_rows(k: usize, seed: u64) -> Vec<Vec<f64>> {
+        let mut state = seed;
+        let mut rows = vec![vec![0.02_f64; k], {
+            let mut peaked = vec![-4.5_f64; k];
+            peaked[0] = 3.0;
+            peaked[k / 2] = 2.25;
+            peaked
+        }];
+        for _ in 0..6 {
+            let row: Vec<f64> = (0..k)
+                .map(|_| {
+                    let bits = splitmix64(&mut state) >> 11;
+                    (bits as f64) / ((1_u64 << 53) as f64) * 8.0 - 4.0
+                })
+                .collect();
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// Hard Gershgorin radius `Σ_j|H_kj|` accumulated in the SAME diagonal-first,
+    /// then `j ≠ k` ascending order the smooth radius uses. Same order matters:
+    /// `f64` addition is monotone in each addend, so term-wise domination
+    /// (`σ_ε ≥ |·|`) implies `D̃_kk ≥ D_kk` EXACTLY only when both sums are
+    /// accumulated identically. Comparing against a differently-ordered sum would
+    /// weaken a hard guarantee into an approximate one.
+    fn hard_radius(h: &Array2<f64>, kk: usize, k: usize) -> f64 {
+        let mut acc = h[[kk, kk]].abs();
+        for jj in 0..k {
+            if jj != kk {
+                acc += h[[kk, jj]].abs();
+            }
+        }
+        acc
+    }
+
+    /// The OLD, non-smooth θ-derivative `∂D_kk/∂z_w = Σ_j sign(H_kj)·Ḣ_kj` with
+    /// `sign(0) = 0`, kept here as the independent reference the smooth adjoint is
+    /// contrasted against. It is what `row_psd_majorizer_logit_derivative`
+    /// computed before #2339.
+    fn hard_radius_logit_derivative(
+        pen: &SoftmaxAssignmentSparsityPenalty,
+        row: &[f64],
+        scale: f64,
+        w: usize,
+        kk: usize,
+    ) -> f64 {
+        let k = pen.k_atoms;
+        let h = pen.row_dense_hessian(row, scale);
+        let dh = pen.row_dense_hessian_logit_derivative(row, scale, w);
+        let mut acc = 0.0_f64;
+        for jj in 0..k {
+            if h[[kk, jj]] != 0.0 {
+                acc += h[[kk, jj]].signum() * dh[[kk, jj]];
+            }
+        }
+        acc
+    }
+
+    /// `K = 2` logit `z_0` (with `z_1 = 0`) at which the off-diagonal `H_01`
+    /// crosses zero — the kink site of the hard radius. Located by bisection on
+    /// the PRODUCTION `row_dense_hessian`, so the test cannot drift from the
+    /// operator it is probing. `H_01 ∝ (L_0 + L_1 + 1 − 2m)` is `+1·scale·a_0a_1`
+    /// at `z_0 = 0` and diverges negative as `a_1 → 0`, so the bracket is real.
+    fn off_diagonal_zero_crossing(pen: &SoftmaxAssignmentSparsityPenalty, scale: f64) -> f64 {
+        let entry = |z0: f64| pen.row_dense_hessian(&[z0, 0.0], scale)[[0, 1]];
+        let (mut lo, mut hi) = (0.0_f64, 20.0_f64);
+        assert!(
+            entry(lo) > 0.0 && entry(hi) < 0.0,
+            "the H_01 zero crossing must be bracketed by [0, 20]; \
+             endpoints are {} and {}",
+            entry(lo),
+            entry(hi)
+        );
+        for _ in 0..200 {
+            let mid = 0.5 * (lo + hi);
+            if mid <= lo || mid >= hi {
+                break;
+            }
+            if entry(mid) > 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    /// (1) The envelope is an UPPER bound on `|·|` — unconditionally, including
+    /// where `f64` rounding of `sqrt(x² + ε²)` would otherwise land below `|x|` —
+    /// and exceeds it by at most `ε`. The contrast arm shows the gate is not
+    /// vacuous: `x·tanh(x/ε)`, a smooth "soft abs" that is commonly reached for,
+    /// sits strictly BELOW `|x|` and would silently invalidate `D ⪰ H`.
+    #[test]
+    fn soft_abs_envelope_dominates_absolute_value_2339() {
+        let mut state = 0x2339_0001_u64;
+        let magnitudes = [0.0_f64, 1e-300, 1e-30, 1e-12, 1e-8, 1e-3, 1.0, 7.5, 1e6];
+        for &eps in &[0.0_f64, 1e-16, 1e-12, 1e-8, 1e-3, 1.0] {
+            let eps_sq = eps * eps;
+            for &mag in &magnitudes {
+                for sign in [1.0_f64, -1.0] {
+                    let x = sign * mag;
+                    let env = soft_abs_squared_scale(x, eps_sq);
+                    assert!(
+                        env >= x.abs(),
+                        "soft-abs must MAJORIZE |x| (#2339): σ({x}, ε²={eps_sq}) = {env} \
+                         < |x| = {}",
+                        x.abs()
+                    );
+                    assert!(
+                        env <= x.abs() + eps + f64::EPSILON * (1.0 + x.abs()),
+                        "soft-abs must exceed |x| by at most ε (#2339): \
+                         σ({x}, ε²={eps_sq}) − |x| = {} > ε = {eps}",
+                        env - x.abs()
+                    );
+                }
+            }
+            // At the seam the envelope is EXACTLY ε: strictly above |0| whenever
+            // ε > 0, which is precisely the kink fill.
+            assert_abs_diff_eq!(
+                soft_abs_squared_scale(0.0, eps_sq),
+                eps,
+                epsilon = 1e-15 * (1.0 + eps)
+            );
+        }
+        // Seeded sweep over arbitrary (x, ε) pairs.
+        for _ in 0..4096 {
+            let x = (splitmix64(&mut state) >> 11) as f64 / ((1_u64 << 53) as f64) * 20.0 - 10.0;
+            let eps = (splitmix64(&mut state) >> 11) as f64 / ((1_u64 << 53) as f64) * 2.0;
+            let env = soft_abs_squared_scale(x, eps * eps);
+            assert!(
+                env >= x.abs() && env <= x.abs() + eps + f64::EPSILON * (1.0 + x.abs()),
+                "soft-abs envelope violated at x={x}, ε={eps}: got {env}"
+            );
+        }
+        // Non-vacuity: the smooth alternative that DIPS below |x| is rejected by
+        // the same predicate, at the very seam where the difference matters.
+        // Sampled inside `tanh`'s transition (it saturates to exactly 1.0 in f64
+        // beyond |arg| ≈ 19, where the minorant becomes indistinguishable from
+        // |x| and the distinction this arm makes would be invisible).
+        let eps = 1e-3_f64;
+        for &x in &[1e-4_f64, 1e-3, 5e-3, 1e-2] {
+            let dipping = x * (x / eps).tanh();
+            assert!(
+                dipping < x.abs(),
+                "x·tanh(x/ε) is a MINORANT of |x| and must fail the majorization \
+                 predicate (#2339): at x={x} it gives {dipping} ≥ |x|"
+            );
+        }
+    }
+
+    /// (1) + (3) On real softmax rows: the smooth radius dominates the hard
+    /// radius, the smoothed diagonal is still a Loewner majorizer of the exact
+    /// (indefinite) entropy Hessian, and the excess sits inside the derived
+    /// deflation-floor budget.
+    #[test]
+    fn smooth_gershgorin_majorizes_entropy_within_the_derived_budget_2339() {
+        let mut checked_rows = 0_usize;
+        for (k, temperature, scale) in [
+            (2_usize, 1.0_f64, 1.0_f64),
+            (3, 0.75, 2.5),
+            (5, 1.4, 0.3),
+            (8, 0.6, 1.7),
+        ] {
+            let pen = SoftmaxAssignmentSparsityPenalty::new(k, temperature);
+            for row in seeded_rows(k, 0x2339_0000 + k as u64) {
+                let h = pen.row_dense_hessian(&row, scale);
+                let d_smooth = pen.psd_majorizer_abs_row_sums(&row, scale);
+                let mut max_abs_h = 0.0_f64;
+                for kk in 0..k {
+                    for jj in 0..k {
+                        max_abs_h = max_abs_h.max(h[[kk, jj]].abs());
+                    }
+                }
+                for kk in 0..k {
+                    let hard = hard_radius(&h, kk, k);
+                    assert!(
+                        d_smooth[kk] >= hard,
+                        "smooth radius must dominate the hard radius EXACTLY \
+                         (#2339, k={k}, atom {kk}): {} < {hard}",
+                        d_smooth[kk]
+                    );
+                    assert!(
+                        d_smooth[kk] >= 0.0,
+                        "the majorizer diagonal must stay nonnegative so D̃ ⪰ 0 \
+                         (#2339, k={k}, atom {kk}): {}",
+                        d_smooth[kk]
+                    );
+                    assert!(
+                        d_smooth[kk] - hard <= SPECTRAL_DEFLATION_REL_FLOOR * hard,
+                        "smoothing gap must stay inside the derived relative budget \
+                         SPECTRAL_DEFLATION_REL_FLOOR·D_kk (#2339, k={k}, atom {kk}): \
+                         gap {} > budget {}",
+                        d_smooth[kk] - hard,
+                        SPECTRAL_DEFLATION_REL_FLOOR * hard
+                    );
+                }
+                // Loewner: λ_min(D̃ − H) ≥ 0 by direct symmetric eigensolve.
+                let mut gap_matrix = Array2::<f64>::zeros((k, k));
+                for i in 0..k {
+                    for j in 0..k {
+                        gap_matrix[[i, j]] = -h[[i, j]];
+                    }
+                    gap_matrix[[i, i]] += d_smooth[i];
+                }
+                let (evals, _) = gap_matrix.eigh(faer::Side::Lower).expect("eigh(D̃−H)");
+                let min_eig = evals.iter().cloned().fold(f64::INFINITY, f64::min);
+                assert!(
+                    min_eig >= -1e-12 * (1.0 + max_abs_h),
+                    "the SMOOTHED Gershgorin diagonal must remain a Loewner \
+                     majorizer of the exact entropy Hessian (#1419/#2339, k={k}): \
+                     λ_min(D̃−H) = {min_eig}"
+                );
+                checked_rows += 1;
+            }
+        }
+        assert!(
+            checked_rows == 32,
+            "expected 32 gated rows, ran {checked_rows}"
+        );
+    }
+
+    /// Width, in logit units, of the smoothing band around the `H_01` crossing:
+    /// the envelope's curvature-space scale `ε_k = ε₀·‖H_0·‖₂` divided by the
+    /// crossing entry's slope `|∂H_01/∂z_0|`. Every seam probe below is expressed
+    /// as a fraction of THIS, never as a hard-coded offset — the band is set by a
+    /// derived temperature and the fixture's own curvature, so a literal step
+    /// would be a magic constant that silently stops probing the seam if either
+    /// moves. Returns `(z*, band, |Ḣ_01|)`.
+    fn zero_crossing_band(pen: &SoftmaxAssignmentSparsityPenalty, scale: f64) -> (f64, f64, f64) {
+        let z_star = off_diagonal_zero_crossing(pen, scale);
+        let row = [z_star, 0.0];
+        let h = pen.row_dense_hessian(&row, scale);
+        let norm = (h[[0, 0]] * h[[0, 0]] + h[[0, 1]] * h[[0, 1]]).sqrt();
+        let eps_k = SoftmaxAssignmentSparsityPenalty::soft_abs_temperature(pen.k_atoms) * norm;
+        let slope = pen.row_dense_hessian_logit_derivative(&row, scale, 0)[[0, 1]].abs();
+        (z_star, eps_k / slope, slope)
+    }
+
+    /// (2) The θ-adjoint is CONTINUOUS across an off-diagonal zero crossing,
+    /// where the hard `sign(H_kj)` jumps by `2|Ḣ_kj|`. Both sides are measured:
+    /// the smooth jump must shrink with the probe offset (C⁰ derivative), while
+    /// the hard jump must stay bounded away from zero — otherwise this test would
+    /// pass on an operator with no kink to remove.
+    #[test]
+    fn smooth_gershgorin_adjoint_is_continuous_across_a_zero_crossing_2339() {
+        let scale = 1.3_f64;
+        let pen = SoftmaxAssignmentSparsityPenalty::new(2, 1.0);
+        let (z_star, band, slope) = zero_crossing_band(&pen, scale);
+        assert!(
+            slope > 1e-4 && band > 0.0 && band.is_finite(),
+            "the crossing entry must move under z_0 for the kink to be real \
+             (#2339): |∂H_01/∂z_0| = {slope}, band = {band}"
+        );
+
+        let mut measured: Vec<(f64, f64, f64)> = Vec::new();
+        for divisor in [100.0_f64, 1000.0] {
+            let delta = band / divisor;
+            let plus = [z_star + delta, 0.0];
+            let minus = [z_star - delta, 0.0];
+            // The realized offset after rounding into `z_star`'s exponent.
+            let realized = 0.5 * (plus[0] - minus[0]);
+            assert!(
+                realized > 0.0,
+                "the seam probe must be representable next to z* = {z_star} \
+                 (#2339): requested δ = {delta}"
+            );
+            let smooth = (pen.row_psd_majorizer_logit_derivative(&plus, scale, 0)[[0, 0]]
+                - pen.row_psd_majorizer_logit_derivative(&minus, scale, 0)[[0, 0]])
+            .abs();
+            let hard = (hard_radius_logit_derivative(&pen, &plus, scale, 0, 0)
+                - hard_radius_logit_derivative(&pen, &minus, scale, 0, 0))
+            .abs();
+            measured.push((realized, smooth, hard));
+        }
+
+        for &(delta, smooth, hard) in &measured {
+            assert!(
+                hard >= slope,
+                "the HARD radius must genuinely jump by ≈2|Ḣ_01| across the \
+                 crossing — otherwise there is no kink for #2339 to remove \
+                 (δ={delta}): hard jump {hard} < {slope}"
+            );
+            assert!(
+                smooth <= 0.05 * hard,
+                "the SMOOTH adjoint must not jump across the crossing (#2339, \
+                 δ={delta}): smooth jump {smooth} vs hard jump {hard}"
+            );
+        }
+        // C⁰: the one-sided values converge as the probe closes in. A ten-fold
+        // smaller offset must cut the residual jump by at least four.
+        let (delta_coarse, coarse, _) = measured[0];
+        let (delta_fine, fine, _) = measured[1];
+        assert!(
+            fine <= 0.25 * coarse,
+            "the smooth adjoint's residual jump must vanish with the probe offset \
+             (#2339): {coarse} at δ={delta_coarse} → {fine} at δ={delta_fine}"
+        );
+    }
+
+    /// (2) The smooth radius is differentiable AT the seam in the strong sense:
+    /// a central finite difference taken INSIDE the smoothing band recovers the
+    /// hand-derived closed form. With the hard `|·|` this is the #2253 failure
+    /// mode — the stencil straddles the kink and the FD reference is meaningless,
+    /// off by `O(|Ḣ_01|)`. The tolerance sits ~200× below that failure signal and
+    /// ~25× above the FD's own truncation/cancellation floor at a band/100 step
+    /// (truncation grows like `h²·|Ḣ_01|³/ε_k²`, cancellation like `ulp(D̃)/h`;
+    /// band/100 is near their crossover).
+    #[test]
+    fn smooth_gershgorin_adjoint_matches_fd_inside_the_smoothing_band_2339() {
+        let scale = 1.3_f64;
+        let pen = SoftmaxAssignmentSparsityPenalty::new(2, 1.0);
+        let (z_star, band, slope) = zero_crossing_band(&pen, scale);
+        let row = [z_star, 0.0];
+        let step = band / 100.0;
+        assert!(
+            step > 0.0 && step.is_finite() && slope > 1e-4,
+            "the ε-scaled probe step must be usable (#2339): step = {step}, \
+             slope = {slope}"
+        );
+        for w in 0..2 {
+            let analytic = pen.row_psd_majorizer_logit_derivative(&row, scale, w);
+            let mut plus = row;
+            let mut minus = row;
+            plus[w] += step;
+            minus[w] -= step;
+            let realized = 0.5 * (plus[w] - minus[w]);
+            let mp = pen.row_psd_majorizer(&plus, scale);
+            let mm = pen.row_psd_majorizer(&minus, scale);
+            for kk in 0..2 {
+                let fd = (mp[[kk, kk]] - mm[[kk, kk]]) / (2.0 * realized);
+                assert_abs_diff_eq!(analytic[[kk, kk]], fd, epsilon = 1e-3);
+            }
+        }
+    }
+
+    /// (4) `D̃` is EXACTLY degree-one homogeneous in `scale = λ/τ²` — bit-for-bit
+    /// under a power-of-two rescale, and to rounding under an arbitrary one. This
+    /// is the property that keeps the `∂B/∂ρ_sparse` channel on its existing seam
+    /// without a code change; smoothing at a fixed absolute `ε` instead of the
+    /// row's own `‖H_k·‖₂` would break it.
+    #[test]
+    fn smooth_gershgorin_is_degree_one_homogeneous_in_scale_2339() {
+        let k = 5_usize;
+        let pen = SoftmaxAssignmentSparsityPenalty::new(k, 0.9);
+        let base = 0.625_f64;
+        for row in seeded_rows(k, 0x2339_0100) {
+            let d_base = pen.psd_majorizer_abs_row_sums(&row, base);
+            let d_doubled = pen.psd_majorizer_abs_row_sums(&row, 2.0 * base);
+            let d_tilted = pen.psd_majorizer_abs_row_sums(&row, 3.5 * base);
+            for kk in 0..k {
+                assert_eq!(
+                    d_doubled[kk],
+                    2.0 * d_base[kk],
+                    "D̃ must be degree-1 homogeneous in scale BIT-FOR-BIT under a \
+                     power-of-two rescale (#2339, atom {kk})"
+                );
+                assert_abs_diff_eq!(
+                    d_tilted[kk],
+                    3.5 * d_base[kk],
+                    epsilon = 1e-14 * (1.0 + d_base[kk])
+                );
+            }
+            // The adjoint inherits the same homogeneity (it is ∂ of a degree-1
+            // homogeneous operator at fixed logits).
+            let dd_base = pen.row_psd_majorizer_logit_derivative(&row, base, 0);
+            let dd_doubled = pen.row_psd_majorizer_logit_derivative(&row, 2.0 * base, 0);
+            for kk in 0..k {
+                assert_eq!(
+                    dd_doubled[[kk, kk]],
+                    2.0 * dd_base[[kk, kk]],
+                    "∂D̃/∂z must be degree-1 homogeneous in scale BIT-FOR-BIT \
+                     (#2339, atom {kk})"
+                );
+            }
+        }
+    }
+
+    /// (2), degenerate corner: an atom whose softmax mass underflows to exactly
+    /// zero has an identically zero Hessian row, so the envelope's smoothing
+    /// scale is exactly zero too. Value and adjoint must both be exactly `0.0` —
+    /// the same exact-zero continuation `entropy_log_plus_one` uses — rather than
+    /// a `0/0` NaN from the soft-sign division.
+    #[test]
+    fn smooth_gershgorin_is_exactly_zero_on_an_underflowed_atom_2339() {
+        let pen = SoftmaxAssignmentSparsityPenalty::new(2, 1.0);
+        let scale = 2.0_f64;
+        // exp(-800) underflows to exactly 0, so a_1 == 0.0 and H_1· ≡ 0.
+        let row = [0.0_f64, -800.0];
+        let d = pen.psd_majorizer_abs_row_sums(&row, scale);
+        assert_eq!(
+            d[1], 0.0,
+            "an underflowed atom's majorizer diagonal must be exactly zero (#2339)"
+        );
+        assert!(
+            d[0].is_finite() && d[0] >= 0.0,
+            "the surviving atom must stay finite and nonnegative (#2339): {}",
+            d[0]
+        );
+        for w in 0..2 {
+            let dd = pen.row_psd_majorizer_logit_derivative(&row, scale, w);
+            assert_eq!(
+                dd[[1, 1]],
+                0.0,
+                "an underflowed atom's majorizer adjoint must be exactly zero, \
+                 not NaN (#2339, w={w})"
+            );
+            assert!(
+                dd[[0, 0]].is_finite(),
+                "the surviving atom's adjoint must stay finite (#2339, w={w}): {}",
+                dd[[0, 0]]
+            );
         }
     }
 }
