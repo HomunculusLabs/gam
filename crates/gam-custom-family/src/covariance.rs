@@ -1702,11 +1702,67 @@ pub(crate) fn compute_joint_posterior<
             }
             Some(constraints) => {
                 let constraints = constraints.to_dense()?;
-                let ambient = spd_covariance_from_precision(
+                // #2442: this route reaches the truncated posterior only through
+                // `Σ = (H + S_λ + H_Φ)⁻¹`, so it needs a PROPER ambient Gaussian.
+                // A constrained mode is not obliged to supply one. Constrained
+                // optimality requires `dᵀHd > 0` only along the FEASIBLE cone —
+                // copositivity — and the Gaussian location-scale observed
+                // information is structurally indefinite off it (its per-row
+                // block `[[κ, 2rκ],[2rκ, 2r²κ]]` has determinant `−2r²κ² < 0`,
+                // the case #2387 documents). There the cone-truncated posterior
+                // still EXISTS and is proper; this decomposition simply cannot
+                // reach its moments.
+                //
+                // So decline the COVARIANCE CHANNEL, not the fit. The
+                // optimization converged and its coefficients are honest; a
+                // derived quantity being unreachable by one particular route is
+                // not a fit-quality failure, and promoting it to one deletes a
+                // converged model.
+                //
+                // Do NOT substitute the active-face reduction here. It is the
+                // `λ → ∞` endpoint of the very formula below and reports exactly
+                // zero variance in every constraint-normal direction — the #748
+                // fabrication this path exists to remove. A visible decline
+                // beats a silent wrong number.
+                let ambient = match spd_covariance_from_precision(
                     &precision,
                     p,
                     "ambient constrained-posterior precision H + S_λ + H_Φ",
-                )?;
+                ) {
+                    Ok(ambient) => ambient,
+                    Err(reason) => {
+                        log::warn!(
+                            "[custom-family covariance] constrained fit converged, but its \
+                             ambient posterior precision is not positive definite, so the \
+                             inequality-truncated covariance is unreachable by this route \
+                             ({reason}); reporting the fit WITHOUT a posterior covariance \
+                             rather than refusing the fit or substituting the zero-variance \
+                             active-face answer (#2442)"
+                        );
+                        // KNOWN GAP (#2442): a consumer cannot tell this state
+                        // apart from an unconstrained fit — both carry
+                        // `constrained_posterior: None` — and here the caller
+                        // keeps the constrained MODE as its coefficient vector
+                        // because the posterior mean is a function of the same
+                        // unreachable covariance. That is the mode/mean
+                        // conflation `FitGeometry` warns about, reachable only
+                        // on this decline. Distinguishing it properly needs a
+                        // typed decline on the wire schema rather than a third
+                        // meaning for `None`; recorded rather than papered over.
+                        return Ok(JointPosteriorAssembly {
+                            covariance_conditional: None,
+                            geometry: FitGeometry {
+                                coefficient_gauge: gam_problem::gauge::Gauge::identity(
+                                    &block_widths,
+                                ),
+                                penalized_hessian: precision.into(),
+                                constrained_posterior: None,
+                                working,
+                            },
+                            reported_beta: None,
+                        });
+                    }
+                };
                 let likelihood_score = terminal_likelihood_score(
                     preferred_workspace,
                     preferred_working_sets,
@@ -2170,6 +2226,137 @@ mod required_covariance_tests {
             eta: Array1::zeros(1),
         };
         (vec![spec], vec![state], vec![array![0.0]], unpenalized)
+    }
+
+    /// One 2-coefficient block with a lower bound on the first coordinate and an
+    /// unpenalized Hessian whose ambient form is INDEFINITE. `H + S_λ` is
+    /// `[[1, 0], [0, -2]]`: strictly positive along the constrained coordinate
+    /// and negative along the free one, which is the shape a constrained
+    /// optimum takes when curvature is blocked by an active bound (#2387's
+    /// Gaussian location-scale case, whose per-row information has determinant
+    /// `−2r²κ² < 0`).
+    fn indefinite_ambient_constrained_fixture() -> (
+        Vec<ParameterBlockSpec>,
+        Vec<ParameterBlockState>,
+        Vec<Array1<f64>>,
+        Array2<f64>,
+    ) {
+        let unpenalized = array![[1.0, 0.0], [0.0, -2.0]];
+        let beta = array![0.0, 0.5];
+        let spec = ParameterBlockSpec {
+            name: "indefinite-ambient".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::zeros((1, 2)),
+            )),
+            offset: Array1::zeros(1),
+            penalties: vec![PenaltyMatrix::Dense(Array2::zeros((2, 2)))],
+            nullspace_dims: vec![2],
+            initial_log_lambdas: array![0.0],
+            initial_beta: Some(beta.clone()),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let state = ParameterBlockState {
+            beta,
+            eta: Array1::zeros(1),
+        };
+        (vec![spec], vec![state], vec![array![0.0]], unpenalized)
+    }
+
+    #[derive(Clone)]
+    struct TwoCoefficientLowerBounded;
+
+    impl CustomFamily for TwoCoefficientLowerBounded {
+        fn evaluate(&self, states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            let beta = states[0].beta.clone();
+            Ok(FamilyEvaluation {
+                log_likelihood: 0.0,
+                blockworking_sets: vec![BlockWorkingSet::ExactNewton {
+                    gradient: array![-beta[0], 2.0 * beta[1]],
+                    hessian: SymmetricMatrix::Dense(array![[1.0, 0.0], [0.0, -2.0]]),
+                }],
+            })
+        }
+
+        fn block_linear_constraints(
+            &self,
+            _: &[ParameterBlockState],
+            block_idx: usize,
+            _: &ParameterBlockSpec,
+        ) -> Result<Option<ConstraintSet>, String> {
+            assert_eq!(block_idx, 0);
+            Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
+                a: array![[1.0, 0.0]],
+                b: array![0.0],
+            })))
+        }
+    }
+
+    /// #2442, and the executable form of a boundary that a comment could not
+    /// hold: an indefinite AMBIENT precision must cost the covariance channel
+    /// and nothing else.
+    ///
+    /// Two ways to break this, and the test fails on both.
+    ///
+    /// * Propagate the SPD refusal (a bare `?` on the ambient inverse) and the
+    ///   whole fit disappears. The optimization converged; a derived quantity
+    ///   being unreachable by one route is not a fit-quality failure, and
+    ///   #2387 already showed what refusing here costs — one Gaussian
+    ///   location-scale wiggle configuration stopped assembling.
+    /// * Substitute the active-face reduction and a covariance comes back that
+    ///   reports exactly zero variance in every constraint-normal direction.
+    ///   That is the `λ → ∞` endpoint of the truncated formula and the #748
+    ///   fabrication this path exists to remove.
+    ///
+    /// The honest answer is neither: report the fit, decline the covariance,
+    /// and leave the estimand gap visible until the cone-truncated moments can
+    /// be reached without inverting an indefinite `H`.
+    #[test]
+    fn indefinite_ambient_precision_declines_the_covariance_and_keeps_the_fit() {
+        let (specs, states, per_block, unpenalized) = indefinite_ambient_constrained_fixture();
+        let options = BlockwiseFitOptions {
+            compute_covariance: true,
+            ..BlockwiseFitOptions::default()
+        };
+        let assembly = compute_joint_posterior(
+            &TwoCoefficientLowerBounded,
+            &specs,
+            &states,
+            &per_block,
+            &options,
+            Some(&unpenalized),
+            None,
+            None,
+        )
+        .expect(
+            "a converged constrained fit whose ambient precision is indefinite must still \
+             assemble: the posterior is proper on the feasible cone and only this ROUTE to \
+             its moments is unavailable",
+        );
+        assert!(
+            assembly.covariance_conditional.is_none(),
+            "the covariance channel must be declined, not filled with the active-face \
+             answer: a zero-variance constraint-normal direction is the #748 fabrication, \
+             got {:?}",
+            assembly.covariance_conditional,
+        );
+        assert!(
+            assembly.geometry.constrained_posterior.is_none(),
+            "no truncated law was computed, so none may be persisted as though it had been",
+        );
+        assert!(
+            assembly.reported_beta.is_none(),
+            "the posterior mean is a function of the same unreachable ambient covariance, so \
+             the caller must keep the converged mode rather than receive a fabricated centre",
+        );
+        assert_eq!(
+            assembly.geometry.penalized_hessian.as_array(),
+            &array![[1.0, 0.0], [0.0, -2.0]],
+            "the full-space precision is still the honest curvature of the fit and must be \
+             reported unchanged",
+        );
     }
 
     #[test]
