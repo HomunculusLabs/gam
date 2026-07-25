@@ -327,7 +327,36 @@ fn iso_kappa_fd_variant_driver(
         rail_probes.push((format!("rhoALL@{value}"), theta_all_rail));
     }
 
-    let h = 1e-5_f64;
+    // Central-difference step, DERIVED rather than picked (#2425).
+    //
+    // The historical `1e-5` assumed an exact evaluator, for which the optimal
+    // central step is `h ≈ eps^(1/3) ≈ 6e-6`. This evaluator is not exact: each
+    // cost runs an inner PIRLS solve, so its value carries an absolute noise
+    // floor `ν`, and the total central-difference error is
+    //
+    //     ν/h  +  h²·S'''/6            (round-off/noise)  +  (truncation)
+    //
+    // minimized at `h* = (3ν/S''')^(1/3)`. `zz_measure_psi_only_rho1_fd_step_law_2425`
+    // measures `ν` on the production objective by sweeping `h` over 1e-3…1e-7 and
+    // reading which law the analytic-vs-FD gap follows. It is unambiguously the
+    // NOISE law, not truncation — `gap·h` is flat at ~1.5e-11 across four decades
+    // while `gap/h²` sweeps from 1e-2 to 1e10:
+    //
+    //     h        1e-3     1e-4     1e-5     1e-6     1e-7
+    //     gap·h    9.6e-12  2.2e-12  1.0e-11  2.1e-11  1.7e-11
+    //     gap/h²   9.6e-3   2.2e0    1.0e4    2.1e7    1.7e10
+    //
+    // So `ν ≈ 1.5e-11` and, with `S''' = O(1)`, `h* = (3·1.5e-11)^(1/3) ≈ 3.6e-4`.
+    // At the old `1e-5` the oracle's OWN error is `ν/h ≈ 1.5e-6`, which is ~10%
+    // of a near-zero component like the `psi_only` ρ₁ row (~1.5e-5) — that is
+    // what made `iso_kappa_duchon_n_smaller_fd` fail at `rel=5.077e-3` against a
+    // `5e-3` gate, with the analytic gradient correct all along. The measurement
+    // confirms the tail of the argument too: at `h=1e-3`, where noise is
+    // negligible, FD agrees with the analytic value to 0.6%.
+    //
+    // Raising `h` costs truncation on the WELL-scaled components, and that is
+    // affordable: `h²·S'''/6 ≈ 9e-8·S'''/6`, four orders inside `rel_tol`.
+    let h = 3e-4_f64;
     let rel_tol = 5e-3_f64;
     let mut violations: Vec<String> = Vec::new();
     let mut analytic_by_probe: Vec<(String, Array1<f64>)> = Vec::new();

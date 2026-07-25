@@ -4140,7 +4140,14 @@ fn iso_kappa_fd_variant_driver(
         theta_alt[rho_dim + k] = 0.4;
     }
 
-    let h = 1e-5_f64;
+    // #2425: DERIVED central-difference step, kept in step with the live copy
+    // in `iso_kappa_reml_gradient_fd_tests` (see the derivation there). The
+    // evaluator is inexact — each cost runs an inner PIRLS solve — so its value
+    // carries an absolute noise floor `ν ≈ 1.5e-11`, measured by
+    // `zz_measure_psi_only_rho1_fd_step_law_2425`, and the central-difference
+    // error `ν/h + h²S'''/6` is minimized at `h* = (3ν/S''')^(1/3) ≈ 3.6e-4`,
+    // not at the exact-evaluator `eps^(1/3) ≈ 6e-6` the old `1e-5` assumed.
+    let h = 3e-4_f64;
     let rel_tol = 5e-3_f64;
     let mut violations: Vec<String> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
