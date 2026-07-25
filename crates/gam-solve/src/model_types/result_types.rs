@@ -1513,6 +1513,14 @@ pub struct FitGeometry {
     /// Stored as [`UnscaledPrecision`] so the dispersion-ownership invariant
     /// (this matrix is *not* φ-scaled) is enforced at the type level.
     pub penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision,
+    /// Exact inequality-truncated posterior identity in the active coefficient
+    /// frame, when linear inequality constraints are part of the fitted model.
+    ///
+    /// This is deliberately part of the required wire schema: old constrained
+    /// models must be regenerated rather than silently treating their reported
+    /// coefficient vector as both a posterior mean and an optimizer mode.
+    pub constrained_posterior:
+        Option<crate::constrained_posterior::ConstrainedPosteriorGeometry>,
     /// Optional owned row-wise diagonal IRLS evidence. `None` is a typed
     /// statement that the terminal solver geometry has no single diagonal
     /// row representation; it is never represented by empty or zero-filled
@@ -1992,6 +2000,15 @@ impl FitGeometry {
             "fit_result.geometry.penalized_hessian",
             self.penalized_hessian.iter().copied(),
         )?;
+        if let Some(constrained) = self.constrained_posterior.as_ref() {
+            constrained
+                .validate_for_dimension(self.coefficient_gauge.reduced_total())
+                .map_err(|reason| {
+                    EstimationError::InvalidInput(format!(
+                        "fit_result.geometry.constrained_posterior is invalid: {reason}"
+                    ))
+                })?;
+        }
         if let Some(working) = self.working.as_ref() {
             working.validate_numeric_finiteness()?;
         }
