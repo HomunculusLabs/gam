@@ -23,11 +23,56 @@ pub fn beta_quantile(p: f64, a: f64, b: f64) -> f64 {
     inv_beta_reg(a, b, p)
 }
 
+/// The part of `x·x` that `f64` cannot hold: `x² = x*x + square_residual(x)`,
+/// exactly, for every `x` whose square neither overflows nor goes subnormal.
+///
+/// This exists because of what `exp` does to a squared argument. Rounding
+/// `x*x` perturbs it by at most `ulp(x²)/2` — a RELATIVE perturbation of
+/// `ε/2`, which is unremarkable on its own. But `exp` converts a relative
+/// perturbation `δ` of its ARGUMENT into a relative perturbation `x²·δ` of
+/// its RESULT, so `exp(x*x)` carries `x²·ε/2` relative error: `3.7e-14` at
+/// `x = 26`, and `7.7e-14` at the `x ≈ 37` where `φ(x)` finally underflows.
+/// That is two orders worse than the `exp` evaluation's own rounding, and it
+/// is the error `erfcx` and `normal_pdf` were both actually delivering.
+///
+/// The residual is the whole of that discarded term and is itself exactly
+/// representable (Dekker's two-product theorem, in its one-FMA form), so
+/// `exp(x²) = exp(x*x)·exp(residual)` and `exp(residual) = 1 + residual` to
+/// `O(residual²)` — below `1e-27` over the entire domain either caller uses.
+/// One multiply by `1 + residual` therefore buys back every digit, and the
+/// callers below apply it fused so the correction itself costs one more
+/// rounding and nothing else.
+///
+/// `mul_add` is a single instruction wherever FMA is in the baseline ISA
+/// (aarch64, and x86-64 built with `+fma`); on a baseline x86-64 build it is
+/// a `glibc` call, measured at ~2.5 ns. Against `erfcx`'s 38 ns that is 9%;
+/// against `normal_pdf`'s 6.2 ns it is 40% of a function that is nowhere the
+/// bottleneck of a row loop that also assembles a design row and a Hessian
+/// block. Both callers guard the pathological arguments BEFORE calling this,
+/// so it never has to defend `±∞` (whose residual would be `NaN`).
+#[inline]
+fn square_residual(x: f64, rounded_square: f64) -> f64 {
+    x.mul_add(x, -rounded_square)
+}
+
 /// Standard normal PDF phi(x).
+///
+/// The squared argument is carried exactly (see [`square_residual`]); without
+/// that, `exp(-½·fl(x*x))` degrades like `x²·ε/2` and reaches `5.7e-14`
+/// relative before `φ` underflows, against the `3.3e-16` it holds with.
 #[inline]
 pub fn normal_pdf(x: f64) -> f64 {
     const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
-    INV_SQRT_2PI * (-0.5 * x * x).exp()
+    let rounded_square = x * x;
+    let head = INV_SQRT_2PI * (-0.5 * rounded_square).exp();
+    if head == 0.0 || head.is_nan() {
+        // The pdf underflowed or `x` was `±∞` (head `0`), or `x` was `NaN`.
+        // Neither admits a relative correction, and `±∞` would feed the
+        // residual an `∞ − ∞`; return the limit the plain form gives.
+        return head;
+    }
+    let residual = square_residual(x, rounded_square);
+    head.mul_add(-0.5 * residual, head)
 }
 
 /// Standard normal CDF Phi(x) evaluated via the exact special-function identity
@@ -52,6 +97,15 @@ pub fn normal_cdf(x: f64) -> f64 {
 /// a six-correction asymptotic expansion avoids overflow while retaining the
 /// representable subnormal tail. At the switch, the first omitted term is
 /// below `2e-17` relative to the leading term.
+///
+/// The direct branch carries `x²` exactly (see [`square_residual`]). Without
+/// that correction the branch degraded like `x²·ε/2` — `1.4e-14` at `x = 10`,
+/// `5.7e-14` by the top of its range — while the asymptotic branch that takes
+/// over at `26` was already delivering `3e-16`. The seam was therefore a
+/// 190-fold step DOWN in error at the point where the code switches to what
+/// reads like the fallback, and the whole `[0, 26)` interval, where every
+/// probit / Mills / log-CDF consumer actually lives, was the inaccurate side.
+/// Both branches now hold `< 5e-16`, so the crossover is invisible.
 #[inline]
 pub fn erfcx_nonnegative(x: f64) -> f64 {
     if x.is_nan() || x < 0.0 {
@@ -61,7 +115,11 @@ pub fn erfcx_nonnegative(x: f64) -> f64 {
         return 0.0;
     }
     if x < 26.0 {
-        (x * x).exp() * erfc(x)
+        // `x` is finite and in `[0, 26)`, so the square is exact-splittable and
+        // `head` is finite and strictly positive (`erfc(26⁻) ≈ 1e-295`).
+        let rounded_square = x * x;
+        let head = rounded_square.exp() * erfc(x);
+        head.mul_add(square_residual(x, rounded_square), head)
     } else {
         let inv = 1.0 / x;
         let inv2 = inv * inv;
@@ -1039,6 +1097,110 @@ mod tests {
         }
     }
 
+    /// `x*x` is exact-splittable and the split is what `exp` needs.
+    ///
+    /// Two independent statements, because the correction is only worth what
+    /// its residual is worth. First, `x*x + residual` is `x²` EXACTLY: checked
+    /// against a Veltkamp/Dekker split, which reaches the same residual through
+    /// pure multiplies and adds and shares no code path with the `mul_add`
+    /// route. Second, the residual is not decorative — for these arguments it
+    /// is a relative perturbation of `x²` big enough that `exp` amplifies it
+    /// past a single ulp of the result.
+    #[test]
+    fn square_residual_completes_the_rounded_square_exactly() {
+        // 2^27 + 1: Veltkamp's splitting factor, exact for any `x` whose
+        // scaled form does not overflow.
+        const SPLIT: f64 = 134_217_729.0;
+        let mut saw_amplified = false;
+        for &x in &[
+            0.1, 0.7, 1.3, 2.9, 6.1, 10.5, 14.3, 19.7, 23.9, 25.9999, 34.7,
+        ] {
+            let rounded = x * x;
+            let residual = square_residual(x, rounded);
+
+            let c = x * SPLIT;
+            let head = c - (c - x);
+            let tail = x - head;
+            let dekker = ((head * head - rounded) + 2.0 * head * tail) + tail * tail;
+            assert_eq!(
+                residual, dekker,
+                "x={x}: mul_add residual {residual:e} != Dekker residual {dekker:e}"
+            );
+
+            // `exp` multiplies a relative argument perturbation by the argument.
+            let amplified = (residual / rounded).abs() * rounded;
+            if amplified > f64::EPSILON {
+                saw_amplified = true;
+            }
+        }
+        assert!(
+            saw_amplified,
+            "no test argument had a residual `exp` could amplify past one ulp; \
+             the correction under test would be untested"
+        );
+    }
+
+    /// `φ(x)` against an EXTERNAL high-precision reference (mpmath, dps=60).
+    ///
+    /// Every argument here has an INEXACT square, which is the whole point.
+    /// `exp(−½·fl(x*x))` misplaces the argument by `x²·ε/2` RELATIVE, and `exp`
+    /// hands that straight back as relative error in the result: `1.4e-14` at
+    /// `x ≈ 17`, `5.7e-14` by `x ≈ 35`, where `φ` is still a normal `f64`. Only
+    /// the top of the range makes that visible, so the table has to reach it —
+    /// a `φ` table that stops at `x = 5` cannot tell the two forms apart.
+    ///
+    /// `1.5e-15` (≈7 ulp) is the portability allowance: `f64::exp` is the
+    /// platform libm and the only part of this that is not fixed by the crate
+    /// graph, and it is worth ~1 ulp on the implementations in use. That still
+    /// leaves 38x of margin against the defect at the top of the table.
+    #[test]
+    fn normal_pdf_matches_high_precision_reference() {
+        const TOLERANCE: f64 = 1.5e-15;
+        let refs: &[(f64, f64)] = &[
+            (0.5, 0.35206532676429947),
+            (1.0, 0.24197072451914334),
+            (2.5, 0.017528300493568537),
+            (4.0, 0.00013383022576488534),
+            (7.3, 1.0693837871541648e-12),
+            (11.9, 7.090702668428078e-32),
+            (17.4, 7.201308152719057e-67),
+            (23.6, 4.555989824112156e-122),
+            (29.1, 5.229437243665329e-185),
+            (34.7, 1.368008224488383e-262),
+        ];
+        for &(x, reference) in refs {
+            // The small arguments anchor the ordinary range; the large ones are
+            // where the defect lives, and every one of THOSE has to have a
+            // square `f64` cannot hold or it exercises nothing.
+            assert!(
+                x <= 5.0 || square_residual(x, x * x) != 0.0,
+                "x={x} squares exactly, so it cannot exercise the correction"
+            );
+            let rel = rel_err(normal_pdf(x), reference);
+            assert!(
+                rel < TOLERANCE,
+                "normal_pdf({x}) = {:.17e}, reference {reference:.17e}, rel {rel:.3e}",
+                normal_pdf(x)
+            );
+        }
+    }
+
+    /// `φ` off the ordinary domain, where the square has no usable residual:
+    /// `±∞` squares to `∞` and would hand the correction an `∞ − ∞`.
+    #[test]
+    fn normal_pdf_nonfinite_and_underflowed_arguments() {
+        assert_eq!(normal_pdf(f64::INFINITY), 0.0);
+        assert_eq!(normal_pdf(f64::NEG_INFINITY), 0.0);
+        assert!(normal_pdf(f64::NAN).is_nan());
+        // Past ~38.6 the pdf underflows; it must reach zero, not NaN.
+        assert_eq!(normal_pdf(40.0), 0.0);
+        assert_eq!(normal_pdf(-40.0), 0.0);
+        assert_eq!(normal_pdf(f64::MAX), 0.0);
+        // Just inside the underflow edge the result is subnormal but positive.
+        let edge = normal_pdf(38.0);
+        assert!(edge > 0.0 && edge.is_subnormal(), "phi(38) = {edge:e}");
+    }
+
     #[test]
     fn normal_pdf_positive() {
         for &x in &[-5.0, -1.0, 0.0, 1.0, 5.0] {
@@ -1126,21 +1288,44 @@ mod tests {
         );
     }
 
+    /// The two branches must describe one function across `x = 26`.
+    ///
+    /// Note WHY the plain `exp(x*x)·erfc(x)` below is a legitimate oracle at
+    /// this particular argument and nowhere else: `26² = 676` is exactly
+    /// representable, so the rounded square carries no residual and the direct
+    /// form is momentarily as good as the corrected one. That is also exactly
+    /// why this check was blind to the `x²·ε/2` defect it looks like it should
+    /// have caught — at `25.9` the same comparison would have failed by
+    /// `5.7e-14`, but the seam was only ever probed at the one point in the
+    /// neighbourhood where the defect vanishes. The bit-adjacent step below
+    /// cannot substitute for it either: `d(ln erfcx)/dx ≈ −2x` at the switch,
+    /// so one ulp of `x` moves the true value by `1.8e-13`, three times the
+    /// defect. It takes a reference at a DISTANCE from the seam — the table in
+    /// `erfcx_matches_high_precision_reference` — to see the defect at all.
     #[test]
     fn erfcx_asymptotic_switch_matches_finite_direct_identity() {
         let switch = 26.0_f64;
+        assert_eq!(
+            square_residual(switch, switch * switch),
+            0.0,
+            "676 must be exact for the direct form below to be an oracle"
+        );
         let direct = (switch * switch).exp() * erfc(switch);
         let asymptotic = erfcx_nonnegative(switch);
         assert!(
-            rel_err(asymptotic, direct) < 5.0e-14,
+            rel_err(asymptotic, direct) < 1.0e-15,
             "switch mismatch: asymptotic={asymptotic:.17e}, direct={direct:.17e}"
         );
 
+        // Continuity across the branch cut, up to how fast the function itself
+        // moves over one ulp of `x` (`|d ln erfcx/dx| ≈ 2x` ⇒ ~1.9e-13 here).
         let immediately_below = f64::from_bits(switch.to_bits() - 1);
         let below = erfcx_nonnegative(immediately_below);
+        let step = 2.0 * switch * (switch - immediately_below);
         assert!(
-            rel_err(asymptotic, below) < 5.0e-14,
-            "discontinuous switch: below={below:.17e}, at={asymptotic:.17e}"
+            rel_err(asymptotic, below) < 2.0 * step,
+            "discontinuous switch: below={below:.17e}, at={asymptotic:.17e}, \
+             one-ulp travel {step:.3e}"
         );
     }
 
@@ -1154,35 +1339,70 @@ mod tests {
     /// (mpmath, dps=60) spanning the direct branch `[0.1, 26)`. This is the
     /// root-cause guard: the previous `exp(x²)·erfc(x)` direct form was built on
     /// `statrs::erfc`, whose ~1e-10 relative accuracy silently poisoned every
-    /// downstream probit / Mills / log-CDF derivative. The `1e-13` tolerance is
-    /// far below what any ~1e-10 `erfc` can meet, so a regression to a
-    /// low-accuracy complementary error function fails here immediately —
-    /// independent of the seam-continuity check above.
+    /// downstream probit / Mills / log-CDF derivative.
+    ///
+    /// The table had a SECOND job it was not doing. Of its twelve arguments,
+    /// eleven — `0.5`, `2`, `3.5`, `6`, `9`, `13`, `18`, `22`, `25.5`, and the
+    /// two whose squares are far too small to matter — square EXACTLY in `f64`,
+    /// so `fl(x*x) = x²` and the `x²·ε/2` error the rounded square feeds `exp`
+    /// was identically zero at every one of them. The twelfth, `25.9999`, does
+    /// not square exactly; it was the one point in the table where the defect
+    /// was live, and its literal had been recorded WITH the defect in it —
+    /// `0.021683668126370212` against a true `0.021683668126369115`, off by
+    /// `5.1e-14`. Three independent high-precision routes (`exp(x²)·erfc(x)`,
+    /// the 12-term asymptotic series, and a 400-level Laplace continued
+    /// fraction) and `scipy.special.erfcx` all agree on the corrected value.
+    /// A `1e-13` tolerance then accepted a reference that was itself wrong by
+    /// half the tolerance, which is how a 190x accuracy defect sat under a
+    /// test named for high precision.
+    ///
+    /// So the table now RUNS ON arguments with inexact squares (`10.5`,
+    /// `14.3`, `19.7`, `23.9` alongside the original grid) and the tolerance is
+    /// `1.5e-15` — 38x below the defect at the top of the range, and still ~7
+    /// ulp of headroom for the platform `f64::exp` (the only part of this path
+    /// not pinned by the crate graph; `erfc` comes from the `libm` crate and is
+    /// identical everywhere).
     #[test]
     fn erfcx_matches_high_precision_reference() {
+        const TOLERANCE: f64 = 1.5e-15;
         // (x, mpmath exp(x²)·erfc(x) at dps=60, rounded to f64).
         let refs: &[(f64, f64)] = &[
-            (0.1, 0.89645697996912664),
-            (0.5, 0.61569034419292587),
+            (0.1, 0.8964569799691267),
+            (0.5, 0.6156903441929259),
             (1.0, 0.427583576155807),
-            (2.0, 0.25539567631050574),
+            (2.0, 0.25539567631050575),
             (3.5, 0.1552936556088943),
-            (6.0, 0.092776567800538354),
-            (9.0, 0.062307724037774684),
-            (13.0, 0.043271921864609693),
+            (6.0, 0.09277656780053835),
+            (9.0, 0.06230772403777468),
+            (10.5, 0.05349189974656412),
+            (13.0, 0.043271921864609694),
+            (14.3, 0.0393580473372741),
             (18.0, 0.03129571781590521),
+            (19.7, 0.028602309402825203),
             (22.0, 0.025618570005879453),
+            (23.9, 0.023585649371803793),
             (25.5, 0.022108108052519827),
-            (25.9999, 0.021683668126370212),
+            (25.9999, 0.021683668126369115),
         ];
         for &(x, reference) in refs {
             let got = erfcx_nonnegative(x);
-            let rel = (got - reference).abs() / reference.abs();
+            let rel = rel_err(got, reference);
             assert!(
-                rel < 1.0e-13,
-                "erfcx({x}) = {got:.17e}, reference {reference:.17e}, rel {rel:.3e} >= 1e-13"
+                rel < TOLERANCE,
+                "erfcx({x}) = {got:.17e}, reference {reference:.17e}, rel {rel:.3e}"
             );
         }
+        // The point of the added arguments: at least four of them must have a
+        // square `f64` cannot hold, or the table is back to testing nothing.
+        let inexact = refs
+            .iter()
+            .filter(|&&(x, _)| square_residual(x, x * x) != 0.0)
+            .count();
+        assert!(
+            inexact >= 4,
+            "only {inexact} of {} reference arguments have an inexact square",
+            refs.len()
+        );
     }
 
     // ── log1mexp_positive ─────────────────────────────────────────────────────
