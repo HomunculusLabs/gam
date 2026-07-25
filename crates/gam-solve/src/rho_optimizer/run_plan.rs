@@ -106,6 +106,88 @@ fn retain_best_outer_checkpoint(slot: &mut Option<OuterResult>, candidate: Outer
     }
 }
 
+fn capture_outer_gradient_fd_at_seed(
+    obj: &mut dyn OuterObjective,
+    config: &OuterConfig,
+    context: &str,
+    seed: &Array1<f64>,
+    lower: &Array1<f64>,
+    upper: &Array1<f64>,
+) -> Result<(), EstimationError> {
+    if !crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled() {
+        return Ok(());
+    }
+    obj.reset();
+    install_matching_initial_inner_seed(obj, config, seed, context)?;
+    let analytic = obj.eval_with_order(seed, OuterEvalOrder::ValueAndGradient)?;
+    let mut finite_difference = Array1::<f64>::zeros(seed.len());
+    let mut steps = Array1::<f64>::zeros(seed.len());
+    for j in 0..seed.len() {
+        let nominal_step = f64::EPSILON.powf(0.25) * (1.0 + seed[j].abs());
+        let left_room = (seed[j] - lower[j]).max(0.0);
+        let right_room = (upper[j] - seed[j]).max(0.0);
+        if left_room >= nominal_step && right_room >= nominal_step {
+            let mut plus = seed.clone();
+            let mut minus = seed.clone();
+            plus[j] += nominal_step;
+            minus[j] -= nominal_step;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_plus = obj.eval_cost(&plus)?;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_minus = obj.eval_cost(&minus)?;
+            finite_difference[j] = (cost_plus - cost_minus) / (2.0 * nominal_step);
+            steps[j] = nominal_step;
+        } else if right_room >= left_room && right_room > 0.0 {
+            let step = nominal_step.min(0.5 * right_room);
+            let mut one = seed.clone();
+            let mut two = seed.clone();
+            one[j] += step;
+            two[j] += 2.0 * step;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_one = obj.eval_cost(&one)?;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_two = obj.eval_cost(&two)?;
+            finite_difference[j] =
+                (-3.0 * analytic.cost + 4.0 * cost_one - cost_two) / (2.0 * step);
+            steps[j] = step;
+        } else if left_room > 0.0 {
+            let step = nominal_step.min(0.5 * left_room);
+            let mut one = seed.clone();
+            let mut two = seed.clone();
+            one[j] -= step;
+            two[j] -= 2.0 * step;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_one = obj.eval_cost(&one)?;
+            obj.reset();
+            install_matching_initial_inner_seed(obj, config, seed, context)?;
+            let cost_two = obj.eval_cost(&two)?;
+            finite_difference[j] =
+                (3.0 * analytic.cost - 4.0 * cost_one + cost_two) / (2.0 * step);
+            steps[j] = step;
+        } else {
+            return Err(EstimationError::InvalidInput(format!(
+                "outer-gradient FD capture cannot perturb collapsed coordinate {j}"
+            )));
+        }
+    }
+    obj.reset();
+    crate::estimate::outer_eval_capture::record_outer_gradient_fd(
+        crate::estimate::OuterGradientFdRecord {
+            theta: seed.clone(),
+            cost: analytic.cost,
+            analytic_gradient: analytic.gradient,
+            finite_difference_gradient: finite_difference,
+            steps,
+        },
+    );
+    Ok(())
+}
+
 /// Execute a single plan attempt (seed generation → solver loop → best result).
 ///
 /// `allow_tail_snap_reseed` gates the one-shot #2348 Inc 2b retry from a
@@ -322,6 +404,19 @@ pub(crate) fn run_outer_with_plan(
             }
         }
         obj.reset();
+        if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled() {
+            capture_outer_gradient_fd_at_seed(
+                obj,
+                config,
+                context,
+                seed,
+                &bounds_template.0,
+                &bounds_template.1,
+            )?;
+            // The audit leaves the objective pristine, so the real seed path
+            // below (including any curvature homotopy) is bit-identical to a
+            // run with capture disabled.
+        }
         // Certified curvature-homotopy entry leg (#1007). When the objective
         // has a certified anchor (the SAE-manifold `η = 0` Eckart-Young
         // relaxation), run the predictor-corrector `η`-walk from it INSTEAD of

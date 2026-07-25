@@ -45,40 +45,14 @@ use gam::{
     types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink},
 };
 use ndarray::{Array1, Array2};
-use std::sync::{Mutex, Once};
+use std::sync::Mutex;
 
-static CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
-static TEST_LOG_LOCK: Mutex<()> = Mutex::new(());
-
-struct CapturingLogger;
-impl log::Log for CapturingLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-    fn log(&self, record: &log::Record<'_>) {
-        let line = format!("{}", record.args());
-        if line.contains("OUTER-FD-AUDIT") {
-            if let Ok(mut g) = CAPTURE.lock() {
-                g.push(line.clone());
-            }
-            eprintln!("{line}");
-        }
-    }
-    fn flush(&self) {}
-}
-
-static LOGGER: CapturingLogger = CapturingLogger;
-static INIT_LOGGER: Once = Once::new();
+static STRUCTURED_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn init() {
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
     gam::init_parallelism();
-    INIT_LOGGER.call_once(|| {
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log::LevelFilter::Info);
-        }
-    });
 }
 
 #[inline]
@@ -119,32 +93,6 @@ fn build_dataset(n: usize, sigma: f64, seed: u64) -> gam::inference::data::Encod
     encode_recordswith_inferred_schema(headers, records).expect("encode dataset")
 }
 
-fn field(line: &str, key: &str) -> String {
-    if let Some(pos) = line.find(key) {
-        let rest = &line[pos + key.len()..];
-        rest.split_whitespace().next().unwrap_or("").to_string()
-    } else {
-        String::new()
-    }
-}
-
-fn parse_components(lines: &[String]) -> Vec<(String, f64, f64, f64)> {
-    let mut out = Vec::new();
-    for l in lines {
-        if !l.contains(" analytic=") || !l.contains(" fd=") || !l.contains(" gap=") {
-            continue;
-        }
-        let block = field(l, "block=");
-        let a: f64 = field(l, "analytic=").parse().unwrap_or(f64::NAN);
-        let fd: f64 = field(l, "fd=").parse().unwrap_or(f64::NAN);
-        let gap: f64 = field(l, "gap=").parse().unwrap_or(f64::NAN);
-        if !block.is_empty() {
-            out.push((block, a, fd, gap));
-        }
-    }
-    out
-}
-
 fn aniso_signal_dataset(n: usize) -> (Array2<f64>, Array1<f64>) {
     let mut x = Array2::<f64>::zeros((n, 2));
     let mut y = Array1::<f64>::zeros(n);
@@ -164,11 +112,9 @@ fn aniso_signal_dataset(n: usize) -> (Array2<f64>, Array1<f64>) {
 /// penalty-quad — with the default double-penalty (nullspace shrinkage) active.
 #[test]
 fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
-    let guard = TEST_LOG_LOCK.lock().unwrap();
+    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
-    if let Ok(mut g) = CAPTURE.lock() {
-        g.clear();
-    }
+    gam::estimate::enable_outer_gradient_fd_capture();
     let data = build_dataset(150, 0.05, 0x9A7E_7212_0001u64);
     let formula = "y ~ matern(x1, x2)";
     let config = FitConfig {
@@ -189,68 +135,28 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
         Err(e) => eprintln!("[FD-DIAG] matern(x1,x2) fit returned Err (audit still ran): {e}"),
     }
 
-    let lines = CAPTURE.lock().unwrap().clone();
-    let gate: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("gate eligible="))
-        .collect();
+    let audit = gam::estimate::take_outer_gradient_fd_capture()
+        .expect("outer runner must return structured analytic-vs-FD evidence");
     assert!(
-        !gate.is_empty(),
-        "expected an [OUTER-FD-AUDIT] gate line; captured {} lines: {:#?}",
-        lines.len(),
-        lines
+        audit.theta.len() >= 2,
+        "matern(x1,x2) must enroll at least one rho and one log-kappa coordinate"
     );
-    let psi_dim: usize = gate
-        .iter()
-        .filter_map(|l| field(l, "psi_dim=").parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
+    let kappa = audit.theta.len() - 1;
+    let analytic = audit.analytic_gradient[kappa];
+    let fd = audit.finite_difference_gradient[kappa];
+    let gap = (analytic - fd).abs();
     assert!(
-        psi_dim >= 1,
-        "matern(x1,x2) must enroll log-κ as a ψ-coordinate (psi_dim≥1); gate lines: {gate:#?}"
+        analytic.is_finite() && fd.is_finite(),
+        "non-finite Matérn log-kappa gradient: analytic={analytic} fd={fd}"
     );
-
-    let comps = parse_components(&lines);
+    let scale = analytic.abs().max(fd.abs()).max(1e-6);
     assert!(
-        !comps.is_empty(),
-        "expected per-coordinate analytic-vs-FD lines; captured: {:#?}",
-        lines
+        gap / scale < 5e-2,
+        "Matérn iso-kappa outer-gradient analytic!=FD: analytic={analytic:.6e} \
+         fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+        gap / scale,
+        audit.steps[kappa],
     );
-
-    // No DESYNC verdict: the FULL-objective analytic gradient agrees with FD.
-    let desync: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("VERDICT=DESYNC"))
-        .collect();
-    assert!(
-        desync.is_empty(),
-        "Matérn iso-κ outer gradient DESYNCs from the FD of the full criterion: {desync:#?}"
-    );
-
-    // The log-κ block(s) specifically: finite and analytic≈fd to tolerance.
-    let kappa_comps: Vec<&(String, f64, f64, f64)> = comps
-        .iter()
-        .filter(|(block, ..)| block.starts_with("psi_kappa"))
-        .collect();
-    assert!(
-        !kappa_comps.is_empty(),
-        "expected a psi_kappa[..] audit component; got blocks: {:?}",
-        comps.iter().map(|c| &c.0).collect::<Vec<_>>()
-    );
-    for (block, a, fd, gap) in &kappa_comps {
-        assert!(
-            a.is_finite() && fd.is_finite(),
-            "non-finite Matérn log-κ gradient component {block}: analytic={a} fd={fd}"
-        );
-        let scale = a.abs().max(fd.abs()).max(1e-6);
-        assert!(
-            gap / scale < 5e-2,
-            "Matérn iso-κ outer-gradient analytic≠FD on {block}: analytic={a:.6e} \
-             fd={fd:.6e} gap={gap:.3e} rel={:.3e}",
-            gap / scale
-        );
-    }
-    drop(guard);
 }
 
 /// #1259: at the symmetric anisotropic Matérn init, the FULL outer REML
@@ -260,11 +166,9 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
 /// perturbations, so the optimizer has a real descent direction at theta0.
 #[test]
 fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
-    let guard = TEST_LOG_LOCK.lock().unwrap();
+    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
-    if let Ok(mut g) = CAPTURE.lock() {
-        g.clear();
-    }
+    gam::estimate::enable_outer_gradient_fd_capture();
 
     let n = 180;
     let (x, y) = aniso_signal_dataset(n);
@@ -344,40 +248,18 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         Err(e) => eprintln!("[ANISO-ETA-GRAD] fit returned Err after audit: {e}"),
     }
 
-    let lines = CAPTURE.lock().unwrap().clone();
-    let gate: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("gate eligible="))
-        .collect();
+    let audit = gam::estimate::take_outer_gradient_fd_capture()
+        .expect("outer runner must return structured analytic-vs-FD evidence");
     assert!(
-        !gate.is_empty(),
-        "expected an [OUTER-FD-AUDIT] gate line; captured {} lines: {:#?}",
-        lines.len(),
-        lines
+        audit.theta.len() >= 3,
+        "anisotropic Matérn must enroll rho plus both eta coordinates"
     );
-    let psi_dim: usize = gate
-        .iter()
-        .filter_map(|l| field(l, "psi_dim=").parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
-    assert!(
-        psi_dim >= 2,
-        "anisotropic Matérn must enroll both eta axes as ψ coordinates; gate lines: {gate:#?}"
-    );
-
-    let comps = parse_components(&lines);
-    let eta_comps: Vec<&(String, f64, f64, f64)> = comps
-        .iter()
-        .filter(|(block, ..)| block.starts_with("psi_kappa"))
-        .take(2)
-        .collect();
-    assert!(
-        eta_comps.len() >= 2,
-        "expected two eta-axis psi_kappa components; got blocks: {:?}",
-        comps.iter().map(|c| &c.0).collect::<Vec<_>>()
-    );
-    let (_, g_signal, fd_signal, _) = eta_comps[0];
-    let (_, g_noise, fd_noise, _) = eta_comps[1];
+    let signal = audit.theta.len() - 2;
+    let noise = audit.theta.len() - 1;
+    let g_signal = audit.analytic_gradient[signal];
+    let fd_signal = audit.finite_difference_gradient[signal];
+    let g_noise = audit.analytic_gradient[noise];
+    let fd_noise = audit.finite_difference_gradient[noise];
     let analytic_contrast = g_signal - g_noise;
     let fd_contrast = fd_signal - fd_noise;
     eprintln!(
@@ -386,15 +268,19 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
          fd_contrast={fd_contrast:.6e}"
     );
 
-    for (block, a, fd, gap) in eta_comps {
+    for (axis, a, fd) in [
+        ("signal", g_signal, fd_signal),
+        ("noise", g_noise, fd_noise),
+    ] {
         assert!(
             a.is_finite() && fd.is_finite(),
-            "non-finite anisotropic eta gradient component {block}: analytic={a} fd={fd}"
+            "non-finite anisotropic eta gradient component {axis}: analytic={a} fd={fd}"
         );
         let scale = a.abs().max(fd.abs()).max(1e-6);
+        let gap = (a - fd).abs();
         assert!(
             gap / scale < 5e-2,
-            "anisotropic eta outer-gradient analytic≠FD on {block}: analytic={a:.6e} \
+            "anisotropic eta outer-gradient analytic!=FD on {axis}: analytic={a:.6e} \
              fd={fd:.6e} gap={gap:.3e} rel={:.3e}",
             gap / scale
         );
@@ -409,7 +295,6 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         "theta0 analytic eta contrast must point toward increasing the signal-axis eta; \
          got g_signal-g_noise={analytic_contrast:.6e}"
     );
-    drop(guard);
 }
 
 /// #1270 regression: a single `matern(x1, x2)` 2-D smooth must fit an ordinary
@@ -433,7 +318,7 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
 /// IntegrationError, post-fix it converges.
 #[test]
 fn matern_2d_smooth_fits_ordinary_surface_full_outer_loop() {
-    let guard = TEST_LOG_LOCK.lock().unwrap();
+    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
     let data = build_dataset(160, 0.05, 0x1270_0001_2D5Eu64);
     let config = FitConfig {
@@ -464,5 +349,4 @@ fn matern_2d_smooth_fits_ordinary_surface_full_outer_loop() {
         "duchon(x1,x2) control must fit (it always did): {:?}",
         duchon.err()
     );
-    drop(guard);
 }

@@ -91,7 +91,10 @@ pub use gam_problem::{ensure_finite_scalar, validate_all_finite};
 pub use joint_hyper::ExternalJointHyperEvaluator;
 pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm_start;
 pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
-pub use outer_eval_capture::{OuterEvalRecord, enable_outer_eval_capture, take_outer_eval_capture};
+pub use outer_eval_capture::{
+    OuterEvalRecord, OuterGradientFdRecord, enable_outer_eval_capture,
+    enable_outer_gradient_fd_capture, take_outer_eval_capture, take_outer_gradient_fd_capture,
+};
 pub(crate) use penalty::{
     ParametricColumnConditioning, faer_frob_inner, kahan_sum, map_hessian_to_original_basis,
 };
