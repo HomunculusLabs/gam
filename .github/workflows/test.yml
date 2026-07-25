@@ -634,8 +634,13 @@ jobs:
           # nextest prints, e.g. `FAIL [ 0.0s] (1/1) gam::quality the_test`; the
           # `(n/m)` try-counter is optional (absent when retries are off), so
           # consume it non-capturing if present before the package::binary id.
-          FAILRE = re.compile(r'^\s*(FAIL|TIMEOUT|TERMINATING|LEAK|SIGSEGV|ABORT)\s*\[[^\]]*\]\s+(?:\(\d+/\d+\)\s+)?(\S+)\s+(.+?)\s*$')
-          SLOWRE = re.compile(r'^\s*(SLOW|TIMEOUT|TERMINATING)\s*\[[^\]]*\]\s+(?:\(\d+/\d+\)\s+)?(\S+)\s+(.+?)\s*$')
+          # nextest RIGHT-PADS that counter to a fixed width once the run has
+          # more than nine tests ('(  1/119)'), so the inner \s* is
+          # load-bearing: without it the counter group falls through and '(' is
+          # captured as the binary id with the counter tail glued onto the test
+          # name - which is what every counted row in this ledger looked like.
+          FAILRE = re.compile(r'^\s*(FAIL|TIMEOUT|TERMINATING|LEAK|SIGSEGV|ABORT)\s*\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(.+?)\s*$')
+          SLOWRE = re.compile(r'^\s*(SLOW|TIMEOUT|TERMINATING)\s*\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(.+?)\s*$')
           run_fails = []; slow = []
           shard_logs = sorted(set(glob.glob('agg/shards/**/*.log', recursive=True) +
                                   glob.glob('agg/shards/*.log')))
