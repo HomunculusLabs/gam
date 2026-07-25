@@ -2238,17 +2238,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         context: "fit_custom_family terminal curvature ownership",
         reason,
     })?;
-    let penalized_hessian = penalized_hessian_from_owned_mode(
-        specs,
-        &per_block,
-        &final_options,
-        &hessian,
-    )
-    .map_err(|reason| CustomFamilyError::Optimization {
-        context: "fit_custom_family terminal penalized Hessian",
-        reason,
-    })?;
-
     let posterior = compute_joint_posterior(
         family,
         specs,
@@ -2271,7 +2260,6 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         geometry,
         reported_beta,
     } = posterior;
-    let geometry = Some(geometry);
     // Cross-fit FitArtifact capture (Phase 0/1) for the converged smoothing
     // fit: persist the descriptor-indexed raw-β + ρ so a later fold transfers
     // ρ. Best-effort; never affects this fit's result. Gated on the same opt-in
@@ -2295,11 +2283,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     )?;
     let precomputed_edf = if label_layout.joint_specs.is_empty() {
         Some(
-            custom_family_blockwise_edf(&penalized_hessian, specs, &physical_lambdas.view())
-                .map_err(|reason| CustomFamilyError::Optimization {
-                    context: "fit_custom_family terminal EDF",
-                    reason,
-                })?,
+            custom_family_blockwise_edf(
+                geometry.penalized_hessian.as_array(),
+                specs,
+                &physical_lambdas.view(),
+            )
+            .map_err(|reason| CustomFamilyError::Optimization {
+                context: "fit_custom_family terminal EDF",
+                reason,
+            })?,
         )
     } else {
         // The public per-penalty EDF vectors are aligned to per-block lambdas.
@@ -2370,6 +2362,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         context: "fit_custom_family reported posterior mean",
         reason,
     })?;
+    let geometry = Some(geometry);
     assemble_custom_family_fit_result(
         inner,
         BlockwiseFitAssembly {
