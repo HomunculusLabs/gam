@@ -103,10 +103,8 @@ pub struct PirlsStepStreamInput<'a> {
 /// Where the host-input form uploads `weights` + `gradient` per Newton
 /// step, this form reads them straight from the
 /// [`crate::gpu_kernels::pirls_row::RowOutputDevBuffers`] populated by the
-/// device-side row-reweight kernel — no host round-trip for the row
-/// state. Only the penalty matrix still crosses the host boundary
-/// because the outer REML loop updates Sλ + LM ridge between PIRLS
-/// steps.
+/// device-side row-reweight kernel. The fixed penalty and linear shift are
+/// uploaded asynchronously; the Newton RHS correction itself stays on device.
 #[cfg(target_os = "linux")]
 pub struct PirlsStepStreamDeviceInput<'a, 'b> {
     /// Device-resident solver weights `w_solver_i` (length n). Read
@@ -123,12 +121,12 @@ pub struct PirlsStepStreamDeviceInput<'a, 'b> {
     /// Real model-objective ridge. Appears in the exported
     /// `penalized_hessian` that flows to EDF / REML curvature.
     pub objective_ridge: f64,
-    /// Current coefficient vector β (length p). Downloaded to the host to
-    /// form the Newton RHS correction S·β. Only p f64 values cross the
-    /// boundary (β is small), so the round-trip cost is negligible.
+    /// Current coefficient vector β (length p), consumed in place by the
+    /// device-side Newton RHS correction.
     pub beta_dev: &'b cudarc::driver::CudaSlice<f64>,
-    /// Linear shift vector (length p) in transformed coordinates, on host.
-    /// Added to Newton RHS so the solve targets Xᵀ·score − S·β + linear_shift.
+    /// Linear shift vector (length p) in transformed coordinates. It is
+    /// uploaded to coefficient scratch without synchronizing the stream, then
+    /// added by the same kernel that applies `−Sβ`.
     pub linear_shift: ArrayView1<'b, f64>,
 }
 
@@ -1246,6 +1244,12 @@ extern "C" __global__ void chol_logdet_col_major(
                 input.linear_shift.len()
             ));
         }
+        if input.beta_dev.len() != p {
+            return Err(format!(
+                "beta_dev length {} does not match p={p}",
+                input.beta_dev.len()
+            ));
+        }
         let n_i = to_i32(n)?;
         let p_i = to_i32(p)?;
 
@@ -1398,28 +1402,42 @@ extern "C" __global__ void chol_logdet_col_major(
                 .memcpy_dtod(&ws.beta_orig_dev, &mut ws.rhs_dev)
                 .map_err(|e| format!("d2d Qsᵀ·score→rhs inplace: {e}"))?;
         }
-        // Now download rhs and β (both p-vectors; small, bounded-cost round-trip).
-        // Apply rhs −= S·β and rhs += linear_shift on the host for correctness.
-        let rhs_raw = ws
-            .stream
-            .clone_dtoh(&ws.rhs_dev)
-            .map_err(|e| format!("download Qsᵀ·score inplace: {e}"))?;
-        let beta_raw = ws
-            .stream
-            .clone_dtoh(input.beta_dev)
-            .map_err(|e| format!("download beta inplace: {e}"))?;
-        let mut rhs_host = Array1::from_vec(rhs_raw);
-        let beta_host = Array1::from_vec(beta_raw);
-        // S·β in transformed coordinates (S = input.penalty_hessian in transformed frame).
-        let s_beta = input.penalty_hessian.dot(&beta_host);
-        rhs_host -= &s_beta;
-        rhs_host += &input.linear_shift;
+        // Keep the correction in coefficient space on the device. The prior
+        // implementation downloaded both rhs and beta, performed Sβ on the
+        // CPU, and uploaded rhs again on every iteration. Those small transfers
+        // still drain the entire CUDA stream and dominated the n=80k, p=44
+        // device-resident loop (#2430).
         ws.stream
             .memcpy_htod(
-                rhs_host.as_slice().ok_or("rhs_host not contiguous")?,
-                &mut ws.rhs_dev,
+                input
+                    .linear_shift
+                    .as_slice()
+                    .ok_or("linear_shift must be contiguous")?,
+                &mut ws.dir_orig_dev,
             )
-            .map_err(|e| format!("re-upload corrected rhs inplace: {e}"))?;
+            .map_err(|e| format!("upload linear shift inplace: {e}"))?;
+        let loop_module = PIRLS_LOOP_CACHE
+            .get_or_compile(&shared.ctx, "pirls_loop", PIRLS_LOOP_PTX_SOURCE)
+            .map_err(|e| format!("load rhs-correction module: {e}"))?;
+        let correction_func = loop_module
+            .load_function("correct_newton_rhs")
+            .map_err(|e| format!("load correct_newton_rhs: {e}"))?;
+        let cfg = LaunchConfig {
+            grid_dim: ((p as u32).div_ceil(256).max(1), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut builder = ws.stream.launch_builder(&correction_func);
+        builder.arg(&mut ws.rhs_dev);
+        builder.arg(&ws.penalty_dev);
+        builder.arg(input.beta_dev);
+        builder.arg(&ws.dir_orig_dev);
+        builder.arg(&input.step_lm_lambda);
+        builder.arg(&p_i);
+        // SAFETY: correct_newton_rhs receives p-sized rhs/beta/shift vectors
+        // and a column-major p×p penalty matrix; the launch covers p threads.
+        unsafe { builder.launch(cfg) }
+            .map_err(|e| format!("correct Newton rhs on device: {e}"))?;
 
         // Step 4: Cholesky factor + solve in-place.
         potrf_in_place_reuse(
@@ -2009,6 +2027,105 @@ extern "C" __global__ void axpy_n(
     y[i] += alpha * x[i];
 }
 
+// Correct the projected score in place:
+//   rhs = Qs^T score - S beta + linear_shift.
+// `penalty_step` stores S + lm*I for the factorization, so subtracting its
+// product and adding lm*beta recovers the model penalty S exactly.
+extern "C" __global__ void correct_newton_rhs(
+    double* __restrict__ rhs,
+    const double* __restrict__ penalty_step,
+    const double* __restrict__ beta,
+    const double* __restrict__ linear_shift,
+    double lm,
+    int p
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= p) return;
+    double s_beta = 0.0;
+    for (int j = 0; j < p; ++j) {
+        s_beta += penalty_step[i + j * p] * beta[j];
+    }
+    rhs[i] += -s_beta + lm * beta[i] + linear_shift[i];
+}
+
+// Select the first acceptable member of the seven-point line-search ladder
+// without exporting beta, direction, objectives, or refusal summaries.
+//
+// output layout:
+//   [0] alpha, [1] accepted data deviance, [2] accepted penalized objective,
+//   [3] halving index, [4] ||direction||_inf,
+//   [5] first refusal row, [6] first refusal code, [7] all-refused flag.
+extern "C" __global__ void select_alpha(
+    const double* __restrict__ data_deviance,
+    const unsigned int* __restrict__ refusal_summary,
+    const double* __restrict__ beta,
+    const double* __restrict__ direction,
+    const double* __restrict__ penalty_step,
+    const double* __restrict__ linear_shift,
+    const double* __restrict__ direction_linf,
+    double previous_deviance,
+    double previous_objective,
+    double constant_shift,
+    double lm,
+    int p,
+    double* __restrict__ output
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const double alphas[7] = {
+        1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625
+    };
+
+    double penalty_beta = constant_shift;
+    double linear_coeff_half = 0.0;
+    double direction_penalty = 0.0;
+    for (int i = 0; i < p; ++i) {
+        double s_beta = 0.0;
+        double s_direction = 0.0;
+        for (int j = 0; j < p; ++j) {
+            double s_ij = penalty_step[i + j * p];
+            if (i == j) s_ij -= lm;
+            s_beta += s_ij * beta[j];
+            s_direction += s_ij * direction[j];
+        }
+        penalty_beta += beta[i] * s_beta - 2.0 * beta[i] * linear_shift[i];
+        linear_coeff_half += direction[i] * (s_beta - linear_shift[i]);
+        direction_penalty += direction[i] * s_direction;
+    }
+
+    output[0] = 0.0;
+    output[1] = previous_deviance;
+    output[2] = previous_objective;
+    output[3] = 0.0;
+    output[4] = direction_linf[0];
+    output[5] = 4294967295.0;
+    output[6] = 0.0;
+    output[7] = 1.0;
+
+    for (int k = 0; k < 7; ++k) {
+        unsigned int row = refusal_summary[k];
+        unsigned int code = refusal_summary[7 + k];
+        if (k == 0 && row != 0xffffffffu) {
+            output[5] = (double)row;
+            output[6] = (double)code;
+        }
+        if (row == 0xffffffffu) {
+            output[7] = 0.0;
+            double alpha = alphas[k];
+            double objective = data_deviance[k]
+                + penalty_beta
+                + 2.0 * alpha * linear_coeff_half
+                + alpha * alpha * direction_penalty;
+            if (isfinite(objective) && objective <= previous_objective) {
+                output[0] = alpha;
+                output[1] = data_deviance[k];
+                output[2] = objective;
+                output[3] = (double)k;
+                return;
+            }
+        }
+    }
+}
+
 extern "C" __global__ void deviance_sum(
     const double* __restrict__ d,
     int n,
@@ -2149,6 +2266,8 @@ extern "C" __global__ void status_first_ladder(
     /// - `row_final`: five numerical fields + status, written once at convergence.
     pub struct PirlsLoopWorkspace {
         pub beta_dev: CudaSlice<f64>,
+        /// Fixed shifted-quadratic linear term, uploaded once per loop.
+        pub linear_shift_dev: CudaSlice<f64>,
         pub eta_dev: CudaSlice<f64>,
         /// Solve-row buffers: `grad_eta`, `w_solver`, `deviance`, `status`.
         pub row_solve: crate::gpu_kernels::pirls_row::SolveRowBuffers,
@@ -2159,6 +2278,10 @@ extern "C" __global__ void status_first_ladder(
         pub direction_dev: CudaSlice<f64>,
         pub xd_dev: CudaSlice<f64>,
         pub scalar_dev: CudaSlice<f64>,
+        /// Compact alpha-selection record, written and selected entirely on
+        /// device, then downloaded in one synchronization per Newton step.
+        /// Layout is documented by `select_alpha`.
+        pub alpha_selection_dev: CudaSlice<f64>,
         /// Fourteen u32 scratch slots: row/code pairs for one row surface or
         /// all seven alpha-ladder candidates.
         pub status_u32_dev: CudaSlice<u32>,
@@ -2180,6 +2303,7 @@ extern "C" __global__ void status_first_ladder(
             };
             Ok(Self {
                 beta_dev: alloc_f64("beta", p)?,
+                linear_shift_dev: alloc_f64("linear shift", p)?,
                 eta_dev: alloc_f64("eta", n)?,
                 row_solve: crate::gpu_kernels::pirls_row::SolveRowBuffers::allocate(stream, n)
                     .map_err(|e| format!("pirls loop alloc row_solve: {e}"))?,
@@ -2192,6 +2316,7 @@ extern "C" __global__ void status_first_ladder(
                 direction_dev: alloc_f64("direction", p)?,
                 xd_dev: alloc_f64("xd", n)?,
                 scalar_dev: alloc_f64("scalar", 1)?,
+                alpha_selection_dev: alloc_f64("alpha selection", 8)?,
                 status_u32_dev: stream
                     .alloc_zeros::<u32>(14)
                     .map_err(|e| format!("pirls loop alloc status_u32: {e}"))?,
@@ -2398,9 +2523,10 @@ extern "C" __global__ void status_first_ladder(
         pub max_abs_eta: f64,
     }
 
-    /// Full device-resident PIRLS loop. Only three scalar (1 f64)
-    /// downloads per Newton iter (deviance, direction-L∞, candidate
-    /// deviance per α). β + final H downloaded once at exit.
+    /// Full device-resident PIRLS loop. Candidate deviances, refusal summaries,
+    /// direction, beta, and shifted-penalty algebra stay on device; one compact
+    /// alpha decision record synchronizes the host per Newton iteration. Beta
+    /// and the final Hessian are downloaded once at exit.
     pub(super) fn pirls_loop(
         shared: &PirlsGpuSharedData,
         ws: &mut SigmaPirlsGpuWorkspace,
@@ -2460,6 +2586,14 @@ extern "C" __global__ void status_first_ladder(
                 &mut loop_ws.beta_dev,
             )
             .map_err(|e| format!("upload beta0: {e}"))?;
+        ws.stream
+            .memcpy_htod(
+                linear_shift
+                    .as_slice()
+                    .ok_or("linear_shift not contiguous")?,
+                &mut loop_ws.linear_shift_dev,
+            )
+            .map_err(|e| format!("upload linear_shift: {e}"))?;
 
         let backend = crate::gpu_kernels::pirls_row::PirlsRowBackend::probe()
             .map_err(|e| format!("pirls_row backend: {e}"))?;
@@ -2481,6 +2615,9 @@ extern "C" __global__ void status_first_ladder(
         let status_first_ladder_func = loop_module
             .load_function("status_first_ladder")
             .map_err(|e| format!("load status_first_ladder: {e}"))?;
+        let select_alpha_func = loop_module
+            .load_function("select_alpha")
+            .map_err(|e| format!("load select_alpha: {e}"))?;
 
         // beta_orig = Qs · beta  (transforms from transformed to original coords).
         // For identity Qs, this is a copy; always goes through ws.beta_orig_dev.
@@ -2549,20 +2686,13 @@ extern "C" __global__ void status_first_ladder(
         let mut last_logdet = 0.0_f64;
         let mut converged = false;
 
-        // Host-side mirror of `beta_dev`. Maintained in lock-step with
-        // every accepted Newton step so we can evaluate the
-        // shifted-quadratic penalty `βᵀSβ − 2βᵀlinear_shift +
-        // constant_shift` on the host without an extra `β` DtoH per
-        // iteration. The initial state is `beta0_host` verbatim.
-        let mut beta_host: Array1<f64> = beta0_host.to_owned();
-
         // Initial *penalized* objective = data-deviance(β₀) + shifted
         // quadratic(β₀). This is the value the line search and
         // convergence test compare candidates against — matches the CPU
         // oracle's `penalized_objective` in `CandidateScreen`.
-        let s_beta0 = penalty_hessian.dot(&beta_host);
+        let s_beta0 = penalty_hessian.dot(&beta0_host);
         let penalty_init =
-            beta_host.dot(&s_beta0) - 2.0 * beta_host.dot(&linear_shift) + constant_shift;
+            beta0_host.dot(&s_beta0) - 2.0 * beta0_host.dot(&linear_shift) + constant_shift;
         let mut prev_objective = prev_deviance + penalty_init;
 
         // Diagnostic scalars surfaced on the outcome so the dispatch
@@ -2599,7 +2729,7 @@ extern "C" __global__ void status_first_ladder(
                 .memcpy_dtod(&ws.rhs_dev, &mut loop_ws.direction_dev)
                 .map_err(|e| format!("direction d2d copy it={it}: {e}"))?;
 
-            let dir_linf = reduce_scalar(
+            launch_scalar_reduction(
                 &ws.stream,
                 &linf_func,
                 &loop_ws.direction_dev,
@@ -2630,10 +2760,10 @@ extern "C" __global__ void status_first_ladder(
             // One kernel launch evaluates eta + alpha_k*xdelta for all k in
             // ALPHA_LADDER simultaneously, atomically accumulating per-row
             // deviance into objective_dev[k] and writing exact per-row refusal
-            // codes. A deterministic device reduction returns 7 row/code pairs;
-            // a scalar-sized DtoH selects the
-            // accepted step -- no per-alpha kernel launch, no full row-output
-            // write, no per-alpha host scalar sync.
+            // codes. A deterministic device reduction returns seven row/code
+            // pairs to device memory; `select_alpha` combines those with the
+            // exact shifted-quadratic penalty and direction norm. Only its
+            // compact decision record crosses to the host.
             loop_ws
                 .alpha_ladder
                 .zero(&ws.stream)
@@ -2652,67 +2782,52 @@ extern "C" __global__ void status_first_ladder(
                 &mut loop_ws.alpha_ladder,
             )
             .map_err(|e| format!("alpha-ladder it={it}: {e}"))?;
-            let obj_host: Vec<f64> = ws
-                .stream
-                .clone_dtoh(&loop_ws.alpha_ladder.objective_dev)
-                .map_err(|e| format!("ladder dtoh obj it={it}: {e}"))?;
-            let candidate_refusals = reduce_ladder_status_first(
+            launch_ladder_status_first_reduction(
                 &ws.stream,
                 &status_first_ladder_func,
                 &loop_ws.alpha_ladder.status_dev,
                 n,
                 &mut loop_ws.status_u32_dev,
             )?;
-            // Download the direction (p << n; one DtoH per iteration to
-            // compute the host-side penalty term and maintain beta_host).
-            let direction_host: Vec<f64> = ws
+            let p_i = to_i32(p)?;
+            let cfg = LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut builder = ws.stream.launch_builder(&select_alpha_func);
+            builder.arg(&loop_ws.alpha_ladder.objective_dev);
+            builder.arg(&loop_ws.status_u32_dev);
+            builder.arg(&loop_ws.beta_dev);
+            builder.arg(&loop_ws.direction_dev);
+            builder.arg(&ws.penalty_dev);
+            builder.arg(&loop_ws.linear_shift_dev);
+            builder.arg(&loop_ws.scalar_dev);
+            builder.arg(&prev_deviance);
+            builder.arg(&prev_objective);
+            builder.arg(&constant_shift);
+            builder.arg(&lm_ridge);
+            builder.arg(&p_i);
+            builder.arg(&mut loop_ws.alpha_selection_dev);
+            // SAFETY: select_alpha is a single-thread coefficient-space
+            // reduction over p-sized vectors and the p×p penalty, with seven
+            // ladder objectives and fourteen refusal-summary inputs.
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("select alpha on device it={it}: {e}"))?;
+            let selection = ws
                 .stream
-                .clone_dtoh(&loop_ws.direction_dev)
-                .map_err(|e| format!("dtoh direction it={it}: {e}"))?;
-
-            // Penalized objective for each candidate step:
-            //   obj_pen[k] = deviance(eta + alpha_k * xd)
-            //               + (beta + alpha_k * d)^T S (beta + alpha_k * d)
-            //               - 2 (beta + alpha_k * d) . linear_shift
-            //               + constant_shift
-            // The quadratic in alpha expands as:
-            //   penalty(beta) + alpha * [2 d^T (S beta - linear_shift)]
-            //                  + alpha^2 * d^T S d
-            let dir_view = ndarray::aview1(&direction_host);
-            let sd = penalty_hessian.dot(&dir_view);
-            let s_beta = penalty_hessian.dot(&beta_host);
-            let dtsd = dir_view.dot(&sd);
-            let linear_coeff = 2.0 * dir_view.dot(&(&s_beta - &linear_shift));
-            let penalty_beta =
-                beta_host.dot(&s_beta) - 2.0 * beta_host.dot(&linear_shift) + constant_shift;
-
-            let mut alpha = 0.0_f64;
-            let mut accepted_dev = prev_deviance;
-            let mut accepted_objective = prev_objective;
-            let mut halving_count: usize = 0;
-            for (k, &dev_k) in obj_host.iter().enumerate() {
-                let a = crate::gpu_kernels::pirls_row::ALPHA_LADDER[k];
-                let pen_k = penalty_beta + a * linear_coeff + a * a * dtsd;
-                let obj_k = dev_k + pen_k;
-                // Match the CPU oracle's acceptance test (#263):
-                // `<= prev_objective` is the `CandidateScreen`
-                // criterion — a step that holds the penalized
-                // objective steady (e.g. an exact zero-gradient
-                // direction) must still be accepted so the line
-                // search does not spuriously exhaust at a
-                // stationary point.
-                if candidate_refusals[k].is_none() && obj_k.is_finite() && obj_k <= prev_objective {
-                    alpha = a;
-                    accepted_dev = dev_k;
-                    accepted_objective = obj_k;
-                    halving_count = k;
-                    break;
-                }
-            }
+                .clone_dtoh(&loop_ws.alpha_selection_dev)
+                .map_err(|e| format!("download alpha selection it={it}: {e}"))?;
+            let alpha = selection[0];
+            let accepted_dev = selection[1];
+            let accepted_objective = selection[2];
+            let halving_count = selection[3] as usize;
+            let dir_linf = selection[4];
+            let all_candidates_refused = selection[7] != 0.0;
             if alpha == 0.0 {
-                if candidate_refusals.iter().all(Option::is_some) {
-                    let (row, code) = candidate_refusals[0]
-                        .expect("all alpha-ladder candidates were certified as refusals");
+                if all_candidates_refused {
+                    let row = selection[5] as usize;
+                    let code = selection[6] as u32;
                     let eta_host = ws
                         .stream
                         .clone_dtoh(&loop_ws.eta_dev)
@@ -2784,10 +2899,6 @@ extern "C" __global__ void status_first_ladder(
                 &mut loop_ws.eta_dev,
                 n,
             )?;
-            // Maintain host-side beta mirror: beta_host += alpha * direction.
-            for (b, &d) in beta_host.iter_mut().zip(direction_host.iter()) {
-                *b += alpha * d;
-            }
             // Refresh the 4-output solve-row buffers for the next Newton iter.
             crate::gpu_kernels::pirls_row::launch_solve_row_on_stream(
                 backend,
@@ -3237,14 +3348,14 @@ extern "C" __global__ void status_first_ladder(
             .map_err(|e| format!("axpy launch: {e}"))
     }
 
-    fn reduce_scalar(
+    fn launch_scalar_reduction(
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
         func: &cudarc::driver::CudaFunction,
         src: &CudaSlice<f64>,
         len: usize,
         scalar_dev: &mut CudaSlice<f64>,
         label: &'static str,
-    ) -> Result<f64, String> {
+    ) -> Result<(), String> {
         const THREADS: u32 = 1024;
         let len_i = to_i32(len)?;
         let cfg = LaunchConfig {
@@ -3258,8 +3369,20 @@ extern "C" __global__ void status_first_ladder(
         builder.arg(&mut *scalar_dev);
         // SAFETY: kernel signature (const double*, int, double*). The
         // `&mut *scalar_dev` reborrow keeps `scalar_dev` available for the
-        // download below.
+        // caller after the asynchronous launch.
         unsafe { builder.launch(cfg) }.map_err(|e| format!("{label} reduce launch: {e}"))?;
+        Ok(())
+    }
+
+    fn reduce_scalar(
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        func: &cudarc::driver::CudaFunction,
+        src: &CudaSlice<f64>,
+        len: usize,
+        scalar_dev: &mut CudaSlice<f64>,
+        label: &'static str,
+    ) -> Result<f64, String> {
+        launch_scalar_reduction(stream, func, src, len, scalar_dev, label)?;
         let host = stream
             .clone_dtoh(scalar_dev)
             .map_err(|e| format!("download {label}: {e}"))?;
@@ -3300,15 +3423,15 @@ extern "C" __global__ void status_first_ladder(
         }
     }
 
-    /// Reduce the alpha-major `[7*n]` status matrix in one seven-block launch.
-    fn reduce_ladder_status_first(
+    /// Reduce the alpha-major `[7*n]` status matrix in one seven-block launch,
+    /// leaving all summaries device-resident for the alpha selector.
+    fn launch_ladder_status_first_reduction(
         stream: &std::sync::Arc<cudarc::driver::CudaStream>,
         func: &cudarc::driver::CudaFunction,
         src: &CudaSlice<u32>,
         n: usize,
         status_dev: &mut CudaSlice<u32>,
-    ) -> Result<[Option<(usize, u32)>; crate::gpu_kernels::pirls_row::ALPHA_LADDER_LEN], String>
-    {
+    ) -> Result<(), String> {
         const THREADS: u32 = 1024;
         let n_i = to_i32(n)?;
         let cfg = LaunchConfig {
@@ -3324,19 +3447,7 @@ extern "C" __global__ void status_first_ladder(
         // status_dev owns 14 slots (seven rows followed by seven codes).
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("alpha-ladder status reduction launch: {e}"))?;
-        let host = stream
-            .clone_dtoh(status_dev)
-            .map_err(|e| format!("download alpha-ladder status summary: {e}"))?;
-        let mut result = [None; crate::gpu_kernels::pirls_row::ALPHA_LADDER_LEN];
-        for k in 0..crate::gpu_kernels::pirls_row::ALPHA_LADDER_LEN {
-            if host[k] != u32::MAX {
-                result[k] = Some((
-                    host[k] as usize,
-                    host[crate::gpu_kernels::pirls_row::ALPHA_LADDER_LEN + k],
-                ));
-            }
-        }
-        Ok(result)
+        Ok(())
     }
 
     fn replay_row_refusal(
@@ -3666,9 +3777,9 @@ pub fn solve_pirls_step_on_stream_device(
 }
 
 /// Stage 3.3 device-resident PIRLS loop driver. See
-/// [`cuda::pirls_loop`] for the full per-iter contract. Only a few
-/// 1-f64 scalars cross the host boundary per Newton iteration; β and
-/// the final penalised Hessian are downloaded once at loop exit.
+/// [`cuda::pirls_loop`] for the full per-iter contract. One compact
+/// device-selected alpha record crosses the host boundary per Newton iteration;
+/// β and the final penalised Hessian are downloaded once at loop exit.
 ///
 /// `step_lm_lambda` is the Levenberg–Marquardt damping applied to each
 /// Newton solve only; it never enters the exported `penalized_hessian`,
