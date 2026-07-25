@@ -127,7 +127,7 @@ pub(crate) mod result_types;
 pub(crate) use result_types::CERTIFICATE_RAIL_MARGIN;
 pub use result_types::{
     AdaptiveRegularizationOptions, BlockRole, CoefficientCovarianceDefinition,
-    DisplayCoefficientUncertainty, ExecutionPath, FitArtifacts, FitGeometry,
+    CurvatureFloorClearance, DisplayCoefficientUncertainty, ExecutionPath, FitArtifacts, FitGeometry,
     FitInference, FitOptions, FittedBlock, FittedLinkState, OuterCriterionCertificate,
     OuterStationarityCertificate, RailCoordinate, UnifiedFitResult, UnifiedFitResultParts,
     ensure_finite_scalar,

@@ -734,7 +734,6 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
         geometry: Some(FitGeometry {
             coefficient_gauge: gam_problem::Gauge::identity(&[2]),
             penalized_hessian: array![[2.0, 0.1], [0.1, 3.0]].into(),
-            constrained_posterior: None,
             working: Some(crate::model_types::WorkingGeometry {
                 weights: array![1.0, 0.5, 0.75],
                 response: array![0.1, 0.2, 0.3],
@@ -753,6 +752,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
                 },
                 hessian_psd: Some(true),
                 lambdas_railed: Vec::new(),
+                curvature_floor: None,
             }),
             ..Default::default()
         },
@@ -876,14 +876,6 @@ fn dispersion_phi_prefers_inference_then_falls_back_to_standard_deviation() {
         ResponseFamily::Poisson,
         InverseLink::Standard(StandardLink::Log),
     ));
-    // The scale metadata has to move WITH the family. Cloning the Gaussian
-    // fixture and swapping only `likelihood_family` left `ProfiledGaussian`
-    // beside a Poisson response, and the resolver refuses that pair on sight —
-    // "family poisson requires exact FixedDispersion { phi: 1.0 } metadata, got
-    // ProfiledGaussian" — so the `unwrap` below blew up before the assertion it
-    // guards was ever reached. Poisson is a fixed-scale family; its metadata
-    // says so.
-    poisson.likelihood_scale = LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 };
     poisson.standard_deviation = 2.7;
     assert_eq!(poisson.dispersion_phi().unwrap(), 1.0);
 }

@@ -512,6 +512,7 @@ mod assembly_convergence_tests {
                 },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         let error =
             blockwise_fit_from_parts(parts_with_outer_evidence(1, true, Some(certificate)), &[])

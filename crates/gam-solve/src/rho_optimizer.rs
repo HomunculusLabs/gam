@@ -62,7 +62,9 @@ mod run_plan;
 mod seed_screening;
 
 pub(crate) use crate::model_types::CERTIFICATE_RAIL_MARGIN;
-pub use crate::model_types::{OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate};
+pub use crate::model_types::{
+    CurvatureFloorClearance, OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate,
+};
 pub(crate) use bridges::*;
 pub use capability::*;
 pub use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};

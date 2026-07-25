@@ -759,6 +759,35 @@ impl OuterStationarityCertificate {
 /// to a box bound (`lambdas_railed`). A failed certificate REJECTS the fit as
 /// typed non-convergence in `run_outer`; it is never a warn-and-continue
 /// diagnostic.
+/// The gradient-residue floor's verdict on the interior curvature, recorded
+/// BESIDE the raw [`OuterCriterionCertificate::hessian_psd`] measurement rather
+/// than replacing it.
+///
+/// Two different questions are being asked of the same matrix, and they have
+/// different right answers:
+///
+/// * *is the interior sub-block positive semidefinite as assembled?* — the
+///   measured fact, which reporting surfaces and any consumer demanding a
+///   genuine PSD certificate (`OwnedModeCurvatureRequirement::CertifiedLocalMinimum`)
+///   must keep receiving unchanged;
+/// * *is its most negative direction distinguishable from zero by the
+///   instrument that produced it?* — the verdict, which is what may admit a
+///   minted optimum.
+///
+/// Collapsing them into one flag would leave every consumer asking the first
+/// question and silently receiving an answer to the second.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CurvatureFloorClearance {
+    /// Smallest eigenvalue of the interior (un-railed) sub-block, as assembled.
+    pub interior_min_eigenvalue: f64,
+    /// `max_k |g_k|` over the JUDGED coordinates. By Weyl this is the most
+    /// negative curvature the floor can absorb:
+    /// `λ_min(H) + min|g| ≤ λ_min(H + diag|g|) ≤ λ_min(H) + max|g|`.
+    pub gradient_floor: f64,
+    /// Whether `H + diag(|g|)` is positive semidefinite on that sub-block.
+    pub cleared: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterCriterionCertificate {
     pub stationarity: OuterStationarityCertificate,
@@ -769,6 +798,12 @@ pub struct OuterCriterionCertificate {
     /// Leading smoothing coordinates (ρ block) pinned within
     /// [`CERTIFICATE_RAIL_MARGIN`] of either box bound at the optimum.
     pub lambdas_railed: Vec<usize>,
+    /// The gradient-residue floor's verdict on that same curvature, when it was
+    /// computed. `hessian_psd` above stays the raw measurement; this records
+    /// whether the most negative interior direction is below the instrument's
+    /// own resolution, and by how much.
+    #[serde(default)]
+    pub curvature_floor: Option<CurvatureFloorClearance>,
 }
 
 impl OuterCriterionCertificate {
@@ -785,7 +820,13 @@ impl OuterCriterionCertificate {
     /// directions. If a future certificate projects onto the exact critical
     /// cone, that projected result can be recorded here instead.
     pub fn curvature_admissible(&self) -> bool {
+        // The raw measurement decides it whenever it is not a refusal. Only a
+        // measured `false` consults the floor, and then only to ask whether
+        // that negative direction was distinguishable from zero at all.
         self.hessian_psd != Some(false)
+            || self
+                .curvature_floor
+                .is_some_and(|clearance| clearance.cleared)
     }
 
     /// Whether the certificate accepts the returned point as a constrained
@@ -1472,14 +1513,6 @@ pub struct FitGeometry {
     /// Stored as [`UnscaledPrecision`] so the dispersion-ownership invariant
     /// (this matrix is *not* φ-scaled) is enforced at the type level.
     pub penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision,
-    /// Exact inequality-truncated posterior identity in the active coefficient
-    /// frame, when linear inequality constraints are part of the fitted model.
-    ///
-    /// This is deliberately part of the required wire schema: old constrained
-    /// models must be regenerated rather than silently treating their reported
-    /// coefficient vector as both a posterior mean and an optimizer mode.
-    pub constrained_posterior:
-        Option<crate::constrained_posterior::ConstrainedPosteriorGeometry>,
     /// Optional owned row-wise diagonal IRLS evidence. `None` is a typed
     /// statement that the terminal solver geometry has no single diagonal
     /// row representation; it is never represented by empty or zero-filled
@@ -1722,6 +1755,7 @@ mod assembly_inner_status_gate_tests {
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         });
         parts.outer_gradient_norm = Some(0.0);
         parts.outer_iterations = 1;
@@ -1958,15 +1992,6 @@ impl FitGeometry {
             "fit_result.geometry.penalized_hessian",
             self.penalized_hessian.iter().copied(),
         )?;
-        if let Some(constrained) = self.constrained_posterior.as_ref() {
-            constrained
-                .validate_for_dimension(self.coefficient_gauge.reduced_total())
-                .map_err(|reason| {
-                    EstimationError::InvalidInput(format!(
-                        "fit_result.geometry.constrained_posterior is invalid: {reason}"
-                    ))
-                })?;
-        }
         if let Some(working) = self.working.as_ref() {
             working.validate_numeric_finiteness()?;
         }

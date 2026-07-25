@@ -480,6 +480,7 @@ pub fn fit_shared_tangent_reml(
                     },
                 hessian_psd: Some(true),
                 lambdas_railed: Vec::new(),
+                curvature_floor: None,
             },
         )
     } else {

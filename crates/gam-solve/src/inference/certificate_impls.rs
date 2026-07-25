@@ -75,6 +75,18 @@ impl Certificate for OuterCriterionCertificate {
                 None => "n/a".into(),
             },
         );
+        // The floor's verdict rides BESIDE the raw measurement, never over it,
+        // so a reader can see both which question was asked and how much
+        // negative curvature the floor was able to absorb.
+        if let Some(clearance) = self.curvature_floor {
+            e.insert("curvature_floor_cleared", clearance.cleared.into());
+            put_finite(
+                &mut e,
+                "curvature_interior_min_eigenvalue",
+                clearance.interior_min_eigenvalue,
+            );
+            put_finite(&mut e, "curvature_gradient_floor", clearance.gradient_floor);
+        }
         e.insert("lambdas_railed_count", self.lambdas_railed.len().into());
         e.insert("stationary", self.is_stationary().into());
         e.insert("curvature_admissible", self.curvature_admissible().into());
@@ -252,6 +264,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         assert_eq!(clean.verdict(), Verdict::Certified);
         assert!(clean.verdict().is_certified());
@@ -331,6 +344,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         let cert = CoresetCertificate::new(0.1, 0.0, 4, 32).expect("coreset");
         ledger.record(&clean); // Certified

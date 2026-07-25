@@ -476,6 +476,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         UnifiedFitResult::try_from_parts(gam::estimate::UnifiedFitResultParts {
             blocks: vec![gam::estimate::FittedBlock {
@@ -568,6 +569,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         let result = UnifiedFitResult::try_from_parts(gam::estimate::UnifiedFitResultParts {
             blocks: vec![gam::estimate::FittedBlock {

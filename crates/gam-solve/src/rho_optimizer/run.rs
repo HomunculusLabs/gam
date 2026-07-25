@@ -1544,6 +1544,68 @@ pub(crate) fn certificate_hessian_is_psd_off_railed_above_gradient_floor(
     certificate_hessian_is_psd_off_railed(&floored, excluded)
 }
 
+/// Measure the gradient-residue floor's clearance on the interior sub-block:
+/// the sub-block's smallest eigenvalue as assembled, the floor it is judged
+/// against (`max_k |g_k|` over exactly those coordinates), and whether
+/// `H + diag(|g|)` is PSD there.
+///
+/// This RECORDS the verdict; it does not replace the raw measurement. See
+/// [`certificate_hessian_is_psd_off_railed_above_gradient_floor`] for why the
+/// Weyl bound makes the floor safe where it can mint, and
+/// [`crate::model_types::CurvatureFloorClearance`] for why the two facts are
+/// kept apart.
+pub(crate) fn interior_curvature_floor_clearance(
+    hessian: &Array2<f64>,
+    excluded: &[usize],
+    gradient: &Array1<f64>,
+) -> Option<CurvatureFloorClearance> {
+    use faer::Side;
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let n = hessian.nrows();
+    if n == 0 || hessian.ncols() != n || gradient.len() != n {
+        return None;
+    }
+    let excluded_set: std::collections::BTreeSet<usize> = excluded.iter().copied().collect();
+    let interior: Vec<usize> = (0..n).filter(|k| !excluded_set.contains(k)).collect();
+    if interior.is_empty() {
+        return None;
+    }
+    let m = interior.len();
+    let mut sub = Array2::<f64>::zeros((m, m));
+    for (i, &ri) in interior.iter().enumerate() {
+        for (j, &rj) in interior.iter().enumerate() {
+            sub[[i, j]] = 0.5 * (hessian[[ri, rj]] + hessian[[rj, ri]]);
+        }
+    }
+    if sub.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let interior_min_eigenvalue = sub
+        .eigh(Side::Lower)
+        .ok()?
+        .0
+        .iter()
+        .fold(f64::INFINITY, |acc, v| acc.min(*v));
+    if !interior_min_eigenvalue.is_finite() {
+        return None;
+    }
+    // The floor is the largest gradient among EXACTLY the judged coordinates —
+    // the excluded ones never enter, so a railed coordinate's large |g| cannot
+    // inflate it.
+    let gradient_floor = interior
+        .iter()
+        .fold(0.0_f64, |acc, &k| acc.max(gradient[k].abs()));
+    let cleared = certificate_hessian_is_psd_off_railed_above_gradient_floor(
+        hessian, excluded, gradient,
+    ) == Some(true);
+    Some(CurvatureFloorClearance {
+        interior_min_eigenvalue,
+        gradient_floor,
+        cleared,
+    })
+}
+
 /// Escape point off a certified strict saddle in the free (un-railed) subspace
 /// (#2357, generalised to the box-constrained case in #2155).
 ///
@@ -2088,6 +2150,7 @@ fn certify_fixed_point_optimality(
         },
         hessian_psd: None,
         lambdas_railed: certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
+        curvature_floor: None,
     };
     result.criterion_certificate = Some(certificate.clone());
     if !certificate.certifies() {
@@ -2234,6 +2297,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
+            curvature_floor: None,
         };
         result.final_value = value;
         result.final_grad_norm = Some(0.0);
@@ -2710,6 +2774,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     },
                     hessian_psd: Some(true),
                     lambdas_railed: certificate_railed.clone(),
+                    curvature_floor: None,
                 };
                 // Move the certified curvature onto the result; the mint path returns
                 // immediately, so the fall-through below never observes the move.
@@ -2852,10 +2917,16 @@ fn certify_outer_optimality_at_terminal_fidelity(
             projected_grad_norm: certified_projected_grad_norm,
             bound: stationarity_bound,
         },
+        // The RAW measurement — unchanged, and what every consumer that asks
+        // for a genuine PSD certificate keeps receiving.
         hessian_psd: analytic_hessian.as_ref().and_then(|hessian| {
             certificate_hessian_is_psd_off_railed(hessian, &certificate_railed)
         }),
         lambdas_railed: certificate_railed.clone(),
+        // The floor's verdict on that same curvature, recorded beside it.
+        curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
+            interior_curvature_floor_clearance(hessian, &certificate_railed, &projected_gradient)
+        }),
     };
     // Certify-time tail snap (#2348 Inc 2). About to refuse a point whose
     // residual gradient is carried by un-railed coordinates crawling a
@@ -2940,6 +3011,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     },
                     hessian_psd: Some(true),
                     lambdas_railed: certificate_railed.clone(),
+                    curvature_floor: None,
                 };
                 result.final_hessian = analytic_hessian;
                 result.criterion_certificate = Some(certificate.clone());
@@ -6222,6 +6294,67 @@ mod asymptote_rail_certify_tests {
             Some(false),
             "a genuine interior saddle dwarfs the bound-scale floor and refuses"
         );
+    }
+
+    /// THE GUARANTEE, not an instance of it. Weyl bounds the floored spectrum by
+    /// `λ_min(H) + min|g| ≤ λ_min(H + diag|g|) ≤ λ_min(H) + max|g|`, so the floor
+    /// can absorb AT MOST `max_k |g_k|` over the JUDGED coordinates. Therefore
+    /// any interior spectrum whose most negative direction exceeds that floor
+    /// must still refuse — for every such spectrum, not merely for the one
+    /// saddle that happened to be measured.
+    ///
+    /// Swept over curvatures spanning six orders and gradients spanning four,
+    /// including the pair where they are within a factor of two of each other
+    /// (the regime the floor exists to serve, and the only place the verdict is
+    /// genuinely close). The excluded coordinate carries a deliberately huge
+    /// gradient: the sub-block is extracted AFTER flooring, so it must never
+    /// reach the floor.
+    #[test]
+    fn gradient_floor_absorbs_at_most_max_interior_gradient_weyl_bound() {
+        let excluded = [0usize];
+        for &lambda_min in &[-5.0e-1, -1.5e-2, -1.0e-3, -1.0e-5, -1.0e-7] {
+            for &g_interior in &[1.0e-7, 1.0e-5, 1.0e-3, 1.0e-2] {
+                // The railed coordinate's gradient is four orders above every
+                // interior one; if it ever entered the floor the sweep would
+                // certify everything.
+                let gradient = array![-1.4017, g_interior];
+                let hessian = array![[0.2828, 0.0004], [0.0004, lambda_min]];
+                let floored = certificate_hessian_is_psd_off_railed_above_gradient_floor(
+                    &hessian, &excluded, &gradient,
+                );
+                if g_interior < lambda_min.abs() {
+                    assert_eq!(
+                        floored,
+                        Some(false),
+                        "Weyl: max|g_int|={g_interior:.1e} < |λ_min|={:.1e} means the floored \
+                         sub-block is still indefinite, so the gate MUST refuse",
+                        lambda_min.abs()
+                    );
+                }
+                // And the recorded clearance must report the same verdict
+                // against the same floor, so the certificate's evidence and its
+                // gate can never disagree.
+                let clearance =
+                    interior_curvature_floor_clearance(&hessian, &excluded, &gradient)
+                        .expect("a finite 1×1 interior sub-block has a clearance");
+                assert_eq!(
+                    clearance.gradient_floor, g_interior,
+                    "the floor must be the largest JUDGED gradient — the excluded \
+                     coordinate's 1.4017 must never enter it"
+                );
+                assert!(
+                    (clearance.interior_min_eigenvalue - lambda_min).abs()
+                        <= 1.0e-12 * lambda_min.abs(),
+                    "recorded λ_min {} should be the interior sub-block's own {lambda_min}",
+                    clearance.interior_min_eigenvalue
+                );
+                assert_eq!(
+                    Some(clearance.cleared),
+                    floored,
+                    "the recorded verdict and the gate must be the same judgment"
+                );
+            }
+        }
     }
 
     /// Joint-face objective `V(ρ) = c·e^{−(ρ₀+ρ₁)/2}` — the algebraic skeleton
