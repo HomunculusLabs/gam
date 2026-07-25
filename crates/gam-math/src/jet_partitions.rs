@@ -40,8 +40,7 @@
 //!
 //!   so a composition is just **three subset convolutions** (`v²`, `v³=v²⊛v`,
 //!   `v⁴=v²⊛v²` — the Motzkin floor for a quartic) plus a five-term combine.
-//!   That is ~3× fewer FLOPs than the per-mask partition gather; each
-//!   convolution is a four-lane compensated dot product (Ogita–Rump–Oishi
+//!   Each convolution is a four-lane compensated dot product (Ogita–Rump–Oishi
 //!   Dot2, FMA-split products + TwoSum carry) so the result is computed in
 //!   ~double the working precision and the rounding of `v²` cannot compound
 //!   through `v³`/`v⁴`; the final per-mask combine is Neumaier-compensated and
@@ -49,6 +48,35 @@
 //!   scratch with no per-call heap traffic. The reassociation is algebraically
 //!   exact; accuracy-vs-truth (a double-double oracle) is the test gate and is
 //!   strictly ≤ the old partition sum's error (see `tests`).
+//!
+//! ### What this schedule costs, and why it is still the right one
+//!
+//! **Accuracy is the whole justification — it is not also cheaper at the `K`
+//! this crate runs at.** The two schedules grow at different rates and the
+//! convolution one starts far behind:
+//!
+//! * three subset convolutions walk `Σ_{p ≥ min_pop} C(K,p)·2^p` submasks each,
+//!   i.e. `Θ(3^K)`, and every step is a compensated Dot2 (~10 flops);
+//! * the partition gather walks `Σ_p C(K,p)·B_{≤4}(p)` terms, i.e. `Θ(5^K/4!)`,
+//!   and every term is `|π|` plain multiplies and an add (~4 flops).
+//!
+//! `3^K` beats `5^K` eventually, but "eventually" is past this crate's range.
+//! Closed-form flop counts (pinned in
+//! `compose_unary_flop_crossover_matches_the_closed_form`):
+//!
+//! ```text
+//!   K        4      6      8      9     10     12
+//!   new/old  9.01x  5.97x  2.51x  1.54x  0.92x  0.33x
+//! ```
+//!
+//! The flop crossover is `K = 10`; measured wall clock crosses at `K ≈ 8.5`,
+//! the new path recovering ~2× of its flop deficit from the four-lane unroll,
+//! the `f64x4` combine, and the absent heap/`dyn` traffic. **The production
+//! entry point [`compose_unary_four_slot_coefficients`] is `K = 4`**, where
+//! this schedule is ~9× the flops and a measured ~2.1× the wall clock of the
+//! partition sum it replaced. That cost is bought deliberately and knowingly,
+//! for the ~double-precision accumulation that the accuracy gate pins; it is
+//! not a free win, and a reader sizing a new call site should plan for it.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wide::f64x4;
@@ -935,15 +963,116 @@ mod tests {
         );
     }
 
+    /// The two schedules' operation counts in closed form, which is the
+    /// machine-independent statement of when the convolution path is cheaper.
+    /// This is the gate for the cost table in the module header; the wall-clock
+    /// test below can only corroborate it.
+    ///
+    /// It exists because the header used to claim the convolution schedule was
+    /// "~3× fewer FLOPs than the per-mask partition gather" full stop, and the
+    /// wall-clock test asserted a speedup from `K = 6`. Both are false: at the
+    /// `K = 4` the production entry point actually uses, the convolution path
+    /// is ~9× the flops, and it does not come out ahead until `K = 10`. A
+    /// closed-form count cannot drift the way a prose factor did.
+    #[test]
+    fn compose_unary_flop_crossover_matches_the_closed_form() {
+        // Three subset convolutions, pruned at popcount < min_pop (min_pop =
+        // 2, 3, 4 for v², v³, v⁴); each surviving mask walks its 2^popcount
+        // submasks, and each step is a Dot2 (mul + FMA + TwoSum + 2 adds).
+        fn new_flops(k: u32) -> u64 {
+            const DOT2_FLOPS: u64 = 10;
+            let binom = |n: u32, r: u32| -> u64 {
+                (0..r).fold(1u64, |acc, i| acc * u64::from(n - i) / (u64::from(i) + 1))
+            };
+            (2u32..=4)
+                .map(|min_pop| {
+                    (min_pop..=k)
+                        .map(|p| binom(k, p) * (1u64 << p))
+                        .sum::<u64>()
+                })
+                .sum::<u64>()
+                * DOT2_FLOPS
+        }
+        // Partition gather: per mask of popcount p, every set partition of a
+        // p-set into 1..=4 blocks contributes |π| multiplies and one add.
+        fn old_flops(k: u32) -> u64 {
+            fn stirling(n: u32, blocks: u32) -> u64 {
+                let (n, blocks) = (n as usize, blocks as usize);
+                let mut s = vec![vec![0u64; blocks + 1]; n + 1];
+                s[0][0] = 1;
+                for i in 1..=n {
+                    for j in 1..=blocks {
+                        s[i][j] = (j as u64) * s[i - 1][j] + s[i - 1][j - 1];
+                    }
+                }
+                s[n][blocks]
+            }
+            let binom = |n: u32, r: u32| -> u64 {
+                (0..r).fold(1u64, |acc, i| acc * u64::from(n - i) / (u64::from(i) + 1))
+            };
+            (0..=k)
+                .map(|p| {
+                    let per_mask: u64 = if p == 0 {
+                        1
+                    } else {
+                        (1..=4u32)
+                            .map(|b| stirling(p, b) * (u64::from(b) + 1))
+                            .sum()
+                    };
+                    binom(k, p) * per_mask
+                })
+                .sum()
+        }
+
+        // The production entry point is four-slot: K = 4.
+        let production_ratio = new_flops(4) as f64 / old_flops(4) as f64;
+        assert!(
+            (production_ratio - 9.01).abs() < 0.05,
+            "at the production K=4 the convolution schedule should cost ~9.01x \
+             the partition gather's flops, got {production_ratio:.2}x"
+        );
+        for k in 2..=9u32 {
+            assert!(
+                new_flops(k) > old_flops(k),
+                "K={k}: convolution schedule should still be the more expensive \
+                 one below the crossover (new {} vs old {})",
+                new_flops(k),
+                old_flops(k)
+            );
+        }
+        for k in 10..=14u32 {
+            assert!(
+                new_flops(k) < old_flops(k),
+                "K={k}: convolution schedule should be cheaper at and above the \
+                 K=10 crossover (new {} vs old {})",
+                new_flops(k),
+                old_flops(k)
+            );
+        }
+    }
+
     #[test]
     fn compose_unary_speedup_over_partition_sum() {
-        // Measure ns/call new vs. the previous partition-sum implementation
-        // across the production K range. Prints the multiple; asserts a
-        // conservative floor so CI noise can't make it flaky.
+        // Measure ns/call new vs. the previous partition-sum implementation.
+        // Prints the multiple at every K; the assert is placed where the win
+        // actually exists.
+        //
+        // It used to be placed at `n_dirs >= 6`, where the convolution path is
+        // ~6x the flops of the partition gather and measured ~2x SLOWER — so
+        // this test was red at main and could not be greened by any threshold,
+        // because the inequality it asserted is false. The real wall-clock
+        // crossover is K ≈ 8.5 (below the K = 10 flop crossover pinned in
+        // `compose_unary_flop_crossover_matches_the_closed_form`, the
+        // difference being the four-lane unroll and the f64x4 combine). The
+        // assert therefore sits at K = 12, where the margin measured 6.1x and
+        // is not something CI noise reaches.
         use std::time::Instant;
         let mut rng = Rng(0xfeed_face_dead_beef);
-        for &n_dirs in &[2usize, 4, 6, 8] {
-            let n_inputs = 256usize;
+        for &n_dirs in &[2usize, 4, 6, 8, 12] {
+            // The per-call cost spans ~5 orders of magnitude across this K
+            // range (both schedules are exponential in K), so the sample count
+            // has to shrink with K or the K=12 arm alone would run for hours.
+            let n_inputs = if n_dirs >= 12 { 4usize } else { 256 };
             let inputs: Vec<(MultiDirJet, [f64; DERIVS])> = (0..n_inputs)
                 .map(|_| {
                     (
@@ -958,7 +1087,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let iters = 200usize;
+            let iters = if n_dirs >= 12 { 3usize } else { 200 };
             // Warm the scratch / partition tables.
             for (j, d) in &inputs {
                 std::hint::black_box(j.compose_unary(*d));
@@ -983,16 +1112,15 @@ mod tests {
                  speedup={:.2}x",
                 old_ns / new_ns
             );
-            // Guard only where the algorithmic win is robust: an optimised build
-            // at the production-dominant K (the partition sum's `Σ_π |π|` work
-            // grows steeply with K, while the new path is three convolutions).
-            // Debug builds and tiny K are dominated by fixed per-call overhead
-            // and the ratio there is not a meaningful guard, so it is printed
-            // but not asserted (and timing asserts must not flake on CI).
-            if !cfg!(debug_assertions) && n_dirs >= 6 {
+            // Guard only in an optimised build and only past the measured
+            // wall-clock crossover. Below it the convolution schedule is
+            // legitimately slower (see the module header's cost table) and
+            // asserting otherwise is asserting a falsehood; debug builds are
+            // dominated by fixed per-call overhead and are not a guard either.
+            if !cfg!(debug_assertions) && n_dirs >= 12 {
                 assert!(
                     new_ns < old_ns,
-                    "K={n_dirs} new path slower: new={new_ns:.1}ns old={old_ns:.1}ns"
+                    "K={n_dirs} is past the crossover, so the convolution path                      must win here: new={new_ns:.1}ns old={old_ns:.1}ns"
                 );
             }
         }
