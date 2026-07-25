@@ -514,6 +514,41 @@ impl Gauge {
         fast_ab(raw_design, &self.t_full)
     }
 
+    /// [`restrict_design`](Self::restrict_design) for a caller that owns the raw
+    /// design and does not need it afterwards.
+    ///
+    /// The borrowed form cannot express the trivial section's real cost: `X·I = X`
+    /// elides the GEMM, but it still has to hand back an `Array2`, so it copies
+    /// `n·w` doubles it did not need to touch. At production sphere shapes
+    /// (`n ≳ 1e5`, `w ~ 200`) that copy is ~320 MB of pure memory traffic —
+    /// measured at 0.167 s of an 8.2 s host Wahba build, and ~17% of the same
+    /// build once the kernel matrix moves to a device (#2420). It also doubles
+    /// peak residency, since the raw and reduced designs are live at once.
+    ///
+    /// Taking the buffer by value lets the identity case return it untouched: no
+    /// allocation, no copy, and the caller's own bytes. The result is
+    /// bit-identical to the borrowed form in both branches, and is in standard
+    /// layout either way — a non-standard input is normalised rather than passed
+    /// through, so downstream consumers see exactly what `to_owned` would have
+    /// given them.
+    pub fn restrict_design_owned(&self, raw_design: Array2<f64>) -> Array2<f64> {
+        let raw_total = self.raw_total();
+        assert_eq!(
+            raw_design.ncols(),
+            raw_total,
+            "Gauge::restrict_design_owned: design has {} columns, expected raw width {raw_total}",
+            raw_design.ncols(),
+        );
+        if self.t_full_is_identity() {
+            return if raw_design.is_standard_layout() {
+                raw_design
+            } else {
+                raw_design.as_standard_layout().into_owned()
+            };
+        }
+        fast_ab(&raw_design, &self.t_full)
+    }
+
     /// Whether the lift `T` is the exact identity (square with unit diagonal
     /// and zero off-diagonal). When true, `restrict_design`/`restrict_penalty`
     /// are no-ops and skip their GEMMs. The comparison is exact equality, not
@@ -724,6 +759,7 @@ impl Gauge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::ShapeBuilder;
 
     #[test]
     fn identity_gauge_round_trips_betas_and_covariance() {
@@ -780,6 +816,70 @@ mod tests {
         assert_eq!(restricted_pen, raw_penalty);
         let pen_via_gemm = fast_ab(&fast_atb(&gauge.t_full, &raw_penalty), &gauge.t_full);
         assert_eq!(restricted_pen, pen_via_gemm);
+    }
+
+    /// The owned form must agree with the borrowed one bit-for-bit in BOTH
+    /// branches — that equivalence is the whole licence for using it — and in the
+    /// identity branch it must hand back the caller's own allocation rather than
+    /// a copy of it. Pointer identity is the only way to state "did not copy"
+    /// that a faster memcpy cannot accidentally satisfy.
+    #[test]
+    fn owned_restrict_design_moves_through_a_trivial_section() {
+        let gauge = Gauge::identity(&[4]);
+        let raw_design = Array2::<f64>::from_shape_fn((7, 4), |(i, j)| {
+            ((i as f64) * 0.3 - (j as f64) * 1.7).sin() * 1.000000001
+        });
+
+        let borrowed = gauge.restrict_design(&raw_design);
+        let raw_ptr = raw_design.as_ptr();
+        let owned = gauge.restrict_design_owned(raw_design.clone());
+        assert_eq!(owned, borrowed, "owned and borrowed forms must agree exactly");
+        assert!(
+            owned.is_standard_layout(),
+            "consumers rely on the standard layout `to_owned` would have produced"
+        );
+
+        // The move path: the returned buffer IS the one that was handed in.
+        let moved = gauge.restrict_design_owned(raw_design);
+        assert_eq!(
+            moved.as_ptr(), raw_ptr,
+            "a trivial section must return the caller's own buffer, not a copy of it"
+        );
+
+        // A real section still goes through the GEMM, from an owned input.
+        let mut t = Array2::<f64>::eye(4);
+        t[[0, 1]] = 0.5;
+        let real = Gauge::from_t(t.clone(), &[4], &[4]);
+        let raw = Array2::<f64>::from_shape_fn((7, 4), |(i, j)| i as f64 + j as f64 * 0.25);
+        assert_eq!(
+            real.restrict_design_owned(raw.clone()),
+            real.restrict_design(&raw),
+            "the non-identity branch must match the borrowed form too"
+        );
+    }
+
+    /// A column-major input would pass the identity branch's move straight
+    /// through to a consumer expecting row-major, so it is normalised instead.
+    #[test]
+    fn owned_restrict_design_normalises_a_non_standard_layout() {
+        let gauge = Gauge::identity(&[3]);
+        let column_major = Array2::<f64>::from_shape_vec(
+            (4, 3).f(),
+            (0..12).map(|v| v as f64 * 0.5).collect(),
+        )
+        .expect("column-major fixture");
+        assert!(!column_major.is_standard_layout());
+
+        let owned = gauge.restrict_design_owned(column_major.clone());
+        assert!(
+            owned.is_standard_layout(),
+            "a non-standard input must be normalised, not passed through"
+        );
+        assert_eq!(
+            owned,
+            gauge.restrict_design(&column_major),
+            "normalisation must not change any value"
+        );
     }
 
     #[test]

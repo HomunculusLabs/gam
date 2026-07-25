@@ -104,8 +104,11 @@ pub fn build_spherical_spline_basis(
     );
     let center_design = gauge.restrict_design(&raw_center_design);
     let function_gram = symmetrize_penalty(&fast_ata(&center_design));
+    // `raw_design` is dead after this point, and the `CenterSumToZero` chart
+    // makes the section the identity, so hand the buffer over rather than paying
+    // an `n × w` copy to be told it is already the answer (#2420).
     let design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
-        gauge.restrict_design(&raw_design),
+        gauge.restrict_design_owned(raw_design),
     ));
     let (_, c_primary) = normalize_penalty(penalty.dense());
     let penalty_norm = penalty.scaled(1.0 / c_primary, "normalized Wahba roughness")?;
