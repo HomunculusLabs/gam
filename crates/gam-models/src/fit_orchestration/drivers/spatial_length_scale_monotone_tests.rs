@@ -210,6 +210,7 @@ mod spatial_length_scale_monotone_tests {
         let n = 60usize;
         let d = 3usize;
         let mut data = Array2::<f64>::zeros((n, d));
+        let mut y = Array1::<f64>::zeros(n);
         for i in 0..n {
             let x0 = i as f64 / (n as f64 - 1.0);
             let x1 = (i as f64 * 0.13).sin();
