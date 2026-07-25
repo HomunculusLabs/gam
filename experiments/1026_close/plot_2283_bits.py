@@ -64,12 +64,24 @@ def _rows(path: str, run_id: str) -> tuple[dict, dict | None]:
                 checkpoint = record
     if "external_topk" not in found:
         raise SystemExit(f"{path}: run {run_id!r} has no external_topk result")
-    if "hybrid_rust" not in found and checkpoint is None:
-        raise SystemExit(
-            f"{path}: run {run_id!r} has neither a hybrid_rust result nor a flat "
-            "checkpoint, so the hybrid configuration is unknown"
-        )
     return found, checkpoint
+
+
+def _declared_config(text: str) -> dict:
+    """`K,k_flat,curved_atoms,curved_k,d_atom` for a run with no hybrid record yet.
+
+    The theorem's prediction is a function of the two CONFIGURATIONS and the
+    external arm's measurement — it never touches the hybrid fit — so it can be
+    drawn before the hybrid tier has run. Taking the configuration as an explicit
+    argument keeps that visible: nothing here is read from a fit.
+    """
+    names = ("K", "k_flat", "curved_atoms", "curved_k", "d_atom")
+    parts = text.split(",")
+    if len(parts) != len(names):
+        raise SystemExit(f"--hybrid-config wants {','.join(names)}, got {text!r}")
+    config = {name: int(value) for name, value in zip(names, parts, strict=True)}
+    config["top_k"] = None
+    return config
 
 
 def _series(record: dict, key: str) -> list[float]:
@@ -108,12 +120,37 @@ def main() -> int:
     parser.add_argument("results")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--estimator-comparison",
+        nargs=2,
+        metavar=("RESULTS", "RUN_ID"),
+        default=None,
+        help="a second run of the SAME fit scored on a different number of "
+             "estimation rows. Its external row is drawn against this one, because "
+             "the movement between them is the scale a margin has to be read "
+             "against",
+    )
+    parser.add_argument(
+        "--hybrid-config",
+        default=None,
+        help="K,k_flat,curved_atoms,curved_k,d_atom — the hybrid CONFIGURATION to "
+             "draw the theorem's prediction for, when the run has produced neither "
+             "a hybrid row nor a flat checkpoint to read it from",
+    )
     args = parser.parse_args()
 
     rows, checkpoint = _rows(args.results, args.run_id)
     external = rows["external_topk"]
     hybrid = rows.get("hybrid_rust")
     config = hybrid if hybrid is not None else checkpoint
+    if config is None and args.hybrid_config is not None:
+        config = _declared_config(args.hybrid_config)
+        config["top_k"] = int(external["top_k"])
+    if config is None:
+        raise SystemExit(
+            f"{args.results}: run {args.run_id!r} has neither a hybrid_rust result "
+            "nor a flat checkpoint; pass --hybrid-config to draw the prediction"
+        )
     external_bits = _series(external, "bits")
     support_external, support_hybrid = _theorem_support_bits(config)
     predicted_margin = support_external - support_hybrid
@@ -139,9 +176,18 @@ def main() -> int:
     else:
         curve.plot(TARGETS, predicted_bits, ":", color=THEOREM_COLOR, linewidth=2,
                    label=f"hybrid PREDICTED by the theorem, {chart_label}")
+    estimator_shift = None
+    if args.estimator_comparison is not None:
+        other_rows, _ = _rows(*args.estimator_comparison)
+        other = other_rows["external_topk"]
+        other_bits = _series(other, "bits")
+        curve.plot(TARGETS, other_bits, "o:", color="#7A7A7A", linewidth=1.6,
+                   markersize=4,
+                   label=f"same fit, scored on {other['bits_rows']} rows")
+        estimator_shift = (external_bits[-1] - other_bits[-1], int(other["bits_rows"]))
     curve.set_xlabel("fixed-distortion operating point  $R^2$")
     curve.set_ylabel("Eq-4 description length (bits / token)")
-    curve.set_title("held-out bits at $R^2$")
+    curve.set_title(f"held-out bits at $R^2$   ({external['bits_rows']} estimation rows)")
     curve.grid(alpha=0.25)
     curve.legend(fontsize=8, loc="upper left")
 
@@ -161,6 +207,18 @@ def main() -> int:
     gap.set_title("the margin, against the theorem's closed form")
     gap.grid(alpha=0.25)
     gap.legend(fontsize=8, loc="best")
+    if estimator_shift is not None:
+        # The scale the margin has to be read against: the same bit-identical fit,
+        # scored on a different number of estimation rows, moves by this much.
+        shift, other_rows_count = estimator_shift
+        gap.annotate(
+            f"for scale: the SAME fit scored on\n"
+            f"{other_rows_count} vs {external['bits_rows']} estimation rows\n"
+            f"moves by {abs(shift):.1f} bits "
+            f"({abs(shift) / max(predicted_margin, 1e-12):.0f}× this margin)",
+            xy=(0.5, 0.06), xycoords="axes fraction", ha="center", fontsize=8.5,
+            color="#8A3324",
+            bbox=dict(boxstyle="round,pad=0.35", fc="#FBEFE9", ec="#8A3324", lw=0.8))
 
     names = ("dictionary", "support", "code", "residual")
     external_terms = _terms(external, ACCEPTANCE_TARGET)
