@@ -146,14 +146,7 @@ impl EvalShared {
     }
 }
 
-pub(crate) static OUTER_IFT_RESIDUAL_ENERGY: OnceLock<Mutex<HashMap<Vec<u64>, (f64, u64)>>> =
-    OnceLock::new();
-
 pub(crate) static OUTER_IFT_RESIDUAL_ENERGY_ITER: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn outer_ift_residual_energy_cache() -> &'static Mutex<HashMap<Vec<u64>, (f64, u64)>> {
-    OUTER_IFT_RESIDUAL_ENERGY.get_or_init(|| Mutex::new(HashMap::new()))
-}
 
 // `pub` (paired with `current_outer_iter` below) so the IFT design-cache
 // memo-invalidation regression guard re-homed into gam-models by #1601 can drive
@@ -167,26 +160,8 @@ pub fn current_outer_iter() -> u64 {
     OUTER_IFT_RESIDUAL_ENERGY_ITER.load(Ordering::Relaxed)
 }
 
-pub(crate) fn clear_outer_ift_residual_energy_for_fit() {
-    if let Some(cache) = OUTER_IFT_RESIDUAL_ENERGY.get()
-        && let Ok(mut cache) = cache.lock()
-    {
-        cache.clear();
-    }
+pub(crate) fn reset_current_outer_iter_for_fit() {
     OUTER_IFT_RESIDUAL_ENERGY_ITER.store(0, Ordering::Relaxed);
-}
-
-pub(crate) fn store_ift_residual_energy_for_outer_theta(theta: &Array1<f64>, energy: Option<f64>) {
-    let Some(key) = super::rho_key::sanitized_rhokey(theta) else {
-        return;
-    };
-    if let Ok(mut cache) = outer_ift_residual_energy_cache().lock() {
-        if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy >= 0.0) {
-            cache.insert(key, (energy, current_outer_iter()));
-        } else {
-            cache.remove(&key);
-        }
-    }
 }
 
 pub(crate) struct PenaltySubspace {

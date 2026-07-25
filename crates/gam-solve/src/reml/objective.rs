@@ -2435,7 +2435,6 @@ impl<'a> RemlState<'a> {
                 super::reml_outer_engine::EvalMode::ValueAndGradient,
             )?;
             let ift_residual_energy = result.ift_residual_energy;
-            store_ift_residual_energy_for_outer_theta(p, ift_residual_energy);
             let grad = result
                 .gradient
                 .ok_or(EstimationError::GradientUnavailable {
@@ -2458,7 +2457,6 @@ impl<'a> RemlState<'a> {
             super::reml_outer_engine::EvalMode::ValueAndGradient,
         )?;
         let ift_residual_energy = result.ift_residual_energy;
-        store_ift_residual_energy_for_outer_theta(p, ift_residual_energy);
         let grad = result
             .gradient
             .ok_or(EstimationError::GradientUnavailable {
@@ -2560,7 +2558,6 @@ impl<'a> RemlState<'a> {
             } else {
                 self.evaluate_unified(p, &bundle, super::reml_outer_engine::EvalMode::ValueOnly)?
             };
-            store_ift_residual_energy_for_outer_theta(p, result.ift_residual_energy);
             let cost = result.cost;
             log::debug!(
                 "[REML] outer-eval value-only done | cost {:.6e} | assemble {:.1}ms | total {:.1}ms",
@@ -2616,7 +2613,6 @@ impl<'a> RemlState<'a> {
         };
         let assemble_ms = t_assemble.elapsed().as_secs_f64() * 1000.0;
         let ift_residual_energy = result.ift_residual_energy;
-        store_ift_residual_energy_for_outer_theta(p, ift_residual_energy);
 
         let gradient = result.gradient.ok_or_else(|| {
             EstimationError::InvalidInput(format!(
