@@ -2231,12 +2231,18 @@ impl SaeManifoldTerm {
         // already independent — every full-`B` fit — reaches the constructor
         // byte-for-byte as before and its quotient is bit-identical.
         //
-        // Drop floor: a candidate whose residual after projecting out the
-        // accepted span has fallen to the modified-Gram–Schmidt backward-error
-        // level `dim · ε · ‖v‖` carries no information beyond the roundoff of
-        // its own orthogonalization, so it is dependent in the only sense
-        // finite precision can decide. Same currency as the rank counts
-        // elsewhere in the stack (`α · ε · max(n,p) · σ_max`), no new knob.
+        // Drop predicate: EXACTLY the constructor's own, `‖residual‖² > 0`
+        // after modified Gram–Schmidt in the same order. Not a tolerance of
+        // ours — deliberately not, because any stricter floor would be an
+        // invented threshold that silently re-shapes the quotient on fits that
+        // were solving perfectly well.
+        //
+        // Matching the predicate makes the change provably behavior-preserving
+        // wherever it was not fatal. A dropped candidate contributed no vector
+        // to the probe basis (its residual was zero), so the probe basis
+        // evolves identically with or without it, and the constructor re-running
+        // MGS over the survivors reproduces its previous arithmetic step for
+        // step. The ONLY fits that move are the ones that previously died.
         let mut probe: Vec<Array1<f64>> = Vec::new();
         for gauge in self.dense_step_gauge_vectors()? {
             if gauge.len() != coord_len + border {
@@ -2256,12 +2262,11 @@ impl SaeManifoldTerm {
                 let coefficient = residual.dot(basis);
                 residual.scaled_add(-coefficient, basis);
             }
-            let residual_norm = residual.dot(&residual).sqrt();
-            let drop_floor = (border as f64) * f64::EPSILON * norm_sq.sqrt();
-            if !(residual_norm.is_finite() && residual_norm > drop_floor) {
+            let residual_norm_sq = residual.dot(&residual);
+            if !(residual_norm_sq.is_finite() && residual_norm_sq > 0.0) {
                 continue;
             }
-            residual *= residual_norm.recip();
+            residual *= residual_norm_sq.sqrt().recip();
             probe.push(residual);
             out.push(beta_part);
         }
