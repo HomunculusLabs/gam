@@ -354,7 +354,7 @@ const LEFT_CONTINUED_FRACTION_SWITCH: f64 = -4.0;
 /// reproduces what this recursion gives in binary64.
 #[inline]
 fn mills_correction_continued_fraction(t: f64) -> MillsCorrectionDerivatives {
-    debug_assert!(t.is_finite() && t >= 4.0);
+    assert!(t.is_finite() && t >= 4.0);
     let mut q = MillsCorrectionDerivatives {
         value: 0.0,
         first: 0.0,
