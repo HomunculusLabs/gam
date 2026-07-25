@@ -2208,6 +2208,36 @@ impl SaeManifoldTerm {
         }
         let coord_len = self.n_obs() * self.assignment.row_block_dim();
         let mut out = Vec::new();
+        // Independence probe for the emitted set. `ArrowBetaGaugeQuotient::new`
+        // treats a linearly dependent direction as a MALFORMED DECLARATION and
+        // refuses the whole solve — the right contract, since a caller that
+        // declares a redundant generator has mis-specified its gauge. Honoring
+        // it is the producer's job: the closed-form chart menu below is a
+        // GENERATING SET, and a generating set can become dependent once
+        // decoder frames compress the border. Two chart symmetries whose
+        // decoder compensations are distinct in the full-`B` border can have
+        // the SAME image in the factored `M_k × r_k` border (an atom whose
+        // decoder is rank-deficient inside its own frame collapses its
+        // per-axis translation/scale compensations onto each other), and the
+        // fit then dies on `direction j is zero or linearly dependent` rather
+        // than solving.
+        //
+        // Emit a maximal independent subset. This is exactly equivalent, not a
+        // relaxation: the Faddeev–Popov pin `P S_β P + Q Qᵀ` with
+        // `P = I − Q Qᵀ` is a function of the gauge SPAN alone, so dropping a
+        // generator that adds nothing to the span leaves `P`, the pin, and the
+        // projected step unchanged. The surviving vectors are pushed in their
+        // ORIGINAL form (the probe basis is internal), so a set that was
+        // already independent — every full-`B` fit — reaches the constructor
+        // byte-for-byte as before and its quotient is bit-identical.
+        //
+        // Drop floor: a candidate whose residual after projecting out the
+        // accepted span has fallen to the modified-Gram–Schmidt backward-error
+        // level `dim · ε · ‖v‖` carries no information beyond the roundoff of
+        // its own orthogonalization, so it is dependent in the only sense
+        // finite precision can decide. Same currency as the rank counts
+        // elsewhere in the stack (`α · ε · max(n,p) · σ_max`), no new knob.
+        let mut probe: Vec<Array1<f64>> = Vec::new();
         for gauge in self.dense_step_gauge_vectors()? {
             if gauge.len() != coord_len + border {
                 continue;
@@ -2218,9 +2248,22 @@ impl SaeManifoldTerm {
             // coordinate block (no decoder compensation) contributes no β-Schur
             // null direction; skip it so the quotient stays exactly the reduced
             // border nullspace.
-            if norm_sq.is_finite() && norm_sq > 1.0e-24 {
-                out.push(beta_part);
+            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+                continue;
             }
+            let mut residual = beta_part.clone();
+            for basis in &probe {
+                let coefficient = residual.dot(basis);
+                residual.scaled_add(-coefficient, basis);
+            }
+            let residual_norm = residual.dot(&residual).sqrt();
+            let drop_floor = (border as f64) * f64::EPSILON * norm_sq.sqrt();
+            if !(residual_norm.is_finite() && residual_norm > drop_floor) {
+                continue;
+            }
+            residual *= residual_norm.recip();
+            probe.push(residual);
+            out.push(beta_part);
         }
         Ok(out)
     }
