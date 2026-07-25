@@ -4089,10 +4089,13 @@ mod batch_tests {
                 _ => 0.01 * ((row as f64 + 1.3) * (col as f64 + 0.7)).sin(),
             }
         });
-        // Duchon decoder centers (the issue's geometry: a 1-D linspace).
+        // Periodic Duchon centers on the half-open circle. Including both -π
+        // and +π would name the same S¹ point twice; the basis correctly
+        // collapses that seam duplicate, which would make a penalty sized from
+        // the raw center count disagree with the realized design.
         let n_centers = 12usize;
         let centers = Array2::from_shape_fn((n_centers, 1), |(i, _)| {
-            -std::f64::consts::PI + i as f64 / (n_centers - 1) as f64 * TAU
+            -std::f64::consts::PI + i as f64 / n_centers as f64 * TAU
         });
         let penalty = Array2::<f64>::eye(n_centers);
 
