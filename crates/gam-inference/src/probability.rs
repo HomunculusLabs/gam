@@ -1035,18 +1035,32 @@ mod tests {
             assert!((regularized_lower_gamma(1.0, x) - (1.0 - (-x).exp())).abs() < 1e-13);
         }
 
-        // (3) The regression heart of #1018: for x far below statrs's clamp the
-        // CDF must remain a faithful, nonzero value, not snap to 0. Compare to
-        // the small-x leading order P(a, x) ≈ x^a / Γ(a+1).
+        // (3) The regression heart of #1018: for x far below the naive
+        // small-argument clamp the CDF must remain a faithful, nonzero value,
+        // not snap to 0. Compare to the small-x leading order
+        // P(a, x) ≈ x^a / Γ(a+1).
+        //
+        // This used to open with `assert_eq!(gamma_lr(a, x), 0.0)` as a
+        // "precondition: statrs clamps P(a,x) to 0" — i.e. it asserted a
+        // THIRD-PARTY DEFECT as a premise, so statrs fixing its clamp broke a
+        // test of our own unchanged, already-correct function. statrs 0.19
+        // fixed it: `gamma_lr(0.05, 1e-20)` now returns 0.1027216865271675,
+        // which is `x^a/Γ(a+1)` to four figures.
+        //
+        // What the fixture actually needs is that `x` sits far below the
+        // threshold where a naive series/clamp implementation gives up — that
+        // is a property of the FIXTURE, checkable without reference to anyone
+        // else's behaviour — and that OUR value is faithful there. Both are
+        // asserted; nothing about statrs is.
+        const NAIVE_SMALL_ARG_CLAMP: f64 = 1.11e-15;
         for &(a, x) in &[(0.05_f64, 1e-20_f64), (0.1, 1e-25), (0.02, 1e-40)] {
-            assert_eq!(
-                gamma_lr(a, x),
-                0.0,
-                "precondition: statrs clamps P({a},{x}) to 0"
+            assert!(
+                x < NAIVE_SMALL_ARG_CLAMP,
+                "fixture must probe below the naive small-argument clamp: x={x}"
             );
             let ours = regularized_lower_gamma(a, x);
             let leading = (a * x.ln() - ln_gamma(a + 1.0)).exp();
-            assert!(ours > 0.0, "P({a},{x})={ours} clamped to 0 like statrs");
+            assert!(ours > 0.0, "P({a},{x})={ours} collapsed to zero");
             assert!(
                 (ours - leading).abs() < 1e-9 * leading,
                 "P({a},{x})={ours}, leading order {leading}"
