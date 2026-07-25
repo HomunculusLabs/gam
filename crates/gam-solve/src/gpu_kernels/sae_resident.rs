@@ -1246,13 +1246,13 @@ impl DeviceResidentArrowWorkspace {
     /// downgrade.
     fn apply_operator(
         &self,
-        _on_device: bool,
+        on_device: bool,
         t: &[f64],
         beta: &[f64],
     ) -> (ArrowOperatorApply, OperatorApplyCost) {
         #[cfg(target_os = "linux")]
         {
-            if _on_device && self.device.is_some() {
+            if on_device && self.device.is_some() {
                 match self.apply_operator_device(t, beta) {
                     Some(apply) => {
                         let moved = (t.len() + beta.len()) * std::mem::size_of::<f64>();
@@ -1275,6 +1275,21 @@ impl DeviceResidentArrowWorkspace {
                     ),
                 }
             }
+        }
+        // Reaching here with `on_device` set means the device arm was asked for
+        // and not taken: the workspace holds no device buffers (below the
+        // upload break-even, or a runtime that never admitted the slab), the
+        // apply faulted, or this target has no CUDA at all. All three are the
+        // downgrade the doc comment above promises is never silent, so report
+        // it through the same once-per-process channel the fault path uses.
+        // This also consumes `on_device` on every target, which is why the
+        // parameter does not need — and must not have — an underscore.
+        if on_device {
+            note_resident_engagement(
+                false,
+                "resident operator apply requested the device arm but the workspace is not \
+                 device-resident; host contraction",
+            );
         }
         (
             self.apply_operator_host(t, beta),
