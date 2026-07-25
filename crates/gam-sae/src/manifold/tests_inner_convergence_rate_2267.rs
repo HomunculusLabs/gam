@@ -1,21 +1,27 @@
-//! #2267 / #2080 — the inner `(t, β)` solve's CONTRACTION RATE, and the
-//! curvature mismatch that sets it.
+//! #2267 / #2080 — the inner `(t, β)` solve's CONTRACTION RATE, and what sets it.
 //!
-//! The shipped manifold-SAE example does not finish at its own documented scale
-//! because the inner solve crawls: measured stable-tail contraction ≈ 0.997 per
-//! iteration, i.e. a first-order rate where a Newton method should be
-//! superlinear. The mechanism is NOT step-length and NOT budget: the assembled
-//! operator `B` is a Gauss-Newton majorizer that DROPS the residual curvature
-//! `ΔC_tt[a,b] = ⟨r, ∂²f/∂t_a∂t_b⟩`. On a periodic (harmonic) chart basis those
-//! second derivatives scale like `(2πh)²` while `B_tt = J̃J̃ᵀ` is QUADRATIC in the
-//! decoder amplitude, so at any state with a material residual and a modest
-//! decoder `B` under-states the true curvature `A = B + ΔC` along the step by
-//! orders of magnitude. A step solved in the `B` metric therefore overshoots,
-//! Armijo truncates it, and the solve degrades to preconditioned steepest
-//! descent with `κ(B⁻¹A) ≫ 1`.
+//! The shipped manifold-SAE example did not finish at its own documented scale
+//! because the inner solve crawled: measured stable-tail contraction ≈ 0.997 per
+//! iteration, a first-order rate where a Newton method should be superlinear.
 //!
-//! These are measurement probes with regression teeth: they assert the
-//! CONTRACTION and the CURVATURE RATIO, the two quantities the fix has to move.
+//! The cause is step LENGTH, not direction. `backtracking_line_search` only ever
+//! CONTRACTS from its first trial, and the joint driver pinned that trial to the
+//! caller's `step_size` — a "learning rate", 0.04 here and 0.05–0.1 on the
+//! production paths. So the accepted `α` could never exceed `step_size`, and the
+//! per-iteration KKT contraction was capped at `1 − step_size ≥ 0.90`
+//! arithmetically, however good the direction was. The measured acceptance
+//! distribution settles it: `α = 4.0000e-2` in 1725 of 1899 iterates — the Armijo
+//! test took the FULL trial at the ceiling and never wanted a shorter step — with
+//! the LM ridge parked at its `1e-6` floor in 1898 of 1899.
+//!
+//! The curvature was not the problem, and these probes are what establish that:
+//! `vᵀBv/vᵀAv` along the Newton direction is `0.36` at the production cold seed
+//! and `~1.000` from iterate 32 on, so the Gauss-Newton majorizer is faithful
+//! along the step almost immediately. (A solve-side SoftAbs(`B + ΔC`) metric was
+//! built on the contrary hypothesis — `B ≪ A` by ~370× — and measured INERT on
+//! this fixture: with the metric installed and the step ceiling left in place the
+//! trajectory is numerically unchanged. The hypothesis does not reproduce here and
+//! the metric was reverted rather than kept as unpriced complexity.)
 
 use super::arrow_solver::{SaeArrowVector, apply_cached_arrow_hessian};
 use super::tests_outer_quasi_laplace_probe_budget_2080::{
@@ -213,6 +219,49 @@ fn zz_measure_inner_step_acceptance_trace_2267() {
         Ok(value) => eprintln!("[2267-TRACE] criterion CONVERGED cost={:.6e} in {wall:.2}s", value.0),
         Err(err) => eprintln!("[2267-TRACE] criterion REFUSED in {wall:.2}s: {err}"),
     }
+}
+
+/// GATE (#2267). The inner solve must NOT be capped at the caller's `step_size`.
+///
+/// This is a PROBE-COUNT assertion, not a wall-clock one (SPEC bans time
+/// budgets): after a fixed 64 inner Newton iterations on the p=16 rung the KKT
+/// residual must be materially below what a solve pinned at `α ≤ step_size`
+/// can reach. The two arms are far apart and the bound sits between them with
+/// room on both sides:
+///
+/// | inner iterations | ‖g‖ with `α ≤ 0.04` | ‖g‖ with the ratchet |
+/// |---|---|---|
+/// | 64 | 9.99e-1 | 4.90e-2 |
+///
+/// A regression that restores the ceiling — here or by re-clamping `warm_step`
+/// to `step_size` on any acceptance path — puts ‖g‖ back at ~1 and fails here.
+/// The threshold is deliberately 4× above the achieved value and 5× below the
+/// capped one, so it is testing the mechanism, not a fitted constant.
+#[test]
+fn inner_solve_is_not_capped_at_the_caller_step_size_2267() {
+    let (base, z, rho) = p16_circle_rung();
+    let mut term = base;
+    let mut rho_fixed = rho;
+    term.run_joint_fit_arrow_schur_for_quasi_laplace(
+        z.view(),
+        &mut rho_fixed,
+        None,
+        64,
+        0.04,
+        1.0e-6,
+        1.0e-6,
+    )
+    .expect("inner evidence fit must not hard-error on the p=16 rung");
+    let sys = term
+        .assemble_arrow_schur(z.view(), &rho_fixed, None)
+        .expect("reassemble at the fitted iterate");
+    let grad_norm = SaeManifoldTerm::system_grad_norm_sq(&sys).sqrt();
+    assert!(
+        grad_norm < 2.0e-1,
+        "64 inner Newton iterations reached ‖g‖={grad_norm:.6e}; a solve whose accepted \
+         step is capped at the caller's step_size reaches only ~1e0 here, so this is the \
+         learning-rate ceiling back in the inner solve"
+    );
 }
 
 /// The same curvature statement at the SEED, isolated from any trajectory: at

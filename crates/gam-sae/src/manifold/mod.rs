@@ -407,7 +407,7 @@ mod tests_cocollapse_disjoint_2027;
 mod tests_cocollapse_reseed_2089;
 
 #[cfg(test)]
-mod tests_inner_curvature_metric_2267;
+mod tests_inner_convergence_rate_2267;
 
 #[cfg(test)]
 #[cfg(test)]

@@ -6202,41 +6202,6 @@ impl SaeManifoldTerm {
                     }
                 }
             }
-            // #2267/#2080 — STEP IN THE TRUE CURVATURE, not in the majorizer.
-            //
-            // The assembled `H_tt` is the Gauss-Newton block `J̃J̃ᵀ`, which drops
-            // the residual curvature `⟨r, ∂²f/∂t²⟩`. On a curved chart basis the
-            // dropped term is LINEAR in the decoder amplitude while the kept term
-            // is QUADRATIC, so away from a tight fit the operator the step is
-            // solved in under-states the true curvature along its own direction by
-            // orders of magnitude — the step overshoots, Armijo truncates it, and
-            // the solve crawls at a first-order rate (measured `vᵀBv/vᵀAv ≈ 3e-3`,
-            // ~0.997 contraction, ~10³ iterations per criterion evaluation).
-            // `row_local_solve_curvature_metric` returns `SoftAbs(B_tt + ΔC_tt)`
-            // per row — SPD by construction, so the step stays a descent direction
-            // and the arrow factorization stays valid — and `None` for a row with
-            // no dropped curvature, which is left byte-untouched.
-            //
-            // The metric is installed for THIS iterate's whole step computation:
-            // the resident device frame, the LM solve, and the proximal correction
-            // all read one operator, so no consumer can disagree with another
-            // about what it just factored. What must NOT see the metric is the
-            // per-row GAUGE FIX below, which freezes exactly the directions the
-            // EVIDENCE log-det deflates — a property of the ASSEMBLED block — so
-            // the assembled blocks displaced here are handed to it directly. The
-            // criterion's own undamped factorization is a separate assembly in
-            // `converge_inner_for_undamped_logdet` and is untouched: the VALUE is
-            // still `½log|B|` at the same fixed point. Only the route there
-            // changes.
-            let solve_curvature_metric = self.row_local_solve_curvature_metric(rho, target, &sys)?;
-            let mut assembled_row_blocks: Vec<Option<Array2<f64>>> =
-                vec![None; solve_curvature_metric.len()];
-            for (row_idx, metric) in solve_curvature_metric.into_iter().enumerate() {
-                if let Some(block) = metric {
-                    assembled_row_blocks[row_idx] =
-                        Some(std::mem::replace(&mut sys.rows[row_idx].htt, block));
-                }
-            }
             // #1017 allocation residency across ACCEPTED nonlinear iterates.
             // The retained handle owns device allocations only; `prepare_*`
             // overwrites every ridge-independent operand from this freshly
@@ -6349,11 +6314,8 @@ impl SaeManifoldTerm {
                         // #1557 — the null-direction eigendecomp (`sym.eigh`) issues a
                         // faer GEMM; pin it to `Par::Seq` inside this row worker so it
                         // does not re-fan the outer pool (bit-identical result).
-                        let assembled = assembled_row_blocks[row_idx]
-                            .as_ref()
-                            .unwrap_or(&sys.rows[row_idx].htt);
                         let dirs = with_nested_parallel(|| {
-                            row_sub_floor_null_directions(assembled.view())
+                            row_sub_floor_null_directions(sys.rows[row_idx].htt.view())
                         });
                         for dir in dirs {
                             if dir.len() != di {
@@ -6374,10 +6336,7 @@ impl SaeManifoldTerm {
                 for row_idx in 0..n_rows {
                     let off = sys.row_offsets[row_idx];
                     let di = sys.row_dims[row_idx];
-                    let assembled = assembled_row_blocks[row_idx]
-                        .as_ref()
-                        .unwrap_or(&sys.rows[row_idx].htt);
-                    for dir in row_sub_floor_null_directions(assembled.view()) {
+                    for dir in row_sub_floor_null_directions(sys.rows[row_idx].htt.view()) {
                         if dir.len() != di {
                             continue;
                         }
@@ -6641,13 +6600,12 @@ impl SaeManifoldTerm {
                 "[SAE/inner] it={outer_iteration} ‖g‖={grad_norm:.6e} \
                  ‖Π⊥g‖={quotient_grad_norm:.6e} ‖Δ‖={:.6e} gᵀΔ={directional_decrease:.6e} \
                  alpha={} warm={warm_step:.4e} ridge_t={lm_ridge_t:.3e} ridge_b={lm_ridge_b:.3e} \
-                 obj={pre_step_total:.9e} metric_rows={}",
+                 obj={pre_step_total:.9e}",
                 step_norm_sq.sqrt(),
                 match accepted_step.as_ref() {
                     Some(step) => format!("{:.4e}", step.step),
                     None => "rejected".to_string(),
                 },
-                assembled_row_blocks.iter().filter(|b| b.is_some()).count(),
             );
             if let Some(step) = accepted_step {
                 state_moved = true;

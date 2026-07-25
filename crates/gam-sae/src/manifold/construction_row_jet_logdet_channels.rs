@@ -755,24 +755,9 @@ impl SaeManifoldTerm {
         border: &[SaeBorderChannel],
         window: &mut std::collections::VecDeque<SaeRowJets>,
     ) -> Result<usize, String> {
-        self.refill_jet_window_for_row_dims(start, &cache.row_dims, second_jets, border, window)
-    }
-
-    /// [`Self::refill_jet_window`] keyed on the per-row widths alone. A factor
-    /// cache contributes nothing else to the refill, so the assembled system's
-    /// `row_dims` selects the identical tiles and the identical row program
-    /// without a factorization (#2267).
-    fn refill_jet_window_for_row_dims(
-        &self,
-        start: usize,
-        row_dims: &[usize],
-        second_jets: &[Array4<f64>],
-        border: &[SaeBorderChannel],
-        window: &mut std::collections::VecDeque<SaeRowJets>,
-    ) -> Result<usize, String> {
         if let AssignmentMode::Softmax { temperature, .. } = self.assignment.mode {
-            let q = row_dims[start];
-            let same_shape_rows = row_dims[start..]
+            let q = cache.row_dims[start];
+            let same_shape_rows = cache.row_dims[start..]
                 .iter()
                 .take_while(|&&candidate| candidate == q)
                 .count();
@@ -795,7 +780,7 @@ impl SaeManifoldTerm {
             let mut assignments = Array1::<f64>::zeros(self.k_atoms());
             let mut shared_beta_layout = None;
             for row in start..start + tile_rows {
-                let vars = self.row_vars_for_row_dim(row, row_dims[row])?;
+                let vars = self.row_vars_for_cache_row(row, cache)?;
                 self.assignment.try_assignments_row_into(
                     row,
                     assignments.as_slice_mut().ok_or_else(|| {
@@ -835,7 +820,7 @@ impl SaeManifoldTerm {
             return Ok(start + tile_rows);
         }
 
-        let vars = self.row_vars_for_row_dim(start, row_dims[start])?;
+        let vars = self.row_vars_for_cache_row(start, cache)?;
         let mut a = Array1::<f64>::zeros(self.k_atoms());
         self.assignment.try_assignments_row_into(
             start,
