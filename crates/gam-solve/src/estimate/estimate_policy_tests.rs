@@ -875,6 +875,14 @@ fn dispersion_phi_prefers_inference_then_falls_back_to_standard_deviation() {
         ResponseFamily::Poisson,
         InverseLink::Standard(StandardLink::Log),
     ));
+    // The scale metadata has to move WITH the family. Cloning the Gaussian
+    // fixture and swapping only `likelihood_family` left `ProfiledGaussian`
+    // beside a Poisson response, and the resolver refuses that pair on sight —
+    // "family poisson requires exact FixedDispersion { phi: 1.0 } metadata, got
+    // ProfiledGaussian" — so the `unwrap` below blew up before the assertion it
+    // guards was ever reached. Poisson is a fixed-scale family; its metadata
+    // says so.
+    poisson.likelihood_scale = LikelihoodScaleMetadata::FixedDispersion { phi: 1.0 };
     poisson.standard_deviation = 2.7;
     assert_eq!(poisson.dispersion_phi().unwrap(), 1.0);
 }
