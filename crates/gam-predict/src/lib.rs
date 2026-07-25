@@ -312,11 +312,18 @@ fn selected_uncertainty_backend<'a>(
                 })
         }
         InferenceCovarianceMode::SmoothingCorrected => {
+            if let Some(covariance) = fit.beta_covariance_corrected() {
+                return Ok((
+                    PredictionCovarianceBackend::from_dense(covariance.view()),
+                    InferenceCovarianceMode::SmoothingCorrected,
+                ));
+            }
             // With no smoothing coordinates the correction J Var(rho) Jᵀ is
-            // the unique zero-dimensional zero matrix, so Vp = Vb exactly.
-            // The conditional backend can consume either the dense covariance
-            // or the storage-efficient factorized Hessian. This is an identity,
-            // not a fallback to a weaker uncertainty definition.
+            // the unique zero-dimensional zero matrix, so Vp = Vb exactly. A
+            // persisted dense Vb was returned above by
+            // beta_covariance_corrected(); this branch covers the
+            // storage-efficient factorized-Hessian representation. This is an
+            // identity, not a fallback to a weaker uncertainty definition.
             if fit.lambdas.is_empty() {
                 return conditional_prediction_backend(fit, expected_dim, label)?
                     .map(|backend| (backend, InferenceCovarianceMode::SmoothingCorrected))
@@ -330,14 +337,8 @@ fn selected_uncertainty_backend<'a>(
                         )
                     });
             }
-            let covariance = fit.beta_covariance_corrected().ok_or_else(|| {
-                EstimationError::InvalidInput(
-                    "fit result does not contain smoothing-corrected covariance".to_string(),
-                )
-            })?;
-            Ok((
-                PredictionCovarianceBackend::from_dense(covariance.view()),
-                InferenceCovarianceMode::SmoothingCorrected,
+            Err(EstimationError::InvalidInput(
+                "fit result does not contain smoothing-corrected covariance".to_string(),
             ))
         }
     }
