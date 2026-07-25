@@ -5963,40 +5963,42 @@ fn run_efs_skips_global_cost_screening() {
         "EFS must perform exactly the mandatory terminal value-agreement audit, \
          with no startup cost-screening pass"
     );
-    // The fixture's premise: the mock's EFS step is identically zero, so the
-    // seed IS the fixed point and the walk stops on its first step-norm test.
-    // Without this the accounting identity below would be vacuous.
+    // The fixture's premise, measured: the mock's EFS step is identically zero,
+    // so `OuterFixedPointBridge::eval_step` takes its `fixed_point_step_converged`
+    // branch and publishes `FixedPointStatus::Stop` for the seed itself. The walk
+    // therefore returns out of iteration zero having applied no step at all.
+    // Pinning it is what makes the call count below decomposable rather than a
+    // golden number.
     assert_eq!(
-        result.iterations, 1,
-        "the all-zero EFS step must make the seed the fixed point in one walk step"
+        result.iterations, 0,
+        "an exactly-zero EFS step must stop the walk AT the seed, before any step is applied"
     );
-    // Accounting identity for an EFS run, derived from the three places that
-    // can drive `eval_efs`:
+    // Complete accounting of the EFS inner solve. Only three sites can drive
+    // `eval_efs` on this path, and none of them is a screening pass:
     //
-    //   * ONE seed validation (`run_fixed_point_outer_solver` evaluates the
-    //     seed before constructing the walk) whose `FixedPointSample` is handed
-    //     straight to `FixedPoint::with_initial_sample`. Iteration zero
-    //     therefore serves from that sample and the walk pays only its
-    //     REMAINING `iterations - 1` steps — this `-1` is what "the validated
-    //     seed sample must be reused instead of paying the EFS inner solve
-    //     twice" actually asserts, and it is the only term a screening pass or
-    //     a dropped initial sample could inflate.
-    //   * TWO terminal state installations at the SELECTED rho, both
-    //     `finalize_outer_result` (which for a fixed-point plan has no
-    //     derivative order to request and so installs through `eval_efs`): the
-    //     plan-level one that leaves the winner installed for `run_outer`'s
-    //     rho-uncertainty diagnostic, and the mint-level one that re-installs
-    //     it at full inner fidelity after that diagnostic and immediately
-    //     before the certificate.
+    //   * ONE seed validation: `run_fixed_point_outer_solver` evaluates the seed
+    //     before constructing the walk and hands the resulting `FixedPointSample`
+    //     to `FixedPoint::with_initial_sample`.
+    //   * ZERO from the walk. `FixedPointCore::run` serves iteration zero from
+    //     that sample (its `approx_point(seed_x, x_k)` guard matches), reads the
+    //     Stop status, and returns with `func_evals = 0`. THIS is the term the
+    //     assertion is really about: drop the initial sample and iteration zero
+    //     re-runs the whole inner solve at the same rho, making the total four.
+    //   * TWO terminal state installations at the selected rho, both
+    //     `finalize_outer_result` — a fixed-point plan has no derivative order to
+    //     request, so it installs through `eval_efs`. One is plan-level, leaving
+    //     the winner installed for `run_outer`'s rho-uncertainty diagnostic; one
+    //     is mint-level, re-installing at full inner fidelity after that
+    //     diagnostic and immediately before the certificate.
     //
-    // Every term is terminal proof work or the single seed solve; none of them
-    // is a screening pass over the candidate pool (`value_only_calls == 1`
-    // above is the direct witness for that half).
+    // The screening half of this test's name is witnessed directly above: a
+    // global cost screen would price every generated candidate through `cost_fn`,
+    // and that count is one — the terminal value-agreement audit.
     assert_eq!(
         efs_calls.load(Ordering::Relaxed),
-        result.iterations + 2,
-        "an EFS run must pay one seed solve the walk then REUSES (iterations - 1 \
-         remaining steps) plus the two terminal installations, and nothing else"
+        3,
+        "an EFS run must pay one seed solve that the walk REUSES (four would mean \
+         iteration zero re-solved it) plus the two terminal installations"
     );
 }
 
