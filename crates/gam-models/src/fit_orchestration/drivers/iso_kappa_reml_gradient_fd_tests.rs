@@ -972,7 +972,14 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
         ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
     ] {
         let (pass, worst, violations, _) =
-            iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5]);
+            // #2444: probe BOTH faces. `+11.5` is the upper rail this gate was
+            // written for; `-11.5` is its mirror a half e-fold inside the LOWER
+            // bound, which is where every failing checkpoint in the kappa cluster
+            // actually rails. A derivative wrong at one bound is not automatically
+            // wrong at the other, and the rationale for measuring the rail at all
+            // -- "the one region the certificate consults is the one region no gate
+            // has ever measured" -- applied verbatim to the lower face until now.
+            iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5, -11.5]);
         eprintln!(
             "[zz-rail-2425] {label}: pass={pass} worst_psi_rel={worst:.3e} \
              violations={}",
