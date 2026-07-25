@@ -24,12 +24,30 @@
 //!
 //! ## The contract
 //!
-//! For every configuration, cold and warm must BOTH converge, and must
-//! agree on the outer criterion value (REML/LAML) and on every
-//! coefficient. The tolerances are far above two-paths-to-one-optimum
-//! noise and far below any genuine alternate-stationary-point divergence
-//! (#873's was ~30% of the curve's range). When a future cache key goes
-//! stale-blind again, this fails in CI instead of in a user's pipeline.
+//! For every configuration, cold and warm must agree BITWISE on the outer
+//! criterion value (REML/LAML), on every coefficient, and on the certified
+//! log-λ. Both arms converging is not a separate assertion — a fit object
+//! only ever comes from a converged optimization, so an arm that fails to
+//! certify fails the fit call and names itself.
+//!
+//! Bitwise, not "close". This gate previously allowed 1e-6 on the criterion
+//! and 1e-4 on β, and under that bound two of the three families it caught in
+//! #2363 agreed with their warm twin to three or four digits while actually
+//! minimizing a *different* criterion (the frozen nuisance differed, so the
+//! objective differed). A tolerance wide enough to absorb solver wobble is
+//! therefore wide enough to absorb the next instance of the bug — and
+//! numerically close state is not interchangeable provenance for a profiled
+//! nonconvex objective anyway, which is the same argument
+//! `bind_certified_custom_family_terminal_mode` makes about inner modes.
+//!
+//! What makes bitwise achievable — and what makes this a real contract rather
+//! than a lucky coincidence — is that both the nuisance freeze (#2363) and the
+//! inner mode (#2366) are now pinned to canonical anchors rather than to
+//! whatever the search happened to be handed, so the two arms do not merely
+//! converge near each other, they follow the same computation.
+//!
+//! Failures name the first disagreeing coordinate and its ulp distance, so a
+//! regression reports how far it moved rather than only that it moved.
 
 use gam::inference::data::load_csvwith_inferred_schema;
 use gam::init_parallelism;
@@ -44,18 +62,54 @@ struct InvarianceCase {
     data: fn() -> (Vec<f64>, Vec<f64>),
 }
 
-/// Relative tolerance for cold-vs-warm agreement of the outer criterion
-/// value. Two solves of the same problem from different starts agree to
-/// roughly solver tolerance at the shared optimum; a warm seed landing on
-/// a DIFFERENT stationary point moves the criterion by orders of
-/// magnitude more than this.
-const CRITERION_REL_TOL: f64 = 1e-6;
+/// Everything an arm has to reproduce exactly.
+///
+/// There is no `converged` field because there is nothing to compare: a fit
+/// object only ever comes from a converged optimization, so an arm that
+/// reaches here at all has certified, and one that did not would have failed
+/// the `fit_from_formula` unwrap in `fit_once` naming which arm it was.
+struct ArmOutcome {
+    criterion: f64,
+    beta: Vec<f64>,
+    log_lambdas: Vec<f64>,
+}
 
-/// Sup-norm tolerance for cold-vs-warm coefficient agreement, relative to
-/// the coefficient scale. Looser than the criterion bound because nearly
-/// flat ρ directions can move β legitimately harder than the criterion,
-/// but still ~two orders below the #873-class divergence.
-const COEF_REL_TOL: f64 = 1e-4;
+/// Signed ulp distance between two `f64`s, using the standard
+/// monotone-ordering trick so the count stays meaningful across zero.
+fn ulp_distance(left: f64, right: f64) -> i128 {
+    let order = |value: f64| -> i128 {
+        let bits = value.to_bits() as i64;
+        if bits < 0 {
+            (i64::MIN - bits) as i128
+        } else {
+            bits as i128
+        }
+    };
+    order(left) - order(right)
+}
+
+/// Describe the first coordinate at which two arms disagree BITWISE, or
+/// `None` when every coordinate is bit-identical.
+fn first_bitwise_gap(cold: &[f64], warm: &[f64]) -> Option<String> {
+    if cold.len() != warm.len() {
+        return Some(format!(
+            "layout differs: cold len={} warm len={}",
+            cold.len(),
+            warm.len()
+        ));
+    }
+    cold.iter()
+        .zip(warm.iter())
+        .enumerate()
+        .find(|(_, (a, b))| a.to_bits() != b.to_bits())
+        .map(|(index, (a, b))| {
+            format!(
+                "coordinate {index}: cold={a:.17e} warm={b:.17e} ulps={} |Δ|={:.3e}",
+                ulp_distance(*a, *b),
+                (a - b).abs()
+            )
+        })
+}
 
 /// Deterministic 32-bit LCG (Numerical Recipes constants) for
 /// reproducible jitter/thresholds without a rand dependency.
@@ -197,7 +251,7 @@ fn fit_once(
     y: &[f64],
     arm: &str,
     persist_warm_start_disk: bool,
-) -> (f64, Vec<f64>) {
+) -> ArmOutcome {
     let mut csv = String::from("x,y\n");
     for i in 0..x.len() {
         csv.push_str(&format!("{:.17e},{:.17e}\n", x[i], y[i]));
@@ -236,7 +290,11 @@ fn fit_once(
         case.name,
         arm
     );
-    (fit.fit.reml_score, fit.fit.beta.to_vec())
+    ArmOutcome {
+        criterion: fit.fit.reml_score,
+        beta: fit.fit.beta.to_vec(),
+        log_lambdas: fit.fit.log_lambdas.to_vec(),
+    }
 }
 
 #[test]
@@ -297,48 +355,33 @@ fn fits_are_invariant_to_warm_start_cache_state_across_families() {
     let mut failures: Vec<String> = Vec::new();
     for case in &cases {
         let (x, y) = (case.data)();
-        let (crit_cold, beta_cold) = fit_once(case, &x, &y, "cold", false);
+        let cold = fit_once(case, &x, &y, "cold", false);
         // Prime both the exact-key and seed-prefix checkpoints. This arm need
         // not itself be cold; after it completes the next arm is guaranteed to
         // have a valid persistent entry.
         drop(fit_once(case, &x, &y, "prime", true));
-        let (crit_warm, beta_warm) = fit_once(case, &x, &y, "warm", true);
+        let warm = fit_once(case, &x, &y, "warm", true);
 
-        let crit_diff = (crit_cold - crit_warm).abs();
-        let crit_tol = CRITERION_REL_TOL * crit_cold.abs().max(1.0);
-        if crit_diff > crit_tol {
+        if let Some(gap) = first_bitwise_gap(
+            std::slice::from_ref(&cold.criterion),
+            std::slice::from_ref(&warm.criterion),
+        ) {
             failures.push(format!(
-                "[{}] criterion depends on cache state: cold={:.10e} warm={:.10e} \
-                 |Δ|={:.3e} > tol={:.3e}",
-                case.name, crit_cold, crit_warm, crit_diff, crit_tol
+                "[{}] criterion depends on cache state: {gap}",
+                case.name
             ));
         }
-
-        if beta_cold.len() != beta_warm.len() {
+        if let Some(gap) = first_bitwise_gap(&cold.beta, &warm.beta) {
             failures.push(format!(
-                "[{}] coefficient layout depends on cache state: cold p={} warm p={}",
-                case.name,
-                beta_cold.len(),
-                beta_warm.len()
+                "[{}] coefficients depend on cache state: {gap}",
+                case.name
             ));
-        } else {
-            let beta_scale = beta_cold
-                .iter()
-                .fold(0.0f64, |acc, b| acc.max(b.abs()))
-                .max(1.0);
-            let max_diff = beta_cold
-                .iter()
-                .zip(beta_warm.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f64, f64::max);
-            let beta_tol = COEF_REL_TOL * beta_scale;
-            if max_diff > beta_tol {
-                failures.push(format!(
-                    "[{}] coefficients depend on cache state: sup|Δβ|={:.3e} > tol={:.3e} \
-                     (scale={:.3e})",
-                    case.name, max_diff, beta_tol, beta_scale
-                ));
-            }
+        }
+        if let Some(gap) = first_bitwise_gap(&cold.log_lambdas, &warm.log_lambdas) {
+            failures.push(format!(
+                "[{}] certified log-λ depends on cache state: {gap}",
+                case.name
+            ));
         }
     }
 
