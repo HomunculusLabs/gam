@@ -9,6 +9,7 @@ mod double_penalty_inflates_edf_instead_of_shrinking;
 mod double_penalty_shrinks_irrelevant_covariate_1266;
 mod duchon_collocation_symmetry_psd_regression;
 mod duchon_hybrid_length_scale_default;
+mod duchon_replay_penalty_topology_2433;
 mod factor_smooth_degree_shrink_predict_replay;
 mod gaulss_by_group_both_blocks_joint_hessian_shape_1504;
 mod gaussian_location_scale_sinusoidal_scale_recovery;
