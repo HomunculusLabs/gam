@@ -1328,17 +1328,48 @@ fn zz_measure_2228_value_lane_budget_sweep() {
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
             .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
             .unwrap();
+        // FULL budget (refine_progress_extension = true): the arm that must reach
+        // the root the test prices against.
         let mut t = term.clone();
         let started = std::time::Instant::now();
-        let outcome =
+        let full =
             t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb);
-        let elapsed = started.elapsed().as_secs_f64();
-        match outcome {
-            Ok((value, _, _)) => eprintln!(
-                "[#2228 sweep] imi={imi:>4} CONVERGED value={value:.9e} ({elapsed:.2}s)"
-            ),
-            Err(err) => eprintln!("[#2228 sweep] imi={imi:>4} REFUSED ({elapsed:.2}s): {err:?}"),
-        }
+        let full_secs = started.elapsed().as_secs_f64();
+        // COARSE budget (refine_progress_extension = false): the cheap ranking
+        // probe, which the fixture requires to be INADEQUATE at the same budget.
+        // If raising `imi` ever made this one adequate too, the test's
+        // coarse-vs-full premise would go vacuous, so sweep both together.
+        let mut t_coarse = term.clone();
+        let started = std::time::Instant::now();
+        let coarse = t_coarse.penalized_quasi_laplace_criterion_with_cache_refine_policy(
+            z.view(),
+            &rho,
+            None,
+            imi,
+            lr,
+            re,
+            rb,
+            false,
+        );
+        let coarse_secs = started.elapsed().as_secs_f64();
+        let render = |outcome: &Result<_, SaeCriterionError>, secs: f64| -> String {
+            match outcome {
+                Ok(_) => format!("CONVERGED ({secs:.2}s)"),
+                Err(_) => format!("REFUSED ({secs:.2}s)"),
+            }
+        };
+        eprintln!(
+            "[#2228 sweep] imi={imi:>4} full={} coarse={}{}",
+            match &full {
+                Ok((value, _, _)) => format!("CONVERGED value={value:.9e} ({full_secs:.2}s)"),
+                Err(err) => format!("REFUSED ({full_secs:.2}s): {err:?}"),
+            },
+            render(&coarse.as_ref().map(|_| ()), coarse_secs),
+            match &coarse {
+                Ok(evaluated) => format!(" coarse_value={:.9e}", evaluated.0),
+                Err(_) => String::new(),
+            }
+        );
     }
 }
 
