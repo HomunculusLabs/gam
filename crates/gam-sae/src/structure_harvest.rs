@@ -6811,7 +6811,7 @@ mod tests;
 #[cfg(test)]
 mod tests_atlas_prior_2280 {
     use super::*;
-    use crate::manifold::topology_fixtures::{circle, cylinder_strip, mobius_strip, trefoil_knot};
+    use crate::manifold::tests_topology_fixtures::{circle, cylinder_strip, mobius_strip, trefoil_knot};
     use ndarray::Array2;
 
     /// A Möbius strip in R³ (a half-twist over one revolution): the canonical

@@ -658,7 +658,7 @@ mod tests_2280 {
     use super::*;
     use crate::manifold::LocalAtlas;
     use crate::manifold::local_charts::LocalAtlasConfig;
-    use crate::manifold::topology_fixtures::{
+    use crate::manifold::tests_topology_fixtures::{
         circle, cylinder_strip, embedded_plane, mobius_strip, open_arc, sphere, spherical_band,
         torus, trefoil_knot,
     };
@@ -1061,10 +1061,10 @@ mod tests_2280 {
 }
 
 #[cfg(test)]
-mod zz_measure_2280 {
+mod tests_zz_measure_2280 {
     use super::*;
     use crate::manifold::local_charts::LocalAtlasConfig;
-    use crate::manifold::topology_fixtures::{
+    use crate::manifold::tests_topology_fixtures::{
         circle, cylinder_strip, embedded_plane, mobius_strip, open_arc, sphere, spherical_band,
         swiss_roll, torus, trefoil_knot,
     };

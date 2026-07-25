@@ -1322,7 +1322,7 @@ fn determinant(m: &Array2<f64>) -> f64 {
 mod tests {
     use super::*;
 
-    use crate::manifold::topology_fixtures::{
+    use crate::manifold::tests_topology_fixtures::{
         cylinder_strip, embedded_plane, mobius_strip, spherical_band, swiss_roll,
     };
 

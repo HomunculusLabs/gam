@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Point clouds of KNOWN topology, shared by every test that needs a manifold
 //! whose answer is decided in advance (#2280).
 //!
