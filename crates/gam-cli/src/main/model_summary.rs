@@ -151,15 +151,18 @@ pub(crate) fn build_model_summary(
     }
 
     let mut smooth_terms = Vec::<SmoothTermSummary>::new();
-    // The fit's GLOBAL penalty layout (and thus `penalty_block_trace`) opens with a
-    // single shared `LinearTermRidge` block IFF any linear term has
-    // `double_penalty=true` (`design_construction.rs`). Random-effect and smooth
-    // penalty blocks follow it. Seeding `penalty_cursor` at 0 ignored that leading
-    // block, sliding every per-term trace window off by one whenever a penalized
-    // linear term was present and masking the bug only on small dense fits (where
-    // `per_term_edf` reads the influence matrix instead, #1372). Start the cursor
-    // PAST any leading `LinearTermRidge` block by counting it in the recorded
-    // global ordering rather than re-deriving it.
+    // The fit's GLOBAL penalty layout (and thus `penalty_block_trace`) opens with
+    // ONE `LinearTermRidge` block PER linear term carrying `double_penalty=true`
+    // — not one shared block (`smooth/term_design.rs:289-311`; every non-intercept
+    // effect owns its own REML coordinate so an unsupported slope can be shrunk
+    // independently). Random-effect and smooth penalty blocks follow them.
+    // Seeding `penalty_cursor` at 0 ignored those leading blocks, sliding every
+    // per-term trace window off by the number of penalized linear terms and
+    // masking the bug only on small dense fits (where `per_term_edf` reads the
+    // influence matrix instead, #1372). Start the cursor PAST them by COUNTING
+    // them in the recorded global ordering rather than re-deriving it — which is
+    // what the `.count()` below does, and why it must not be replaced by a
+    // boolean.
     let mut penalty_cursor = design
         .penaltyinfo
         .iter()
