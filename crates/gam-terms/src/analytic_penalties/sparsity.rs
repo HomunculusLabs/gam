@@ -288,7 +288,15 @@ impl SoftmaxAssignmentSparsityPenalty {
     ///
     /// `‖H_k·‖₂²` is accumulated, and never square-rooted, in the SAME
     /// diagonal-first traversal order the envelope sum uses, so the value and its
-    /// θ-adjoint differentiate one floating-point expression. If the row is so
+    /// θ-adjoint differentiate one floating-point expression. The off-diagonal is
+    /// grouped `scale·a_k·(a_j·bracket)` — matching
+    /// [`Self::row_dense_hessian`]'s `scale·a_k·(δ_kj·… + a_j·bracket)` — rather
+    /// than the flat left-to-right `scale·a_k·a_j·bracket`, which differs by an
+    /// ulp and made the majorized radius here and the `H` its adjoint
+    /// differentiates two operators that disagreed in the last bit. That was
+    /// invisible while `D` was compared at `1e-12`; it is visible the moment
+    /// `D̃ ≥ D` is asserted EXACTLY, which is the form the majorization guarantee
+    /// actually takes. If the row is so
     /// deeply underflowed that `Σ_l H_kl²` flushes to zero while the entries do
     /// not, `ε_k` is exactly 0 and the sum degrades gracefully to the exact hard
     /// `Σ_j|H_kj|` — the majorization guarantee is unconditional, and smoothing
@@ -311,7 +319,7 @@ impl SoftmaxAssignmentSparsityPenalty {
                 if jj == kk {
                     continue;
                 }
-                let h_kj = scale * a[kk] * a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m);
+                let h_kj = scale * a[kk] * (a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m));
                 sum_sq += h_kj * h_kj;
             }
             // Pass 2: the soft-abs row sum at that scale, ε_k² = ε₀²·‖H_k·‖₂².
@@ -322,7 +330,7 @@ impl SoftmaxAssignmentSparsityPenalty {
                 if jj == kk {
                     continue;
                 }
-                let h_kj = scale * a[kk] * a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m);
+                let h_kj = scale * a[kk] * (a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m));
                 acc += soft_abs_squared_scale(h_kj, eps_sq);
             }
             d[kk] = acc;
@@ -1864,27 +1872,59 @@ mod soft_abs_gershgorin_2339_tests {
         acc
     }
 
-    /// `K = 2` logit `z_0` (with `z_1 = 0`) at which the off-diagonal `H_01`
-    /// crosses zero — the kink site of the hard radius. Located by bisection on
-    /// the PRODUCTION `row_dense_hessian`, so the test cannot drift from the
-    /// operator it is probing. `H_01 ∝ (L_0 + L_1 + 1 − 2m)` is `+1·scale·a_0a_1`
-    /// at `z_0 = 0` and diverges negative as `a_1 → 0`, so the bracket is real.
-    fn off_diagonal_zero_crossing(pen: &SoftmaxAssignmentSparsityPenalty, scale: f64) -> f64 {
-        let entry = |z0: f64| pen.row_dense_hessian(&[z0, 0.0], scale)[[0, 1]];
-        let (mut lo, mut hi) = (0.0_f64, 20.0_f64);
+    /// Logit `z_0` at which the off-diagonal `H_01` crosses zero — the kink site
+    /// of the hard radius — with the remaining logits held at `base`. Located by
+    /// a scan for a sign change followed by bisection on the PRODUCTION
+    /// `row_dense_hessian`, so the fixture cannot drift from the operator it
+    /// probes.
+    ///
+    /// `K = 2` CANNOT serve as this fixture. The entropy block is gauge-null
+    /// (`Σ_j H_kj = 0`, the softmax's shift invariance), so with two atoms row 0
+    /// is exactly `(x, −x)`: both entries vanish together and the row DEGENERATES
+    /// at the crossing instead of exposing an isolated one. `‖H_0·‖₂` then
+    /// collapses to ~1e-16, the smoothing scale `ε₀‖H_0·‖₂` with it, and every
+    /// seam probe lands below the representable neighbourhood of `z*`. `K = 3`
+    /// keeps `H_00 = −H_02 ≠ 0` where `H_01 = 0`, which is the configuration the
+    /// production assembly actually sees.
+    fn off_diagonal_zero_crossing(
+        pen: &SoftmaxAssignmentSparsityPenalty,
+        base: &[f64],
+        scale: f64,
+    ) -> f64 {
         assert!(
-            entry(lo) > 0.0 && entry(hi) < 0.0,
-            "the H_01 zero crossing must be bracketed by [0, 20]; \
-             endpoints are {} and {}",
-            entry(lo),
-            entry(hi)
+            pen.k_atoms >= 3,
+            "the isolated-crossing fixture needs K ≥ 3 (gauge-null rows make K=2 \
+             degenerate); got K = {}",
+            pen.k_atoms
         );
+        let entry = |z0: f64| {
+            let mut row = base.to_vec();
+            row[0] = z0;
+            pen.row_dense_hessian(&row, scale)[[0, 1]]
+        };
+        let (sweep_lo, sweep_hi, steps) = (-8.0_f64, 8.0_f64, 1600_usize);
+        let mut bracket: Option<(f64, f64)> = None;
+        let mut prev_z = sweep_lo;
+        let mut prev = entry(prev_z);
+        for i in 1..=steps {
+            let z = sweep_lo + (sweep_hi - sweep_lo) * (i as f64) / (steps as f64);
+            let cur = entry(z);
+            if prev * cur < 0.0 {
+                bracket = Some((prev_z, z));
+                break;
+            }
+            prev_z = z;
+            prev = cur;
+        }
+        let (mut lo, mut hi) =
+            bracket.expect("H_01 must change sign over the swept z_0 range (#2339)");
+        let lo_is_positive = entry(lo) > 0.0;
         for _ in 0..200 {
             let mid = 0.5 * (lo + hi);
             if mid <= lo || mid >= hi {
                 break;
             }
-            if entry(mid) > 0.0 {
+            if (entry(mid) > 0.0) == lo_is_positive {
                 lo = mid;
             } else {
                 hi = mid;
@@ -2027,21 +2067,30 @@ mod soft_abs_gershgorin_2339_tests {
         );
     }
 
-    /// Width, in logit units, of the smoothing band around the `H_01` crossing:
-    /// the envelope's curvature-space scale `ε_k = ε₀·‖H_0·‖₂` divided by the
-    /// crossing entry's slope `|∂H_01/∂z_0|`. Every seam probe below is expressed
-    /// as a fraction of THIS, never as a hard-coded offset — the band is set by a
-    /// derived temperature and the fixture's own curvature, so a literal step
-    /// would be a magic constant that silently stops probing the seam if either
-    /// moves. Returns `(z*, band, |Ḣ_01|)`.
-    fn zero_crossing_band(pen: &SoftmaxAssignmentSparsityPenalty, scale: f64) -> (f64, f64, f64) {
-        let z_star = off_diagonal_zero_crossing(pen, scale);
-        let row = [z_star, 0.0];
+    /// The seam fixture: a `K = 3` logit row sitting exactly on an `H_01` zero
+    /// crossing, plus the width of the smoothing band around it — the envelope's
+    /// curvature-space scale `ε_0 = ε₀·‖H_0·‖₂` divided by the crossing entry's
+    /// slope `|∂H_01/∂z_0|`. Every seam probe below is expressed as a fraction of
+    /// THIS band, never as a hard-coded offset: the band is set by a derived
+    /// temperature and the fixture's own curvature, so a literal step would be a
+    /// magic constant that silently stops probing the seam if either moves.
+    /// Returns `(row, band, |Ḣ_01|)`.
+    fn zero_crossing_fixture(
+        pen: &SoftmaxAssignmentSparsityPenalty,
+        base: &[f64],
+        scale: f64,
+    ) -> (Vec<f64>, f64, f64) {
+        let z_star = off_diagonal_zero_crossing(pen, base, scale);
+        let mut row = base.to_vec();
+        row[0] = z_star;
         let h = pen.row_dense_hessian(&row, scale);
-        let norm = (h[[0, 0]] * h[[0, 0]] + h[[0, 1]] * h[[0, 1]]).sqrt();
-        let eps_k = SoftmaxAssignmentSparsityPenalty::soft_abs_temperature(pen.k_atoms) * norm;
+        let norm = (0..pen.k_atoms)
+            .map(|jj| h[[0, jj]] * h[[0, jj]])
+            .sum::<f64>()
+            .sqrt();
+        let eps_0 = SoftmaxAssignmentSparsityPenalty::soft_abs_temperature(pen.k_atoms) * norm;
         let slope = pen.row_dense_hessian_logit_derivative(&row, scale, 0)[[0, 1]].abs();
-        (z_star, eps_k / slope, slope)
+        (row, eps_0 / slope, slope)
     }
 
     /// (2) The θ-adjoint is CONTINUOUS across an off-diagonal zero crossing,
@@ -2052,25 +2101,30 @@ mod soft_abs_gershgorin_2339_tests {
     #[test]
     fn smooth_gershgorin_adjoint_is_continuous_across_a_zero_crossing_2339() {
         let scale = 1.3_f64;
-        let pen = SoftmaxAssignmentSparsityPenalty::new(2, 1.0);
-        let (z_star, band, slope) = zero_crossing_band(&pen, scale);
+        let pen = SoftmaxAssignmentSparsityPenalty::new(3, 1.0);
+        let base = [0.0_f64, 0.0, -0.7];
+        let (row, band, slope) = zero_crossing_fixture(&pen, &base, scale);
         assert!(
-            slope > 1e-4 && band > 0.0 && band.is_finite(),
-            "the crossing entry must move under z_0 for the kink to be real \
-             (#2339): |∂H_01/∂z_0| = {slope}, band = {band}"
+            slope > 1e-4 && band > 1e-13 && band.is_finite(),
+            "the crossing entry must move under z_0, and the row must not \
+             degenerate, for the kink to be real (#2339): |∂H_01/∂z_0| = {slope}, \
+             band = {band}"
         );
 
         let mut measured: Vec<(f64, f64, f64)> = Vec::new();
         for divisor in [100.0_f64, 1000.0] {
             let delta = band / divisor;
-            let plus = [z_star + delta, 0.0];
-            let minus = [z_star - delta, 0.0];
-            // The realized offset after rounding into `z_star`'s exponent.
+            let mut plus = row.clone();
+            let mut minus = row.clone();
+            plus[0] += delta;
+            minus[0] -= delta;
+            // The realized offset after rounding into `z*`'s exponent.
             let realized = 0.5 * (plus[0] - minus[0]);
             assert!(
                 realized > 0.0,
-                "the seam probe must be representable next to z* = {z_star} \
-                 (#2339): requested δ = {delta}"
+                "the seam probe must be representable next to z* = {} (#2339): \
+                 requested δ = {delta}",
+                row[0]
             );
             let smooth = (pen.row_psd_majorizer_logit_derivative(&plus, scale, 0)[[0, 0]]
                 - pen.row_psd_majorizer_logit_derivative(&minus, scale, 0)[[0, 0]])
@@ -2116,25 +2170,25 @@ mod soft_abs_gershgorin_2339_tests {
     #[test]
     fn smooth_gershgorin_adjoint_matches_fd_inside_the_smoothing_band_2339() {
         let scale = 1.3_f64;
-        let pen = SoftmaxAssignmentSparsityPenalty::new(2, 1.0);
-        let (z_star, band, slope) = zero_crossing_band(&pen, scale);
-        let row = [z_star, 0.0];
+        let pen = SoftmaxAssignmentSparsityPenalty::new(3, 1.0);
+        let base = [0.0_f64, 0.0, -0.7];
+        let (row, band, slope) = zero_crossing_fixture(&pen, &base, scale);
         let step = band / 100.0;
         assert!(
-            step > 0.0 && step.is_finite() && slope > 1e-4,
+            step > 1e-15 && step.is_finite() && slope > 1e-4,
             "the ε-scaled probe step must be usable (#2339): step = {step}, \
              slope = {slope}"
         );
-        for w in 0..2 {
+        for w in 0..3 {
             let analytic = pen.row_psd_majorizer_logit_derivative(&row, scale, w);
-            let mut plus = row;
-            let mut minus = row;
+            let mut plus = row.clone();
+            let mut minus = row.clone();
             plus[w] += step;
             minus[w] -= step;
             let realized = 0.5 * (plus[w] - minus[w]);
             let mp = pen.row_psd_majorizer(&plus, scale);
             let mm = pen.row_psd_majorizer(&minus, scale);
-            for kk in 0..2 {
+            for kk in 0..3 {
                 let fd = (mp[[kk, kk]] - mm[[kk, kk]]) / (2.0 * realized);
                 assert_abs_diff_eq!(analytic[[kk, kk]], fd, epsilon = 1e-3);
             }

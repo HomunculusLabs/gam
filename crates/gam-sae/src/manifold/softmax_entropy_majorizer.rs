@@ -84,7 +84,7 @@ pub(crate) fn active_softmax_gershgorin_majorizer_entry(a: &[f64], kk: usize, m:
             continue;
         }
         let l_jj = softmax_entropy_log_plus_one(a_jj);
-        let h_kj = scale * a[kk] * a_jj * (l_kk + l_jj + 1.0 - 2.0 * m);
+        let h_kj = scale * a[kk] * (a_jj * (l_kk + l_jj + 1.0 - 2.0 * m));
         sum_sq += h_kj * h_kj;
     }
     // Pass 2: the soft-abs row sum at that scale, ε_k² = ε₀²·‖H_k·‖₂².
@@ -100,7 +100,7 @@ pub(crate) fn active_softmax_gershgorin_majorizer_entry(a: &[f64], kk: usize, m:
             continue;
         }
         let l_jj = softmax_entropy_log_plus_one(a_jj);
-        let h_kj = scale * a[kk] * a_jj * (l_kk + l_jj + 1.0 - 2.0 * m);
+        let h_kj = scale * a[kk] * (a_jj * (l_kk + l_jj + 1.0 - 2.0 * m));
         acc += gam_terms::analytic_penalties::soft_abs_squared_scale(h_kj, eps_sq);
     }
     acc
