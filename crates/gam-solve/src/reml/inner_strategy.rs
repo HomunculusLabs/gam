@@ -142,6 +142,12 @@ impl<'a> RemlState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The canonical Gaussian-identity fixture spec is owned by the REML module's
+    // own test tree. `use super::*` reaches the REML module itself, which does
+    // not re-export its `#[cfg(test)] mod tests` items, so the helper has to be
+    // named explicitly — by relative path, because this file is `#[path]`-
+    // included and therefore has no stable absolute module path.
+    use super::super::tests::gaussian_identity_glm_spec;
     use faer::sparse::{SparseColMat, Triplet};
     use ndarray::{Array1, Array2, array};
 
