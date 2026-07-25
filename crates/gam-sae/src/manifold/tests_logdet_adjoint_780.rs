@@ -1967,22 +1967,26 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144
 /// pins it against a fixed-state central difference of the joint `log|H|`.
 #[test]
 pub(crate) fn ordered_beta_bernoulli_sparse_strength_trace_matches_dense_fd() {
-    let (mut term, target, mut rho) = gamma_fd_tiny_fixture();
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
     // Fixed-alpha ordered Beta--Bernoulli with an active sparse prior.
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
     // Keep a moderate prior strength so the retained diagonal majorizer is live.
-    rho.log_lambda_sparse = -0.8;
-    let (_value, _loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
+    // The ladder starts at the historical `-0.8` and walks the strength both
+    // ways; the gate needs a live retained majorizer, which is a property of
+    // the state rather than of any one level.
+    let anchor = certified_fd_anchor(
+        "ordered Beta--Bernoulli sparse-strength trace",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &[-0.8, -0.4, 0.0, 0.5, 1.0, -1.2, -1.6]),
             200,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .expect("converged cache");
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
     let solver = DeflatedArrowSolver::plain(&cache);
     let analytic = term
         .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
