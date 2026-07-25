@@ -982,3 +982,93 @@ fn grassmann_operations_are_invariant_to_the_frame_representative() {
         "no Grassmann gauge invariance was actually checked"
     );
 }
+
+#[test]
+fn a_gradient_step_descends_at_the_riemannian_gradient_norm() {
+    // The defining first-order property of a retraction is `DR_x(0) = id` on
+    // `T_xM`. Combined with the Riesz property of the Riemannian gradient it
+    // pins the slope of a gradient step exactly: for the ambient-linear
+    // objective `f(y) = ⟨e, y⟩`, whose ambient differential is the constant `e`,
+    //
+    //   d/dη f(R_x(−η·v))|₀ = −⟨e, v⟩ = −g_x(v, v) = −‖v‖²_g,   v = grad f(x).
+    //
+    // Nothing else in this file checks `retract` against the tangent space it
+    // retracts from — the membership test only asks that the result land on the
+    // manifold, which a retraction that moves in the wrong direction would also
+    // satisfy. And the check is sharp in a way the standalone Riesz test is not:
+    // it consumes the gradient THROUGH `riemannian_gradient_step`, so a metric
+    // raise and a retraction that are each defensible alone but inconsistent
+    // with one another still fails. That composition is the actual production
+    // path (issue #955), and a merely-projected differential — correct only for
+    // the embedded metric — gives the wrong slope on SPD and Stiefel.
+    //
+    // `−e` supplies the opposite arm of the central difference, since
+    // `riemannian_gradient_step` refuses a non-positive learning rate and
+    // `grad` is linear in the differential.
+    //
+    // The learning rate is chosen so the ambient DISPLACEMENT is `TRAVEL`,
+    // not so the rate itself is fixed. Central-difference truncation is
+    // governed by how far the retraction actually moves — `O((η‖v‖)²)` — and
+    // the gradients here differ by orders of magnitude across the inventory
+    // (`‖v‖²_g` reaches ~1.6e3 on `Spd(5)`, where a fixed `η = 1e-4` travels far
+    // enough to leave a 1.9e-6 truncation residual and fail a tolerance the
+    // geometry has no trouble meeting). Fixing the displacement instead makes
+    // the residual the same size on every manifold.
+    const TRAVEL: f64 = 1.0e-4;
+    let mut verified = 0usize;
+    for (label, spec) in inventory() {
+        let manifold = spec.build().expect("build");
+        let ambient = manifold.ambient_dim();
+        if manifold.dim() == 0 {
+            continue;
+        }
+        let mut rng = Rng::new(SEED);
+        for trial in 0..TRIALS {
+            let p = random_point(&spec, &mut rng);
+            let differential = rng.gaussian_vec(ambient);
+            let negated = &differential * -1.0;
+
+            let gradient = manifold
+                .riemannian_gradient(p.view(), differential.view())
+                .expect("riemannian_gradient");
+            let metric = manifold.metric_tensor(p.view()).expect("metric_tensor");
+            let squared_norm = gradient.view().dot(&metric.dot(&gradient));
+            if squared_norm <= 1.0e-12 {
+                continue;
+            }
+            let ambient_norm = norm(gradient.view());
+            if ambient_norm <= 1.0e-12 {
+                continue;
+            }
+            let rate = TRAVEL / ambient_norm;
+
+            let downhill = manifold
+                .riemannian_gradient_step(p.view(), differential.view(), rate)
+                .expect("gradient step");
+            let uphill = manifold
+                .riemannian_gradient_step(p.view(), negated.view(), rate)
+                .expect("reverse gradient step");
+
+            // Circle and Torus wrap their coordinates, so a step across the ±π
+            // seam is a jump in the ambient chart even though it is a
+            // continuous move on the manifold. The difference quotient is
+            // meaningless there; detect the wrap by its size and skip, rather
+            // than reporting the chart's discontinuity as a geometry defect.
+            let jumped = sup_diff(&downhill, &p).max(sup_diff(&uphill, &p)) > 0.5;
+            if jumped {
+                continue;
+            }
+
+            let slope = (dot(differential.view(), uphill.view())
+                - dot(differential.view(), downhill.view()))
+                / (2.0 * rate);
+            assert!(
+                (slope - squared_norm).abs() <= 1.0e-8 * squared_norm,
+                "{label} trial {trial}: a gradient step descends at {slope}, but the \
+                 Riemannian gradient norm is {squared_norm}"
+            );
+            verified += 1;
+        }
+    }
+    assert!(verified > 0, "no gradient step was actually differenced");
+}
