@@ -5895,13 +5895,15 @@ pub(crate) struct RemlState<'a> {
     /// #1033: memoized fit-invariant O(n) response/weight scalars.
     ///
     /// `gaussian_weight_log_sum_half` (`½·Σ log wᵢ`),
-    /// `gaussian_dp_floor_scale` (the weighted null deviance `D₀`), and the
-    /// positive-weight observation count are pure functions of the borrowed
-    /// `(y, weights)` — fields `reset_surface` NEVER reassigns — so they are
-    /// constant for the whole life of the `RemlState`. Memoizing them once per
-    /// fit keeps every subsequent outer trial in coefficient space. Plain
-    /// scalar closures, no rayon inside `get_or_init` (no deadlock trap).
+    /// `gaussian_dp_floor_scale` (the weighted null deviance `D₀`), the
+    /// positive-weight observation count, and `rho_weight_anchor`
+    /// (`mean(log wᵢ)`) are pure functions of the borrowed `(y, weights)` —
+    /// fields `reset_surface` NEVER reassigns — so they are constant for the
+    /// whole life of the `RemlState`. Memoizing them once per fit keeps every
+    /// subsequent outer trial in coefficient space. Plain scalar closures, no
+    /// rayon inside `get_or_init` (no deadlock trap).
     pub(crate) gaussian_weight_log_sum_half_cache: std::sync::OnceLock<f64>,
     pub(crate) gaussian_dp_floor_scale_cache: std::sync::OnceLock<f64>,
     pub(crate) positive_weight_observation_count_cache: std::sync::OnceLock<usize>,
+    pub(crate) rho_weight_anchor_cache: std::sync::OnceLock<f64>,
 }

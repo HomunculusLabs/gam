@@ -3819,15 +3819,20 @@ impl<'a> RemlState<'a> {
         if !reml_is_gaussian_identity(&self.config.likelihood) {
             return 0.0;
         }
-        let mut sum = 0.0;
-        let mut count = 0usize;
-        for &wi in self.weights.iter() {
-            if wi > 0.0 {
-                sum += wi.ln();
-                count += 1;
+        // The anchor is a sufficient statistic of immutable prior weights, not
+        // a property of rho. Carry it across outer evaluations instead of
+        // re-scanning every observation each time the rho prior is evaluated.
+        *self.rho_weight_anchor_cache.get_or_init(|| {
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for &wi in self.weights.iter() {
+                if wi > 0.0 {
+                    sum += wi.ln();
+                    count += 1;
+                }
             }
-        }
-        if count == 0 { 0.0 } else { sum / count as f64 }
+            if count == 0 { 0.0 } else { sum / count as f64 }
+        })
     }
 
     /// mgcv-style analytic initial smoothing-parameter seed (`initial.sp`).
@@ -4142,6 +4147,7 @@ impl<'a> RemlState<'a> {
             gaussian_weight_log_sum_half_cache: std::sync::OnceLock::new(),
             gaussian_dp_floor_scale_cache: std::sync::OnceLock::new(),
             positive_weight_observation_count_cache: std::sync::OnceLock::new(),
+            rho_weight_anchor_cache: std::sync::OnceLock::new(),
         })
     }
 
