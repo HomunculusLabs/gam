@@ -274,22 +274,13 @@ jobs:
               expression="package(=${RUST_PACKAGE}) and ${expression}"
             fi
 
-            # Prove the expression selects at least one archived test before
-            # execution. Archive list/run perform no compilation or relinking.
-            selected=$(cargo nextest list \
-              --archive-file "$archive_file" \
-              --workspace-remap . \
-              -E "$expression" 2>/dev/null | grep -cE '^\s' || true)
-            if [[ "${selected:-0}" -eq 0 ]]; then
-              echo "::error::rust_filter '${filter}' selected ZERO tests in ${archive_file}."
-              exit 1
-            fi
-            echo "Running ${selected} archived test(s): ${expression}"
+            echo "Running archived tests selected by: ${expression}"
             cargo nextest run \
               --archive-file "$archive_file" \
               --workspace-remap . \
               --profile ci --config-file .config/nextest.toml \
               --test-threads 1 \
+              --no-tests=fail \
               -E "$expression"
           done
 
