@@ -229,9 +229,14 @@ mod tests {
     fn a_real_tie_class_builds_exactly_one_profile_per_candidate() {
         let mut builds = 0usize;
         let tied = [0_usize, 1, 2, 3, 4];
-        let _ = resolve_sorted_profile_tie(64, &tied, |i, j| ((i * j) % 7) as f64, &mut |b| {
-            builds += b
-        });
+        let resolved =
+            resolve_sorted_profile_tie(64, &tied, |i, j| ((i * j) % 7) as f64, &mut |b| {
+                builds += b
+            });
         assert_eq!(builds, tied.len());
+        // The resolution is a subset of the class it was handed, and never empty:
+        // a tie must resolve to at least one of its own members, whatever the key.
+        assert!(!resolved.is_empty());
+        assert!(resolved.iter().all(|index| tied.contains(index)));
     }
 }
