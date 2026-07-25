@@ -5871,11 +5871,18 @@ fn sparse_posterior_mean_matches_dense() {
 
 #[test]
 fn wiggle_posterior_mean_matches_exact_nested_4d_quadrature_small_case() {
+    // #2390: `β_w = [0.05, -0.02]` is OUTSIDE the `β_w ≥ 0` monotone I-spline
+    // cone the fit certifies, so no fitted model can produce it and the warp it
+    // describes is non-monotone. Pinning production's handling of an input the
+    // model cannot emit is not a contract worth having — and with a coordinate
+    // below its wall the feasibility clip and the `[0, ∞)` truncation both bind
+    // permanently, which is what made this comparison unfalsifiable rather than
+    // merely wrong. The fixture is now interior to the cone.
     let fit = test_survival_fit(
         array![0.4, -0.1],
         array![0.2, 0.3],
         array![-0.5, 0.1],
-        Some(array![0.05, -0.02]),
+        Some(array![0.05, 0.02]),
     );
     let x_threshold_dense = array![[1.0, -0.2]];
     let x_log_sigma_dense = array![[1.0, 0.3]];
@@ -6005,11 +6012,28 @@ fn wiggle_posterior_mean_matches_exact_nested_4d_quadrature_small_case() {
         15,
         "wiggle posterior mean test projected covariance",
         |x, z| {
-            let mut cond_beta_w = fit.beta_link_wiggle().expect("wiggle beta");
+            // #2390: the reference must integrate the model production
+            // implements, not the unconstrained one production used to
+            // approximate. Two corrections, both matching
+            // `exact_survival_response_moments_row`: every realized conditional
+            // mean is clipped back into the `β_w ≥ 0` cone PER COORDINATE, and
+            // the scalar warp is integrated over its feasible image `w ≥ 0`
+            // rather than over the whole line. Without them this asserted that
+            // the constrained posterior equals the unconstrained one — the
+            // #2385 error written down as a test.
+            let beta_w = fit.beta_link_wiggle().expect("wiggle beta");
+            let mut cond_beta_w = beta_w.clone();
             for j in 0..cond_beta_w.len() {
+                let mut displacement = 0.0;
                 for (col, &latent) in z.iter().enumerate() {
-                    cond_beta_w[j] += regression[[j, col]] * latent;
+                    displacement += regression[[j, col]] * latent;
                 }
+                let wall = beta_w[j].max(0.0);
+                cond_beta_w[j] += if displacement.abs() > wall {
+                    wall.copysign(displacement)
+                } else {
+                    displacement
+                };
             }
             let q0 = survival_q0_from_eta(x[1], x[2]);
             let q0_arr = Array1::from_vec(vec![q0]);
@@ -6021,21 +6045,44 @@ fn wiggle_posterior_mean_matches_exact_nested_4d_quadrature_small_case() {
             )?;
             let b = basis.row(0).to_owned();
             let w_mean = b.dot(&cond_beta_w);
-            let w_var = b.dot(&cov_cond.dot(&b)).max(0.0);
-            crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
-                &quadctx,
-                [x[0] + q0 + w_mean],
-                [[w_var]],
-                21,
-                |eta| {
-                    let p = inverse_link_survival_prob_checked(&input.inverse_link, eta[0])?;
-                    Ok((p, p * p))
-                },
-            )
+            let sd_w = b.dot(&cov_cond.dot(&b)).max(0.0).sqrt();
+            if sd_w <= 0.0 {
+                let p = inverse_link_survival_prob_checked(
+                    &input.inverse_link,
+                    x[0] + q0 + w_mean.max(0.0),
+                )?;
+                return Ok((p, p * p));
+            }
+            // The `[0, ∞)`-truncated inner expectation, built here by DIRECT
+            // density integration. Deliberately not production's primitive: the
+            // point of this test is an independent construction of the same
+            // nested integral, so the inner rule must not be the one under
+            // test. Beyond `w_mean + 10·σ` the retained density is below 1e-22.
+            let upper = (w_mean + 10.0 * sd_w).max(10.0 * sd_w);
+            let (nodes, weights) = gam_math::special::gauss_legendre(64);
+            let half = 0.5 * upper;
+            let mut first = 0.0;
+            let mut second = 0.0;
+            let mut mass = 0.0;
+            for (t, wgt) in nodes.iter().zip(weights.iter()) {
+                let w = half * (t + 1.0);
+                let standardized = (w - w_mean) / sd_w;
+                let weight = half * wgt * (-0.5 * standardized * standardized).exp();
+                let p = inverse_link_survival_prob_checked(&input.inverse_link, x[0] + q0 + w)?;
+                first += weight * p;
+                second += weight * p * p;
+                mass += weight;
+            }
+            Ok((first / mass, second / mass))
         },
     )
     .expect("exact conditional wiggle ghq");
-    assert!((predicted.survival_prob[0] - ghq.0).abs() <= 2e-4);
+    assert!(
+        (predicted.survival_prob[0] - ghq.0).abs() <= 2e-4,
+        "production posterior mean {} vs independently nested reference {}",
+        predicted.survival_prob[0],
+        ghq.0
+    );
 }
 
 #[test]
@@ -8703,12 +8750,30 @@ pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390
 pub(crate) fn truncated_nonnegative_normal_expectation_matches_closed_form_2390() {
     use gam_math::probability::normal_cdf;
     let phi = |x: f64| (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    // Measure normalization: a constant integrand integrates to itself.
-    let (one, four) = super::moments::truncated_nonnegative_normal_expectation_pair(
-        0.3, 0.7, |_| Ok((1.0, 4.0)),
-    )
-    .expect("constant integrand");
-    assert!((one - 1.0).abs() < 1e-12 && (four - 4.0).abs() < 1e-12);
+    // Measure normalization: a constant integrand integrates to itself. The
+    // rule divides by its own quadrature mass, so this holds at EVERY
+    // parameter, not just near the wall — including 30 sigma into the tail,
+    // where the unscaled Gaussian weights are ~1e-196 and only the reference
+    // scaling keeps them representable.
+    for &(mu, sd) in &[
+        (0.3_f64, 0.7_f64),
+        (0.0, 1.3),
+        (2.5, 0.5),
+        (50.0, 1.0),
+        (-10.0, 1.0),
+        (-30.0, 1.0),
+    ] {
+        let (one, four) = super::moments::truncated_nonnegative_normal_expectation_pair(
+            mu,
+            sd,
+            |_| Ok((1.0, 4.0)),
+        )
+        .expect("constant integrand");
+        assert!(
+            (one - 1.0).abs() < 1e-12 && (four - 4.0).abs() < 1e-12,
+            "constant integrand must integrate to itself at mu={mu} sd={sd}: got {one}, {four}"
+        );
+    }
     // First moment against the closed form, at a wall-adjacent mean.
     for &(mu, sd) in &[(0.3_f64, 0.7_f64), (0.0, 1.3), (2.5, 0.5), (-0.4, 0.8)] {
         let alpha = -mu / sd;
