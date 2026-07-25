@@ -6972,6 +6972,13 @@ impl<'a> RemlState<'a> {
         // Capture the data-driven Tweedie φ from the first converged non-screening
         // λ-search solve and freeze it for the rest of the search (#1477),
         // exactly as for the NB θ above.
+        //
+        // In the standard fit that first solve is the canonical anchor
+        // `freeze_lambda_search_nuisance_at_canonical_anchor` (estimate/optimizer.rs)
+        // runs at ρ = 0 before any warm start is attached, so the value captured
+        // here is a function of (data, model spec) and not of whichever seed the
+        // persistent cache donated (#2363). This branch remains the general
+        // capture path for any caller that reaches the λ-search without it.
         if !in_screening
             && matches!(
                 resolved_likelihood_scale,
@@ -7026,6 +7033,8 @@ impl<'a> RemlState<'a> {
         // simply stop letting it drift with each warm-start η (which makes both
         // the curvature `H = k·XᵀX + λS` and the data-fit `k·½D` jump with ρ and
         // rails λ to the over-smoothed corner) on subsequent outer evaluations.
+        // Which solve is "first" is itself pinned by the canonical anchor at
+        // ρ = 0 (#2363, see the Tweedie block above).
         if !in_screening
             && matches!(
                 resolved_likelihood_scale,
@@ -7088,7 +7097,10 @@ impl<'a> RemlState<'a> {
         // re-solve, and NOT a per-λ re-profile: the value is captured once and
         // held fixed for every subsequent ρ, so `F(ρ) = REML(ρ, φ_frozen)` stays
         // stationary in ρ exactly as #2369 requires. The single final reported
-        // fit still Pearson-refreshes φ at its own converged η.
+        // fit still Pearson-refreshes φ at its own converged η. Which solve is
+        // "first" is pinned by the canonical anchor at ρ = 0 (#2363, see the
+        // Tweedie block above) — Beta is the family where letting the cache pick
+        // it moved the reported criterion by 16%.
         if !in_screening
             && matches!(
                 resolved_likelihood_scale,
