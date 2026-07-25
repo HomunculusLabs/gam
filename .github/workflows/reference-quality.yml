@@ -374,6 +374,40 @@ jobs:
           echo "Gate: PASSED — every test met its quality bar; guaranteed-comparator reference coverage 100% (mgcv/gamlss/survival REF_ERROR=0); optional-reference REF_ERROR=${referr}/${N} within the 25% floor."
           { echo ""; echo "### Gate: PASSED"; } >> "$GITHUB_STEP_SUMMARY"
 
+      # #1561 aggregate + #2395 power view. The gate above decides red/green from
+      # per-test outcomes; this reads the machine-readable [QUALITY_PAIR] lines
+      # every test emits and recomputes the whole-suite signed-rank aggregate,
+      # plus the paired-panel power table (per-pair resolution, the standard
+      # errors pairing recovers, which pairs are RESOLVED worse, and which
+      # near-ties are still undecided). `always()` and non-gating on purpose: the
+      # gate step exits 1 on a gating bucket, and losing this report on exactly
+      # the runs that regressed would hide the numbers that explain the
+      # regression. Its exit status is printed, never propagated.
+      - name: Aggregate quality pairs (#1561 gate + #2395 paired power)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          OUT=/tmp/quality-report
+          if [ ! -d "$OUT/logs" ]; then
+            echo "no per-test logs at $OUT/logs — the run step produced nothing to aggregate"
+            exit 0
+          fi
+          cat "$OUT"/logs/*.log > "$OUT/all-tests.log" 2>/dev/null || true
+          report="$OUT/quality-aggregate.txt"
+          python3 bench/aggregate_quality_gate_1561.py "$OUT/all-tests.log" > "$report" 2>&1
+          rc=$?
+          cat "$report"
+          {
+            echo ""
+            echo "### Quality-pair aggregate (#1561) + paired power (#2395)"
+            echo ""
+            echo '```'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "aggregator exit=${rc} (reported, not gated)"
+
       - name: Upload full quality report (always — survives failures)
         if: always()
         uses: actions/upload-artifact@v7
