@@ -228,3 +228,9 @@ include!("design_assembly_constraint_tests.rs");
 // here where its `build_term_collection_design` / freeze / SAS-link-state /
 // joint-hyper FD deps resolve post-#1521 carve. Self-contained `#[cfg(test)] mod`.
 include!("adaptive_bounded_duchon_tests.rs");
+
+// #2425 Half-A instrumentation. Measurement-only probes (they print numbers and
+// assert only that the measurement completed), kept in-tree so the next lane
+// does not have to rebuild this crate to re-derive them. Self-contained
+// `#[cfg(test)] mod`, so it adds nothing to the non-test build.
+include!("zz_measure_2425_kappa_tests.rs");
