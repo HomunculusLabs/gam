@@ -1549,22 +1549,40 @@ impl FitConvergenceEvidence {
             ));
         }
 
-        let outer = match parts.artifacts.criterion_certificate.as_ref() {
-            Some(certificate) if certificate.certifies() => {
-                FitOuterConvergenceEvidence::Analytic(certificate.clone())
-            }
-            Some(certificate) => {
+        let outer = if parts.log_lambdas.is_empty() {
+            if parts.outer_iterations != 0 {
                 return Err(Self::assembly_error(
                     parts,
-                    format!("analytic certificate failed: {}", certificate.summary()),
+                    format!(
+                        "zero-dimensional outer evidence cannot carry {} outer iterations",
+                        parts.outer_iterations
+                    ),
                 ));
             }
-            None if parts.outer_iterations == 0 => FitOuterConvergenceEvidence::Fixed,
-            None => {
-                return Err(Self::assembly_error(
-                    parts,
-                    "outer iterations ran without an analytic stationarity certificate".to_string(),
-                ));
+            // A zero-dimensional analytic certificate (|g|=|Pg|=bound=0)
+            // proves no equation: there was no smoothing coordinate to
+            // optimize. Canonicalize that vacuous optimizer artifact to the
+            // semantically exact `Fixed` arm.
+            FitOuterConvergenceEvidence::Fixed
+        } else {
+            match parts.artifacts.criterion_certificate.as_ref() {
+                Some(certificate) if certificate.certifies() => {
+                    FitOuterConvergenceEvidence::Analytic(certificate.clone())
+                }
+                Some(certificate) => {
+                    return Err(Self::assembly_error(
+                        parts,
+                        format!("analytic certificate failed: {}", certificate.summary()),
+                    ));
+                }
+                None if parts.outer_iterations == 0 => FitOuterConvergenceEvidence::Fixed,
+                None => {
+                    return Err(Self::assembly_error(
+                        parts,
+                        "outer iterations ran without an analytic stationarity certificate"
+                            .to_string(),
+                    ));
+                }
             }
         };
 
@@ -1585,15 +1603,13 @@ mod assembly_inner_status_gate_tests {
     /// PIRLS status. `outer_iterations = 0` routes the outer obligation through
     /// the `Fixed` evidence branch (no criterion certificate needed), so the
     /// pass/fail turns entirely on the inner-status gate under test.
-    fn assemble_with_inner_status(
-        status: PirlsStatus,
-    ) -> Result<UnifiedFitResult, EstimationError> {
+    fn parts_with_inner_status(status: PirlsStatus) -> UnifiedFitResultParts {
         let p = 2usize;
         let mut hessian = Array2::<f64>::zeros((p, p));
         for j in 0..p {
             hessian[[j, j]] = 1.0;
         }
-        UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
+        UnifiedFitResultParts {
             blocks: vec![FittedBlock {
                 beta: Array1::zeros(p),
                 role: BlockRole::Mean,
@@ -1646,7 +1662,13 @@ mod assembly_inner_status_gate_tests {
             constraint_kkt: None,
             artifacts: FitArtifacts::default(),
             inner_cycles: 0,
-        })
+        }
+    }
+
+    fn assemble_with_inner_status(
+        status: PirlsStatus,
+    ) -> Result<UnifiedFitResult, EstimationError> {
+        UnifiedFitResult::try_from_parts(parts_with_inner_status(status))
     }
 
     /// SPEC rule 20 is deliberately status-exact: only a `Converged` inner
@@ -1671,6 +1693,43 @@ mod assembly_inner_status_gate_tests {
                 "expected a non-convergence assembly error for {status:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn zero_dimensional_outer_artifacts_canonicalize_to_fixed_evidence() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.blocks[0].lambdas = Array1::zeros(0);
+        parts.log_lambdas = Array1::zeros(0);
+        parts.lambdas = Array1::zeros(0);
+        if let Some(inference) = parts.inference.as_mut() {
+            inference.edf_by_block.clear();
+            inference.penalty_block_trace.clear();
+        }
+        parts.artifacts.criterion_certificate = Some(OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 0.0,
+                projected_grad_norm: 0.0,
+                bound: 0.0,
+            },
+            hessian_psd: None,
+            lambdas_railed: Vec::new(),
+        });
+        parts.outer_gradient_norm = Some(0.0);
+
+        let fit = UnifiedFitResult::try_from_parts(parts)
+            .expect("a converged fit with no outer coordinate must mint");
+        assert!(
+            fit.convergence_evidence().outer_certificate().is_none(),
+            "no smoothing coordinate means no outer stationarity equation"
+        );
+        assert!(
+            fit.artifacts.criterion_certificate.is_none(),
+            "the vacuous zero-dimensional certificate must not survive as an artifact"
+        );
+        assert!(
+            fit.outer_gradient_norm.is_none(),
+            "a zero-length gradient is absence, not a measured zero norm"
+        );
     }
 }
 
@@ -2140,6 +2199,16 @@ impl UnifiedFitResult {
             artifacts,
             inner_cycles,
         } = parts;
+        let mut artifacts = artifacts;
+        let outer_gradient_norm = if log_lambdas.is_empty() {
+            // Keep the stored artifacts in the same semantic frame as the
+            // sealed evidence. A zero-length gradient/certificate is vacuous,
+            // not a measured stationary outer equation.
+            artifacts.criterion_certificate = None;
+            None
+        } else {
+            outer_gradient_norm
+        };
 
         if blocks.is_empty() {
             crate::bail_invalid_estim!("UnifiedFitResult requires at least one coefficient block");
@@ -2467,7 +2536,7 @@ impl UnifiedFitResult {
             crate::bail_invalid_estim!("UnifiedFitResult decoded beta must match coefficient blocks concatenated in block order"
                     .to_string(),);
         }
-        Self::try_from_parts(UnifiedFitResultParts {
+        let reconstructed = Self::try_from_parts(UnifiedFitResultParts {
             blocks: self.blocks.clone(),
             log_lambdas: self.log_lambdas.clone(),
             lambdas: self.lambdas.clone(),
@@ -2495,8 +2564,15 @@ impl UnifiedFitResult {
             constraint_kkt: self.constraint_kkt.clone(),
             artifacts: self.artifacts.clone(),
             inner_cycles: self.inner_cycles,
-        })
-        .map(|_| ())
+        })?;
+        if self.convergence.outer_certificate().is_some()
+            != reconstructed.convergence.outer_certificate().is_some()
+        {
+            crate::bail_invalid_estim!(
+                "UnifiedFitResult convergence evidence kind does not match its smoothing-coordinate geometry"
+            );
+        }
+        Ok(())
     }
 }
 
