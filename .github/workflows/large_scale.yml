@@ -31,7 +31,69 @@ permissions:
   contents: read
 
 jobs:
+  resolve-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.runtime.outputs.run_id }}
+      sha: ${{ steps.runtime.outputs.sha }}
+      artifact: ${{ steps.runtime.outputs.artifact }}
+    steps:
+      - name: Resolve newest immutable warm runtime on this history
+        id: runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runtime_run_id=""
+          runtime_sha=""
+          runtime_artifact=""
+          while IFS=$'\t' read -r candidate_run candidate_sha; do
+            if [[ -z "$candidate_run" || ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              continue
+            fi
+            candidate_artifact="gamfit-runtime-${candidate_sha}"
+            artifact_count=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run}/artifacts?per_page=100" \
+              --jq ".artifacts | map(select(.name == \"${candidate_artifact}\" and (.expired == false))) | length")
+            if [[ "$artifact_count" -ne 1 ]]; then
+              continue
+            fi
+            merge_base=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${candidate_sha}...${GITHUB_SHA}" \
+              --jq .merge_base_commit.sha)
+            if [[ "$merge_base" != "$candidate_sha" ]]; then
+              continue
+            fi
+            runtime_run_id="$candidate_run"
+            runtime_sha="$candidate_sha"
+            runtime_artifact="$candidate_artifact"
+            break
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow wheel-nightly.yml \
+            --branch main \
+            --limit 50 \
+            --json databaseId,headSha \
+            --jq '.[] | [.databaseId, .headSha] | @tsv')
+          if [[ -z "$runtime_run_id" ]]; then
+            echo "::error::No unexpired warm runtime artifact exists on the ancestry of ${GITHUB_SHA}; refusing a source-build fallback."
+            exit 1
+          fi
+          printf 'run_id=%s\n' "$runtime_run_id" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$runtime_sha" >> "$GITHUB_OUTPUT"
+          printf 'artifact=%s\n' "$runtime_artifact" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Large-scale runtime"
+            echo
+            echo "- scheduled workflow SHA: \`${GITHUB_SHA}\`"
+            echo "- immutable runtime SHA: \`${runtime_sha}\`"
+            echo "- producer run: \`${runtime_run_id}\`"
+            echo "- artifact: \`${runtime_artifact}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   prepare:
+    needs: resolve-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 50
     outputs:
@@ -41,6 +103,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -116,12 +180,14 @@ jobs:
           if-no-files-found: error
 
   bootstrap-runtime:
-    needs: prepare
+    needs: resolve-runtime
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -129,30 +195,23 @@ jobs:
           python-version: "3.11"
 
       - name: Download exact warm runtime
-        # Resolve the successful runtime-producing run by this exact commit,
-        # then download its immutable run artifact. The rolling release is only
-        # a convenience alias and is not an estimator input: main churn cannot
-        # make this workflow consume a stale or newer executable. A missing
-        # exact artifact fails immediately; there is no source-build fallback.
+        # `resolve-runtime` chooses one immutable artifact first, then every job
+        # checks out that artifact's recorded commit. The rolling release is
+        # only a convenience alias and is not an estimator input.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RUNTIME_RUN_ID: ${{ needs.resolve-runtime.outputs.run_id }}
+          RUNTIME_SHA: ${{ needs.resolve-runtime.outputs.sha }}
+          RUNTIME_ARTIFACT: ${{ needs.resolve-runtime.outputs.artifact }}
         run: |
           set -euo pipefail
           rm -rf dist
           mkdir -p dist target/release
-          runtime_run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
-            --workflow wheel-nightly.yml \
-            --commit "$GITHUB_SHA" \
-            --status success \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')
-          test -n "$runtime_run_id"
-          gh run download "$runtime_run_id" --repo "$GITHUB_REPOSITORY" \
-            --name "gamfit-runtime-${GITHUB_SHA}" \
+          gh run download "$RUNTIME_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$RUNTIME_ARTIFACT" \
             --dir dist
-          grep -Fx "commit=${GITHUB_SHA}" dist/RUNTIME_PROVENANCE.txt
+          grep -Fx "commit=${RUNTIME_SHA}" dist/RUNTIME_PROVENANCE.txt
           (
             cd dist
             tail -n +2 RUNTIME_PROVENANCE.txt | sha256sum --check --strict
@@ -174,6 +233,7 @@ jobs:
 
   preprocess-ctn:
     needs:
+      - resolve-runtime
       - prepare
       - bootstrap-runtime
     runs-on: ubuntu-latest
@@ -183,6 +243,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -226,6 +288,7 @@ jobs:
 
   benchmark:
     needs:
+      - resolve-runtime
       - prepare
       - bootstrap-runtime
       - preprocess-ctn
@@ -242,6 +305,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -318,12 +383,16 @@ jobs:
           if-no-files-found: warn
 
   aggregate:
-    needs: benchmark
+    needs:
+      - resolve-runtime
+      - benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-runtime.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
