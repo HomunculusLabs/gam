@@ -11,7 +11,8 @@ use super::derivative_oracle::{
 };
 use super::dual::{Dual, DualKinkBranch};
 use super::tests::{
-    FdAnchorRegime, FiniteDifferenceStratumCertificate, certified_central_logdet_difference,
+    FdAnchorRegime, FdBranchRegime, FiniteDifferenceStratumCertificate,
+    certified_branch_stable_central_difference, certified_central_logdet_difference,
     certified_fd_anchor, decisive_logit_homotopy, decisive_logit_pattern,
     fixed_state_logdet_sample, gamma_fd_tiny_fixture, rho_ladder_family,
     rho_ladder_family_with_tolerance, smoothing_and_decisive_family, sparse_lift_ladder,
@@ -1496,6 +1497,13 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
     let fd_stratum = anchor.stratum;
     let mut checked = 0usize;
     let mut worst = 0.0_f64;
+    // #2366 branch-guard tally. Reported rather than asserted: which regime a
+    // stencil lands in is a measurement about this fixture at this step, and
+    // pinning it would turn an honest "the guard cannot see here" into a gate
+    // on the roundoff floor.
+    let mut branch_smooth = 0usize;
+    let mut branch_roundoff = 0usize;
+    let mut worst_branch_ratio = 0.0_f64;
     for row in 0..term.n_obs() {
         let vars = term
             .row_vars_for_cache_row(row, &cache)
@@ -1519,15 +1527,31 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
                 t.assignment.coords[atom].set_flat(flat.view());
                 fixed_state_logdet_sample(t, &target, &rho)
             };
-            let fd = certified_central_logdet_difference(
+            // The deflated fixture is where classifier-invisible nonsmoothness
+            // is likeliest, so this gate carries the value-free branch guard on
+            // top of the structural stratum certificate (#2366).
+            let (fd, branch) = certified_branch_stable_central_difference(
                 &format!(
                     "deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis}"
                 ),
                 &fd_stratum,
-                at(h),
-                at(-h),
                 h,
+                at,
             );
+            match branch {
+                FdBranchRegime::Smooth { ratio } => {
+                    branch_smooth += 1;
+                    worst_branch_ratio = worst_branch_ratio.max(ratio);
+                }
+                FdBranchRegime::RoundoffDominated { coarse_gap, floor } => {
+                    branch_roundoff += 1;
+                    eprintln!(
+                        "deflated Gamma_joint row={row} pos={local_pos}: branch guard \
+                         inapplicable — coarse gap {coarse_gap:.3e} is at the roundoff \
+                         floor {floor:.3e}"
+                    );
+                }
+            }
             let analytic = gamma.t[cache.row_offsets[row] + local_pos];
             let err = (fd - analytic).abs();
             worst = worst.max(err);
@@ -1548,6 +1572,16 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
     assert!(
         checked > 0,
         "deflated-fixture adjoint test probed no interior ARD coordinate (worst so far {worst:.3e})"
+    );
+    eprintln!(
+        "#2366 branch guard on the deflated fixture: {branch_smooth} stencil(s) certified \
+         smooth (worst h² gap ratio {worst_branch_ratio:.4}, predicted 0.25), \
+         {branch_roundoff} roundoff-dominated and therefore not concluded"
+    );
+    assert_eq!(
+        branch_smooth + branch_roundoff,
+        checked,
+        "every probed stencil must reach one of the two branch-guard regimes"
     );
 }
 

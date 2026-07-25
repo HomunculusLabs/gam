@@ -1662,6 +1662,98 @@ pub(crate) fn certified_central_logdet_difference(
     (plus.value - minus.value) / (2.0 * step)
 }
 
+/// What the value-free branch guard could establish about a stencil.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FdBranchRegime {
+    /// Consecutive Richardson gaps fall like `h²`, so the SAMPLED function is
+    /// smooth across the stencil. Carries the measured gap ratio.
+    Smooth { ratio: f64 },
+    /// The gaps have fallen to the roundoff floor, where their ratio measures
+    /// rounding rather than the branch. The guard is INAPPLICABLE at this step
+    /// and reports instead of certifying.
+    RoundoffDominated { coarse_gap: f64, floor: f64 },
+}
+
+/// Value-free branch guard for a central difference (#2366).
+///
+/// # What it adds over the structural stratum certificate
+///
+/// [`FiniteDifferenceStratumCertificate`] pins every discrete decision the
+/// cache CLASSIFIER makes. That is the right guard for classifier-visible
+/// discreteness, and it is all these gates need, because they freeze `θ̂`
+/// (`inner_max_iter = 0`) at every stencil point and so cannot land on a
+/// different inner mode at `±h`. It is blind, however, to any nonsmoothness the
+/// classifier does not label — including a branch that leaves and returns
+/// between sample points.
+///
+/// This guard is blind to nothing, because it reads only the samples. For a
+/// `C⁴` target, `CD(h) = f′ + f‴h²/6 + O(h⁴)`, so
+///
+/// ```text
+///   CD(h)   − CD(h/2) = (3/8)·f‴h²  + O(h⁴)
+///   CD(h/2) − CD(h/4) = (3/32)·f‴h² + O(h⁴)
+/// ```
+///
+/// and the ratio of consecutive gaps is `1/4` with `f′` cancelling out — so
+/// this tests the sampled function, never the claim under test. A jump inside
+/// the stencil leaves the gaps `O(1)` (ratio ≈ 1); a kink leaves them `O(h)`
+/// (ratio ≈ 1/2). The `0.35` bound matches the sibling predicate landed for
+/// `#2354/#2366`, so the fleet asserts one constant.
+///
+/// # Applicability
+///
+/// The identity above holds while TRUNCATION dominates. Once the gaps reach the
+/// roundoff floor `≈ ε·|f|/h_fine` the ratio is noise, and asserting it would
+/// manufacture failures out of rounding. The guard therefore refuses to
+/// conclude below that floor and says so, rather than certifying a stencil it
+/// cannot see. That distinction is the point: an inapplicable guard reported as
+/// inapplicable is honest; an inapplicable guard asserted anyway is a gate that
+/// fails for reasons unrelated to its subject.
+pub(crate) fn certified_branch_stable_central_difference(
+    label: &str,
+    center: &FiniteDifferenceStratumCertificate,
+    step: f64,
+    sample: impl Fn(f64) -> FixedStateLogdetSample,
+) -> (f64, FdBranchRegime) {
+    assert!(
+        step.is_finite() && step > 0.0,
+        "{label}: central-difference step must be finite and positive, got {step}"
+    );
+    let mut magnitude = 0.0_f64;
+    let mut quotients = [0.0_f64; 3];
+    for (index, scale) in [1.0_f64, 0.5, 0.25].into_iter().enumerate() {
+        let h = step * scale;
+        let plus = sample(h);
+        let minus = sample(-h);
+        center.assert_same_stratum(&format!("{label} (+{scale}h)"), &plus.stratum);
+        center.assert_same_stratum(&format!("{label} (-{scale}h)"), &minus.stratum);
+        magnitude = magnitude.max(plus.value.abs()).max(minus.value.abs());
+        quotients[index] = (plus.value - minus.value) / (2.0 * h);
+    }
+    let coarse_gap = (quotients[0] - quotients[1]).abs();
+    let fine_gap = (quotients[1] - quotients[2]).abs();
+    // Roundoff floor of the FINEST quotient, which bounds both gaps from below.
+    let floor = f64::EPSILON * magnitude / (0.25 * step);
+    // A hundredfold margin puts the coarse gap unambiguously in the truncation
+    // regime before its ratio is read as evidence about the branch.
+    if coarse_gap <= 100.0 * floor {
+        return (
+            quotients[0],
+            FdBranchRegime::RoundoffDominated { coarse_gap, floor },
+        );
+    }
+    let ratio = fine_gap / coarse_gap;
+    assert!(
+        ratio <= 0.35,
+        "{label}: central-difference gaps must fall as h² across a branch-stable \
+         stencil; coarse(h={step:.3e}) {coarse_gap:.6e}, fine(h/2) {fine_gap:.6e}, \
+         ratio {ratio:.4} (predicted 0.25; O(h) kink gives 0.5, O(1) jump gives 1). \
+         The stratum certificate passed, so this is nonsmoothness the classifier \
+         does not label."
+    );
+    (quotients[0], FdBranchRegime::Smooth { ratio })
+}
+
 /// Row-deflation regime a finite-difference anchor must PROVE.
 ///
 /// The deflation state is not a detail of the fixture: it decides which
