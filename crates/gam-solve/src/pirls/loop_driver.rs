@@ -790,6 +790,7 @@ pub fn fit_model_for_fixed_rho<'a, X: Into<DesignMatrix> + Clone>(
         warm_start_beta,
         None,
         false,
+        None,
     )
 }
 
@@ -822,6 +823,13 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     warm_start_beta: Option<&Coefficients>,
     adaptive_kkt_tolerance: Option<AdaptiveKktTolerance>,
     refine_dispersion_at_converged_eta: bool,
+    /// Shared invariant row carrier for a Gaussian value-only evaluation.
+    ///
+    /// `Some` requests sufficient-statistic-only result synthesis: beta,
+    /// deviance, gradient, and curvature remain exact, while observation-scale
+    /// fields share these placeholders instead of recomputing `X beta`.
+    /// Full gradients and accepted fits always pass `None`.
+    cost_only_gaussian_rows: Option<&Arc<GaussianFrozenRows>>,
 ) -> Result<(PirlsResult, WorkingModelPirlsResult), EstimationError> {
     let PirlsProblem {
         x,
@@ -1218,7 +1226,9 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             .as_ref()
             .map(|transform| transform.apply(beta_transformed.as_ref()))
             .unwrap_or_else(|| beta_transformed.as_ref().clone());
-        let stale_row_cache = cache_for_solve.filter(|cache| cache.row_prediction_is_stale);
+        let sufficient_only_row_cache = cache_for_solve.filter(|cache| {
+            cache.row_prediction_is_stale || cost_only_gaussian_rows.is_some()
+        });
 
         // #1868: all length-`n` row arrays of the zero-iteration synthesis,
         // collected in one place so the skip path can SHARE them O(1) from the
@@ -1247,7 +1257,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             max_abs_eta: f64,
         }
 
-        let rows = if let Some(cache) = stale_row_cache {
+        let rows = if let Some(cache) = sufficient_only_row_cache {
             // #1868 FAST PATH: the criterion, gradient and inner solve are served
             // entirely from k-space Gram sufficient statistics; the length-`n`
             // row arrays are trial-invariant placeholders (η≡μ≡offset, z≡y,
@@ -1279,7 +1289,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // statistic.
             let deviance = weighted_rss;
 
-            if let Some(bundle) = cache.frozen_rows.as_ref() {
+            if let Some(bundle) = cost_only_gaussian_rows.or(cache.frozen_rows.as_ref()) {
                 // Zero length-`n` touches: every row array is an O(1) Arc clone
                 // of the shared frozen bundle (η≡μ≡offset via `bundle.eta`).
                 ZeroIterRows {

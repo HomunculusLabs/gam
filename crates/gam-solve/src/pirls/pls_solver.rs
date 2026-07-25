@@ -29,10 +29,11 @@ use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink, LinkFunction};
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ShapeBuilder};
 use std::sync::Arc;
 
-/// #1868 / #1033: the once-built, ψ-invariant length-`n` row bundle for the
-/// Gaussian-identity n-free κ-trial *skip* path.
+/// Once-built, hyperparameter-invariant length-`n` row carrier for a
+/// Gaussian-identity sufficient-statistic-only evaluation.
 ///
-/// On that path the inner "solve" is a zero-iteration synthesis whose every
+/// On the n-free κ skip path and fixed-design value-only ρ path (#2435), the
+/// inner "solve" is a zero-iteration synthesis whose every
 /// length-`n` array is a trial-INVARIANT placeholder — the row predictions are
 /// not recomputed, so `η ≡ μ ≡ offset`, the working response `z ≡ y`, the
 /// score/Hessian weights `w ≡ priorweights`, and the working-weight
@@ -41,7 +42,7 @@ use std::sync::Arc;
 /// the trial ψ. Re-materialising them on every κ callback is the O(n)-per-call
 /// regression #1868 tracks (~16·n element touches per trial).
 ///
-/// Building them **once** and sharing them by `ArcArray1` (a reference-counted
+/// Building them **once per surface** and sharing them by `ArcArray1` (a reference-counted
 /// ndarray whose `.clone()` is O(1)) lets each trial's `PirlsResult` reuse the
 /// same rows with zero per-callback row work, so the κ outer loop touches only
 /// k×k objects per trial — the #1033 architectural invariant. The two cached
@@ -77,11 +78,11 @@ pub struct GaussianFrozenRows {
 }
 
 impl GaussianFrozenRows {
-    /// Build the ψ-invariant frozen row bundle ONCE from the fit's frozen
-    /// `(offset, y, weights)` and fixed link. This is the single O(n) reduction
-    /// the n-free κ loop is allowed to pay (it is amortised across every trial),
-    /// so every subsequent skip-path callback shares these rows O(1) and touches
-    /// zero length-`n` objects (#1868).
+    /// Build the hyperparameter-invariant row carrier ONCE from the fit's frozen
+    /// `(offset, y, weights)` and fixed link. This is the single O(n)
+    /// materialization the sufficient-statistic lane is allowed to pay, amortized
+    /// across every κ or value-only ρ trial; subsequent callbacks share these
+    /// rows O(1) and touch zero length-`n` objects (#1868/#2435).
     ///
     /// The values are bit-identical to what the loop_driver stale-row synthesis
     /// used to re-materialise per trial: `η ≡ μ ≡ offset` (the tensor path is

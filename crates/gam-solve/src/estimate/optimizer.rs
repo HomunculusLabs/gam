@@ -1806,6 +1806,7 @@ where
             // undoing the slope attenuation from a φ frozen at the null predictor
             // (#769). λ is fixed here, so there is no scale↔λ feedback.
             true,
+            None,
         )?;
         pirls_res = pirls_res_pair.0;
 

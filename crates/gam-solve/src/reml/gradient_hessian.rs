@@ -4115,6 +4115,7 @@ impl<'a> RemlState<'a> {
             kronecker_penalty_system: None,
             kronecker_factored: None,
             gaussian_fixed_cache: RwLock::new(None),
+            gaussian_cost_only_frozen_rows: RwLock::new(None),
             gaussian_psi_gram_deriv: RwLock::new(None),
             glm_psi_gram_deriv: RwLock::new(None),
             glm_first_step_gram: RwLock::new(None),
@@ -4363,6 +4364,15 @@ impl<'a> RemlState<'a> {
         rho: &Array1<f64>,
         key: Option<Vec<u64>>,
     ) -> Result<EvalShared, EstimationError> {
+        self.prepare_eval_bundlewithkey_and_row_policy(rho, key, false)
+    }
+
+    fn prepare_eval_bundlewithkey_and_row_policy(
+        &self,
+        rho: &Array1<f64>,
+        key: Option<Vec<u64>>,
+        value_only_rows: bool,
+    ) -> Result<EvalShared, EstimationError> {
         // #1575 observability: count every genuine (cache-missing) full-n inner
         // P-IRLS solve. Callers funnel cache hits through `obtain_eval_bundle*`,
         // which only reaches here on a miss, so this counts exactly the
@@ -4375,7 +4385,11 @@ impl<'a> RemlState<'a> {
         let decision = self.select_reml_geometry(rho)?;
         match decision.geometry {
             RemlGeometry::SparseExactSpd => {
-                match self.prepare_sparse_eval_bundlewithkey(rho, key.clone()) {
+                match self.prepare_sparse_eval_bundlewithkey(
+                    rho,
+                    key.clone(),
+                    value_only_rows,
+                ) {
                     Ok(bundle) => {
                         log::info!(
                             "[reml-geometry] sparse_exact_spd reason={} p={} nnz_x={} nnz_h_est={} density_h_est={}",
@@ -4398,11 +4412,13 @@ impl<'a> RemlState<'a> {
                             "[reml-geometry] sparse_exact_spd failed ({}); falling back to dense spectral",
                             err
                         );
-                        self.prepare_dense_eval_bundlewithkey(rho, key)
+                        self.prepare_dense_eval_bundlewithkey(rho, key, value_only_rows)
                     }
                 }
             }
-            RemlGeometry::DenseSpectral => self.prepare_dense_eval_bundlewithkey(rho, key),
+            RemlGeometry::DenseSpectral => {
+                self.prepare_dense_eval_bundlewithkey(rho, key, value_only_rows)
+            }
         }
     }
 
@@ -4417,6 +4433,27 @@ impl<'a> RemlState<'a> {
         let bundle = self.prepare_eval_bundlewithkey(rho, key)?;
         self.cache_manager.store_eval_bundle(bundle.clone());
         Ok(bundle)
+    }
+
+    /// Obtain a bundle for a scalar value callback without forcing fixed-design
+    /// Gaussian row materialization.
+    ///
+    /// A previously cached full bundle is always reusable. On a cache miss,
+    /// only the eligible Gaussian-identity surface takes the compact row policy,
+    /// and that bundle is not stored in the full-result cache. Other families
+    /// retain the ordinary path and its cache behavior.
+    pub(crate) fn obtain_value_eval_bundle(
+        &self,
+        rho: &Array1<f64>,
+    ) -> Result<EvalShared, EstimationError> {
+        if !self.gaussian_fixed_cache_eligible() {
+            return self.obtain_eval_bundle(rho);
+        }
+        let key = self.rhokey_sanitized(rho);
+        if let Some(existing) = self.cache_manager.cached_eval_bundle(&key) {
+            return Ok(existing.clone());
+        }
+        self.prepare_eval_bundlewithkey_and_row_policy(rho, key, true)
     }
 
     /// Fixes audit answer C for design-moving ext-coords: when the realized
@@ -6234,6 +6271,43 @@ impl<'a> RemlState<'a> {
         Some(cache)
     }
 
+    /// Return the shared fixed-design Gaussian row placeholders used only by
+    /// value-only rho probes.
+    ///
+    /// The exact coefficient solve, score, deviance, Hessian, and REML value
+    /// still come from `GaussianFixedCache` sufficient statistics. The row
+    /// carrier exists solely because `PirlsResult` also transports
+    /// observation-scale diagnostics that the value evaluator never reads.
+    /// Building these invariant arrays once keeps distinct rho trials in
+    /// coefficient space without lying to full gradient or final-fit callers
+    /// about their fitted rows (#2435).
+    fn gaussian_cost_only_frozen_rows_if_eligible(
+        &self,
+    ) -> Result<Option<Arc<crate::pirls::GaussianFrozenRows>>, EstimationError> {
+        if !self.gaussian_fixed_cache_eligible() {
+            return Ok(None);
+        }
+        {
+            let guard = self.gaussian_cost_only_frozen_rows.read().unwrap();
+            if let Some(rows) = guard.as_ref() {
+                return Ok(Some(Arc::clone(rows)));
+            }
+        }
+        let mut guard = self.gaussian_cost_only_frozen_rows.write().unwrap();
+        if let Some(rows) = guard.as_ref() {
+            return Ok(Some(Arc::clone(rows)));
+        }
+        let rows = Arc::new(crate::pirls::GaussianFrozenRows::build(
+            self.offset.view(),
+            self.y,
+            self.weights,
+            &self.config.likelihood,
+            &self.runtime_inverse_link(),
+        )?);
+        *guard = Some(Arc::clone(&rows));
+        Ok(Some(rows))
+    }
+
     pub(crate) fn canonical_penalties(&self) -> &[gam_terms::construction::CanonicalPenalty] {
         &self.canonical_penalties
     }
@@ -6242,8 +6316,13 @@ impl<'a> RemlState<'a> {
         &self,
         rho: &Array1<f64>,
         key: Option<Vec<u64>>,
+        value_only_rows: bool,
     ) -> Result<EvalShared, EstimationError> {
-        let pirls_result = self.execute_pirls_if_needed(rho)?;
+        let pirls_result = if value_only_rows {
+            self.execute_pirls_for_value_only(rho)?
+        } else {
+            self.execute_pirls_if_needed(rho)?
+        };
         let (mut h_total, ridge_passport) = self.effectivehessian(pirls_result.as_ref())?;
         let mut firth_dense_operator: Option<Arc<FirthDenseOperator>> = None;
         if let Some(jeffreys_link) = reml_robust_jeffreys_link(&self.config) {
@@ -6341,8 +6420,13 @@ impl<'a> RemlState<'a> {
         &self,
         rho: &Array1<f64>,
         key: Option<Vec<u64>>,
+        value_only_rows: bool,
     ) -> Result<EvalShared, EstimationError> {
-        let pirls_result = self.execute_pirls_if_needed(rho)?;
+        let pirls_result = if value_only_rows {
+            self.execute_pirls_for_value_only(rho)?
+        } else {
+            self.execute_pirls_if_needed(rho)?
+        };
         if !matches!(
             pirls_result.coordinate_frame,
             pirls::PirlsCoordinateFrame::OriginalSparseNative
@@ -6487,6 +6571,28 @@ impl<'a> RemlState<'a> {
         &self,
         rho: &Array1<f64>,
     ) -> Result<Arc<PirlsResult>, EstimationError> {
+        self.execute_pirls_if_needed_with_row_policy(rho, false)
+    }
+
+    /// Gaussian value-only twin of [`Self::execute_pirls_if_needed`].
+    ///
+    /// On an eligible fixed-design Gaussian surface this asks P-IRLS to synthesize
+    /// observation fields from one shared invariant carrier while all numerical
+    /// fit quantities come from exact sufficient statistics. The compact result
+    /// is deliberately not inserted into the ordinary PIRLS cache: a later
+    /// gradient or accepted fit at the same rho must materialize exact rows.
+    fn execute_pirls_for_value_only(
+        &self,
+        rho: &Array1<f64>,
+    ) -> Result<Arc<PirlsResult>, EstimationError> {
+        self.execute_pirls_if_needed_with_row_policy(rho, true)
+    }
+
+    fn execute_pirls_if_needed_with_row_policy(
+        &self,
+        rho: &Array1<f64>,
+        value_only_rows: bool,
+    ) -> Result<Arc<PirlsResult>, EstimationError> {
         let use_cache = self
             .cache_manager
             .pirls_cache_enabled
@@ -6586,6 +6692,11 @@ impl<'a> RemlState<'a> {
             .as_ref()
             .map(|(c, _)| c.clone());
         let prediction_source = predicted_warm_start_with_source.as_ref().map(|(_, s)| *s);
+        let cost_only_gaussian_rows = if value_only_rows {
+            self.gaussian_cost_only_frozen_rows_if_eligible()?
+        } else {
+            None
+        };
         let pirls_result = {
             let warm_start_holder = self.warm_start_beta.read().unwrap();
             let fallback_warm_start_ref = if self.warm_start_enabled.load(Ordering::Relaxed) {
@@ -6919,6 +7030,7 @@ impl<'a> RemlState<'a> {
                 // shape / Beta precision) against the trial λ's residuals — that
                 // would couple the scale to λ and bias selection (#678, #769).
                 false,
+                cost_only_gaussian_rows.as_ref(),
             );
             let pirls_elapsed = pirls_start.elapsed();
             if let Ok((ref res, ref wm)) = result {
@@ -7272,7 +7384,7 @@ impl<'a> RemlState<'a> {
                     }
                     self.store_persistent_warm_start();
                     // Cache only if key is valid (not NaN).
-                    if use_cache && let Some(key) = key_opt {
+                    if use_cache && !value_only_rows && let Some(key) = key_opt {
                         self.cache_manager
                             .pirls_cache
                             .write()
@@ -7581,6 +7693,7 @@ impl<'a> RemlState<'a> {
             // Sigma-point cubature eval: Gamma scale refinement stays OFF (only
             // the final reported fit refines — see #678).
             false,
+            None,
         );
         let pirls_elapsed = pirls_start.elapsed();
         if let Ok((ref res, ref wm)) = result {

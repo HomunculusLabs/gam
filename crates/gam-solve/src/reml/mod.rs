@@ -5791,6 +5791,15 @@ pub(crate) struct RemlState<'a> {
     ///
     /// Invalidated jointly with the design in `reset_surface`.
     pub(crate) gaussian_fixed_cache: RwLock<Option<Arc<crate::pirls::GaussianFixedCache>>>,
+    /// Once-built row placeholders for fixed-design Gaussian value-only
+    /// evaluations. These rows depend only on the immutable
+    /// `(offset, y, weights, link)` surface, so every distinct rho probe can
+    /// share them while its exact deviance/score comes from the Gaussian
+    /// sufficient statistics. Full derivative/final-fit evaluations never
+    /// consume this slot and continue to materialize their exact `X beta`
+    /// rows (#2435).
+    pub(crate) gaussian_cost_only_frozen_rows:
+        RwLock<Option<Arc<crate::pirls::GaussianFrozenRows>>>,
     /// Conditioned-frame exact ψ-derivatives `(∂XᵀWX/∂ψ, ∂XᵀW(y−offset)/∂ψ)`
     /// for the SINGLE design-moving spatial hyperparameter (#1033b), assembled
     /// n-free from the certified Chebyshev ψ-Gram tensor and installed beside

@@ -184,7 +184,7 @@ impl<'a> RemlState<'a> {
             return Ok(f64::INFINITY);
         }
         let t_pirls = std::time::Instant::now();
-        let bundle = match self.obtain_eval_bundle(p) {
+        let bundle = match self.obtain_value_eval_bundle(p) {
             Ok(bundle) => bundle,
             Err(EstimationError::ModelIsIllConditioned { .. }) => {
                 self.cache_manager.invalidate_eval_bundle();
