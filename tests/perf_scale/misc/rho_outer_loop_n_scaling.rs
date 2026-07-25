@@ -263,6 +263,32 @@ fn rho_outer_loop_is_n_independent() {
         );
     }
 
+    // VALIDITY PRECONDITION, checked before any ratio is formed (#2449).
+    //
+    // Per-trial cost cannot DECREASE as n grows -- the work is monotone in the
+    // row count -- so a non-monotone reading is not a noisy measurement of this
+    // quantity, it is a measurement of the machine. Under contention the whole
+    // sweep collapses toward the load rather than the code: a replicate at load
+    // 25 returned [111.427, 72.745, 86.596] ms, and the ratio built from it was
+    // NEGATIVE. Reporting that as a verdict about the Gram cache would be a
+    // number with no relationship to the code under test.
+    //
+    // This is the automatic form of "declining to measure is a result". A
+    // pre-run load gate cannot do it, because load rising DURING the sweep
+    // produces exactly this signature; only the readings themselves can.
+    for pair in per_trial.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "INVALID MEASUREMENT (contention), not a verdict about the code: per-trial \
+             cost fell from {:.3} ms to {:.3} ms as n grew, which this quantity cannot \
+             do. The sweep measured the machine; re-run on an idle box before reading \
+             any ratio from it. per_trial_ms={:?}",
+            1e3 * pair[0],
+            1e3 * pair[1],
+            per_trial.iter().map(|v| (v * 1e6).round() / 1e3).collect::<Vec<_>>()
+        );
+    }
+
     let first = per_trial.first().copied().unwrap_or(0.0).max(1e-6);
     let last = per_trial.last().copied().unwrap_or(0.0).max(1e-6);
     let n_ratio = (*ns.last().unwrap() as f64) / (*ns.first().unwrap() as f64);
