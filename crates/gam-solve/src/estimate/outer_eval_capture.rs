@@ -6,9 +6,13 @@
 //! at its first bounded seed with a finite difference of that same objective.
 //! Tests consume typed arrays rather than scraping formatted production logs.
 //!
-//! Both channels are disabled by default and gated by relaxed atomic loads.
+//! Both channels are disabled by default. The raw window is process-global
+//! because its flexible-link measurements intentionally span helper calls. The
+//! finite-difference request is thread-local: a parallel integration test can
+//! neither consume nor overwrite another test's one-shot audit.
 
 use ndarray::Array1;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -25,6 +29,8 @@ pub struct OuterEvalRecord {
 #[derive(Clone, Debug)]
 pub struct OuterGradientFdRecord {
     pub theta: Array1<f64>,
+    pub rho_dim: usize,
+    pub psi_dim: usize,
     pub cost: f64,
     pub analytic_gradient: Array1<f64>,
     pub finite_difference_gradient: Array1<f64>,
@@ -35,16 +41,19 @@ pub struct OuterGradientFdRecord {
 const MAX_CAPTURED: usize = 8;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static FD_ENABLED: AtomicBool = AtomicBool::new(false);
+
+struct OuterGradientFdCapture {
+    min_psi_dim: usize,
+    record: Option<OuterGradientFdRecord>,
+}
+
+thread_local! {
+    static FD_CAPTURE: RefCell<Option<OuterGradientFdCapture>> = const { RefCell::new(None) };
+}
 
 fn buffer() -> &'static Mutex<Vec<OuterEvalRecord>> {
     static BUFFER: OnceLock<Mutex<Vec<OuterEvalRecord>>> = OnceLock::new();
     BUFFER.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn fd_buffer() -> &'static Mutex<Option<OuterGradientFdRecord>> {
-    static BUFFER: OnceLock<Mutex<Option<OuterGradientFdRecord>>> = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(None))
 }
 
 /// Start capturing outer evaluations, clearing any prior window.
@@ -59,30 +68,39 @@ pub fn take_outer_eval_capture() -> Vec<OuterEvalRecord> {
     std::mem::take(&mut *buffer().lock().expect("outer-eval capture buffer"))
 }
 
-/// Request one structured analytic-vs-FD audit at the next outer seed.
-pub fn enable_outer_gradient_fd_capture() {
-    *fd_buffer().lock().expect("outer-gradient FD buffer") = None;
-    FD_ENABLED.store(true, Ordering::Relaxed);
+/// Request one structured audit at the next outer seed with enough ψ axes.
+pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
+    FD_CAPTURE.with(|capture| {
+        *capture.borrow_mut() = Some(OuterGradientFdCapture {
+            min_psi_dim,
+            record: None,
+        });
+    });
 }
 
 /// Stop the audit window and take its single record.
 pub fn take_outer_gradient_fd_capture() -> Option<OuterGradientFdRecord> {
-    FD_ENABLED.store(false, Ordering::Relaxed);
-    fd_buffer()
-        .lock()
-        .expect("outer-gradient FD buffer")
-        .take()
+    FD_CAPTURE.with(|capture| capture.borrow_mut().take().and_then(|state| state.record))
 }
 
-pub(crate) fn outer_gradient_fd_capture_enabled() -> bool {
-    FD_ENABLED.load(Ordering::Relaxed)
+pub(crate) fn outer_gradient_fd_capture_enabled(psi_dim: usize) -> bool {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.record.is_none() && psi_dim >= state.min_psi_dim)
+    })
 }
 
 pub(crate) fn record_outer_gradient_fd(record: OuterGradientFdRecord) {
-    if !FD_ENABLED.swap(false, Ordering::Relaxed) {
-        return;
-    }
-    *fd_buffer().lock().expect("outer-gradient FD buffer") = Some(record);
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+            && record.psi_dim >= state.min_psi_dim
+        {
+            state.record = Some(record);
+        }
+    });
 }
 
 /// Record one outer evaluation when capture is enabled (no-op otherwise). Only

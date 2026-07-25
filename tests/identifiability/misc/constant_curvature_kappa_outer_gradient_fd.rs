@@ -5,11 +5,10 @@
 //! LAML/REML optimization. This is the merge gate the issue names: the standing
 //! full-outer-gradient finite-difference audit, with κ active.
 //!
-//! The outer driver (`spatial-exact-joint`) runs
-//! `solver::outer_strategy::outer_gradient_fd_audit` automatically at θ₀,
-//! central-differencing the *outer criterion* component-by-component and
-//! comparing it to the analytic outer gradient. The κ coordinate is labelled
-//! `psi_kappa[..]`. This test:
+//! The test enables the generic outer runner's structured finite-difference
+//! capture at its first seed with a ψ coordinate. The record contains the
+//! exact ρ/ψ layout plus analytic and finite-difference gradient arrays. This
+//! test:
 //!
 //!  (1) fits a Gaussian response with a single `curv(x1, x2, kappa=..)` smooth
 //!      on data GENERATED on `M_κ` for a planted κ, captures the audit, and
@@ -27,40 +26,11 @@
 use gam::geometry::constant_curvature::ConstantCurvature;
 use gam::geometry::curvature_estimand::{flatness_lr_test, profile_ci_walk};
 use gam::{FitConfig, encode_recordswith_inferred_schema};
-use std::sync::{Mutex, Once};
-
-static CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-struct CapturingLogger;
-impl log::Log for CapturingLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        // The audit emits at WARN; the gate/trace lines at WARN/INFO.
-        metadata.level() <= log::Level::Info
-    }
-    fn log(&self, record: &log::Record<'_>) {
-        let line = format!("{}", record.args());
-        if line.contains("OUTER-FD-AUDIT") {
-            if let Ok(mut g) = CAPTURE.lock() {
-                g.push(line.clone());
-            }
-            eprintln!("{line}");
-        }
-    }
-    fn flush(&self) {}
-}
-
-static LOGGER: CapturingLogger = CapturingLogger;
-static INIT_LOGGER: Once = Once::new();
 
 fn init() {
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
     gam::init_parallelism();
-    INIT_LOGGER.call_once(|| {
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log::LevelFilter::Info);
-        }
-    });
 }
 
 #[inline]
@@ -120,42 +90,13 @@ fn build_dataset(
     encode_recordswith_inferred_schema(headers, records).expect("encode dataset")
 }
 
-fn field(line: &str, key: &str) -> String {
-    if let Some(pos) = line.find(key) {
-        let rest = &line[pos + key.len()..];
-        rest.split_whitespace().next().unwrap_or("").to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Per-coordinate `(block, analytic, fd, gap)` rows parsed out of the audit.
-fn parse_components(lines: &[String]) -> Vec<(String, f64, f64, f64)> {
-    let mut out = Vec::new();
-    for l in lines {
-        if !l.contains(" analytic=") || !l.contains(" fd=") || !l.contains(" gap=") {
-            continue;
-        }
-        let block = field(l, "block=");
-        let a: f64 = field(l, "analytic=").parse().unwrap_or(f64::NAN);
-        let fd: f64 = field(l, "fd=").parse().unwrap_or(f64::NAN);
-        let gap: f64 = field(l, "gap=").parse().unwrap_or(f64::NAN);
-        if !block.is_empty() {
-            out.push((block, a, fd, gap));
-        }
-    }
-    out
-}
-
 /// MERGE GATE: the analytic outer LAML/REML gradient w.r.t. κ matches a central
 /// finite difference of the outer criterion at θ₀ on a constant-curvature fit
 /// where κ is active.
 #[test]
 fn constant_curvature_kappa_outer_gradient_matches_fd() {
     init();
-    if let Ok(mut g) = CAPTURE.lock() {
-        g.clear();
-    }
+    gam::estimate::enable_outer_gradient_fd_capture(1);
     // Data generated on M_κ with a planted spherical curvature.
     let data = build_dataset(400, 0.8, 0.6, 0xC0FF_EE01);
     // κ must be a FREE outer coordinate for this FD audit — the audit exists to
@@ -182,66 +123,27 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
         Err(e) => eprintln!("[FD-DIAG] constant-curvature fit returned Err (audit still ran): {e}"),
     }
 
-    let lines = CAPTURE.lock().unwrap().clone();
-    // The κ coordinate must have been enrolled: the gate line reports psi_dim≥1.
-    let gate: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("gate eligible="))
-        .collect();
+    let audit = gam::estimate::take_outer_gradient_fd_capture()
+        .expect("outer runner must return structured analytic-vs-FD evidence");
     assert!(
-        !gate.is_empty(),
-        "expected an [OUTER-FD-AUDIT] gate line; captured {} lines: {:#?}",
-        lines.len(),
-        lines
+        audit.psi_dim >= 1,
+        "constant-curvature smooth must enroll kappa as a psi coordinate"
     );
-    let psi_dim: usize = gate
-        .iter()
-        .filter_map(|l| field(l, "psi_dim=").parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
-    assert!(
-        psi_dim >= 1,
-        "constant-curvature smooth must enroll κ as a ψ-coordinate (psi_dim≥1); gate lines: {gate:#?}"
-    );
-
-    let comps = parse_components(&lines);
-    assert!(
-        !comps.is_empty(),
-        "expected per-coordinate analytic-vs-FD lines; captured: {:#?}",
-        lines
-    );
-
-    // No DESYNC verdict: the analytic gradient agrees with the FD criterion.
-    let desync: Vec<&String> = lines
-        .iter()
-        .filter(|l| l.contains("VERDICT=DESYNC"))
-        .collect();
-    assert!(
-        desync.is_empty(),
-        "outer gradient w.r.t. κ DESYNCs from the FD of the criterion: {desync:#?}"
-    );
-
-    // The κ block(s) specifically: finite, and analytic≈fd to tolerance.
-    let kappa_comps: Vec<&(String, f64, f64, f64)> = comps
-        .iter()
-        .filter(|(block, ..)| block.starts_with("psi_kappa"))
-        .collect();
-    assert!(
-        !kappa_comps.is_empty(),
-        "expected a psi_kappa[..] audit component; got blocks: {:?}",
-        comps.iter().map(|c| &c.0).collect::<Vec<_>>()
-    );
-    for (block, a, fd, gap) in &kappa_comps {
+    for j in audit.rho_dim..audit.rho_dim + audit.psi_dim {
+        let analytic = audit.analytic_gradient[j];
+        let fd = audit.finite_difference_gradient[j];
+        let gap = (analytic - fd).abs();
         assert!(
-            a.is_finite() && fd.is_finite(),
-            "non-finite κ gradient component {block}: analytic={a} fd={fd}"
+            analytic.is_finite() && fd.is_finite(),
+            "non-finite kappa gradient component {j}: analytic={analytic} fd={fd}"
         );
-        let scale = a.abs().max(fd.abs()).max(1e-6);
+        let scale = analytic.abs().max(fd.abs()).max(1e-6);
         assert!(
             gap / scale < 5e-2,
-            "κ outer-gradient analytic≠FD on {block}: analytic={a:.6e} fd={fd:.6e} \
-             gap={gap:.3e} rel={:.3e}",
-            gap / scale
+            "kappa outer-gradient analytic!=FD on coordinate {j}: \
+             analytic={analytic:.6e} fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+            gap / scale,
+            audit.steps[j]
         );
     }
 }

@@ -5,15 +5,11 @@
 //! or because of weak IDENTIFIABILITY (a genuinely flat valley — analytic ≈ FD
 //! everywhere but a near-zero outer-Hessian eigenvalue)?
 //!
-//! The fork is the central-difference of the outer gradient at a fixed θ,
-//! component by component. The audit machinery lives in
-//! `outer_strategy::outer_gradient_fd_audit` and is invoked automatically by
-//! `optimize_spatial_length_scale_exact_joint` on diagnostic-sized problems
-//! (this one: n=800, centers=4). It emits `[OUTER-FD-AUDIT/...]` log lines
-//! including per-block analytic gradient norms, per-coordinate analytic-vs-FD
-//! gaps, the outer-Hessian eigenvalue spectrum, and a single VERDICT line. This
-//! test drives a small survival-MS fit, captures those lines, and asserts the
-//! verdict is emitted and self-consistent.
+//! The fork is a finite difference of the outer gradient at a fixed θ,
+//! component by component. The generic outer runner exposes an opt-in
+//! structured record containing its real bounded seed, exact ρ/ψ layout,
+//! analytic gradient, finite-difference gradient, and stencil steps. This test
+//! drives a small survival-MS fit and consumes that typed evidence directly.
 //!
 //! The audit runs at θ₀ BEFORE the (potentially non-terminating) outer loop, so
 //! `outer_max_iter` is capped low to keep the test cheap regardless of whether
@@ -21,47 +17,13 @@
 
 use csv::StringRecord;
 use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism};
-use std::sync::{Mutex, Once};
 
 const N: usize = 800;
-
-static CAPTURE: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-struct CapturingLogger;
-impl log::Log for CapturingLogger {
-    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::Level::Info
-    }
-    fn log(&self, record: &log::Record<'_>) {
-        let line = format!("{}", record.args());
-        if line.contains("OUTER-FD-AUDIT") {
-            if let Ok(mut g) = CAPTURE.lock() {
-                g.push(line.clone());
-            }
-            eprintln!("{line}");
-        } else if line.contains("survival-marginal-slope/outer")
-            || line.contains("[joint-newton-tr]")
-            || line.contains("KAPPA-PHASE")
-            || line.contains("startup")
-        {
-            eprintln!("[trace] {line}");
-        }
-    }
-    fn flush(&self) {}
-}
-
-static LOGGER: CapturingLogger = CapturingLogger;
-static INIT_LOGGER: Once = Once::new();
 
 fn init() {
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
     init_parallelism();
-    INIT_LOGGER.call_once(|| {
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log::LevelFilter::Info);
-        }
-    });
 }
 
 #[inline]
@@ -170,39 +132,9 @@ fn build_dataset() -> gam::inference::data::EncodedDataset {
         .expect("encode small survival marginal-slope dataset")
 }
 
-fn field(line: &str, key: &str) -> String {
-    match line.find(key) {
-        Some(p) => {
-            let rest = &line[p + key.len()..];
-            rest.split_whitespace().next().unwrap_or("").to_string()
-        }
-        None => String::new(),
-    }
-}
-
-fn parse_components(lines: &[String]) -> Vec<(String, usize, f64, f64, f64)> {
-    let mut out = Vec::new();
-    for l in lines {
-        if !l.contains(" analytic=") || !l.contains(" fd=") || !l.contains(" gap=") {
-            continue;
-        }
-        let block = field(l, "block=");
-        let i: usize = field(l, "i=").parse().unwrap_or(usize::MAX);
-        let a: f64 = field(l, "analytic=").parse().unwrap_or(f64::NAN);
-        let fd: f64 = field(l, "fd=").parse().unwrap_or(f64::NAN);
-        let gap: f64 = field(l, "gap=").parse().unwrap_or(f64::NAN);
-        if i != usize::MAX {
-            out.push((block, i, a, fd, gap));
-        }
-    }
-    out
-}
-
 fn run_basis(basis_term: &str) {
     init();
-    if let Ok(mut g) = CAPTURE.lock() {
-        g.clear();
-    }
+    gam::estimate::enable_outer_gradient_fd_capture(1);
     let data = build_dataset();
     let formula = format!("Surv(entry_age, exit_age, event) ~ {basis_term} + sex");
     let config = FitConfig {
@@ -222,39 +154,35 @@ fn run_basis(basis_term: &str) {
     eprintln!("[FD-DIAG] starting survival-MS fit: n={N} formula={formula:?}");
     fit_from_formula(&formula, &data, &config).ok();
 
-    let lines = CAPTURE.lock().unwrap().clone();
-    let verdict: Vec<&String> = lines.iter().filter(|l| l.contains("VERDICT=")).collect();
+    let audit = gam::estimate::take_outer_gradient_fd_capture().unwrap_or_else(|| {
+        panic!("expected structured outer-gradient evidence for basis {basis_term:?}")
+    });
     assert!(
-        !verdict.is_empty(),
-        "expected an [OUTER-FD-AUDIT] VERDICT line for basis {basis_term:?}; captured {} audit lines: {:#?}",
-        lines.len(),
-        lines
+        audit.psi_dim >= 1,
+        "basis {basis_term:?} must enroll at least one psi coordinate"
     );
-
-    let comps = parse_components(&lines);
-    assert!(
-        !comps.is_empty(),
-        "expected per-coordinate analytic-vs-FD lines for basis {basis_term:?}; captured: {:#?}",
-        lines
-    );
-
-    let worst = comps
-        .iter()
-        .max_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal))
-        .cloned()
-        .unwrap();
+    let worst = (0..audit.theta.len())
+        .map(|j| {
+            let analytic = audit.analytic_gradient[j];
+            let fd = audit.finite_difference_gradient[j];
+            (j, analytic, fd, (analytic - fd).abs())
+        })
+        .max_by(|a, b| a.3.total_cmp(&b.3))
+        .expect("outer-gradient record must have at least one coordinate");
     eprintln!(
-        "[FD-DIAG] basis={basis_term} worst component: block={} i={} analytic={:.6e} fd={:.6e} gap={:.3e}",
-        worst.0, worst.1, worst.2, worst.3, worst.4
+        "[FD-DIAG] basis={basis_term} rho_dim={} psi_dim={} worst coordinate: \
+         i={} analytic={:.6e} fd={:.6e} gap={:.3e}",
+        audit.rho_dim, audit.psi_dim, worst.0, worst.1, worst.2, worst.3
     );
-    for v in &verdict {
-        eprintln!("[FD-DIAG] {v}");
-    }
 
-    for (block, i, a, fd, _gap) in &comps {
+    for j in 0..audit.theta.len() {
+        let analytic = audit.analytic_gradient[j];
+        let fd = audit.finite_difference_gradient[j];
         assert!(
-            a.is_finite() && fd.is_finite(),
-            "non-finite gradient component for basis {basis_term:?}: block={block} i={i} analytic={a} fd={fd}"
+            analytic.is_finite() && fd.is_finite() && audit.steps[j] > 0.0,
+            "invalid gradient evidence for basis {basis_term:?}: i={j} \
+             analytic={analytic} fd={fd} step={}",
+            audit.steps[j]
         );
     }
 }

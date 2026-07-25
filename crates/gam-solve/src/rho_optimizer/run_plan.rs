@@ -111,15 +111,38 @@ fn capture_outer_gradient_fd_at_seed(
     config: &OuterConfig,
     context: &str,
     seed: &Array1<f64>,
+    rho_dim: usize,
+    psi_dim: usize,
     lower: &Array1<f64>,
     upper: &Array1<f64>,
 ) -> Result<(), EstimationError> {
-    if !crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled() {
+    if !crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled(psi_dim) {
         return Ok(());
+    }
+    if rho_dim.checked_add(psi_dim) != Some(seed.len())
+        || lower.len() != seed.len()
+        || upper.len() != seed.len()
+    {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD capture received inconsistent layout: \
+             rho_dim={rho_dim} psi_dim={psi_dim} theta_dim={} lower_dim={} upper_dim={}",
+            seed.len(),
+            lower.len(),
+            upper.len()
+        )));
     }
     obj.reset();
     install_matching_initial_inner_seed(obj, config, seed, context)?;
     let analytic = obj.eval_with_order(seed, OuterEvalOrder::ValueAndGradient)?;
+    if analytic.gradient.len() != seed.len() || !analytic.cost.is_finite() {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD capture received invalid analytic evidence: \
+             theta_dim={} gradient_dim={} cost={}",
+            seed.len(),
+            analytic.gradient.len(),
+            analytic.cost
+        )));
+    }
     let mut finite_difference = Array1::<f64>::zeros(seed.len());
     let mut steps = Array1::<f64>::zeros(seed.len());
     for j in 0..seed.len() {
@@ -179,6 +202,8 @@ fn capture_outer_gradient_fd_at_seed(
     crate::estimate::outer_eval_capture::record_outer_gradient_fd(
         crate::estimate::OuterGradientFdRecord {
             theta: seed.clone(),
+            rho_dim,
+            psi_dim,
             cost: analytic.cost,
             analytic_gradient: analytic.gradient,
             finite_difference_gradient: finite_difference,
@@ -404,12 +429,14 @@ pub(crate) fn run_outer_with_plan(
             }
         }
         obj.reset();
-        if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled() {
+        if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_enabled(cap.psi_dim) {
             capture_outer_gradient_fd_at_seed(
                 obj,
                 config,
                 context,
                 seed,
+                cap.theta_layout().rho_dim(),
+                cap.psi_dim,
                 &bounds_template.0,
                 &bounds_template.1,
             )?;

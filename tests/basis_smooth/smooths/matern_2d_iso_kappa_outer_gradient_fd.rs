@@ -20,15 +20,11 @@
 //! rebuild and mirrored onto the spec read by the analytic ψ-gradient. Value
 //! and gradient therefore share one fixed chart and topology at every trial.
 //!
-//! The outer driver (`spatial-exact-joint`) runs
-//! `solver::outer_strategy::outer_gradient_fd_audit` automatically at θ₀,
-//! central-differencing the *outer criterion* component-by-component and
-//! comparing it to the analytic outer gradient. The Matérn log-κ coordinate is
-//! labelled `psi_kappa[..]`. This test fits an ordinary Gaussian 2-D surface
-//! with a single `matern(x1, x2)` smooth (default double-penalty), captures the
-//! audit, and asserts the analytic gradient w.r.t. log-κ matches the central FD
-//! of the full criterion (no DESYNC verdict, finite per-coordinate analytic/fd,
-//! small relative gap on the κ block).
+//! The generic outer runner exposes an opt-in structured finite-difference
+//! record at its real bounded seed. This test fits an ordinary Gaussian 2-D
+//! surface with a single `matern(x1, x2)` smooth (default double-penalty), then
+//! asserts that the typed Matérn log-κ component matches the finite difference
+//! of the full criterion.
 //!
 //! Reference-as-truth: every assertion is against the analytic FD of gam's own
 //! profiled REML criterion — never another tool's output.
@@ -45,9 +41,6 @@ use gam::{
     types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink},
 };
 use ndarray::{Array1, Array2};
-use std::sync::Mutex;
-
-static STRUCTURED_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn init() {
     #[cfg(target_os = "macos")]
@@ -112,9 +105,8 @@ fn aniso_signal_dataset(n: usize) -> (Array2<f64>, Array1<f64>) {
 /// penalty-quad — with the default double-penalty (nullspace shrinkage) active.
 #[test]
 fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
-    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
-    gam::estimate::enable_outer_gradient_fd_capture();
+    gam::estimate::enable_outer_gradient_fd_capture(1);
     let data = build_dataset(150, 0.05, 0x9A7E_7212_0001u64);
     let formula = "y ~ matern(x1, x2)";
     let config = FitConfig {
@@ -141,7 +133,8 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
         audit.theta.len() >= 2,
         "matern(x1,x2) must enroll at least one rho and one log-kappa coordinate"
     );
-    let kappa = audit.theta.len() - 1;
+    assert_eq!(audit.psi_dim, 1, "isotropic Matérn must own one psi axis");
+    let kappa = audit.rho_dim;
     let analytic = audit.analytic_gradient[kappa];
     let fd = audit.finite_difference_gradient[kappa];
     let gap = (analytic - fd).abs();
@@ -166,9 +159,8 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
 /// perturbations, so the optimizer has a real descent direction at theta0.
 #[test]
 fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
-    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
-    gam::estimate::enable_outer_gradient_fd_capture();
+    gam::estimate::enable_outer_gradient_fd_capture(2);
 
     let n = 180;
     let (x, y) = aniso_signal_dataset(n);
@@ -254,8 +246,12 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         audit.theta.len() >= 3,
         "anisotropic Matérn must enroll rho plus both eta coordinates"
     );
-    let signal = audit.theta.len() - 2;
-    let noise = audit.theta.len() - 1;
+    assert_eq!(
+        audit.psi_dim, 2,
+        "anisotropic Matérn must own exactly two psi axes"
+    );
+    let signal = audit.rho_dim;
+    let noise = audit.rho_dim + 1;
     let g_signal = audit.analytic_gradient[signal];
     let fd_signal = audit.finite_difference_gradient[signal];
     let g_noise = audit.analytic_gradient[noise];
@@ -318,7 +314,6 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
 /// IntegrationError, post-fix it converges.
 #[test]
 fn matern_2d_smooth_fits_ordinary_surface_full_outer_loop() {
-    let _capture_guard = STRUCTURED_CAPTURE_LOCK.lock().unwrap();
     init();
     let data = build_dataset(160, 0.05, 0x1270_0001_2D5Eu64);
     let config = FitConfig {
