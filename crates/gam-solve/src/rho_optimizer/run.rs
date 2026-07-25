@@ -1862,33 +1862,45 @@ fn certify_fixed_point_optimality(
     config: &OuterConfig,
     context: &str,
     result: &mut OuterResult,
+    fidelity: CertificationFidelity,
 ) -> Result<OuterCriterionCertificate, EstimationError> {
     let layout = obj.capability().theta_layout();
     // A fixed-point residual is only a certificate for the scalar objective
     // when both lanes price that same objective at the same rho. Sample the
     // authoritative value lane first; the analytic fixed-point evaluator then
     // remains the installed terminal-state owner.
-    let value_only = obj
-        .eval_with_order(&result.rho, OuterEvalOrder::Value)
-        .map_err(|err| {
-            outer_nonconvergence_error(
-                context,
-                &format!("terminal value-only certificate evaluation failed: {err}"),
-                result,
-                None,
-                config.tolerance,
-            )
-        })?
-        .cost;
-    if !value_only.is_finite() {
-        return Err(outer_nonconvergence_error(
-            context,
-            "terminal value-only certificate evaluation returned a non-finite objective value",
-            result,
-            None,
-            config.tolerance,
-        ));
-    }
+    //
+    // MINT ONLY (#2359), for the same reason as on the analytic path: whether
+    // the two lanes agree is terminal proof work, not a ranking signal, and on
+    // this route it is the ONLY thing that distinguishes screening from mint —
+    // there is no order-four ladder to reserve here.
+    let value_only = match fidelity {
+        CertificationFidelity::Screening => None,
+        CertificationFidelity::Mint => {
+            let sample = obj
+                .eval_with_order(&result.rho, OuterEvalOrder::Value)
+                .map_err(|err| {
+                    outer_nonconvergence_error(
+                        context,
+                        &format!("terminal value-only certificate evaluation failed: {err}"),
+                        result,
+                        None,
+                        config.tolerance,
+                    )
+                })?
+                .cost;
+            if !sample.is_finite() {
+                return Err(outer_nonconvergence_error(
+                    context,
+                    "terminal value-only certificate evaluation returned a non-finite objective value",
+                    result,
+                    None,
+                    config.tolerance,
+                ));
+            }
+            Some(sample)
+        }
+    };
     let evaluation = obj
         .eval_fixed_point_certificate(&result.rho)
         .map_err(|err| {
@@ -1931,14 +1943,16 @@ fn certify_fixed_point_optimality(
             config.tolerance,
         ));
     }
-    audit_outer_value_agreement(
-        context,
-        value_only,
-        evaluation.cost,
-        result,
-        None,
-        config.tolerance,
-    )?;
+    if let Some(value_only) = value_only {
+        audit_outer_value_agreement(
+            context,
+            value_only,
+            evaluation.cost,
+            result,
+            None,
+            config.tolerance,
+        )?;
+    }
 
     let mut normalized_updates = Vec::with_capacity(layout.n_params);
     let mut uncovered = Vec::new();
@@ -2172,7 +2186,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
     if matches!(result.plan_used.solver, Solver::Efs | Solver::HybridEfs)
         && capability.gradient != Derivative::Analytic
     {
-        return certify_fixed_point_optimality(obj, config, context, result);
+        return certify_fixed_point_optimality(obj, config, context, result, fidelity);
     }
     if capability.gradient != Derivative::Analytic {
         return Err(outer_nonconvergence_error(
@@ -2188,27 +2202,39 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // evaluator as the terminal state owner. This is one same-rho audit, not a
     // finite-difference derivative: it catches a split value/gradient
     // implementation without violating the production no-FD contract.
-    let value_only = obj
-        .eval_with_order(&result.rho, OuterEvalOrder::Value)
-        .map_err(|err| {
-            outer_nonconvergence_error(
-                context,
-                &format!("terminal value-only certificate evaluation failed: {err}"),
-                result,
-                result.final_grad_norm,
-                outer_gradient_tolerance(config).abs,
-            )
-        })?
-        .cost;
-    if !value_only.is_finite() {
-        return Err(outer_nonconvergence_error(
-            context,
-            "terminal value-only certificate evaluation returned a non-finite objective value",
-            result,
-            result.final_grad_norm,
-            outer_gradient_tolerance(config).abs,
-        ));
-    }
+    //
+    // MINT ONLY (#2359). Detecting a split value/gradient implementation is
+    // terminal proof work: it says nothing about which multistart candidate is
+    // better, so it is not part of the filter. Spending it per candidate buys
+    // no ranking information and costs one extra full objective evaluation per
+    // seed — the same economics that reserve order four for the mint.
+    let value_only = match fidelity {
+        CertificationFidelity::Screening => None,
+        CertificationFidelity::Mint => {
+            let sample = obj
+                .eval_with_order(&result.rho, OuterEvalOrder::Value)
+                .map_err(|err| {
+                    outer_nonconvergence_error(
+                        context,
+                        &format!("terminal value-only certificate evaluation failed: {err}"),
+                        result,
+                        result.final_grad_norm,
+                        outer_gradient_tolerance(config).abs,
+                    )
+                })?
+                .cost;
+            if !sample.is_finite() {
+                return Err(outer_nonconvergence_error(
+                    context,
+                    "terminal value-only certificate evaluation returned a non-finite objective value",
+                    result,
+                    result.final_grad_norm,
+                    outer_gradient_tolerance(config).abs,
+                ));
+            }
+            Some(sample)
+        }
+    };
 
     // Order four is reserved for the mint audit (#2359). A screening pass takes
     // the same first-order evidence the no-analytic-Hessian path already
@@ -2314,14 +2340,16 @@ fn certify_outer_optimality_at_terminal_fidelity(
     {
         stationarity_bound = stationarity_bound.max(noise_bound);
     }
-    audit_outer_value_agreement(
-        context,
-        value_only,
-        evaluation.cost,
-        result,
-        Some(projected_grad_norm),
-        stationarity_bound,
-    )?;
+    if let Some(value_only) = value_only {
+        audit_outer_value_agreement(
+            context,
+            value_only,
+            evaluation.cost,
+            result,
+            Some(projected_grad_norm),
+            stationarity_bound,
+        )?;
+    }
 
     // The optimizer's own recorded best-iterate evidence, captured before the
     // fresh certificate-time measurement overwrites it below. Together with
