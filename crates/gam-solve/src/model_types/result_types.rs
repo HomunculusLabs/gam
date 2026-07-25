@@ -1549,23 +1549,16 @@ impl FitConvergenceEvidence {
             ));
         }
 
-        let outer = if parts.log_lambdas.is_empty() {
-            if parts.outer_iterations != 0 {
-                return Err(Self::assembly_error(
-                    parts,
-                    format!(
-                        "zero-dimensional outer evidence cannot carry {} outer iterations",
-                        parts.outer_iterations
-                    ),
-                ));
-            }
+        let (outer_iterations, outer) = if parts.log_lambdas.is_empty() {
             // A zero-dimensional analytic certificate (|g|=|Pg|=bound=0)
             // proves no equation: there was no smoothing coordinate to
-            // optimize. Canonicalize that vacuous optimizer artifact to the
-            // semantically exact `Fixed` arm.
-            FitOuterConvergenceEvidence::Fixed
+            // optimize. Some orchestration paths still report one
+            // administrative pass through the outer driver; dimensionality,
+            // not that implementation counter, is the semantic authority.
+            // Canonicalize both artifacts to the exact `Fixed` representation.
+            (0, FitOuterConvergenceEvidence::Fixed)
         } else {
-            match parts.artifacts.criterion_certificate.as_ref() {
+            let outer = match parts.artifacts.criterion_certificate.as_ref() {
                 Some(certificate) if certificate.certifies() => {
                     FitOuterConvergenceEvidence::Analytic(certificate.clone())
                 }
@@ -1583,12 +1576,13 @@ impl FitConvergenceEvidence {
                             .to_string(),
                     ));
                 }
-            }
+            };
+            (parts.outer_iterations, outer)
         };
 
         Ok(Self {
             inner_status: parts.pirls_status,
-            outer_iterations: parts.outer_iterations,
+            outer_iterations,
             outer,
         })
     }
@@ -1715,6 +1709,7 @@ mod assembly_inner_status_gate_tests {
             lambdas_railed: Vec::new(),
         });
         parts.outer_gradient_norm = Some(0.0);
+        parts.outer_iterations = 1;
 
         let fit = UnifiedFitResult::try_from_parts(parts)
             .expect("a converged fit with no outer coordinate must mint");
@@ -1729,6 +1724,15 @@ mod assembly_inner_status_gate_tests {
         assert!(
             fit.outer_gradient_norm.is_none(),
             "a zero-length gradient is absence, not a measured zero norm"
+        );
+        assert_eq!(
+            fit.outer_iterations, 0,
+            "an administrative outer-driver pass is not an optimized coordinate"
+        );
+        assert_eq!(
+            fit.convergence_evidence().outer_iterations(),
+            0,
+            "sealed fixed-outer evidence must use the canonical zero count"
         );
     }
 }
@@ -2200,6 +2204,11 @@ impl UnifiedFitResult {
             inner_cycles,
         } = parts;
         let mut artifacts = artifacts;
+        let outer_iterations = if log_lambdas.is_empty() {
+            0
+        } else {
+            outer_iterations
+        };
         let outer_gradient_norm = if log_lambdas.is_empty() {
             // Keep the stored artifacts in the same semantic frame as the
             // sealed evidence. A zero-length gradient/certificate is vacuous,
