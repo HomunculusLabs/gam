@@ -1,0 +1,202 @@
+name: Rust Test Archive
+
+# Produces the exact-SHA nextest archive that `validate-one.yml` executes against
+# — and, unlike `test.yml`'s copy of this job, produces it under a concurrency
+# key that CANNOT be destroyed by another lane (#2429).
+#
+# WHY THIS EXISTS. `test.yml` declares its concurrency at WORKFLOW level
+# (`group: rust-ci-${{ github.ref }}`, `cancel-in-progress: true`). A
+# workflow-level group cancels EVERY job in the run, including the archive
+# build; job-level concurrency cannot protect against it. So during active
+# development each lane that dispatches Rust CI to check its own work destroys
+# the archive that every other lane's fast path depends on. `validate-one` then
+# has nothing to execute, and `focused-rust-proof` is left as the only fast lane
+# — precisely for the large packages it cannot compile inside its budget. The
+# fast loop disappeared exactly when it was needed most, and it was
+# self-inflicted: config, not build shape.
+#
+# WHY THE KEY IS THE SHA, NOT THE REF. An archive is only ever useful to the
+# commit it was built from — `validate-one` verifies `headSha` and refuses any
+# mismatch. So the two axes want opposite behaviour, which one ref-keyed group
+# cannot express:
+#
+#   * same SHA  -> dedupe. A second archive for a commit that already has one is
+#     pure waste, and that is all the burst protection an archive needs.
+#   * different SHAs -> BOTH must run. Cancelling an older SHA's archive is not
+#     "superseding" it; it destroys the only artifact that could ever validate
+#     that commit, and no later run will ever recreate it.
+#
+# `group: rust-archive-<sha>` + `cancel-in-progress: false` gives exactly that.
+#
+# WHY A SEPARATE WORKFLOW RATHER THAN RE-KEYING `test.yml`. Re-keying test.yml
+# on the SHA would apply these semantics to its whole 11-job fan-out, so N
+# distinct SHAs would mean N concurrent full matrices — trading a starved
+# archive for a runner-pool explosion. Splitting means only the single archive
+# job multiplies. `test.yml` is deliberately NOT modified here: its shard
+# fan-out and its own build job are untouched, so this change cannot regress the
+# nightly.
+#
+# The steps below mirror `test.yml`'s `build` job, and the artifact NAMES are
+# identical (`nx-archive` / `nx-pyffi-archive`) because `validate-one` consumes
+# either source.
+#
+# HOW TO USE IT — AND THE ONE WAY TO RE-CREATE THE PROBLEM.
+#
+# This config makes a durable archive POSSIBLE. It does not make one appear for a
+# commit nobody asked about: the config change opens the fast path, and only the
+# habit below keeps it open. To get a fast validation loop on your SHA:
+#
+#   1. `gh workflow run rust-archive.yml` — dispatch it on the commit you want,
+#   2. then `validate-one.yml` with your filter, which downloads that archive and
+#      only ever EXECUTES; it never rebuilds or relinks.
+#
+# DO NOT dispatch `test.yml` (`Rust CI`) to get an archive. That is the mistake
+# this whole workflow exists to make unnecessary, and it is self-defeating on
+# both ends: `test.yml` is REF-keyed with `cancel-in-progress: true` at workflow
+# level, so your dispatch KILLS whatever full-suite run is in flight — including
+# its archive job, and including the run someone is depending on for the red
+# ledger — while giving you nothing this single-job workflow does not already
+# give you. Every occurrence of "there is no fast path right now" traces back to
+# somebody reaching for `Rust CI` when they wanted an archive.
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: rust-archive-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: Build & archive workspace tests (SHA-keyed, uncancellable)
+    runs-on: ubuntu-latest
+    # The archive build is the long pole (it compiles + links every test binary
+    # once). Keep a generous backstop under GitHub's 6-hour ceiling.
+    timeout-minutes: 330
+    env:
+      # Pin lld to one worker and link test binaries serially: each `gam` test
+      # binary pulls the full dep closure (faer, burn, bevy_reflect, ndarray,
+      # nalgebra, arrow, parquet, ad_trait, num-dual, statrs, …) and two large
+      # links at once overflowed the 16-GB runner ("collect2: ld terminated with
+      # signal 7 [Bus error]").
+      RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
+      # Build EVERY test target in one pass and report ALL compile errors,
+      # instead of aborting at the first crate that fails to compile.
+      CARGO_BUILD_KEEP_GOING: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # build.rs human-author gate needs the real last build.rs editor; a depth-1 clone makes git log return HEAD, false-failing every Claude-authored HEAD (#1458)
+
+      - name: Setup Rust CI
+        uses: ./.github/actions/setup-rust-ci
+        with:
+          free-disk-space: 'true'
+          cache-targets: 'false'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # `--workspace --all-features` builds the root crate AND every member
+      # crate's lib/bins/examples AND every integration target.
+      # `--exclude gam-pyffi`: with --all-features, gam-pyffi's default-on
+      # `extension-module` feature tells PyO3 NOT to link libpython, so a
+      # standalone test binary fails to LINK; it is archived separately below.
+      #
+      # `--config profile.dev.debug=0` drops dev DWARF to keep the archive small.
+      # The step exits 0 even on compile failure so the archive (if any) and the
+      # build log still upload.
+      - name: Build nextest archive (whole workspace, all features)
+        id: archive
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo nextest archive \
+            --workspace --all-features --exclude gam-pyffi \
+            --config 'profile.dev.debug=0' \
+            --archive-file nx.tar.zst 2>&1 | tee archive-build.log || status="${PIPESTATUS[0]}"
+          echo "nextest archive exit status: ${status}"
+          if [ -f nx.tar.zst ]; then
+            echo "archived=true" >> "$GITHUB_OUTPUT"
+            echo "Archive built: $(du -h nx.tar.zst | cut -f1)"
+          else
+            echo "archived=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Workspace test build FAILED to produce an archive (compile errors); see the build-logs artifact."
+          fi
+
+      # gam-pyffi unit tests need extension-module OFF so the harness links
+      # libpython. Archive it on its own so its tests still run.
+      - name: Build nextest archive (gam-pyffi, no default features)
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo nextest archive \
+            -p gam-pyffi --no-default-features \
+            --config 'profile.dev.debug=0' \
+            --archive-file nx-pyffi.tar.zst 2>&1 | tee -a archive-build.log || true
+          if [ -f nx-pyffi.tar.zst ]; then echo "gam-pyffi archive built."; fi
+          exit 0
+
+      # Name the artifact this run produced, and for which commit, in the run
+      # summary — so a lane can tell at a glance whether its SHA has a usable
+      # archive without opening `validate-one` and reading a refusal.
+      - name: Report archive provenance
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "### Rust test archive"
+            echo ""
+            echo "- commit: \`${GITHUB_SHA}\`"
+            if [ -f nx.tar.zst ]; then
+              echo "- workspace archive: **present** ($(du -h nx.tar.zst | cut -f1))"
+            else
+              echo "- workspace archive: **ABSENT** — the workspace test build did not compile."
+            fi
+            if [ -f nx-pyffi.tar.zst ]; then
+              echo "- gam-pyffi archive: **present** ($(du -h nx-pyffi.tar.zst | cut -f1))"
+            else
+              echo "- gam-pyffi archive: **absent**"
+            fi
+            echo ""
+            echo "\`validate-one.yml\` requires an archive whose \`headSha\` equals the"
+            echo "commit under test; it never falls back to a source build."
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          exit 0
+
+      - name: Upload workspace test archive
+        uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.archive.outputs.archived == 'true' }}
+        with:
+          name: nx-archive
+          path: nx.tar.zst
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Upload gam-pyffi test archive
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: nx-pyffi-archive
+          path: nx-pyffi.tar.zst
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Upload build logs (compile-failure surface)
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: build-logs-archive
+          path: archive-build.log
+          retention-days: 7
+          if-no-files-found: warn

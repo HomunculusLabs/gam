@@ -149,32 +149,55 @@ jobs:
             archive_file=nx-pyffi.tar.zst
           fi
 
-          # Find a Rust CI run for THIS commit only. It may still be running:
-          # its build job uploads the archive before the long run shards finish.
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
-            --workflow test.yml \
-            --commit "$GITHUB_SHA" \
-            --limit 20 \
-            --json databaseId,status,conclusion \
-            --jq 'map(select(.status == "in_progress" or .conclusion == "success"))[0].databaseId // empty')
+          # Find an archive for THIS commit only, from either producer. A run may
+          # still be going: the archive uploads before the long run shards finish.
+          #
+          # `rust-archive.yml` is tried FIRST because it is the purpose-built
+          # producer and cannot be cancelled by another lane: its concurrency is
+          # keyed on the SHA with `cancel-in-progress: false`, so an archive, once
+          # started for a commit, always lands (#2429). `test.yml` remains a valid
+          # source and is tried second — its archive is identical when it survives,
+          # but its workflow-level `cancel-in-progress` on a REF-keyed group means
+          # any other lane's dispatch destroys it mid-build, which is why relying
+          # on it alone left active development with no fast path at all.
+          #
+          # The exact-SHA contract is unchanged: whichever producer supplies the
+          # archive, its `headSha` must equal the commit under test, and there is
+          # still NO source-build fallback.
+          run_id=""
+          archive_source=""
+          for workflow_file in rust-archive.yml test.yml; do
+            candidate=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow "$workflow_file" \
+              --commit "$GITHUB_SHA" \
+              --limit 20 \
+              --json databaseId,status,conclusion \
+              --jq 'map(select(.status == "in_progress" or .conclusion == "success"))[0].databaseId // empty')
+            if [[ -z "$candidate" ]]; then
+              echo "no run for ${GITHUB_SHA} in ${workflow_file}"
+              continue
+            fi
+            candidate_sha=$(gh run view "$candidate" --repo "$GITHUB_REPOSITORY" \
+              --json headSha --jq .headSha)
+            if [[ "$candidate_sha" != "$GITHUB_SHA" ]]; then
+              echo "::warning::${workflow_file} run ${candidate} reports ${candidate_sha}, not ${GITHUB_SHA}; skipping."
+              continue
+            fi
+            if gh run download "$candidate" --repo "$GITHUB_REPOSITORY" \
+              --name "$archive_name" --dir rust-archive; then
+              run_id="$candidate"
+              archive_source="$workflow_file"
+              break
+            fi
+            echo "${workflow_file} run ${candidate} has not produced ${archive_name} yet."
+          done
           if [[ -z "$run_id" ]]; then
-            echo "::error::No Rust CI run exists for exact commit ${GITHUB_SHA}. Dispatch Rust CI for this SHA; Validate One never performs a source-build fallback."
-            exit 1
-          fi
-          archive_sha=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
-            --json headSha --jq .headSha)
-          if [[ "$archive_sha" != "$GITHUB_SHA" ]]; then
-            echo "::error::Rust archive provenance mismatch: requested ${GITHUB_SHA}, run ${run_id} is ${archive_sha}."
-            exit 1
-          fi
-          if ! gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
-            --name "$archive_name" --dir rust-archive; then
-            echo "::error::Rust CI run ${run_id} has not produced ${archive_name} for ${GITHUB_SHA}. Wait for its build job; no source-build fallback is permitted."
+            echo "::error::No exact-SHA ${archive_name} exists for ${GITHUB_SHA} from rust-archive.yml or test.yml. Dispatch 'Rust Test Archive' for this SHA and wait for its archive step; Validate One never performs a source-build fallback."
             exit 1
           fi
           test -s "rust-archive/${archive_file}"
-          printf 'run_id=%s\ncommit=%s\nartifact=%s\n' \
-            "$run_id" "$GITHUB_SHA" "$archive_name" \
+          printf 'run_id=%s\ncommit=%s\nartifact=%s\nsource_workflow=%s\n' \
+            "$run_id" "$GITHUB_SHA" "$archive_name" "$archive_source" \
             | tee rust-archive/PROVENANCE.txt
 
       - name: Run Rust tests from exact-SHA archive
