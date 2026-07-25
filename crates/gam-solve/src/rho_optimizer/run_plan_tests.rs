@@ -5951,7 +5951,7 @@ fn run_efs_skips_global_cost_screening() {
                 .collect(),
         })
     });
-    problem
+    let result = problem
         .run(
             &mut obj,
             "EFS should not use a separate global cost-screening pass",
@@ -5963,10 +5963,40 @@ fn run_efs_skips_global_cost_screening() {
         "EFS must perform exactly the mandatory terminal value-agreement audit, \
          with no startup cost-screening pass"
     );
+    // The fixture's premise: the mock's EFS step is identically zero, so the
+    // seed IS the fixed point and the walk stops on its first step-norm test.
+    // Without this the accounting identity below would be vacuous.
+    assert_eq!(
+        result.iterations, 1,
+        "the all-zero EFS step must make the seed the fixed point in one walk step"
+    );
+    // Accounting identity for an EFS run, derived from the three places that
+    // can drive `eval_efs`:
+    //
+    //   * ONE seed validation (`run_fixed_point_outer_solver` evaluates the
+    //     seed before constructing the walk) whose `FixedPointSample` is handed
+    //     straight to `FixedPoint::with_initial_sample`. Iteration zero
+    //     therefore serves from that sample and the walk pays only its
+    //     REMAINING `iterations - 1` steps — this `-1` is what "the validated
+    //     seed sample must be reused instead of paying the EFS inner solve
+    //     twice" actually asserts, and it is the only term a screening pass or
+    //     a dropped initial sample could inflate.
+    //   * TWO terminal state installations at the SELECTED rho, both
+    //     `finalize_outer_result` (which for a fixed-point plan has no
+    //     derivative order to request and so installs through `eval_efs`): the
+    //     plan-level one that leaves the winner installed for `run_outer`'s
+    //     rho-uncertainty diagnostic, and the mint-level one that re-installs
+    //     it at full inner fidelity after that diagnostic and immediately
+    //     before the certificate.
+    //
+    // Every term is terminal proof work or the single seed solve; none of them
+    // is a screening pass over the candidate pool (`value_only_calls == 1`
+    // above is the direct witness for that half).
     assert_eq!(
         efs_calls.load(Ordering::Relaxed),
-        1,
-        "the validated seed sample must be reused instead of paying the EFS inner solve twice"
+        result.iterations + 2,
+        "an EFS run must pay one seed solve the walk then REUSES (iterations - 1 \
+         remaining steps) plus the two terminal installations, and nothing else"
     );
 }
 
