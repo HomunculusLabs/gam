@@ -5027,6 +5027,81 @@ pub(crate) fn test_gaussian_reml_fd_vs_analytic_gradient() {
     }
 }
 
+/// The saturated-ρ half of `test_gaussian_reml_fd_vs_analytic_gradient`: the
+/// same analytic-vs-FD comparison swept up a ρ ladder to λ = 2.6e10 instead of
+/// pinned at `‖ρ‖ ≤ 1`.
+///
+/// #2454 reports an analytic−FD gap on a production Matérn fixture that is
+/// additive and **exactly proportional to λ** (`gap/λ` constant to three digits
+/// over four e-folds, sign-indefinite per coordinate). Such a term is ~1e-8 at
+/// `‖ρ‖ ≤ 1` and therefore invisible to every historical FD gate, all of which
+/// probe near the origin — it only becomes visible once λ multiplies it up.
+///
+/// This fixture is a 3-coefficient Gaussian whose inner solve is EXACT
+/// (`β̂ = H⁻¹X'y`, rebuilt at every ρ), so the envelope identity holds to
+/// machine precision and central FD of the cost IS the true total derivative.
+/// It isolates the unified ρ-gradient assembly from everything the spatial
+/// drivers add. The measured gap stays at the FD floor (max 5.9e-10 absolute,
+/// no λ scaling) across the whole ladder, so the generic assembly is clean and
+/// #2454's λ-linear term needs something this fixture lacks.
+///
+/// The bound is ABSOLUTE, not relative, precisely because a λ-linear defect is
+/// what is being excluded: the true gradient decays like 1/λ up the ladder, so
+/// a relative bound would loosen exactly where the defect is loudest. At 1e-8
+/// it sits 17x above the observed floor and a `c·λ` term with #2454's
+/// `c = 5e-8` would breach it from ρ = 6 (`2e-5`) onward.
+#[test]
+pub(crate) fn gaussian_reml_outer_gradient_matches_fd_up_the_saturated_rho_ladder() {
+    const GAP_ABS_TOL: f64 = 1e-8;
+    let mut violations: Vec<String> = Vec::new();
+    for &r in &[0.0_f64, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0] {
+        let rho = vec![r, r];
+        let solution = build_gaussian_test_solution(&rho);
+        let result = reml_laml_evaluate(&solution, &rho, EvalMode::ValueAndGradient, None).unwrap();
+        let analytic = result.gradient.unwrap();
+        let h = 1e-4;
+        for k in 0..rho.len() {
+            let mut rp = rho.clone();
+            rp[k] += h;
+            let cp = reml_laml_evaluate(
+                &build_gaussian_test_solution(&rp),
+                &rp,
+                EvalMode::ValueOnly,
+                None,
+            )
+            .unwrap()
+            .cost;
+            let mut rm = rho.clone();
+            rm[k] -= h;
+            let cm = reml_laml_evaluate(
+                &build_gaussian_test_solution(&rm),
+                &rm,
+                EvalMode::ValueOnly,
+                None,
+            )
+            .unwrap()
+            .cost;
+            let fd = (cp - cm) / (2.0 * h);
+            let gap = analytic[k] - fd;
+            if gap.abs() > GAP_ABS_TOL {
+                violations.push(format!(
+                    "rho={r:.1} k={k}: analytic={:+.8e} fd={:+.8e} gap={gap:+.4e} \
+                     gap/lambda={:+.4e}",
+                    analytic[k],
+                    fd,
+                    gap / r.exp(),
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "outer ρ-gradient departs from FD by more than {GAP_ABS_TOL:.0e} on the saturated \
+         ladder — a gap that grows with λ is the #2454 signature:\n  {}",
+        violations.join("\n  "),
+    );
+}
+
 #[test]
 pub(crate) fn test_stochastic_trace_estimator_accuracy() {
     // Build a small SPD matrix and compare stochastic trace estimate
