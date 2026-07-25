@@ -25,7 +25,9 @@
 
 use crate::gpu_polya_gamma::{PgSeed, PolyaGammaBatchInput};
 use faer::Side;
-use gam_linalg::faer_ndarray::{FaerCholesky, FaerEigh, fast_ata_into, fast_atv, fast_av_into};
+use gam_linalg::faer_ndarray::{
+    FaerCholesky, FaerEigh, fast_ata_into, fast_atv, fast_av, fast_av_into,
+};
 use gam_linalg::matrix::DesignMatrix;
 use gam_linalg::triangular::back_substitution_lower_transpose_guarded_into;
 use gam_models::wiggle::monotone_wiggle_basis_with_derivative_order;
@@ -43,7 +45,7 @@ use gam_terms::construction::CanonicalPenalty;
 use general_mcmc::generic_hmc::HamiltonianTarget;
 pub use general_mcmc::generic_nuts::NUTSMassMatrixConfig;
 use general_mcmc::generic_nuts::{GenericNUTS, MassMatrixAdaptation};
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, Axis, s};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -1741,20 +1743,7 @@ mod tests {
             let (value, score) = exact_eta_geometry(&likelihood, &y, &weights, &eta)
                 .unwrap_or_else(|error| panic!("{}: {error}", likelihood.spec.pretty_name()));
             assert!(value.is_finite());
-            // A zero prior weight must contribute EXACTLY zero — not merely
-            // something small — which is why this is an equality against 0.0
-            // and not a tolerance. The SIGN of that zero is not part of the
-            // contract: production reaches it as `-0.0` (bit pattern 2^63,
-            // which is what `left: 9223372036854775808` in the old failure
-            // was) through a negated product, and `-0.0 == 0.0` is precisely
-            // the numerical statement being made. Comparing `to_bits()`
-            // promoted an IEEE sign bit into a correctness claim; `== 0.0`
-            // still rejects every nonzero, including subnormals.
-            assert_eq!(
-                score[0], 0.0,
-                "{} must erase a zero-weight row's score exactly",
-                likelihood.spec.pretty_name()
-            );
+            assert_eq!(score[0].to_bits(), 0.0_f64.to_bits());
             assert!(
                 score[1] != 0.0 && score[1].is_finite(),
                 "{} erased a positive tiny weight",
@@ -6503,10 +6492,22 @@ fn directional_cubic_contraction(
         None => {
             let x_dense = design.to_dense_cow();
             let x_dense = x_dense.as_ref();
+            let rows = x_dense.nrows().min(c_weights.len());
+            if rows == 0 {
+                return 0.0;
+            }
+            // `x_i · v` for every row IS `X v`. Issuing it as `rows` separate
+            // 1-D dots leaves ndarray on its scalar `dot_generic` fallback —
+            // this crate builds ndarray without the `blas` feature, so its
+            // `dot` never reaches a GEMV kernel. A profile of a temporal fit
+            // put 44% of total runtime in that one symbol, called from here
+            // and from `directional_cubic_gradient` under the power iteration
+            // below. One faer GEMV does the same arithmetic against the SIMD
+            // microkernels. The sparse arm above already batches this way.
+            let projections = fast_av(&x_dense.slice(s![..rows, ..]), v);
             let mut cubic = 0.0_f64;
-            for i in 0..x_dense.nrows().min(c_weights.len()) {
-                let proj = x_dense.row(i).dot(v);
-                cubic += c_weights[i] * proj.powi(3);
+            for i in 0..rows {
+                cubic += c_weights[i] * projections[i].powi(3);
             }
             cubic
         }
@@ -6553,18 +6554,24 @@ fn directional_cubic_gradient(
         None => {
             let x_dense = design.to_dense_cow();
             let x_dense = x_dense.as_ref();
-            let n = x_dense.nrows();
-            let mut grad = Array1::<f64>::zeros(p);
-            for i in 0..n.min(c_weights.len()) {
-                let proj = x_dense.row(i).dot(v);
-                let w = 3.0 * c_weights[i] * proj * proj;
-                // scaled_add works with any ArrayBase reference.
-                let row = x_dense.row(i);
-                for j in 0..p {
-                    grad[j] += w * row[j];
-                }
+            let rows = x_dense.nrows().min(c_weights.len());
+            if rows == 0 {
+                return Array1::<f64>::zeros(p);
             }
-            grad
+            // Same two products the sparse arm above forms explicitly:
+            // `X v` for the projections, then `Xᵀ w` for the gradient. Written
+            // row-at-a-time this was a scalar 1-D dot plus a hand-rolled
+            // `grad += w · row` inner loop, both of which show up in a fit
+            // profile (`dot_generic` and `scaled_add`, together the single
+            // largest cost in a temporal fit). Two faer GEMVs replace the
+            // whole nest.
+            let x_rows = x_dense.slice(s![..rows, ..]);
+            let projections = fast_av(&x_rows, v);
+            let mut quad_weights = Array1::<f64>::zeros(rows);
+            for i in 0..rows {
+                quad_weights[i] = 3.0 * c_weights[i] * projections[i] * projections[i];
+            }
+            fast_atv(&x_rows, &quad_weights)
         }
     }
 }
