@@ -254,10 +254,51 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
             _ => 0.0,
         };
 
+        // Explicit ψ motion of the Jeffreys curvature. This is a dense
+        // correction even when the likelihood's ψ Hessian drift is carried by
+        // an operator, so build it from the unpenalized information derivative
+        // and compose it onto either representation below. The old code formed
+        // this only in the dense branch and used the penalty-augmented `dense_b`
+        // as ∂ψH_info; operator-backed spatial axes therefore omitted the term
+        // entirely, while dense axes could contaminate it with ∂ψS.
+        let explicit_jeffreys_hphi =
+            if let (Some((z_j, h_joint)), Some(pert_info)) = (
+                jeffreys_hphi_ctx
+                    .as_ref()
+                    .filter(|_| jeffreys_info_depends_on_psi),
+                firth_pert_info.as_ref(),
+            ) {
+                Some(
+                    gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_hphi_explicit_param_derivative(
+                        h_joint.view(),
+                        z_j.view(),
+                        pert_info,
+                        |dir: &Array1<f64>| {
+                            family.joint_jeffreys_information_directional_derivative_with_specs(
+                                synced_states,
+                                specs,
+                                dir,
+                            )
+                        },
+                        |dir: &Array1<f64>| {
+                            family.exact_newton_joint_psihessian_directional_derivative(
+                                synced_states,
+                                specs,
+                                hyper_layout,
+                                psi_global,
+                                dir,
+                            )
+                        },
+                    )?,
+                )
+            } else {
+                None
+            };
+
         // Build drift: use block-local representation when possible to avoid
         // materializing full p×p dense matrices.
         let drift = if let Some(operator) = psi_terms.hessian_psi_operator {
-            if let Some((_, start, end, s_psi_local)) = penalty_motion {
+            let mut drift = if let Some((_, start, end, s_psi_local)) = penalty_motion {
                 // No dense Hessian contribution — penalty is block-local, operator
                 // (if present) handles the likelihood part. O(p_block²) fast path.
                 HyperCoordDrift::from_block_local_and_operator(
@@ -269,7 +310,9 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 )
             } else {
                 HyperCoordDrift::from_parts(None, Some(operator))
-            }
+            };
+            drift.dense = explicit_jeffreys_hphi;
+            drift
         } else {
             // Dense Hessian term exists (e.g., from non-implicit family).
             // Add block-local penalty motion only for DesignPenalty axes.
@@ -279,41 +322,9 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                     .slice_mut(ndarray::s![start..end, start..end])
                     .scaled_add(1.0, &s_psi_local);
             }
-                // `dense_b` is now `∂_ρ_i H_joint|_β`. Add the explicit Jeffreys term
-                // `∂_ρ_i H_Φ|_β` (gam#854) using it as the H_joint perturbation, the
-                // family's base directional Hessian derivative `Hdot[e_a]`, and the
-                // ψ-Hessian directional derivative `∂_ρ_i Hdot[e_a]|_β`. The helper
-                // returns zeros when the conditioning gate skips the term or the
-                // family lacks the exact directional derivatives, so a clean /
-                // well-conditioned fit is byte-unchanged.
-                if let Some((z_j, h_joint)) = jeffreys_hphi_ctx
-                    .as_ref()
-                    .filter(|_| jeffreys_info_depends_on_psi)
-                {
-                    let explicit_hphi =
-                        gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_hphi_explicit_param_derivative(
-                            h_joint.view(),
-                            z_j.view(),
-                            &dense_b,
-                            |dir: &Array1<f64>| {
-                                family.joint_jeffreys_information_directional_derivative_with_specs(
-                                    synced_states,
-                                    specs,
-                                    dir,
-                                )
-                            },
-                            |dir: &Array1<f64>| {
-                                family.exact_newton_joint_psihessian_directional_derivative(
-                                    synced_states,
-                                    specs,
-                                    hyper_layout,
-                                    psi_global,
-                                    dir,
-                                )
-                            },
-                        )?;
-                    dense_b += &explicit_hphi;
-                }
+            if let Some(explicit_hphi) = explicit_jeffreys_hphi {
+                dense_b += &explicit_hphi;
+            }
             HyperCoordDrift::from_parts(Some(dense_b), None)
         };
 

@@ -141,16 +141,22 @@ pub(crate) struct SurvivalJointQuantities {
 pub(crate) struct SurvivalJointPsiDirection {
     pub(crate) x_t_exit_psi: Option<Array2<f64>>,
     pub(crate) x_t_entry_psi: Option<Array2<f64>>,
+    pub(crate) x_t_deriv_psi: Option<Array2<f64>>,
     pub(crate) x_ls_exit_psi: Option<Array2<f64>>,
     pub(crate) x_ls_entry_psi: Option<Array2<f64>>,
+    pub(crate) x_ls_deriv_psi: Option<Array2<f64>>,
     pub(crate) z_t_exit_psi: Array1<f64>,
     pub(crate) z_t_entry_psi: Array1<f64>,
+    pub(crate) z_t_deriv_psi: Array1<f64>,
     pub(crate) z_ls_exit_psi: Array1<f64>,
     pub(crate) z_ls_entry_psi: Array1<f64>,
+    pub(crate) z_ls_deriv_psi: Array1<f64>,
     pub(crate) x_t_exit_action: Option<CustomFamilyPsiDesignAction>,
     pub(crate) x_t_entry_action: Option<CustomFamilyPsiDesignAction>,
+    pub(crate) x_t_deriv_action: Option<CustomFamilyPsiDesignAction>,
     pub(crate) x_ls_exit_action: Option<CustomFamilyPsiDesignAction>,
     pub(crate) x_ls_entry_action: Option<CustomFamilyPsiDesignAction>,
+    pub(crate) x_ls_deriv_action: Option<CustomFamilyPsiDesignAction>,
 }
 
 pub(crate) fn split_survival_psi_design(
@@ -158,7 +164,7 @@ pub(crate) fn split_survival_psi_design(
     n: usize,
     time_varying: bool,
     label: &str,
-) -> Result<(Array2<f64>, Array2<f64>), String> {
+) -> Result<(Array2<f64>, Array2<f64>, Option<Array2<f64>>), String> {
     if time_varying {
         if x_psi.nrows() != 2 * n && x_psi.nrows() != 3 * n {
             return Err(SurvivalLocationScaleError::DimensionMismatch {
@@ -174,6 +180,7 @@ pub(crate) fn split_survival_psi_design(
         Ok((
             x_psi.slice(s![0..n, ..]).to_owned(),
             x_psi.slice(s![n..2 * n, ..]).to_owned(),
+            (x_psi.nrows() == 3 * n).then(|| x_psi.slice(s![2 * n..3 * n, ..]).to_owned()),
         ))
     } else {
         if x_psi.nrows() != n {
@@ -186,7 +193,75 @@ pub(crate) fn split_survival_psi_design(
             }
             .into());
         }
-        Ok((x_psi.clone(), x_psi.clone()))
+        Ok((x_psi.clone(), x_psi.clone(), None))
+    }
+}
+
+impl SurvivalJointPsiDirection {
+    fn channel_dense(&self, channel: usize) -> Option<&Array2<f64>> {
+        match channel {
+            3 => self.x_t_exit_psi.as_ref(),
+            4 => self.x_t_entry_psi.as_ref(),
+            5 => self.x_t_deriv_psi.as_ref(),
+            6 => self.x_ls_exit_psi.as_ref(),
+            7 => self.x_ls_entry_psi.as_ref(),
+            8 => self.x_ls_deriv_psi.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn channel_action(&self, channel: usize) -> Option<&CustomFamilyPsiDesignAction> {
+        match channel {
+            3 => self.x_t_exit_action.as_ref(),
+            4 => self.x_t_entry_action.as_ref(),
+            5 => self.x_t_deriv_action.as_ref(),
+            6 => self.x_ls_exit_action.as_ref(),
+            7 => self.x_ls_entry_action.as_ref(),
+            8 => self.x_ls_deriv_action.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn channel_row(&self, channel: usize, row: usize) -> Result<Option<Array1<f64>>, String> {
+        if let Some(action) = self.channel_action(channel) {
+            return action.row_vector(row).map(Some);
+        }
+        Ok(self
+            .channel_dense(channel)
+            .map(|design| design.row(row).to_owned()))
+    }
+
+    fn primary_direction(&self, row: usize) -> [f64; SLS_ROW_K] {
+        [
+            0.0,
+            0.0,
+            0.0,
+            self.z_t_exit_psi[row],
+            self.z_t_entry_psi[row],
+            self.z_t_deriv_psi[row],
+            self.z_ls_exit_psi[row],
+            self.z_ls_entry_psi[row],
+            self.z_ls_deriv_psi[row],
+        ]
+    }
+
+    fn jacobian_action(
+        &self,
+        row: usize,
+        d_beta: &[f64],
+        offsets: &[usize],
+    ) -> Result<[f64; SLS_ROW_K], String> {
+        let mut out = [0.0; SLS_ROW_K];
+        for channel in 3..SLS_ROW_K {
+            let Some(design_row) = self.channel_row(channel, row)? else {
+                continue;
+            };
+            let block = if channel <= 5 { 1 } else { 2 };
+            out[channel] = design_row.dot(&ArrayView1::from(
+                &d_beta[offsets[block]..offsets[block + 1]],
+            ));
+        }
+        Ok(out)
     }
 }
 
@@ -2522,6 +2597,158 @@ impl crate::row_kernel::RowKernel<SLS_ROW_K> for SurvivalLsRowKernel<'_> {
     }
 }
 
+/// Exact mixed coefficient/design derivative `D_beta(D_psi H)[u]` for the
+/// non-wiggle survival location-scale Hessian.
+///
+/// For one row, write the coefficient-space observed information as
+/// `H = Jᵀ L₂ J`, where `J` is the predictor Jacobian and `L_k` is the kth
+/// derivative of the single-sourced row NLL in predictor space. A design
+/// hyperparameter moves both `J` and the predictors (`p_psi = J_psi beta`).
+/// Differentiating first in psi and then along coefficient direction `u` gives
+///
+/// ```text
+/// J_psiᵀ L₃[Ju] J
+/// + Jᵀ (L₄[Ju, p_psi] + L₃[J_psi u]) J
+/// + Jᵀ L₃[Ju] J_psi .
+/// ```
+///
+/// The three contractions come from the same packed `OneSeed`/`TwoSeed` row
+/// program as the production Hessian. This avoids a second hand-derived
+/// survival formula and includes exit, entry, and time-derivative design
+/// channels uniformly.
+pub(crate) fn survival_ls_joint_psi_hessian_directional_derivative_dense(
+    family: &SurvivalLocationScaleFamily,
+    dynamic: &SurvivalDynamicGeometry,
+    direction: &SurvivalJointPsiDirection,
+    d_beta: &[f64],
+    row_mask: Option<&Array1<f64>>,
+) -> Result<Array2<f64>, String> {
+    if family.x_link_wiggle.is_some() {
+        return Err(
+            "survival joint psi mixed Hessian uses the fixed-width row program; \
+             link-wiggle geometry requires its dynamic-width analogue"
+                .to_string(),
+        );
+    }
+    let kernel = family.survival_ls_row_kernel_rescaled(dynamic, 0.0);
+    let offsets = &kernel.offsets;
+    let p = *offsets
+        .last()
+        .ok_or_else(|| "missing survival joint coefficient offset".to_string())?;
+    if d_beta.len() != p {
+        return Err(format!(
+            "survival joint psi mixed Hessian direction length {} != coefficient dimension {p}",
+            d_beta.len()
+        ));
+    }
+    let rows = row_set_from_survival_mask(row_mask, family.n);
+    rows.par_try_reduce_fold(
+        family.n,
+        || Array2::<f64>::zeros((p, p)),
+        |mut acc, row, row_weight| -> Result<_, String> {
+            let beta_direction =
+                crate::row_kernel::RowKernel::jacobian_action(&kernel, row, d_beta);
+            let psi_direction = direction.primary_direction(row);
+            let mixed_primary = direction.jacobian_action(row, d_beta, offsets)?;
+            let third_beta = crate::row_kernel::RowKernel::row_third_contracted(
+                &kernel,
+                row,
+                &beta_direction,
+            )?;
+            let fourth_beta_psi = crate::row_kernel::RowKernel::row_fourth_contracted(
+                &kernel,
+                row,
+                &beta_direction,
+                &psi_direction,
+            )?;
+            let third_mixed = crate::row_kernel::RowKernel::row_third_contracted(
+                &kernel,
+                row,
+                &mixed_primary,
+            )?;
+
+            let mut center = [[0.0; SLS_ROW_K]; SLS_ROW_K];
+            for a in 0..SLS_ROW_K {
+                for b in 0..SLS_ROW_K {
+                    center[a][b] =
+                        row_weight * (fourth_beta_psi[a][b] + third_mixed[a][b]);
+                }
+            }
+            crate::row_kernel::RowKernel::add_pullback_hessian(
+                &kernel,
+                row,
+                &center,
+                &mut acc,
+            );
+
+            let base_rows: Vec<Option<(usize, Array1<f64>)>> = (0..SLS_ROW_K)
+                .map(|channel| {
+                    kernel
+                        .channel_block(channel)
+                        .zip(kernel.channel_row(channel, row))
+                        .map(|(block, design_row)| (offsets[block], design_row))
+                })
+                .collect();
+            let psi_rows: Vec<Option<(usize, Array1<f64>)>> = (0..SLS_ROW_K)
+                .map(|channel| {
+                    let Some(block) = kernel.channel_block(channel) else {
+                        return Ok(None);
+                    };
+                    direction
+                        .channel_row(channel, row)
+                        .map(|row| row.map(|design_row| (offsets[block], design_row)))
+                })
+                .collect::<Result<_, String>>()?;
+
+            for a in 0..SLS_ROW_K {
+                if let Some((psi_offset, psi_row)) = psi_rows[a].as_ref() {
+                    for b in 0..SLS_ROW_K {
+                        let Some((base_offset, base_row)) = base_rows[b].as_ref() else {
+                            continue;
+                        };
+                        let scale = row_weight * third_beta[a][b];
+                        if scale == 0.0 {
+                            continue;
+                        }
+                        for (ia, &va) in psi_row.iter().enumerate() {
+                            if va == 0.0 {
+                                continue;
+                            }
+                            let left = scale * va;
+                            for (ib, &vb) in base_row.iter().enumerate() {
+                                acc[[psi_offset + ia, base_offset + ib]] += left * vb;
+                            }
+                        }
+                    }
+                }
+                let Some((base_offset, base_row)) = base_rows[a].as_ref() else {
+                    continue;
+                };
+                for b in 0..SLS_ROW_K {
+                    let Some((psi_offset, psi_row)) = psi_rows[b].as_ref() else {
+                        continue;
+                    };
+                    let scale = row_weight * third_beta[a][b];
+                    if scale == 0.0 {
+                        continue;
+                    }
+                    for (ia, &va) in base_row.iter().enumerate() {
+                        if va == 0.0 {
+                            continue;
+                        }
+                        let left = scale * va;
+                        for (ib, &vb) in psi_row.iter().enumerate() {
+                            acc[[base_offset + ia, psi_offset + ib]] += left * vb;
+                        }
+                    }
+                }
+            }
+            Ok(acc)
+        },
+        |a, b| Ok(a + b),
+    )
+}
+
 fn require_fitted_block_geometry(
     block_states: &[ParameterBlockState],
     context: &'static str,
@@ -3775,16 +4002,22 @@ impl SurvivalLocationScaleFamily {
                 if global == psi_index {
                     let mut x_t_exit_psi = None;
                     let mut x_t_entry_psi = None;
+                    let mut x_t_deriv_psi = None;
                     let mut x_ls_exit_psi = None;
                     let mut x_ls_entry_psi = None;
+                    let mut x_ls_deriv_psi = None;
                     let mut x_t_exit_action = None;
                     let mut x_t_entry_action = None;
+                    let mut x_t_deriv_action = None;
                     let mut x_ls_exit_action = None;
                     let mut x_ls_entry_action = None;
+                    let mut x_ls_deriv_action = None;
                     let mut z_t_exit_psi = Array1::<f64>::zeros(n);
                     let mut z_t_entry_psi = Array1::<f64>::zeros(n);
+                    let mut z_t_deriv_psi = Array1::<f64>::zeros(n);
                     let mut z_ls_exit_psi = Array1::<f64>::zeros(n);
                     let mut z_ls_entry_psi = Array1::<f64>::zeros(n);
+                    let mut z_ls_deriv_psi = Array1::<f64>::zeros(n);
                     match block_idx {
                         Self::BLOCK_THRESHOLD => {
                             let total_rows = if t_time_varying { 3 * n } else { n };
@@ -3800,10 +4033,13 @@ impl SurvivalLocationScaleFamily {
                                     if t_time_varying {
                                         let exit_action = action.slice_rows(0..n)?;
                                         let entry_action = action.slice_rows(n..2 * n)?;
+                                        let deriv_action = action.slice_rows(2 * n..3 * n)?;
                                         z_t_exit_psi = exit_action.forward_mul(beta_t.view());
                                         z_t_entry_psi = entry_action.forward_mul(beta_t.view());
+                                        z_t_deriv_psi = deriv_action.forward_mul(beta_t.view());
                                         x_t_exit_action = Some(exit_action);
                                         x_t_entry_action = Some(entry_action);
+                                        x_t_deriv_action = Some(deriv_action);
                                     } else {
                                         z_t_exit_psi = action.forward_mul(beta_t.view());
                                         z_t_entry_psi = z_t_exit_psi.clone();
@@ -3812,7 +4048,7 @@ impl SurvivalLocationScaleFamily {
                                     }
                                 }
                                 PsiDesignMap::Dense { matrix } => {
-                                    let (exit, entry) = split_survival_psi_design(
+                                    let (exit, entry, deriv) = split_survival_psi_design(
                                         &matrix,
                                         n,
                                         t_time_varying,
@@ -3820,8 +4056,12 @@ impl SurvivalLocationScaleFamily {
                                     )?;
                                     z_t_exit_psi = fast_av(&exit, beta_t);
                                     z_t_entry_psi = fast_av(&entry, beta_t);
+                                    if let Some(d) = deriv.as_ref() {
+                                        z_t_deriv_psi = fast_av(d, beta_t);
+                                    }
                                     x_t_exit_psi = Some(exit);
                                     x_t_entry_psi = Some(entry);
+                                    x_t_deriv_psi = deriv;
                                 }
                                 PsiDesignMap::Zero { .. } => {}
                                 PsiDesignMap::Second { .. } => {
@@ -3844,10 +4084,13 @@ impl SurvivalLocationScaleFamily {
                                     if ls_time_varying {
                                         let exit_action = action.slice_rows(0..n)?;
                                         let entry_action = action.slice_rows(n..2 * n)?;
+                                        let deriv_action = action.slice_rows(2 * n..3 * n)?;
                                         z_ls_exit_psi = exit_action.forward_mul(beta_ls.view());
                                         z_ls_entry_psi = entry_action.forward_mul(beta_ls.view());
+                                        z_ls_deriv_psi = deriv_action.forward_mul(beta_ls.view());
                                         x_ls_exit_action = Some(exit_action);
                                         x_ls_entry_action = Some(entry_action);
+                                        x_ls_deriv_action = Some(deriv_action);
                                     } else {
                                         z_ls_exit_psi = action.forward_mul(beta_ls.view());
                                         z_ls_entry_psi = z_ls_exit_psi.clone();
@@ -3856,7 +4099,7 @@ impl SurvivalLocationScaleFamily {
                                     }
                                 }
                                 PsiDesignMap::Dense { matrix } => {
-                                    let (exit, entry) = split_survival_psi_design(
+                                    let (exit, entry, deriv) = split_survival_psi_design(
                                         &matrix,
                                         n,
                                         ls_time_varying,
@@ -3864,8 +4107,12 @@ impl SurvivalLocationScaleFamily {
                                     )?;
                                     z_ls_exit_psi = fast_av(&exit, beta_ls);
                                     z_ls_entry_psi = fast_av(&entry, beta_ls);
+                                    if let Some(d) = deriv.as_ref() {
+                                        z_ls_deriv_psi = fast_av(d, beta_ls);
+                                    }
                                     x_ls_exit_psi = Some(exit);
                                     x_ls_entry_psi = Some(entry);
+                                    x_ls_deriv_psi = deriv;
                                 }
                                 PsiDesignMap::Zero { .. } => {}
                                 PsiDesignMap::Second { .. } => {
@@ -3879,16 +4126,22 @@ impl SurvivalLocationScaleFamily {
                     return Ok(Some(SurvivalJointPsiDirection {
                         x_t_exit_psi,
                         x_t_entry_psi,
+                        x_t_deriv_psi,
                         x_ls_exit_psi,
                         x_ls_entry_psi,
+                        x_ls_deriv_psi,
                         z_t_exit_psi,
                         z_t_entry_psi,
+                        z_t_deriv_psi,
                         z_ls_exit_psi,
                         z_ls_entry_psi,
+                        z_ls_deriv_psi,
                         x_t_exit_action,
                         x_t_entry_action,
+                        x_t_deriv_action,
                         x_ls_exit_action,
                         x_ls_entry_action,
+                        x_ls_deriv_action,
                     }));
                 }
                 global += 1;
