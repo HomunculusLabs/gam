@@ -4199,8 +4199,15 @@ pub fn project_point_strictly_into_feasible_constraint_set(
     }
 }
 
-/// Re-solve one discovered passive face in the original metric, pruning every
-/// row whose conditioned equality multiplier is not strictly positive.
+/// Re-solve one discovered passive face in the original metric.
+///
+/// The terminal KKT contract admits multipliers down to
+/// `-ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL`; the transition rule must use that
+/// same numerical cone. Treating every roundoff-sized negative multiplier as a
+/// leaving pivot makes a degenerate face alternate between equivalent bases
+/// that the eventual certificate would accept. Materially negative rows leave
+/// one at a time in Bland order (lowest constraint id), so the conditioned
+/// phase has a deterministic anti-cycling pivot rule.
 fn refine_operator_metric_face(
     hessian: &Array2<f64>,
     unconstrained: &Array1<f64>,
@@ -4224,24 +4231,20 @@ fn refine_operator_metric_face(
             Some(&active_residual),
         )?;
         let refined_multipliers = -system_multipliers;
-        if refined_multipliers
+        let leaving_position = refined_multipliers
             .iter()
-            .all(|value| value.is_finite() && *value > 0.0)
-        {
+            .enumerate()
+            .filter(|(_, value)| {
+                !value.is_finite() || **value < -ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
+            })
+            .min_by_key(|(position, _)| active[*position])
+            .map(|(position, _)| position);
+        let Some(leaving_position) = leaving_position else {
             return Ok((unconstrained + &correction, refined_multipliers));
-        }
-        let mut retained = Vec::with_capacity(active.len());
-        for (position, &active_row) in active.iter().enumerate() {
-            if refined_multipliers[position].is_finite()
-                && refined_multipliers[position] > 0.0
-            {
-                retained.push(active_row);
-            } else {
-                is_active[active_row] = false;
-                *transitions += 1;
-            }
-        }
-        *active = retained;
+        };
+        let leaving_row = active.remove(leaving_position);
+        is_active[leaving_row] = false;
+        *transitions += 1;
     }
 }
 
@@ -4359,9 +4362,20 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
                 worst_violation = violation;
                 worst_row = row;
             }
-            if !is_active[row] && !banned[row] && violation > entering_violation {
-                entering = Some(row);
-                entering_violation = violation;
+            if !is_active[row] && !banned[row] {
+                if conditioned_phase {
+                    // Bland entering rule: after promotion to the numerically
+                    // authoritative metric, choose the lowest-index violated
+                    // row. The discovery phase above still chooses the most
+                    // violated separator for fast face identification.
+                    if entering.is_none() && violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+                        entering = Some(row);
+                        entering_violation = violation;
+                    }
+                } else if violation > entering_violation {
+                    entering = Some(row);
+                    entering_violation = violation;
+                }
             }
         }
 
@@ -4451,14 +4465,22 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
         // directions serially makes one Newton cycle pay O(p) null-space
         // factorizations. The batch scanner keeps memory coefficient-bounded
         // and returns at most `p-active.len()` rows.
-        let independent_entering = independent_violated_operator_rows(
-            &ops,
-            &values,
-            &active,
-            &is_active,
-            &banned,
-            p.saturating_sub(active.len()),
-        )?;
+        let independent_entering = if conditioned_phase {
+            // The conditioned phase uses one Bland pivot at a time. Route the
+            // selected row through the exchange below even when it increases
+            // rank; `compress_working` then either appends it or replaces the
+            // dependent representative without a batch pivot.
+            Vec::new()
+        } else {
+            independent_violated_operator_rows(
+                &ops,
+                &values,
+                &active,
+                &is_active,
+                &banned,
+                p.saturating_sub(active.len()),
+            )?
+        };
         if !independent_entering.is_empty() {
             for &entering_row in &independent_entering {
                 active.push(entering_row);
@@ -4541,17 +4563,35 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
                 let trial_candidate = &unconstrained + &inverse_rows_t.dot(&trial);
                 (trial, trial_candidate)
             };
-            let mut retained_rows = Vec::with_capacity(active.len());
-            for (position, &active_row) in active.iter().enumerate() {
-                if trial[position].is_finite() && trial[position] > 0.0 {
-                    retained_rows.push(active_row);
-                } else {
-                    is_active[active_row] = false;
-                    banned[active_row] = true;
+            let materially_negative = |value: f64| {
+                !value.is_finite() || value < -ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
+            };
+            if conditioned_phase {
+                let leaving_position = trial
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, value)| materially_negative(**value))
+                    .min_by_key(|(position, _)| active[*position])
+                    .map(|(position, _)| position);
+                if let Some(leaving_position) = leaving_position {
+                    let leaving_row = active.remove(leaving_position);
+                    is_active[leaving_row] = false;
+                    banned[leaving_row] = true;
                     transitions += 1;
                 }
+            } else {
+                let mut retained_rows = Vec::with_capacity(active.len());
+                for (position, &active_row) in active.iter().enumerate() {
+                    if !materially_negative(trial[position]) {
+                        retained_rows.push(active_row);
+                    } else {
+                        is_active[active_row] = false;
+                        banned[active_row] = true;
+                        transitions += 1;
+                    }
+                }
+                active = retained_rows;
             }
-            active = retained_rows;
             if active.is_empty() {
                 candidate.assign(&unconstrained);
                 multipliers = Array1::<f64>::zeros(0);
@@ -4565,10 +4605,23 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
             break;
         }
 
-        let moved = candidate
+        let movement_norm = candidate
             .iter()
             .zip(candidate_before_transition.iter())
-            .any(|(left, right)| left.to_bits() != right.to_bits());
+            .map(|(left, right)| {
+                let delta = left - right;
+                delta * delta
+            })
+            .sum::<f64>()
+            .sqrt();
+        let movement_scale = candidate
+            .iter()
+            .chain(candidate_before_transition.iter())
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+            .max(1.0);
+        let moved = movement_norm > ACTIVE_SET_WORKING_FACE_TOL * movement_scale;
         if active.len() > p {
             crate::bail_invalid_estim!(
                 "operator metric-projection passive face escaped its coefficient-rank bound: \
@@ -4751,11 +4804,11 @@ pub fn solve_quadratic_with_linear_constraints(
 #[cfg(test)]
 mod tests {
     use super::{
-        ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId,
-        ConstraintSet, ConstraintSetOps, ConstraintSetReducedFace, LinearInequalityConstraints,
-        active_set_boundary_hit_step_fraction, certify_active_equalities,
-        compute_constraint_kkt_diagnostics, constraint_set_rows_tight_at_point,
-        fallback_projected_gradient_direction,
+        ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
+        ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId, ConstraintSet, ConstraintSetOps,
+        ConstraintSetReducedFace, LinearInequalityConstraints, active_set_boundary_hit_step_fraction,
+        certify_active_equalities, compute_constraint_kkt_diagnostics,
+        constraint_set_rows_tight_at_point, fallback_projected_gradient_direction,
         fallback_projected_gradient_direction_with_constraint_set,
         independent_violated_operator_rows, khatri_rao_cone_reduced_face,
         moreau_projection_via_primal_qp, nonnegative_cone_multipliers,
@@ -5939,6 +5992,43 @@ mod tests {
         let gradient = hessian.dot(&candidate) - rhs;
         assert_relative_eq!(gradient[0], 2.0, epsilon = 1e-12);
         assert_relative_eq!(gradient[1], 0.0, epsilon = 1e-12);
+    }
+
+    /// The passive-set transition cone and the terminal KKT certificate must be
+    /// the same numerical cone. A face multiplier a half tolerance below zero
+    /// is certificate-admissible; dropping and rediscovering that row under a
+    /// stricter `μ > 0` pivot rule is the degenerate conditioned-face cycle
+    /// observed by the Python transformation fits in #2432.
+    #[test]
+    fn operator_metric_dual_uses_the_certificate_multiplier_cone_2432() {
+        let psi = array![[1.0_f64, 0.0], [0.0, 1.0]];
+        let cone =
+            KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+                .expect("nonnegative quadrant");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let hessian = Array2::<f64>::eye(2);
+        let epsilon = 0.5 * ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL;
+        let rhs = array![epsilon, 1.0];
+        let beta_start = array![0.0_f64, 0.0];
+
+        let (candidate, active) = solve_quadratic_with_constraint_set(
+            &hessian,
+            &rhs,
+            &beta_start,
+            &set,
+            Some(&[0]),
+        )
+        .expect("certificate-admissible degenerate face must not pivot-cycle");
+
+        assert_eq!(active, vec![0]);
+        assert_relative_eq!(candidate[0], 0.0, epsilon = 1e-14);
+        assert_relative_eq!(candidate[1], 1.0, epsilon = 1e-14);
+        let gradient = hessian.dot(&candidate) - rhs;
+        assert_relative_eq!(gradient[0], -epsilon, epsilon = 1e-14);
+        assert!(
+            (-gradient[0]).abs() <= ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
+            "the retained numerical multiplier must lie inside the certified dual cone"
+        );
     }
 
     #[test]
