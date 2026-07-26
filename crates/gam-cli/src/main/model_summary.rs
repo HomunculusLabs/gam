@@ -59,11 +59,24 @@ pub(crate) fn build_model_summary(
         if !z.is_finite() {
             return None;
         }
+        // Both tails come from the function that computes them, never from
+        // `1 - CDF` (#2562). A CDF saturates to exactly 1.0 once its upper tail
+        // drops below half an ulp of one, so the subtraction reports p = 0 for
+        // every |z| above 8.3 and is 7% high already at |z| = 8 -- and the
+        // `.clamp(0.0, 1.0)` that used to wrap it made the zero look legal.
         if scale_is_estimated {
-            let dist = StudentsT::new(0.0, 1.0, residual_df?).ok()?;
-            Some((2.0 * (1.0 - dist.cdf(z.abs()))).clamp(0.0, 1.0))
+            // For t > 0, P(T > t) = I_{nu/(nu+t^2)}(nu/2, 1/2) / 2, so the
+            // two-sided p-value is that regularized incomplete beta outright.
+            let df = residual_df?;
+            let t = z.abs();
+            let x = df / (df + t * t);
+            if !(x.is_finite() && (0.0..=1.0).contains(&x)) {
+                return None;
+            }
+            Some(beta_reg(0.5 * df, 0.5, x).clamp(0.0, 1.0))
         } else {
-            Some((2.0 * (1.0 - normal_cdf(z.abs()))).clamp(0.0, 1.0))
+            // 2 * (1 - Phi(|z|)) is erfc(|z|/sqrt2), one call and no subtraction.
+            Some((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0))
         }
     };
 

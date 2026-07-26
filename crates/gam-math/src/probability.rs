@@ -216,6 +216,25 @@ pub fn normal_pdf(x: f64) -> f64 {
 /// returned function is the standard normal CDF itself rather than a separate
 /// polynomial surrogate surface.
 #[inline]
+/// Upper tail of the standard normal, `1 - Φ(x)`, with full *relative*
+/// accuracy everywhere it is representable.
+///
+/// This is not `1.0 - normal_cdf(x)`. `Φ(x)` rounds to exactly `1.0` once its
+/// upper tail falls below half an ulp of one (5.55e-17, reached at `x ≈ 8.3`),
+/// so the subtraction returns exactly zero for every larger `x` — and is already
+/// wrong in its leading digits before that: at `x = 8` the true tail is
+/// 6.22e-16 and `1 - Φ(8)` gives 6.66e-16, seven percent high. The
+/// complementary error function carries the small tail directly and never forms
+/// the difference, so the relative error stays at a few ulp down to `x ≈ 37`,
+/// below which the true value is smaller than the smallest subnormal and zero
+/// is the correctly rounded answer.
+///
+/// Symmetry makes this the whole story for two-sided tests: the two-sided
+/// p-value of a z statistic is `2 * normal_sf(|z|)`, which is `erfc(|z|/√2)`.
+pub fn normal_sf(x: f64) -> f64 {
+    0.5 * erfc(x / std::f64::consts::SQRT_2)
+}
+
 pub fn normal_cdf(x: f64) -> f64 {
     0.5 * erfc(-x / std::f64::consts::SQRT_2)
 }
@@ -1200,6 +1219,64 @@ mod tests {
 
     fn rel_err(got: f64, expected: f64) -> f64 {
         (got - expected).abs() / expected.abs().max(1e-300)
+    }
+
+    #[test]
+    fn normal_sf_keeps_the_upper_tail_that_one_minus_the_cdf_destroys() {
+        // `Φ(x)` rounds to exactly 1.0 once its upper tail drops below half an
+        // ulp of one, so `1 - normal_cdf(x)` returns exactly zero from x ~ 8.3 up
+        // and is already 7% high at x = 8. `normal_sf` computes the tail rather
+        // than reconstructing it. References are correctly rounded doubles from a
+        // 60-dps `erfc(x/√2)/2`.
+        //
+        // Bar: `x * x * eps`, which is derived rather than chosen. Forming the
+        // argument `u = x / √2` rounds it, a relative eps, i.e. an absolute
+        // `u * eps`. The relative condition number of `erfc` at `u` is
+        // `u * |erfc'(u)| / erfc(u)`, and since `erfc(u) ~ exp(-u^2) / (u√π)` for
+        // large `u` that tends to `2u^2 = x^2`. So the returned tail inherits
+        // `x^2 * eps` from the argument alone, before `erfc`'s own couple of ulp
+        // -- 36 ulp at x = 6, 1370 ulp at x = 37. That is intrinsic to taking a
+        // z score as the input: the tail is exponentially steep in `x`, so the
+        // last bit of `x` is worth `x^2` bits of the tail. It is also
+        // irrelevant next to what it replaces, which is a relative error of 1.
+        const ROWS: [(f64, f64); 11] = [
+            (0.5, 0.3085375387259869),
+            (2.0, 0.02275013194817921),
+            (4.0, 3.1671241833119924e-5),
+            (6.0, 9.86587645037698e-10),
+            (8.0, 6.220960574271784e-16),
+            (8.3, 5.205569744890254e-17),
+            (9.0, 1.1285884059538405e-19),
+            (12.0, 1.776482112077679e-33),
+            (20.0, 2.7536241186062337e-89),
+            (30.0, 4.906713927148187e-198),
+            (37.0, 5.725571222524577e-300),
+        ];
+        for (x, want) in ROWS {
+            let bar = (x * x + 2.0) * f64::EPSILON;
+            let got = normal_sf(x);
+            let rel = ((got - want) / want).abs();
+            assert!(
+                rel <= bar,
+                "normal_sf({x}) = {got:e}, want {want:e}, relative {rel:e} > {bar:e}"
+            );
+            // The value this replaces. Above the saturation point it is not a
+            // less accurate answer, it is no answer.
+            if x >= 8.3 {
+                assert_eq!(
+                    1.0 - normal_cdf(x),
+                    0.0,
+                    "1 - normal_cdf({x}) is expected to have saturated"
+                );
+            }
+        }
+        // Complementarity holds wherever the sum is representable, and the
+        // symmetry that makes a two-sided p-value a single call.
+        for x in [-3.0_f64, -0.25, 0.0, 0.25, 3.0] {
+            let sum = normal_sf(x) + normal_cdf(x);
+            assert!((sum - 1.0).abs() <= 2.0 * f64::EPSILON, "sf + cdf = {sum}");
+            assert_eq!(normal_sf(-x), normal_cdf(x), "sf(-x) != cdf(x) at {x}");
+        }
     }
 
     #[test]

@@ -14,6 +14,12 @@ pub use gam_math::probability::normal_pdf;
 /// `crate::probability::normal_cdf` resolving for all existing callers.
 pub use gam_math::probability::normal_cdf;
 
+/// Standard normal upper tail `1 - Φ(x)`, computed rather than reconstructed.
+/// `1.0 - normal_cdf(x)` returns exactly zero for `x` above ~8.3 because Φ
+/// saturates; this keeps full relative accuracy down to the subnormal floor
+/// (#2562). Implementation lives in `gam-math`.
+pub use gam_math::probability::normal_sf;
+
 /// Scaled complementary error function `erfcx(x) = exp(x²) · erfc(x)`,
 /// specialized to `x ≥ 0`.  The implementation now lives in the lowest crate
 /// (`gam-math`) so the survival/probit cluster can consume it without reaching
