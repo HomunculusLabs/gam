@@ -1114,7 +1114,20 @@ pub fn reml_laml_evaluate(
                             } else {
                                 let (range_root, root_start, root_end) =
                                     coord.block_local_root()?;
-                                assert_eq!((root_start, root_end), (start, end));
+                                // The root chart's span must be the span this
+                                // coordinate is being evaluated over, or the fused
+                                // gradient below reads the wrong block. Checked
+                                // unconditionally: a `debug_assert` states an
+                                // invariant that then vanishes from every shipped
+                                // build, which is where a mismatch would actually
+                                // do its damage. Two usize comparisons on a path
+                                // that follows a Cholesky are free.
+                                assert_eq!(
+                                    (root_start, root_end),
+                                    (start, end),
+                                    "block-local root chart span ({root_start}, {root_end}) \
+                                     must match the coordinate's evaluated span ({start}, {end})"
+                                );
                                 ds.fused_logdet_gradient_minus_rank_from_root_chart(
                                     &s_block,
                                     range_root,
