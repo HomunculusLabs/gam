@@ -27,15 +27,17 @@ on:
     - cron: "7,37 * * * *"
   workflow_dispatch:
 
-# NO concurrency group, deliberately. Parallel runs of this workflow are wanted
-# and must never queue or cancel each other — the fleet's throughput comes from
-# many agents working main at once.
+# This is one continuous agent on one finite OAuth subscription. Runs #16 and
+# #17 overlapped for 48 minutes, doubled inference demand, and #17 exhausted the
+# account limit. Keep one run active and at most one pending; GitHub coalesces
+# older pending schedules without interrupting the active agent.
+concurrency:
+  group: connectome-freeform
+  cancel-in-progress: false
 #
-# That means memory has more than one writer, so the save is built to be
-# contention-free rather than serialized (see "Save memory"): every run writes
-# its own immutable ref, which cannot collide, and only the shared *pointer* is
-# advanced best-effort. Parallel runs therefore fork their memory from a common
-# ancestor and each keeps a complete lineage; nothing is ever lost or blocked.
+# The save remains contention-safe because a workflow_dispatch started just
+# before this policy landed can still overlap: every run writes its own
+# immutable ref, and only the shared pointer advances best-effort.
 
 permissions:
   contents: write

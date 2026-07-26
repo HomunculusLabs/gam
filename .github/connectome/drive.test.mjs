@@ -143,6 +143,9 @@ async function scenario({ name, env = {}, play, expectExit, expect = [], reject 
 
 const OVER_BUDGET =
   'Adaptive picker exhausted but 165494 tokens still exceed hard budget 163616';
+const ACCOUNT_RATE_LIMIT =
+  `429 {"type":"error","error":{"type":"rate_limit_error","message":` +
+  `"This request would exceed your account's rate limit. Please try again later."}}`;
 
 // S1 — THE REGRESSION. Stall + deadline are 10 minutes: only correct handling
 // of inference:exhausted can finish this inside the scenario budget.
@@ -165,6 +168,33 @@ await scenario({
     }
     send({ type: 'inference:exhausted', error: 'retries exhausted' });
     await waitFor(isShutdown, 'graceful shutdown request', 6000);
+    send({ type: 'lifecycle', phase: 'exiting' });
+    conn().end();
+  },
+});
+
+// S10 — account capacity is an operational deferral for this scheduled worker,
+// not a broken checkout or driver. It must remain visibly different from S1:
+// clean exit plus an Actions warning, with no false-green failure annotation.
+await scenario({
+  name: 'S10 exhausted Anthropic account capacity defers to a later scheduled run',
+  expectExit: 0,
+  expect: [
+    /attempt 4\/4/,
+    /Connectome deferred by Anthropic capacity/,
+    /rate-limit deferred/,
+  ],
+  reject: [/refusing a false-green run/],
+  play: async ({ send, waitFor, isShutdown, isKickoff, conn }) => {
+    send({ type: 'lifecycle', phase: 'ready' });
+    await waitFor(isKickoff, 'kickoff');
+    send({ type: 'inference:started' });
+    for (let i = 0; i < 4; i++) {
+      send({ type: 'inference:failed', error: ACCOUNT_RATE_LIMIT });
+      if (i < 3) send({ type: 'inference:started' });
+    }
+    send({ type: 'inference:exhausted', error: ACCOUNT_RATE_LIMIT });
+    await waitFor(isShutdown, 'rate-limit deferral shutdown', 6000);
     send({ type: 'lifecycle', phase: 'exiting' });
     conn().end();
   },

@@ -15,7 +15,10 @@
 //      quiet interval. This is the success certificate.
 //   2. A terminal failure event — `inference:exhausted` or `inference:aborted`.
 //      These are the framework's real terminal failure states
-//      (agent-tree-reducer.ts: both flip the node to `cancelled`).
+//      (agent-tree-reducer.ts: both flip the node to `cancelled`). The one
+//      operational exception is Anthropic's account-capacity limit: a
+//      scheduled worker that has no capacity left defers cleanly to the next
+//      scheduled run, while still emitting a warning and persisting its memory.
 //   3. The retry budget being spent: MAX_INFERENCE_ATTEMPTS consecutive
 //      `inference:failed` with no intervening progress. `inference:failed` is
 //      ATTEMPT-level telemetry — startAgentStream emits it before consulting
@@ -145,12 +148,16 @@ let recoveryTimer = null;
 let lastSubstantiveAt = Date.now();
 let consecutiveFailures = 0;
 let lastInferenceFailure = null;
+let rateLimitDeferred = false;
 const counts = { inferences: 0, completions: 0, failures: 0, tools: 0, toolFailures: 0, events: 0 };
 const unknownEventTypes = new Set();
 
 // Terminal FAILURE states in agent-framework 0.6.8. Both flip the agent node
 // to `cancelled` in the host's reducer; neither is followed by more work.
 const TERMINAL_FAILURE_EVENTS = new Set(['inference:exhausted', 'inference:aborted']);
+const ACCOUNT_RATE_LIMIT = /This request would exceed your account's rate limit/i;
+const isAccountRateLimit = (...errors) =>
+  errors.some((error) => ACCOUNT_RATE_LIMIT.test(String(error ?? '')));
 
 const send = (message) => {
   if (!sock.writable) {
@@ -193,6 +200,8 @@ const requestShutdown = (failure = null) => {
   say(
     failure
       ? `[drive] refusing a false-green run: ${failure}`
+      : rateLimitDeferred
+        ? '[drive] Anthropic account capacity exhausted; deferring to the next scheduled run'
       : `[drive] completed turn stayed quiescent for ${IDLE_SETTLE_MS} ms; requesting shutdown`,
   );
   send({ type: 'shutdown', graceful: true });
@@ -218,6 +227,20 @@ const settleTerminal = (failure = null) => {
     terminalSettleTimer = null;
     requestShutdown(failure);
   }, IDLE_SETTLE_MS);
+};
+
+const deferForAccountRateLimit = () => {
+  const firstDeferral = !rateLimitDeferred;
+  rateLimitDeferred = true;
+  clearRecovery();
+  cancelTerminalSettlement();
+  if (firstDeferral) {
+    say(
+      "::warning title=Connectome deferred by Anthropic capacity::Anthropic's account " +
+        'rate limit is exhausted; memory will be saved and work will resume on a later scheduled run',
+    );
+  }
+  settleTerminal();
 };
 
 // --- backstops --------------------------------------------------------------
@@ -346,6 +369,10 @@ sock.on('data', (chunk) => {
     if (TERMINAL_FAILURE_EVENTS.has(event.type)) {
       const why = String(event.error ?? event.reason ?? 'no reason given');
       cry(`[${event.type}] ${why}`);
+      if (event.type === 'inference:exhausted' && isAccountRateLimit(why, lastInferenceFailure)) {
+        deferForAccountRateLimit();
+        continue;
+      }
       cancelTerminalSettlement();
       settleTerminal(`${event.type}: ${why}`);
       continue;
@@ -400,6 +427,10 @@ sock.on('data', (chunk) => {
       );
       cancelTerminalSettlement();
       if (consecutiveFailures >= MAX_INFERENCE_ATTEMPTS) {
+        if (isAccountRateLimit(lastInferenceFailure)) {
+          deferForAccountRateLimit();
+          continue;
+        }
         settleTerminal(
           `inference failed on all ${consecutiveFailures} attempts: ${lastInferenceFailure}`,
         );
@@ -464,7 +495,7 @@ sock.on('close', () => {
     terminalFailure ??= 'host closed without acknowledging graceful shutdown';
   }
 
-  summarise(terminalFailure ? 'failed' : 'clean');
+  summarise(terminalFailure ? 'failed' : rateLimitDeferred ? 'rate-limit deferred' : 'clean');
   if (terminalFailure) {
     cry(`[drive] failed: ${terminalFailure}`);
     process.exit(1);
