@@ -6,37 +6,72 @@
 //! ------------------------------------------
 //! The data are generated from a KNOWN truth,
 //!   x = seq(0, 2*pi, length = 150),  y ~ N(mu*(x), sigma*(x)^2),
-//!   mu*(x)    = sin(x),
-//!   sigma*(x) = 0.15 + 0.1*cos(x),   (so log sigma*(x) is also known),
 //! with x circular (0 and 2*pi identified). The PRIMARY claim is that gam's
-//! constrained cyclic smooths recover those generating functions. We assert,
-//! on 50 equally-spaced grid points in [0, 2*pi):
-//!   RMSE(mu_gam,        mu*)        <= 0.06   (~40% of the mean's signal SD;
-//!                                              cf. per-point noise sigma 0.05..0.25)
-//!   RMSE(log_sigma_gam, log sigma*) <= 0.30   (log-scale is identified one
-//!                                              likelihood-derivative removed from
-//!                                              the data, so its absolute bar is
-//!                                              looser, yet still pins the shape).
-//! These are absolute, reference-free accuracy bars: passing means gam fit the
-//! TRUE periodic mean and the TRUE periodic (log-)scale, not that it imitated
-//! another tool's (possibly equally wrong) fit.
+//! constrained cyclic smooths recover those generating functions, measured on
+//! 50 equally-spaced grid points in [0, 2*pi) as an absolute, reference-free
+//! accuracy bar. Passing means gam fit the TRUE periodic mean and the TRUE
+//! periodic (log-)scale, not that it imitated another tool's (possibly equally
+//! wrong) fit.
+//!
+//! TWO TRUTHS, and why the second one exists (#1561)
+//! -------------------------------------------------
+//! The original fixture used
+//!   mu*(x)    = sin(x),
+//!   sigma*(x) = 0.15 + 0.1*cos(x),
+//! and gam lost the mu channel to gamlss by 2.4x. That gap is very largely an
+//! artifact of the REFERENCE's penalty, not of gam.
+//!
+//! `gamlss::pbc()` builds its second-order circular difference operator with the
+//! stencil `c(-1, 2*cos(2*pi/n), -1)` (see `gamlss:::pbc`, the `sin = TRUE`
+//! branch of its `Cdiff`) — the HARMONIC recurrence, not the ordinary
+//! `c(-1, 2, -1)`. Its penalty therefore annihilates the FUNDAMENTAL sinusoid
+//! rather than the constant: as lambda grows, a pbc fit converges onto a 2-df
+//! pure first-harmonic model instead of onto a constant. Measured on this
+//! fixture, pbc selects `mu.df = 2.004` on every one of 25 seeds and leaves
+//! 8e-7 of energy above mode 1.
+//!
+//! `mu*(x) = sin(x)` IS that null space (its amplitude above k=1 is 5e-17), so on
+//! the original truth the "mature reference" is an oracle-parametric model with
+//! no approximation bias and ~2 parameters of variance. No general-purpose
+//! cyclic smoother can match that, and matching it is not a quality claim about
+//! gam. Paired over 25 seeds, gamlss's mu advantage is 1.832x on that truth and
+//! 1.063x once the truth carries content above the fundamental; against
+//! `mgcv gaulss` (a general cyclic location-scale smoother, no null-space
+//! advantage) gam is 3.2% / 9.0% behind.
+//!
+//! The same mechanism predicts the SIGN of the other channel of this same test:
+//! `log sigma*(x) = log(0.15 + 0.1 cos x)` is a nonlinear function of a
+//! fundamental, so it carries cos2 = -0.146, cos3 = +0.037, ... — 11% of its
+//! energy above k=1, outside pbc's null space — and gam WINS that channel.
+//!
+//! So this test runs BOTH truths. The ORIGINAL arm is kept (a loss that is
+//! understood is worth more than a loss that is deleted); the ABOVE-FUNDAMENTAL
+//! arm is the one that measures cyclic smoothing rather than a null-space
+//! coincidence. Full measurement: issue #1561, commit `e9fa87f5f`, instrument
+//! `tests/zz_measure_1561_cyclic_null_space_arms.rs`.
+//!
+//! PAIRED over seeds, not one draw (#2395)
+//! ---------------------------------------
+//! The joint gam/gamlss recovery ratio on a SINGLE draw of this fixture ranges
+//! over 0.90..1.23 across seeds, so a one-draw 1.10x ceiling is a coin flip
+//! whichever truth it uses. Both arms therefore run `K_SEEDS` seeds and compare
+//! the two engines on the SAME noise draw seed by seed, so the common draw
+//! cancels; the decision is `assert_paired_match_or_beat`, which additionally
+//! requires that gam not be RESOLVED worse across seeds. At K=10 the joint
+//! channel is an unresolved tie on both truths; K=25 resolves it in gam's
+//! favour on both, which is why K is 25.
 //!
 //! gamlss as a match-or-beat ACCURACY baseline (not a target)
 //! ----------------------------------------------------------
 //! `gamlss::gamlss(family = NO())` is the mature distributional-regression
-//! engine; fed the IDENTICAL (x, y) and the SAME explicit period via mgcv's
-//! cyclic cubic basis (`ga(~ s(x, bs = "cc"))`), it produces its own cyclic mu-
-//! and log-sigma fits. We measure ITS error against the same truth and require
-//! gam to be at least as accurate (within a small slack):
-//!   RMSE(mu_gam,        mu*)        <= 1.10 * RMSE(mu_gamlss,        mu*)
-//!   RMSE(log_sigma_gam, log sigma*) <= 1.10 * RMSE(log_sigma_gamlss, log sigma*)
-//! gamlss is thus a floor to match-or-beat on recovery accuracy, never a fit gam
-//! must reproduce. The raw gam-vs-gamlss rel_l2 is still printed for context.
-//!
-//! Note on the formula: this is the faithful location-scale + cyclic-both
-//! configuration. We deliberately do NOT add a `linkwiggle` mean-warp here —
-//! gamlss `NO()` has no inverse-link warp, so the baseline would not see the same
-//! model, and the truth-recovery metric does not need it.
+//! engine; fed the IDENTICAL (x, y) it produces its own cyclic mu- and
+//! log-sigma fits, and we measure ITS error against the same truth. The
+//! match-or-beat runs on the COMBINED location-scale recovery rather than each
+//! block separately: the two engines use different cyclic penalties and trade
+//! error BETWEEN the mean and log-scale blocks, and the joint object is what a
+//! location-scale model estimates. Both blocks' absolute truth-recovery bars
+//! remain the primary objective claim; per-block QUALITY_PAIR telemetry is
+//! emitted for both channels so neither trade is hidden from the #1561 gate.
 
 use csv::StringRecord;
 use gam::families::sigma_link::logb_sigma_from_eta_scalar;
@@ -44,7 +79,8 @@ use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::solver::estimate::BlockRole;
 use gam::test_support::reference::{
-    Column, QualityPair, held_out_r2, pad_to, relative_l2, rmse, run_r,
+    Column, PairedFoldComparison, QualityPair, assert_paired_match_or_beat, held_out_r2, pad_to,
+    relative_l2, rmse, run_r,
 };
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -54,19 +90,57 @@ use ndarray::{Array1, Array2};
 use std::f64::consts::PI;
 use std::path::Path;
 
-/// True mean function on the circle.
-fn true_mu(x: f64) -> f64 {
-    x.sin()
+/// Paired seeds per arm. See the "PAIRED over seeds" note above: 10 leaves the
+/// joint channel unresolved, 25 resolves it.
+const K_SEEDS: usize = 25;
+/// Training points per seed.
+const N_TRAIN: usize = 150;
+/// Evaluation grid points in [0, 2*pi).
+const N_GRID: usize = 50;
+
+/// Which generating truth an arm uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Truth {
+    /// The original fixture: a pure fundamental in both blocks, which is exactly
+    /// `gamlss::pbc`'s penalty null space.
+    Fundamental,
+    /// The same kind of object — periodic, smooth, heteroscedastic — carrying
+    /// content ABOVE the fundamental, so no cyclic penalty's null space contains
+    /// it and the comparison measures smoothing rather than a coincidence.
+    AboveFundamental,
 }
 
-/// True standard deviation function on the circle (strictly positive on [0,2π]).
-fn true_sigma(x: f64) -> f64 {
-    0.15 + 0.1 * x.cos()
+impl Truth {
+    fn label(self) -> &'static str {
+        match self {
+            Truth::Fundamental => "fundamental",
+            Truth::AboveFundamental => "above_fundamental",
+        }
+    }
+
+    /// True mean function on the circle.
+    fn mu(self, x: f64) -> f64 {
+        match self {
+            Truth::Fundamental => x.sin(),
+            Truth::AboveFundamental => x.sin() + 0.4 * (2.0 * x + 0.7).sin(),
+        }
+    }
+
+    /// True standard deviation on the circle (strictly positive on [0, 2*pi]).
+    fn sigma(self, x: f64) -> f64 {
+        match self {
+            Truth::Fundamental => 0.15 + 0.1 * x.cos(),
+            // min over the circle is 0.15 - 0.07 - 0.04 = 0.04 > 0.
+            Truth::AboveFundamental => {
+                0.15 + 0.07 * x.cos() + 0.04 * (2.0 * x - 0.4).cos()
+            }
+        }
+    }
 }
 
 /// Deterministic standard-normal draws via Box–Muller from a tiny LCG, so the
-/// data handed to gam and to gamlss is bit-identical and reproducible without
-/// pulling an RNG-crate dependency that could drift between versions. Seed 123.
+/// data handed to gam and to gamlss is identical and reproducible without
+/// pulling an RNG-crate dependency that could drift between versions.
 fn standard_normals(n: usize, seed: u64) -> Vec<f64> {
     // 64-bit LCG (Numerical Recipes constants).
     let mut state = seed;
@@ -93,25 +167,26 @@ fn standard_normals(n: usize, seed: u64) -> Vec<f64> {
     out
 }
 
-#[test]
-fn gam_cyclic_location_scale_recovers_truth() {
-    init_parallelism();
-
-    // ---- build the synthetic circular, heteroscedastic dataset ------------
-    // x = seq(0, 2*pi, length = 150); y ~ N(sin x, (0.15 + 0.1 cos x)^2), seed=123.
-    let n = 150usize;
+/// The `x` grid every seed shares.
+fn training_x() -> Vec<f64> {
     let period = 2.0 * PI;
-    let xs: Vec<f64> = (0..n)
-        .map(|i| period * (i as f64) / ((n - 1) as f64))
-        .collect();
-    let z = standard_normals(n, 123);
-    let ys: Vec<f64> = xs
-        .iter()
-        .zip(z.iter())
-        .map(|(&x, &zi)| true_mu(x) + true_sigma(x) * zi)
-        .collect();
+    (0..N_TRAIN)
+        .map(|i| period * (i as f64) / ((N_TRAIN - 1) as f64))
+        .collect()
+}
 
-    // Encode identically for gam (the same numbers go to R below).
+/// One seed's response vector under `truth`.
+fn training_y(truth: Truth, xs: &[f64], seed: u64) -> Vec<f64> {
+    let z = standard_normals(N_TRAIN, seed);
+    xs.iter()
+        .zip(z.iter())
+        .map(|(&x, &zi)| truth.mu(x) + truth.sigma(x) * zi)
+        .collect()
+}
+
+/// gam's cyclic location-scale fit on one seed; returns (mu-RMSE, log-sigma-RMSE)
+/// against the truth on the shared evaluation grid.
+fn gam_arm_scores(truth: Truth, xs: &[f64], ys: &[f64], grid_x: &[f64]) -> (f64, f64) {
     let headers = vec!["y".to_string(), "x".to_string()];
     let rows: Vec<StringRecord> = xs
         .iter()
@@ -122,9 +197,8 @@ fn gam_cyclic_location_scale_recovers_truth() {
     let col = ds.column_map();
     let x_idx = col["x"];
 
-    // ---- fit with gam: Gaussian location-scale, cyclic smooth in BOTH blocks
-    // Pin the period explicitly to [0, 2*pi] so gam's cyclic boundary matches
-    // the `knots = list(x = c(0, 2*pi))` we hand mgcv inside gamlss below.
+    // Pin the period explicitly to [0, 2*pi] so gam's cyclic boundary matches the
+    // data range gamlss's pbc infers below.
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
         noise_formula: Some(
@@ -142,7 +216,6 @@ fn gam_cyclic_location_scale_recovers_truth() {
         panic!("expected a GaussianLocationScale fit for a Gaussian noise_formula model");
     };
 
-    // Mean (Location) and log-sigma (Scale) coefficient blocks.
     let beta_mu = fit
         .fit
         .fit
@@ -165,17 +238,10 @@ fn gam_cyclic_location_scale_recovers_truth() {
         beta_noise.len()
     );
 
-    // ---- 50 equally-spaced evaluation points in [0, 2*pi) -----------------
-    let m = 50usize;
-    let grid_x: Vec<f64> = (0..m).map(|i| period * (i as f64) / (m as f64)).collect();
-
     // Rebuild the mean and noise designs from the FROZEN resolved specs at the
-    // evaluation grid (identity mean link => eta_mu = X_mu·beta_mu; gam's logb
-    // sigma link => sigma = 0.01 + exp(X_noise·beta_noise), response_scale = 1
-    // on the library fit path). This is the same plug-in path gam's predictor
-    // takes; we reconstruct it from the resolved specs so the comparison is on
-    // the smooth SHAPE off the training points, not in-sample fitted values.
-    let mut eval_grid = Array2::<f64>::zeros((m, ds.headers.len()));
+    // evaluation grid, so the comparison is on the smooth SHAPE off the training
+    // points rather than in-sample fitted values.
+    let mut eval_grid = Array2::<f64>::zeros((N_GRID, ds.headers.len()));
     for (i, &gx) in grid_x.iter().enumerate() {
         eval_grid[[i, x_idx]] = gx;
     }
@@ -205,137 +271,198 @@ fn gam_cyclic_location_scale_recovers_truth() {
         .map(|&e| logb_sigma_from_eta_scalar(e).ln())
         .collect();
 
-    // ---- fit the SAME model with gamlss (the mature reference) ------------
-    // family = NO() (normal, identity mu, log sigma); mu and sigma each get a
-    // cyclic cubic smooth via mgcv's `ga(~ s(x, bs="cc"))`, with the cyclic
-    // knot endpoints pinned to [0, 2*pi] to match gam's explicit period.
+    let truth_mu: Vec<f64> = grid_x.iter().map(|&gx| truth.mu(gx)).collect();
+    let truth_log_sigma: Vec<f64> = grid_x.iter().map(|&gx| truth.sigma(gx).ln()).collect();
+    (
+        rmse(&gam_mu, &truth_mu),
+        rmse(&gam_log_sigma, &truth_log_sigma),
+    )
+}
+
+/// Run one truth's whole paired panel: K seeds through gam and through gamlss on
+/// the SAME per-seed data, then the paired decision.
+fn run_cyclic_location_scale_arm(truth: Truth) {
+    init_parallelism();
+
+    let period = 2.0 * PI;
+    let xs = training_x();
+    let grid_x: Vec<f64> = (0..N_GRID)
+        .map(|i| period * (i as f64) / (N_GRID as f64))
+        .collect();
+    let truth_mu: Vec<f64> = grid_x.iter().map(|&gx| truth.mu(gx)).collect();
+    let truth_log_sigma: Vec<f64> = grid_x.iter().map(|&gx| truth.sigma(gx).ln()).collect();
+
+    // ---- gam on every seed, and the long-format data the reference replays ---
+    let mut gam_mu_rmses = Vec::with_capacity(K_SEEDS);
+    let mut gam_ls_rmses = Vec::with_capacity(K_SEEDS);
+    let mut long_seed = Vec::with_capacity(K_SEEDS * N_TRAIN);
+    let mut long_x = Vec::with_capacity(K_SEEDS * N_TRAIN);
+    let mut long_y = Vec::with_capacity(K_SEEDS * N_TRAIN);
+    for k in 0..K_SEEDS {
+        let seed = 1 + k as u64;
+        let ys = training_y(truth, &xs, seed);
+        let (mu_rmse, ls_rmse) = gam_arm_scores(truth, &xs, &ys, &grid_x);
+        gam_mu_rmses.push(mu_rmse);
+        gam_ls_rmses.push(ls_rmse);
+        for (&x, &y) in xs.iter().zip(ys.iter()) {
+            long_seed.push(seed as f64);
+            long_x.push(x);
+            long_y.push(y);
+        }
+    }
+
+    // ---- the SAME K datasets through gamlss, in ONE R session ---------------
+    // family = NO() (normal, identity mu, log sigma); mu and sigma each get
+    // gamlss's native penalized CYCLIC P-spline `pbc()`, the cyclic analogue of
+    // `pb()`. x spans exactly [0, 2*pi], so pbc's data-range period matches gam's
+    // explicit [0, 2*pi] cyclic boundary.
     let r = run_r(
-        &[Column::new("x", &xs), Column::new("y", &ys)],
+        &[
+            Column::new("seed", &long_seed),
+            Column::new("x", &long_x),
+            Column::new("y", &long_y),
+        ],
         r#"
         suppressPackageStartupMessages(library(gamlss))
-        # gamlss's native penalized CYCLIC P-spline `pbc()` (auto smoothing-
-        # parameter selection) is the cyclic analogue of `pb()` and lives in the
-        # base gamlss package; it does NOT need the gamlss.add/mgcv `ga(~ s(.))`
-        # bridge (which is unavailable here). x spans exactly [0, 2*pi], so pbc's
-        # data-range period matches gam's explicit [0, 2*pi] cyclic boundary.
-        m <- gamlss(
-            y ~ pbc(x),
-            sigma.formula = ~ pbc(x),
-            family = NO(),
-            data = df,
-            control = gamlss.control(n.cyc = 200, trace = FALSE)
-        )
         xg <- seq(0, 2*pi, length.out = 51)[1:50]
         nd <- data.frame(x = xg)
-        mu <- as.numeric(predict(m, what = "mu", newdata = nd, type = "response", data = df))
-        ls <- as.numeric(predict(m, what = "sigma", newdata = nd, type = "link", data = df))
-        emit("mu", mu)
-        emit("log_sigma", ls)
+        mu_all <- c(); ls_all <- c()
+        for (s in sort(unique(df$seed))) {
+            d <- df[df$seed == s, c("x", "y")]
+            m <- gamlss(
+                y ~ pbc(x),
+                sigma.formula = ~ pbc(x),
+                family = NO(),
+                data = d,
+                control = gamlss.control(n.cyc = 200, trace = FALSE)
+            )
+            mu_all <- c(mu_all,
+                as.numeric(predict(m, what = "mu", newdata = nd, type = "response", data = d)))
+            ls_all <- c(ls_all,
+                as.numeric(predict(m, what = "sigma", newdata = nd, type = "link", data = d)))
+        }
+        emit("mu", mu_all)
+        emit("log_sigma", ls_all)
         "#,
     );
-    let gamlss_mu = r.vector("mu");
+    let gamlss_mu_flat = r.vector("mu");
     // gamlss NO() uses a log link for sigma, so the "link"-scale sigma predictor
     // is exactly log(sigma): directly comparable to gam's log-sigma curve.
-    let gamlss_log_sigma = r.vector("log_sigma");
-    assert_eq!(gamlss_mu.len(), m, "gamlss mu length mismatch");
+    let gamlss_ls_flat = r.vector("log_sigma");
     assert_eq!(
-        gamlss_log_sigma.len(),
-        m,
-        "gamlss log-sigma length mismatch"
+        gamlss_mu_flat.len(),
+        K_SEEDS * N_GRID,
+        "gamlss mu panel length mismatch"
+    );
+    assert_eq!(
+        gamlss_ls_flat.len(),
+        K_SEEDS * N_GRID,
+        "gamlss log-sigma panel length mismatch"
     );
 
-    // ---- KNOWN truth on the same evaluation grid --------------------------
-    // The data were generated from mu*(x)=sin(x) and sigma*(x)=0.15+0.1 cos(x),
-    // so log sigma*(x) is known too. These are the objective targets.
-    let truth_mu: Vec<f64> = grid_x.iter().map(|&gx| true_mu(gx)).collect();
-    let truth_log_sigma: Vec<f64> = grid_x.iter().map(|&gx| true_sigma(gx).ln()).collect();
+    let mut gamlss_mu_rmses = Vec::with_capacity(K_SEEDS);
+    let mut gamlss_ls_rmses = Vec::with_capacity(K_SEEDS);
+    for k in 0..K_SEEDS {
+        let lo = k * N_GRID;
+        let hi = lo + N_GRID;
+        gamlss_mu_rmses.push(rmse(&gamlss_mu_flat[lo..hi], &truth_mu));
+        gamlss_ls_rmses.push(rmse(&gamlss_ls_flat[lo..hi], &truth_log_sigma));
+    }
 
-    // ---- objective accuracy of gam against the truth ----------------------
-    let gam_mu_rmse = rmse(&gam_mu, &truth_mu);
-    let gam_log_sigma_rmse = rmse(&gam_log_sigma, &truth_log_sigma);
+    // ---- paired panels: same seed, same bytes, seed by seed -----------------
+    let mu_panel = PairedFoldComparison::new(&gam_mu_rmses, &gamlss_mu_rmses, true);
+    let ls_panel = PairedFoldComparison::new(&gam_ls_rmses, &gamlss_ls_rmses, true);
+    // The joint location-scale object: what a location-scale model estimates, and
+    // the channel the match-or-beat decision runs on.
+    let gam_joint: Vec<f64> = gam_mu_rmses
+        .iter()
+        .zip(gam_ls_rmses.iter())
+        .map(|(m, l)| (m * m + l * l).sqrt())
+        .collect();
+    let gamlss_joint: Vec<f64> = gamlss_mu_rmses
+        .iter()
+        .zip(gamlss_ls_rmses.iter())
+        .map(|(m, l)| (m * m + l * l).sqrt())
+        .collect();
+    let joint_panel = PairedFoldComparison::new(&gam_joint, &gamlss_joint, true);
 
-    // ---- gamlss accuracy against the SAME truth (match-or-beat baseline) ---
-    let gamlss_mu_rmse = rmse(gamlss_mu, &truth_mu);
-    let gamlss_log_sigma_rmse = rmse(gamlss_log_sigma, &truth_log_sigma);
-
-    // Raw gam-vs-gamlss agreement, printed for context only (NOT asserted).
-    let mu_rel = relative_l2(&gam_mu, gamlss_mu);
-    let log_sigma_rel = relative_l2(&gam_log_sigma, gamlss_log_sigma);
-
+    let label = truth.label();
     eprintln!(
-        "cyclic location-scale truth recovery: n={n} m={m} \
-         mu_rmse_gam={gam_mu_rmse:.4} mu_rmse_gamlss={gamlss_mu_rmse:.4} \
-         log_sigma_rmse_gam={gam_log_sigma_rmse:.4} log_sigma_rmse_gamlss={gamlss_log_sigma_rmse:.4} \
-         (context: mu_rel_l2={mu_rel:.4} log_sigma_rel_l2={log_sigma_rel:.4}) \
-         beta_mu={} beta_sigma={}",
-        beta_mu.len(),
-        beta_noise.len()
+        "cyclic location-scale [{label}] K={K_SEEDS}-seed paired: n={N_TRAIN} grid={N_GRID} \
+         gam_mu={:.5} gamlss_mu={:.5} gam_logsigma={:.5} gamlss_logsigma={:.5} \
+         gam_joint={:.5} gamlss_joint={:.5}",
+        mu_panel.gam_mean,
+        mu_panel.reference_mean,
+        ls_panel.gam_mean,
+        ls_panel.reference_mean,
+        joint_panel.gam_mean,
+        joint_panel.reference_mean,
     );
+    eprintln!("{}", mu_panel.report(&format!("cyclic_ls::{label}::mu")));
     eprintln!(
         "{}",
-        QualityPair::error(
+        ls_panel.report(&format!("cyclic_ls::{label}::log_sigma"))
+    );
+    eprintln!("{}", joint_panel.report(&format!("cyclic_ls::{label}::joint")));
+    eprintln!(
+        "{}",
+        QualityPair::paired(
             "families",
-            "quality_vs_gamlss_gaussian_location_scale_cyclic::mu",
+            &format!("quality_vs_gamlss_gaussian_location_scale_cyclic::{label}::mu"),
             "mu_rmse_to_truth",
-            gam_mu_rmse,
             "gamlss",
-            gamlss_mu_rmse,
+            &mu_panel,
         )
         .line()
     );
     eprintln!(
         "{}",
-        QualityPair::error(
+        QualityPair::paired(
             "families",
-            "quality_vs_gamlss_gaussian_location_scale_cyclic::log_sigma",
+            &format!("quality_vs_gamlss_gaussian_location_scale_cyclic::{label}::log_sigma"),
             "log_sigma_rmse_to_truth",
-            gam_log_sigma_rmse,
             "gamlss",
-            gamlss_log_sigma_rmse,
+            &ls_panel,
         )
         .line()
     );
 
-    // PRIMARY: gam recovers the true cyclic mean. The mean's signal SD is
-    // ~1/sqrt(2) and per-point noise sigma runs 0.05..0.25, so 0.06 RMSE means
-    // the recovered mean tracks sin(x) to a small fraction of the signal range.
+    // PRIMARY: gam recovers the true cyclic mean. The mean's signal SD is ~1/sqrt(2)
+    // and per-point noise sigma runs 0.04..0.26, so 0.06 RMSE means the recovered
+    // mean tracks the truth to a small fraction of the signal range. Measured
+    // fold-mean: 0.0342 (fundamental) / 0.0376 (above-fundamental).
     assert!(
-        gam_mu_rmse <= 0.06,
-        "cyclic mu does not recover sin(x): RMSE={gam_mu_rmse:.4} (bound 0.06)"
+        mu_panel.gam_mean <= 0.06,
+        "cyclic mu [{label}] does not recover the truth: fold-mean RMSE={:.4} (bound 0.06)",
+        mu_panel.gam_mean
     );
     // PRIMARY: gam recovers the true cyclic log-scale. The log-scale block is
-    // identified one likelihood-derivative removed from the data, so its
-    // absolute bar is looser, yet 0.30 still requires the recovered curve to
-    // track log(0.15+0.1 cos x) (which spans about [log 0.05, log 0.25]).
+    // identified one likelihood-derivative removed from the data, so its absolute
+    // bar is looser, yet 0.30 still requires the recovered curve to track the true
+    // log sigma. Measured fold-mean: 0.129 / 0.146.
     assert!(
-        gam_log_sigma_rmse <= 0.30,
-        "cyclic log-sigma does not recover log(0.15+0.1 cos x): RMSE={gam_log_sigma_rmse:.4} (bound 0.30)"
+        ls_panel.gam_mean <= 0.30,
+        "cyclic log-sigma [{label}] does not recover the truth: fold-mean RMSE={:.4} (bound 0.30)",
+        ls_panel.gam_mean
     );
 
-    // MATCH-OR-BEAT: gam must be at least as accurate as the mature gamlss fit
-    // (within a 10% slack) at recovering the truth of the JOINT location-scale
-    // object. We compare the COMBINED mean+scale recovery error rather than each
-    // block separately: the two engines use different cyclic bases (gam's
-    // REML-penalized cyclic smooth vs gamlss's mgcv `cc` basis) and trade error
-    // BETWEEN the mean and log-scale blocks on this small (n=150) noisy
-    // heteroscedastic sample — gamlss recovers the mean a little better here
-    // (~0.021 vs gam's ~0.049, both well under the 0.06 absolute mean bar
-    // asserted above), while gam recovers the log-scale better (~0.083 vs
-    // gamlss's ~0.117). A brittle per-block 1.10× would fail gam for losing the
-    // mean block even though it WINS the scale block and is more accurate on the
-    // joint object. The honest match-or-beat is therefore on the combined
-    // location-scale recovery RMSE — gam (~0.096) must be no worse than 1.10×
-    // gamlss (~0.119). Both blocks' absolute truth-recovery bars (above) remain
-    // the primary objective claim; this is the relative accuracy floor.
-    let gam_joint_rmse = (gam_mu_rmse.powi(2) + gam_log_sigma_rmse.powi(2)).sqrt();
-    let gamlss_joint_rmse = (gamlss_mu_rmse.powi(2) + gamlss_log_sigma_rmse.powi(2)).sqrt();
-    assert!(
-        gam_joint_rmse <= 1.10 * gamlss_joint_rmse,
-        "gam joint location-scale recovery worse than gamlss: \
-         gam=sqrt({gam_mu_rmse:.4}²+{gam_log_sigma_rmse:.4}²)={gam_joint_rmse:.4} \
-         > 1.10*gamlss=sqrt({gamlss_mu_rmse:.4}²+{gamlss_log_sigma_rmse:.4}²)*1.10={:.4}",
-        1.10 * gamlss_joint_rmse
-    );
+    // MATCH-OR-BEAT on the JOINT location-scale object, paired across the K shared
+    // noise draws. See the header: the two engines trade error between the mean and
+    // the log-scale block, and on the `fundamental` truth gamlss's mu arm is an
+    // oracle for a reason that has nothing to do with estimation quality. Measured
+    // paired effect: -0.118 (fundamental) / -0.066 (above-fundamental), both
+    // resolved in gam's favour.
+    assert_paired_match_or_beat(&format!("cyclic_ls::{label}::joint"), &joint_panel, 1.10);
+}
+
+#[test]
+fn gam_cyclic_location_scale_recovers_truth() {
+    run_cyclic_location_scale_arm(Truth::Fundamental);
+}
+
+#[test]
+fn gam_cyclic_location_scale_recovers_truth_above_the_fundamental() {
+    run_cyclic_location_scale_arm(Truth::AboveFundamental);
 }
 
 // ===========================================================================
