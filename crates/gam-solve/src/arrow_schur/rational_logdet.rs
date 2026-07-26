@@ -372,7 +372,34 @@ impl RationalLogdetPlan {
         cg_rel_tol: f64,
         cg_max_iters: usize,
     ) -> Option<RationalLogdetEval> {
-        // Ladder: descending t (warm starts carry per vector across shifts).
+        let solve = |shift: f64, rhs: &Array1<f64>, warm: &Array1<f64>| {
+            shifted_cg(matvec, shift, rhs, warm, cg_rel_tol, cg_max_iters)
+        };
+        self.evaluate_with_shifted_solver(&solve)
+    }
+
+    /// Evaluate this frozen rational functional with a caller-owned shifted
+    /// linear solver.
+    ///
+    /// The solver must return the converged solution of
+    /// `(S + shift·I)y = rhs` and an iteration count. `warm` is the solution
+    /// from the preceding, larger shift for the same right-hand side. Separating
+    /// the statistical functional (fixed probes, nodes, deflation basis, value
+    /// assembly, and derivative bundle) from the numerical inverse lets callers
+    /// use a structured preconditioner without changing the criterion. In
+    /// particular, an exact-observed-information operator can use its positive
+    /// majorizer only as a preconditioner; storage strategy can no longer require
+    /// a different log-determinant definition.
+    pub fn evaluate_with_shifted_solver(
+        &self,
+        solve: &(impl Fn(
+            f64,
+            &Array1<f64>,
+            &Array1<f64>,
+        ) -> Option<(Array1<f64>, usize)>
+                  + Sync),
+    ) -> Option<RationalLogdetEval> {
+        // Ladder: descending shift (warm starts carry per vector across shifts).
         let mut order: Vec<usize> = (0..self.nodes.len()).collect();
         order.sort_by(|&a, &b| {
             self.nodes[b]
@@ -382,8 +409,8 @@ impl RationalLogdetPlan {
         });
 
         // FROZEN top-subspace deflation basis Q (empty without a DeflationSpec).
-        // Built once at plan creation from the operator at the plan's ρ; reused
-        // verbatim here so the surrogate is one fixed-Q function of ρ.
+        // Built once at plan creation from the operator at the plan's rho; reused
+        // verbatim here so the surrogate is one fixed-Q function of rho.
         let basis: &[Array1<f64>] = self
             .deflation
             .as_ref()
@@ -393,19 +420,13 @@ impl RationalLogdetPlan {
         // Deflation-projected probes u_j = P v_j (raw probes without a basis).
         let probes_proj = self.projected_probes(basis);
 
-        // Shifted solves for the projected probes and (if any) the basis columns.
-        let (shifted, iters_probe) = solve_shift_ladder(
-            matvec,
-            &self.nodes,
-            &order,
-            &probes_proj,
-            cg_rel_tol,
-            cg_max_iters,
-        )?;
+        // Both solve families use the same injected solver and shift ordering.
+        let (shifted, iters_probe) =
+            solve_shift_ladder_with(solve, &self.nodes, &order, &probes_proj)?;
         let (deflation_solves, iters_basis) = if basis.is_empty() {
             (Vec::new(), 0)
         } else {
-            solve_shift_ladder(matvec, &self.nodes, &order, basis, cg_rel_tol, cg_max_iters)?
+            solve_shift_ladder_with(solve, &self.nodes, &order, basis)?
         };
         self.assemble_eval(
             probes_proj,
@@ -905,13 +926,16 @@ fn build_inverse_deflation_basis(
 /// `solves[ℓ][j]` and the total CG iteration count, or `None` on a shifted-CG
 /// breakdown. Shared by the projected-probe and deflation-basis solve families
 /// so both warm-start identically.
-fn solve_shift_ladder(
-    matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+fn solve_shift_ladder_with(
+    solve: &(impl Fn(
+        f64,
+        &Array1<f64>,
+        &Array1<f64>,
+    ) -> Option<(Array1<f64>, usize)>
+              + Sync),
     nodes: &[(f64, f64)],
     order: &[usize],
     vectors: &[Array1<f64>],
-    cg_rel_tol: f64,
-    cg_max_iters: usize,
 ) -> Option<(Vec<Vec<Array1<f64>>>, usize)> {
     let m = vectors.len();
     let dim = vectors.first().map(|v| v.len()).unwrap_or(0);
@@ -919,13 +943,16 @@ fn solve_shift_ladder(
     let mut warm: Vec<Array1<f64>> = vec![Array1::zeros(dim); m];
     let mut total = 0usize;
     for &ell in order {
-        let (t, _) = nodes[ell];
+        let (shift, _) = nodes[ell];
         let mut per = Vec::with_capacity(m);
-        for (j, v) in vectors.iter().enumerate() {
-            let (y, iters) = shifted_cg(matvec, t, v, &warm[j], cg_rel_tol, cg_max_iters)?;
-            total += iters;
-            warm[j] = y.clone();
-            per.push(y);
+        for (j, rhs) in vectors.iter().enumerate() {
+            let (solution, iters) = solve(shift, rhs, &warm[j])?;
+            if solution.len() != dim || solution.iter().any(|value| !value.is_finite()) {
+                return None;
+            }
+            total = total.checked_add(iters)?;
+            warm[j] = solution.clone();
+            per.push(solution);
         }
         solves[ell] = per;
     }
@@ -1124,6 +1151,63 @@ mod tests {
             (raw_shift_zero - authority).abs() > 1.0e-4,
             "fixture must separate the rational derivative ({authority:.9e}) from the \
              raw shift-zero inverse trace ({raw_shift_zero:.9e})"
+        );
+    }
+
+    #[test]
+    fn injected_shifted_solver_preserves_value_and_derivative_authority_2515() {
+        let diagonal = array![0.4, 2.0, 9.0];
+        let matvec = |v: ArrayView1<f64>| &diagonal * &v;
+        let plan = RationalLogdetPlan::build(3, 3, 2515, 0.4, 9.0, 1.0e-9)
+            .expect("frozen rational plan");
+
+        let cg = plan
+            .evaluate(&matvec, 1.0e-13, 128)
+            .expect("plain-CG evaluation");
+        let injected = plan
+            .evaluate_with_shifted_solver(&|shift, rhs, _warm| {
+                Some((
+                    Array1::from_iter(
+                        rhs.iter()
+                            .enumerate()
+                            .map(|(index, value)| value / (diagonal[index] + shift)),
+                    ),
+                    0,
+                ))
+            })
+            .expect("injected exact shifted solves");
+
+        let value_scale = cg.estimate.abs().max(injected.estimate.abs()).max(1.0);
+        assert!(
+            (cg.estimate - injected.estimate).abs() <= 1.0e-10 * value_scale,
+            "changing only the shifted solver changed the frozen rational value: \
+             cg={:.17e}, injected={:.17e}",
+            cg.estimate,
+            injected.estimate
+        );
+        assert!(cg.cg_iterations > 0, "plain CG must report actual work");
+        assert_eq!(
+            injected.cg_iterations, 0,
+            "the caller's solve accounting must be preserved"
+        );
+
+        let direction = array![0.2, -0.3, 0.7];
+        let dmatvec = |v: ArrayView1<f64>| &direction * &v;
+        let cg_derivative = plan
+            .directional_derivative(&cg, &dmatvec)
+            .expect("CG derivative");
+        let injected_derivative = plan
+            .directional_derivative(&injected, &dmatvec)
+            .expect("injected derivative");
+        let derivative_scale = cg_derivative
+            .abs()
+            .max(injected_derivative.abs())
+            .max(1.0);
+        assert!(
+            (cg_derivative - injected_derivative).abs() <= 1.0e-10 * derivative_scale,
+            "changing only the shifted solver changed the derivative of the frozen \
+             rational value: cg={cg_derivative:.17e}, \
+             injected={injected_derivative:.17e}"
         );
     }
 
