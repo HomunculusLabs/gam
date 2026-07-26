@@ -359,70 +359,36 @@ impl ArdAxisPrior {
         }
     }
 
-    /// Dimensionless softplus temperature `τ₀` for the homogeneity-preserving
-    /// smooth PSD clamp of the *periodic* ARD curvature `V'' = α·cos(κt)`
-    /// (#2339). NOT a tunable knob — derived below.
-    ///
-    /// The hard clamp `max(V'', 0)` has a kink at `cos κt = 0`. We instead smooth
-    /// the DIMENSIONLESS cosine `c = cos κt ∈ [−1,1]` with the temperature-`τ₀`
-    /// softplus `s_{τ₀}(c) = τ₀·ln(1 + e^{c/τ₀})` and set the majorizer to
-    /// `α·s_{τ₀}(c)` ([`Self::smooth_clamp`]). Multiplying the smoothed
-    /// dimensionless cosine by `α` — never smoothing the dimensional `α·c`
-    /// directly — keeps the operator EXACTLY degree-one homogeneous in
-    /// `α = e^{ρ_ard}`. That homogeneity is load-bearing: the `½log|B|`
-    /// θ-adjoint's explicit-`ρ` channel uses `∂/∂ρ_ard[α·s_{τ₀}(c)] = α·s_{τ₀}(c)
-    /// = psd_majorizer_hess`, so the log-precision log-det traces
-    /// (`ard_log_precision_hessian_trace`,
-    /// `coordinate_block_ard_log_precision_hessian_trace`) remain the exact
+    /// The periodic ARD curvature `V'' = α·cos(κt)` is signed, so the operator the
+    /// Newton/Schur majorizer installs is the homogeneity-preserving smooth PSD
+    /// clamp `α·s_{τ₀}(cos κt)` (#2339). Both the clamp and its derived
+    /// temperature live in `gam_linalg::utils` — the layer that owns
+    /// `SPECTRAL_DEFLATION_REL_FLOOR`, which is what fixes `τ₀` — so every family
+    /// that has to majorize a signed curvature reads ONE seam. Aliased here
+    /// because the homogeneity is load-bearing for THIS family in a specific way:
+    /// the `½log|B|` θ-adjoint's explicit-`ρ` channel uses
+    /// `∂/∂ρ_ard[α·s_{τ₀}(c)] = α·s_{τ₀}(c) = psd_majorizer_hess`, so the
+    /// log-precision log-det traces (`ard_log_precision_hessian_trace`,
+    /// `coordinate_block_ard_log_precision_hessian_trace`) are the exact
     /// `∂B/∂ρ_ard` with no code change. A non-homogeneous `s_{τ}(α·c)` would
     /// silently desync them.
-    ///
-    /// DERIVATION of `τ₀`. `s_{τ₀}(c)` deviates from `max(c, 0)` by at most
-    /// `s_{τ₀}(0) − 0 = τ₀·ln2` (the maximum, attained at `c = 0`), measured in
-    /// the dimensionless cosine whose natural scale is unity (`|c| ≤ 1`). The
-    /// criterion already resolves relative curvature only down to the spectral-
-    /// deflation floor `SPECTRAL_DEFLATION_REL_FLOOR` (a direction with
-    /// `λ < floor·λ_max` is deflated as null). Requiring the smoothing deviation
-    /// to stay at/below that floor's resolution,
-    /// `τ₀·ln2 ≤ SPECTRAL_DEFLATION_REL_FLOOR`, and taking the binding
-    /// (largest-admissible, hence smoothest) value gives
-    /// `τ₀ = SPECTRAL_DEFLATION_REL_FLOOR / ln2 ≈ 1.4427e-8`. The resulting
-    /// absolute majorizer perturbation is `α·τ₀·ln2 = α·SPECTRAL_DEFLATION_REL_FLOOR`,
-    /// i.e. exactly the deflation floor relative to that axis's own curvature
-    /// scale `α`.
-    pub(crate) const CLAMP_TEMPERATURE: f64 =
-        gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2;
+    pub(crate) const CLAMP_TEMPERATURE: f64 = gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE;
 
-    /// Homogeneity-preserving smooth replacement for `α·max(cos, 0)` acting on
-    /// the dimensionless cosine `cos = cos κt ∈ [−1,1]` (`alpha ≥ 0`). Uses the
-    /// numerically stable softplus `max(c,0) + τ₀·ln(1 + e^{−|c|/τ₀})`, which
-    /// collapses to `max(c,0)` exactly (via IEEE underflow of `e^{−|c|/τ₀}`) once
-    /// `|c|` leaves the `~745·τ₀ ≈ 1e-5` band around the seam — so the majorizer is
-    /// bit-for-bit the hard clamp there, including a hard `0` on the deep concave
-    /// half. Mathematically `softplus > 0`, but the returned value is only `⪰ 0`
-    /// numerically (strictly positive within the transition band and on the convex
-    /// half). The majorizer is therefore PSD, matching the hard clamp it replaces.
+    /// Homogeneity-preserving smooth replacement for `α·max(cos, 0)` acting on the
+    /// dimensionless cosine `cos = cos κt ∈ [−1,1]` (`alpha ≥ 0`). See
+    /// [`gam_linalg::utils::smooth_psd_clamp`].
     #[inline]
     pub(crate) fn smooth_clamp(alpha: f64, cos: f64) -> f64 {
-        let tau = Self::CLAMP_TEMPERATURE;
-        let softplus = cos.max(0.0) + tau * (-(cos.abs()) / tau).exp().ln_1p();
-        alpha * softplus
+        gam_linalg::utils::smooth_psd_clamp(alpha, cos)
     }
 
     /// Derivative of the smooth clamp w.r.t. the dimensionless cosine `c`:
-    /// `s'_{τ₀}(c) = logistic(c/τ₀) ∈ (0,1)`, the smooth replacement for the hard
-    /// clamp's `1{c > 0}` step indicator (`τ₀ → 0` recovers the step). Stable
-    /// logistic. Consumed by `ard_majorized_hessian_derivative` to form the
-    /// analytic `∂/∂t` of `α·s_{τ₀}(cos κt)`.
+    /// `s'_{τ₀}(c) = logistic(c/τ₀) ∈ (0,1)`. Consumed by
+    /// `ard_majorized_hessian_derivative` to form the analytic `∂/∂t` of
+    /// `α·s_{τ₀}(cos κt)`. See [`gam_linalg::utils::smooth_psd_clamp_slope`].
     #[inline]
     pub(crate) fn clamp_slope(cos: f64) -> f64 {
-        let z = cos / Self::CLAMP_TEMPERATURE;
-        if z >= 0.0 {
-            1.0 / (1.0 + (-z).exp())
-        } else {
-            let e = z.exp();
-            e / (1.0 + e)
-        }
+        gam_linalg::utils::smooth_psd_clamp_slope(cos)
     }
 
     /// Positive-semidefinite curvature used by the Newton/Schur majorizer.

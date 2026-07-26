@@ -38,6 +38,62 @@ use ndarray::{
 /// unanchored magic constant in the layer that needs it most.
 pub const SPECTRAL_DEFLATION_REL_FLOOR: f64 = 1.0e-8;
 
+/// Dimensionless softplus temperature `τ₀` for the homogeneity-preserving smooth
+/// PSD clamp of a SIGNED curvature (#2339). NOT a tunable knob — derived.
+///
+/// A curvature that must be PSD-majorized before it enters a Cholesky factor is
+/// written as `P·x` with a NONNEGATIVE dimensional prefactor `P` and a
+/// DIMENSIONLESS signed factor `x` whose natural scale is unity (`|x| ≤ 1`). The
+/// hard clamp `P·max(x, 0)` has a kink at `x = 0`; smoothing the dimensionless
+/// `x` with the temperature-`τ₀` softplus `s_{τ₀}(x) = τ₀·ln(1 + e^{x/τ₀})` and
+/// multiplying by `P` — never smoothing the dimensional `P·x` directly — keeps
+/// the majorizer EXACTLY degree-one homogeneous in `P`. That homogeneity is
+/// load-bearing wherever `P` carries the `e^ρ` an outer coordinate scales, since
+/// it makes `∂(P·s_{τ₀}(x))/∂ρ` equal the majorizer itself.
+///
+/// DERIVATION. `s_{τ₀}` deviates from `max(x, 0)` by at most `s_{τ₀}(0) = τ₀·ln2`
+/// (attained at `x = 0`), measured in the unit-scale dimensionless factor. The
+/// engine resolves relative curvature only down to
+/// [`SPECTRAL_DEFLATION_REL_FLOOR`]. Requiring the smoothing deviation to sit at
+/// or below that resolution, `τ₀·ln2 ≤ floor`, and taking the binding
+/// (largest-admissible, hence smoothest) value gives `τ₀ = floor/ln2 ≈ 1.443e-8`,
+/// so the absolute perturbation is `P·floor` — exactly the deflation floor
+/// relative to the operator's own curvature scale.
+pub const SMOOTH_PSD_CLAMP_TEMPERATURE: f64 = SPECTRAL_DEFLATION_REL_FLOOR / std::f64::consts::LN_2;
+
+/// Homogeneity-preserving smooth replacement for `prefactor · max(x, 0)` on a
+/// dimensionless `x` (`prefactor ≥ 0`), at [`SMOOTH_PSD_CLAMP_TEMPERATURE`].
+///
+/// Uses the numerically stable softplus `max(x,0) + τ₀·ln(1 + e^{−|x|/τ₀})`,
+/// which collapses to `max(x,0)` exactly (via IEEE underflow of `e^{−|x|/τ₀}`)
+/// once `|x|` leaves the `~745·τ₀ ≈ 1e-5` band around the seam — so the majorizer
+/// is bit-for-bit the hard clamp there, including a hard `0` on the deep concave
+/// half. Mathematically `softplus > 0`, but the returned value is only `⪰ 0`
+/// numerically (strictly positive inside the transition band and on the convex
+/// half). The majorizer is therefore PSD, matching the hard clamp it replaces.
+#[inline]
+#[must_use]
+pub fn smooth_psd_clamp(prefactor: f64, x: f64) -> f64 {
+    let tau = SMOOTH_PSD_CLAMP_TEMPERATURE;
+    prefactor * (x.max(0.0) + tau * (-(x.abs()) / tau).exp().ln_1p())
+}
+
+/// Derivative of [`smooth_psd_clamp`] w.r.t. the dimensionless `x`, per unit
+/// prefactor: `s'_{τ₀}(x) = logistic(x/τ₀) ∈ (0,1)`, the smooth replacement for
+/// the hard clamp's `1{x > 0}` step indicator (`τ₀ → 0` recovers the step).
+/// Stable logistic.
+#[inline]
+#[must_use]
+pub fn smooth_psd_clamp_slope(x: f64) -> f64 {
+    let z = x / SMOOTH_PSD_CLAMP_TEMPERATURE;
+    if z >= 0.0 {
+        1.0 / (1.0 + (-z).exp())
+    } else {
+        let e = z.exp();
+        e / (1.0 + e)
+    }
+}
+
 /// SplitMix64: deterministic 64-bit hash / streaming RNG step.
 ///
 /// Canonical home for the implementation that previously lived as eight
