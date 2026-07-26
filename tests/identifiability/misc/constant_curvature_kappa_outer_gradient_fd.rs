@@ -138,12 +138,29 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
             "non-finite kappa gradient component {j}: analytic={analytic} fd={fd}"
         );
         let scale = analytic.abs().max(fd.abs()).max(1e-6);
+        // 5e-3, not 5e-2. The old number was the fixed-step oracle's error
+        // budget rather than the gradient's; the audit now Ridders-extrapolates
+        // and reports `psi_fd_uncertainty`, so the tolerance can describe the
+        // gradient again. #2461.
         assert!(
-            gap / scale < 5e-2,
+            gap / scale < 5e-3,
             "kappa outer-gradient analytic!=FD on coordinate {j}: \
-             analytic={analytic:.6e} fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+             analytic={analytic:.6e} fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e} \
+             oracle_unc={:.3e} order={}",
             gap / scale,
-            audit.psi_steps[j]
+            audit.psi_steps[j],
+            audit.psi_fd_uncertainty[j],
+            audit.psi_fd_orders[j],
+        );
+        // An unresolved finite difference agrees with everything, so the gap
+        // check alone can pass on a measurement that measured nothing.
+        assert!(
+            audit.psi_fd_uncertainty[j] <= 5e-3 * fd.abs().max(1e-6),
+            "outer-gradient FD oracle did not resolve kappa coordinate {j}: \
+             fd={fd:.6e} uncertainty={:.3e} at step {:.3e} (order {})",
+            audit.psi_fd_uncertainty[j],
+            audit.psi_steps[j],
+            audit.psi_fd_orders[j],
         );
     }
 }

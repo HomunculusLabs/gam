@@ -624,6 +624,16 @@ fn iso_kappa_matern_2d_gaussian_identity_fd() {
 /// per 10× shrink in `h` (until the roundoff floor); a REAL derivative bug
 /// leaves an `h`-independent floor. The analytic gradient is computed once;
 /// only `h` changes. This is a diagnostic oracle (FD is sanctioned in tests).
+///
+/// ANSWERED (#2461): truncation. The question this sweep poses by hand is the
+/// same one `ridders_derivative` now answers automatically for every component
+/// — the production audit this diagnostic shadows extrapolates across the
+/// ladder and reports its own uncertainty, so the ~1.6e-3 residual it was
+/// written to explain is no longer in the comparison and the end-to-end gate's
+/// tolerance came down from `5e-2` to `5e-3`. Kept because a printed sweep at
+/// the production init is still the cheapest way to SEE the law, and because
+/// its `V(ψ)` scaling argument (`κ^{2m}`, `m = ν + d/2 = 3.5`) is the reason
+/// this fixture has a large third derivative in the first place.
 #[test]
 fn iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic() {
     use ndarray::Array2 as NdArray2;
@@ -1419,6 +1429,15 @@ fn zz_measure_psi_only_rho1_fd_step_law_2425() {
     //                rather than left at a magic 1e-3 denominator.
     //
     // Reports only. `ratio` is gap/h²: constant ⇒ truncation.
+    //
+    // The general form of this question — "which of the three laws is the gap
+    // following, here, at this θ?" — is no longer asked by hand: the driver
+    // measures every component with `ridders_derivative`, which walks the ladder
+    // and reports its own uncertainty, so a component whose law is `ν/h` comes
+    // back Unresolved rather than as a gradient violation (#2461). This
+    // measurement survives because it PINS the noise floor `ν ≈ 1.5e-11` at a
+    // known θ, which is a property of the evaluator worth keeping visible; the
+    // conclusion it drew about which side to fix is now drawn automatically.
     let DuchonProbitSetup {
         data,
         y,
