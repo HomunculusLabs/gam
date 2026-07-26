@@ -2392,3 +2392,165 @@ fn zz_measure_tiny_fixture_target_rank_2253() {
     let (_t2, tgt_h, _r2) = small_two_atom_periodic_term();
     svd_report("hutchinson_small_two_atom", &tgt_h);
 }
+
+/// #2253/#2089 — the co-collapse verdict is ONE predicate, and reconstruction EV
+/// alone cannot be it.
+///
+/// Two reconstructions of the same target with the *identical* explained
+/// variance: one is the target's own column mean (the decoders produced
+/// nothing), the other is twice the centered target (the decoders are alive and
+/// overshooting). They are different states with different remedies, and
+/// [`SaeManifoldTerm::enforce_decoder_norm_guard`] says so in its own comment —
+/// "a present-decoder fit that merely reconstructs poorly keeps output energy
+/// and is left to the optimizer". The #2089 budget-exhaustion refusal used to
+/// decide on `ev <= ev_floor` alone, which cannot separate them, so it could
+/// raise "every atom's decoder co-vanished" on the second one while printing the
+/// non-zero norms that refute it.
+///
+/// Both arms are pinned, in both directions: the genuine co-vanish must still be
+/// a verdict, and the live-decoder arm must not be.
+#[test]
+pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
+    // Ten rows against three M=3 periodic atoms: the concatenated chart design has
+    // rank well under n, so the signal-free floor renders a verdict at all (at
+    // rank q >= n it is NaN by the saturated-cover convention and there is
+    // nothing to test).
+    let coords0 = array![[0.05], [0.20], [0.55], [0.80], [0.35], [0.65], [0.12], [0.48], [0.72], [0.93]];
+    let coords1 = array![[0.15], [0.30], [0.65], [0.90], [0.45], [0.10], [0.28], [0.58], [0.83], [0.02]];
+    let coords2 = array![[0.25], [0.40], [0.75], [0.05], [0.60], [0.85], [0.38], [0.68], [0.18], [0.52]];
+    let (phi0, jet0) = periodic_basis(&coords0);
+    let (phi1, jet1) = periodic_basis(&coords1);
+    let (phi2, jet2) = periodic_basis(&coords2);
+    // Each atom decodes onto its OWN output axis, so the union decoder span has
+    // rank 3 = K and the #2362 structural arm short-circuits. This isolates the
+    // co-vanish arm, which is the one under test.
+    let axis_decoder = |axis: usize| {
+        Array2::<f64>::from_shape_fn((3, 3), |(_, col)| if col == axis { 0.30 } else { 0.0 })
+    };
+    let make_atom = |name: &str, phi: Array2<f64>, jet: Array3<f64>, axis: usize| {
+        SaeManifoldAtom::new_with_provided_function_gram(
+            name,
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jet,
+            axis_decoder(axis),
+            Array2::<f64>::eye(3),
+        )
+        .unwrap()
+        .with_basis_evaluator(Arc::new(TestPeriodicEvaluator))
+    };
+    let logits = array![
+        [0.7, -0.2, 0.3],
+        [0.1, 0.4, -0.1],
+        [-0.3, 0.5, 0.2],
+        [0.6, -0.1, 0.4],
+        [0.2, 0.3, -0.2],
+        [0.4, 0.1, 0.5],
+        [0.5, 0.2, -0.3],
+        [-0.1, 0.6, 0.1],
+        [0.3, -0.4, 0.2],
+        [0.0, 0.2, 0.6]
+    ];
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        logits,
+        vec![coords0, coords1, coords2],
+        vec![
+            LatentManifold::Circle { period: 1.0 },
+            LatentManifold::Circle { period: 1.0 },
+            LatentManifold::Circle { period: 1.0 },
+        ],
+        AssignmentMode::softmax(0.8),
+    )
+    .unwrap();
+    let term = SaeManifoldTerm::new(
+        vec![
+            make_atom("periodic0", phi0, jet0, 0),
+            make_atom("periodic1", phi1, jet1, 1),
+            make_atom("periodic2", phi2, jet2, 2),
+        ],
+        assignment,
+    )
+    .unwrap();
+    let target = array![
+        [0.40, -0.10, 0.05],
+        [-0.20, 0.35, -0.15],
+        [0.10, 0.05, 0.30],
+        [0.25, -0.30, -0.05],
+        [-0.15, 0.20, 0.18],
+        [0.30, 0.12, -0.22],
+        [0.05, 0.28, 0.11],
+        [-0.32, -0.08, 0.24],
+        [0.18, 0.22, -0.30],
+        [-0.06, -0.25, 0.14]
+    ];
+
+    let mut col_means = vec![0.0_f64; target.ncols()];
+    for (col, mean) in col_means.iter_mut().enumerate() {
+        *mean = target.column(col).iter().sum::<f64>() / target.nrows() as f64;
+    }
+    // Arm A — the reconstruction IS the column mean: residual = centered target,
+    // so EV = 0 and the output carries no centered energy at all.
+    let vanished_fit =
+        Array2::<f64>::from_shape_fn(target.dim(), |(_, col)| col_means[col]);
+    // Arm B — twice the centered target: residual is again exactly the centered
+    // target, so EV is the SAME 0, while the output carries 4x the total
+    // centered variance. Live decoders, aimed wrong.
+    let overshooting_fit = Array2::<f64>::from_shape_fn(target.dim(), |(row, col)| {
+        col_means[col] + 2.0 * (target[[row, col]] - col_means[col])
+    });
+
+    let vanished = term
+        .absolute_co_collapse_verdict(&vanished_fit, target.view(), None)
+        .expect("verdict evaluates on the mean reconstruction");
+    let overshooting = term
+        .absolute_co_collapse_verdict(&overshooting_fit, target.view(), None)
+        .expect("verdict evaluates on the overshooting reconstruction");
+
+    assert!(
+        vanished.ev_floor.is_finite(),
+        "fixture must render a verdict: reachable rank q={} against n={} left the floor at {}",
+        vanished.dictionary_rank,
+        target.nrows(),
+        vanished.ev_floor
+    );
+    assert!(
+        (vanished.explained_variance - overshooting.explained_variance).abs() < 1e-12,
+        "the two arms must be indistinguishable BY EV — that is the whole point: {} vs {}",
+        vanished.explained_variance,
+        overshooting.explained_variance
+    );
+    assert!(
+        vanished.explained_variance <= vanished.ev_floor,
+        "both arms must sit at or below the signal-free null floor: EV={} floor={}",
+        vanished.explained_variance,
+        vanished.ev_floor
+    );
+    assert!(
+        !vanished.structurally_collapsed && !overshooting.structurally_collapsed,
+        "axis-disjoint decoders span rank K, so the structural arm must stand down"
+    );
+
+    assert!(
+        vanished.co_vanished && vanished.degenerate(),
+        "a reconstruction that is the bare column mean IS a co-vanish: \
+         out_energy={} floor={}",
+        vanished.output_energy_ratio,
+        vanished.ev_floor
+    );
+    assert!(
+        overshooting.output_energy_ratio > overshooting.ev_floor,
+        "precondition: the overshooting fit must keep output energy above the null level; \
+         got {} vs {}",
+        overshooting.output_energy_ratio,
+        overshooting.ev_floor
+    );
+    assert!(
+        !overshooting.co_vanished && !overshooting.degenerate(),
+        "a present-decoder fit that merely reconstructs poorly is not a co-collapse; \
+         EV={} floor={} out_energy={}",
+        overshooting.explained_variance,
+        overshooting.ev_floor,
+        overshooting.output_energy_ratio
+    );
+}

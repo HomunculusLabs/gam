@@ -35,6 +35,57 @@ pub(crate) struct EvidenceJointFitOutcome {
     /// A whole evidence-only re-entry started at the current state and found no
     /// strict objective decrease, with no temperature/polish state transition.
     pub(crate) fixed_point: bool,
+    /// Which clause of that conjunction was false, for the re-entry loop's
+    /// refusal to name (see [`EvidenceFixedPointGap`]).
+    pub(crate) gap: EvidenceFixedPointGap,
+}
+
+/// Which clause of the idempotent-re-entry certificate a pass failed.
+///
+/// `fixed_point` is a four-way conjunction, and the four clauses have four
+/// different causes and four different remedies — a settled-but-annealing
+/// schedule is not the same defect as a Newton walk that is still descending,
+/// which is not the same as a pass that ran a full sweep and wrote back a state
+/// differing in its last bits. A caller that exhausts its re-entry budget can
+/// only report "did not reach an idempotent fixed point", which names none of
+/// them; and `gam-sae` test binaries install no logger backend, so a `log::`
+/// line would not surface it either. Carrying the clause makes the refusal
+/// actionable at the point it is raised.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EvidenceFixedPointGap {
+    /// No clause failed: the pass recurred its entry state exactly.
+    None,
+    /// The pass left through a route that is not a settled root (it exhausted
+    /// its iteration budget, or took a descent step it accepted).
+    NotASettledRoot,
+    /// The pass reported that it moved model state.
+    StateMoved,
+    /// The pass reported no move, yet the model state is not bit-identical to
+    /// the entry snapshot — the re-entry wrote back a perturbed state.
+    StateNotRecurred,
+    /// The annealing schedule will emit a different temperature on the next
+    /// re-entry, so the objective this pass settled on is not the objective the
+    /// next one would see.
+    TemperatureStillAnnealing,
+}
+
+impl EvidenceFixedPointGap {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none (the pass recurred its entry state)",
+            Self::NotASettledRoot => {
+                "the pass did not terminate on a settled root (budget exhausted, or a step \
+                 was accepted)"
+            }
+            Self::StateMoved => "the Newton walk reported it moved model state",
+            Self::StateNotRecurred => {
+                "the pass reported no move but the model state is not bit-identical to entry"
+            }
+            Self::TemperatureStillAnnealing => {
+                "the annealing schedule will emit a different temperature next re-entry"
+            }
+        }
+    }
 }
 
 /// Put one softmax-logit row in the reference-logit chart used by the joint
@@ -156,7 +207,142 @@ impl TargetCenteredColStats {
     }
 }
 
+/// The ABSOLUTE co-collapse verdict and every measurement it rests on.
+///
+/// Two sites decide "this dictionary co-collapsed": the reseed arm in
+/// [`SaeManifoldTerm::enforce_decoder_norm_guard`], which spends the multi-start
+/// budget, and the #2089 budget-exhaustion refusal in the joint fit, which turns
+/// a spent budget into a typed error. They must ask the same question — the
+/// refusal's whole meaning is "the reseeds did not escape the state that armed
+/// them" — and they did not. The refusal tested `ev <= ev_floor` ALONE, which is
+/// precisely the "merely-uncompetitive fit" the S1 surgery excludes on purpose:
+/// a fit whose decoders are present keeps its output energy and is left to the
+/// optimizer. So a live dictionary that merely reconstructed poorly could be
+/// refused by a message asserting "every atom's decoder co-vanished" while that
+/// same message printed the non-zero norms refuting it.
+///
+/// Carrying the components rather than a bare bool is what lets the refusal
+/// state which arm fired and on what numbers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AbsoluteCoCollapseVerdict {
+    pub(crate) explained_variance: f64,
+    pub(crate) output_energy_ratio: f64,
+    pub(crate) ev_floor: f64,
+    pub(crate) dictionary_rank: usize,
+    /// The decoders vanished TOGETHER: EV at or below the signal-free null floor
+    /// AND the reconstruction output at or below the same null level.
+    pub(crate) co_vanished: bool,
+    /// The decoders piled onto a shared output subspace whose best achievable,
+    /// amplitude-free capture is no better than a random subspace of that rank.
+    pub(crate) structurally_collapsed: bool,
+}
+
+impl AbsoluteCoCollapseVerdict {
+    pub(crate) fn degenerate(&self) -> bool {
+        self.co_vanished || self.structurally_collapsed
+    }
+}
+
 impl SaeManifoldTerm {
+    /// Compute [`AbsoluteCoCollapseVerdict`] from one reconstruction.
+    ///
+    /// `fitted` is the current `(n × p)` reconstruction; both degeneracy tests
+    /// read it, so callers assemble it once.
+    pub(crate) fn absolute_co_collapse_verdict(
+        &self,
+        fitted: &Array2<f64>,
+        target: ArrayView2<'_, f64>,
+        target_col_stats: Option<&TargetCenteredColStats>,
+    ) -> Result<AbsoluteCoCollapseVerdict, String> {
+        let explained_variance =
+            self.dictionary_reconstruction_ev_from_fitted(fitted, target, target_col_stats)?;
+        let output_energy_ratio = self.dictionary_reconstruction_output_energy_ratio_from_fitted(
+            fitted,
+            target,
+            target_col_stats,
+        )?;
+        let n = self.n_obs();
+        let p = target.ncols();
+        let k = self.k_atoms();
+        // Reachable rank `q = rank([Φ_1 … Φ_K])`, the CONCATENATED chart-design
+        // rank (#C5), NOT the sum `Σ_k rank(Φ_k)` — shared atom column spaces
+        // are counted once (chart geometry alone, so a co-collapsed decoder
+        // still reports full reach). Sets the null floor.
+        let dictionary_rank =
+            crate::manifold::outer_objective::reachable_dictionary_rank(&self.atoms, n, p);
+        let ev_floor =
+            crate::manifold::outer_objective::absolute_degeneracy_ev_floor(target, dictionary_rank);
+        let co_vanished = explained_variance.is_finite()
+            && explained_variance <= ev_floor
+            && output_energy_ratio <= ev_floor;
+        // #2362 Face B — STRUCTURAL co-collapse the achieved-EV / output-energy
+        // pair is blind to. The inner solve AMPLITUDE-COMPENSATES tiny decoders
+        // (a_i grows as the decoder norm shrinks), so the reconstruction keeps
+        // O(1) output energy even when every decoder has collapsed onto a shared
+        // low-dimensional OUTPUT subspace: `out_energy_ratio` never reaches the
+        // null floor, so the co-vanished test misses it (the k3 fixture in
+        // `decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3`: rank-1
+        // constant decoders, `events: []`). Detect it from the DECODERS. With `Q`
+        // an orthonormal basis of the union decoder output span (rank `R_dec`),
+        // the BEST reconstruction achievable WITHIN that span — amplitude-free —
+        // captures `reach = ||Q^T T_c||_F^2 / ss_tot` of the centered target
+        // variance. When the atoms have piled onto a shared subspace
+        // (`R_dec < K`) whose capture is no better than a RANDOM output subspace
+        // of the same dimension (`reach <= R_dec / p`), the dictionary is
+        // structurally co-collapsed however much output energy amplitude
+        // compensation manufactures. Scale-free (relative SVD cutoff),
+        // amplitude-free (subspace projection), and pairing-free (a UNION rank,
+        // not the pairwise coherence that false-fired on healthy correlated K>=2
+        // fits): a healthy overcomplete fit whose union span is RICH keeps
+        // `reach` well above `R_dec / p` and never trips it
+        // (`manifold_beats_linear_joint_streaming_1026`: 8 atoms on a 2-D ring,
+        // `R_dec` ~ 2, reach ~ 0.9, null 0.2).
+        let frames_sc = (0..k)
+            .map(|atom| crate::manifold::certificate::certificate_output_frame(self, atom))
+            .collect::<Result<Vec<_>, String>>()?;
+        let r_dec_sc = union_output_frame_rank(&frames_sc, p);
+        let structurally_collapsed = if r_dec_sc == 0 || r_dec_sc >= k || p == 0 {
+            false
+        } else {
+            let owned_stats;
+            let stats = match target_col_stats {
+                Some(stats) => stats,
+                None => {
+                    owned_stats = TargetCenteredColStats::compute(target);
+                    &owned_stats
+                }
+            };
+            if !(stats.ss_tot > 0.0) {
+                false
+            } else {
+                let q = union_output_frame_basis(&frames_sc, p);
+                let qc = q.ncols();
+                let n_rows = target.nrows();
+                let mut in_span = 0.0_f64;
+                for row in 0..n_rows {
+                    for c in 0..qc {
+                        let mut proj = 0.0_f64;
+                        for out in 0..p {
+                            proj += q[[out, c]] * (target[[row, out]] - stats.col_means[out]);
+                        }
+                        in_span += proj * proj;
+                    }
+                }
+                let ceiling = in_span / stats.ss_tot;
+                let random_subspace_null = r_dec_sc as f64 / p as f64;
+                ceiling <= random_subspace_null
+            }
+        };
+        Ok(AbsoluteCoCollapseVerdict {
+            explained_variance,
+            output_energy_ratio,
+            ev_floor,
+            dictionary_rank,
+            co_vanished,
+            structurally_collapsed,
+        })
+    }
+
     pub fn solve_newton_step(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -3312,26 +3498,12 @@ impl SaeManifoldTerm {
             // derive both from it (identical values, one `try_fitted_for_rho`
             // instead of two) — this guard runs once per accepted outer iterate.
             let fitted = self.try_fitted_for_rho(rho)?;
-            let ev =
-                self.dictionary_reconstruction_ev_from_fitted(&fitted, target, target_col_stats)?;
-            let out_energy_ratio = self.dictionary_reconstruction_output_energy_ratio_from_fitted(
-                &fitted,
-                target,
-                target_col_stats,
-            )?;
-            let n = self.n_obs();
-            let p = target.ncols();
-            // Reachable rank `q = rank([Φ_1 … Φ_K])`, the CONCATENATED chart-design
-            // rank (#C5), NOT the sum `Σ_k rank(Φ_k)` — shared atom column spaces
-            // are counted once (chart geometry alone, so a co-collapsed decoder
-            // still reports full reach). Sets the null floor, shared with the
-            // fitted-data collapse verdict so both key on one bar.
-            let dictionary_rank =
-                crate::manifold::outer_objective::reachable_dictionary_rank(&self.atoms, n, p);
-            let ev_floor = crate::manifold::outer_objective::absolute_degeneracy_ev_floor(
-                target,
-                dictionary_rank,
-            );
+            // ONE predicate, shared with the #2089 budget-exhaustion refusal so
+            // the arm that spends the multi-start budget and the refusal that
+            // reports it spent cannot disagree about what co-collapse is
+            // (see [`AbsoluteCoCollapseVerdict`]).
+            let verdict = self.absolute_co_collapse_verdict(&fitted, target, target_col_stats)?;
+            let ev = verdict.explained_variance;
             // The reseed fires when the decoders have VANISHED together (EV at the
             // signal-free null floor AND the output co-vanished). #2082 note: an
             // additional STRUCTURAL trigger (`structural_coherence_collapse_detected`,
@@ -3352,66 +3524,9 @@ impl SaeManifoldTerm {
             // is diagnostic ONLY (no state change), so healthy fits are byte-unchanged;
             // it lets the structure search / operator see the mode the two-width test
             // catches without the false-positive reseed that regressed live fits.
-            let base_degenerate = ev.is_finite() && ev <= ev_floor && out_energy_ratio <= ev_floor;
             // #2362 Face B — STRUCTURAL co-collapse the achieved-EV / output-energy
-            // pair is blind to. The inner solve AMPLITUDE-COMPENSATES tiny decoders
-            // (a_i grows as the decoder norm shrinks), so the reconstruction keeps
-            // O(1) output energy even when every decoder has collapsed onto a shared
-            // low-dimensional OUTPUT subspace: `out_energy_ratio` never reaches the
-            // null floor, so the co-vanished test misses it (the k3 fixture in
-            // `decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3`: rank-1
-            // constant decoders, `events: []`). Detect it from the DECODERS. With `Q`
-            // an orthonormal basis of the union decoder output span (rank `R_dec`),
-            // the BEST reconstruction achievable WITHIN that span — amplitude-free —
-            // captures `reach = ||Q^T T_c||_F^2 / ss_tot` of the centered target
-            // variance. When the atoms have piled onto a shared subspace
-            // (`R_dec < K`) whose capture is no better than a RANDOM output subspace
-            // of the same dimension (`reach <= R_dec / p`), the dictionary is
-            // structurally co-collapsed however much output energy amplitude
-            // compensation manufactures. Scale-free (relative SVD cutoff),
-            // amplitude-free (subspace projection), and pairing-free (a UNION rank,
-            // not the pairwise coherence that false-fired on healthy correlated K>=2
-            // fits): a healthy overcomplete fit whose union span is RICH keeps
-            // `reach` well above `R_dec / p` and never trips it
-            // (`manifold_beats_linear_joint_streaming_1026`: 8 atoms on a 2-D ring,
-            // `R_dec` ~ 2, reach ~ 0.9, null 0.2).
-            let frames_sc = (0..k)
-                .map(|atom| crate::manifold::certificate::certificate_output_frame(self, atom))
-                .collect::<Result<Vec<_>, String>>()?;
-            let r_dec_sc = union_output_frame_rank(&frames_sc, p);
-            let structural_degenerate = if r_dec_sc == 0 || r_dec_sc >= k || p == 0 {
-                false
-            } else {
-                let owned_stats;
-                let stats = match target_col_stats {
-                    Some(stats) => stats,
-                    None => {
-                        owned_stats = TargetCenteredColStats::compute(target);
-                        &owned_stats
-                    }
-                };
-                if !(stats.ss_tot > 0.0) {
-                    false
-                } else {
-                    let q = union_output_frame_basis(&frames_sc, p);
-                    let qc = q.ncols();
-                    let n_rows = target.nrows();
-                    let mut in_span = 0.0_f64;
-                    for row in 0..n_rows {
-                        for c in 0..qc {
-                            let mut proj = 0.0_f64;
-                            for out in 0..p {
-                                proj += q[[out, c]] * (target[[row, out]] - stats.col_means[out]);
-                            }
-                            in_span += proj * proj;
-                        }
-                    }
-                    let ceiling = in_span / stats.ss_tot;
-                    let random_subspace_null = r_dec_sc as f64 / p as f64;
-                    ceiling <= random_subspace_null
-                }
-            };
-            let ev_degenerate = base_degenerate || structural_degenerate;
+            // pair is blind to, now computed inside the shared verdict.
+            let ev_degenerate = verdict.degenerate();
             if !ev_degenerate
                 && let Some((j, kk, coherence)) = self.structural_coherence_collapse_detected()?
             {
@@ -5726,14 +5841,28 @@ impl SaeManifoldTerm {
                 schedule.current_tau(schedule.iter_count).to_bits()
                     == self.assignment.mode.temperature().to_bits()
             });
+        // Evaluate the conjunction clause by clause so the first false one can be
+        // named. The order is the causal one: a pass that never reached a settled
+        // root explains a state move, which explains a non-recurrence.
+        let settled_root = matches!(
+            outcome.termination,
+            JointFitTermination::Frozen | JointFitTermination::NoStrictDecrease
+        );
+        let gap = if !settled_root {
+            EvidenceFixedPointGap::NotASettledRoot
+        } else if outcome.state_moved {
+            EvidenceFixedPointGap::StateMoved
+        } else if !entry_state_recurred {
+            EvidenceFixedPointGap::StateNotRecurred
+        } else if !temperature_stable_on_reentry {
+            EvidenceFixedPointGap::TemperatureStillAnnealing
+        } else {
+            EvidenceFixedPointGap::None
+        };
         Ok(EvidenceJointFitOutcome {
             loss: outcome.loss,
-            fixed_point: matches!(
-                outcome.termination,
-                JointFitTermination::Frozen | JointFitTermination::NoStrictDecrease
-            ) && !outcome.state_moved
-                && entry_state_recurred
-                && temperature_stable_on_reentry,
+            fixed_point: gap == EvidenceFixedPointGap::None,
+            gap,
         })
     }
 
@@ -6870,27 +6999,34 @@ impl SaeManifoldTerm {
             if self.dictionary_cocollapse_reseeds
                 >= crate::assignment::SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET
             {
-                let ev_now = self.dictionary_reconstruction_ev(target, rho)?;
-                let dictionary_rank = crate::manifold::outer_objective::reachable_dictionary_rank(
-                    &self.atoms,
-                    self.n_obs(),
-                    target.ncols(),
-                );
-                let ev_floor = crate::manifold::outer_objective::absolute_degeneracy_ev_floor(
-                    target,
-                    dictionary_rank,
-                );
-                // The signal-free floor renders NO verdict when the dictionary is
-                // rank-saturated (reachable rank >= n): colspan(Φ) is all of Rⁿ, so
-                // every fit reconstructs the target and EV carries zero evidence
-                // about degeneracy — `absolute_degeneracy_ev_floor` returns NaN by
-                // that convention. The per-iteration detector already stands down on
-                // a NaN floor (its `ev <= ev_floor` guard is false on NaN); the
-                // exhaustion guard MUST too, or a high-EV fit on a small saturated
-                // fixture is falsely rejected as co-collapsed — `ev_now > NaN` is
-                // always false, so the bare `!(ev_now > ev_floor)` always fired.
-                // Only raise on a FINITE verdict that EV genuinely fails to clear.
-                if ev_floor.is_finite() && !(ev_now.is_finite() && ev_now > ev_floor) {
+                // Ask the SAME question the reseed arm asked. This refusal means
+                // "the reseeds did not escape the state that armed them", so the
+                // state must be re-tested against the predicate that armed them:
+                // `AbsoluteCoCollapseVerdict::degenerate` — decoders co-vanished
+                // (EV at the signal-free null floor AND the output at that same
+                // null level) or piled onto a shared output subspace no richer
+                // than a random one of its rank.
+                //
+                // It previously tested `ev <= ev_floor` ALONE. That is strictly
+                // weaker, and weaker in exactly the direction the arming site
+                // rules out on purpose: a present-decoder fit that merely
+                // reconstructs poorly keeps its output energy and is left to the
+                // optimizer (S1 (2)). So a live dictionary could be refused by a
+                // message asserting "every atom's decoder co-vanished" while the
+                // `decoder_norms` it printed were O(0.1) and the coherence probe
+                // reported nothing — the refusal contradicted its own payload.
+                //
+                // The signal-free floor still renders NO verdict when the
+                // dictionary is rank-saturated (reachable rank >= n): colspan(Φ)
+                // is all of Rⁿ, so EV carries zero evidence about degeneracy and
+                // `absolute_degeneracy_ev_floor` returns NaN. `co_vanished` is
+                // false on a NaN floor, so that convention is preserved without a
+                // separate guard.
+                let fitted = self.try_fitted_for_rho(rho)?;
+                let verdict = self.absolute_co_collapse_verdict(&fitted, target, None)?;
+                let ev_now = verdict.explained_variance;
+                let ev_floor = verdict.ev_floor;
+                if verdict.degenerate() {
                     // Carry the collapse MEASUREMENTS in the message so a caller that
                     // deliberately drives co-collapse as a control (red-tree scaling
                     // experiments) can read the numbers off the exception instead of
@@ -6914,17 +7050,31 @@ impl SaeManifoldTerm {
                                 .sqrt()
                         })
                         .collect();
+                    // Name the arm that fired. "Co-vanished" and "structurally
+                    // collapsed" are different states with different remedies, and
+                    // a refusal that asserts both while only one holds is what made
+                    // the old message contradict its own decoder norms.
+                    let arm = if verdict.co_vanished {
+                        "every atom's decoder co-vanished (reconstruction output energy \
+                         at the same null level)"
+                    } else {
+                        "every atom's decoder piled onto one shared output subspace whose \
+                         best achievable capture is no better than a random subspace of \
+                         its rank"
+                    };
                     return Err(format!(
                         "SaeManifoldTerm::run_joint_fit_arrow_schur: dictionary did not escape \
-                         total co-collapse after {} reseed multi-starts (reconstruction \
-                         EV={ev_now:.4} at or below the signal-free null floor {ev_floor:.4}); \
-                         every atom's decoder co-vanished and no residual structure could anchor \
-                         K={} distinct charts for this input [mu_hat_max={mu_hat}, \
+                         total co-collapse after {} reseed multi-starts: {arm}, so no residual \
+                         structure could anchor K={} distinct charts for this input \
+                         [EV={ev_now:.4}, output_energy_ratio={:.4}, signal-free null floor \
+                         {ev_floor:.4} at reachable rank q={}, mu_hat_max={mu_hat}, \
                          decoder_norms={decoder_norms:.4?}]. Refusing to continue the degenerate \
                          fit. Try fewer atoms (a smaller K), a different atom_topology/assignment, \
                          more observations, or a different random_state.",
                         crate::assignment::SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET,
-                        self.k_atoms()
+                        self.k_atoms(),
+                        verdict.output_energy_ratio,
+                        verdict.dictionary_rank,
                     ));
                 }
             }

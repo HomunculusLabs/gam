@@ -568,6 +568,10 @@ fn fit_to_idempotent_reentry_and_read_back(
     const MAX_REENTRIES: usize = 8;
     let target_f64 = target.mapv(|v| v as f64);
     let mut certified = false;
+    // The clause that blocked the LAST re-entry. Reporting "not an idempotent
+    // fixed point" names none of the four, and a re-entry loop that exhausts its
+    // budget is exactly where the reader needs to know which one.
+    let mut last_gap = "no pass ran";
     for _ in 0..MAX_REENTRIES {
         let outcome = term.run_joint_fit_arrow_schur_for_quasi_laplace(
             target_f64.view(),
@@ -578,12 +582,13 @@ fn fit_to_idempotent_reentry_and_read_back(
             config.ridge_ext_coord,
             config.ridge_beta,
         )?;
+        last_gap = outcome.gap.as_str();
         if outcome.fixed_point {
             certified = true;
             break;
         }
     }
-    require_idempotent_fixed_point(certified, entry, config.max_iter)?;
+    require_idempotent_fixed_point(certified, entry, MAX_REENTRIES, config.max_iter, last_gap)?;
 
     let recon_f64 = term.try_fitted_for_rho(&rho)?;
     let reconstructed = recon_f64.mapv(|v| v as f32);
@@ -591,16 +596,24 @@ fn fit_to_idempotent_reentry_and_read_back(
     Ok((reconstructed, explained_variance))
 }
 
+/// The budget this refusal reports is the RE-ENTRY count, which is what the loop
+/// above exhausts. It previously reported `max_iter` — the per-pass inner Newton
+/// budget — so a reader chasing "within 256 iterations" was chasing a number no
+/// loop here counts to, and the per-pass budget looked like the thing to raise.
 fn require_idempotent_fixed_point(
     fixed_point: bool,
     entry: &str,
-    max_iter: usize,
+    max_reentries: usize,
+    inner_max_iter: usize,
+    gap: &str,
 ) -> Result<(), String> {
     if fixed_point {
         Ok(())
     } else {
         Err(format!(
-            "{entry}: deterministic joint-solver re-entry did not reach an idempotent fixed point within {max_iter} iterations"
+            "{entry}: deterministic joint-solver re-entry did not reach an idempotent fixed \
+             point within {max_reentries} re-entries of {inner_max_iter} inner iterations each; \
+             the last pass was blocked by: {gap}"
         ))
     }
 }
