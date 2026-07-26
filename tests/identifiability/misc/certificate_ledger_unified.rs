@@ -19,6 +19,7 @@ fn clean_criterion() -> OuterCriterionCertificate {
         },
         hessian_psd: Some(true),
         lambdas_railed: Vec::new(),
+        railed_facts: Vec::new(),
         curvature_floor: None,
     }
 }
