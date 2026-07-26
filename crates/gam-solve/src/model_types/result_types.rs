@@ -1140,15 +1140,59 @@ impl OuterCriterionCertificate {
     /// Whether the certificate accepts the returned point as a constrained
     /// minimum. This is the load-bearing verdict: a `false` here rejects the
     /// fit with typed non-convergence.
+    ///
+    /// Defined as "no conjunct refused" so that this and [`Self::refusal`]
+    /// cannot disagree. Two renderings of one predicate is exactly what #2550
+    /// was: the verdict string named a cause the predicate had not tested.
     pub fn certifies(&self) -> bool {
-        self.stationarity.raw_norm().is_finite()
-            && self.stationarity.raw_norm() >= 0.0
-            && self.stationarity.projected_norm() >= 0.0
-            && self.stationarity.bound().is_finite()
-            && self.stationarity.bound() >= 0.0
-            && self.rails_are_well_formed()
-            && self.is_stationary()
-            && self.curvature_admissible()
+        self.refusal().is_none()
+    }
+
+    /// WHICH conjunct refused, or `None` when the certificate accepts.
+    ///
+    /// `certifies()` is a conjunction of six independent things and its verdict
+    /// string used to be a three-way branch, so the middle branch had to GUESS
+    /// among four surviving culprits — and guessed curvature every time. It
+    /// printed `INDEFINITE CURVATURE AT INTERIOR OPTIMUM` four words after
+    /// printing `hessian_psd=yes`, on a fit whose actual refusal was a rail
+    /// with a zero pencil constant (#2550, observed at #2348's increment 2).
+    /// A misdirecting refusal is worse than a vague one: it spends the reader's
+    /// attention on the one component the same line proves is not at fault.
+    ///
+    /// The order is the conjunction's own. It is reported first-failure-wins
+    /// because that is what a conjunction means; a certificate failing several
+    /// conjuncts is not better described by listing them than by naming the
+    /// first thing that was wrong with it.
+    pub fn refusal(&self) -> Option<CertificationRefusal> {
+        if !self.stationarity.raw_norm().is_finite()
+            || self.stationarity.raw_norm() < 0.0
+            || self.stationarity.projected_norm() < 0.0
+        {
+            return Some(CertificationRefusal::UnusableNorms {
+                raw: self.stationarity.raw_norm(),
+                projected: self.stationarity.projected_norm(),
+            });
+        }
+        if !self.stationarity.bound().is_finite() || self.stationarity.bound() < 0.0 {
+            return Some(CertificationRefusal::UnusableBound {
+                bound: self.stationarity.bound(),
+            });
+        }
+        if let Some(malformed) = self.first_malformed_rail() {
+            return Some(malformed);
+        }
+        if !self.is_stationary() {
+            return Some(CertificationRefusal::NotStationary {
+                projected: self.stationarity.projected_norm(),
+                bound: self.stationarity.bound(),
+            });
+        }
+        if !self.curvature_admissible() {
+            return Some(CertificationRefusal::InadmissibleCurvature {
+                floor_consulted: self.curvature_floor.is_some(),
+            });
+        }
+        None
     }
 
     /// An `AsymptoteRail` certificate is only admissible when it carries at
@@ -1165,20 +1209,42 @@ impl OuterCriterionCertificate {
     /// exactly zero. The mint logged a successful proof and `certifies()` then
     /// returned false with nothing recording why — reachable only on a face of
     /// two or more coordinates, which no single-coordinate fixture produces.
-    fn rails_are_well_formed(&self) -> bool {
-        match &self.stationarity {
-            OuterStationarityCertificate::AsymptoteRail { rails, .. } => {
-                !rails.is_empty()
-                    && rails.iter().all(|rail| {
-                        rail.evidence.admits(rail.tail_constant)
-                            && rail.value_gap.is_finite()
-                            && rail.value_gap >= 0.0
-                            && rail.estimand_travel_bound.is_finite()
-                            && rail.estimand_travel_bound >= 0.0
-                    })
-            }
-            _ => true,
+    /// The first rail that fails its own route's admissibility, named.
+    ///
+    /// A boolean here was enough for `certifies()` and never enough for a
+    /// reader: "some rail is malformed" among a list of rails, each with its
+    /// own route and its own rule, is the shape of message that sends someone
+    /// to read all of them. The route is carried because the pencil-constant
+    /// rule is delegated to [`RailTailEvidence::admits`] and differs between
+    /// routes — a proven face's constant of exactly zero is admissible on the
+    /// analytic route and not on the measured one, which is precisely the
+    /// distinction that produced #2550's observed misdirection.
+    fn first_malformed_rail(&self) -> Option<CertificationRefusal> {
+        let OuterStationarityCertificate::AsymptoteRail { rails, .. } = &self.stationarity else {
+            return None;
+        };
+        if rails.is_empty() {
+            return Some(CertificationRefusal::NoRailOnRailCertificate);
         }
+        rails.iter().find_map(|rail| {
+            let fault = if !rail.evidence.admits(rail.tail_constant) {
+                RailFault::TailConstantRefusedByRoute
+            } else if !(rail.value_gap.is_finite() && rail.value_gap >= 0.0) {
+                RailFault::UnusableValueGap
+            } else if !(rail.estimand_travel_bound.is_finite()
+                && rail.estimand_travel_bound >= 0.0)
+            {
+                RailFault::UnusableTravelBound
+            } else {
+                return None;
+            };
+            Some(CertificationRefusal::MalformedRail {
+                index: rail.index,
+                route: rail.evidence.route(),
+                tail_constant: rail.tail_constant,
+                fault,
+            })
+        })
     }
 
     /// Whether every audited fact is clean (stationary, PSD-or-untracked
@@ -1251,18 +1317,106 @@ impl OuterCriterionCertificate {
                     .join(", ")
             )
         };
+        let verdict = match self.refusal() {
+            None => "stationary".to_string(),
+            Some(refusal) => refusal.to_string(),
+        };
         format!(
-            "{stationarity} hessian_psd={} railed={} → {}",
-            self.curvature,
-            railed,
-            if self.certifies() {
-                "stationary"
-            } else if self.is_stationary() {
-                "INDEFINITE CURVATURE AT INTERIOR OPTIMUM"
-            } else {
-                "NOT STATIONARY"
-            },
+            "{stationarity} hessian_psd={} railed={} → {verdict}",
+            self.curvature, railed,
         )
+    }
+}
+
+/// Which conjunct of [`OuterCriterionCertificate::certifies`] refused.
+///
+/// Exists so a refusal cannot name a cause that was not the one tested (#2550).
+/// Every rendering of a non-certifying verdict is built from this, so there is
+/// no second place for a verdict string to be inferred.
+// No `Eq`: two variants carry the `f64` quantities that decided the refusal,
+// and reporting them is the point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CertificationRefusal {
+    /// A stationarity norm is non-finite or negative — no comparison is
+    /// possible, so nothing downstream of it was tested.
+    UnusableNorms { raw: f64, projected: f64 },
+    /// The bound the norms would be compared against is non-finite or negative.
+    UnusableBound { bound: f64 },
+    /// A rail certificate carrying no rail at all. Deserialization can produce
+    /// this; a mint cannot.
+    NoRailOnRailCertificate,
+    /// A rail whose certified facts its own route does not admit.
+    MalformedRail {
+        index: usize,
+        route: &'static str,
+        tail_constant: f64,
+        fault: RailFault,
+    },
+    /// The projected norm exceeds its bound: the point is not a stationary
+    /// point of the outer problem.
+    NotStationary { projected: f64, bound: f64 },
+    /// Measured indefinite curvature that no floor clearance excused. **The
+    /// only variant permitted to speak about curvature.**
+    InadmissibleCurvature { floor_consulted: bool },
+}
+
+/// Which of a rail's certified facts its route refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RailFault {
+    /// The pencil constant is outside what this rail's route admits. The rule
+    /// is the route's, not a fixed `ĉ > 0`.
+    TailConstantRefusedByRoute,
+    UnusableValueGap,
+    UnusableTravelBound,
+}
+
+impl std::fmt::Display for RailFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TailConstantRefusedByRoute => "pencil constant not admitted by its route",
+            Self::UnusableValueGap => "non-finite or negative value gap",
+            Self::UnusableTravelBound => "non-finite or negative estimand travel bound",
+        })
+    }
+}
+
+impl std::fmt::Display for CertificationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnusableNorms { raw, projected } => write!(
+                f,
+                "UNUSABLE STATIONARITY NORMS (|g|={raw:.3e}, |Pg|={projected:.3e})"
+            ),
+            Self::UnusableBound { bound } => {
+                write!(f, "UNUSABLE STATIONARITY BOUND ({bound:.3e})")
+            }
+            Self::NoRailOnRailCertificate => {
+                f.write_str("RAIL CERTIFICATE CARRIES NO RAIL")
+            }
+            Self::MalformedRail {
+                index,
+                route,
+                tail_constant,
+                fault,
+            } => write!(
+                f,
+                "MALFORMED RAIL #{index} via {route}: {fault} (ĉ={tail_constant:.3e})"
+            ),
+            Self::NotStationary { projected, bound } => write!(
+                f,
+                "NOT STATIONARY (|Pg|={projected:.3e} > bound={bound:.3e})"
+            ),
+            // The historical wording, kept verbatim: downstream refusal text is
+            // asserted on it, and this is now the ONLY branch that can emit it.
+            Self::InadmissibleCurvature { floor_consulted } => {
+                f.write_str("INDEFINITE CURVATURE AT INTERIOR OPTIMUM")?;
+                if *floor_consulted {
+                    f.write_str(" (curvature floor did not clear)")
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -1466,6 +1620,220 @@ impl Default for FitOptions {
 /// `detect_wrong_rail_pullback`) decide by testing that `ĉ` is CONSTANT. One
 /// `Default` disabled the face certificate, the tail snap, and the repair path
 /// for a coordinate stuck on the wrong bound.
+#[cfg(test)]
+mod tests_certification_refusal_2550 {
+    use super::{
+        CertificationRefusal, CurvatureEvidence, OuterCriterionCertificate,
+        OuterStationarityCertificate, RailCoordinate, RailFault, RailTailEvidence,
+    };
+    use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
+
+    fn rung() -> super::CertifiedRung {
+        gam_problem::StationarityRung {
+            label: "solver-band",
+            derived_standard: false,
+        }
+        .into()
+    }
+
+    /// A rail the ANALYTIC route admits: proven face, non-negative constant.
+    fn proven_rail(index: usize, tail_constant: f64) -> RailCoordinate {
+        RailCoordinate {
+            index,
+            side: AsymptoteSide::Upper,
+            tail_constant,
+            value_gap: 2.6e-5,
+            estimand_travel_bound: 1.0e-9,
+            evidence: RailTailEvidence::AnalyticFaceProof {
+                min_curvature: 3.5,
+                curvature_margin: 1.0e-12,
+            },
+        }
+    }
+
+    /// Stationary, admissible curvature, well-formed rails — the certificate
+    /// every case below perturbs in EXACTLY ONE conjunct.
+    fn certifying(rails: Vec<RailCoordinate>) -> OuterCriterionCertificate {
+        OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AsymptoteRail {
+                interior_projected_grad_norm: 1.0e-9,
+                bound: 1.0e-6,
+                rung: rung(),
+                rails,
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: vec![0, 1],
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        }
+    }
+
+    /// The baseline must CERTIFY, or every negative control below is vacuous:
+    /// a fixture that already refuses proves nothing about which conjunct the
+    /// verdict names.
+    #[test]
+    fn the_unperturbed_certificate_certifies() {
+        let certificate = certifying(vec![proven_rail(0, 4.25), proven_rail(1, 0.0)]);
+        assert_eq!(certificate.refusal(), None, "{}", certificate.summary());
+        assert!(certificate.certifies());
+        assert!(certificate.summary().contains("stationary"));
+    }
+
+    /// ⭐ #2550's observed case, as a gate.
+    ///
+    /// A rail whose pencil constant its own route refuses, with curvature
+    /// MEASURED PSD and the point stationary. The old three-way verdict had
+    /// only "INDEFINITE CURVATURE AT INTERIOR OPTIMUM" available for this
+    /// branch, so it printed that four words after printing `hessian_psd=yes`
+    /// — naming the one component the same line proves is not at fault.
+    #[test]
+    fn a_malformed_rail_is_not_blamed_on_curvature() {
+        // ProbedTail refuses a non-positive constant; the analytic route does
+        // not. Using the measured route with c = 0 fails EXACTLY the rails
+        // conjunct.
+        let mut rails = vec![proven_rail(0, 4.25), proven_rail(1, 0.0)];
+        rails[1].evidence = RailTailEvidence::ProbedTail {
+            noise_floor: 1.0e-12,
+            drift_band: 1.0e-3,
+        };
+        let certificate = certifying(rails);
+
+        assert!(
+            certificate.is_stationary(),
+            "the fixture must be stationary, or it exercises the wrong branch"
+        );
+        assert!(
+            certificate.curvature_admissible(),
+            "the fixture's curvature must be admissible, or the blame would be earned"
+        );
+        assert!(!certificate.certifies());
+
+        let summary = certificate.summary();
+        assert!(
+            !summary.contains("CURVATURE"),
+            "a refusal caused by a rail must not name curvature, least of all on a line \
+             that also prints hessian_psd=yes: {summary}"
+        );
+        assert!(
+            summary.contains("hessian_psd=yes"),
+            "the contradicting evidence is what made this defect visible; keep it: {summary}"
+        );
+        assert!(
+            matches!(
+                certificate.refusal(),
+                Some(CertificationRefusal::MalformedRail {
+                    index: 1,
+                    fault: RailFault::TailConstantRefusedByRoute,
+                    ..
+                })
+            ),
+            "the refusal must name WHICH rail and WHICH of its facts: {:?}",
+            certificate.refusal()
+        );
+        assert!(
+            summary.contains("MALFORMED RAIL #1"),
+            "the rendered verdict must carry the rail's index: {summary}"
+        );
+    }
+
+    /// The curvature arm still says what it always said, and is the only arm
+    /// that may. Downstream refusal text is asserted on this wording.
+    #[test]
+    fn inadmissible_curvature_is_still_named_curvature() {
+        let mut certificate = certifying(vec![proven_rail(0, 4.25)]);
+        certificate.curvature = CurvatureEvidence::Measured { psd: false };
+
+        assert!(certificate.is_stationary());
+        assert!(certificate.first_malformed_rail().is_none());
+        assert!(!certificate.certifies());
+        assert!(matches!(
+            certificate.refusal(),
+            Some(CertificationRefusal::InadmissibleCurvature { .. })
+        ));
+        let summary = certificate.summary();
+        assert!(
+            summary.contains("INDEFINITE CURVATURE AT INTERIOR OPTIMUM"),
+            "the historical wording must survive for the case that earns it: {summary}"
+        );
+        assert!(summary.contains("hessian_psd=NO"), "{summary}");
+    }
+
+    /// A non-stationary point names stationarity and carries the comparison
+    /// that decided it, rather than the bare words.
+    #[test]
+    fn a_non_stationary_point_names_stationarity_with_its_comparison() {
+        let certificate = OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AsymptoteRail {
+                interior_projected_grad_norm: 1.0e-2,
+                bound: 1.0e-6,
+                rung: rung(),
+                rails: vec![proven_rail(0, 4.25)],
+            },
+            curvature: CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: vec![0],
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        };
+        assert!(matches!(
+            certificate.refusal(),
+            Some(CertificationRefusal::NotStationary { .. })
+        ));
+        let summary = certificate.summary();
+        assert!(summary.contains("NOT STATIONARY"), "{summary}");
+        assert!(
+            !summary.contains("CURVATURE"),
+            "curvature is admissible here and must not be named: {summary}"
+        );
+    }
+
+    /// A rail certificate with no rail at all is its own refusal, not a
+    /// malformed one — deserialization can produce it and a mint cannot.
+    #[test]
+    fn a_rail_certificate_with_no_rail_says_so() {
+        let certificate = certifying(Vec::new());
+        assert_eq!(
+            certificate.refusal(),
+            Some(CertificationRefusal::NoRailOnRailCertificate)
+        );
+        let summary = certificate.summary();
+        assert!(summary.contains("CARRIES NO RAIL"), "{summary}");
+        assert!(!summary.contains("CURVATURE"), "{summary}");
+    }
+
+    /// `certifies()` and `refusal()` are one predicate, so they cannot drift.
+    /// This is the invariant the whole change rests on: the defect was two
+    /// renderings of one question disagreeing.
+    #[test]
+    fn certifies_agrees_with_refusal_across_every_perturbation() {
+        let mut cases = vec![
+            certifying(vec![proven_rail(0, 4.25), proven_rail(1, 0.0)]),
+            certifying(Vec::new()),
+        ];
+        let mut indefinite = certifying(vec![proven_rail(0, 4.25)]);
+        indefinite.curvature = CurvatureEvidence::Measured { psd: false };
+        cases.push(indefinite);
+        let mut unmeasured = certifying(vec![proven_rail(0, 4.25)]);
+        unmeasured.curvature = CurvatureEvidence::NotAvailable;
+        cases.push(unmeasured);
+        let mut bad_rail = certifying(vec![proven_rail(0, 4.25)]);
+        if let OuterStationarityCertificate::AsymptoteRail { rails, .. } =
+            &mut bad_rail.stationarity
+        {
+            rails[0].value_gap = f64::NAN;
+        }
+        cases.push(bad_rail);
+
+        for certificate in cases {
+            assert_eq!(
+                certificate.certifies(),
+                certificate.refusal().is_none(),
+                "certifies() and refusal() must be one predicate: {}",
+                certificate.summary()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod rail_tail_evidence_tests {
     use super::{
