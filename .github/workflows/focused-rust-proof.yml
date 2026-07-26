@@ -103,7 +103,7 @@ jobs:
           echo "RUSTFLAGS=-C link-arg=-Wl,--threads=1" >> "$GITHUB_ENV"
 
       - name: Checkout exact requested SHA
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           # build.rs's human-author gate needs real history.
           fetch-depth: 0
@@ -115,6 +115,13 @@ jobs:
           # Compiler outputs belong in shared sccache. A target-directory cache
           # would be a second, key-sensitive source of truth.
           cache-targets: "false"
+
+      - name: Record execution host and compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          rustc -vV
 
       - name: Require reachable shared compiler cache
         shell: bash
@@ -336,7 +343,7 @@ jobs:
 
       - name: Upload focused logs
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: focused-rust-${{ github.run_id }}
           path: focused-rust-logs
