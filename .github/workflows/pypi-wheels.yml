@@ -19,12 +19,10 @@ name: Publish to PyPI
 # `continue-on-error: true` is removed everywhere: real failures need to
 # fail loudly so the wheel slot doesn't silently disappear.
 
+# Publication is an explicit action pinned by GitHub to the selected ref's exact
+# commit. A version-file edit on a busy main branch must not implicitly launch a
+# six-platform release matrix.
 on:
-  push:
-    branches:
-      - main         # only runs when pyproject.toml `[project].version` changed
-    tags:
-      - 'v*'        # builds + publishes
   workflow_dispatch:
     inputs:
       scope:
@@ -64,63 +62,17 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  # Gate: on a branch push, only proceed when the wheel version actually
-  # changed. Tag pushes and workflow_dispatch always run (force-publish or
-  # explicit release path).
+  # Validate the exact dispatch commit before the matrix fans out.
   gate:
     runs-on: ubuntu-24.04
-    outputs:
-      should_run: ${{ steps.check.outputs.should_run }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Need the previous commit to diff the version line against.
-          fetch-depth: 2
-      - id: check
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" != "push" || "${GITHUB_REF}" != refs/heads/* ]]; then
-            echo "Non-branch push (tag or dispatch) — always run."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # If this exact commit is also a `v*` release tag, defer to the
-          # tag-triggered run so a coordinated release (version bump pushed to
-          # main together with its tag) publishes the wheels exactly once
-          # instead of racing two identical twine uploads. The standalone
-          # "bump pyproject on main, no tag" quick-fix path is unaffected.
-          git fetch --tags --force --quiet origin 2>/dev/null || true
-          if git tag --points-at HEAD | grep -q '^v'; then
-            echo "Commit is tagged $(git tag --points-at HEAD | grep '^v' | head -n1) — deferring to the tag run."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Gate on the file that DRIVES the published wheel: maturin reads the
-          # version from `[project].version` in pyproject.toml. The internal
-          # crates/gam-pyffi/Cargo.toml version (publish = false) does NOT change
-          # the artifact, so diffing it let a pyproject-only bump slip through as
-          # should_run=false (issue #570). `^version[[:space:]]*=` matches exactly
-          # the single `[project].version` line in pyproject.toml.
-          manifest=pyproject.toml
-          new_ver=$(grep -E '^version[[:space:]]*=' "$manifest" | head -n1)
-          old_ver=$(git show "${GITHUB_EVENT_BEFORE:-HEAD^}:$manifest" 2>/dev/null | grep -E '^version[[:space:]]*=' | head -n1 || true)
-          echo "old: $old_ver"
-          echo "new: $new_ver"
-          if [[ "$new_ver" != "$old_ver" ]]; then
-            echo "Version changed — running publish."
-            echo "should_run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Version unchanged — skipping publish."
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-          fi
 
       # Resolve metadata once before the matrix fans out. Running without
       # --locked is deliberate in this ephemeral checkout: Cargo can reveal the
       # exact resolver-owned delta, then this gate refuses publication if the
       # checked-in lockfile was not already canonical.
       - name: Require resolver-clean Cargo.lock
-        if: steps.check.outputs.should_run == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -136,7 +88,6 @@ jobs:
 
   linux:
     needs: gate
-    if: needs.gate.outputs.should_run == 'true'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: true
@@ -219,7 +170,7 @@ jobs:
     needs: gate
     # Built on every release EXCEPT a manual `scope=x86` run (musllinux is part
     # of the Linux set). Branch-push/tag leave scope empty → runs.
-    if: needs.gate.outputs.should_run == 'true' && github.event.inputs.scope != 'x86'
+    if: github.event.inputs.scope != 'x86'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: true
@@ -295,7 +246,7 @@ jobs:
     needs: gate
     # Full only: skipped on a manual `scope=linux` or `scope=x86` run. Branch-push
     # and tag releases leave scope empty → runs.
-    if: needs.gate.outputs.should_run == 'true' && github.event.inputs.scope != 'linux' && github.event.inputs.scope != 'x86'
+    if: github.event.inputs.scope != 'linux' && github.event.inputs.scope != 'x86'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: true
@@ -358,7 +309,7 @@ jobs:
   windows:
     needs: gate
     # Full only: skipped on a manual `scope=linux` or `scope=x86` run (same as macos).
-    if: needs.gate.outputs.should_run == 'true' && github.event.inputs.scope != 'linux' && github.event.inputs.scope != 'x86'
+    if: github.event.inputs.scope != 'linux' && github.event.inputs.scope != 'x86'
     runs-on: windows-latest
     strategy:
       fail-fast: true
@@ -413,7 +364,6 @@ jobs:
 
   sdist:
     needs: gate
-    if: needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -467,7 +417,7 @@ jobs:
             needs.windows.result == 'skipped'
           ) ||
           (
-            (github.event_name != 'workflow_dispatch' || github.event.inputs.scope == 'full') &&
+            github.event.inputs.scope == 'full' &&
             needs.musllinux.result == 'success' &&
             needs.macos.result == 'success' &&
             needs.windows.result == 'success'
