@@ -55,7 +55,7 @@
 
 use super::sphere_kernels::{
     wahba_sphere_kernel_pseudo_coincident, wahba_sphere_kernel_pseudo_from_cos,
-    wahba_sphere_kernel_sobolev_closed_form,
+    wahba_sphere_kernel_sobolev_closed_form, wahba_sphere_kernel_sobolev_derivative_dcos,
 };
 
 const FOUR_PI: f64 = 4.0 * std::f64::consts::PI;
@@ -396,4 +396,50 @@ fn zz_measure_2475_sobolev_m1_gram_diagonal_is_inhomogeneous() {
         (p_hi - p_lo) / p_lo < 1e-7,
         "pseudo diagonal should vary only at the cusp scale"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4. DELETED: the Sobolev DERIVATIVE floors were unreachable behind the pole
+//    guard, so they were dead arithmetic rather than a regularization.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zz_measure_2475_sobolev_derivative_floors_were_unreachable() {
+    // `wahba_sphere_kernel_sobolev_derivative_dcos` only enters the closed form
+    // inside `|cos γ| <= 1 - POLE_LIMIT_THRESHOLD` (1e-10), which bounds
+    // `u = (1 - cos γ)/2` into `[5e-11, 1 - 5e-11]`. Both bounds are nine
+    // orders above the `EPSILON * 1e-4` floor the closed form used to apply
+    // (a factor of 2.3e9), so neither `.max()` could ever change a value.
+    const POLE_LIMIT_THRESHOLD: f64 = 1.0e-10;
+    let u_min = (1.0 - (1.0 - POLE_LIMIT_THRESHOLD)) * 0.5;
+    let u_max = (1.0 - (-(1.0 - POLE_LIMIT_THRESHOLD))) * 0.5;
+    println!(
+        "\n  closed form sees u in [{u_min:.3e}, {u_max:.6}]; the deleted floor was \
+         {LEGACY_FLOOR:.3e}, smaller than the tighter end by {:.1e}x\n",
+        u_min / LEGACY_FLOOR
+    );
+    assert!(u_min / LEGACY_FLOOR > 1e9);
+    assert!((1.0 - u_max) / LEGACY_FLOOR > 1e9);
+
+    // And the dispatcher stays finite right across the pole boundary and at the
+    // poles themselves, where it hands off to the bounded spectral limit.
+    for m in 1..=4 {
+        for &x in &[
+            -1.0,
+            -1.0 + 0.5 * POLE_LIMIT_THRESHOLD,
+            -1.0 + POLE_LIMIT_THRESHOLD,
+            -0.5,
+            0.0,
+            0.5,
+            1.0 - POLE_LIMIT_THRESHOLD,
+            1.0 - 0.5 * POLE_LIMIT_THRESHOLD,
+            1.0,
+        ] {
+            let v = wahba_sphere_kernel_sobolev_derivative_dcos(x, m);
+            assert!(
+                v.is_finite(),
+                "Sobolev derivative m={m} at cos γ = {x} is not finite: {v}"
+            );
+        }
+    }
 }

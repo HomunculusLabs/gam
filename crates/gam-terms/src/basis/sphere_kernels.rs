@@ -310,8 +310,21 @@ pub(crate) fn wahba_sphere_kernel_from_cos_simd_kind(
 fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: usize) -> f64 {
     let cos_g = cos_gamma.clamp(-1.0, 1.0);
     let four_pi = 4.0 * std::f64::consts::PI;
-    let u = ((1.0 - cos_g) * 0.5).max(f64::EPSILON * 1.0e-4);
-    let one_minus_u = (1.0 - u).max(f64::EPSILON * 1.0e-4);
+    // No floor on `u` or `1 - u`. The sole caller only reaches this closed form
+    // inside `|cos γ| <= 1 - POLE_LIMIT_THRESHOLD`, which bounds
+    // `u = (1 - cos γ)/2` into `[5e-11, 1 - 5e-11]` — nine orders above the
+    // `f64::EPSILON * 1.0e-4` floor these two lines used to carry (a factor of
+    // 2.3e9), so neither could ever bind. Everything closer to either pole is
+    // routed to the
+    // bounded spectral pole limit below. Flooring here was dead arithmetic that
+    // read as if the singularities were being handled (#2469, #2475 site 4).
+    let u = (1.0 - cos_g) * 0.5;
+    let one_minus_u = 1.0 - u;
+    debug_assert!(
+        u > 0.0 && one_minus_u > 0.0,
+        "closed-form Sobolev derivative called at a pole (cos γ = {cos_g}); the \
+         caller's POLE_LIMIT_THRESHOLD guard is supposed to make this unreachable"
+    );
     let dk_du = match m {
         1 => -1.0 / (four_pi * u),
         2 => u.ln() / (one_minus_u * four_pi),
