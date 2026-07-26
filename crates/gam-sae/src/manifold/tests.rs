@@ -3250,7 +3250,14 @@ pub(crate) fn reconstruction_dispersion_uses_ard_shrunk_coordinate_edf() {
         .iter()
         .sum();
     let beta_edf = (term.beta_dim() as f64 - smooth_edf).max(0.0);
-    let traces = term.ard_inverse_traces(&cache).unwrap();
+    // #2499 — the EDF is a function of the SHRINKAGE trace (the inverse diagonal
+    // weighted by the prior curvature actually assembled at each row), not of
+    // the raw posterior-variance trace the Fellner–Schall α-step consumes. On
+    // this `Circle` fixture the two differ by a factor of ~4: the von-Mises
+    // prior's PSD majorizer is `α·softplus(cos κt) ≤ α`, so `α·tr(H⁻¹)` reaches
+    // 96.5 on an interval of width 24 and the raw trace produces an "EDF" of
+    // −72.6.
+    let traces = term.ard_shrinkage_traces(&cache).unwrap();
     let coord_edf = super::construction_reconstruction::certified_ard_axis_edf(
         n as f64,
         alpha,
@@ -3267,13 +3274,54 @@ pub(crate) fn reconstruction_dispersion_uses_ard_shrunk_coordinate_edf() {
     let old_full_coordinate_edf = n as f64;
     let old_full_coordinate_dispersion =
         rss / ((n * p) as f64 - beta_edf - old_full_coordinate_edf).max(1.0);
-    assert!(
-        coord_edf < 0.25 * old_full_coordinate_edf,
-        "test setup must put the coordinate axis in an ARD-shrunk regime; \
-             coord_edf={coord_edf}, old_full_coordinate_edf={old_full_coordinate_edf}"
+    // #2499 — the reachable EDF range on this fixture is a THEOREM, not a tuned
+    // fraction, and it is a much stronger statement than the `< 0.25·n` bar that
+    // stood here. The latent axis is a `Circle`, so the coordinate prior is
+    // von-Mises and the curvature the arrow is actually assembled with is the PSD
+    // majorizer `P_i = α·softplus_{τ₀}(cos κt_i) ∈ [0, α]` — identically ZERO on
+    // the concave half of the circle. Hence
+    //     edf = Σ_i (1 − P_i·[H⁻¹]_ii),   every term ∈ [0, 1],   = 1 where P_i = 0,
+    // so the EDF is bounded BELOW by the number of concave-half rows and strictly
+    // above by `n`. The old bar asserted a regime this geometry cannot reach, and
+    // was only ever satisfiable while the shrinkage was computed as `α·tr(H⁻¹)` —
+    // which on a periodic axis is bounded by nothing (it reaches 96.5 against an
+    // interval of width 24, i.e. an "EDF" of −72.6: the #2499 refusal).
+    let periods = term.assignment.coords[0].effective_axis_periods();
+    let coord_offsets = term.assignment.coord_offsets();
+    let inv_diag = cache.latent_block_inverse_diagonal().unwrap();
+    let mut unpenalized_rows = 0usize;
+    let mut assembled_shrinkage = 0.0_f64;
+    for row in 0..n {
+        let t = term.assignment.coords[0].row(row)[0];
+        let p_i = ArdAxisPrior::eval(alpha, t, periods[0]).psd_majorizer_hess();
+        if p_i == 0.0 {
+            unpenalized_rows += 1;
+        }
+        assembled_shrinkage += p_i * inv_diag[cache.row_offsets[row] + coord_offsets[0]];
+    }
+    // The certificate's shrinkage must BE `Σ_i P_i·[H⁻¹]_ii` with `P_i` read back
+    // out of the same `ArdAxisPrior` seam the assembly writes into `htt` — the
+    // definition, recomputed here independently of the grouped trace path.
+    assert_abs_diff_eq!(alpha * traces[0][0], assembled_shrinkage, epsilon = 1.0e-12);
+    // 24 coordinates equispaced round one period: exactly half land on the
+    // concave arc `cos κt < 0`, where the majorizer is a hard zero.
+    assert_eq!(
+        unpenalized_rows,
+        n / 2,
+        "equispaced coordinates must split evenly across the von-Mises convex/concave arcs"
     );
     assert!(
-        dispersion < 0.75 * old_full_coordinate_dispersion,
+        coord_edf >= unpenalized_rows as f64,
+        "each slot the majorizer leaves unpenalized carries a full unit of \
+         freedom, so edf >= {unpenalized_rows}; got coord_edf={coord_edf}"
+    );
+    assert!(
+        coord_edf < old_full_coordinate_edf,
+        "the convex-arc slots ARE shrunk, so edf must sit strictly below the full \
+         coordinate count {old_full_coordinate_edf}; got coord_edf={coord_edf}"
+    );
+    assert!(
+        dispersion < old_full_coordinate_dispersion,
         "φ̂ must use the ARD-shrunk coordinate edf, not the old full \
              coordinate count: got {dispersion}, old formula {old_full_coordinate_dispersion}"
     );

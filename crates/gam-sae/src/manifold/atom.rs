@@ -438,6 +438,34 @@ impl ArdAxisPrior {
         self.hess_majorized
     }
 
+    /// The DIMENSIONLESS factor `f(t) ∈ [0, 1]` with
+    /// `psd_majorizer_hess == alpha * f(t)`, for the axis geometry selected by
+    /// `period`.
+    ///
+    /// This is the seam any consumer needs when it holds a quantity that has
+    /// already been divided by `alpha` — chiefly the ARD effective-degrees-of-
+    /// freedom identity, whose shrinkage term is `Σ_i (prior curvature at row i)
+    /// · [H⁻¹]_ii`. Writing that as `alpha · Σ_i f(t_i) · [H⁻¹]_ii` keeps the
+    /// Euclidean path (`f ≡ 1`) bit-for-bit the historical `alpha · tr(H⁻¹)`
+    /// while making the periodic path carry the curvature the arrow was actually
+    /// assembled with.
+    ///
+    /// Euclidean: `f = 1` exactly. Periodic: `f = softplus_{τ₀}(cos κt)`, which
+    /// is `smooth_clamp(1.0, cos)` — so `alpha * f` reproduces
+    /// `smooth_clamp(alpha, cos)` bit-for-bit, since [`Self::smooth_clamp`] is
+    /// itself `alpha * softplus` with the softplus formed independently of
+    /// `alpha`.
+    #[inline]
+    pub(crate) fn curvature_shrinkage_factor(t: f64, period: Option<f64>) -> f64 {
+        match period {
+            None => 1.0,
+            Some(p) => {
+                let kappa = std::f64::consts::TAU / p;
+                Self::smooth_clamp(1.0, (kappa * t).cos())
+            }
+        }
+    }
+
     /// Signed correction that turns the PSD majorizer back into the exact prior
     /// Hessian: `hess = psd_majorizer_hess + negative_hessian_remainder`. Defined
     /// as the complement `hess - hess_majorized`, so the identity holds

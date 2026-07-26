@@ -49,15 +49,25 @@ pub(super) fn undamped_row_curvature_scale(cache: &ArrowFactorCache) -> f64 {
 const ARD_EDF_FORWARD_ERROR_FACTOR: f64 = 64.0;
 
 /// Certify the ARD identity
-/// `edf = n_active - alpha * tr(H^-1)` against its exact `[0, n_active]`
-/// interval.  A tiny excursion at the forward-error scale of the accumulated
-/// trace is snapped to the boundary; a material excursion is a failed trace
-/// certificate, not an EDF that may be silently projected into another model.
+/// `edf = n_active - alpha * shrinkage_trace` against its exact
+/// `[0, n_active]` interval.  A tiny excursion at the forward-error scale of
+/// the accumulated trace is snapped to the boundary; a material excursion is a
+/// failed trace certificate, not an EDF that may be silently projected into
+/// another model.
+///
+/// `shrinkage_trace` is [`SaeManifoldTerm::ard_shrinkage_traces`], NOT
+/// [`SaeManifoldTerm::ard_inverse_traces`]: it carries the per-row
+/// dimensionless prior-curvature factor `f = softplus_{τ₀}(cos κt)` so that
+/// `alpha * shrinkage_trace` is `Σ_i P_i·[H⁻¹]_{ss}` with `P_i` the curvature
+/// the arrow was actually assembled with. On a Euclidean axis `f ≡ 1` and the
+/// two traces are the same number; on a periodic axis they are not, and only
+/// this one is bounded (#2499 — see that function's derivation).
 ///
 /// # Why the tolerance carries the block's conditioning
 ///
-/// The interval is exact for `H = C + αI` with data curvature `C ⪰ 0`: then
-/// `H ⪰ αI`, so every slot has `α·[H⁻¹]_ss ≤ 1` and the sum lands in
+/// The interval is exact for `H = C + P` with data curvature `C ⪰ 0` and
+/// diagonal prior curvature `P ⪰ 0`: then `H ⪰ P`, so every slot has
+/// `P_s·[H⁻¹]_ss ≤ 1` (and `= 0` where `P_s = 0`), and the sum lands in
 /// `[0, n_active]`. The certificate is therefore asking whether the ASSEMBLED
 /// curvature is PSD, and it must tell a state whose curvature is genuinely
 /// indefinite from one whose curvature is zero on this axis and whose assembled
@@ -65,7 +75,8 @@ const ARD_EDF_FORWARD_ERROR_FACTOR: f64 = 64.0;
 ///
 /// For `Ĥ = H + E`,
 /// `|α·tr(Ĥ⁻¹) − α·tr(H⁻¹)| ≤ α‖E‖₂·tr(H⁻²) ≤ (‖E‖₂/λ_min(H))·α·tr(H⁻¹)`,
-/// and `λ_min(H) ≥ α`, so with `‖E‖₂ ≤ c·ε·‖H‖₂` the excursion is bounded by
+/// and on the Euclidean axis this derivation was written for, `λ_min(H) ≥ α`,
+/// so with `‖E‖₂ ≤ c·ε·‖H‖₂` the excursion is bounded by
 /// `c·ε·(‖H‖₂/α)·shrinkage`. The factor `‖H‖₂/α` is the block's conditioning,
 /// and it is exactly what a tolerance written against `n_active + shrinkage`
 /// omits: on a `d`-dimensional axis pinned at the prior, `shrinkage = n_active`
@@ -75,7 +86,12 @@ const ARD_EDF_FORWARD_ERROR_FACTOR: f64 = 64.0;
 /// state where the exact EDF is zero, which refused an ordinary dispersion.
 /// A genuinely indefinite state on the same fixture missed the interval by
 /// `17.3` on `n_active = 10` — ten orders of magnitude clear of either bound,
-/// so the conditioning factor costs the certificate no discrimination.
+/// so the conditioning factor costs the certificate no discrimination. On a
+/// periodic axis `λ_min(H) ≥ α` does not hold, so `‖H‖₂/α` is an observable
+/// scale there rather than a proved bound — the same standing the scale it
+/// multiplies already has (see [`undamped_row_curvature_scale`]), and the two
+/// regimes this certificate separates are ten orders apart on every state
+/// measured.
 pub(super) fn certified_ard_axis_edf(
     n_active: f64,
     alpha: f64,
@@ -117,12 +133,34 @@ pub(super) fn certified_ard_axis_edf(
         * f64::EPSILON
         * conditioning
         * shrinkage.abs().max(n_active).max(1.0);
+    // #2499 — one message cannot serve two failure modes whose remedies are
+    // opposite. A roundoff excursion (just past a correctly-derived tolerance)
+    // is answered by re-deriving the tolerance; a STRUCTURAL excursion — one
+    // whose magnitude is orders past any admissible tolerance — is answered by
+    // suspecting the assembly, and widening is categorically wrong. The
+    // discriminator is already computed: the excursion measured in units of the
+    // tolerance. Ten-plus orders means no admissible widening reaches it, so
+    // the two must not be one grep-able string.
     if raw < -tolerance || raw > n_active + tolerance {
+        let excursion = if raw < 0.0 { -raw } else { raw - n_active };
+        let over_tolerance = excursion / tolerance;
+        let regime = if over_tolerance > 1.0e3 {
+            "STRUCTURAL: the assembled quantity is not the EDF this interval was \
+             derived for — widening the tolerance cannot reach it. An EDF is a \
+             trace of a projection-like operator; check that the prior curvature \
+             the shrinkage trace carries is the curvature the arrow was assembled \
+             with (a periodic axis majorizes it to α·softplus(cos κt), NOT α)"
+        } else {
+            "ROUNDOFF: the excursion is at the forward-error scale of the \
+             accumulated trace, so the tolerance's derivation is the suspect, \
+             not the assembly"
+        };
         return Err(format!(
             "reconstruction_dispersion: ARD EDF at atom {atom}, axis {axis} is \
-             {raw:.6e}, outside certified [0, {n_active}] (roundoff tolerance \
-             {tolerance:.6e} at conditioning {conditioning:.6e}; alpha={alpha:.6e}, \
-             trace={inverse_trace:.6e})"
+             {raw:.6e}, outside certified [0, {n_active}] by {excursion:.6e} = \
+             {over_tolerance:.3e}x the roundoff tolerance {tolerance:.6e} at \
+             conditioning {conditioning:.6e}; alpha={alpha:.6e}, \
+             shrinkage_trace={inverse_trace:.6e}. {regime}"
         ));
     }
     Ok(raw.clamp(0.0, n_active))
@@ -481,8 +519,8 @@ impl SaeManifoldTerm {
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let stochastic_ard_trace = self.k_atoms() >= Self::ARD_TRACE_HUTCHINSON_MIN_ATOMS;
         let traces = self
-            .ard_inverse_traces(cache)
-            .map_err(|e| format!("reconstruction_dispersion: ARD traces: {e}"))?;
+            .ard_shrinkage_traces(cache)
+            .map_err(|e| format!("reconstruction_dispersion: ARD shrinkage traces: {e}"))?;
         // The scale at which those traces' forward error lives (see
         // `certified_ard_axis_edf`). One pass over factors the cache already
         // holds.
