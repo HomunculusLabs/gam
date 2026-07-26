@@ -4150,34 +4150,7 @@ impl<'a> RemlState<'a> {
             gaussian_dp_floor_scale_cache: std::sync::OnceLock::new(),
             positive_weight_observation_count_cache: std::sync::OnceLock::new(),
             rho_weight_anchor_cache: std::sync::OnceLock::new(),
-            warm_start_criterion: RwLock::new(None),
         })
-    }
-
-    /// Pair `rho` with the REML/LAML criterion evaluated at it.
-    pub(crate) fn record_warm_start_criterion(&self, rho: &Array1<f64>, cost: f64) {
-        if !cost.is_finite() {
-            return;
-        }
-        *self.warm_start_criterion.write().unwrap() = Some((rho.clone(), cost));
-    }
-
-    /// The criterion belonging to `rho`, or `None` when the cached pair
-    /// describes a different point.
-    ///
-    /// Bitwise equality is deliberate, not a tolerance question: either the
-    /// cached criterion was computed at this very rho or it was not, and
-    /// recording one that was not is the failure this pairing exists to
-    /// prevent.
-    pub(crate) fn warm_start_criterion_for(&self, rho: &[f64]) -> Option<f64> {
-        let guard = self.warm_start_criterion.read().unwrap();
-        let (cached_rho, cost) = guard.as_ref()?;
-        (cached_rho.len() == rho.len()
-            && cached_rho
-                .iter()
-                .zip(rho.iter())
-                .all(|(a, b)| a.to_bits() == b.to_bits()))
-        .then_some(*cost)
     }
 
     pub(in crate::estimate) fn reset_surface<X>(
@@ -5445,12 +5418,7 @@ impl<'a> RemlState<'a> {
             finite_nonnegative_from_bits(self.last_ift_prediction_residual.load(Ordering::Relaxed));
         record.last_pirls_accept_rho =
             finite_nonnegative_from_bits(self.last_pirls_accept_rho.load(Ordering::Relaxed));
-        // Only the criterion evaluated at THIS rho qualifies; otherwise the
-        // store would rank entries by a number describing a different point,
-        // so this returns None and the entry is written without an objective
-        // exactly as before.
-        let objective = self.warm_start_criterion_for(&record.rho);
-        if let Err(err) = store_record(&record, objective) {
+        if let Err(err) = store_record(&record) {
             log::warn!("[warm-start-cache] failed to persist warm start: {err}");
         }
     }

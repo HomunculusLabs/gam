@@ -2915,9 +2915,7 @@ fn store_survival_transformation_persistent_warm_start(
     record.last_pirls_accept_rho = summary
         .final_accept_rho
         .filter(|value| value.is_finite() && *value >= 0.0);
-    // No outer REML/LAML criterion is in hand on this path, so the entry is
-    // written without an objective and selection behaves as before (#2486).
-    match gam_solve::persistent_warm_start::store_record(&record, None) {
+    match gam_solve::persistent_warm_start::store_record(&record) {
         Ok(()) => {
             gam_solve::persistent_warm_start::load_record(&record.key).is_some_and(|stored| {
                 stored.rho == record.rho

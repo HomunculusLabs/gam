@@ -209,36 +209,15 @@ pub fn load_block_record(key: &str) -> Option<PersistentBlockWarmStartRecord> {
     load_json_record(key)
 }
 
-pub fn store_record(
-    record: &PersistentWarmStartRecord,
-    objective: Option<f64>,
-) -> Result<(), String> {
-    store_json_record(&record.key, record, objective)
+pub fn store_record(record: &PersistentWarmStartRecord) -> Result<(), String> {
+    store_json_record(&record.key, record)
 }
 
-pub fn store_block_record(
-    record: &PersistentBlockWarmStartRecord,
-    objective: Option<f64>,
-) -> Result<(), String> {
-    store_json_record(&record.key, record, objective)
+pub fn store_block_record(record: &PersistentBlockWarmStartRecord) -> Result<(), String> {
+    store_json_record(&record.key, record)
 }
 
-/// `objective` is the REML/LAML criterion at the iterate being written, or
-/// `None` when it is not known to correspond to that iterate.
-///
-/// It is load-bearing rather than telemetry. `WarmStartStore::lookup` selects
-/// "lowest objective first" but degrades to "picks the latest write" when every
-/// candidate carries `None`. Passing `None` unconditionally -- which this did --
-/// left that degraded arm the only reachable one, so a resumed fit restarted
-/// from wherever the previous one happened to stop rather than from the best
-/// iterate the store held, and repeat fits on one machine walked away from the
-/// cold answer (#2486). The module header's "resumes from the best-known
-/// iterate" was unachievable as written.
-fn store_json_record<T: Serialize>(
-    key: &str,
-    record: &T,
-    objective: Option<f64>,
-) -> Result<(), String> {
+fn store_json_record<T: Serialize>(key: &str, record: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec(record)
         .map_err(|e| format!("failed to encode warm-start cache record: {e}"))?;
     if bytes.len() as u64 > MAX_ENTRY_BYTES {
@@ -250,13 +229,7 @@ fn store_json_record<T: Serialize>(
     let mut fp = Fingerprinter::new();
     fp.absorb_str(b"warm-start-key", key);
     store
-        .save(
-            &fp.finalize(),
-            &bytes,
-            objective.filter(|v| v.is_finite()),
-            None,
-            EntryKind::Checkpoint,
-        )
+        .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
         .map(|_| ())
         .map_err(|e| format!("failed to persist warm-start cache record: {e}"))
 }

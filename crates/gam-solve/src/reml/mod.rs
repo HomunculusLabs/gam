@@ -5892,15 +5892,6 @@ pub(crate) struct RemlState<'a> {
     /// `FitConfig::persist_warm_start_disk` flips this to `true` only when the
     /// caller explicitly asks for cross-process / repeat-fit persistence.
     pub(crate) persistent_warm_start_disk_enabled: AtomicBool,
-    /// The most recent `(rho, REML/LAML criterion)` pair, kept whole.
-    ///
-    /// Stored together rather than as a bare scalar so a criterion can never
-    /// be attached to an iterate it does not describe: the persist path
-    /// compares this rho against the one it is about to write and declines to
-    /// record an objective unless they match. A mismatched objective is worse
-    /// than none, because the store would then rank a "best" entry on a number
-    /// belonging to a different point (#2486).
-    pub(crate) warm_start_criterion: RwLock<Option<(Array1<f64>, f64)>>,
     /// #1033: memoized fit-invariant O(n) response/weight scalars.
     ///
     /// `gaussian_weight_log_sum_half` (`½·Σ log wᵢ`),
