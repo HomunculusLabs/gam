@@ -36,7 +36,7 @@ def pca(values: np.ndarray, n_components: int) -> tuple[np.ndarray, np.ndarray, 
 def configure(ax) -> None:
     ax.set_facecolor(INK)
     ax.set_axis_off()
-    ax.set_box_aspect((1.7, 1.1, 0.75), zoom=1.22)
+    ax.set_box_aspect((1.7, 1.1, 0.75), zoom=1.38)
     ax.view_init(elev=23, azim=-58)
     ax.set_proj_type("persp", focal_length=0.9)
 
@@ -53,7 +53,6 @@ curve_entries = [
     by_kind["periodic"][0],
     by_kind["euclidean"][0],
     by_kind["periodic"][1],
-    by_kind["euclidean"][2],
 ]
 
 # Real Qwen activation chart.  Neighborhood discovery is done in its top-24
@@ -122,11 +121,16 @@ for item in candidates:
         break
 
 fig = plt.figure(figsize=(15, 6), dpi=200, facecolor=INK)
-fig.subplots_adjust(left=0.005, right=0.995, bottom=0.015, top=0.985, wspace=0.0, hspace=0.0)
-curve_axes = [fig.add_subplot(2, 3, i + 1) for i in range(4)]
+fig.subplots_adjust(left=0.015, right=0.985, bottom=0.01, top=0.99, wspace=0.02, hspace=0.0)
+grid = fig.add_gridspec(2, 6, height_ratios=[0.92, 1.28])
+curve_axes = [
+    fig.add_subplot(grid[0, 0:2]),
+    fig.add_subplot(grid[0, 2:4]),
+    fig.add_subplot(grid[0, 4:6]),
+]
 surface_axes = [
-    fig.add_subplot(2, 3, 5, projection="3d"),
-    fig.add_subplot(2, 3, 6, projection="3d"),
+    fig.add_subplot(grid[1, 0:3], projection="3d", computed_zorder=False),
+    fig.add_subplot(grid[1, 3:6], projection="3d", computed_zorder=False),
 ]
 axes = curve_axes + surface_axes
 for ax in curve_axes:
@@ -136,7 +140,7 @@ for ax in curve_axes:
 for ax in surface_axes:
     configure(ax)
 
-cmaps = ["twilight_shifted", "viridis", "twilight_shifted", "plasma"]
+cmaps = ["twilight_shifted", "viridis", "twilight_shifted"]
 for ax, item, cmap_name in zip(axes[:4], curve_entries, cmaps):
     idx = item["idx"]
     curve = np.fromfile(DUMP / f"curve_{idx}.bin", dtype="<f8").reshape(-1, ambient_dim)
@@ -149,40 +153,42 @@ for ax, item, cmap_name in zip(axes[:4], curve_entries, cmaps):
     )
     cmap = plt.get_cmap(cmap_name)
     phase = np.linspace(0, 1, len(curve2))
-    for width, alpha in ((16, 0.025), (9, 0.055)):
+    for width, alpha in ((24, 0.025), (14, 0.060), (8, 0.10)):
         ax.plot(curve2[:, 0], curve2[:, 1], color=cmap(0.55), lw=width, alpha=alpha)
     for j in range(len(curve2) - 1):
         ax.plot(
             curve2[j : j + 2, 0],
             curve2[j : j + 2, 1],
             color=cmap(phase[j]),
-            lw=3.0,
+            lw=4.2,
             alpha=0.98,
             solid_capstyle="round",
         )
-    keep = RNG.choice(len(beads2), min(70, len(beads2)), replace=False)
+    keep = RNG.choice(len(beads2), min(90, len(beads2)), replace=False)
     bead_phase = (t - grid[0]) / max(grid[-1] - grid[0], 1e-12)
     ax.scatter(
         beads2[keep, 0],
         beads2[keep, 1],
         c=bead_phase[keep],
         cmap=cmap,
-        s=18,
+        s=42,
         edgecolors="#f2f6ff",
-        linewidths=0.45,
+        linewidths=0.9,
         alpha=0.98,
     )
     extent = np.ptp(np.vstack([curve2, beads2]), axis=0)
     center = np.mean(np.vstack([curve2, beads2]), axis=0)
-    radius = max(float(extent.max()) * 0.62, 1e-9)
+    radius = max(float(extent.max()) * 0.56, 1e-9)
     ax.set_xlim(center[0] - radius, center[0] + radius)
     ax.set_ylim(center[1] - radius, center[1] + radius)
 
 surface_meta = []
-for ax, item, cmap_name in zip(surface_axes, surfaces, ["viridis", "magma"]):
-    q = np.linspace(-1.75, 1.75, 29)
+for surface_index, (ax, item, cmap_name) in enumerate(
+    zip(surface_axes, surfaces, ["viridis", "magma"])
+):
+    q = np.linspace(-2.45, 2.45, 35)
     uu, vv = np.meshgrid(q, q)
-    mask = uu**2 + vv**2 <= 2.9
+    mask = uu**2 + vv**2 <= 5.8
     design = np.column_stack(
         [
             np.ones(uu.size),
@@ -218,9 +224,10 @@ for ax, item, cmap_name in zip(surface_axes, surfaces, ["viridis", "magma"]):
         linewidth=0,
         antialiased=True,
         shade=True,
-        alpha=0.88,
+        alpha=0.82,
+        zorder=2,
     )
-    keep = RNG.choice(len(bead3), min(75, len(bead3)), replace=False)
+    keep = RNG.choice(len(bead3), min(105, len(bead3)), replace=False)
     phase = np.arctan2(item["u"][:, 1], item["u"][:, 0])
     ax.scatter(
         bead3[keep, 0],
@@ -228,12 +235,17 @@ for ax, item, cmap_name in zip(surface_axes, surfaces, ["viridis", "magma"]):
         bead3[keep, 2],
         c=phase[keep],
         cmap=cmap_name,
-        s=14,
+        s=34,
         edgecolors="#f2f6ff",
-        linewidths=0.35,
-        alpha=0.94,
+        linewidths=0.75,
+        alpha=0.98,
         depthshade=False,
+        zorder=10,
     )
+    if surface_index == 0:
+        ax.view_init(elev=29, azim=-54)
+    else:
+        ax.view_init(elev=31, azim=34)
     surface_meta.append(
         {
             "anchor_row": int(item["anchor"]),

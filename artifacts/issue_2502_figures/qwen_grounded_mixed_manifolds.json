@@ -17,11 +17,6 @@
       "atom": 200,
       "kind": "periodic",
       "usage": 288
-    },
-    {
-      "atom": 109,
-      "kind": "euclidean",
-      "usage": 316
     }
   ],
   "surfaces": [
