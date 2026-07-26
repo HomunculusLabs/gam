@@ -698,97 +698,6 @@ pub fn project_stationarity_residual_on_constraint_cone(
     nonnegative_cone_multipliers(active_a, residual).map(|(lambda, projected)| (projected, lambda))
 }
 
-#[cfg(test)]
-fn moreau_projection_via_strict_qp(
-    residual: &Array1<f64>,
-    active_a: &Array2<f64>,
-) -> Option<(Array1<f64>, Array1<f64>)> {
-    let p = residual.len();
-
-    let m = active_a.nrows();
-    let constraints = LinearInequalityConstraints::new(active_a.clone(), Array1::<f64>::zeros(m))
-        .ok()?
-        .canonicalized()
-        .ok()?;
-
-    // Moreau projection onto the tangent cone is the strictly convex QP
-    //
-    //   min_d  1/2 ||d + residual||^2    s.t. A d >= 0.
-    //
-    // This test oracle routes the geometry through the repository's finite dual
-    // metric projection. Its identity Hessian is strictly positive definite, so
-    // the returned face and direction are unique.
-    let identity = Array2::<f64>::eye(p);
-    let origin = Array1::<f64>::zeros(p);
-    let rhs = -residual;
-    let (tangent_direction, tangent_active) = solve_quadratic_with_linear_constraints(
-        &identity,
-        &rhs,
-        &origin,
-        &constraints,
-        None,
-    )
-    .ok()?;
-    if !array_is_finite(&tangent_direction) {
-        return None;
-    }
-    let projected = -&tangent_direction;
-
-    // Reconstruct the strict QP's nonnegative KKT multipliers once on its
-    // canonical full-row-rank face: residual + d = A_active^T lambda. This is
-    // a single rectangular least-squares solve, never normal equations and
-    // never another active-set loop.
-    let mut lambda_canonical = Array1::<f64>::zeros(m);
-    if !tangent_active.is_empty() {
-        let gathered = gather_linear_constraint_rows(&constraints, &tangent_active).ok()?;
-        // `design` is `p × |tangent_active|`. The face is meant to be
-        // full-row-rank (≤ p active rows), but a degenerate iterate can present
-        // more active rows than dimensions; the min-norm helper handles that wide
-        // case rather than panicking inside faer's tall-only `solve_lstsq`.
-        let design = gathered.a.t().to_owned();
-        let solved = least_squares_min_norm_any_shape(&design, &(residual + &tangent_direction))?;
-        let scale = residual
-            .iter()
-            .fold(0.0_f64, |acc, &value| acc.max(value.abs()))
-            .max(1.0);
-        let tol = 100.0 * f64::EPSILON * (p.max(m) as f64) * scale;
-        for (position, &row) in tangent_active.iter().enumerate() {
-            let value = solved[position];
-            if !value.is_finite() || value < -tol {
-                return None;
-            }
-            lambda_canonical[row] = value.max(0.0);
-        }
-    }
-    let reconstructed = residual - &constraints.a.t().dot(&lambda_canonical);
-    let reconstruction_error = reconstructed
-        .iter()
-        .zip(projected.iter())
-        .fold(0.0_f64, |acc, (&left, &right)| {
-            acc.max((left - right).abs())
-        });
-    let scale = residual
-        .iter()
-        .fold(0.0_f64, |acc, &value| acc.max(value.abs()))
-        .max(1.0);
-    if reconstruction_error > 1e-8 * scale || !array_is_finite(&lambda_canonical) {
-        return None;
-    }
-
-    // `constraints` has unit rows, but this public helper historically returns
-    // multipliers in the caller's original row units. If a_i^canon = a_i/s_i,
-    // then lambda_i^original = lambda_i^canon/s_i preserves
-    // A_original^T lambda_original = A_canon^T lambda_canon.
-    let mut lambda = Array1::<f64>::zeros(m);
-    for row in 0..m {
-        let norm = active_a.row(row).dot(&active_a.row(row)).sqrt();
-        if norm > 0.0 {
-            lambda[row] = lambda_canonical[row] / norm;
-        }
-    }
-    Some((projected, lambda))
-}
-
 pub(crate) fn feasible_point_for_linear_constraints(
     constraints: &LinearInequalityConstraints,
     p: usize,
@@ -2360,29 +2269,6 @@ pub(crate) fn working_set_kkt_diagnostics_from_multipliers(
         working_set_rank_deficient: false,
         gradient_scale: gradient_inf_norm(gradient),
     })
-}
-
-#[cfg(test)]
-fn gather_linear_constraint_rows(
-    constraints: &LinearInequalityConstraints,
-    rows: &[usize],
-) -> Result<LinearInequalityConstraints, EstimationError> {
-    let p = constraints.a.ncols();
-    let mut a = Array2::<f64>::zeros((rows.len(), p));
-    let mut b = Array1::<f64>::zeros(rows.len());
-    for (out, &row) in rows.iter().enumerate() {
-        if row >= constraints.a.nrows() {
-            crate::bail_invalid_estim!(
-                "active constraint row {} out of bounds for {} rows",
-                row,
-                constraints.a.nrows()
-            );
-        }
-        a.row_mut(out).assign(&constraints.a.row(row));
-        b[out] = constraints.b[row];
-    }
-    LinearInequalityConstraints::new(a, b)
-        .map_err(|error| EstimationError::ParameterConstraintViolation(error.to_string()))
 }
 
 fn log_active_set_transition(
@@ -4312,10 +4198,10 @@ mod tests {
         ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
         ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId, ConstraintSet, ConstraintSetOps,
         ConstraintSetReducedFace, LinearInequalityConstraints, active_set_boundary_hit_step_fraction,
-        certify_active_equalities, compute_constraint_kkt_diagnostics,
+        array_is_finite, certify_active_equalities, compute_constraint_kkt_diagnostics,
         constraint_set_rows_tight_at_point,
         fallback_projected_gradient_direction_with_constraint_set, independent_violated_operator_rows,
-        khatri_rao_cone_reduced_face, moreau_projection_via_strict_qp,
+        khatri_rao_cone_reduced_face, least_squares_min_norm_any_shape,
         nonnegative_cone_multipliers,
         project_point_strictly_into_feasible_cone,
         project_point_strictly_into_feasible_constraint_set,
@@ -4327,9 +4213,106 @@ mod tests {
         solve_quadratic_with_linear_constraints,
         working_set_kkt_diagnostics_from_multipliers,
     };
+    use crate::estimate::EstimationError;
     use approx::assert_relative_eq;
     use gam_problem::KhatriRaoConeConstraints;
     use ndarray::{Array1, Array2, array, s};
+
+    fn gather_linear_constraint_rows(
+        constraints: &LinearInequalityConstraints,
+        rows: &[usize],
+    ) -> Result<LinearInequalityConstraints, EstimationError> {
+        let p = constraints.a.ncols();
+        let mut a = Array2::<f64>::zeros((rows.len(), p));
+        let mut b = Array1::<f64>::zeros(rows.len());
+        for (out, &row) in rows.iter().enumerate() {
+            if row >= constraints.a.nrows() {
+                crate::bail_invalid_estim!(
+                    "active constraint row {} out of bounds for {} rows",
+                    row,
+                    constraints.a.nrows()
+                );
+            }
+            a.row_mut(out).assign(&constraints.a.row(row));
+            b[out] = constraints.b[row];
+        }
+        LinearInequalityConstraints::new(a, b)
+            .map_err(|error| EstimationError::ParameterConstraintViolation(error.to_string()))
+    }
+
+    fn moreau_projection_via_strict_qp(
+        residual: &Array1<f64>,
+        active_a: &Array2<f64>,
+    ) -> Option<(Array1<f64>, Array1<f64>)> {
+        let p = residual.len();
+        let m = active_a.nrows();
+        let constraints =
+            LinearInequalityConstraints::new(active_a.clone(), Array1::<f64>::zeros(m))
+                .ok()?
+                .canonicalized()
+                .ok()?;
+
+        // Independent oracle: solve the strictly convex primal tangent-cone QP
+        // and reconstruct its canonical-face multipliers.
+        let identity = Array2::<f64>::eye(p);
+        let origin = Array1::<f64>::zeros(p);
+        let rhs = -residual;
+        let (tangent_direction, tangent_active) = solve_quadratic_with_linear_constraints(
+            &identity,
+            &rhs,
+            &origin,
+            &constraints,
+            None,
+        )
+        .ok()?;
+        if !array_is_finite(&tangent_direction) {
+            return None;
+        }
+        let projected = -&tangent_direction;
+
+        let mut lambda_canonical = Array1::<f64>::zeros(m);
+        if !tangent_active.is_empty() {
+            let gathered = gather_linear_constraint_rows(&constraints, &tangent_active).ok()?;
+            let design = gathered.a.t().to_owned();
+            let solved =
+                least_squares_min_norm_any_shape(&design, &(residual + &tangent_direction))?;
+            let scale = residual
+                .iter()
+                .fold(0.0_f64, |acc, &value| acc.max(value.abs()))
+                .max(1.0);
+            let tol = 100.0 * f64::EPSILON * (p.max(m) as f64) * scale;
+            for (position, &row) in tangent_active.iter().enumerate() {
+                let value = solved[position];
+                if !value.is_finite() || value < -tol {
+                    return None;
+                }
+                lambda_canonical[row] = value.max(0.0);
+            }
+        }
+        let reconstructed = residual - &constraints.a.t().dot(&lambda_canonical);
+        let reconstruction_error = reconstructed
+            .iter()
+            .zip(projected.iter())
+            .fold(0.0_f64, |acc, (&left, &right)| {
+                acc.max((left - right).abs())
+            });
+        let scale = residual
+            .iter()
+            .fold(0.0_f64, |acc, &value| acc.max(value.abs()))
+            .max(1.0);
+        if reconstruction_error > 1e-8 * scale || !array_is_finite(&lambda_canonical) {
+            return None;
+        }
+
+        let mut lambda = Array1::<f64>::zeros(m);
+        for row in 0..m {
+            let norm = active_a.row(row).dot(&active_a.row(row)).sqrt();
+            if norm > 0.0 {
+                lambda[row] = lambda_canonical[row] / norm;
+            }
+        }
+        Some((projected, lambda))
+    }
 
     #[test]
     fn working_set_cycle_detection_requires_the_same_primal_point() {
