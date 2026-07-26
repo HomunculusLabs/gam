@@ -2280,7 +2280,12 @@ mod sphere_gpu_tests {
             SphereWahbaKernel::SobolevTruncated { lmax: lmax as u16 },
         )
         .expect("cpu kernel matrix");
-        assert_cpu_kernel_matches_spectral_definition(&b_cpu, &data_xyz, &centers_xyz, &coeffs);
+        assert_cpu_kernel_matches_stable_spectral_definition(
+            &b_cpu,
+            &data_ll,
+            &centers_ll,
+            &coeffs,
+        );
         assert_householder_fused_matches_explicit_product(&b_cpu, &v, beta);
 
         if !cuda_available_for_test("householder parity") {
@@ -2645,10 +2650,10 @@ mod sphere_gpu_tests {
         // the kernel matrix equals its elementwise spectral definition, and the
         // fitted coefficients solve the penalised normal equations. Both are
         // the oracle the device output is graded against.
-        assert_cpu_kernel_matches_spectral_definition(
+        assert_cpu_kernel_matches_stable_spectral_definition(
             &raw_design_cpu,
-            &data_xyz,
-            &centers_xyz,
+            &data_ll,
+            &centers_ll,
             &coeffs,
         );
         {
