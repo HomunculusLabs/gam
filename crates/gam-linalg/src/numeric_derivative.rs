@@ -223,7 +223,10 @@ where
         config.shrink > 1.0 && config.shrink.is_finite(),
         "ridders_derivative: shrink must exceed 1"
     );
-    assert!(config.rungs >= 2, "ridders_derivative: need at least 2 rungs");
+    // Four, not two: an extrapolant is only accepted once TWO same-order
+    // extrapolants one and two rungs coarser exist to compare it against (see
+    // below), and the first of those appears at `i = 3`.
+    assert!(config.rungs >= 4, "ridders_derivative: need at least 4 rungs");
 
     // `tableau[i][j]` is the order-`2(j+1)` extrapolant built from rungs
     // `i-j ..= i`. Column 0 is the raw stencil value at step `h_i`.
@@ -252,14 +255,57 @@ where
                 let up = tableau[i - 1][j - 1];
                 let extrapolant = (factor * left - up) / (factor - 1.0);
                 row.push(extrapolant);
-                // Ridders' error estimate: an extrapolant is only as
-                // trustworthy as the agreement of the two entries it cancels.
-                let error = (extrapolant - left).abs().max((extrapolant - up).abs());
-                if extrapolant.is_finite() && error < best.uncertainty {
-                    best.value = extrapolant;
-                    best.uncertainty = error;
-                    best.step = h;
-                    best.order = 2 * (j + 1);
+                // Ridders' error estimate is the agreement of the two entries
+                // an extrapolant cancels — but that is an INTERNAL consistency
+                // check, and on a noise-dominated ladder two neighbouring
+                // garbage values can cancel into agreement by luck. Measured on
+                // the #2425 ladder at `rho0@27`, where the raw stencil sweeps
+                // `+2.3e-5, +8.9e-5, −6.9e-6, −8.9e-5, +1.7e-4, …` (sign
+                // flipping, magnitude growing as `h` shrinks — the `ν/h` law),
+                // the pairwise rule accepted an entry to `±8.3e-6` out of
+                // `−9.7e-3` and turned a component nothing could measure into a
+                // confident gradient violation.
+                //
+                // So an entry must also be STABLE as the ladder shrinks, over
+                // a PLATEAU rather than a single step: it is eligible only once
+                // the same-order extrapolants one AND two rungs coarser exist,
+                // and both disagreements count. One predecessor is not enough —
+                // on the ladder above, rungs 8–10 happen to look locally like
+                // `h²` convergence and an order-10 entry agrees with its single
+                // predecessor to `1.2e-5`, still minting the false verdict.
+                // With two, the best eligible entry is `-1.16e-4 ± 2.3e-4`,
+                // which is `Unresolved` — the honest reading of a stencil that
+                // sweeps three orders and flips sign four times.
+                //
+                // Measured cost on converged ladders: none. Across a sinc with
+                // scale `1.66e-3`, `e^(2+t)·ln(1+0.3t)`, `sin(1.3+t)·e^(0.4+t)`
+                // and a cubic, going from one predecessor to two changes the
+                // realized relative error by at most `4e-13` and never by more
+                // than the entry's own uncertainty. What it does cost is a
+                // SHORT plateau: a component whose ladder is coherent for only
+                // three rungs (`rho1@27` on the #2425 ladder, coherent to 0.2%
+                // over `h = 1e-2 … 2.5e-3` and then excursion) comes back
+                // `Unresolved` instead of `Disagree`. That is the safe
+                // direction — a false `Disagree` is precisely the disease
+                // #2461 is a case of — and the ladder length is a knob for a
+                // caller who wants the plateau extended.
+                let plateau = if j + 2 <= i {
+                    Some((tableau[i - 1][j], tableau[i - 2][j]))
+                } else {
+                    None
+                };
+                if let Some((previous, before_that)) = plateau {
+                    let error = (extrapolant - left)
+                        .abs()
+                        .max((extrapolant - up).abs())
+                        .max((extrapolant - previous).abs())
+                        .max((extrapolant - before_that).abs());
+                    if extrapolant.is_finite() && error < best.uncertainty {
+                        best.value = extrapolant;
+                        best.uncertainty = error;
+                        best.step = h;
+                        best.order = 2 * (j + 1);
+                    }
                 }
                 factor *= ratio_sq;
             }
@@ -468,6 +514,88 @@ mod tests {
             measured.value,
             measured.uncertainty
         );
+    }
+
+    /// A REPLAY of the real noise-dominated ladder that made the pairwise
+    /// Ridders rule mint a false `Disagree`.
+    ///
+    /// These twelve numbers are the measured central differences of the
+    /// production REML criterion at `duchon_gaussian rho0@27` on the #2425
+    /// saturation ladder — λ = e²⁷ ≈ 5.3e11, where the criterion's own
+    /// evaluation, not its gradient, is the limit. The sequence flips sign four
+    /// times and GROWS as `h` shrinks, which is the `ν/h` law and not a
+    /// derivative; the analytic gradient there is `+1.4e-7`.
+    ///
+    /// With the pairwise error estimate alone, the tableau found two entries
+    /// agreeing to `8.3e-6` out of `-9.7e-3` and the driver reported a gradient
+    /// violation at `rel = 1.0`. Requiring same-order stability across rungs
+    /// makes it `Unresolved`, which is what a ladder like this can honestly
+    /// say. Replayed rather than re-derived so the regression is pinned to the
+    /// numbers that actually produced it.
+    #[test]
+    fn ridders_refuses_the_measured_noise_ladder_that_minted_a_false_disagree() {
+        const MEASURED: [f64; 12] = [
+            2.2711765979e-5,
+            8.8927099284e-5,
+            -6.9222892307e-6,
+            -8.8662108055e-5,
+            1.7342896399e-4,
+            -4.0490124320e-4,
+            -7.1388753895e-4,
+            -3.2858329178e-3,
+            -7.7696204244e-3,
+            -9.1939324193e-3,
+            9.8518321465e-3,
+            1.6926779062e-2,
+        ];
+        let mut rung = 0usize;
+        let measured = ridders_from_stencil(
+            |_h| {
+                let value = MEASURED[rung];
+                rung += 1;
+                value
+            },
+            RiddersConfig::default(),
+        );
+        assert_eq!(rung, MEASURED.len(), "the whole ladder must be consumed");
+        const ANALYTIC: f64 = 1.399_835e-7;
+        assert_eq!(
+            measured.judge(ANALYTIC, 5e-3, 1e-3),
+            FdVerdict::Unresolved,
+            "value={:.6e} uncertainty={:.3e} step={:.2e} order={}",
+            measured.value,
+            measured.uncertainty,
+            measured.step,
+            measured.order
+        );
+    }
+
+    /// The stability requirement must not cost a CONVERGED ladder anything: on
+    /// a clean objective the accepted entry has to stay high-order and sharp,
+    /// or the cure for the noise ladder above would have quietly blunted every
+    /// good measurement.
+    #[test]
+    fn ridders_keeps_its_order_on_a_converged_ladder() {
+        let f = |t: f64| (1.3 + t).sin() * (0.4 + t).exp();
+        let exact = {
+            let (s, c) = 1.3_f64.sin_cos();
+            let e = 0.4_f64.exp();
+            c * e + s * e
+        };
+        let measured = ridders_derivative(f, RiddersConfig::default());
+        assert!(
+            measured.order >= 6,
+            "a clean ladder should still reach order >= 6, got {}",
+            measured.order
+        );
+        assert!(
+            (measured.value - exact).abs() < 1e-11,
+            "value {:.14e} vs exact {exact:.14e} (unc {:.3e}, order {})",
+            measured.value,
+            measured.uncertainty,
+            measured.order
+        );
+        assert_eq!(measured.judge(exact, 1e-9, 1e-14), FdVerdict::Agree);
     }
 
     /// The ladder is reported coarsest-first with exactly `rungs` entries, so a
