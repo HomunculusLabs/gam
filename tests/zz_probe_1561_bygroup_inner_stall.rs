@@ -154,9 +154,11 @@ fn zz_probe_bygroup_inner_stall_trace() {
             }
             Err(e) => {
                 let msg = e.to_string();
-                eprintln!("[zz1561bg] ARM {label}: REFUSED: {msg}");
-                let head: String = msg.chars().take(260).collect();
-                verdicts.push((label, false, head));
+                eprintln!("[zz1561bg] ARM {label}: REFUSED");
+                eprintln!("[zz1561bg-MSG-BEGIN arm={label}]");
+                eprintln!("{msg}");
+                eprintln!("[zz1561bg-MSG-END arm={label}]");
+                verdicts.push((label, false, msg));
             }
         }
     }
@@ -242,11 +244,19 @@ fn zz_probe_bygroup_sigma_block_structure() {
             };
             match fit_from_formula("y ~ s(x, bs='tp', by=group)", &ds, &cfg) {
                 Err(e) => {
-                    let m = e.to_string();
-                    eprintln!(
-                        "[zz1561sig] {label} seed={seed} REFUSED: {}",
-                        &m[..m.len().min(120)]
-                    );
+                    // The refusal is reported WHOLE and deliberately so. This
+                    // site used to cut it at 120 bytes, and all 120 are wrapper
+                    // text (`exact two-block spatial optimization failed:
+                    // custom-family optimization error in fit_custom_family
+                    // outer smoothing`) -- `fit.rs` puts the failed certificate,
+                    // the rho and the last objective error after it. #2501 was
+                    // filed, argued and nearly closed on that prefix alone; the
+                    // cause was never in the record. The byte-index slice could
+                    // also panic mid-UTF-8, and these messages carry non-ASCII.
+                    eprintln!("[zz1561sig] {label} seed={seed} REFUSED");
+                    eprintln!("[zz1561sig-MSG-BEGIN label={label} seed={seed}]");
+                    eprintln!("{e}");
+                    eprintln!("[zz1561sig-MSG-END label={label} seed={seed}]");
                 }
                 Ok(res) => {
                     let gam::FitResult::GaussianLocationScale(fit) = res else {
@@ -279,4 +289,70 @@ fn zz_probe_bygroup_sigma_block_structure() {
         }
     }
     eprintln!("[zz1561sig] done");
+}
+
+// ---------------------------------------------------------------------------
+// #2524 lane: the ONE fit in the 8x2 census that still refuses after #2485,
+// end to end. Kept separate from the census above because it turns the solver's
+// own per-cycle channel on -- the trace is megabytes, and the census must stay
+// readable.
+//
+// Provenance: adopted from an untracked probe drafted in this lane
+// (`zz_probe_2501_two_block_refusal_class.rs`, recovered 2026-07-26) and folded
+// in here rather than landed beside it, so the fixture generator has ONE
+// definition. #2524 cites this fit's refusal text and its restart trace, and a
+// measurement cited from an unlanded instrument is not reproducible.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zz_probe_2501_bygroup_seed3_refusal_traced() {
+    init_parallelism();
+    // The per-cycle convergence channel is `debug`; the library default is
+    // `Warn` (#1688), so the backend must be installed and the level raised.
+    init_logging();
+    set_log_level("debug");
+
+    let n_per = 100usize;
+    let seed = 3u64;
+    let mut rng = StdRng::seed_from_u64(300 + seed);
+    let ux = Uniform::new(0.0_f64, 1.0_f64).expect("u");
+    let sn = Normal::new(0.0_f64, 1.0_f64).expect("n");
+    let headers = vec!["y".to_string(), "x".to_string(), "group".to_string()];
+    let mut rows: Vec<StringRecord> = Vec::with_capacity(2 * n_per);
+    for _ in 0..n_per {
+        let x = ux.sample(&mut rng);
+        let y = mean_a_t(x) + sigma_a_t(x) * sn.sample(&mut rng);
+        rows.push(StringRecord::from(vec![
+            y.to_string(),
+            x.to_string(),
+            "A".to_string(),
+        ]));
+    }
+    for _ in 0..n_per {
+        let x = ux.sample(&mut rng);
+        let y = mean_b_t(x) + sigma_b_t(x) * sn.sample(&mut rng);
+        rows.push(StringRecord::from(vec![
+            y.to_string(),
+            x.to_string(),
+            "B".to_string(),
+        ]));
+    }
+    assert_eq!(rows.len(), 2 * n_per, "fixture row count");
+    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode");
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        noise_formula: Some("s(x, bs='tp', by=group)".to_string()),
+        ..FitConfig::default()
+    };
+    eprintln!("[zz2524] seed={} sigma=by-group, tracing", 300 + seed);
+    match fit_from_formula("y ~ s(x, bs='tp', by=group)", &ds, &cfg) {
+        Ok(_) => eprintln!("[zz2524] FIT (the #2524 refusal did not reproduce)"),
+        Err(e) => {
+            eprintln!("[zz2524] REFUSED");
+            eprintln!("[zz2524-MSG-BEGIN]");
+            eprintln!("{e}");
+            eprintln!("[zz2524-MSG-END]");
+        }
+    }
+    eprintln!("[zz2524] done");
 }
