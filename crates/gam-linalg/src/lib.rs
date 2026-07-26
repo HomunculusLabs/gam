@@ -32,6 +32,7 @@ pub mod gpu_hook;
 pub mod lanczos;
 pub mod low_rank_weight;
 pub mod matrix;
+pub mod numeric_derivative;
 pub mod pairwise_reduce;
 pub mod parallel;
 pub mod pcg;
