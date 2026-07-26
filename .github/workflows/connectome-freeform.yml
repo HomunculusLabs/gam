@@ -25,11 +25,15 @@ on:
   # The schedule moves here from claude-freeform.yml once a dispatch run is
   # verified green end-to-end.
 
-# One continuous agent means one writer. Overlapping runs would fork its
-# memory, so scheduled runs queue rather than race.
-concurrency:
-  group: connectome-freeform
-  cancel-in-progress: false
+# NO concurrency group, deliberately. Parallel runs of this workflow are wanted
+# and must never queue or cancel each other — the fleet's throughput comes from
+# many agents working main at once.
+#
+# That means memory has more than one writer, so the save is built to be
+# contention-free rather than serialized (see "Save memory"): every run writes
+# its own immutable ref, which cannot collide, and only the shared *pointer* is
+# advanced best-effort. Parallel runs therefore fork their memory from a common
+# ancestor and each keeps a complete lineage; nothing is ever lost or blocked.
 
 permissions:
   contents: write
@@ -186,16 +190,36 @@ jobs:
             commit=$(git commit-tree "$tree" -m "$msg")
           fi
           unset GIT_WORK_TREE GIT_INDEX_FILE
+
+          # 1. This run's own lineage. The ref name contains the run id, so no
+          #    concurrent run can ever contend for it and this push cannot fail
+          #    for a reason another agent caused. This is what makes the memory
+          #    safe WITHOUT a concurrency group.
+          own="refs/agent-memory/runs/${GITHUB_RUN_ID}"
+          if git push origin "$commit:$own" 2>&1 | tail -1; then
+            echo "saved this run's memory at $own (${commit:0:9})"
+          else
+            echo "::error::could not save this run's memory lineage"
+          fi
+
+          # 2. Advance the shared pointer that the next run restores from.
+          #    Contended by design: with parallel runs the last finisher wins,
+          #    and a loss here costs nothing because step 1 already persisted
+          #    everything. Never retried into a spin — a losing run just yields.
           for attempt in 1 2 3; do
-            if git push origin "$commit:$MEMORY_REF" 2>&1 | tail -2; then
-              echo "saved memory as ${commit:0:9}"
+            if git push origin "$commit:$MEMORY_REF" 2>&1 | tail -1; then
+              echo "advanced $MEMORY_REF to ${commit:0:9}"
               exit 0
             fi
-            echo "push attempt $attempt failed; refetching"
             git fetch --quiet origin "+$MEMORY_REF:$MEMORY_REF" || true
-            sleep 5
+            newtip=$(git rev-parse --verify -q "$MEMORY_REF" || true)
+            if [ -n "$newtip" ] && [ "$newtip" != "${parent:-}" ]; then
+              echo "::notice::a parallel run advanced $MEMORY_REF to ${newtip:0:9} first; this run's memory is preserved at $own"
+              exit 0
+            fi
+            sleep $((attempt * 3))
           done
-          echo "::error::could not save memory after 3 attempts"
+          echo "::notice::did not advance the shared pointer; this run's memory is preserved at $own"
 
       - name: Rescue any unpushed commits
         if: always()
