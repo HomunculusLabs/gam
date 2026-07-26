@@ -1120,9 +1120,21 @@ impl CascadeRemlProfile<'_> {
         let Some(bracket) = self.multiplicative_bracket(left, right, width, dof)? else {
             return Ok(pad);
         };
+        // Two OUTER enclosures of the same real number must overlap — both
+        // contain the endpoint derivatives, if nothing else. A disjoint pair
+        // means one of them is not an outer bound, and an enclosure that is not
+        // an outer bound does not fail loudly downstream: it lets the search
+        // discard a cell that held a stationary point and return a certified
+        // wrong answer. Refuse here instead of narrowing to whichever one is
+        // left, which would be choosing a winner between two derivations with
+        // no evidence about which is sound.
+        let derivative = intersect(pad.derivative, bracket.derivative)
+            .ok_or_else(|| disjoint("derivative", lo, hi, pad.derivative, bracket.derivative))?;
+        let curvature = intersect(pad.curvature, bracket.curvature)
+            .ok_or_else(|| disjoint("curvature", lo, hi, pad.curvature, bracket.curvature))?;
         Ok(DerivativeEnclosure {
-            derivative: intersect(pad.derivative, bracket.derivative),
-            curvature: intersect(pad.curvature, bracket.curvature),
+            derivative,
+            curvature,
         })
     }
 
@@ -1228,9 +1240,25 @@ impl CascadeRemlProfile<'_> {
     }
 }
 
-/// The tighter of two outer enclosures of the same quantity.
-fn intersect(a: ClosedInterval, b: ClosedInterval) -> ClosedInterval {
-    ClosedInterval::new(a.lo.max(b.lo), a.hi.min(b.hi))
+/// The tighter of two outer enclosures of the same quantity, or `None` if they
+/// are disjoint — which is a contradiction, not a tight answer.
+fn intersect(a: ClosedInterval, b: ClosedInterval) -> Option<ClosedInterval> {
+    let merged = ClosedInterval::new(a.lo.max(b.lo), a.hi.min(b.hi));
+    (merged.lo <= merged.hi).then_some(merged)
+}
+
+fn disjoint(
+    what: &str,
+    lo: f64,
+    hi: f64,
+    pad: ClosedInterval,
+    bracket: ClosedInterval,
+) -> String {
+    format!(
+        "residual cascade: the Lipschitz pad and the multiplicative bracket give DISJOINT \
+         {what} enclosures on [{lo}, {hi}] ({pad:?} versus {bracket:?}); two outer bounds of \
+         one quantity cannot be disjoint, so one of them is not an outer bound"
+    )
 }
 
 /// A coefficient solver pinned to one λ (see [`Core::coeff_solver`]). The dense
@@ -3466,6 +3494,37 @@ mod refinement_decision_tests {
         (x1, x2, y)
     }
 
+    /// Tight clusters with empty space between them, deterministic.
+    ///
+    /// `extend_net` fills the whole bounding BOX, not just the data, so a cloud
+    /// with genuine voids puts cascade columns where no row supports them. Those
+    /// columns are annihilated by the design exactly, which is what produces the
+    /// numerically null Schur modes. A regular grid never does — every bump has
+    /// data under it — which is why the other fixture cannot cover that edge.
+    fn clustered_fixture() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let centers = [(0.12_f64, 0.13_f64), (0.86, 0.20), (0.45, 0.88)];
+        let mut x1 = Vec::new();
+        let mut x2 = Vec::new();
+        let mut y = Vec::new();
+        let mut state = 0x2455_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        for (cx, cy) in centers {
+            for _ in 0..60 {
+                let a = cx + 0.06 * (next() - 0.5);
+                let b = cy + 0.06 * (next() - 0.5);
+                x1.push(a);
+                x2.push(b);
+                y.push((3.0 * a).sin() + (2.0 * b).cos() + 0.05 * (next() - 0.5));
+            }
+        }
+        (x1, x2, y)
+    }
+
     /// The two [`CascadeResidualForm`] arms are the same function of λ.
     ///
     /// The spectral arm reads the profiled residual and its three quadratic
@@ -3666,12 +3725,43 @@ mod refinement_decision_tests {
     }
 
     /// The multiplicative bracket is an OUTER bound, checked against the score
-    /// it claims to bracket.
+    /// it claims to bracket, on a design that HAS numerically null Schur modes.
     ///
     /// A too-tight enclosure does not fail loudly — it makes the search discard
     /// a cell that contained a stationary point and return a certified wrong
     /// answer. So the bracket is charged against densely sampled truth on cells
     /// spanning the whole domain and every width from the resolution floor up.
+    ///
+    /// The deep fixture is deliberate: the null modes are the edge where the
+    /// bracket's premises are thinnest (`R'` is a positive mixture only over the
+    /// modes that survive the roundoff floor), so the containment claim is made
+    /// where it is hardest, not where it is easiest. The test asserts the
+    /// fixture still reaches that regime, so it cannot quietly stop covering it.
+    #[test]
+    fn enclosure_contains_the_derivatives_it_brackets_with_null_modes() {
+        let (x1, x2, y) = clustered_fixture();
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 3)
+            .expect("cascade design");
+        let profile = design.core.reml_profile().expect("spectral profile");
+        let null_modes = profile
+            .modes
+            .iter()
+            .filter(|mode| mode.eigenvalue == 0.0)
+            .count();
+        assert!(
+            null_modes > 0,
+            "fixture no longer reaches the null-mode regime this test exists to cover \
+             ({} modes, all positive)",
+            profile.modes.len()
+        );
+        check_containment_over(&profile);
+    }
+
+    /// The same containment claim on the small, well-conditioned fixture the
+    /// other tests use — the two together bracket the range of designs the
+    /// enclosure has to serve.
     #[test]
     fn enclosure_contains_the_derivatives_it_brackets() {
         let (x1, x2, y) = dense_fixture(6);
@@ -3680,6 +3770,10 @@ mod refinement_decision_tests {
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
             .expect("cascade design");
         let profile = design.core.reml_profile().expect("spectral profile");
+        check_containment_over(&profile);
+    }
+
+    fn check_containment_over(profile: &CascadeRemlProfile<'_>) {
         let (domain_lo, domain_hi) = profile.log_lambda_domain().expect("domain");
         let span = domain_hi - domain_lo;
 
@@ -3690,8 +3784,8 @@ mod refinement_decision_tests {
             if !(hi > lo) {
                 continue;
             }
-            let left = sample_at(&profile, lo);
-            let right = sample_at(&profile, hi);
+            let left = sample_at(profile, lo);
+            let right = sample_at(profile, hi);
             let enclosure = profile.enclose(left, right).expect("enclosure");
             for step in 0..=32 {
                 let x = lo + (hi - lo) * step as f64 / 32.0;
