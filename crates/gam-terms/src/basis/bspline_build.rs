@@ -1445,7 +1445,7 @@ pub fn estimate_penalty_nullity(penalty: &Array2<f64>) -> Result<usize, BasisErr
 
     let (_, evals, _) = spectral_summary(penalty)?;
     let tol = spectral_tolerance(&evals);
-    Ok(SpectralClassification::new(&evals, tol).nullity())
+    Ok(SpectralClassification::new(&evals, tol, spectral_noise_tolerance(&evals)).nullity())
 }
 
 #[derive(Debug, Clone)]
@@ -1517,6 +1517,22 @@ pub(crate) fn project_penalty_to_psd_cone(matrix: &Array2<f64>) -> Array2<f64> {
 /// together.
 pub(crate) const SPECTRAL_RANK_RELATIVE_TOLERANCE: f64 = 1e-10;
 
+/// The relative width of the penalty-spectrum cutoff below which a NEGATIVE
+/// eigenvalue is read as roundoff rather than as genuine negative curvature.
+///
+/// This is a different question from the rank cutoff, and it has the opposite
+/// safety direction. The rank cutoff decides how many directions are penalized:
+/// too loose and genuinely penalized low-curvature modes are misreported as
+/// unpenalized null (measured: a 4th-difference penalty at `m = 300` loses 20
+/// degrees of freedom). The noise cutoff decides whether `λ_min < 0` is a
+/// numerical artifact or a real indefiniteness worth refusing on: too tight and
+/// PSD penalties start being rejected for roundoff.
+///
+/// They were one constant, so no value could be right for both. Equal today, so
+/// this split changes no decision; separating them is what makes the rank cutoff
+/// movable without arming every PSD refusal in the crate (#2469).
+pub(crate) const SPECTRAL_NOISE_RELATIVE_TOLERANCE: f64 = 1e-10;
+
 /// The canonical penalty-spectrum rank cutoff at a caller-stated dimension.
 ///
 /// The dimension is an explicit argument because the consumers do not all score
@@ -1545,6 +1561,18 @@ pub(crate) fn spectral_tolerance_for_dim(dim: usize, evals: &Array1<f64>) -> f64
 /// ended up hand-inlined at the sites that could not call this.
 pub(crate) fn spectral_tolerance(evals: &Array1<f64>) -> f64 {
     spectral_tolerance_for_dim(evals.len(), evals)
+}
+
+/// The canonical cutoff for deciding whether a negative eigenvalue is roundoff.
+///
+/// Same shape and same value as [`spectral_tolerance`] today; separate because
+/// it answers a different question and will not move with it.
+pub(crate) fn spectral_noise_tolerance(evals: &Array1<f64>) -> f64 {
+    let max_abs_ev = evals
+        .iter()
+        .copied()
+        .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    (evals.len().max(1) as f64) * SPECTRAL_NOISE_RELATIVE_TOLERANCE * max_abs_ev
 }
 
 /// Where a single eigenvalue of a symmetric penalty sits relative to the
@@ -1577,10 +1605,20 @@ impl EigenClass {
     /// tolerance. This is the canonical, single-definition partition every
     /// penalty-spectrum consumer routes through.
     #[inline]
-    pub(crate) fn of(eigenvalue: f64, tol: f64) -> EigenClass {
-        if eigenvalue > tol {
+    /// Classify one eigenvalue against the two cutoffs the three classes
+    /// actually answer to.
+    ///
+    /// `rank_tol` separates Range from Null — how much curvature counts as
+    /// penalized. `noise_tol` separates Null from Negative — how negative a
+    /// value must be before it is indefiniteness rather than roundoff. The Null
+    /// band is therefore `[-noise_tol, rank_tol]` and is asymmetric whenever the
+    /// two differ, which is correct: nothing requires the answer to "is this
+    /// direction penalized?" and the answer to "is this negative value real?"
+    /// to be the same number, and they have opposite safety directions.
+    pub(crate) fn of(eigenvalue: f64, rank_tol: f64, noise_tol: f64) -> EigenClass {
+        if eigenvalue > rank_tol {
             EigenClass::Range
-        } else if eigenvalue < -tol {
+        } else if eigenvalue < -noise_tol {
             EigenClass::Negative
         } else {
             EigenClass::Null
@@ -1604,18 +1642,27 @@ pub(crate) struct SpectralClassification {
     pub(crate) null_idx: Vec<usize>,
     /// Indices with `ev < -tol` — genuine negative curvature (non-PSD).
     pub(crate) negative_idx: Vec<usize>,
-    /// The tolerance the partition was computed against.
-    pub(crate) tol: f64,
+    /// The rank cutoff the Range/Null split was computed against.
+    pub(crate) rank_tol: f64,
+    /// The noise cutoff the Null/Negative split was computed against. Carried
+    /// separately because a single stored tolerance cannot reproduce a
+    /// two-tolerance partition — a reconstruction from one value would silently
+    /// re-merge the two decisions this split exists to separate.
+    pub(crate) noise_tol: f64,
 }
 
 impl SpectralClassification {
     /// Partition `evals` against `tol` into range / null / negative classes.
-    pub(crate) fn new(evals: &Array1<f64>, tol: f64) -> SpectralClassification {
+    pub(crate) fn new(
+        evals: &Array1<f64>,
+        rank_tol: f64,
+        noise_tol: f64,
+    ) -> SpectralClassification {
         let mut range_idx = Vec::new();
         let mut null_idx = Vec::new();
         let mut negative_idx = Vec::new();
         for (i, &ev) in evals.iter().enumerate() {
-            match EigenClass::of(ev, tol) {
+            match EigenClass::of(ev, rank_tol, noise_tol) {
                 EigenClass::Range => range_idx.push(i),
                 EigenClass::Null => null_idx.push(i),
                 EigenClass::Negative => negative_idx.push(i),
@@ -1625,7 +1672,8 @@ impl SpectralClassification {
             range_idx,
             null_idx,
             negative_idx,
-            tol,
+            rank_tol,
+            noise_tol,
         }
     }
 
@@ -1679,8 +1727,10 @@ impl SpectralClassification {
     pub(crate) fn absorption_order(&self, evals: &Array1<f64>) -> Vec<usize> {
         let mut order: Vec<usize> = (0..evals.len()).collect();
         order.sort_by(|&a, &b| {
-            let null_a = EigenClass::of(evals[a], self.tol) == EigenClass::Null;
-            let null_b = EigenClass::of(evals[b], self.tol) == EigenClass::Null;
+            let null_a =
+                EigenClass::of(evals[a], self.rank_tol, self.noise_tol) == EigenClass::Null;
+            let null_b =
+                EigenClass::of(evals[b], self.rank_tol, self.noise_tol) == EigenClass::Null;
             match (null_a, null_b) {
                 (false, true) => std::cmp::Ordering::Less,
                 (true, false) => std::cmp::Ordering::Greater,
@@ -1723,7 +1773,8 @@ pub(crate) fn validate_psd_penalty(
 
     let (_, evals, _) = spectral_summary(penalty)?;
     let tolerance = spectral_tolerance(&evals);
-    let classes = SpectralClassification::new(&evals, tolerance);
+    let classes =
+        SpectralClassification::new(&evals, tolerance, spectral_noise_tolerance(&evals));
     let min_eigenvalue = evals.iter().copied().fold(f64::INFINITY, f64::min);
     let max_abs_eigenvalue = evals
         .iter()
@@ -1770,7 +1821,10 @@ pub fn analyze_penalty_block_with_op(
             rank: 0,
             nullity: 0,
             negative_dim: 0,
-            tol: 1e-10,
+            // An empty block has no spectrum to scale against; carry the
+            // conventions themselves rather than a literal standing in for them.
+            rank_tol: SPECTRAL_RANK_RELATIVE_TOLERANCE,
+            noise_tol: SPECTRAL_NOISE_RELATIVE_TOLERANCE,
             iszero: true,
             op,
         });
@@ -1784,7 +1838,8 @@ pub fn analyze_penalty_block_with_op(
     // (the #1425 defect class). `nullity` is the genuine null space
     // (`|ev| <= tol`); negative-curvature directions are tracked separately in
     // `negative_dim` and are neither range nor null.
-    let classes = SpectralClassification::new(&evals, tol);
+    let noise_tol = spectral_noise_tolerance(&evals);
+    let classes = SpectralClassification::new(&evals, tol, noise_tol);
     Ok(CanonicalPenaltyBlock {
         sym_penalty: sym,
         eigenvalues: evals,
@@ -1792,7 +1847,8 @@ pub fn analyze_penalty_block_with_op(
         rank: classes.rank(),
         nullity: classes.nullity(),
         negative_dim: classes.negative_dim(),
-        tol,
+        rank_tol: tol,
+        noise_tol,
         iszero: classes.iszero(),
         op,
     })
@@ -1803,7 +1859,7 @@ pub fn analyze_penalty_block_with_op(
 /// Returns `Some(U_null)` with `U_null.ncols() == block.nullity` when the
 /// block has a non-trivial null space; `None` when the block is full-rank
 /// (`block.nullity == 0`). The columns of `U_null` are the eigenvectors of
-/// `block.sym_penalty` at eigenvalues `|ev| ≤ block.tol` (genuine null
+/// `block.sym_penalty` at eigenvalues `|ev| ≤ block.rank_tol` (genuine null
 /// directions only — never the negative-curvature class) — exactly the
 /// directions along which `Sβ = 0` and on which `H_pen = H_loglik + S` carries no
 /// curvature from the penalty. These are the directions that must be
@@ -1817,7 +1873,8 @@ pub(crate) fn nullspace_basis_from_block(block: &CanonicalPenaltyBlock) -> Optio
     // Derive the null basis from the canonical classifier so the columns it
     // selects are exactly the directions counted in `block.nullity`
     // (`|ev| <= tol`), never the negative-curvature directions (#1425).
-    SpectralClassification::new(&block.eigenvalues, block.tol).null_basis(&block.eigenvectors)
+    SpectralClassification::new(&block.eigenvalues, block.rank_tol, block.noise_tol)
+        .null_basis(&block.eigenvectors)
 }
 
 /// Compute the joint-null absorption rotation for a smooth with one or more
@@ -1868,12 +1925,13 @@ pub fn compute_joint_null_rotation(
     }
     let (_, evals, evecs) = spectral_summary(&s_sum)?;
     let tol = spectral_tolerance(&evals);
+    let noise_tol = spectral_noise_tolerance(&evals);
     // Classify the joint penalty `Σ_k S_k` through the single canonical
     // partition. Only the genuine joint null (`|ev| <= tol`) is absorbed; a
     // negative joint eigenvalue (`ev < -tol`) is negative curvature, NOT an
     // unpenalized direction, and stays in the leading (non-absorbed) block
     // (#1425).
-    let classes = SpectralClassification::new(&evals, tol);
+    let classes = SpectralClassification::new(&evals, tol, noise_tol);
     let joint_nullity = classes.nullity();
     if joint_nullity == 0 {
         return Ok(None);

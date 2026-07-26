@@ -804,7 +804,11 @@ fn decompose_kronecker_factors(
         // directions via the canonical classifier — never the null or
         // negative-curvature directions (#1425).
         let factor_classes =
-            crate::basis::SpectralClassification::new(&analysis.eigenvalues, analysis.tol);
+            crate::basis::SpectralClassification::new(
+                &analysis.eigenvalues,
+                analysis.rank_tol,
+                analysis.noise_tol,
+            );
         let mut root_j = Array2::zeros((analysis.rank, q_j));
         let mut pos_eigs = Vec::with_capacity(analysis.rank);
         for (row_idx, &i) in factor_classes.range_idx.iter().enumerate() {
@@ -1307,8 +1311,12 @@ pub fn canonicalize_penalty_spec(
     // classifier, so this root construction cannot disagree with the block's
     // own `rank` / `nullity` / `negative_dim` about which directions are
     // penalized, unpenalized, or non-PSD (#1425).
-    let tolerance = analysis.tol;
-    let classes = crate::basis::SpectralClassification::new(&analysis.eigenvalues, tolerance);
+    let tolerance = analysis.rank_tol;
+    let classes = crate::basis::SpectralClassification::new(
+        &analysis.eigenvalues,
+        tolerance,
+        analysis.noise_tol,
+    );
     let rank_k = classes.rank();
     assert_eq!(
         rank_k, analysis.rank,

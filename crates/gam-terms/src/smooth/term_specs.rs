@@ -5712,7 +5712,7 @@ pub fn tensor_margin_range_null_projectors(
             let mut range_idx = Vec::<usize>::new();
             let mut null_idx = Vec::<usize>::new();
             for (idx, &ev) in analysis.eigenvalues.iter().enumerate() {
-                if ev > analysis.tol {
+                if ev > analysis.rank_tol {
                     range_idx.push(idx);
                 } else {
                     null_idx.push(idx);
