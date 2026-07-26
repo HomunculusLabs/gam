@@ -98,9 +98,8 @@
 //!   of 2 from pinning the block that owns `ℓ`, one from walking submasks of
 //!   `mask ^ ℓ` instead of `mask`. Its flop crossover against the gather sat at
 //!   `K = 10`; the pointed recurrence moves it to `K = 8`.
-//! * **The production entry point [`compose_unary_four_slot_coefficients`] is
-//!   `K = 4`**, where the schedule walks 34 terms against the gather's 52. It
-//!   does strictly *less* combinatorial work than the partition sum it replaced —
+//! * At `K = 4` the schedule walks 34 terms against the gather's 52. It does
+//!   strictly *less* combinatorial work than the partition sum it replaced —
 //!   at every `K`, not just past a crossover — and the residual 3.3× flop ratio
 //!   at `K = 4` is entirely the Dot2 compensation: 10 flops a term against ~3.
 //!   That is the accuracy the double-double gate pins, and the only reason to
@@ -264,27 +263,6 @@ impl MultiDirJet {
         });
         Self { coeffs: out }
     }
-}
-
-/// Compose a four-slot multilinear coefficient table through one unary
-/// derivative stack without constructing an owned [`MultiDirJet`].
-///
-/// This is the allocation-free fixed-width entry point to the exact same
-/// compensated truncated-Taylor/subset-convolution schedule used by
-/// [`MultiDirJet::compose_unary`]. Slot-mask `m` in the returned array is the
-/// derivative for the corresponding subset of the four input slots. It exists
-/// for packed analytic primitives that already own their normalized derivative
-/// table and need the shared, double-double-graded composition arithmetic
-/// without adopting the oracle's heap-backed storage layout.
-#[inline]
-pub fn compose_unary_four_slot_coefficients(
-    coefficients: [f64; 16],
-    derivs: [f64; 5],
-) -> [f64; 16] {
-    let mut scratch = [0.0f64; 64];
-    let mut out = [0.0f64; 16];
-    compose_unary_coefficients_into(&coefficients, derivs, &mut scratch, &mut out);
-    out
 }
 
 thread_local! {

@@ -26,7 +26,7 @@ use crate::custom_family::{
 use crate::fit_orchestration::drivers::freeze_term_collection_from_design;
 use crate::gamlss::{FamilyMetadata, ParameterLink};
 use crate::model_types::UnifiedFitResult;
-use crate::probability::signed_log_sum_exp;
+use crate::probability::{log1mexp_positive, signed_log_sum_exp};
 use crate::quadrature::{IntegratedExpectationMode, QuadratureContext};
 use crate::sigma_link::{exp_sigma_eta_for_sigma_scalar, exp_sigma_from_eta_scalar};
 use crate::survival::latent::interval::{
@@ -1336,27 +1336,120 @@ const LATENT_SURVIVAL_PRIMARY_MU: usize = 4;
 const LATENT_SURVIVAL_PRIMARY_LOG_SIGMA: usize = 5;
 const LATENT_SURVIVAL_PRIMARY_DIM: usize = 6;
 
-/// Derivatives of `log(x)` through 4th order.
+/// Derivatives of `log(x)` through fourth order at the only point needed by
+/// normalized kernel sums: the literal `x = 1`.
 ///
-/// # Contract
-///
-/// `x` must be strictly positive. This function does NOT clamp: a previous
-/// version replaced `x` by `x.max(1e-300)`, which fabricated enormous finite
-/// derivatives (`1/1e-300` etc.) that are the derivatives of neither `log(x)`
-/// nor `log(max(x, floor))` and would silently mask an upstream domain
-/// failure. Both callers guarantee `x > 0`: one composes at the literal `1.0`
-/// (the normalised log-sum base); the other passes `base`, which is gated by
-/// an explicit `base.is_finite() && base > 0.0` check immediately upstream. A
-/// non-positive `x` therefore never reaches here on any supported path; were
-/// one to, the function returns the honest IEEE result (`-inf`/`NaN`) —
-/// identical in debug and release — rather than a finite fabrication. For all
-/// valid `x > 0` the output is bit-identical to the previous clamped version.
+/// Keeping the point in the function name and removing the free argument makes
+/// the representability contract structural. No caller can accidentally feed a
+/// small positive linear-domain mass into the reciprocal powers.
 #[inline]
-fn latent_unary_derivatives_log(x: f64) -> [f64; 5] {
-    let x2 = x * x;
-    let x3 = x2 * x;
-    let x4 = x3 * x;
-    [x.ln(), 1.0 / x, -1.0 / x2, 2.0 / x3, -6.0 / x4]
+fn latent_unary_derivatives_log_at_one() -> [f64; 5] {
+    [0.0, 1.0, -1.0, 2.0, -6.0]
+}
+
+/// Certified derivative tower of `f(x) = log(1 - exp(x))` for `x < 0`.
+///
+/// The value uses `log1mexp`; derivative magnitudes are assembled in log space:
+///
+/// ```text
+/// |f'|    = r / s
+/// |f''|   = r / s²
+/// |f'''|  = r(1 + r) / s³
+/// |f''''| = r(1 + 4r + r²) / s⁴,
+/// r = exp(x), s = 1 - r.
+/// ```
+///
+/// This never forms `1/s^k`. If a true derivative magnitude cannot be
+/// represented by `f64`, the routine returns a typed numerical refusal instead
+/// of publishing an infinite jet. Only the derivative order consumed by the
+/// selected jet backend is certified. There is no clamp or magnitude cutoff.
+fn latent_unary_derivatives_log1mexp_negative(
+    x: f64,
+    derivative_order: usize,
+    context: &str,
+) -> Result<[f64; 5], LatentSurvivalError> {
+    assert!(derivative_order <= 4);
+    if !(x.is_finite() && x < 0.0) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!("{context} requires a finite negative log-boundary gap, got {x:?}"),
+        });
+    }
+    let value = log1mexp_positive(-x);
+    let exp_x = x.exp();
+    let log_derivative_magnitudes = [
+        x - value,
+        x - 2.0 * value,
+        x + exp_x.ln_1p() - 3.0 * value,
+        x + (exp_x * (4.0 + exp_x)).ln_1p() - 4.0 * value,
+    ];
+    let mut derivatives = [value, 0.0, 0.0, 0.0, 0.0];
+    for (offset, log_magnitude) in log_derivative_magnitudes
+        .into_iter()
+        .take(derivative_order)
+        .enumerate()
+    {
+        let order = offset + 1;
+        let magnitude = log_magnitude.exp();
+        if !magnitude.is_finite() {
+            return Err(LatentSurvivalError::NumericalFailure {
+                reason: format!(
+                    "{context} derivative order {order} is not representable at \
+                     log-boundary gap {x:?} (log magnitude {log_magnitude:?})"
+                ),
+            });
+        }
+        derivatives[order] = -magnitude;
+    }
+    Ok(derivatives)
+}
+
+/// Stable jet for `log(exp(log_left + c_left) - exp(log_right + c_right))`.
+///
+/// Positivity implies the log-domain gap
+/// `delta = (log_right + c_right) - (log_left + c_left)` is negative, so
+///
+/// ```text
+/// log(A - B) = log(A) + log(1 - exp(delta)).
+/// ```
+///
+/// Absolute mass never leaves log space. The caller supplies a complete
+/// finiteness predicate for its concrete jet representation so an `Ok` result
+/// certifies every carried channel, including contracted third/fourth parts.
+fn latent_survival_positive_log_difference_jet<J: JetField>(
+    log_left: &J,
+    log_coefficient_left: f64,
+    log_right: &J,
+    log_coefficient_right: f64,
+    derivative_order: usize,
+    context: &str,
+    all_channels_finite: impl Fn(&J) -> bool,
+) -> Result<J, LatentSurvivalError> {
+    let weighted_left = log_left.add(&log_left.constant_like(log_coefficient_left));
+    let weighted_right = log_right.add(&log_right.constant_like(log_coefficient_right));
+    let delta = weighted_right.sub(&weighted_left);
+    let delta_value = delta.value();
+    if !(delta_value.is_finite() && delta_value < 0.0) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} must be a positive survival-mass difference: \
+                 log(c_L*K0(M_L))={:?}, log(c_R*K0(M_R))={:?}; \
+                 require M_L < M_R (i.e. L < R)",
+                weighted_left.value(),
+                weighted_right.value(),
+            ),
+        });
+    }
+    let derivatives =
+        latent_unary_derivatives_log1mexp_negative(delta_value, derivative_order, context)?;
+    let out = weighted_left.add(&delta.compose_unary(derivatives));
+    if !all_channels_finite(&out) {
+        return Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} derivative jet is not representable at log-boundary gap {delta_value:?}"
+            ),
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1366,6 +1459,67 @@ struct LatentKernelPrimaryTerm {
     qdot_power: usize,
     tau_exp: usize,
     k: usize,
+}
+
+/// One signed magnitude kept in logarithmic coordinates.
+///
+/// The latent-kernel recurrence naturally produces derivatives as signed
+/// log-sums.  Keeping that representation through the moment-to-cumulant
+/// conversion is essential: materialising `S_ab / S` and `S_a / S` separately
+/// before computing `S_ab / S - (S_a / S)(S_b / S)` rounds both large moments
+/// and destroys the small curvature left by their cancellation.
+#[derive(Clone, Copy, Debug)]
+struct LatentSignedLog {
+    log_abs: f64,
+    sign: f64,
+}
+
+impl LatentSignedLog {
+    const ZERO: Self = Self {
+        log_abs: f64::NEG_INFINITY,
+        sign: 0.0,
+    };
+    const ONE: Self = Self {
+        log_abs: 0.0,
+        sign: 1.0,
+    };
+
+    #[inline]
+    fn product(self, other: Self) -> Self {
+        if self.sign == 0.0 || other.sign == 0.0 {
+            Self::ZERO
+        } else {
+            Self {
+                log_abs: self.log_abs + other.log_abs,
+                sign: self.sign * other.sign,
+            }
+        }
+    }
+
+    #[inline]
+    fn negated(self) -> Self {
+        Self {
+            log_abs: self.log_abs,
+            sign: -self.sign,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LatentSignedLogOrder2<const K: usize> {
+    v: LatentSignedLog,
+    g: [LatentSignedLog; K],
+    h: [[LatentSignedLog; K]; K],
+}
+
+impl<const K: usize> LatentSignedLogOrder2<K> {
+    const fn zero() -> Self {
+        Self {
+            v: LatentSignedLog::ZERO,
+            g: [LatentSignedLog::ZERO; K],
+            h: [[LatentSignedLog::ZERO; K]; K],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1780,10 +1934,128 @@ mod tests_multidir_kernel {
             };
         }
 
-        let mut out = normalized.compose_unary(latent_unary_derivatives_log(1.0));
+        let mut out = normalized.compose_unary(latent_unary_derivatives_log_at_one());
         out.coeffs[0] += base_log_sum;
         Ok(out)
     }
+}
+
+fn latent_signed_log_checked(
+    log_abs: f64,
+    sign: f64,
+    context: &str,
+    quantity: &str,
+) -> Result<LatentSignedLog, LatentSurvivalError> {
+    if log_abs == f64::NEG_INFINITY && sign == 0.0 {
+        return Ok(LatentSignedLog::ZERO);
+    }
+    if log_abs.is_finite() && (sign == -1.0 || sign == 1.0) {
+        return Ok(LatentSignedLog { log_abs, sign });
+    }
+    Err(LatentSurvivalError::NumericalFailure {
+        reason: format!(
+            "{context} produced an invalid signed-log {quantity}: log_abs={log_abs}, sign={sign}"
+        ),
+    })
+}
+
+fn latent_signed_log_normalized(
+    log_abs: f64,
+    sign: f64,
+    base_log_sum: f64,
+    context: &str,
+) -> Result<LatentSignedLog, LatentSurvivalError> {
+    let value = latent_signed_log_checked(log_abs, sign, context, "kernel derivative")?;
+    if value.sign == 0.0 {
+        Ok(value)
+    } else {
+        latent_signed_log_checked(
+            value.log_abs - base_log_sum,
+            value.sign,
+            context,
+            "normalised kernel derivative",
+        )
+    }
+}
+
+fn latent_signed_log_materialize(
+    value: LatentSignedLog,
+    context: &str,
+) -> Result<f64, LatentSurvivalError> {
+    let value =
+        latent_signed_log_checked(value.log_abs, value.sign, context, "log-sum derivative")?;
+    if value.sign == 0.0 {
+        return Ok(0.0);
+    }
+    let materialized = value.sign * value.log_abs.exp();
+    if materialized.is_finite() {
+        Ok(materialized)
+    } else {
+        Err(LatentSurvivalError::NumericalFailure {
+            reason: format!(
+                "{context} log-sum derivative is outside the finite f64 range: \
+                 log_abs={}, sign={}",
+                value.log_abs, value.sign
+            ),
+        })
+    }
+}
+
+/// Convert normalized signed-log moments into derivatives of `log(S)`.
+///
+/// For a non-empty slot set `A`, normalized moments and log derivatives obey
+///
+/// `m(A) = Σ_{B ⊆ A, pivot ∈ B} κ(B) m(A \\ B)`,
+///
+/// where `m(A) = S_A / S`, `κ(A) = ∂_A log(S)`, and the distinguished pivot is
+/// the least-significant slot. Isolating `B = A` gives a pointed cumulant
+/// recurrence. Every product is multiplication in signed-log coordinates and
+/// every subtraction is one signed log-sum-exp, so no large normalized moment
+/// is rounded to value space before cancellation. The four-slot table covers
+/// the `(a,b,u,v)` layouts used by Order2, OneSeed, and TwoSeed.
+fn latent_signed_log_cumulants(
+    moments: [LatentSignedLog; 16],
+    target_mask: usize,
+    context: &str,
+) -> Result<[LatentSignedLog; 16], LatentSurvivalError> {
+    assert!(target_mask > 0 && target_mask < 16);
+    let mut cumulants = [LatentSignedLog::ZERO; 16];
+    for mask in 1usize..16 {
+        if mask & !target_mask != 0 {
+            continue;
+        }
+        if mask.is_power_of_two() {
+            cumulants[mask] = moments[mask];
+            continue;
+        }
+        let pivot = 1usize << mask.trailing_zeros();
+        // One leading moment plus at most 2^(4 - 1) - 1 proper pointed
+        // submasks. Fixed scratch keeps this hot row primitive allocation-free.
+        let mut log_mags = [f64::NEG_INFINITY; 8];
+        let mut signs = [0.0_f64; 8];
+        let mut len = 1usize;
+        log_mags[0] = moments[mask].log_abs;
+        signs[0] = moments[mask].sign;
+
+        let mut block = (mask - 1) & mask;
+        while block != 0 {
+            if block & pivot != 0 {
+                let complement = mask ^ block;
+                let subtract = cumulants[block].product(moments[complement]).negated();
+                log_mags[len] = subtract.log_abs;
+                signs[len] = subtract.sign;
+                len += 1;
+            }
+            block = (block - 1) & mask;
+        }
+        debug_assert!(len <= log_mags.len());
+
+        let (log_abs, sign) = signed_log_sum_exp(&log_mags[..len], &signs[..len]);
+        let cumulant =
+            latent_signed_log_checked(log_abs, sign, context, "log-sum cumulant")?;
+        cumulants[mask] = cumulant;
+    }
+    Ok(cumulants)
 }
 
 /// A one-pass analytic lift of a latent kernel sum into an order-specific jet.
@@ -1885,7 +2157,7 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
     }
     let normalized = |axes: &[LatentKernelPrimaryDirection],
                       suffix: &[LatentKernelPrimaryDirection]|
-     -> Result<f64, LatentSurvivalError> {
+     -> Result<LatentSignedLog, LatentSurvivalError> {
         let is_zero = |direction: &LatentKernelPrimaryDirection| {
             direction.dq == 0.0
                 && direction.dqd == 0.0
@@ -1893,7 +2165,7 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
                 && direction.dtau == 0.0
         };
         if axes.iter().chain(suffix.iter()).any(is_zero) {
-            return Ok(0.0);
+            return Ok(LatentSignedLog::ZERO);
         }
         let terms = latent_kernel_term_sequence_inline(base_terms, axes, suffix);
         assert!(
@@ -1903,23 +2175,19 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
             LATENT_TERM_INLINE_CAPACITY
         );
         let (log_abs, sign) = evaluate_terms(&terms)?;
-        Ok(if !log_abs.is_finite() || sign == 0.0 {
-            0.0
-        } else {
-            sign * (log_abs - base_log_sum).exp()
-        })
+        latent_signed_log_normalized(log_abs, sign, base_log_sum, context)
     };
 
-    let mut parts = [Order2::<K>::constant(0.0); 4];
+    let mut parts = [LatentSignedLogOrder2::<K>::zero(); 4];
     for (part, suffix) in suffixes.iter().enumerate() {
         let value = if part == 0 {
-            // The base is the kernel divided by itself.  Keep this literal 1.0,
-            // matching the old `MultiDirJet::constant(..., 1.0)` construction.
-            1.0
+            // The base is the kernel divided by itself.
+            LatentSignedLog::ONE
         } else {
             normalized(&[], suffix)?
         };
-        let mut tower = gam_math::jet_tower::Tower2::<K>::constant(value);
+        let mut tower = LatentSignedLogOrder2::<K>::zero();
+        tower.v = value;
         for a in 0..K {
             tower.g[a] = normalized(&[primary_directions[a]], suffix)?;
         }
@@ -1931,43 +2199,41 @@ fn latent_kernel_sum_order2_parts<const K: usize>(
                 tower.h[b][a] = derivative;
             }
         }
-        parts[part] = Order2(tower);
+        parts[part] = tower;
     }
-    Ok(latent_kernel_normalized_log_parts(
+    latent_kernel_signed_log_parts(
         base_log_sum,
         parts,
         suffixes.len(),
-    ))
+        context,
+    )
 }
 
-/// Convert normalized kernel-sum moments into derivatives of the log sum.
+/// Convert normalized signed-log kernel moments into derivatives of the log sum.
 ///
 /// `normalized_parts` is the single analytic recurrence's compact moment
 /// layout: the base carries `(1, S_a/S, S_ab/S)`, the one-seed parts carry
-/// `(S_u/S, S_au/S, S_abu/S)`, and the two-seed cross part carries
-/// `(S_uv/S, S_auv/S, S_abuv/S)`. For each requested output channel we expose
-/// those moments as a four-slot derivative table `(a,b,u,v)` and let the shared
-/// compensated truncated-Taylor reducer perform `log` composition. This avoids
-/// the severe tail cancellation caused by composing projected `Order2` products
-/// in stages, while retaining one recurrence, one moment layout, and one general
-/// composition rule for Order2, OneSeed, and TwoSeed.
-fn latent_kernel_normalized_log_parts<const K: usize>(
+/// `(S_u/S, S_au/S, S_abu/S)`, and the two-seed cross part carries `(S_uv/S,
+/// S_auv/S, S_abuv/S)`. For each requested output channel those moments become
+/// a four-slot `(a,b,u,v)` table for [`latent_signed_log_cumulants`]. The final
+/// log derivative is the first point at which the result enters value space.
+fn latent_kernel_signed_log_parts<const K: usize>(
     base_log_sum: f64,
-    normalized_parts: [Order2<K>; 4],
+    normalized_parts: [LatentSignedLogOrder2<K>; 4],
     part_count: usize,
-) -> [Order2<K>; 4] {
+    context: &str,
+) -> Result<[Order2<K>; 4], LatentSurvivalError> {
     assert!(matches!(part_count, 1 | 2 | 4));
-    let log_stack = latent_unary_derivatives_log(1.0);
-    let compose_log = |moments: [f64; 16]| {
-        gam_math::jet_partitions::compose_unary_four_slot_coefficients(moments, log_stack)
+    let compose_log = |moments: [LatentSignedLog; 16], target_mask: usize| {
+        latent_signed_log_cumulants(moments, target_mask, context)
     };
     let moments_for = |a: usize, b: usize| {
-        let base = &normalized_parts[0].0;
-        let u = &normalized_parts[1].0;
-        let v = &normalized_parts[2].0;
-        let uv = &normalized_parts[3].0;
+        let base = &normalized_parts[0];
+        let u = &normalized_parts[1];
+        let v = &normalized_parts[2];
+        let uv = &normalized_parts[3];
         [
-            1.0,
+            LatentSignedLog::ONE,
             base.g[a],
             base.g[b],
             base.h[a][b],
@@ -1989,40 +2255,56 @@ fn latent_kernel_normalized_log_parts<const K: usize>(
     let mut out = [Order2::<K>::constant(0.0); 4];
     out[0].0.v = base_log_sum;
     if part_count >= 2 {
-        out[1].0.v = normalized_parts[1].0.v;
+        out[1].0.v = latent_signed_log_materialize(normalized_parts[1].v, context)?;
     }
     if part_count == 4 {
-        out[2].0.v = normalized_parts[2].0.v;
-        let composed = compose_log(moments_for(0, 0));
-        out[3].0.v = composed[0b1100];
+        out[2].0.v = latent_signed_log_materialize(normalized_parts[2].v, context)?;
+        let composed = compose_log(moments_for(0, 0), 0b1100)?;
+        out[3].0.v = latent_signed_log_materialize(composed[0b1100], context)?;
     }
 
     for a in 0..K {
-        let composed = compose_log(moments_for(a, a));
-        out[0].0.g[a] = composed[0b0001];
+        let gradient_mask = match part_count {
+            1 => 0b0001,
+            2 => 0b0101,
+            4 => 0b1101,
+            _ => unreachable!(),
+        };
+        let composed = compose_log(moments_for(a, a), gradient_mask)?;
+        out[0].0.g[a] = latent_signed_log_materialize(composed[0b0001], context)?;
         if part_count >= 2 {
-            out[1].0.g[a] = composed[0b0101];
+            out[1].0.g[a] = latent_signed_log_materialize(composed[0b0101], context)?;
         }
         if part_count == 4 {
-            out[2].0.g[a] = composed[0b1001];
-            out[3].0.g[a] = composed[0b1101];
+            out[2].0.g[a] = latent_signed_log_materialize(composed[0b1001], context)?;
+            out[3].0.g[a] = latent_signed_log_materialize(composed[0b1101], context)?;
         }
         for b in a..K {
-            let composed = compose_log(moments_for(a, b));
-            out[0].0.h[a][b] = composed[0b0011];
+            let hessian_mask = match part_count {
+                1 => 0b0011,
+                2 => 0b0111,
+                4 => 0b1111,
+                _ => unreachable!(),
+            };
+            let composed = compose_log(moments_for(a, b), hessian_mask)?;
+            out[0].0.h[a][b] =
+                latent_signed_log_materialize(composed[0b0011], context)?;
             if part_count >= 2 {
-                out[1].0.h[a][b] = composed[0b0111];
+                out[1].0.h[a][b] =
+                    latent_signed_log_materialize(composed[0b0111], context)?;
             }
             if part_count == 4 {
-                out[2].0.h[a][b] = composed[0b1011];
-                out[3].0.h[a][b] = composed[0b1111];
+                out[2].0.h[a][b] =
+                    latent_signed_log_materialize(composed[0b1011], context)?;
+                out[3].0.h[a][b] =
+                    latent_signed_log_materialize(composed[0b1111], context)?;
             }
             for part in 0..part_count {
                 out[part].0.h[b][a] = out[part].0.h[a][b];
             }
         }
     }
-    out
+    Ok(out)
 }
 
 #[inline]
@@ -2045,11 +2327,24 @@ fn latent_kernel_direction_linear_combination<const K: usize>(
     out
 }
 
+fn latent_order2_all_finite<const K: usize>(jet: &Order2<K>) -> bool {
+    jet.value().is_finite()
+        && jet.g().iter().all(|value| value.is_finite())
+        && jet
+            .h()
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
+}
+
 /// Backend seam for the single latent-survival row expression.  Only the
 /// analytic multivariate kernel primitive differs by requested channel; all
 /// numerator/denominator/event algebra below is instantiated unchanged.
 trait LatentPrimaryJetBackend<const K: usize> {
     type Jet: JetScalar<K>;
+
+    fn derivative_order(&self) -> usize;
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool;
 
     fn kernel_sum_log(
         &self,
@@ -2066,6 +2361,14 @@ struct LatentOrder2Backend;
 
 impl<const K: usize> LatentPrimaryJetBackend<K> for LatentOrder2Backend {
     type Jet = Order2<K>;
+
+    fn derivative_order(&self) -> usize {
+        2
+    }
+
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool {
+        latent_order2_all_finite(jet)
+    }
 
     fn kernel_sum_log(
         &self,
@@ -2095,6 +2398,14 @@ struct LatentOneSeedBackend<const K: usize> {
 
 impl<const K: usize> LatentPrimaryJetBackend<K> for LatentOneSeedBackend<K> {
     type Jet = OneSeed<K>;
+
+    fn derivative_order(&self) -> usize {
+        3
+    }
+
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool {
+        latent_order2_all_finite(&jet.base) && latent_order2_all_finite(&jet.eps)
+    }
 
     fn kernel_sum_log(
         &self,
@@ -2130,6 +2441,17 @@ struct LatentTwoSeedBackend<const K: usize> {
 
 impl<const K: usize> LatentPrimaryJetBackend<K> for LatentTwoSeedBackend<K> {
     type Jet = TwoSeed<K>;
+
+    fn derivative_order(&self) -> usize {
+        4
+    }
+
+    fn all_channels_finite(&self, jet: &Self::Jet) -> bool {
+        latent_order2_all_finite(&jet.base)
+            && latent_order2_all_finite(&jet.eps)
+            && latent_order2_all_finite(&jet.del)
+            && latent_order2_all_finite(&jet.eps_del)
+    }
 
     fn kernel_sum_log(
         &self,
@@ -2426,25 +2748,17 @@ mod tests_multidir_row {
     /// `M_L = exp(q_exit)`, `M_R = exp(q_right)`, `c_L = exp(-mass_unloaded_left)`
     /// and `c_R = exp(-mass_unloaded_right)`.
     ///
-    /// This is the dynamic-time analogue of the static
-    /// [`LatentSurvivalRowJet::interval_censored`] kernel: the interval likelihood
-    /// is the difference of two BOUNDARY survival masses, each a single-state
-    /// order-0 kernel, but at two DISTINCT cumulative masses. Because the two
-    /// boundaries respond to different time functionals (`q_exit` vs `q_right`) we
-    /// cannot fold them into one `latent_kernel_sum_log_jet` state. Instead we:
-    ///   1. build each boundary's `log K_{0,M}` jet at its own state, with its own
-    ///      direction map (left → `dq_exit`, right → `dq_right`; both share
-    ///      `mu`/`sigma`),
-    ///   2. lift each to the LINEAR domain via `exp` (a unary composition whose five
-    ///      derivatives at value `v` are all `exp(v)`), scaled by its coefficient
-    ///      `c_L` (resp. `−c_R`),
-    ///   3. add the two linear-domain jets, and
-    ///   4. drop back to the log domain via the same `log` unary composition the
-    ///      single-state path uses.
-    /// Every multi-direction coefficient (value, score, neg-Hessian, 3rd, 4th)
-    /// follows by the Faà-di-Bruno composition already implemented in
-    /// `MultiDirJet::compose_unary`, so the derivative reductions are consistent
-    /// with the exact-event/right-censored branches by construction.
+    /// The two boundary kernels use distinct states and direction maps, but their
+    /// difference stays in log space:
+    ///
+    /// ```text
+    /// log(c_L K_L - c_R K_R)
+    ///   = log(c_L K_L) + log1mexp(log(c_R K_R) - log(c_L K_L)).
+    /// ```
+    ///
+    /// The same certified unary stack as production is composed over the
+    /// multi-direction oracle, so absolute tail mass cannot underflow and the
+    /// reference cannot silently publish a non-finite higher coefficient.
     fn latent_survival_interval_numerator_log_jet_multidir_reference(
         quadctx: &QuadratureContext,
         row: &LatentSurvivalRow,
@@ -2507,33 +2821,48 @@ mod tests_multidir_row {
             "latent survival interval right boundary",
         )?;
 
-        // Lift each boundary's log-kernel jet to the linear domain and scale by the
-        // unloaded-mass prefactor. exp''''(v) = exp(v) for all orders, so the unary
-        // derivative tower is `[exp(v); exp(v); exp(v); exp(v); exp(v)]`.
-        let c_left = (-row.mass_unloaded_left).exp();
-        let c_right = (-row.mass_unloaded_right).exp();
-        let exp_left_value = log_left.coeff(0).exp();
-        let exp_right_value = log_right.coeff(0).exp();
-        let linear_left = log_left.compose_unary([exp_left_value; 5]).scale(c_left);
-        let linear_right = log_right.compose_unary([exp_right_value; 5]).scale(c_right);
-
-        let linear_numerator = linear_left.add(&linear_right.scale(-1.0));
-        let base = linear_numerator.coeff(0);
-        if !(base.is_finite() && base > 0.0) {
+        // `MultiDirJet` is the runtime-width test oracle rather than a
+        // `JetField`, so spell out the same log-domain identity while sharing
+        // the certified unary derivative stack with production.
+        let weighted_left = log_left.add(&LatentMultiDirJet::constant(
+            directions.len(),
+            -row.mass_unloaded_left,
+        ));
+        let weighted_right = log_right.add(&LatentMultiDirJet::constant(
+            directions.len(),
+            -row.mass_unloaded_right,
+        ));
+        let delta = weighted_right.sub(&weighted_left);
+        let delta_value = delta.coeff(0);
+        if !(delta_value.is_finite() && delta_value < 0.0) {
             return Err(LatentSurvivalError::NumericalFailure {
-            reason: format!(
-                "latent survival interval numerator must be a positive survival-mass difference, \
-                 got c_L*K0(M_L) - c_R*K0(M_R) = {base}; require M_L < M_R (i.e. L < R)"
-            ),
+                reason: format!(
+                    "latent survival interval numerator must be a positive \
+                     survival-mass difference: log(c_L*K0(M_L))={:?}, \
+                     log(c_R*K0(M_R))={:?}; require M_L < M_R (i.e. L < R)",
+                    weighted_left.coeff(0),
+                    weighted_right.coeff(0),
+                ),
+            }
+            .to_string());
         }
-        .into());
+        let derivatives = latent_unary_derivatives_log1mexp_negative(
+            delta_value,
+            directions.len(),
+            "latent survival interval numerator",
+        )
+        .map_err(|error| error.to_string())?;
+        let out = weighted_left.add(&delta.compose_unary(derivatives));
+        if !out.coeffs.iter().all(|value| value.is_finite()) {
+            return Err(LatentSurvivalError::NumericalFailure {
+                reason: format!(
+                    "latent survival interval numerator derivative jet is not \
+                     representable at log-boundary gap {delta_value:?}"
+                ),
+            }
+            .to_string());
         }
-        // Drop back to the log domain. `latent_unary_derivatives_log(base)` is the
-        // unary derivative tower of `ln` at the positive base value, so the composed
-        // value channel is `ln(base)` and the higher coefficients are the
-        // log-of-a-difference score / curvature, consistent with the single-state
-        // log-sum path (which composes `ln` at its normalised base of 1).
-        Ok(linear_numerator.compose_unary(latent_unary_derivatives_log(base)))
+        Ok(out)
     }
 }
 
@@ -2729,20 +3058,16 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
         )
         .map_err(|error| error.to_string())?;
 
-    let linear_left = log_left.exp().scale((-row.mass_unloaded_left).exp());
-    let linear_right = log_right.exp().scale((-row.mass_unloaded_right).exp());
-    let linear_numerator = linear_left.sub(&linear_right);
-    let base = linear_numerator.value();
-    if !(base.is_finite() && base > 0.0) {
-        return Err(LatentSurvivalError::NumericalFailure {
-            reason: format!(
-                "latent survival interval numerator must be a positive survival-mass difference, \
-                 got c_L*K0(M_L) - c_R*K0(M_R) = {base}; require M_L < M_R (i.e. L < R)"
-            ),
-        }
-        .into());
-    }
-    Ok(linear_numerator.compose_unary(latent_unary_derivatives_log(base)))
+    latent_survival_positive_log_difference_jet(
+        &log_left,
+        -row.mass_unloaded_left,
+        &log_right,
+        -row.mass_unloaded_right,
+        backend.derivative_order(),
+        "latent survival interval numerator",
+        |jet| backend.all_channels_finite(jet),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn latent_survival_row_primary_gradient_hessian(
@@ -6293,6 +6618,7 @@ mod tests {
         latent_survival_row_primary_gradient_hessian_multidir_reference,
         latent_survival_row_primary_third_contracted_multidir_reference,
     };
+    use super::tests_multidir_row::latent_survival_row_primary_log_jet_multidir_reference;
     use super::*;
     use crate::custom_family::BlockWorkingSet;
     use gam_linalg::matrix::DenseDesignMatrix;
@@ -6620,6 +6946,61 @@ mod tests {
         )
         .expect("row primary evaluation")
         .0
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct RichardsonDerivative {
+        value: f64,
+        uncertainty: f64,
+    }
+
+    fn floating_point_gamma(operations: usize) -> f64 {
+        let accumulated = operations as f64 * f64::EPSILON;
+        accumulated / (1.0 - accumulated)
+    }
+
+    /// Fourth-order Richardson derivative and its local, measured error budget.
+    ///
+    /// The first term is the standard central-difference truncation estimate
+    /// from step halving. The second propagates the ordinary floating-point
+    /// `γ_n` bounds through the two central differences and their Richardson
+    /// combination. No production derivative path is called by this authority.
+    fn richardson_central_difference(
+        mut value_at: impl FnMut(f64) -> f64,
+        coordinate: f64,
+        step: f64,
+    ) -> RichardsonDerivative {
+        let coarse_plus = value_at(coordinate + step);
+        let coarse_minus = value_at(coordinate - step);
+        let fine_step = 0.5 * step;
+        let fine_plus = value_at(coordinate + fine_step);
+        let fine_minus = value_at(coordinate - fine_step);
+        let coarse = (coarse_plus - coarse_minus) / (2.0 * step);
+        let fine = (fine_plus - fine_minus) / (2.0 * fine_step);
+        let value = (4.0 * fine - coarse) / 3.0;
+
+        let gamma = floating_point_gamma(3);
+        let coarse_roundoff =
+            gamma * (coarse_plus.abs() + coarse_minus.abs()) / (2.0 * step);
+        let fine_roundoff =
+            gamma * (fine_plus.abs() + fine_minus.abs()) / (2.0 * fine_step);
+        let combine_roundoff = gamma * (4.0 * fine.abs() + coarse.abs()) / 3.0;
+        RichardsonDerivative {
+            value,
+            uncertainty: (fine - coarse).abs() / 3.0
+                + (4.0 * fine_roundoff + coarse_roundoff) / 3.0
+                + combine_roundoff,
+        }
+    }
+
+    fn latent_survival_value_fd_authority(
+        quadctx: &QuadratureContext,
+        row: &LatentSurvivalRow,
+        point: LatentSurvivalPrimaryPoint,
+    ) -> f64 {
+        latent_survival_row_primary_log_jet_multidir_reference(quadctx, row, point, &[])
+            .expect("value-only finite-difference authority")
+            .coeff(0)
     }
 
     fn latent_test_specs(n: usize, block_dims: &[(&str, usize)]) -> Vec<ParameterBlockSpec> {
@@ -8730,6 +9111,150 @@ mod tests {
         }
     }
 
+    #[test]
+    fn latent_signed_log_cumulant_preserves_cancellation_2566() {
+        // m_ab and m_a*m_b are about 7.9e13, while their cumulant is about
+        // 7.4e4. The deliberately tiny separation is represented in log space;
+        // the production recurrence must not exponentiate either large moment
+        // before subtracting them.
+        let separation = 2.0_f64.powi(-30);
+        let mut moments = [LatentSignedLog::ZERO; 16];
+        moments[0] = LatentSignedLog::ONE;
+        moments[0b0001] = LatentSignedLog {
+            log_abs: 16.0,
+            sign: 1.0,
+        };
+        moments[0b0010] = moments[0b0001];
+        moments[0b0011] = LatentSignedLog {
+            log_abs: 32.0 + separation,
+            sign: 1.0,
+        };
+
+        let signed = latent_signed_log_cumulants(moments, 0b0011, "2566 cancellation oracle")
+            .expect("finite signed-log cumulant")[0b0011];
+        let got = latent_signed_log_materialize(signed, "2566 cancellation oracle")
+            .expect("materialized finite signed-log cumulant");
+        let expected = (32.0 + separation.exp_m1().ln()).exp();
+        let relative_error = (got - expected).abs() / expected;
+        assert!(
+            relative_error <= floating_point_gamma(16),
+            "signed-log cumulant lost the small residual: got={got:e}, expected={expected:e}, \
+             relative_error={relative_error:e}"
+        );
+
+        assert!(
+            latent_signed_log_normalized(f64::INFINITY, 1.0, 0.0, "2566 nonfinite oracle")
+                .is_err(),
+            "a non-finite derivative magnitude must be refused, never rewritten as zero"
+        );
+    }
+
+    /// #2566 analytic/FD authority split across the measured scale cliff.
+    ///
+    /// The analytic authority is the production negative Hessian. Its audit
+    /// authority is a Richardson finite difference of the production GRADIENT,
+    /// so it never touches the second-order moment-to-cumulant algebra under
+    /// test. At every gradient sample, a separate Richardson difference of a
+    /// value-only zero-direction jet measures the gradient authority's own
+    /// numerical error. Those observed errors, the step-halving truncation
+    /// estimate, and `γ_n` roundoff propagation form the assertion budget; no
+    /// fitted tolerance or scale cutoff enters the gate.
+    #[test]
+    fn latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566() {
+        let quadctx = QuadratureContext::new();
+        let row = LatentSurvivalRow::right_censored(0.3, 0.67, 0.01, 0.02);
+        let point_at = |log_sigma: f64| LatentSurvivalPrimaryPoint {
+            q_entry: -1.2,
+            q_exit: -0.4,
+            qdot_exit: 0.73,
+            q_right: 0.5,
+            mu: -0.15,
+            sigma: log_sigma.exp(),
+        };
+        let analytic_at = |log_sigma: f64| {
+            latent_survival_row_primary_gradient_hessian(
+                &quadctx,
+                &row,
+                point_at(log_sigma),
+                true,
+            )
+            .expect("analytic latent-survival row")
+        };
+        let value_gradient_authority = |log_sigma: f64| {
+            let step = f64::EPSILON.cbrt() * (1.0 + log_sigma.abs());
+            richardson_central_difference(
+                |at| latent_survival_value_fd_authority(&quadctx, &row, point_at(at)),
+                log_sigma,
+                step,
+            )
+        };
+        let gradient_sample = |log_sigma: f64| {
+            let (_, gradient, _) = analytic_at(log_sigma);
+            let analytic = gradient[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA];
+            let authority = value_gradient_authority(log_sigma);
+            (
+                analytic,
+                (analytic - authority.value).abs() + authority.uncertainty,
+            )
+        };
+
+        for log_sigma in [-3.0_f64, 0.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+            let step = f64::EPSILON.cbrt() * (1.0 + log_sigma.abs());
+            let (_, _, negative_hessian) = analytic_at(log_sigma);
+            let analytic = negative_hessian[[
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+            ]];
+
+            let (gradient_coarse_plus, error_coarse_plus) =
+                gradient_sample(log_sigma + step);
+            let (gradient_coarse_minus, error_coarse_minus) =
+                gradient_sample(log_sigma - step);
+            let half_step = 0.5 * step;
+            let (gradient_fine_plus, error_fine_plus) =
+                gradient_sample(log_sigma + half_step);
+            let (gradient_fine_minus, error_fine_minus) =
+                gradient_sample(log_sigma - half_step);
+
+            // The row API returns the negative Hessian, hence the leading minus.
+            let coarse =
+                -(gradient_coarse_plus - gradient_coarse_minus) / (2.0 * step);
+            let fine = -(gradient_fine_plus - gradient_fine_minus) / (2.0 * half_step);
+            let authority = (4.0 * fine - coarse) / 3.0;
+
+            let coarse_input_uncertainty =
+                (error_coarse_plus + error_coarse_minus) / (2.0 * step);
+            let fine_input_uncertainty =
+                (error_fine_plus + error_fine_minus) / (2.0 * half_step);
+            let gamma = floating_point_gamma(3);
+            let coarse_roundoff = gamma
+                * (gradient_coarse_plus.abs() + gradient_coarse_minus.abs())
+                / (2.0 * step);
+            let fine_roundoff = gamma
+                * (gradient_fine_plus.abs() + gradient_fine_minus.abs())
+                / (2.0 * half_step);
+            let combine_roundoff = gamma * (4.0 * fine.abs() + coarse.abs()) / 3.0;
+            let uncertainty = (fine - coarse).abs() / 3.0
+                + (4.0 * (fine_input_uncertainty + fine_roundoff)
+                    + coarse_input_uncertainty
+                    + coarse_roundoff)
+                    / 3.0
+                + combine_roundoff;
+            let disagreement = (analytic - authority).abs();
+
+            assert!(
+                analytic.is_finite()
+                    && authority.is_finite()
+                    && uncertainty.is_finite()
+                    && disagreement <= uncertainty,
+                "log_sigma={log_sigma}: analytic negative curvature escaped its independently \
+                 measured FD budget: analytic={analytic:e}, fd_gradient={authority:e}, \
+                 disagreement={disagreement:e}, uncertainty={uncertainty:e}, \
+                 coarse={coarse:e}, fine={fine:e}"
+            );
+        }
+    }
+
     /// The primary-jet producer must REFUSE a non-finite operating coordinate
     /// rather than carry it into the channels it returns.
     ///
@@ -8837,5 +9362,136 @@ mod tests {
                  value={value:?}, gradient={gradient:?}"
             );
         }
+    }
+
+    #[test]
+    fn latent_interval_log_difference_stays_finite_at_small_absolute_mass_2565() {
+        let quadctx = QuadratureContext::new();
+        let row =
+            LatentSurvivalRow::interval_censored(0.3, 0.67, 1.65, 0.01, 0.02, 0.05);
+        let cases = [
+            ("small Hessian tail", -6.0_f64, 20.0_f64, -1.0_f64),
+            ("small gradient tail", 12.0, 5.0, -1.0),
+            ("deep location tail", 20.0, 20.0, 0.0),
+            ("deep mass tail", 40.0, -0.15, 0.0),
+        ];
+        let point_at = |log_mass: f64, mu: f64, log_sigma: f64| {
+            LatentSurvivalPrimaryPoint {
+                q_entry: log_mass,
+                q_exit: log_mass + 0.8,
+                qdot_exit: 0.73,
+                q_right: log_mass + 1.6,
+                mu,
+                sigma: log_sigma.exp(),
+            }
+        };
+
+        for (label, log_mass, mu, log_sigma) in cases {
+            let point = point_at(log_mass, mu, log_sigma);
+            let (value, gradient, hessian) =
+                latent_survival_row_primary_gradient_hessian(&quadctx, &row, point, true)
+                    .unwrap_or_else(|error| panic!("{label} must remain representable: {error}"));
+            assert!(
+                value.is_finite()
+                    && gradient.iter().all(|entry| entry.is_finite())
+                    && hessian.iter().all(|entry| entry.is_finite()),
+                "{label} returned Ok with a non-finite channel: \
+                 value={value:?}, gradient={gradient:?}, hessian={hessian:?}"
+            );
+        }
+
+        // The same log-difference primitive serves the contracted third and
+        // fourth channels; exercise them at the first old Hessian-overflow point.
+        let point = point_at(-6.0, 20.0, -1.0);
+        let mut direction = Array1::<f64>::zeros(LATENT_SURVIVAL_PRIMARY_DIM);
+        direction[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA] = 1.0;
+        let third =
+            latent_survival_row_primary_third_contracted(&quadctx, &row, point, &direction, true)
+                .expect("small absolute interval mass must have finite contracted third order");
+        let fourth = latent_survival_row_primary_fourth_contracted(
+            &quadctx,
+            &row,
+            point,
+            &direction,
+            &direction,
+            true,
+        )
+        .expect("small absolute interval mass must have finite contracted fourth order");
+        assert!(third.iter().all(|entry| entry.is_finite()));
+        assert!(fourth.iter().all(|entry| entry.is_finite()));
+    }
+
+    #[test]
+    fn latent_interval_log_difference_matches_closed_form_curvature_2565() {
+        // With A = exp(a), B = 1/2, and a = 0,
+        //
+        //   log(A - B) = -log(2),
+        //   d/da log(A - B) = 2,
+        //   d²/da² log(A - B) = -2.
+        //
+        // This is an algebraic oracle independent of the multi-direction
+        // reference, which deliberately shares the stable production primitive.
+        let log_left = Order2::<1>::variable(0.0, 0);
+        let log_right = Order2::<1>::constant(-std::f64::consts::LN_2);
+        let out = latent_survival_positive_log_difference_jet(
+            &log_left,
+            0.0,
+            &log_right,
+            0.0,
+            2,
+            "interval closed-form discriminator",
+            latent_order2_all_finite,
+        )
+        .expect("the closed-form interval mass and derivatives are representable");
+        assert_eq!(out.value(), -std::f64::consts::LN_2);
+        assert_eq!(out.g()[0], 2.0);
+        assert_eq!(out.h()[0][0], -2.0);
+    }
+
+    #[test]
+    fn latent_interval_log_difference_refuses_domain_and_derivative_overflow_2565() {
+        let left = Order2::<1>::constant(0.0);
+        let equal = Order2::<1>::constant(0.0);
+        let domain_error = latent_survival_positive_log_difference_jet(
+            &left,
+            0.0,
+            &equal,
+            0.0,
+            2,
+            "interval boundary discriminator",
+            latent_order2_all_finite,
+        )
+        .expect_err("equal boundaries have zero interval mass");
+        assert!(matches!(
+            &domain_error,
+            LatentSurvivalError::NumericalFailure { .. }
+        ));
+        assert!(
+            domain_error.to_string().contains("positive survival-mass difference"),
+            "domain refusal must identify the estimand: {domain_error}"
+        );
+
+        // The value log(1-exp(delta)) is finite here, as is its first
+        // derivative, but the true second derivative exceeds f64. The producer
+        // must refuse that derivative domain instead of returning Ok with inf.
+        let near_boundary = Order2::<1>::variable(-f64::MIN_POSITIVE, 0);
+        let overflow_error = latent_survival_positive_log_difference_jet(
+            &left,
+            0.0,
+            &near_boundary,
+            0.0,
+            2,
+            "interval derivative discriminator",
+            latent_order2_all_finite,
+        )
+        .expect_err("unrepresentable log-gap derivatives require typed refusal");
+        assert!(matches!(
+            &overflow_error,
+            LatentSurvivalError::NumericalFailure { .. }
+        ));
+        assert!(
+            overflow_error.to_string().contains("derivative order 2"),
+            "refusal must name the first unrepresentable derivative: {overflow_error}"
+        );
     }
 }
