@@ -5148,6 +5148,44 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
     );
 }
 
+/// Keep-best must rank CERTIFICATION above VALUE, the invariant `run_plan.rs`
+/// relies on when it routes the #1371/#1476 ARC box-corner substitution through
+/// keep-best "as a NON-converged candidate" so an earlier converged seed still
+/// wins. The costs below are that scenario's own numbers: a genuine interior
+/// optimum at ~133 and a degenerate stall caching a spuriously LOWER ~65.
+#[test]
+fn keep_best_ranks_convergence_above_value() {
+    let plan = OuterPlan {
+        solver: Solver::Bfgs,
+        hessian_source: HessianSource::BfgsApprox,
+    };
+    let converged = OuterResult::new(array![-1.0], 133.0, 12, true, plan);
+    let stalled_cheaper = OuterResult::new(array![8.0], 65.0, 58, false, plan);
+
+    assert!(
+        !candidate_improves_best(&stalled_cheaper, Some(&converged)),
+        "a non-converged candidate must not displace a converged best, however \
+         much lower its cached cost is — that cost is where the search stopped, \
+         not a claim about an optimum"
+    );
+    assert!(
+        candidate_improves_best(&converged, Some(&stalled_cheaper)),
+        "a converged candidate must displace a non-converged best even when its \
+         value is worse"
+    );
+
+    // With convergence equal on both sides, value decides exactly as before.
+    let cheaper_converged = OuterResult::new(array![-2.0], 132.0, 9, true, plan);
+    assert!(candidate_improves_best(&cheaper_converged, Some(&converged)));
+    assert!(!candidate_improves_best(&converged, Some(&cheaper_converged)));
+    let dearer_stall = OuterResult::new(array![9.0], 70.0, 4, false, plan);
+    assert!(candidate_improves_best(&stalled_cheaper, Some(&dearer_stall)));
+
+    // Nothing to beat: the first candidate is always adopted, converged or not,
+    // so a single-start fit still returns its result unchanged.
+    assert!(candidate_improves_best(&stalled_cheaper, None));
+}
+
 #[test]
 fn parsimonious_keep_best_breaks_laml_tie_toward_more_smoothing() {
     let plan = OuterPlan {

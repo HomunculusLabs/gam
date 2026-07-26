@@ -609,10 +609,39 @@ pub(crate) fn seed_is_oversmoothing_boundary(
     })
 }
 
+/// Keep-best adoption: CERTIFICATION STATUS IS LEXICOGRAPHICALLY PRIOR TO VALUE.
+///
+/// A converged incumbent always beats a non-converged candidate, however much
+/// lower that candidate's cached cost looks, and a converged candidate always
+/// displaces a non-converged incumbent. Only when the two agree on convergence
+/// does `final_value` decide.
+///
+/// WHY VALUE ALONE IS NOT A SAFE ADOPTION RULE. A non-converged seed's
+/// `final_value` is the cost at wherever the search stopped, which is not a
+/// claim about an optimum: a seed that stalls on a flat over-smoothed shelf can
+/// cache a LOWER number than a genuine interior optimum and win a pure-value
+/// comparison, and the fit that ships is then one no certificate can be minted
+/// from. That is the same principle the repo has already ruled on repeatedly —
+/// SPEC rule 20 (a fit is only minted from a converged optimization), #2255
+/// (mint only converged modes), and the EM exhaustion gate (progress must be
+/// certified, not asserted). This is that principle at the ADOPTION stage.
+///
+/// THIS IS A RESTORATION, NOT A NEW POLICY. The rule below is the line
+/// `Some(best) if candidate.converged != best.converged => candidate.converged`
+/// that `dd7f3580a` ("Checkpoint Codex-fleet WIP interrupted by usage limit")
+/// deleted along with its companion `nonconverged_cost_is_trustworthy` guard
+/// (#1426/#1477); a later edit dropped even the asymmetric remnant, leaving a
+/// bare value comparison. Callers were never told: `run_plan.rs` still routes
+/// the #1371/#1476 ARC box-corner substitution through keep-best specifically
+/// "as a NON-converged candidate" so that `candidate_improves_best` will "reject
+/// it (a converged best always beats a non-converged candidate)" — a property
+/// the function had silently stopped having. Restoring it makes that comment
+/// true again.
 #[inline]
 pub(crate) fn candidate_improves_best(candidate: &OuterResult, best: Option<&OuterResult>) -> bool {
     match best {
         None => true,
+        Some(best) if candidate.converged != best.converged => candidate.converged,
         Some(best) => candidate.final_value < best.final_value,
     }
 }
