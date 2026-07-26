@@ -91,6 +91,35 @@ fn iso_kappa_fd_variant_driver(
     well_conditioned: bool,
     extra_rho_probes: &[f64],
 ) -> (bool, f64, Vec<String>, Vec<(String, Array1<f64>)>) {
+    let fixture = build_iso_kappa_fixture(label, n, family, well_conditioned);
+    iso_kappa_fd_variant_driver_on(&fixture, label, skip_psi, extra_rho_probes)
+}
+
+/// The realized fixture behind [`iso_kappa_fd_variant_driver`], split out so a
+/// targeted diagnostic can probe ONE θ with its own finite-difference stencil
+/// instead of re-running the driver's whole probe grid at the driver's single
+/// hard-wired step. Everything here is a pure function of
+/// `(label, n, family, well_conditioned)`.
+struct IsoKappaFixture {
+    data: Array2<f64>,
+    y: Array1<f64>,
+    weights: Array1<f64>,
+    offset: Array1<f64>,
+    family: LikelihoodSpec,
+    frozen: TermCollectionSpec,
+    frozen_design: TermCollectionDesign,
+    spatial_terms: Vec<usize>,
+    dims_per_term: Vec<usize>,
+    rho_dim: usize,
+    psi_dim: usize,
+}
+
+fn build_iso_kappa_fixture(
+    label: &str,
+    n: usize,
+    family: LikelihoodSpec,
+    well_conditioned: bool,
+) -> IsoKappaFixture {
     // A `"*_2d"` label builds an ordinary 2-D feature cloud (the production
     // `matern(x1, x2)` regime: operator triplet {mass, tension, stiffness}, with
     // the per-axis tension and mixed-curvature stiffness blocks that only carry
@@ -191,14 +220,6 @@ fn iso_kappa_fd_variant_driver(
             joint_null_rotation: None,
         }],
     };
-    let fit_opts = FitOptions {
-        compute_inference: false,
-        max_iter: 200,
-        tol: 1e-12,
-        penalty_shrinkage_floor: None,
-        ..FitOptions::default()
-    };
-
     let design = build_term_collection_design(data.view(), &spec).unwrap_or_else(|e| panic!("{} failed: {:?}", "design", e));
     let frozen = freeze_term_collection_from_design(&spec, &design).unwrap_or_else(|e| panic!("{} failed: {:?}", "freeze", e));
     let frozen_design = build_term_collection_design(data.view(), &frozen).unwrap_or_else(|e| panic!("{} failed: {:?}", "frozen design", e));
@@ -220,26 +241,85 @@ fn iso_kappa_fd_variant_driver(
             .collect::<Vec<_>>()
     );
 
-    let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
-    let mut cache = SingleBlockExactJointDesignCache::new(
-        data.view(),
-        frozen.clone(),
-        frozen_design.clone(),
-        spatial_terms.clone(),
+    IsoKappaFixture {
+        data,
+        y,
+        weights,
+        offset,
+        family,
+        frozen,
+        frozen_design,
+        spatial_terms,
+        dims_per_term,
         rho_dim,
-        dims_per_term.clone(),
-    )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "single-block cache", e));
-    let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
-        y.view(),
-        weights.view(),
-        &frozen_design.design,
-        offset.view(),
-        &frozen_design.penalties,
-        &external_opts,
-        "iso-κ variant FD evaluator",
-    )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "evaluator", e));
+        psi_dim,
+    }
+}
+
+/// The `FitOptions` every iso-κ FD probe evaluates the production criterion
+/// under: inference off, inner tolerance far below any gradient gap the oracle
+/// resolves, and no shrinkage floor (so the criterion is the criterion, not a
+/// regularized surrogate).
+fn iso_kappa_fd_fit_options() -> FitOptions {
+    FitOptions {
+        compute_inference: false,
+        max_iter: 200,
+        tol: 1e-12,
+        penalty_shrinkage_floor: None,
+        ..FitOptions::default()
+    }
+}
+
+impl IsoKappaFixture {
+    fn cache(&self) -> SingleBlockExactJointDesignCache<'_> {
+        SingleBlockExactJointDesignCache::new(
+            self.data.view(),
+            self.frozen.clone(),
+            self.frozen_design.clone(),
+            self.spatial_terms.clone(),
+            self.rho_dim,
+            self.dims_per_term.clone(),
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "single-block cache", e))
+    }
+
+    fn evaluator<'a>(
+        &'a self,
+        external_opts: &'a ExternalOptimOptions,
+    ) -> gam_solve::estimate::ExternalJointHyperEvaluator<'a> {
+        gam_solve::estimate::ExternalJointHyperEvaluator::new(
+            self.y.view(),
+            self.weights.view(),
+            &self.frozen_design.design,
+            self.offset.view(),
+            &self.frozen_design.penalties,
+            external_opts,
+            "iso-κ variant FD evaluator",
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "evaluator", e))
+    }
+
+    fn external_opts(&self) -> ExternalOptimOptions {
+        external_opts_for_design(&self.family, &self.frozen_design, &iso_kappa_fd_fit_options())
+    }
+}
+
+fn iso_kappa_fd_variant_driver_on(
+    fixture: &IsoKappaFixture,
+    label: &str,
+    skip_psi: bool,
+    extra_rho_probes: &[f64],
+) -> (bool, f64, Vec<String>, Vec<(String, Array1<f64>)>) {
+    let IsoKappaFixture {
+        data,
+        rho_dim,
+        psi_dim,
+        ..
+    } = fixture;
+    let (rho_dim, psi_dim) = (*rho_dim, *psi_dim);
+    let external_opts = fixture.external_opts();
+    let mut cache = fixture.cache();
+    let mut evaluator = fixture.evaluator(&external_opts);
 
     let cost_at = |theta: &Array1<f64>,
                    cache: &mut SingleBlockExactJointDesignCache<'_>,
@@ -1427,6 +1507,123 @@ fn zz_measure_psi_only_rho1_fd_step_law_2425() {
             gap / (h * h),
             richardson
                 .map(|r| format!("{r:+.10e} (gap {:+.4e})", analytic - r))
+                .unwrap_or_else(|| "-".to_string())
+        );
+        previous = Some((h, fd));
+    }
+}
+
+/// #2461 — the step-law discriminator the issue asks for, on the row that
+/// actually fails: `duchon_gaussian`, ψ (`j = rho_dim`), at the `rho1@R` rung
+/// of the #2425 saturation ladder.
+///
+/// The reported defect is a *constant* 0.54% analytic-vs-FD relative gap on a
+/// ψ-gradient of magnitude ~249, stable to four digits over twelve e-folds of
+/// ρ₁. The ladder measures it at ONE step (`h = 3e-4`), which cannot separate
+/// the three candidate laws. This sweeps `h` at a fixed rung and reports both
+/// `gap/h²` (constant ⇒ central-difference truncation, analytic side right)
+/// and `gap·h` (constant ⇒ evaluator noise), plus a Richardson extrapolation
+/// against the 3× coarser rung, which kills the leading `h²` term and so
+/// converges to the true derivative if truncation is the story.
+///
+/// Reporting only — it is the measurement that decides which side to fix.
+#[test]
+fn zz_measure_duchon_psi_fd_step_law_at_rho1_2461() {
+    const RUNG: f64 = 15.0;
+    let fixture = build_iso_kappa_fixture(
+        "duchon_gaussian",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+    );
+    let rho_dim = fixture.rho_dim;
+    let psi_dim = fixture.psi_dim;
+    let external_opts = fixture.external_opts();
+    let mut cache = fixture.cache();
+    let mut evaluator = fixture.evaluator(&external_opts);
+    let data = fixture.data.view();
+
+    // The ladder's `rho1@RUNG` probe: `theta_base` with ρ₁ raised to the rung.
+    let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
+    for j in 0..rho_dim {
+        theta[j] = 0.2 - 0.1 * j as f64;
+    }
+    theta[1] = RUNG;
+    let coord = rho_dim;
+
+    let eval_at = |theta: &Array1<f64>,
+                   order: gam_solve::rho_optimizer::OuterEvalOrder,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> (f64, Array1<f64>) {
+        cache
+            .ensure_theta(theta)
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "ensure_theta", e));
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data,
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "hyper dirs build", e))
+        .expect("hyper dirs present");
+        let (cost, grad, _) = evaluate_joint_reml_outer_eval_at_theta(
+            evaluator,
+            cache.design(),
+            theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            order,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "outer eval", e));
+        (cost, grad)
+    };
+
+    let (cost, grad) = eval_at(
+        &theta,
+        gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+        &mut cache,
+        &mut evaluator,
+    );
+    let analytic = grad[coord];
+    eprintln!(
+        "[zz-2461-steplaw] rung=rho1@{RUNG} cost={cost:.12e} analytic_psi={analytic:+.10e}"
+    );
+    let mut previous: Option<(f64, f64)> = None;
+    for h in [
+        3.0e-2, 1.0e-2, 3.0e-3, 1.0e-3, 3.0e-4, 1.0e-4, 3.0e-5, 1.0e-5, 3.0e-6, 1.0e-6,
+    ] {
+        let mut plus = theta.clone();
+        plus[coord] += h;
+        let mut minus = theta.clone();
+        minus[coord] -= h;
+        let (cp, _) = eval_at(
+            &plus,
+            gam_solve::rho_optimizer::OuterEvalOrder::Value,
+            &mut cache,
+            &mut evaluator,
+        );
+        let (cm, _) = eval_at(
+            &minus,
+            gam_solve::rho_optimizer::OuterEvalOrder::Value,
+            &mut cache,
+            &mut evaluator,
+        );
+        let fd = (cp - cm) / (2.0 * h);
+        let gap = analytic - fd;
+        let richardson = previous.map(|(hc, fdc): (f64, f64)| {
+            let ratio = (hc / h).powi(2);
+            (ratio * fd - fdc) / (ratio - 1.0)
+        });
+        eprintln!(
+            "[zz-2461-steplaw] h={h:.1e} fd={fd:+.10e} gap={gap:+.6e} \
+             gap/h2={:+.4e} gap*h={:+.4e} richardson={}",
+            gap / (h * h),
+            gap * h,
+            richardson
+                .map(|r| format!("{r:+.10e} (gap {:+.6e})", analytic - r))
                 .unwrap_or_else(|| "-".to_string())
         );
         previous = Some((h, fd));
