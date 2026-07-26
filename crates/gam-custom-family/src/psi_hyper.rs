@@ -1786,6 +1786,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         warm_start: value_only.warm_start,
                         inner_converged: inner.converged,
                         hyper_values: hyper_layout.values().clone(),
+                        ext_mode_response_cols: None,
                         inner: inner.clone(),
                     });
                 }
@@ -2222,6 +2223,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                         warm_start: value_only.warm_start,
                         inner_converged: inner.converged,
                         hyper_values: hyper_layout.values().clone(),
+                        ext_mode_response_cols: None,
                         inner: inner.clone(),
                     });
                 }

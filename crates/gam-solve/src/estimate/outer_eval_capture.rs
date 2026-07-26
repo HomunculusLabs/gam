@@ -11,7 +11,7 @@
 //! finite-difference request is thread-local: a parallel integration test can
 //! neither consume nor overwrite another test's one-shot audit.
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -47,6 +47,10 @@ pub struct OuterGradientFdRecord {
     pub logdet_h_psi_gradient: Array1<f64>,
     pub frozen_logdet_h_psi_gradient: Array1<f64>,
     pub mode_response_logdet_h_psi_gradient: Array1<f64>,
+    pub analytic_mode_response_norm: Array1<f64>,
+    pub finite_difference_mode_response_norm: Array1<f64>,
+    pub mode_response_relative_error: Array1<f64>,
+    pub mode_response_max_abs_error: Array1<f64>,
     pub logdet_s_psi_gradient: Array1<f64>,
     pub kkt_psi_gradient: Array1<f64>,
     pub finite_difference_fixed_beta_psi_gradient: Array1<f64>,
@@ -65,6 +69,7 @@ struct OuterGradientFdCapture {
     record: Option<OuterGradientFdRecord>,
     components: Vec<(f64, f64, f64, f64, f64, f64)>,
     criterion_components: Option<(f64, [f64; 4])>,
+    selected_mode: Option<(Array1<f64>, Option<Array2<f64>>)>,
 }
 
 thread_local! {
@@ -96,6 +101,7 @@ pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
             record: None,
             components: Vec::new(),
             criterion_components: None,
+            selected_mode: None,
         });
     });
 }
@@ -154,6 +160,7 @@ pub(crate) fn begin_outer_criterion_component_capture() {
     FD_CAPTURE.with(|capture| {
         if let Some(state) = capture.borrow_mut().as_mut() {
             state.criterion_components = None;
+            state.selected_mode = None;
         }
     });
 }
@@ -180,6 +187,35 @@ pub(crate) fn take_outer_criterion_components() -> Option<(f64, [f64; 4])> {
             .borrow_mut()
             .as_mut()
             .and_then(|state| state.criterion_components.take())
+    })
+}
+
+/// Retain the selected coefficient mode and its analytic extended-coordinate
+/// response columns for an armed finite-difference audit.
+///
+/// Sibling workspace evaluators call this only after nonconvex candidate
+/// selection, beside [`record_outer_criterion_components`]. Value-only
+/// evaluations pass no response columns but still retain their selected
+/// coefficients for the scalar stencil.
+pub fn record_outer_selected_mode(
+    beta: Array1<f64>,
+    ext_mode_response_cols: Option<Array2<f64>>,
+) {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+        {
+            state.selected_mode = Some((beta, ext_mode_response_cols));
+        }
+    });
+}
+
+pub(crate) fn take_outer_selected_mode() -> Option<(Array1<f64>, Option<Array2<f64>>)> {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.selected_mode.take())
     })
 }
 

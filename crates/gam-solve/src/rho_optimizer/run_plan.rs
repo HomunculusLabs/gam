@@ -112,7 +112,7 @@ fn evaluate_fd_cost_with_criterion_components(
     context: &str,
     inner_seed: &Array1<f64>,
     theta: &Array1<f64>,
-) -> Result<(f64, [f64; 4]), EstimationError> {
+) -> Result<(f64, [f64; 4], Array1<f64>), EstimationError> {
     obj.reset();
     install_matching_initial_inner_seed(obj, config, inner_seed, context)?;
     crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
@@ -129,7 +129,13 @@ fn evaluate_fd_cost_with_criterion_components(
              components={component_cost:.17e}"
         )));
     }
-    Ok((cost, components))
+    let (beta, _) =
+        crate::estimate::outer_eval_capture::take_outer_selected_mode().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "outer-gradient FD capture received no selected coefficient mode".to_string(),
+            )
+        })?;
+    Ok((cost, components, beta))
 }
 
 fn capture_outer_gradient_fd_at_seed(
@@ -206,10 +212,72 @@ fn capture_outer_gradient_fd_at_seed(
             analytic.cost
         )));
     }
+    let (analytic_beta, analytic_ext_mode_response_cols) =
+        crate::estimate::outer_eval_capture::take_outer_selected_mode().ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "outer-gradient FD capture received no analytic selected coefficient mode"
+                    .to_string(),
+            )
+        })?;
+    let analytic_ext_mode_response_cols =
+        analytic_ext_mode_response_cols.ok_or_else(|| {
+            EstimationError::InvalidInput(
+                "outer-gradient FD capture received no analytic extended-coordinate mode responses"
+                    .to_string(),
+            )
+        })?;
+    if analytic_ext_mode_response_cols.nrows() != analytic_beta.len()
+        || analytic_ext_mode_response_cols.ncols() != psi_dim
+    {
+        return Err(EstimationError::InvalidInput(format!(
+            "outer-gradient FD mode-response layout mismatch: beta_dim={} response_shape={}x{} psi_dim={psi_dim}",
+            analytic_beta.len(),
+            analytic_ext_mode_response_cols.nrows(),
+            analytic_ext_mode_response_cols.ncols(),
+        )));
+    }
     let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
     let mut finite_difference_component_psi_gradients: [Array1<f64>; 4] =
         std::array::from_fn(|_| Array1::<f64>::zeros(psi_dim));
     let mut psi_steps = Array1::<f64>::zeros(psi_dim);
+    let mut analytic_mode_response_norm = Array1::<f64>::zeros(psi_dim);
+    let mut finite_difference_mode_response_norm = Array1::<f64>::zeros(psi_dim);
+    let mut mode_response_relative_error = Array1::<f64>::zeros(psi_dim);
+    let mut mode_response_max_abs_error = Array1::<f64>::zeros(psi_dim);
+    let mut record_mode_response =
+        |psi_j: usize,
+         finite_difference_beta_dot: &Array1<f64>|
+         -> Result<(), EstimationError> {
+            if finite_difference_beta_dot.len() != analytic_beta.len() {
+                return Err(EstimationError::InvalidInput(format!(
+                    "outer-gradient FD coefficient-response length mismatch: analytic={} finite_difference={}",
+                    analytic_beta.len(),
+                    finite_difference_beta_dot.len(),
+                )));
+            }
+            let analytic_beta_dot = analytic_ext_mode_response_cols
+                .column(psi_j)
+                .mapv(|value| -value);
+            let analytic_norm = analytic_beta_dot.dot(&analytic_beta_dot).sqrt();
+            let finite_difference_norm = finite_difference_beta_dot
+                .dot(finite_difference_beta_dot)
+                .sqrt();
+            let mut squared_error = 0.0_f64;
+            let mut max_abs_error = 0.0_f64;
+            for (&analytic_value, &fd_value) in
+                analytic_beta_dot.iter().zip(finite_difference_beta_dot.iter())
+            {
+                let error = analytic_value - fd_value;
+                squared_error += error * error;
+                max_abs_error = max_abs_error.max(error.abs());
+            }
+            analytic_mode_response_norm[psi_j] = analytic_norm;
+            finite_difference_mode_response_norm[psi_j] = finite_difference_norm;
+            mode_response_relative_error[psi_j] =
+                squared_error.sqrt() / analytic_norm.max(finite_difference_norm).max(1e-12);
+            mode_response_max_abs_error[psi_j] = max_abs_error;
+            Ok(())
+        };
     for psi_j in 0..psi_dim {
         let j = rho_dim + psi_j;
         let nominal_step = f64::EPSILON.powf(0.25) * (1.0 + seed[j].abs());
@@ -220,9 +288,9 @@ fn capture_outer_gradient_fd_at_seed(
             let mut minus = seed.clone();
             plus[j] += nominal_step;
             minus[j] -= nominal_step;
-            let (cost_plus, components_plus) =
+            let (cost_plus, components_plus, beta_plus) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &plus)?;
-            let (cost_minus, components_minus) =
+            let (cost_minus, components_minus, beta_minus) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &minus)?;
             finite_difference_psi_gradient[psi_j] =
                 (cost_plus - cost_minus) / (2.0 * nominal_step);
@@ -230,6 +298,15 @@ fn capture_outer_gradient_fd_at_seed(
                 finite_difference_component_psi_gradients[atom][psi_j] =
                     (components_plus[atom] - components_minus[atom]) / (2.0 * nominal_step);
             }
+            let beta_dot = Array1::from_iter(
+                beta_plus
+                    .iter()
+                    .zip(beta_minus.iter())
+                    .map(|(&plus_value, &minus_value)| {
+                        (plus_value - minus_value) / (2.0 * nominal_step)
+                    }),
+            );
+            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = nominal_step;
         } else if right_room >= left_room && right_room > 0.0 {
             let step = nominal_step.min(0.5 * right_room);
@@ -237,9 +314,9 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] += step;
             two[j] += 2.0 * step;
-            let (cost_one, components_one) =
+            let (cost_one, components_one, beta_one) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (cost_two, components_two) =
+            let (cost_two, components_two, beta_two) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
             finite_difference_psi_gradient[psi_j] =
                 (-3.0 * analytic.cost + 4.0 * cost_one - cost_two) / (2.0 * step);
@@ -249,6 +326,16 @@ fn capture_outer_gradient_fd_at_seed(
                         - components_two[atom])
                         / (2.0 * step);
             }
+            let beta_dot = Array1::from_iter(
+                analytic_beta
+                    .iter()
+                    .zip(beta_one.iter())
+                    .zip(beta_two.iter())
+                    .map(|((&base_value, &one_value), &two_value)| {
+                        (-3.0 * base_value + 4.0 * one_value - two_value) / (2.0 * step)
+                    }),
+            );
+            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else if left_room > 0.0 {
             let step = nominal_step.min(0.5 * left_room);
@@ -256,9 +343,9 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] -= step;
             two[j] -= 2.0 * step;
-            let (cost_one, components_one) =
+            let (cost_one, components_one, beta_one) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (cost_two, components_two) =
+            let (cost_two, components_two, beta_two) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
             finite_difference_psi_gradient[psi_j] =
                 (3.0 * analytic.cost - 4.0 * cost_one + cost_two) / (2.0 * step);
@@ -268,6 +355,16 @@ fn capture_outer_gradient_fd_at_seed(
                         + components_two[atom])
                         / (2.0 * step);
             }
+            let beta_dot = Array1::from_iter(
+                analytic_beta
+                    .iter()
+                    .zip(beta_one.iter())
+                    .zip(beta_two.iter())
+                    .map(|((&base_value, &one_value), &two_value)| {
+                        (3.0 * base_value - 4.0 * one_value + two_value) / (2.0 * step)
+                    }),
+            );
+            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else {
             return Err(EstimationError::InvalidInput(format!(
@@ -289,6 +386,10 @@ fn capture_outer_gradient_fd_at_seed(
             logdet_h_psi_gradient,
             frozen_logdet_h_psi_gradient,
             mode_response_logdet_h_psi_gradient,
+            analytic_mode_response_norm,
+            finite_difference_mode_response_norm,
+            mode_response_relative_error,
+            mode_response_max_abs_error,
             logdet_s_psi_gradient,
             kkt_psi_gradient,
             finite_difference_fixed_beta_psi_gradient:

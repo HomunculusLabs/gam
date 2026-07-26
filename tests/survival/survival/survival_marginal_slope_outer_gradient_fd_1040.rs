@@ -214,6 +214,14 @@ fn run_basis(basis_term: &str) {
                 + audit.finite_difference_logdet_s_psi_gradient[j]
                 + audit.finite_difference_kkt_psi_gradient[j],
         );
+        eprintln!(
+            "[FD-DIAG] psi_i={j} coefficient response: analytic_norm={:.6e} \
+             fd_norm={:.6e} relative_error={:.3e} max_abs_error={:.3e}",
+            audit.analytic_mode_response_norm[j],
+            audit.finite_difference_mode_response_norm[j],
+            audit.mode_response_relative_error[j],
+            audit.mode_response_max_abs_error[j],
+        );
     }
 
     for j in 0..audit.psi_dim {

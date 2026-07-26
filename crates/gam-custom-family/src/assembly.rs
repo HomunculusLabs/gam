@@ -464,7 +464,16 @@ pub(crate) fn unified_joint_cost_gradient(
     // (`cost −= Φ`) so the outer criterion matches the Φ-augmented inner
     // objective (gam#979). `None` when the term is unavailable/gated to zero.
     firth_value: Option<f64>,
-) -> Result<(f64, Array1<f64>, gam_problem::HessianValue, [f64; 4]), String> {
+) -> Result<
+    (
+        f64,
+        Array1<f64>,
+        gam_problem::HessianValue,
+        [f64; 4],
+        Option<Array2<f64>>,
+    ),
+    String,
+> {
     let hessian_op: Arc<dyn HessianFactorization> = match first_order_trace_skip.as_ref() {
         Some(trace_values) if !trace_values.is_empty() => Arc::new(
             FirstOrderTraceSkipOperator::new(hessian_op, trace_values.len()),
@@ -533,8 +542,15 @@ pub(crate) fn unified_joint_cost_gradient(
         .unwrap_or_else(|| Array1::zeros(rho.len() + n_joint + ext_dim));
 
     let hessian = result.hessian;
+    let ext_mode_response_cols = result.ext_mode_response_cols;
 
-    Ok((cost, gradient, hessian, criterion_components))
+    Ok((
+        cost,
+        gradient,
+        hessian,
+        criterion_components,
+        ext_mode_response_cols,
+    ))
 }
 
 pub(crate) fn unified_joint_efs_eval(
@@ -1429,7 +1445,13 @@ pub(crate) fn joint_outer_evaluate(
     } else {
         None
     };
-    let (objective, grad, outer_hessian, criterion_components) = unified_joint_cost_gradient(
+    let (
+        objective,
+        grad,
+        outer_hessian,
+        criterion_components,
+        ext_mode_response_cols,
+    ) = unified_joint_cost_gradient(
         inner,
         specs,
         per_block,
@@ -1546,6 +1568,7 @@ pub(crate) fn joint_outer_evaluate(
         warm_start: warm,
         inner_converged: inner.converged,
         hyper_values: Array1::zeros(0),
+        ext_mode_response_cols,
         inner: inner.clone(),
     })
 }

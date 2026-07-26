@@ -1162,6 +1162,7 @@ pub struct CustomFamilyOwnedMode {
     pub(crate) objective: f64,
     pub(crate) rho: Array1<f64>,
     pub(crate) hyper_values: Array1<f64>,
+    pub(crate) ext_mode_response_cols: Option<Array2<f64>>,
     pub(crate) inner: BlockwiseInnerResult,
 }
 
@@ -1214,11 +1215,22 @@ pub(crate) fn outer_eval_result_into_joint_hyper_owned_result(
         warm_start,
         inner_converged,
         hyper_values,
+        ext_mode_response_cols,
         inner,
     } = result;
     gam_solve::estimate::outer_eval_capture::record_outer_criterion_components(
         objective,
         criterion_components,
+    );
+    let selected_beta = Array1::from_iter(
+        inner
+            .block_states
+            .iter()
+            .flat_map(|state| state.beta.iter().copied()),
+    );
+    gam_solve::estimate::outer_eval_capture::record_outer_selected_mode(
+        selected_beta,
+        ext_mode_response_cols,
     );
     let rho = warm_start.rho.clone();
     CustomFamilyJointHyperOwnedResult {
