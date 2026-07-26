@@ -502,6 +502,44 @@ impl<'a> S2KernelBuildInputs<'a> {
 const KERNEL_TEMPLATE: &str = r#"
 // LMAX is supplied by the host via a `#define LMAX ...` prepended to
 // this source before NVRTC compilation (see `SphereGpuBackend::module_for`).
+// Recover cos(gamma) from the two half-angle chord lengths instead of
+// x dot c. The dot product rounds 1 - O(gamma^2) to 1 near coincidence,
+// permanently destroying the separation before the spectral evaluator sees it.
+// Here u = |x-c|^2 / (|x-c|^2 + |x+c|^2) and
+// v = |x+c|^2 / (|x-c|^2 + |x+c|^2), so both singular ends are carried
+// without cancellation and exact coincidence gives u=0, v=1 by construction.
+__device__ __forceinline__
+double s2_chord_cos_gamma(
+    double xi,
+    double yi,
+    double zi,
+    double cxj,
+    double cyj,
+    double czj
+) {
+    const double dx = xi - cxj;
+    const double dy = yi - cyj;
+    const double dz = zi - czj;
+    const double sx = xi + cxj;
+    const double sy = yi + cyj;
+    const double sz = zi + czj;
+    const double chord_sq = fma(dx, dx, fma(dy, dy, dz * dz));
+    const double anti_chord_sq = fma(sx, sx, fma(sy, sy, sz * sz));
+    const double scale = chord_sq + anti_chord_sq;
+
+    double u = chord_sq / scale;
+    double v = anti_chord_sq / scale;
+    if (u > 1.0) u = 1.0;
+    if (u < 0.0) u = 0.0;
+    if (v > 1.0) v = 1.0;
+    if (v < 0.0) v = 0.0;
+
+    double cos_gamma = v - u;
+    if (cos_gamma >  1.0) cos_gamma =  1.0;
+    if (cos_gamma < -1.0) cos_gamma = -1.0;
+    return cos_gamma;
+}
+
 extern "C" __global__
 __launch_bounds__(256)
 void s2_wahba_legendre_colmajor(
@@ -525,10 +563,8 @@ void s2_wahba_legendre_colmajor(
     const double cyj = centers_xyz[3 * j + 1];
     const double czj = centers_xyz[3 * j + 2];
 
-    // t = clamp(x_i · z_j, -1, +1).
-    double t = fma(xi, cxj, fma(yi, cyj, zi * czj));
-    if (t >  1.0) t =  1.0;
-    if (t < -1.0) t = -1.0;
+    // Stable half-angle chord geometry; no near-coincident dot-product loss.
+    const double t = s2_chord_cos_gamma(xi, yi, zi, cxj, cyj, czj);
 
     // Legendre 3-term recurrence in registers.
     // P_0(t) = 1, P_1(t) = t.
@@ -587,9 +623,7 @@ void s2_wahba_householder_constrained_colmajor(
         const double cxj = centers_xyz[3 * j + 0];
         const double cyj = centers_xyz[3 * j + 1];
         const double czj = centers_xyz[3 * j + 2];
-        double t = fma(xi, cxj, fma(yi, cyj, zi * czj));
-        if (t >  1.0) t =  1.0;
-        if (t < -1.0) t = -1.0;
+        const double t = s2_chord_cos_gamma(xi, yi, zi, cxj, cyj, czj);
 
         double p_prev = 1.0;
         double p_curr = t;
@@ -614,9 +648,7 @@ void s2_wahba_householder_constrained_colmajor(
         const double cxj = centers_xyz[3 * j + 0];
         const double cyj = centers_xyz[3 * j + 1];
         const double czj = centers_xyz[3 * j + 2];
-        double t = fma(xi, cxj, fma(yi, cyj, zi * czj));
-        if (t >  1.0) t =  1.0;
-        if (t < -1.0) t = -1.0;
+        const double t = s2_chord_cos_gamma(xi, yi, zi, cxj, cyj, czj);
 
         double p_prev = 1.0;
         double p_curr = t;
@@ -1584,6 +1616,7 @@ pub fn solve_penalised_ls_device(
 #[cfg(test)]
 mod sphere_gpu_tests {
     use super::*;
+    use crate::basis::sphere_half_angle::{SphereTrig, half_angle_separation_scalar};
     use crate::basis::{
         SphereWahbaKernel, sobolev_s2_truncated_coefficients, sphere_truncated_spectral_eval,
         spherical_wahba_kernel_matrix_with_kind,
@@ -1650,27 +1683,34 @@ mod sphere_gpu_tests {
     /// against that definition evaluated point-by-point through the Legendre
     /// recurrence — the same definition the device kernel implements, so it
     /// pins the ORACLE the GPU is compared against, on every host.
-    fn assert_cpu_kernel_matches_spectral_definition(
+    fn assert_cpu_kernel_matches_stable_spectral_definition(
         kernel_matrix: &Array2<f64>,
-        data_xyz: &[f64],
-        centers_xyz: &[f64],
+        data_latlon: &Array2<f64>,
+        centers_latlon: &Array2<f64>,
         coeffs: &[f64],
     ) {
         let (n, m) = kernel_matrix.dim();
+        let to_radians = std::f64::consts::PI / 180.0;
         let mut max_abs = 0.0_f64;
         for i in 0..n {
+            let point = SphereTrig::from_radians(
+                data_latlon[(i, 0)] * to_radians,
+                data_latlon[(i, 1)] * to_radians,
+            );
             for j in 0..m {
-                let dot = data_xyz[3 * i] * centers_xyz[3 * j]
-                    + data_xyz[3 * i + 1] * centers_xyz[3 * j + 1]
-                    + data_xyz[3 * i + 2] * centers_xyz[3 * j + 2];
-                let expected = sphere_truncated_spectral_eval(dot.clamp(-1.0, 1.0), coeffs);
+                let center = SphereTrig::from_radians(
+                    centers_latlon[(j, 0)] * to_radians,
+                    centers_latlon[(j, 1)] * to_radians,
+                );
+                let separation = half_angle_separation_scalar(point, center);
+                let expected =
+                    sphere_truncated_spectral_eval(separation.cos_gamma(), coeffs);
                 max_abs = max_abs.max((kernel_matrix[(i, j)] - expected).abs());
             }
         }
         assert!(
             max_abs < 1e-12,
-            "CPU truncated-spectral kernel matrix departs from its elementwise definition \
-             Σ_ℓ c_ℓ P_ℓ(x·c): max |Δ| = {max_abs:.3e}"
+            "CPU truncated-spectral kernel matrix departs from the stable half-angle              elementwise definition: max |delta| = {max_abs:.3e}"
         );
     }
 
@@ -1844,11 +1884,21 @@ mod sphere_gpu_tests {
             SphereWahbaKernel::SobolevTruncated { lmax: lmax as u16 },
         )
         .expect("kernel matrix");
-        // Recompute cos γ on the unit sphere.
-        let xyz_d = latlon_to_xyz_host(data.view(), false).unwrap();
-        let xyz_c = latlon_to_xyz_host(centers.view(), false).unwrap();
-        let cos_g = xyz_d[0] * xyz_c[0] + xyz_d[1] * xyz_c[1] + xyz_d[2] * xyz_c[2];
-        let expected = sphere_truncated_spectral_eval(cos_g, &coeffs);
+        // Recompute cos gamma through the stable half-angle geometry, not the
+        // dot-product route whose near-coincident loss this contract must catch.
+        let to_radians = std::f64::consts::PI / 180.0;
+        let point = SphereTrig::from_radians(
+            data[(0, 0)] * to_radians,
+            data[(0, 1)] * to_radians,
+        );
+        let center = SphereTrig::from_radians(
+            centers[(0, 0)] * to_radians,
+            centers[(0, 1)] * to_radians,
+        );
+        let expected = sphere_truncated_spectral_eval(
+            half_angle_separation_scalar(point, center).cos_gamma(),
+            &coeffs,
+        );
         assert!(
             (mat[(0, 0)] - expected).abs() < 1e-13,
             "matrix helper differs from scalar evaluator: {} vs {}",
@@ -1926,8 +1976,14 @@ mod sphere_gpu_tests {
     /// assertion and report a pass on every CI runner).
     #[test]
     fn sphere_gpu_raw_kernel_parity_vs_cpu_truncated() {
-        let data_ll = small_latlon_grid(7, 9);
-        let centers_ll = small_latlon_grid(5, 7);
+        let mut data_ll = small_latlon_grid(7, 9);
+        let mut centers_ll = small_latlon_grid(5, 7);
+        // Exercise the region where x dot c rounds away the separation. The
+        // chord form still carries this distinct pair monotonically.
+        centers_ll[(0, 0)] = 12.5;
+        centers_ll[(0, 1)] = -34.0;
+        data_ll[(0, 0)] = 12.5 + 1.0e-8;
+        data_ll[(0, 1)] = -34.0;
         let data_xyz = latlon_to_xyz_host(data_ll.view(), false).unwrap();
         let centers_xyz = latlon_to_xyz_host(centers_ll.view(), false).unwrap();
         let n = data_ll.nrows();
@@ -1958,7 +2014,12 @@ mod sphere_gpu_tests {
 
         // EVERY HOST: the oracle the device is graded against must itself
         // equal the elementwise truncated-spectral definition.
-        assert_cpu_kernel_matches_spectral_definition(&cpu, &data_xyz, &centers_xyz, &coeffs);
+        assert_cpu_kernel_matches_stable_spectral_definition(
+            &cpu,
+            &data_ll,
+            &centers_ll,
+            &coeffs,
+        );
 
         if !cuda_available_for_test("raw-kernel parity") {
             assert_sphere_decision_declines_without_device(n, m, lmax);
