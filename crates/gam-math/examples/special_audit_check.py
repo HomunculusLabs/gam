@@ -102,6 +102,9 @@ CHANNELS = {
     "pentagamma": lambda x: mp.psi(3, x),
     "normal_pdf": mp.npdf,
     "normal_cdf": mp.ncdf,
+    # Not `1 - ncdf(x)`: the reference must not share the defect under test.
+    # erfc carries the upper tail directly, to full precision, at any x.
+    "normal_sf": lambda x: mp.erfc(x / mp.sqrt(2)) / 2,
     "normal_logcdf": log_ncdf,
     "normal_logsf": lambda x: log_ncdf(-x),
     "probit_logcdf": log_ncdf,
@@ -195,6 +198,7 @@ def main():
     gl_rows = defaultdict(dict)
     binomial_rows = []
     beta_rows = []
+    t_rows = []
     skipped = defaultdict(int)
 
     with open(path) as handle:
@@ -213,6 +217,27 @@ def main():
                 binomial_rows.append((int(parts[1]), int(parts[2]), float(parts[3])))
                 continue
             if channel == "beta_shape":
+                continue
+            if channel == "students_t_sf":
+                if only and channel not in only:
+                    continue
+                nu, t, value = (float(x) for x in parts[1:4])
+                # P(T > t) = I_{nu/(nu+t^2)}(nu/2, 1/2) / 2, reflected below 0.
+                # The incomplete beta is evaluated directly; no complement is
+                # formed anywhere in the reference.
+                half = mp.betainc(
+                    mp.mpf(nu) / 2, mp.mpf(1) / 2, 0, mp.mpf(nu) / (mp.mpf(nu) + mp.mpf(t) ** 2),
+                    regularized=True,
+                ) / 2
+                want = half if t >= 0 else 1 - half
+                if want == 0:
+                    if value != 0.0:
+                        t_rows.append((float("inf"), (nu, t)))
+                    continue
+                if not (MIN_MAGNITUDE < abs(want) < MAX_MAGNITUDE):
+                    skipped[channel] += 1
+                    continue
+                t_rows.append((float(abs((mp.mpf(value) - want) / want)), (nu, t)))
                 continue
             if channel == "beta_quantile":
                 if only and channel not in only:
@@ -263,6 +288,17 @@ def main():
             f"{channel:26s} rel={mp.nstr(relative, 3):>9s} @ {rel_arg!r:<24s}"
             f" abs={mp.nstr(absolute, 3):>9s} @ {abs_arg!r}{note}"
         )
+
+    if t_rows:
+        t_rows.sort(reverse=True)
+        worst, where = t_rows[0]
+        median = sorted(row[0] for row in t_rows)[len(t_rows) // 2]
+        print(
+            f"{'students_t_sf':26s} rel={mp.nstr(worst, 3):>9s} @ "
+            f"(nu,t)={where!r}  median={median:.3e}  n={len(t_rows)}"
+        )
+        for relative, where in t_rows[1:4]:
+            print(f"{'':26s}     {relative:.6e} @ {where!r}")
 
     if beta_rows:
         beta_rows.sort(reverse=True)

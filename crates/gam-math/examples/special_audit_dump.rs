@@ -77,6 +77,10 @@ fn main() {
     for x in normal_args {
         emit("normal_pdf", x, prob::normal_pdf(x));
         emit("normal_cdf", x, prob::normal_cdf(x));
+        // The upper tail as its own quantity. `1 - normal_cdf(x)` is exactly
+        // zero above x ~ 8.3 and 7% high already at x = 8 (#2562); this channel
+        // exists so that cannot silently return.
+        emit("normal_sf", x, prob::normal_sf(x));
         emit("normal_logcdf", x, prob::normal_logcdf(x));
         emit("normal_logsf", x, prob::normal_logsf(x));
         let (log_cdf, mills) = prob::signed_probit_logcdf_and_mills_ratio(x);
@@ -187,6 +191,26 @@ fn main() {
             println!(
                 "beta_quantile\t{a:e}\t{b:e}\t{p:e}\t{:e}",
                 prob::beta_quantile(p, a, b)
+            );
+        }
+    }
+
+    // ---- Student-t survival function -------------------------------------
+    // Two-argument channel (nu, t). The complement `1 - cdf` saturates SOONER
+    // the larger nu is -- already at nu = 500, t = 10, where the true tail is
+    // 6.9e-22 -- because the loss is in the subtraction, not in the cdf (#2562).
+    for nu in [1.0_f64, 2.5, 5.0, 30.0, 120.0, 500.0, 5000.0, 1.0e4] {
+        for t in [
+            0.0_f64, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0, 30.0, 40.0, 80.0,
+        ] {
+            println!(
+                "students_t_sf\t{nu:e}\t{t:e}\t{:e}",
+                prob::students_t_sf(t, nu)
+            );
+            println!(
+                "students_t_sf\t{nu:e}\t{:e}\t{:e}",
+                -t,
+                prob::students_t_sf(-t, nu)
             );
         }
     }
