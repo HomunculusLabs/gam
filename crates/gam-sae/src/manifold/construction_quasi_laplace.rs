@@ -154,10 +154,20 @@ impl SaeManifoldTerm {
             // normalizer `½ log|H|` and the Occam term, so large shapes (exactly
             // where streaming is needed) were ranked by penalized loss rather than
             // penalized quasi-Laplace — and dense vs streaming disagreed on the objective. Route
-            // through the streaming exact-logdet path, which assembles the same
-            // chunk-by-chunk-bit-identical `½ log|H|_stream` and the same
-            // `−Occam`/extra-penalty terms as the dense `penalized_quasi_laplace_criterion_with_cache`
-            // (different memory strategy, same objective).
+            // through the streaming exact-logdet path, which assembles a
+            // chunk-by-chunk `½ log|H|_stream` and the same `−Occam`/extra-penalty
+            // terms as the dense `penalized_quasi_laplace_criterion_with_cache`.
+            //
+            // ⚠ #2509 — THE TWO `log|H|` ARE NOT THE SAME OPERATOR TODAY. #2330
+            // Phase-2 migrated the DENSE lane to the exact observed information
+            // `A = ∇²_θθ L = B + ΔC` and left this one on the Arrow–Schur
+            // majorizer `B`, so the objectives split by exactly
+            // `½·[(log|A| − log|A_tt|) − (log|B| − log|B_tt|)]` whenever `ΔC ≠ 0`
+            // (residual curvature, softmax entropy-minus-majorizer, the periodic
+            // ARD concave clamp, ordered Beta–Bernoulli). The #1225 statement
+            // above is the CONTRACT, and it is currently unmet on this branch;
+            // `criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509` pins
+            // that the split is confined to that pair and nothing else.
             self.penalized_quasi_laplace_criterion_streaming_exact_with_lane(
                 target,
                 rho,
@@ -606,8 +616,14 @@ impl SaeManifoldTerm {
     /// `PerRowFactorFailed` from the undamped `factor_one_row`. Both the dense
     /// (`penalized_quasi_laplace_criterion_with_cache`) and the streaming
     /// (`penalized_quasi_laplace_criterion_streaming_exact`) criterion paths route through this same
-    /// driver, so they converge to the identical inner state and their
-    /// `ridge = 0` log-determinants stay bit-identical (#847).
+    /// driver, so they converge to the identical inner state (#847).
+    ///
+    /// ⚠ #2509 — a shared inner state is NOT a shared log-determinant. #2330
+    /// Phase-2 changed which OPERATOR each lane factors at that shared state:
+    /// dense prices the exact observed information `A = B + ΔC`
+    /// (`exact_observed_information_log_dets`), streaming prices the Arrow–Schur
+    /// majorizer `B` (`streaming_exact_arrow_log_det`). The #847 bit-identity
+    /// claim held for `B` against `B` and does not survive that migration.
     pub(crate) fn converge_inner_for_undamped_logdet(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -2614,8 +2630,9 @@ impl SaeManifoldTerm {
         // succeeds — without this, a state stopped after only `inner_max_iter`
         // steps can leave a rank-deficient / indefinite row block (`p_out = 1` →
         // rank-1 `JᵀJ`, softmax negative-logit curvature) that surfaces
-        // `PerRowFactorFailed` at base ridge 0. Sharing the driver also keeps the
-        // streaming and dense log-determinants bit-identical (#847).
+        // `PerRowFactorFailed` at base ridge 0. Sharing the driver puts both lanes
+        // at the SAME inner state — but not, since #2330 Phase-2, on the same
+        // evidence operator; see the #2509 note below.
         let options = ArrowSolveOptions::direct()
             .with_gpu_policy(self.gpu_policy)
             .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
@@ -2625,7 +2642,17 @@ impl SaeManifoldTerm {
         // never materialised here); it is RETURNED so the EFS lane can take its
         // matrix-free ARD/smoothness traces off it. The log-determinant itself is
         // recomputed chunk-by-chunk in `streaming_exact_arrow_log_det` to bound
-        // peak memory (bit-identical to the dense path, #847).
+        // peak memory.
+        //
+        // ⚠ #2509 — that recomputation prices the Arrow–Schur MAJORIZER `B`,
+        // while the dense lane's `exact_observed_information_log_dets` prices the
+        // exact observed information `A = B + ΔC` (#2330 Phase-2). The two are
+        // equal only where `ΔC ≡ 0`; elsewhere the criteria differ by exactly
+        // `½·[(log|A| − log|A_tt|) − (log|B| − log|B_tt|)]`. Making this route
+        // price `A` needs the four `apply_exact_hessian_minus_b` channels in
+        // ASSEMBLED per-row block form (they are already row-local for every mode
+        // except `OrderedBetaBernoulli`, whose prior couples rows within an atom
+        // column and is therefore not arrow-structured).
         let mut converged_cache = self.converge_inner_for_undamped_logdet(
             target,
             rho,
@@ -2676,7 +2703,14 @@ impl SaeManifoldTerm {
             // each atom's realised decoder rank, priced through the SAME
             // `rank_dof_from_grams` MP hard count as the dense path off the
             // chunk-accumulated Grams. The β/Schur block (the ‖B‖-independent part
-            // of log_det) is untouched — bit-identical dense↔streaming by design.
+            // of log_det) is untouched by the rank charge — but it is where #2509
+            // lives. The shared seam is `0.5*(log_det − log_det_tt) + rank_charge`,
+            // and on THIS lane `log_det = log_det_tt + log|S_B|` by construction,
+            // so the criterion's whole exposure to the A-vs-B operator split is
+            // `log|S_A|` against `log|S_B|`: the per-row t-block log-dets cancel.
+            // (On the dense lane the two log-dets come from two independent
+            // spectral classifications of `A` and `A_tt`, so their difference is
+            // `log|S_A|` only where neither PD floor deflates a direction.)
             let residual = self.reconstruction_residual(target, rho)?;
             let residual_energy =
                 self.residual_energy_for_vanishing(residual.view())?;

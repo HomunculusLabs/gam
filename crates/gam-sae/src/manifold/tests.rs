@@ -6200,3 +6200,127 @@ impl SaeBasisEvaluator for TestPeriodicEvaluator {
         Ok(periodic_basis(&coords.to_owned()))
     }
 }
+
+/// #2509 SEAM GATE — the dense and streaming quasi-Laplace criteria may differ
+/// **only** in the evidence log-determinant pair, and by exactly the amount that
+/// pair differs.
+///
+/// Both lanes build their value the same way:
+///
+/// ```text
+/// v = loss.total() + extra_penalty_energy − occam
+///     + rank_adjusted_quasi_laplace_complexity(log_det, log_det_tt, d_eff, n_eff)
+/// ```
+///
+/// and that shared seam is `0.5·(log_det − log_det_tt) + rank_charge`
+/// (`construction.rs`). The dense lane feeds it the EXACT observed information
+/// `A = ∇²_θθ L = B + ΔC` (#2330 Phase-2, `exact_observed_information_log_dets`);
+/// the streaming lane feeds it the Arrow–Schur majorizer `B`
+/// (`streaming_exact_arrow_log_det`). So the two costs are related by the
+/// **parameter-free** identity
+///
+/// ```text
+/// dense_cost − streaming_cost = ½·[ (log|A| − log|A_tt|) − (log|B| − log|B_tt|) ]
+/// ```
+///
+/// This gate does NOT assert the two lanes agree — #2509 is open precisely
+/// because they do not, and the sibling
+/// `reml_retries_refinement_after_non_pd_undamped_evidence_factor` owns that
+/// assertion. It asserts something the equality assertion cannot: that the WHOLE
+/// disagreement is the log-determinant pair. Every other term — the converged
+/// loss, the Occam term, the extra penalized energy, and the MP rank charge off
+/// two independently accumulated Gram/N_eff paths — must agree.
+///
+/// It is therefore stable across the repair rather than an encoding of the bug:
+/// once the streaming lane prices `A`, both sides of the identity become zero and
+/// the gate still holds. What it catches is a SECOND desync opening at any of the
+/// other terms, which a bare `assert_abs_diff_eq!(stream_cost, full_cost)` reports
+/// identically to this one — the failure mode #2509 spent its first two triage
+/// passes on (the refinement-policy diagnosis, refuted at source).
+#[test]
+pub(crate) fn criterion_lane_gap_is_exactly_the_evidence_logdet_gap_2509() {
+    use crate::manifold::construction::StreamingRankInputs;
+
+    let (term0, target, rho) = small_two_atom_periodic_term();
+    let mut dense = term0.clone();
+    let mut streaming = term0;
+
+    let (dense_cost, dense_loss, cache) = dense
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            1,
+            0.25,
+            1.0e-4,
+            1.0e-4,
+        )
+        .expect("dense criterion must evaluate on the #2509 witness");
+    // The SAME call the dense criterion makes internally, off the SAME returned
+    // cache — so these are the log-dets that priced `dense_cost`, not a re-derivation.
+    let (log_a, log_a_tt) = dense
+        .exact_observed_information_log_dets(&rho, target.view(), &cache)
+        .expect("exact observed-information log-dets");
+
+    let (stream_cost, stream_loss) = streaming
+        .penalized_quasi_laplace_criterion_streaming_exact(
+            target.view(),
+            &rho,
+            None,
+            1,
+            0.25,
+            1.0e-4,
+            1.0e-4,
+        )
+        .expect("streaming criterion must evaluate on the #2509 witness");
+    let mut rank_inputs = StreamingRankInputs::default();
+    let log_b = streaming
+        .streaming_exact_arrow_log_det(target.view(), &rho, None, Some(&mut rank_inputs))
+        .expect("streaming majorizer log-det");
+    let log_b_tt = rank_inputs.log_det_tt;
+
+    let measured_gap = dense_cost - stream_cost;
+    let logdet_gap = 0.5 * ((log_a - log_a_tt) - (log_b - log_b_tt));
+
+    // Precision scale of the identity: it is exact algebra over sums whose
+    // largest summand is the biggest quantity entering either side, so the
+    // admissible residual is f64 round-off at that scale accumulated over the
+    // criterion's terms — not a tuned threshold.
+    let scale = [
+        dense_cost.abs(),
+        stream_cost.abs(),
+        log_a.abs(),
+        log_a_tt.abs(),
+        log_b.abs(),
+        log_b_tt.abs(),
+        dense_loss.total().abs(),
+    ]
+    .into_iter()
+    .fold(1.0_f64, f64::max);
+    let tolerance = 4096.0 * f64::EPSILON * scale;
+
+    // The converged inner state must be shared: both lanes drive the SAME
+    // `converge_inner_for_undamped_logdet` with the refinement extension on, so a
+    // loss split would mean the two inner solves stopped in different places —
+    // the (refuted) refinement-policy diagnosis — and the identity below would be
+    // measuring two things at once.
+    assert!(
+        (dense_loss.total() - stream_loss.total()).abs() <= tolerance,
+        "#2509: the two lanes' converged losses must agree before any log-det \
+         claim is meaningful: dense {} vs streaming {} (tolerance {tolerance:.3e})",
+        dense_loss.total(),
+        stream_loss.total()
+    );
+
+    assert!(
+        (measured_gap - logdet_gap).abs() <= tolerance,
+        "#2509: the dense↔streaming criterion gap must be EXACTLY the evidence \
+         log-determinant gap, so a second desync cannot hide inside it.\n  \
+         dense_cost      = {dense_cost}\n  streaming_cost  = {stream_cost}\n  \
+         measured_gap    = {measured_gap}\n  logdet_gap      = {logdet_gap}\n  \
+         residual        = {:.6e} (tolerance {tolerance:.3e})\n  \
+         log|A| = {log_a}  log|A_tt| = {log_a_tt}\n  \
+         log|B| = {log_b}  log|B_tt| = {log_b_tt}",
+        measured_gap - logdet_gap
+    );
+}
