@@ -259,10 +259,7 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
                 risk_profile: SeedRiskProfile::Gaussian,
                 screen_max_inner_iterations: SeedConfig::default().screen_max_inner_iterations,
                 num_auxiliary_trailing: 0,
-                // DIAGNOSTIC EXPERIMENT ONLY — NOT A PROPOSED FIX. Second of the
-                // two probe sites; the k>=CAP branch is the one these fixtures
-                // take. Revert before any landing.
-                over_smoothing_probe_rho: None,
+                over_smoothing_probe_rho: Some(8.0),
             };
         }
         return SeedConfig {
@@ -315,10 +312,7 @@ pub(crate) fn external_reml_seed_config(k: usize, link: LinkFunction) -> SeedCon
         // parked at the tail) seeds the over-smoothed basin the Gaussian global
         // shifts (±4) and baseline centers (±6) never reach. None for non-Gaussian
         // (their symmetric shifts + promote-extreme already span both basins).
-        // DIAGNOSTIC EXPERIMENT ONLY — NOT A PROPOSED FIX. Disabling the probe to
-        // test whether the two N-3 refusals that checkpoint at EXACTLY rho=8.0
-        // are caused by this seed being adopted. Revert before any landing.
-        over_smoothing_probe_rho: None,
+        over_smoothing_probe_rho: if gaussian { Some(8.0) } else { None },
     }
 }
 
