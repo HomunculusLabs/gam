@@ -756,6 +756,9 @@ impl SaeManifoldTerm {
         window: &mut std::collections::VecDeque<SaeRowJets>,
     ) -> Result<usize, String> {
         if let AssignmentMode::Softmax { temperature, .. } = self.assignment.mode {
+            // #2560 — one cgroup-aware budget reading per window, passed down,
+            // instead of one per planner call.
+            let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
             let q = cache.row_dims[start];
             let same_shape_rows = cache.row_dims[start..]
                 .iter()
@@ -768,6 +771,7 @@ impl SaeManifoldTerm {
                 self.output_dim(),
                 border.len(),
                 self.gpu_policy,
+                host_budget,
             )?;
             let tile_rows = plan.tile_rows;
             if tile_rows == 0 {
@@ -862,6 +866,9 @@ impl SaeManifoldTerm {
         let p = self.output_dim();
         let n_beta = border.len();
         let mut assignments = Array1::<f64>::zeros(self.k_atoms());
+        // #2560 — the cgroup-aware budget is a property of the host, not of the
+        // row chunk, so read it once here rather than once per loop turn.
+        let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
         let mut start = 0usize;
         while start < n {
             let q = cache.row_dims[start];
@@ -876,6 +883,7 @@ impl SaeManifoldTerm {
                 p,
                 n_beta,
                 self.gpu_policy,
+                host_budget,
             )?;
             let tile_rows = plan.tile_rows;
             if tile_rows == 0 {
@@ -982,6 +990,9 @@ impl SaeManifoldTerm {
             ));
         }
         let mut assignments = Array1::<f64>::zeros(self.k_atoms());
+        // #2560 — the cgroup-aware budget is a property of the host, not of the
+        // row chunk, so read it once here rather than once per loop turn.
+        let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
         let mut start = 0usize;
         while start < n {
             let q = cache.row_dims[start];
@@ -996,6 +1007,7 @@ impl SaeManifoldTerm {
                 p,
                 n_beta,
                 self.gpu_policy,
+                host_budget,
             )?;
             let tile_rows = plan.tile_rows;
             if tile_rows == 0 {

@@ -1142,6 +1142,7 @@ pub fn plan_softmax_row_jets(
     p: usize,
     n_beta: usize,
     mode: gam_gpu::GpuPolicy,
+    host_budget: usize,
 ) -> Result<SaeRowJetExecutionPlan, String> {
     if k == 0 || p == 0 {
         return Err(format!(
@@ -1149,7 +1150,7 @@ pub fn plan_softmax_row_jets(
         ));
     }
     let ledger = SaeRowJetMemoryLedger::for_shape(k, q, p, n_beta)?;
-    plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger)
+    plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger, host_budget)
 }
 
 /// Decide the backend and bounded tile width for a REDUCED (contracted) tile.
@@ -1166,6 +1167,7 @@ pub fn plan_softmax_row_jets_contracted(
     p: usize,
     n_beta: usize,
     mode: gam_gpu::GpuPolicy,
+    host_budget: usize,
 ) -> Result<SaeRowJetExecutionPlan, String> {
     if k == 0 || p == 0 {
         return Err(format!(
@@ -1173,7 +1175,7 @@ pub fn plan_softmax_row_jets_contracted(
         ));
     }
     let ledger = SaeRowJetMemoryLedger::for_contracted_shape(k, q, p, n_beta)?;
-    plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger)
+    plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger, host_budget)
 }
 
 /// Shared backend/tile-width dispatch for an already-computed shape ledger.
@@ -1185,6 +1187,7 @@ fn plan_dispatch(
     n_beta: usize,
     mode: gam_gpu::GpuPolicy,
     ledger: SaeRowJetMemoryLedger,
+    host_budget: usize,
 ) -> Result<SaeRowJetExecutionPlan, String> {
     if total_rows == 0 {
         return Ok(SaeRowJetExecutionPlan {
@@ -1193,7 +1196,6 @@ fn plan_dispatch(
             ledger,
         });
     }
-    let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
     let one_row_host_bytes = ledger
         .fixed_host_bytes
         .checked_add(ledger.cpu_host_bytes_per_row)
