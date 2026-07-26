@@ -1007,8 +1007,12 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
         let x_eta = self.dense_eta_design_fromspecs(specs)?.into_owned();
-        let workspace =
-            BinomialMeanWiggleHessianWorkspace::new(self.clone(), block_states.to_vec(), x_eta)?;
+        let workspace = BinomialMeanWiggleHessianWorkspace::new(
+            self.clone(),
+            block_states.to_vec(),
+            specs.to_vec(),
+            x_eta,
+        )?;
         Ok(Some(Arc::new(workspace)))
     }
 
@@ -1678,6 +1682,10 @@ impl CustomFamily for BinomialMeanWiggleFamily {
 pub(crate) struct BinomialMeanWiggleHessianWorkspace {
     pub(crate) family: BinomialMeanWiggleFamily,
     pub(crate) block_states: Vec<ParameterBlockState>,
+    /// The block specs the workspace was built against. Held so the workspace
+    /// can answer `joint_gradient_evaluation` from its own captured state; the
+    /// designs are `Arc`-backed, so this clone is O(1) in the matrix data.
+    pub(crate) specs: Vec<ParameterBlockSpec>,
     pub(crate) x_eta: Arc<Array2<f64>>,
     pub(crate) hessian_operator: Arc<RowCoeffOperator>,
 }
@@ -1686,6 +1694,7 @@ impl BinomialMeanWiggleHessianWorkspace {
     pub(crate) fn new(
         family: BinomialMeanWiggleFamily,
         block_states: Vec<ParameterBlockState>,
+        specs: Vec<ParameterBlockSpec>,
         x_eta: Array2<f64>,
     ) -> Result<Self, String> {
         let x_eta = Arc::new(x_eta);
@@ -1693,6 +1702,7 @@ impl BinomialMeanWiggleHessianWorkspace {
         Ok(Self {
             family,
             block_states,
+            specs,
             x_eta,
             hessian_operator,
         })
@@ -1700,6 +1710,27 @@ impl BinomialMeanWiggleHessianWorkspace {
 }
 
 impl ExactNewtonJointHessianWorkspace for BinomialMeanWiggleHessianWorkspace {
+    /// The terminal constrained-posterior assembly places the ambient centre at
+    /// `beta_unc = beta_hat - Sigma * grad(l_p)`, so it needs the exact
+    /// likelihood score at the certified mode. This family answers
+    /// `exact_newton_joint_gradient_evaluation` analytically, which makes the
+    /// inner solve skip the `FamilyEvaluation` whose working sets would
+    /// otherwise carry that score forward, leaving this workspace as the sole
+    /// retained source at assembly. Without this method it exposes none and a
+    /// converged constrained fit is refused outright (#2474).
+    ///
+    /// Reporting it here does not re-evaluate a live family: the workspace the
+    /// assembly holds is built at the converged states (fresh, by the
+    /// returned-mode curvature certificate) and owns its own family clone, and
+    /// the delegate is the same working-set identity the inner joint-Newton RHS
+    /// uses, so the score reported is the one the mode was certified with.
+    fn joint_gradient_evaluation(
+        &self,
+    ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        self.family
+            .exact_newton_joint_gradient_evaluation(&self.block_states, &self.specs)
+    }
+
     fn warm_up_outer_caches_for_mode(
         &self,
         eval_mode: gam_problem::EvalMode,
