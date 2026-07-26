@@ -170,7 +170,7 @@ fn sae_manifold_d1_ordered_beta_bernoulli_gate_cocollapse() {
     let fitted_out = fitted.term.fitted();
     let r2 = reconstruction_r2(&fitted_out, &z);
     let converged_via = result
-        .converged_via
+        .converged_via()
         .expect("certified result carries its convergence verdict")
         .as_str();
     let criterion_certificate = result

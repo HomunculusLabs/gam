@@ -401,7 +401,7 @@ fn fit_ceiling_region(
         top_m_linear_ev: topm_linear_ev,
         chart_efficiency_eta: ratio,
         final_outer_grad_norm: result.final_grad_norm,
-        outer_converged: result.converged,
+        outer_converged: result.converged(),
         outer_iterations: result.iterations,
         inner_iterations: inner_iters,
         fit_wall_seconds: fit_elapsed.as_secs_f64(),

@@ -219,7 +219,7 @@ mod tests {
             .run(&mut objective, "#2263 native replay fixture")
             .expect("native outer search must run");
         assert!(
-            result.converged,
+            result.converged(),
             "native fixture must be genuinely converged"
         );
         objective

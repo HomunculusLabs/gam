@@ -231,7 +231,7 @@ fn two_basin_outer_fit_engages_exact_envelope() {
         })
         .run(&mut objective, "SAE manifold basin envelope")
         .expect("two-basin outer penalized quasi-Laplace fit must terminate");
-    assert!(result.converged, "the envelope fit must be certified");
+    assert!(result.converged(), "the envelope fit must be certified");
     let certificate = result
         .criterion_certificate
         .as_ref()

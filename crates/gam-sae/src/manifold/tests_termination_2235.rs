@@ -115,9 +115,9 @@ fn planted_circle_fit_returns_with_analytic_certificate() {
     // concluded it (gradient-stationary / criterion-flat / recurrent-
     // incumbent); `certify_outer_optimality` stamps it on every converged
     // result the engine returns.
-    assert!(result.converged, "run() only returns certified results");
+    assert!(result.converged(), "run() only returns certified results");
     assert!(
-        result.converged_via.is_some(),
+        result.converged_via().is_some(),
         "a converged OuterResult must carry its converged-via certificate verdict"
     );
     let certificate = result

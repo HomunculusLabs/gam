@@ -153,26 +153,15 @@ impl PerAtomEfsResult {
     // facade re-exports `run_per_atom_efs` / `PerAtomEfsConfig` /
     // `SharedBorderTopology`, never this convenience method.
     pub(crate) fn into_outer_result(self, plan_used: OuterPlan) -> OuterResult {
-        OuterResult {
-            rho: self.rho,
-            final_value: self.final_value,
-            iterations: self.iterations,
-            final_grad_norm: Some(self.final_step_inf_norm),
-            final_gradient: None,
-            final_hessian: None,
-            converged: self.converged,
+        let mut result = OuterResult::new(
+            self.rho,
+            self.final_value,
+            self.iterations,
+            self.converged,
             plan_used,
-            operator_trust_radius: None,
-            operator_stop_reason: None,
-            criterion_certificate: None,
-            rho_uncertainty_diagnostic: None,
-            converged_via: None,
-            flat_noise_grad_bound: None,
-            tail_snap_reseed: None,
-            saddle_escape_reseed: None,
-            wrong_rail_reseed: None,
-            active_set_reseed: None,
-        }
+        );
+        result.final_grad_norm = Some(self.final_step_inf_norm);
+        result
     }
 }
 

@@ -991,7 +991,7 @@ fn run(shape: Shape) -> Result<(), String> {
             "final_value={:.12e} iterations={} converged={} eval_cost={} eval={} eval_efs={} seed_inner_state={}",
             result.final_value,
             result.iterations,
-            result.converged,
+            result.converged(),
             counted.eval_cost_count,
             counted.eval_count,
             counted.eval_efs_count,

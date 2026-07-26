@@ -379,7 +379,7 @@ fn fit_real_chart(
         full_reconstruction_ev,
         topm_linear_ev,
         curved_vs_envelope_ratio,
-        converged: result.converged,
+        converged: result.converged(),
         outer_iterations: result.iterations,
         final_grad_norm: result.final_grad_norm,
         fit_wall_seconds: fit_started.elapsed().as_secs_f64(),

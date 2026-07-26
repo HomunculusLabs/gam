@@ -331,7 +331,7 @@ fn zz_planted_circle_plain_engine_stall_diagnostic_2234() {
             eprintln!(
                 "[zz2234] PLAIN ENGINE CONVERGED: value={:.6e} converged={} — the Python-entry \
                  stall is ORCHESTRATION-layer (pyffi), not the optimizer",
-                result.final_value, result.converged,
+                result.final_value, result.converged(),
             );
         }
         Err(err) => {

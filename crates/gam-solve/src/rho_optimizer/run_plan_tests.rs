@@ -1492,7 +1492,7 @@ fn no_gradient_efs_requires_and_accepts_explicit_full_coverage_certificate() {
         .expect("fully covered analytic fixed point must certify");
     assert_eq!(result.plan_used.solver, Solver::Efs);
     assert!(matches!(
-        result.converged_via,
+        result.converged_via(),
         Some(OuterConvergedVia::FixedPointStationary { .. })
     ));
     assert!(
@@ -3818,7 +3818,7 @@ fn criterion_flat_provenance_preserves_score_relative_certificate_1689() {
     assert!(certificate.certifies());
     assert!(certificate.stationarity.bound() >= flat_valley_converged_grad_bound(score));
     assert!(matches!(
-        result.converged_via,
+        result.converged_via(),
         Some(OuterConvergedVia::CriterionFlat { .. })
     ));
 }
@@ -5494,7 +5494,7 @@ fn parsimony_multistart_breaks_after_sharp_well_penalized_first_seed() {
     // Well-penalized minimum (ρ = 2.7 ≥ 0): slot 0 is sharp and every λ ≥ 1, so
     // the heavy seed is redundant — exactly ONE seed solves.
     let (well_penalized_seeds, well_result) = seeds_run(2.7);
-    assert!(well_result.converged, "well-penalized fit converges");
+    assert!(well_result.converged(), "well-penalized fit converges");
     assert!(
         (well_result.rho[0] - 2.7).abs() < 1e-4,
         "publishes the slot-0 optimum, got {}",
@@ -5508,7 +5508,7 @@ fn parsimony_multistart_breaks_after_sharp_well_penalized_first_seed() {
     // Under-penalized minimum (ρ = -2.7 < 0): the #1373 overshoot regime — the
     // heavy parsimony seed must still run.
     let (under_penalized_seeds, under_result) = seeds_run(-2.7);
-    assert!(under_result.converged, "under-penalized fit converges");
+    assert!(under_result.converged(), "under-penalized fit converges");
     assert!(
         (under_result.rho[0] + 2.7).abs() < 1e-4,
         "publishes the slot-0 optimum, got {}",
@@ -7343,7 +7343,7 @@ fn exact_final_cache_hit_resumes_and_recertifies_without_resolving() {
     // (2.5-2.5)^2 = 0, NOT the fictional stored 0.25. Outcome-invariance: the
     // cache donates the seed, the current criterion decides the value.
     assert_eq!(result.final_value, 0.0);
-    assert!(result.converged);
+    assert!(result.converged());
     // Accelerator half AND proof the run RESUMED from the cached rho: the recertify
     // must certify in ~0-1 outer iterations. The Hessian-free gradient solve here
     // could not reach the 2.5 optimum from the -3.0 initial in a single step, so a
@@ -7555,7 +7555,7 @@ fn run_bimodal_terminal(owns_terminal: bool) -> (f64, f64) {
     let result = problem
         .run(&mut obj, "bimodal-terminal")
         .expect("stationary seed must certify");
-    assert!(result.converged, "stationary seed must converge");
+    assert!(result.converged(), "stationary seed must converge");
     let installed = finalize_installed
         .lock()
         .unwrap()
@@ -7811,7 +7811,7 @@ fn outer_search_escapes_railed_saddle_and_certifies_minimum_2155() {
         .run(&mut obj, "railed-saddle-escape pipeline #2155")
         .expect("the outer search must escape the railed saddle and certify a minimum");
     assert!(
-        result.converged,
+        result.converged(),
         "must converge at a reduced-PSD minimum, not refuse at the railed saddle: rho={:?}",
         result.rho
     );
@@ -7851,7 +7851,7 @@ fn outer_search_escapes_interior_saddle_and_certifies_minimum() {
         .run(&mut obj, "saddle-escape pipeline #2357")
         .expect("the outer search must escape the saddle and certify a minimum");
     assert!(
-        result.converged,
+        result.converged(),
         "must converge at a minimum, not refuse at the saddle"
     );
     assert!(

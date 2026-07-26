@@ -80,10 +80,7 @@ impl CertifiedOuterCandidate {
                 candidate.criterion_certificate = Some(certificate);
                 Ok(Self(candidate))
             }
-            Err(error) => {
-                candidate.converged = false;
-                Err((candidate, error))
-            }
+            Err(error) => Err((candidate, error)),
         }
     }
 
@@ -2071,9 +2068,9 @@ pub(crate) fn run_outer_with_plan(
                     the_plan.solver,
                     seed_elapsed,
                     candidate.final_value,
-                    candidate.converged,
+                    candidate.solver_claimed_convergence(),
                 );
-                if !candidate.converged {
+                if !candidate.solver_claimed_convergence() {
                     retain_best_outer_checkpoint(&mut best_checkpoint, candidate);
                     // An exhausted iterate is resumable work, not a fit
                     // candidate. Continue the declared multistart budget in

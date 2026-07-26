@@ -481,7 +481,7 @@ fn run_wide_outer_fit(
         .run(&mut objective, "SAE manifold")
         .expect("#2080 wide-p outer penalized quasi-Laplace fit must terminate, not hang / abort");
     assert!(
-        result.converged,
+        result.converged(),
         "#2080 wide-p acceptance requires a CONVERGED outer penalized quasi-Laplace optimum, not a \
          finite max-iteration/line-search incumbent: iterations={}, final_value={:.6e}, \
          final_grad_norm={:?}",
@@ -525,7 +525,7 @@ fn run_k1_generated_seed_outer_fit(
         .run(&mut objective, "SAE manifold K=1 generated seed")
         .expect("#2153 K=1 generated-seed circle fit must terminate");
     assert!(
-        result.converged,
+        result.converged(),
         "#2153 K=1 acceptance requires a converged outer optimum: iterations={}, \
          final_value={:.6e}, final_grad_norm={:?}",
         result.iterations, result.final_value, result.final_grad_norm,
@@ -705,7 +705,7 @@ fn run_ceiling_vs_pathology_instrument(cfg: CeilingPathologyConfig) -> CeilingPa
                 predicted_decrease,
                 actual_decrease,
                 materialization_ratio,
-                outer_converged: result.converged,
+                outer_converged: result.converged(),
                 outer_iterations: result.iterations,
                 final_value: result.final_value,
                 final_grad_norm,
@@ -997,7 +997,7 @@ fn entangled_two_circle_outer_reml_separates_2080() {
         .run(&mut objective, "SAE manifold entangled two-circle")
         .expect("#2080 entangled two-circle outer penalized quasi-Laplace fit must terminate, not abort");
     assert!(
-        result.converged,
+        result.converged(),
         "#2080 entangled acceptance requires a converged outer penalized quasi-Laplace optimum: \
          iterations={}, final_value={:.6e}, final_grad_norm={:?}",
         result.iterations, result.final_value, result.final_grad_norm,

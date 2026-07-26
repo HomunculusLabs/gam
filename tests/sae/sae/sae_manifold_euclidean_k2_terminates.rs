@@ -205,9 +205,9 @@ fn sae_manifold_euclidean_k2_fit_terminates() {
         "[#1094] euclidean K=2 fit: final_value={:.6e} recheck_criterion={:.6e} recon_R2={:.6} elapsed={elapsed:.1}s",
         result.final_value, recheck_cost, r2
     );
-    assert!(result.converged, "run() must return only a certified fit");
+    assert!(result.converged(), "run() must return only a certified fit");
     assert!(
-        result.converged_via.is_some(),
+        result.converged_via().is_some(),
         "a returned fit must name its convergence certificate"
     );
     // The fit reconstructs the two planted lines — a FEASIBLE fit by its own

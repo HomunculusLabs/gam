@@ -912,7 +912,7 @@ impl OuterProblem {
             .and_then(|result| checkpointing.inner_beta_for(&result.rho));
         if let Ok(result) = result.as_ref()
             && result.final_value.is_finite()
-            && result.converged
+            && result.converged()
             && result
                 .criterion_certificate
                 .as_ref()
@@ -1055,6 +1055,87 @@ impl OuterConvergedVia {
     }
 }
 
+/// Typed lifecycle of an outer optimization result.
+///
+/// A solver claim and an analytic certificate are different stages, but they
+/// belong to one state machine. Encoding them in one enum makes it impossible
+/// to retain a certified success verdict after a later certificate refusal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OuterTermination {
+    /// The solver exhausted or refused without claiming convergence.
+    Exhausted,
+    /// The solver claimed convergence, but no terminal analytic certificate
+    /// currently authorizes the point. `proposed_via` is reserved for the
+    /// recurrent-incumbent fixed-point signal that certification must corroborate.
+    SolverClaimed {
+        proposed_via: Option<OuterConvergedVia>,
+    },
+    /// A terminal analytic certificate authorizes the point and records why.
+    Certified(OuterConvergedVia),
+}
+
+impl OuterTermination {
+    fn from_solver_claim(claimed: bool) -> Self {
+        if claimed {
+            Self::SolverClaimed { proposed_via: None }
+        } else {
+            Self::Exhausted
+        }
+    }
+
+    fn solver_claimed_convergence(self) -> bool {
+        !matches!(self, Self::Exhausted)
+    }
+
+    fn is_certified(self) -> bool {
+        matches!(self, Self::Certified(_))
+    }
+
+    fn certified_via(self) -> Option<OuterConvergedVia> {
+        match self {
+            Self::Certified(via) => Some(via),
+            Self::Exhausted | Self::SolverClaimed { .. } => None,
+        }
+    }
+
+    fn proposed_via(self) -> Option<OuterConvergedVia> {
+        match self {
+            Self::SolverClaimed { proposed_via } => proposed_via,
+            Self::Exhausted | Self::Certified(_) => None,
+        }
+    }
+
+    /// Revoke any earlier screening certificate before measuring a new
+    /// screening/mint verdict. Only the model-state recurrent-incumbent signal
+    /// survives as a proposal; ordinary gradient/rail verdicts must be re-earned.
+    fn begin_certification(&mut self) {
+        let proposed_via = match *self {
+            Self::SolverClaimed {
+                proposed_via: Some(via @ OuterConvergedVia::RecurrentIncumbent { .. }),
+            }
+            | Self::Certified(via @ OuterConvergedVia::RecurrentIncumbent { .. }) => Some(via),
+            Self::Exhausted
+            | Self::SolverClaimed { .. }
+            | Self::Certified(_) => None,
+        };
+        if !matches!(*self, Self::Exhausted) {
+            *self = Self::SolverClaimed { proposed_via };
+        }
+    }
+
+    fn certify(&mut self, via: OuterConvergedVia) {
+        *self = Self::Certified(via);
+    }
+
+    /// A refused analytic pass may retain the factual solver claim for resume
+    /// policy, but never a proposed or certified success verdict.
+    fn refuse_certificate(&mut self) {
+        if !matches!(*self, Self::Exhausted) {
+            *self = Self::SolverClaimed { proposed_via: None };
+        }
+    }
+}
+
 /// Result of a completed outer optimization.
 #[derive(Clone, Debug)]
 pub struct OuterResult {
@@ -1070,8 +1151,9 @@ pub struct OuterResult {
     pub final_gradient: Option<Array1<f64>>,
     /// Final Hessian when the solver tracks one.
     pub final_hessian: Option<Array2<f64>>,
-    /// Whether the optimizer converged to a stationary point.
-    pub converged: bool,
+    /// Single authoritative termination lifecycle. Private so downstream
+    /// callers cannot manufacture convergence without the optimizer transition.
+    termination: OuterTermination,
     /// Which plan was actually used (may differ from initial if fallback fired).
     pub plan_used: OuterPlan,
     /// Final trust radius for the internal operator trust-region solver.
@@ -1091,11 +1173,6 @@ pub struct OuterResult {
     /// when an audit probe failed to evaluate. Populated once by
     /// [`run_outer`] after the solver ladder returns, outside all hot loops.
     pub criterion_certificate: Option<OuterCriterionCertificate>,
-    /// Which certificate concluded a converged run (#2235/#2241). Stamped by
-    /// [`certify_outer_optimality`] on every certified result (the
-    /// Fellner–Schall lane pre-stamps `RecurrentIncumbent`, which certification
-    /// preserves); `None` exactly on non-converged resume checkpoints.
-    pub converged_via: Option<OuterConvergedVia>,
     /// Probe-noise-floor gradient bound measured by the cost-stall guard at a
     /// halted stall (#2241): σ̂/Δ, the criterion's evaluation-noise floor over
     /// the stall window divided by the radius the accepted steps actually
@@ -1176,7 +1253,7 @@ impl OuterResult {
         rho: Array1<f64>,
         final_value: f64,
         iterations: usize,
-        converged: bool,
+        solver_claimed_convergence: bool,
         plan_used: OuterPlan,
     ) -> Self {
         Self {
@@ -1186,12 +1263,11 @@ impl OuterResult {
             final_grad_norm: None,
             final_gradient: None,
             final_hessian: None,
-            converged,
+            termination: OuterTermination::from_solver_claim(solver_claimed_convergence),
             plan_used,
             operator_trust_radius: None,
             operator_stop_reason: None,
             criterion_certificate: None,
-            converged_via: None,
             flat_noise_grad_bound: None,
             rho_uncertainty_diagnostic: None,
             tail_snap_reseed: None,
@@ -1199,6 +1275,23 @@ impl OuterResult {
             wrong_rail_reseed: None,
             active_set_reseed: None,
         }
+    }
+
+    /// Whether this result owns a terminal analytic convergence certificate.
+    pub fn converged(&self) -> bool {
+        self.termination.is_certified()
+    }
+
+    /// Which analytic certificate concluded this run.
+    pub fn converged_via(&self) -> Option<OuterConvergedVia> {
+        self.termination.certified_via()
+    }
+
+    /// Whether the underlying solver claimed convergence before analytic
+    /// certification. Certified results necessarily originated from a claim or
+    /// an explicit stationary-point audit.
+    pub(crate) fn solver_claimed_convergence(&self) -> bool {
+        self.termination.solver_claimed_convergence()
     }
 
     /// Human-readable rendering of `final_grad_norm` for diagnostics. Returns
@@ -1229,7 +1322,7 @@ impl CertifiedOuterResult {
     /// payload, so a public conversion would let downstream code fabricate a
     /// certificate-shaped result without ever running an objective.
     fn from_optimizer_result(result: OuterResult) -> Result<Self, String> {
-        if !result.converged {
+        if !result.converged() {
             return Err(format!(
                 "outer optimization did not converge after {} iterations",
                 result.iterations
@@ -1262,12 +1355,6 @@ impl CertifiedOuterResult {
                 "outer optimization certificate does not certify: {}",
                 certificate.summary()
             ));
-        }
-        if result.converged_via.is_none() {
-            return Err(
-                "outer optimization did not retain optimizer-owned termination provenance"
-                    .to_string(),
-            );
         }
         Ok(Self { result })
     }
@@ -1330,7 +1417,7 @@ mod certified_outer_result_tests {
         );
         fabricated.final_grad_norm = Some(0.0);
         fabricated.final_gradient = Some(Array1::from_vec(vec![0.0]));
-        fabricated.converged_via = Some(OuterConvergedVia::GradientStationary);
+        fabricated.termination = OuterTermination::Certified(OuterConvergedVia::GradientStationary);
 
         let reason = CertifiedOuterResult::from_optimizer_result(fabricated)
             .expect_err("caller-written status and gradient must not mint a certificate");
@@ -2090,13 +2177,13 @@ fn outer_nonconvergence_error(
     // the result and cost nothing to print.
     let reason = format!(
         "{reason}; solver provenance: claimed_converged={}{}{}",
-        result.converged,
+        result.solver_claimed_convergence(),
         result
             .operator_stop_reason
             .map(|stop| format!(", stop_reason={stop:?}"))
             .unwrap_or_default(),
         result
-            .converged_via
+            .converged_via()
             .map(|via| format!(", converged_via={via:?}"))
             .unwrap_or_default(),
     );
@@ -2142,7 +2229,6 @@ fn audit_outer_value_agreement(
     // the resumable checkpoint rather than the derivative lane's inconsistent
     // scalar; no certificate may be attached to this mixed evidence.
     result.final_value = value_only;
-    result.converged = false;
     Err(outer_nonconvergence_error(
         context,
         &format!(
@@ -2315,7 +2401,6 @@ fn certify_fixed_point_optimality(
     result.final_grad_norm = None;
     result.final_gradient = None;
     result.final_hessian = None;
-    result.converged = false;
 
     let certificate = OuterCriterionCertificate {
         stationarity: OuterStationarityCertificate::FixedPoint {
@@ -2339,14 +2424,14 @@ fn certify_fixed_point_optimality(
         ));
     }
 
-    result.converged = true;
-    result.converged_via = match result.converged_via {
-        Some(via @ OuterConvergedVia::RecurrentIncumbent { .. }) => Some(via),
-        _ => Some(OuterConvergedVia::FixedPointStationary {
+    let via = match result.termination.proposed_via() {
+        Some(via @ OuterConvergedVia::RecurrentIncumbent { .. }) => via,
+        _ => OuterConvergedVia::FixedPointStationary {
             projected_residual_inf_norm: projected_inf,
             certificate_bound: config.tolerance,
-        }),
+        },
     };
+    result.termination.certify(via);
     log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
     Ok(certificate)
 }
@@ -2396,6 +2481,7 @@ pub(crate) fn certify_outer_optimality_with_fidelity(
     result: &mut OuterResult,
     fidelity: CertificationFidelity,
 ) -> Result<OuterCriterionCertificate, EstimationError> {
+    result.termination.begin_certification();
     let terminal_cap_guard = config
         .outer_inner_cap
         .as_ref()
@@ -2417,6 +2503,9 @@ pub(crate) fn certify_outer_optimality_with_fidelity(
     let outcome =
         certify_outer_optimality_at_terminal_fidelity(obj, config, context, result, true, fidelity);
     drop(terminal_cap_guard);
+    if outcome.is_err() {
+        result.termination.refuse_certificate();
+    }
     outcome
 }
 
@@ -2479,8 +2568,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
         result.final_grad_norm = Some(0.0);
         result.final_gradient = Some(Array1::zeros(0));
         result.final_hessian = None;
-        result.converged = true;
-        result.converged_via = Some(OuterConvergedVia::GradientStationary);
+        result
+            .termination
+            .certify(OuterConvergedVia::GradientStationary);
         result.criterion_certificate = Some(certificate.clone());
         return Ok(certificate);
     }
@@ -2679,7 +2769,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
     result.final_value = evaluation.cost;
     result.final_grad_norm = Some(projected_grad_norm);
     result.final_gradient = Some(evaluation.gradient);
-    result.converged = false;
 
     let analytic_hessian = if wants_analytic_hessian {
         match evaluation.hessian.materialize_dense() {
@@ -2995,7 +3084,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 result.final_hessian = analytic_hessian;
                 result.criterion_certificate = Some(certificate.clone());
                 if !certificate.certifies() {
-                    result.converged = false;
                     return Err(outer_nonconvergence_error(
                         context,
                         &certificate.summary(),
@@ -3004,10 +3092,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         StationarityBound::from_ladder(stationarity_bound, bound_source),
                     ));
                 }
-                result.converged = true;
-                result.converged_via = Some(OuterConvergedVia::AsymptoteStationary {
-                    rails: certificate.stationarity.rails().len(),
-                });
+                result
+                    .termination
+                    .certify(OuterConvergedVia::AsymptoteStationary {
+                        rails: certificate.stationarity.rails().len(),
+                    });
                 log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
                 return Ok(certificate);
             }
@@ -3230,7 +3319,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 result.final_hessian = analytic_hessian;
                 result.criterion_certificate = Some(certificate.clone());
                 if !certificate.certifies() {
-                    result.converged = false;
                     return Err(outer_nonconvergence_error(
                         context,
                         &certificate.summary(),
@@ -3239,10 +3327,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         StationarityBound::unrecorded(effective_interior_bound),
                     ));
                 }
-                result.converged = true;
-                result.converged_via = Some(OuterConvergedVia::AsymptoteStationary {
-                    rails: certificate.stationarity.rails().len(),
-                });
+                result
+                    .termination
+                    .certify(OuterConvergedVia::AsymptoteStationary {
+                        rails: certificate.stationarity.rails().len(),
+                    });
                 log::info!(
                     "[CERTIFICATE] {context}: tail-stationary at the checkpoint \
                      (#2348 Inc 2c): {}",
@@ -3274,7 +3363,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
     result.final_hessian = analytic_hessian;
     result.criterion_certificate = Some(certificate.clone());
     if !certificate.certifies() {
-        result.converged = false;
         // Mint the #2392 reseeds fresh for THIS refused point: clear any value a
         // prior (multistart / pre-polish) certification of a different ρ left on
         // the result so the resume loop never consumes a stale pull-back/freeze.
@@ -3488,7 +3576,6 @@ fn certify_outer_optimality_at_terminal_fidelity(
         );
         result.final_gradient = Some(restored.gradient);
     }
-    result.converged = true;
     // #2235/#2241 — record WHICH certificate concluded this run. A
     // Fellner–Schall model-state fixed point was pre-stamped by the runner and
     // is preserved (this analytic certificate is its corroborating evidence);
@@ -3496,16 +3583,17 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // projected gradient actually cleared: the solver's own tolerance
     // (gradient-stationary) or only the widened flat certificate band
     // (criterion-flat, #2241).
-    result.converged_via = match result.converged_via {
-        Some(via @ OuterConvergedVia::RecurrentIncumbent { .. }) => Some(via),
+    let via = match result.termination.proposed_via() {
+        Some(via @ OuterConvergedVia::RecurrentIncumbent { .. }) => via,
         _ if certified_projected_grad_norm <= solver_bound => {
-            Some(OuterConvergedVia::GradientStationary)
+            OuterConvergedVia::GradientStationary
         }
-        _ => Some(OuterConvergedVia::CriterionFlat {
+        _ => OuterConvergedVia::CriterionFlat {
             residual_grad_norm: certified_projected_grad_norm,
             certificate_bound: stationarity_bound,
-        }),
+        },
     };
+    result.termination.certify(via);
     log::info!("[CERTIFICATE] {context}: {}", certificate.summary());
     Ok(certificate)
 }
@@ -5255,7 +5343,7 @@ pub(crate) fn run_outer(
     // exhausts the general resume budget (#2357).
     let mut saddle_escapes_remaining: usize = OUTER_SADDLE_ESCAPE_BUDGET;
     let certificate = loop {
-        let claimed_converged = result.converged;
+        let claimed_converged = result.solver_claimed_convergence();
         match certify_diagnose_and_install(obj, &mut result) {
             Ok(certificate) => break certificate,
             Err(refusal) => {
@@ -5582,7 +5670,7 @@ pub(crate) fn run_outer_uncertified(
     // iteration; everything else falls through to the dense / standard path
     // below. Routed here so every entry point inherits it (magic by default).
     if let Some(result) = run_per_atom_efs_if_frontier(obj, config, context)? {
-        if result.converged {
+        if result.solver_claimed_convergence() {
             return Ok(result);
         }
         return Err(outer_nonconvergence_error(
@@ -5774,7 +5862,7 @@ pub(crate) fn run_outer_uncertified(
 
         match outcome {
             Ok(result) => {
-                if result.converged {
+                if result.solver_claimed_convergence() {
                     return Ok(result);
                 }
 
@@ -6168,9 +6256,11 @@ pub(crate) fn run_fixed_point_outer_solver(
             if let Some(consecutive_restores) =
                 recurrent_incumbent_exit.lock().ok().and_then(|slot| *slot)
             {
-                result.converged_via = Some(OuterConvergedVia::RecurrentIncumbent {
-                    consecutive_restores,
-                });
+                result.termination = OuterTermination::SolverClaimed {
+                    proposed_via: Some(OuterConvergedVia::RecurrentIncumbent {
+                        consecutive_restores,
+                    }),
+                };
             }
             Ok(result)
         }

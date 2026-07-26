@@ -1511,7 +1511,7 @@ impl SaeManifoldOuterObjective {
     /// Stamp the currently installed state with a successful outer search's
     /// analytic convergence evidence.
     ///
-    /// Merely receiving `OuterResult { converged: true, .. }` is insufficient:
+    /// Merely receiving `an OuterResult whose solver claimed convergence` is insufficient:
     /// the result must carry both the shared engine's explicit `converged_via`
     /// verdict and a valid analytic criterion certificate, and its rho must be
     /// bit-identical to the state currently installed on this objective. This
@@ -1521,11 +1521,11 @@ impl SaeManifoldOuterObjective {
     pub fn certify_outer_result(&mut self, result: &OuterResult) -> Result<(), String> {
         self.fit_verdict = None;
         self.terminal_penalized_quasi_laplace_criterion = None;
-        if !result.converged {
+        if !result.converged() {
             return Err("outer result is not converged".to_string());
         }
         let via = result
-            .converged_via
+            .converged_via()
             .ok_or_else(|| "converged outer result is missing converged_via".to_string())?;
         let certificate = result.criterion_certificate.as_ref().ok_or_else(|| {
             "converged outer result is missing its analytic criterion certificate".to_string()
@@ -1580,11 +1580,11 @@ impl SaeManifoldOuterObjective {
         if !self.audit_installed_state {
             return Err("installed-state audit was not enabled on this objective".to_string());
         }
-        if result.iterations != 0 || !result.converged {
+        if result.iterations != 0 || !result.converged() {
             return Err("installed-state audit result is not a zero-step convergence".to_string());
         }
         let via = result
-            .converged_via
+            .converged_via()
             .ok_or_else(|| "installed-state audit is missing converged_via".to_string())?;
         let certificate = result.criterion_certificate.as_ref().ok_or_else(|| {
             "installed-state audit is missing its analytic criterion certificate".to_string()

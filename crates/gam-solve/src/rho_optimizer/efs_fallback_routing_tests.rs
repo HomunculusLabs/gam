@@ -84,7 +84,7 @@ fn efs_fallback_marker_raised_after_the_seed_degrades_to_bfgs_2253() {
         "the marker asks for the joint gradient solver; the run must have used it"
     );
     assert!(
-        result.converged,
+        result.converged(),
         "the degraded BFGS plan solves this quadratic and must certify"
     );
     assert!(

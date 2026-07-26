@@ -472,7 +472,7 @@ pub(crate) fn certify_outer_stage(
     run_result: Result<OuterResult, EstimationError>,
 ) -> Result<SaeManifoldOuterObjective, SaeFitError> {
     match run_result {
-        Ok(result) if result.converged => {
+        Ok(result) if result.converged() => {
             let mut objective = objective;
             match objective.certify_outer_result(&result) {
                 Ok(()) => Ok(objective),
@@ -611,7 +611,7 @@ fn fit_outer_stage_to_boundary(
                     ..Default::default()
                 });
             match problem.run(&mut objective, "SAE manifold") {
-                Ok(result) if result.converged => {
+                Ok(result) if result.converged() => {
                     return certify_outer_stage(objective, stage, Ok(result))
                         .map(SaeStageFit::Certified);
                 }

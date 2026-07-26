@@ -224,11 +224,11 @@ fn run() -> Result<(), String> {
     let outer = problem
         .run(&mut objective, "#1017 production color SAE")
         .map_err(|err| format!("full color REML fit failed: {err}"))?;
-    if !outer.converged || outer.converged_via.is_none() {
+    if !outer.converged() || outer.converged_via().is_none() {
         return Err(format!(
             "outer optimizer returned without a convergence certificate: \
              converged={} via={:?}",
-            outer.converged, outer.converged_via
+            outer.converged(), outer.converged_via()
         ));
     }
     objective
@@ -253,7 +253,7 @@ fn run() -> Result<(), String> {
     println!(
         "FULLCOLOR_1017 converged=true via={:?} plan={:?} outer_iterations={} \
          criterion={:.12e} loss_total={:.12e}",
-        outer.converged_via,
+        outer.converged_via(),
         outer.plan_used,
         outer.iterations,
         outer.final_value,

@@ -111,7 +111,7 @@ fn zz_zoo_micro_local_full_fit_and_oos_discriminator() {
         })
         .run(&mut objective, "SAE manifold")
         .expect("zoo-micro full fit must not abort");
-    assert!(result.converged, "zoo fit must be analytically certified");
+    assert!(result.converged(), "zoo fit must be analytically certified");
     let certificate = result
         .criterion_certificate
         .as_ref()
@@ -208,7 +208,7 @@ fn rank_charge_zoo_arm(train: &Array2<f64>, test: &Array2<f64>) -> RankChargeArm
     RankChargeArm {
         fit_secs,
         final_value: result.final_value,
-        converged: result.converged,
+        converged: result.converged(),
         iterations: result.iterations,
         grad_norm,
         native_ev,
