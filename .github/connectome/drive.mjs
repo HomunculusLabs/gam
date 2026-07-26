@@ -4,9 +4,11 @@
 // The host deliberately runs without --exit-when-idle. Its 500 ms idle signal
 // observes agent states, not the framework event queue, so treating that signal
 // as an instruction to stop can close the queue while a late tool result is
-// still scheduling the next inference. We instead require a completed,
-// user-visible turn and a quiet interval, then request an explicit graceful
-// shutdown.
+// still scheduling the next inference. Lifecycle idleness is therefore
+// diagnostic only. We arm shutdown solely from a terminal framework event:
+// either a completed, user-visible turn or an explicit inference failure.
+// Any subsequent work cancels that decision; only a quiet terminal interval
+// permits an explicit graceful shutdown.
 
 import { connect } from 'node:net';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -70,7 +72,7 @@ let sawExiting = false;
 let shutdownRequested = false;
 let terminalFailure = null;
 let lastInferenceFailure = null;
-let idleSettleTimer = null;
+let terminalSettleTimer = null;
 
 const send = (message) => {
   if (!sock.writable) {
@@ -80,10 +82,10 @@ const send = (message) => {
   return sock.write(`${JSON.stringify(message)}\n`);
 };
 
-const cancelIdleSettlement = () => {
-  if (idleSettleTimer !== null) {
-    clearTimeout(idleSettleTimer);
-    idleSettleTimer = null;
+const cancelTerminalSettlement = () => {
+  if (terminalSettleTimer !== null) {
+    clearTimeout(terminalSettleTimer);
+    terminalSettleTimer = null;
   }
 };
 
@@ -99,25 +101,11 @@ const requestShutdown = (failure = null) => {
   send({ type: 'shutdown', graceful: true });
 };
 
-const settleIdle = () => {
-  cancelIdleSettlement();
-  idleSettleTimer = setTimeout(() => {
-    idleSettleTimer = null;
-    if (!sawInference) {
-      requestShutdown('the kickoff caused no inference');
-    } else if (!sawCompletion) {
-      requestShutdown(
-        `inference never completed${lastInferenceFailure ? `: ${lastInferenceFailure}` : ''}`,
-      );
-    } else if (!sawFinalSpeech) {
-      requestShutdown(
-        `the agent produced no completed final response${
-          lastInferenceFailure ? `; last inference failure: ${lastInferenceFailure}` : ''
-        }`,
-      );
-    } else {
-      requestShutdown();
-    }
+const settleTerminal = (failure = null) => {
+  cancelTerminalSettlement();
+  terminalSettleTimer = setTimeout(() => {
+    terminalSettleTimer = null;
+    requestShutdown(failure);
   }, IDLE_SETTLE_MS);
 };
 
@@ -159,15 +147,17 @@ sock.on('data', (chunk) => {
     if (event.type === 'lifecycle') {
       console.log(`[lifecycle] ${event.phase}${event.reason ? ` (${event.reason})` : ''}`);
       if (event.phase === 'ready') kickOnce('lifecycle:ready');
-      if (event.phase === 'idle') settleIdle();
+      if (event.phase === 'idle' && !sawCompletion && !lastInferenceFailure) {
+        console.log('[drive] premature lifecycle idle ignored; no terminal inference event yet');
+      }
       if (event.phase === 'exiting') sawExiting = true;
       continue;
     }
 
-    // Any work after lifecycle:idle proves that the host's state-only idle
-    // observation raced the event queue. Cancel the pending shutdown and wait
-    // for the next confirmed idle transition.
-    cancelIdleSettlement();
+    // A framework event after a terminal candidate means work continued.
+    // Cancel the candidate before interpreting this event; a new terminal
+    // event below may arm a fresh quiet interval.
+    cancelTerminalSettlement();
 
     if (event.type === 'inference:started') {
       sawInference = true;
@@ -180,11 +170,13 @@ sock.on('data', (chunk) => {
     if (event.type === 'inference:failed') {
       lastInferenceFailure = String(event.error ?? 'unknown inference failure');
       console.error(`[inference failed] ${lastInferenceFailure}`);
+      settleTerminal(`inference failed: ${lastInferenceFailure}`);
       continue;
     }
     if (event.type === 'inference:speech' && event.content) {
       sawFinalSpeech = true;
       console.log(`\n${String(event.content).trimEnd()}`);
+      if (sawCompletion) settleTerminal();
       continue;
     }
     if (event.type === 'tool:started') {
@@ -207,7 +199,7 @@ sock.on('error', (error) => {
 
 sock.on('close', () => {
   clearTimeout(readyFallback);
-  cancelIdleSettlement();
+  cancelTerminalSettlement();
 
   if (!shutdownRequested) {
     terminalFailure ??= 'host closed the socket before the driver requested shutdown';
