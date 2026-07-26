@@ -2341,8 +2341,13 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
     let error = bridge
         .eval_step(&array![0.0])
         .expect_err("a typed value-probe failure must leave EFS backtracking");
-    assert!(matches!(error, ObjectiveEvalError::Fatal { .. }));
-    assert!(error.message().contains(SENTINEL));
+    let message = match error {
+        ObjectiveEvalError::Fatal { message } => message,
+        ObjectiveEvalError::Recoverable { message } => {
+            panic!("typed value-probe failure was downgraded to recoverable: {message}")
+        }
+    };
+    assert!(message.contains(SENTINEL));
 }
 
 #[test]
