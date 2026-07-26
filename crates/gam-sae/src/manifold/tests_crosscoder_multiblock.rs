@@ -217,7 +217,7 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     let n = 62usize;
     let p_x = 4usize;
     let vocab = 5usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(5).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(11).unwrap());
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(i, _)| i as f64 / n as f64);
 
     let mut z = Array2::<f64>::zeros((n, p_x));
@@ -245,9 +245,22 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     let blocks = vec![OutputBlock::new("behavior", behavior.target, 0.0).unwrap()];
     let target = stack_augmented_target(z.view(), &blocks).unwrap();
     let p_tot = target.ncols();
+    assert_eq!(p_tot, 8, "#2512 fixture requires p_x + p_y = 8");
     let mut fits: Vec<(SaeManifoldTerm, SaeManifoldRho)> = (0..4)
         .map(|_| build_k1(&evaluator, &coords, p_tot))
         .collect();
+    for (term, _rho) in &fits {
+        assert_eq!(
+            term.atoms[0].basis_values.ncols(),
+            11,
+            "#2512 fixture requires the reported M=11 periodic basis"
+        );
+        assert_eq!(
+            term.atoms[0].decoder_coefficients.dim(),
+            (11, 8),
+            "#2512 fixture requires the reported 11 × 8 Arrow border"
+        );
+    }
     for (term, rho) in &mut fits {
         term.set_guards_enabled(false);
         term.run_joint_fit_arrow_schur(
@@ -263,6 +276,11 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     }
 
     let reference = &fits[0].0.atoms[0].decoder_coefficients;
+    assert_eq!(
+        reference.len(),
+        88,
+        "#2512 fitted decoder must retain the reported 11 × 8 Arrow border"
+    );
     let reference_norm = reference.iter().map(|value| value * value).sum::<f64>().sqrt();
     assert!(
         reference_norm > 1.0,
