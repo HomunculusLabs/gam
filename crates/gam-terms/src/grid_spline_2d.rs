@@ -57,7 +57,9 @@
 //! cell index clamps, the local coordinate does not).
 
 use faer::{Mat, Side};
-use gam_math::score_opt::AffineRemlProfile;
+use gam_math::score_opt::{
+    AffineRemlProfile, ClosedInterval, ScoreOptimumLocation, certified_ln_positive,
+};
 
 /// Dimension of the penalty null space: span{1, x1, x2}. The mixed
 /// `2·a1·a2·f_{x1x2}²` term excludes `x1·x2` (its cross derivative is 1).
@@ -297,18 +299,42 @@ impl RemlSpectrum {
         let mut highest_transition = f64::NEG_INFINITY;
         for (&gram, &penalty) in self.gram_modes.iter().zip(&self.penalty_modes) {
             if gram > 0.0 && penalty > 0.0 {
-                let transition = gram.ln() - penalty.ln();
-                lowest_transition = lowest_transition.min(transition);
-                highest_transition = highest_transition.max(transition);
+                let transition = certified_ln_positive(gram)
+                    .ok_or_else(|| {
+                        "grid spline 2d: could not enclose a Gram-mode logarithm".to_string()
+                    })?
+                    .sub(certified_ln_positive(penalty).ok_or_else(|| {
+                        "grid spline 2d: could not enclose a penalty-mode logarithm".to_string()
+                    })?);
+                lowest_transition = lowest_transition.min(transition.lo);
+                highest_transition = highest_transition.max(transition.hi);
             }
         }
         if !(lowest_transition.is_finite() && highest_transition.is_finite()) {
             lowest_transition = 0.0;
             highest_transition = 0.0;
         }
-        let margin = -f64::EPSILON.sqrt().ln();
-        let lo = (lowest_transition - margin).max(f64::MIN_POSITIVE.ln());
-        let hi = (highest_transition + margin).min(f64::MAX.ln());
+        let margin = certified_ln_positive(f64::EPSILON.sqrt())
+            .ok_or_else(|| {
+                "grid spline 2d: could not enclose the spectral-domain margin".to_string()
+            })?
+            .neg();
+        let minimum_log = certified_ln_positive(f64::MIN_POSITIVE)
+            .ok_or_else(|| {
+                "grid spline 2d: could not enclose the minimum-normal logarithm".to_string()
+            })?;
+        let maximum_log = certified_ln_positive(f64::MAX)
+            .ok_or_else(|| {
+                "grid spline 2d: could not enclose the maximum-finite logarithm".to_string()
+            })?;
+        let lo = ClosedInterval::point(lowest_transition)
+            .sub(margin)
+            .lo
+            .max(minimum_log.lo);
+        let hi = ClosedInterval::point(highest_transition)
+            .add(margin)
+            .hi
+            .min(maximum_log.lo);
         if !(lo < hi) {
             return Err(format!(
                 "grid spline 2d: no representable REML search domain after spectral scaling ({lo}, {hi})"
@@ -850,8 +876,69 @@ impl GridSpline2dDesign {
         let profile = spectrum.profile()?;
         let (log_lambda_lo, log_lambda_hi) = spectrum.log_lambda_domain()?;
         let search = profile
-            .maximize(log_lambda_lo, log_lambda_hi, f64::EPSILON.sqrt())
+            .maximize_value_ordered(log_lambda_lo, log_lambda_hi, f64::EPSILON.sqrt())
             .map_err(|error| format!("grid spline 2d: REML optimization failed: {error}"))?;
+        if search.value_certificate.maximum_excess
+            > search.value_certificate.comparison_resolution
+        {
+            return Err(format!(
+                "grid spline 2d: REML candidates are not globally ordered \
+                 (maximum excess {}, comparison resolution {})",
+                search.value_certificate.maximum_excess,
+                search.value_certificate.comparison_resolution
+            ));
+        }
+        enum KktKind {
+            LowerBoundary,
+            UpperBoundary,
+            Stationary,
+        }
+        let (bracket, kkt_kind) = match search.location {
+            ScoreOptimumLocation::LowerBoundary => (
+                gam_math::score_opt::ClosedInterval::point(search.lower_boundary.x),
+                KktKind::LowerBoundary,
+            ),
+            ScoreOptimumLocation::UpperBoundary => (
+                gam_math::score_opt::ClosedInterval::point(search.upper_boundary.x),
+                KktKind::UpperBoundary,
+            ),
+            ScoreOptimumLocation::Stationary(index) => (
+                search
+                    .stationary_points
+                    .get(index)
+                    .ok_or_else(|| {
+                        "grid spline 2d: optimizer returned an invalid stationary index".to_string()
+                    })?
+                    .bracket,
+                KktKind::Stationary,
+            ),
+            ScoreOptimumLocation::ResolutionFlat(index) => {
+                let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
+                    "grid spline 2d: optimizer returned an invalid resolution-flat index"
+                        .to_string()
+                })?;
+                return Err(format!(
+                    "grid spline 2d: REML optimum is value-resolved but not stationary on \
+                     {:?} (gap {}, resolution {})",
+                    flat.bracket, flat.max_score_gap, flat.score_resolution
+                ));
+            }
+        };
+        let kkt = profile
+            .enclose(bracket.lo, bracket.hi)
+            .map_err(|error| format!("grid spline 2d: {error}"))?;
+        let kkt_holds = match kkt_kind {
+            KktKind::LowerBoundary => kkt.derivative.hi <= 0.0,
+            KktKind::UpperBoundary => kkt.derivative.lo >= 0.0,
+            KktKind::Stationary => {
+                kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0
+            }
+        };
+        if !kkt_holds {
+            return Err(format!(
+                "grid spline 2d: exact-real REML KKT certificate failed on {bracket:?}: {kkt:?}"
+            ));
+        }
         self.fit_at(search.optimum.x, None)
     }
 

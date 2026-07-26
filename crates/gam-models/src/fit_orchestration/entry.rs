@@ -1365,7 +1365,9 @@ fn fit_materialized_once_with_notes(
                 &inputs.w,
                 inputs.order,
             )
-            .map_err(|reason| WorkflowError::IntegrationFailed { reason })?;
+            .map_err(|reason| WorkflowError::IntegrationFailed {
+                reason: reason.to_string(),
+            })?;
             return Ok(FormulaFitResult {
                 result: FitResult::SplineScan(scan),
                 inference_notes,
@@ -1376,28 +1378,28 @@ fn fit_materialized_once_with_notes(
         // dense-kernel cliff. UNLIKE the scan, the cascade is a DIFFERENT
         // posterior from the dense radial term, so it only ever fires as an
         // explicit alternative estimator on the exact structural signature
-        // (`residual_cascade_fast_path`) AND when the in-cascade quasi-uniformity
-        // guard certifies the metric — a rejected metric or any ineligible shape
-        // falls through to the dense `fit_model` path (a genuine estimator
-        // choice, never a silent swap). The save paths build the persistence
-        // payload from this `ResidualCascadeFit`'s `to_state` snapshot.
+        // (`residual_cascade_fast_path`). Once that explicit structural route
+        // is selected, a proof or convergence refusal is propagated: silently
+        // replacing it with the different dense-kernel estimator would erase
+        // the typed reason automatic REML was unavailable. The save paths
+        // build the persistence payload from this `ResidualCascadeFit`'s
+        // `to_state` snapshot.
         if let Some(inputs) = residual_cascade_fast_path(request) {
             let coord_refs: Vec<&[f64]> = inputs.coords.iter().map(Vec::as_slice).collect();
-            if let Ok(fit) = gam_solve::residual_cascade::fit_residual_cascade(
+            let fit = gam_solve::residual_cascade::fit_residual_cascade(
                 &coord_refs,
                 &inputs.y,
                 &inputs.w,
                 &inputs.metric,
                 inputs.sobolev_s,
-            ) {
-                return Ok(FormulaFitResult {
-                    result: FitResult::ResidualCascade(fit),
-                    inference_notes,
-                });
-            }
-            // The quasi-uniformity guard (caveat 2) or any degenerate-design
-            // signal surfaces as a build/solve error; fall through to the dense
-            // kernel path rather than failing the fit outright.
+            )
+            .map_err(|reason| WorkflowError::IntegrationFailed {
+                reason: reason.to_string(),
+            })?;
+            return Ok(FormulaFitResult {
+                result: FitResult::ResidualCascade(fit),
+                inference_notes,
+            });
         }
     }
     // `fit_model` already returns `WorkflowError` end-to-end; propagate it
@@ -1869,7 +1871,9 @@ pub fn fit_spline_scan_from_formula(
     };
     gam_solve::spline_scan::fit_spline_scan(&inputs.x, &inputs.y, &inputs.w, inputs.order)
         .map(Some)
-        .map_err(|reason| WorkflowError::IntegrationFailed { reason })
+        .map_err(|reason| WorkflowError::IntegrationFailed {
+            reason: reason.to_string(),
+        })
 }
 
 /// #1464 diagnostic entry point: evaluate the exact production fixed-κ
@@ -1983,9 +1987,9 @@ fn cascade_sobolev_order(requested: f64, d: usize) -> f64 {
 /// The returned [`ResidualCascadeInputs`] carry a unit per-axis metric (the
 /// spec's isotropic radial distance); the quasi-uniformity guard inside
 /// [`gam_solve::residual_cascade::fit_residual_cascade`] (issue caveat 2)
-/// is the no-regression gate that refuses the iterative solve — and forces the
-/// caller back to the dense path — when a near-degenerate metric would break
-/// the BPX iteration bound.
+/// is the no-regression gate that refuses the selected route when a
+/// near-degenerate metric would break the BPX iteration bound. That refusal is
+/// propagated; it never silently changes the estimator.
 pub fn residual_cascade_fast_path(
     request: &StandardFitRequest<'_>,
 ) -> Option<ResidualCascadeInputs> {
@@ -2098,15 +2102,12 @@ pub fn residual_cascade_fast_path(
 /// (issue #1032).
 ///
 /// Materializes the formula exactly like [`fit_from_formula`], runs the
-/// [`residual_cascade_fast_path`] detection, and — when it fires AND the
-/// quasi-uniformity guard inside the cascade certifies the metric — returns the
+/// [`residual_cascade_fast_path`] detection, and — when it fires and the
+/// cascade supplies every required proof — returns the
 /// certified [`ResidualCascadeFit`](gam_solve::residual_cascade::ResidualCascadeFit).
-/// `Ok(None)` means EITHER the model is not the cascade-eligible shape OR the
-/// quasi-uniformity guard rejected the metric; in both cases the caller falls
-/// back to the dense [`fit_from_formula`] path (the cascade is a different
-/// posterior, so the fallback is a genuine estimator choice, never a silent
-/// swap). This keeps every persistence-bearing consumer on the dense fit until
-/// the cascade payload schema lands.
+/// `Ok(None)` means only that the model is not the cascade-eligible shape.
+/// Once the route is selected, a proof/convergence failure is returned rather
+/// than silently changing estimators.
 pub fn fit_residual_cascade_from_formula(
     formula: &str,
     data: &Dataset,
@@ -2120,20 +2121,17 @@ pub fn fit_residual_cascade_from_formula(
         return Ok(None);
     };
     let coord_refs: Vec<&[f64]> = inputs.coords.iter().map(Vec::as_slice).collect();
-    match gam_solve::residual_cascade::fit_residual_cascade(
+    gam_solve::residual_cascade::fit_residual_cascade(
         &coord_refs,
         &inputs.y,
         &inputs.w,
         &inputs.metric,
         inputs.sobolev_s,
-    ) {
-        Ok(fit) => Ok(Some(fit)),
-        // The quasi-uniformity guard (caveat 2) and any degenerate-design
-        // signal both surface as a build/solve error; treat them as "not
-        // cascade-eligible" so the caller falls back to the dense kernel path
-        // rather than failing the fit outright.
-        Err(_) => Ok(None),
-    }
+    )
+    .map(Some)
+    .map_err(|reason| WorkflowError::IntegrationFailed {
+        reason: reason.to_string(),
+    })
 }
 
 /// Parse a formula, resolve it against a dataset, and produce a ready-to-fit `FitRequest`.

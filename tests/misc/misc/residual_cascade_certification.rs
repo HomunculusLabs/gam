@@ -26,7 +26,7 @@
 
 use gam::solver::residual_cascade::{
     LogdetMethod, ResidualCascadeDesign, ResidualCascadeError, ResidualCascadeFit,
-    ResidualCascadeState, ResidualMomentMethod, fit_residual_cascade,
+    ResidualCascadeState, fit_residual_cascade,
 };
 
 /// SplitMix64 — deterministic test stream, no external RNG dependency.
@@ -1106,8 +1106,8 @@ fn smoothness_ceiling_forces_refinement_and_certifies_residual_bias() {
 /// iteration bound rests on the metric-scaled net being quasi-uniform; a
 /// near-degenerate metric (the cloud collapsed onto a sheet in `z`) breaks it.
 /// The guard must DETECT this from the metric-scaled aspect ratio up front and
-/// refuse the iterative solve — so the auto-route falls back to the dense
-/// kernel BEFORE paying an unbounded CG — while leaving the well-conditioned
+/// refuse the iterative solve BEFORE paying an unbounded CG, without silently
+/// changing estimators, while leaving the well-conditioned
 /// (isotropic) case certified. We assert both directions: the benign metric
 /// certifies and fits; the collapsed metric is rejected by the guard.
 #[test]
@@ -1142,8 +1142,9 @@ fn quasi_uniformity_guard_rejects_degenerate_metric_keeps_benign() {
          aspect_ratio={}",
         design_bad.metric_scaled_aspect_ratio()
     );
-    // The full magic-default fit refuses the degenerate metric with the typed
-    // computation failure that the auto-route reads as "fall back to dense".
+    // The full magic-default fit refuses the degenerate metric with a typed
+    // computation failure; the selected route must not silently change
+    // estimators.
     match fit_residual_cascade(&xs, &y, &w, &collapse, 2.0) {
         Ok(_) => panic!("degenerate metric must be refused by the quasi-uniformity guard"),
         Err(ResidualCascadeError::Computation(_)) => {}
@@ -1247,27 +1248,24 @@ fn cascade_state_rejects_corruption() {
     );
 }
 
-/// #2503 — past the dense cap, REML selection must reach its λ without solving
-/// `A = X'WX + λD` at ANY λ in the domain, and it must SAY so.
+/// #2503/#2513 — past the dense cap, the diagnostic criterion must reach the
+/// hard λ values without solving `A = X'WX + λD`, while automatic REML must
+/// still refuse until its independent stochastic determinant has an exact-real
+/// value/derivative enclosure.
 ///
-/// The defect: `maximize_score_1d` evaluates `log_lambda_domain`'s lower boundary
-/// before anything else, and past the cap the profiled residual and its three
-/// derivative moments were re-derived from two PCG solves at every λ. At the
-/// boundary — `λ = e^-30.14 = 8.1e-14` on this fixture — the multilevel Wendland
-/// frame is redundant across scales, `cond(X'WX + λD) ~ 1e10`, and PCG to `1e-9`
-/// needs ~`1e5` iterations against a 4000 budget. Eight tests in this file died
-/// there with that one error, and the search was paying an ill-conditioned solve
-/// for a number the domain padding already bounds to `√ε`.
+/// The original #2503 defect was a pair of PCG solves at every λ. At the lower
+/// domain endpoint the multilevel Wendland frame is redundant across scales and
+/// the system is numerically singular. The β-seeded quadrature removes those
+/// solves from point evaluation. That is a useful capability, but it is not the
+/// #2513 proof: a converged residual quadrature does not enclose the separate
+/// fixed-probe SLQ log-determinant, so it cannot certify score signs, stationary
+/// roots, or global candidate ordering.
 ///
-/// Three claims, in the order they have to hold:
-///
-/// 1. the criterion is EVALUABLE at both domain endpoints, which is the repro;
-/// 2. `fit_reml` completes, which is the eight tests;
-/// 3. the route reports `ConvergedQuadrature`, which is why — and not, say,
-///    because a solver tolerance moved. Without (3) a future regression to the
-///    solve would only reappear as the same opaque CG message.
+/// This gate keeps those two claims separate: every representative point of the
+/// declared domain remains evaluable, then the same design returns the typed
+/// proof refusal rather than promoting point accuracy into an automatic fit.
 #[test]
-fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
+fn past_cap_point_criterion_is_solve_free_but_auto_reml_needs_exact_proof_2503_2513() {
     let n = 800;
     let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
     let xs = axis_refs(&axes);
@@ -1296,63 +1294,15 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
         );
     }
 
-    let fit = design
-        .fit_reml()
-        .expect("REML selection past the dense cap");
-    assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
-    let Some(ResidualMomentMethod::ConvergedQuadrature {
-        steps,
-        coarse_steps,
-        rank,
-        budget,
-        tail_estimate,
-        target,
-        mass_defect,
-        dropped_mass_fraction,
-        ..
-    }) = fit.certificate.residual_moments
-    else {
-        panic!(
-            "the past-cap residual moments must come from a CONVERGED quadrature, not a solve: \
-             {:?}",
-            fit.certificate.residual_moments
-        );
+    let refusal = match design.fit_reml() {
+        Err(error) => error,
+        Ok(_) => panic!("point-evaluable SLQ must not escape as an exact-real REML fit"),
     };
-    assert!(
-        tail_estimate <= target,
-        "admitted with an extrapolated remaining error of {tail_estimate} against {target}"
-    );
-    assert!(
-        steps <= budget && coarse_steps <= steps,
-        "step accounting: {steps} steps, {coarse_steps} coarse, budget {budget}"
-    );
-    // The accepted rule must be far below the penalized rank. That is the whole
-    // point — a rule at `steps == rank` would be exact by dimension alone and
-    // would prove nothing about the quadrature, and it would cost an `O(rank^3)`
-    // reorthogonalization this route exists to avoid.
-    assert!(
-        2 * steps < rank,
-        "the accepted rule must be TRUNCATED: {steps} nodes against penalized rank {rank}"
-    );
-    assert!(
-        mass_defect <= 1e-12 && dropped_mass_fraction <= f64::EPSILON,
-        "the rule's own self-checks must hold: mass defect {mass_defect}, dropped null mass \
-         {dropped_mass_fraction}"
-    );
-    eprintln!(
-        "[2503-SOLVEFREE] m={} rank={rank} steps={steps} coarse={coarse_steps} budget={budget} \
-         tail_estimate={tail_estimate:.3e} target={target:.3e} log_lambda={}",
-        design.num_coeffs(),
-        fit.log_lambda()
-    );
-
-    // ...and the selected fit is still a fit: a certified coefficient solve and a
-    // positive predictive variance.
-    assert!(
-        fit.certificate.solve_rel_residual <= 1e-9,
-        "uncertified coefficient solve at the selected lambda: {}",
-        fit.certificate.solve_rel_residual
-    );
-    let (_, var) = fit.predict(&[0.4, 0.6]).expect("predict");
-    assert!(var > 0.0, "non-positive predictive variance {var}");
+    assert!(matches!(
+        refusal,
+        ResidualCascadeError::RemlScoreProofUnavailable {
+            columns,
+            dense_gram_max: 1536,
+        } if columns == design.num_coeffs()
+    ));
 }

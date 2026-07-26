@@ -10,11 +10,11 @@
 //! through), and the cascade ESTIMATOR itself is certified bit-for-bit against
 //! an in-test dense penalized oracle in `residual_cascade_certification.rs`.
 //!
-//! What those two suites do NOT assert is the thing this file owns: that the
-//! cascade estimator actually delivers the quality of the dense estimator at a
-//! tractable end-to-end size. The cliff-scale auto-route shape is covered
-//! structurally in `residual_cascade_workflow_detection.rs`; this file does not
-//! allocate a half-million-row formula dataset just to prove dispatch.
+//! This file owns two distinct gates: the cascade estimator must deliver the
+//! quality of the dense estimator at a tractable end-to-end size, and a
+//! cliff-scale formula route must propagate the typed automatic-REML proof
+//! refusal once refinement crosses onto the iterative coefficient route. The
+//! latter must never be hidden by silently switching to a different estimator.
 
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
@@ -210,16 +210,18 @@ fn cascade_matches_or_beats_dense_duchon_on_truth_recovery() {
     );
 }
 
-/// Arm 2 — the formula auto-route itself must return a quality cascade past
-/// the dense-kernel cliff.
+/// Arm 2 — the formula auto-route must propagate iterative automatic-REML
+/// proof refusal past the dense-kernel cliff.
 ///
-/// This is intentionally a positive `fit_from_formula` route test, not just a
-/// direct estimator check: it owns the deleted cliff-scale auto-route arm. The
-/// dense radial posterior is not built here; once `default_num_centers` is at
-/// its cap, the route must return `FitResult::ResidualCascade`, and that
-/// returned fit must still recover the planted truth on interior probes.
+/// This is intentionally a `fit_from_formula` route test, not just a direct
+/// estimator check. Once the cascade estimator is structurally selected, its
+/// refinement can exceed the dense Gram cap. PCG's solve-residual certificate
+/// does not supply the inverse-norm bound needed for an outer REML derivative
+/// enclosure, so automatic λ selection must stop with the proof-unavailable
+/// error. Falling through to the dense radial posterior would erase both that
+/// certificate boundary and the estimator the route selected.
 #[test]
-fn past_cliff_fit_from_formula_returns_quality_residual_cascade() {
+fn past_cliff_fit_from_formula_propagates_iterative_reml_proof_refusal() {
     init_parallelism();
     let n = 525_000;
     assert!(
@@ -228,21 +230,14 @@ fn past_cliff_fit_from_formula_returns_quality_residual_cascade() {
     );
     let data = sample(3, n);
     let cfg = gaussian_config();
-    let result =
-        fit_from_formula("y ~ duchon(x1, x2, x3)", &data, &cfg).expect("past-cliff duchon fit");
-    let FitResult::ResidualCascade(cascade) = result else {
-        panic!("past-cliff scattered 3-D duchon must auto-route to ResidualCascade");
+    let error = match fit_from_formula("y ~ duchon(x1, x2, x3)", &data, &cfg) {
+        Ok(_) => panic!("iterative automatic REML must propagate its proof refusal"),
+        Err(error) => error,
     };
-
-    let probes = probe_grid(3, 4);
-    let yhat: Vec<f64> = probes
-        .iter()
-        .map(|p| cascade.predict(p).expect("auto-route cascade predict").0)
-        .collect();
-    let cascade_rmse = rmse(&yhat, &probes);
-    eprintln!("[cascade auto-route cliff quality] n={n} cascade_rmse={cascade_rmse:.5}");
+    let message = error.to_string();
     assert!(
-        cascade_rmse < 0.08,
-        "auto-routed residual cascade fails planted-truth recovery: RMSE={cascade_rmse}"
+        message.contains("automatic REML proof unavailable for the iterative route")
+            && message.contains("use an explicitly fixed log lambda"),
+        "the selected cascade route returned the wrong refusal: {message}"
     );
 }

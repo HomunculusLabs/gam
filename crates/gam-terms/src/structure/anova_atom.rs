@@ -94,7 +94,10 @@ use crate::inference::smooth_test::{
     SmoothTestInput, SmoothTestResult, SmoothTestScale, wood_smooth_test,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
-use gam_math::score_opt::AffineRemlProfile;
+use gam_math::score_opt::{
+    AffineRemlProfile, ClosedInterval, ScoreOptimumLocation, certified_exp_representative,
+    certified_ln_positive,
+};
 
 /// Interaction energy fraction at or below which the interaction block is
 /// energetically negligible and lossless fission is on the table. The bar is
@@ -432,7 +435,9 @@ pub fn fit_tensor_surface(
     let yty: Vec<f64> = (0..d_dims)
         .map(|d| responses.column(d).dot(&responses.column(d)))
         .collect();
-    let mut null_score = 0.0_f64;
+    let log_n = certified_ln_positive(n as f64)
+        .ok_or_else(|| "fit_tensor_surface: could not enclose log(n)".to_string())?;
+    let mut null_score_enclosure = ClosedInterval::point(0.0);
     for (output, &energy) in yty.iter().enumerate() {
         if !(energy.is_finite() && energy > 0.0) {
             return Err(format!(
@@ -440,9 +445,17 @@ pub fn fit_tensor_surface(
                  its profiled Gaussian scale has no finite REML optimum"
             ));
         }
-        null_score += energy.ln() - (n as f64).ln();
+        null_score_enclosure = null_score_enclosure.add(
+            certified_ln_positive(energy)
+                .ok_or_else(|| {
+                    format!(
+                        "fit_tensor_surface: could not enclose response {output} energy log"
+                    )
+                })?
+                .sub(log_n),
+        );
     }
-    null_score *= -0.5 * n as f64;
+    null_score_enclosure = null_score_enclosure.scale(-0.5 * n as f64);
 
     // Pooled Gaussian REML in the eigensystem.  For h_i(λ) = d_i + λ,
     // the profiled score is
@@ -493,11 +506,22 @@ pub fn fit_tensor_surface(
         .filter(|&value| value > 0.0)
         .fold(f64::INFINITY, f64::min);
     let relative_resolution = f64::EPSILON.sqrt();
-    let log_relative_resolution = relative_resolution.ln();
-    let log_lambda_lo = (d_min_relative.ln() + log_relative_resolution).max(f64::MIN_POSITIVE.ln());
-    let log_lambda_hi = -log_relative_resolution;
+    let log_relative_resolution = certified_ln_positive(relative_resolution).ok_or_else(|| {
+        "fit_tensor_surface: could not enclose the relative-resolution logarithm".to_string()
+    })?;
+    let log_d_min = certified_ln_positive(d_min_relative).ok_or_else(|| {
+        "fit_tensor_surface: could not enclose the smallest spectral transition".to_string()
+    })?;
+    let log_minimum_normal = certified_ln_positive(f64::MIN_POSITIVE).ok_or_else(|| {
+        "fit_tensor_surface: could not enclose the minimum-normal logarithm".to_string()
+    })?;
+    let log_lambda_lo = log_d_min
+        .add(log_relative_resolution)
+        .lo
+        .max(log_minimum_normal.lo);
+    let log_lambda_hi = log_relative_resolution.neg().hi;
     let search = profile
-        .maximize(log_lambda_lo, log_lambda_hi, relative_resolution)
+        .maximize_value_ordered(log_lambda_lo, log_lambda_hi, relative_resolution)
         .map_err(|error| {
             format!("fit_tensor_surface: REML stationary isolation failed: {error}")
         })?;
@@ -506,16 +530,51 @@ pub fn fit_tensor_surface(
     // is identically zero and PRSS_d→y_dᵀy_d. Choosing infinity is safe for
     // the algebra below (coefficients, EDF, and covariance all become zero) and
     // makes null recovery exact rather than a large-finite-λ approximation.
-    //
-    // The null side is EXACT and the interior side is not, so the search's own
-    // `value_uncertainty` — a certified bound on how much any cell it closed on
-    // the value side could still hide — sets the band in which the null wins.
-    // A finite λ is chosen only when it beats the exact null by more than what
-    // the search could not resolve.
-    let lambda = if null_score + search.value_uncertainty >= search.optimum.value {
+    let lambda = if search.value_certificate.maximum.lo <= null_score_enclosure.hi {
         f64::INFINITY
     } else {
-        d_max * search.optimum.x.exp()
+        if search.value_certificate.maximum_excess
+            > search.value_certificate.comparison_resolution
+        {
+            return Err(format!(
+                "fit_tensor_surface: finite REML candidates are not globally ordered \
+                 (maximum excess {}, comparison resolution {})",
+                search.value_certificate.maximum_excess,
+                search.value_certificate.comparison_resolution
+            ));
+        }
+        let ScoreOptimumLocation::Stationary(index) = search.location else {
+            return Err(format!(
+                "fit_tensor_surface: finite REML optimum is value-resolved but not an \
+                 isolated stationary point ({:?})",
+                search.location
+            ));
+        };
+        let stationary = search.stationary_points.get(index).ok_or_else(|| {
+            "fit_tensor_surface: optimizer returned an invalid stationary index".to_string()
+        })?;
+        let kkt = profile
+            .enclose(stationary.bracket.lo, stationary.bracket.hi)
+            .map_err(|error| format!("fit_tensor_surface: {error}"))?;
+        if !(kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0) {
+            return Err(format!(
+                "fit_tensor_surface: exact-real interior REML KKT certificate failed on \
+                 {:?}: {kkt:?}",
+                stationary.bracket
+            ));
+        }
+        let relative_lambda = certified_exp_representative(search.optimum.x).ok_or_else(|| {
+            "fit_tensor_surface: could not construct the certified finite REML representative"
+                .to_string()
+        })?;
+        let lambda = d_max * relative_lambda;
+        if !(lambda.is_finite() && lambda > 0.0) {
+            return Err(format!(
+                "fit_tensor_surface: selected finite REML strength is not representable \
+                 after restoring the Gram scale ({d_max} * {relative_lambda})"
+            ));
+        }
+        lambda
     };
 
     // Coefficients, EDF, residuals, covariances at the selected λ.

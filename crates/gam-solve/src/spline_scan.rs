@@ -53,8 +53,12 @@
 //! boundaries compete exactly. σ² is profiled in closed form from the proper
 //! innovations plus the within-tie residual sum.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use gam_math::score_opt::{
-    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, maximize_score_1d,
+    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, ScoreValueEnclosure,
+    ScoreOptimumLocation, maximize_score_1d,
 };
 
 /// One pooled (distinct-abscissa) observation node.
@@ -70,9 +74,6 @@ struct PooledNode {
 /// Search interval for log λ (natural log), generous on both sides.
 const LOG_LAMBDA_LO: f64 = -18.0;
 const LOG_LAMBDA_HI: f64 = 18.0;
-/// Numerical floor treating a predicted innovation variance as singular.
-const INNOVATION_VAR_FLOOR: f64 = 1e-300;
-
 /// Maximum supported smoothing-spline order handled by the fixed-capacity
 /// small-matrix layer. Order `m` penalizes `∫(f^{(m)})²`; the state dimension
 /// is `m`. The exact diffuse leading-block smoother (see the smoother pass)
@@ -89,6 +90,371 @@ const MAX_ORDER: usize = 3;
 /// at runtime.
 type Mat2 = [[f64; MAX_ORDER]; MAX_ORDER];
 type Vec2 = [f64; MAX_ORDER];
+
+/// A nearest-rounded representative carried beside an outward interval for the
+/// exact-real result of the same arithmetic expression.
+///
+/// Every elementary operation rounds both interval endpoints away from the
+/// result. `exp` and `ln` use `gam-math`'s range-reduced, directed Taylor
+/// enclosures; all other operations are IEEE basic operations. No platform
+/// libm accuracy contract is assumed. This is interval arithmetic, not a
+/// tolerance: widening is entirely source-derived from the operations the
+/// filter actually performs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ball {
+    value: f64,
+    lo: f64,
+    hi: f64,
+}
+
+impl Ball {
+    const ZERO: Self = Self {
+        value: 0.0,
+        lo: 0.0,
+        hi: 0.0,
+    };
+    const ONE: Self = Self {
+        value: 1.0,
+        lo: 1.0,
+        hi: 1.0,
+    };
+
+    #[inline]
+    fn exact(value: f64) -> Self {
+        Self {
+            value,
+            lo: value,
+            hi: value,
+        }
+    }
+
+    /// Attach an independently certified exact-real enclosure to a rounded
+    /// representative.
+    #[inline]
+    fn certified(value: f64, enclosure: ClosedInterval) -> Self {
+        Self {
+            value,
+            lo: enclosure.lo,
+            hi: enclosure.hi,
+        }
+    }
+
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        let enclosure = self.interval().add(other.interval());
+        Self {
+            value: self.value + other.value,
+            lo: enclosure.lo,
+            hi: enclosure.hi,
+        }
+    }
+
+    #[inline]
+    fn neg(self) -> Self {
+        Self {
+            value: -self.value,
+            lo: -self.hi,
+            hi: -self.lo,
+        }
+    }
+
+    #[inline]
+    fn sub(self, other: Self) -> Self {
+        self.add(other.neg())
+    }
+
+    #[inline]
+    fn mul(self, other: Self) -> Self {
+        let enclosure = self.interval().mul(other.interval());
+        Self {
+            value: self.value * other.value,
+            lo: enclosure.lo,
+            hi: enclosure.hi,
+        }
+    }
+
+    #[inline]
+    fn scale(self, factor: f64) -> Self {
+        self.mul(Self::exact(factor))
+    }
+
+    /// Division after the caller has proved the denominator interval positive.
+    #[inline]
+    fn div_positive(self, denominator: Self) -> Self {
+        assert!(
+            denominator.is_finite() && denominator.lo > 0.0,
+            "Ball::div_positive requires a finite, strictly positive denominator interval, got \
+             value={} lo={} hi={}",
+            denominator.value,
+            denominator.lo,
+            denominator.hi
+        );
+        let reciprocal = Self {
+            value: 1.0 / denominator.value,
+            lo: if denominator.hi == 1.0 {
+                1.0
+            } else {
+                next_down_ball(1.0 / denominator.hi)
+            },
+            hi: if denominator.lo == 1.0 {
+                1.0
+            } else {
+                next_up_ball(1.0 / denominator.lo)
+            },
+        };
+        self.mul(reciprocal)
+    }
+
+    #[inline]
+    fn ln_positive(self) -> Self {
+        assert!(
+            self.is_finite() && self.lo > 0.0,
+            "Ball::ln_positive requires a finite, strictly positive interval, got value={} lo={} \
+             hi={}",
+            self.value,
+            self.lo,
+            self.hi
+        );
+        let lo = gam_math::score_opt::certified_ln_positive(self.lo)
+            .expect("positive finite interval lower endpoint");
+        let hi = gam_math::score_opt::certified_ln_positive(self.hi)
+            .expect("positive finite interval upper endpoint");
+        Self {
+            value: self.value.ln(),
+            lo: lo.lo,
+            hi: hi.hi,
+        }
+    }
+
+    #[inline]
+    fn square(self) -> Self {
+        let hi_abs = self.lo.abs().max(self.hi.abs());
+        let lo_abs = if self.lo <= 0.0 && self.hi >= 0.0 {
+            0.0
+        } else {
+            self.lo.abs().min(self.hi.abs())
+        };
+        Self {
+            value: self.value * self.value,
+            lo: if lo_abs == 0.0 {
+                0.0
+            } else if lo_abs == 1.0 {
+                1.0
+            } else {
+                next_down_ball(lo_abs * lo_abs)
+            },
+            hi: if hi_abs == 0.0 || hi_abs == 1.0 {
+                hi_abs
+            } else {
+                next_up_ball(hi_abs * hi_abs)
+            },
+        }
+    }
+
+    #[inline]
+    fn is_finite(self) -> bool {
+        self.value.is_finite() && self.lo.is_finite() && self.hi.is_finite() && self.lo <= self.hi
+    }
+
+    #[inline]
+    fn interval(self) -> ClosedInterval {
+        ClosedInterval::new(self.lo, self.hi)
+    }
+
+    #[inline]
+    fn forward_error(self) -> f64 {
+        // One outward successor covers the subtraction roundoff even when the
+        // exact distance is subnormal and the rounded subtraction is zero.
+        // Every Ball primitive already preserves exact structural zero or
+        // moves each inexact endpoint by one representable value.
+        next_up_ball(
+            (self.value - self.lo)
+                .abs()
+                .max((self.hi - self.value).abs()),
+        )
+    }
+}
+
+type BallMat = [[Ball; MAX_ORDER]; MAX_ORDER];
+type BallVec = [Ball; MAX_ORDER];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplineInnovationKind {
+    Diffuse,
+    Proper,
+}
+
+/// Failure to construct a numerical proof for one spline-score evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SplineScoreProofError {
+    /// Directed roundoff made an innovation interval include zero, so division
+    /// by that innovation cannot be certified.
+    InnovationContainsZero {
+        node: usize,
+        kind: SplineInnovationKind,
+        enclosure: ClosedInterval,
+    },
+    /// An innovation interval was entirely nonpositive. This indicates a
+    /// violated covariance invariant rather than loss of numerical resolution.
+    NonPositiveInnovation {
+        node: usize,
+        kind: SplineInnovationKind,
+        enclosure: ClosedInterval,
+    },
+    NonPositiveProfileResidual {
+        enclosure: ClosedInterval,
+    },
+    InvalidArithmetic {
+        context: &'static str,
+    },
+    InvalidInput(String),
+    MissingEndpointCertificate {
+        log_lambda: f64,
+    },
+    OptimumResolutionFlat {
+        bracket: ClosedInterval,
+        max_score_gap: f64,
+        score_resolution: f64,
+    },
+    GlobalValueOrderingUnresolved {
+        maximum_excess: f64,
+        comparison_resolution: f64,
+    },
+    OptimumKktUncertified {
+        location: ScoreOptimumLocation,
+        bracket: ClosedInterval,
+        derivative: ClosedInterval,
+        curvature: ClosedInterval,
+    },
+    Search(String),
+    Computation(String),
+}
+
+impl std::fmt::Display for SplineScoreProofError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InnovationContainsZero {
+                node,
+                kind,
+                enclosure,
+            } => write!(
+                f,
+                "spline scan: {kind:?} innovation ball at node {node} contains zero: {enclosure:?}"
+            ),
+            Self::NonPositiveInnovation {
+                node,
+                kind,
+                enclosure,
+            } => write!(
+                f,
+                "spline scan: {kind:?} innovation ball at node {node} is nonpositive: {enclosure:?}"
+            ),
+            Self::NonPositiveProfileResidual { enclosure } => write!(
+                f,
+                "spline scan: profiled residual ball is not strictly positive: {enclosure:?}"
+            ),
+            Self::InvalidArithmetic { context } => {
+                write!(f, "spline scan: non-finite interval arithmetic in {context}")
+            }
+            Self::InvalidInput(reason) => f.write_str(reason),
+            Self::MissingEndpointCertificate { log_lambda } => write!(
+                f,
+                "spline scan: certified search requested an uncached endpoint {log_lambda}"
+            ),
+            Self::OptimumResolutionFlat {
+                bracket,
+                max_score_gap,
+                score_resolution,
+            } => write!(
+                f,
+                "spline scan: REML optimum is value-resolved but not stationary on {bracket:?} \
+                 (maximum score gap {max_score_gap}, score resolution {score_resolution})"
+            ),
+            Self::GlobalValueOrderingUnresolved {
+                maximum_excess,
+                comparison_resolution,
+            } => write!(
+                f,
+                "spline scan: the selected REML representative can trail another exact \
+                 candidate by {maximum_excess}, beyond the certified comparison resolution \
+                 {comparison_resolution}"
+            ),
+            Self::OptimumKktUncertified {
+                location,
+                bracket,
+                derivative,
+                curvature,
+            } => write!(
+                f,
+                "spline scan: exact-real REML KKT condition is uncertified for {location:?} \
+                 on {bracket:?} (derivative {derivative:?}, curvature {curvature:?})"
+            ),
+            Self::Search(reason) => write!(f, "spline scan: REML stationary isolation failed: {reason}"),
+            Self::Computation(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for SplineScoreProofError {}
+
+impl From<String> for SplineScoreProofError {
+    fn from(reason: String) -> Self {
+        Self::Computation(reason)
+    }
+}
+
+#[inline]
+fn require_positive_innovation(
+    node: usize,
+    kind: SplineInnovationKind,
+    innovation: Ball,
+) -> Result<(), SplineScoreProofError> {
+    if !innovation.is_finite() {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "innovation recurrence",
+        });
+    }
+    let enclosure = innovation.interval();
+    if innovation.lo <= 0.0 && innovation.hi >= 0.0 {
+        Err(SplineScoreProofError::InnovationContainsZero {
+            node,
+            kind,
+            enclosure,
+        })
+    } else if innovation.hi < 0.0 {
+        Err(SplineScoreProofError::NonPositiveInnovation {
+            node,
+            kind,
+            enclosure,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+#[inline]
+fn next_down_ball(value: f64) -> f64 {
+    if value.is_nan() || value == f64::NEG_INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return -f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits - 1 } else { bits + 1 })
+}
+
+#[inline]
+fn next_up_ball(value: f64) -> f64 {
+    if value.is_nan() || value == f64::INFINITY {
+        return value;
+    }
+    if value == 0.0 {
+        return f64::from_bits(1);
+    }
+    let bits = value.to_bits();
+    f64::from_bits(if value > 0.0 { bits + 1 } else { bits - 1 })
+}
 
 #[inline]
 fn mat_mul(a: &Mat2, b: &Mat2, m: usize) -> Mat2 {
@@ -358,6 +724,142 @@ fn symmetrize(a: &mut Mat2, m: usize) {
     }
 }
 
+#[inline]
+fn ball_mat_mul(a: &BallMat, b: &BallMat, m: usize) -> BallMat {
+    let mut c = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        for j in 0..m {
+            let mut acc = Ball::ZERO;
+            for k in 0..m {
+                acc = acc.add(a[i][k].mul(b[k][j]));
+            }
+            c[i][j] = acc;
+        }
+    }
+    c
+}
+
+#[inline]
+fn ball_mat_t(a: &BallMat, m: usize) -> BallMat {
+    let mut c = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        for j in 0..m {
+            c[i][j] = a[j][i];
+        }
+    }
+    c
+}
+
+#[inline]
+fn ball_mat_vec(a: &BallMat, v: &BallVec, m: usize) -> BallVec {
+    let mut out = [Ball::ZERO; MAX_ORDER];
+    for i in 0..m {
+        let mut acc = Ball::ZERO;
+        for j in 0..m {
+            acc = acc.add(a[i][j].mul(v[j]));
+        }
+        out[i] = acc;
+    }
+    out
+}
+
+#[inline]
+fn ball_mat_add(a: &BallMat, b: &BallMat, m: usize) -> BallMat {
+    let mut c = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        for j in 0..m {
+            c[i][j] = a[i][j].add(b[i][j]);
+        }
+    }
+    c
+}
+
+#[inline]
+fn ball_mat_sub(a: &BallMat, b: &BallMat, m: usize) -> BallMat {
+    let mut c = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        for j in 0..m {
+            c[i][j] = a[i][j].sub(b[i][j]);
+        }
+    }
+    c
+}
+
+#[inline]
+fn ball_transition(delta: Ball, m: usize) -> BallMat {
+    let mut f = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        let mut power = Ball::ONE;
+        for j in i..m {
+            if j > i {
+                power = power.mul(delta);
+            }
+            f[i][j] = power.div_positive(Ball::exact(factorial(j - i)));
+        }
+    }
+    f
+}
+
+#[inline]
+fn ball_process_noise(delta: Ball, q: Ball, m: usize) -> BallMat {
+    let mut powers = [Ball::ONE; 2 * MAX_ORDER];
+    for exponent in 1..powers.len() {
+        powers[exponent] = powers[exponent - 1].mul(delta);
+    }
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..m {
+        for j in 0..m {
+            let exponent = 2 * m - 1 - i - j;
+            let denominator =
+                factorial(m - 1 - i) * factorial(m - 1 - j) * exponent as f64;
+            out[i][j] = q
+                .mul(powers[exponent])
+                .div_positive(Ball::exact(denominator));
+        }
+    }
+    out
+}
+
+#[inline]
+fn ball_symmetrize(a: &mut BallMat, m: usize) {
+    for i in 0..m {
+        for j in (i + 1)..m {
+            let off = a[i][j].add(a[j][i]).scale(0.5);
+            a[i][j] = off;
+            a[j][i] = off;
+        }
+    }
+}
+
+/// Intersect a proper covariance enclosure with its exact PSD invariant.
+///
+/// Once the diffuse rank is exhausted, `P*` is the conditional covariance of
+/// the state. Its diagonal is therefore nonnegative at every measurement
+/// update and prediction. A componentwise interval evaluation of
+/// `P - PH'(HPH' + R)⁻¹HP` forgets that dependency and can widen a diagonal
+/// through zero after repeated rank-one subtractions, even though the exact
+/// innovation is bounded below by the positive observation variance `R`.
+///
+/// This intersection restores proof information supplied by the statistical
+/// model; it is not a numerical tolerance. A wholly negative or non-finite
+/// diagonal still signals an inconsistent enclosure and fails closed.
+#[inline]
+fn intersect_proper_covariance_psd(
+    covariance: &mut BallMat,
+    order: usize,
+) -> Result<(), SplineScoreProofError> {
+    for (index, row) in covariance.iter_mut().enumerate().take(order) {
+        let diagonal = &mut row[index];
+        if !diagonal.is_finite() || diagonal.hi < 0.0 {
+            return Err(SplineScoreProofError::InvalidArithmetic {
+                context: "proper covariance PSD intersection",
+            });
+        }
+        diagonal.lo = diagonal.lo.max(0.0);
+    }
+    Ok(())
+}
+
 /// Per-node filter storage needed by the RTS backward pass.
 struct FilterStep {
     /// Filtered mean `a_{t|t}` and proper covariance `P*_{t|t}`.
@@ -388,6 +890,20 @@ struct FilterPass {
     sum_v2_over_f_d2: f64,
     sum_v2_over_f_d3: f64,
     /// Number of proper (non-diffuse) innovations.
+    n_proper: usize,
+}
+
+/// The scalar criterion accumulators with directed-rounding enclosures.
+#[derive(Debug)]
+struct BallFilterPass {
+    sum_log_f: Ball,
+    sum_log_f_d1: Ball,
+    sum_log_f_d2: Ball,
+    sum_log_f_d3: Ball,
+    sum_v2_over_f: Ball,
+    sum_v2_over_f_d1: Ball,
+    sum_v2_over_f_d2: Ball,
+    sum_v2_over_f_d3: Ball,
     n_proper: usize,
 }
 
@@ -465,7 +981,11 @@ fn run_filter<const RECORD_STEPS: bool>(
                 m_inf[i] = p_inf[i][0];
             }
             let f_inf = m_inf[0];
-            if f_inf > INNOVATION_VAR_FLOOR {
+            if !f_inf.is_finite() {
+                return Err(format!(
+                    "spline scan: non-finite diffuse innovation variance at node {t}: {f_inf}"
+                ));
+            } else if f_inf > 0.0 {
                 // Exact diffuse update (Koopman 1997): the κ→∞ limit of the
                 // standard update; the diffuse step contributes −½·log F_∞ to
                 // the restricted likelihood and consumes one diffuse dimension.
@@ -513,15 +1033,22 @@ fn run_filter<const RECORD_STEPS: bool>(
                 if diffuse_rank == 0 {
                     p_inf = [[0.0; MAX_ORDER]; MAX_ORDER];
                 }
-            } else {
+            } else if f_inf == 0.0 {
                 // Diffuse direction orthogonal to H: this observation is an
                 // ordinary proper update of P* even though diffuse rank remains.
                 proper_update = true;
+            } else {
+                return Err(format!(
+                    "spline scan: non-positive diffuse innovation variance at node {t}: {f_inf}"
+                ));
             }
         }
         if proper_update {
-            if f_star <= INNOVATION_VAR_FLOOR {
-                return Err("spline scan: non-positive innovation variance".to_string());
+            if !(f_star.is_finite() && f_star > 0.0) {
+                return Err(format!(
+                    "spline scan: non-positive or non-finite proper innovation variance \
+                     at node {t}: {f_star}"
+                ));
             }
             let inv_f = 1.0 / f_star;
             // Quotient jets in the recursive Leibniz form: for s = num/f,
@@ -686,6 +1213,346 @@ fn run_filter<const RECORD_STEPS: bool>(
     })
 }
 
+/// Directed-rounding twin of [`run_filter`] used by automatic REML selection.
+///
+/// The recurrence follows the production diffuse filter operation for
+/// operation, but every scalar carries an outward interval. Its cost is
+/// `O(n·order³)` (the same fixed-size covariance propagations as the scalar
+/// pass), with no data-dependent refinement knobs. A denominator is used only
+/// after its innovation ball is proved strictly positive; if the ball contains
+/// zero, the typed proof refusal is returned at that exact node.
+fn run_filter_ball(
+    nodes: &[PooledNode],
+    q: Ball,
+    order: usize,
+) -> Result<BallFilterPass, SplineScoreProofError> {
+    let mut a: BallVec = [Ball::ZERO; MAX_ORDER];
+    let mut a_d1: BallVec = [Ball::ZERO; MAX_ORDER];
+    let mut a_d2: BallVec = [Ball::ZERO; MAX_ORDER];
+    let mut a_d3: BallVec = [Ball::ZERO; MAX_ORDER];
+    let mut p_star: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    let mut p_star_d1: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    let mut p_star_d2: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    let mut p_star_d3: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    let mut p_inf: BallMat = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        p_inf[i][i] = Ball::ONE;
+    }
+    let mut diffuse_rank = order;
+    let mut sum_log_f = Ball::ZERO;
+    let mut sum_log_f_d1 = Ball::ZERO;
+    let mut sum_log_f_d2 = Ball::ZERO;
+    let mut sum_log_f_d3 = Ball::ZERO;
+    let mut sum_v2_over_f = Ball::ZERO;
+    let mut sum_v2_over_f_d1 = Ball::ZERO;
+    let mut sum_v2_over_f_d2 = Ball::ZERO;
+    let mut sum_v2_over_f_d3 = Ball::ZERO;
+    let mut n_proper = 0usize;
+
+    for t in 0..nodes.len() {
+        let r = Ball::ONE.div_positive(Ball::exact(nodes[t].w));
+        let v = Ball::exact(nodes[t].y).sub(a[0]);
+        let v_d1 = a_d1[0].neg();
+        let v_d2 = a_d2[0].neg();
+        let v_d3 = a_d3[0].neg();
+        let mut m_star: BallVec = [Ball::ZERO; MAX_ORDER];
+        let mut m_star_d1: BallVec = [Ball::ZERO; MAX_ORDER];
+        let mut m_star_d2: BallVec = [Ball::ZERO; MAX_ORDER];
+        let mut m_star_d3: BallVec = [Ball::ZERO; MAX_ORDER];
+        for i in 0..order {
+            m_star[i] = p_star[i][0];
+            m_star_d1[i] = p_star_d1[i][0];
+            m_star_d2[i] = p_star_d2[i][0];
+            m_star_d3[i] = p_star_d3[i][0];
+        }
+        let f_star = m_star[0].add(r);
+        let f_star_d1 = m_star_d1[0];
+        let f_star_d2 = m_star_d2[0];
+        let f_star_d3 = m_star_d3[0];
+
+        let mut proper_update = diffuse_rank == 0;
+        if diffuse_rank > 0 {
+            let mut m_inf: BallVec = [Ball::ZERO; MAX_ORDER];
+            for i in 0..order {
+                m_inf[i] = p_inf[i][0];
+            }
+            let f_inf = m_inf[0];
+            if f_inf.lo == 0.0 && f_inf.hi == 0.0 {
+                // The observation is exactly orthogonal to the remaining
+                // diffuse subspace. It receives an ordinary proper update
+                // without consuming diffuse rank.
+                proper_update = true;
+            } else {
+                require_positive_innovation(t, SplineInnovationKind::Diffuse, f_inf)?;
+            }
+            if !proper_update {
+                let inv_f_inf = Ball::ONE.div_positive(f_inf);
+                let inv_f_inf_sq = inv_f_inf.square();
+                for i in 0..order {
+                    let k_inf = m_inf[i].mul(inv_f_inf);
+                    a[i] = a[i].add(k_inf.mul(v));
+                    a_d1[i] = a_d1[i].add(k_inf.mul(v_d1));
+                    a_d2[i] = a_d2[i].add(k_inf.mul(v_d2));
+                    a_d3[i] = a_d3[i].add(k_inf.mul(v_d3));
+                }
+                let mut p_new = p_star;
+                let mut p_new_d1 = p_star_d1;
+                let mut p_new_d2 = p_star_d2;
+                let mut p_new_d3 = p_star_d3;
+                for i in 0..order {
+                    for j in 0..order {
+                        let inf_product = m_inf[i].mul(m_inf[j]);
+                        let subtract_left = m_inf[i].mul(m_star[j]).mul(inv_f_inf);
+                        let subtract_right = m_star[i].mul(m_inf[j]).mul(inv_f_inf);
+                        let add_star = inf_product.mul(f_star).mul(inv_f_inf_sq);
+                        p_new[i][j] = p_new[i][j]
+                            .sub(subtract_left)
+                            .sub(subtract_right)
+                            .add(add_star);
+
+                        let subtract_left_d1 = m_inf[i].mul(m_star_d1[j]).mul(inv_f_inf);
+                        let subtract_right_d1 = m_star_d1[i].mul(m_inf[j]).mul(inv_f_inf);
+                        p_new_d1[i][j] = p_new_d1[i][j]
+                            .sub(subtract_left_d1)
+                            .sub(subtract_right_d1)
+                            .add(inf_product.mul(f_star_d1).mul(inv_f_inf_sq));
+
+                        let subtract_left_d2 = m_inf[i].mul(m_star_d2[j]).mul(inv_f_inf);
+                        let subtract_right_d2 = m_star_d2[i].mul(m_inf[j]).mul(inv_f_inf);
+                        p_new_d2[i][j] = p_new_d2[i][j]
+                            .sub(subtract_left_d2)
+                            .sub(subtract_right_d2)
+                            .add(inf_product.mul(f_star_d2).mul(inv_f_inf_sq));
+
+                        let subtract_left_d3 = m_inf[i].mul(m_star_d3[j]).mul(inv_f_inf);
+                        let subtract_right_d3 = m_star_d3[i].mul(m_inf[j]).mul(inv_f_inf);
+                        p_new_d3[i][j] = p_new_d3[i][j]
+                            .sub(subtract_left_d3)
+                            .sub(subtract_right_d3)
+                            .add(inf_product.mul(f_star_d3).mul(inv_f_inf_sq));
+                    }
+                }
+                p_star = p_new;
+                p_star_d1 = p_new_d1;
+                p_star_d2 = p_new_d2;
+                p_star_d3 = p_new_d3;
+                ball_symmetrize(&mut p_star, order);
+                ball_symmetrize(&mut p_star_d1, order);
+                ball_symmetrize(&mut p_star_d2, order);
+                ball_symmetrize(&mut p_star_d3, order);
+                for i in 0..order {
+                    for j in 0..order {
+                        p_inf[i][j] =
+                            p_inf[i][j].sub(m_inf[i].mul(m_inf[j]).mul(inv_f_inf));
+                    }
+                }
+                ball_symmetrize(&mut p_inf, order);
+                diffuse_rank -= 1;
+                if diffuse_rank == 0 {
+                    p_inf = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+                    intersect_proper_covariance_psd(&mut p_star, order)?;
+                }
+            }
+        }
+
+        if proper_update {
+            require_positive_innovation(t, SplineInnovationKind::Proper, f_star)?;
+            let inv_f = Ball::ONE.div_positive(f_star);
+            let mut gain = [Ball::ZERO; MAX_ORDER];
+            let mut gain_d1 = [Ball::ZERO; MAX_ORDER];
+            let mut gain_d2 = [Ball::ZERO; MAX_ORDER];
+            let mut gain_d3 = [Ball::ZERO; MAX_ORDER];
+            for i in 0..order {
+                gain[i] = m_star[i].mul(inv_f);
+                gain_d1[i] = m_star_d1[i]
+                    .sub(gain[i].mul(f_star_d1))
+                    .mul(inv_f);
+                gain_d2[i] = m_star_d2[i]
+                    .sub(gain_d1[i].mul(f_star_d1).scale(2.0))
+                    .sub(gain[i].mul(f_star_d2))
+                    .mul(inv_f);
+                gain_d3[i] = m_star_d3[i]
+                    .sub(gain_d2[i].mul(f_star_d1).scale(3.0))
+                    .sub(gain_d1[i].mul(f_star_d2).scale(3.0))
+                    .sub(gain[i].mul(f_star_d3))
+                    .mul(inv_f);
+            }
+            let a_old_d1 = a_d1;
+            let a_old_d2 = a_d2;
+            let a_old_d3 = a_d3;
+            for i in 0..order {
+                a[i] = a[i].add(gain[i].mul(v));
+                a_d1[i] = a_old_d1[i]
+                    .add(gain_d1[i].mul(v))
+                    .add(gain[i].mul(v_d1));
+                a_d2[i] = a_old_d2[i]
+                    .add(gain_d2[i].mul(v))
+                    .add(gain_d1[i].mul(v_d1).scale(2.0))
+                    .add(gain[i].mul(v_d2));
+                a_d3[i] = a_old_d3[i]
+                    .add(gain_d3[i].mul(v))
+                    .add(gain_d2[i].mul(v_d1).scale(3.0))
+                    .add(gain_d1[i].mul(v_d2).scale(3.0))
+                    .add(gain[i].mul(v_d3));
+            }
+
+            let mut p_new = p_star;
+            let mut p_new_d1 = p_star_d1;
+            let mut p_new_d2 = p_star_d2;
+            let mut p_new_d3 = p_star_d3;
+            for i in 0..order {
+                for j in 0..order {
+                    let mm = m_star[i].mul(m_star[j]);
+                    let mm_d1 = m_star_d1[i]
+                        .mul(m_star[j])
+                        .add(m_star[i].mul(m_star_d1[j]));
+                    let mm_d2 = m_star_d2[i]
+                        .mul(m_star[j])
+                        .add(m_star_d1[i].mul(m_star_d1[j]).scale(2.0))
+                        .add(m_star[i].mul(m_star_d2[j]));
+                    let mm_d3 = m_star_d3[i]
+                        .mul(m_star[j])
+                        .add(m_star_d2[i].mul(m_star_d1[j]).scale(3.0))
+                        .add(m_star_d1[i].mul(m_star_d2[j]).scale(3.0))
+                        .add(m_star[i].mul(m_star_d3[j]));
+                    let s0 = mm.mul(inv_f);
+                    let s1 = mm_d1.sub(s0.mul(f_star_d1)).mul(inv_f);
+                    let s2 = mm_d2
+                        .sub(s1.mul(f_star_d1).scale(2.0))
+                        .sub(s0.mul(f_star_d2))
+                        .mul(inv_f);
+                    let s3 = mm_d3
+                        .sub(s2.mul(f_star_d1).scale(3.0))
+                        .sub(s1.mul(f_star_d2).scale(3.0))
+                        .sub(s0.mul(f_star_d3))
+                        .mul(inv_f);
+                    p_new[i][j] = p_new[i][j].sub(s0);
+                    p_new_d1[i][j] = p_new_d1[i][j].sub(s1);
+                    p_new_d2[i][j] = p_new_d2[i][j].sub(s2);
+                    p_new_d3[i][j] = p_new_d3[i][j].sub(s3);
+                }
+            }
+            p_star = p_new;
+            p_star_d1 = p_new_d1;
+            p_star_d2 = p_new_d2;
+            p_star_d3 = p_new_d3;
+            ball_symmetrize(&mut p_star, order);
+            ball_symmetrize(&mut p_star_d1, order);
+            ball_symmetrize(&mut p_star_d2, order);
+            ball_symmetrize(&mut p_star_d3, order);
+            intersect_proper_covariance_psd(&mut p_star, order)?;
+
+            let vv = v.square();
+            let vv_d1 = v.mul(v_d1).scale(2.0);
+            let vv_d2 = v_d1.square().add(v.mul(v_d2)).scale(2.0);
+            let vv_d3 = v.mul(v_d3).add(v_d1.mul(v_d2).scale(3.0)).scale(2.0);
+            let logf_d1 = f_star_d1.mul(inv_f);
+            let logf_d2 = f_star_d2.mul(inv_f).sub(logf_d1.square());
+            let logf_d3 = f_star_d3
+                .mul(inv_f)
+                .sub(f_star_d2.mul(inv_f).mul(logf_d1).scale(3.0))
+                .add(logf_d1.square().mul(logf_d1).scale(2.0));
+            sum_log_f = sum_log_f.add(f_star.ln_positive());
+            sum_log_f_d1 = sum_log_f_d1.add(logf_d1);
+            sum_log_f_d2 = sum_log_f_d2.add(logf_d2);
+            sum_log_f_d3 = sum_log_f_d3.add(logf_d3);
+            let t0 = vv.mul(inv_f);
+            let t1 = vv_d1.sub(t0.mul(f_star_d1)).mul(inv_f);
+            let t2 = vv_d2
+                .sub(t1.mul(f_star_d1).scale(2.0))
+                .sub(t0.mul(f_star_d2))
+                .mul(inv_f);
+            let t3 = vv_d3
+                .sub(t2.mul(f_star_d1).scale(3.0))
+                .sub(t1.mul(f_star_d2).scale(3.0))
+                .sub(t0.mul(f_star_d3))
+                .mul(inv_f);
+            sum_v2_over_f = sum_v2_over_f.add(t0);
+            sum_v2_over_f_d1 = sum_v2_over_f_d1.add(t1);
+            sum_v2_over_f_d2 = sum_v2_over_f_d2.add(t2);
+            sum_v2_over_f_d3 = sum_v2_over_f_d3.add(t3);
+            n_proper += 1;
+        }
+
+        if t + 1 < nodes.len() {
+            let delta = Ball::exact(nodes[t + 1].x).sub(Ball::exact(nodes[t].x));
+            let f_t = ball_transition(delta, order);
+            a = ball_mat_vec(&f_t, &a, order);
+            a_d1 = ball_mat_vec(&f_t, &a_d1, order);
+            a_d2 = ball_mat_vec(&f_t, &a_d2, order);
+            a_d3 = ball_mat_vec(&f_t, &a_d3, order);
+            let f_t_t = ball_mat_t(&f_t, order);
+            let q_noise = ball_process_noise(delta, q, order);
+            let mut p_next = ball_mat_add(
+                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star, order), &f_t_t, order),
+                &q_noise,
+                order,
+            );
+            let mut p_next_d1 = ball_mat_sub(
+                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d1, order), &f_t_t, order),
+                &q_noise,
+                order,
+            );
+            let mut p_next_d2 = ball_mat_add(
+                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d2, order), &f_t_t, order),
+                &q_noise,
+                order,
+            );
+            let mut p_next_d3 = ball_mat_sub(
+                &ball_mat_mul(&ball_mat_mul(&f_t, &p_star_d3, order), &f_t_t, order),
+                &q_noise,
+                order,
+            );
+            ball_symmetrize(&mut p_next, order);
+            ball_symmetrize(&mut p_next_d1, order);
+            ball_symmetrize(&mut p_next_d2, order);
+            ball_symmetrize(&mut p_next_d3, order);
+            p_star = p_next;
+            p_star_d1 = p_next_d1;
+            p_star_d2 = p_next_d2;
+            p_star_d3 = p_next_d3;
+            if diffuse_rank > 0 {
+                let mut pi_next =
+                    ball_mat_mul(&ball_mat_mul(&f_t, &p_inf, order), &f_t_t, order);
+                ball_symmetrize(&mut pi_next, order);
+                p_inf = pi_next;
+            } else {
+                intersect_proper_covariance_psd(&mut p_star, order)?;
+            }
+        }
+    }
+
+    let pass = BallFilterPass {
+        sum_log_f,
+        sum_log_f_d1,
+        sum_log_f_d2,
+        sum_log_f_d3,
+        sum_v2_over_f,
+        sum_v2_over_f_d1,
+        sum_v2_over_f_d2,
+        sum_v2_over_f_d3,
+        n_proper,
+    };
+    if [
+        pass.sum_log_f,
+        pass.sum_log_f_d1,
+        pass.sum_log_f_d2,
+        pass.sum_log_f_d3,
+        pass.sum_v2_over_f,
+        pass.sum_v2_over_f_d1,
+        pass.sum_v2_over_f_d2,
+        pass.sum_v2_over_f_d3,
+    ]
+    .into_iter()
+    .any(|ball| !ball.is_finite())
+    {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "diffuse filter accumulator",
+        });
+    }
+    Ok(pass)
+}
+
 /// Fitted exact smoothing-spline posterior on the pooled knots.
 #[derive(Clone, Debug)]
 pub struct SplineScanFit {
@@ -841,6 +1708,102 @@ fn concentrated_criterion_jet(
     ))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct CertifiedCriterionJet {
+    jet: ScoreJet,
+    value: Ball,
+    derivative: Ball,
+    curvature: Ball,
+    third: Ball,
+}
+
+/// The concentrated criterion evaluated once with a simultaneous
+/// directed-rounding proof of all four returned components.
+fn certified_concentrated_criterion_jet(
+    nodes: &[PooledNode],
+    ssr_within: f64,
+    n_obs: usize,
+    log_lambda: f64,
+    order: usize,
+) -> Result<CertifiedCriterionJet, SplineScoreProofError> {
+    let q_value = gam_problem::checked_exp_log_strength(-log_lambda)
+        .map_err(|error| {
+            SplineScoreProofError::InvalidInput(format!(
+                "spline scan inverse log strength: {error}"
+            ))
+        })?;
+    let q_enclosure = gam_math::score_opt::certified_exp(-log_lambda).ok_or(
+        SplineScoreProofError::InvalidArithmetic {
+            context: "inverse log-strength exponential",
+        },
+    )?;
+    let q = Ball::certified(q_value, q_enclosure);
+    let pass = run_filter_ball(nodes, q, order)?;
+    if pass.n_proper != nodes.len() - order {
+        return Err(SplineScoreProofError::InvalidInput(format!(
+            "spline scan: expected {} proper innovations, got {} (diffuse rank not consumed)",
+            nodes.len() - order,
+            pass.n_proper
+        )));
+    }
+
+    let dof = Ball::exact((n_obs - order) as f64);
+    let rss = pass.sum_v2_over_f.add(Ball::exact(ssr_within));
+    if !(rss.lo > 0.0) {
+        return Err(SplineScoreProofError::NonPositiveProfileResidual {
+            enclosure: rss.interval(),
+        });
+    }
+    let sigma2 = rss.div_positive(dof);
+    let rss_d1 = pass.sum_v2_over_f_d1;
+    let rss_d2 = pass.sum_v2_over_f_d2;
+    let rss_d3 = pass.sum_v2_over_f_d3;
+    let rss_log_d1 = rss_d1.div_positive(rss);
+    let rss_log_d2 = rss_d2
+        .div_positive(rss)
+        .sub(rss_log_d1.square());
+    let rss_log_d3 = rss_d3
+        .div_positive(rss)
+        .sub(rss_d2.div_positive(rss).mul(rss_log_d1).scale(3.0))
+        .add(rss_log_d1.square().mul(rss_log_d1).scale(2.0));
+    let value = pass
+        .sum_log_f
+        .add(dof.mul(sigma2.ln_positive()))
+        .scale(-0.5);
+    let derivative = pass
+        .sum_log_f_d1
+        .add(dof.mul(rss_log_d1))
+        .scale(-0.5);
+    let curvature = pass
+        .sum_log_f_d2
+        .add(dof.mul(rss_log_d2))
+        .scale(-0.5);
+    let third = pass
+        .sum_log_f_d3
+        .add(dof.mul(rss_log_d3))
+        .scale(-0.5);
+    if [value, derivative, curvature, third]
+        .into_iter()
+        .any(|ball| !ball.is_finite())
+    {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "concentrated criterion",
+        });
+    }
+    Ok(CertifiedCriterionJet {
+        jet: ScoreJet {
+            value: value.value,
+            derivative: derivative.value,
+            curvature: curvature.value,
+            third: third.value,
+        },
+        value,
+        derivative,
+        curvature,
+        third,
+    })
+}
+
 /// Rigorous interval enclosure of the score's first two derivatives.
 ///
 /// After eliminating the diffuse polynomial null space, the Gaussian profile
@@ -852,38 +1815,42 @@ fn concentrated_criterion_jet(
 /// `|L''''| <= 1/2 (r/4 + 26 nu)`,
 ///
 /// where `r` is the number of proper innovation modes and `nu=n-order` is the
-/// residual d.f. The fourth-order coefficients: per determinant mode
-/// `|u''''| = u(1-u)|1-14u+36u^2-24u^3| <= 1/4` on `u in [0,1]`, and per
-/// residual kernel `t = z^2 (1-u)` every ratio `|t^{(k)}/t| <= 1` for
-/// `k <= 4`, so Faa di Bruno on `log R` gives `1+4+3+12+6 = 26`. Within-tie
-/// residual energy is lambda-independent and only tightens these bounds.
+/// residual d.f. For one normalized determinant contribution, the fourth
+/// derivative is `u(1-u)(1-6u+6u^2)`, whose magnitude is at most `1/4` on
+/// `u in [0,1]`. For each residual kernel `t = z^2 (1-u)`, every ratio
+/// `|t^{(k)}/t| <= 1` for `k <= 4`, so Faa di Bruno on `log R` gives
+/// `1+4+3+12+6 = 26`. Within-tie residual energy is lambda-independent and
+/// only tightens these bounds.
 /// Endpoint jets plus these analytic Lipschitz bounds therefore enclose the
 /// entire interval without a sampling lattice.
 ///
-/// The pad is built ENTIRELY from the two endpoint jets and closed-form
-/// Lipschitz constants, so the search's own endpoint samples are the only
-/// evaluations it needs: `maximize_score_1d` hands them in (`left`/`right`)
-/// and this function performs no filter pass of its own. It used to re-run
-/// `concentrated_criterion_jet` at both endpoints of every cell, which made
-/// each branch-and-bound cell cost three O(n) filter passes (two here plus the
-/// midpoint evaluation) where one suffices.
+/// The pad is built from the two endpoint BALLS and closed-form Lipschitz
+/// constants. The search caches the ball produced alongside each endpoint jet,
+/// so this function performs no filter pass of its own. Both the Taylor anchor
+/// and its reported numerical resolution therefore include the endpoint
+/// evaluator's directed-rounding error.
 fn concentrated_criterion_enclosure(
     n_nodes: usize,
     n_obs: usize,
     left: ScoreSample,
     right: ScoreSample,
+    left_certificate: CertifiedCriterionJet,
+    right_certificate: CertifiedCriterionJet,
     order: usize,
-) -> Result<DerivativeEnclosure, String> {
+) -> Result<DerivativeEnclosure, SplineScoreProofError> {
     let (lo, hi) = (left.x, right.x);
     if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
-        return Err(format!(
+        return Err(SplineScoreProofError::InvalidInput(format!(
             "spline scan: invalid score-enclosure interval [{lo}, {hi}]"
-        ));
+        )));
     }
-    let width = hi - lo;
-    let proper_modes = (n_nodes - order) as f64;
-    let residual_dof = (n_obs - order) as f64;
-    let fourth_abs_bound = 0.5 * (0.25 * proper_modes + 26.0 * residual_dof);
+    let width = Ball::exact(hi).sub(Ball::exact(lo));
+    let proper_modes = Ball::exact((n_nodes - order) as f64);
+    let residual_dof = Ball::exact((n_obs - order) as f64);
+    let fourth_abs_bound = proper_modes
+        .scale(0.25)
+        .add(residual_dof.scale(26.0))
+        .scale(0.5);
     // Derivative enclosure from ENDPOINT JETS through third order, not a
     // global constant. For any u in [lo, hi], Taylor with the L4-Lipschitz
     // third derivative gives
@@ -898,23 +1865,84 @@ fn concentrated_criterion_enclosure(
     // exact V''' endpoint jets makes the pad CUBIC in w on plateaus, so a
     // tail cell certifies at width ~(|V'|/L4)^{1/3} and the walk costs
     // e^{X/3} — each exact derivative order divides the exponent again.
-    let curvature_endpoint_abs = left.curvature.abs().max(right.curvature.abs());
-    let third_endpoint_abs = left.third.abs().max(right.third.abs());
-    let derivative_radius = curvature_endpoint_abs * width
-        + 0.5 * third_endpoint_abs * width * width
-        + fourth_abs_bound * width * width * width / 6.0;
+    let curvature_endpoint_abs = left_certificate
+        .curvature
+        .lo
+        .abs()
+        .max(left_certificate.curvature.hi.abs())
+        .max(right_certificate.curvature.lo.abs())
+        .max(right_certificate.curvature.hi.abs());
+    let third_endpoint_abs = left_certificate
+        .third
+        .lo
+        .abs()
+        .max(left_certificate.third.hi.abs())
+        .max(right_certificate.third.lo.abs())
+        .max(right_certificate.third.hi.abs());
+    let width2 = width.square();
+    let width3 = width2.mul(width);
+    let derivative_radius = Ball::exact(curvature_endpoint_abs)
+        .mul(width)
+        .add(Ball::exact(third_endpoint_abs).mul(width2).scale(0.5))
+        .add(fourth_abs_bound.mul(width3).div_positive(Ball::exact(6.0)))
+        .hi;
     // Curvature enclosure, endpoint-anchored the same way: V''' is
     // L4-Lipschitz, so |V''(u) − V''(e)| ≤ |V'''(e)|·w + L4·w²/2.
-    let curvature_radius = third_endpoint_abs * width + 0.5 * fourth_abs_bound * width * width;
+    let curvature_radius = Ball::exact(third_endpoint_abs)
+        .mul(width)
+        .add(fourth_abs_bound.mul(width2).scale(0.5))
+        .hi;
+    let derivative = ClosedInterval::new(
+        left_certificate
+            .derivative
+            .lo
+            .min(right_certificate.derivative.lo),
+        left_certificate
+            .derivative
+            .hi
+            .max(right_certificate.derivative.hi),
+    )
+    .add(ClosedInterval::new(-derivative_radius, derivative_radius));
+    let curvature = ClosedInterval::new(
+        left_certificate
+            .curvature
+            .lo
+            .min(right_certificate.curvature.lo),
+        left_certificate
+            .curvature
+            .hi
+            .max(right_certificate.curvature.hi),
+    )
+    .add(ClosedInterval::new(-curvature_radius, curvature_radius));
+    let derivative_ball = Ball::certified(0.0, derivative);
+    let from_left = left_certificate.value.add(derivative_ball.mul(Ball::certified(
+        0.0,
+        ClosedInterval::new(0.0, width.hi),
+    )));
+    let from_right = right_certificate.value.add(derivative_ball.mul(Ball::certified(
+        0.0,
+        ClosedInterval::new(-width.hi, 0.0),
+    )));
+    let score_value = ClosedInterval::new(
+        from_left.lo.max(from_right.lo),
+        from_left.hi.min(from_right.hi),
+    );
+    if !(score_value.lo <= score_value.hi) {
+        return Err(SplineScoreProofError::InvalidArithmetic {
+            context: "score-value enclosure intersection",
+        });
+    }
+    let evaluation_error = left_certificate
+        .value
+        .forward_error()
+        .max(right_certificate.value.forward_error());
     Ok(DerivativeEnclosure {
-        derivative: ClosedInterval::outward(
-            (left.derivative - derivative_radius).min(right.derivative - derivative_radius),
-            (left.derivative + derivative_radius).max(right.derivative + derivative_radius),
-        ),
-        curvature: ClosedInterval::outward(
-            (left.curvature - curvature_radius).min(right.curvature - curvature_radius),
-            (left.curvature + curvature_radius).max(right.curvature + curvature_radius),
-        ),
+        score: ScoreValueEnclosure {
+            value: score_value,
+            evaluation_error,
+        },
+        derivative,
+        curvature,
     })
 }
 
@@ -1218,11 +2246,11 @@ pub fn fit_spline_scan(
     y: &[f64],
     w: &[f64],
     order: usize,
-) -> Result<SplineScanFit, String> {
+) -> Result<SplineScanFit, SplineScoreProofError> {
     if order == 0 || order > MAX_ORDER {
-        return Err(format!(
+        return Err(SplineScoreProofError::InvalidInput(format!(
             "spline scan: order must be in 1..={MAX_ORDER}, got {order}"
-        ));
+        )));
     }
     let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
     // Covariate-rescaling equivariance (#1214). The order-`m` IWP process noise
@@ -1239,33 +2267,210 @@ pub fn fit_spline_scan(
     // `(2m−1)·log L` where `L` is the abscissa span (which scales linearly with
     // the covariate), so the search is performed in scale-free units and the
     // selected `q · L^{2m−1}` — hence the posterior `f(x)` — is invariant.
-    let span = nodes.last().map(|n| n.x).unwrap_or(0.0) - nodes.first().map(|n| n.x).unwrap_or(0.0);
-    let scale_shift = if span.is_finite() && span > 0.0 {
-        (2 * order - 1) as f64 * span.ln()
-    } else {
-        0.0
-    };
+    let first_x = nodes
+        .first()
+        .ok_or_else(|| {
+            SplineScoreProofError::InvalidInput(
+                "spline scan: pooled data unexpectedly contain no nodes".to_string(),
+            )
+        })?
+        .x;
+    let last_x = nodes
+        .last()
+        .ok_or_else(|| {
+            SplineScoreProofError::InvalidInput(
+                "spline scan: pooled data unexpectedly contain no nodes".to_string(),
+            )
+        })?
+        .x;
+    let span = last_x - first_x;
+    if !(span.is_finite() && span > 0.0) {
+        return Err(SplineScoreProofError::InvalidInput(format!(
+            "spline scan: pooled covariate span must be finite and positive, got {span}"
+        )));
+    }
+    let log_span = gam_math::score_opt::certified_ln_positive(span).ok_or(
+        SplineScoreProofError::InvalidArithmetic {
+            context: "covariate-span logarithm",
+        },
+    )?;
+    let log_span_representative = log_span.lo + 0.5 * (log_span.hi - log_span.lo);
+    let scale_shift = (2 * order - 1) as f64 * log_span_representative;
     let lo_anchor = LOG_LAMBDA_LO + scale_shift;
     let hi_anchor = LOG_LAMBDA_HI + scale_shift;
     let n_nodes = nodes.len();
+    let endpoint_certificates =
+        RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
     let search = maximize_score_1d(
         lo_anchor,
         hi_anchor,
         f64::EPSILON.sqrt(),
         |ll| {
-            concentrated_criterion_jet(&nodes, ssr_within, n_obs, ll, order).map(
-                |(value, derivative, curvature, third)| ScoreJet {
-                    value,
-                    derivative,
-                    curvature,
-                    third,
+            let certificate =
+                certified_concentrated_criterion_jet(&nodes, ssr_within, n_obs, ll, order)?;
+            endpoint_certificates
+                .borrow_mut()
+                .insert(ll.to_bits(), certificate);
+            Ok(certificate.jet)
+        },
+        |left, right| {
+            let certificates = endpoint_certificates.borrow();
+            let left_certificate = certificates.get(&left.x.to_bits()).copied().ok_or(
+                SplineScoreProofError::MissingEndpointCertificate {
+                    log_lambda: left.x,
                 },
+            )?;
+            let right_certificate = certificates.get(&right.x.to_bits()).copied().ok_or(
+                SplineScoreProofError::MissingEndpointCertificate {
+                    log_lambda: right.x,
+                },
+            )?;
+            concentrated_criterion_enclosure(
+                n_nodes,
+                n_obs,
+                left,
+                right,
+                left_certificate,
+                right_certificate,
+                order,
             )
         },
-        |left, right| concentrated_criterion_enclosure(n_nodes, n_obs, left, right, order),
     )
-    .map_err(|error| format!("spline scan: REML stationary isolation failed: {error}"))?;
+    .map_err(|error| match error {
+        gam_math::score_opt::ScoreSearchError::PointEvaluation { source, .. }
+        | gam_math::score_opt::ScoreSearchError::EnclosureEvaluation { source, .. } => source,
+        other => SplineScoreProofError::Search(other.to_string()),
+    })?;
+    if search.value_certificate.maximum_excess
+        > search.value_certificate.comparison_resolution
+    {
+        return Err(SplineScoreProofError::GlobalValueOrderingUnresolved {
+            maximum_excess: search.value_certificate.maximum_excess,
+            comparison_resolution: search.value_certificate.comparison_resolution,
+        });
+    }
+    enum KktKind {
+        LowerBoundary,
+        UpperBoundary,
+        Stationary,
+    }
+    let (kkt_bracket, kkt_kind) = match search.location {
+        ScoreOptimumLocation::LowerBoundary => (
+            ClosedInterval::point(search.lower_boundary.x),
+            KktKind::LowerBoundary,
+        ),
+        ScoreOptimumLocation::UpperBoundary => (
+            ClosedInterval::point(search.upper_boundary.x),
+            KktKind::UpperBoundary,
+        ),
+        ScoreOptimumLocation::Stationary(index) => (
+            search
+                .stationary_points
+                .get(index)
+                .ok_or_else(|| {
+                    SplineScoreProofError::Search(
+                        "optimizer returned an invalid stationary-point index".to_string(),
+                    )
+                })?
+                .bracket,
+            KktKind::Stationary,
+        ),
+        ScoreOptimumLocation::ResolutionFlat(index) => {
+            let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
+                SplineScoreProofError::Search(
+                    "optimizer returned an invalid resolution-flat index".to_string(),
+                )
+            })?;
+            return Err(SplineScoreProofError::OptimumResolutionFlat {
+                bracket: flat.bracket,
+                max_score_gap: flat.max_score_gap,
+                score_resolution: flat.score_resolution,
+            });
+        }
+    };
+    let kkt_enclosure = {
+        let certificates = endpoint_certificates.borrow();
+        let left_certificate = certificates
+            .get(&kkt_bracket.lo.to_bits())
+            .copied()
+            .ok_or(SplineScoreProofError::MissingEndpointCertificate {
+                log_lambda: kkt_bracket.lo,
+            })?;
+        let right_certificate = certificates
+            .get(&kkt_bracket.hi.to_bits())
+            .copied()
+            .ok_or(SplineScoreProofError::MissingEndpointCertificate {
+                log_lambda: kkt_bracket.hi,
+            })?;
+        let sample = |log_lambda: f64, certificate: CertifiedCriterionJet| ScoreSample {
+            x: log_lambda,
+            value: certificate.jet.value,
+            derivative: certificate.jet.derivative,
+            curvature: certificate.jet.curvature,
+            third: certificate.jet.third,
+        };
+        concentrated_criterion_enclosure(
+            n_nodes,
+            n_obs,
+            sample(kkt_bracket.lo, left_certificate),
+            sample(kkt_bracket.hi, right_certificate),
+            left_certificate,
+            right_certificate,
+            order,
+        )?
+    };
+    let kkt_holds = match kkt_kind {
+        KktKind::LowerBoundary => kkt_enclosure.derivative.hi <= 0.0,
+        KktKind::UpperBoundary => kkt_enclosure.derivative.lo >= 0.0,
+        KktKind::Stationary => {
+            kkt_enclosure.derivative.contains_zero() && kkt_enclosure.curvature.hi < 0.0
+        }
+    };
+    if !kkt_holds {
+        return Err(SplineScoreProofError::OptimumKktUncertified {
+            location: search.location,
+            bracket: kkt_bracket,
+            derivative: kkt_enclosure.derivative,
+            curvature: kkt_enclosure.curvature,
+        });
+    }
+    // The fixed-λ fitter below consumes the historical scalar recurrence.
+    // Before crossing that seam, independently re-evaluate the selected point
+    // and require every scalar component to lie in the directed ball that won
+    // the search. This is one O(n) pass per completed fit, not per search cell.
+    let selected_certificate = endpoint_certificates
+        .borrow()
+        .get(&search.optimum.x.to_bits())
+        .copied()
+        .ok_or_else(|| {
+            SplineScoreProofError::Search(format!(
+                "spline scan: selected log lambda {} has no cached score certificate",
+                search.optimum.x
+            ))
+        })?;
+    let independent = concentrated_criterion_jet(
+        &nodes,
+        ssr_within,
+        n_obs,
+        search.optimum.x,
+        order,
+    )
+    .map_err(SplineScoreProofError::Computation)?;
+    for (name, ball, scalar) in [
+        ("value", selected_certificate.value, independent.0),
+        ("derivative", selected_certificate.derivative, independent.1),
+        ("curvature", selected_certificate.curvature, independent.2),
+        ("third", selected_certificate.third, independent.3),
+    ] {
+        if !ball.interval().contains(scalar) {
+            return Err(SplineScoreProofError::Computation(format!(
+                "spline scan: selected {name} scalar {scalar} escapes its directed score ball {:?}",
+                ball.interval()
+            )));
+        }
+    }
     fit_spline_scan_at(x, y, w, search.optimum.x, None, order)
+        .map_err(SplineScoreProofError::Computation)
 }
 
 /// Lossless serializable snapshot of a [`SplineScanFit`] (#1034).
@@ -1712,6 +2917,8 @@ mod tests {
             let n_nodes = nodes.len();
             let evals = std::cell::Cell::new(0u64);
             let last_x = std::cell::Cell::new(f64::NAN);
+            let endpoint_certificates =
+                RefCell::new(HashMap::<u64, CertifiedCriterionJet>::new());
             let budget = 2_000_000u64;
             let result = gam_math::score_opt::maximize_score_1d(
                 lo,
@@ -1727,16 +2934,31 @@ mod tests {
                          evaluations (last log-lambda sample {ll:.9}; bracket \
                          [{lo:.3}, {hi:.3}]) — non-terminating subdivision reproduced"
                     );
-                    concentrated_criterion_jet(&nodes, ssr_within, n_obs, ll, order).map(
-                        |(value, derivative, curvature, third)| gam_math::score_opt::ScoreJet {
-                            value,
-                            derivative,
-                            curvature,
-                            third,
-                        },
+                    let certificate =
+                        certified_concentrated_criterion_jet(
+                            &nodes,
+                            ssr_within,
+                            n_obs,
+                            ll,
+                            order,
+                        )?;
+                    endpoint_certificates
+                        .borrow_mut()
+                        .insert(ll.to_bits(), certificate);
+                    Ok(certificate.jet)
+                },
+                |a, b| {
+                    let certificates = endpoint_certificates.borrow();
+                    let left = certificates.get(&a.x.to_bits()).copied().ok_or(
+                        SplineScoreProofError::MissingEndpointCertificate { log_lambda: a.x },
+                    )?;
+                    let right = certificates.get(&b.x.to_bits()).copied().ok_or(
+                        SplineScoreProofError::MissingEndpointCertificate { log_lambda: b.x },
+                    )?;
+                    concentrated_criterion_enclosure(
+                        n_nodes, n_obs, a, b, left, right, order,
                     )
                 },
-                |a, b| concentrated_criterion_enclosure(n_nodes, n_obs, a, b, order),
             );
             match result {
                 Ok(search) => {
@@ -1791,6 +3013,49 @@ mod tests {
                 let d1_fd = (fp - fm) / (2.0 * h);
                 let d2_fd = (fp - 2.0 * value + fm) / (h * h);
                 let d3_fd = (fp2 - 2.0 * fp + 2.0 * fm - fm2) / (2.0 * h * h * h);
+                // Independent finite-difference certificate: endpoint VALUE
+                // balls enclose the central quotient, and the global third-
+                // derivative theorem bounds its O(h²) truncation remainder.
+                let left_ball =
+                    certified_concentrated_criterion_jet(
+                        &nodes,
+                        within,
+                        n_obs,
+                        rho - h,
+                        order,
+                    )
+                    .expect("left value ball");
+                let right_ball =
+                    certified_concentrated_criterion_jet(
+                        &nodes,
+                        within,
+                        n_obs,
+                        rho + h,
+                        order,
+                    )
+                    .expect("right value ball");
+                let finite_difference = right_ball
+                    .value
+                    .sub(left_ball.value)
+                    .div_positive(Ball::exact(2.0 * h));
+                let proper_modes = (nodes.len() - order) as f64;
+                let residual_dof = (n_obs - order) as f64;
+                let third_bound = 0.5 * (0.25 * proper_modes + 6.0 * residual_dof);
+                let truncation = third_bound * h * h / 6.0;
+                let certified_center =
+                    certified_concentrated_criterion_jet(
+                        &nodes, within, n_obs, rho, order,
+                    )
+                    .expect("center derivative ball");
+                assert!(
+                    certified_center.derivative.hi >= finite_difference.lo - truncation
+                        && certified_center.derivative.lo
+                            <= finite_difference.hi + truncation,
+                    "order={order} rho={rho}: analytic derivative ball {:?} is disjoint \
+                     from independently value-differenced {:?} ± {truncation:e}",
+                    certified_center.derivative,
+                    finite_difference
+                );
                 let d1_scale = 1.0 + d1.abs().max(d1_fd.abs());
                 let d2_scale = 1.0 + d2.abs().max(d2_fd.abs());
                 let d3_scale = 1.0 + d3.abs().max(d3_fd.abs());
@@ -1808,6 +3073,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn directed_score_balls_contain_independent_scalar_jets_across_scales() {
+        let base_x = [0.0, 0.03, 0.11, 0.27, 0.52, 0.81, 1.17, 1.6];
+        let y = [2.0e3, -4.0e2, 8.0e2, 1.0e2, 3.5e2, -2.0e2, 7.0e2, 1.5e2];
+        let w = [1.0e-4, 2.0e4, 0.7, 1.4e3, 9.0e-3, 3.0e2, 1.2, 8.0e-2];
+        for order in 1..=MAX_ORDER {
+            for scale in [1.0e-1_f64, 1.0, 1.0e2] {
+                let x: Vec<f64> = base_x.iter().map(|value| scale * value).collect();
+                let (nodes, within, n_obs) =
+                    pool_nodes(&x, &y, &w, order).expect("adversarial pooled data");
+                let rho = (2 * order - 1) as f64 * scale.ln() + 0.35;
+                let certified =
+                    certified_concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                        .expect("directed score recurrence");
+                let scalar =
+                    concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
+                        .expect("independent scalar recurrence");
+                for (name, ball, reference) in [
+                    ("value", certified.value, scalar.0),
+                    ("derivative", certified.derivative, scalar.1),
+                    ("curvature", certified.curvature, scalar.2),
+                    ("third", certified.third, scalar.3),
+                ] {
+                    assert!(
+                        ball.interval().contains(reference),
+                        "order={order} scale={scale:e}: scalar {name} {reference} escaped {ball:?}"
+                    );
+                }
+
+                let point_sample = ScoreSample {
+                    x: rho,
+                    value: certified.jet.value,
+                    derivative: certified.jet.derivative,
+                    curvature: certified.jet.curvature,
+                    third: certified.jet.third,
+                };
+                let point_enclosure = concentrated_criterion_enclosure(
+                    nodes.len(),
+                    n_obs,
+                    point_sample,
+                    point_sample,
+                    certified,
+                    certified,
+                    order,
+                )
+                .expect("degenerate point enclosure");
+                assert_eq!(
+                    point_enclosure.derivative,
+                    certified.derivative.interval(),
+                    "a zero-width cell must preserve the certified point derivative exactly"
+                );
+                assert_eq!(
+                    point_enclosure.curvature,
+                    certified.curvature.interval(),
+                    "a zero-width cell must preserve the certified point curvature exactly"
+                );
+                assert_eq!(
+                    point_enclosure.score.value,
+                    certified.value.interval(),
+                    "a zero-width cell must preserve the certified point score exactly"
+                );
+
+                let rho_right = rho + 0.125;
+                let right = certified_concentrated_criterion_jet(
+                    &nodes,
+                    within,
+                    n_obs,
+                    rho_right,
+                    order,
+                )
+                .expect("right endpoint ball");
+                let enclosure = concentrated_criterion_enclosure(
+                    nodes.len(),
+                    n_obs,
+                    ScoreSample {
+                        x: rho,
+                        value: certified.jet.value,
+                        derivative: certified.jet.derivative,
+                        curvature: certified.jet.curvature,
+                        third: certified.jet.third,
+                    },
+                    ScoreSample {
+                        x: rho_right,
+                        value: right.jet.value,
+                        derivative: right.jet.derivative,
+                        curvature: right.jet.curvature,
+                        third: right.jet.third,
+                    },
+                    certified,
+                    right,
+                    order,
+                )
+                .expect("endpoint-anchored enclosure");
+                for certificate in [certified, right] {
+                    assert!(
+                        enclosure.derivative.lo <= certificate.derivative.lo
+                            && enclosure.derivative.hi >= certificate.derivative.hi,
+                        "exact endpoint derivative escaped the cell enclosure"
+                    );
+                    assert!(
+                        enclosure.curvature.lo <= certificate.curvature.lo
+                            && enclosure.curvature.hi >= certificate.curvature.hi,
+                        "exact endpoint curvature escaped the cell enclosure"
+                    );
+                    assert!(
+                        enclosure.score.value.lo <= certificate.value.lo
+                            && enclosure.score.value.hi >= certificate.value.hi,
+                        "exact endpoint score escaped the cell enclosure"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn score_proof_refuses_exactly_when_diffuse_innovation_ball_contains_zero() {
+        assert_eq!(
+            Ball::ZERO.square(),
+            Ball::ZERO,
+            "structural zero must survive squaring exactly"
+        );
+        assert_eq!(
+            Ball::ONE.square(),
+            Ball::ONE,
+            "the exact unit covariance must not acquire artificial width"
+        );
+        let tiny = f64::from_bits(1);
+        let nodes = [
+            PooledNode {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+            },
+            PooledNode {
+                x: tiny,
+                y: 1.0,
+                w: 1.0,
+            },
+            PooledNode {
+                x: 1.0,
+                y: -1.0,
+                w: 1.0,
+            },
+        ];
+        let error = run_filter_ball(&nodes, Ball::ONE, 2)
+            .expect_err("an underflow-wide diffuse innovation cannot be divided soundly");
+        assert!(matches!(
+            error,
+            SplineScoreProofError::InnovationContainsZero {
+                node: 1,
+                kind: SplineInnovationKind::Diffuse,
+                ..
+            }
+        ));
     }
 
     /// #1034 persistence seam: snapshot → JSON → restore must replay the

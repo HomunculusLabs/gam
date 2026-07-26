@@ -89,7 +89,10 @@ use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_with_permutation,
 };
-use gam_math::score_opt::{AffineRemlProfile, ScoreOptimumLocation};
+use gam_math::score_opt::{
+    AffineRemlProfile, ScoreOptimumLocation, certified_exp_representative,
+    certified_ln_positive,
+};
 use gam_problem::{MetricProvenance, RowMetric};
 use gam_terms::inference::structure_evidence::{StructureCertificate, StructureLedger};
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, s};
@@ -540,7 +543,20 @@ pub fn ridge_reml_select_weight(
         // complete representable log-domain even for ill-scaled Gram matrices.
         .map(|(&g, &m)| (g / gamma_max, m / gamma_max))
         .collect();
-    let boundary_score = scalar_observations * (aux_norm_sq / scalar_observations).ln();
+    let boundary_score_enclosure = certified_ln_positive(aux_norm_sq)
+        .ok_or_else(|| {
+            "ridge_reml_select_weight: could not enclose the full-shrinkage response log"
+                .to_string()
+        })?
+        .sub(
+            certified_ln_positive(scalar_observations).ok_or_else(|| {
+                "ridge_reml_select_weight: could not enclose the observation-count log"
+                    .to_string()
+            })?,
+        )
+        .scale(scalar_observations);
+    let boundary_score = boundary_score_enclosure.lo
+        + 0.5 * (boundary_score_enclosure.hi - boundary_score_enclosure.lo);
     if pairs.is_empty() {
         // G = 0: the ridge map is identically zero for every λ.
         return Ok(RidgeRemlWeight::FullShrinkage {
@@ -583,35 +599,43 @@ pub fn ridge_reml_select_weight(
     // Search the complete finite log(λ/γ_max) domain. The exact λ=∞
     // empirical-Bayes null is compared separately below, so it is never
     // represented by an arbitrary large finite weight.
-    let rho_lo = f64::MIN_POSITIVE.ln();
-    let rho_hi = (f64::MAX / 2.0).ln();
+    let rho_lo = certified_ln_positive(f64::MIN_POSITIVE)
+        .ok_or_else(|| {
+            "ridge_reml_select_weight: could not enclose the finite-domain lower bound"
+                .to_string()
+        })?
+        .lo;
+    let rho_hi = certified_ln_positive(f64::MAX / 2.0)
+        .ok_or_else(|| {
+            "ridge_reml_select_weight: could not enclose the finite-domain upper bound"
+                .to_string()
+        })?
+        .hi;
     let rho_tolerance = f64::EPSILON.sqrt();
     let search = profile
-        .maximize(rho_lo, rho_hi, rho_tolerance)
+        .maximize_value_ordered(rho_lo, rho_hi, rho_tolerance)
         .map_err(|error| format!("ridge_reml_select_weight: {error}"))?;
     let optimum = search.optimum;
     let score = -2.0 * optimum.value;
-    let gradient = -2.0 * optimum.derivative;
-    let curvature = -2.0 * optimum.curvature;
-    let gradient_scale = 1.0
-        + 2.0 * search.lower_boundary.derivative.abs()
-        + 2.0 * search.upper_boundary.derivative.abs()
-        + curvature.abs();
-    let gradient_tolerance = f64::EPSILON.sqrt() * gradient_scale;
-    // The λ→∞ boundary is EXACT (A = 0), the interior optimum is not, and the
-    // search now reports how much it could not resolve. Ties therefore go to
-    // the boundary across a band that is the certified uncertainty rather than
-    // an assumed epsilon: the interior is preferred only when it beats the
-    // exact null by more than everything the search could not see. The factor
-    // two carries `value_uncertainty` from the maximized profile's scale into
-    // this criterion's, since `score = -2 * optimum.value`.
-    let score_roundoff =
-        f64::EPSILON * (1.0 + score.abs() + boundary_score.abs()) + 2.0 * search.value_uncertainty;
-
-    if score + score_roundoff >= boundary_score {
+    let finite_criterion = search.value_certificate.maximum.scale(-2.0);
+    // Empirical-Bayes null recovery is the conservative decision: a finite
+    // weight is admitted only when its exact-real criterion interval lies
+    // strictly below the exact full-shrinkage interval. Overlap is numerical
+    // non-identifiability, so the exact null wins without an epsilon heuristic.
+    if finite_criterion.hi >= boundary_score_enclosure.lo {
         return Ok(RidgeRemlWeight::FullShrinkage {
             score: boundary_score,
         });
+    }
+    if search.value_certificate.maximum_excess
+        > search.value_certificate.comparison_resolution
+    {
+        return Err(format!(
+            "ridge_reml_select_weight: finite REML candidates are not globally ordered \
+             (maximum excess {}, comparison resolution {})",
+            search.value_certificate.maximum_excess,
+            search.value_certificate.comparison_resolution
+        ));
     }
     if search.location == ScoreOptimumLocation::LowerBoundary {
         return Err(
@@ -620,27 +644,36 @@ pub fn ridge_reml_select_weight(
                 .to_string(),
         );
     }
-    // A cell closed on the value side is not a certified stationary point: it
-    // says the cell's interior cannot beat this sample, not that the sample is
-    // a minimum. Since it did not tie with the exact null above, it is a real
-    // interior finding the search could not certify — a typed refusal, never a
-    // degraded answer.
-    if !matches!(search.location, ScoreOptimumLocation::Stationary(_))
-        || gradient.abs() > gradient_tolerance
-        || curvature <= 0.0
-    {
+    let ScoreOptimumLocation::Stationary(index) = search.location else {
         return Err(format!(
-            "ridge_reml_select_weight: continuous REML search did not certify an interior \
-             minimum (location={:?}, d/dlogλ={gradient}, curvature={curvature}, \
-             tolerance={gradient_tolerance}, value uncertainty={})",
-            search.location, search.value_uncertainty
+            "ridge_reml_select_weight: finite REML optimum is value-resolved but not an \
+             isolated stationary point ({:?})",
+            search.location
+        ));
+    };
+    let stationary = search.stationary_points.get(index).ok_or_else(|| {
+        "ridge_reml_select_weight: optimizer returned an invalid stationary index".to_string()
+    })?;
+    let kkt = profile
+        .enclose(stationary.bracket.lo, stationary.bracket.hi)
+        .map_err(|error| format!("ridge_reml_select_weight: {error}"))?;
+    if !(kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0) {
+        return Err(format!(
+            "ridge_reml_select_weight: exact-real interior maximum KKT certificate failed \
+             on {:?}: {kkt:?}",
+            stationary.bracket
         ));
     }
-    let lambda = gamma_max * optimum.x.exp();
-    if !lambda.is_finite() {
-        return Ok(RidgeRemlWeight::FullShrinkage {
-            score: boundary_score,
-        });
+    let relative_lambda = certified_exp_representative(optimum.x).ok_or_else(|| {
+        "ridge_reml_select_weight: could not construct the certified finite REML representative"
+            .to_string()
+    })?;
+    let lambda = gamma_max * relative_lambda;
+    if !(lambda.is_finite() && lambda > 0.0) {
+        return Err(format!(
+            "ridge_reml_select_weight: selected finite REML weight is not representable \
+             after restoring the Gram scale ({gamma_max} * {relative_lambda})"
+        ));
     }
     Ok(RidgeRemlWeight::Interior { lambda, score })
 }

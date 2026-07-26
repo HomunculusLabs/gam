@@ -2435,19 +2435,27 @@ pub enum ClosureOptimumKind {
     CircleBoundary,
 }
 
-/// First-order certificate for the selected closure parameter.
+/// Optimality certificate for the selected closure parameter.
 #[derive(Debug, Clone, Copy)]
-pub struct ClosureStationarityCertificate {
-    pub kind: ClosureOptimumKind,
-    /// Absolute gradient in the interior, or the violated outward component
-    /// of the one-sided KKT condition at a boundary.
-    pub projected_gradient: f64,
-    pub tolerance: f64,
-    /// Certified bracket for the stationary abscissa (a point at an exact
-    /// endpoint optimum).
-    pub bracket: gam_math::score_opt::ClosedInterval,
-    /// Outward score-derivative and curvature ranges on `bracket`.
-    pub derivative_enclosure: gam_math::score_opt::DerivativeEnclosure,
+pub enum ClosureOptimalityCertificate {
+    /// Exact-real KKT certificate at an isolated stationary point or domain
+    /// boundary.
+    Kkt {
+        kind: ClosureOptimumKind,
+        /// Certified bracket for the stationary abscissa (a point at an exact
+        /// endpoint optimum).
+        bracket: gam_math::score_opt::ClosedInterval,
+        /// Outward exact score, derivative, and curvature ranges on `bracket`.
+        score_enclosure: gam_math::score_opt::DerivativeEnclosure,
+    },
+    /// Stationary structure is numerically unidentifiable, but the entire
+    /// bracket is optimal at the score evaluator's representable resolution.
+    ResolutionFlat {
+        bracket: gam_math::score_opt::ClosedInterval,
+        max_score_gap: f64,
+        score_resolution: f64,
+        score_enclosure: gam_math::score_opt::DerivativeEnclosure,
+    },
 }
 
 /// The result of profiling the closure parameter inside the smooth class.
@@ -2463,7 +2471,7 @@ pub struct ClosureStationarityCertificate {
 pub struct ClosureSelection<FitHandle> {
     pub ci: gam_geometry::ClosureProfileCi,
     pub representative: ClosureProfilePoint<FitHandle>,
-    pub stationarity: ClosureStationarityCertificate,
+    pub optimality: ClosureOptimalityCertificate,
     /// True when the profile pinned γ at the singular cluster boundary — the
     /// "not a regular smooth 1-D topology" signal that must be routed to the
     /// #907 mixture/union rung rather than reported as a regular closure.
@@ -2475,14 +2483,14 @@ fn closure_profile_ci_side<EvaluateScore>(
     gamma_hat: f64,
     target: f64,
     bound: f64,
-    stationary_abscissae: &[f64],
+    partition_abscissae: &[f64],
     resolution: f64,
 ) -> Result<(f64, bool), String>
 where
     EvaluateScore: Fn(f64) -> Result<f64, String>,
 {
     let toward_lower = bound < gamma_hat;
-    let mut probes: Vec<f64> = stationary_abscissae
+    let mut probes: Vec<f64> = partition_abscissae
         .iter()
         .copied()
         .filter(|&gamma| {
@@ -2551,21 +2559,22 @@ where
 /// negative-log evidence on the same scale [`tk_normalized_score`] produces (so
 /// γ and λ_smooth must both be optimised inside the closure, per the issue's
 /// confounding contract). Lower score is better. The analytic score oracle is
-/// searched continuously on `[0, 1]`; `enclose_derivatives` supplies outward
-/// ranges containing the score gradient and curvature on every requested
-/// interval. Exact endpoints compete with every certified isolated interior
+/// searched continuously on `[0, 1]`; `enclose_score` supplies outward exact
+/// score, gradient, and curvature ranges on every requested interval. Exact
+/// endpoints compete with every certified isolated interior
 /// stationary point. The same continuous oracle supplies the profile-Wilks
 /// crossings, so neither the winner nor its interval is selected or
 /// interpolated from a lattice. An interval whose stationary structure cannot
-/// be certified is an error, never a best sampled point.
-pub fn profile_closure_within_smooth_class<FitHandle, FitAtGamma, EncloseDerivatives>(
+/// be isolated is accepted only with an explicit exact-score/value-resolution
+/// certificate; otherwise it is an error, never a best sampled point.
+pub fn profile_closure_within_smooth_class<FitHandle, FitAtGamma, EncloseScore>(
     fit_at_gamma: FitAtGamma,
-    enclose_derivatives: EncloseDerivatives,
+    enclose_score: EncloseScore,
     level: f64,
 ) -> Result<ClosureSelection<FitHandle>, String>
 where
     FitAtGamma: Fn(f64) -> Result<ClosureProfileFit<FitHandle>, String>,
-    EncloseDerivatives: Fn(f64, f64) -> Result<gam_math::score_opt::DerivativeEnclosure, String>,
+    EncloseScore: Fn(f64, f64) -> Result<gam_math::score_opt::DerivativeEnclosure, String>,
 {
     let gamma_tolerance = f64::EPSILON.sqrt();
     let evaluate = |gamma: f64| -> Result<ClosureProfilePoint<FitHandle>, String> {
@@ -2603,24 +2612,22 @@ where
             third: 0.0,
         })
     };
-    // The caller-supplied `enclose_derivatives` is a genuine interval extension
+    // The caller-supplied `enclose_score` is a genuine interval extension
     // over the cell, not an endpoint Taylor pad, so it reads only the abscissae
     // of the samples the search hands in.
     let mut score_enclosure = |lo: gam_math::score_opt::ScoreSample,
                                hi: gam_math::score_opt::ScoreSample| {
-        let tk = enclose_derivatives(lo.x, hi.x)?;
+        let tk = enclose_score(lo.x, hi.x)?;
         Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
-            derivative: gam_math::score_opt::ClosedInterval::outward(
-                -tk.derivative.hi,
-                -tk.derivative.lo,
-            ),
-            curvature: gam_math::score_opt::ClosedInterval::outward(
-                -tk.curvature.hi,
-                -tk.curvature.lo,
-            ),
+            score: gam_math::score_opt::ScoreValueEnclosure {
+                value: tk.score.value.neg(),
+                evaluation_error: tk.score.evaluation_error,
+            },
+            derivative: tk.derivative.neg(),
+            curvature: tk.curvature.neg(),
         })
     };
-    let search = gam_math::score_opt::maximize_score_1d(
+    let search = gam_math::score_opt::maximize_score_1d_value_ordered(
         0.0,
         1.0,
         gamma_tolerance,
@@ -2628,76 +2635,80 @@ where
         &mut score_enclosure,
     )
     .map_err(|error| format!("closure profile: {error}"))?;
-    let representative = evaluate(search.optimum.x)?;
-    let gradient_scale = 1.0
-        + search.lower_boundary.derivative.abs()
-        + search.upper_boundary.derivative.abs()
-        + representative.score_curvature.abs();
-    let stationarity_tolerance = f64::EPSILON.sqrt() * gradient_scale;
-    let (kind, projected_gradient) = match search.location {
-        gam_math::score_opt::ScoreOptimumLocation::LowerBoundary => (
-            ClosureOptimumKind::IntervalBoundary,
-            (-representative.score_gradient).max(0.0),
-        ),
-        gam_math::score_opt::ScoreOptimumLocation::UpperBoundary => (
-            ClosureOptimumKind::CircleBoundary,
-            representative.score_gradient.max(0.0),
-        ),
-        // A cell the search closed on the VALUE side is an interior claim like
-        // any other, and it is held to exactly the same bar below: the
-        // representative's own gradient and curvature decide it. Closing the
-        // cell says its interior cannot beat the representative by more than
-        // the score's own roundoff; it says nothing about stationarity, which
-        // is why nothing here is relaxed for it.
-        gam_math::score_opt::ScoreOptimumLocation::Stationary(_)
-        | gam_math::score_opt::ScoreOptimumLocation::BoundedCell(_) => (
-            ClosureOptimumKind::Interior,
-            representative.score_gradient.abs(),
-        ),
-    };
-    if projected_gradient > stationarity_tolerance
-        || (kind == ClosureOptimumKind::Interior && representative.score_curvature <= 0.0)
+    if search.value_certificate.maximum_excess
+        > search.value_certificate.comparison_resolution
     {
         return Err(format!(
-            "closure profile did not certify its continuous optimum: γ={}, projected \
-             gradient={}, curvature={}, tolerance={}",
-            representative.gamma,
-            projected_gradient,
-            representative.score_curvature,
-            stationarity_tolerance
+            "closure profile could not order its exact global candidates: maximum excess {} \
+             exceeds comparison resolution {}",
+            search.value_certificate.maximum_excess,
+            search.value_certificate.comparison_resolution
         ));
     }
-    let bracket = match search.location {
-        gam_math::score_opt::ScoreOptimumLocation::LowerBoundary
-        | gam_math::score_opt::ScoreOptimumLocation::UpperBoundary => {
-            gam_math::score_opt::ClosedInterval::point(representative.gamma)
-        }
+    let representative = evaluate(search.optimum.x)?;
+    let kkt_certificate =
+        |kind: ClosureOptimumKind,
+         bracket: gam_math::score_opt::ClosedInterval|
+         -> Result<ClosureOptimalityCertificate, String> {
+            let score_enclosure = enclose_score(bracket.lo, bracket.hi)?;
+            let certified = match kind {
+                ClosureOptimumKind::Interior => {
+                    score_enclosure.derivative.contains_zero()
+                        && score_enclosure.curvature.lo > 0.0
+                }
+                ClosureOptimumKind::IntervalBoundary => {
+                    score_enclosure.derivative.lo >= 0.0
+                }
+                ClosureOptimumKind::CircleBoundary => {
+                    score_enclosure.derivative.hi <= 0.0
+                }
+            };
+            if !certified {
+                return Err(format!(
+                    "closure profile did not certify the exact-real KKT condition at γ={} \
+                     ({kind:?}, bracket {bracket:?}, enclosure {score_enclosure:?})",
+                    representative.gamma
+                ));
+            }
+            Ok(ClosureOptimalityCertificate::Kkt {
+                kind,
+                bracket,
+                score_enclosure,
+            })
+        };
+    let optimality = match search.location {
+        gam_math::score_opt::ScoreOptimumLocation::LowerBoundary => kkt_certificate(
+            ClosureOptimumKind::IntervalBoundary,
+            gam_math::score_opt::ClosedInterval::point(representative.gamma),
+        )?,
+        gam_math::score_opt::ScoreOptimumLocation::UpperBoundary => kkt_certificate(
+            ClosureOptimumKind::CircleBoundary,
+            gam_math::score_opt::ClosedInterval::point(representative.gamma),
+        )?,
         gam_math::score_opt::ScoreOptimumLocation::Stationary(index) => {
-            search
+            let bracket = search
                 .stationary_points
                 .get(index)
                 .ok_or_else(|| {
                     "closure profile optimizer returned an invalid stationary index".to_string()
                 })?
-                .bracket
+                .bracket;
+            kkt_certificate(
+                ClosureOptimumKind::Interior,
+                bracket,
+            )?
         }
-        gam_math::score_opt::ScoreOptimumLocation::BoundedCell(index) => {
-            search
-                .bounded_cells
-                .get(index)
-                .ok_or_else(|| {
-                    "closure profile optimizer returned an invalid bounded-cell index".to_string()
-                })?
-                .cell
+        gam_math::score_opt::ScoreOptimumLocation::ResolutionFlat(index) => {
+            let flat = *search.resolution_flat_regions.get(index).ok_or_else(|| {
+                "closure profile optimizer returned an invalid resolution-flat index".to_string()
+            })?;
+            ClosureOptimalityCertificate::ResolutionFlat {
+                bracket: flat.bracket,
+                max_score_gap: flat.max_score_gap,
+                score_resolution: flat.score_resolution,
+                score_enclosure: enclose_score(flat.bracket.lo, flat.bracket.hi)?,
+            }
         }
-    };
-    let derivative_enclosure = enclose_derivatives(bracket.lo, bracket.hi)?;
-    let stationarity = ClosureStationarityCertificate {
-        kind,
-        projected_gradient,
-        tolerance: stationarity_tolerance,
-        bracket,
-        derivative_enclosure,
     };
 
     if !(level.is_finite() && level > 0.0 && level < 1.0) {
@@ -2706,24 +2717,21 @@ where
     let chi_squared = ChiSquared::new(1.0)
         .map_err(|error| format!("closure profile CI distribution: {error}"))?;
     let target = representative.tk_score + 0.5 * chi_squared.inverse_cdf(level);
-    // `closure_profile_ci_side` bisects between ADJACENT entries of this list on
-    // the strength of the score being monotone between them, so the list has to
-    // be a complete partition of the domain into monotone pieces — not merely
-    // the certified stationary points. A cell the search closed on the value
-    // side is either one-signed (monotone inside, so its endpoints suffice) or
-    // flat to roundoff at the resolution floor (nothing inside to cross), but
-    // in both cases the cell's endpoints are the partition boundaries and
-    // dropping them would let a bisection step span a piece the profile is not
-    // monotone across. Extra probes only refine the partition.
-    let stationary_abscissae: Vec<f64> = search
+    // A resolution-flat region can hide unresolved stationary structure, but
+    // its exact score range is no wider than the evaluator's certified
+    // pairwise score-comparison error. Its two certified edges therefore
+    // belong in the same monotonicity partition as isolated stationary points:
+    // a numerically resolvable Wilks crossing cannot be jumped across the
+    // region without one of those edges observing it.
+    let profile_partition_abscissae: Vec<f64> = search
         .stationary_points
         .iter()
         .map(|stationary| stationary.sample.x)
         .chain(
             search
-                .bounded_cells
+                .resolution_flat_regions
                 .iter()
-                .flat_map(|closed| [closed.cell.lo, closed.cell.hi]),
+                .flat_map(|flat| [flat.bracket.lo, flat.bracket.hi]),
         )
         .collect();
     let evaluate_score = |gamma| evaluate(gamma).map(|point| point.tk_score);
@@ -2735,7 +2743,7 @@ where
             representative.gamma,
             target,
             0.0,
-            &stationary_abscissae,
+            &profile_partition_abscissae,
             gamma_tolerance,
         )?
     };
@@ -2747,7 +2755,7 @@ where
             representative.gamma,
             target,
             1.0,
-            &stationary_abscissae,
+            &profile_partition_abscissae,
             gamma_tolerance,
         )?
     };
@@ -2764,7 +2772,7 @@ where
     Ok(ClosureSelection {
         ci,
         representative,
-        stationarity,
+        optimality,
         route_to_mixture_rung: singular_boundary,
     })
 }
@@ -3382,12 +3390,32 @@ mod tests {
                 })
             },
             |lo, hi| {
+                let center = gam_math::score_opt::ClosedInterval::point(0.7);
+                let intercept = gam_math::score_opt::ClosedInterval::point(100.0);
+                let endpoint_score = |gamma| {
+                    let displacement =
+                        gam_math::score_opt::ClosedInterval::point(gamma).sub(center);
+                    intercept.add(displacement.mul(displacement).scale(80.0))
+                };
+                let endpoint_lo = endpoint_score(lo);
+                let endpoint_hi = endpoint_score(hi);
+                let score_lo = if lo <= center.lo && center.hi <= hi {
+                    intercept.lo
+                } else {
+                    endpoint_lo.lo.min(endpoint_hi.lo)
+                };
                 Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
-                    derivative: gam_math::score_opt::ClosedInterval::outward(
-                        160.0 * (lo - 0.7),
-                        160.0 * (hi - 0.7),
-                    ),
-                    curvature: gam_math::score_opt::ClosedInterval::outward(160.0, 160.0),
+                    score: gam_math::score_opt::ScoreValueEnclosure {
+                        value: gam_math::score_opt::ClosedInterval::new(
+                            score_lo,
+                            endpoint_lo.hi.max(endpoint_hi.hi),
+                        ),
+                        evaluation_error: 1.0e-12,
+                    },
+                    derivative: gam_math::score_opt::ClosedInterval::new(lo, hi)
+                        .sub(center)
+                        .scale(160.0),
+                    curvature: gam_math::score_opt::ClosedInterval::point(160.0),
                 })
             },
             0.95,
@@ -3401,8 +3429,14 @@ mod tests {
         assert!(!selection.ci.ci_includes_circle);
         assert!(!selection.ci.ci_includes_interval);
         assert!(!selection.route_to_mixture_rung);
-        assert_eq!(selection.stationarity.kind, ClosureOptimumKind::Interior);
-        assert!(selection.stationarity.projected_gradient <= selection.stationarity.tolerance);
+        match selection.optimality {
+            ClosureOptimalityCertificate::Kkt { kind, .. } => {
+                assert_eq!(kind, ClosureOptimumKind::Interior);
+            }
+            ClosureOptimalityCertificate::ResolutionFlat { .. } => {
+                panic!("a well-curved planted parabola must have an isolated KKT optimum")
+            }
+        }
         // The representative fit handle is the γ̂ point.
         assert!((selection.representative.gamma - selection.ci.gamma_hat).abs() < 1e-12);
     }
@@ -3421,10 +3455,18 @@ mod tests {
                     fit_handle: gamma,
                 })
             },
-            |_lo, _hi| {
+            |lo, hi| {
                 Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
-                    derivative: gam_math::score_opt::ClosedInterval::outward(25.0, 25.0),
-                    curvature: gam_math::score_opt::ClosedInterval::outward(0.0, 0.0),
+                    score: gam_math::score_opt::ScoreValueEnclosure {
+                        value: gam_math::score_opt::ClosedInterval::point(10.0)
+                            .add(
+                                gam_math::score_opt::ClosedInterval::new(lo, hi)
+                                    .scale(25.0),
+                            ),
+                        evaluation_error: 1.0e-12,
+                    },
+                    derivative: gam_math::score_opt::ClosedInterval::point(25.0),
+                    curvature: gam_math::score_opt::ClosedInterval::point(0.0),
                 })
             },
             0.95,
@@ -3433,10 +3475,13 @@ mod tests {
         assert!(selection.ci.gamma_hat.abs() < 1e-9);
         assert!(selection.route_to_mixture_rung);
         assert!(selection.ci.ci_includes_interval);
-        assert_eq!(
-            selection.stationarity.kind,
-            ClosureOptimumKind::IntervalBoundary
-        );
+        assert!(matches!(
+            selection.optimality,
+            ClosureOptimalityCertificate::Kkt {
+                kind: ClosureOptimumKind::IntervalBoundary,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3451,19 +3496,27 @@ mod tests {
                     fit_handle: gamma,
                 })
             },
-            |_lo, _hi| {
+            |lo, hi| {
                 Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
-                    derivative: gam_math::score_opt::ClosedInterval::outward(1.0, 1.0),
-                    curvature: gam_math::score_opt::ClosedInterval::outward(0.0, 0.0),
+                    score: gam_math::score_opt::ScoreValueEnclosure {
+                        value: gam_math::score_opt::ClosedInterval::point(4.0)
+                            .add(gam_math::score_opt::ClosedInterval::new(lo, hi)),
+                        evaluation_error: 1.0e-12,
+                    },
+                    derivative: gam_math::score_opt::ClosedInterval::point(1.0),
+                    curvature: gam_math::score_opt::ClosedInterval::point(0.0),
                 })
             },
             0.95,
         )
         .expect("regular interval-boundary profile");
-        assert_eq!(
-            selection.stationarity.kind,
-            ClosureOptimumKind::IntervalBoundary
-        );
+        assert!(matches!(
+            selection.optimality,
+            ClosureOptimalityCertificate::Kkt {
+                kind: ClosureOptimumKind::IntervalBoundary,
+                ..
+            }
+        ));
         assert!(!selection.ci.singular_boundary);
         assert!(!selection.route_to_mixture_rung);
     }
@@ -3485,12 +3538,32 @@ mod tests {
                 })
             },
             |lo, hi| {
+                let center = gam_math::score_opt::ClosedInterval::point(planted);
+                let intercept = gam_math::score_opt::ClosedInterval::point(7.0);
+                let endpoint_score = |gamma| {
+                    let displacement =
+                        gam_math::score_opt::ClosedInterval::point(gamma).sub(center);
+                    intercept.add(displacement.mul(displacement).scale(32.0))
+                };
+                let at_lo = endpoint_score(lo);
+                let at_hi = endpoint_score(hi);
+                let score_lo = if lo <= center.lo && center.hi <= hi {
+                    intercept.lo
+                } else {
+                    at_lo.lo.min(at_hi.lo)
+                };
                 Ok::<_, String>(gam_math::score_opt::DerivativeEnclosure {
-                    derivative: gam_math::score_opt::ClosedInterval::outward(
-                        64.0 * (lo - planted),
-                        64.0 * (hi - planted),
-                    ),
-                    curvature: gam_math::score_opt::ClosedInterval::outward(64.0, 64.0),
+                    score: gam_math::score_opt::ScoreValueEnclosure {
+                        value: gam_math::score_opt::ClosedInterval::new(
+                            score_lo,
+                            at_lo.hi.max(at_hi.hi),
+                        ),
+                        evaluation_error: 1.0e-12,
+                    },
+                    derivative: gam_math::score_opt::ClosedInterval::new(lo, hi)
+                        .sub(center)
+                        .scale(64.0),
+                    curvature: gam_math::score_opt::ClosedInterval::point(64.0),
                 })
             },
             0.95,

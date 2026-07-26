@@ -386,10 +386,11 @@ pub enum FitResult {
     /// it stands in for (a different finite basis — the multilevel Wendland
     /// frame), so it is never a silent swap: this variant is produced only when
     /// the structural detector [`residual_cascade_fast_path`] fires on an
-    /// eligible scattered-low-d Gaussian fit past the dense-kernel cliff AND the
-    /// in-cascade quasi-uniformity guard certifies the metric; every other shape
-    /// (and a rejected metric) falls through to the dense `fit_model` path. The
-    /// cascade-bearing model carries the
+    /// eligible scattered-low-d Gaussian fit past the dense-kernel cliff and
+    /// every in-cascade proof succeeds. Structurally ineligible shapes stay on
+    /// the dense `fit_model` path; after the cascade route is selected, a
+    /// quasi-uniformity, automatic-REML, or convergence refusal propagates
+    /// instead of silently changing estimators. The cascade-bearing model carries the
     /// [`ResidualCascadeFit`](gam_solve::residual_cascade::ResidualCascadeFit)
     /// directly — knots-free nested geometry, coefficients, the factored
     /// precision, and an exact per-row `predict`; the CLI/FFI save paths build

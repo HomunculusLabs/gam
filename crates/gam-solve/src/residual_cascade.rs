@@ -57,13 +57,18 @@
 //! is `log|G₀₀| + log|I+B/λ|`. Its spectrum is exact on the dense route and
 //! represented by one fixed-probe Lanczos quadrature on the iterative route.
 //! Thus the score, gradient, and curvature are analytic functions of log λ
-//! with the SAME spectral nodes at every trial. Rigorous derivative enclosures
-//! isolate every stationary interval before safeguarded root refinement; both
-//! bounded-domain endpoints are compared exactly, with no basin-selecting
-//! lattice.
+//! with the SAME spectral nodes at every trial. The dense route has a rigorous
+//! interval extension that isolates every stationary interval before
+//! safeguarded root refinement. The iterative route deliberately refuses
+//! automatic λ selection: its fixed-probe SLQ log-determinant has no exact-real
+//! outer enclosure. Closing the separate β-seeded residual Krylov space can
+//! make the residual exact, but cannot enclose that determinant; a merely
+//! converged residual tail is numerical point evidence only. Fixed-λ fits
+//! remain available on the iterative route.
 //!
-//! The same elimination puts the profiled RESIDUAL in the same form, and this is
-//! what makes the criterion solve-free at every λ on BOTH routes. With
+//! The same elimination puts the profiled RESIDUAL in the same form, making the
+//! diagnostic criterion solve-free at every λ whenever its residual rule is
+//! admitted. With
 //! `β = D^{−1/2}(b₁ − G₁₀G₀₀^{−1}b₀)` and `S_k(λ) = β'(B+λI)^{−k}β`, the residual
 //! is `R = anchor − S₁` and its three `log λ` derivatives are built from
 //! `S₂, S₃, S₄`; `anchor = y'Wy − b₀'G₀₀^{−1}b₀` is the part no λ can move. On
@@ -72,14 +77,14 @@
 //! seeded with β (rather than with a Rademacher probe) returns the Jacobi matrix
 //! of its Golub–Meurant Gauss rule — the same `(node, weight)` shape the dense
 //! route stores, so both routes then evaluate one expression. That rule is
-//! admitted only when it has earned it: either the Krylov space has consumed
-//! `rank(B) ≤ n − nullity` and is therefore invariant (the rule is then exact for
-//! every kernel), or two NESTED rules — free, since `T_m`'s leading block is
-//! `T_j` — agree to `√ε` over the whole domain, which for a completely monotone
-//! kernel bounds the coarser rule's error exactly. Uncertified, the route falls
-//! back to two PCG solves per λ and says so in the fit certificate: at the bottom
-//! of the domain `X'WX + λD` is numerically singular and no solve can be
-//! certified there, which is why the quadrature exists (#2503).
+//! admitted only when it has earned point-evaluation trust: either the Krylov
+//! space has consumed `rank(B) ≤ n − nullity` and is therefore invariant (the
+//! rule is then exact for every kernel), or the gaps over the nested
+//! `m/4, m/2, m` rules contract enough that their geometric tail estimate is at
+//! most `√ε` over the whole domain. A failed admission is an error; the
+//! ill-conditioned two-PCG-solves-per-λ fallback is not revived (#2503).
+//! Neither residual admission encloses the independent fixed-probe SLQ
+//! determinant, so neither authorizes automatic iterative-route REML (#2513).
 //!
 //! Refinement certificate. After fitting L levels, the candidate level L+1
 //! is constructed (O(n)) and the EXACT objective decrease available from
@@ -91,7 +96,7 @@
 //! discretization certificate. The cascade refines (adds the level, refits,
 //! re-selects λ) until that bound drops below `REFINE_TOL` of the penalized
 //! residual, the net stops producing new centers (every point is a center),
-//! or the level/center caps are reached: certified-or-fallback, the same
+//! or the level/center caps are reached: certified-or-typed-refusal, the same
 //! discipline as the radial-profile GL ladder.
 //!
 //! Posterior. Coefficient covariance is `σ²(X'WX+λD)^{−1}`; pointwise
@@ -115,8 +120,7 @@ use std::sync::Arc;
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::score_opt::{
-    AffineRemlProfile, ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample,
-    maximize_score_1d,
+    AffineRemlProfile, ScoreJet, certified_ln_positive,
 };
 use gam_terms::grid_spline_2d::{chol_solve, cholesky_logdet};
 use ndarray::Array2;
@@ -202,8 +206,8 @@ const MIN_COARSE_LEVELS: usize = 2;
 /// preconditioner constant (hence the iteration count) grows without an
 /// n-independent bound. The realized symptom is `solve_iters` climbing toward
 /// [`CG_MAX_ITERS`]; this guard detects the *cause* up front from the
-/// metric-scaled per-axis spread so the auto-route can fall back to the dense
-/// kernel BEFORE paying an unbounded iterative solve, rather than discovering
+/// metric-scaled per-axis spread so the selected route can refuse BEFORE
+/// paying an unbounded iterative solve, rather than discovering
 /// the blow-up only after `CG_MAX_ITERS` work.
 ///
 /// Condition measure: the ratio of the largest to smallest metric-scaled
@@ -228,7 +232,7 @@ const SLQ_LANCZOS_STEPS: usize = 48;
 ///
 /// The number is chosen so the run can REACH its Krylov ceiling, because that is
 /// where the rule becomes exact and stopping short of it buys nothing at all: a
-/// budget of `0.9 * ceiling` pays 90% of the work and then falls back to the solve.
+/// budget of `0.9 * ceiling` pays 90% of the work and then refuses point evaluation.
 /// The binding requirement is therefore `ceiling * rank * 8` bytes, measured on the
 /// designs the #2503 integration fixtures actually build:
 ///
@@ -241,7 +245,8 @@ const SLQ_LANCZOS_STEPS: usize = 48;
 ///
 /// 512 MiB covers all of them and still bounds the run on the
 /// hundred-thousand-column designs `MAX_CENTERS` permits, where the ceiling is
-/// unreachable at any budget worth paying and the route keeps the solve.
+/// unreachable at any budget worth paying and the point route refuses rather
+/// than reviving the ill-conditioned solve.
 const RESIDUAL_QUADRATURE_BASIS_BYTES: usize = 512 << 20;
 
 /// Deterministic seed for the SLQ probes and posterior samples.
@@ -430,59 +435,6 @@ pub enum LogdetMethod {
     Slq,
 }
 
-/// Route the profiled residual `R(λ)` and its three `log λ` derivative moments
-/// `S₂, S₃, S₄` took during REML selection — reported WITH the quantity that
-/// decided it, because two of the three arms carry a convergence certificate and
-/// the third is the refusal to issue one, and which a fit received is not
-/// otherwise readable from the outside.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ResidualMomentMethod {
-    /// Read off the dense Schur eigenbasis under the sizing cap: exact, with no
-    /// linear solve at any λ.
-    DenseExact,
-    /// Golub–Meurant quadrature seeded with the whitened right-hand side,
-    /// admitted because it CONVERGED: either the Krylov space closed (the rule is
-    /// then exact) or two nested rules agree to the search's own resolution over
-    /// the whole λ domain. No linear solve at any λ either way.
-    ConvergedQuadrature {
-        /// Nodes in the admitted rule.
-        steps: usize,
-        /// Nodes in the coarser rule it was charged against (`steps / 2`), or `0`
-        /// when the Krylov space closed and no comparison was needed.
-        coarse_steps: usize,
-        /// Penalized Schur rank, the hard ceiling on `steps`.
-        rank: usize,
-        /// Step budget the growth loop was allowed, before that ceiling.
-        budget: usize,
-        /// Conservative geometric extrapolation of the rule's REMAINING relative
-        /// error, over `S₁..S₄` and the whole λ domain, from three nested rules.
-        /// `0` when the Krylov space closed and the rule is exact outright.
-        tail_estimate: f64,
-        /// The resolution `tail_estimate` was charged against.
-        target: f64,
-        /// `‖r_m‖ / maxᵢ|αᵢ|`: the Krylov residual against the operator scale.
-        /// At roundoff the space closed and the rule is exact outright.
-        relative_tail: f64,
-        /// `|Σⱼ wⱼ / ‖β‖² − 1|`: a Gauss rule's weights sum to its measure's
-        /// mass, so this is a free end-to-end check on the Jacobi pipeline.
-        mass_defect: f64,
-        /// Fraction of `‖β‖²` dropped as null-space mass. `β ⊥ null(B)` holds
-        /// EXACTLY, so this is roundoff, and its size is the evidence for that.
-        dropped_mass_fraction: f64,
-    },
-    /// No rule converged inside the budget, so `S₁..S₄` are re-derived from two
-    /// solves of `A = X'WX + λD` at every λ the search visits — which is where
-    /// the λ at the bottom of the domain cannot be solved at all (#2503).
-    Solved {
-        steps: usize,
-        rank: usize,
-        budget: usize,
-        tail_estimate: f64,
-        target: f64,
-        relative_tail: f64,
-    },
-}
-
 /// Computable certificates attached to a fit.
 #[derive(Clone, Copy, Debug)]
 pub struct CascadeCertificate {
@@ -494,10 +446,6 @@ pub struct CascadeCertificate {
     pub solve_iters: usize,
     /// Route the log-determinant took.
     pub logdet_method: LogdetMethod,
-    /// Route the profiled residual's `λ` moments took, on a fit whose `λ` was
-    /// SELECTED by the REML criterion. `None` on a fixed-λ fit, which evaluates
-    /// no criterion and therefore takes no such route.
-    pub residual_moments: Option<ResidualMomentMethod>,
 }
 
 /// Discretization certificate of the refinement loop: the exact upper bound
@@ -657,6 +605,28 @@ impl std::fmt::Debug for ResidualCascadeCheckpoint {
 pub enum ResidualCascadeError {
     /// Invalid input or a numerical failure in design construction/optimization.
     Computation(String),
+    /// Automatic smoothing-parameter selection needs mathematical outer
+    /// enclosures of the score value and derivatives. Past the dense Gram cap,
+    /// the stochastic log-determinant has no such proof. Exact or numerically
+    /// converged residual evidence cannot repair that independent gap.
+    RemlScoreProofUnavailable {
+        columns: usize,
+        dense_gram_max: usize,
+    },
+    /// Stationary structure could not be isolated even though the score was
+    /// certified flat at its representable value resolution.
+    RemlOptimumResolutionFlat {
+        lo: f64,
+        hi: f64,
+        max_score_gap: f64,
+        score_resolution: f64,
+    },
+    /// Rounded candidate ordering is wider than its certified comparison
+    /// resolution, so no unique representative may be fitted.
+    RemlValueOrderingUnresolved {
+        maximum_excess: f64,
+        comparison_resolution: f64,
+    },
     /// Refinement could not meet its requested tolerance before a structural
     /// capacity was reached. The checkpoint preserves all completed work while
     /// remaining unusable as a public fit.
@@ -678,6 +648,37 @@ impl std::fmt::Display for ResidualCascadeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Computation(reason) => f.write_str(reason),
+            Self::RemlScoreProofUnavailable {
+                columns,
+                dense_gram_max,
+            } => write!(
+                f,
+                "residual cascade: automatic REML proof unavailable for the iterative \
+                 route ({columns} columns exceed the dense Gram limit {dense_gram_max}); \
+                 fixed-probe SLQ has no exact-real value/derivative enclosure, so score signs, \
+                 KKT roots, and global candidate ordering are uncertified even when the separate \
+                 residual quadrature converges; use an explicitly fixed log lambda"
+            ),
+            Self::RemlOptimumResolutionFlat {
+                lo,
+                hi,
+                max_score_gap,
+                score_resolution,
+            } => write!(
+                f,
+                "residual cascade: REML optimum is value-resolved but not stationary on \
+                 [{lo}, {hi}] (maximum score gap {max_score_gap}, score resolution \
+                 {score_resolution})"
+            ),
+            Self::RemlValueOrderingUnresolved {
+                maximum_excess,
+                comparison_resolution,
+            } => write!(
+                f,
+                "residual cascade: selected REML representative can trail another exact \
+                 candidate by {maximum_excess}, beyond comparison resolution \
+                 {comparison_resolution}"
+            ),
             Self::Underresolved {
                 checkpoint,
                 gain_bound,
@@ -962,29 +963,39 @@ impl CascadeResidualSpectrum {
     }
 }
 
-/// What the profiled-residual quadrature certified about ITSELF, past the dense
-/// cap. See [`Core::iterative_residual_spectrum`].
+/// Numerical evidence for the profiled-residual point quadrature past the dense
+/// cap.
+///
+/// This is deliberately not a REML proof object. Krylov invariance makes the
+/// residual rule exact, but a geometric tail estimate is only point-evaluation
+/// evidence. Neither case encloses the independent stochastic determinant, so
+/// [`ResidualCascadeDesign::fit_reml`] refuses the entire iterative route before
+/// this evidence can participate in fit certification.
 #[derive(Clone, Copy, Debug)]
-struct ResidualQuadratureCertificate {
-    /// Nodes in the rule this certificate is about.
+struct ResidualQuadratureEvidence {
+    /// Nodes in the rule this evidence is about.
     steps: usize,
     /// Nodes in the nested coarser rule it was charged against; `0` when the
     /// Krylov space closed and no comparison was needed.
     coarse_steps: usize,
-    /// Penalized Schur rank, the hard ceiling on `steps`.
+    /// Penalized Schur rank. The reachable Krylov dimension may be smaller,
+    /// because `rank(B) <= n - nullity`.
     rank: usize,
     /// Step budget the growth loop was allowed, before that ceiling.
     budget: usize,
     /// `||r_m|| / max_i |alpha_i|`: the Krylov residual against the operator
     /// scale. At roundoff, `K_m(B, beta)` is invariant and the rule is exact.
     relative_tail: f64,
-    /// Conservative geometric extrapolation of the rule's remaining relative
-    /// error over `S_1..S_4` and the whole lambda domain, from three nested rules.
+    /// Geometric estimate of the rule's remaining relative error over
+    /// `S_1..S_4` and the whole lambda domain, from three nested rules.
     tail_estimate: f64,
     /// The resolution `tail_estimate` had to reach.
     target: f64,
-    /// The rule may be used: it either closed the Krylov space or met `target`.
-    certified: bool,
+    /// Whether the Krylov space closed, making the residual rule exact.
+    invariant: bool,
+    /// Whether the rule may be used for the diagnostic point criterion. This is
+    /// never sufficient to authorize automatic REML.
+    accepted_for_point_evaluation: bool,
     /// `|sum_j w_j / ||beta||^2 - 1|` — the free mass self-check of a Gauss rule.
     mass_defect: f64,
     /// Fraction of `||beta||^2` that landed on roundoff-level nodes and was
@@ -992,56 +1003,18 @@ struct ResidualQuadratureCertificate {
     dropped_mass_fraction: f64,
 }
 
-impl ResidualQuadratureCertificate {
-    /// This certificate as the route it authorizes.
-    fn method(&self) -> ResidualMomentMethod {
-        let Self {
-            steps,
-            coarse_steps,
-            rank,
-            budget,
-            relative_tail,
-            tail_estimate,
-            target,
-            certified,
-            mass_defect,
-            dropped_mass_fraction,
-        } = *self;
-        if certified {
-            ResidualMomentMethod::ConvergedQuadrature {
-                steps,
-                coarse_steps,
-                rank,
-                budget,
-                tail_estimate,
-                target,
-                relative_tail,
-                mass_defect,
-                dropped_mass_fraction,
-            }
-        } else {
-            ResidualMomentMethod::Solved {
-                steps,
-                rank,
-                budget,
-                tail_estimate,
-                target,
-                relative_tail,
-            }
-        }
-    }
-}
-
 /// Extrapolated estimate of the profiled-residual quadrature's REMAINING relative
 /// error, from three NESTED Gauss rules for the same measure, over `S_1..S_4` and
 /// the whole `log lambda` domain.
 ///
 /// An estimate, stated as one: it is a rate fitted to two observed gaps and
-/// summed, not an inequality. What makes it usable as an admission test rather
-/// than a hope is (a) the rate it fits is the one the Gauss error for a resolvent
-/// is KNOWN to decay at, (b) the fit errs high — see below — and (c) it is charged
-/// against the exact dense eigenbasis at every budget on the production ladder by
-/// `the_quadrature_tail_estimate_bounds_the_error_against_the_exact_spectrum_2503`.
+/// summed, not an inequality. It can authorize only the diagnostic point
+/// criterion represented by [`ResidualQuadratureEvidence`], never automatic
+/// REML: the independent stochastic determinant still lacks exact-real
+/// value/derivative enclosures. The exact-dense comparison in
+/// `the_quadrature_tail_estimate_bounds_the_error_against_the_exact_spectrum_2503`
+/// charges the estimate against its intended numerical use at every production
+/// budget.
 ///
 /// WHY NOT TWO RULES. `(theta + lambda)^-k` has positive even derivatives, so the
 /// standard Gauss error representation is one-signed and every rule
@@ -1192,7 +1165,7 @@ struct ResidualGaussRule {
 
 /// Where the profiled residual and its three log-lambda derivatives come from.
 ///
-/// All three arms describe the SAME function of lambda; they differ only in what
+/// Both forms describe the SAME function of lambda; they differ only in what
 /// the design's Schur decomposition left behind. Under the dense sizing cap the
 /// determinant spectrum comes from a full eigendecomposition, so the eigen-BASIS
 /// exists and the residual is a closed-form sum over exactly the modes the
@@ -1204,58 +1177,31 @@ struct ResidualGaussRule {
 /// does not need one. It is a single quadratic form of a single known vector, so
 /// one Lanczos run seeded with that vector gives the Golub–Meurant Gauss rule
 /// for `S_k(lambda) = beta'(B + lambda I)^-k beta`, in the same node/weight
-/// shape the dense route stores. When that run exhausts the Krylov space the
-/// rule is EXACT, and the whole score is again solve-free at every lambda; when
-/// it does not, the rule's derivative moments are not approximately right but
-/// useless (#2503), so the route falls back to solving rather than shipping a
-/// stationarity certificate stated in numbers that are 80% wrong.
+/// shape the dense route stores. Krylov invariance is exact residual evidence;
+/// a contracting nested-rule tail can also support the explicitly diagnostic point
+/// criterion, but is never promoted to an exact-real fit certificate. If neither
+/// condition holds, construction refuses instead of retrying every point with
+/// the ill-conditioned solve that caused #2503.
 enum CascadeResidualForm {
     /// Exact eigenbasis projection under the dense cap. Interval-extendable via
     /// [`CascadeRemlProfile::affine_view`], because the determinant modes on
     /// this route are the SAME unit-weight modes.
     Spectral(CascadeResidualSpectrum),
-    /// The Golub–Meurant quadrature past the dense cap, WITH the certificate it
-    /// earned. `spectrum` is `Some` exactly when that certificate says the
-    /// Krylov space closed, and `None` — meaning "solve at every lambda" — when
-    /// it did not; the certificate travels either way, so the refusal to use a
-    /// quadrature carries the numbers that refused it.
+    /// The Golub–Meurant point quadrature past the dense cap, admitted only for
+    /// diagnostic score evaluation after its own numerical evidence passes.
     ///
-    /// Never affine-viewable even when exact: this route's DETERMINANT modes are
-    /// Hutchinson Ritz nodes with fractional weights, unrelated to the residual
-    /// run's nodes.
-    Quadrature {
-        spectrum: Option<CascadeResidualSpectrum>,
-        certificate: ResidualQuadratureCertificate,
-    },
+    /// Never affine-viewable: this route's DETERMINANT modes are Hutchinson Ritz
+    /// nodes with fractional weights, unrelated to the residual run's nodes.
+    Quadrature(CascadeResidualSpectrum),
 }
 
 impl CascadeResidualForm {
     /// The lambda-independent spectral form, when this route has one.
-    fn spectrum(&self) -> Option<&CascadeResidualSpectrum> {
+    fn spectrum(&self) -> &CascadeResidualSpectrum {
         match self {
-            Self::Spectral(spectrum) => Some(spectrum),
-            Self::Quadrature { spectrum, .. } => spectrum.as_ref(),
+            Self::Spectral(spectrum) | Self::Quadrature(spectrum) => spectrum,
         }
     }
-
-    /// This route, as the fit certificate reports it.
-    fn method(&self) -> ResidualMomentMethod {
-        match self {
-            Self::Spectral(_) => ResidualMomentMethod::DenseExact,
-            Self::Quadrature { certificate, .. } => certificate.method(),
-        }
-    }
-}
-
-/// What a REML-SELECTED fit inherits from the profile that selected it: the
-/// normalized log-determinant already evaluated at the chosen λ (so the fit does
-/// not redo it), and the route the profiled residual's λ moments took (so the
-/// fit certificate can report which of the three it was). A fixed-λ fit
-/// evaluates no criterion and passes `None`.
-#[derive(Clone, Copy, Debug)]
-struct CascadeSelectionProvenance {
-    normalized_logdet: f64,
-    residual_moments: ResidualMomentMethod,
 }
 
 struct CascadeScoreEvaluation {
@@ -1281,10 +1227,12 @@ struct DeterminantParts {
 /// design spectrum rather than a fixed log-lambda window.
 ///
 /// A free function rather than a profile method because the profiled RESIDUAL's
-/// convergence certificate has to be charged over exactly this interval, and the
-/// residual is built while the profile is being assembled — the interval is a
-/// function of the determinant modes alone, so it is available at that point.
-fn log_lambda_domain_from_modes(modes: &[CascadeSpectralMode]) -> Result<(f64, f64), String> {
+/// point-evaluation evidence has to be charged over exactly this interval, and
+/// the residual is built while the profile is being assembled — the interval is
+/// a function of the determinant modes alone, so it is available at that point.
+fn certified_log_lambda_domain_from_modes(
+    modes: &[CascadeSpectralMode],
+) -> Result<(f64, f64), String> {
     let mut smallest = f64::INFINITY;
     let mut largest = 0.0_f64;
     for mode in modes {
@@ -1299,9 +1247,29 @@ fn log_lambda_domain_from_modes(modes: &[CascadeSpectralMode]) -> Result<(f64, f
                 .into(),
         );
     }
-    let log_relative_resolution = f64::EPSILON.sqrt().ln();
-    let lo = (smallest.ln() + log_relative_resolution).max(f64::MIN_POSITIVE.ln());
-    let hi = (largest.ln() - log_relative_resolution).min(f64::MAX.ln());
+    let log_relative_resolution = certified_ln_positive(f64::EPSILON.sqrt()).ok_or_else(|| {
+        "residual cascade: could not enclose the spectral-domain resolution".to_string()
+    })?;
+    let log_smallest = certified_ln_positive(smallest).ok_or_else(|| {
+        "residual cascade: could not enclose the smallest spectral transition".to_string()
+    })?;
+    let log_largest = certified_ln_positive(largest).ok_or_else(|| {
+        "residual cascade: could not enclose the largest spectral transition".to_string()
+    })?;
+    let minimum_log = certified_ln_positive(f64::MIN_POSITIVE).ok_or_else(|| {
+        "residual cascade: could not enclose the minimum-normal logarithm".to_string()
+    })?;
+    let maximum_log = certified_ln_positive(f64::MAX).ok_or_else(|| {
+        "residual cascade: could not enclose the maximum-finite logarithm".to_string()
+    })?;
+    let lo = log_smallest
+        .add(log_relative_resolution)
+        .lo
+        .max(minimum_log.lo);
+    let hi = log_largest
+        .sub(log_relative_resolution)
+        .hi
+        .min(maximum_log.lo);
     if !(lo.is_finite() && hi.is_finite() && lo < hi) {
         return Err(format!(
             "residual cascade: invalid spectrum-derived log-lambda domain [{lo}, {hi}]"
@@ -1312,7 +1280,7 @@ fn log_lambda_domain_from_modes(modes: &[CascadeSpectralMode]) -> Result<(f64, f
 
 impl CascadeRemlProfile<'_> {
     fn log_lambda_domain(&self) -> Result<(f64, f64), String> {
-        log_lambda_domain_from_modes(&self.modes)
+        certified_log_lambda_domain_from_modes(&self.modes)
     }
 
     /// This profile as the affine spectral REML score it is, when the residual
@@ -1324,11 +1292,11 @@ impl CascadeRemlProfile<'_> {
     /// profiled residual, and there is one response. The point of saying so is
     /// the ENCLOSURE. `AffineRemlProfile::enclose` evaluates the mode kernels on
     /// an interval lambda, so it is a genuine interval extension whose width
-    /// collapses with the cell; [`CascadeRemlProfile::enclose`] can only pad the
-    /// endpoint jets with global Lipschitz constants, and that pad does not
-    /// collapse — see its own note on why the search could not terminate.
+    /// collapses with the cell. The former endpoint-jet/global-Lipschitz
+    /// enclosure did not collapse fast enough in saturated tails and has been
+    /// removed.
     ///
-    /// [`CascadeResidualForm::Quadrature`] is DELIBERATELY excluded even though
+    /// [`CascadeResidualForm::Quadrature`] is deliberately excluded even though
     /// it carries the same spectral shape. `AffineRemlProfile` computes the
     /// determinant from the modes it is handed — `sum_i log h_i - rank log
     /// lambda` — and past the dense cap the determinant is a Hutchinson
@@ -1358,9 +1326,7 @@ impl CascadeRemlProfile<'_> {
     /// The normalized log-determinant and its first two `log lambda`
     /// derivatives.
     ///
-    /// `O(modes)` and free of linear algebra on every route, which is what lets
-    /// [`Self::enclose`] have the determinant half of the jet at both cell
-    /// endpoints without an evaluation of its own.
+    /// `O(modes)` and free of linear algebra on every route.
     fn determinant_parts(&self, log_lambda: f64, lambda: f64) -> DeterminantParts {
         let mut parts = DeterminantParts {
             normalized_logdet: self.null_logdet,
@@ -1401,64 +1367,12 @@ impl CascadeRemlProfile<'_> {
         // R = y'Wy - b'A^-1b. With A' = lambda D,
         // R' = lambda c'Dc and
         // R'' = lambda c'Dc - 2 lambda^2 (Dc)'A^-1(Dc).
-        // The third derivative is retained to justify the analytic enclosure
-        // used below; it needs no third solve because the last quadratic is
-        // u'Du for u=A^-1Dc.
-        let (rss, penalty_energy, inverse_penalty_energy, third_energy) = match self
-            .residual
-            .spectrum()
-        {
-            // The decomposition that produced the determinant modes produced
-            // these three quadratic forms too. Reading them off it costs
-            // O(rank); re-deriving them cost a fresh O(m^3) factorization of
-            // `A = X'WX + λD` at EVERY λ the certified search visits.
-            Some(spectrum) => spectrum.moments(lambda),
-            None => {
-                // ONE factorization of `A` for BOTH right-hand sides below; the
-                // matrix is the same at this λ and only the right-hand side
-                // differs.
-                //
-                // Every failure here is a failure to evaluate the criterion at a
-                // λ the search chose, and on this route the reason the criterion
-                // needs a solve at all is that no quadrature converged. So the
-                // refusal carries the certificate that refused: without it the
-                // message names the SOLVER ("CG failed to reach 1e-9") when the
-                // decision that put a solve in the path was made much earlier
-                // and elsewhere. That is the archaeology #2503 opens with.
-                let solved = |error: String| -> String {
-                    format!(
-                        "{error}; the profiled residual is on the SOLVE route at this λ because                          the Golub–Meurant quadrature did not converge: {:?}",
-                        self.residual.method()
-                    )
-                };
-                let solver = core.coeff_solver(lambda).map_err(solved)?;
-                let coeff = solver.solve(core, lambda, &core.rhs).map_err(solved)?;
-                let dc: Vec<f64> = coeff
-                    .iter()
-                    .zip(core.pen_diag.iter())
-                    .map(|(&c, &d)| d * c)
-                    .collect();
-                let penalty_energy = coeff
-                    .iter()
-                    .zip(dc.iter())
-                    .map(|(&c, &v)| c * v)
-                    .sum::<f64>();
-                let u = solver.solve(core, lambda, &dc).map_err(solved)?;
-                let inverse_penalty_energy =
-                    dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum::<f64>();
-                let third_energy = u
-                    .iter()
-                    .zip(core.pen_diag.iter())
-                    .map(|(&v, &d)| d * v * v)
-                    .sum::<f64>();
-                (
-                    core.rss_pen(&coeff),
-                    penalty_energy,
-                    inverse_penalty_energy,
-                    third_energy,
-                )
-            }
-        };
+        // Both admitted forms are lambda-independent spectral sums. The
+        // iterative constructor requires either an invariant Krylov space or a
+        // sufficiently small nested-rule tail estimate instead of reviving the
+        // ill-conditioned per-lambda solved fallback from #2503.
+        let (rss, penalty_energy, inverse_penalty_energy, _third_energy) =
+            self.residual.spectrum().moments(lambda);
         if !(rss.is_finite() && rss > 0.0) {
             return Err(format!(
                 "residual cascade: degenerate penalized residual {rss}"
@@ -1467,9 +1381,6 @@ impl CascadeRemlProfile<'_> {
         let rss_d1 = lambda * penalty_energy;
         let lambda2 = lambda * lambda;
         let rss_d2 = rss_d1 - 2.0 * lambda2 * inverse_penalty_energy;
-        let rss_d3 =
-            rss_d1 - 6.0 * lambda2 * inverse_penalty_energy + 6.0 * lambda2 * lambda * third_energy;
-
         let DeterminantParts {
             normalized_logdet,
             first: determinant_d1,
@@ -1479,21 +1390,13 @@ impl CascadeRemlProfile<'_> {
         let dof = (core.y.len() - core.nullity()) as f64;
         let rss_log_d1 = rss_d1 / rss;
         let rss_log_d2 = rss_d2 / rss - rss_log_d1 * rss_log_d1;
-        let rss_log_d3 = rss_d3 / rss - 3.0 * rss_d1 * rss_d2 / (rss * rss)
-            + 2.0 * rss_log_d1 * rss_log_d1 * rss_log_d1;
-        if !(rss_log_d3.is_finite()) {
-            return Err(format!(
-                "residual cascade: non-finite analytic residual derivative at log lambda {log_lambda}"
-            ));
-        }
         let jet = ScoreJet {
             value: -0.5 * (normalized_logdet + dof * (rss / dof).ln()),
             derivative: -0.5 * (determinant_d1 + dof * rss_log_d1),
             curvature: -0.5 * (determinant_d2 + dof * rss_log_d2),
-            // This profile's enclosure pads with the CLOSED-FORM `third_abs_bound`
-            // Lipschitz constant rather than the endpoint third derivative, so it
-            // never reads this field; the exact `rss_log_d3` above is retained
-            // only as the analyticity check that justifies that bound.
+            // The cascade criterion API does not consume a third derivative;
+            // certified dense-route search evaluates the affine interval
+            // extension directly, so no endpoint third derivative is needed.
             third: 0.0,
         };
         if !(jet.value.is_finite() && jet.derivative.is_finite() && jet.curvature.is_finite()) {
@@ -1508,228 +1411,6 @@ impl CascadeRemlProfile<'_> {
         })
     }
 
-    /// Outer derivative ranges for the route with no eigenbasis: the INTERSECTION
-    /// of an additive Lipschitz pad and a multiplicative spectral bracket.
-    ///
-    /// Both are outer enclosures of the same two derivatives, so intersecting
-    /// them is again one — and they fail in opposite places, which is the whole
-    /// reason both are here.
-    ///
-    /// THE PAD. Each determinant mode has `|f''| <= 1/4` and `|f'''| <= 1/4`.
-    /// After the null-space elimination the profiled residual is a positive
-    /// mixture of `lambda/(theta+lambda)` kernels plus a lambda-independent
-    /// residual, so its log has `|g''| <= 2`, `|g'''| <= 6` (the loose moment
-    /// bounds for variables in `[0,1]`). Endpoint jets plus these bounds enclose
-    /// the interval without sampling it, and the jets arrive as the search's own
-    /// `left`/`right` SAMPLES, so this function evaluates the profile zero
-    /// times. The pad is tight where the score has real curvature — around the
-    /// optimum, where certifying a unique root actually happens.
-    ///
-    /// WHERE THE PAD FAILS. Its radius is `C·width` with `C` of order the
-    /// residual degrees of freedom, and it shrinks only as fast as the cell.
-    /// [`Self::log_lambda_domain`] deliberately runs `ln(1/sqrt(eps))` past the
-    /// extreme Schur eigenvalues, and out there `f'` has decayed to order
-    /// `rank·sqrt(eps)` — while the search's resolution floor is also
-    /// `sqrt(eps)`, so `C·width` AT THE FLOOR is larger than the derivative it
-    /// is meant to bracket. The tail is then neither dismissible (the pad
-    /// straddles zero) nor refinable (the floor is reached), and the search
-    /// grinds toward a `ScoreSearchError::Unresolved` it cannot avoid. That is
-    /// a search that does not terminate on its own domain, not a slow one.
-    ///
-    /// THE BRACKET, which has no floor because it is RELATIVE. Write
-    /// `f' = -(D1 + dof·rho)/2` with `D1 = -sum_i w_i t_i`,
-    /// `t_i = theta_i/(theta_i+lambda)` and `rho = R'/R > 0`.
-    ///
-    /// * every `t_i` falls with `log lambda`, so `D1` RISES: `D1` on the cell is
-    ///   bracketed by its two endpoint values exactly, with no bound at all;
-    /// * `d log t_i/dx = -(1-t_i)` and `d log[t_i(1-t_i)]/dx = 2t_i - 1`, both
-    ///   in `[-1, 1]`, and a positive mixture's log-derivative is a convex
-    ///   combination of its parts', so `D2` and `R'` each satisfy
-    ///   `|d log(.)/dx| <= 1`;
-    /// * `R` rises, so `d log rho/dx = d log R'/dx - rho <= 1`, giving
-    ///   `rho(x) <= rho(a)e^w` and `rho(x) >= rho(b)e^{-w}`;
-    /// * `|R''| <= R'` mode by mode, so `sigma = R''/R - rho^2` lies in
-    ///   `[-rho(1+rho), rho]`.
-    ///
-    /// Every one of those bounds is proportional to the quantity it bounds, so
-    /// in a tail where `f'` merely has a constant sign the bracket excludes zero
-    /// at a width that does not depend on how far the tail runs.
-    fn enclose(&self, left: ScoreSample, right: ScoreSample) -> Result<DerivativeEnclosure, String> {
-        let (lo, hi) = (left.x, right.x);
-        if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
-            return Err(format!(
-                "residual cascade: invalid score-enclosure interval [{lo}, {hi}]"
-            ));
-        }
-        let width = hi - lo;
-        let dof = (self.core.y.len() - self.core.nullity()) as f64;
-        let pad = self.lipschitz_pad(left, right, width);
-        let Some(bracket) = self.multiplicative_bracket(left, right, width, dof)? else {
-            return Ok(pad);
-        };
-        // Two OUTER enclosures of the same real number must overlap — both
-        // contain the endpoint derivatives, if nothing else. A disjoint pair
-        // means one of them is not an outer bound, and an enclosure that is not
-        // an outer bound does not fail loudly downstream: it lets the search
-        // discard a cell that held a stationary point and return a certified
-        // wrong answer. Refuse here instead of narrowing to whichever one is
-        // left, which would be choosing a winner between two derivations with
-        // no evidence about which is sound.
-        let derivative = intersect(pad.derivative, bracket.derivative)
-            .ok_or_else(|| disjoint("derivative", lo, hi, pad.derivative, bracket.derivative))?;
-        let curvature = intersect(pad.curvature, bracket.curvature)
-            .ok_or_else(|| disjoint("curvature", lo, hi, pad.curvature, bracket.curvature))?;
-        Ok(DerivativeEnclosure {
-            derivative,
-            curvature,
-        })
-    }
-
-    /// The additive half of [`Self::enclose`], on its own — the enclosure this
-    /// module used to return, kept separable so its tail stall can be asserted
-    /// against the bracket that repairs it rather than described.
-    fn lipschitz_pad(
-        &self,
-        left: ScoreSample,
-        right: ScoreSample,
-        width: f64,
-    ) -> DerivativeEnclosure {
-        let rank = (self.core.m - self.core.nullity()) as f64;
-        let dof = (self.core.y.len() - self.core.nullity()) as f64;
-        let curvature_abs_bound = 0.5 * (0.25 * rank + 2.0 * dof);
-        let third_abs_bound = 0.5 * (0.25 * rank + 6.0 * dof);
-        let derivative_radius = curvature_abs_bound * width;
-        let curvature_radius = third_abs_bound * width;
-        DerivativeEnclosure {
-            derivative: ClosedInterval::outward(
-                (left.derivative - derivative_radius).min(right.derivative - derivative_radius),
-                (left.derivative + derivative_radius).max(right.derivative + derivative_radius),
-            ),
-            curvature: ClosedInterval::outward(
-                (left.curvature - curvature_radius).min(right.curvature - curvature_radius),
-                (left.curvature + curvature_radius).max(right.curvature + curvature_radius),
-            ),
-        }
-    }
-
-    /// The relative bracket described on [`Self::enclose`], or `None` when the
-    /// endpoint residual log-slopes cannot be recovered to a definite sign (see
-    /// below), in which case the pad stands alone and nothing is claimed.
-    fn multiplicative_bracket(
-        &self,
-        left: ScoreSample,
-        right: ScoreSample,
-        width: f64,
-        dof: f64,
-    ) -> Result<Option<DerivativeEnclosure>, String> {
-        // Per endpoint: (D1, D2, rho lower estimate, rho upper estimate).
-        let mut parts = [(0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64); 2];
-        for (slot, sample) in parts.iter_mut().zip([left, right]) {
-            let lambda = gam_problem::checked_exp_log_strength(sample.x)
-                .map_err(|error| format!("residual cascade: {error}"))?;
-            let determinant = self.determinant_parts(sample.x, lambda);
-            // `evaluate` formed `derivative = -(D1 + dof*rho)/2` from THIS
-            // determinant value — recomputed here bitwise, same inputs, same
-            // code — so `-2*derivative` returns that sum exactly (halving and
-            // doubling are exact) and one subtraction recovers `dof*rho`. The
-            // recovery's error is the roundoff of the sum it undoes plus its
-            // own and the division: at most four roundings of magnitude
-            // `|D1| + |2*derivative|`. That is a rounding COUNT, not a slack to
-            // tune, and it is carried in both directions.
-            let total = -2.0 * sample.derivative;
-            let recovered = (total - determinant.first) / dof;
-            let slack = 4.0 * f64::EPSILON * (determinant.first.abs() + total.abs()) / dof;
-            *slot = (
-                determinant.first,
-                determinant.second,
-                recovered - slack,
-                recovered + slack,
-            );
-        }
-        let (first_lo, second_lo, _, rho_left_upper) = parts[0];
-        let (first_hi, second_hi, rho_right_lower, rho_right_upper) = parts[1];
-
-        // `rho > 0` is a theorem (`R' = lambda c'Dc > 0`), but a recovery that
-        // cannot place it strictly above zero has lost it to cancellation and
-        // can no longer carry a RELATIVE bound. Decline rather than guess.
-        let growth = width.exp();
-        if !(rho_left_upper > 0.0 && rho_right_upper > 0.0 && growth.is_finite()) {
-            return Ok(None);
-        }
-        // `rho(x) <= rho(a)e^w` integrating the `<= 1` side forward from the
-        // left endpoint; `rho(x) >= rho(b)e^-w` integrating it back from the
-        // right. Only those two directions are free of `rho` itself.
-        let rho_hi = rho_left_upper.max(rho_right_upper) * growth;
-        let rho_lo = (rho_right_lower / growth).max(0.0);
-
-        // D1 rises across the cell, so its endpoint values bracket it exactly.
-        let derivative = ClosedInterval::outward(
-            -0.5 * (first_hi + dof * rho_hi),
-            -0.5 * (first_lo + dof * rho_lo),
-        );
-
-        // D2 > 0 at both ends forces D2 > 0 throughout (a zero inside would make
-        // `|d log D2/dx| <= 1` impossible on a finite cell), which is what lets
-        // the relative bound apply; otherwise only `D2 >= 0` is available.
-        let (d2_lo, d2_hi) = if second_lo > 0.0 && second_hi > 0.0 {
-            (second_lo.max(second_hi) / growth, second_lo.min(second_hi) * growth)
-        } else {
-            (0.0, 0.25 * self.modes.iter().map(|mode| mode.weight).sum::<f64>())
-        };
-        let curvature = ClosedInterval::outward(
-            -0.5 * (d2_hi + dof * rho_hi),
-            -0.5 * (d2_lo - dof * rho_hi * (1.0 + rho_hi)),
-        );
-        Ok(Some(DerivativeEnclosure {
-            derivative,
-            curvature,
-        }))
-    }
-}
-
-/// The tighter of two outer enclosures of the same quantity, or `None` if they
-/// are disjoint — which is a contradiction, not a tight answer.
-fn intersect(a: ClosedInterval, b: ClosedInterval) -> Option<ClosedInterval> {
-    let merged = ClosedInterval::new(a.lo.max(b.lo), a.hi.min(b.hi));
-    (merged.lo <= merged.hi).then_some(merged)
-}
-
-fn disjoint(
-    what: &str,
-    lo: f64,
-    hi: f64,
-    pad: ClosedInterval,
-    bracket: ClosedInterval,
-) -> String {
-    format!(
-        "residual cascade: the Lipschitz pad and the multiplicative bracket give DISJOINT \
-         {what} enclosures on [{lo}, {hi}] ({pad:?} versus {bracket:?}); two outer bounds of \
-         one quantity cannot be disjoint, so one of them is not an outer bound"
-    )
-}
-
-/// A coefficient solver pinned to one λ (see [`Core::coeff_solver`]). The dense
-/// arms hold the Cholesky factor so repeated right-hand sides at that λ cost
-/// only triangular solves; the iterative arm holds the coarse-space
-/// preconditioner, which is likewise a function of λ alone and whose coarse
-/// block is an `O(n·q_C²) + O(q_C³)` assembly and factorization — paid once per
-/// λ, not once per right-hand side.
-enum CoeffSolver<'a> {
-    Cached(&'a [f64]),
-    Factored(Vec<f64>),
-    Iterative(Preconditioner),
-}
-
-impl CoeffSolver<'_> {
-    fn solve(&self, core: &Core, lambda: f64, b: &[f64]) -> Result<Vec<f64>, String> {
-        match self {
-            Self::Cached(l) => Ok(chol_solve(l, core.m, b)),
-            Self::Factored(l) => Ok(chol_solve(l, core.m, b)),
-            Self::Iterative(preconditioner) => core
-                .pcg_with(lambda, preconditioner, b, None)
-                .map(|(coeff, _, _)| coeff),
-        }
-    }
 }
 
 impl Core {
@@ -2203,7 +1884,7 @@ impl Core {
     /// would have produced had it stopped at step `j` — the Lanczos recurrence is
     /// forward. So every nested rule of a single run is available for the cost of
     /// one tridiagonal eigendecomposition, which is what makes the convergence
-    /// certificate in [`Self::iterative_residual_spectrum`] free of a second run.
+    /// comparison in [`Self::iterative_residual_spectrum`] free of a second run.
     ///
     /// Nodes are the Ritz values `theta_j`, weights are `||beta||^2 tau_j^2` with
     /// `tau_j` the first component of Ritz vector `j` — exactly the
@@ -2266,7 +1947,7 @@ impl Core {
         // threshold at which negativity stops being arithmetic and starts being a
         // statement about `B` is NOT the eigenvalue floor. Below `sqrt(eps)*theta_max`
         // — the resolution this module works at throughout, the same one
-        // `log_lambda_domain_from_modes` pads with — a negative Ritz value is
+        // `certified_log_lambda_domain_from_modes` pads with — a negative Ritz value is
         // indistinguishable from the zero it is approximating, and is clamped to
         // the null direction it represents. Above it, the penalty-whitened Schur
         // complement is genuinely indefinite, which is a defect and not roundoff.
@@ -2343,8 +2024,8 @@ impl Core {
     /// `(theta + lambda)^-k` grows more peaked at the bottom of the spectrum with
     /// every power of `k`. `S_2, S_3, S_4` ARE the score's first three
     /// `log lambda` derivatives, so a rule may not be admitted on `R` alone. Two
-    /// admissions are available and both are properties of the run, not of a
-    /// calibrated budget:
+    /// point-evaluation admissions are available and both are properties of the
+    /// run, not of a calibrated budget:
     ///
     /// 1. THE KRYLOV SPACE CLOSED (`SchurLanczos::invariant`). Then
     ///    `(B + lambda I)^-k beta` lies inside `K_m` for every `k` and every
@@ -2358,11 +2039,11 @@ impl Core {
     ///    [`residual_quadrature_tail_estimate`] extrapolates that tail
     ///    geometrically and REFUSES when the last two gaps do not contract, which
     ///    is the stagnation case a bare two-rule agreement test cannot see. The
-    ///    estimate must fall below the resolution the score search itself works at
-    ///    — `sqrt(eps)`, the same constant `log_lambda_domain_from_modes` pads
-    ///    with and `fit_reml` refines to. Measured against the exact dense
-    ///    eigenbasis at every budget on this ladder, over three designs: where the
-    ///    estimate passed, the rule was within `1e-12`.
+    ///    estimate must fall below the diagnostic point resolution —
+    ///    `sqrt(eps)`, the same constant `certified_log_lambda_domain_from_modes` uses for
+    ///    endpoint padding. Measured against the exact dense eigenbasis at every
+    ///    budget on this ladder, over three designs: where the estimate passed,
+    ///    the rule was within `1e-12`.
     ///
     /// The budget GROWS geometrically until one of those fires, so the accepted
     /// rule is the smallest that passes rather than the largest affordable. That
@@ -2370,13 +2051,13 @@ impl Core {
     /// starts producing near-null ghost nodes (measured: rank 473, from 256 steps
     /// on), so the cheapest passing rule is also the cleanest one.
     ///
-    /// Refuses by returning `None` rather than by erroring: the caller then solves
-    /// at every `lambda`, which is what shipped, and the certificate says so.
+    /// Returns `None` when neither admission holds. The caller turns that into a
+    /// refusal; it never revives the per-`lambda` solve fallback.
     fn iterative_residual_spectrum(
         &self,
         null_chol: &[f64],
         domain: (f64, f64),
-    ) -> Result<(Option<CascadeResidualSpectrum>, ResidualQuadratureCertificate), String> {
+    ) -> Result<(Option<CascadeResidualSpectrum>, ResidualQuadratureEvidence), String> {
         let rank = self.m - self.nullity();
         let ceiling = self.residual_krylov_ceiling();
         let budget = self.residual_quadrature_budget();
@@ -2392,7 +2073,7 @@ impl Core {
         if !(measure_mass > 0.0) {
             // No response energy outside the polynomial null space: the profiled
             // residual is the anchor at every lambda. A zero measure is exactly
-            // integrated by the empty rule, so this is certified, not degraded.
+            // integrated by the empty rule, so this evidence is exact.
             return Ok((
                 Some(CascadeResidualSpectrum {
                     eigenvalue: Vec::new(),
@@ -2400,7 +2081,7 @@ impl Core {
                     projected_square: Vec::new(),
                     anchor_energy: [anchor_energy],
                 }),
-                ResidualQuadratureCertificate {
+                ResidualQuadratureEvidence {
                     steps: 0,
                     coarse_steps: 0,
                     rank,
@@ -2408,7 +2089,8 @@ impl Core {
                     relative_tail: 0.0,
                     tail_estimate: 0.0,
                     target,
-                    certified: true,
+                    invariant: true,
+                    accepted_for_point_evaluation: true,
                     mass_defect: 0.0,
                     dropped_mass_fraction: 0.0,
                 },
@@ -2441,7 +2123,7 @@ impl Core {
                     domain,
                 )?
             };
-            let certificate = ResidualQuadratureCertificate {
+            let evidence = ResidualQuadratureEvidence {
                 steps: taken,
                 coarse_steps: if run.invariant { 0 } else { coarse_steps },
                 rank,
@@ -2449,15 +2131,16 @@ impl Core {
                 relative_tail: run.tail / run.spectral_scale.max(f64::MIN_POSITIVE),
                 tail_estimate,
                 target,
-                certified: run.invariant || tail_estimate <= target,
+                invariant: run.invariant,
+                accepted_for_point_evaluation: run.invariant || tail_estimate <= target,
                 mass_defect: fine.mass_defect,
                 dropped_mass_fraction: fine.dropped_mass_fraction,
             };
-            if certificate.certified {
-                return Ok((Some(fine.spectrum), certificate));
+            if evidence.accepted_for_point_evaluation {
+                return Ok((Some(fine.spectrum), evidence));
             }
             if taken >= budget {
-                return Ok((None, certificate));
+                return Ok((None, evidence));
             }
             steps = steps.saturating_mul(2).min(budget);
         }
@@ -2468,7 +2151,7 @@ impl Core {
     ///
     /// Not an accuracy dial — a rule is admitted by its own convergence, not by
     /// reaching a step count — so this bounds how large a Krylov space we are
-    /// willing to REORTHOGONALIZE before declining to certify. The binding
+    /// willing to REORTHOGONALIZE before declining the point evaluation. The binding
     /// resource is the basis itself (`steps x rank` doubles held live), so the
     /// bound is stated as that memory and the number in the code is the one being
     /// reasoned about.
@@ -2513,18 +2196,32 @@ impl Core {
             (modes, CascadeResidualForm::Spectral(spectrum))
         } else {
             let modes = self.iterative_cascade_spectrum(&null_chol)?;
-            // The residual's convergence certificate is charged over exactly the
-            // interval the search will visit, so the determinant modes — which
-            // define that interval — are built first.
-            let domain = log_lambda_domain_from_modes(&modes)?;
-            let (spectrum, certificate) = self.iterative_residual_spectrum(&null_chol, domain)?;
-            (
-                modes,
-                CascadeResidualForm::Quadrature {
-                    spectrum,
-                    certificate,
-                },
-            )
+            // The residual's numerical evidence is charged over exactly the
+            // interval the diagnostic point criterion may visit, so the
+            // determinant modes — which define that interval — are built first.
+            let domain = certified_log_lambda_domain_from_modes(&modes)?;
+            let (spectrum, evidence) =
+                self.iterative_residual_spectrum(&null_chol, domain)?;
+            let spectrum = spectrum.ok_or_else(|| {
+                format!(
+                    "residual cascade: profiled-residual quadrature did not resolve inside its \
+                     resource-derived budget (steps {}, coarse steps {}, rank {}, budget {}, \
+                     invariant {}, tail estimate {:.3e} against target {:.3e}, relative tail {:.3e}, \
+                     mass defect {:.3e}, dropped mass fraction {:.3e}); refusing the \
+                     ill-conditioned per-lambda solve fallback",
+                    evidence.steps,
+                    evidence.coarse_steps,
+                    evidence.rank,
+                    evidence.budget,
+                    evidence.invariant,
+                    evidence.tail_estimate,
+                    evidence.target,
+                    evidence.relative_tail,
+                    evidence.mass_defect,
+                    evidence.dropped_mass_fraction,
+                )
+            })?;
+            (modes, CascadeResidualForm::Quadrature(spectrum))
         };
         Ok(CascadeRemlProfile {
             core: self,
@@ -2933,26 +2630,6 @@ impl Core {
         } else {
             Ok((self.logdet_slq(lambda)?, LogdetMethod::Slq))
         }
-    }
-
-    /// The coefficient solver at a FIXED λ, obtained once so that several
-    /// right-hand sides can share one factorization or one preconditioner.
-    ///
-    /// Neither `A = X'WX + λD` nor its preconditioner depends on the right-hand
-    /// side, so a caller that needs two solves at the same λ must not pay two
-    /// O(m³) Cholesky factorizations — or two coarse-block assemblies — for it.
-    /// [`CascadeResidualForm::Solved`] needs exactly that pair (`A⁻¹b` and then
-    /// `A⁻¹Dc`), and going through `solve_coeff`/`pcg` twice rebuilt the
-    /// identical operator both times.
-    fn coeff_solver(&self, lambda: f64) -> Result<CoeffSolver<'_>, String> {
-        if let Some(l) = &self.predict_chol {
-            return Ok(CoeffSolver::Cached(l));
-        }
-        if let Some(mut a) = self.dense_system(lambda) {
-            cholesky_logdet(&mut a, self.m)?;
-            return Ok(CoeffSolver::Factored(a));
-        }
-        Ok(CoeffSolver::Iterative(self.build_preconditioner(lambda)?))
     }
 
     /// Coefficient solve at λ: dense Cholesky when cached, else certified PCG.
@@ -3481,11 +3158,11 @@ impl ResidualCascadeDesign {
 
     /// Quasi-uniformity certificate (issue #1032, caveat 2): `true` iff the
     /// metric-scaled cloud is isotropic enough that the BPX n-independent CG
-    /// iteration bound is trustworthy. When this returns `false` the auto-route
-    /// MUST fall back to the dense kernel path rather than pay an iterative
-    /// solve whose iteration count is no longer n-independent — the CG residual
-    /// certificate would still *catch* a mis-solve at [`CG_MAX_ITERS`], but the
-    /// guard prevents the silent O(n·iters) blow-up up front.
+    /// iteration bound is trustworthy. When this returns `false`, automatic
+    /// fitting must return a typed refusal rather than pay an iterative solve
+    /// whose iteration count is no longer n-independent. The CG residual
+    /// certificate would still *catch* a mis-solve at [`CG_MAX_ITERS`], but
+    /// the guard prevents the silent O(n·iters) blow-up up front.
     pub fn quasi_uniformity_certified(&self) -> bool {
         self.metric_scaled_aspect_ratio() <= QUASI_UNIFORMITY_MAX_ASPECT
     }
@@ -3587,16 +3264,17 @@ impl ResidualCascadeDesign {
         self.core.logdet_slq(lambda)
     }
 
-    /// The bounded `log λ` domain the certified REML search runs on — every
-    /// determinant transition `λ ≈ θ`, padded by `ln(1/√ε)` past the extreme Schur
-    /// modes.
+    /// The bounded `log λ` domain used by the exact dense REML search and by
+    /// iterative-route diagnostic point evaluation — every determinant
+    /// transition `λ ≈ θ`, padded by `ln(1/√ε)` past the extreme Schur modes.
     ///
     /// Exposed because the ENDPOINTS are where a criterion evaluation is hardest:
     /// `maximize_score_1d` evaluates the lower boundary before anything else, and
     /// on the iterative route that is the λ at which `X'WX + λD` is numerically
     /// singular (#2503). A gate on "the criterion is evaluable everywhere the
-    /// search will look" needs to know where that is, rather than hard-coding a λ
-    /// read out of one failure's message.
+    /// profile may look" needs to know where that is, rather than hard-coding a
+    /// λ read out of one failure's message. This does not authorize automatic
+    /// iterative REML; [`Self::fit_reml`] returns a typed proof refusal there.
     ///
     /// Rebuilds the whole REML profile, exactly as [`Self::criterion`] does — both
     /// are single-shot oracles, not loop bodies. Past the dense cap that includes
@@ -3606,9 +3284,9 @@ impl ResidualCascadeDesign {
         self.core.reml_profile()?.log_lambda_domain()
     }
 
-    /// Profiled-σ² REML criterion at `log λ` (differences across λ are exact
-    /// REML differences on the dense route; one fixed spectral quadrature is
-    /// used past the cap).
+    /// Profiled-σ² REML criterion at `log λ` (differences across λ are
+    /// exact-real certifiable on the dense route; one fixed numerical spectral
+    /// quadrature is used for diagnostic evaluation past the cap).
     pub fn criterion(&self, log_lambda: f64) -> Result<f64, String> {
         Ok(self.core.reml_profile()?.evaluate(log_lambda)?.jet.value)
     }
@@ -3627,7 +3305,7 @@ impl ResidualCascadeDesign {
         log_lambda: f64,
         sigma2: Option<f64>,
         warm: Option<&[f64]>,
-        selection: Option<CascadeSelectionProvenance>,
+        profile_normalized_logdet: Option<f64>,
     ) -> Result<ResidualCascadeFit, String> {
         let core = &self.core;
         let lambda = gam_problem::checked_exp_log_strength(log_lambda)
@@ -3652,7 +3330,7 @@ impl ResidualCascadeDesign {
             }
         };
         let r = (core.m - core.nullity()) as f64;
-        let (logdet, logdet_method) = match selection.map(|s| s.normalized_logdet) {
+        let (logdet, logdet_method) = match profile_normalized_logdet {
             Some(normalized) => (
                 normalized + r * log_lambda + core.pen_logdet_const,
                 if core.dense_gram.is_some() {
@@ -3686,7 +3364,6 @@ impl ResidualCascadeDesign {
                 solve_rel_residual: rel_res,
                 solve_iters: iters,
                 logdet_method,
-                residual_moments: selection.map(|s| s.residual_moments),
             },
             refinement: None,
         })
@@ -3695,53 +3372,111 @@ impl ResidualCascadeDesign {
     /// Fit with `log λ` selected by the profiled REML criterion. Every
     /// stationary interval in the bounded domain is isolated from analytic
     /// derivative enclosures, refined by safeguarded Newton/bisection, and
-    /// compared with both exact boundary candidates. The large route uses one
-    /// lambda-independent fixed-probe spectral profile, so it is the same
-    /// smooth deterministic score at every trial.
-    pub fn fit_reml(&self) -> Result<ResidualCascadeFit, String> {
+    /// compared with both exact boundary candidates.
+    ///
+    /// Automatic selection is intentionally limited to the dense route. The
+    /// iterative route has no exact-real enclosure of its stochastic
+    /// log-determinant, even when the separate β-seeded residual Krylov space
+    /// closes. A pointwise solve or quadrature value cannot certify a score
+    /// sign, stationary point, or global ordering. Returning a typed refusal is
+    /// the only sound result; [`Self::fit_at`] remains available when the user
+    /// explicitly fixes the smoothing parameter.
+    pub fn fit_reml(&self) -> Result<ResidualCascadeFit, ResidualCascadeError> {
+        if self.core.dense_gram.is_none() {
+            return Err(ResidualCascadeError::RemlScoreProofUnavailable {
+                columns: self.core.m,
+                dense_gram_max: DENSE_GRAM_MAX,
+            });
+        }
         let profile = self.core.reml_profile()?;
         let (log_lambda_lo, log_lambda_hi) = profile.log_lambda_domain()?;
         let resolution = f64::EPSILON.sqrt();
         let failed = |error: &dyn std::fmt::Display| {
             format!("residual cascade: REML stationary isolation failed: {error}")
         };
-        // Both arms run the SAME certified isolation on the SAME domain; they
-        // differ only in the enclosure oracle the design can honestly supply.
-        let selected_log_lambda = match profile.affine_view()? {
-            Some(affine) => {
-                affine
-                    .maximize(log_lambda_lo, log_lambda_hi, resolution)
-                    .map_err(|error| failed(&error))?
-                    .optimum
-                    .x
-            }
-            None => {
-                maximize_score_1d(
-                    log_lambda_lo,
-                    log_lambda_hi,
-                    resolution,
-                    |log_lambda| {
-                        profile
-                            .evaluate(log_lambda)
-                            .map(|evaluation| evaluation.jet)
-                    },
-                    |left, right| profile.enclose(left, right),
-                )
-                .map_err(|error| failed(&error))?
-                .optimum
-                .x
+        let affine = profile.affine_view()?.ok_or(
+            ResidualCascadeError::RemlScoreProofUnavailable {
+                columns: self.core.m,
+                dense_gram_max: DENSE_GRAM_MAX,
+            },
+        )?;
+        let search = affine
+            .maximize_value_ordered(log_lambda_lo, log_lambda_hi, resolution)
+            .map_err(|error| failed(&error))?;
+        if search.value_certificate.maximum_excess
+            > search.value_certificate.comparison_resolution
+        {
+            return Err(ResidualCascadeError::RemlValueOrderingUnresolved {
+                maximum_excess: search.value_certificate.maximum_excess,
+                comparison_resolution: search.value_certificate.comparison_resolution,
+            });
+        }
+        enum KktKind {
+            LowerBoundary,
+            UpperBoundary,
+            Stationary,
+        }
+        let (bracket, kkt_kind) = match search.location {
+            gam_math::score_opt::ScoreOptimumLocation::LowerBoundary => (
+                gam_math::score_opt::ClosedInterval::point(search.lower_boundary.x),
+                KktKind::LowerBoundary,
+            ),
+            gam_math::score_opt::ScoreOptimumLocation::UpperBoundary => (
+                gam_math::score_opt::ClosedInterval::point(search.upper_boundary.x),
+                KktKind::UpperBoundary,
+            ),
+            gam_math::score_opt::ScoreOptimumLocation::Stationary(index) => (
+                search
+                    .stationary_points
+                    .get(index)
+                    .ok_or_else(|| {
+                        ResidualCascadeError::Computation(
+                            "residual cascade: optimizer returned an invalid stationary index"
+                                .to_string(),
+                        )
+                    })?
+                    .bracket,
+                KktKind::Stationary,
+            ),
+            gam_math::score_opt::ScoreOptimumLocation::ResolutionFlat(index) => {
+                let flat = search.resolution_flat_regions.get(index).ok_or_else(|| {
+                    ResidualCascadeError::Computation(
+                        "residual cascade: optimizer returned an invalid resolution-flat index"
+                            .to_string(),
+                    )
+                })?;
+                return Err(ResidualCascadeError::RemlOptimumResolutionFlat {
+                    lo: flat.bracket.lo,
+                    hi: flat.bracket.hi,
+                    max_score_gap: flat.max_score_gap,
+                    score_resolution: flat.score_resolution,
+                });
             }
         };
+        let kkt = affine
+            .enclose(bracket.lo, bracket.hi)
+            .map_err(|error| ResidualCascadeError::Computation(failed(&error)))?;
+        let kkt_holds = match kkt_kind {
+            KktKind::LowerBoundary => kkt.derivative.hi <= 0.0,
+            KktKind::UpperBoundary => kkt.derivative.lo >= 0.0,
+            KktKind::Stationary => {
+                kkt.derivative.contains_zero() && kkt.curvature.hi < 0.0
+            }
+        };
+        if !kkt_holds {
+            return Err(ResidualCascadeError::Computation(format!(
+                "residual cascade: exact-real REML KKT certificate failed on \
+                 {bracket:?}: {kkt:?}"
+            )));
+        }
+        let selected_log_lambda = search.optimum.x;
         let selected = profile.evaluate(selected_log_lambda)?;
-        self.fit_at_with_warm(
+        Ok(self.fit_at_with_warm(
             selected_log_lambda,
             None,
             None,
-            Some(CascadeSelectionProvenance {
-                normalized_logdet: selected.normalized_logdet,
-                residual_moments: profile.residual.method(),
-            }),
-        )
+            Some(selected.normalized_logdet),
+        )?)
     }
 
     /// Assess the candidate level L+1 at this fit's λ. A complete candidate
@@ -4188,12 +3923,6 @@ impl ResidualCascadeFit {
                 solve_rel_residual: 0.0,
                 solve_iters: 0,
                 logdet_method: LogdetMethod::DenseExact,
-                // A core rebuilt from a persisted state carries no training
-                // design, so it can neither re-derive nor replay the criterion
-                // that selected this λ — the selection provenance is not
-                // reconstructible here and is reported as absent rather than
-                // guessed from the route the rebuilt core happens to be on.
-                residual_moments: None,
             },
             refinement: None,
         })
@@ -4260,17 +3989,18 @@ pub fn fit_residual_cascade(
         // Quasi-uniformity guard (issue #1032, caveat 2): if the metric has
         // collapsed the cloud onto a near-degenerate sheet in scaled
         // coordinates, the BPX iteration bound no longer holds. Refuse the
-        // iterative solve up front with a typed signal so the auto-route falls
-        // back to the dense kernel BEFORE paying an unbounded CG, rather than
-        // grinding to CG_MAX_ITERS. (The guard is checked at the root level
-        // only — refinement adds finer nets to the SAME scaled cloud, so the
-        // aspect ratio is invariant under added levels.)
+        // iterative solve up front with a typed signal before paying an
+        // unbounded CG or grinding to CG_MAX_ITERS. (The guard is checked at
+        // the root level only — refinement adds finer nets to the SAME scaled
+        // cloud, so the aspect ratio is invariant under added levels.) The
+        // typed computation refusal propagates through the selected cascade
+        // route; callers must not silently replace this estimator with another
+        // one.
         if levels == INITIAL_LEVELS && !design.quasi_uniformity_certified() {
             return Err(format!(
                 "residual cascade: metric-scaled aspect ratio {:.3e} exceeds the \
                  quasi-uniformity ceiling {QUASI_UNIFORMITY_MAX_ASPECT:.0e}; the BPX \
-                 iteration bound is not trustworthy on this (near-degenerate) metric — \
-                 fall back to the dense kernel path",
+                 iteration bound is not trustworthy on this (near-degenerate) metric",
                 design.metric_scaled_aspect_ratio()
             )
             .into());
@@ -4411,48 +4141,53 @@ mod refinement_decision_tests {
         (x1, x2, y)
     }
 
-    /// Tight clusters with empty space between them, deterministic.
-    ///
-    /// `extend_net` fills the whole bounding BOX, not just the data, so a cloud
-    /// with genuine voids puts cascade columns where no row supports them. Those
-    /// columns are annihilated by the design exactly, which is what produces the
-    /// numerically null Schur modes. A regular grid never does — every bump has
-    /// data under it — which is why the other fixture cannot cover that edge.
-    fn clustered_fixture() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-        let centers = [(0.12_f64, 0.13_f64), (0.86, 0.20), (0.45, 0.88)];
-        let mut x1 = Vec::new();
-        let mut x2 = Vec::new();
-        let mut y = Vec::new();
-        let mut state = 0x2455_u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    #[test]
+    fn iterative_route_refuses_auto_reml_but_keeps_fixed_lambda_fit() {
+        // Six levels fill a 65×65 finest box grid, taking this deliberately
+        // small data fixture past the dense Gram cap without making the test's
+        // row-wise work large.
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 6)
+            .expect("iterative-route cascade design");
+        assert!(
+            design.core.m > DENSE_GRAM_MAX && design.core.dense_gram.is_none(),
+            "fixture must exercise the solved/iterative route, got {} columns",
+            design.core.m
+        );
+
+        let error = match design.fit_reml() {
+            Ok(_) => panic!("auto-REML must not claim a derivative proof on the iterative route"),
+            Err(error) => error,
         };
-        for (cx, cy) in centers {
-            for _ in 0..60 {
-                let a = cx + 0.06 * (next() - 0.5);
-                let b = cy + 0.06 * (next() - 0.5);
-                x1.push(a);
-                x2.push(b);
-                y.push((3.0 * a).sin() + (2.0 * b).cos() + 0.05 * (next() - 0.5));
-            }
-        }
-        (x1, x2, y)
+        assert!(matches!(
+            error,
+            ResidualCascadeError::RemlScoreProofUnavailable {
+                columns,
+                dense_gram_max: DENSE_GRAM_MAX,
+            } if columns == design.core.m
+        ));
+
+        let fixed = design
+            .fit_at(0.0, None)
+            .expect("the same iterative design remains fit-capable at fixed lambda");
+        assert_eq!(fixed.log_lambda(), 0.0);
+        assert_eq!(fixed.certificate.logdet_method, LogdetMethod::Slq);
     }
 
-    /// The two [`CascadeResidualForm`] arms are the same function of λ.
+    /// The residual spectral sum and a direct factorization compute the same
+    /// function of λ.
     ///
-    /// The spectral arm reads the profiled residual and its three quadratic
-    /// forms off the Schur decomposition; the solved arm re-derives them from a
+    /// The spectral expression reads the profiled residual and its three
+    /// quadratic forms off the Schur decomposition; the comparator re-derives them from a
     /// factorization of `A = X'WX + λD`. If they ever disagree the criterion is
-    /// route-dependent, which is the defect the spectral arm exists to remove —
+    /// representation-dependent, which is the defect the spectral form exists to remove —
     /// so the agreement is asserted directly rather than inferred from the
     /// scores that consume it.
     ///
     /// The bound is the textbook forward-error of the comparator, not a tuned
-    /// number: the solved arm's Cholesky solve carries `O(m)·eps·cond(A)`, and
+    /// number: the comparator's Cholesky solve carries `O(m)·eps·cond(A)`, and
     /// `cond(A) = (θ_max + λ)/(θ_min + λ)` is available exactly from the same
     /// spectrum. Nothing here is free to be widened without changing that claim.
     #[test]
@@ -4485,14 +4220,15 @@ mod refinement_decision_tests {
             let (rss, penalty_energy, inverse_penalty_energy, third_energy) =
                 spectrum.moments(lambda);
 
-            let solver = core.coeff_solver(lambda).expect("factored solver");
-            let coeff = solver.solve(core, lambda, &core.rhs).expect("first solve");
+            let (coeff, _, _) = core
+                .solve_coeff(lambda, &core.rhs, None)
+                .expect("first solve");
             let dc: Vec<f64> = coeff
                 .iter()
                 .zip(core.pen_diag.iter())
                 .map(|(&c, &d)| d * c)
                 .collect();
-            let u = solver.solve(core, lambda, &dc).expect("second solve");
+            let (u, _, _) = core.solve_coeff(lambda, &dc, None).expect("second solve");
             let solved = [
                 core.rss_pen(&coeff),
                 coeff.iter().zip(dc.iter()).map(|(&c, &v)| c * v).sum(),
@@ -4575,162 +4311,6 @@ mod refinement_decision_tests {
                      (relative {gap:e} exceeds the shared mode-sum roundoff {bound:e})"
                 );
             }
-        }
-    }
-
-    /// Both replacement enclosures dismiss a tail cell the Lipschitz pad cannot.
-    ///
-    /// At the top of `log_lambda_domain` the score's derivative has decayed to
-    /// order `rank·sqrt(eps)`, while the pad's radius at the search's own
-    /// resolution floor is `C·sqrt(eps)` with `C` of order the residual degrees
-    /// of freedom. The pad therefore straddles zero at a width the search cannot
-    /// go below — a search that cannot terminate, not a slow one. Both cures
-    /// have widths that collapse with the cell instead: the affine interval
-    /// extension on the dense route, and the multiplicative bracket that
-    /// [`CascadeRemlProfile::enclose`] intersects into the pad everywhere else.
-    /// This asserts the difference at the resolution floor rather than
-    /// describing it.
-    #[test]
-    fn tail_cell_the_lipschitz_pad_cannot_dismiss_is_dismissed_by_both_cures() {
-        let (x1, x2, y) = dense_fixture(6);
-        let weights = vec![1.0; y.len()];
-        let axes: [&[f64]; 2] = [&x1, &x2];
-        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
-            .expect("cascade design");
-        let profile = design.core.reml_profile().expect("spectral profile");
-        let affine = profile
-            .affine_view()
-            .expect("affine view")
-            .expect("the dense route must expose an affine view");
-        let (_, hi) = profile.log_lambda_domain().expect("domain");
-
-        let lo = hi - f64::EPSILON.sqrt();
-        let left = sample_at(&profile, lo);
-        let right = sample_at(&profile, hi);
-
-        let pad = profile.lipschitz_pad(left, right, hi - lo);
-        assert!(
-            pad.derivative.contains_zero(),
-            "the fixture no longer reproduces the pad's tail stall: {pad:?}"
-        );
-        assert!(
-            pad.derivative.hi - pad.derivative.lo > 10.0 * left.derivative.abs(),
-            "the stall is that the pad is WIDER than the derivative it brackets; \
-             derivative {}, pad {:?}",
-            left.derivative,
-            pad.derivative
-        );
-
-        for (name, enclosure) in [
-            (
-                "affine interval extension",
-                affine.enclose(lo, hi).expect("interval extension").derivative,
-            ),
-            (
-                "multiplicative bracket (intersected)",
-                profile.enclose(left, right).expect("enclosure").derivative,
-            ),
-        ] {
-            assert!(
-                !enclosure.contains_zero(),
-                "{name} must exclude zero on a floor-width tail cell where the \
-                 derivative is {} and the pad reports {:?}; got {enclosure:?}",
-                left.derivative,
-                pad.derivative
-            );
-        }
-    }
-
-    /// The multiplicative bracket is an OUTER bound, checked against the score
-    /// it claims to bracket, on a design that HAS numerically null Schur modes.
-    ///
-    /// A too-tight enclosure does not fail loudly — it makes the search discard
-    /// a cell that contained a stationary point and return a certified wrong
-    /// answer. So the bracket is charged against densely sampled truth on cells
-    /// spanning the whole domain and every width from the resolution floor up.
-    ///
-    /// The deep fixture is deliberate: the null modes are the edge where the
-    /// bracket's premises are thinnest (`R'` is a positive mixture only over the
-    /// modes that survive the roundoff floor), so the containment claim is made
-    /// where it is hardest, not where it is easiest. The test asserts the
-    /// fixture still reaches that regime, so it cannot quietly stop covering it.
-    #[test]
-    fn enclosure_contains_the_derivatives_it_brackets_with_null_modes() {
-        let (x1, x2, y) = clustered_fixture();
-        let weights = vec![1.0; y.len()];
-        let axes: [&[f64]; 2] = [&x1, &x2];
-        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 3)
-            .expect("cascade design");
-        let profile = design.core.reml_profile().expect("spectral profile");
-        let null_modes = profile
-            .modes
-            .iter()
-            .filter(|mode| mode.eigenvalue == 0.0)
-            .count();
-        assert!(
-            null_modes > 0,
-            "fixture no longer reaches the null-mode regime this test exists to cover \
-             ({} modes, all positive)",
-            profile.modes.len()
-        );
-        check_containment_over(&profile);
-    }
-
-    /// The same containment claim on the small, well-conditioned fixture the
-    /// other tests use — the two together bracket the range of designs the
-    /// enclosure has to serve.
-    #[test]
-    fn enclosure_contains_the_derivatives_it_brackets() {
-        let (x1, x2, y) = dense_fixture(6);
-        let weights = vec![1.0; y.len()];
-        let axes: [&[f64]; 2] = [&x1, &x2];
-        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
-            .expect("cascade design");
-        let profile = design.core.reml_profile().expect("spectral profile");
-        check_containment_over(&profile);
-    }
-
-    fn check_containment_over(profile: &CascadeRemlProfile<'_>) {
-        let (domain_lo, domain_hi) = profile.log_lambda_domain().expect("domain");
-        let span = domain_hi - domain_lo;
-
-        for cell in 0..24 {
-            let width = span * 0.5_f64.powi(cell as i32 % 12);
-            let start = domain_lo + (span - width) * (cell / 12) as f64;
-            let (lo, hi) = (start, (start + width).min(domain_hi));
-            if !(hi > lo) {
-                continue;
-            }
-            let left = sample_at(profile, lo);
-            let right = sample_at(profile, hi);
-            let enclosure = profile.enclose(left, right).expect("enclosure");
-            for step in 0..=32 {
-                let x = lo + (hi - lo) * step as f64 / 32.0;
-                let jet = profile.evaluate(x).expect("jet").jet;
-                assert!(
-                    enclosure.derivative.contains(jet.derivative),
-                    "derivative {} at {x} escapes {:?} on cell [{lo}, {hi}]",
-                    jet.derivative,
-                    enclosure.derivative
-                );
-                assert!(
-                    enclosure.curvature.contains(jet.curvature),
-                    "curvature {} at {x} escapes {:?} on cell [{lo}, {hi}]",
-                    jet.curvature,
-                    enclosure.curvature
-                );
-            }
-        }
-    }
-
-    fn sample_at(profile: &CascadeRemlProfile<'_>, x: f64) -> ScoreSample {
-        let jet = profile.evaluate(x).expect("cascade jet").jet;
-        ScoreSample {
-            x,
-            value: jet.value,
-            derivative: jet.derivative,
-            curvature: jet.curvature,
-            third: jet.third,
         }
     }
 
@@ -4858,7 +4438,7 @@ mod refinement_decision_tests {
             let (modes, exact) = core
                 .dense_cascade_spectrum(&null_chol)
                 .expect("dense spectrum");
-            let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+            let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (spectrum, certificate) = core
                 .iterative_residual_spectrum(&null_chol, domain)
                 .expect("quadrature");
@@ -4883,7 +4463,7 @@ mod refinement_decision_tests {
             });
             println!(
                 "#2503 side={side} levels={levels} n={} m={} rank={rank} budget={} steps={} \
-                 coarse={} tail_estimate={:.3e} target={:.3e} certified={} tail={:.2e} \
+                 coarse={} tail_estimate={:.3e} target={:.3e} accepted={} invariant={} tail={:.2e} \
                  mass_defect={:.2e} dropped={:.2e}",
                 y.len(),
                 core.m,
@@ -4892,7 +4472,8 @@ mod refinement_decision_tests {
                 certificate.coarse_steps,
                 certificate.tail_estimate,
                 certificate.target,
-                certificate.certified,
+                certificate.accepted_for_point_evaluation,
+                certificate.invariant,
                 certificate.relative_tail,
                 certificate.mass_defect,
                 certificate.dropped_mass_fraction,
@@ -4902,13 +4483,13 @@ mod refinement_decision_tests {
                     "#2503   versus exact dense: dR/anchor={:.3e} S2={:.3e} S3={:.3e} S4={:.3e}",
                     worst[0], worst[1], worst[2], worst[3]
                 ),
-                None => println!("#2503   no rule admitted; the route solves at every lambda"),
+                None => println!("#2503   no rule admitted; point evaluation is refused"),
             }
         }
     }
 
-    /// The admitted quadrature IS the dense eigenbasis residual, to the resolution
-    /// its own certificate claims.
+    /// The admitted point quadrature matches the dense eigenbasis residual to the
+    /// resolution its numerical evidence claims on this fixture.
     ///
     /// This is the substitution gate: past the dense cap the profiled residual and
     /// its three `log λ` derivative moments come from a Golub–Meurant rule instead
@@ -4934,14 +4515,14 @@ mod refinement_decision_tests {
         let (modes, exact) = core
             .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
-        let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+        let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (spectrum, certificate) = core
             .iterative_residual_spectrum(&null_chol, domain)
             .expect("quadrature");
         let rank = core.m - core.nullity();
         assert!(
-            certificate.certified,
-            "the quadrature must certify on this fixture: {certificate:?}"
+            certificate.accepted_for_point_evaluation,
+            "the point quadrature must be admitted on this fixture: {certificate:?}"
         );
         assert!(
             certificate.steps * 2 < rank,
@@ -4953,10 +4534,10 @@ mod refinement_decision_tests {
             certificate.tail_estimate <= certificate.target,
             "the extrapolated tail must reach the search resolution: {certificate:?}"
         );
-        let spectrum = spectrum.expect("a certified rule is returned");
+        let spectrum = spectrum.expect("an admitted point rule is returned");
 
         // The comparator is the exact projection, and the bound is the resolution
-        // the certificate claims — not a widened number. `R` is charged
+        // the evidence claims — not a widened number. `R` is charged
         // ABSOLUTELY against the anchor energy: `R = anchor − S₁` cancels to nine
         // digits at the bottom of an over-complete cascade's domain, so a relative
         // bound there would be a statement about cancellation.
@@ -5019,7 +4600,7 @@ mod refinement_decision_tests {
         let modes = core
             .iterative_cascade_spectrum(&null_chol)
             .expect("determinant modes");
-        let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+        let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (spectrum, certificate) = core
             .iterative_residual_spectrum(&null_chol, domain)
             .expect("quadrature");
@@ -5033,17 +4614,16 @@ mod refinement_decision_tests {
             let quadrature = spectrum.moment_sums(lambda);
 
             // Exactly what `CascadeRemlProfile::evaluate` does on the solve route.
-            let solver = core.coeff_solver(lambda).expect("iterative solver");
-            let coeff = solver
-                .solve(core, lambda, &core.rhs)
+            let (coeff, _, _) = core
+                .solve_coeff(lambda, &core.rhs, None)
                 .expect("first certified solve");
             let dc: Vec<f64> = coeff
                 .iter()
                 .zip(core.pen_diag.iter())
                 .map(|(&c, &d)| d * c)
                 .collect();
-            let u = solver
-                .solve(core, lambda, &dc)
+            let (u, _, _) = core
+                .solve_coeff(lambda, &dc, None)
                 .expect("second certified solve");
             let anchor = spectrum.anchor_energy[0];
             let solved = [
@@ -5093,8 +4673,9 @@ mod refinement_decision_tests {
     }
 
     /// Past the dense cap, a scattered design must EXHAUST its Krylov space inside
-    /// the budget — because on these designs that is the only route to admission,
-    /// and without admission the route falls back to the solve and #2503 returns.
+    /// the budget. On these designs that is the only exact residual admission,
+    /// and without point admission the route refuses rather than reviving #2503's
+    /// ill-conditioned per-lambda solve.
     ///
     /// The measurement behind this gate is the reason the budget is stated the way
     /// it is. On every past-cap fixture the nested-rule tail estimate stays at
@@ -5108,9 +4689,8 @@ mod refinement_decision_tests {
     ///
     /// That makes the budget load-bearing in a way a step count is not: it must
     /// reach `min(rank, n − nullity)`, and a budget at 90% of that pays 90% of the
-    /// work and then falls back to the solve anyway. The fixtures below are the
-    /// three shapes the #2503 integration reds build, at the first level past the
-    /// cap.
+    /// work and then refuses anyway. The fixtures below are the three shapes the
+    /// #2503 integration reds build, at the first level past the cap.
     #[test]
     fn past_cap_designs_exhaust_their_krylov_space_inside_the_budget_2503() {
         for (n, levels) in [(1200usize, 6usize), (2500, 6), (6000, 6)] {
@@ -5129,43 +4709,44 @@ mod refinement_decision_tests {
             let modes = core
                 .iterative_cascade_spectrum(&null_chol)
                 .expect("determinant modes");
-            let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+            let domain = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let rank = core.m - core.nullity();
             let ceiling = core.residual_krylov_ceiling();
             let budget = core.residual_quadrature_budget();
             assert_eq!(
                 budget, ceiling,
                 "n={n} levels={levels}: the budget must reach the Krylov ceiling (rank {rank}); \
-                 stopping short of it pays the work and still falls back to the solve"
+                 stopping short of it pays the work and still refuses point evaluation"
             );
-            let (spectrum, certificate) = core
+            let (spectrum, evidence) = core
                 .iterative_residual_spectrum(&null_chol, domain)
                 .expect("quadrature");
             println!(
                 "#2503 n={n} levels={levels} m={} rank={rank} ceiling={ceiling} steps={} \
-                 tail={:.2e} tail_estimate={:.3e} certified={} dropped={:.2e}",
+                 tail={:.2e} tail_estimate={:.3e} accepted={} invariant={} dropped={:.2e}",
                 core.m,
-                certificate.steps,
-                certificate.relative_tail,
-                certificate.tail_estimate,
-                certificate.certified,
-                certificate.dropped_mass_fraction,
+                evidence.steps,
+                evidence.relative_tail,
+                evidence.tail_estimate,
+                evidence.accepted_for_point_evaluation,
+                evidence.invariant,
+                evidence.dropped_mass_fraction,
             );
             assert!(
-                certificate.certified && spectrum.is_some(),
-                "n={n} levels={levels}: the past-cap quadrature must be admitted, else the \
-                 criterion is evaluated by a solve at every λ and the domain endpoint refuses \
-                 (#2503): {certificate:?}"
+                evidence.invariant && evidence.accepted_for_point_evaluation && spectrum.is_some(),
+                "n={n} levels={levels}: the past-cap residual quadrature must close its Krylov \
+                 space and be admitted for point evaluation, else the route refuses (#2503): \
+                 {evidence:?}"
             );
             assert!(
-                certificate.relative_tail <= f64::EPSILON * certificate.steps as f64,
+                evidence.relative_tail <= f64::EPSILON * evidence.steps as f64,
                 "n={n} levels={levels}: admission here must come from EXHAUSTION — the Krylov \
                  residual against the operator scale must be at the arithmetic floor: \
-                 {certificate:?}"
+                 {evidence:?}"
             );
             assert!(
-                certificate.steps <= ceiling,
-                "the run cannot exceed the reachable dimension: {certificate:?}"
+                evidence.steps <= ceiling,
+                "the run cannot exceed the reachable dimension: {evidence:?}"
             );
         }
     }
@@ -5211,7 +4792,7 @@ mod refinement_decision_tests {
         let (modes, exact) = core
             .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
-        let (lo, hi) = log_lambda_domain_from_modes(&modes).expect("domain");
+        let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
         let mass = beta.iter().map(|value| value * value).sum::<f64>();
         let run = core
@@ -5270,7 +4851,7 @@ mod refinement_decision_tests {
         let (modes, exact) = core
             .dense_cascade_spectrum(&null_chol)
             .expect("dense spectrum");
-        let (lo, hi) = log_lambda_domain_from_modes(&modes).expect("domain");
+        let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
         let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
         let mass = beta.iter().map(|value| value * value).sum::<f64>();
         let steps = 96;
@@ -5361,7 +4942,7 @@ mod refinement_decision_tests {
     /// over three nested Gauss rules falls below `sqrt(eps)`, the finest rule
     /// really is that close to the EXACT spectrum.
     ///
-    /// The certificate is a self-comparison — it never sees the truth — so the
+    /// The admission evidence is a self-comparison — it never sees the truth — so the
     /// inference from "the ladder has contracted" to "the rule is right" is the
     /// thing that has to be measured. It rests on two facts and one model: every
     /// Gauss rule for a completely monotone kernel under-estimates its integral,
@@ -5370,7 +4951,7 @@ mod refinement_decision_tests {
     /// geometrically from the last two gaps, refusing outright when they do not
     /// contract. This charges that inference against the dense eigenbasis at every
     /// budget on the PRODUCTION ladder, over three designs — including the budgets
-    /// the certificate REFUSES, where it must be the refusal that is right.
+    /// the admission REFUSES, where it must be the refusal that is right.
     #[test]
     fn the_quadrature_tail_estimate_bounds_the_error_against_the_exact_spectrum_2503() {
         for (side, levels) in [(14usize, 4usize), (20, 5), (28, 5)] {
@@ -5382,14 +4963,14 @@ mod refinement_decision_tests {
             let (modes, exact) = core
                 .dense_cascade_spectrum(&null_chol)
                 .expect("dense spectrum");
-            let (lo, hi) = log_lambda_domain_from_modes(&modes).expect("domain");
+            let (lo, hi) = certified_log_lambda_domain_from_modes(&modes).expect("domain");
             let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
             let mass = beta.iter().map(|value| value * value).sum::<f64>();
             let rank = core.m - core.nullity();
             let target = f64::EPSILON.sqrt();
             let ceiling = core.residual_krylov_ceiling();
             let budget = core.residual_quadrature_budget();
-            let mut certified_at_least_once = false;
+            let mut accepted_at_least_once = false;
             let mut refused_at_least_once = false;
 
             // The same start and the same geometric growth
@@ -5421,7 +5002,7 @@ mod refinement_decision_tests {
                 }
 
                 if run.invariant || estimate <= target {
-                    certified_at_least_once = true;
+                    accepted_at_least_once = true;
                     assert!(
                         worst <= target,
                         "side={side} levels={levels} steps={taken}: the tail estimate was \
@@ -5438,10 +5019,10 @@ mod refinement_decision_tests {
                 steps = (steps * 2).min(budget);
             }
             assert!(
-                certified_at_least_once,
-                "side={side} levels={levels}: the growth ladder must reach a certified rule \
-                 inside the budget ({budget} of rank {rank}), or the route can never leave the \
-                 solve"
+                accepted_at_least_once,
+                "side={side} levels={levels}: the growth ladder must reach an admitted point \
+                 rule inside the budget ({budget} of rank {rank}), or the diagnostic criterion \
+                 remains unavailable"
             );
             assert!(
                 refused_at_least_once,
