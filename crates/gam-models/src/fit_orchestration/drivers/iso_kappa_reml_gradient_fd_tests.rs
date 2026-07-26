@@ -1121,7 +1121,7 @@ fn zz_measure_iso_kappa_rail_gradient_fd_2425() {
         ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
         ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
     ] {
-        let (pass, worst, violations, _) =
+        let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
             // #2444: probe BOTH faces. `+11.5` is the upper rail this gate was
             // written for; `-11.5` is its mirror a half e-fold inside the LOWER
             // bound, which is where every failing checkpoint in the kappa cluster
