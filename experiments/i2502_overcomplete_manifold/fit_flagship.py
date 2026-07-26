@@ -111,8 +111,8 @@ def main():
     ap.add_argument("--top-k", type=int, default=8)
     ap.add_argument("--lane", default="topk",
                     help="assignment lane for the manifold arm (topk | threshold_gate)")
-    ap.add_argument("--gpu", default="off",
-                    help="gam gpu policy (wheel 0.1.259 predates the #2393 "
+    ap.add_argument("--gpu", default="auto",
+                    help="gam gpu policy ("
                          "route-not-refuse fix, so its device lane hard-errors "
                          "on small decoder-smoothness groups)")
     ap.add_argument("--n-iter", type=int, default=8)
