@@ -680,8 +680,19 @@ pub(crate) fn sae_norm(a: &SaeArrowVector) -> f64 {
 /// Krylov directions) without imposing a dimension or iteration constant;
 /// genuinely large systems use the largest restart that can be allocated
 /// without violating the process budget.
-fn admitted_gmres_restart(dim: usize) -> Result<usize, String> {
-    let (budget, available) = sae_host_in_core_budget_bytes();
+/// Largest Arnoldi restart whose storage fits `budget`, as a pure function of
+/// the shape and the budget.
+///
+/// #2486 — separated from the host probe so the two regimes that actually
+/// depend on the budget are testable at a chosen value rather than only on a
+/// memory-starved machine. The search is capped at `dim`, so it returns `dim`
+/// — full, unrestarted, exact-in-`dim`-directions GMRES — whenever
+/// `24·dim² + 96·dim <= budget`. That threshold is `dim ≈ 9457` even at the
+/// 2 GiB in-core floor, so for every shape this repository fits the result is
+/// the shape's own `dim` and the budget does not enter. The budget binds only
+/// in the large-border regime, which is also the regime with no test coverage;
+/// `gmres_restart_saturates_below_the_binding_dimension` pins both halves.
+fn admitted_gmres_restart_with_budget(dim: usize, budget: usize) -> Result<usize, String> {
     let storage_bytes = |m: usize| -> Option<usize> {
         let basis = m.checked_add(1)?.checked_mul(dim)?;
         let preconditioned_directions = m.checked_mul(dim)?;
@@ -699,7 +710,7 @@ fn admitted_gmres_restart(dim: usize) -> Result<usize, String> {
     if minimum > budget {
         return Err(format!(
             "solve_b_preconditioned_gmres: even one Arnoldi direction needs {minimum} bytes, \
-             exceeding the cgroup-aware Krylov budget {budget} (available {available})"
+             exceeding the cgroup-aware Krylov budget {budget}"
         ));
     }
     let mut low = 1usize;
@@ -713,6 +724,55 @@ fn admitted_gmres_restart(dim: usize) -> Result<usize, String> {
         }
     }
     Ok(low)
+}
+
+fn admitted_gmres_restart(dim: usize) -> Result<usize, String> {
+    let (budget, available) = sae_host_in_core_budget_bytes();
+    admitted_gmres_restart_with_budget(dim, budget)
+        .map_err(|reason| format!("{reason} (available {available})"))
+}
+
+#[cfg(test)]
+mod gmres_restart_budget_tests {
+    use super::admitted_gmres_restart_with_budget;
+
+    /// Saturated storage at `m == dim`, in bytes: the basis, the preconditioned
+    /// directions, the Hessenberg block and the fixed workspace.
+    fn saturated_bytes(dim: usize) -> usize {
+        24 * dim * dim + 96 * dim
+    }
+
+    #[test]
+    fn gmres_restart_saturates_below_the_binding_dimension() {
+        // A budget that admits the whole Krylov space: the restart is the
+        // shape's own dim, so the budget does not enter the answer at all.
+        for dim in [26usize, 200, 2_048] {
+            let budget = saturated_bytes(dim);
+            assert_eq!(
+                admitted_gmres_restart_with_budget(dim, budget),
+                Ok(dim),
+                "dim={dim} must take full unrestarted GMRES when its whole basis fits"
+            );
+            // One byte short of saturation must NOT return dim, otherwise the
+            // assertion above would pass for a rule that ignores the budget.
+            let restart = admitted_gmres_restart_with_budget(dim, budget - 1)
+                .expect("one Arnoldi direction still fits");
+            assert!(
+                restart < dim,
+                "dim={dim} must restart below dim once its full basis no longer fits, got {restart}"
+            );
+        }
+    }
+
+    #[test]
+    fn gmres_restart_refuses_when_a_single_direction_does_not_fit() {
+        let error = admitted_gmres_restart_with_budget(1_000, 8)
+            .expect_err("8 bytes cannot hold one Arnoldi direction at dim=1000");
+        assert!(
+            error.contains("even one Arnoldi direction"),
+            "the refusal must name the storage it could not afford, got {error}"
+        );
+    }
 }
 
 /// Solve `A x = rhs` by flexible right-preconditioned restarted GMRES.
