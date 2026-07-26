@@ -547,81 +547,34 @@ fn gaussian_reml_optimize_latent<'py>(
     Ok(out.unbind())
 }
 
-fn latent_glm_family_from_str(
-    value: &str,
-    tweedie_p: f64,
-    negbin_theta: f64,
-    beta_phi: f64,
-) -> Result<LikelihoodSpec, String> {
-    match value.to_ascii_lowercase().replace('_', "-").as_str() {
-        "gaussian" | "gaussian-identity" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Gaussian,
-            InverseLink::Standard(StandardLink::Identity),
-        )),
-        "binomial" | "binomial-logit" | "logistic" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Binomial,
-            InverseLink::Standard(StandardLink::Logit),
-        )),
-        "binomial-probit" | "probit" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Binomial,
-            InverseLink::Standard(StandardLink::Probit),
-        )),
-        "binomial-cloglog" | "cloglog" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Binomial,
-            InverseLink::Standard(StandardLink::CLogLog),
-        )),
-        "poisson" | "poisson-log" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Poisson,
-            InverseLink::Standard(StandardLink::Log),
-        )),
-        "tweedie" | "tweedie-log" => {
-            // The compound-Poisson-Gamma Tweedie variance power must lie
-            // strictly in (1, 2); outside that range the unit-deviance and
-            // working-response formulas are undefined and the downstream
-            // solver bails with a NaN deviance. Validate eagerly here (mirror
-            // of the negbin/beta nuisance-parameter checks below) so the user
-            // sees an actionable error instead of an opaque fit failure.
-            if !gam::types::is_valid_tweedie_power(tweedie_p) {
-                return Err(format!(
-                    "tweedie_p must be finite and strictly between 1 and 2; got {tweedie_p}"
-                ));
-            }
-            Ok(LikelihoodSpec::new(
-                ResponseFamily::Tweedie { p: tweedie_p },
-                InverseLink::Standard(StandardLink::Log),
-            ))
-        }
-        "negbin" | "negbin-log" | "negative-binomial" | "negative-binomial-log" => {
-            if !(negbin_theta.is_finite() && negbin_theta > 0.0) {
-                return Err(format!(
-                    "negbin_theta must be finite and > 0; got {negbin_theta}"
-                ));
-            }
-            Ok(LikelihoodSpec::new(
-                ResponseFamily::NegativeBinomial {
-                    theta: negbin_theta,
-                    theta_fixed: false,
-                },
-                InverseLink::Standard(StandardLink::Log),
-            ))
-        }
-        "beta" | "beta-logit" | "beta-regression" | "beta-regression-logit" => {
-            if !(beta_phi.is_finite() && beta_phi > 0.0) {
-                return Err(format!("beta_phi must be finite and > 0; got {beta_phi}"));
-            }
-            Ok(LikelihoodSpec::new(
-                ResponseFamily::Beta { phi: beta_phi },
-                InverseLink::Standard(StandardLink::Logit),
-            ))
-        }
-        "gamma-log" => Ok(LikelihoodSpec::new(
-            ResponseFamily::Gamma,
-            InverseLink::Standard(StandardLink::Log),
-        )),
-        other => Err(format!(
-            "unsupported latent GLM family {other:?}; supported families are gaussian-identity, binomial-logit, binomial-probit, binomial-cloglog, poisson-log, tweedie-log, negbin-log, beta-regression-logit, gamma-log"
-        )),
-    }
+/// Resolve the latent GLM family name through the canonical resolver.
+///
+/// SPEC rules 8/9: this crate owns no family table. Every spelling the CLI, the
+/// Rust library and Python accept — and the rule that a supplied
+/// `negbin_theta` *pins* θ rather than merely seeding it (#983) — lives in
+/// `gam::families::fit_orchestration::scalar_family_from_name`. The private copy
+/// this replaced resolved a strictly smaller set of names (it rejected bare
+/// `"gamma"`, the canonical spelling the CLI emits, and every mgcv `family(link)`
+/// form) and reported every explicit θ as unpinned, so the same
+/// `family=..., negbin_theta=...` pair meant two different models depending on
+/// which surface was asked. `link_pinned` is discarded here because this entry
+/// point takes no separate link argument for it to contradict.
+fn latent_family_spec(
+    name: &str,
+    tweedie_power: Option<f64>,
+    negative_binomial_theta: Option<f64>,
+    beta_phi: Option<f64>,
+) -> PyResult<LikelihoodSpec> {
+    gam::families::fit_orchestration::scalar_family_from_name(
+        name,
+        gam::families::fit_orchestration::FamilyNuisanceOverrides {
+            negative_binomial_theta,
+            tweedie_power,
+            beta_phi,
+        },
+    )
+    .map(|(spec, _link_pinned)| spec)
+    .map_err(py_value_error)
 }
 
 fn glm_reml_fit_latent_impl(
@@ -793,9 +746,9 @@ fn set_ok_glm_latent_items<'py>(
     centers,
     penalty,
     family,
-    tweedie_p = 1.5,
-    negbin_theta = 1.0,
-    beta_phi = 1.0,
+    tweedie_p = None,
+    negbin_theta = None,
+    beta_phi = None,
     m = 2,
     weights = None,
     fisher_w = None,
@@ -815,9 +768,9 @@ fn glm_reml_fit_latent<'py>(
     centers: PyReadonlyArray2<'py, f64>,
     penalty: PyReadonlyArray2<'py, f64>,
     family: String,
-    tweedie_p: f64,
-    negbin_theta: f64,
-    beta_phi: f64,
+    tweedie_p: Option<f64>,
+    negbin_theta: Option<f64>,
+    beta_phi: Option<f64>,
     m: usize,
     weights: Option<PyReadonlyArray1<'py, f64>>,
     fisher_w: Option<PyReadonlyArray3<'py, f64>>,
@@ -904,8 +857,7 @@ fn glm_reml_fit_latent<'py>(
             aux_strength_state,
         );
     }
-    let family = latent_glm_family_from_str(&family, tweedie_p, negbin_theta, beta_phi)
-        .map_err(py_value_error)?;
+    let family = latent_family_spec(&family, tweedie_p, negbin_theta, beta_phi)?;
     let analytic_penalties_for_thread = analytic_penalties.clone();
     let latent_payload_for_thread = latent_payload.clone();
     let (fit, design, _, aux_strength_state) =
@@ -959,9 +911,9 @@ fn glm_reml_fit_latent<'py>(
     aux_family = "ridge".to_string(),
     aux_strength = None,
     dim_selection_log_precision = None,
-    tweedie_p = 1.5,
-    negbin_theta = 1.0,
-    beta_phi = 1.0,
+    tweedie_p = None,
+    negbin_theta = None,
+    beta_phi = None,
     basis_kind = "duchon".to_string(),
 ))]
 fn glm_reml_fit_latent_backward<'py>(
@@ -982,13 +934,12 @@ fn glm_reml_fit_latent_backward<'py>(
     aux_family: String,
     aux_strength: Option<f64>,
     dim_selection_log_precision: Option<PyReadonlyArray1<'py, f64>>,
-    tweedie_p: f64,
-    negbin_theta: f64,
-    beta_phi: f64,
+    tweedie_p: Option<f64>,
+    negbin_theta: Option<f64>,
+    beta_phi: Option<f64>,
     basis_kind: String,
 ) -> PyResult<Py<PyDict>> {
-    let family = latent_glm_family_from_str(&family, tweedie_p, negbin_theta, beta_phi)
-        .map_err(py_value_error)?;
+    let family = latent_family_spec(&family, tweedie_p, negbin_theta, beta_phi)?;
     let aux_family = match aux_family.to_ascii_lowercase().as_str() {
         "ridge" => AuxPriorFamily::Ridge,
         "linear" => AuxPriorFamily::Linear,
@@ -6529,43 +6480,130 @@ fn poincare_mobius_add<'py>(
 
 #[cfg(test)]
 mod latent_glm_family_validation_tests {
-    use super::latent_glm_family_from_str;
+    use gam::families::fit_orchestration::{FamilyNuisanceOverrides, scalar_family_from_name};
     use gam::types::ResponseFamily;
 
+    fn tweedie_overrides(power: f64) -> FamilyNuisanceOverrides {
+        FamilyNuisanceOverrides {
+            tweedie_power: Some(power),
+            ..FamilyNuisanceOverrides::default()
+        }
+    }
+
     /// The Tweedie compound-Poisson-Gamma variance power must lie strictly in
-    /// (1, 2). Previously `latent_glm_family_from_str` only rejected non-finite
-    /// `tweedie_p`, so an out-of-range power (e.g. 2.5, 1.0, 0.5) constructed a
-    /// `ResponseFamily::Tweedie { p }` whose deviance/working-response formulas
-    /// are undefined — surfacing only later as an opaque NaN-deviance fit
-    /// failure. This now mirrors the eager negbin/beta nuisance-parameter
-    /// checks and rejects the bad power up front with an actionable message.
+    /// (1, 2); outside it the unit-deviance and working-response formulas are
+    /// undefined and the failure surfaces much later as an opaque NaN deviance.
+    /// The FFI used to enforce this inside its own family table; it now shares
+    /// the canonical gate, so an out-of-range power is rejected with the same
+    /// message whichever surface named the family.
     #[test]
     fn tweedie_rejects_out_of_range_variance_power() {
         for &bad in &[0.5_f64, 1.0, 2.0, 2.5, -1.0, f64::INFINITY, f64::NAN] {
-            let result = latent_glm_family_from_str("tweedie", bad, 1.0, 1.0);
+            let message = scalar_family_from_name("tweedie", tweedie_overrides(bad))
+                .expect_err("a power outside (1, 2) must be rejected");
             assert!(
-                result.is_err(),
-                "tweedie_p={bad} is outside (1, 2) and must be rejected"
-            );
-            let msg = result.err().unwrap();
-            assert!(
-                msg.contains("between 1 and 2"),
-                "error message must explain the (1, 2) constraint; got {msg:?}"
+                message.contains("between 1 and 2"),
+                "error must explain the (1, 2) constraint; got {message:?}"
             );
         }
     }
 
-    /// A valid in-range Tweedie power is still accepted and yields the expected
-    /// `ResponseFamily::Tweedie { p }` (the validation does not over-reject).
+    /// A valid in-range power is still accepted (the gate does not over-reject).
     #[test]
     fn tweedie_accepts_canonical_variance_power() {
         for &good in &[1.1_f64, 1.5, 1.9] {
-            let spec = latent_glm_family_from_str("tweedie", good, 1.0, 1.0)
-                .expect("in-range Tweedie power must be accepted");
+            let (spec, _) = scalar_family_from_name("tweedie", tweedie_overrides(good))
+                .expect("an in-range Tweedie power must be accepted");
             match spec.response {
                 ResponseFamily::Tweedie { p } => assert_eq!(p, good),
                 other => panic!("expected Tweedie family, got {other:?}"),
             }
+        }
+    }
+
+    /// The FFI's private table rejected bare `"gamma"` while accepting
+    /// `"gamma-log"` — and bare `"gamma"` is exactly the spelling the CLI's
+    /// canonical family name resolves to, so one model was reachable from one
+    /// surface and not the other. Every spelling either surface accepts now
+    /// resolves through the one table.
+    #[test]
+    fn every_surface_spelling_of_a_family_resolves() {
+        for name in [
+            "gamma",
+            "gamma-log",
+            "gaussian",
+            "gaussian-identity",
+            "poisson",
+            "poisson-log",
+            "negbin",
+            "negbin-log",
+            "binomial",
+            "logistic",
+            "probit",
+            "cloglog",
+            "beta-regression-logit",
+        ] {
+            scalar_family_from_name(name, FamilyNuisanceOverrides::default())
+                .unwrap_or_else(|err| panic!("family {name:?} must resolve; got {err}"));
+        }
+    }
+
+    /// #983: an explicitly supplied θ *pins* the negative-binomial shape. The
+    /// FFI's private table hardcoded `theta_fixed: false`, so the identical
+    /// `family="negbin", negbin_theta=2.5` request estimated θ from Python and
+    /// held it fixed from the CLI — one request, two models.
+    #[test]
+    fn an_explicit_negative_binomial_theta_pins_it() {
+        let (spec, _) = scalar_family_from_name(
+            "negbin-log",
+            FamilyNuisanceOverrides {
+                negative_binomial_theta: Some(2.5),
+                ..FamilyNuisanceOverrides::default()
+            },
+        )
+        .expect("an explicit theta must be accepted");
+        match spec.response {
+            ResponseFamily::NegativeBinomial { theta, theta_fixed } => {
+                assert_eq!(theta, 2.5);
+                assert!(
+                    theta_fixed,
+                    "an explicitly supplied theta is pinned, not merely seeded"
+                );
+            }
+            other => panic!("expected NegativeBinomial, got {other:?}"),
+        }
+    }
+
+    /// The distinction the FFI's bare `f64` default could not express: no theta
+    /// supplied means estimate it.
+    #[test]
+    fn an_absent_negative_binomial_theta_is_estimated() {
+        let (spec, _) = scalar_family_from_name("negbin", FamilyNuisanceOverrides::default())
+            .expect("an absent theta seeds the estimate");
+        match spec.response {
+            ResponseFamily::NegativeBinomial { theta_fixed, .. } => {
+                assert!(!theta_fixed, "an unsupplied theta must remain estimated");
+            }
+            other => panic!("expected NegativeBinomial, got {other:?}"),
+        }
+    }
+
+    /// The Beta precision reached the family as a hardcoded 1.0 on the canonical
+    /// path while the FFI threaded the user's value through its own table. It is
+    /// now one override, honoured identically from both.
+    #[test]
+    fn the_beta_precision_override_reaches_the_family() {
+        let (spec, _) = scalar_family_from_name(
+            "beta-regression-logit",
+            FamilyNuisanceOverrides {
+                beta_phi: Some(7.5),
+                ..FamilyNuisanceOverrides::default()
+            },
+        )
+        .expect("an explicit beta phi must be accepted");
+        match spec.response {
+            ResponseFamily::Beta { phi } => assert_eq!(phi, 7.5),
+            other => panic!("expected Beta family, got {other:?}"),
         }
     }
 }

@@ -3243,7 +3243,7 @@ def glm_reml_fit_latent(
     penalty: Any,
     family: str,
     *,
-    tweedie_p: float = 1.5,
+    tweedie_p: float | None = None,
     negbin_theta: float | None = None,
     beta_phi: float | None = None,
     m: int = 2,
@@ -3264,8 +3264,12 @@ def glm_reml_fit_latent(
     ``"gaussian-identity"``, and the multi-output families
     ``"multinomial-logit"`` (aliases ``"multinomial"`` / ``"softmax"`` /
     ``"categorical-logit"``) and a multi-column binomial-logit fit (pass a
-    multi-column ``y`` with ``family="binomial-logit"``). ``tweedie_p``
-    defaults to ``1.5``.
+    multi-column ``y`` with ``family="binomial-logit"``). ``tweedie_p``,
+    ``negbin_theta`` and ``beta_phi`` are the family's nuisance parameters;
+    leaving one ``None`` means "not supplied", which is what lets Rust seed and
+    estimate a negative-binomial ``theta`` rather than pinning it. An explicit
+    ``negbin_theta`` pins it, exactly as ``--negative-binomial-theta`` does on
+    the CLI. An unset ``tweedie_p`` resolves to ``1.5``.
 
     ``fisher_w`` is an advanced research hook: a per-row Fisher-block override
     that replaces the analytic curvature in the inner penalised Newton/PIRLS
@@ -3296,29 +3300,10 @@ def glm_reml_fit_latent(
     import numpy as np
 
     rust = rust_module()
-    family_normalized = str(family).lower().replace("_", "-")
-    is_negbin = family_normalized in {
-        "negbin",
-        "negbin-log",
-        "negative-binomial",
-        "negative-binomial-log",
-    }
-    is_beta = family_normalized in {
-        "beta",
-        "beta-logit",
-        "beta-regression",
-        "beta-regression-logit",
-    }
-    if is_negbin and negbin_theta is None:
-        raise ValueError("negbin_theta must be provided when family='negbin'")
-    theta = 1.0 if negbin_theta is None else float(negbin_theta)
-    if is_negbin and not (np.isfinite(theta) and theta > 0.0):
-        raise ValueError(f"negbin_theta must be finite and > 0; got {theta!r}")
-    if is_beta and beta_phi is None:
-        raise ValueError("beta_phi must be provided when family='beta'")
-    phi = 1.0 if beta_phi is None else float(beta_phi)
-    if is_beta and not (np.isfinite(phi) and phi > 0.0):
-        raise ValueError(f"beta_phi must be finite and > 0; got {phi!r}")
+    # The family name table and the nuisance-parameter rules live in Rust
+    # (SPEC rule 8): `scalar_family_from_name` is the one place that knows which
+    # families take a theta / phi and what "not supplied" means for each. This
+    # wrapper forwards `None` as `None` so Rust can still tell the difference.
     try:
         out = rust.glm_reml_fit_latent(
             _numeric_vector(t, "t"),
@@ -3328,9 +3313,9 @@ def glm_reml_fit_latent(
             _numeric_matrix(centers, "centers"),
             _numeric_matrix(penalty, "penalty"),
             str(family),
-            float(tweedie_p),
-            theta,
-            phi,
+            None if tweedie_p is None else float(tweedie_p),
+            None if negbin_theta is None else float(negbin_theta),
+            None if beta_phi is None else float(beta_phi),
             int(m),
             None if weights is None else _numeric_vector(weights, "weights"),
             None if fisher_w is None else _numeric_array(fisher_w, "fisher_w"),
@@ -3368,7 +3353,7 @@ def glm_reml_fit_latent_backward(
     family: str,
     *,
     grad_reml_score: float = 1.0,
-    tweedie_p: float = 1.5,
+    tweedie_p: float | None = None,
     negbin_theta: float | None = None,
     beta_phi: float | None = None,
     m: int = 2,
@@ -3395,29 +3380,10 @@ def glm_reml_fit_latent_backward(
     import numpy as np
 
     rust = rust_module()
-    family_normalized = str(family).lower().replace("_", "-")
-    is_negbin = family_normalized in {
-        "negbin",
-        "negbin-log",
-        "negative-binomial",
-        "negative-binomial-log",
-    }
-    is_beta = family_normalized in {
-        "beta",
-        "beta-logit",
-        "beta-regression",
-        "beta-regression-logit",
-    }
-    if is_negbin and negbin_theta is None:
-        raise ValueError("negbin_theta must be provided when family='negbin'")
-    theta = 1.0 if negbin_theta is None else float(negbin_theta)
-    if is_negbin and not (np.isfinite(theta) and theta > 0.0):
-        raise ValueError(f"negbin_theta must be finite and > 0; got {theta!r}")
-    if is_beta and beta_phi is None:
-        raise ValueError("beta_phi must be provided when family='beta'")
-    phi = 1.0 if beta_phi is None else float(beta_phi)
-    if is_beta and not (np.isfinite(phi) and phi > 0.0):
-        raise ValueError(f"beta_phi must be finite and > 0; got {phi!r}")
+    # The family name table and the nuisance-parameter rules live in Rust
+    # (SPEC rule 8): `scalar_family_from_name` is the one place that knows which
+    # families take a theta / phi and what "not supplied" means for each. This
+    # wrapper forwards `None` as `None` so Rust can still tell the difference.
     try:
         out = rust.glm_reml_fit_latent_backward(
             _numeric_vector(t, "t"),
@@ -3438,9 +3404,9 @@ def glm_reml_fit_latent_backward(
             None
             if dim_selection_log_precision is None
             else _numeric_vector(dim_selection_log_precision, "dim_selection_log_precision"),
-            float(tweedie_p),
-            theta,
-            phi,
+            None if tweedie_p is None else float(tweedie_p),
+            None if negbin_theta is None else float(negbin_theta),
+            None if beta_phi is None else float(beta_phi),
             str(basis_kind),
         )
     except Exception as exc:

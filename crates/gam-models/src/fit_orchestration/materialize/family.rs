@@ -1,9 +1,12 @@
 use super::*;
 
-const SCALAR_FAMILY_NAMES_HELP: &str = "auto, gaussian, binomial/bernoulli, \
-binomial-logit/bernoulli-logit, binomial-probit/bernoulli-probit, \
-binomial-cloglog/bernoulli-cloglog, latent-cloglog-binomial, poisson, gamma, \
-beta/beta-regression, tweedie/tw, negative-binomial/negbin/nb, \
+const SCALAR_FAMILY_NAMES_HELP: &str = "auto, gaussian, gaussian-identity, \
+binomial/bernoulli, binomial-logit/bernoulli-logit/logistic, \
+binomial-probit/bernoulli-probit/probit, \
+binomial-cloglog/bernoulli-cloglog/cloglog, latent-cloglog-binomial, \
+poisson, poisson-log, gamma, gamma-log, beta/beta-regression, \
+beta-logit/beta-regression-logit, tweedie/tw, tweedie-log, \
+negative-binomial/negbin/nb, negative-binomial-log/negbin-log, \
 royston-parmar, transformation-normal";
 
 /// Project an ingest-layer [`ColumnKindTag`] (plus the column's level table)
@@ -215,6 +218,377 @@ pub fn tweedie_power_is_estimated(family: Option<&str>) -> bool {
     }
 }
 
+/// Nuisance parameters that a family NAME cannot carry on its own.
+///
+/// The response family is fully determined by its name; `theta`, the Tweedie
+/// variance power and the Beta precision are not. Every surface that names a
+/// family supplies them through this one struct, so "the user pinned it"
+/// versus "estimate it from the data" is a distinction the type can express
+/// (`Some` vs `None`) rather than one each caller re-invents — the FFI
+/// previously collapsed both onto a bare `f64` default and therefore had to
+/// treat every supplied theta as a mere seed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FamilyNuisanceOverrides {
+    /// `Some(theta)` pins the negative-binomial theta; `None` seeds it and
+    /// leaves it to be estimated (#983).
+    pub negative_binomial_theta: Option<f64>,
+    /// Tweedie variance power supplied out of band. A power written into the
+    /// name itself (`tweedie(1.6)`) wins over this; absent both, 1.5.
+    pub tweedie_power: Option<f64>,
+    /// Beta-regression precision. `None` is the neutral 1.0.
+    pub beta_phi: Option<f64>,
+}
+
+/// Resolve a scalar family NAME to its likelihood spec, plus whether the name
+/// pinned a link.
+///
+/// This is the single total source of truth for every family spelling the
+/// surface accepts — the CLI reaches it through [`resolve_family`], and the
+/// Python FFI calls it directly. It deliberately takes no response data: a
+/// name either denotes a family or it does not, and only the auto-detect path
+/// in [`resolve_family`] needs `y`.
+pub fn scalar_family_from_name(
+    name: &str,
+    overrides: FamilyNuisanceOverrides,
+) -> Result<(LikelihoodSpec, bool), String> {
+    let FamilyNuisanceOverrides {
+        negative_binomial_theta,
+        tweedie_power,
+        beta_phi,
+    } = overrides;
+    // The Beta precision is a nuisance parameter of the family, not of the
+    // name; validate it at the one place the family is minted so every
+    // surface rejects the same values.
+    let beta_phi = match beta_phi {
+        Some(phi) => {
+            if !(phi.is_finite() && phi > 0.0) {
+                return Err(WorkflowError::InvalidConfig {
+                    reason: format!("beta phi must be finite and > 0; got {phi}"),
+                }
+                .into());
+            }
+            phi
+        }
+        None => 1.0,
+    };
+    // Resolve the optional theta only inside a structurally selected NB arm.
+    // Outside NB, the option is an invalid configuration rather than a global
+    // scalar that happens to be fabricated as one.
+    let resolve_negative_binomial_theta = || -> Result<(f64, bool), String> {
+        const ESTIMATED_THETA_SEED: f64 = 1.0;
+        let (theta, fixed) = match negative_binomial_theta {
+            Some(theta) => (theta, true),
+            None => (ESTIMATED_THETA_SEED, false),
+        };
+        if !(theta.is_finite() && theta > 0.0) {
+            return Err(format!(
+                "negative-binomial theta must be finite and > 0; got {theta}"
+            ));
+        }
+        Ok((theta, fixed))
+    };
+    // Accept both '-' and '_' as separators so e.g. "binomial_logit" and
+    // "negative-binomial" resolve identically. Also accept mgcv's
+    // parenthesized form `family(link)` (e.g. "binomial(logit)",
+    // "Binomial(Probit)") which is how mgcv writes a GLM family with an
+    // explicit link in R. Canonicalize all forms to `family-link`.
+    let lowered = name.to_ascii_lowercase().replace('_', "-");
+    // mgcv writes a GLM family carrying an explicit link as
+    // `family(link)` (e.g. "poisson(log)", "Gamma(log)",
+    // "gaussian(identity)", "binomial(probit)"). Parse that form
+    // *structurally* — separate the family head from the link argument —
+    // rather than flattening it to a `family-link` string and depending
+    // on a hand-written match arm existing for that exact pair.
+    // Flattening is why the canonical default-link spellings
+    // `poisson(log)` / `gamma(log)` / `gaussian(identity)` were rejected
+    // as "unknown family": those families only ever had a bare arm, never
+    // a `poisson-log` / `gamma-log` / `gaussian-identity` arm (#1129).
+    // Resolving the head as a family and validating the link against it
+    // (`apply_paren_link`) makes every legal pairing accept uniformly and
+    // rejects illegal ones with a precise message. Non-parenthesized
+    // names — bare (`poisson`) and the historical hyphen spellings
+    // (`binomial-probit`) — match the table directly as before.
+    let (head_name, paren_link): (&str, Option<&str>) = if let Some(open) =
+        lowered.find('(')
+        && lowered.ends_with(')')
+    {
+        let head = lowered[..open].trim_end_matches('-').trim();
+        let inner = lowered[open + 1..lowered.len() - 1].trim();
+        if head.is_empty() || inner.is_empty() {
+            // Malformed parens ("()", "poisson()", "(log)") — match the
+            // whole lowered string, which falls through to the standard
+            // "unknown family" error below.
+            (lowered.as_str(), None)
+        } else {
+            (head, Some(inner))
+        }
+    } else {
+        (lowered.as_str(), None)
+    };
+    // mgcv's `tw()` carries the Tweedie variance power as its
+    // parenthesized argument (`tweedie(1.6)` / `tweedie(p=1.6)`), NOT a
+    // link name. When the head is Tweedie and the argument parses as a
+    // number, interpret it as the power `p` and consume the argument so
+    // it is not misrouted to the link resolver — which previously
+    // rejected `tweedie(1.5)` as `unknown link '1.5'` (#2026), leaving
+    // no user-facing way to set `p`. A non-numeric argument
+    // (e.g. `tweedie(log)`) still flows through to the link resolver.
+    let (paren_link, tweedie_p_override): (Option<&str>, Option<f64>) =
+        if matches!(head_name, "tweedie" | "tw" | "tweedie-log")
+            && let Some(arg) = paren_link
+        {
+            let numeric = arg.strip_prefix("p=").unwrap_or(arg).trim();
+            match numeric.parse::<f64>() {
+                Ok(p) => {
+                    // Reuse the single Tweedie-power validity gate
+                    // (`p` finite and strictly in (1, 2)) that the
+                    // latent FFI and PIRLS deviance paths enforce, so a
+                    // bad power fails here with an actionable message
+                    // instead of an opaque downstream NaN deviance.
+                    if !gam_spec::is_valid_tweedie_power(p) {
+                        return Err(WorkflowError::InvalidConfig {
+                            reason: format!(
+                                "tweedie power p must be finite and strictly \
+                                 between 1 and 2; got {p}"
+                            ),
+                        }
+                        .into());
+                    }
+                    (None, Some(p))
+                }
+                Err(_) => (Some(arg), tweedie_power),
+            }
+        } else {
+            (paren_link, tweedie_power)
+        };
+    // A power supplied out of band (the FFI's `tweedie_p` argument) passes the
+    // same validity gate as the parenthesized `tweedie(p=…)` form above, so one
+    // bad power fails identically whichever surface named the family. A power
+    // written into the name wins, because it is the more specific statement.
+    if let Some(p) = tweedie_p_override
+        && !gam_spec::is_valid_tweedie_power(p)
+    {
+        return Err(WorkflowError::InvalidConfig {
+            reason: format!("tweedie power p must be finite and strictly between 1 and 2; got {p}"),
+        }
+        .into());
+    }
+    let resolved = match head_name {
+        "gaussian" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Gaussian,
+                InverseLink::Standard(StandardLink::Identity),
+            ),
+            false,
+        ),
+        "gaussian-identity" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Gaussian,
+                InverseLink::Standard(StandardLink::Identity),
+            ),
+            true,
+        ),
+        "binomial" | "bernoulli" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            ),
+            false,
+        ),
+        "binomial-logit" | "bernoulli-logit" | "logistic" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Logit),
+            ),
+            true,
+        ),
+        "binomial-probit" | "bernoulli-probit" | "probit" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::Probit),
+            ),
+            true,
+        ),
+        "binomial-cloglog" | "bernoulli-cloglog" | "cloglog" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::Standard(StandardLink::CLogLog),
+            ),
+            true,
+        ),
+        "latent-cloglog-binomial" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Binomial,
+                InverseLink::LatentCLogLog(
+                    LatentCLogLogState::new(1.0)
+                        .map_err(|err| format!("latent cloglog default state: {err}"))?,
+                ),
+            ),
+            true,
+        ),
+        "poisson" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Poisson,
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            false,
+        ),
+        "poisson-log" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Poisson,
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            true,
+        ),
+        // #983: a user-supplied `--negative-binomial-theta` holds θ
+        // fixed at exactly that value (`theta_fixed = true` →
+        // `FixedNegBinTheta` scale → the PIRLS refresh gate
+        // `negbin_theta_is_estimated()` stays closed). With no flag,
+        // θ is the running ML estimate (the #802 default seed 1.0).
+        "nb" | "negbin" | "negative-binomial" => {
+            let (theta, theta_fixed) = resolve_negative_binomial_theta()?;
+            (
+                LikelihoodSpec::new(
+                    ResponseFamily::NegativeBinomial { theta, theta_fixed },
+                    InverseLink::Standard(StandardLink::Log),
+                ),
+                false,
+            )
+        }
+        "negative-binomial-log" | "negbin-log" => {
+            let (theta, theta_fixed) = resolve_negative_binomial_theta()?;
+            (
+                LikelihoodSpec::new(
+                    ResponseFamily::NegativeBinomial { theta, theta_fixed },
+                    InverseLink::Standard(StandardLink::Log),
+                ),
+                true,
+            )
+        }
+        "beta" | "beta-regression" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Beta { phi: beta_phi },
+                InverseLink::Standard(StandardLink::Logit),
+            ),
+            false,
+        ),
+        "beta-logit" | "beta-regression-logit" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Beta { phi: beta_phi },
+                InverseLink::Standard(StandardLink::Logit),
+            ),
+            true,
+        ),
+        "gamma" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Gamma,
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            false,
+        ),
+        "gamma-log" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Gamma,
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            true,
+        ),
+        // Royston-Parmar flexible-parametric survival and the
+        // transformation-normal response model are CLI/formula families
+        // whose materialization is dispatched before the scalar GLM
+        // family resolver runs (survival via `Surv(...)`, transformation
+        // via the dedicated transformation-normal path). They are listed
+        // here so this resolver is the single total source of truth for
+        // every family name the surface accepts: `royston-parmar` maps to
+        // the canonical flexible-parametric likelihood, and
+        // `transformation-normal` shares Gaussian-identity scalar
+        // semantics (the transformation is learned outside this spec).
+        "royston-parmar" => (LikelihoodSpec::royston_parmar(), true),
+        "transformation-normal" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Gaussian,
+                InverseLink::Standard(StandardLink::Identity),
+            ),
+            true,
+        ),
+        // Tweedie compound-Poisson-Gamma family. The variance power p
+        // must lie strictly in (1, 2). mgcv's `tw()` has NO canonical
+        // p — it *estimates* p by profile likelihood; here p can be set
+        // explicitly via the mgcv-style `tweedie(1.6)` / `tweedie(p=1.6)`
+        // parenthesized argument (parsed above into `tweedie_p_override`,
+        // #2026). Absent an explicit power we fall back to p = 1.5, a
+        // neutral interior default; the fitted mean (log-link
+        // quasi-likelihood) is robust to a misspecified p, but the
+        // observation-interval calibration depends on it, so callers on
+        // data whose true p != 1.5 should set it. The link is fixed to
+        // log (the only link wired through the Tweedie working-response
+        // and dispersion machinery). "tw" matches mgcv's family alias.
+        "tweedie" | "tw" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Tweedie {
+                    p: tweedie_p_override.unwrap_or(1.5),
+                },
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            false,
+        ),
+        "tweedie-log" => (
+            LikelihoodSpec::new(
+                ResponseFamily::Tweedie {
+                    p: tweedie_p_override.unwrap_or(1.5),
+                },
+                InverseLink::Standard(StandardLink::Log),
+            ),
+            true,
+        ),
+        "multinomial" | "multinomial-logit" | "categorical" | "categorical-logit"
+        | "softmax" => {
+            // Multinomial-logit is a vector-response family with K-1
+            // active linear predictors and a per-row dense Fisher
+            // block — it cannot be represented by the scalar
+            // `LikelihoodSpec` (one `ResponseFamily` × one
+            // `InverseLink`) that this entry point produces.
+            //
+            // The principled coefficient-space solver lives in
+            // `crate::multinomial::fit_penalized_multinomial`,
+            // which routes the canonical
+            // `MultinomialLogitLikelihood: VectorLikelihood` through
+            // `gam_solve::pirls::dense_block_xtwx` in output-major
+            // coefficient ordering. The forthcoming
+            // `gamfit.fit_multinomial(...)` Python entry exposes that
+            // path with formula → design wiring; until that wrapper
+            // lands, callers reach the driver directly through the
+            // FFI surface.
+            return Err(WorkflowError::InvalidConfig {
+                reason: format!(
+                    "family '{name}' is a vector-response family; use \
+                     the dedicated multinomial entry point \
+                     (`crate::multinomial::fit_penalized_multinomial` \
+                     in Rust, or `gamfit.fit_multinomial(...)` in Python) \
+                     rather than the scalar `fit(family=...)` path"
+                ),
+            }
+            .into());
+        }
+        _ => {
+            return Err(WorkflowError::InvalidConfig {
+                reason: format!(
+                    "unknown family '{name}'; expected one of: {SCALAR_FAMILY_NAMES_HELP}"
+                ),
+            }
+            .into());
+        }
+    };
+    // Apply an explicit mgcv-style `(link)` argument to the resolved
+    // family, validating legality. A bare family name leaves the
+    // family's default link untouched.
+    let resolved = match paren_link {
+        Some(link_str) => apply_paren_link(resolved, link_str, name)?,
+        None => resolved,
+    };
+    Ok(resolved)
+}
+
 /// Resolve a family from an optional name, optional link choice, and response data.
 ///
 /// `y_kind` describes the *source* representation of the response column
@@ -234,296 +608,21 @@ pub fn resolve_family(
     y_kind: ResponseColumnKind,
     response_name: &str,
 ) -> Result<LikelihoodSpec, String> {
-    // Resolve the optional theta only inside a structurally selected NB arm.
-    // Outside NB, the option is an invalid configuration rather than a global
-    // scalar that happens to be fabricated as one.
-    let resolve_negative_binomial_theta = || -> Result<(f64, bool), String> {
-        const ESTIMATED_THETA_SEED: f64 = 1.0;
-        let (theta, fixed) = match negative_binomial_theta {
-            Some(theta) => (theta, true),
-            None => (ESTIMATED_THETA_SEED, false),
-        };
-        if !(theta.is_finite() && theta > 0.0) {
-            return Err(format!(
-                "negative-binomial theta must be finite and > 0; got {theta}"
-            ));
-        }
-        Ok((theta, fixed))
-    };
     // `link_pinned = true` means the family name carried a specific link suffix
     // (e.g. "binomial-probit"); `false` means the user only declared the response
     // family (e.g. "binomial") and any link_choice may legally refine the link
     // without being treated as a contradiction.
     let explicit: Option<(LikelihoodSpec, bool)> = match family {
-        Some(name) => {
-            // Accept both '-' and '_' as separators so e.g. "binomial_logit" and
-            // "negative-binomial" resolve identically. Also accept mgcv's
-            // parenthesized form `family(link)` (e.g. "binomial(logit)",
-            // "Binomial(Probit)") which is how mgcv writes a GLM family with an
-            // explicit link in R. Canonicalize all forms to `family-link`.
-            let lowered = name.to_ascii_lowercase().replace('_', "-");
-            // mgcv writes a GLM family carrying an explicit link as
-            // `family(link)` (e.g. "poisson(log)", "Gamma(log)",
-            // "gaussian(identity)", "binomial(probit)"). Parse that form
-            // *structurally* — separate the family head from the link argument —
-            // rather than flattening it to a `family-link` string and depending
-            // on a hand-written match arm existing for that exact pair.
-            // Flattening is why the canonical default-link spellings
-            // `poisson(log)` / `gamma(log)` / `gaussian(identity)` were rejected
-            // as "unknown family": those families only ever had a bare arm, never
-            // a `poisson-log` / `gamma-log` / `gaussian-identity` arm (#1129).
-            // Resolving the head as a family and validating the link against it
-            // (`apply_paren_link`) makes every legal pairing accept uniformly and
-            // rejects illegal ones with a precise message. Non-parenthesized
-            // names — bare (`poisson`) and the historical hyphen spellings
-            // (`binomial-probit`) — match the table directly as before.
-            let (head_name, paren_link): (&str, Option<&str>) = if let Some(open) =
-                lowered.find('(')
-                && lowered.ends_with(')')
-            {
-                let head = lowered[..open].trim_end_matches('-').trim();
-                let inner = lowered[open + 1..lowered.len() - 1].trim();
-                if head.is_empty() || inner.is_empty() {
-                    // Malformed parens ("()", "poisson()", "(log)") — match the
-                    // whole lowered string, which falls through to the standard
-                    // "unknown family" error below.
-                    (lowered.as_str(), None)
-                } else {
-                    (head, Some(inner))
-                }
-            } else {
-                (lowered.as_str(), None)
-            };
-            // mgcv's `tw()` carries the Tweedie variance power as its
-            // parenthesized argument (`tweedie(1.6)` / `tweedie(p=1.6)`), NOT a
-            // link name. When the head is Tweedie and the argument parses as a
-            // number, interpret it as the power `p` and consume the argument so
-            // it is not misrouted to the link resolver — which previously
-            // rejected `tweedie(1.5)` as `unknown link '1.5'` (#2026), leaving
-            // no user-facing way to set `p`. A non-numeric argument
-            // (e.g. `tweedie(log)`) still flows through to the link resolver.
-            let (paren_link, tweedie_p_override): (Option<&str>, Option<f64>) =
-                if matches!(head_name, "tweedie" | "tw" | "tweedie-log")
-                    && let Some(arg) = paren_link
-                {
-                    let numeric = arg.strip_prefix("p=").unwrap_or(arg).trim();
-                    match numeric.parse::<f64>() {
-                        Ok(p) => {
-                            // Reuse the single Tweedie-power validity gate
-                            // (`p` finite and strictly in (1, 2)) that the
-                            // latent FFI and PIRLS deviance paths enforce, so a
-                            // bad power fails here with an actionable message
-                            // instead of an opaque downstream NaN deviance.
-                            if !gam_spec::is_valid_tweedie_power(p) {
-                                return Err(WorkflowError::InvalidConfig {
-                                    reason: format!(
-                                        "tweedie power p must be finite and strictly \
-                                         between 1 and 2; got {p}"
-                                    ),
-                                }
-                                .into());
-                            }
-                            (None, Some(p))
-                        }
-                        Err(_) => (Some(arg), None),
-                    }
-                } else {
-                    (paren_link, None)
-                };
-            let resolved = match head_name {
-                "gaussian" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Gaussian,
-                        InverseLink::Standard(StandardLink::Identity),
-                    ),
-                    false,
-                ),
-                "binomial" | "bernoulli" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Binomial,
-                        InverseLink::Standard(StandardLink::Logit),
-                    ),
-                    false,
-                ),
-                "binomial-logit" | "bernoulli-logit" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Binomial,
-                        InverseLink::Standard(StandardLink::Logit),
-                    ),
-                    true,
-                ),
-                "binomial-probit" | "bernoulli-probit" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Binomial,
-                        InverseLink::Standard(StandardLink::Probit),
-                    ),
-                    true,
-                ),
-                "binomial-cloglog" | "bernoulli-cloglog" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Binomial,
-                        InverseLink::Standard(StandardLink::CLogLog),
-                    ),
-                    true,
-                ),
-                "latent-cloglog-binomial" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Binomial,
-                        InverseLink::LatentCLogLog(
-                            LatentCLogLogState::new(1.0)
-                                .map_err(|err| format!("latent cloglog default state: {err}"))?,
-                        ),
-                    ),
-                    true,
-                ),
-                "poisson" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Poisson,
-                        InverseLink::Standard(StandardLink::Log),
-                    ),
-                    false,
-                ),
-                // #983: a user-supplied `--negative-binomial-theta` holds θ
-                // fixed at exactly that value (`theta_fixed = true` →
-                // `FixedNegBinTheta` scale → the PIRLS refresh gate
-                // `negbin_theta_is_estimated()` stays closed). With no flag,
-                // θ is the running ML estimate (the #802 default seed 1.0).
-                "nb" | "negbin" | "negative-binomial" => {
-                    let (theta, theta_fixed) = resolve_negative_binomial_theta()?;
-                    (
-                        LikelihoodSpec::new(
-                            ResponseFamily::NegativeBinomial { theta, theta_fixed },
-                            InverseLink::Standard(StandardLink::Log),
-                        ),
-                        false,
-                    )
-                }
-                "negative-binomial-log" => {
-                    let (theta, theta_fixed) = resolve_negative_binomial_theta()?;
-                    (
-                        LikelihoodSpec::new(
-                            ResponseFamily::NegativeBinomial { theta, theta_fixed },
-                            InverseLink::Standard(StandardLink::Log),
-                        ),
-                        true,
-                    )
-                }
-                "beta" | "beta-regression" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Beta { phi: 1.0 },
-                        InverseLink::Standard(StandardLink::Logit),
-                    ),
-                    false,
-                ),
-                "beta-logit" | "beta-regression-logit" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Beta { phi: 1.0 },
-                        InverseLink::Standard(StandardLink::Logit),
-                    ),
-                    true,
-                ),
-                "gamma" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Gamma,
-                        InverseLink::Standard(StandardLink::Log),
-                    ),
-                    false,
-                ),
-                // Royston-Parmar flexible-parametric survival and the
-                // transformation-normal response model are CLI/formula families
-                // whose materialization is dispatched before the scalar GLM
-                // family resolver runs (survival via `Surv(...)`, transformation
-                // via the dedicated transformation-normal path). They are listed
-                // here so this resolver is the single total source of truth for
-                // every family name the surface accepts: `royston-parmar` maps to
-                // the canonical flexible-parametric likelihood, and
-                // `transformation-normal` shares Gaussian-identity scalar
-                // semantics (the transformation is learned outside this spec).
-                "royston-parmar" => (LikelihoodSpec::royston_parmar(), true),
-                "transformation-normal" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Gaussian,
-                        InverseLink::Standard(StandardLink::Identity),
-                    ),
-                    true,
-                ),
-                // Tweedie compound-Poisson-Gamma family. The variance power p
-                // must lie strictly in (1, 2). mgcv's `tw()` has NO canonical
-                // p — it *estimates* p by profile likelihood; here p can be set
-                // explicitly via the mgcv-style `tweedie(1.6)` / `tweedie(p=1.6)`
-                // parenthesized argument (parsed above into `tweedie_p_override`,
-                // #2026). Absent an explicit power we fall back to p = 1.5, a
-                // neutral interior default; the fitted mean (log-link
-                // quasi-likelihood) is robust to a misspecified p, but the
-                // observation-interval calibration depends on it, so callers on
-                // data whose true p != 1.5 should set it. The link is fixed to
-                // log (the only link wired through the Tweedie working-response
-                // and dispersion machinery). "tw" matches mgcv's family alias.
-                "tweedie" | "tw" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Tweedie {
-                            p: tweedie_p_override.unwrap_or(1.5),
-                        },
-                        InverseLink::Standard(StandardLink::Log),
-                    ),
-                    false,
-                ),
-                "tweedie-log" => (
-                    LikelihoodSpec::new(
-                        ResponseFamily::Tweedie {
-                            p: tweedie_p_override.unwrap_or(1.5),
-                        },
-                        InverseLink::Standard(StandardLink::Log),
-                    ),
-                    true,
-                ),
-                "multinomial" | "multinomial-logit" | "categorical" | "categorical-logit"
-                | "softmax" => {
-                    // Multinomial-logit is a vector-response family with K-1
-                    // active linear predictors and a per-row dense Fisher
-                    // block — it cannot be represented by the scalar
-                    // `LikelihoodSpec` (one `ResponseFamily` × one
-                    // `InverseLink`) that this entry point produces.
-                    //
-                    // The principled coefficient-space solver lives in
-                    // `crate::multinomial::fit_penalized_multinomial`,
-                    // which routes the canonical
-                    // `MultinomialLogitLikelihood: VectorLikelihood` through
-                    // `gam_solve::pirls::dense_block_xtwx` in output-major
-                    // coefficient ordering. The forthcoming
-                    // `gamfit.fit_multinomial(...)` Python entry exposes that
-                    // path with formula → design wiring; until that wrapper
-                    // lands, callers reach the driver directly through the
-                    // FFI surface.
-                    return Err(WorkflowError::InvalidConfig {
-                        reason: format!(
-                            "family '{name}' is a vector-response family; use \
-                             the dedicated multinomial entry point \
-                             (`crate::multinomial::fit_penalized_multinomial` \
-                             in Rust, or `gamfit.fit_multinomial(...)` in Python) \
-                             rather than the scalar `fit(family=...)` path"
-                        ),
-                    }
-                    .into());
-                }
-                _ => {
-                    return Err(WorkflowError::InvalidConfig {
-                        reason: format!(
-                            "unknown family '{name}'; expected one of: {SCALAR_FAMILY_NAMES_HELP}"
-                        ),
-                    }
-                    .into());
-                }
-            };
-            // Apply an explicit mgcv-style `(link)` argument to the resolved
-            // family, validating legality. A bare family name leaves the
-            // family's default link untouched.
-            let resolved = match paren_link {
-                Some(link_str) => apply_paren_link(resolved, link_str, name)?,
-                None => resolved,
-            };
-            Some(resolved)
-        }
+        Some(name) => Some(scalar_family_from_name(
+            name,
+            FamilyNuisanceOverrides {
+                negative_binomial_theta,
+                // The CLI/config surface carries the Tweedie power inside the
+                // name (`tweedie(p=1.6)`) and has no Beta-precision knob yet.
+                tweedie_power: None,
+                beta_phi: None,
+            },
+        )?),
         None => {
             if negative_binomial_theta.is_some() {
                 return Err(WorkflowError::InvalidConfig {
