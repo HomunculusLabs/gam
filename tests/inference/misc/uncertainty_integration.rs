@@ -276,6 +276,113 @@ fn fit_exposes_posterior_covariance_and_standard_errors() {
 }
 
 #[test]
+fn noiseless_gaussian_smoothing_correction_is_a_valid_covariance_2490() {
+    let n = 160usize;
+    let mut x = Array2::<f64>::zeros((n, 3));
+    for i in 0..n {
+        let t = (i as f64 + 0.5) / n as f64;
+        let x1 = -3.0 + 6.0 * t;
+        x[[i, 0]] = 1.0;
+        x[[i, 1]] = x1;
+        x[[i, 2]] = (1.7 * x1).sin();
+    }
+
+    let truth = Array1::from_vec(vec![0.8, -1.1, 0.55]);
+    let y = x.dot(&truth);
+    let weights = Array1::<f64>::ones(n);
+    let offset = Array1::<f64>::zeros(n);
+
+    let mut penalty = Array2::<f64>::zeros((3, 3));
+    penalty[[2, 2]] = 1.0;
+
+    let fit = fit_gam(
+        x.view(),
+        y.view(),
+        weights.view(),
+        offset.view(),
+        &[dense_penalty(penalty)],
+        gaussian_identity_likelihood(),
+        &FitOptions {
+            skip_rho_posterior_inference: true,
+            max_iter: 80,
+            tol: 1e-8,
+            nullspace_dims: vec![2],
+            penalty_shrinkage_floor: None,
+            ..FitOptions::default()
+        },
+    )
+    .expect("a noiseless penalized Gaussian fit must produce valid inference");
+
+    let phi = fit
+        .dispersion_phi()
+        .expect("profiled Gaussian dispersion must be available");
+    assert!(
+        phi.is_finite() && phi > 0.0,
+        "the penalized fit must retain its finite positive profiled dispersion, got {phi}"
+    );
+
+    let p = fit.beta.len();
+    let conditional = fit
+        .beta_covariance()
+        .expect("fit must retain conditional covariance");
+    let conditional_se = fit
+        .beta_standard_errors()
+        .expect("fit must retain conditional standard errors");
+    assert_eq!(conditional.dim(), (p, p));
+    assert_eq!(conditional_se.len(), p);
+    assert!(conditional.iter().all(|value| value.is_finite()));
+    for index in 0..p {
+        let variance = conditional[[index, index]];
+        assert!(
+            variance >= 0.0,
+            "conditional covariance diagonal {index} is negative: {variance}"
+        );
+        assert_eq!(
+            conditional_se[index],
+            variance.sqrt(),
+            "conditional SE {index} must be derived from its reported covariance"
+        );
+    }
+
+    let first_order = fit
+        .smoothing_correction_first_order()
+        .expect("fixture must exercise the first-order smoothing correction");
+    assert_eq!(first_order.dim(), (p, p));
+    assert!(first_order.iter().all(|value| value.is_finite()));
+    assert!(
+        first_order.diag().iter().all(|&variance| variance >= 0.0),
+        "a Gram covariance must have non-negative diagonal: {first_order:?}"
+    );
+    assert!(
+        first_order.diag().iter().any(|&variance| variance > 0.0),
+        "fixture no longer exercises a non-vacuous smoothing correction"
+    );
+
+    let corrected = fit
+        .beta_covariance_corrected()
+        .expect("fit must retain corrected covariance");
+    let corrected_se = fit
+        .beta_standard_errors_corrected()
+        .expect("fit must retain corrected standard errors");
+    assert_eq!(corrected.dim(), (p, p));
+    assert_eq!(corrected_se.len(), p);
+    assert!(corrected.iter().all(|value| value.is_finite()));
+
+    for index in 0..p {
+        let variance = corrected[[index, index]];
+        assert!(
+            variance >= 0.0,
+            "corrected covariance diagonal {index} is negative: {variance}"
+        );
+        assert_eq!(
+            corrected_se[index],
+            variance.sqrt(),
+            "corrected SE {index} must be derived from its reported covariance"
+        );
+    }
+}
+
+#[test]
 fn prediction_uncertainty_is_finite_andwell_shaped() {
     let n = 80usize;
     let mut x = Array2::<f64>::zeros((n, 2));
