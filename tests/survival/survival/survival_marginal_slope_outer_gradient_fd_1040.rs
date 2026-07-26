@@ -235,13 +235,24 @@ fn run_basis(basis_term: &str) {
             audit.psi_steps[j]
         );
         let scale = analytic.abs().max(fd.abs()).max(1e-6);
+        // Left at 5e-2 deliberately. The audit now Ridders-extrapolates and
+        // reports `psi_fd_uncertainty` (#2461), so this tolerance is no longer
+        // pinned by the oracle's truncation and the isotropic-kappa and
+        // constant-curvature siblings came down to 5e-3 on the strength of
+        // that. This lane is not tightened with them because its own
+        // convergence behaviour is the subject of #979 and a tightening here
+        // could not be told apart from that; the realized uncertainty is
+        // printed on failure so the next reader can make the call from data.
         assert!(
             gap / scale < 5e-2,
             "survival marginal-slope outer-gradient analytic!=FD for basis \
              {basis_term:?} on psi coordinate {j}: analytic={analytic:.6e} \
-             fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+             fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e} \
+             oracle_unc={:.3e} order={}",
             gap / scale,
             audit.psi_steps[j],
+            audit.psi_fd_uncertainty[j],
+            audit.psi_fd_orders[j],
         );
     }
 }
