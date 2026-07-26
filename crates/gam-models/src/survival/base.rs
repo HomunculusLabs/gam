@@ -2630,21 +2630,15 @@ impl WorkingModelSurvival {
         let lambdas: Vec<f64> = rho.iter().map(|&r| r.exp()).collect();
 
         // --- Raw penalized Hessian + its LAML logdet mode -------------------
-        // (unchanged: delayed entry → HardPseudo identified positive-subspace
-        // logdet; right-censored → historical Smooth full-spectrum convention).
-        // Orthogonal similarity preserves the spectrum exactly, so evaluating
-        // the SAME mode on the transformed H′ below keeps the HardPseudo mask and
-        // the active rank bit-identical to the raw frame (#2331 R3 tripwire).
+        // Survival LAML is a Laplace approximation at the fitted inner mode.
+        // Its observed penalized Hessian must therefore be positive definite on
+        // the fitted coefficient space. Delayed entry can make trial Hessians
+        // indefinite; such a trial is not a Laplace mode and is refused instead
+        // of being converted into a positive-subspace pseudo-objective. The
+        // exact positive spectrum is also the full IFT system for beta_rho, so
+        // value, trace, and mode response now use one Hessian (#2491).
         let h_dense = state.hessian.to_dense();
-        let has_left_truncation = self
-            .age_entry
-            .iter()
-            .any(|&t| t > ENTRY_AT_ORIGIN_THRESHOLD);
-        let hessian_logdet_mode = if has_left_truncation {
-            PseudoLogdetMode::HardPseudo
-        } else {
-            PseudoLogdetMode::Smooth
-        };
+        let hessian_logdet_mode = PseudoLogdetMode::PositiveDefinite;
 
         // --- Raw per-block penalties, embedded p×p, in ρ order --------------
         // Feeds the joint pseudo-logdet `log|Σ_k λ_k S_k|₊` (frame-invariant,
@@ -2746,8 +2740,8 @@ impl WorkingModelSurvival {
         )
         .map_err(EstimationError::InvalidInput)?;
 
-        // Hessian operator on the TRANSFORMED H′ (spectrum, HardPseudo mask, and
-        // active rank identical to raw — see mode note above).
+        // Hessian operator on the transformed H′. Orthogonal similarity
+        // preserves strict positive definiteness and the exact spectrum.
         let hop = DenseSpectralOperator::from_symmetric_with_mode(
             &reparam_inner.hessian_transformed,
             hessian_logdet_mode,
@@ -5079,16 +5073,17 @@ mod tests {
     }
 
     fn laml_test_logdet_h(state: &WorkingState) -> f64 {
-        use gam_linalg::faer_ndarray::FaerEigh;
-        use gam_solve::estimate::reml::reml_outer_engine::{spectral_epsilon, spectral_regularize};
+        use gam_problem::PseudoLogdetMode;
+        use gam_solve::estimate::reml::reml_outer_engine::{
+            DenseSpectralOperator, HessianFactorization,
+        };
 
-        let h_dense = state.hessian.to_dense();
-        let (evals, _) = h_dense.eigh(faer::Side::Lower).expect("eigh");
-        let eps = spectral_epsilon(evals.as_slice().unwrap());
-        evals
-            .iter()
-            .map(|&sigma| spectral_regularize(sigma, eps).ln())
-            .sum()
+        DenseSpectralOperator::from_symmetric_with_mode(
+            &state.hessian.to_dense(),
+            PseudoLogdetMode::PositiveDefinite,
+        )
+        .expect("positive-definite fitted survival Hessian")
+        .logdet()
     }
 
     /// Decompose the survival LAML rho chain rule into independently
@@ -5221,18 +5216,18 @@ mod tests {
         let t3_fd = -0.5_f64;
 
         // Contract the already-verified A and C matrices through the exact
-        // HardPseudo kernel used by the production left-truncated LAML path.
-        // This separates a family-chain-rule error from a transformed-assembly
-        // trace/sign error without changing either implementation.
-        let hard_hop = DenseSpectralOperator::from_symmetric_with_mode(
+        // positive-definite kernel used by production. The operator's solve is
+        // the same full-space IFT solve certified above, so an identifiable
+        // low-curvature direction cannot disappear between value and gradient.
+        let positive_hop = DenseSpectralOperator::from_symmetric_with_mode(
             &h_center,
-            PseudoLogdetMode::HardPseudo,
+            PseudoLogdetMode::PositiveDefinite,
         )
-        .expect("HardPseudo operator at the fitted survival mode");
-        let half_trace_a = 0.5 * hard_hop.trace_hinv_product(&a);
-        let half_trace_c = 0.5 * hard_hop.trace_hinv_product(&correction);
+        .expect("positive-definite operator at the fitted survival mode");
+        let half_trace_a = 0.5 * positive_hop.trace_hinv_product(&a);
+        let half_trace_c = 0.5 * positive_hop.trace_hinv_product(&correction);
         let t1_analytic = 0.5 * beta_hat.dot(&a.dot(&beta_hat));
-        let expected_hard_gradient = t1_analytic + half_trace_a + half_trace_c - 0.5;
+        let expected_gradient = t1_analytic + half_trace_a + half_trace_c - 0.5;
         let rho = array![RHO];
         let (_, public_gradient) = center_model
             .unified_lamlobjective_and_rhogradient(&beta_hat, &center_state, &rho)
@@ -5244,7 +5239,7 @@ mod tests {
              total_error={total_error:.6e} total_reversed_error={total_reversed_error:.6e} \
              t1_fd={t1_fd:+.12e} t2_fd={t2_fd:+.12e} t3_fd={t3_fd:+.12e} \
              t1_analytic={t1_analytic:+.12e} half_trace_a={half_trace_a:+.12e} \
-             half_trace_c={half_trace_c:+.12e} expected_hard_gradient={expected_hard_gradient:+.12e} \
+             half_trace_c={half_trace_c:+.12e} expected_gradient={expected_gradient:+.12e} \
              public_gradient={:?} beta_analytic={:?} beta_fd={:?} correction={:?} correction_fd={:?} \
              total_analytic={:?} total_fd={:?}",
             public_gradient.to_vec(),
@@ -5256,13 +5251,17 @@ mod tests {
             total_fd,
         );
 
+        let public_gradient_error = (public_gradient[0] - expected_gradient).abs()
+            / expected_gradient.abs().max(1.0);
         assert!(
             mode_error <= REL_TOL
                 && correction_error <= REL_TOL
-                && total_error <= REL_TOL,
+                && total_error <= REL_TOL
+                && public_gradient_error <= REL_TOL,
             "survival rho chain-rule identity failed: mode_error={mode_error:.6e}, \
              correction_error={correction_error:.6e} (sign-reversed={correction_reversed_error:.6e}), \
-             total_error={total_error:.6e} (sign-reversed={total_reversed_error:.6e})"
+             total_error={total_error:.6e} (sign-reversed={total_reversed_error:.6e}), \
+             public_gradient_error={public_gradient_error:.6e}"
         );
     }
 

@@ -75,10 +75,10 @@ impl DenseSpectralOperator {
     /// log-determinant convention.
     ///
     /// See [`PseudoLogdetMode`] for the derivation and the exact set of
-    /// kernels that differ between the two modes.  At a high level:
-    /// `Smooth` keeps every eigenpair in play with a soft floor, whereas
-    /// `HardPseudo` masks out `σ_j ≤ ε` consistently across logdet,
-    /// gradient traces, cross-traces, and the H⁻¹ kernels.
+    /// kernels that differ between the modes. At a high level: `Smooth` keeps
+    /// every eigenpair in play with a soft floor; `HardPseudo` masks a
+    /// numerical null space; and `PositiveDefinite` rejects any non-positive
+    /// eigenvalue and uses the exact, unregularized positive spectrum.
     pub fn from_symmetric_with_mode(
         h: &Array2<f64>,
         mode: PseudoLogdetMode,
@@ -101,7 +101,28 @@ impl DenseSpectralOperator {
             .eigh(Side::Lower)
             .map_err(|e| format!("Eigendecomposition failed: {e}"))?;
 
-        let epsilon = spectral_epsilon(eigenvalues.as_slice().unwrap());
+        // A Laplace approximation is defined at a local mode, whose observed
+        // penalized Hessian is positive definite on the fitted coefficient
+        // space. Do not turn a saddle into a different objective by discarding
+        // its negative directions, and do not floor an identifiable positive
+        // direction out of the implicit mode response.
+        if mode == PseudoLogdetMode::PositiveDefinite {
+            for (index, &sigma) in eigenvalues.iter().enumerate() {
+                if !sigma.is_finite() || sigma <= 0.0 {
+                    return Err(format!(
+                        "positive-definite Hessian required for Laplace evaluation:                          eigenvalue {index} is {sigma:.6e}"
+                    ));
+                }
+            }
+        }
+        // epsilon=0 makes every existing spectral formula exact on a strictly
+        // positive spectrum: r_0(sigma)=sigma, phi'(sigma)=1/sigma, and the
+        // divided-difference kernel is -1/(sigma_a sigma_b).
+        let epsilon = if mode == PseudoLogdetMode::PositiveDefinite {
+            0.0
+        } else {
+            spectral_epsilon(eigenvalues.as_slice().unwrap())
+        };
 
         // `active[j]` selects which eigenpairs participate in every trace
         // and in the cached logdet.
@@ -134,7 +155,7 @@ impl DenseSpectralOperator {
         // few orders of `σ_max` (≫ the relative floor), so every eigenpair stays
         // active and the mask is byte-identical to the pre-#2358 absolute-ε mask.
         let active: Vec<bool> = match mode {
-            PseudoLogdetMode::Smooth => vec![true; n],
+            PseudoLogdetMode::Smooth | PseudoLogdetMode::PositiveDefinite => vec![true; n],
             PseudoLogdetMode::HardPseudo => {
                 let sigma_max = eigenvalues
                     .iter()
