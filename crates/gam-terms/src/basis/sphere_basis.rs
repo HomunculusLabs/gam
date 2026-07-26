@@ -24,6 +24,21 @@ pub fn build_spherical_spline_basis(
             spec.penalty_order
         );
     }
+    if matches!(spec.wahba_kernel, SphereWahbaKernel::Sobolev) && spec.penalty_order == 1 {
+        // The m = 1 Sobolev kernel is K = (-ln u - 1)/4pi with u = (1 - cos g)/2:
+        // log-singular, so its Gram diagonal does not exist. Evaluating it at a
+        // coincident pair only returns a number because the closed form floors
+        // `u`, and that floor SELECTS the diagonal rather than approximating a
+        // limit -- it silently asserts a spectral resolution of ~3.8e9 (#2475).
+        // Refuse here instead, and name the kernel that asks for the resolution.
+        crate::bail_invalid_basis!(
+            "the m = 1 Sobolev sphere kernel is log-singular at coincident points, so its Gram \
+             diagonal does not exist and any finite value is a choice of resolution rather than a \
+             limit; use SobolevTruncated {{ lmax }} (the same kernel with the resolution stated, \
+             diagonal ~ ln(lmax)/2pi) or penalty_order >= 2, whose diagonals are finite closed \
+             forms (1/(4pi) at m = 2, (2*zeta3 - 2)/(4pi) at m = 3)"
+        );
+    }
     let centers = match realized_center_strategy(&spec.center_strategy) {
         CenterStrategy::FarthestPoint { num_centers } => {
             select_spherical_farthest_point_centers(data, *num_centers, spec.radians)?
@@ -3568,6 +3583,48 @@ pub fn build_matern_basis_log_kappa_aniso_derivatives(
 mod wahba_penalty_invariants_tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn sobolev_m1_sphere_kernel_is_refused_rather_than_given_a_fabricated_diagonal() {
+        // `K = (-ln u - 1)/4pi` is log-singular, so the Gram diagonal does not
+        // exist. The builder must say so rather than return whichever value the
+        // epsilon floor happened to select (#2475).
+        let data = array![
+            [-1.1, 0.1],
+            [-0.7, 1.0],
+            [-0.2, 2.0],
+            [0.3, 2.8],
+            [0.8, -2.5],
+            [1.1, -1.4],
+            [0.5, -0.4],
+            [-0.4, -1.8],
+        ];
+        let spec = SphericalSplineBasisSpec {
+            center_strategy: CenterStrategy::FarthestPoint { num_centers: 8 },
+            penalty_order: 1,
+            double_penalty: false,
+            radians: true,
+            method: SphereMethod::Wahba,
+            max_degree: None,
+            wahba_kernel: SphereWahbaKernel::Sobolev,
+            identifiability: SphericalSplineIdentifiability::CenterSumToZero,
+        };
+        let error = build_spherical_spline_basis(data.view(), &spec)
+            .expect_err("m = 1 Sobolev has no Gram diagonal and must be refused");
+        let text = error.to_string();
+        assert!(
+            text.contains("log-singular") && text.contains("SobolevTruncated"),
+            "the refusal must name both the defect and the remedy; got: {text}"
+        );
+
+        // Positive control: the SAME data at m = 2 still builds. The refusal is
+        // specific to the order whose diagonal diverges, not to the kernel, so
+        // this test cannot pass by refusing everything.
+        let mut buildable = spec.clone();
+        buildable.penalty_order = 2;
+        build_spherical_spline_basis(data.view(), &buildable)
+            .expect("m = 2 Sobolev has a finite closed-form diagonal and must still build");
+    }
 
     #[test]
     fn wahba_primary_is_exact_function_seminorm_without_coefficient_ridge() {
