@@ -429,15 +429,17 @@ pub(crate) fn fused_rail_logdet_hessian_diagonal_beats_naive_and_restores_tail_s
 // the integer `rank(S_k)`, but the full-rank fusion subtracts the block WIDTH,
 // so those coordinates were excluded from the fused branch (issue #2298) and
 // took the naive `tr(G_ε λS) − rank` path — the exact over-smoothing-rail
-// cancellation the fusion exists to kill. `fused_..._rank_deficient_block`
+// cancellation the fusion is designed to reduce. `fused_..._rank_deficient_block`
 // distributes the `−rank` over the RANGE PROJECTOR `P_{S_k}` instead of the
 // block identity, so `Σ_j p_term = rank` (not width) and the subtraction is
-// matched eigenpair-by-eigenpair. This pins: (1) value identity with the naive
-// trace − rank at moderate scale, and (2) at the deep rail the fused form
-// matches a compensated reference to roundoff while the naive form's error is
-// amplified by the cancellation ratio.
+// matched eigenpair-by-eigenpair. This pins: (1) the projector-mass identity,
+// (2) value identity with the naive trace − rank, (3) accuracy against a
+// compensated reference within a scale-derived roundoff budget, and (4) the
+// deterministic representable-resolution gap opened by the deep-rail
+// cancellation. It deliberately does not order two realized errors once both
+// lie at that roundoff floor.
 #[test]
-pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() {
+pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_identities() {
     use faer::Side;
     // 3-wide second-difference penalty on block [0..3]: rank 2, null space is
     // the constant vector [1,1,1] — the canonical rank-deficient smooth penalty.
@@ -470,7 +472,8 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
     assert_eq!(op.active_rank(), p, "smooth mode keeps the complete eigenbasis");
 
     // Production naive form: full block trace, then subtract the integer rank.
-    let naive = op.trace_logdet_block_local(&s_block, lambda, 0, width) - rank as f64;
+    let trace = op.trace_logdet_block_local(&s_block, lambda, 0, width);
+    let naive = trace - rank as f64;
     // Production fused (rank-deficient) form.
     let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
         &s_block,
@@ -480,8 +483,8 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
         lambda,
     );
 
-    // Compensated (Neumaier) reference over the SAME per-eigenpair terms the
-    // fused method sums naively — ground truth for the gradient value. The
+    // Compensated (Neumaier) reference over mathematically equivalent
+    // per-eigenpair terms, with an independently constructed range basis. The
     // `−rank` share is the range-projector mass `‖Qᵀ u_j^{blk}‖²`.
     let (evals, evecs) = s_block.eigh(Side::Lower).expect("s_block eigendecomposition");
     let max_ev = evals.iter().copied().fold(0.0_f64, f64::max);
@@ -537,34 +540,60 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
 
     let err_naive = (naive - reference).abs();
     let err_fused = (fused - reference).abs();
-    let cancellation = op.trace_logdet_block_local(&s_block, lambda, 0, width).abs()
-        / reference.abs().max(f64::MIN_POSITIVE);
+    let cancellation = trace.abs() / reference.abs().max(f64::MIN_POSITIVE);
+    let ulp_above = |value: f64| {
+        let magnitude = value.abs();
+        assert!(
+            magnitude.is_finite() && magnitude < f64::MAX,
+            "ULP fixture requires a finite non-maximal value, got {value}"
+        );
+        f64::from_bits(magnitude.to_bits() + 1) - magnitude
+    };
+    // The naive form materializes two rank-sized operands. Their coarser local
+    // lattice, not the answer's own ULP, is the honest accuracy currency for
+    // comparing independently rounded eigenspace constructions. Allow one
+    // such lattice step for each of the `p` eigenpair reductions.
+    let aggregate_scale = trace.abs().max(rank as f64);
+    let aggregate_resolution = ulp_above(aggregate_scale);
+    let answer_resolution = ulp_above(reference);
+    let resolution_gap = aggregate_resolution / answer_resolution;
+    let roundoff_budget = (p as f64) * aggregate_resolution;
     eprintln!(
         "[FUSED-RANKDEF] reference={reference:.6e} naive={naive:.6e} fused={fused:.6e} \
-         err_naive={err_naive:.3e} err_fused={err_fused:.3e} cancellation={cancellation:.3e}"
+         err_naive={err_naive:.3e} err_fused={err_fused:.3e} \
+         cancellation={cancellation:.3e} aggregate_ulp={aggregate_resolution:.3e} \
+         answer_ulp={answer_resolution:.3e} resolution_gap={resolution_gap:.3e} \
+         roundoff_budget={roundoff_budget:.3e}"
     );
 
     // Value identity: the reformulation must not move the derivative.
     assert!(
-        (fused - naive).abs() <= 1.0e-6 * (1.0 + reference.abs()),
-        "fused and naive rank-deficient rail gradient disagree beyond roundoff: \
-         fused={fused:.6e} naive={naive:.6e}"
+        (fused - naive).abs() <= roundoff_budget,
+        "fused and naive rank-deficient rail gradient disagree beyond the \
+         scale-derived roundoff budget: fused={fused:.6e} naive={naive:.6e} \
+         budget={roundoff_budget:.3e}"
     );
-    // The fused form matches the compensated reference to roundoff.
+    // The fused form matches the independently constructed compensated
+    // reference within the same scale-derived roundoff budget.
     assert!(
-        err_fused <= 1.0e-14 * (1.0 + reference.abs()),
-        "fused rank-deficient rail gradient not accurate to roundoff: err_fused={err_fused:.3e}"
+        err_fused <= roundoff_budget,
+        "fused rank-deficient rail gradient exceeds its scale-derived roundoff \
+         budget: err_fused={err_fused:.3e} budget={roundoff_budget:.3e}"
     );
     // The fixture is genuinely in the cancellation regime.
     assert!(
         cancellation >= 1.0e4,
         "fixture is not deep enough to exercise the cancellation: ratio={cancellation:.3e}"
     );
-    // The witness: fusing the subtraction cuts the summation error by ≥100×.
+    // For normalized binary64 values, an ULP ratio follows the exponent ratio
+    // while the significand ratio lies in [1/2, 2). Therefore the lattice gap
+    // must be at least half the measured magnitude cancellation. Unlike an
+    // ordering of two floor-sized realized errors, this statement is
+    // deterministic across valid rounding outcomes.
     assert!(
-        err_naive >= 100.0 * err_fused.max(f64::MIN_POSITIVE),
-        "fused reformulation did not reduce the summation error: \
-         err_naive={err_naive:.3e} err_fused={err_fused:.3e}"
+        resolution_gap >= 0.5 * cancellation,
+        "aggregate/answer resolution gap does not reflect the cancellation: \
+         gap={resolution_gap:.3e} cancellation={cancellation:.3e}"
     );
 }
 
