@@ -101,9 +101,34 @@ impl OuterTerminationLedger {
 
     /// Record one finite criterion value; returns `true` on a MATERIAL
     /// improvement of the best cost (the caller's checkpoint-bank signal).
-    pub(crate) fn record(&mut self, cost: f64) -> bool {
+    ///
+    /// This is the single point every outer criterion evaluation passes
+    /// through, so it is also where the fit says where it has got to (#2472).
+    /// A long SAE fit used to emit nothing at all between its start and its
+    /// return, which meant a run killed at any point — a CI timeout, a lost
+    /// box — yielded no trace, no iteration count, and no criterion history.
+    /// One line per evaluation is bounded by the evaluation count rather than
+    /// by the inner iteration count, so it stays readable on a fit that runs
+    /// for hours.
+    ///
+    /// `gradient_norm` is optional because most lanes reaching here are
+    /// value-only (the EFS, streaming and criterion-only routes carry no
+    /// gradient); those print `grad=na` rather than reporting a zero gradient
+    /// that was never measured.
+    pub(crate) fn record(&mut self, cost: f64, gradient_norm: Option<f64>) -> bool {
         self.evals += 1;
+        let gradient_field = match gradient_norm {
+            Some(norm) => format!("{norm:.6e}"),
+            None => "na".to_string(),
+        };
         if !cost.is_finite() {
+            log::info!(
+                "[SAE/outer] eval={} criterion={:.9e} grad={} best={:.9e} improved=false",
+                self.evals,
+                cost,
+                gradient_field,
+                self.best_cost.unwrap_or(f64::NAN),
+            );
             return false;
         }
         let improved = match self.best_cost {
@@ -119,6 +144,13 @@ impl OuterTerminationLedger {
             });
             self.last_improvement_eval = self.evals;
         }
+        log::info!(
+            "[SAE/outer] eval={} criterion={:.9e} grad={} best={:.9e} improved={improved}",
+            self.evals,
+            cost,
+            gradient_field,
+            self.best_cost.unwrap_or(cost),
+        );
         improved
     }
 
@@ -3689,7 +3721,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 if !cost.is_finite() {
                     return Ok(f64::INFINITY);
                 }
-                if self.reactive_waypoint_checkpoint.is_none() && self.termination.record(cost) {
+                if self.reactive_waypoint_checkpoint.is_none()
+                    && self.termination.record(cost, None)
+                {
                     self.bank_checkpoint(rho);
                 }
                 Ok(cost)
@@ -3762,7 +3796,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             if !cost.is_finite() {
                 return Ok(OuterEval::infeasible(rho.len()));
             }
-            if self.termination.record(cost) {
+            if self.termination.record(cost, None) {
                 self.bank_checkpoint(rho);
             }
             return Ok(OuterEval {
@@ -3971,7 +4005,11 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // differenced value path.
         self.current_rho = rho_state;
         self.last_loss = Some(evaluation.loss);
-        if !self.audit_installed_state && self.termination.record(cost) {
+        if !self.audit_installed_state
+            && self
+                .termination
+                .record(cost, Some(gradient.dot(&gradient).sqrt()))
+        {
             self.bank_checkpoint(rho);
         }
         Ok(OuterEval {
@@ -4059,7 +4097,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 if !cost.is_finite() {
                     return Ok(OuterEval::infeasible(rho.len()));
                 }
-                if self.reactive_waypoint_checkpoint.is_none() && self.termination.record(cost) {
+                if self.reactive_waypoint_checkpoint.is_none()
+                    && self.termination.record(cost, None)
+                {
                     self.bank_checkpoint(rho);
                 }
                 Ok(OuterEval {
@@ -4091,7 +4131,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
             .from_flat(rho.view())
             .map_err(EstimationError::InvalidInput)?;
         eval.cost += self.block_jacobian(&rho_state);
-        if self.termination.record(eval.cost) {
+        if self.termination.record(eval.cost, None) {
             self.bank_checkpoint(rho);
         }
         Ok(eval)

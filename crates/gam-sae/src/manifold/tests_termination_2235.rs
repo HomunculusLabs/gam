@@ -68,17 +68,23 @@ fn fixed_rho_entry_stamps_its_explicit_verdict() {
 #[test]
 fn ledger_tracks_material_objective_improvement_without_deciding_convergence() {
     let mut ledger = OuterTerminationLedger::new();
-    assert!(ledger.record(50.0), "the first finite objective is banked");
+    // The optional gradient norm is diagnostic only (#2472): it reaches the
+    // per-evaluation log line and nothing else, so the improvement decision
+    // below must be identical whether or not a lane supplies one.
     assert!(
-        !ledger.record(f64::NAN),
+        ledger.record(50.0, None),
+        "the first finite objective is banked"
+    );
+    assert!(
+        !ledger.record(f64::NAN, Some(1.0)),
         "non-finite values are never improvements"
     );
     assert!(
-        !ledger.record(50.0 - 1.0e-12),
+        !ledger.record(50.0 - 1.0e-12, None),
         "roundoff below the material objective tolerance is not improvement"
     );
     assert!(
-        ledger.record(40.0),
+        ledger.record(40.0, Some(2.5e-3)),
         "a material objective descent is banked"
     );
     let (evals, last_improvement, best) = ledger.checkpoint_counters();
