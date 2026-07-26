@@ -1336,6 +1336,7 @@ impl SaeSupportSparseTerm {
             return Err("SaeSupportSparseTerm::solve_coordinates_fixed_decoder requires positive max_iter and finite positive tolerance".into());
         }
         let mut previous_candidate = false;
+        let mut last_objective: Option<f64> = None;
         for iteration in 1..=max_iter {
             let max_change =
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
@@ -1346,8 +1347,12 @@ impl SaeSupportSparseTerm {
             // so it is certified relative to max(1, |objective|).
             let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
             let kkt_scale = objective.abs().max(1.0);
+            let objective_recurred = last_objective
+                .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
+                .unwrap_or(false);
+            last_objective = Some(objective);
             let candidate =
-                max_change <= tolerance && coordinate_max_abs <= tolerance * kkt_scale;
+                objective_recurred && coordinate_max_abs <= tolerance * kkt_scale;
             if candidate && previous_candidate {
                 return Ok(SaeSupportCoordinateFixedPointReport {
                     iterations: iteration,
@@ -1392,11 +1397,14 @@ impl SaeSupportSparseTerm {
             return Err("SaeSupportSparseTerm::solve_fixed_point requires positive max_iter and finite positive tolerance".into());
         }
         let mut previous_candidate = false;
+        let mut last_max_change = f64::NAN;
+        let mut last_objective: Option<f64> = None;
         for iteration in 1..=max_iter {
             let decoder_change = self.decoder_sweep(target, lambda_smooth)?;
             let coordinate_change =
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
             let max_change = decoder_change.max(coordinate_change);
+            last_max_change = max_change;
             let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
             // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
             // gradients over every row on the atom's support, so its natural
@@ -1406,8 +1414,21 @@ impl SaeSupportSparseTerm {
             // never meet at any cycle budget.
             let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
             let kkt_scale = objective.abs().max(1.0);
+            // Both certificate limbs are relative AND gauge-invariant: the KKT
+            // against the objective scale, and the OBJECTIVE's own recurrence
+            // instead of a parameter step. A parameter-recurrence limb can
+            // never certify here: the alternating solve slides along exactly
+            // flat gauge orbits (e.g. a periodic atom's phase origin — rotate
+            // its coordinates and counter-rotate its Fourier block and f is
+            // unchanged), so parameters keep moving at zero gradient. Measured
+            // on real activations: relative KKT 6.9e-5 with per-cycle
+            // parameter moves of 1.4e-1.
+            let objective_recurred = last_objective
+                .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
+                .unwrap_or(false);
+            last_objective = Some(objective);
             let candidate =
-                max_change <= tolerance && stationarity.max_abs() <= tolerance * kkt_scale;
+                objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
             log::info!(
                 "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} max_change={:.3e} objective={:.6e}",
                 stationarity.max_abs(),
@@ -1429,7 +1450,7 @@ impl SaeSupportSparseTerm {
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
         let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
         Err(format!(
-            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e})",
+            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; last parameter max_change={last_max_change:.6e}, gauge-invariant limbs required)",
             stationarity.max_abs(),
             objective,
             stationarity.max_abs() / objective.abs().max(1.0)
