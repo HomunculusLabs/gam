@@ -510,11 +510,24 @@ fn run_arm(arm: Arm) {
         grid_rmse(&beta_recon)
     );
 
-    // ---- sweep ρ ∈ [−8, 8] under BOTH weight sets -----------------------------
+    // ---- sweep ρ ∈ [−8, 24] under BOTH weight sets -----------------------------
+    // The upper end used to be +8, and that is not enough window to read the curve.
+    // The by-group sibling sweep had the same `ρ_hi = +8` and it produced a WRONG
+    // VERDICT: the curve looked flat, was read as "no smoothing level helps ⇒
+    // representation floor", and the flatness was really the window stopping
+    // mid-climb (0.34 at +8, rising to 0.578 at +24, which is the in-null-space
+    // asymptote). `74b01f817` widened that one to [−8, +24]; this one was left
+    // behind. On λ̂_μ ≈ 1e-2 the old top is λ ≈ 38, nowhere near enough to drive a
+    // block onto its penalty null space, so an argmin found inside [−8, +8] cannot
+    // be distinguished from an argmin pinned at the window edge.
+    //
+    // The edf column below is the other half of the instrument and is already
+    // here: a REAL floor is flat in RMSE while edf MOVES; a short window is flat
+    // because edf does NOT move. Neither column is readable without the other.
     let (xtwx_true, xtwr_true) = build_xtwx_xtwr(&w_true);
-    let n_grid = 65usize; // step 0.25
+    let n_grid = 129usize; // step 0.25 over the widened window
     let rho_lo = -8.0;
-    let rho_hi = 8.0;
+    let rho_hi = 24.0;
 
     let mut best_hat = (f64::INFINITY, 0.0f64, 0.0f64); // (rmse, rho, edf)
     let mut best_true = (f64::INFINITY, 0.0f64, 0.0f64);
@@ -592,6 +605,42 @@ fn run_arm(arm: Arm) {
     };
     eprintln!("[{}] VERDICT: {verdict}", arm.label);
     eprintln!("[{}] H2 read: {h2}", arm.label);
+
+    // WINDOW GUARD. Every verdict above reads the LOCATION of an argmin, which is
+    // only meaningful if the argmin is interior. An argmin sitting on a window edge
+    // means the sweep never bracketed the optimum, and the sign it reports is the
+    // direction the window ran out — not the direction the criterion is wrong. That
+    // is exactly how the by-group sibling produced a wrong verdict from `ρ_hi = +8`.
+    // Report it rather than trusting it; the reader can widen and re-run.
+    let step = (rho_hi - rho_lo) / ((n_grid - 1) as f64);
+    for (which, best) in [("frozen-σ̂", best_hat), ("truth-σ", best_true)] {
+        let at_lo = (best.1 - rho_lo).abs() <= step;
+        let at_hi = (best.1 - rho_hi).abs() <= step;
+        if at_lo || at_hi {
+            eprintln!(
+                "[{}] ⚠ WINDOW-EDGE ARGMIN ({which}): rho*={:.2} sits on the {} edge of \
+                 [{rho_lo:.1}, {rho_hi:.1}] — the optimum is NOT bracketed, so the verdict \
+                 above reads where the window stopped, not where the criterion is wrong. \
+                 Widen and re-run before quoting it.",
+                arm.label,
+                best.1,
+                if at_lo { "LOWER" } else { "UPPER" }
+            );
+        }
+    }
+    // The companion read: a genuine floor is flat in RMSE while edf MOVES; a short
+    // window is flat because edf does not. Print the edf span so the two are always
+    // distinguishable from the log alone.
+    eprintln!(
+        "[{}] edf span over the swept window: frozen-σ̂ {:.3} at ρ*={:.2} vs {:.3} at fit; \
+         truth-σ {:.3} at ρ*={:.2}",
+        arm.label,
+        best_hat.2,
+        best_hat.1,
+        edf_mu,
+        best_true.2,
+        best_true.1
+    );
 
     // The ONLY validity assert: the frozen-σ̂ WLS at ρ=0 must reproduce the
     // production μ solve, otherwise the whole oracle is meaningless. Loose enough
