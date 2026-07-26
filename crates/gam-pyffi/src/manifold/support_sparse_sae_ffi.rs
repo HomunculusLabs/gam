@@ -14,7 +14,7 @@ use gam::terms::sae::manifold::{
 };
 use gam::terms::sae::manifold::{SaeSupportSeedRequest, SaeSupportStationarity};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -232,6 +232,66 @@ impl SupportSparseManifoldSaeCore {
         Ok(out.unbind())
     }
 
+    /// Sample one atom's decoded curve at coordinates `(n, d)` → `(n, P)`.
+    fn atom_curve<'py>(
+        &self,
+        py: Python<'py>,
+        atom_k: usize,
+        coords: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let curve = self
+            .term
+            .decode_atom_at(atom_k, coords.as_array())
+            .map_err(py_value_error)?;
+        Ok(curve.into_pyarray(py))
+    }
+
+    /// On-manifold steering delta along one atom:
+    /// `amplitude · (γ_k(t_to) − γ_k(t_from))`, decoded by the atom's own
+    /// evaluator. Returns the ambient-chart delta plus both decoded images.
+    fn steer<'py>(
+        &self,
+        py: Python<'py>,
+        atom_k: usize,
+        amplitude: f64,
+        t_from: PyReadonlyArray1<'py, f64>,
+        t_to: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<Py<PyDict>> {
+        if !amplitude.is_finite() {
+            return Err(py_value_error(format!(
+                "ManifoldSAE.steer: amplitude must be finite; got {amplitude}"
+            )));
+        }
+        let from = t_from.as_array();
+        let to = t_to.as_array();
+        let width = from.len();
+        if to.len() != width {
+            return Err(py_value_error(format!(
+                "ManifoldSAE.steer: t_from width {} != t_to width {}",
+                width,
+                to.len()
+            )));
+        }
+        let stack = |values: ndarray::ArrayView1<'_, f64>| {
+            ndarray::Array2::from_shape_vec((1, width), values.to_vec())
+                .map_err(|error| py_value_error(format!("ManifoldSAE.steer: {error}")))
+        };
+        let g_from = self
+            .term
+            .decode_atom_at(atom_k, stack(from)?.view())
+            .map_err(py_value_error)?;
+        let g_to = self
+            .term
+            .decode_atom_at(atom_k, stack(to)?.view())
+            .map_err(py_value_error)?;
+        let delta = (&g_to - &g_from).row(0).mapv(|value| amplitude * value);
+        let out = PyDict::new(py);
+        out.set_item("delta", delta.into_pyarray(py))?;
+        out.set_item("decoded_from", g_from.row(0).to_owned().into_pyarray(py))?;
+        out.set_item("decoded_to", g_to.row(0).to_owned().into_pyarray(py))?;
+        Ok(out.unbind())
+    }
+
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
         out.set_item("schema", "gamfit.ManifoldSAE/support-v1")?;
@@ -357,7 +417,9 @@ pub(crate) fn fit_support_sparse_manifold_sae(
 ) -> PyResult<PyObject> {
     let (n_obs, output_dim) = request.target.dim();
     let requested_k = request.atom_basis.len();
-    let effective_dims = sae_support_effective_atom_dims(&request.atom_basis, &request.atom_dim)
+    let mut resolved_basis = request.atom_basis.clone();
+    gam::terms::sae::manifold::resolve_support_auto_atoms(&mut resolved_basis);
+    let effective_dims = sae_support_effective_atom_dims(&resolved_basis, &request.atom_dim)
         .map_err(py_value_error)?;
     let d_max = effective_dims.iter().copied().max().unwrap_or(1);
     let admission = admit_topk_manifold(n_obs, output_dim, requested_k, d_max, request.support_k)
@@ -376,7 +438,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     let centered_target = centered(request.target, &training_mean);
     let seed = build_sae_support_seed(SaeSupportSeedRequest {
         target: centered_target.view(),
-        atom_basis: &request.atom_basis,
+        atom_basis: &resolved_basis,
         atom_dim: &request.atom_dim,
         support_k: request.support_k,
         random_state: request.random_state,
@@ -386,7 +448,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     let retained_atom_indices = seed.retained_atom_indices;
     let atom_basis = retained_atom_indices
         .iter()
-        .map(|&atom| request.atom_basis[atom].clone())
+        .map(|&atom| resolved_basis[atom].clone())
         .collect::<Vec<_>>();
     let atom_dim = retained_atom_indices
         .iter()

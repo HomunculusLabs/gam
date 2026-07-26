@@ -621,6 +621,35 @@ impl SaeSupportSparseTerm {
         })
     }
 
+    /// Decode one atom's image at caller coordinates: `Φ(t)·B_k`, shape
+    /// `(n, P)`. The atom's own evaluator is the single source of truth for
+    /// the chart convention — callers never re-derive the basis.
+    pub fn decode_atom_at(
+        &self,
+        atom_idx: usize,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        if atom_idx >= self.k_atoms() {
+            return Err(format!(
+                "SaeSupportSparseTerm::decode_atom_at: atom {atom_idx} out of range K={}",
+                self.k_atoms()
+            ));
+        }
+        let atom = &self.atoms[atom_idx];
+        if coords.ncols() != atom.latent_dim() {
+            return Err(format!(
+                "SaeSupportSparseTerm::decode_atom_at: coords width {} != atom latent dim {}",
+                coords.ncols(),
+                atom.latent_dim()
+            ));
+        }
+        let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
+            format!("SaeSupportSparseTerm::decode_atom_at: atom {atom_idx} has no evaluator")
+        })?;
+        let (phi, _jet) = evaluator.evaluate(coords)?;
+        Ok(phi.dot(&atom.decoder_coefficients))
+    }
+
     fn reconstruct_row(&self, row: usize) -> Result<Array1<f64>, String> {
         let mut fitted = Array1::<f64>::zeros(self.output_dim);
         for slot in 0..self.assignment.support_indices(row).len() {

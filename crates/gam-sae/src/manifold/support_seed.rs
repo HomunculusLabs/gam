@@ -150,6 +150,27 @@ fn effective_atom(
     ))
 }
 
+/// Scalable `"auto"` policy for the overcomplete support lane. At K > P the
+/// per-atom fit-entry evidence race (#2238) is statistically vacuous — a
+/// hard-TopK dictionary sees ~N·s/K rows per atom — so `"auto"` seeds a
+/// UNIFORM, cyclic-bias-free topology portfolio (linear / euclidean curve /
+/// periodic, round-robin by atom index) and lets the support competition, the
+/// LAML-selected final-function seminorm, and the coordinate ARD prior
+/// adjudicate which kinds survive where. Deterministic and target-free, so
+/// admission and seeding resolve identically.
+pub fn resolve_support_auto_atoms(atom_basis: &mut [String]) {
+    for (atom, basis) in atom_basis.iter_mut().enumerate() {
+        if basis == "auto" {
+            *basis = match atom % 3 {
+                0 => "linear",
+                1 => "euclidean",
+                _ => "periodic",
+            }
+            .to_string();
+        }
+    }
+}
+
 fn resolve_support_atoms(
     atom_basis: &[String],
     atom_dim: &[usize],

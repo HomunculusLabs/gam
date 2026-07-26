@@ -599,6 +599,23 @@ fn sae_manifold_fit_model<'py>(
         let support_k = top_k.ok_or_else(|| {
             py_value_error("overcomplete assignment='topk' requires top_k".to_string())
         })?;
+        if !has_declared_bases
+            && matches!(
+                atom_topology.as_deref(),
+                Some("circle" | "sphere" | "torus" | "projective_plane" | "klein_bottle" | "mobius")
+            )
+        {
+            return Err(py_value_error(format!(
+                "overcomplete (K={k_atoms} > P={p_out}) dictionaries do not take a homogeneous \
+                 cyclic/compact topology by shorthand: most features are not cyclic, and an \
+                 all-{} dictionary is a modeling prior the data never chose. Use the default \
+                 atom_topology=None (auto: a uniform linear/euclidean/periodic portfolio \
+                 adjudicated by the support competition and the REML/ARD priors), or spell out \
+                 an explicit per-atom atom_basis vector if a homogeneous compact dictionary is \
+                 genuinely intended.",
+                atom_topology.as_deref().unwrap_or("")
+            )));
+        }
         if max_iter == 0 {
             return Err(py_value_error(
                 "support-sparse ManifoldSAE requires max_iter >= 1".to_string(),
