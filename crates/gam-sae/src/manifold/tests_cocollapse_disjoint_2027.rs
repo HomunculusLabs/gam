@@ -8,7 +8,7 @@
 //! Before the fix the joint decoder refit at the co-collapse reseed re-spread one
 //! residual direction across both atoms and the gate let them trade rows, so the
 //! dictionary re-symmetrised into a single shared basin and the reconstruction EV
-//! sat near the signal-free null floor. With the greedy disjoint-subspace decoder
+//! collapsed to the no-signal level. With the greedy disjoint-subspace decoder
 //! refit + soft row-ownership anchor + reseed cooldown the two atoms hold distinct
 //! territories and the fit recovers a materially positive EV.
 
@@ -124,7 +124,7 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
 }
 
 /// The K=2 whitened two-circle fit must recover a materially positive
-/// reconstruction EV — NOT co-collapse to the signal-free null floor. Two disjoint
+/// reconstruction EV — the concrete bar this test asserts is `EV > 0.20`. Two disjoint
 /// circles together span a rank-4 subspace of the whitened cloud, so an honest K=2
 /// dictionary explains a large fraction of the variance (the torch proxy reaches
 /// ≈0.47 on the sibling nursery experiment). The disjoint-subspace decoder refit,

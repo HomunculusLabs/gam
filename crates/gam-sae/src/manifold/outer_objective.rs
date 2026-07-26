@@ -3516,11 +3516,22 @@ fn reactive_ard_curvature_scale(
 
 /// Objective-owned legal rho upper face for dense reactive SAE fits.
 ///
-/// The generic `+30` box corresponds to a penalty strength around `1e13` and
-/// is outside the SAE objective's structural domain: it drives the dictionary
-/// below the exact signal-free null floor before continuation can start. This
-/// contract instead uses the objective's literal entry assignments and native
-/// penalty geometry. Decoder smoothness is bounded by the exact largest
+/// The generic `+30` box corresponds to a penalty strength around `1e13` and is
+/// outside the SAE objective's structural domain: at that strength every atom's
+/// gated reconstruction signal is shrunk under the backward-error vanishing
+/// boundary, so `DictionaryCollapseVerdict::all_decoders_vanished`
+/// (`manifold::fit_drivers`) holds before continuation can start — the
+/// dictionary is numerically gone, not merely uncompetitive.
+///
+/// This sentence used to name a `q/n` "signal-free null floor", which #2498
+/// deleted. The hard collapse decision no longer rests on a training-`R²`
+/// statistic at all: it is proved from the fitted state's floating-point
+/// residual backward-error envelope, so the bound above is about decoder signal
+/// disappearing into numerical noise rather than about explained variance
+/// falling under a sample-size ratio.
+///
+/// This contract instead uses the objective's literal entry assignments and
+/// native penalty geometry. Decoder smoothness is bounded by the exact largest
 /// generalized eigenvalue of `(G, P)`; Euclidean ARD is bounded by its observed
 /// latent Gauss--Newton curvature. Periodic ARD stays at its literal target
 /// because the von-Mises Hessian changes sign and therefore cannot define a
