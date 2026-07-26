@@ -216,6 +216,14 @@ pub const ENTRY_AT_ORIGIN_THRESHOLD: f64 = 1e-8;
 /// boundary where curvature blows up.
 const DERIVATIVE_FRACTION_TO_BOUNDARY: f64 = 0.995;
 
+/// Relative projected-KKT accuracy required before evaluating survival LAML.
+///
+/// LAML is an envelope at the fitted inner mode. A looser or decrement-only
+/// certificate is not sufficient: differentiating the criterion away from the
+/// mode requires higher-order residual-response terms that the survival family
+/// deliberately does not approximate.
+pub(crate) const SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL: f64 = 1.0e-8;
+
 #[derive(Debug, Clone)]
 pub struct CauseSpecificRoystonParmarBlock {
     pub age_entry: Array1<f64>,
@@ -2776,7 +2784,6 @@ impl WorkingModelSurvival {
         // be projected out before the stationarity decision. Once certified,
         // the exact envelope has no residual term; the transformed assembly
         // therefore carries kkt_residual=None deliberately.
-        const SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL: f64 = 1.0e-8;
         let relative_projected_norm = {
             let raw = state.gradient.clone();
             let projected = match self.monotonicity_linear_constraints() {
