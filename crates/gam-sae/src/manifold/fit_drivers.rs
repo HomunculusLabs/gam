@@ -8040,6 +8040,11 @@ impl SaeManifoldTerm {
             assignment.frozen_logits = Some(frozen);
         }
         let mut term = SaeManifoldTerm::new(atoms, assignment)?;
+        // #2532 — the chunk plans against the SAME environment reading as the fit
+        // it belongs to. `new` samples afresh, which would let a chunk choose a
+        // different evidence operator than its parent purely because the box got
+        // busy between materializations.
+        term.host_available_bytes = self.host_available_bytes;
         // The temperature schedule is global outer state; the chunk term is
         // assembled at the schedule's current temperature, which the caller
         // already baked into `self.assignment.mode` before materializing.

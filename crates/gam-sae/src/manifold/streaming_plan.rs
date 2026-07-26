@@ -176,6 +176,16 @@ pub(crate) fn sae_streaming_plan_from_budget(
     }
 }
 
+/// Resolve the plan against a LIVE reading of host memory.
+///
+/// Prefer [`sae_streaming_plan_for_shape_with_available`] wherever the caller
+/// belongs to a fit: since #2330 Phase-2 this predicate selects which OPERATOR
+/// the quasi-Laplace criterion prices (exact observed information `A` on the
+/// direct route, the Arrow-Schur majorizer `B` on the streaming one), so a
+/// route resolved from ambient memory makes the OBJECTIVE depend on how much
+/// RAM the box happens to have free at that instant (#2532). Sampling here is
+/// correct only for callers that are deciding something now and are not part of
+/// a fit whose probes must stay comparable to one another.
 pub fn sae_streaming_plan_for_shape(
     n_obs: usize,
     total_basis: usize,
@@ -183,6 +193,35 @@ pub fn sae_streaming_plan_for_shape(
     d_max: usize,
     border_dim: usize,
     gpu_policy: gam_gpu::GpuPolicy,
+) -> Result<SaeStreamingPlan, String> {
+    sae_streaming_plan_for_shape_with_available(
+        n_obs,
+        total_basis,
+        k_atoms,
+        d_max,
+        border_dim,
+        gpu_policy,
+        sae_process_available_memory_bytes(),
+    )
+}
+
+/// The same plan, resolved against a host-memory reading the CALLER supplies.
+///
+/// The plan has exactly two inputs: the model SHAPE (`n_obs`, `total_basis`,
+/// `k_atoms`, `d_max`, `border_dim`) and the ENVIRONMENT (available bytes —
+/// every budget below is derived from that one number by
+/// [`sae_host_in_core_budget_from_available`]). The shape legitimately moves
+/// during a fit as atoms are rank-reduced and frames activate; the environment
+/// must not, or two probes of the same rho are priced by two different
+/// operators (#2532). A fit therefore samples ONCE and passes the sample here.
+pub fn sae_streaming_plan_for_shape_with_available(
+    n_obs: usize,
+    total_basis: usize,
+    k_atoms: usize,
+    d_max: usize,
+    border_dim: usize,
+    gpu_policy: gam_gpu::GpuPolicy,
+    host_available_bytes: usize,
 ) -> Result<SaeStreamingPlan, String> {
     // Size gate BEFORE any CUDA probe (startup-tax fix, #1017 ordering): decide
     // admission against `min(host budget, conservative device-pool floor)`
@@ -199,7 +238,8 @@ pub fn sae_streaming_plan_for_shape(
     // CUDA primary context on every GPU for a fit that stays on the CPU. Larger
     // shapes fall through to the exact probed-budget logic below, bit-for-bit
     // as before.
-    let (host_budget, host_available) = sae_host_in_core_budget_bytes();
+    let host_available = host_available_bytes;
+    let host_budget = sae_host_in_core_budget_from_available(host_available);
     let host_window = SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE;
     let pessimistic_plan = sae_streaming_plan_from_budget(
         n_obs,
@@ -248,37 +288,29 @@ pub fn sae_streaming_plan_for_shape(
                     let per_device_budget = aggregate_budget / rt.device_count();
                     let window = (per_device_budget / 16)
                         .max(SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE);
-                    let host_available = sae_process_available_memory_bytes();
                     (
                         (aggregate_budget / 4).min(host_available),
                         window,
                         host_available,
                     )
                 } else {
-                    let (budget, host_available) = sae_host_in_core_budget_bytes();
                     (
-                        budget,
+                        host_budget,
                         SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
                         host_available,
                     )
                 }
             }
-            Some(_) => {
-                let (budget, host_available) = sae_host_in_core_budget_bytes();
-                (
-                    budget,
-                    SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
-                    host_available,
-                )
-            }
-            None => {
-                let (budget, host_available) = sae_host_in_core_budget_bytes();
-                (
-                    budget,
-                    SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
-                    host_available,
-                )
-            }
+            Some(_) => (
+                host_budget,
+                SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
+                host_available,
+            ),
+            None => (
+                host_budget,
+                SAE_CPU_L2_CACHE_BYTES * SAE_CHUNK_CACHE_MULTIPLE,
+                host_available,
+            ),
         };
     Ok(sae_streaming_plan_from_budget(
         n_obs,
@@ -570,11 +602,29 @@ mod cpu_sized_plan_laziness_tests {
         // The early-returned plan must record the honest host in-core budget
         // (downstream gates like the #2080 escalation ledger compare against
         // it), not the 64 MiB pessimistic decision floor.
-        let plan = sae_streaming_plan_for_shape(700, 60, 6, 2, 144, gam_gpu::GpuPolicy::Auto)
-            .expect("CPU-sized plan must not require CUDA resolution");
-        let (host_budget, _) = sae_host_in_core_budget_bytes();
+        //
+        // Both sides derive from ONE reading. This used to plan through the
+        // sampling entry point and then take a SECOND, independent sample to
+        // compare against — two readings of a quantity that moves continuously,
+        // asserted equal. On a loaded box they differ (observed: 128383706726 vs
+        // 128382792499, a 0.9 MB drift between two calls microseconds apart) and
+        // the test fails for a reason that has nothing to do with the property
+        // it is trying to pin. #2532's explicit-reading entry point is what lets
+        // it ask the question without the race.
+        let available = sae_process_available_memory_bytes();
+        let plan = sae_streaming_plan_for_shape_with_available(
+            700,
+            60,
+            6,
+            2,
+            144,
+            gam_gpu::GpuPolicy::Auto,
+            available,
+        )
+        .expect("CPU-sized plan must not require CUDA resolution");
         assert_eq!(
-            plan.in_core_budget_bytes, host_budget,
+            plan.in_core_budget_bytes,
+            sae_host_in_core_budget_from_available(available),
             "direct early-return must install the host budget"
         );
     }
@@ -797,6 +847,93 @@ mod topk_curved_budget_tests {
         assert_eq!(
             ten_thousand.routing_workspace_bytes,
             (64 + 4 * (2 + 2)) * SAE_BYTES_PER_F64
+        );
+    }
+}
+
+#[cfg(test)]
+mod frozen_host_sample_tests {
+    use super::*;
+
+    /// A shape big enough that its direct plan is not trivially admitted, so the
+    /// route genuinely depends on the environment rather than on the 16 MiB
+    /// always-admit floor.
+    const SHAPE: (usize, usize, usize, usize, usize) = (4_000, 256, 32, 2, 2_048);
+
+    fn route_at(available: usize) -> SaeStreamingPlan {
+        let (n_obs, total_basis, k_atoms, d_max, border_dim) = SHAPE;
+        sae_streaming_plan_for_shape_with_available(
+            n_obs,
+            total_basis,
+            k_atoms,
+            d_max,
+            border_dim,
+            gam_gpu::GpuPolicy::Off,
+            available,
+        )
+        .expect("plan resolves for an explicit host reading")
+    }
+
+    /// NON-VACUITY. Everything below is worthless unless the route actually
+    /// moves with the environment at this shape: if it did not, a gate saying
+    /// "the frozen sample determines the route" would pass on a predicate that
+    /// ignores the sample entirely.
+    #[test]
+    fn the_route_really_does_depend_on_the_host_reading() {
+        let starved = route_at(0);
+        let roomy = route_at(1 << 40);
+        assert!(
+            starved.streaming,
+            "a host with no available bytes must refuse the direct plan; got {starved:?}"
+        );
+        assert!(
+            !roomy.streaming,
+            "a terabyte of headroom must admit the direct plan at this shape; got {roomy:?}"
+        );
+    }
+
+    /// #2532 — `streaming_plan()` is a function of the CARRIED reading and of
+    /// nothing ambient.
+    ///
+    /// The two carried values below produce different routes (pinned above), so
+    /// this cannot be satisfied by a `streaming_plan()` that samples the process's
+    /// real available memory: such an implementation would return the same route
+    /// both times whatever the field says. That is the whole content of the fix —
+    /// before it, the route (and since #2330 Phase-2, therefore WHICH OPERATOR the
+    /// quasi-Laplace criterion prices) moved with whatever else the box was doing
+    /// between two probes of the same rho.
+    #[test]
+    fn streaming_plan_follows_the_carried_sample_not_ambient_memory() {
+        let (mut term, _target, _rho) = crate::manifold::tests::small_two_atom_periodic_term();
+        term.gpu_policy = gam_gpu::GpuPolicy::Off;
+
+        term.host_available_bytes = 0;
+        let starved = term.streaming_plan().expect("plan at a starved reading");
+        term.host_available_bytes = 1 << 40;
+        let roomy = term.streaming_plan().expect("plan at a roomy reading");
+
+        assert!(
+            starved.streaming,
+            "carrying a zero host reading must route this term to streaming; got {starved:?}"
+        );
+        assert!(
+            !roomy.streaming,
+            "carrying a terabyte must route this term direct; got {roomy:?}"
+        );
+        assert_ne!(
+            starved.in_core_budget_bytes, roomy.in_core_budget_bytes,
+            "the two readings must produce different budgets, or the pair proves nothing"
+        );
+
+        // Re-planning at an unchanged reading is stable — the shape did not move,
+        // so neither may the route, however busy the box became meanwhile.
+        let roomy_again = term.streaming_plan().expect("re-plan at the same reading");
+        assert_eq!(roomy.streaming, roomy_again.streaming);
+        assert_eq!(roomy.chunk_size, roomy_again.chunk_size);
+        assert_eq!(roomy.in_core_budget_bytes, roomy_again.in_core_budget_bytes);
+        assert_eq!(
+            roomy.process_available_bytes,
+            roomy_again.process_available_bytes
         );
     }
 }

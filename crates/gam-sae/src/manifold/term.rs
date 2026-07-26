@@ -679,6 +679,26 @@ pub struct SaeManifoldTerm {
     /// Device routing is part of the fit's identity, never process-global
     /// mutable state. `Off` guarantees that this term reaches no CUDA probe.
     pub(crate) gpu_policy: gam_gpu::GpuPolicy,
+    /// #2532 — the host-memory reading this fit plans against, sampled ONCE when
+    /// the term is built and carried thereafter.
+    ///
+    /// `streaming_plan()` is a function of the model SHAPE and this ONE number
+    /// (every budget in `streaming_plan.rs` is derived from it). It used to read
+    /// ambient memory on every call, which was harmless while the plan only
+    /// chose a memory STRATEGY — but #2330 Phase-2 made the same predicate
+    /// choose which OPERATOR the quasi-Laplace criterion prices, so a re-read
+    /// per call means two probes of the same rho can be priced by two different
+    /// operators depending on what else the box was doing between them.
+    ///
+    /// Held as a plain value, not an `Option` with a live-sampling fallback: an
+    /// `Option` would make "which environment did this plan see" depend on
+    /// whether some caller remembered to freeze it, which is the same
+    /// two-states-for-one-fact ambiguity as #2479. A caller that genuinely wants
+    /// a fresh reading calls `sae_streaming_plan_for_shape` and says so.
+    ///
+    /// Chunk terms inherit the parent's sample (`materialize_chunk`), so a chunk
+    /// can never plan against a different environment than the fit it belongs to.
+    pub(crate) host_available_bytes: usize,
     /// #2023 — persisted per-fit opt-in for the dead-atom DATA-ROW reseed
     /// (default false). Set from the FFI via the typed `data_row_reseed` kwarg —
     /// no env lever. Carried across clones.
@@ -806,6 +826,7 @@ impl Clone for SaeManifoldTerm {
             // assignment mode so a cloned term keeps the same barrier override.
             separation_barrier_strength_override: self.separation_barrier_strength_override,
             gpu_policy: self.gpu_policy,
+            host_available_bytes: self.host_available_bytes,
             data_row_reseed: self.data_row_reseed,
             guards_enabled: self.guards_enabled,
             // Rung-2 behavioral identity is persisted configuration (like the

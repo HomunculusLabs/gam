@@ -811,6 +811,10 @@ impl SaeManifoldTerm {
         Ok(Self {
             atoms,
             assignment,
+            // #2532 — sample the environment ONCE, here, and carry it. See the
+            // field docs: the plan's route selects which operator the criterion
+            // prices, so it must not move under a fit because the box got busy.
+            host_available_bytes: sae_process_available_memory_bytes(),
             chart_atlases: Vec::new(),
             temperature_schedule: None,
             last_row_layout: None,
@@ -2888,6 +2892,13 @@ impl SaeManifoldTerm {
     /// This is intentionally not user-configurable: the route follows the
     /// retained full-batch working-set estimate and the currently selected GPU
     /// memory budget when CUDA is usable, otherwise a conservative host budget.
+    ///
+    /// #2532 — the host figure comes from [`Self::host_available_bytes`], the
+    /// reading this term was built with, NOT from a fresh sample. The shape
+    /// below is recomputed every call because it legitimately moves during a fit
+    /// (atoms rank-reduce, frames activate and change `border_dim`); the
+    /// environment is the input that must hold still, because since #2330
+    /// Phase-2 this route decides which operator the criterion prices.
     pub fn streaming_plan(&self) -> Result<SaeStreamingPlan, String> {
         let n_obs = self.n_obs();
         let total_basis: usize = self.atoms.iter().map(|atom| atom.basis_size()).sum();
@@ -2902,13 +2913,14 @@ impl SaeManifoldTerm {
         } else {
             self.beta_dim()
         };
-        sae_streaming_plan_for_shape(
+        sae_streaming_plan_for_shape_with_available(
             n_obs,
             total_basis,
             self.k_atoms(),
             d_max,
             border_dim,
             self.gpu_policy,
+            self.host_available_bytes,
         )
     }
 
