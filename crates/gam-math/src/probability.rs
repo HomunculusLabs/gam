@@ -1,5 +1,5 @@
 use libm::{erf, erfc};
-use statrs::function::beta::{inv_beta_reg, ln_beta};
+use statrs::function::beta::{beta_reg, inv_beta_reg, ln_beta};
 
 const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3;
 const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4;
@@ -233,6 +233,39 @@ pub fn normal_pdf(x: f64) -> f64 {
 /// p-value of a z statistic is `2 * normal_sf(|z|)`, which is `erfc(|z|/√2)`.
 pub fn normal_sf(x: f64) -> f64 {
     0.5 * erfc(x / std::f64::consts::SQRT_2)
+}
+
+/// Upper tail of Student's t on `nu` degrees of freedom, `P(T > t)`, with full
+/// *relative* accuracy in the tail.
+///
+/// This is not `1 - cdf(t)`. Like every CDF, `F_ν` saturates to exactly 1.0 once
+/// its upper tail falls below half an ulp of one, and the larger `ν` is the
+/// sooner that happens: at `ν = 500`, `1 - F(10)` is already exactly zero while
+/// the true tail is 6.9e-22. Here the tail comes from the identity
+///
+/// ```text
+/// P(T > t) = I_{ν/(ν+t²)}(ν/2, 1/2) / 2      for t >= 0
+/// ```
+///
+/// which is a single regularized incomplete beta and forms no difference. The
+/// argument `ν/(ν+t²)` stays in `(0, 1]` and moves *away* from the endpoints as
+/// `t` grows, so the deep tail is evaluated where the incomplete beta is at its
+/// best conditioned rather than its worst.
+///
+/// For `t < 0` the tail exceeds 1/2 and the reflection `1 - P(T > -t)` is
+/// harmless: the result is O(1), so one ulp of absolute error is one ulp of
+/// relative error.
+///
+/// The two-sided p-value of a t statistic is `2 * students_t_sf(|t|, ν)`, which
+/// is `beta_reg(ν/2, 1/2, ν/(ν+t²))` outright.
+///
+/// Returns NaN unless `nu` is finite and positive.
+pub fn students_t_sf(t: f64, nu: f64) -> f64 {
+    if !(nu.is_finite() && nu > 0.0) || t.is_nan() {
+        return f64::NAN;
+    }
+    let half_tail = 0.5 * beta_reg(0.5 * nu, 0.5, nu / (nu + t * t));
+    if t >= 0.0 { half_tail } else { 1.0 - half_tail }
 }
 
 pub fn normal_cdf(x: f64) -> f64 {
@@ -1219,6 +1252,81 @@ mod tests {
 
     fn rel_err(got: f64, expected: f64) -> f64 {
         (got - expected).abs() / expected.abs().max(1e-300)
+    }
+
+    #[test]
+    fn students_t_sf_keeps_the_upper_tail_that_one_minus_the_cdf_destroys() {
+        // References are correctly rounded doubles from a 60-dps regularized
+        // incomplete beta. The `nu = 10000, t = 10` row is here because a
+        // plausible-looking hand-extrapolated literal for it (1.60e-23) is 20%
+        // from the truth: this table has to come from the reference, not from
+        // pattern-matching the rows above it.
+        const ROWS: [(f64, f64, f64); 10] = [
+            (5.0, 20.0, 2.887758186612086e-6),
+            (5.0, 40.0, 9.205981085886477e-8),
+            (30.0, 10.0, 2.2876257041148065e-11),
+            (30.0, 20.0, 3.3745418328856434e-19),
+            (30.0, 40.0, 6.863022597203202e-28),
+            (500.0, 8.0, 4.3648313969400955e-15),
+            (500.0, 10.0, 6.930246799119958e-22),
+            (500.0, 20.0, 4.056001518093838e-66),
+            (500.0, 40.0, 3.14532145912912e-158),
+            (10000.0, 10.0, 9.816403714331914e-24),
+        ];
+        // Bar: 1e-11, a measured envelope rather than a derivation. Everything
+        // below the incomplete beta is derivable -- the identity is exact and
+        // forms no difference -- but `beta_reg` is statrs's continued fraction
+        // and its error is a property of that implementation, so the honest
+        // thing is to measure it and say so. Worst over this table by shape
+        // parameter `a = nu/2`:
+        //
+        //     a = 2.5     2e-15
+        //     a = 15      1.6e-13
+        //     a = 250     2.3e-13
+        //     a = 5000    2.0e-12
+        //
+        // It grows slowly with nu, which is what a continued fraction needing
+        // more terms looks like, and it does *not* grow with tail depth -- the
+        // nu = 500 rows sit at 2e-13 whether the answer is 1e-15 or 1e-158.
+        // That is the distinction that matters: a fixed relative cost, not a
+        // cancellation. Bar is 5x the worst measured.
+        let bar = 1.0e-11;
+        for (nu, t, want) in ROWS {
+            let got = students_t_sf(t, nu);
+            let rel = ((got - want) / want).abs();
+            assert!(
+                rel <= bar,
+                "students_t_sf({t}, {nu}) = {got:e}, want {want:e}, relative {rel:e} > {bar:e}"
+            );
+            // The reflection. `1 - want` is O(1), so its own absolute error of
+            // one ulp is a relative error of one ulp -- which is exactly why
+            // reflecting is safe here and reconstructing the small tail is not.
+            let lower = students_t_sf(-t, nu);
+            assert!(
+                (lower - (1.0 - want)).abs() <= 2.0 * f64::EPSILON,
+                "students_t_sf({}, {nu}) = {lower}, want {}",
+                -t,
+                1.0 - want
+            );
+        }
+        // Symmetry at the median, and the degenerate arguments.
+        for nu in [1.0_f64, 5.0, 1e4] {
+            assert!(
+                (students_t_sf(0.0, nu) - 0.5).abs() <= f64::EPSILON,
+                "median at nu = {nu}"
+            );
+        }
+        assert!(students_t_sf(1.0, 0.0).is_nan(), "nu = 0 is not a t");
+        assert!(
+            students_t_sf(1.0, f64::INFINITY).is_nan(),
+            "nu = inf is not a t"
+        );
+        assert_eq!(students_t_sf(f64::INFINITY, 5.0), 0.0, "tail beyond +inf");
+        assert_eq!(
+            students_t_sf(f64::NEG_INFINITY, 5.0),
+            1.0,
+            "tail beyond -inf"
+        );
     }
 
     #[test]

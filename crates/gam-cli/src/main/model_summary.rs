@@ -67,13 +67,8 @@ pub(crate) fn build_model_summary(
         if scale_is_estimated {
             // For t > 0, P(T > t) = I_{nu/(nu+t^2)}(nu/2, 1/2) / 2, so the
             // two-sided p-value is that regularized incomplete beta outright.
-            let df = residual_df?;
-            let t = z.abs();
-            let x = df / (df + t * t);
-            if !(x.is_finite() && (0.0..=1.0).contains(&x)) {
-                return None;
-            }
-            Some(beta_reg(0.5 * df, 0.5, x).clamp(0.0, 1.0))
+            let p = 2.0 * students_t_sf(z.abs(), residual_df?);
+            p.is_finite().then(|| p.clamp(0.0, 1.0))
         } else {
             // 2 * (1 - Phi(|z|)) is erfc(|z|/sqrt2), one call and no subtraction.
             Some((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0))

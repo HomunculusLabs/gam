@@ -20,6 +20,11 @@ pub use gam_math::probability::normal_cdf;
 /// (#2562). Implementation lives in `gam-math`.
 pub use gam_math::probability::normal_sf;
 
+/// Upper tail of Student's t, `P(T > t)`, computed rather than reconstructed.
+/// `1 - cdf` saturates to exactly zero the sooner the larger `nu` is -- already
+/// at `nu = 500, t = 10` (#2562). Implementation lives in `gam-math`.
+pub use gam_math::probability::students_t_sf;
+
 /// Scaled complementary error function `erfcx(x) = exp(x²) · erfc(x)`,
 /// specialized to `x ≥ 0`.  The implementation now lives in the lowest crate
 /// (`gam-math`) so the survival/probit cluster can consume it without reaching

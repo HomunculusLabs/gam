@@ -85,7 +85,7 @@ pub(crate) use gam_predict::{
 
 pub(crate) use gam::report;
 
-pub(crate) use gam::probability::{normal_cdf, normal_sf, standard_normal_quantile};
+pub(crate) use gam::probability::{normal_cdf, normal_sf, standard_normal_quantile, students_t_sf};
 
 pub(crate) use gam::families::fit_orchestration::drivers::freeze_term_collection_from_design;
 pub(crate) use gam::smooth::{
@@ -165,7 +165,6 @@ pub(crate) use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 pub(crate) use rand::{SeedableRng, rngs::StdRng};
 
 pub(crate) use statrs::distribution::ContinuousCDF;
-pub(crate) use statrs::function::beta::beta_reg;
 
 pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap};
 
