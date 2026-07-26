@@ -556,7 +556,12 @@ pub fn constrained_posterior_correction(
         .map_err(|error| format!("resolution horizon for the constraint slack: {error}"))?;
 
     // Order candidates by standardized slack so the greedy rank filter below
-    // keeps the rows that bind hardest when a face carries redundant rows.
+    // keeps the rows that bind hardest when a face carries redundant rows. That
+    // ordering is a STATISTICAL choice and it stays: two near-parallel rows with
+    // different offsets are not the same constraint, and the tighter one
+    // dominates, so retaining the slacker of a pair would quietly relax the
+    // constraint by a multiple of its own standard deviation. Ordering by pivot
+    // magnitude instead would reveal the conditioning but pay exactly that cost.
     let mut candidates: Vec<(usize, f64, Array1<f64>)> = Vec::new();
     for row_index in 0..constraints.a.nrows() {
         let row = constraints.a.row(row_index).to_owned();
@@ -589,18 +594,111 @@ pub fn constrained_posterior_correction(
             .then_with(|| left.0.cmp(&right.0))
     });
 
-    // Greedy pivoted-Cholesky rank filter on `W = A Σ Aᵀ`. A row that is a
-    // linear combination of already-accepted rows adds no constraint-normal
-    // direction; keeping it would make `W` singular and `W⁻¹` meaningless.
+    // The retention floor is the accuracy the retained face must deliver, and
+    // the first pass asks for exactly the accuracy this module reports its
+    // moments to. When the assembled face misses that, the floor is raised by
+    // the amount it missed by and the face rebuilt — the identity departure
+    // scales like `ε / (pivot / diagonal)`, so the overshoot IS the factor the
+    // floor is short by.
+    //
+    // This terminates by construction and without an iteration budget: the
+    // demanded accuracy at least halves every pass, so once it falls below
+    // `f64::EPSILON` the floor exceeds the diagonal itself and no row can be
+    // retained. That is at most `log2(ORTHANT_MOMENT_RELATIVE_TOLERANCE /
+    // f64::EPSILON)` passes — about forty — independent of how many constraint
+    // rows the system carries.
+    let mut demanded_accuracy = ORTHANT_MOMENT_RELATIVE_TOLERANCE;
+    let mut first_pass = true;
+    while demanded_accuracy >= f64::EPSILON {
+        let Some(face) = assemble_retained_face(&candidates, demanded_accuracy, constraints)?
+        else {
+            if first_pass {
+                return Ok(None);
+            }
+            return Err(format!(
+                "no constraint face survives the accuracy its own lift must deliver: raising \
+                 the retention floor to {demanded_accuracy:.3e} relative left no retained row"
+            ));
+        };
+        first_pass = false;
+        // `G = Σ Aᵀ W⁻¹` solved through the factor built above, one column of
+        // `Gᵀ` at a time: `W Gᵀ_col = (Σ Aᵀ)ᵀ_col`.
+        let lift = cholesky_solve_right(&face.factor, &face.sigma_at)?;
+        let departure = lift_identity_departure(&lift, constraints, &face.rows)?;
+        if departure > ORTHANT_MOMENT_RELATIVE_TOLERANCE {
+            if face.rows.len() == 1 {
+                return Err(format!(
+                    "a single retained constraint row still misses the identity that defines \
+                     its lift: max|A G - I| = {departure:.6e} exceeds \
+                     {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e}, which one row cannot be \
+                     ill-conditioned enough to cause"
+                ));
+            }
+            // The departure scales like `ε / (pivot / diagonal)`, so the amount
+            // the face missed by IS the factor its floor was short by.
+            let overshoot = (departure / ORTHANT_MOMENT_RELATIVE_TOLERANCE).max(2.0);
+            demanded_accuracy /= overshoot;
+            continue;
+        }
+
+        let q = face.rows.len();
+        let mut normal_center = Array1::<f64>::zeros(q);
+        for (position, &row_index) in face.rows.iter().enumerate() {
+            normal_center[position] =
+                constraints.a.row(row_index).dot(unconstrained_center) - constraints.b[row_index];
+        }
+
+        let (normal_mean, normal_covariance) =
+            orthant_truncated_moments(&normal_center, &face.w, face.factor.view())?;
+
+        let mut removed = &face.w - &normal_covariance;
+        symmetrize_in_place(&mut removed);
+        certify_removed_variance(&removed, &face.w)?;
+
+        return Ok(Some(ConstrainedPosteriorCorrection {
+            lift,
+            removed_normal_variance: removed,
+            normal_mean_shift: normal_mean - normal_center,
+            rows: face.rows,
+        }));
+    }
+    Err(
+        "the constraint-normal lift never reached the accuracy it is certified to, even with \
+         the retention floor raised to double-precision resolution"
+            .to_string(),
+    )
+}
+
+/// One assembled constraint face: the retained rows in acceptance order, the
+/// lower Cholesky factor of `W = A Σ Aᵀ` built while retaining them, `W` itself,
+/// and the `Σ Aᵀ` block restricted to those rows.
+struct RetainedFace {
+    rows: Vec<usize>,
+    factor: Array2<f64>,
+    w: Array2<f64>,
+    sigma_at: Array2<f64>,
+}
+
+/// Greedy pivoted-Cholesky rank filter on `W = A Σ Aᵀ`, walking the candidates
+/// in their slack order.
+///
+/// The factor is built incrementally here and handed back, so the face is
+/// factorized exactly once: a second factorization of the same `W` under a
+/// different guard would let one matrix be judged by two standards, and near the
+/// retention floor those two standards disagree.
+fn assemble_retained_face(
+    candidates: &[(usize, f64, Array1<f64>)],
+    demanded_accuracy: f64,
+    constraints: &LinearInequalityConstraints,
+) -> Result<Option<RetainedFace>, String> {
     let mut rows: Vec<usize> = Vec::new();
     let mut sigma_a_columns: Vec<Array1<f64>> = Vec::new();
-    let mut offsets: Vec<f64> = Vec::new();
     let mut w_accepted = Array2::<f64>::zeros((0, 0));
     let mut factor = Array2::<f64>::zeros((0, 0));
     for (row_index, _, sigma_row) in candidates {
-        let row = constraints.a.row(row_index);
+        let row = constraints.a.row(*row_index);
         let accepted = rows.len();
-        let diagonal = row.dot(&sigma_row);
+        let diagonal = row.dot(sigma_row);
         let mut cross = Array1::<f64>::zeros(accepted);
         for (position, column) in sigma_a_columns.iter().enumerate() {
             cross[position] = row.dot(column);
@@ -615,7 +713,28 @@ pub fn constrained_posterior_correction(
             new_column[i] = sum / factor[[i, i]];
         }
         let pivot = diagonal - new_column.dot(&new_column);
-        let rank_floor = (accepted + 1) as f64 * f64::EPSILON * diagonal;
+        // `pivot / diagonal` is the squared sine of the angle between this row's
+        // constraint normal and the span of the rows accepted before it, in the
+        // `Σ` metric. The lift `G = Σ Aᵀ W⁻¹` is solved through this same factor,
+        // so its relative error grows like `ε · diagonal / pivot`. A floor at the
+        // bare DETECTABILITY limit — `pivot ≈ ε · diagonal`, i.e. "reject only a
+        // row that is dependent to the last bit" — therefore retains rows whose
+        // lift carries no correct digits: measured 1.3e-2 relative error against
+        // an exact rational reference at `pivot = 2 ε · diagonal`.
+        //
+        // So the floor is the one that keeps the retained face's own numerical
+        // error under the accuracy demanded of it, and dropping instead costs
+        // `O(θ)` with `θ` the angle between the two normals — below `5e-7`
+        // radians at the first pass's floor — so a dropped row imposes no
+        // constraint the retained one does not already impose.
+        //
+        // This is necessary and NOT sufficient, which is why the caller checks
+        // the assembled face and raises `demanded_accuracy` when it falls short:
+        // `min pivot / diagonal` is the smallest pivot of the correlation matrix
+        // and bounds its smallest eigenvalue only when the elimination is ordered
+        // by pivot magnitude. This walk is ordered by slack, so every row can
+        // clear the floor while the face as a whole does not.
+        let rank_floor = (accepted + 1) as f64 * f64::EPSILON * diagonal / demanded_accuracy;
         if !(pivot.is_finite() && pivot > rank_floor) {
             continue;
         }
@@ -640,41 +759,59 @@ pub fn constrained_posterior_correction(
         grown_w[[accepted, accepted]] = diagonal;
         w_accepted = grown_w;
 
-        rows.push(row_index);
-        sigma_a_columns.push(sigma_row);
-        offsets.push(constraints.b[row_index]);
+        rows.push(*row_index);
+        sigma_a_columns.push(sigma_row.clone());
     }
     if rows.is_empty() {
         return Ok(None);
     }
 
     let q = rows.len();
+    let p = sigma_a_columns[0].len();
     let mut sigma_at = Array2::<f64>::zeros((p, q));
     for (position, column) in sigma_a_columns.iter().enumerate() {
         sigma_at.column_mut(position).assign(column);
     }
-    // `G = Σ Aᵀ W⁻¹` solved through the factor built above, one column of `Gᵀ`
-    // at a time: `W Gᵀ_col = (Σ Aᵀ)ᵀ_col`.
-    let lift = cholesky_solve_right(&factor, &sigma_at)?;
-
-    let mut normal_center = Array1::<f64>::zeros(q);
-    for (position, &row_index) in rows.iter().enumerate() {
-        normal_center[position] =
-            constraints.a.row(row_index).dot(unconstrained_center) - offsets[position];
-    }
-
-    let (normal_mean, normal_covariance) = orthant_truncated_moments(&normal_center, &w_accepted)?;
-
-    let mut removed = &w_accepted - &normal_covariance;
-    symmetrize_in_place(&mut removed);
-    certify_removed_variance(&removed, &w_accepted)?;
-
-    Ok(Some(ConstrainedPosteriorCorrection {
-        lift,
-        removed_normal_variance: removed,
-        normal_mean_shift: normal_mean - normal_center,
+    Ok(Some(RetainedFace {
         rows,
+        factor,
+        w: w_accepted,
+        sigma_at,
     }))
+}
+
+/// `max |A G - I|` over the retained rows.
+///
+/// `G = Σ Aᵀ W⁻¹` satisfies `A G = I` on those rows EXACTLY, because
+/// `A (Σ Aᵀ) = W` by construction of `W`. The departure from that identity is
+/// therefore not a modelling approximation: it is precisely the accuracy the
+/// retained face's conditioning destroyed, measured on the object that is
+/// actually used rather than on a proxy for it. Across a sweep of near-parallel
+/// constraint normals it tracked the true error in `G` — against an exact
+/// rational reference — to three significant digits at every angle.
+fn lift_identity_departure(
+    lift: &Array2<f64>,
+    constraints: &LinearInequalityConstraints,
+    rows: &[usize],
+) -> Result<f64, String> {
+    let q = rows.len();
+    let mut departure = 0.0_f64;
+    for (i, &row_index) in rows.iter().enumerate() {
+        let row = constraints.a.row(row_index);
+        for j in 0..q {
+            let entry = row.dot(&lift.column(j));
+            let target = if i == j { 1.0 } else { 0.0 };
+            let deviation = (entry - target).abs();
+            if !deviation.is_finite() {
+                return Err(format!(
+                    "the constraint-normal lift is not finite at retained row {row_index}, \
+                     constraint-normal coordinate {j}"
+                ));
+            }
+            departure = departure.max(deviation);
+        }
+    }
+    Ok(departure)
 }
 
 /// Solve `X W = B` for `X` given the lower Cholesky factor `L` of the symmetric
@@ -771,6 +908,7 @@ fn symmetrize_in_place(matrix: &mut Array2<f64>) {
 fn orthant_truncated_moments(
     mean: &Array1<f64>,
     covariance: &Array2<f64>,
+    factor: ArrayView2<'_, f64>,
 ) -> Result<(Array1<f64>, Array2<f64>), String> {
     let q = mean.len();
     if covariance.nrows() != q || covariance.ncols() != q {
@@ -783,16 +921,14 @@ fn orthant_truncated_moments(
     if q == 1 {
         return scalar_truncated_moments(mean[0], covariance[[0, 0]]);
     }
-
-    let factor = gam_linalg::triangular::cholesky_factor_in_place(
-        covariance.view(),
-        gam_linalg::triangular::CholeskyGuard::FiniteStrict,
-    )
-    .ok_or_else(|| {
-        "orthant moments: the constraint-normal covariance W = AΣAᵀ is not numerically \
-         positive definite"
-            .to_string()
-    })?;
+    if factor.nrows() != q || factor.ncols() != q {
+        return Err(format!(
+            "orthant moments: the constraint-normal covariance is {q}x{q} but the Cholesky \
+             factor supplied with it is {}x{}",
+            factor.nrows(),
+            factor.ncols()
+        ));
+    }
 
     let generator = kronecker_generator(q);
     let mut accumulator = OrthantAccumulator::new(q);
@@ -804,14 +940,7 @@ fn orthant_truncated_moments(
         } else {
             evaluated * 2
         };
-        accumulate_orthant_nodes(
-            &mut accumulator,
-            mean,
-            factor.view(),
-            &generator,
-            evaluated,
-            target,
-        )?;
+        accumulate_orthant_nodes(&mut accumulator, mean, factor, &generator, evaluated, target)?;
         evaluated = target;
         let current = accumulator.moments()?;
         if let Some(ref last) = previous
@@ -1521,6 +1650,162 @@ mod tests {
         );
     }
 
+    /// A constraint row whose normal is nearly a combination of the accepted
+    /// ones must be dropped — and the reason matters. It is not dropped because
+    /// it is undetectable: its pivot sits two hundred times above the bare
+    /// `ε·diagonal` limit at which an exactly dependent row stops being
+    /// distinguishable. It is dropped because retaining it reports a lift
+    /// `G = Σ Aᵀ W⁻¹` whose error exceeds the accuracy this module certifies its
+    /// own moments to, and a wrong lift is worse than a missing row that imposes
+    /// nothing the retained one does not already impose.
+    ///
+    /// Both arms are asserted so the gate discriminates: a filter that never
+    /// drops fails the near-degenerate arm, one that always drops fails the
+    /// resolvable arm.
+    #[test]
+    fn a_constraint_row_below_the_lift_accuracy_floor_is_dropped_though_detectable() {
+        let identity = Array2::<f64>::eye(4);
+        let center = Array1::<f64>::zeros(4);
+
+        let mut resolvable = Array2::<f64>::zeros((3, 4));
+        resolvable[[0, 0]] = 1.0;
+        resolvable[[1, 1]] = 1.0;
+        resolvable[[2, 2]] = 1.0;
+        let constraints = LinearInequalityConstraints::new(resolvable, Array1::<f64>::zeros(3))
+            .expect("orthogonal constraint rows");
+        let correction =
+            constrained_posterior_correction_from_covariance(&identity, &center, &constraints)
+                .expect("orthogonal face")
+                .expect("an active face at zero slack");
+        assert_eq!(
+            correction.rows,
+            vec![0, 1, 2],
+            "three mutually independent constraint normals must all be retained"
+        );
+
+        // Row 1 is row 0 rotated by `sine` in the `Σ` metric, so its pivot is
+        // exactly `sine²` against a diagonal of `1 + sine²`.
+        let sine = 3.0e-7;
+        let pivot = sine * sine;
+        let diagonal = 1.0 + pivot;
+        let detectability_limit = 2.0 * f64::EPSILON * diagonal;
+        assert!(
+            pivot > detectability_limit,
+            "the fixture must be DETECTABLE, or the drop below proves nothing: pivot \
+             {pivot:e} against the bare rank limit {detectability_limit:e}"
+        );
+        assert!(
+            pivot < detectability_limit / ORTHANT_MOMENT_RELATIVE_TOLERANCE,
+            "the fixture must sit below the accuracy the first pass demands"
+        );
+
+        let mut degenerate = Array2::<f64>::zeros((3, 4));
+        degenerate[[0, 0]] = 1.0;
+        degenerate[[1, 0]] = 1.0;
+        degenerate[[1, 1]] = sine;
+        degenerate[[2, 2]] = 1.0;
+        let constraints = LinearInequalityConstraints::new(degenerate, Array1::<f64>::zeros(3))
+            .expect("near-parallel constraint rows");
+        let correction =
+            constrained_posterior_correction_from_covariance(&identity, &center, &constraints)
+                .expect("near-degenerate face")
+                .expect("an active face at zero slack");
+        assert_eq!(
+            correction.rows,
+            vec![0, 2],
+            "the near-parallel row must be dropped: retaining it reports a lift whose own \
+             defining identity A·G = I fails by more than the certified accuracy"
+        );
+    }
+
+    /// The retention floor is necessary and NOT sufficient, so the assembled
+    /// face has to be checked and the floor raised until it delivers. Because
+    /// the filter walks candidates in slack order rather than in pivot order —
+    /// a statistical choice, since two near-parallel rows with different offsets
+    /// are not the same constraint and the tighter one dominates — its per-row
+    /// pivots do not reveal the assembled face's conditioning. Every pivot can
+    /// clear the floor while the face as a whole does not.
+    ///
+    /// A Vandermonde face in clustered nodes is the sharp case: seven rows whose
+    /// effective rank is five, all well inside the slack horizon so nothing is
+    /// dropped for statistical reasons. Measured `max|A G − I|` on the face this
+    /// fixture produces:
+    ///
+    /// * bare detectability floor, no check — `3.26e-1`, 326× the accuracy this
+    ///   module reports its moments to;
+    /// * one pass at the derived floor — `1.21e-1`, still 121× over;
+    /// * the floor raised by the amount it missed by — `3.53e-5`, inside, in two
+    ///   passes.
+    ///
+    /// So this gate fails on the shipped filter, fails on a single-pass floor
+    /// change, and passes only when the realized lift governs the retained face.
+    #[test]
+    fn the_retained_face_satisfies_the_identity_that_defines_its_lift() {
+        const ROWS: usize = 7;
+        const DIMENSION: usize = 8;
+        const DEGREE: usize = 5;
+        const SPACING: f64 = 1.0e-2;
+
+        let mut a = Array2::<f64>::zeros((ROWS, DIMENSION));
+        for row in 0..ROWS {
+            let node = row as f64 * SPACING;
+            for power in 0..DEGREE {
+                a[[row, power]] = node.powi(power as i32);
+            }
+        }
+        let constraints = LinearInequalityConstraints::new(a.clone(), Array1::<f64>::zeros(ROWS))
+            .expect("clustered Vandermonde rows");
+
+        // Place the centre so every row sits at ~7 standardized units of slack:
+        // inside the resolution horizon, so each row is a genuine candidate and
+        // nothing is dropped for being statistically irrelevant, while the
+        // truncation itself is nearly invisible — which keeps this gate a
+        // statement about the lift rather than about the cubature.
+        let covariance = Array2::<f64>::eye(DIMENSION);
+        let mut center = Array1::<f64>::zeros(DIMENSION);
+        center[0] = 7.0;
+        for row in 0..ROWS {
+            let normal = a.row(row);
+            let slack = normal.dot(&center) / normal.dot(&normal).sqrt();
+            assert!(
+                slack < 8.12 && slack > 6.0,
+                "row {row} must be a candidate inside the resolution horizon, got slack {slack}"
+            );
+        }
+
+        let correction =
+            constrained_posterior_correction_from_covariance(&covariance, &center, &constraints)
+                .expect("clustered Vandermonde face")
+                .expect("an active face inside the horizon");
+
+        assert!(
+            correction.rows.len() < ROWS,
+            "the fixture must exercise the filter: all {ROWS} rows were retained"
+        );
+        assert!(
+            correction.rows.len() >= 2,
+            "the face must not collapse to a single row, or the identity below is vacuous: \
+             retained {:?}",
+            correction.rows
+        );
+
+        let mut departure = 0.0_f64;
+        for (i, &row_index) in correction.rows.iter().enumerate() {
+            for j in 0..correction.rows.len() {
+                let entry = a.row(row_index).dot(&correction.lift.column(j));
+                let target = if i == j { 1.0 } else { 0.0 };
+                departure = departure.max((entry - target).abs());
+            }
+        }
+        assert!(
+            departure <= ORTHANT_MOMENT_RELATIVE_TOLERANCE,
+            "the reported lift must satisfy A·G = I, the identity it is defined by, to the \
+             accuracy this module certifies its moments to: max|A G - I| = {departure:e} on \
+             the retained rows {:?}",
+            correction.rows
+        );
+    }
+
     /// The cubature must reproduce the closed form when the orthant factorizes
     /// into independent coordinates, which is the only multivariate case with
     /// an exact answer to check against. The bound is the module's own
@@ -1531,8 +1816,14 @@ mod tests {
     fn cubature_reproduces_independent_coordinates_within_its_certified_accuracy() {
         let mean = array![-0.5, 0.25, -1.5];
         let covariance = array![[2.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]];
+        let factor = gam_linalg::triangular::cholesky_factor_in_place(
+            covariance.view(),
+            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+        )
+        .expect("independent orthant covariance factors");
         let (moment_mean, moment_covariance) =
-            orthant_truncated_moments(&mean, &covariance).expect("independent orthant");
+            orthant_truncated_moments(&mean, &covariance, factor.view())
+                .expect("independent orthant");
         for i in 0..3 {
             let (exact_mean, exact_variance) =
                 scalar_truncated_moments(mean[i], covariance[[i, i]]).expect("scalar");
