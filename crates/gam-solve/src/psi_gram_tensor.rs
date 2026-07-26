@@ -1628,6 +1628,158 @@ mod tests {
         design.t().dot(&wd)
     }
 
+
+    /// Duchon-shaped analytic synthetic design: polyharmonic `s^p·ln s` radial
+    /// columns (`s = r·e^ψ`) plus a ψ-free polynomial column — the structural
+    /// shape of the production hybrid-Duchon radial designs, as distinct from
+    /// [`synth_design`]'s `(1+s)e^{-s}` Matérn shape.
+    ///
+    /// The distinction is the whole point (#2464). `s^p·ln s = r^p e^{pψ}(ln r + ψ)`
+    /// is an exponential amplitude times a factor AFFINE in ψ, so it is NOT a pure
+    /// per-column amplitude `e^{p_jψ+c_j}`; the leftover ψ-motion has to be carried
+    /// by the Chebyshev series `G̃(x(ψ))` and therefore by its DERIVATIVE `G̃'`.
+    /// The Matérn shape is far smoother in `x`, so a series accurate enough for the
+    /// value there is also accurate in slope — which is exactly the coincidence a
+    /// Matérn-only fixture cannot distinguish from a correct derivative.
+    fn synth_duchon_design(psi: f64, n: usize, k: usize) -> Result<Array2<f64>, String> {
+        let mut x = Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            for j in 0..k {
+                let r = 0.05 + (i as f64 + 1.0) * (j as f64 + 1.0) / (n as f64 * k as f64) * 3.0;
+                if j == k - 1 {
+                    x[[i, j]] = r * r * r;
+                } else {
+                    let s = r * psi.exp();
+                    x[[i, j]] = s * s * s * s.ln();
+                }
+            }
+        }
+        Ok(x)
+    }
+
+    fn exact_duchon_gram(psi: f64, n: usize, k: usize, w: &Array1<f64>) -> Array2<f64> {
+        let design = synth_duchon_design(psi, n, k).unwrap();
+        let mut wd = design.clone();
+        for (mut row, &wi) in wd.outer_iter_mut().zip(w.iter()) {
+            row.mapv_inplace(|v| v * wi);
+        }
+        design.t().dot(&wd)
+    }
+
+    fn exact_duchon_rhs(psi: f64, n: usize, k: usize, w: &Array1<f64>, z: &Array1<f64>) -> Array1<f64> {
+        let design = synth_duchon_design(psi, n, k).unwrap();
+        let mut wz = Array1::<f64>::zeros(n);
+        for ((slot, &wi), &zi) in wz.iter_mut().zip(w.iter()).zip(z.iter()) {
+            *slot = wi * zi;
+        }
+        design.t().dot(&wz)
+    }
+
+    /// #2464: the same certification as
+    /// [`psi_gram_tensor_matches_exact_gram_and_fd_gradient`], on the profile
+    /// shape that actually CONSUMES this lane in production.
+    ///
+    /// The `#1033b` n-free ψ-gradient short-circuit in `reml/hyper.rs` is reachable
+    /// only where `supports_nfree_penalty_rekey` is admitted — Duchon — because
+    /// Matérn was excluded by the #1274 revert. Yet the tensor's derivative
+    /// certification runs on a Matérn-shaped fixture. Production measures the
+    /// Duchon `fixed_beta` ψ-gradient at `+9.821e2` against FD `−3.431e3` (opposite
+    /// sign) while Matérn at the same pin is clean, so the fixture's shape and the
+    /// consumer's shape are exactly the variable that is not controlled.
+    ///
+    /// This also closes a gap in the sibling gate: that one FD-checks `dgram_dpsi`
+    /// but never `drhs_dpsi` against a difference of `rhs_at`. `drhs_dpsi` carries
+    /// the dominant term of `a_j = −(∂b/∂ψ)·β̂ + ½β̂ᵀ(∂G/∂ψ)β̂ + ½β̂ᵀS_τβ̂`, so an
+    /// error there lands in `fixed_beta` and nowhere else — which is precisely the
+    /// one channel production reports wrong.
+    ///
+    /// Tolerances are the sibling gate's, unchanged, so a failure here is directly
+    /// comparable to the Matérn arm passing rather than a differently-graded test.
+    #[test]
+    fn psi_gram_tensor_derivatives_certify_on_a_duchon_profile_2464() {
+        let (n, k) = (160usize, 7usize);
+        let w = Array1::from_iter((0..n).map(|i| 1.0 + 0.5 * ((i % 3) as f64)));
+        let z = Array1::from_iter((0..n).map(|i| ((i as f64) * 0.37).sin()));
+        let (psi_lo, psi_hi) = (-1.2_f64, 1.0_f64);
+
+        let tensor = PsiGramTensor::build(
+            |psi| synth_duchon_design(psi, n, k),
+            w.view(),
+            z.view(),
+            psi_lo,
+            psi_hi,
+        )
+        .expect("analytic Duchon-shaped design must certify");
+
+        let h = 1e-5_f64;
+        let mut worst_gram_rel = 0.0_f64;
+        let mut worst_rhs_rel = 0.0_f64;
+        let mut worst_dgram_rel = 0.0_f64;
+        let mut worst_drhs_rel = 0.0_f64;
+        let mut graded = 0usize;
+
+        for &psi in &[-1.1, -0.63, 0.0, 0.41, 0.97] {
+            assert!(tensor.contains(psi), "psi={psi} must be in the value window");
+            if !tensor.contains_for_gradient(psi - h) || !tensor.contains_for_gradient(psi + h) {
+                continue;
+            }
+            graded += 1;
+
+            // VALUE: both channels, against the exact streamed statistics.
+            let exact_g = exact_duchon_gram(psi, n, k, &w);
+            let gscale = exact_g.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1e-300);
+            for (a, b) in tensor.gram_at(psi).iter().zip(exact_g.iter()) {
+                worst_gram_rel = worst_gram_rel.max((a - b).abs() / gscale);
+            }
+            let exact_r = exact_duchon_rhs(psi, n, k, &w, &z);
+            let rscale = exact_r.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1e-300);
+            for (a, b) in tensor.rhs_at(psi).iter().zip(exact_r.iter()) {
+                worst_rhs_rel = worst_rhs_rel.max((a - b).abs() / rscale);
+            }
+
+            // DERIVATIVE: both channels, against a central difference of the EXACT
+            // statistics — not of the tensor's own value, so a representation that
+            // is self-consistent but wrong about the design cannot pass.
+            let dg = tensor.dgram_dpsi(psi);
+            let dgscale = dg.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1e-12);
+            let gp = exact_duchon_gram(psi + h, n, k, &w);
+            let gm = exact_duchon_gram(psi - h, n, k, &w);
+            for ((a, p), m) in dg.iter().zip(gp.iter()).zip(gm.iter()) {
+                worst_dgram_rel = worst_dgram_rel.max((a - (p - m) / (2.0 * h)).abs() / dgscale);
+            }
+
+            let dr = tensor.drhs_dpsi(psi);
+            let drscale = dr.iter().fold(0.0_f64, |a, &v| a.max(v.abs())).max(1e-12);
+            let rp = exact_duchon_rhs(psi + h, n, k, &w, &z);
+            let rm = exact_duchon_rhs(psi - h, n, k, &w, &z);
+            for ((a, p), m) in dr.iter().zip(rp.iter()).zip(rm.iter()) {
+                worst_drhs_rel = worst_drhs_rel.max((a - (p - m) / (2.0 * h)).abs() / drscale);
+            }
+        }
+
+        eprintln!(
+            "[2464-tensor-duchon] graded={graded} gram_rel={worst_gram_rel:.3e} \
+             rhs_rel={worst_rhs_rel:.3e} dgram_rel={worst_dgram_rel:.3e} \
+             drhs_rel={worst_drhs_rel:.3e}"
+        );
+        assert!(
+            graded >= 3,
+            "the certified gradient sub-window admitted only {graded} probes; this gate \
+             would be reporting on almost nothing"
+        );
+        assert!(worst_gram_rel <= 1e-9, "gram value: {worst_gram_rel:.3e} > 1e-9");
+        assert!(worst_rhs_rel <= 1e-9, "rhs value: {worst_rhs_rel:.3e} > 1e-9");
+        assert!(
+            worst_dgram_rel <= 1e-5,
+            "dgram/dpsi vs FD of the exact Duchon gram: {worst_dgram_rel:.3e} > 1e-5"
+        );
+        assert!(
+            worst_drhs_rel <= 1e-5,
+            "drhs/dpsi vs FD of the exact Duchon rhs: {worst_drhs_rel:.3e} > 1e-5 \
+             (this channel had no FD gate at all before #2464)"
+        );
+    }
+
     /// #1033b primitive gate: the certified tensor must reproduce the exact
     /// Gram/rhs at arbitrary in-window ψ to certification accuracy, and its
     /// analytic ψ-derivative must match central finite differences of the
