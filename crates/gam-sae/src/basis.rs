@@ -297,9 +297,12 @@ pub trait SaeBasisThirdJet: SaeBasisSecondJet {
 
 /// Periodic harmonic basis evaluator for a single-dimensional circle latent.
 ///
-/// Produces `M = 2*num_harmonics + 1` basis functions
-/// `[1, sin(2π·1·t), cos(2π·1·t), …, sin(2π·H·t), cos(2π·H·t)]` where
-/// `H = (M − 1) / 2`. The latent must have `latent_dim == 1`.
+/// [`PeriodicHarmonicEvaluator::new`] accepts the **total odd basis width**
+/// `M`, not the number of non-constant harmonics. It emits
+/// `[1, sin(2π·1·t), cos(2π·1·t), …, sin(2π·H·t), cos(2π·H·t)]`, where
+/// `H = (M − 1) / 2`. Thus `new(5)` means `M = 5` (two harmonics), while
+/// `new(11)` means `M = 11` (five harmonics). The latent must have
+/// `latent_dim == 1`.
 #[derive(Debug, Clone)]
 pub struct PeriodicHarmonicEvaluator {
     pub num_basis: usize,
