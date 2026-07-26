@@ -18,6 +18,14 @@ use ndarray::{Array1, ArrayView2};
 
 /// Bound on every `rho` (log smoothing / log dispersion) coordinate in the
 /// exact-joint theta vector. Shared by all location-scale families.
+///
+/// Consumed ONLY by the exact-joint (ρ, ψ) outer optimizer, i.e. when spatial
+/// κ coordinates exist and are enabled. A location-scale fit with no spatial
+/// terms routes through `fit_custom_family`, whose ρ box ceiling is
+/// `gam_custom_family::fit::EFFECTIVE_DF_CEILING` (same value 12.0, different
+/// constant): a λ railed at `exp(12)` in such a fit is railed THERE, and
+/// widening this bound does nothing — measured bit-identical across a 5×
+/// widening on #1561 (2026-07-26).
 pub(crate) const EXACT_JOINT_RHO_BOUND: f64 = 12.0;
 
 /// Shared operator-aware coefficient-Hessian cost for joint-coupled

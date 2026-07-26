@@ -437,6 +437,22 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// from collapsing onto its unpenalized null space, so this only frees the
 /// coordinates whose honest optimum was being clipped at ρ = 10.
 ///
+/// #1561 forensic note (2026-07-26): for a location-scale fit with NO spatial
+/// terms, the exact-joint (ρ, ψ) outer optimizer is inactive
+/// (`log_kappa_dim() == 0`), the fit routes through `fit_custom_family`, and
+/// THIS ceiling — not `EXACT_JOINT_RHO_BOUND` — is the operative ρ box. A
+/// selected λ equal to `exp(EFFECTIVE_DF_CEILING)` to the last bit is a
+/// coordinate railed HERE (`ln λ = 12.000000…` ⇒ check this constant first);
+/// widening the location-scale engine's box cannot move it, and was measured
+/// not to (bit-identical λ across a 5× widening of that box). The value
+/// coincidence with `EXACT_JOINT_RHO_BOUND` is what makes the misattribution
+/// cheap. A null-space-ridge coordinate railed here with z² = θ̂²g ≤ 1 is
+/// HARMLESS — the criterion is monotone to +∞ and the shrinkage factor
+/// g/(g+e¹²) ≈ 1e-4 means the λ=∞ limit is already attained — while a
+/// Primary railed here with a finite beyond-ceiling optimum is the #2356
+/// class. A ceiling sweep 12→14→20 on the #1561 by-group fixture moved every
+/// truth-RMSE by < 1e-5, both cases included.
+///
 /// Exported `pub` because regimes that PIN a coordinate at the strong-smoothing
 /// wall seed from it (the survival parametric-AFT time-warp seed, #2356): a
 /// wall-pinning seed must move WITH the ceiling, or a ceiling raise strands it
