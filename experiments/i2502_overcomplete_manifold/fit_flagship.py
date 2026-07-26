@@ -142,7 +142,7 @@ def main():
                 out, f"pilot_{lane}_k{args.pilot_k}{args.tag}",
                 {**base, "k": args.pilot_k, "n_train": len(Xp), "lane": lane},
                 lambda lane=lane: gamfit.sae_manifold_fit(
-                    Xp, K=args.pilot_k, d_atom=1, atom_topology="circle",
+                    Xp, K=args.pilot_k, d_atom=1,
                     assignment=lane, n_iter=args.n_iter, random_state=args.seed,
                     gpu=args.gpu, **lane_kwargs(lane, args.top_k),
                     **({} if args.smooth is None else {"smoothness_weight": args.smooth})),
@@ -153,7 +153,7 @@ def main():
         model, alive = run_arm(
             out, f"manifold_k{args.k}", {**base, "k": args.k, "lane": args.lane},
             lambda: gamfit.sae_manifold_fit(
-                X_train, K=args.k, d_atom=1, atom_topology="circle",
+                X_train, K=args.k, d_atom=1,
                 assignment=args.lane, n_iter=args.n_iter, random_state=args.seed,
                 gpu=args.gpu, **lane_kwargs(args.lane, args.top_k)),
             X_train, X_test)
