@@ -1479,9 +1479,9 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     // `inner_quality_mode`, so the objective winner is solved once at the exact
     // quality its derivatives require and that owned mode can be reused below.
     // Restricted to the ρ-only joint path (`psi_dim == 0`): ψ-bearing
-    // evaluations already have their inner tolerance managed deliberately by
-    // `derivative_quality_options_and_warm_start` (which intentionally LOOSENS
-    // it for large-scale ψ fits), and must not be re-tightened here.
+    // evaluations already pass through the monotone caller-authority rule in
+    // `derivative_quality_options_and_warm_start`; this local branch must not
+    // impose a second, competing coefficient-quality policy.
     const JOINT_LAML_DERIV_INNER_TOL_FLOOR: f64 = 1e-11;
     let tighten_inner_for_deriv = psi_dim == 0
         && include_logdet_h
@@ -3061,53 +3061,43 @@ pub(crate) fn derivative_quality_options_and_warm_start(
     warm_start: Option<&CustomFamilyWarmStart>,
     has_psi_derivatives: bool,
 ) -> (BlockwiseFitOptions, Option<CustomFamilyWarmStart>) {
-    const DIRECT_JOINT_HYPER_INNER_TOL_FLOOR: f64 = 1e-10;
     const DIRECT_JOINT_HYPER_MIN_CYCLES: usize = 200;
 
     let mut eval_options = options.clone();
-    // The alignment exists so exact joint-hyper evaluations with real ψ
-    // coordinates resolve the inner solve at the outer optimizer's requested
-    // derivative scale. With zero ψ-derivative blocks this API is just the
-    // rho-only outer surface; mutating its inner tolerance makes the direct
-    // joint-hyper path evaluate a different function than the rho-only path.
+    // With zero ψ coordinates this API is the rho-only outer surface. Preserve
+    // its coefficient-solve contract exactly.
     if !has_psi_derivatives {
         return (eval_options, None);
     }
+
+    // A profiled ψ derivative differentiates F_β(β̂, θ) = 0. Its coefficient
+    // mode therefore cannot be certified LESS accurately than the caller asked:
+    // replacing a tight inner tolerance with a looser outer tolerance changes
+    // β̂(θ), while the IFT still treats the selected mode as stationary. That
+    // silently made the analytic response disagree with finite differences on
+    // the selected Matérn profile (#2460).
     //
-    // Do not hard-force f64-precision KKT solves for every ψ-bearing model:
-    // large-scale survival marginal-slope fits have row-summed objectives
-    // around 1e5-1e6, so `1e-10 * objective` asks the inner loop to resolve
-    // gradient components far below the outer optimizer's own `outer_tol`.
-    // Matching the inner target to the outer target keeps the IFT gradient
-    // noise below the requested optimization accuracy without rejecting all
-    // startup seeds after hundreds of accepted but numerically flat Newton
-    // steps.
-    let default_inner_tol = BlockwiseFitOptions::default().inner_tol;
-    let requested_tighter_than_default = eval_options.inner_tol < default_inner_tol;
-    let direct_joint_hyper_inner_tol = if requested_tighter_than_default {
-        eval_options.inner_tol.max(1.0e-12)
-    } else {
-        eval_options
-            .outer_tol
-            .max(DIRECT_JOINT_HYPER_INNER_TOL_FLOOR)
-    };
-    let tolerance_differs = eval_options.inner_tol != direct_joint_hyper_inner_tol;
-    let tightening = eval_options.inner_tol > direct_joint_hyper_inner_tol;
-    let align = eval_options.inner_max_cycles > 1 && tolerance_differs;
+    // The relation is one-way. A stricter outer target may require a tighter
+    // coefficient solve, but a looser outer target grants no authority to relax
+    // the inner stationarity equation. No scale floor or size-dependent escape
+    // belongs here: if the requested inner contract cannot be reached, the inner
+    // solve must report that honestly instead of returning derivatives of a
+    // different profiled objective.
+    let derivative_inner_tol = eval_options.inner_tol.min(eval_options.outer_tol);
+    let tighten =
+        eval_options.inner_max_cycles > 1 && derivative_inner_tol < eval_options.inner_tol;
     let psi_safe_warm_start = warm_start_without_cached_inner_for_psi_derivatives(
         warm_start.map(|warm| &warm.inner),
         true,
     )
     .map(|inner| CustomFamilyWarmStart { inner });
-    if !align {
+    if !tighten {
         return (eval_options, psi_safe_warm_start);
     }
-    eval_options.inner_tol = direct_joint_hyper_inner_tol;
-    if tightening {
-        eval_options.inner_max_cycles = eval_options
-            .inner_max_cycles
-            .max(DIRECT_JOINT_HYPER_MIN_CYCLES);
-    }
+    eval_options.inner_tol = derivative_inner_tol;
+    eval_options.inner_max_cycles = eval_options
+        .inner_max_cycles
+        .max(DIRECT_JOINT_HYPER_MIN_CYCLES);
     (eval_options, psi_safe_warm_start)
 }
 

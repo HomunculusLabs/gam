@@ -1261,7 +1261,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
 }
 
 #[test]
-pub(crate) fn direct_joint_hyper_inner_tolerance_follows_outer_target() {
+pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
     let options = BlockwiseFitOptions {
         inner_tol: 1e-6,
         outer_tol: 1e-5,
@@ -1272,59 +1272,48 @@ pub(crate) fn direct_joint_hyper_inner_tolerance_follows_outer_target() {
         derivative_quality_options_and_warm_start(&options, None, true);
 
     assert_eq!(
-        eval_options.inner_tol, options.outer_tol,
-        "default exact joint-hyper eval should use the outer optimizer scale"
+        eval_options.inner_tol, options.inner_tol,
+        "a looser outer target cannot weaken the coefficient-stationarity contract"
     );
     assert_eq!(eval_options.inner_max_cycles, options.inner_max_cycles);
-    assert!(
-        strict_warm_start.is_none(),
-        "loosening to the outer scale should not discard cached inner state"
-    );
-    let large_scale_objective = 3.689e5;
-    let posted_residual = 6.788e-1;
-    let posted_objective_change = 4.209e-2;
-    let eval_tol = eval_options.inner_tol * (1.0 + large_scale_objective);
-    assert!(
-        posted_residual <= 2.0 * eval_tol && posted_objective_change <= eval_tol,
-        "the exact outer startup validation should accept numerically flat inner solves at outer scale"
-    );
+    assert!(strict_warm_start.is_none());
+
     let (rho_default, _) = derivative_quality_options_and_warm_start(&options, None, false);
     assert_eq!(
         rho_default.inner_tol, options.inner_tol,
-        "rho-only exact joint-hyper eval must preserve the rho-only outer surface"
+        "rho-only exact joint-hyper evaluation must preserve its inner surface"
     );
 
-    let tighter_options = BlockwiseFitOptions {
+    let outer_is_stricter = BlockwiseFitOptions {
         inner_tol: 1e-3,
         outer_tol: 1e-5,
         inner_max_cycles: 100,
         ..BlockwiseFitOptions::default()
     };
-    let (tightened, _) = derivative_quality_options_and_warm_start(&tighter_options, None, true);
-    assert_eq!(tightened.inner_tol, tighter_options.outer_tol);
+    let (tightened, _) =
+        derivative_quality_options_and_warm_start(&outer_is_stricter, None, true);
+    assert_eq!(tightened.inner_tol, outer_is_stricter.outer_tol);
     assert_eq!(tightened.inner_max_cycles, 200);
 
-    let (rho_only, _) = derivative_quality_options_and_warm_start(&tighter_options, None, false);
-    assert_eq!(rho_only.inner_tol, tighter_options.inner_tol);
-    assert_eq!(rho_only.inner_max_cycles, tighter_options.inner_max_cycles);
+    let (rho_only, _) =
+        derivative_quality_options_and_warm_start(&outer_is_stricter, None, false);
+    assert_eq!(rho_only.inner_tol, outer_is_stricter.inner_tol);
+    assert_eq!(rho_only.inner_max_cycles, outer_is_stricter.inner_max_cycles);
 
-    let explicitly_tight_options = BlockwiseFitOptions {
+    let explicitly_tight = BlockwiseFitOptions {
         inner_tol: 1e-12,
         outer_tol: 1e-10,
         inner_max_cycles: 100,
         ..BlockwiseFitOptions::default()
     };
-    let (explicitly_tight, _) =
-        derivative_quality_options_and_warm_start(&explicitly_tight_options, None, true);
-    assert_eq!(
-        explicitly_tight.inner_tol, 1e-12,
-        "an explicitly sub-default inner tolerance should be honored down to the explicit direct joint-hyper floor instead of being loosened to outer_tol"
-    );
-    assert_eq!(explicitly_tight.inner_max_cycles, 100);
+    let (preserved, _) =
+        derivative_quality_options_and_warm_start(&explicitly_tight, None, true);
+    assert_eq!(preserved.inner_tol, explicitly_tight.inner_tol);
+    assert_eq!(preserved.inner_max_cycles, explicitly_tight.inner_max_cycles);
 }
 
 #[test]
-pub(crate) fn exact_spatial_joint_hyper_inner_tolerance_follows_spatial_outer_target() {
+pub(crate) fn exact_spatial_joint_hyper_never_loosens_inner_tolerance() {
     let options = BlockwiseFitOptions {
         inner_tol: 1e-6,
         outer_tol: 1e-10,
@@ -1338,22 +1327,11 @@ pub(crate) fn exact_spatial_joint_hyper_inner_tolerance_follows_spatial_outer_ta
 
     assert_eq!(eval_options.outer_tol, spatial_outer_tol);
     assert_eq!(
-        eval_options.inner_tol, spatial_outer_tol,
-        "exact spatial [rho, psi] evaluations should certify beta only to the tolerance of the outer optimizer consuming the derivative"
+        eval_options.inner_tol, options.inner_tol,
+        "spatial optimization may set its own outer target but may not degrade coefficient stationarity"
     );
-    assert!(
-        strict_warm_start.is_none(),
-        "loosening an over-tight caller tolerance should preserve the cached inner state"
-    );
-
-    let large_scale_objective = 3.689e5;
-    let posted_residual_plateau = 6.788e-1;
-    let posted_objective_change = 4.209e-2;
-    let eval_tol = eval_options.inner_tol * (1.0 + large_scale_objective);
-    assert!(
-        posted_residual_plateau <= eval_tol && posted_objective_change <= eval_tol,
-        "the posted saturated Newton plateau is below the spatial outer derivative accuracy target"
-    );
+    assert_eq!(eval_options.inner_max_cycles, options.inner_max_cycles);
+    assert!(strict_warm_start.is_none());
 }
 
 pub(crate) fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync + 'static>(
