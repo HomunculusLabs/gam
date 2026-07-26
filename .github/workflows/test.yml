@@ -51,7 +51,10 @@ name: Rust CI
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    # Off the hour on purpose. GitHub queues scheduled runs fleet-wide, and the
+    # top of the hour is the most contended minute there is; a nightly that is
+    # delayed past the next working morning is a nightly that never reported.
+    - cron: "37 2 * * *"
   workflow_dispatch:
     inputs:
       shards:
