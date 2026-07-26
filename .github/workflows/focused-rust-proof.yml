@@ -52,11 +52,6 @@ permissions:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
-  # Match the full Rust archive builder so compiler objects are reusable across
-  # the focused and complete lanes.
-  # GNU ld's threaded linker flag is Linux-only. An empty value on macOS
-  # matches native release builds and therefore their compiler-cache keys.
-  RUSTFLAGS: ${{ startsWith(github.event.inputs.runner, 'macos-') && '' || '-C link-arg=-Wl,--threads=1' }}
   SCCACHE_GHA_ENABLED: "true"
   # The two budgets below replace ONE bound that covered codegen, link AND
   # execution together (#2429).
@@ -96,10 +91,16 @@ jobs:
           fi
           echo "FOCUSED_TIMEOUT=gtimeout" >> "$GITHUB_ENV"
 
-      - name: Select native timeout command on Linux
+      - name: Select native timeout and linker flags on Linux
         if: runner.os == 'Linux'
         shell: bash
-        run: echo "FOCUSED_TIMEOUT=timeout" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          echo "FOCUSED_TIMEOUT=timeout" >> "$GITHUB_ENV"
+          # Keep this GNU ld flag scoped to Linux. GitHub expressions treat an
+          # empty string as false, so the boolean-ternary idiom cannot safely
+          # express "no RUSTFLAGS" for the macOS cache key.
+          echo "RUSTFLAGS=-C link-arg=-Wl,--threads=1" >> "$GITHUB_ENV"
 
       - name: Checkout exact requested SHA
         uses: actions/checkout@v5
