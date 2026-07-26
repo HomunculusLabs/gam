@@ -749,7 +749,12 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
                 stationarity: crate::model_types::OuterStationarityCertificate::AnalyticGradient {
                     grad_norm: 0.05,
                     projected_grad_norm: 0.05,
-                    bound: 0.1,
+                    bound:
+rung: 0.1,::StationarityRung {
+    label: "solver-band",
+    derived_standard: false,
+}
+.into(), 0.1,
                 },
                 hessian_psd: Some(true),
                 lambdas_railed: Vec::new(),

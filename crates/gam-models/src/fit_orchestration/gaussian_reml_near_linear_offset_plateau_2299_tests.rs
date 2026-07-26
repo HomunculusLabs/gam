@@ -134,6 +134,7 @@ fn near_linear_offset_fit_converges_railed_off_the_infinite_smoothing_plateau_22
             interior_projected_grad_norm,
             bound,
             rails,
+            ..
         } => {
             assert!(
                 interior_projected_grad_norm.is_finite() && interior_projected_grad_norm <= bound,

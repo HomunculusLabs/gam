@@ -1022,29 +1022,35 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
                     grad_norm,
                     projected_grad_norm,
                     bound,
+                    rung,
                 } => report::CriterionStationarityRow::AnalyticGradient {
                     grad_norm: *grad_norm,
                     projected_grad_norm: *projected_grad_norm,
                     bound: *bound,
+                    rung: (rung.label.clone(), rung.derived_standard),
                 },
                 gam::model_types::OuterStationarityCertificate::FixedPoint {
                     residual_inf_norm,
                     projected_residual_inf_norm,
                     bound,
+                    rung,
                     covered_coordinates,
                 } => report::CriterionStationarityRow::FixedPoint {
                     residual_inf_norm: *residual_inf_norm,
                     projected_residual_inf_norm: *projected_residual_inf_norm,
                     bound: *bound,
+                    rung: (rung.label.clone(), rung.derived_standard),
                     covered_coordinates: *covered_coordinates,
                 },
                 gam::model_types::OuterStationarityCertificate::AsymptoteRail {
                     interior_projected_grad_norm,
                     bound,
+                    rung,
                     rails,
                 } => report::CriterionStationarityRow::AsymptoteRail {
                     interior_projected_grad_norm: *interior_projected_grad_norm,
                     bound: *bound,
+                    rung: (rung.label.clone(), rung.derived_standard),
                     rails: rails
                         .iter()
                         .map(|r| report::AsymptoteRailRow {

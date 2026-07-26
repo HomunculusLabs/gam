@@ -477,6 +477,12 @@ pub fn fit_shared_tangent_reml(
                         grad_norm: 0.0,
                         projected_grad_norm: 0.0,
                         bound: 0.0,
+                        // A parametric model has no smoothing estimand, so the
+                        // empty score is stationary by construction rather than
+                        // by clearing a band; `bound: 0.0` is a formality and
+                        // borrowing a gradient rung for it would name a
+                        // comparison that never ran (#2530).
+                        rung: gam_problem::StationarityRung::EMPTY_ESTIMAND.into(),
                     },
                 hessian_psd: Some(true),
                 lambdas_railed: Vec::new(),

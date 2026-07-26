@@ -2244,11 +2244,6 @@ pub(crate) enum StationarityBoundSource {
     /// Only the ONE refusal on that route which has actually formed the
     /// residual carries this. Its eight early exits formed none, and now say so.
     FixedPointResidual,
-    /// The closed-form Gaussian profiled REML search's own relative gradient
-    /// band `GRAD_TOL·(1+|cost|)`. A separate subsystem with a separate
-    /// derivation: a gradient-magnitude test like the solver band, but five to
-    /// ten orders tighter, so it must not read as the outer ladder's.
-    ClosedFormProfileBand,
 }
 
 impl StationarityBoundSource {
@@ -2261,7 +2256,6 @@ impl StationarityBoundSource {
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
             Self::FixedPointResidual => "fixed-point-residual",
-            Self::ClosedFormProfileBand => "closed-form-profile-band",
         }
     }
 
@@ -2594,6 +2588,7 @@ fn certify_fixed_point_optimality(
             residual_inf_norm: raw_inf,
             projected_residual_inf_norm: projected_inf,
             bound: config.tolerance,
+            rung: StationarityBoundSource::FixedPointResidual.provenance().into(),
             covered_coordinates: layout.n_params,
         },
         hessian_psd: None,
@@ -2763,6 +2758,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 grad_norm: 0.0,
                 projected_grad_norm: 0.0,
                 bound: outer_gradient_tolerance(config).abs,
+                // No smoothing estimand: the empty score is stationary by
+                // construction, not by clearing this band (#2530).
+                rung: StationarityRung::EMPTY_ESTIMAND.into(),
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
@@ -3325,6 +3323,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         // interior sub-block's Newton decrement is below the loop's
                         // cost resolution (shared judgment with the Inc 2c mint).
                         bound: effective_interior_bound.value(),
+                        rung: effective_interior_bound.rung().into(),
                         rails,
                     },
                     hessian_psd: Some(true),
@@ -3476,6 +3475,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             grad_norm,
             projected_grad_norm: certified_projected_grad_norm,
             bound: stationarity_bound,
+            rung: bound_source.provenance().into(),
         },
         // The RAW measurement — unchanged, and what every consumer that asks
         // for a genuine PSD certificate keeps receiving.
@@ -3569,6 +3569,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     stationarity: OuterStationarityCertificate::AsymptoteRail {
                         interior_projected_grad_norm,
                         bound: effective_interior_bound.value(),
+                        rung: effective_interior_bound.rung().into(),
                         rails,
                     },
                     hessian_psd: Some(true),

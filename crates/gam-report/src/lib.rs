@@ -80,11 +80,19 @@ pub enum CriterionStationarityRow {
         grad_norm: f64,
         projected_grad_norm: f64,
         bound: f64,
+        /// Which standard produced `bound`, as `(label, derived_standard)`
+        /// (#2530). Beside the bound, because the bound alone spans nine orders
+        /// across the outer subsystem and names nothing on its own.
+        rung: (String, bool),
     },
     FixedPoint {
         residual_inf_norm: f64,
         projected_residual_inf_norm: f64,
         bound: f64,
+        /// Which standard produced `bound`, as `(label, derived_standard)`
+        /// (#2530). Beside the bound, because the bound alone spans nine orders
+        /// across the outer subsystem and names nothing on its own.
+        rung: (String, bool),
         covered_coordinates: usize,
     },
     /// Stationary-at-asymptote (#2348): the interior (non-railed) coordinates
@@ -95,6 +103,10 @@ pub enum CriterionStationarityRow {
     AsymptoteRail {
         interior_projected_grad_norm: f64,
         bound: f64,
+        /// Which standard produced `bound`, as `(label, derived_standard)`
+        /// (#2530). Beside the bound, because the bound alone spans nine orders
+        /// across the outer subsystem and names nothing on its own.
+        rung: (String, bool),
         rails: Vec<AsymptoteRailRow>,
     },
 }
@@ -120,20 +132,27 @@ impl CriterionStationarityRow {
                 grad_norm,
                 projected_grad_norm,
                 bound,
+                rung,
             } => format!(
-                "|g|={grad_norm:.3e}, |Pg|={projected_grad_norm:.3e} {relation} bound={bound:.3e}"
+                "|g|={grad_norm:.3e}, |Pg|={projected_grad_norm:.3e} {relation} bound={bound:.3e} (rung={}, derived_standard={})",
+                rung.0,
+                rung.1
             ),
             Self::FixedPoint {
                 residual_inf_norm,
                 projected_residual_inf_norm,
                 bound,
+                rung,
                 covered_coordinates,
             } => format!(
-                "fixed-point |r|\u{221e}={residual_inf_norm:.3e}, |Pr|\u{221e}={projected_residual_inf_norm:.3e} {relation} bound={bound:.3e}, coordinates={covered_coordinates}"
+                "fixed-point |r|\u{221e}={residual_inf_norm:.3e}, |Pr|\u{221e}={projected_residual_inf_norm:.3e} {relation} bound={bound:.3e}, coordinates={covered_coordinates} (rung={}, derived_standard={})",
+                rung.0,
+                rung.1
             ),
             Self::AsymptoteRail {
                 interior_projected_grad_norm,
                 bound,
+                rung,
                 rails,
             } => {
                 let rail_list = rails
@@ -149,7 +168,9 @@ impl CriterionStationarityRow {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "stationary-at-asymptote: interior |Pg|={interior_projected_grad_norm:.3e} {relation} bound={bound:.3e}, rails=[{rail_list}]"
+                    "stationary-at-asymptote: interior |Pg|={interior_projected_grad_norm:.3e} {relation} bound={bound:.3e}, rails=[{rail_list}] (rung={}, derived_standard={})",
+                    rung.0,
+                    rung.1
                 )
             }
         }
@@ -1423,6 +1444,7 @@ mod tests {
                 grad_norm: 2.0e-9,
                 projected_grad_norm: 1.0e-9,
                 bound: 1.0e-8,
+                rung: ("solver-band".to_string(), false),
             },
             hessian_psd: Some(true),
             lambdas_railed: vec![3],
@@ -1451,6 +1473,7 @@ mod tests {
                 grad_norm: 2.0e-9,
                 projected_grad_norm: 1.0e-9,
                 bound: 1.0e-8,
+                rung: ("solver-band".to_string(), false),
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
@@ -1471,6 +1494,7 @@ mod tests {
                 residual_inf_norm: 2.0e-9,
                 projected_residual_inf_norm: 1.0e-9,
                 bound: 1.0e-8,
+                rung: ("solver-band".to_string(), false),
                 covered_coordinates: 7,
             },
             hessian_psd: None,

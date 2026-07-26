@@ -28,6 +28,20 @@ pub struct StationarityRung {
     pub derived_standard: bool,
 }
 
+impl StationarityRung {
+    /// A zero-dimensional outer problem (#2530): no smoothing estimand exists,
+    /// so the score is empty and exactly stationary *by construction* rather
+    /// than by clearing any band. The `bound` on such a certificate is a
+    /// formality — no ladder ran, because there was nothing to weigh — and
+    /// borrowing a gradient rung for it would claim a comparison that never
+    /// happened, which is the same error `NoComparison` exists to prevent one
+    /// level down.
+    pub const EMPTY_ESTIMAND: Self = Self {
+        label: "empty-estimand",
+        derived_standard: false,
+    };
+}
+
 impl std::fmt::Display for StationarityRung {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

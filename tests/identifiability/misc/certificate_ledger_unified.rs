@@ -15,7 +15,11 @@ fn clean_criterion() -> OuterCriterionCertificate {
         stationarity: OuterStationarityCertificate::AnalyticGradient {
             grad_norm: 1e-9,
             projected_grad_norm: 1e-9,
-            bound: 1e-6,
+            bound:
+rung: 1e-6, {
+    label: "solver-band".to_string(),
+    derived_standard: false,
+}, 1e-6,
         },
         hessian_psd: Some(true),
         lambdas_railed: Vec::new(),

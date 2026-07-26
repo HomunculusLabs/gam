@@ -59,15 +59,17 @@ impl Certificate for OuterCriterionCertificate {
             self.stationarity.projected_norm(),
         );
         put_finite(&mut e, "stationarity_bound", self.stationarity.bound());
-        e.insert(
-            "stationarity_kind",
-            if self.stationarity.is_fixed_point() {
-                "fixed_point"
-            } else {
-                "analytic_gradient"
-            }
-            .into(),
-        );
+        // The bound never appears without the standard that produced it: across
+        // this subsystem the bound alone spans nine orders and names nothing
+        // (#2458/#2530).
+        let rung = self.stationarity.rung();
+        e.insert("stationarity_rung", rung.label.clone().into());
+        e.insert("stationarity_rung_derived", rung.derived_standard.into());
+        // `kind_label` rather than `is_fixed_point()` + else: the old two-way
+        // test reported an AsymptoteRail certificate as "analytic_gradient" —
+        // a route wearing another route's name, in the map a reader consults
+        // precisely to find out which route ran.
+        e.insert("stationarity_kind", self.stationarity.kind_label().into());
         e.insert(
             "hessian_psd",
             match self.hessian_psd {
@@ -261,6 +263,11 @@ mod tests {
                 grad_norm: 1e-8,
                 projected_grad_norm: 1e-8,
                 bound: 1e-6,
+                rung: gam_problem::StationarityRung {
+                    label: "solver-band",
+                    derived_standard: false,
+                }
+                .into(),
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
@@ -275,6 +282,11 @@ mod tests {
                 grad_norm: 1e-2,
                 projected_grad_norm: 1e-2,
                 bound: 1e-6,
+                rung: gam_problem::StationarityRung {
+                    label: "solver-band",
+                    derived_standard: false,
+                }
+                .into(),
             },
             ..clean
         };
@@ -342,6 +354,11 @@ mod tests {
                 grad_norm: 1e-8,
                 projected_grad_norm: 1e-8,
                 bound: 1e-6,
+                rung: gam_problem::StationarityRung {
+                    label: "solver-band",
+                    derived_standard: false,
+                }
+                .into(),
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),

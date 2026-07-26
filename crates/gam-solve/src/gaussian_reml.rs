@@ -1,4 +1,5 @@
 use crate::estimate::EstimationError;
+use gam_problem::StationarityStandard;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, fast_ab, fast_atb, fast_xt_diag_x, fast_xt_diag_y,
@@ -43,7 +44,6 @@ fn zero_backward_result(n: usize, p: usize, d: usize) -> GaussianRemlBackwardRes
 const RHO_LOWER: f64 = -30.0;
 const RHO_UPPER: f64 = 30.0;
 const EIGEN_REL_TOL: f64 = 1.0e-10;
-const GRAD_TOL: f64 = 1.0e-12;
 const MIN_DEVIANCE: f64 = 1.0e-300;
 /// Relative first-order convergence certificate for the block-orthogonal
 /// alternation: the largest per-block |dV/drho|, normalized by the score's
@@ -4173,19 +4173,19 @@ fn profile_search_refusal(
         iterations: 0,
         final_value: e.cost,
         projected_grad_norm: e.grad.is_finite().then_some(e.grad.abs()),
-        // The closed-form profiled search uses its own relative gradient
-        // tolerance, which is not one of the outer ladder's rungs (#2458).
-        // That makes it a rung of ITS OWN, not an absent one: a refusal from
-        // this route reports `1e-12·(1 + |V|)`, five to ten orders tighter
-        // than anything the iterative outer ladder produces, and a reader
-        // comparing the two numbers needs to know they are not the same
-        // standard. This route DOES weigh a gradient against that band, so it
-        // reports a measured standard rather than `NoComparison`.
-        stationarity_standard: crate::rho_optimizer::StationarityBound::from_ladder(
-            GRAD_TOL * (1.0 + e.cost.abs()),
-            crate::rho_optimizer::StationarityBoundSource::ClosedFormProfileBand,
-        )
-        .into(),
+        // This route makes NO stationarity comparison, so it reports no
+        // bound (#2458/#2530).
+        //
+        // It used to report `GRAD_TOL·(1 + |V|)`, and I labelled that a
+        // gradient band of its own. Measuring instead of reading settles it:
+        // `GRAD_TOL` occurs exactly twice in this file — its definition and
+        // that message — so nothing ever compared against it. The acceptance
+        // criterion here is `width <= resolution * scale`, a BRACKET-WIDTH test
+        // in rho, and every refusal above is a bracket, enclosure or
+        // representability failure rather than a residual weighed against a
+        // band. Naming that number a rung made a false sentence more
+        // confident, which is the defect this pair of issues exists to remove.
+        stationarity_standard: StationarityStandard::NoComparison,
         rho_checkpoint: vec![checkpoint],
     }
 }

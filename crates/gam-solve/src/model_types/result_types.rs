@@ -8,7 +8,7 @@ use gam_linalg::utils::stack_offsets;
 use gam_problem::{
     GlmLikelihoodSpec, InverseLink, LatentCLogLogState, LikelihoodScaleMetadata, LikelihoodSpec,
     LogLikelihoodNormalization, MixtureLinkSpec, MixtureLinkState, ResponseFamily, SasLinkSpec,
-    SasLinkState, StabilizationLedger, StandardLink,
+    SasLinkState, StabilizationLedger, StandardLink, StationarityRung,
 };
 
 pub use gam_problem::ExecutionPath;
@@ -750,12 +750,19 @@ pub enum OuterStationarityCertificate {
         grad_norm: f64,
         projected_grad_norm: f64,
         bound: f64,
+        /// Which rung produced `bound` (#2530). Beside it inside the variant,
+        /// not as a sibling field on the certificate, so the two cannot be read
+        /// apart — the bound alone spans nine orders across this subsystem and
+        /// says nothing about which standard it came from.
+        rung: CertifiedRung,
     },
     /// KKT-projected, root-equivalent analytic fixed-point equations.
     FixedPoint {
         residual_inf_norm: f64,
         projected_residual_inf_norm: f64,
         bound: f64,
+        /// Which rung produced `bound` (#2530).
+        rung: CertifiedRung,
         covered_coordinates: usize,
     },
     /// Stationary-at-asymptote (#2348 Inc 1): the interior (non-railed)
@@ -768,6 +775,8 @@ pub enum OuterStationarityCertificate {
     AsymptoteRail {
         interior_projected_grad_norm: f64,
         bound: f64,
+        /// Which rung produced `bound` (#2530).
+        rung: CertifiedRung,
         rails: Vec<RailCoordinate>,
     },
 }
@@ -811,6 +820,29 @@ impl OuterStationarityCertificate {
             Self::AnalyticGradient { bound, .. }
             | Self::FixedPoint { bound, .. }
             | Self::AsymptoteRail { bound, .. } => *bound,
+        }
+    }
+
+    /// The rung that produced [`Self::bound`] (#2530).
+    pub fn rung(&self) -> &CertifiedRung {
+        match self {
+            Self::AnalyticGradient { rung, .. }
+            | Self::FixedPoint { rung, .. }
+            | Self::AsymptoteRail { rung, .. } => rung,
+        }
+    }
+
+    /// A stable label for which stationarity equation certified this point.
+    ///
+    /// Previously derived as `if is_fixed_point() { .. } else { "analytic_gradient" }`,
+    /// which reported an `AsymptoteRail` certificate as an analytic gradient —
+    /// a verdict wearing another route's name, in the evidence map a reader
+    /// consults precisely to find out which route ran.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::AnalyticGradient { .. } => "analytic_gradient",
+            Self::FixedPoint { .. } => "fixed_point",
+            Self::AsymptoteRail { .. } => "asymptote_rail",
         }
     }
 
@@ -909,6 +941,42 @@ impl std::fmt::Display for RailedCoordinateFact {
             f,
             "#{} theta={:.6e} box=[{:.6e}, {:.6e}] margin={:.3e}",
             self.index, self.theta, self.lower, self.upper, self.margin
+        )
+    }
+}
+
+/// The rung a CERTIFICATE was decided against, in owned form (#2530).
+///
+/// [`StationarityRung::label`] is a `&'static str` — a fixed in-process
+/// vocabulary — and a certificate is a PERSISTED artifact: it round-trips
+/// through `Serialize`/`Deserialize` from stored fits, where a borrowing
+/// deserializer cannot produce a `'static` label. So the certificate owns its
+/// label while the in-process refusal carrier keeps the static form. One
+/// allocation per minted certificate, which is once per fit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CertifiedRung {
+    /// Stable rung label, e.g. `"curvature-resolvability"`.
+    pub label: String,
+    /// Whether this rung is the derived resolvability standard rather than a
+    /// gradient-magnitude substitute.
+    pub derived_standard: bool,
+}
+
+impl From<StationarityRung> for CertifiedRung {
+    fn from(rung: StationarityRung) -> Self {
+        Self {
+            label: rung.label.to_string(),
+            derived_standard: rung.derived_standard,
+        }
+    }
+}
+
+impl std::fmt::Display for CertifiedRung {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "rung={} derived_standard={}",
+            self.label, self.derived_standard
         )
     }
 }
@@ -1017,20 +1085,23 @@ impl OuterCriterionCertificate {
                 grad_norm,
                 projected_grad_norm,
                 bound,
+                rung,
             } => format!(
-                "gradient |g|={grad_norm:.3e} |Pg|={projected_grad_norm:.3e} bound={bound:.3e}"
+                "gradient |g|={grad_norm:.3e} |Pg|={projected_grad_norm:.3e} bound={bound:.3e} ({rung})"
             ),
             OuterStationarityCertificate::FixedPoint {
                 residual_inf_norm,
                 projected_residual_inf_norm,
                 bound,
+                rung,
                 covered_coordinates,
             } => format!(
-                "fixed-point |r|inf={residual_inf_norm:.3e} |Pr|inf={projected_residual_inf_norm:.3e} bound={bound:.3e} covered={covered_coordinates}"
+                "fixed-point |r|inf={residual_inf_norm:.3e} |Pr|inf={projected_residual_inf_norm:.3e} bound={bound:.3e} ({rung}) covered={covered_coordinates}"
             ),
             OuterStationarityCertificate::AsymptoteRail {
                 interior_projected_grad_norm,
                 bound,
+                rung,
                 rails,
             } => {
                 let rail_summary = rails
@@ -1054,7 +1125,7 @@ impl OuterCriterionCertificate {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "asymptote-rail |Pg_interior|={interior_projected_grad_norm:.3e} bound={bound:.3e} rails=[{rail_summary}]"
+                    "asymptote-rail |Pg_interior|={interior_projected_grad_norm:.3e} bound={bound:.3e} ({rung}) rails=[{rail_summary}]"
                 )
             }
         };
@@ -1316,6 +1387,11 @@ mod rail_tail_evidence_tests {
             stationarity: OuterStationarityCertificate::AsymptoteRail {
                 interior_projected_grad_norm: 1.0e-9,
                 bound: 1.0e-6,
+                rung: gam_problem::StationarityRung {
+                    label: "solver-band",
+                    derived_standard: false,
+                }
+                .into(),
                 rails,
             },
             hessian_psd: Some(true),
@@ -2121,6 +2197,9 @@ mod assembly_inner_status_gate_tests {
                 grad_norm: 0.0,
                 projected_grad_norm: 0.0,
                 bound: 0.0,
+                // No outer estimand on this path either: stationary by
+                // construction, not by clearing a band (#2530).
+                rung: StationarityRung::EMPTY_ESTIMAND.into(),
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
