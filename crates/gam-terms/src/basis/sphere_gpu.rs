@@ -2416,21 +2416,40 @@ mod sphere_gpu_tests {
         );
     }
 
-    /// Hill-climb: an end-to-end Gaussian fit through
-    /// `build_spherical_spline_basis` (GPU-dispatched) against the CPU-only
-    /// build at a workload where the kernel build dominates PIRLS.
+    /// The end-to-end sphere build routes its kernel to the device exactly
+    /// when the dispatch policy admits one, on both kinds of host.
     ///
-    /// #2424: as for the kernel-matrix hill climb, the wall-clock ratio is
-    /// device-only and gets no host-side stand-in; the device-free half
-    /// asserts the dispatch decision declines at this exact shape and stops
-    /// before building the 200k-row fixture.
+    /// #2424: the device-free half asserts the decision declines at the
+    /// end-to-end shape and stops before building the 200k-row fixture.
     ///
-    /// The ratio arm is a KNOWN RED on a real A10 (#2372 / #2420): the fit
-    /// side pays farthest-point center selection that the kernel-only CPU
-    /// baseline does not, so the two sides do not time the same work and the
-    /// implied Amdahl ceiling is ~1.4×, far under the ≥10× target.
+    /// #2372/#2420: this arm used to divide two `Instant::elapsed()` readings
+    /// and demand `≥ 10×`, and it could never have reached that number on any
+    /// hardware. The GPU side timed the whole `build_spherical_spline_basis`
+    /// while the CPU side timed `spherical_wahba_kernel_matrix_cpu` plus one
+    /// `dot`; the comment justifying that claimed farthest-point center
+    /// selection was excluded because it "is identical for both paths", but it
+    /// was excluded only from the CPU side. Measured on an A10 at this exact
+    /// shape the fit paid `centers = 15.625 s` against a `0.243 s` device
+    /// kernel and a `7.778 s` host kernel, so the ratio read `0.51×` while the
+    /// device path itself was running `37×` faster than the host. Timing the
+    /// same work on both sides puts the shared center selection in both
+    /// numerator and denominator, which caps the ratio at
+    /// `(centers + host_kernel + rest) / (centers + rest)` — **1.99×** even
+    /// with a free kernel, and #2420's landed `55b4367e2` (centers 15.6 s →
+    /// 6.0 s) lowers that ceiling rather than raising it.
+    ///
+    /// So the ratio is retired here rather than re-derived: a smaller constant
+    /// would still be a stopwatch on a co-tenanted box (SPEC rule 19, and the
+    /// #2487 precedent that replaced four such gates). What this workload
+    /// actually needs asserted is that its shape *belongs* on the device, and
+    /// the calibrated dispatch policy owns that decision — so the gate is the
+    /// policy's own crossover, pinned by the pair straddling it. The device
+    /// kernel's speed keeps its gate in
+    /// `sphere_gpu_kernel_matrix_hill_climb_declines_without_device_else_20x_vs_cpu`,
+    /// where both arms do time the same work; device/host agreement keeps its
+    /// gates in the raw-kernel and end-to-end fit parity tests.
     #[test]
-    fn sphere_gpu_end_to_end_fit_hill_climb_declines_without_device_else_10x_vs_cpu() {
+    fn sphere_gpu_end_to_end_fit_dispatches_to_device_else_declines() {
         use crate::basis::{
             CenterStrategy, SphereMethod, SphericalSplineBasisSpec, SphericalSplineIdentifiability,
             build_spherical_spline_basis,
@@ -2441,14 +2460,37 @@ mod sphere_gpu_tests {
         let m: usize = 200;
         let lmax: u16 = 50;
 
-        if !cuda_available_for_test("end-to-end fit hill climb") {
+        if !cuda_available_for_test("end-to-end fit dispatch") {
             assert_sphere_decision_declines_without_device(n_lat * n_lon, m, lmax as usize);
             return;
         }
         // A CUDA runtime is present, so a probe failure is a real device/
         // dispatch fault — fail the gate loudly rather than skip-passing.
         SphereGpuBackend::probe()
-            .expect("[sphere_gpu hill-climb fit] backend probe must succeed on a CUDA host");
+            .expect("[sphere_gpu end-to-end dispatch] backend probe must succeed on a CUDA host");
+
+        // The policy's device-work crossover, pinned by the adjacent pair that
+        // straddles it. Both shapes stage `≈ n·m·8 B = 8 MB`, three orders
+        // under any plausible `memory_budget_bytes`, so neither side of the
+        // pair can flip on a co-tenanted device — the only thing separating
+        // them is the crossover itself. Without the negative arm the positive
+        // one proves nothing: a predicate that admits everything would pass it.
+        let admit = sphere_kernel_decision(5_000, m, lmax as usize)
+            .expect("the sphere GPU decision must not fault on a CUDA host");
+        assert!(
+            admit.use_gpu,
+            "a CUDA device is present and (n=5000, m={m}) is exactly at the sphere device-work \
+             crossover, yet the dispatch decision kept it on the host — reason={}",
+            admit.reason
+        );
+        let refuse = sphere_kernel_decision(4_999, m, lmax as usize)
+            .expect("the sphere GPU decision must not fault on a CUDA host");
+        assert!(
+            !refuse.use_gpu,
+            "(n=4999, m={m}) is one row below the sphere device-work crossover, yet the dispatch \
+             decision admitted the device — reason={}",
+            refuse.reason
+        );
 
         let data_ll = small_latlon_grid(n_lat, n_lon);
         let spec_gpu = SphericalSplineBasisSpec {
@@ -2462,48 +2504,48 @@ mod sphere_gpu_tests {
             identifiability: SphericalSplineIdentifiability::CenterSumToZero,
         };
 
-        // Warm-up GPU build.
-        drop(build_spherical_spline_basis(data_ll.view(), &spec_gpu).expect("warmup build"));
-
+        // The decision above is about a shape; this is the production entry
+        // actually taking it. `n·m = 4·10⁷` clears the crossover by 40×, so on
+        // this host the build routes its kernel to the device — a path the
+        // device-free half can never reach, and the reason this test still
+        // pays for a 200k-row fixture.
         let t0 = std::time::Instant::now();
-        drop(build_spherical_spline_basis(data_ll.view(), &spec_gpu).expect("gpu build"));
-        let gpu_secs = t0.elapsed().as_secs_f64();
+        let built = build_spherical_spline_basis(data_ll.view(), &spec_gpu)
+            .expect("the end-to-end sphere build must succeed on a CUDA host");
+        let build_secs = t0.elapsed().as_secs_f64();
 
-        // CPU comparison: directly invoke the CPU helper and apply the
-        // same constraint transform (matches what build_*_basis would do
-        // when GPU dispatch declines). Going through the public matrix
-        // helper isolates the GPU-vs-CPU kernel cost without re-doing
-        // farthest-point center selection (which is identical for both
-        // paths).
-        let centers =
-            crate::basis::select_spherical_farthest_point_centers(data_ll.view(), m, false)
-                .expect("centers");
-        let z = Array2::<f64>::eye(centers.nrows());
-        let t1 = std::time::Instant::now();
-        // Explicit host oracle: at this shape the dispatcher routes to the GPU,
-        // so the CPU baseline must call `spherical_wahba_kernel_matrix_cpu`
-        // directly — otherwise this would time GPU-vs-GPU and the ratio would
-        // collapse to ~1×.
-        let raw_cpu = crate::basis::spherical_wahba_kernel_matrix_cpu(
-            data_ll.view(),
-            centers.view(),
-            2,
-            false,
-            SphereWahbaKernel::SobolevTruncated { lmax },
-        )
-        .expect("cpu raw");
-        raw_cpu.dot(&z);
-        let cpu_secs = t1.elapsed().as_secs_f64();
-
-        let ratio = cpu_secs / gpu_secs.max(1e-9);
-        eprintln!(
-            "[sphere_gpu hill-climb fit] n={} m={m} L={lmax} cpu={cpu_secs:.3}s gpu={gpu_secs:.3}s ratio={ratio:.2}x",
+        assert_eq!(
+            built.design.nrows(),
+            data_ll.nrows(),
+            "the device-dispatched sphere build returned {} design rows for {} data rows",
+            built.design.nrows(),
             data_ll.nrows()
         );
         assert!(
-            ratio >= 10.0,
-            "End-to-end sphere fit only {ratio:.2}× faster on GPU (target ≥ 10×): \
-             cpu={cpu_secs:.3}s gpu={gpu_secs:.3}s"
+            built.design.ncols() > 0 && built.design.ncols() <= m,
+            "the device-dispatched sphere build returned {} design columns for m={m} centers",
+            built.design.ncols()
+        );
+        // A device path that faulted into NaN would still return the right
+        // shape; probing rows spread across the grid costs nothing next to the
+        // build and is the cheapest thing that distinguishes the two.
+        let beta = ndarray::Array1::<f64>::ones(built.design.ncols());
+        for row in (0..built.design.nrows()).step_by(data_ll.nrows() / 64 + 1) {
+            let value = built.design.dot_row(row, &beta);
+            assert!(
+                value.is_finite(),
+                "the device-dispatched sphere design row {row} sums to {value}, not a finite number"
+            );
+        }
+
+        // Kept as the hill-climbing record this workload is worth, not as a
+        // gate: `build_secs` is dominated by single-threaded farthest-point
+        // center selection (#2420), so it tracks the host's core speed and the
+        // box's load rather than the device kernel's.
+        eprintln!(
+            "[sphere_gpu end-to-end dispatch] n={} m={m} L={lmax} build={build_secs:.3}s reason={}",
+            data_ll.nrows(),
+            admit.reason
         );
     }
 
