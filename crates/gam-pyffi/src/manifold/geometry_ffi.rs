@@ -37,6 +37,159 @@ fn sae_default_ordered_beta_bernoulli_concentration_for_k_atoms(k_atoms: usize) 
     gam::terms::sae::assignment::default_ordered_beta_bernoulli_concentration_for_k_atoms(k_atoms)
 }
 
+/// Read the topology an atlas of certified local charts determines for `z`.
+///
+/// Thin exposure of `manifold::observe_atlas_topology`: this builds the atlas
+/// through the crate's own `LocalAtlas::build` and returns the observation the
+/// crate produces. No loop, no policy, no analysis — the Rust side stays the
+/// single source of truth for what the invariants are and for whether they name
+/// a manifold, and Python owns only what to do with the answer.
+///
+/// The construction is pure and deterministic: farthest-point centers,
+/// nearest-row patches, local-PCA charts each certified injective or rejected,
+/// orthogonal Procrustes transitions, exact `GF(2)` homology, and a verdict read
+/// off `(d, b₀, b₁, b₂, χ, w₁)` by closed-form table lookup. There is no fit, no
+/// RNG and no threshold anywhere in it.
+///
+/// `intrinsic_dim` is the chart rank `d` to certify. The three cover parameters
+/// default to `LocalAtlasConfig::balanced`, whose derivation lives in the crate;
+/// they are echoed back under `config` so a caller records the cover it actually
+/// measured rather than the one it assumed.
+///
+/// A refusal is a result, not an error: `observed_manifold` is then `None` and
+/// `refusal` carries the typed reason with its own counts. Only a malformed
+/// atlas (empty input, non-finite rows, no certifiable chart) raises.
+#[pyfunction]
+#[pyo3(signature = (z, intrinsic_dim, patch_count=None, patch_size=None, min_overlap=None))]
+fn sae_observe_atlas_topology<'py>(
+    py: Python<'py>,
+    z: PyReadonlyArray2<'py, f64>,
+    intrinsic_dim: usize,
+    patch_count: Option<usize>,
+    patch_size: Option<usize>,
+    min_overlap: Option<usize>,
+) -> PyResult<Py<PyDict>> {
+    use gam::terms::sae::manifold::{
+        AtlasOrientability, LocalAtlas, LocalAtlasConfig, TopologyRefusal, observe_atlas_topology,
+        observed_manifold_name,
+    };
+
+    let z = z.as_array();
+    let mut config = LocalAtlasConfig::balanced(z.nrows(), intrinsic_dim);
+    if let Some(value) = patch_count {
+        config.patch_count = value;
+    }
+    if let Some(value) = patch_size {
+        config.patch_size = value;
+    }
+    if let Some(value) = min_overlap {
+        config.min_overlap = value;
+    }
+
+    // `LocalAtlasConfig` is `Copy`, so the echoed `config` below is the one the
+    // atlas was actually built at, not a reconstruction of it.
+    let atlas = LocalAtlas::build(z, config).map_err(|error| py_value_error(error.to_string()))?;
+    let readout = observe_atlas_topology(&atlas).map_err(py_value_error)?;
+    let invariants = readout.invariants();
+
+    let betti = PyDict::new(py);
+    betti.set_item("b0", invariants.betti.b0)?;
+    betti.set_item("b1", invariants.betti.b1)?;
+    betti.set_item("b2", invariants.betti.b2)?;
+
+    let cover = PyDict::new(py);
+    cover.set_item("intrinsic_dim", config.intrinsic_dim)?;
+    cover.set_item("patch_count", config.patch_count)?;
+    cover.set_item("patch_size", config.patch_size)?;
+    cover.set_item("min_overlap", config.min_overlap)?;
+
+    let refusal = match readout.refusal() {
+        None => None,
+        Some(reason) => {
+            let out = PyDict::new(py);
+            match reason {
+                TopologyRefusal::EmptyAtlas => {
+                    out.set_item("kind", "empty_atlas")?;
+                }
+                TopologyRefusal::DisconnectedCover { components } => {
+                    out.set_item("kind", "disconnected_cover")?;
+                    out.set_item("components", *components)?;
+                }
+                TopologyRefusal::IncoherentOverlap { pairs } => {
+                    out.set_item("kind", "incoherent_overlap")?;
+                    out.set_item("pairs", *pairs)?;
+                }
+                TopologyRefusal::OrientationCocycleOpen {
+                    open_triangles,
+                    total,
+                } => {
+                    out.set_item("kind", "orientation_cocycle_open")?;
+                    out.set_item("open_triangles", *open_triangles)?;
+                    out.set_item("total", *total)?;
+                }
+                TopologyRefusal::NoTwoCells => {
+                    out.set_item("kind", "no_two_cells")?;
+                }
+                other => {
+                    out.set_item("kind", "other")?;
+                    out.set_item("detail", format!("{other:?}"))?;
+                }
+            }
+            Some(out)
+        }
+    };
+
+    let out = PyDict::new(py);
+    out.set_item(
+        "observed_manifold",
+        readout.observed_manifold().map(observed_manifold_name),
+    )?;
+    out.set_item("refusal", refusal)?;
+    out.set_item("intrinsic_dim", invariants.intrinsic_dim)?;
+    out.set_item("betti", betti)?;
+    out.set_item(
+        "euler_characteristic",
+        i64::try_from(invariants.euler_characteristic).map_err(|_| {
+            py_value_error(format!(
+                "Euler characteristic {} does not fit in i64",
+                invariants.euler_characteristic
+            ))
+        })?,
+    )?;
+    out.set_item("simplex_counts", invariants.simplex_counts.clone())?;
+    out.set_item(
+        "orientation_class",
+        match invariants.orientation_class {
+            AtlasOrientability::Orientable => "orientable",
+            AtlasOrientability::NonOrientable => "non_orientable",
+        },
+    )?;
+    out.set_item(
+        "orientation_cocycle_closes",
+        invariants.orientation_cocycle_closes,
+    )?;
+    out.set_item(
+        "open_orientation_triangles",
+        invariants.open_orientation_triangles,
+    )?;
+    out.set_item("incoherent_overlap_pairs", invariants.incoherent_overlap_pairs)?;
+    out.set_item("max_cover_multiplicity", invariants.max_cover_multiplicity)?;
+    out.set_item("mean_cover_multiplicity", invariants.mean_cover_multiplicity)?;
+    out.set_item("chart_count", invariants.chart_count)?;
+    out.set_item("dropped_center_count", invariants.dropped_center_count)?;
+    out.set_item(
+        "orientation_gauge",
+        readout
+            .orientation_gauge()
+            .iter()
+            .map(|sign| i64::from(*sign))
+            .collect::<Vec<_>>(),
+    )?;
+    out.set_item("twisted_edges", readout.twisted_edges().to_vec())?;
+    out.set_item("config", cover)?;
+    Ok(out.unbind())
+}
+
 /// #2232 Inc 5b (Gap B) — MODELING-CHOICE admission for an EXPLICIT
 /// linear-dictionary request (`atom_topology="linear"` + hard top-k support):
 /// the sparse-code lane at ANY `K`, owned by the Rust front door
@@ -4642,6 +4795,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<SpdManifold>()?;
     module.add_class::<ProductManifold>()?;
     module.add_class::<PyEncodedTable>()?;
+    module.add_function(wrap_pyfunction!(sae_observe_atlas_topology, module)?)?;
     module.add_function(wrap_pyfunction!(fit_penalized_multinomial_pyfunc, module)?)?;
     module.add_function(wrap_pyfunction!(fit_multinomial_formula_pyfunc, module)?)?;
     module.add_function(wrap_pyfunction!(
