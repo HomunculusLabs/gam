@@ -3,7 +3,7 @@ name: Publish to PyPI
 # Build wheels per (os, arch) as artifacts, then upload them in one final
 # job using twine. Why split build from upload?
 #
-# `maturin-action@v1`'s `command: publish` injects `--release` into the
+# The former unpinned `maturin-action@v1` `command: publish` injected `--release` into the
 # maturin invocation, but newer maturin's `publish` subcommand rejects it
 # (it's always release). Every wheel job was failing at that line, but
 # `continue-on-error: true` swallowed the error so only the sdist made it
@@ -57,6 +57,11 @@ env:
   # registry is already populated under ~/.cargo).  Does not affect the
   # rustc invocation, so does not invalidate Swatinem/rust-cache keys.
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # The wheel matrix is a publication boundary, so every compiled wheel must
+  # prove real reuse from the shared content-addressed compiler cache. Merely
+  # enabling a cache is not evidence: each job zeroes its counters immediately
+  # before compilation and refuses publication when the measured hit count is zero.
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   # Gate: on a branch push, only proceed when the wheel version actually
@@ -130,9 +135,10 @@ jobs:
         with:
           python-version: '3.x'
       - name: Build Linux wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
+          maturin-version: v1.14.1
           # Cross-run compilation cache (GitHub Actions cache backend),
           # configured INSIDE the manylinux container by maturin-action.
           # CI runners are ephemeral, so without this every wheel recompiles
@@ -143,15 +149,44 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: >-
             --profile release-pypi
+            --locked
+            --compatibility pypi
             --strip
             --out dist
             --manifest-path crates/gam-pyffi/Cargo.toml
-          manylinux: auto
+          manylinux: 2014
           # #1534: inside the manylinux container the mounted workspace is
           # owned by a different uid than the build user, so git refuses
           # build.rs's author-gate `git log` with "detected dubious ownership"
           # and the build panics. Trust the mounted tree before the build runs.
-          before-script-linux: git config --global --add safe.directory '*'
+          before-script-linux: |
+            git config --global --add safe.directory '*'
+            # maturin-action runs this definition in the same container shell
+            # that later invokes maturin. The function therefore brackets the
+            # real compiler invocation with target-local counters and turns a
+            # zero-hit build into a hard refusal before any artifact upload.
+            maturin() {
+              sccache --start-server
+              sccache --zero-stats
+              local status=0
+              command maturin "$@" || status=$?
+              local stats hits
+              stats=$(sccache --show-stats)
+              printf '%s\n' "$stats"
+              hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+              if (( status != 0 )); then
+                return "$status"
+              fi
+              if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not read in-container sccache hit count; refusing an unmeasured wheel build."
+                return 1
+              fi
+              if (( hits == 0 )); then
+                echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
+                return 1
+              fi
+              echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
+            }
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.platform.target }}
@@ -180,13 +215,16 @@ jobs:
         with:
           python-version: '3.x'
       - name: Build musllinux wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
+          maturin-version: v1.14.1
           sccache: true
           target: ${{ matrix.target }}
           args: >-
             --profile release-pypi
+            --locked
+            --compatibility pypi
             --strip
             --out dist
             --manifest-path crates/gam-pyffi/Cargo.toml
@@ -194,7 +232,34 @@ jobs:
           # #1534: same dubious-ownership fix as the manylinux job — the
           # musllinux_1_2 container mounts the workspace under a foreign uid,
           # blocking build.rs's `git log` author gate.
-          before-script-linux: git config --global --add safe.directory '*'
+          before-script-linux: |
+            git config --global --add safe.directory '*'
+            # maturin-action runs this definition in the same container shell
+            # that later invokes maturin. The function therefore brackets the
+            # real compiler invocation with target-local counters and turns a
+            # zero-hit build into a hard refusal before any artifact upload.
+            maturin() {
+              sccache --start-server
+              sccache --zero-stats
+              local status=0
+              command maturin "$@" || status=$?
+              local stats hits
+              stats=$(sccache --show-stats)
+              printf '%s\n' "$stats"
+              hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+              if (( status != 0 )); then
+                return "$status"
+              fi
+              if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not read in-container sccache hit count; refusing an unmeasured wheel build."
+                return 1
+              fi
+              if (( hits == 0 )); then
+                echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
+                return 1
+              fi
+              echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
+            }
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-musllinux-${{ matrix.target }}
@@ -220,17 +285,46 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - name: Set up shared compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - name: Require reachable shared compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          sccache --start-server
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          sccache --show-stats
+          sccache --zero-stats
       - name: Build macOS wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
-          sccache: true
+          maturin-version: v1.14.1
+          sccache: false
           target: ${{ matrix.platform.target }}
           args: >-
             --profile release-pypi
+            --locked
+            --compatibility pypi
             --strip
             --out dist
             --manifest-path crates/gam-pyffi/Cargo.toml
+      - name: Require measured warm compiler-cache reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          stats=$(sccache --show-stats)
+          printf '%s\n' "$stats"
+          hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not read sccache hit count; refusing an unmeasured wheel build."
+            exit 1
+          fi
+          if (( hits == 0 )); then
+            echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
+            exit 1
+          fi
+          echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
@@ -254,17 +348,40 @@ jobs:
         with:
           python-version: '3.x'
           architecture: ${{ matrix.target }}
+      - name: Set up shared compiler cache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - name: Require reachable shared compiler cache
+        shell: pwsh
+        run: |
+          sccache --start-server
+          if ($LASTEXITCODE -ne 0) { throw 'Shared sccache backend is unreachable; refusing a cold wheel build.' }
+          "RUSTC_WRAPPER=sccache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          sccache --show-stats
+          sccache --zero-stats
       - name: Build Windows wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
+          maturin-version: v1.14.1
           sccache: false
           target: ${{ matrix.target }}
           args: >-
             --profile release-pypi
+            --locked
+            --compatibility pypi
             --strip
             --out dist
             --manifest-path crates/gam-pyffi/Cargo.toml
+      - name: Require measured warm compiler-cache reuse
+        shell: pwsh
+        run: |
+          $stats = (sccache --show-stats | Out-String)
+          Write-Host $stats
+          $match = [regex]::Match($stats, '(?m)^Cache hits\s+(\d+)\s*$')
+          if (-not $match.Success) { throw 'Could not read sccache hit count; refusing an unmeasured wheel build.' }
+          $hits = [int]$match.Groups[1].Value
+          if ($hits -eq 0) { throw 'Wheel target reused zero compiler objects; refusing a cold publication build.' }
+          Write-Host "Measured warm wheel build: $hits cached compiler object(s) reused."
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.target }}
@@ -281,10 +398,11 @@ jobs:
         with:
           python-version: '3.x'
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
-          args: --out dist --manifest-path crates/gam-pyffi/Cargo.toml
+          maturin-version: v1.14.1
+          args: --locked --out dist --manifest-path crates/gam-pyffi/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
