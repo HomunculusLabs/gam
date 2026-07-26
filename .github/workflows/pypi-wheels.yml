@@ -185,6 +185,10 @@ jobs:
             # zero-hit build into a hard refusal before any artifact upload.
             maturin() {
               sccache --start-server
+              # maturin-action exports RUSTC_WRAPPER in its Node process, but
+              # Docker receives an empty value on this route. Bind Cargo to the
+              # executable that was just installed inside this container.
+              export RUSTC_WRAPPER="$(command -v sccache)"
               sccache --zero-stats
               local status=0
               command maturin "$@" || status=$?
@@ -257,6 +261,10 @@ jobs:
             # zero-hit build into a hard refusal before any artifact upload.
             maturin() {
               sccache --start-server
+              # maturin-action exports RUSTC_WRAPPER in its Node process, but
+              # Docker receives an empty value on this route. Bind Cargo to the
+              # executable that was just installed inside this container.
+              export RUSTC_WRAPPER="$(command -v sccache)"
               sccache --zero-stats
               local status=0
               command maturin "$@" || status=$?

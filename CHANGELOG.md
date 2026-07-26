@@ -25,6 +25,10 @@ campaign into one coordinated Rust/Python release. Notable root repairs:
   (#2432, #2420, #2504).** Dense constrained QPs use a certified finite dual
   projection, sphere basis construction avoids a trivial-section copy at scale,
   and Polya–Gamma GPU dispatch obeys the measured problem-size threshold.
+- **Spherical kernels preserve near-coincident geometry (#2489).** Wahba
+  kernels now carry `sin²(γ/2)` and `cos²(γ/2)` directly from chord
+  identities, so close points, antipodes, diagonals, rotations, and analytic
+  jets no longer lose their separation through a rounded dot product.
 - **Release builds are measured, pinned, and warm.** PyPI wheel production pins
   maturin-action and maturin, fixes the manylinux contract, zeros compiler-cache
   counters immediately before each target, and refuses any unmeasured or zero-hit
