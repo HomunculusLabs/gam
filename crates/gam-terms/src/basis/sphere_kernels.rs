@@ -311,29 +311,62 @@ fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: us
     let cos_g = cos_gamma.clamp(-1.0, 1.0);
     let four_pi = 4.0 * std::f64::consts::PI;
     // No floor on `u` or `1 - u`. The sole caller only reaches this closed form
-    // inside `|cos γ| <= 1 - POLE_LIMIT_THRESHOLD`, which bounds
-    // `u = (1 - cos γ)/2` into `[5e-11, 1 - 5e-11]` — nine orders above the
-    // `f64::EPSILON * 1.0e-4` floor these two lines used to carry (a factor of
-    // 2.3e9), so neither could ever bind. Everything closer to either pole is
-    // routed to the
-    // bounded spectral pole limit below. Flooring here was dead arithmetic that
-    // read as if the singularities were being handled (#2469, #2475 site 4).
+    // below the COINCIDENT pole, which bounds `u = (1 - cos γ)/2` away from `0`
+    // by `5e-11` — nine orders above the `f64::EPSILON * 1.0e-4` floor these
+    // lines used to carry (a factor of 2.3e9), so it could never bind.
+    // Flooring here was dead arithmetic that read as if the singularities were
+    // being handled (#2469, #2475 site 4).
+    //
+    // `1 - u` is carried as `v = (1 + cos γ)/2` rather than as `1.0 - u`,
+    // because `v` is the quantity that vanishes at the ANTIPODE and only this
+    // form resolves it. Both halves are exact by Sterbenz's lemma on the side
+    // where they are small: `1 - cos γ` for `cos γ ∈ [0.5, 1]` and `1 + cos γ`
+    // for `cos γ ∈ [-1, -0.5]`. Going through `u` instead destroys the
+    // antipodal end outright — at `cos γ = -1 + 1e-16`, `1 - cos γ` rounds to
+    // `2.0`, so `u` rounds to `1.0` and `1.0 - u` is `0`, reporting an exact
+    // antipode for a pair that is not one.
     let u = (1.0 - cos_g) * 0.5;
-    let one_minus_u = 1.0 - u;
+    let v = (1.0 + cos_g) * 0.5;
     // assert!, not debug_assert!: the ban-scanner forbids debug_assert (silent
-    // in release → debug/release divergence). Two O(1) comparisons in front of
-    // a dilogarithm is free.
+    // in release → debug/release divergence). An O(1) comparison in front of a
+    // dilogarithm is free.
+    //
+    // Only `u > 0` is asserted. `v == 0` is the antipode, which is an ordinary
+    // interior point of all three closed forms — every one of them is finite
+    // and smooth there — and is handled by the removable-singularity arms
+    // below rather than excluded.
     assert!(
-        u > 0.0 && one_minus_u > 0.0,
-        "closed-form Sobolev derivative called at a pole (cos γ = {cos_g}); the \
-         caller's POLE_LIMIT_THRESHOLD guard is supposed to make this unreachable"
+        u > 0.0,
+        "closed-form Sobolev derivative called at the coincident pole \
+         (cos γ = {cos_g}); the caller's POLE_LIMIT_THRESHOLD guard is supposed \
+         to make this unreachable"
     );
+    // `ln u`, taken from whichever of the two exact halves is the small one.
+    // `ln_1p(-v)` keeps full relative accuracy as `v → 0` (where `ln u → 0` and
+    // is about to be divided by `v`); `u.ln()` keeps it as `u → 0`, where
+    // `ln_1p` would have to reconstitute a tiny `1 - v` and lose the digits.
+    let ln_u = if v <= 0.5 { (-v).ln_1p() } else { u.ln() };
+    // `ln(1-u) = ln v`, by the same rule mirrored. Taking it as `v.ln()` near
+    // the COINCIDENT end costs relative accuracy for exactly the reason `ln u`
+    // costs it near the antipodal end: at `u = 5e-11` the true `ln v` is
+    // `-5e-11`, but `v` can only carry `1 - 5e-11` to an absolute `1.1e-16`, so
+    // the answer arrives with `2.2e-6` relative error. That error was reaching
+    // the m=3 derivative — measured 2.4e-6 against a 40-digit reference at
+    // `cos γ = 1 - 1e-10`, against `< 2e-14` everywhere else on the branch.
+    let ln_v = if u <= 0.5 { (-u).ln_1p() } else { v.ln() };
+    // `ln(u)/(1-u)` is `0/0` at the antipode with the finite limit `-1`:
+    // `ln(1-v)/v = -1 - v/2 - v²/3 - …`. This is the factor that carries the
+    // antipodal limit of BOTH the m=2 and the m=3 form.
+    let ln_u_over_v = if v == 0.0 { -1.0 } else { ln_u / v };
     let dk_du = match m {
         1 => -1.0 / (four_pi * u),
-        2 => u.ln() / (one_minus_u * four_pi),
+        2 => ln_u_over_v / four_pi,
         3 => {
             let li2_u = dilog_unit(u);
-            (-li2_u / u - u.ln() / one_minus_u - u.ln() * one_minus_u.ln() / u) / four_pi
+            // `ln(u)·ln(1-u)/u` is `0·(-∞)` at the antipode and vanishes there
+            // like `v·ln v`; nothing cancels in it for `v > 0`.
+            let cross = if v == 0.0 { 0.0 } else { ln_u * ln_v / u };
+            (-li2_u / u - ln_u_over_v - cross) / four_pi
         }
         // SAFETY: the sole caller `wahba_sphere_kernel_sobolev_derivative_dcos`
         // dispatches to this closed form only inside `(1..=3).contains(&m)`, so
@@ -353,10 +386,38 @@ pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dcos(x: f64, m: usize) -> f
 
     // m in {1,2,3} use the exact polylog closed-form derivative so the jet
     // matches the closed-form forward kernel; m=4 falls back to the spectral
-    // series (the forward m=4 kernel is itself spectral). Stay on the spectral
-    // path near the poles where the closed forms have integrable log/1/u
-    // singularities that the bounded-derivative pole limit handles cleanly.
-    if (1..=3).contains(&m) && x.clamp(-1.0, 1.0).abs() <= 1.0 - POLE_LIMIT_THRESHOLD {
+    // series (the forward m=4 kernel is itself spectral). Leave the closed form
+    // near the COINCIDENT pole, where `dK/du` carries the genuine `1/u` (m=1)
+    // and `ln u` (m=2, m=3) singularities of the Sobolev kernel.
+    //
+    // The guard is ONE-SIDED, and used not to be. Only `cos γ → +1` is a pole
+    // of these kernels; `cos γ → -1` is an ordinary interior point where all
+    // three derivatives are finite, smooth, and elementary:
+    //
+    // ```text
+    //   m=1, m=2:  dK/d(cos γ)|_{cos γ = -1} = 1/(8π)          = 3.9788735772973834e-2
+    //   m=3:       dK/d(cos γ)|_{cos γ = -1} = (π²/6 - 1)/(8π) = 2.5661111176813525e-2
+    // ```
+    //
+    // Routing the antipode to the spectral branch was not a conservative
+    // choice, it was wrong, because term-by-term differentiation of a Legendre
+    // series need not converge where the series itself does. At `m = 1` the
+    // differentiated terms `(2ℓ+1)(-1)^{ℓ+1}/8π` GROW, so the branch summed a
+    // divergent alternating series and returned its `l_max`-th partial sum:
+    // `Σ_{ℓ≤L}(-1)^{ℓ+1}(2ℓ+1) = -L` exactly, i.e. `-4096/(8π) = -162.9747`
+    // where the answer is `+0.0397887`. Wrong sign, 4096x magnitude, and a pure
+    // function of the truncation constant — doubling `l_max` doubles it.
+    //
+    // The region is not measure-zero either: `|cos γ| > 1 - 1e-10` at the
+    // antipodal end is every pair within 1.4e-5 rad (~3 arcsec) of antipodal,
+    // and the previous behaviour stepped from `+0.0398` to `-162.97` across
+    // that boundary. Antipodal pairs are what farthest-point centre selection
+    // actively seeks out, which is the same reason the `Li₃` accuracy near
+    // `z = 1` mattered (see `polylog`'s module docs).
+    //
+    // m=4 keeps both poles: its differentiated terms decay like `ℓ^-4`, so the
+    // spectral limit converges there and is the only form available.
+    if (1..=3).contains(&m) && x.clamp(-1.0, 1.0) <= 1.0 - POLE_LIMIT_THRESHOLD {
         return wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(x, m);
     }
 

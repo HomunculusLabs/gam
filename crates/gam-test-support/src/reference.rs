@@ -1235,5 +1235,4 @@ mod pad_to_tests {
         assert_eq!(train_wire[n_train], train[n_train - 1]);
         assert_eq!(train_wire[n - 1], train[n_train - 1]);
     }
-
 }
