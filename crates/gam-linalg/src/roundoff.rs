@@ -78,6 +78,23 @@ pub fn accumulation_band(terms: usize, absolute_sum: f64) -> f64 {
     accumulation_growth(terms) * absolute_sum
 }
 
+/// Forward-error band of a **compensated** summation (Kahan–Babuška–Neumaier)
+/// whose summands have absolute sum `absolute_sum`, where building each summand
+/// cost `formation_roundings` floating-point operations.
+///
+/// Compensated summation satisfies `|fl(S) − S| ≤ 2u·Σ|xᵢ|` **with no
+/// dependence on the term count** (Higham, *ASNA* 2nd ed., §4.3) — shedding the
+/// `n` is the entire reason to pay for the compensation. Scaling a compensated
+/// sum's band by `n` anyway applies the naive-summation model to an algorithm
+/// chosen to defeat it, and inflates the band by a factor of `n`.
+///
+/// `formation_roundings` covers the arithmetic that produces each summand
+/// before any addition happens: an inner-product term formed as `(a/p)*(b/q)`
+/// costs three. Count the operations at the call site, where they are visible.
+pub fn compensated_band(formation_roundings: usize, absolute_sum: f64) -> f64 {
+    (2.0 + formation_roundings as f64) * UNIT_ROUNDOFF * absolute_sum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +120,32 @@ mod tests {
             assert!(gamma >= n as f64 * UNIT_ROUNDOFF);
             assert!(gamma <= n as f64 * UNIT_ROUNDOFF * 1.000_001);
             previous = gamma;
+        }
+    }
+
+    #[test]
+    fn compensated_band_is_the_naive_one_divided_by_the_term_count() {
+        // The compensated band takes no term count at all -- independence from
+        // `n` is a property of the signature, so the thing worth asserting is
+        // the GAP against the naive bound, which is what a caller pays for by
+        // scaling a compensated sum by `n` anyway.
+        assert_eq!(compensated_band(0, 1.0), 2.0 * UNIT_ROUNDOFF);
+        assert_eq!(compensated_band(3, 1.0), 5.0 * UNIT_ROUNDOFF);
+        // Linear in the magnitude sum, as a forward-error bound must be.
+        assert_eq!(compensated_band(3, 4.0), 4.0 * compensated_band(3, 1.0));
+        // The gap grows without bound in n: that IS the defect it exists to
+        // fix, so pin its size rather than merely asserting an inequality.
+        let mut previous = 0.0_f64;
+        for terms in [100_usize, 2_500, 10_000] {
+            let ratio = accumulation_band(terms, 1.0) / compensated_band(3, 1.0);
+            assert!(ratio > previous, "the gap must widen with n");
+            // gamma_n ~ n*u, so the ratio approaches n/5.
+            let expected = terms as f64 / 5.0;
+            assert!(
+                (ratio / expected - 1.0).abs() < 1.0e-6,
+                "n={terms}: ratio {ratio} is not ~n/5 ({expected})"
+            );
+            previous = ratio;
         }
     }
 
