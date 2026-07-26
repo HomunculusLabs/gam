@@ -246,11 +246,60 @@ fn sphere_equatorial_data() {
     assert!(p.iter().all(|v| v.is_finite()));
 }
 #[test]
-fn sphere_with_explicit_m_equals_1() {
+fn sphere_with_explicit_m_equals_1_is_refused_with_both_remedies() {
+    // This asked for a finite prediction from `m=1`, which requires the
+    // untruncated Sobolev sphere kernel's Gram DIAGONAL — and that diagonal does
+    // not exist: K = (-ln u - 1)/4pi diverges at a coincident pair. #2475 removed
+    // the closed form that floored `u` at an undocumented epsilon and therefore
+    // SELECTED a value that moved 21.5% on one ulp of input noise. The refusal is
+    // the fix, so the test asserts the refusal.
+    //
+    // It is asserted by CONTENT, not merely as "an error": a refusal that names
+    // the defect and both remedies is what makes this a usable failure rather
+    // than an opaque one, and that property is the thing worth regressing.
+    //
+    // NOTE (product question, deliberately NOT decided here, see #2549): this
+    // means `y~sphere(lat,lon,m=1)` is no longer reachable through the formula
+    // interface. If m = 1 should stay reachable, the route is to map it onto
+    // SobolevTruncated with a stated lmax — not to restore a floor. This test
+    // pins current behaviour and will need updating if that decision is made.
     init_parallelism();
     let d = mk_sphere(300, |lat, _| 0.5 + 0.3 * lat.to_radians().sin(), 0.05, 7);
-    let p = fit_sphere("y~sphere(lat,lon,k=20,m=1)", d, &[(45.0, 0.0)]);
-    assert!(p[0].is_finite());
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    // `match`, not `expect_err`: `FitResult` is not `Debug`, and the Ok arm is
+    // the interesting failure here anyway — it means the fabricated diagonal came
+    // back.
+    let text = match fit_from_formula("y~sphere(lat,lon,k=20,m=1)", &d, &cfg) {
+        Ok(_) => panic!(
+            "the untruncated m = 1 sphere kernel has no Gram diagonal, so this fit must be \
+             refused rather than answered"
+        ),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        text.contains("log-singular"),
+        "the refusal must name the defect; got: {text}"
+    );
+    assert!(
+        text.contains("SobolevTruncated"),
+        "the refusal must name the stated-resolution remedy; got: {text}"
+    );
+    assert!(
+        text.contains("penalty_order"),
+        "the refusal must name the higher-order remedy; got: {text}"
+    );
+
+    // Non-vacuity: the same fixture at m = 2 fits and predicts finitely, so this
+    // cannot pass by the sphere path refusing everything.
+    let d2 = mk_sphere(300, |lat, _| 0.5 + 0.3 * lat.to_radians().sin(), 0.05, 7);
+    let p = fit_sphere("y~sphere(lat,lon,k=20,m=2)", d2, &[(45.0, 0.0)]);
+    assert!(
+        p[0].is_finite(),
+        "m = 2 has a finite closed-form diagonal and must still fit"
+    );
 }
 #[test]
 fn sphere_harmonic_with_m_equals_3() {

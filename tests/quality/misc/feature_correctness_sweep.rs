@@ -11,7 +11,8 @@ use gam::basis::{
     PenaltySource, PeriodicBSplineBasisSpec, SphereMethod, SphericalSplineBasisSpec,
     build_bspline_basis_1d, build_periodic_bspline_basis_1d, build_spherical_spline_basis,
     cyclic_bspline_derivative_penalty_matrix, evaluate_bspline_derivative_scalar,
-    periodic_bspline_first_derivative_nd, spherical_wahba_kernel_matrix,
+    periodic_bspline_first_derivative_nd, SphereWahbaKernel, spherical_wahba_kernel_matrix,
+    spherical_wahba_kernel_matrix_with_kind,
 };
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::f64::consts::{PI, TAU};
@@ -394,11 +395,52 @@ fn bc_bspline_realizes_nonzero_anchor_as_affine_lift() {
 
 // ----- SPHERE WAHBA: ~40 cases -----
 
+/// The untruncated Sobolev sphere kernel at `m = 1` is `K = (-ln u - 1)/4pi`
+/// with `u = (1 - cos gamma)/2`, so at a coincident pair `u = 0` and the Gram
+/// DIAGONAL DOES NOT EXIST. #2475 removed a closed form that floored `u` at an
+/// undocumented epsilon and therefore SELECTED a diagonal — one that moved 21.5%
+/// on one ulp of input noise. Every gate below that touches `m = 1` asserts the
+/// refusal by name instead of demanding the fabricated value back, and asserts
+/// that it names both remedies, so a refusal that stopped explaining itself
+/// would fail here too.
+fn assert_untruncated_m1_is_refused_by_name<T, E: std::fmt::Display>(result: Result<T, E>) {
+    let text = match result {
+        Ok(_) => panic!(
+            "the untruncated Sobolev m = 1 Gram diagonal does not exist; building it must be \
+             refused, not answered"
+        ),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        text.contains("log-singular"),
+        "the refusal must name the defect (log-singular at coincident points); got: {text}"
+    );
+    assert!(
+        text.contains("SobolevTruncated"),
+        "the refusal must name the stated-resolution remedy; got: {text}"
+    );
+}
+
 #[test]
 fn wahba_kernel_kxx_is_psd_and_symmetric() {
-    // Wahba's kernel K(x, x) for m ≥ 1 is finite and the Gram K[X, X]
-    // must be symmetric positive semi-definite. Test across m and N.
-    for m in 1..=4 {
+    // Wahba's kernel K(x, x) is finite for m >= 2 — NOT for m >= 1, which is
+    // what this comment used to claim — and the Gram K[X, X] must then be
+    // symmetric positive semi-definite. Test across m and N.
+    //
+    // The m = 1 arm is kept rather than dropped, as a refusal assertion: the
+    // non-vacuous statement is "m >= 2 gives a finite PSD Gram AND m = 1 is
+    // refused by name", which covers both halves. Narrowing the loop alone would
+    // silently retire the coverage.
+    for &n in &[8_usize, 32, 128] {
+        let pts = random_lat_lon(n, 42 + 1);
+        assert_untruncated_m1_is_refused_by_name(spherical_wahba_kernel_matrix(
+            pts.view(),
+            pts.view(),
+            1,
+            false,
+        ));
+    }
+    for m in 2..=4 {
         for &n in &[8_usize, 32, 128] {
             let pts = random_lat_lon(n, 42 + m as u64);
             let k = spherical_wahba_kernel_matrix(pts.view(), pts.view(), m, false).unwrap();
@@ -437,9 +479,19 @@ fn wahba_kernel_kxx_is_psd_and_symmetric() {
 }
 
 #[test]
-fn wahba_kernel_at_same_point_is_finite_for_all_orders() {
+fn wahba_kernel_at_same_point_is_finite_from_order_two_and_refused_at_order_one() {
+    // Renamed from "..._for_all_orders": that name asserted the very thing #2475
+    // established is false. The diagonal is a finite closed form from m = 2 up
+    // (1/(4pi) at m = 2, (2*zeta3 - 2)/(4pi) at m = 3) and does not exist at
+    // m = 1.
     let pts = ndarray::array![[10.0, 20.0], [-30.0, 60.0], [45.0, -150.0]];
-    for m in 1..=4 {
+    assert_untruncated_m1_is_refused_by_name(spherical_wahba_kernel_matrix(
+        pts.view(),
+        pts.view(),
+        1,
+        false,
+    ));
+    for m in 2..=4 {
         let k = spherical_wahba_kernel_matrix(pts.view(), pts.view(), m, false).unwrap();
         for i in 0..pts.nrows() {
             assert!(k[(i, i)].is_finite(), "m={m} k({i},{i}) non-finite");
@@ -449,10 +501,35 @@ fn wahba_kernel_at_same_point_is_finite_for_all_orders() {
 
 #[test]
 fn wahba_kernel_radians_consistent_with_degrees_across_orders() {
+    // The invariant under test — the kernel depends only on angular separation,
+    // so degrees and radians must agree — has NOTHING to do with the m = 1
+    // singularity. This loop only failed there because it could not build the
+    // matrix at all. So the untruncated loop starts at m = 2, and the m = 1
+    // coverage is preserved on the kernel that IS constructible at that order:
+    // SobolevTruncated states the resolution the untruncated form leaves open,
+    // and the degrees/radians invariant must hold for it too. Restricting the
+    // loop alone would have lost an order's worth of coverage of an unrelated
+    // invariant.
     let deg = ndarray::array![[15.0, 30.0], [-45.0, 90.0], [60.0, -120.0]];
     let to_rad = PI / 180.0;
     let rad = deg.map(|v| v * to_rad);
-    for m in 1..=4 {
+    let truncated = SphereWahbaKernel::SobolevTruncated { lmax: 64 };
+    let kd_m1 =
+        spherical_wahba_kernel_matrix_with_kind(deg.view(), deg.view(), 1, false, truncated)
+            .expect("m = 1 with a STATED resolution is constructible");
+    let kr_m1 = spherical_wahba_kernel_matrix_with_kind(rad.view(), rad.view(), 1, true, truncated)
+        .expect("m = 1 with a STATED resolution is constructible");
+    for i in 0..deg.nrows() {
+        for j in 0..deg.nrows() {
+            assert!(
+                near(kd_m1[(i, j)], kr_m1[(i, j)], 1e-10),
+                "SobolevTruncated m=1 ({i},{j}): deg={} rad={}",
+                kd_m1[(i, j)],
+                kr_m1[(i, j)]
+            );
+        }
+    }
+    for m in 2..=4 {
         let kd = spherical_wahba_kernel_matrix(deg.view(), deg.view(), m, false).unwrap();
         let kr = spherical_wahba_kernel_matrix(rad.view(), rad.view(), m, true).unwrap();
         for i in 0..deg.nrows() {
