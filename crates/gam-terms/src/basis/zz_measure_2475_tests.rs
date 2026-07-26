@@ -57,6 +57,9 @@ use super::sphere_kernels::{
     wahba_sphere_kernel_pseudo_coincident, wahba_sphere_kernel_pseudo_from_cos,
     wahba_sphere_kernel_sobolev_closed_form, wahba_sphere_kernel_sobolev_derivative_dcos,
 };
+use super::sphere_spectral::{
+    sobolev_s2_truncated_coefficients, sphere_truncated_spectral_derivative_eval,
+};
 
 const FOUR_PI: f64 = 4.0 * std::f64::consts::PI;
 /// The floor that used to be shared by all four sites.
@@ -617,4 +620,104 @@ fn zz_measure_2475_sobolev_derivative_matches_high_precision_reference() {
         worst_at.0,
         worst_at.1
     );
+}
+
+// ---------------------------------------------------------------------------
+// 6. The Legendre DERIVATIVE recurrence. `P'_ℓ = ℓ(P_{ℓ-1} - x P_ℓ)/(1 - x²)`
+//    is a removable 0/0 at the poles, so it carried a floor and a second
+//    branch; it also decays like `ε/(1-x²)` long before either fires.
+// ---------------------------------------------------------------------------
+
+/// `d/d(cos γ) Σ_{ℓ=1}^{64} c_ℓ P_ℓ(cos γ)` for the truncated Sobolev `m = 2`
+/// coefficients, from 40-digit `mpmath`. The `±1` rows use the closed pole
+/// value `P'_ℓ(±1) = (±1)^{ℓ+1}·ℓ(ℓ+1)/2`; every other row differentiates the
+/// Legendre polynomials themselves, so the table does not assume the identity
+/// the code is being checked against.
+const TRUNCATED_DERIVATIVE_REFERENCE: [(f64, f64); 15] = [
+    (1.0, 0.33833024203025926),
+    (-1.0, 0.039176601376466544),
+    (0.9999999999, 0.338330237845485),
+    (-0.9999999999, 0.039176601442087355),
+    (0.99999999, 0.33832982355359548),
+    (-0.99999999, 0.039176607938524592),
+    (0.999999, 0.33828840165834044),
+    (-0.999999, 0.039177257357422111),
+    (0.9999, 0.33421830105231071),
+    (-0.9999, 0.039239990051586801),
+    (0.99, 0.2120348157213505),
+    (-0.99, 0.039859419520289469),
+    (0.5, 0.073546528978107252),
+    (-0.5, 0.045788612629465944),
+    (0.0, 0.055157001437210544),
+];
+
+#[test]
+fn zz_measure_2475_truncated_spectral_derivative_holds_accuracy_into_the_poles() {
+    // The quotient form this replaced was measured at 6.5e-8 relative at
+    // |cos γ| = 1 - 1e-10 and 7.0e-10 at 1 - 1e-8 — i.e. it had already fallen
+    // to eight digits by the point its own pole threshold took over, so the
+    // loss sat entirely inside the branch nothing was checking. The bound here
+    // is 1e-14, four orders tighter than the worst the old form reached.
+    let coeffs = sobolev_s2_truncated_coefficients(64, 2);
+    let mut worst = 0.0_f64;
+    let mut worst_x = f64::NAN;
+    println!(
+        "\n{:>18} {:>24} {:>24} {:>10}",
+        "cos γ", "reference", "shipped", "rel"
+    );
+    for (x, want) in TRUNCATED_DERIVATIVE_REFERENCE {
+        let got = sphere_truncated_spectral_derivative_eval(x, &coeffs);
+        let rel = (got - want).abs() / want.abs();
+        if rel > worst {
+            worst = rel;
+            worst_x = x;
+        }
+        println!("{x:>18} {want:>24.17e} {got:>24.17e} {rel:>10.2e}");
+    }
+    println!("\n  worst: {worst:.3e} at cos γ = {worst_x}\n");
+    assert!(
+        worst < 1e-14,
+        "truncated spectral derivative is off by {worst:.3e} relative at cos γ = {worst_x}"
+    );
+}
+
+#[test]
+fn zz_measure_2475_the_deleted_pole_branch_was_a_second_route_to_the_same_number() {
+    // The justification for removing the `|cos γ| > 1 - 1e-10` branch: it summed
+    // `Σ c_ℓ P'_ℓ(±1)` from the closed value `P'_ℓ(±1) = (±1)^{ℓ+1}·ℓ(ℓ+1)/2`,
+    // which for a FINITE sum is exact — and the recurrence that now spans the
+    // whole interval lands on the same value unaided. Two routes to one number
+    // is what let the primary route's accuracy go unmeasured; this asserts they
+    // agree so the deletion cannot be read as a change of answer.
+    //
+    // (Contrast the Sobolev m=1 case in test 5, where the analogous branch was
+    // NOT a second route to the same number, because that sum is infinite and
+    // its differentiated form diverges.)
+    for m in 1..=3 {
+        let coeffs = sobolev_s2_truncated_coefficients(64, m);
+        for pole in [1.0_f64, -1.0] {
+            let deleted_branch: f64 = (1..=64)
+                .map(|ell| {
+                    let lf = ell as f64;
+                    let sign = if pole < 0.0 && ell % 2 == 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    coeffs[ell] * 0.5 * lf * (lf + 1.0) * sign
+                })
+                .sum();
+            let recurrence = sphere_truncated_spectral_derivative_eval(pole, &coeffs);
+            let rel = (recurrence - deleted_branch).abs() / deleted_branch.abs();
+            println!(
+                "  m={m} cos γ={pole:>4}: recurrence {recurrence:>23.16e}  \
+                 deleted branch {deleted_branch:>23.16e}  rel {rel:.2e}"
+            );
+            assert!(
+                rel < 1e-14,
+                "m={m}: the recurrence disagrees with the deleted pole branch at \
+                 cos γ = {pole} by {rel:.3e} relative"
+            );
+        }
+    }
 }
