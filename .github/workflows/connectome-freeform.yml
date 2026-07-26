@@ -132,13 +132,43 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$DATA_DIR"
+
+          # --- episodic: this lineage's Chronicle store -------------------
+          # Two runs that diverged from a common ancestor have two genuinely
+          # different narratives and there is no honest way to merge them, so
+          # a lineage is inherited whole from the shared pointer.
           if git fetch --quiet origin "+$MEMORY_REF:$MEMORY_REF" 2>/dev/null \
              && git rev-parse --verify -q "$MEMORY_REF" >/dev/null; then
             git archive "$MEMORY_REF" | tar -x -C "$DATA_DIR"
-            echo "restored memory from $(git log -1 --format='%h %ad %s' --date=iso "$MEMORY_REF")"
-            echo "store size: $(du -sh "$DATA_DIR" | cut -f1), $(find "$DATA_DIR" -type f | wc -l) files"
+            echo "restored lineage from $(git log -1 --format='%h %ad %s' --date=iso "$MEMORY_REF")"
+            echo "store: $(du -sh "$DATA_DIR" | cut -f1), $(find "$DATA_DIR" -type f | wc -l) files"
           else
             echo "::notice::no memory ref yet — this is the agent's first run"
+          fi
+
+          # --- semantic: lessons, unioned across EVERY lineage ------------
+          # Lessons are id-addressed facts, so unlike a narrative their union
+          # is well-defined. This is what stops a hard-won fact from being
+          # stranded in a parallel lineage nobody inherits. connectome-host
+          # reads the global file at $DATA_DIR/lessons.json
+          # (index.ts:186 -> storePath/../.. with storePath={dataDir}/sessions/{id}).
+          shards=$(git ls-remote origin 'refs/agent-memory/lessons/*' 2>/dev/null | awk '{print $2}' | sort | tail -300)
+          if [ -n "$shards" ]; then
+            n=$(printf '%s\n' "$shards" | wc -l | tr -d ' ')
+            echo "fetching $n lesson shard(s)"
+            # shellcheck disable=SC2086
+            git fetch --quiet origin $(printf '+%s:%s\n' $shards $shards | paste -sd' ' -) 2>/dev/null || true
+            tmp=$(mktemp -d)
+            i=0
+            for r in $shards; do
+              i=$((i+1))
+              git show "$r:lessons.json" > "$tmp/$i.json" 2>/dev/null || true
+            done
+            node "$AGENT_REPO_DIR/.github/connectome/merge-lessons.mjs" \
+              "$DATA_DIR/lessons.json" "$tmp"/*.json || true
+            rm -rf "$tmp"
+          else
+            echo "::notice::no lesson shards yet — nothing to union"
           fi
 
       - name: Run the agent
@@ -165,6 +195,11 @@ jobs:
       # run still lived through something.
       - name: Save memory
         if: always()
+        # Reports its own failure without failing the run: a save that breaks
+        # must be VISIBLE (the first cutover run reported success and saved
+        # nothing), but it should not retroactively redden a run whose agent
+        # worked fine.
+        continue-on-error: true
         run: |
           set -uo pipefail
           [ -d "$DATA_DIR" ] || { echo "no data dir; nothing to save"; exit 0; }
@@ -176,12 +211,16 @@ jobs:
             echo "::warning::memory store is ${size} MB — consider pruning old Chronicle branches"
           fi
 
-          idx=$(mktemp)
+          # `mktemp` (no -u) CREATES the file, and git rejects a zero-byte
+          # index with "index file smaller than expected" -- which is exactly
+          # how the first cutover run staged nothing, reported success, and
+          # lost the agent's entire memory. -u yields an unused NAME.
+          idx=$(mktemp -u)
           export GIT_INDEX_FILE="$idx"
           export GIT_DIR="$AGENT_REPO_DIR/.git"
           export GIT_WORK_TREE="$DATA_DIR"
-          git add -A . || { echo "::error::failed to stage memory"; exit 0; }
-          tree=$(git write-tree) || exit 0
+          git add -A . || { echo "::error::failed to stage memory"; exit 1; }
+          tree=$(git write-tree) || { echo "::error::failed to write memory tree"; exit 1; }
           parent=$(git rev-parse --verify -q "$MEMORY_REF" || true)
           msg="memory after run ${GITHUB_RUN_ID} (${GITHUB_RUN_NUMBER})"
           if [ -n "$parent" ]; then
@@ -202,7 +241,27 @@ jobs:
             echo "::error::could not save this run's memory lineage"
           fi
 
-          # 2. Advance the shared pointer that the next run restores from.
+          # 2. This run's LESSONS shard. Its own ref, so parallel runs never
+          #    contend; every future run unions all shards, so a fact learned
+          #    in a lineage that loses the pointer race still reaches everyone.
+          if [ -s "$DATA_DIR/lessons.json" ]; then
+            lidx=$(mktemp -u)
+            if GIT_INDEX_FILE="$lidx" GIT_DIR="$AGENT_REPO_DIR/.git" GIT_WORK_TREE="$DATA_DIR" \
+                 git add -- lessons.json 2>/dev/null; then
+              ltree=$(GIT_INDEX_FILE="$lidx" GIT_DIR="$AGENT_REPO_DIR/.git" git write-tree)
+              lcommit=$(git commit-tree "$ltree" -m "lessons from run ${GITHUB_RUN_ID}")
+              count=$(node -e 'try{console.log((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).lessons||[]).length)}catch{console.log("?")}' "$DATA_DIR/lessons.json")
+              if git push origin "$lcommit:refs/agent-memory/lessons/${GITHUB_RUN_ID}" 2>&1 | tail -1; then
+                echo "saved $count lesson(s) to refs/agent-memory/lessons/${GITHUB_RUN_ID}"
+              else
+                echo "::error::could not save lessons shard"
+              fi
+            fi
+          else
+            echo "no lessons.json produced this run"
+          fi
+
+          # 3. Advance the shared pointer that the next run restores from.
           #    Contended by design: with parallel runs the last finisher wins,
           #    and a loss here costs nothing because step 1 already persisted
           #    everything. Never retried into a spin — a losing run just yields.
