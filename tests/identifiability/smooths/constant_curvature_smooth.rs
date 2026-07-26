@@ -490,6 +490,7 @@ fn planted_flat_rows(n: usize) -> Vec<(f64, f64, f64, f64)> {
 /// and matches-or-beats (within slack) the in-tree Euclidean radial smooth.
 #[test]
 fn kappa_zero_fit_recovers_planted_flat_signal() {
+    gam_runtime::test_support::install_diagnostic_logger();
     gam::init_parallelism();
     let rows = planted_flat_rows(400);
     let r2_curv = fit_and_score("y ~ curv(x1, x2, centers=30)", &rows);
