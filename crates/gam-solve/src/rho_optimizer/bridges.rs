@@ -3170,10 +3170,9 @@ impl FixedPointObjective for OuterFixedPointBridge<'_> {
 impl OuterFixedPointBridge<'_> {
     /// Backtrack the cost along `raw_step` by halving α ∈ {1, 1/2, …, 2^-k}
     /// up to `max_halvings` times. Returns `Some(α·raw_step)` for the first
-    /// α that yields a strictly lower finite cost, `None` if every trial
-    /// failed or evaluation errored. Eval errors at trial points are
-    /// treated as step rejection (a common pathology in inner solves at
-    /// over-aggressive λ jumps), not propagated.
+    /// α that yields a strictly lower finite cost, or `None` when every
+    /// evaluable trial is rejected. A typed objective error means the evaluation
+    /// artifact could not be constructed and is propagated without further probes.
     fn efs_backtrack(
         &mut self,
         x: &Array1<f64>,
@@ -3186,9 +3185,9 @@ impl OuterFixedPointBridge<'_> {
         // and forces unnecessary halvings.
         let cost_floor = current_cost + EFS_COST_DESCENT_TOL * current_cost.abs().max(1.0);
         // `bt` counts trials so the accepted step can report its halving count
-        // (trial `bt` runs at α = 2^-bt). An eval error is an INVALID trial
-        // (`Ok(None)`): the search halves without consulting the acceptance
-        // test, exactly as the pre-migration loop swallowed `Err(_)`.
+        // (trial `bt` runs at α = 2^-bt). Recoverable domain refusals arrive as
+        // `Ok(+∞)` and keep halving; `Err` is reserved for a broken evaluation
+        // artifact and leaves the search immediately.
         let mut bt = 0usize;
         let accepted = backtracking_line_search::<_, ObjectiveEvalError>(
             BacktrackConfig {
@@ -3199,26 +3198,19 @@ impl OuterFixedPointBridge<'_> {
                 bt += 1;
                 let trial_step = raw_step * alpha;
                 let trial = x + &trial_step;
-                match self.obj.eval_cost(&trial) {
-                    Ok(c) => {
-                        if !(c.is_finite() && c <= cost_floor) {
-                            log::trace!(
-                                "[EFS] backtrack α=2^-{bt}={alpha:.4e}: trial cost {c:.6e} \
-                                 not below current {current_cost:.6e}, halving",
-                                bt = bt - 1,
-                            );
-                        }
-                        Ok(Some((c, trial_step)))
-                    }
-                    Err(err) => {
-                        log::trace!(
-                            "[EFS] backtrack α=2^-{bt}={alpha:.4e}: trial eval failed \
-                             ({err}), halving",
-                            bt = bt - 1,
-                        );
-                        Ok(None)
-                    }
+                let cost = self
+                    .obj
+                    .eval_cost(&trial)
+                    .map_err(|error| {
+                        into_objective_error("EFS backtracking cost evaluation failed", error)
+                    })?;
+                if !(cost.is_finite() && cost <= cost_floor) {
+                    log::trace!(
+                        "[EFS] backtrack α=2^-{bt}={alpha:.4e}: trial cost {cost:.6e} not below current {current_cost:.6e}, halving",
+                        bt = bt - 1,
+                    );
                 }
+                Ok(Some((cost, trial_step)))
             },
             |_alpha, c| c.is_finite() && c <= cost_floor,
         )?;
