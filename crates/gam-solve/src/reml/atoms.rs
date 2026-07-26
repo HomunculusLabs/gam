@@ -579,6 +579,22 @@ pub struct PenaltyQuadAtom {
     /// projections of one object that owns the numerically-sound spelling, so
     /// the cost can no longer read a raw penalty scalar the gradient atom does
     /// not own (the #931 structural kill, without the large-λ cancellation).
+    ///
+    /// #2454 closed the remaining gap in that argument. Basis-invariance is
+    /// necessary but not sufficient: the two spellings must also be the SAME
+    /// PENALTY. `stable_penalty_term` is the energy of the split-projected
+    /// `S̃(λ) = E(λ)ᵀE(λ)` — the reparameterization keeps only balanced-penalty
+    /// eigendirections above a relative rank tolerance, and `S̃` is what the
+    /// inner solve minimizes, what `H` contains and what `log|S|₊` measures —
+    /// whereas `block_quadratics` used to come from the UNPROJECTED `S_k`,
+    /// whose own root rank can exceed the split's penalized rank. β̂ is free in
+    /// the discarded directions, so the difference was not a rounding one and
+    /// `∂/∂ρ_k` multiplied it by `λ_k`. The coordinates handed to this atom are
+    /// now projected onto the split at assembly time
+    /// (`PenaltyCoordinate::project_out_null_directions`), so
+    /// `½ Σ_j λ_j q_j == stable_value` holds numerically, not just in exact
+    /// arithmetic — verified to every printed digit in
+    /// `outer_rho_gradient_error_does_not_scale_with_lambda_2454`.
     pub stable_value: Option<f64>,
 }
 
