@@ -258,6 +258,221 @@ fn generalized_trust_region_reduced_metric(
     Ok((metric, exact_positive_curvature))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct QuadraticCandidateComparison {
+    directional_descent: f64,
+    metric_norm_squared: f64,
+    model_decrease: f64,
+    tolerance: f64,
+}
+
+impl QuadraticCandidateComparison {
+    fn certifies_strict_improvement(&self) -> bool {
+        self.directional_descent.is_finite()
+            && self.metric_norm_squared.is_finite()
+            && self.model_decrease.is_finite()
+            && self.directional_descent > 0.0
+            && self.metric_norm_squared > 0.0
+            && self.model_decrease + self.tolerance >= 0.0
+    }
+}
+
+/// Compare two points in the absolute quadratic
+/// `q(x) = 1/2 x' M x - objective_rhs' x`.
+///
+/// For `delta_ref = candidate - reference` and
+/// `local_rhs = objective_rhs - M reference`,
+///
+/// `q(reference) - q(candidate) =
+/// local_rhs' delta_ref - 1/2 delta_ref' M delta_ref`.
+///
+/// Keeping this algebra in absolute-objective coordinates is essential when
+/// the point that anchored `objective_rhs` is not itself feasible: only a
+/// feasible `reference` is an admissible comparison point for the constrained
+/// minimizer.
+fn compare_quadratic_candidate_to_reference(
+    metric: &Array2<f64>,
+    objective_rhs: &Array1<f64>,
+    reference: &Array1<f64>,
+    candidate: &Array1<f64>,
+) -> Result<QuadraticCandidateComparison, String> {
+    let p = reference.len();
+    if metric.nrows() != p
+        || metric.ncols() != p
+        || objective_rhs.len() != p
+        || candidate.len() != p
+    {
+        return Err(format!(
+            "quadratic comparison dimension contract failed \
+             (reference={p}, metric={}x{}, objective_rhs={}, candidate={})",
+            metric.nrows(),
+            metric.ncols(),
+            objective_rhs.len(),
+            candidate.len(),
+        ));
+    }
+    if metric.iter().any(|value| !value.is_finite())
+        || objective_rhs.iter().any(|value| !value.is_finite())
+        || reference.iter().any(|value| !value.is_finite())
+        || candidate.iter().any(|value| !value.is_finite())
+    {
+        return Err("quadratic comparison finite-value contract failed".into());
+    }
+
+    let delta_ref = candidate - reference;
+    let local_rhs = objective_rhs - &metric.dot(reference);
+    let directional_descent = local_rhs.dot(&delta_ref);
+    let metric_delta_ref = metric.dot(&delta_ref);
+    let metric_norm_squared = delta_ref.dot(&metric_delta_ref);
+    let model_decrease = directional_descent - 0.5 * metric_norm_squared;
+    let tolerance =
+        1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
+    Ok(QuadraticCandidateComparison {
+        directional_descent,
+        metric_norm_squared,
+        model_decrease,
+        tolerance,
+    })
+}
+
+/// Upgrade a tolerance-feasible active-set result to a mathematically feasible
+/// point without changing either the quadratic objective or its feasible
+/// reference.
+///
+/// The generic QP solver intentionally classifies violations up to
+/// `ACTIVE_SET_PRIMAL_FEASIBILITY_TOL` as numerically feasible. That contract is
+/// appropriate for active-set iteration, but it is weaker than the exact
+/// feasibility premise used by the reduced-face descent theorem. When the
+/// solver endpoint is on the wrong side of a constraint, intersect the chord
+/// from the already-certified feasible reference with the first blocking
+/// hyperplane. The ratio-test endpoint is reclassified through the constraint
+/// carrier. In the exceptional case where floating-point reconstruction rounds
+/// it outward, an ordered-bit bisection selects the largest representable chord
+/// step whose *evaluated* endpoint is feasible. This is a finite exact search
+/// over binary64 values, not a geometric tolerance or objective fallback.
+fn clip_infeasible_candidate_to_certified_feasible_chord(
+    constraints: &ConstraintSet,
+    reference: &Array1<f64>,
+    candidate: &Array1<f64>,
+) -> Result<(Array1<f64>, usize, f64), String> {
+    if reference.len() != candidate.len()
+        || reference.iter().any(|value| !value.is_finite())
+        || candidate.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "feasible-chord finite/dimension contract failed \
+             (reference={}, candidate={})",
+            reference.len(),
+            candidate.len(),
+        ));
+    }
+    let (reference_violation, reference_worst_row) = constraints
+        .max_scaled_violation(reference.view())
+        .map_err(|error| format!("feasible-chord reference classification failed: {error}"))?;
+    let (candidate_violation, candidate_worst_row) = constraints
+        .max_scaled_violation(candidate.view())
+        .map_err(|error| format!("feasible-chord candidate classification failed: {error}"))?;
+    if !reference_violation.is_finite()
+        || reference_violation > 0.0
+        || !candidate_violation.is_finite()
+        || candidate_violation <= 0.0
+    {
+        return Err(format!(
+            "feasible-chord clipping premise failed \
+             (reference_scaled_violation={reference_violation:.6e}@{reference_worst_row:?}, \
+             candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
+        ));
+    }
+
+    let direction = candidate - reference;
+    if direction.iter().any(|value| !value.is_finite()) {
+        return Err("feasible-chord direction overflowed binary64".into());
+    }
+    let (raw_boundary_step, blocking_row) = constraints
+        .max_feasible_step(reference.view(), direction.view(), &[])
+        .map_err(|error| format!("feasible-chord boundary ratio test failed: {error}"))?;
+    let boundary_step = if raw_boundary_step == 0.0 {
+        0.0
+    } else {
+        raw_boundary_step
+    };
+    let Some(blocking_row) = blocking_row else {
+        return Err(format!(
+            "infeasible QP endpoint has no blocking constraint on its feasible chord \
+             (candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
+        ));
+    };
+    if !boundary_step.is_finite() || !(0.0..=1.0).contains(&boundary_step) {
+        return Err(format!(
+            "feasible-chord boundary ratio is outside [0,1] \
+             (step={boundary_step:.6e}, blocking_row={blocking_row})"
+        ));
+    }
+
+    let point_at = |step: f64| reference + &(&direction * step);
+    let mut certified_step = boundary_step;
+    let mut clipped = point_at(certified_step);
+    let (mut clipped_violation, mut clipped_worst_row) = constraints
+        .max_scaled_violation(clipped.view())
+        .map_err(|error| format!("feasible-chord boundary classification failed: {error}"))?;
+    if !clipped_violation.is_finite() {
+        return Err(format!(
+            "feasible-chord boundary classification is non-finite \
+             (step={certified_step:.6e}, blocking_row={blocking_row}, \
+             scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
+        ));
+    }
+
+    if clipped_violation > 0.0 {
+        let mut feasible_bits = 0_u64;
+        let mut infeasible_bits = certified_step.to_bits();
+        if infeasible_bits == 0 {
+            return Err(format!(
+                "certified feasible reference became infeasible at zero chord step \
+                 (blocking_row={blocking_row}, \
+                 scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
+            ));
+        }
+        while infeasible_bits - feasible_bits > 1 {
+            let middle_bits = feasible_bits + (infeasible_bits - feasible_bits) / 2;
+            let middle_step = f64::from_bits(middle_bits);
+            let middle = point_at(middle_step);
+            let (middle_violation, middle_worst_row) = constraints
+                .max_scaled_violation(middle.view())
+                .map_err(|error| {
+                    format!("feasible-chord representable-step classification failed: {error}")
+                })?;
+            if !middle_violation.is_finite() {
+                return Err(format!(
+                    "feasible-chord representable-step classification is non-finite \
+                     (step={middle_step:.6e}, blocking_row={blocking_row}, \
+                     scaled_violation={middle_violation:.6e}@{middle_worst_row:?})"
+                ));
+            }
+            if middle_violation <= 0.0 {
+                feasible_bits = middle_bits;
+            } else {
+                infeasible_bits = middle_bits;
+            }
+        }
+        certified_step = f64::from_bits(feasible_bits);
+        clipped = point_at(certified_step);
+        (clipped_violation, clipped_worst_row) = constraints
+            .max_scaled_violation(clipped.view())
+            .map_err(|error| {
+                format!("feasible-chord final endpoint classification failed: {error}")
+            })?;
+    }
+    if !clipped_violation.is_finite() || clipped_violation > 0.0 {
+        return Err(format!(
+            "feasible-chord endpoint failed mathematical feasibility certification \
+             (step={certified_step:.6e}, blocking_row={blocking_row}, \
+             scaled_violation={clipped_violation:.6e}@{clipped_worst_row:?})"
+        ));
+    }
+    Ok((clipped, blocking_row, certified_step))
+}
+
 /// Reduced-space Newton candidate on a certified current inequality face.
 ///
 /// The global constrained step uses a convex model to discover the active
@@ -277,18 +492,29 @@ fn generalized_trust_region_reduced_metric(
 /// the self-vanishing shift `λ` from the current trust radius. The resulting
 /// positive metric `M = H_face + λD_face` defines the constraint-aware map
 ///
-///     beta_next = argmin_{x in C} 1/2 ||x-beta||_M^2 - r' (x-beta)
-///               = P_C^M(beta + M^-1 r).
+///     beta_next = argmin_{x in C} 1/2 ||x-beta||_M^2 - r' (x-beta).
 ///
-/// The projection variational inequality
-/// certifies
+/// Here `beta` anchors the objective even if accumulated floating-point error
+/// has put it infinitesimally outside `C`. Such a point cannot be the feasible
+/// comparator required by the constrained-minimization theorem. In that case a
+/// strictly feasible projection `s` is used only as the solver seed and
+/// comparison point; the objective remains exactly the one anchored at `beta`,
 ///
-///     r' delta >= ||delta||_M^2 > 0
+///     q_beta(x) = 1/2 x' M x - (M beta + r)' x.
 ///
-/// for every nonzero step, so the exact-objective trust loop receives a genuine
-/// first-order descent direction. Strict hard-case saddles at zero projected
-/// gradient are handled separately by the reduced-curvature certificate/escape
-/// machinery. A
+/// The generic active-set result is tolerance-feasible by contract. Before it
+/// can enter this exact theorem, any positive evaluated violation is clipped on
+/// the chord from `s` to the first blocking hyperplane and re-certified with no
+/// feasibility tolerance. The returned feasible point is certified against
+/// `s` through the exact comparison
+///
+///     q_beta(s) - q_beta(beta_next)
+///       = (M beta + r - M s)' (beta_next-s)
+///         - 1/2 ||beta_next-s||_M^2 >= 0,
+///
+/// while the returned step and original-Hessian KKT check remain relative to
+/// the original `beta`. Strict hard-case saddles at zero projected gradient are
+/// handled separately by the reduced-curvature certificate/escape machinery. A
 /// fully pinned current face has no tangent system to regularize; there the
 /// routine uses the original `D`-metric projected gradient so invalid active
 /// rows can still release.
@@ -420,6 +646,8 @@ fn certified_reduced_face_candidate(
     if face_metric.iter().any(|value| !value.is_finite()) {
         return Err("reduced-face lifted metric is non-finite".into());
     }
+    // `rhs_beta` owns the QP objective. A feasibility repair below may replace
+    // the solver/comparison seed, but must never silently re-anchor this RHS.
     let rhs_beta = face_metric.dot(beta) + rhs;
     let projection_started = std::time::Instant::now();
     let projection_scope = gam_runtime::process_monitor::track_scope(format!(
@@ -427,21 +655,115 @@ fn certified_reduced_face_candidate(
         active_rows.len(),
         constraints.nrows(),
     ));
-    let (candidate, next_active) = gam_solve::active_set::solve_quadratic_with_constraint_set(
-        &face_metric,
-        &rhs_beta,
-        beta,
-        constraints,
-        Some(active_rows),
-    )
-    .map_err(|error| {
-        format!(
-            "reduced-face constrained metric projection failed \
-                 (ambient_dim={p}, warm_active_rows={}, constraint_rows={}): {error}",
-            active_rows.len(),
-            constraints.nrows(),
+    let (original_base_violation, original_base_worst_row) = constraints
+        .max_scaled_violation(beta.view())
+        .map_err(|error| format!("reduced-face base feasibility classification failed: {error}"))?;
+    if !original_base_violation.is_finite() {
+        return Err(format!(
+            "reduced-face base feasibility classification is non-finite \
+             (base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?})"
+        ));
+    }
+    // Mathematical feasibility is the theorem premise, so any positive
+    // violation triggers repair. This decision deliberately has no tolerance.
+    let feasible_base = if original_base_violation > 0.0 {
+        gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
+            beta,
+            constraints,
         )
-    })?;
+        .map_err(|error| {
+            format!(
+                "reduced-face infeasible base has no certified feasible reference \
+                 (base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?}): \
+                 {error}"
+            )
+        })?
+    } else {
+        beta.clone()
+    };
+    let (reference_violation, reference_worst_row) = constraints
+        .max_scaled_violation(feasible_base.view())
+        .map_err(|error| {
+            format!("reduced-face feasible-reference certification failed: {error}")
+        })?;
+    if !reference_violation.is_finite() || reference_violation > 0.0 {
+        return Err(format!(
+            "reduced-face solver reference is not mathematically feasible \
+             (base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?}, \
+             reference_scaled_violation={reference_violation:.6e}@{reference_worst_row:?})"
+        ));
+    }
+    let (solver_candidate, mut next_active) =
+        gam_solve::active_set::solve_quadratic_with_constraint_set(
+            &face_metric,
+            &rhs_beta,
+            &feasible_base,
+            constraints,
+            Some(active_rows),
+        )
+        .map_err(|error| {
+            format!(
+                "reduced-face constrained metric projection failed \
+                 (ambient_dim={p}, warm_active_rows={}, constraint_rows={}): {error}",
+                active_rows.len(),
+                constraints.nrows(),
+            )
+        })?;
+    let (solver_candidate_violation, solver_candidate_worst_row) = constraints
+        .max_scaled_violation(solver_candidate.view())
+        .map_err(|error| {
+            format!("reduced-face QP endpoint feasibility classification failed: {error}")
+        })?;
+    if !solver_candidate_violation.is_finite() {
+        return Err(format!(
+            "reduced-face QP endpoint feasibility classification is non-finite \
+             (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?})"
+        ));
+    }
+    if solver_candidate_violation
+        > gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
+    {
+        return Err(format!(
+            "reduced-face QP endpoint violates the active-set feasibility contract \
+             (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}, \
+             solver_tolerance={:.6e})",
+            gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+        ));
+    }
+    let candidate = if solver_candidate_violation > 0.0 {
+        let (clipped, blocking_row, _certified_step) =
+            clip_infeasible_candidate_to_certified_feasible_chord(
+                constraints,
+                &feasible_base,
+                &solver_candidate,
+            )
+            .map_err(|error| {
+                format!(
+                    "reduced-face tolerance-feasible QP endpoint could not be upgraded \
+                     to mathematical feasibility \
+                     (candidate_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}): \
+                     {error}"
+                )
+            })?;
+        next_active.push(blocking_row);
+        next_active.sort_unstable();
+        next_active.dedup();
+        clipped
+    } else {
+        solver_candidate
+    };
+    let (candidate_violation, candidate_worst_row) = constraints
+        .max_scaled_violation(candidate.view())
+        .map_err(|error| {
+            format!("reduced-face final candidate feasibility certification failed: {error}")
+        })?;
+    if !candidate_violation.is_finite() || candidate_violation > 0.0 {
+        return Err(format!(
+            "reduced-face final candidate is not mathematically feasible \
+             (solver_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}, \
+             candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
+        ));
+    }
     drop(projection_scope);
     let projection_elapsed = projection_started.elapsed();
     if projection_elapsed >= std::time::Duration::from_secs(1) {
@@ -453,45 +775,33 @@ fn certified_reduced_face_candidate(
         );
     }
     let delta = &candidate - beta;
-    let directional_descent = rhs.dot(&delta);
-    let metric_delta = face_metric.dot(&delta);
-    let metric_norm_squared = delta.dot(&metric_delta);
-    // Relative to the feasible base point `beta`, the projected quadratic is
-    //
-    //   q(delta) - q(0) = 0.5 * delta' M delta - rhs' delta.
-    //
-    // Therefore the solver-independent descent certificate is
-    // `rhs' delta >= 0.5 * delta' M delta`. Requiring the full metric norm
-    // assumes an exact KKT variational identity; it spuriously rejects a
-    // certified finite-tolerance solution when the stationarity residual has
-    // the opposite rounding sign. Solver-level primal/dual/stationarity gates
-    // already certify optimality, while this gate independently ensures the
-    // returned point actually improves the quadratic over the feasible seed.
-    let model_decrease = directional_descent - 0.5 * metric_norm_squared;
-    let projection_tolerance =
-        1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
-    if !(directional_descent.is_finite()
-        && metric_norm_squared.is_finite()
-        && model_decrease.is_finite()
-        && directional_descent > 0.0
-        && metric_norm_squared > 0.0
-        && model_decrease + projection_tolerance >= 0.0)
-    {
-        let (base_violation, base_worst_row) = constraints
-            .max_scaled_violation(beta.view())
-            .unwrap_or((f64::NAN, None));
-        let (candidate_violation, candidate_worst_row) = constraints
-            .max_scaled_violation(candidate.view())
-            .unwrap_or((f64::NAN, None));
+    let comparison = compare_quadratic_candidate_to_reference(
+        &face_metric,
+        &rhs_beta,
+        &feasible_base,
+        &candidate,
+    )?;
+    if !comparison.certifies_strict_improvement() {
+        let reference_delta_inf = (&candidate - &feasible_base)
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
         return Err(format!(
             "reduced-face metric projection failed its descent certificate \
-             (directional_descent={directional_descent:.6e}, \
-             metric_norm_squared={metric_norm_squared:.6e}, \
-             model_decrease={model_decrease:.6e}, \
-             tolerance={projection_tolerance:.6e}, \
-             step_inf={:.6e}, active_rows={}, \
-             base_scaled_violation={base_violation:.6e}@{base_worst_row:?}, \
+             (reference_directional_descent={:.6e}, \
+             reference_metric_norm_squared={:.6e}, \
+             reference_model_decrease={:.6e}, \
+             tolerance={:.6e}, \
+             original_step_inf={:.6e}, reference_step_inf={reference_delta_inf:.6e}, \
+             active_rows={}, \
+             base_scaled_violation={original_base_violation:.6e}@{original_base_worst_row:?}, \
+             reference_scaled_violation={reference_violation:.6e}@{reference_worst_row:?}, \
+             solver_scaled_violation={solver_candidate_violation:.6e}@{solver_candidate_worst_row:?}, \
              candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})",
+            comparison.directional_descent,
+            comparison.metric_norm_squared,
+            comparison.model_decrease,
+            comparison.tolerance,
             delta
                 .iter()
                 .map(|value| value.abs())
@@ -605,6 +915,144 @@ mod exact_face_newton_tests {
         assert!(
             error.contains("dimension/metric contract failed"),
             "unexpected reduced-face diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn reduced_face_infeasible_beta_uses_feasible_reference_without_weakening_gate_2525() {
+        // #2525's live geometry: a tiny infeasibility is multiplied by a stiff
+        // face metric. The QP objective is still anchored at beta=-9e-9, but
+        // beta cannot serve as the feasible comparison required by the descent
+        // theorem. For x>=0 the constrained minimizer is x=0.
+        let exact_hessian = array![[-1.0_f64]];
+        let face_metric = array![[2.0e11_f64]];
+        let rhs = array![-1.0_f64];
+        let beta = array![-9.0e-9_f64];
+        let constraints = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(array![[1.0_f64]], array![0.0])
+                .expect("x>=0 half-space"),
+        );
+        let (base_violation, base_worst_row) = constraints
+            .max_scaled_violation(beta.view())
+            .expect("base violation");
+        assert_eq!(base_violation, 9.0e-9);
+        assert_eq!(base_worst_row, Some(0));
+
+        let feasible_base =
+            gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
+                &beta,
+                &constraints,
+            )
+            .expect("strict feasible comparison point");
+        let (reference_violation, reference_worst_row) = constraints
+            .max_scaled_violation(feasible_base.view())
+            .expect("reference violation");
+        assert_eq!(reference_violation, 0.0);
+        assert_eq!(reference_worst_row, None);
+        let objective_rhs = face_metric.dot(&beta) + &rhs;
+
+        // The generic active-set contract deliberately accepts this endpoint:
+        // its 9.005e-9 violation is below the solver's numerical feasibility
+        // tolerance. The reduced-face theorem must explicitly strengthen that
+        // contract rather than silently inheriting it.
+        let (raw_solver_candidate, _) =
+            gam_solve::active_set::solve_quadratic_with_constraint_set(
+                &face_metric,
+                &objective_rhs,
+                &feasible_base,
+                &constraints,
+                Some(&[0]),
+            )
+            .expect("generic tolerance-feasible QP endpoint");
+        let (raw_solver_violation, raw_solver_worst_row) = constraints
+            .max_scaled_violation(raw_solver_candidate.view())
+            .expect("raw solver endpoint violation");
+        assert!(
+            raw_solver_violation > 0.0
+                && raw_solver_violation
+                    <= gam_solve::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+            "fixture must discriminate the generic tolerance contract from exact feasibility"
+        );
+        assert_eq!(raw_solver_worst_row, Some(0));
+
+        let (candidate, active, kind) = certified_reduced_face_candidate(
+            &exact_hessian,
+            &rhs,
+            &beta,
+            &constraints,
+            &[0],
+            &array![2.0e11_f64],
+            1.0,
+        )
+        .expect("the feasible-reference certificate must accept the constrained minimizer")
+        .expect("fully pinned projected-gradient candidate");
+        let (candidate_violation, candidate_worst_row) = constraints
+            .max_scaled_violation(candidate.view())
+            .expect("candidate violation");
+        assert_eq!(candidate_violation, 0.0);
+        assert_eq!(candidate_worst_row, None);
+        assert_eq!(active, vec![0]);
+        assert_eq!(kind, ReducedFaceCandidateKind::ProjectedGradient);
+
+        let infeasible_base_comparison = compare_quadratic_candidate_to_reference(
+            &face_metric,
+            &objective_rhs,
+            &beta,
+            &candidate,
+        )
+        .expect("old comparison algebra");
+        assert!(
+            infeasible_base_comparison.model_decrease < 0.0
+                && !infeasible_base_comparison.certifies_strict_improvement(),
+            "the infeasible-base theorem must reproduce the live false refusal"
+        );
+
+        let feasible_base_comparison = compare_quadratic_candidate_to_reference(
+            &face_metric,
+            &objective_rhs,
+            &feasible_base,
+            &candidate,
+        )
+        .expect("feasible comparison algebra");
+        assert!(
+            feasible_base_comparison.certifies_strict_improvement(),
+            "the same minimizer must improve the unchanged QP objective over a feasible point"
+        );
+
+        // The reference change grants no blanket tolerance exemption. Moving
+        // farther into x>=0 is feasible but genuinely raises this quadratic, so
+        // the exact same production gate must still refuse it.
+        let worse_feasible_candidate = &feasible_base + &array![1.0e-6_f64];
+        let (worse_violation, _) = constraints
+            .max_scaled_violation(worse_feasible_candidate.view())
+            .expect("worse-candidate violation");
+        assert_eq!(worse_violation, 0.0);
+        let worse_comparison = compare_quadratic_candidate_to_reference(
+            &face_metric,
+            &objective_rhs,
+            &feasible_base,
+            &worse_feasible_candidate,
+        )
+        .expect("worse comparison algebra");
+        assert!(
+            worse_comparison.model_decrease < -worse_comparison.tolerance
+                && !worse_comparison.certifies_strict_improvement(),
+            "a genuinely worse feasible candidate must remain outside the descent gate"
+        );
+
+        eprintln!(
+            "[ISSUE2525-FEASIBLE-REFERENCE] metric={:.6e} beta={:.6e} \
+             base_violation={base_violation:.6e} raw_solver_violation={raw_solver_violation:.6e} \
+             feasible_base={:.6e} candidate={:.6e} candidate_violation={candidate_violation:.6e} \
+             infeasible_base_model_decrease={:.6e} feasible_base_model_decrease={:.6e} \
+             worse_feasible_model_decrease={:.6e} worse_refused=true",
+            face_metric[[0, 0]],
+            beta[0],
+            feasible_base[0],
+            candidate[0],
+            infeasible_base_comparison.model_decrease,
+            feasible_base_comparison.model_decrease,
+            worse_comparison.model_decrease,
         );
     }
 
