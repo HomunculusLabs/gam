@@ -1,0 +1,103 @@
+name: PyPI Linux wheel cache probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact 40-character source commit to probe
+        required: true
+        type: string
+        default: bc7ec30b836d672c6a87b4a55a237a31564024d1
+      target:
+        description: Missing Linux wheel target whose compiler cache should be measured
+        required: true
+        type: choice
+        options:
+          - manylinux-aarch64
+          - musllinux-x86_64
+          - musllinux-aarch64
+        default: musllinux-aarch64
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  probe:
+    name: Probe ${{ inputs.target }} at ${{ inputs.source_ref }}
+    runs-on: ${{ endsWith(inputs.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      TARGET_TRIPLE: ${{ inputs.target == 'manylinux-aarch64' && 'aarch64-unknown-linux-gnu' || inputs.target == 'musllinux-aarch64' && 'aarch64-unknown-linux-musl' || 'x86_64-unknown-linux-musl' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Require an immutable source commit
+        shell: bash
+        env:
+          REQUESTED_SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${REQUESTED_SOURCE_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_ref must be an exact lowercase 40-character commit."
+            exit 1
+          fi
+          resolved=$(git rev-parse HEAD)
+          if [[ "${resolved}" != "${REQUESTED_SOURCE_REF}" ]]; then
+            echo "::error::Checkout resolved to ${resolved}, not ${REQUESTED_SOURCE_REF}."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Probe exact target-local release cache without building a wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: v1.14.1
+          sccache: true
+          target: ${{ endsWith(inputs.target, 'aarch64') && 'aarch64' || 'x86_64' }}
+          manylinux: ${{ startsWith(inputs.target, 'musllinux') && 'musllinux_1_2' || '2014' }}
+          args: --version
+          before-script-linux: |
+            set -euo pipefail
+            git config --global --add safe.directory '*'
+            maturin() {
+              sccache --start-server
+              export RUSTC_WRAPPER="$(command -v sccache)"
+              sccache --zero-stats
+
+              local build_status=0
+              cargo build                 --locked                 --profile release-pypi                 --target "${TARGET_TRIPLE}"                 -p gam-linalg || build_status=$?
+
+              local stats hits misses errors
+              stats=$(sccache --show-stats)
+              printf '%s\n' "${stats}"
+              hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "${stats}")
+              misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "${stats}")
+              errors=$(awk '$1 == "Cache" && ($2 == "errors" || $2 == "read" || $2 == "write") { total += $NF } END { print total + 0 }' <<< "${stats}")
+
+              if (( build_status != 0 )); then
+                return "${build_status}"
+              fi
+              if [[ ! "${hits:-}" =~ ^[0-9]+$ || ! "${misses:-}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not parse the target-local sccache receipt."
+                return 1
+              fi
+              if (( hits == 0 || misses != 0 || errors != 0 )); then
+                echo "::error::Cache is not fully warm: hits=${hits}, misses=${misses}, errors=${errors}. No wheel was built."
+                return 1
+              fi
+
+              echo "Fully warm cache proved for ${TARGET_TRIPLE}: hits=${hits}, misses=0, errors=0."
+              echo "Probe-only mode: suppressing the full maturin wheel build."
+            }
