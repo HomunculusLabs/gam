@@ -1443,8 +1443,8 @@ pub fn estimate_penalty_nullity(penalty: &Array2<f64>) -> Result<usize, BasisErr
         return Ok(0);
     }
 
-    let (sym, evals, _) = spectral_summary(penalty)?;
-    let tol = spectral_tolerance(&sym, &evals);
+    let (_, evals, _) = spectral_summary(penalty)?;
+    let tol = spectral_tolerance(&evals);
     Ok(SpectralClassification::new(&evals, tol).nullity())
 }
 
@@ -1506,14 +1506,45 @@ pub(crate) fn project_penalty_to_psd_cone(matrix: &Array2<f64>) -> Array2<f64> {
     clamped
 }
 
-pub(crate) fn spectral_tolerance(sym: &Array2<f64>, evals: &Array1<f64>) -> f64 {
+/// The relative width of the canonical penalty-spectrum rank cutoff, in
+/// eigenvalue units per penalty dimension.
+///
+/// This is the one place the convention's magnitude is written. Every other
+/// site that needs it — including the ladders defined *relative* to it, such as
+/// `duchon_range_floor_curvature`'s range floor — must reach it through
+/// [`spectral_tolerance`] or [`spectral_tolerance_for_dim`] rather than
+/// restating the number, so a change here moves every dependent decision
+/// together.
+pub(crate) const SPECTRAL_RANK_RELATIVE_TOLERANCE: f64 = 1e-10;
+
+/// The canonical penalty-spectrum rank cutoff at a caller-stated dimension.
+///
+/// The dimension is an explicit argument because the consumers do not all score
+/// the spectrum they hold: a block's rank is decided at its own dimension,
+/// while a floor that must survive a later congruence and renormalization is
+/// scored at the EMBEDDED dimension of the assembled block. Making the caller
+/// state which one it means is what keeps the two from silently reaching for
+/// whichever count is in scope.
+pub(crate) fn spectral_tolerance_for_dim(dim: usize, evals: &Array1<f64>) -> f64 {
     let max_abs_ev = evals
         .iter()
         .copied()
         .fold(0.0_f64, |acc, v| acc.max(v.abs()));
     // Keep the cutoff in eigenvalue units so uniform penalty scaling does not
     // change PSD/rank decisions for the same spectrum shape.
-    (sym.nrows().max(1) as f64) * 1e-10 * max_abs_ev
+    (dim.max(1) as f64) * SPECTRAL_RANK_RELATIVE_TOLERANCE * max_abs_ev
+}
+
+/// The canonical penalty-spectrum rank cutoff for a spectrum scored at its own
+/// dimension — a symmetric eigendecomposition returns one eigenvalue per
+/// dimension, so `evals.len()` IS the matrix order.
+///
+/// Takes the spectrum alone. The matrix it came from is deliberately not a
+/// parameter: it was only ever read for `.nrows()`, and demanding it locked out
+/// every caller holding a spectrum without its Gram, which is why the formula
+/// ended up hand-inlined at the sites that could not call this.
+pub(crate) fn spectral_tolerance(evals: &Array1<f64>) -> f64 {
+    spectral_tolerance_for_dim(evals.len(), evals)
 }
 
 /// Where a single eigenvalue of a symmetric penalty sits relative to the
@@ -1690,8 +1721,8 @@ pub(crate) fn validate_psd_penalty(
         });
     }
 
-    let (sym, evals, _) = spectral_summary(penalty)?;
-    let tolerance = spectral_tolerance(&sym, &evals);
+    let (_, evals, _) = spectral_summary(penalty)?;
+    let tolerance = spectral_tolerance(&evals);
     let classes = SpectralClassification::new(&evals, tolerance);
     let min_eigenvalue = evals.iter().copied().fold(f64::INFINITY, f64::min);
     let max_abs_eigenvalue = evals
@@ -1746,7 +1777,7 @@ pub fn analyze_penalty_block_with_op(
     }
 
     let (sym, evals, evecs) = spectral_summary(penalty)?;
-    let tol = spectral_tolerance(&sym, &evals);
+    let tol = spectral_tolerance(&evals);
     // Route the entire range / null / negative-curvature partition through the
     // single canonical classifier so this block can never disagree with any
     // other penalty-spectrum consumer about which directions are unpenalized
@@ -1835,8 +1866,8 @@ pub fn compute_joint_null_rotation(
     for penalty in penalties {
         s_sum += &penalty.matrix;
     }
-    let (sym, evals, evecs) = spectral_summary(&s_sum)?;
-    let tol = spectral_tolerance(&sym, &evals);
+    let (_, evals, evecs) = spectral_summary(&s_sum)?;
+    let tol = spectral_tolerance(&evals);
     // Classify the joint penalty `Σ_k S_k` through the single canonical
     // partition. Only the genuine joint null (`|ev| <= tol`) is absorbed; a
     // negative joint eigenvalue (`ev < -tol`) is negative curvature, NOT an
@@ -2729,7 +2760,7 @@ pub(crate) fn constructive_nullspace_basis(
     // never disagree about this block's nullity.
     let sym = symmetrize_penalty(quadratic.dense());
     let (evals, _) = FaerEigh::eigh(&sym, Side::Lower).map_err(BasisError::LinalgError)?;
-    let singular_cutoff = spectral_tolerance(&sym, &evals).sqrt();
+    let singular_cutoff = spectral_tolerance(&evals).sqrt();
     let factor_transpose = quadratic.factor().t().to_owned();
     let (null, rank) = rrqr_nullspace_basis_with_cutoff(&factor_transpose, singular_cutoff)
         .map_err(BasisError::LinalgError)?;

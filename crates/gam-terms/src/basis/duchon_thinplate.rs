@@ -762,6 +762,16 @@ pub(crate) fn polynomial_block_from_order(
     }
 }
 
+/// How far the Duchon range floor sits above the spectral rank cutoff it is
+/// defined relative to: two decades.
+///
+/// The margin has to survive the later identifiability congruence `Tᵀ(·)T` and
+/// the Frobenius renormalization that happen between this floor and the point
+/// where the assembled block's rank is scored, while staying far below the
+/// statistical scale. It is a margin on the cutoff, never a magnitude of its
+/// own — hence a multiplier rather than a second literal.
+const RANGE_FLOOR_ABOVE_SPECTRAL_RANK_CUTOFF: f64 = 100.0;
+
 /// Range-floor the reparam'd Duchon Primary curvature block so its numerical
 /// null space is exactly the polynomial null space, not inflated by the
 /// ill-conditioned kernel Gram's low-curvature tail.
@@ -770,7 +780,7 @@ pub(crate) fn polynomial_block_from_order(
 /// penalty kernel block is `Vᵀ Ω_c V` — diagonal in the `μ` (generalized
 /// curvature) eigenvalues. The Duchon polyharmonic Gram is extremely
 /// ill-conditioned (cond ≫ 1e10 at k=20), so most `μ` fall far below the
-/// numerical-rank cutoff `spectral_tolerance = nrows·1e-10·λmax` that
+/// numerical-rank cutoff [`spectral_tolerance`] that
 /// [`analyze_penalty_block`] uses to partition range vs null. Those genuine
 /// low-curvature directions are then mis-classified as UNPENALIZED null:
 /// retained in the design (they clear the SEPARATE `k·ε` design-support floor)
@@ -778,11 +788,12 @@ pub(crate) fn polynomial_block_from_order(
 /// irrelevant covariate (measured `nulldim = 19` vs the affine `{1,x} = 2`
 /// expected on the gam#1815 null-recovery fixture) and REML over-selects EDF.
 ///
-/// Lift the smallest eigenvalues to a relative floor one decade above that
-/// cutoff (`nrows·1e-9·λmax`, with `nrows` the EMBEDDED penalty dimension
-/// kernel+poly, so the floor clears the tolerance the assembled block is scored
-/// against) so every retained mode is a genuine — if weak — penalized `Range`
-/// direction; REML's `λ→∞` tail then collapses them. The floor is far below the
+/// Lift the smallest eigenvalues to a relative floor
+/// [`RANGE_FLOOR_ABOVE_SPECTRAL_RANK_CUTOFF`] times that cutoff, evaluated at
+/// the EMBEDDED penalty dimension (kernel+poly), so the floor clears the
+/// tolerance the assembled block is scored against and every retained mode is a
+/// genuine — if weak — penalized `Range` direction; REML's `λ→∞` tail then
+/// collapses them. The floor is far below the
 /// statistical scale and lifts only the lowest-curvature (near-linear) modes, so
 /// signal recovery (e.g. the sin8 centers=50 escape) is unchanged — the
 /// high-curvature signal modes sit orders of magnitude above the floor.
@@ -800,11 +811,12 @@ pub(crate) fn duchon_range_floor_curvature(
     if !lam_max.is_finite() || lam_max <= 0.0 {
         return Ok(sym);
     }
-    // Two decades above `analyze_penalty_block`'s `nrows·1e-10·λmax` cutoff, so
-    // the margin survives the later identifiability congruence `Tᵀ(·)T` and the
-    // Frobenius renormalization before the block's rank is scored. Still far
-    // below the statistical scale (`≤ nrows·1e-8·λmax`).
-    let floor = (embedded_penalty_dim.max(n) as f64) * 1e-8 * lam_max;
+    // Read the cutoff from the same helper `analyze_penalty_block` scores this
+    // block with, at the EMBEDDED dimension, and lift by the stated margin.
+    // Writing the product out as a literal is what let the doc comment above
+    // drift to "one decade" while the code kept two.
+    let floor = RANGE_FLOOR_ABOVE_SPECTRAL_RANK_CUTOFF
+        * spectral_tolerance_for_dim(embedded_penalty_dim.max(n), &evals);
     let mut floored = false;
     for v in evals.iter_mut() {
         if v.is_finite() && *v < floor {
@@ -4009,6 +4021,55 @@ mod range_floor_psi_jet_tests {
             second_err / second_scale < 1e-3,
             "range-floor second derivative mismatch: rel={:.3e} (err={second_err:.3e})",
             second_err / second_scale
+        );
+    }
+
+    /// The range floor is a MARGIN on the spectral rank cutoff, not a magnitude
+    /// of its own, and the margin is scored at the EMBEDDED dimension.
+    ///
+    /// Both halves were held in prose before, and the prose had already drifted:
+    /// the doc comment said "one decade above (`nrows·1e-9·λmax`)" while the code
+    /// wrote `1e-8`. A relation stated in two literals cannot be checked, so pin
+    /// it executably — this fails if either the cutoff or the margin moves alone.
+    #[test]
+    fn duchon_range_floor_sits_the_stated_margin_above_the_embedded_rank_cutoff() {
+        // A spectrum that straddles the cutoff: one strong curvature mode and
+        // two low-curvature modes far beneath it.
+        let n = 3usize;
+        // The assembled kernel+poly dimension the block is finally scored at,
+        // deliberately larger than the block handed in.
+        let embedded = 100usize;
+        let mut omega = Array2::<f64>::zeros((n, n));
+        omega[[0, 0]] = 1.0;
+        omega[[1, 1]] = 1.0e-14;
+        omega[[2, 2]] = 1.0e-15;
+
+        let floored = duchon_range_floor_curvature(&omega, embedded)
+            .expect("a finite PSD diagonal must range-floor");
+        let (evals, _) =
+            FaerEigh::eigh(&floored, Side::Lower).expect("floored block must eigendecompose");
+
+        let cutoff = spectral_tolerance_for_dim(embedded.max(n), &evals);
+        let expected = RANGE_FLOOR_ABOVE_SPECTRAL_RANK_CUTOFF * cutoff;
+        let lam_max = evals.iter().copied().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let min_eval = evals.iter().copied().fold(f64::INFINITY, f64::min);
+        // The symmetric eigensolve and the `U diag(λ) Uᵀ` reconstruction are each
+        // backward stable at `n·ε·λmax`; their sum is the entire error budget
+        // between the floor written and the floor observed.
+        let envelope = 2.0 * (n as f64) * f64::EPSILON * lam_max;
+
+        assert!(
+            (min_eval - expected).abs() <= envelope,
+            "range floor {min_eval:.17e} is not {RANGE_FLOOR_ABOVE_SPECTRAL_RANK_CUTOFF}x the \
+             embedded-dimension rank cutoff {cutoff:.17e} (expected {expected:.17e}, \
+             envelope {envelope:.3e})"
+        );
+        // The point of the floor: nothing is left below the cutoff the block's
+        // rank is scored against, so no genuine low-curvature mode is read as
+        // unpenalized null.
+        assert!(
+            evals.iter().all(|&v| v > cutoff),
+            "range-floored spectrum still holds a sub-cutoff (null-classified) mode: {evals:?}"
         );
     }
 }

@@ -1709,8 +1709,11 @@ fn reject_nonpsd_then_clamp_noise(matrix: &Array2<f64>) -> Result<Array2<f64>, B
         .fold(0.0_f64, |acc, v| acc.max(v.abs()));
     let min_ev = evals.iter().copied().fold(f64::INFINITY, f64::min);
     // Noise-floor tolerance in eigenvalue units, so uniform scaling of the
-    // penalty does not change the PSD decision (matches `spectral_tolerance`).
-    let tol = (n as f64) * 1e-10 * max_abs_ev;
+    // penalty does not change the PSD decision. Read from the canonical
+    // penalty-spectrum cutoff itself: this block is scored for rank downstream
+    // against that same cutoff, so a PSD verdict taken against a private copy
+    // of its formula could disagree with the rank it is later assigned.
+    let tol = spectral_tolerance(&evals);
     if min_ev < -tol {
         crate::bail_invalid_basis!(
             "Duchon constrained penalty is not positive semidefinite: λ_min={min_ev:.6e} \
@@ -2595,11 +2598,11 @@ mod hybrid_high_dim_psd_tests {
         // partial-fraction kernel evaluation lost every significant digit here
         // and the normalized λ_min was ≈ −0.264. The stable single-integral
         // kernel keeps λ_min at the float noise floor. Tolerance is the same
-        // scale-relative noise floor used by the penalty pipeline
-        // (`spectral_tolerance`: n·1e-10); do NOT weaken it.
+        // scale-relative noise floor the penalty pipeline scores this block
+        // against, taken from its own constant; do NOT weaken it.
         let d = 16;
         let n = 4 * d; // penalty dimension upper bound (kernel coeff frame).
-        let tol = (n as f64) * 1e-10;
+        let tol = (n as f64) * SPECTRAL_RANK_RELATIVE_TOLERANCE;
         let lambda_min_rel = hybrid_constrained_lambda_min(d, 7);
         assert!(
             lambda_min_rel >= -tol,
@@ -2615,7 +2618,7 @@ mod hybrid_high_dim_psd_tests {
         // d=10). Each must now be PSD to the float noise floor.
         for (d, s) in [(8usize, 3usize), (10, 4), (12, 5)] {
             let n = 4 * d;
-            let tol = (n as f64) * 1e-10;
+            let tol = (n as f64) * SPECTRAL_RANK_RELATIVE_TOLERANCE;
             let lambda_min_rel = hybrid_constrained_lambda_min(d, s);
             assert!(
                 lambda_min_rel >= -tol,

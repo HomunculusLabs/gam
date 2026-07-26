@@ -1977,7 +1977,7 @@ impl ConstructiveQuadratic {
         }
         let sym = symmetrize_penalty(&dense);
         let (evals, evecs) = FaerEigh::eigh(&sym, Side::Lower).map_err(BasisError::LinalgError)?;
-        let tolerance = spectral_tolerance(&sym, &evals);
+        let tolerance = spectral_tolerance(&evals);
         if let Some(&negative) = evals.iter().find(|&&value| value < -tolerance) {
             return Err(BasisError::IndefinitePenalty {
                 context: context.to_string(),
