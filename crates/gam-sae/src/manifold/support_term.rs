@@ -845,6 +845,48 @@ impl SaeSupportSparseTerm {
     /// One deterministic Gauss-Seidel decoder sweep. Each block update is the
     /// exact minimum-norm minimizer of the current final-function-penalized
     /// quadratic, not a coefficient-ridge surrogate.
+    /// Greedy conflict coloring of atoms by shared rows: atoms in one color
+    /// class touch pairwise-disjoint row sets, so their Gauss-Seidel updates
+    /// commute exactly.
+    fn decoder_conflict_colors(&self) -> Vec<Vec<usize>> {
+        let mut row_atoms: Vec<Vec<u32>> = vec![Vec::new(); self.n_obs()];
+        for (atom_idx, rows) in self.atom_rows.iter().enumerate() {
+            for &(row, _slot) in rows {
+                row_atoms[row].push(atom_idx as u32);
+            }
+        }
+        let mut color_of: Vec<u32> = vec![u32::MAX; self.k_atoms()];
+        let mut classes: Vec<Vec<usize>> = Vec::new();
+        let mut used: Vec<u32> = Vec::new();
+        for atom_idx in 0..self.k_atoms() {
+            used.clear();
+            for &(row, _slot) in &self.atom_rows[atom_idx] {
+                for &other in &row_atoms[row] {
+                    let color = color_of[other as usize];
+                    if color != u32::MAX {
+                        used.push(color);
+                    }
+                }
+            }
+            used.sort_unstable();
+            used.dedup();
+            let mut color = 0u32;
+            for &taken in &used {
+                if taken == color {
+                    color += 1;
+                } else if taken > color {
+                    break;
+                }
+            }
+            color_of[atom_idx] = color;
+            if classes.len() <= color as usize {
+                classes.resize(color as usize + 1, Vec::new());
+            }
+            classes[color as usize].push(atom_idx);
+        }
+        classes
+    }
+
     fn decoder_sweep(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -853,36 +895,61 @@ impl SaeSupportSparseTerm {
         self.validate_smoothing(lambda_smooth)?;
         let mut fitted = self.reconstruct()?;
         let mut max_change = 0.0_f64;
-        for atom_idx in 0..self.k_atoms() {
-            let m = self.atoms[atom_idx].basis_size();
-            let old_decoder = self.atoms[atom_idx].decoder_coefficients.clone();
-            let mut gram = self.atoms[atom_idx].smooth_penalty().clone() * lambda_smooth[atom_idx];
-            let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
-            let mut rows = Vec::with_capacity(self.atom_rows[atom_idx].len());
-            for &(row, slot) in &self.atom_rows[atom_idx] {
-                let active = self.evaluate_active(row, slot)?;
-                for left in 0..m {
-                    for right in 0..m {
-                        gram[[left, right]] += active.phi[left] * active.phi[right];
+        let classes = self.decoder_conflict_colors();
+        for class in &classes {
+            // Atoms in one class are row-disjoint: solve in parallel against
+            // the shared `fitted` snapshot (each atom reads only its own rows),
+            // then apply the disjoint updates.
+            let solved: Vec<(usize, Array2<f64>, Vec<(usize, Array1<f64>)>, f64)> = class
+                .par_iter()
+                .map(|&atom_idx| -> Result<_, String> {
+                    let m = self.atoms[atom_idx].basis_size();
+                    let old_decoder = &self.atoms[atom_idx].decoder_coefficients;
+                    let mut gram =
+                        self.atoms[atom_idx].smooth_penalty().clone() * lambda_smooth[atom_idx];
+                    let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
+                    let mut rows = Vec::with_capacity(self.atom_rows[atom_idx].len());
+                    for &(row, slot) in &self.atom_rows[atom_idx] {
+                        let active = self.evaluate_active(row, slot)?;
+                        for left in 0..m {
+                            for right in 0..m {
+                                gram[[left, right]] += active.phi[left] * active.phi[right];
+                            }
+                            for output in 0..self.output_dim {
+                                let residual_without = target[[row, output]]
+                                    - fitted[[row, output]]
+                                    + active.decoded[output];
+                                rhs[[left, output]] += active.phi[left] * residual_without;
+                            }
+                        }
+                        rows.push((row, active.phi, active.decoded));
                     }
+                    let decoder = Self::solve_psd_minimum_norm(
+                        &gram,
+                        &rhs,
+                        "SaeSupportSparseTerm::decoder_sweep",
+                    )?;
+                    let mut atom_change = 0.0_f64;
+                    for (new, old) in decoder.iter().zip(old_decoder.iter()) {
+                        atom_change = atom_change.max((new - old).abs());
+                    }
+                    let mut row_updates = Vec::with_capacity(rows.len());
+                    for (row, phi, old_decoded) in rows {
+                        let new_decoded = phi.dot(&decoder);
+                        let mut delta = new_decoded;
+                        delta -= &old_decoded;
+                        row_updates.push((row, delta));
+                    }
+                    Ok((atom_idx, decoder, row_updates, atom_change))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (atom_idx, decoder, row_updates, atom_change) in solved {
+                max_change = max_change.max(atom_change);
+                self.atoms[atom_idx].decoder_coefficients = decoder;
+                for (row, delta) in row_updates {
                     for output in 0..self.output_dim {
-                        let residual_without =
-                            target[[row, output]] - fitted[[row, output]] + active.decoded[output];
-                        rhs[[left, output]] += active.phi[left] * residual_without;
+                        fitted[[row, output]] += delta[output];
                     }
-                }
-                rows.push((row, active.phi, active.decoded));
-            }
-            let decoder =
-                Self::solve_psd_minimum_norm(&gram, &rhs, "SaeSupportSparseTerm::decoder_sweep")?;
-            for (new, old) in decoder.iter().zip(old_decoder.iter()) {
-                max_change = max_change.max((new - old).abs());
-            }
-            self.atoms[atom_idx].decoder_coefficients = decoder;
-            for (row, phi, old_decoded) in rows {
-                let new_decoded = phi.dot(&self.atoms[atom_idx].decoder_coefficients);
-                for output in 0..self.output_dim {
-                    fitted[[row, output]] += new_decoded[output] - old_decoded[output];
                 }
             }
         }
