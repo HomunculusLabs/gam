@@ -1162,7 +1162,6 @@ pub struct CustomFamilyOwnedMode {
     pub(crate) objective: f64,
     pub(crate) rho: Array1<f64>,
     pub(crate) hyper_values: Array1<f64>,
-    pub(crate) ext_mode_response_cols: Option<Array2<f64>>,
     pub(crate) inner: BlockwiseInnerResult,
 }
 
@@ -1195,6 +1194,7 @@ pub(crate) struct OuterObjectiveEvalResult {
     pub(crate) warm_start: ConstrainedWarmStart,
     pub(crate) inner_converged: bool,
     pub(crate) hyper_values: Array1<f64>,
+    pub(crate) ext_mode_response_cols: Option<Array2<f64>>,
     /// The exact coefficient mode used to assemble this objective payload.
     ///
     /// Keeping the owned result here lets an atomic multi-start evaluation
