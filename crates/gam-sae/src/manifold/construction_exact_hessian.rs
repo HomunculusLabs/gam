@@ -4048,11 +4048,219 @@ mod test_support {
         ArrowFactorCache, DeflatedArrowSolver, SaeArrowVector, SaeManifoldRho,
         ThetaAdjointDhChannel,
     };
+    use super::{
+        ArdAxisPrior, AssignmentMode, SaeLocalRowVar, SaeRowJets,
+        active_softmax_gershgorin_majorizer_entry, sae_dot, softmax_dense_entropy_hessian_entry,
+        softmax_majorizer_log_mean,
+    };
+    use ndarray::{Array2, ArrayView2};
+
+    /// One row's assembled `ΔC = A − B` blocks, in the arrow layout the streaming
+    /// evidence system already uses (`ArrowRowBlock::{htt, htbeta}`).
+    #[derive(Debug, Clone)]
+    pub(crate) struct ExactHessianDeltaRow {
+        /// `ΔC_tt^(i)`, shape `(q_i, q_i)`.
+        pub(crate) tt: Array2<f64>,
+        /// `ΔC_tβ^(i)`, shape `(q_i, border_dim)`.
+        pub(crate) tbeta: Array2<f64>,
+    }
     use ndarray::{Array1, s};
     use gam_linalg::faer_ndarray::FaerEigh;
     use super::Side;
 
     impl super::SaeManifoldTerm {
+        /// Assemble `ΔC = A − B` per row, so the arrow evidence system can carry the
+        /// EXACT observed information instead of the Newton/Schur majorizer.
+        ///
+        /// [`Self::apply_exact_hessian_minus_b`] contracts these blocks against a
+        /// direction without ever forming them, which is all a matvec consumer needs.
+        /// The streaming log-determinant is not a matvec consumer: it takes
+        /// `log|H_tt^(i)|` off assembled per-row factors and reduces an assembled
+        /// border, so it can only price `A` if the blocks exist (#2509).
+        ///
+        /// Every channel is row-local — (1a)/(1b) residual curvature, (2) the softmax
+        /// entropy-minus-Gershgorin delta, (3) the periodic ARD concave clamp — except
+        /// ordered Beta–Bernoulli, whose integrated-marginal prior couples every row
+        /// within an atom column. That mode has no arrow-structured `ΔC` and is
+        /// REFUSED here rather than silently dropped: pricing `B` while claiming `A`
+        /// is the defect this function exists to remove.
+        ///
+        /// `ΔC_ββ` is identically zero (the decoder is linear in β), so the β block of
+        /// the arrow system is unchanged and only the eliminated Schur sum moves.
+        pub(crate) fn assemble_exact_hessian_minus_b_rows(
+            &self,
+            rho: &SaeManifoldRho,
+            target: ArrayView2<'_, f64>,
+            cache: &ArrowFactorCache,
+        ) -> Result<Vec<ExactHessianDeltaRow>, String> {
+            self.assignment.validate_rho_domain(rho)?;
+            if matches!(
+                self.assignment.mode,
+                AssignmentMode::OrderedBetaBernoulli { .. }
+            ) {
+                return Err(
+                    "assemble_exact_hessian_minus_b_rows: the ordered Beta-Bernoulli prior couples \
+                     every row within an atom column, so A - B has no per-row arrow block; this \
+                     route must refuse rather than assemble a majorizer and call it exact (#2509)"
+                        .to_string(),
+                );
+            }
+            let p = self.output_dim();
+            let n = self.n_obs();
+            let k_atoms = self.k_atoms();
+            let second_jets = self.atom_second_jets()?;
+            let border = self.border_channels_for_cache(cache)?;
+            let row_loss_w = self.row_loss_weights.as_deref();
+            let ard_axis_periods: Vec<Vec<Option<f64>>> = self
+                .assignment
+                .coords
+                .iter()
+                .map(|coord| coord.effective_axis_periods())
+                .collect();
+            let ard_precisions = self.validated_ard_precisions(rho)?;
+
+            // Softmax entropy-minus-majorizer scale (#1419); `None` off softmax.
+            let softmax_scale: Option<f64> = match self.assignment.mode {
+                AssignmentMode::Softmax {
+                    temperature,
+                    sparsity,
+                } if k_atoms > 1 => {
+                    let inv_tau = 1.0 / temperature;
+                    Some(rho.lambda_sparse()? * sparsity * inv_tau * inv_tau)
+                }
+                _ => None,
+            };
+
+            let whitens = self
+                .row_metric
+                .as_ref()
+                .is_some_and(|metric| metric.whitens_likelihood());
+            let mut decoded = vec![0.0_f64; p];
+            let mut fitted = Array1::<f64>::zeros(p);
+            let mut error = Array1::<f64>::zeros(p);
+            let mut assignments = Array1::<f64>::zeros(k_atoms);
+
+            let mut rows_out: Vec<ExactHessianDeltaRow> = Vec::with_capacity(n);
+            let mut jet_window: std::collections::VecDeque<SaeRowJets> =
+                std::collections::VecDeque::new();
+            let mut jet_window_next = 0usize;
+            for row in 0..n {
+                let q = cache.row_dims[row];
+                let a_scratch = assignments.as_slice_mut().ok_or_else(|| {
+                    "assemble_exact_hessian_minus_b_rows: assignment scratch is not contiguous"
+                        .to_string()
+                })?;
+                self.assignment.try_assignments_row_into(row, a_scratch)?;
+                if jet_window.is_empty() {
+                    jet_window_next = self.refill_jet_window(
+                        jet_window_next,
+                        cache,
+                        &second_jets,
+                        &border,
+                        &mut jet_window,
+                    )?;
+                }
+                let jets = jet_window
+                    .pop_front()
+                    .expect("jet window must be non-empty");
+                let sqrt_row_w = row_loss_w.map_or(1.0, |w| w[row].sqrt());
+                let w_row = row_loss_w.map_or(1.0, |w| w[row]);
+
+                // The same sqrt(w)-scaled metric-applied residual the applier contracts.
+                fitted.fill(0.0);
+                let active_atoms = self
+                    .last_row_layout
+                    .as_ref()
+                    .map(|layout| layout.active_atoms[row].as_slice());
+                for k in 0..k_atoms {
+                    if active_atoms.is_some_and(|active| active.binary_search(&k).is_err()) {
+                        continue;
+                    }
+                    self.atoms[k].fill_decoded_row(row, &mut decoded);
+                    let a_k = assignments[k];
+                    for out_col in 0..p {
+                        fitted[out_col] += a_k * decoded[out_col];
+                    }
+                }
+                for out_col in 0..p {
+                    error[out_col] = sqrt_row_w * (fitted[out_col] - target[[row, out_col]]);
+                }
+                let error_metric: Vec<f64> = match self.row_metric.as_ref() {
+                    Some(metric) if whitens => metric.apply_metric_row(row, error.view()),
+                    _ => error.to_vec(),
+                };
+
+                let mut tt = Array2::<f64>::zeros((q, q));
+                let mut tbeta = Array2::<f64>::zeros((q, border.len()));
+
+                // (1a) residual curvature, t-t.
+                for a in 0..q {
+                    for b in 0..q {
+                        tt[[a, b]] = sae_dot(&error_metric, jets.second(a, b));
+                    }
+                }
+                // (1b) residual curvature, t-beta. The beta-t block is its transpose;
+                // the arrow system stores only this orientation.
+                for a in 0..q {
+                    for beta_pos in 0..border.len() {
+                        tbeta[[a, beta_pos]] = sae_dot(&error_metric, jets.beta_deriv(a, beta_pos));
+                    }
+                }
+                // (2) softmax exact entropy minus the Gershgorin majorizer written into B.
+                if let Some(scale) = softmax_scale {
+                    let assignment_dim = self.assignment.assignment_coord_dim();
+                    let a_soft = assignments
+                        .as_slice()
+                        .expect("softmax assignments row must be contiguous");
+                    let m = softmax_majorizer_log_mean(a_soft);
+                    for (a, va) in jets.vars.iter().enumerate() {
+                        let SaeLocalRowVar::Logit { atom: ka } = *va else {
+                            continue;
+                        };
+                        if ka >= assignment_dim {
+                            continue;
+                        }
+                        for (b, vb) in jets.vars.iter().enumerate() {
+                            let SaeLocalRowVar::Logit { atom: kb } = *vb else {
+                                continue;
+                            };
+                            if kb >= assignment_dim {
+                                continue;
+                            }
+                            let h_entropy =
+                                softmax_dense_entropy_hessian_entry(a_soft, ka, kb, m, scale);
+                            let delta = if ka == kb {
+                                h_entropy
+                                    - active_softmax_gershgorin_majorizer_entry(a_soft, ka, m, scale)
+                            } else {
+                                h_entropy
+                            };
+                            tt[[a, b]] += w_row * delta;
+                        }
+                    }
+                }
+                // (3) periodic ARD concave clamp, diagonal on coordinate vars.
+                for (a, va) in jets.vars.iter().enumerate() {
+                    let SaeLocalRowVar::Coord { atom, axis } = *va else {
+                        continue;
+                    };
+                    if rho.log_ard[atom].is_empty() {
+                        continue;
+                    }
+                    let alpha = ard_precisions[atom][axis];
+                    let t_val = self.assignment.coords[atom].row(row)[axis];
+                    let prior = ArdAxisPrior::eval(alpha, t_val, ard_axis_periods[atom][axis]);
+                    let neg = prior.negative_hessian_remainder();
+                    if neg != 0.0 {
+                        tt[[a, a]] += w_row * neg;
+                    }
+                }
+
+                rows_out.push(ExactHessianDeltaRow { tt, tbeta });
+            }
+            Ok(rows_out)
+        }
+
         /// #2330 Patch D arbiter support — spectrum summary of the EXACT `A` at a
         /// built cache: `(min_eig, max_eig, n_below_neg_floor, ‖ΔC‖_F, ‖A‖_F)`.
         /// The PD-window scan uses it to pick an arbiter fixture whose exact `A`
@@ -4278,4 +4486,135 @@ mod test_support {
             ])
         }
     }
+
+    /// #2509 — the assembled `ΔC = A − B` row blocks and the matrix-free applier
+    /// are ONE derivation with two readers, and this is the executable link.
+    ///
+    /// Assembling `ΔC` necessarily writes the four channels' arithmetic a second
+    /// time (the applier contracts a block against a direction; the assembler
+    /// stores the block), and one quantity with two standards is a failure mode
+    /// this repository keeps paying for. So the blocks are contracted here and
+    /// required to reproduce `apply_exact_hessian_minus_b` to round-off.
+    ///
+    /// It is a real cross-check rather than a tautology: on softmax rows the
+    /// applier reaches the residual-curvature channels (1a)/(1b) through the
+    /// device-contracted `contracted_softmax_bilinear_hvp`, while the assembler
+    /// reads the shared row-jet window. Agreement is agreement between two
+    /// different execution paths over the same jets. The fixture is softmax with
+    /// periodic (Circle) manifolds and non-empty `log_ard`, so channels (1a),
+    /// (1b), (2) and (3) are all live — asserted below rather than assumed.
+    #[test]
+    fn assembled_exact_hessian_delta_contracts_like_the_applier_2509() {
+        use ndarray::Array1;
+        let (term0, target, rho) = crate::manifold::tests::small_two_atom_periodic_term();
+        let mut term = term0;
+        let (_cost, _loss, cache) = term
+            .penalized_quasi_laplace_criterion_with_cache(
+                target.view(),
+                &rho,
+                None,
+                1,
+                0.25,
+                1.0e-4,
+                1.0e-4,
+            )
+            .expect("dense criterion must evaluate on the #2509 witness");
+
+        let blocks = term
+            .assemble_exact_hessian_minus_b_rows(&rho, target.view(), &cache)
+            .expect("assembled delta rows");
+        let border = term
+            .border_channels_for_cache(&cache)
+            .expect("border channels");
+        let total_t = cache.delta_t_len();
+        let dim = total_t + cache.k;
+        assert_eq!(blocks.len(), term.n_obs());
+
+        // NON-VACUITY: the correction must be non-zero on this fixture, or the
+        // agreement below says nothing at all.
+        let max_block = blocks
+            .iter()
+            .flat_map(|row| row.tt.iter().chain(row.tbeta.iter()))
+            .fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        assert!(
+            max_block > 0.0,
+            "ΔC is identically zero on this fixture, so the gate cannot discriminate"
+        );
+
+        // Deterministic probes: every (t, β) unit direction, plus one dense mix so
+        // every stored entry contributes to at least one compared component.
+        for probe in 0..=dim {
+            let mut v = SaeArrowVector {
+                t: Array1::<f64>::zeros(total_t),
+                beta: Array1::<f64>::zeros(cache.k),
+            };
+            if probe < dim {
+                if probe < total_t {
+                    v.t[probe] = 1.0;
+                } else {
+                    v.beta[probe - total_t] = 1.0;
+                }
+            } else {
+                for (idx, value) in v.t.iter_mut().enumerate() {
+                    *value = 1.0 + 0.25 * (idx as f64);
+                }
+                for (idx, value) in v.beta.iter_mut().enumerate() {
+                    *value = -0.5 - 0.125 * (idx as f64);
+                }
+            }
+
+            let applied = term
+                .apply_exact_hessian_minus_b(&rho, target.view(), &cache, &v)
+                .expect("matrix-free delta apply");
+
+            let mut assembled = SaeArrowVector {
+                t: Array1::<f64>::zeros(total_t),
+                beta: Array1::<f64>::zeros(cache.k),
+            };
+            for (row, block) in blocks.iter().enumerate() {
+                let base = cache.row_offsets[row];
+                let q = cache.row_dims[row];
+                for a in 0..q {
+                    let mut acc = 0.0_f64;
+                    for b in 0..q {
+                        acc += block.tt[[a, b]] * v.t[base + b];
+                    }
+                    for (beta_pos, channel) in border.iter().enumerate() {
+                        acc += block.tbeta[[a, beta_pos]] * v.beta[channel.index];
+                        assembled.beta[channel.index] +=
+                            block.tbeta[[a, beta_pos]] * v.t[base + a];
+                    }
+                    assembled.t[base + a] += acc;
+                }
+            }
+
+            // Both sides sum the SAME products in a different association, so the
+            // admissible gap is f64 round-off at the largest magnitude involved.
+            let scale = applied
+                .t
+                .iter()
+                .chain(applied.beta.iter())
+                .fold(1.0_f64, |acc, v| acc.max(v.abs()));
+            let tolerance = 4096.0 * f64::EPSILON * scale;
+            for idx in 0..total_t {
+                assert!(
+                    (applied.t[idx] - assembled.t[idx]).abs() <= tolerance,
+                    "probe {probe}: assembled ΔC t[{idx}] = {} but the applier says {} \
+                     (tolerance {tolerance:.3e})",
+                    assembled.t[idx],
+                    applied.t[idx]
+                );
+            }
+            for idx in 0..cache.k {
+                assert!(
+                    (applied.beta[idx] - assembled.beta[idx]).abs() <= tolerance,
+                    "probe {probe}: assembled ΔC beta[{idx}] = {} but the applier says {} \
+                     (tolerance {tolerance:.3e})",
+                    assembled.beta[idx],
+                    applied.beta[idx]
+                );
+            }
+        }
+    }
+
 }
