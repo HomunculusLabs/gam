@@ -1034,12 +1034,14 @@ fn nested_moment_disagreement(
     }
     let cells = cells as usize;
     let mut worst = 0.0_f64;
+    let mut sampled = 0usize;
     for step in 0..=cells {
         let log_lambda = lo + (hi - lo) * step as f64 / cells as f64;
         let lambda = log_lambda.exp();
         if !(lambda.is_finite() && lambda > 0.0) {
             continue;
         }
+        sampled += 1;
         let fine_moments = fine.moment_sums(lambda);
         let coarse_moments = coarse.moment_sums(lambda);
         for (fine_value, coarse_value) in fine_moments.into_iter().zip(coarse_moments) {
@@ -1059,6 +1061,13 @@ fn nested_moment_disagreement(
             }
             worst = worst.max((fine_value - coarse_value).abs() / denominator);
         }
+    }
+    if sampled == 0 {
+        // No representable `lambda` on the declared domain, so the rules were
+        // never compared. Agreement on zero samples is not agreement.
+        return Err(format!(
+            "residual cascade: the quadrature certification domain [{lo}, {hi}] contains no              representable lambda, so no nested-rule comparison was made"
+        ));
     }
     Ok(worst)
 }
