@@ -598,7 +598,15 @@ pub fn ridge_reml_select_weight(
         + 2.0 * search.upper_boundary.derivative.abs()
         + curvature.abs();
     let gradient_tolerance = f64::EPSILON.sqrt() * gradient_scale;
-    let score_roundoff = f64::EPSILON * (1.0 + score.abs() + boundary_score.abs());
+    // The λ→∞ boundary is EXACT (A = 0), the interior optimum is not, and the
+    // search now reports how much it could not resolve. Ties therefore go to
+    // the boundary across a band that is the certified uncertainty rather than
+    // an assumed epsilon: the interior is preferred only when it beats the
+    // exact null by more than everything the search could not see. The factor
+    // two carries `value_uncertainty` from the maximized profile's scale into
+    // this criterion's, since `score = -2 * optimum.value`.
+    let score_roundoff =
+        f64::EPSILON * (1.0 + score.abs() + boundary_score.abs()) + 2.0 * search.value_uncertainty;
 
     if score + score_roundoff >= boundary_score {
         return Ok(RidgeRemlWeight::FullShrinkage {
@@ -612,13 +620,20 @@ pub fn ridge_reml_select_weight(
                 .to_string(),
         );
     }
+    // A cell closed on the value side is not a certified stationary point: it
+    // says the cell's interior cannot beat this sample, not that the sample is
+    // a minimum. Since it did not tie with the exact null above, it is a real
+    // interior finding the search could not certify — a typed refusal, never a
+    // degraded answer.
     if !matches!(search.location, ScoreOptimumLocation::Stationary(_))
         || gradient.abs() > gradient_tolerance
         || curvature <= 0.0
     {
         return Err(format!(
             "ridge_reml_select_weight: continuous REML search did not certify an interior \
-             minimum (d/dlogλ={gradient}, curvature={curvature}, tolerance={gradient_tolerance})"
+             minimum (location={:?}, d/dlogλ={gradient}, curvature={curvature}, \
+             tolerance={gradient_tolerance}, value uncertainty={})",
+            search.location, search.value_uncertainty
         ));
     }
     let lambda = gamma_max * optimum.x.exp();

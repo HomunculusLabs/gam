@@ -2643,7 +2643,14 @@ where
             ClosureOptimumKind::CircleBoundary,
             representative.score_gradient.max(0.0),
         ),
-        gam_math::score_opt::ScoreOptimumLocation::Stationary(_) => (
+        // A cell the search closed on the VALUE side is an interior claim like
+        // any other, and it is held to exactly the same bar below: the
+        // representative's own gradient and curvature decide it. Closing the
+        // cell says its interior cannot beat the representative by more than
+        // the score's own roundoff; it says nothing about stationarity, which
+        // is why nothing here is relaxed for it.
+        gam_math::score_opt::ScoreOptimumLocation::Stationary(_)
+        | gam_math::score_opt::ScoreOptimumLocation::BoundedCell(_) => (
             ClosureOptimumKind::Interior,
             representative.score_gradient.abs(),
         ),
@@ -2673,6 +2680,15 @@ where
                     "closure profile optimizer returned an invalid stationary index".to_string()
                 })?
                 .bracket
+        }
+        gam_math::score_opt::ScoreOptimumLocation::BoundedCell(index) => {
+            search
+                .bounded_cells
+                .get(index)
+                .ok_or_else(|| {
+                    "closure profile optimizer returned an invalid bounded-cell index".to_string()
+                })?
+                .cell
         }
     };
     let derivative_enclosure = enclose_derivatives(bracket.lo, bracket.hi)?;

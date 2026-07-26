@@ -6,8 +6,18 @@
 //! stationary pair between them.  The search therefore requires two pieces of
 //! information from its caller:
 //!
-//! * an exact point evaluation `(value, first derivative, second derivative)`;
+//! * a point evaluation `(value, first derivative, second derivative)`;
 //! * an OUTER enclosure of both derivatives over every requested interval.
+//!
+//! The enclosure must contain the values the POINT EVALUATOR returns on the
+//! interval, not merely the range of the ideal derivatives.  For an oracle that
+//! pads endpoint jets with Lipschitz constants this is automatic.  For a
+//! genuine interval extension it is not: an exact-range bound and a
+//! floating-point jet are different currencies, and the search checks
+//! containment at zero tolerance because that check is what keeps its
+//! sign-based decisions consistent with its exclusion-based ones.  Such an
+//! oracle owes the search a range widened by its own forward error — see
+//! [`AffineRemlProfile::enclose`], which carries both together (#2513).
 //!
 //! An interval is discarded only when its first-derivative enclosure excludes
 //! zero.  A stationary point is refined only after the second-derivative
@@ -96,44 +106,42 @@ impl ClosedInterval {
     #[inline]
     fn add(self, other: Self) -> Self {
         Self {
-            lo: next_down(self.lo + other.lo),
-            hi: next_up(self.hi + other.hi),
+            lo: sum_down(self.lo, other.lo),
+            hi: sum_up(self.hi, other.hi),
         }
     }
 
     #[inline]
     fn sub(self, other: Self) -> Self {
         Self {
-            lo: next_down(self.lo - other.hi),
-            hi: next_up(self.hi - other.lo),
+            lo: sum_down(self.lo, -other.hi),
+            hi: sum_up(self.hi, -other.lo),
         }
     }
 
     #[inline]
     fn neg(self) -> Self {
+        // Negation is exact.
         Self {
-            lo: next_down(-self.hi),
-            hi: next_up(-self.lo),
+            lo: -self.hi,
+            hi: -self.lo,
         }
     }
 
     fn mul(self, other: Self) -> Self {
-        let products = [
-            self.lo * other.lo,
-            self.lo * other.hi,
-            self.hi * other.lo,
-            self.hi * other.hi,
+        let pairs = [
+            (self.lo, other.lo),
+            (self.lo, other.hi),
+            (self.hi, other.lo),
+            (self.hi, other.hi),
         ];
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
-        for value in products {
-            lo = lo.min(value);
-            hi = hi.max(value);
+        for (a, b) in pairs {
+            lo = lo.min(product_down(a, b));
+            hi = hi.max(product_up(a, b));
         }
-        Self {
-            lo: next_down(lo),
-            hi: next_up(hi),
-        }
+        Self { lo, hi }
     }
 
     #[inline]
@@ -144,18 +152,18 @@ impl ClosedInterval {
     fn square(self) -> Self {
         if self.lo >= 0.0 {
             Self {
-                lo: next_down(self.lo * self.lo).max(0.0),
-                hi: next_up(self.hi * self.hi),
+                lo: product_down(self.lo, self.lo).max(0.0),
+                hi: product_up(self.hi, self.hi),
             }
         } else if self.hi <= 0.0 {
             Self {
-                lo: next_down(self.hi * self.hi).max(0.0),
-                hi: next_up(self.lo * self.lo),
+                lo: product_down(self.hi, self.hi).max(0.0),
+                hi: product_up(self.lo, self.lo),
             }
         } else {
             Self {
                 lo: 0.0,
-                hi: next_up((self.lo * self.lo).max(self.hi * self.hi)),
+                hi: product_up(self.lo, self.lo).max(product_up(self.hi, self.hi)),
             }
         }
     }
@@ -168,8 +176,8 @@ impl ClosedInterval {
             denominator.lo
         );
         let reciprocal = Self {
-            lo: next_down(1.0 / denominator.hi).max(0.0),
-            hi: next_up(1.0 / denominator.lo),
+            lo: quotient_down(1.0, denominator.hi).max(0.0),
+            hi: quotient_up(1.0, denominator.lo),
         };
         self.mul(reciprocal)
     }
@@ -227,11 +235,36 @@ pub struct StationaryPoint {
     pub bracket: ClosedInterval,
 }
 
+/// A cell closed on the VALUE side instead of by isolating its stationary
+/// structure.
+///
+/// Two situations produce one.  A cell whose derivative enclosure has a
+/// constant sign but touches zero is monotone: its maximum IS an endpoint, and
+/// `excess` is the representational floor alone.  A cell over which the score
+/// is flat to that same floor cannot be told apart from a constant, and every
+/// point of it maximizes the score to the resolution the arithmetic can carry.
+///
+/// Neither is a best-effort answer.  `excess` is a certified bound on how much
+/// the cell's true maximum can exceed `sample.value`, derived from the cell's
+/// endpoint values and its derivative enclosure, so the search's global
+/// statement survives intact — see [`ScoreSearchResult::value_uncertainty`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundedCell {
+    /// The better of the cell's two endpoint samples.
+    pub sample: ScoreSample,
+    pub cell: ClosedInterval,
+    /// Certified bound on `max_{x in cell} V(x) - sample.value`.
+    pub excess: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScoreOptimumLocation {
     LowerBoundary,
     UpperBoundary,
     Stationary(usize),
+    /// The optimum is the representative of a cell closed on the value side;
+    /// the index selects it from [`ScoreSearchResult::bounded_cells`].
+    BoundedCell(usize),
 }
 
 /// Complete successful search result.  Endpoints are retained explicitly so
@@ -243,6 +276,15 @@ pub struct ScoreSearchResult {
     pub lower_boundary: ScoreSample,
     pub upper_boundary: ScoreSample,
     pub stationary_points: Vec<StationaryPoint>,
+    /// Cells closed on the value side; see [`BoundedCell`].
+    pub bounded_cells: Vec<BoundedCell>,
+    /// Certified bound on `global maximum - optimum.value`.
+    ///
+    /// Zero when every cell was excluded or isolated, which is the classical
+    /// guarantee.  Otherwise it is the largest amount by which any cell closed
+    /// on the value side could still hide a better point — a number the caller
+    /// can compare its own tolerances against instead of having to assume one.
+    pub value_uncertainty: f64,
 }
 
 /// Failure of the generic certified search.
@@ -280,12 +322,19 @@ pub enum ScoreSearchError<E> {
     },
     /// The enclosure still admits both a stationary point and a curvature
     /// zero, so uniqueness could not be proved before the requested or
-    /// floating-point resolution floor.
+    /// floating-point resolution floor — AND the cell's own values are not
+    /// flat enough for the value side to close it either.
     Unresolved {
         lo: f64,
         hi: f64,
         requested_resolution: f64,
         enclosure: DerivativeEnclosure,
+        /// Certified bound on how much the cell's interior can exceed its
+        /// better endpoint, and the floor it had to fall below to be closed on
+        /// the value side.  A refusal carries the quantity it was decided
+        /// against.
+        value_excess: f64,
+        value_floor: f64,
     },
 }
 
@@ -329,9 +378,11 @@ impl<E: fmt::Display> fmt::Display for ScoreSearchError<E> {
                 hi,
                 requested_resolution,
                 enclosure,
+                value_excess,
+                value_floor,
             } => write!(
                 f,
-                "score search: stationary structure unresolved on [{lo}, {hi}] at requested resolution {requested_resolution}: {enclosure:?}"
+                "score search: stationary structure unresolved on [{lo}, {hi}] at requested resolution {requested_resolution}: {enclosure:?}; the cell's interior can still exceed its better endpoint by {value_excess} against a value floor of {value_floor}"
             ),
         }
     }
@@ -527,9 +578,25 @@ where
 /// ignore the jets and use `a.x`/`b.x`.
 ///
 /// There is no evaluation or subdivision budget.  A successful return means
-/// every stationary interval was either excluded or isolated to `resolution`.
-/// Any interval that cannot be proved before that floor produces
+/// every cell was excluded, isolated to `resolution`, or closed on the value
+/// side with a certified bound on what it could still hide — the last case is
+/// summarized by [`ScoreSearchResult::value_uncertainty`], which is zero when
+/// it did not arise.  Any cell that none of the three can close produces
 /// [`ScoreSearchError::Unresolved`].
+///
+/// The value side matters because THIS IS A MAXIMIZER.  Isolating stationary
+/// structure is the means; bounding the maximum is the end.  A cell whose
+/// derivative enclosure has a constant sign — even one that touches zero, so
+/// the derivative test cannot discard it — attains its maximum at an endpoint
+/// the search has already evaluated.  And a cell already narrowed to
+/// `resolution` over which the score varies by less than one unit in the last
+/// place of its own magnitude cannot be told apart from a constant by any
+/// arithmetic this search can perform.  Refusing there is not conservatism; it
+/// is asking arithmetic for a distinction it does not carry (#2513).
+///
+/// Flatness closes a cell only once it is already at `resolution`, never
+/// earlier.  The caller asked for that abscissa accuracy, and flatness improves
+/// only the VALUE — a wide flat cell would answer a question nobody asked.
 pub fn maximize_score_1d<E, Eval, Enclose>(
     lo: f64,
     hi: f64,
@@ -556,6 +623,8 @@ where
             lower_boundary,
             upper_boundary: lower_boundary,
             stationary_points: Vec::new(),
+            bounded_cells: Vec::new(),
+            value_uncertainty: 0.0,
         });
     }
     let upper_boundary = evaluate_sample(hi, &mut evaluate)?;
@@ -566,6 +635,7 @@ where
     };
 
     let mut stationary_points = Vec::<StationaryPoint>::new();
+    let mut bounded_cells = Vec::<BoundedCell>::new();
     let mut stack = vec![SearchNode {
         left: lower_boundary,
         right: upper_boundary,
@@ -622,12 +692,62 @@ where
 
         let width = node.right.x - node.left.x;
         let midpoint = node.left.x + 0.5 * width;
-        if width <= resolution || !(midpoint > node.left.x && midpoint < node.right.x) {
+        let at_floor = width <= resolution || !(midpoint > node.left.x && midpoint < node.right.x);
+
+        // The value side, tried after the monotone branch so a well-conditioned
+        // optimum is still located by root refinement.
+        let value_floor = f64::EPSILON
+            * lower_boundary
+                .value
+                .abs()
+                .max(upper_boundary.value.abs())
+                .max(optimum.value.abs())
+                .max(node.left.value.abs())
+                .max(node.right.value.abs());
+        let excess = cell_excess_bound(node.left, node.right, enclosure.derivative);
+        // A one-signed enclosure closes the cell at ANY width: the maximum IS
+        // an endpoint, exactly, and no arithmetic was involved in saying so.
+        // Flatness only closes a cell the search has already subdivided to the
+        // caller's `resolution` — the caller asked for that abscissa accuracy,
+        // and a cell being flat improves the VALUE nothing further can improve
+        // while saying nothing about the location.  Closing a wide flat cell
+        // early would answer a question the caller did not ask.
+        if excess.exact || (at_floor && excess.bound <= value_floor) {
+            let sample = if node.right.value > node.left.value {
+                node.right
+            } else {
+                node.left
+            };
+            let index = bounded_cells.len();
+            if sample.value > optimum.value {
+                optimum = sample;
+                location = ScoreOptimumLocation::BoundedCell(index);
+            }
+            bounded_cells.push(BoundedCell {
+                sample,
+                cell: ClosedInterval::new(node.left.x, node.right.x),
+                // The crossing formula is itself evaluated in double precision,
+                // so its own roundoff is of order the floor.  Charging the
+                // floor makes the recorded bound one the arithmetic can stand
+                // behind rather than one it merely computed.  The exact branch
+                // needs no such charge, and gets none.
+                excess: if excess.exact {
+                    0.0
+                } else {
+                    excess.bound + value_floor
+                },
+            });
+            continue;
+        }
+
+        if at_floor {
             return Err(ScoreSearchError::Unresolved {
                 lo: node.left.x,
                 hi: node.right.x,
                 requested_resolution: resolution,
                 enclosure,
+                value_excess: excess.bound,
+                value_floor,
             });
         }
         let middle = evaluate_sample(midpoint, &mut evaluate)?;
@@ -643,13 +763,78 @@ where
         });
     }
 
+    // The only place the reported optimum can be beaten is inside a cell that
+    // was closed without isolating it, and only by that cell's own certified
+    // excess over the sample it was closed on.
+    let value_uncertainty = bounded_cells
+        .iter()
+        .map(|cell| (cell.sample.value + cell.excess - optimum.value).max(0.0))
+        .fold(0.0_f64, f64::max);
+
     Ok(ScoreSearchResult {
         optimum,
         location,
         lower_boundary,
         upper_boundary,
         stationary_points,
+        bounded_cells,
+        value_uncertainty,
     })
+}
+
+/// Certified bound on how much the maximum of a smooth score over `[a, b]` can
+/// exceed the larger of its two endpoint values, given an OUTER enclosure of
+/// the derivative on the cell.
+///
+/// For `x` in the cell, `t = x - a` and `w = b - a`, the mean value theorem
+/// gives BOTH `V(x) <= V(a) + d_hi*t` (rising from the left) and
+/// `V(x) <= V(b) - d_lo*(w - t)` (falling back to the right).  The cell's
+/// maximum is under the smaller of the two lines everywhere, so it is under
+/// their crossing.  On the symmetric case `V(a) = V(b) = v` this collapses to
+/// the classical `v + w*(d_hi - d_lo)/4`, which shrinks QUADRATICALLY as the
+/// cell does — so a cell that is flat at the resolution floor is flat by orders
+/// of magnitude, not marginally, while a genuine peak stays well clear.
+///
+/// A one-signed derivative enclosure gives exactly zero: the cell is monotone
+/// and its maximum is an endpoint the search already holds.  `exact` reports
+/// which of the two cases produced the bound, because the caller charges the
+/// crossing formula's own roundoff and must not charge the structural answer's.
+struct CellExcess {
+    bound: f64,
+    exact: bool,
+}
+
+fn cell_excess_bound(
+    left: ScoreSample,
+    right: ScoreSample,
+    derivative: ClosedInterval,
+) -> CellExcess {
+    let width = right.x - left.x;
+    if !(width > 0.0) || derivative.lo >= 0.0 || derivative.hi <= 0.0 {
+        return CellExcess {
+            bound: 0.0,
+            exact: true,
+        };
+    }
+    if !(derivative.lo.is_finite() && derivative.hi.is_finite()) {
+        return CellExcess {
+            bound: f64::INFINITY,
+            exact: false,
+        };
+    }
+    let span = derivative.hi - derivative.lo;
+    let crossing = (((right.value - left.value) - derivative.lo * width) / span).clamp(0.0, width);
+    let ceiling = (left.value + derivative.hi * crossing)
+        .min(right.value - derivative.lo * (width - crossing));
+    let excess = ceiling - left.value.max(right.value);
+    CellExcess {
+        bound: if excess.is_nan() {
+            f64::INFINITY
+        } else {
+            excess.max(0.0)
+        },
+        exact: false,
+    }
 }
 
 /// Static validation or evaluation failure for [`AffineRemlProfile`].
@@ -999,6 +1184,14 @@ impl<'a> AffineRemlProfile<'a> {
 
     /// Outward enclosure of the first two score derivatives on a bounded
     /// log-lambda interval.
+    ///
+    /// The returned ranges enclose the IMPLEMENTED jet, not only the ideal
+    /// one: every mode kernel is carried as a [`RoundedRange`], so the range of
+    /// the exact derivative and a bound on [`Self::evaluate`]'s own forward
+    /// error travel together and the result is widened by the latter.  That is
+    /// what makes the search's zero-tolerance endpoint-containment check a
+    /// property this oracle can actually have rather than a currency mismatch
+    /// between an exact-range enclosure and a floating-point point jet (#2513).
     pub fn enclose(&self, lo: f64, hi: f64) -> Result<DerivativeEnclosure, AffineRemlError> {
         if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
             return Err(AffineRemlError::InvalidLogLambdaInterval { lo, hi });
@@ -1009,55 +1202,66 @@ impl<'a> AffineRemlProfile<'a> {
         }
 
         let modes = self.num_modes();
-        let mut determinant_first = ClosedInterval::point(0.0);
-        let mut determinant_second = ClosedInterval::point(0.0);
-        let mut fitted_quadratic = vec![ClosedInterval::point(0.0); self.num_responses()];
-        let mut response_first = vec![ClosedInterval::point(0.0); self.num_responses()];
-        let mut response_second = vec![ClosedInterval::point(0.0); self.num_responses()];
+        let responses = self.num_responses();
+        let mut determinant_first = RoundedSum::seeded(ClosedInterval::point(0.0));
+        let mut determinant_second = RoundedSum::seeded(ClosedInterval::point(0.0));
+        let mut fitted_quadratic: Vec<RoundedSum> = self
+            .response_energy
+            .iter()
+            .map(|&energy| RoundedSum::seeded(ClosedInterval::point(energy)))
+            .collect();
+        let mut response_first = vec![RoundedSum::seeded(ClosedInterval::point(0.0)); responses];
+        let mut response_second = vec![RoundedSum::seeded(ClosedInterval::point(0.0)); responses];
         for i in 0..modes {
             let ranges = mode_ranges(self.gram_modes[i], self.penalty_modes[i], lambda);
-            determinant_first = determinant_first.add(ranges.determinant_first);
-            determinant_second = determinant_second.add(ranges.determinant_second);
-            for output in 0..self.num_responses() {
-                let projected =
-                    ClosedInterval::point(self.projected_rhs_squared[output * modes + i]);
-                fitted_quadratic[output] =
-                    fitted_quadratic[output].add(projected.mul(ranges.fitted));
-                response_first[output] = response_first[output].add(projected.mul(ranges.first));
-                response_second[output] = response_second[output].add(projected.mul(ranges.second));
+            determinant_first.add(ranges.determinant_first);
+            determinant_second.add(ranges.determinant_second);
+            for output in 0..responses {
+                let projected = self.projected_rhs_squared[output * modes + i];
+                // One rounding for the `projected * kernel` product itself; the
+                // kernel's own error scales with the same exact factor.
+                fitted_quadratic[output].sub(ranges.fitted.scaled(projected));
+                response_first[output].add(ranges.first.scaled(projected));
+                response_second[output].add(ranges.second.scaled(projected));
             }
         }
+        let determinant_first = determinant_first.finish();
+        let determinant_second = determinant_second.finish();
 
-        let mut residual_first_sum = ClosedInterval::point(0.0);
-        let mut residual_second_sum = ClosedInterval::point(0.0);
-        for (output, &energy) in self.response_energy.iter().enumerate() {
-            let first = response_first[output];
-            let second = response_second[output];
-            let residual = ClosedInterval::point(energy).sub(fitted_quadratic[output]);
-            if !(residual.lo > 0.0 && residual.is_valid()) {
+        let mut residual_first_sum = RoundedSum::seeded(ClosedInterval::point(0.0));
+        let mut residual_second_sum = RoundedSum::seeded(ClosedInterval::point(0.0));
+        for output in 0..responses {
+            let first = response_first[output].finish();
+            let second = response_second[output].finish();
+            let residual = fitted_quadratic[output].finish();
+            if !(residual.range.lo > 0.0 && residual.range.is_valid()) {
                 return Err(AffineRemlError::NonPositiveResidualInterval {
                     output,
                     lo,
                     hi,
-                    lower_bound: residual.lo,
+                    lower_bound: residual.range.lo,
                 });
             }
             let first_ratio = first.div_positive(residual).nonnegative();
             let second_ratio = second.div_positive(residual);
-            residual_first_sum = residual_first_sum.add(first_ratio);
-            residual_second_sum = residual_second_sum.add(second_ratio.sub(first_ratio.square()));
+            residual_first_sum.add(first_ratio);
+            residual_second_sum.add(second_ratio.sub(first_ratio.square()));
         }
+        let residual_first_sum = residual_first_sum.finish();
+        let residual_second_sum = residual_second_sum.finish();
 
-        let outputs = self.num_responses() as f64;
-        let first_bracket = determinant_first
-            .scale(outputs)
-            .add(residual_first_sum.scale(self.residual_dof));
-        let second_bracket = determinant_second
-            .scale(outputs)
-            .add(residual_second_sum.scale(self.residual_dof));
+        let outputs = responses as f64;
+        let derivative = determinant_first
+            .scaled(outputs)
+            .add(residual_first_sum.scaled(self.residual_dof))
+            .scaled(-0.5);
+        let curvature = determinant_second
+            .scaled(outputs)
+            .add(residual_second_sum.scaled(self.residual_dof))
+            .scaled(-0.5);
         Ok(DerivativeEnclosure {
-            derivative: first_bracket.scale(-0.5),
-            curvature: second_bracket.scale(-0.5),
+            derivative: derivative.observable(),
+            curvature: curvature.observable(),
         })
     }
 
@@ -1073,6 +1277,202 @@ impl<'a> AffineRemlProfile<'a> {
             resolution,
             |x| self.evaluate(x),
             |a, b| self.enclose(a.x, b.x),
+        )
+    }
+}
+
+/// The relative error bound of one correctly rounded double operation.
+const UNIT_ROUNDOFF: f64 = f64::EPSILON / 2.0;
+
+/// Wilkinson's `gamma_k = k*u/(1 - k*u)`: the relative error bound accumulated
+/// by `k` chained roundings.  Saturates to infinity rather than turning
+/// negative once `k*u >= 1/2`, which would take ~2e15 modes.
+fn gamma(operations: usize) -> f64 {
+    let scaled = operations as f64 * UNIT_ROUNDOFF;
+    if scaled >= 0.5 {
+        f64::INFINITY
+    } else {
+        scaled / (1.0 - scaled)
+    }
+}
+
+#[inline]
+fn magnitude_of(range: ClosedInterval) -> f64 {
+    range.lo.abs().max(range.hi.abs())
+}
+
+/// A range of an exact quantity over a cell, together with a bound on the
+/// forward error the POINT evaluator makes computing that same quantity
+/// anywhere in the cell.
+///
+/// This pairing is the whole content of #2513.  An interval extension bounds
+/// the range of the EXACT function; the search compares that bound against
+/// `fl(f(x))`, and no theorem says an exact-range enclosure contains an
+/// inexact point evaluation.  Carrying the evaluator's own error alongside the
+/// range makes the two commensurable: [`Self::observable`] is the set of values
+/// the implemented evaluator may return on the cell, which is what
+/// `checked_enclosure` is entitled to demand at zero tolerance.
+///
+/// Widening is also the safe direction for every decision the search makes.  A
+/// wider derivative range excludes zero less often, so fewer cells are
+/// discarded; a wider curvature range admits zero more readily, so uniqueness
+/// is certified less often.  The pad can cost a certificate; it cannot mint one.
+#[derive(Clone, Copy, Debug)]
+struct RoundedRange {
+    range: ClosedInterval,
+    error: f64,
+}
+
+impl RoundedRange {
+    #[inline]
+    fn new(range: ClosedInterval, error: f64) -> Self {
+        Self { range, error }
+    }
+
+    /// A quantity the point evaluator obtains through `operations` chained
+    /// roundings with no cancelling subtraction, so its error is relative.
+    #[inline]
+    fn rounded(range: ClosedInterval, operations: usize) -> Self {
+        Self {
+            range,
+            error: gamma(operations) * magnitude_of(range),
+        }
+    }
+
+    #[inline]
+    fn exact(range: ClosedInterval) -> Self {
+        Self { range, error: 0.0 }
+    }
+
+    #[inline]
+    fn magnitude(self) -> f64 {
+        magnitude_of(self.range)
+    }
+
+    /// Bound on the magnitude of the value the POINT evaluator holds, which is
+    /// what the next rounding is charged against — one step further out than
+    /// the exact range.
+    #[inline]
+    fn bound(self) -> f64 {
+        self.magnitude() + self.error
+    }
+
+    #[inline]
+    fn scaled(self, factor: f64) -> Self {
+        let range = self.range.scale(factor);
+        let propagated = factor.abs() * self.error;
+        Self {
+            range,
+            error: propagated + UNIT_ROUNDOFF * (magnitude_of(range) + propagated),
+        }
+    }
+
+    #[inline]
+    fn add(self, other: Self) -> Self {
+        Self {
+            range: self.range.add(other.range),
+            error: self.error + other.error + UNIT_ROUNDOFF * (self.bound() + other.bound()),
+        }
+    }
+
+    #[inline]
+    fn sub(self, other: Self) -> Self {
+        Self {
+            range: self.range.sub(other.range),
+            error: self.error + other.error + UNIT_ROUNDOFF * (self.bound() + other.bound()),
+        }
+    }
+
+    #[inline]
+    fn square(self) -> Self {
+        let range = self.range.square();
+        let propagated = (2.0 * self.magnitude() + self.error) * self.error;
+        Self {
+            range,
+            error: propagated + UNIT_ROUNDOFF * (magnitude_of(range) + propagated),
+        }
+    }
+
+    /// `self / denominator` where the denominator's EXACT range is strictly
+    /// positive.  The point evaluator divides by its own rounded denominator,
+    /// which this can only place above `range.lo - error`; when that floor is
+    /// not positive the quotient's forward error is genuinely unbounded and
+    /// saying so is the honest answer.  The resulting entire enclosure costs
+    /// the search a subdivision, never a wrong certificate.
+    fn div_positive(self, denominator: Self) -> Self {
+        let range = self.range.div_positive(denominator.range);
+        let quotient = magnitude_of(range);
+        let floor = denominator.range.lo - denominator.error;
+        let error = if floor > 0.0 {
+            let propagated = (self.error + quotient * denominator.error) / floor;
+            propagated + UNIT_ROUNDOFF * (quotient + propagated)
+        } else {
+            f64::INFINITY
+        };
+        Self { range, error }
+    }
+
+    #[inline]
+    fn nonnegative(self) -> Self {
+        Self {
+            range: self.range.nonnegative(),
+            error: self.error,
+        }
+    }
+
+    /// The set of values the POINT evaluator may return on this cell.
+    fn observable(self) -> ClosedInterval {
+        if !(self.error >= 0.0) {
+            return ClosedInterval::entire();
+        }
+        ClosedInterval::new(
+            next_down(self.range.lo - self.error),
+            next_up(self.range.hi + self.error),
+        )
+    }
+}
+
+/// A sequentially accumulated sum, carrying what Wilkinson's bound needs: the
+/// sum of the per-term MAGNITUDES, which is what the accumulated roundings are
+/// charged against, rather than the (possibly cancelled) total.
+#[derive(Clone, Copy, Debug)]
+struct RoundedSum {
+    range: ClosedInterval,
+    magnitude: f64,
+    error: f64,
+    additions: usize,
+}
+
+impl RoundedSum {
+    fn seeded(seed: ClosedInterval) -> Self {
+        Self {
+            range: seed,
+            magnitude: magnitude_of(seed),
+            error: 0.0,
+            additions: 0,
+        }
+    }
+
+    fn add(&mut self, term: RoundedRange) {
+        self.range = self.range.add(term.range);
+        // The roundings are charged against what the evaluator actually held,
+        // which is the exact term plus its own error.
+        self.magnitude += term.bound();
+        self.error += term.error;
+        self.additions += 1;
+    }
+
+    fn sub(&mut self, term: RoundedRange) {
+        self.range = self.range.sub(term.range);
+        self.magnitude += term.bound();
+        self.error += term.error;
+        self.additions += 1;
+    }
+
+    fn finish(self) -> RoundedRange {
+        RoundedRange::new(
+            self.range,
+            self.error + gamma(self.additions) * self.magnitude,
         )
     }
 }
@@ -1192,25 +1592,35 @@ fn kernel_point(t: f64) -> KernelPoint {
 }
 
 /// One mode's contribution to the score jet over a `lambda` cell, per unit
-/// `projected_square`.  Field for field the interval image of [`ModePoint`].
+/// `projected_square`.  Field for field the interval image of [`ModePoint`],
+/// each field carrying the bound on that point evaluation's own forward error.
+///
+/// The rounding counts below are read off [`mode_point`] and [`kernel_point`]
+/// directly.  `lambda` itself is NOT charged: the cell's `lambda` interval is
+/// built by rounding `exp` outward at both ends, so it already contains the
+/// point evaluator's `log_lambda.exp()`.
 #[derive(Clone, Copy)]
 struct ModeRanges {
-    determinant_first: ClosedInterval,
-    determinant_second: ClosedInterval,
-    fitted: ClosedInterval,
-    first: ClosedInterval,
-    second: ClosedInterval,
+    determinant_first: RoundedRange,
+    determinant_second: RoundedRange,
+    fitted: RoundedRange,
+    first: RoundedRange,
+    second: RoundedRange,
 }
 
 fn mode_ranges(gram: f64, penalty: f64, lambda: ClosedInterval) -> ModeRanges {
-    let zero = ClosedInterval::point(0.0);
+    let zero = RoundedRange::exact(ClosedInterval::point(0.0));
     if penalty == 0.0 {
         return ModeRanges {
             determinant_first: zero,
             determinant_second: zero,
-            fitted: ClosedInterval::point(1.0)
-                .div_positive(ClosedInterval::point(gram))
-                .nonnegative(),
+            // `1.0 / gram`.
+            fitted: RoundedRange::rounded(
+                ClosedInterval::point(1.0)
+                    .div_positive(ClosedInterval::point(gram))
+                    .nonnegative(),
+                1,
+            ),
             first: zero,
             second: zero,
         };
@@ -1223,16 +1633,17 @@ fn mode_ranges(gram: f64, penalty: f64, lambda: ClosedInterval) -> ModeRanges {
         // the search, which will subdivide, but never a false enclosure and
         // never a panic inside `div_positive`.
         let fitted = if h.lo > 0.0 {
-            ClosedInterval::point(1.0).div_positive(h).nonnegative()
+            // `1.0 / (lambda * penalty)`.
+            RoundedRange::rounded(ClosedInterval::point(1.0).div_positive(h).nonnegative(), 2)
         } else {
-            ClosedInterval::new(0.0, f64::INFINITY)
+            RoundedRange::new(ClosedInterval::new(0.0, f64::INFINITY), f64::INFINITY)
         };
         return ModeRanges {
             determinant_first: zero,
             determinant_second: zero,
             fitted,
             first: fitted,
-            second: fitted.neg(),
+            second: RoundedRange::new(fitted.range.neg(), fitted.error),
         };
     }
 
@@ -1248,12 +1659,24 @@ fn mode_ranges(gram: f64, penalty: f64, lambda: ClosedInterval) -> ModeRanges {
         .div_positive(ClosedInterval::point(gram))
         .nonnegative();
     let kernels = kernel_ranges(t);
+    // `mode_point` reaches `c` and `u` in five roundings (ratio, t, and three
+    // in the branch) and `w = u*c` in six.  Negation and the `1/gram` scaling
+    // add one each.
+    let first = inverse_gram.mul(kernels.w).nonnegative();
     ModeRanges {
-        determinant_first: kernels.c.neg(),
-        determinant_second: kernels.w,
-        fitted: inverse_gram.mul(kernels.c).nonnegative(),
-        first: inverse_gram.mul(kernels.w).nonnegative(),
-        second: inverse_gram.mul(kernels.k),
+        determinant_first: RoundedRange::rounded(kernels.c.neg(), 5),
+        determinant_second: RoundedRange::rounded(kernels.w, 6),
+        fitted: RoundedRange::rounded(inverse_gram.mul(kernels.c).nonnegative(), 6),
+        first: RoundedRange::rounded(first, 7),
+        // `k = w*(c-u)` is the ONE kernel with a cancelling subtraction: `c-u`
+        // vanishes at `t = 1` while its own error does not, so `k` has no
+        // bounded relative error and charging `|k|` would understate it by
+        // `1/|c-u|`.  The pre-cancellation magnitude is `|w|`, and
+        // `|c-u| <= 1`, so `2*gamma_8*|w/gram| = 2*gamma_8*|first|` bounds it.
+        second: RoundedRange::new(
+            inverse_gram.mul(kernels.k),
+            2.0 * gamma(8) * magnitude_of(first),
+        ),
     }
 }
 
@@ -1324,6 +1747,82 @@ fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
     c.lo = c.lo.max(0.0);
     c.hi = c.hi.min(next_up(1.0));
     KernelRanges { u, c, w, k }
+}
+
+/// Directed outward rounding that does NOT widen an operation IEEE-754
+/// performs exactly.
+///
+/// Structural zeros are the case that matters.  A kernel that is identically
+/// zero on a cell, or the `0.0` an accumulator starts at, produced a
+/// `-4.9e-324` lower bound once it met a `next_down` — enough to turn a
+/// provably one-signed derivative enclosure into one that straddles zero, and
+/// so to lose the cheapest fact the search has: that a monotone cell attains
+/// its maximum at an endpoint.  `x + 0` and `x * 0` are exact for every finite
+/// `x`, as is scaling by a unit, and rounding them outward claims an
+/// uncertainty that is not there.
+#[inline]
+fn sum_down(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if a == 0.0 || b == 0.0 {
+        sum
+    } else {
+        next_down(sum)
+    }
+}
+
+#[inline]
+fn sum_up(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if a == 0.0 || b == 0.0 {
+        sum
+    } else {
+        next_up(sum)
+    }
+}
+
+#[inline]
+fn product_is_exact(a: f64, b: f64) -> bool {
+    a == 0.0 || b == 0.0 || a.abs() == 1.0 || b.abs() == 1.0
+}
+
+#[inline]
+fn quotient_down(a: f64, b: f64) -> f64 {
+    let quotient = a / b;
+    if a == 0.0 || b.abs() == 1.0 {
+        quotient
+    } else {
+        next_down(quotient)
+    }
+}
+
+#[inline]
+fn quotient_up(a: f64, b: f64) -> f64 {
+    let quotient = a / b;
+    if a == 0.0 || b.abs() == 1.0 {
+        quotient
+    } else {
+        next_up(quotient)
+    }
+}
+
+#[inline]
+fn product_down(a: f64, b: f64) -> f64 {
+    let product = a * b;
+    if product_is_exact(a, b) {
+        product
+    } else {
+        next_down(product)
+    }
+}
+
+#[inline]
+fn product_up(a: f64, b: f64) -> f64 {
+    let product = a * b;
+    if product_is_exact(a, b) {
+        product
+    } else {
+        next_up(product)
+    }
 }
 
 /// Next representable number below `value`, used for directed outward
@@ -1468,9 +1967,15 @@ mod tests {
         assert!(result.stationary_points.is_empty());
     }
 
+    /// `x^3` has a tangential stationary point at the origin that no
+    /// derivative/curvature enclosure can isolate.  It is also irrelevant to
+    /// the MAXIMUM: the derivative enclosure is one-signed, so the cell is
+    /// monotone and its maximum is an endpoint.  The search must say so
+    /// exactly — with an empty stationary list, because nothing was certified
+    /// stationary — rather than refuse.
     #[test]
-    fn unresolved_tangential_stationary_point_is_typed() {
-        let error = maximize_score_1d(
+    fn tangential_stationary_point_is_not_certified_and_does_not_block_the_maximum() {
+        let result = maximize_score_1d(
             -1.0,
             1.0,
             1.0e-8,
@@ -1490,8 +1995,82 @@ mod tests {
                 })
             },
         )
-        .expect_err("a tangential root needs stronger structural bounds");
-        assert!(matches!(error, ScoreSearchError::Unresolved { .. }));
+        .expect("a monotone cell needs no structural bound at all");
+        assert_eq!(result.location, ScoreOptimumLocation::UpperBoundary);
+        assert_eq!(result.optimum.x, 1.0);
+        assert!(result.stationary_points.is_empty());
+        assert_eq!(result.bounded_cells.len(), 1);
+        assert_eq!(result.bounded_cells[0].cell, ClosedInterval::new(-1.0, 1.0));
+        assert_eq!(result.value_uncertainty, 0.0);
+    }
+
+    /// A degenerate quartic peak off the bisection lattice: `V'` and `V''`
+    /// vanish together at the maximum, so no curvature enclosure ever excludes
+    /// zero there.  Whether that is resolvable is a VALUE question, and the two
+    /// arms below differ only in the requested resolution.
+    fn quartic_peak_jet(x: f64) -> ScoreJet {
+        let d = x - 0.3;
+        ScoreJet {
+            value: -d * d * d * d,
+            derivative: -4.0 * d * d * d,
+            curvature: -12.0 * d * d,
+            third: -24.0 * d,
+        }
+    }
+
+    fn quartic_peak_enclosure(lo: f64, hi: f64) -> DerivativeEnclosure {
+        let d = ClosedInterval::new(lo, hi).sub(ClosedInterval::point(0.3));
+        DerivativeEnclosure {
+            derivative: d.mul(d).mul(d).scale(-4.0),
+            curvature: d.square().scale(-12.0),
+        }
+    }
+
+    #[test]
+    fn degenerate_peak_is_refused_while_its_cell_still_carries_value() {
+        let error = maximize_score_1d(
+            -1.0,
+            1.0,
+            1.0e-3,
+            |x| -> Result<_, String> { Ok(quartic_peak_jet(x)) },
+            |lo, hi| -> Result<_, String> { Ok(quartic_peak_enclosure(lo.x, hi.x)) },
+        )
+        .expect_err("at 1e-3 the peak cell still varies far above its own ulp");
+        let ScoreSearchError::Unresolved {
+            value_excess,
+            value_floor,
+            ..
+        } = error
+        else {
+            panic!("expected an unresolved cell, got {error}");
+        };
+        assert!(
+            value_excess > value_floor,
+            "excess {value_excess} must be the reason, against floor {value_floor}"
+        );
+    }
+
+    #[test]
+    fn degenerate_peak_is_value_certified_once_its_cell_is_flat_to_roundoff() {
+        let result = maximize_score_1d(
+            -1.0,
+            1.0,
+            1.0e-8,
+            |x| -> Result<_, String> { Ok(quartic_peak_jet(x)) },
+            |lo, hi| -> Result<_, String> { Ok(quartic_peak_enclosure(lo.x, hi.x)) },
+        )
+        .expect("a cell flat below its own ulp is resolved, not refused");
+        assert!(
+            matches!(result.location, ScoreOptimumLocation::BoundedCell(_)),
+            "location was {:?}",
+            result.location
+        );
+        assert!((result.optimum.x - 0.3).abs() <= 1.0e-8);
+        // The true maximum is exactly zero, and the search says so to within
+        // the uncertainty it reports rather than to an assumed tolerance.
+        assert!(result.optimum.value <= 0.0);
+        assert!(-result.optimum.value <= result.value_uncertainty);
+        assert!(result.value_uncertainty <= 1.0e-14);
     }
 
     fn affine_fixture() -> AffineRemlProfile<'static> {
@@ -1683,6 +2262,123 @@ mod tests {
         );
         assert!(stationary.bracket.hi - stationary.bracket.lo <= resolution);
         assert!(stationary.bracket.contains(stationary.sample.x));
+    }
+
+    /// The containment the search demands at zero tolerance is a PROPERTY of
+    /// this oracle pair, not a coincidence of the fixtures that happened to be
+    /// tried.  A deterministic sweep over ill-conditioned spectra, several
+    /// responses, and cells from a single point up to the width of the whole
+    /// representable log-lambda domain pins it as one.
+    #[test]
+    fn affine_reml_enclosure_contains_every_point_jet_it_is_checked_against() {
+        // A deterministic LCG: the point of the sweep is coverage, not chance,
+        // and a random seed would make a failure unreproducible.
+        let mut state = 0x2513_2513_2513_2513_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let domain_lo = f64::MIN_POSITIVE.ln();
+        let domain_hi = (f64::MAX / 2.0).ln();
+        let mut checked = 0usize;
+        for case in 0..64 {
+            let modes = 1 + case % 5;
+            let responses = 1 + case % 3;
+            // Spectra spanning up to 12 decades, and every case gives one mode
+            // an exact zero gram or penalty so both degenerate branches run.
+            let mut gram = Vec::new();
+            let mut penalty = Vec::new();
+            for i in 0..modes {
+                let g = 10.0_f64.powf(12.0 * next() - 6.0);
+                let s = 10.0_f64.powf(12.0 * next() - 6.0);
+                if i == 0 && case % 3 == 1 {
+                    gram.push(0.0);
+                    penalty.push(s);
+                } else if i == 0 && case % 3 == 2 {
+                    gram.push(g);
+                    penalty.push(0.0);
+                } else {
+                    gram.push(g);
+                    penalty.push(s);
+                }
+            }
+            let rank = penalty.iter().filter(|&&value| value > 0.0).count();
+            let projected: Vec<f64> = (0..modes * responses).map(|_| next()).collect();
+            // Keep the profiled residual comfortably positive: the enclosure
+            // rejects a cell it cannot certify positive, which is a different
+            // (and already tested) verdict.
+            let energy: Vec<f64> = (0..responses)
+                .map(|output| {
+                    let fitted: f64 = (0..modes)
+                        .map(|i| projected[output * modes + i] / gram[i].max(penalty[i]).min(1.0))
+                        .sum();
+                    fitted * (2.0 + next()) + 1.0
+                })
+                .collect();
+            let Ok(profile) = AffineRemlProfile::new(
+                &gram,
+                &penalty,
+                &projected,
+                &energy,
+                7.0 + case as f64,
+                rank,
+                0.25,
+            ) else {
+                continue;
+            };
+            for cell in 0..12 {
+                let width = (domain_hi - domain_lo) * 0.5_f64.powi(cell);
+                let lo = domain_lo + (domain_hi - domain_lo - width) * next();
+                let hi = (lo + width).min(domain_hi);
+                let Ok(enclosure) = profile.enclose(lo, hi) else {
+                    continue;
+                };
+                for at in [lo, hi, 0.5 * (lo + hi)] {
+                    let Ok(jet) = profile.evaluate(at) else {
+                        continue;
+                    };
+                    checked += 1;
+                    assert!(
+                        enclosure.derivative.contains(jet.derivative),
+                        "case {case}: derivative {} at {at} outside {:?} on [{lo}, {hi}]",
+                        jet.derivative,
+                        enclosure.derivative
+                    );
+                    assert!(
+                        enclosure.curvature.contains(jet.curvature),
+                        "case {case}: curvature {} at {at} outside {:?} on [{lo}, {hi}]",
+                        jet.curvature,
+                        enclosure.curvature
+                    );
+                }
+            }
+        }
+        assert!(checked > 1000, "sweep only checked {checked} jets");
+    }
+
+    /// The widening is not decorative: on a degenerate cell the exact range of
+    /// each derivative is a single real number, so the whole width of the
+    /// returned enclosure IS the evaluator's forward-error bound.
+    #[test]
+    fn affine_reml_enclosure_carries_a_real_evaluator_pad() {
+        let profile = tail_fixture();
+        for rho in [-2.0_f64, 0.0, 5.0, 40.0] {
+            let enclosure = profile.enclose(rho, rho).expect("degenerate cell");
+            let jet = profile.evaluate(rho).expect("jet");
+            let width = enclosure.derivative.hi - enclosure.derivative.lo;
+            assert!(width > 0.0, "no pad at rho={rho}");
+            // The pad tracks the quantity it brackets rather than sitting at an
+            // absolute floor: that is what keeps the far tail certifiable.
+            assert!(
+                width <= 1.0e-12 * (1.0 + jet.derivative.abs()),
+                "pad {width} at rho={rho} is not proportional to |derivative| {}",
+                jet.derivative.abs()
+            );
+            assert!(enclosure.derivative.contains(jet.derivative));
+            assert!(enclosure.curvature.contains(jet.curvature));
+        }
     }
 
     #[test]
