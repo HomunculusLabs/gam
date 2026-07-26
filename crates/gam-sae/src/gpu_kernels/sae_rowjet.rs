@@ -2761,6 +2761,41 @@ mod device {
 mod tests {
     use super::*;
 
+    /// #2422 device-free half, shared by this module's three CUDA-gated tests.
+    ///
+    /// Each of them returned on `Ok(None)` before its first assertion, so on a
+    /// device-free host -- which is every CI runner -- they reported `passed`
+    /// having measured nothing. Without a device the production entry's
+    /// `Device` path must REFUSE: `execute_softmax_row_jet_tile` dispatches
+    /// straight to `device::device_tile`, which opens with `backend()?`, and
+    /// maps the error out rather than falling back to the host. An `Ok` here
+    /// would mean the seam quietly computed the CPU answer under a `Device`
+    /// request -- the #1551 silent-fallback class, and exactly what a `return`
+    /// before the first assertion could never see.
+    ///
+    /// The fixture is small on purpose: the refusal is a property of the absent
+    /// device, not of the workload, and the gated tests' own 1<<17-row fixtures
+    /// would cost real time on a host that is going to refuse anyway. The CPU
+    /// arm is asserted first so a fixture that is broken for some unrelated
+    /// reason cannot make the refusal check pass for the wrong reason.
+    fn assert_row_jet_device_path_declines_without_cuda() {
+        let rows = complete_fixture(64);
+        let cpu = execute_softmax_row_jet_tile(&rows, 1.0, SaeRowJetPath::Cpu)
+            .expect("the CPU row-jet path must succeed on every host");
+        assert_eq!(
+            cpu.n_rows, 64,
+            "the device-free half needs a CPU result over the whole fixture, or it \
+             proves nothing about the seam"
+        );
+        if let Ok(channels) = execute_softmax_row_jet_tile(&rows, 1.0, SaeRowJetPath::Device) {
+            panic!(
+                "no CUDA runtime on this host, yet the Device row-jet path returned Ok with \
+                 n_rows={} -- the seam fell back to the host silently (#1551 class)",
+                channels.n_rows
+            );
+        }
+    }
+
     fn complete_fixture(n: usize) -> Vec<SaeSoftmaxRowJetInput> {
         let k = 3;
         let p = 2;
@@ -2998,7 +3033,10 @@ mod tests {
     fn complete_device_matches_cpu_every_channel_when_admitted_2304() {
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
             Ok(Some(_)) => {}
-            Ok(None) => return,
+            Ok(None) => {
+                assert_row_jet_device_path_declines_without_cuda();
+                return;
+            }
             Err(error) => panic!("complete row-jet CUDA admission failed: {error}"),
         }
         // A 37-row smoke fixture launches each kernel for too little time to
@@ -3200,7 +3238,10 @@ mod tests {
     fn contracted_device_matches_cpu_reduction_when_admitted_2304() {
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
             Ok(Some(_)) => {}
-            Ok(None) => return,
+            Ok(None) => {
+                assert_row_jet_device_path_declines_without_cuda();
+                return;
+            }
             Err(error) => panic!("contracted row-jet CUDA admission failed: {error}"),
         }
         const ROW_COUNT: usize = 1 << 17;
@@ -3306,7 +3347,10 @@ mod tests {
     fn contracted_trace_device_matches_cpu_reduction_when_admitted_2304() {
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
             Ok(Some(_)) => {}
-            Ok(None) => return,
+            Ok(None) => {
+                assert_row_jet_device_path_declines_without_cuda();
+                return;
+            }
             Err(error) => panic!("Trace row-jet CUDA admission failed: {error}"),
         }
         const ROW_COUNT: usize = 1 << 17;
