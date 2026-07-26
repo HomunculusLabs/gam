@@ -4231,9 +4231,13 @@ fn try_certify_face_analytically(
             // move the criterion at all.
             value_gap: tail_constant * (-rho_k).exp(),
             estimand_travel_bound: proof.estimand_travel,
-            // The analytic proof's floor is the eigen-backward-error margin it
-            // cleared, not a finite-difference noise floor.
-            noise_margin: proof.curvature_margin,
+            // The face was PROVEN, so the standard it cleared is the form's own
+            // eigen-backward-error margin — not a finite-difference floor, and
+            // not a quantity comparable with one.
+            evidence: RailTailEvidence::AnalyticFaceProof {
+                min_curvature: proof.min_curvature,
+                curvature_margin: proof.curvature_margin,
+            },
         })
         .collect();
     Ok(Ok((rails, proof)))
@@ -4639,7 +4643,10 @@ fn try_tail_snap_to_rail(
                             tail_constant,
                             value_gap: extrapolated_gap,
                             estimand_travel_bound,
-                            noise_margin: tol.tail_noise_floor,
+                            evidence: RailTailEvidence::ProbedTail {
+                                noise_floor: tol.tail_noise_floor,
+                                drift_band: tol.tail_drift_rel,
+                            },
                         });
                     }
                     None
@@ -4707,7 +4714,10 @@ fn try_tail_snap_to_rail(
                             tail_constant,
                             value_gap: joint_gap,
                             estimand_travel_bound,
-                            noise_margin: tol.tail_noise_floor,
+                            evidence: RailTailEvidence::ProbedTail {
+                                noise_floor: tol.tail_noise_floor,
+                                drift_band: tol.tail_drift_rel,
+                            },
                         })
                         .collect();
                 }
@@ -4862,7 +4872,10 @@ fn build_and_assess_rail_coordinate(
             tail_constant,
             value_gap,
             estimand_travel_bound,
-            noise_margin: tol.tail_noise_floor,
+            evidence: RailTailEvidence::ProbedTail {
+                noise_floor: tol.tail_noise_floor,
+                drift_band: tol.tail_drift_rel,
+            },
         })),
         other => Ok(Err(format!("k={coord}: tail verdict {other:?}"))),
     }

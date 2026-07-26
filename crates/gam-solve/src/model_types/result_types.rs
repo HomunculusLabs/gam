@@ -627,6 +627,92 @@ mod per_term_edf_tests {
 /// counts as railed against its box bound.
 pub(crate) const CERTIFICATE_RAIL_MARGIN: f64 = 0.5;
 
+/// What established a rail coordinate's tail law, and the standard it cleared
+/// (#2348 Inc 5 build-out).
+///
+/// The two routes are not two ways of measuring one quantity. They apply
+/// different standards to different evidence, and the floors they clear are not
+/// comparable: one is a threshold on a finite-difference estimate of `ĉ`, the
+/// other a backward-error threshold on the smallest eigenvalue of a matrix.
+/// Carrying both in a single `noise_margin: f64` — documented as "the
+/// pencil-constant noise floor for a measured tail, or the eigen-backward-error
+/// margin of the analytic face form" — left every reader unable to tell which
+/// number they held, including this module's own well-formedness guard.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum RailTailEvidence {
+    /// PROVEN at the face. The `λ = ∞` limit was formed exactly and the
+    /// first-order form `C` on the released subspace is positive definite, so
+    /// the criterion strictly increases for every finite smoothing parameter on
+    /// the face, and on every sub-face, at once.
+    ///
+    /// A coordinate whose own penalty releases nothing once the REST of the
+    /// face is at `λ = ∞` is unidentified there, and the proof derives
+    /// `tail_constant = 0` for it exactly: `V` does not depend on its smoothing
+    /// parameter at all. That zero is a result of the proof, not a missing
+    /// measurement — which is precisely why the two routes cannot share one
+    /// well-formedness rule.
+    AnalyticFaceProof {
+        /// `λ_min(C)`, the smallest curvature of the face's first-order form.
+        min_curvature: f64,
+        /// The floor it cleared: `q·ε·‖C‖·(1 + cond)`, the eigenvalue backward
+        /// error amplified by the `Z`-block solve that formed `C`.
+        curvature_margin: f64,
+    },
+    /// MEASURED by probing back from the rail: the pencil constant
+    /// `ĉ = −e^{ρ}·∂V/∂ρ` held across a finite-difference-clean window. The
+    /// evidence is a window at finite `λ`, so a constant that is not strictly
+    /// positive is the instrument reporting itself rather than a tail law.
+    ProbedTail {
+        /// The finite-difference floor `ĉ` had to exceed to count as signal.
+        noise_floor: f64,
+        /// The relative drift band the window was held to.
+        drift_band: f64,
+    },
+}
+
+impl RailTailEvidence {
+    /// Whether `tail_constant` is well formed FOR THIS ROUTE.
+    ///
+    /// The routes disagree about zero, and both are right. A probed tail reads
+    /// `ĉ` off a finite-difference window, where a non-positive constant is
+    /// noise being reported as a law. A proven face derives `ĉ` from the limit
+    /// itself, and derives exactly zero for a coordinate the rest of the face
+    /// has already pinned; refusing that would refuse a face the proof covers.
+    /// Such a coordinate needs another face coordinate to pin its directions, so
+    /// it can only arise on a face of two or more — which is why a
+    /// single-coordinate certificate never exercised the disagreement.
+    pub fn admits(&self, tail_constant: f64) -> bool {
+        if !tail_constant.is_finite() {
+            return false;
+        }
+        match self {
+            Self::AnalyticFaceProof {
+                min_curvature,
+                curvature_margin,
+            } => {
+                // Re-check the proof's own inequality: `certifies()` may be
+                // asked of a DESERIALIZED certificate, where these are only
+                // numbers someone supplied.
+                tail_constant >= 0.0
+                    && min_curvature.is_finite()
+                    && curvature_margin.is_finite()
+                    && *min_curvature > *curvature_margin
+            }
+            Self::ProbedTail { noise_floor, .. } => {
+                noise_floor.is_finite() && tail_constant > 0.0
+            }
+        }
+    }
+
+    /// A short label naming the route, for logs and refusal summaries.
+    pub fn route(&self) -> &'static str {
+        match self {
+            Self::AnalyticFaceProof { .. } => "analytic face proof",
+            Self::ProbedTail { .. } => "probed tail",
+        }
+    }
+}
+
 /// One outer smoothing coordinate certified stationary-at-asymptote: it has no
 /// interior optimum (its gradient never clears the fixed bound), but the fitted
 /// model has provably reached its rail limit to within tolerance along it
@@ -650,11 +736,10 @@ pub struct RailCoordinate {
     pub value_gap: f64,
     /// The bound on remaining coefficient travel to the rail limit.
     pub estimand_travel_bound: f64,
-    /// The floor the evidence cleared: the pencil-constant noise floor for a
-    /// measured tail (`ĉ > noise_margin`, the self-protection against the
-    /// finite-difference floor), or the eigen-backward-error margin the
-    /// analytic face form's smallest curvature cleared.
-    pub noise_margin: f64,
+    /// Which route established the tail, and the standard that route applied.
+    /// The well-formedness rule for `tail_constant` comes from here, because
+    /// the two routes genuinely differ about what a valid constant is.
+    pub evidence: RailTailEvidence,
 }
 
 /// The stationarity equation that certified an outer optimum.
@@ -890,22 +975,29 @@ impl OuterCriterionCertificate {
     }
 
     /// An `AsymptoteRail` certificate is only admissible when it carries at
-    /// least one rail and every rail's certified facts are finite (a positive
-    /// pencil constant and non-negative gaps). Non-rail certificates trivially
-    /// pass. This closes the door on a deserialized rail certificate with an
-    /// empty or non-finite `rails` list minting convergence.
+    /// least one rail and every rail's certified facts are finite, with
+    /// non-negative gaps and a pencil constant its own route admits. Non-rail
+    /// certificates trivially pass. This closes the door on a deserialized rail
+    /// certificate with an empty or non-finite `rails` list minting
+    /// convergence.
+    ///
+    /// The pencil-constant rule is delegated to [`RailTailEvidence::admits`]
+    /// rather than fixed here at `ĉ > 0`. That flat rule was the MEASURED
+    /// route's, applied to both: it silently un-certified any analytically
+    /// proven face carrying an unidentified coordinate, whose proven constant is
+    /// exactly zero. The mint logged a successful proof and `certifies()` then
+    /// returned false with nothing recording why — reachable only on a face of
+    /// two or more coordinates, which no single-coordinate fixture produces.
     fn rails_are_well_formed(&self) -> bool {
         match &self.stationarity {
             OuterStationarityCertificate::AsymptoteRail { rails, .. } => {
                 !rails.is_empty()
                     && rails.iter().all(|rail| {
-                        rail.tail_constant.is_finite()
-                            && rail.tail_constant > 0.0
+                        rail.evidence.admits(rail.tail_constant)
                             && rail.value_gap.is_finite()
                             && rail.value_gap >= 0.0
                             && rail.estimand_travel_bound.is_finite()
                             && rail.estimand_travel_bound >= 0.0
-                            && rail.noise_margin.is_finite()
                     })
             }
             _ => true,
@@ -945,7 +1037,7 @@ impl OuterCriterionCertificate {
                     .iter()
                     .map(|rail| {
                         format!(
-                            "#{}{} ĉ={:.3e} gap={:.3e} travel={:.3e}",
+                            "#{}{} ĉ={:.3e} gap={:.3e} travel={:.3e} via {}",
                             rail.index,
                             match rail.side {
                                 crate::rho_optimizer::asymptote_certificate::AsymptoteSide::Upper =>
@@ -956,6 +1048,7 @@ impl OuterCriterionCertificate {
                             rail.tail_constant,
                             rail.value_gap,
                             rail.estimand_travel_bound,
+                            rail.evidence.route(),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1197,6 +1290,115 @@ impl Default for FitOptions {
 /// `detect_wrong_rail_pullback`) decide by testing that `ĉ` is CONSTANT. One
 /// `Default` disabled the face certificate, the tail snap, and the repair path
 /// for a coordinate stuck on the wrong bound.
+#[cfg(test)]
+mod rail_tail_evidence_tests {
+    use super::{
+        OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate, RailTailEvidence,
+    };
+    use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
+
+    fn proven_rail(index: usize, tail_constant: f64) -> RailCoordinate {
+        RailCoordinate {
+            index,
+            side: AsymptoteSide::Upper,
+            tail_constant,
+            value_gap: tail_constant * (-12.0_f64).exp(),
+            estimand_travel_bound: 1.0e-9,
+            evidence: RailTailEvidence::AnalyticFaceProof {
+                min_curvature: 3.5,
+                curvature_margin: 1.0e-12,
+            },
+        }
+    }
+
+    fn certificate(rails: Vec<RailCoordinate>) -> OuterCriterionCertificate {
+        OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AsymptoteRail {
+                interior_projected_grad_norm: 1.0e-9,
+                bound: 1.0e-6,
+                rails,
+            },
+            hessian_psd: Some(true),
+            lambdas_railed: vec![0, 1],
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        }
+    }
+
+    /// A PROVEN face carrying an UNIDENTIFIED coordinate must certify.
+    ///
+    /// `certify_rail_face` types a coordinate whose penalty releases nothing —
+    /// once the rest of the face is at `λ = ∞` — as `Unidentified` and derives
+    /// `c = 0` for it exactly: `V` does not depend on its smoothing parameter at
+    /// all. The well-formedness guard used to demand `c > 0` of every rail,
+    /// which is the MEASURED route's rule, so a face the analytic route had
+    /// just proven came back un-certified with nothing recording why. Building
+    /// the state needs a second face coordinate to do the pinning, which is why
+    /// no single-coordinate fixture could reach it.
+    #[test]
+    fn a_proven_face_certifies_with_an_unidentified_coordinate_2348() {
+        let certificate = certificate(vec![proven_rail(0, 4.25), proven_rail(1, 0.0)]);
+        assert!(
+            certificate.certifies(),
+            "an analytically proven face must certify even though coordinate 1 is \
+             unidentified there — c = 0 is the proof's answer, not a missing \
+             measurement: {}",
+            certificate.summary()
+        );
+    }
+
+    /// The measured route keeps its own rule. A probed tail reads `ĉ` off a
+    /// finite-difference window, where a non-positive constant is the
+    /// instrument reporting itself rather than a tail law — that must still
+    /// refuse, or the fix above would have widened both routes at once.
+    #[test]
+    fn a_probed_tail_still_refuses_a_non_positive_constant_2348() {
+        let probed = RailCoordinate {
+            index: 0,
+            side: AsymptoteSide::Upper,
+            tail_constant: 0.0,
+            value_gap: 0.0,
+            estimand_travel_bound: 1.0e-9,
+            evidence: RailTailEvidence::ProbedTail {
+                noise_floor: 1.0e-6,
+                drift_band: 1.0e-2,
+            },
+        };
+        assert!(
+            !certificate(vec![probed]).certifies(),
+            "a probed tail with c = 0 carries no evidence of a tail law at all"
+        );
+    }
+
+    /// A DESERIALIZED certificate cannot claim a proof it does not carry: the
+    /// analytic route stores the inequality it was minted under, and the guard
+    /// re-checks it rather than trusting the label.
+    #[test]
+    fn a_claimed_face_proof_below_its_own_margin_does_not_certify_2348() {
+        let mut rail = proven_rail(0, 4.25);
+        rail.evidence = RailTailEvidence::AnalyticFaceProof {
+            min_curvature: 1.0e-14,
+            curvature_margin: 1.0e-12,
+        };
+        assert!(
+            !certificate(vec![rail]).certifies(),
+            "lambda_min(C) must exceed the margin the certificate claims it cleared"
+        );
+    }
+
+    /// The route is visible to a reader of the certificate, not only to the
+    /// guard: a rail line that does not say which standard produced its
+    /// constant leaves the two routes indistinguishable in the run record.
+    #[test]
+    fn the_summary_names_the_route_that_established_each_rail_2348() {
+        let analytic = certificate(vec![proven_rail(0, 4.25)]).summary();
+        assert!(
+            analytic.contains("analytic face proof"),
+            "a proven rail must say so: {analytic}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shipped_criterion_identity_tests {
     use super::FitOptions;
