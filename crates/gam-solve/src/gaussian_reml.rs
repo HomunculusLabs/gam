@@ -4940,6 +4940,129 @@ mod tests {
         assert!(result.edf <= x.ncols() as f64 + 1.0e-10);
     }
 
+    /// #2496: this one-mode problem has an analytic interior optimum at λ=1.
+    ///
+    /// With `X=(1,0,0)'`, `y=(1,1,0)'`, and `S=(1)`, the fitted coefficient is
+    /// `1/(1+λ)` and the profiled scale is
+    /// `dp = ||y-Xβ||² + λβ'Sβ = 2 - 1/(1+λ)`. Differentiating the full REML
+    /// objective gives its unique finite stationary minimum at λ=1. A profile
+    /// that substitutes plain RSS for `dp` does not satisfy this identity.
+    #[test]
+    fn profiled_gaussian_reml_penalized_scale_selects_analytic_lambda_one_2496() {
+        let x = array![[1.0], [0.0], [0.0]];
+        let y = array![1.0, 1.0, 0.0];
+        let penalty = array![[1.0]];
+        let fit = gaussian_reml_closed_form_with_nullspace_dim(
+            x.view(),
+            y.view(),
+            penalty.view(),
+            Some(0),
+            None,
+            None,
+        )
+        .expect("analytic one-mode Gaussian REML profile");
+
+        eprintln!(
+            "[#2496] analytic profile: lambda={:.12e} rho={:.12e} sigma2={:.12e}",
+            fit.lambda, fit.rho, fit.sigma2,
+        );
+        assert!(
+            fit.rho.abs() <= 1.0e-9,
+            "analytic optimum is rho=log(lambda)=0, got {}",
+            fit.rho,
+        );
+        assert!((fit.lambda - 1.0).abs() <= 1.0e-9);
+        assert!((fit.coefficients[0] - 0.5).abs() <= 1.0e-9);
+        assert!((fit.sigma2 - 0.5).abs() <= 1.0e-9);
+    }
+
+    /// Profiling must be invariant to both gauges of the same penalized
+    /// function: scaling `S -> αS` translates `rho -> rho-log(α)`, while the
+    /// coefficient-chart change `X -> X/c`, `S -> S/c²`, `β -> cβ` leaves rho
+    /// unchanged. In both cases the fitted function and REML evidence are the
+    /// same. This is a regression on the canonical certified solver, not a
+    /// second implementation of its objective or λ search.
+    #[test]
+    fn profiled_gaussian_reml_is_penalty_scale_and_coefficient_chart_invariant_2496() {
+        let x = array![[1.0], [0.0], [0.0]];
+        let y = array![1.0, 1.0, 0.0];
+        let penalty = array![[1.0]];
+        let baseline = gaussian_reml_closed_form_with_nullspace_dim(
+            x.view(),
+            y.view(),
+            penalty.view(),
+            Some(0),
+            None,
+            None,
+        )
+        .expect("baseline analytic Gaussian REML profile");
+
+        for alpha in [1.0e-3_f64, 37.0, 1.0e4] {
+            let scaled_penalty = penalty.mapv(|value| alpha * value);
+            let scaled = gaussian_reml_closed_form_with_nullspace_dim(
+                x.view(),
+                y.view(),
+                scaled_penalty.view(),
+                Some(0),
+                None,
+                Some(baseline.rho - alpha.ln()),
+            )
+            .expect("penalty-scaled Gaussian REML profile");
+            let score_tolerance = 1.0e-9 * (1.0 + baseline.reml_score.abs());
+            assert!(
+                (scaled.reml_score - baseline.reml_score).abs() <= score_tolerance,
+                "S -> alpha S changed profiled evidence at alpha={alpha}: baseline={}, scaled={}",
+                baseline.reml_score,
+                scaled.reml_score,
+            );
+            assert!(
+                (scaled.rho - (baseline.rho - alpha.ln())).abs() <= 1.0e-9,
+                "S -> alpha S must shift rho by -log(alpha) at alpha={alpha}: baseline={}, scaled={}",
+                baseline.rho,
+                scaled.rho,
+            );
+            assert!(
+                (alpha * scaled.lambda - baseline.lambda).abs() <= 1.0e-9,
+                "physical lambda*S changed at alpha={alpha}",
+            );
+            for row in 0..x.nrows() {
+                assert!((scaled.fitted[row] - baseline.fitted[row]).abs() <= 1.0e-9);
+            }
+        }
+
+        let coefficient_scale = 7.0_f64;
+        let reparameterized_x = x.mapv(|value| value / coefficient_scale);
+        let reparameterized_penalty =
+            penalty.mapv(|value| value / coefficient_scale.powi(2));
+        let reparameterized = gaussian_reml_closed_form_with_nullspace_dim(
+            reparameterized_x.view(),
+            y.view(),
+            reparameterized_penalty.view(),
+            Some(0),
+            None,
+            Some(baseline.rho),
+        )
+        .expect("coefficient-reparameterized Gaussian REML profile");
+        let score_tolerance = 1.0e-9 * (1.0 + baseline.reml_score.abs());
+        assert!(
+            (reparameterized.reml_score - baseline.reml_score).abs() <= score_tolerance
+        );
+        assert!((reparameterized.rho - baseline.rho).abs() <= 1.0e-9);
+        assert!(
+            (reparameterized.coefficients[0]
+                - coefficient_scale * baseline.coefficients[0])
+                .abs()
+                <= 1.0e-9
+        );
+        for row in 0..x.nrows() {
+            assert!((reparameterized.fitted[row] - baseline.fitted[row]).abs() <= 1.0e-9);
+        }
+        eprintln!(
+            "[#2496] gauges: base_rho={:.12e}, chart_rho={:.12e}, score={:.12e}",
+            baseline.rho, reparameterized.rho, baseline.reml_score,
+        );
+    }
+
     #[test]
     fn shared_dispersion_pools_projection_exact_and_missed_outputs() {
         let n = 12usize;

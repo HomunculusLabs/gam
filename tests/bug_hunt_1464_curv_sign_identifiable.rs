@@ -98,34 +98,17 @@ fn fit_kappa_hat(kappa_star: f64, seed: u64) -> f64 {
         .expect("fitted spec must carry a constant-curvature κ̂")
 }
 
-// #1464 (fixed): the full `fit_from_formula` path used to rail κ̂ to the +chart
-// bound (~+1.08 at radius 0.68) for BOTH the spherical and the hyperbolic mirror
-// dataset, so the two signs were indistinguishable and hyperbolic truth was
-// mis-recovered as spherical. Basis-level effective-length L(κ) reparam +
-// `double_penalty:false` were already in place and the isolated profiled-REML
-// criterion (`constant_curvature_recovers_curvature_sign_1404`) already
-// identified the sign; the residual railing was in the joint [ρ,ψ] spatial outer
-// solver (the κ-optimized path this test drives). Its constant-curvature seed
-// config used to inject an explicit over-smoothing probe at ρ ≈ +15 — a seed
-// pinned to the collapsed-kernel corner where the geodesic exponential
-// exp(−d_κ/L) degenerates to a near-constant. There the criterion is flat in κ
-// (the kernel no longer resolves curvature) and reduces to the monotone log-det
-// Occam term, so the keep-best multistart adopted the low-Occam collapsed null
-// regardless of the true sign — the bit-identical κ̂ → +bound rail for both
-// datasets. The fix removes that probe for constant-curvature terms and instead
-// seeds the κ-sign basin from the sign-correct fixed-κ profiled-REML scan
-// (`select_constant_curvature_kappa_sign_seed`): a small symmetric grid of
-// fixed-κ profiled fits spanning both chart signs, evaluated through the SAME
-// κ-opt-OFF profiled criterion the `curvature_inference_forspec` CI oracle
-// trusts, whose argmin seeds the joint solve INSIDE the correct sign basin with
-// a κ-resolving (non-degenerate) kernel. The ρ upper bound stays widened to
-// RHO_BOUND so a genuinely heavily-smoothed optimum is still reachable via the
-// gradient solve and the sweep grid — it just is not pre-pinned to the collapse
-// point. With the joint solve started in the right basin and the per-κ REML cost
-// matching the textbook profiled-REML, the curvature SIGN is identifiable again,
-// so this contract PASSES. This contract runs unconditionally in CI:
-// re-`#[ignore]`ing it would only hide a future regression behind a skip, which
-// the ban gate forbids and which is exactly the failure mode #1464 was.
+// #1464 production route: before the baseline fit, each free
+// constant-curvature coordinate is selected once by the continuously optimized,
+// analytically differentiated curvature-fair profile
+// `V_p(κ; y) - V_p(κ; radial_reference)`. The subsequent nuisance-ρ/spatial
+// solve holds that selected κ fixed, and curvature inference evaluates the same
+// fair profile for its interval and flatness statistic. This contract therefore
+// guards the actual user-visible estimand route rather than a deleted
+// basis-local RSS profiler or the raw pinned-fit diagnostic.
+//
+// It runs unconditionally in CI: re-`#[ignore]`ing it would hide the exact
+// hyperbolic-as-spherical regression the issue reports.
 #[test]
 fn curv_full_fit_identifies_curvature_sign_on_mirror_datasets() {
     init_parallelism();

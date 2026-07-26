@@ -1872,19 +1872,19 @@ pub fn fit_spline_scan_from_formula(
         .map_err(|reason| WorkflowError::IntegrationFailed { reason })
 }
 
-/// #1464 diagnostic entry point: evaluate the EXACT production fixed-κ
-/// profiled-REML criterion (`fixed_kappa_profiled_reml_score`, the same one the
-/// joint-fit κ-sign scan uses) at a list of pinned κ values for the first
-/// constant-curvature term of `formula`, materialised from `data`/`config`
-/// exactly like [`fit_from_formula`]. Returns `(κ, V_p(κ))` pairs.
+/// #1464 diagnostic entry point: evaluate the exact production fixed-κ
+/// profiled-REML criterion (`fixed_kappa_profiled_reml_score`) at a list of
+/// pinned κ values for the first constant-curvature term of `formula`,
+/// materialised from `data`/`config` exactly like [`fit_from_formula`]. The
+/// scorer runs a complete production fit independently at every pinned κ and
+/// returns `(κ, V_p(κ))` pairs.
 ///
-/// This settles solver-vs-criterion for the railing bug: if `V_p(+κ) < V_p(−κ)`
-/// for a genuinely HYPERBOLIC dataset, the criterion itself prefers the collapsed
-/// +κ corner — the bug is in the constant-curvature REML/Occam term, not the
-/// optimiser. If `V_p(−κ) < V_p(+κ)` yet the full fit still returns +κ, the bug
-/// is in the solver/readback. The profiled fit pins κ and profiles only ρ
-/// (κ-optimisation disabled), so each returned score is the negative-log-evidence
-/// the outer loop minimises.
+/// This is a raw pinned-fit diagnostic, not the curvature estimand objective.
+/// Curvature point estimation, confidence intervals, and flatness inference use
+/// the separate continuously differentiable curvature-fair
+/// response-minus-reference profile. Here κ-optimisation is disabled and each
+/// complete fit profiles only its smoothing parameters, so every returned score
+/// is the canonical negative log evidence of that independently pinned model.
 pub fn constant_curvature_profiled_reml_scores(
     formula: &str,
     data: &Dataset,

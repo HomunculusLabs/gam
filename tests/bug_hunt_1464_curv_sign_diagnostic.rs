@@ -3,12 +3,13 @@
 //! spatial solve is directly observable. This is a DIAGNOSTIC (plain `eprintln!`,
 //! no `{:?}`), not a pass/fail contract — the contract lives in
 //! `bug_hunt_1464_curv_sign_identifiable.rs`. It exists so a maintainer can see,
-//! per dataset, the final κ̂ the fit reports after the fixed-κ sign-basin scan +
-//! hard sign-pin land, and whether the two mirror datasets are now separated.
+//! per dataset, the final κ̂ selected by the continuous curvature-fair profile
+//! and then held fixed through the nuisance fit, and whether the two mirror
+//! datasets are separated.
 //!
-//! The scan's selected κ_seed per term is emitted by the production
-//! `log::info!("[spatial-kappa] #1464 fixed-κ sign-basin scan selected …")`; run
-//! with `RUST_LOG=info` to see it alongside this κ̂ output.
+//! The selected value is emitted by the production
+//! `log::info!("[spatial-kappa] continuous fair-profile optimum …")`; run with
+//! `RUST_LOG=info` to see it alongside this κ̂ output.
 
 use gam::geometry::constant_curvature::ConstantCurvature;
 use gam::smooth::get_constant_curvature_kappa;

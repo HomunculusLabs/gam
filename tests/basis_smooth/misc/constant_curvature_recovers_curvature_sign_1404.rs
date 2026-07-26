@@ -1,27 +1,27 @@
 //! #1404 / #1464 regression guard: the constant-curvature (`curv`) smooth's
-//! profiled-REML criterion must IDENTIFY THE SIGN of the true curvature — it
-//! must prefer a negative κ for hyperbolic-shaped data and a positive κ for
-//! spherical-shaped data, instead of railing to the positive chart bound for
-//! every dataset (the #1464 symptom: hyperbolic truth recovered as spherical).
+//! fitted curvature estimand must IDENTIFY THE SIGN of the true curvature — a
+//! negative κ for hyperbolic-shaped data and a positive κ for spherical-shaped
+//! data, instead of railing to the positive chart bound for every dataset.
 //!
-//! This drives the PUBLIC basis API (`build_constant_curvature_basis` at each
-//! candidate κ + a self-contained profiled-Gaussian-REML λ sweep) rather than a
-//! crate-private oracle, so it guards the user-visible path the #1404 cluster
-//! reported on. Two things make the sign identifiable and are exercised here:
-//!   * the fill-invariant effective length L(κ) baked into the basis builder
-//!     (so changing κ moves the geodesic-distance SHAPE, not the kernel
-//!     resolution), and
-//!   * NO curvature-blind double-penalty ridge (#1464 default), which otherwise
-//!     absorbs the fit independently of κ and lets the criterion rail.
+//! This drives the production free-curvature fit, whose continuous
+//! response-minus-reference fair profile selects κ before the baseline fit. It
+//! therefore guards the user-visible estimand without substituting either the
+//! deleted plain-RSS profiler or the raw fixed-fit diagnostic.
 //!
-//! Reference-as-truth: every assertion is against the argmin of gam's own
-//! profiled REML criterion over a κ grid — never another tool's output.
+//! Reference-as-truth: the response is generated from gam's own
+//! constant-curvature kernel and every assertion is on gam's fitted κ.
 
-use gam::terms::basis::{
-    CenterStrategy, ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability, PenaltySource,
-    build_constant_curvature_basis, constant_curvature_kernel_matrix,
-    realized_constant_curvature_length_scale,
+use gam::estimate::FitOptions;
+use gam::smooth::{
+    ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
+    TermCollectionSpec, fit_term_collectionwith_spatial_length_scale_optimization,
+    get_constant_curvature_kappa,
 };
+use gam::terms::basis::{
+    CenterStrategy, ConstantCurvatureBasisSpec, ConstantCurvatureIdentifiability,
+    constant_curvature_kernel_matrix, realized_constant_curvature_length_scale,
+};
+use gam::types::LikelihoodSpec;
 use ndarray::{Array1, Array2};
 
 fn splitmix64(state: &mut u64) -> u64 {
@@ -40,7 +40,7 @@ fn next_gauss(state: &mut u64) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
-/// Reproducible data on a disk of radius 0.45 (inside every κ chart in the grid).
+/// Reproducible data on a disk of radius 0.45.
 fn disk_points(n: usize, seed: u64) -> Array2<f64> {
     let mut st = seed;
     let mut pts = Array2::<f64>::zeros((n, 2));
@@ -73,110 +73,60 @@ fn curved_response(data: &Array2<f64>, kappa_true: f64, ell: f64, seed: u64) -> 
     y
 }
 
-/// Profiled Gaussian REML deviance for design `b`, response `y`, single penalty
-/// `s`, minimized over a log-λ grid. Mirrors the in-crate constant-curvature
-/// oracle; self-contained so this test needs no crate-private helper.
-fn profiled_reml(b: &Array2<f64>, y: &Array1<f64>, s: &Array2<f64>) -> f64 {
-    use gam::linalg::faer_ndarray::FaerEigh;
-    let n = b.nrows();
-    let p = b.ncols();
-    let btb = {
-        let m = b.t().dot(b);
-        (&m + &m.t()) * 0.5
-    };
-    let bty = b.t().dot(y);
-    let s_sym = (s + &s.t()) * 0.5;
-    let (s_evals, _sv) = FaerEigh::eigh(&s_sym, faer::Side::Lower).unwrap();
-    let s_max = s_evals.iter().cloned().fold(0.0_f64, f64::max).max(1e-300);
-    let s_tol = s_max * 1e-9;
-    let r = s_evals.iter().filter(|&&e| e > s_tol).count();
-    let m_p = p - r;
-    let dof = (n - m_p) as f64;
-    let log_det_s_plus: f64 = s_evals
-        .iter()
-        .filter(|&&e| e > s_tol)
-        .map(|&e| e.ln())
-        .sum();
-    let mut best = f64::INFINITY;
-    for grid in -24i32..=24 {
-        let lam = (0.5 * f64::from(grid)).exp();
-        let h = {
-            let m = &btb
-                + &s_sym.mapv(|v| v * lam)
-                + &(Array2::<f64>::eye(p) * (1e-10 * s_max.max(1.0)));
-            (&m + &m.t()) * 0.5
-        };
-        let (hv, hq) = FaerEigh::eigh(&h, faer::Side::Lower).unwrap();
-        let qty = hq.t().dot(&bty);
-        let mut beta = Array1::<f64>::zeros(p);
-        let mut log_det_h = 0.0_f64;
-        for i in 0..p {
-            let ev = hv[i].max(1e-300);
-            log_det_h += ev.ln();
-            let coef = qty[i] / ev;
-            for j in 0..p {
-                beta[j] += hq[[j, i]] * coef;
-            }
-        }
-        let resid = y - &b.dot(&beta);
-        let rss = resid.dot(&resid).max(1e-300);
-        let log_det_lam_s = (r as f64) * lam.ln() + log_det_s_plus;
-        let dev = dof * (rss / dof).ln() + log_det_h - log_det_lam_s;
-        if dev < best {
-            best = dev;
-        }
-    }
-    best
-}
-
-/// argmin of the profiled criterion over a κ grid, for a given true curvature.
-fn argmin_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
+/// Fit the free-curvature production model for a given true curvature.
+fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
     let y = curved_response(data, kappa_true, ell_ref, 11);
-    let grid: Vec<f64> = (-30..=30).map(|i| f64::from(i) * 0.1).collect();
-    let mut best_k = f64::NAN;
-    let mut best_v = f64::INFINITY;
-    for &kappa in &grid {
-        let spec = ConstantCurvatureBasisSpec {
-            // A modest farthest-point center set keeps the per-κ eigensolves
-            // cheap across the grid while still resolving the radial signal.
-            center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
-            kappa,
-            kappa_fixed: false,
-            length_scale: ell_ref,
-            // No ridge: the curvature-blind double penalty defeats sign
-            // identification (#1464). The RKHS Gram alone is full-rank PD.
-            double_penalty: false,
-            identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
-        };
-        let built = build_constant_curvature_basis(data.view(), &spec).unwrap();
-        let b = built.design.to_dense();
-        assert_eq!(
-            built.active_penalties.len(),
-            1,
-            "with double_penalty=false the curv smooth must expose exactly one (RKHS Gram) penalty"
-        );
-        let primary = built
-            .active_penalties
-            .iter()
-            .find(|penalty| matches!(penalty.info.source, PenaltySource::Primary))
-            .expect("constant-curvature basis must retain its primary RKHS penalty");
-        let v = profiled_reml(&b, &y, &primary.matrix);
-        if v < best_v {
-            best_v = v;
-            best_k = kappa;
-        }
-    }
-    best_k
+    let resolved_spec = TermCollectionSpec {
+        linear_terms: Vec::new(),
+        random_effect_terms: Vec::new(),
+        smooth_terms: vec![SmoothTermSpec {
+            name: "curvature".to_string(),
+            basis: SmoothBasisSpec::ConstantCurvature {
+                feature_cols: vec![0, 1],
+                spec: ConstantCurvatureBasisSpec {
+                    // A modest farthest-point center set keeps each analytic
+                    // fair-profile evaluation cheap while resolving the signal.
+                    center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                    kappa: 0.0,
+                    kappa_fixed: false,
+                    length_scale: ell_ref,
+                    double_penalty: false,
+                    identifiability: ConstantCurvatureIdentifiability::CenterSumToZero,
+                },
+            },
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }],
+    };
+    let weights = Array1::<f64>::ones(data.nrows());
+    let offset = Array1::<f64>::zeros(data.nrows());
+    let options = FitOptions::default();
+    let fitted = fit_term_collectionwith_spatial_length_scale_optimization(
+        data.view(),
+        y,
+        weights,
+        offset,
+        &resolved_spec,
+        LikelihoodSpec::gaussian_identity(),
+        &options,
+        &SpatialLengthScaleOptimizationOptions {
+            pilot_subsample_threshold: 0,
+            ..SpatialLengthScaleOptimizationOptions::default()
+        },
+    )
+    .expect("free-curvature production fit");
+    get_constant_curvature_kappa(&fitted.resolvedspec, 0)
+        .expect("fitted constant-curvature term must retain kappa")
 }
 
 #[test]
-fn curv_profiled_reml_identifies_curvature_sign_both_ways() {
+fn curv_production_estimand_identifies_curvature_sign_both_ways() {
     let data = disk_points(220, 0xC0FF_EE12);
     // κ=0 reference length (auto chart spacing) — the L(κ) target is pinned to it.
     let ell_ref = realized_constant_curvature_length_scale(data.view(), 0.0).unwrap();
 
-    let k_hyp = argmin_kappa(&data, ell_ref, -2.0);
-    let k_sph = argmin_kappa(&data, ell_ref, 2.0);
+    let k_hyp = fitted_kappa(&data, ell_ref, -2.0);
+    let k_sph = fitted_kappa(&data, ell_ref, 2.0);
     eprintln!("[#1404] curvature-sign recovery: hyperbolic κ̂={k_hyp:.2}  spherical κ̂={k_sph:.2}");
 
     assert!(
@@ -191,7 +141,7 @@ fn curv_profiled_reml_identifies_curvature_sign_both_ways() {
     // The two signs must be genuinely DISTINGUISHED, not a coincidence of one bound.
     assert!(
         k_hyp < k_sph,
-        "curvature criterion must separate hyperbolic from spherical truth: \
+        "curvature estimand must separate hyperbolic from spherical truth: \
          hyperbolic κ̂={k_hyp} should be below spherical κ̂={k_sph}"
     );
 }

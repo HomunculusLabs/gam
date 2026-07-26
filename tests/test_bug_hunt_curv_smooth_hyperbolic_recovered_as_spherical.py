@@ -1,12 +1,10 @@
 """#1464 contract: curv() constant-curvature smooth must recover the *sign* of the
 true curvature through the Python full-fit path.
 
-The bug (#1464) was that hyperbolic data (kappa* < 0) was recovered as spherical —
-`kappa_hat` railed to the positive chart bound because the accept-gate scored a
-sign-blind raw V_p criterion. The fix pins the constant-curvature baseline kappa to
-the sign-correct kappa-fair fast-path scan (spatial_optimization.rs). The Rust e2e
-contract is covered by tests/owed_1464.rs / bug_hunt_1464_*; this is the matching
-guard for the *Python* `gamfit.fit(...).curvature(...)` full-fit path the issue names.
+The bug (#1464) is that hyperbolic data (kappa* < 0) can be recovered as spherical:
+`kappa_hat` rails to the positive chart bound. The Rust `bug_hunt_1464_*` tests
+exercise the same curvature-identifiability contract. This is the matching guard
+for the *Python* `gamfit.fit(...).curvature(...)` full-fit path the issue names.
 
 Previously this file was a print-only diagnostic (no test_ function, no asserts) and
 was not collected by pytest, so it guarded nothing — it is now an asserting gate.
