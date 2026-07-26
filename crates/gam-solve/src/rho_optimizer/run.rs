@@ -1952,6 +1952,61 @@ pub(crate) fn certificate_railed_coordinates(
         .collect()
 }
 
+/// Which term of the stationarity bound's `max` chain actually set it.
+///
+/// `certify_outer_optimality` does not compute *a* bound; it takes the maximum of
+/// up to five independently-derived quantities, and until #2458 nothing recorded
+/// which one won. That is why a `bound=1.000e0` and a `bound=5.68e-6` came out of
+/// the same message shape and telling them apart required reading this file --
+/// the emitted number is a DERIVATIVE of a construction-site value, computed
+/// later, so grepping the construction sites cannot match an observed bound.
+///
+/// The rungs are not interchangeable calibrations of one quantity. Only
+/// [`Self::CurvatureResolvability`] is derived from what a gradient of that size
+/// does to the criterion: `|Pg|·√(τ/Δpred)` simplifies to `√(2·h·τ)` -- the `|Pg|`
+/// cancels -- i.e. the gradient magnitude below which the criterion cannot resolve
+/// descent at all. The others are gradient-magnitude tests, blind to how curvature
+/// maps a gradient to an objective change, which is exactly what this file's own
+/// comment at the curvature block already says. Recording the rung is the
+/// prerequisite for holding every route to the derived one: it makes "which
+/// machinery did this route happen to have" an observable rather than an
+/// inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StationarityBoundSource {
+    /// `outer_gradient_tolerance(config).threshold(cost, |g|)` -- the raw band.
+    SolverBand,
+    /// `flat_valley_converged_grad_bound(cost)`, gated on a `CostStallFlatValley`
+    /// exit. Saturates at its `1.0` cap (#2456).
+    FlatValleyScore,
+    /// The cost-stall guard's measured probe-noise floor `σ̂/Δ` (#2241). Diverges
+    /// as the step collapses, which is the regime it fires in.
+    ProbeNoiseFloor,
+    /// `|Pg|·√(τ/Δpred)` = `√(2·h·τ)` (#2253/#2249/#2015/#2091) -- the only rung
+    /// with a derivation from the criterion's own resolution.
+    CurvatureResolvability,
+    /// Twice the same-ρ spread between the run-recorded and certificate-time
+    /// gradients (#2299): the measuring instrument's demonstrated noise.
+    GradientReproducibility,
+}
+
+impl StationarityBoundSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::SolverBand => "solver-band",
+            Self::FlatValleyScore => "flat-valley-score",
+            Self::ProbeNoiseFloor => "probe-noise-floor",
+            Self::CurvatureResolvability => "curvature-resolvability",
+            Self::GradientReproducibility => "gradient-reproducibility",
+        }
+    }
+
+    /// Whether this rung is the derived resolvability standard rather than a
+    /// gradient-magnitude substitute adopted where that standard was unavailable.
+    pub(crate) fn is_derived_standard(self) -> bool {
+        matches!(self, Self::CurvatureResolvability)
+    }
+}
+
 fn outer_nonconvergence_error(
     context: &str,
     reason: &str,
@@ -2512,11 +2567,18 @@ fn certify_outer_optimality_at_terminal_fidelity(
     );
     let projected_grad_norm = projected_gradient.iter().map(|v| v * v).sum::<f64>().sqrt();
     let solver_bound = outer_gradient_tolerance(config).threshold(evaluation.cost, grad_norm);
+    let mut bound_source = StationarityBoundSource::SolverBand;
     let mut stationarity_bound = if matches!(
         result.operator_stop_reason,
         Some(OperatorTrustRegionStopReason::CostStallFlatValley)
     ) {
-        solver_bound.max(flat_valley_converged_grad_bound(evaluation.cost))
+        let flat_valley = flat_valley_converged_grad_bound(evaluation.cost);
+        if flat_valley > solver_bound {
+            bound_source = StationarityBoundSource::FlatValleyScore;
+            flat_valley
+        } else {
+            solver_bound
+        }
     } else {
         solver_bound
     };
@@ -2527,7 +2589,10 @@ fn certify_outer_optimality_at_terminal_fidelity(
     if let Some(noise_bound) = result.flat_noise_grad_bound
         && noise_bound.is_finite()
     {
-        stationarity_bound = stationarity_bound.max(noise_bound);
+        if noise_bound > stationarity_bound {
+            bound_source = StationarityBoundSource::ProbeNoiseFloor;
+            stationarity_bound = noise_bound;
+        }
     }
     audit_outer_value_agreement(
         context,
@@ -2652,6 +2717,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                  widened from gradient-band {stationarity_bound:.3e}"
             );
             stationarity_bound = curvature_grad_bound;
+            bound_source = StationarityBoundSource::CurvatureResolvability;
         }
     }
 
@@ -2709,8 +2775,25 @@ fn certify_outer_optimality_at_terminal_fidelity(
                  {spread:.3e}, cost drift {cost_drift:.3e} ≤ tol {objective_tol:.3e})"
             );
             stationarity_bound = repro_bound;
+            bound_source = StationarityBoundSource::GradientReproducibility;
         }
     }
+
+    // #2458 -- the bound's own provenance, emitted UNCONDITIONALLY rather than only
+    // when a rung happens to widen. A certificate that does not carry which of its
+    // five terms decided it can only be re-derived from source, never audited; the
+    // same complaint this file's refusal messages make about the fits they refuse.
+    // `derived_standard=false` is the actionable bit: it says this verdict rests on
+    // a gradient-magnitude substitute because the resolvability form was
+    // unavailable on this route, not because the problem called for it.
+    log::info!(
+        "[CERTIFICATE-BOUND] {context}: bound {stationarity_bound:.6e} set by {} \
+         (derived_standard={}, |Pg|={projected_grad_norm:.6e}, |g|={grad_norm:.6e}, \
+         solver_band={solver_bound:.6e}, cost={:.6e})",
+        bound_source.label(),
+        bound_source.is_derived_standard(),
+        evaluation.cost,
+    );
 
     // Large-step flatness certificate (#2299 fully-saturated smooth). After the
     // reproducibility floor a coordinate that has collapsed EXACTLY onto its
