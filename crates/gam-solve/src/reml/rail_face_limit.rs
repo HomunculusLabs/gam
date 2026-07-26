@@ -676,6 +676,394 @@ mod rail_face_limit_tests {
         );
     }
 
+    // ═════════════ multi-coordinate faces (#2348 Inc 5 build-out) ═════════════
+
+    /// The cubic fixture's bend block split into its two eigen-directions, so a
+    /// face can rail them as TWO ρ coordinates instead of one, plus the same
+    /// finite slope survivor.
+    ///
+    /// `S_0 + S_1` is the single `bend` of [`cubic_penalties`] exactly
+    /// (canonicalization stores `RᵀR`, which reproduces the block on its range
+    /// without rescaling), and `M_p = p − Σ_j rank(S_j)` is 4 − 3 in both
+    /// layouts — three rank-1 blocks against one rank-2 plus one rank-1. So at
+    /// `ρ_0 = ρ_1` the two layouts are the SAME model with the same `S_λ` and
+    /// the same criterion, which is what makes the cross-layout comparison an
+    /// identity rather than an approximation.
+    fn split_bend_penalties() -> Vec<gam_terms::construction::CanonicalPenalty> {
+        let p = 4usize;
+        let mut quadratic = Array2::<f64>::zeros((p, p));
+        quadratic[[2, 2]] = 1.0;
+        let mut cubic = Array2::<f64>::zeros((p, p));
+        cubic[[3, 3]] = 2.0;
+        let mut slope = Array2::<f64>::zeros((p, p));
+        slope[[1, 1]] = 1.0;
+        gam_terms::construction::canonicalize_penalty_specs(
+            &[
+                crate::estimate::PenaltySpec::Dense(quadratic),
+                crate::estimate::PenaltySpec::Dense(cubic),
+                crate::estimate::PenaltySpec::Dense(slope),
+            ],
+            &[3, 3, 3],
+            p,
+            "rail_face_limit_split_fixture",
+        )
+        .map(|(canonical, _)| canonical)
+        .expect("canonicalize the split-bend fixture penalties")
+    }
+
+    /// The same released subspace reached by a face whose two coordinates
+    /// OVERLAP: `S_0` is the full rank-2 bend and `S_1` is a rank-1 penalty
+    /// along `(e₂+e₃)/√2`, a direction `S_0` already penalizes. This is the
+    /// coalesced geometry the face form exists for — the case a per-coordinate
+    /// marginal law cannot describe, because coordinate 1 releases nothing once
+    /// coordinate 0 is at `λ = ∞`.
+    fn overlapping_face_penalties() -> Vec<gam_terms::construction::CanonicalPenalty> {
+        let p = 4usize;
+        let mut bend = Array2::<f64>::zeros((p, p));
+        bend[[2, 2]] = 1.0;
+        bend[[3, 3]] = 2.0;
+        let mut coalesced = Array2::<f64>::zeros((p, p));
+        for (i, j) in [(2, 2), (2, 3), (3, 2), (3, 3)] {
+            coalesced[[i, j]] = 0.5;
+        }
+        let mut slope = Array2::<f64>::zeros((p, p));
+        slope[[1, 1]] = 1.0;
+        gam_terms::construction::canonicalize_penalty_specs(
+            &[
+                crate::estimate::PenaltySpec::Dense(bend),
+                crate::estimate::PenaltySpec::Dense(coalesced),
+                crate::estimate::PenaltySpec::Dense(slope),
+            ],
+            &[2, 3, 3],
+            p,
+            "rail_face_limit_overlap_fixture",
+        )
+        .map(|(canonical, _)| canonical)
+        .expect("canonicalize the overlapping-face fixture penalties")
+    }
+
+    /// THE MULTI-COORDINATE JOINT LAW, against production.
+    ///
+    /// Release the whole face along its diagonal: with every face `λ_j = e^ρ`,
+    /// `V(ρ) = V_∞ + e^{−ρ}·c_joint` exactly, so
+    /// `Σ_{j∈F} ∂V/∂ρ_j = −c_joint·e^{−ρ}`. That is the `|F| > 1` analogue of
+    /// the single-coordinate pencil law, and it holds whether or not the face
+    /// penalties overlap, because it differentiates the one form `C` along the
+    /// ray rather than assembling marginals.
+    ///
+    /// This is the first test in this module to build a face limit at all at
+    /// `|F| > 1`. The proof module has always accepted a multi-coordinate face
+    /// and has unit tests on hand-built `RailFaceLimit` values; every limit
+    /// this module built for it, however, was built for `&[0]` — so the
+    /// production assembly at `|F| > 1` (the Q/Z split of a multi-penalty face,
+    /// the per-coordinate released blocks, the rank bookkeeping against a
+    /// survivor) was covered only by the run-loop, which passes whatever the
+    /// active box face is.
+    #[test]
+    fn two_coordinate_face_joint_law_reproduces_the_production_gradient() {
+        let (y, weights, x) = cubic_fixture(NULL_CURVATURE);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = gaussian_config();
+        let state = RemlState::newwith_offset(
+            y.view(),
+            x.clone(),
+            weights.view(),
+            offset.view(),
+            split_bend_penalties(),
+            4,
+            &config,
+            Some(vec![3, 3, 3]),
+            None,
+            None,
+        )
+        .expect("build the split-bend fixture state");
+
+        let rho_face = 10.0_f64;
+        let rho = Array1::from(vec![rho_face, rho_face, 1.0]);
+        let limit = expect_available(
+            state
+                .rail_face_limit(&rho, &[0, 1])
+                .expect("the analytic face limit must not error"),
+            "two-coordinate face",
+        );
+        assert_eq!(
+            limit.face,
+            vec![0, 1],
+            "the limit must carry BOTH railed coordinates, not collapse to one"
+        );
+        assert_eq!(
+            limit.released_penalties.len(),
+            2,
+            "each face coordinate needs its own released block"
+        );
+
+        let proof = match certify_rail_face(&limit) {
+            RailFaceVerdict::Certified(proof) => proof,
+            RailFaceVerdict::Refused { reason } => {
+                panic!("the two-coordinate face should certify on a null truth: {reason}")
+            }
+        };
+        assert_eq!(
+            proof.coordinate_kinds,
+            vec![
+                crate::rho_optimizer::rail_face::FaceCoordinateKind::StrictOutward,
+                crate::rho_optimizer::rail_face::FaceCoordinateKind::StrictOutward
+            ],
+            "disjoint face penalties each release a direction of their own"
+        );
+
+        let eval = state
+            .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the production REML gradient must evaluate");
+        let measured_joint = -(rho_face.exp()) * (eval.gradient[0] + eval.gradient[1]);
+        assert!(
+            measured_joint > 0.0,
+            "the fixture must sit on an upper tail in both face coordinates; \
+             measured joint pencil {measured_joint:.6e}"
+        );
+        let joint_rel =
+            (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
+        assert!(
+            joint_rel < 5.0e-3,
+            "the analytic JOINT constant must reproduce the production gradient summed \
+             over the face: analytic={:.9e} measured={measured_joint:.9e} rel={joint_rel:.4e}",
+            proof.joint_tail_constant
+        );
+
+        // The per-coordinate law, one coordinate at a time. These face
+        // penalties have orthogonal ranges, so releasing j alone and releasing
+        // it alongside the rest agree, and each `c_j` is separately measurable
+        // against its own production partial.
+        for (idx, &measured) in [
+            -(rho_face.exp()) * eval.gradient[0],
+            -(rho_face.exp()) * eval.gradient[1],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let rel = (proof.tail_constants[idx] - measured).abs() / measured;
+            assert!(
+                rel < 5.0e-3,
+                "face coordinate {idx}: analytic c={:.9e} against measured {measured:.9e} \
+                 (rel {rel:.4e})",
+                proof.tail_constants[idx]
+            );
+        }
+
+        // With disjoint released blocks the joint constant is the sum of the
+        // marginals — an internal identity of the assembly, not a fixture
+        // accident: `½tr((ΣA)⁻¹C)` splits when the `A_j` have orthogonal
+        // ranges. It is asserted here because it FAILS for the overlapping
+        // face below, which is what makes that case the interesting one.
+        let additive: f64 = proof.tail_constants.iter().sum();
+        let additive_rel =
+            (additive - proof.joint_tail_constant).abs() / proof.joint_tail_constant;
+        assert!(
+            additive_rel < 1.0e-10,
+            "disjoint face blocks must make the joint constant additive: \
+             Σc_j={additive:.12e} joint={:.12e} rel={additive_rel:.3e}",
+            proof.joint_tail_constant
+        );
+    }
+
+    /// ONE GEOMETRY, TWO PENALTY LAYOUTS, ONE CONSTANT.
+    ///
+    /// The rank-2 bend railed as a SINGLE coordinate and the same bend split
+    /// into two rank-1 coordinates railed TOGETHER at equal `ρ` are the same
+    /// `S_λ`, the same `M_p`, and therefore the same criterion — so the face
+    /// they describe is the same face and the analytic constant must be the
+    /// same number. Nothing here is measured against production: this is an
+    /// identity between two paths through the assembly, and it fails if the
+    /// `|F| > 1` path double-counts a penalty, builds the wrong `Q`, or gets
+    /// the released/surviving rank split wrong — none of which a
+    /// single-coordinate test can see.
+    #[test]
+    fn a_face_split_into_two_coordinates_is_the_same_face() {
+        let (y, weights, x) = cubic_fixture(NULL_CURVATURE);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = gaussian_config();
+        let rho_face = 10.0_f64;
+
+        let single_state = RemlState::newwith_offset(
+            y.view(),
+            x.clone(),
+            weights.view(),
+            offset.view(),
+            cubic_penalties(),
+            4,
+            &config,
+            Some(vec![2, 3]),
+            None,
+            None,
+        )
+        .expect("build the single-coordinate fixture state");
+        let single = expect_available(
+            single_state
+                .rail_face_limit(&Array1::from(vec![rho_face, 1.0]), &[0])
+                .expect("the analytic face limit must not error"),
+            "single-coordinate face",
+        );
+        let single_proof = match certify_rail_face(&single) {
+            RailFaceVerdict::Certified(proof) => proof,
+            RailFaceVerdict::Refused { reason } => panic!("single face should certify: {reason}"),
+        };
+
+        let split_state = RemlState::newwith_offset(
+            y.view(),
+            x.clone(),
+            weights.view(),
+            offset.view(),
+            split_bend_penalties(),
+            4,
+            &config,
+            Some(vec![3, 3, 3]),
+            None,
+            None,
+        )
+        .expect("build the split-bend fixture state");
+        let split = expect_available(
+            split_state
+                .rail_face_limit(&Array1::from(vec![rho_face, rho_face, 1.0]), &[0, 1])
+                .expect("the analytic face limit must not error"),
+            "two-coordinate face",
+        );
+        let split_proof = match certify_rail_face(&split) {
+            RailFaceVerdict::Certified(proof) => proof,
+            RailFaceVerdict::Refused { reason } => panic!("split face should certify: {reason}"),
+        };
+
+        // The two layouts release the same subspace, so the forms are the same
+        // size and carry the same spectrum extremes.
+        assert_eq!(
+            single.first_order_form.nrows(),
+            split.first_order_form.nrows(),
+            "the two layouts must release the same subspace"
+        );
+        let constant_rel = (split_proof.joint_tail_constant - single_proof.joint_tail_constant)
+            .abs()
+            / single_proof.joint_tail_constant;
+        assert!(
+            constant_rel < 1.0e-9,
+            "one geometry must give one constant: single-coordinate={:.15e} \
+             two-coordinate joint={:.15e} rel={constant_rel:.3e}",
+            single_proof.joint_tail_constant,
+            split_proof.joint_tail_constant
+        );
+
+        // The pricing of the shipped point is the same statement, and it is
+        // what the certificate reports to the fit — so it has to agree too.
+        let gap_rel =
+            (split_proof.value_gap - single_proof.value_gap).abs() / single_proof.value_gap;
+        assert!(
+            gap_rel < 1.0e-9,
+            "the value gap must not depend on how the face is coordinatized: \
+             single={:.15e} split={:.15e} rel={gap_rel:.3e}",
+            single_proof.value_gap,
+            split_proof.value_gap
+        );
+        let travel_rel = (split_proof.estimand_travel - single_proof.estimand_travel).abs()
+            / single_proof.estimand_travel;
+        assert!(
+            travel_rel < 1.0e-9,
+            "the estimand travel must not depend on the coordinatization: \
+             single={:.15e} split={:.15e} rel={travel_rel:.3e}",
+            single_proof.estimand_travel,
+            split_proof.estimand_travel
+        );
+    }
+
+    /// AN OVERLAPPING FACE COORDINATE IS UNIDENTIFIED, AND MUST NOT BLOCK THE
+    /// FACE.
+    ///
+    /// Coordinate 1's penalty acts only along a direction coordinate 0 already
+    /// pins at `λ = ∞`, so releasing it alone frees nothing: `V` is exactly
+    /// independent of `λ_1` there. The certificate has to type that as
+    /// [`FaceCoordinateKind::Unidentified`] with `c_1 = 0` and still certify —
+    /// demanding a strict outward derivative from a coordinate that has none
+    /// would refuse a face that is genuinely optimal.
+    ///
+    /// This is the coalesced/overlapping-penalty geometry (#2349's multinomial
+    /// family, the all-on Hilbert scale) reaching the production assembly
+    /// rather than a hand-built form, and the joint law is the ONLY law that
+    /// describes it: the marginals do not add up here, which the test asserts.
+    #[test]
+    fn an_overlapping_face_coordinate_is_unidentified_and_still_certifies() {
+        let (y, weights, x) = cubic_fixture(NULL_CURVATURE);
+        let offset = Array1::<f64>::zeros(y.len());
+        let config = gaussian_config();
+        let state = RemlState::newwith_offset(
+            y.view(),
+            x.clone(),
+            weights.view(),
+            offset.view(),
+            overlapping_face_penalties(),
+            4,
+            &config,
+            Some(vec![2, 3, 3]),
+            None,
+            None,
+        )
+        .expect("build the overlapping-face fixture state");
+
+        let rho_face = 10.0_f64;
+        let rho = Array1::from(vec![rho_face, rho_face, 1.0]);
+        let limit = expect_available(
+            state
+                .rail_face_limit(&rho, &[0, 1])
+                .expect("the analytic face limit must not error"),
+            "overlapping two-coordinate face",
+        );
+        let proof = match certify_rail_face(&limit) {
+            RailFaceVerdict::Certified(proof) => proof,
+            RailFaceVerdict::Refused { reason } => panic!(
+                "an unidentified face coordinate must not block a face that is otherwise \
+                 proven: {reason}"
+            ),
+        };
+
+        use crate::rho_optimizer::rail_face::FaceCoordinateKind;
+        assert_eq!(
+            proof.coordinate_kinds,
+            vec![
+                FaceCoordinateKind::StrictOutward,
+                FaceCoordinateKind::Unidentified
+            ],
+            "the coalesced coordinate releases nothing once the bend is at lambda=infinity"
+        );
+        assert_eq!(
+            proof.tail_constants[1], 0.0,
+            "an unidentified coordinate carries no outward derivative at all"
+        );
+        assert!(
+            proof.tail_constants[0] > 0.0,
+            "the identified coordinate must still carry its own strict constant"
+        );
+
+        // The joint law still holds — and it is not the sum of the marginals
+        // here, which is exactly why a face certificate cannot be assembled
+        // coordinate-wise.
+        let eval = state
+            .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
+            .expect("the production REML gradient must evaluate");
+        let measured_joint = -(rho_face.exp()) * (eval.gradient[0] + eval.gradient[1]);
+        let joint_rel =
+            (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
+        assert!(
+            joint_rel < 5.0e-3,
+            "the joint law must hold on an OVERLAPPING face: analytic={:.9e} \
+             measured={measured_joint:.9e} rel={joint_rel:.4e}",
+            proof.joint_tail_constant
+        );
+        let marginal_sum: f64 = proof.tail_constants.iter().sum();
+        assert!(
+            (marginal_sum - proof.joint_tail_constant).abs() / proof.joint_tail_constant > 1.0e-3,
+            "the overlapping face must NOT be describable by its marginals: \
+             Σc_j={marginal_sum:.9e} against joint {:.9e} — if these agree the fixture has \
+             stopped exercising the coalesced geometry",
+            proof.joint_tail_constant
+        );
+    }
+
     // ═══════════════════ the LAML closed form (#2349) ═══════════════════
 
     /// Binomial sibling of the cubic fixture: logistic truth `η = a + b·t +
