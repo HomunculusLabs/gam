@@ -2,7 +2,7 @@ use gam::ResourcePolicy;
 use gam::inference::data::EncodedDataset;
 use gam::inference::formula_dsl::parse_formula;
 use gam::inference::model::{ColumnKindTag, DataSchema, SchemaColumn};
-use gam::smooth::{BySmoothKind, SmoothBasisSpec};
+use gam::smooth::{BySmoothKind, FactorSmoothFlavour, SmoothBasisSpec};
 use gam::terms::term_builder::build_termspec;
 use ndarray::array;
 
@@ -108,5 +108,27 @@ fn binary_by_and_sz_parse_to_specialized_basis_specs() {
         &ResourcePolicy::default_library(),
     )
     .expect("sz termspec");
-    assert!(sz.smooth_terms.iter().any(|term| matches!(term.basis, SmoothBasisSpec::FactorSumToZero { ref levels, .. } if levels.len() == 2)));
+    // `bs="sz"` types as `FactorSmooth { flavour: Sz }`, NOT the legacy
+    // `FactorSumToZero` envelope this previously asserted. That envelope is the
+    // mis-typed representation #1981 reintroduced and #1403 removed again
+    // (owner-confirmed in #1887, and documented at the construction site in
+    // term_builder.rs): re-wrapping `sz(fac, x)` into it broke the
+    // refit/predict freeze path's `(FactorSmooth, …)` metadata match. The
+    // zero-sum geometry is still the construction underneath — it is reused
+    // internally — so what identifies the term is the flavour plus the factor it
+    // is keyed to. Levels are not carried on the spec at PARSE time
+    // (`group_frozen_levels` is populated at freeze), so the 2-level factor is
+    // pinned by its column instead: `group` is index 2 of the fixture headers.
+    assert!(
+        sz.smooth_terms.iter().any(|term| matches!(
+            term.basis,
+            SmoothBasisSpec::FactorSmooth { ref spec }
+                if matches!(spec.flavour, FactorSmoothFlavour::Sz) && spec.group_col == 2
+        )),
+        "`bs=sz` must parse to FactorSmooth {{ flavour: Sz }} keyed to `group`; got {:?}",
+        sz.smooth_terms
+            .iter()
+            .map(|term| std::mem::discriminant(&term.basis))
+            .collect::<Vec<_>>()
+    );
 }
