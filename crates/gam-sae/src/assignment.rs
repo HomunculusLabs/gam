@@ -2003,6 +2003,32 @@ pub(crate) fn assignment_prior_grad_hdiag_weighted(
             // threshold-centered surrogate σ((l−θ)/τ), using the same
             // machine-precision support as the value path. Data-fit JVP support
             // is narrower and follows the hard forward gate.
+            //
+            // #2500 — the `d` returned here is the curvature the arrow assembly
+            // writes into `block.htt` VERBATIM, and it is the ONLY assignment /
+            // coordinate prior curvature in the SAE inner system that is not
+            // PSD-majorized first (`λ_k·S_k ⊗ I` is PSD by construction; periodic
+            // ARD is `α·softplus_{τ₀}(cos κt)`; softmax is the Gershgorin radius
+            // `diag(Σ_j soft|H_kj|)`; ordered Beta--Bernoulli goes through
+            // `ordered_beta_bernoulli_psd_majorized_hdiag`). `1 − 2a` is NEGATIVE
+            // for every logit above the threshold — the sigmoid penalty
+            // `λ·σ((ℓ−θ)/τ)` is concave there — so the per-row `H_tt` block goes
+            // indefinite on exactly the atoms the gate has switched ON, and the
+            // factorization spectrally deflates that direction to unit stiffness.
+            // Measured on `threshold_gate_tiny_fixture(straddle = true)`: all ten
+            // rows deflate exactly one direction each, and each one is the
+            // negative-curvature logit.
+            //
+            // The ρ-gradient is CORRECT under that deflation — #2500's
+            // `row_deflation_map_derivative` differentiates the conditioned block —
+            // but the conditioning itself is the #1419 pathology (a deflated
+            // direction is a data-relevant logit direction the solver then takes no
+            // step along). Majorizing this diagonal into `B` and carrying the
+            // negative remainder in `ΔC`, exactly as `ArdAxisPrior`'s
+            // `psd_majorizer_hess` / `negative_hessian_remainder` pair does, would
+            // remove the deflation at its source and leave `A = B + ΔC` unchanged.
+            // That moves the `½log|B|` criterion of every ThresholdGate fit, so it
+            // is deliberately NOT bundled with the #2500 gradient fix.
             let sparsity_strength = rho.lambda_sparse()?;
             let inv_tau = 1.0 / temperature;
             let inv_tau2 = inv_tau * inv_tau;
