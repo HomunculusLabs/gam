@@ -863,11 +863,13 @@ fn assemble_retained_face(
                 *row_index,
                 &cross,
                 diagonal,
-                &w_accepted,
-                &rows,
-                constraints,
-                unconstrained_center,
-                antiparallel_tolerance,
+                &AcceptedFace {
+                    w_accepted: &w_accepted,
+                    rows: &rows,
+                    constraints,
+                    unconstrained_center,
+                    antiparallel_tolerance,
+                },
                 &mut upper,
             )?;
             continue;
@@ -916,6 +918,21 @@ fn assemble_retained_face(
     }))
 }
 
+/// The accepted face an anti-parallel test reads: the retained rows with their
+/// `W` block, the constraint system those rows index into, the centre the walls
+/// are measured from, and the correlation at which two normals count as opposed.
+///
+/// These five never vary independently at the call site — they all describe one
+/// accepted face — so they travel as one borrow rather than as five parameters
+/// whose covariance the signature does not state.
+struct AcceptedFace<'a> {
+    w_accepted: &'a Array2<f64>,
+    rows: &'a [usize],
+    constraints: &'a LinearInequalityConstraints,
+    unconstrained_center: &'a Array1<f64>,
+    antiparallel_tolerance: f64,
+}
+
 /// Keep the far wall of a two-sided bound that the rank filter has just refused
 /// as a direction.
 ///
@@ -947,22 +964,18 @@ fn record_opposed_face_limit(
     row_index: usize,
     cross: &Array1<f64>,
     diagonal: f64,
-    w_accepted: &Array2<f64>,
-    rows: &[usize],
-    constraints: &LinearInequalityConstraints,
-    unconstrained_center: &Array1<f64>,
-    antiparallel_tolerance: f64,
+    face: &AcceptedFace<'_>,
     upper: &mut [f64],
 ) -> Result<(), String> {
     let mut opposed: Option<(usize, f64, f64)> = None;
-    for position in 0..rows.len() {
-        let w_kk = w_accepted[[position, position]];
+    for position in 0..face.rows.len() {
+        let w_kk = face.w_accepted[[position, position]];
         let scale = (w_kk * diagonal).sqrt();
         if !(scale.is_finite() && scale > 0.0) {
             continue;
         }
         let correlation = cross[position] / scale;
-        if correlation + 1.0 > antiparallel_tolerance {
+        if correlation + 1.0 > face.antiparallel_tolerance {
             continue;
         }
         let gamma = -cross[position] / w_kk;
@@ -979,12 +992,12 @@ fn record_opposed_face_limit(
     let Some((position, _, gamma)) = opposed else {
         return Ok(());
     };
-    let accepted_row = rows[position];
-    let delta = (constraints.a.row(row_index).dot(unconstrained_center)
-        - constraints.b[row_index])
+    let accepted_row = face.rows[position];
+    let delta = (face.constraints.a.row(row_index).dot(face.unconstrained_center)
+        - face.constraints.b[row_index])
         + gamma
-            * (constraints.a.row(accepted_row).dot(unconstrained_center)
-                - constraints.b[accepted_row]);
+            * (face.constraints.a.row(accepted_row).dot(face.unconstrained_center)
+                - face.constraints.b[accepted_row]);
     let limit = delta / gamma;
     if !(limit.is_finite() && limit > 0.0) {
         return Err(format!(
