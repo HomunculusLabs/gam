@@ -1003,9 +1003,7 @@ pub(crate) fn fused_first_attempt_log_likelihood<
 /// otherwise the mathematically identical pairwise directional assembly. An
 /// unavailable completion is a derivative-contract error, never permission to
 /// certify a different objective.
-fn exact_joint_jeffreys_completion_at<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
+fn exact_joint_jeffreys_completion_at<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
@@ -1031,13 +1029,9 @@ fn exact_joint_jeffreys_completion_at<
         JeffreysCompletionAssembly::Exact,
     )?
     .ok_or_else(|| {
-        format!(
-            "{context}: active Jeffreys term did not supply its exact second-order completion"
-        )
+        format!("{context}: active Jeffreys term did not supply its exact second-order completion")
     })?;
-    if completion.dim() != (total_p, total_p)
-        || completion.iter().any(|value| !value.is_finite())
-    {
+    if completion.dim() != (total_p, total_p) || completion.iter().any(|value| !value.is_finite()) {
         return Err(format!(
             "{context}: Jeffreys completion is non-finite or has shape {:?}, expected ({total_p}, {total_p})",
             completion.dim(),
@@ -1080,8 +1074,7 @@ fn assemble_true_joint_objective_hessian(
     match (hphi, completion) {
         (None, None) => {}
         (Some(hphi), Some(completion))
-            if hphi.dim() == (total_p, total_p)
-                && completion.dim() == (total_p, total_p) =>
+            if hphi.dim() == (total_p, total_p) && completion.dim() == (total_p, total_p) =>
         {
             likelihood_hessian += hphi;
             likelihood_hessian += completion;
@@ -1100,10 +1093,7 @@ fn assemble_true_joint_objective_hessian(
         }
     }
     symmetrize_dense_in_place(&mut likelihood_hessian);
-    if likelihood_hessian
-        .iter()
-        .any(|value| !value.is_finite())
-    {
+    if likelihood_hessian.iter().any(|value| !value.is_finite()) {
         return Err(format!(
             "{context}: exact joint objective Hessian contains a non-finite value"
         ));
@@ -1111,18 +1101,12 @@ fn assemble_true_joint_objective_hessian(
     Ok(likelihood_hessian)
 }
 
-fn symmetric_eigen_extremes(
-    matrix: &Array2<f64>,
-    context: &str,
-) -> Result<(f64, f64), String> {
+fn symmetric_eigen_extremes(matrix: &Array2<f64>, context: &str) -> Result<(f64, f64), String> {
     let (eigenvalues, _) = matrix
         .eigh(Side::Lower)
         .map_err(|error| format!("{context}: symmetric eigendecomposition failed: {error}"))?;
     Ok((
-        eigenvalues
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min),
+        eigenvalues.iter().copied().fold(f64::INFINITY, f64::min),
         eigenvalues
             .iter()
             .copied()
@@ -2965,9 +2949,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // form the exact second-order remainder exactly once at this beta.
             // There is no component-wise PSD gate: only the spectrum of the
             // complete objective Hessian has mathematical authority.
-            let true_jeffreys_hessian_required =
-                (jeffreys_completion_endgame || returned_mode_curvature_pending)
-                    && head_jeffreys_term.is_some();
+            let true_jeffreys_hessian_required = (jeffreys_completion_endgame
+                || returned_mode_curvature_pending)
+                && head_jeffreys_term.is_some();
             let head_jeffreys_completion = if true_jeffreys_hessian_required {
                 let z_joint = joint_jeffreys_subspace.as_ref().ok_or_else(|| {
                     "joint Newton true Jeffreys Hessian requested without a coefficient subspace"
@@ -4205,9 +4189,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // byte-identical. `None` outside the damped phase (λ_N below the
             // quadratic-phase threshold), where plain Newton owns the endgame.
             let self_concordant_damping: Option<f64> =
-                if !true_jeffreys_hessian_required
-                    && family.inner_objective_is_self_concordant()
-                {
+                if !true_jeffreys_hessian_required && family.inner_objective_is_self_concordant() {
                     joint_spectrum.as_ref().and_then(|spectrum| {
                         self_concordant_damped_step_alpha(spectrum.newton_decrement())
                     })

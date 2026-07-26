@@ -34,7 +34,7 @@ fn sae_ift_min_curvature_fraction() -> f64 {
 /// so `∂K_w/∂ρ_i` equals the term itself). Keeping them as distinct channels
 /// makes a failing finite-difference gate localize to ONE formula.
 #[derive(Clone, Copy)]
-enum ThetaAdjointDhChannel {
+pub(crate) enum ThetaAdjointDhChannel {
     /// Every `∂H/∂θ_w` contribution: data residual curvature, the softmax
     /// data-weight logit factor, the softmax entropy Gershgorin majorizer, and
     /// the periodic ARD majorizer diagonal.
@@ -1647,7 +1647,7 @@ impl SaeManifoldTerm {
         sqrt_w * gate_factor * acc
     }
 
-    fn logdet_theta_adjoint_dense(
+    pub(crate) fn logdet_theta_adjoint_dense(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
@@ -2538,8 +2538,15 @@ impl SaeManifoldTerm {
         // skipped rather than computed and overwritten. The `explicit`, `occam`
         // and rank-charge-direct channels are majorizer-independent and are
         // produced on every route.
-        let exact_a_logdet_route =
-            logdet_derivative_bundle.is_none() && matrix_free_system.is_none();
+        // #2500 — and only where the dense θ-adjoint reconstruction MODELS this
+        // fit's assignment family. Taking the exact-A arm with a `Γ` that is not
+        // the θ-derivative of `A` would trade the B-route's staged value↔gradient
+        // gap for an outright wrong gradient; deciding it HERE, with the rest of
+        // the route, is also what keeps the B-majorizer producers alive for a
+        // family that needs them.
+        let exact_a_logdet_route = logdet_derivative_bundle.is_none()
+            && matrix_free_system.is_none()
+            && self.dense_exact_a_theta_adjoint_is_modelled();
 
         if let Some(sparse_index) = rho.sparse_flat_index() {
             explicit[sparse_index] =
@@ -3718,6 +3725,50 @@ impl SaeManifoldTerm {
         let a_tt = a.slice(s![..total_t, ..total_t]).to_owned();
         accumulate(&a_tt, total_t, -1.0, &mut k_tt)?;
         Ok((delta_trace, delta_gamma_t, k_joint, k_tt))
+    }
+
+    /// #2500 — does [`Self::logdet_theta_adjoint_dense`] model this fit's
+    /// assignment family? The exact-A logdet channels are taken only where it
+    /// does; elsewhere the B-majorizer channels stand, because those are modelled
+    /// for EVERY family.
+    ///
+    /// The dense reconstruction carries three prior legs: the softmax entropy
+    /// Gershgorin majorizer (`want_entropy`), the ordered-Beta–Bernoulli Patch-D
+    /// cross-row adjoint, and the periodic-ARD majorizer diagonal. It carries no
+    /// per-atom-logistic GATE legs, which is what a `ThresholdGate` row needs —
+    /// the same limitation `third_order_forward_sensitivity_hessian` already
+    /// refuses on ("only the softmax assignment route is modelled by the dense
+    /// θ-adjoint reconstruction"). `TopK` mints no free logit at all, so there is
+    /// nothing for a gate leg to model and the reconstruction is complete there by
+    /// construction.
+    ///
+    /// MEASURED on `threshold_gate_tiny_fixture`, dense vs the production
+    /// `logdet_theta_adjoint` on the SAME inverse (they agree for softmax by
+    /// design — the dense route is documented as self-checked against it):
+    ///
+    /// ```text
+    ///   deflation-free arm   worst |production − dense| = 2.53e0  (on a 8.91e-1 entry)
+    ///   deflating arm        worst |production − dense| = 3.31e0  (on a −2.50e-1 entry)
+    /// ```
+    ///
+    /// and against a central finite difference of `½(log|A| − log|A_tt|)` in a
+    /// logit, the dense Γ read `1.373e-1` where the FD read `3.521e-1`, with a
+    /// SIGN FLIP on the next logit. So this is not a tolerance question.
+    ///
+    /// Before the sparse operator was modelled, a ThresholdGate fit could not
+    /// reach this code at all — `penalty_curvature_operators_by_flat` refused
+    /// first — so the gap was unreachable rather than absent. Gating here keeps
+    /// that family on the fully-modelled `½log|B|` channels (`logdet_theta_adjoint`
+    /// and `assignment_log_strength_hessian_trace` both carry it), which is the
+    /// same staged position the matrix-free and bundle routes already hold until
+    /// Phase-2b.
+    fn dense_exact_a_theta_adjoint_is_modelled(&self) -> bool {
+        match self.assignment.mode {
+            AssignmentMode::Softmax { .. }
+            | AssignmentMode::OrderedBetaBernoulli { .. }
+            | AssignmentMode::TopK { .. } => true,
+            AssignmentMode::ThresholdGate { .. } => false,
+        }
     }
 
     pub(crate) fn dense_exact_a_logdet_channels(

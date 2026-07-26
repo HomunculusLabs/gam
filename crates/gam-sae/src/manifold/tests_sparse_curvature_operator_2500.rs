@@ -21,6 +21,7 @@
 //! exactly those directions. These gates pin both halves.
 
 use super::*;
+use crate::manifold::construction::ThetaAdjointDhChannel;
 use ndarray::{Array1, Array2};
 
 /// A `ThresholdGate` twin of `gamma_fd_tiny_fixture`: two periodic atoms on one
@@ -550,4 +551,184 @@ fn threshold_gate_outer_solve_is_not_aborted_by_an_unmodelled_sparse_operator_25
             );
         }
     }
+}
+
+/// #2500 GATE 8 — the measurement that justifies refusing the exact-A override
+/// for a ThresholdGate fit: on the SAME inverse, the dense θ-adjoint
+/// reconstruction and the production one disagree by MORE than the entry's own
+/// magnitude. They are not interchangeable for this family, so a fit of it must
+/// not have its logdet channels overwritten with the exact-A pair (GATE 9).
+///
+/// `logdet_theta_adjoint_dense` carries the softmax entropy Gershgorin majorizer,
+/// the ordered-Beta–Bernoulli Patch-D cross-row adjoint and the periodic-ARD
+/// majorizer diagonal, and is documented as self-checked against the production
+/// `logdet_theta_adjoint` for softmax. It carries no per-atom-logistic GATE leg,
+/// which is what a threshold-gate row needs — the same limitation
+/// `third_order_forward_sensitivity_hessian` already refuses on. Against a
+/// central finite difference of `½(log|A| − log|A_tt|)` in a logit the dense Γ
+/// read `1.373e-1` where the FD read `3.521e-1`, with a sign flip on the next
+/// logit, so this is not a tolerance question.
+#[test]
+fn dense_theta_adjoint_is_not_interchangeable_for_a_threshold_gate_2500() {
+    for straddle in [false, true] {
+        let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
+        let (_loss, cache) = frozen_cache(&term, &target, &rho);
+        let solver = crate::manifold::arrow_solver::DeflatedArrowSolver::plain(&cache);
+        let production = term
+            .logdet_theta_adjoint(&rho, &cache, &solver)
+            .expect("production theta adjoint");
+        let g = term
+            .materialize_joint_inverse(&cache, &solver)
+            .expect("joint inverse");
+        let dense = term
+            .logdet_theta_adjoint_dense(
+                &rho,
+                &cache,
+                &g,
+                ThetaAdjointDhChannel::All,
+                false,
+                false,
+                None,
+            )
+            .expect("dense theta adjoint");
+        // Per ENTRY: an error exceeding that entry's own magnitude means the dense
+        // value is not even the right scale there, let alone a usable substitute.
+        let worst = production
+            .t
+            .iter()
+            .zip(dense.t.iter())
+            .filter(|(p, _)| p.abs() > 1.0e-3)
+            .map(|(p, d)| (p - d).abs() / p.abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            worst > 1.0,
+            "#2500 (straddle={straddle}): refusing the exact-A override for this family is \
+             only justified if the two θ-adjoints genuinely disagree; worst per-entry \
+             relative gap = {worst:.3}"
+        );
+    }
+}
+
+/// #2500 GATE 8b — the leg of the production θ-adjoint that the ThresholdGate
+/// gradient falls back to and that IS exact: `coordinate_block_logdet_theta_adjoint`
+/// reproduces a central finite difference of the per-row undamped factors' own
+/// log-determinant on every free logit.
+///
+/// Convention, measured rather than read: the returned vector is
+/// `∂(Σ_i log|H_tt^(i)|)/∂θ` with NO leading ½, even though the function's own doc
+/// describes it as the derivative of `½ Σ_i log|H_tt^(i)|`. Halving the reference
+/// puts every entry off by exactly a factor of two.
+///
+/// Measured on this fixture the analytic/FD ratio is `1.0000` on every entry
+/// checked, so this is a tight gate rather than a loose one, and it pins the half
+/// of the fallback that is load-bearing for the row-local prior curvature this
+/// issue added.
+#[test]
+fn threshold_gate_coordinate_block_theta_adjoint_matches_finite_difference_2500() {
+    for straddle in [false, true] {
+        let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
+        let (_loss, cache) = frozen_cache(&term, &target, &rho);
+        let solver = crate::manifold::arrow_solver::DeflatedArrowSolver::plain(&cache);
+        let coord = term
+            .coordinate_block_logdet_theta_adjoint(&rho, &cache, &solver)
+            .expect("coordinate-block theta adjoint");
+        let base_deflated = deflated_direction_count(&term, &cache);
+        let block_logdet = |t: &SaeManifoldTerm| -> (f64, usize) {
+            let (_l, c) = frozen_cache(t, &target, &rho);
+            let mut acc = 0.0_f64;
+            for row in 0..t.n_obs() {
+                let factor = c.undamped_factor(row);
+                for d in 0..c.row_dims[row] {
+                    acc += 2.0 * factor[[d, d]].ln();
+                }
+            }
+            (acc, deflated_direction_count(t, &c))
+        };
+        let h = 1.0e-6;
+        let mut worst = 0.0_f64;
+        let mut label = String::new();
+        let mut checked = 0usize;
+        for (row, atom, slot) in logit_slots(&term, &cache) {
+            let mut plus = term.clone();
+            plus.assignment.logits[[row, atom]] += h;
+            let mut minus = term.clone();
+            minus.assignment.logits[[row, atom]] -= h;
+            let (lp, dp) = block_logdet(&plus);
+            let (lm, dm) = block_logdet(&minus);
+            // A central difference across a change in the deflated dimension
+            // differences two different operators, not a derivative.
+            if dp != base_deflated || dm != base_deflated {
+                continue;
+            }
+            let fd = (lp - lm) / (2.0 * h);
+            let analytic = coord.t[slot];
+            let tol = 1.0e-6 + 1.0e-4 * analytic.abs().max(fd.abs());
+            let ratio = (analytic - fd).abs() / tol;
+            if ratio > worst {
+                worst = ratio;
+                label = format!(
+                    "row {row} atom {atom}: analytic={analytic:.9e} fd={fd:.9e} tol={tol:.3e}"
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked >= 4,
+            "#2500 (straddle={straddle}): the FD gate must reach at least four logits on a \
+             fixed deflation stratum; checked={checked}"
+        );
+        assert!(
+            worst <= 1.0,
+            "#2500 (straddle={straddle}): the coordinate-block theta-adjoint must \
+             differentiate the per-row log|H_tt| it is defined as; worst normalized error \
+             {worst:.3} at {label}"
+        );
+    }
+}
+
+/// #2500 GATE 9 — the consequence of GATE 8, at the production seam: a
+/// ThresholdGate fit's analytic outer gradient must be assembled from the
+/// B-majorizer logdet channels (which model this family) rather than the exact-A
+/// pair (which does not). Pinned behaviourally: the assembled sparse logdet
+/// component must equal the B-route trace, and must NOT equal the exact-A one.
+#[test]
+fn threshold_gate_outer_gradient_uses_the_modelled_logdet_channels_2500() {
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
+    let (loss, cache) = frozen_cache(&term, &target, &rho);
+    let sparse = rho.sparse_flat_index().expect("sparse coordinate");
+    let solver = crate::manifold::arrow_solver::DeflatedArrowSolver::plain(&cache);
+
+    let b_route = {
+        let joint = term
+            .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
+            .expect("B-route sparse joint trace");
+        let coord = term
+            .coordinate_block_assignment_log_strength_hessian_trace(&rho, &cache)
+            .expect("B-route sparse coordinate trace");
+        joint - coord
+    };
+    let (exact_a_trace, _gamma) = term
+        .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
+        .expect("exact-A channels still assemble when asked directly");
+
+    // Non-vacuity: the two routes must genuinely differ on this fixture, else the
+    // assertion below cannot distinguish them.
+    assert!(
+        (b_route - exact_a_trace[sparse]).abs() > 1.0e-6,
+        "#2500: the two logdet routes must differ materially for this gate to have \
+         content: B-route={b_route:.9e}, exact-A={:.9e}",
+        exact_a_trace[sparse]
+    );
+
+    let components = term
+        .analytic_outer_rho_gradient_at_converged(target.view(), &rho, &loss, &cache)
+        .expect("analytic outer gradient");
+    let assembled = components.logdet_trace[sparse];
+    assert!(
+        (assembled - b_route).abs() <= 1.0e-9,
+        "#2500: a ThresholdGate fit must assemble its sparse logdet component from the \
+         MODELLED B-majorizer channel; assembled={assembled:.9e}, B-route={b_route:.9e}, \
+         exact-A={:.9e}",
+        exact_a_trace[sparse]
+    );
 }
