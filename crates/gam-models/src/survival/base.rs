@@ -5081,7 +5081,155 @@ mod tests {
             .sum()
     }
 
-    /// Two-ACTIVE-block variant of [`laml_fd_test_model`] (both penalty blocks
+    /// Decompose the survival LAML rho chain rule into independently
+    /// finite-differentiable identities. This prevents a value/gradient failure
+    /// from being "fixed" by changing a sign at the final trace: the mode
+    /// response, likelihood-Hessian directional derivative, and total Hessian
+    /// drift must each agree before their scalar contraction is trusted.
+    #[test]
+    fn survival_laml_mode_response_and_hessian_drift_match_finite_differences() {
+        use gam_linalg::faer_ndarray::FaerCholesky;
+
+        const RHO: f64 = 4.0;
+        const RHO_STEP: f64 = 1.0e-5;
+        const BETA_STEP: f64 = 1.0e-5;
+        const REL_TOL: f64 = 2.0e-4;
+
+        let beta0 = array![-2.5_f64, 1.0];
+        let model = laml_fd_test_model(1.0);
+        let (center_model, beta_hat) = model
+            .reconverge_survival_inner_mode(&[RHO], &beta0)
+            .expect("reconverge survival mode at rho=4");
+        let center_state = center_model
+            .update_state(&beta_hat)
+            .expect("center survival state");
+        let h_center = center_state.hessian.to_dense();
+        let p = beta_hat.len();
+
+        // A = dS/d rho = lambda S for the single active penalty block.
+        let active: Vec<&PenaltyBlock> = center_model
+            .penalties
+            .blocks
+            .iter()
+            .filter(|block| block.lambda > 0.0)
+            .collect();
+        assert_eq!(active.len(), 1, "fixture must have one active penalty block");
+        let block = active[0];
+        let mut a = Array2::<f64>::zeros((p, p));
+        for i in 0..block.matrix.nrows() {
+            for j in 0..block.matrix.ncols() {
+                a[[block.range.start + i, block.range.start + j]] =
+                    block.lambda * block.matrix[[i, j]];
+            }
+        }
+
+        // IFT identity: beta_rho = -H^-1 A beta.
+        let factor = h_center
+            .cholesky(faer::Side::Lower)
+            .expect("center Hessian Cholesky");
+        let v = factor.solvevec(&a.dot(&beta_hat));
+        let u = -&v;
+        let (plus_model, beta_plus) = model
+            .reconverge_survival_inner_mode(&[RHO + RHO_STEP], &beta_hat)
+            .expect("rho-plus survival mode");
+        let (minus_model, beta_minus) = model
+            .reconverge_survival_inner_mode(&[RHO - RHO_STEP], &beta_hat)
+            .expect("rho-minus survival mode");
+        let beta_fd = (&beta_plus - &beta_minus) / (2.0 * RHO_STEP);
+
+        // Family identity: C = D_beta H_lik[u]. The penalty is fixed in this
+        // beta-direction FD, so it cancels from H(beta+h u)-H(beta-h u).
+        let correction = center_model
+            .survival_hessian_derivative_correction(&beta_hat, &u)
+            .expect("analytic survival Hessian correction");
+        let beta_dir_plus = &beta_hat + &u.mapv(|value| BETA_STEP * value);
+        let beta_dir_minus = &beta_hat - &u.mapv(|value| BETA_STEP * value);
+        let h_beta_plus = center_model
+            .update_state(&beta_dir_plus)
+            .expect("beta-direction plus state")
+            .hessian
+            .to_dense();
+        let h_beta_minus = center_model
+            .update_state(&beta_dir_minus)
+            .expect("beta-direction minus state")
+            .hessian
+            .to_dense();
+        let correction_fd = (&h_beta_plus - &h_beta_minus) / (2.0 * BETA_STEP);
+
+        // Total identity along the re-converged surface: H_rho = A + C.
+        let state_plus = plus_model
+            .update_state(&beta_plus)
+            .expect("rho-plus state");
+        let state_minus = minus_model
+            .update_state(&beta_minus)
+            .expect("rho-minus state");
+        let total_fd =
+            (state_plus.hessian.to_dense() - state_minus.hessian.to_dense()) / (2.0 * RHO_STEP);
+        let total_analytic = &a + &correction;
+        let total_sign_reversed = &a - &correction;
+
+        let relative_vector_error = |actual: &Array1<f64>, expected: &Array1<f64>| {
+            let difference = actual
+                .iter()
+                .zip(expected.iter())
+                .map(|(&lhs, &rhs)| (lhs - rhs) * (lhs - rhs))
+                .sum::<f64>()
+                .sqrt();
+            let scale = expected.iter().map(|value| value * value).sum::<f64>().sqrt();
+            difference / scale.max(1.0e-12)
+        };
+        let relative_matrix_error = |actual: &Array2<f64>, expected: &Array2<f64>| {
+            let difference = actual
+                .iter()
+                .zip(expected.iter())
+                .map(|(&lhs, &rhs)| (lhs - rhs) * (lhs - rhs))
+                .sum::<f64>()
+                .sqrt();
+            let scale = expected.iter().map(|value| value * value).sum::<f64>().sqrt();
+            difference / scale.max(1.0e-12)
+        };
+
+        let mode_error = relative_vector_error(&u, &beta_fd);
+        let correction_error = relative_matrix_error(&correction, &correction_fd);
+        let correction_reversed_error = relative_matrix_error(&(-&correction), &correction_fd);
+        let total_error = relative_matrix_error(&total_analytic, &total_fd);
+        let total_reversed_error = relative_matrix_error(&total_sign_reversed, &total_fd);
+
+        // Scalar value decomposition names which LAML term moves on the same
+        // rho perturbation: T1 = 0.5(deviance+penalty), T2 = 0.5 log|H|,
+        // T3 = -0.5 log|lambda S|_+ (rank one, hence derivative -0.5).
+        let t1_plus = 0.5 * (state_plus.deviance + state_plus.penalty_term);
+        let t1_minus = 0.5 * (state_minus.deviance + state_minus.penalty_term);
+        let t1_fd = (t1_plus - t1_minus) / (2.0 * RHO_STEP);
+        let t2_fd = 0.5
+            * (laml_test_logdet_h(&state_plus) - laml_test_logdet_h(&state_minus))
+            / (2.0 * RHO_STEP);
+        let t3_fd = -0.5_f64;
+
+        eprintln!(
+            "survival rho-chain decomposition: mode_error={mode_error:.6e} \
+             correction_error={correction_error:.6e} correction_reversed_error={correction_reversed_error:.6e} \
+             total_error={total_error:.6e} total_reversed_error={total_reversed_error:.6e} \
+             t1_fd={t1_fd:+.12e} t2_fd={t2_fd:+.12e} t3_fd={t3_fd:+.12e} \
+             beta_analytic={:?} beta_fd={:?} correction={:?} correction_fd={:?} \
+             total_analytic={:?} total_fd={:?}",
+            u.to_vec(),
+            beta_fd.to_vec(),
+            correction,
+            correction_fd,
+            total_analytic,
+            total_fd,
+        );
+
+        assert!(
+            mode_error <= REL_TOL
+                && correction_error <= REL_TOL
+                && total_error <= REL_TOL,
+            "survival rho chain-rule identity failed: mode_error={mode_error:.6e}, \
+             correction_error={correction_error:.6e} (sign-reversed={correction_reversed_error:.6e}), \
+             total_error={total_error:.6e} (sign-reversed={total_reversed_error:.6e})"
+        );
+    }    /// Two-ACTIVE-block variant of [`laml_fd_test_model`] (both penalty blocks
     /// carry `λ > 0`), so the active-ρ vector is 2-dimensional. This lets the
     /// FD gate probe the survival-transformation outer stall's structure — one
     /// coordinate driven to the over-smoothing rail, the other free — which the
