@@ -316,6 +316,43 @@ pub struct UncertaintyProvenance {
     pub covariance_source: InferenceCovarianceMode,
 }
 
+/// The symmetric predictive (observation) band `μ ± z·√(SE(μ̂)² + σ²)`, clamped
+/// to the response support.
+///
+/// A prediction interval covers a *future* response `Y = μ + ε` at the query
+/// point. The point `μ̂` is itself estimated (`Var(μ̂) = SE(μ̂)²`) and the
+/// observation noise has `Var(Y|μ) = σ²`; the two are independent, so the
+/// predictive variance is their sum and the half-width is `z·√(SE(μ̂)² + σ²)`,
+/// **not** `z·σ` — dropping the estimation term under-covers wherever the fit is
+/// uncertain. The support clamp is not cosmetic either: a symmetric band on a
+/// bounded or half-bounded response otherwise reports impossible values, such as
+/// a count band going negative.
+///
+/// Both prediction-interval entry points call this, so they cannot disagree on
+/// the same fit. They previously held that agreement — and this
+/// `√(mean_se² + obsvar)` convention, shared with `family_observation_band` — by
+/// asserting it in a comment in each copy rather than by sharing a call.
+pub fn symmetric_predictive_band(
+    mean: &Array1<f64>,
+    mean_standard_error: &Array1<f64>,
+    noise_sd: &Array1<f64>,
+    z: f64,
+    bounds: &ResponseBounds,
+) -> (Array1<f64>, Array1<f64>) {
+    let predictive_se = Array1::from_iter(
+        mean_standard_error
+            .iter()
+            .zip(noise_sd.iter())
+            .map(|(&mse, &sd)| (mse * mse + sd * sd).max(0.0).sqrt()),
+    );
+    let half = predictive_se.mapv(|s| z * s);
+    let mut lower = mean - &half;
+    let mut upper = mean + &half;
+    bounds.clamp_in_place(&mut lower);
+    bounds.clamp_in_place(&mut upper);
+    (lower, upper)
+}
+
 /// Assemble a [`PredictUncertaintyResult`] from a predictor's already-computed
 /// linear-predictor / response state.
 ///
@@ -345,29 +382,8 @@ pub fn assemble_uncertainty_result(
         // equal-tailed band directly; use it verbatim (already support-clamped).
         Some(ObservationInterval::Override { lower, upper }) => (Some(lower), Some(upper)),
         Some(ObservationInterval::Symmetric { noise_sd, bounds }) => {
-            // A prediction (observation) interval covers a *future* response
-            // `Y = μ + ε` at the query point. The point `μ̂` is itself estimated
-            // (`Var(μ̂) = mean_standard_error²`) and the observation noise has
-            // `Var(Y|μ) = noise_sd²`; the two are independent, so the predictive
-            // variance is the sum and the band half-width is
-            //   z·√(SE(μ̂)² + σ²),
-            // NOT `z·σ`. Dropping the estimation term under-covers wherever the
-            // fit is uncertain. This matches `family_observation_band`'s
-            // `√(mean_se² + obsvar)` convention used by the dedicated engine.
-            let predictive_se = Array1::from_iter(
-                mean_standard_error
-                    .iter()
-                    .zip(noise_sd.iter())
-                    .map(|(&mse, &sd)| (mse * mse + sd * sd).max(0.0).sqrt()),
-            );
-            let half = predictive_se.mapv(|s| z * s);
-            let mut lower = &mean - &half;
-            let mut upper = &mean + &half;
-            // The predictive band must lie within the response support; a
-            // symmetric band on a bounded/half-bounded response otherwise
-            // reports impossible values (a count band going negative).
-            bounds.clamp_in_place(&mut lower);
-            bounds.clamp_in_place(&mut upper);
+            let (lower, upper) =
+                symmetric_predictive_band(&mean, &mean_standard_error, noise_sd, z, &bounds);
             (Some(lower), Some(upper))
         }
         None => (None, None),
@@ -902,17 +918,8 @@ pub fn predict_posterior_mean_generic<T: PredictionTransform>(
             // genuinely symmetric, so it keeps this arm.)
             (None, Some(noise_sd)) => {
                 let bounds = transform.bounds();
-                let predictive_se = Array1::from_iter(
-                    mean_se
-                        .iter()
-                        .zip(noise_sd.iter())
-                        .map(|(&mse, &sd)| (mse * mse + sd * sd).max(0.0).sqrt()),
-                );
-                let half = predictive_se.mapv(|s| z * s);
-                let mut lower = &result.mean - &half;
-                let mut upper = &result.mean + &half;
-                bounds.clamp_in_place(&mut lower);
-                bounds.clamp_in_place(&mut upper);
+                let (lower, upper) =
+                    symmetric_predictive_band(&result.mean, &mean_se, &noise_sd, z, &bounds);
                 result.observation_lower = Some(lower);
                 result.observation_upper = Some(upper);
             }
