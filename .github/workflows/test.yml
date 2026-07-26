@@ -1,5 +1,8 @@
 name: Rust CI
 
+run-name: >-
+  ${{ inputs.ledger_date != '' && format('Rust CI: nightly ledger {0}', inputs.ledger_date) || 'Rust CI: interactive' }}
+
 # REDESIGN (completeness + speed + total-failure visibility)
 # ----------------------------------------------------------
 # The previous version of this workflow had three structural defects:
@@ -50,50 +53,28 @@ name: Rust CI
 # and the build.rs human-author gate (fetch-depth: 0 on every building job).
 
 on:
-  schedule:
-    # Off the hour on purpose. GitHub queues scheduled runs fleet-wide, and the
-    # top of the hour is the most contended minute there is; a nightly that is
-    # delayed past the next working morning is a nightly that never reported.
-    - cron: "37 2 * * *"
   workflow_dispatch:
     inputs:
       shards:
         description: "Number of parallel test run-shards (matrix size)."
         default: "10"
         required: false
+      ledger_date:
+        description: "UTC date reserved for nightly-ledger-guardian; empty means interactive."
+        default: ""
+        required: false
 
-# The two triggers of this workflow want OPPOSITE concurrency semantics, and one
-# group cannot express both (#2437):
+# GitHub may drop scheduled events under load (#2437), so this expensive workflow
+# is dispatch-only. nightly-ledger-guardian.yml owns several cheap, idempotent
+# schedule opportunities and supplies `ledger_date` exactly once when the current
+# UTC ledger is overdue.
 #
-#   * DISPATCHED runs should supersede each other. A lane re-dispatching wants the
-#     newest answer, and a ref-keyed group with `cancel-in-progress` is right.
-#   * SCHEDULED runs must never be cancelled. The nightly IS the red ledger —
-#     `aggregate` is what writes `MASTER_FAILURES` — and there is no later run
-#     that recreates it.
-#
-# Keyed on `github.ref` alone, both triggers landed in the SAME group, because
-# `github.ref` is `refs/heads/main` for the cron and for every dispatch. So any
-# lane's dispatch cancelled the nightly, and a workflow-level group cancels EVERY
-# job in the run including `aggregate`. The measured consequence: the last five
-# runs were all cancelled — 30145478392, 30141465131, 30141248301, 30135536531,
-# and the 07-24 cron nightly 30069250206 — and nothing completed after
-# 29982196128 on 07-23, so the project went two days with no full test signal, by
-# construction and with nobody's behaviour at fault.
-#
-# Splitting the triggers into different groups fixes it without touching the
-# shard fan-out: a scheduled run sits in `rust-ci-<sha>` with cancellation OFF,
-# dispatches stay in `rust-ci-<ref>` with cancellation ON. A dispatch can no
-# longer cancel the nightly because they are no longer the same group, and
-# dispatches still supersede one another exactly as before.
-#
-# Cost: the nightly and one dispatch may now run concurrently — bounded at two
-# matrices, because dispatches still collapse among themselves. That is the whole
-# increase, and the "saving" it gives up was destroying the ledger. Note this is
-# NOT the same as SHA-keying the workflow unconditionally, which was rejected in
-# #2429 precisely because N distinct SHAs would then mean N concurrent matrices.
+# Interactive dispatches keep their ref-keyed supersession policy. A guardian
+# dispatch gets a UTC-date group with cancellation disabled, so interactive work
+# cannot destroy the ledger and duplicate guardian events cannot supersede it.
 concurrency:
-  group: rust-ci-${{ github.event_name == 'schedule' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  group: rust-ci-${{ inputs.ledger_date != '' && format('ledger-{0}', inputs.ledger_date) || github.ref }}
+  cancel-in-progress: ${{ inputs.ledger_date == '' }}
 
 permissions:
   actions: read
@@ -127,8 +108,14 @@ jobs:
     steps:
       - id: plan
         shell: bash
+        env:
+          LEDGER_DATE: ${{ inputs.ledger_date }}
         run: |
           set -uo pipefail
+          if [[ -n "$LEDGER_DATE" && ! "$LEDGER_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::ledger_date must be an ISO UTC date (YYYY-MM-DD)."
+            exit 1
+          fi
           N="${{ github.event.inputs.shards }}"
           if ! [[ "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ]; then N=10; fi
           echo "total=$N" >> "$GITHUB_OUTPUT"
