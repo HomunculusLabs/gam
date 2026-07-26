@@ -320,7 +320,10 @@ fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: us
     // read as if the singularities were being handled (#2469, #2475 site 4).
     let u = (1.0 - cos_g) * 0.5;
     let one_minus_u = 1.0 - u;
-    debug_assert!(
+    // assert!, not debug_assert!: the ban-scanner forbids debug_assert (silent
+    // in release → debug/release divergence). Two O(1) comparisons in front of
+    // a dilogarithm is free.
+    assert!(
         u > 0.0 && one_minus_u > 0.0,
         "closed-form Sobolev derivative called at a pole (cos γ = {cos_g}); the \
          caller's POLE_LIMIT_THRESHOLD guard is supposed to make this unreachable"
