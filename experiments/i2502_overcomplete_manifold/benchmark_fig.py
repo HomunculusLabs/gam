@@ -29,9 +29,9 @@ def main():
     s = args.suffix
 
     bars = []
-    man = latest(records, f"manifold_k{args.k}{s}") or latest(records, f"manifold_k{args.k}")
+    man = latest(records, f"manifold_k{args.k}_p128") or latest(records, f"manifold_k{args.k}")
     if man:
-        bars.append((f"gam manifold dictionary\nK={args.k} circle atoms (REML/LAML)",
+        bars.append((f"gam manifold dictionary\nK={args.k} (topology-adjudicated, REML/LAML)",
                      man["test_ev"], BLUE, man.get("test_mean_l0")))
     lin = latest(records, f"linear_k{args.k}{s}") or latest(records, f"linear_k{args.k}")
     if lin:
@@ -39,8 +39,12 @@ def main():
                      lin.get("test_mean_l0")))
     tk = latest(records, f"torch_topk_k{args.k}{s}")
     if tk:
-        bars.append(("standard TopK SAE\n(Adam, Gao et al. 2024)", tk["test_ev"],
+        bars.append(("TopK SAE, direct torch\n(Adam, Gao et al. 2024)", tk["test_ev"],
                      ORANGE, tk.get("test_mean_l0")))
+    sl = latest(records, f"saelens_topk_k{args.k}{s}")
+    if sl:
+        bars.append(("TopK SAE, sae-lens 6.46\n(external library)", sl["test_ev"],
+                     "#E69F00", sl.get("test_mean_l0")))
     pca = latest(records, f"pca_M8{s}")
     if pca:
         bars.append(("PCA, 8 components\n(matched coefficient budget)",
