@@ -52,7 +52,7 @@ pub enum SparseDictionaryError {
         solve_residual: f64,
         solve_tolerance: f64,
         decoder_nonconverged_columns: usize,
-        decoder_factorization_failures: usize,
+        decoder_dense_cholesky_declines: usize,
     },
     TraceNonConvergence {
         rho: f64,
@@ -97,7 +97,7 @@ impl fmt::Display for SparseDictionaryError {
                 solve_residual,
                 solve_tolerance,
                 decoder_nonconverged_columns,
-                decoder_factorization_failures,
+                decoder_dense_cholesky_declines,
             } => write!(
                 f,
                 "fit_sparse_dictionary did not converge after {epochs} epochs: EV \
@@ -106,8 +106,8 @@ impl fmt::Display for SparseDictionaryError {
                  {decoder_fixed_point_residual:.3e}, routing residual {routing_residual:.3e}, \
                  accepted births {accepted_births}, linear-solve residual \
                  {solve_residual:.3e} (tolerance {solve_tolerance:.3e}), nonconverged decoder \
-                 columns {decoder_nonconverged_columns}, dense factorization failures \
-                 {decoder_factorization_failures}"
+                 columns {decoder_nonconverged_columns}, dense Cholesky declines routed to CG \
+                 {decoder_dense_cholesky_declines}"
             ),
             Self::TraceNonConvergence {
                 rho,
@@ -822,8 +822,13 @@ pub(super) fn run(
         // the independent objective window below must plateau too. Raw
         // normal-equation convergence alone cannot certify a model because unit
         // projection and rerouting happen afterward.
+        //
+        // Soundness is a property of the ANSWER, not of which solver produced
+        // it. A dense-factorization decline routes the same component through
+        // block CG below; that solve certifies itself through its convergence
+        // status and residual. The decline count is therefore path telemetry,
+        // never an independent veto on a certified CG answer.
         let numerically_sound = decoder_solve_stats.cg_nonconverged_columns == 0
-            && decoder_solve_stats.dense_factorization_failures == 0
             && decoder_solve_stats.cg_relative_residual
                 <= decoder_solve_stats.cg_residual_stop.max(f64::MIN_POSITIVE);
         let structure_settled = accepted_births == 0;
@@ -940,7 +945,7 @@ pub(super) fn run(
         solve_residual: decoder_solve_stats.cg_relative_residual,
         solve_tolerance: decoder_solve_stats.cg_residual_stop,
         decoder_nonconverged_columns: decoder_solve_stats.cg_nonconverged_columns,
-        decoder_factorization_failures: decoder_solve_stats.dense_factorization_failures,
+        decoder_dense_cholesky_declines: decoder_solve_stats.dense_cholesky_declines,
     })
 }
 
@@ -2153,12 +2158,14 @@ pub struct DecoderSolveStats {
     /// Decoder columns whose CG did NOT reach the charge floor before the
     /// conditioning-derived iteration cap (or broke down on a non-SPD step).
     /// Non-zero means at least one giant-scale co-firing block was too
-    /// ill-conditioned to solve to tolerance and fell back to the ridge-diagonal
-    /// best effort — a TYPED non-convergence, surfaced instead of a silent spin.
+    /// ill-conditioned to solve to tolerance. Its previous decoder column is
+    /// retained and the enclosing fit reports TYPED non-convergence instead of
+    /// installing a substitute or spinning silently.
     pub cg_nonconverged_columns: usize,
-    /// Dense SPD components whose Cholesky factorization failed. No bumped-ridge
-    /// or diagonal substitute is installed; a non-zero count forbids a fit.
-    pub dense_factorization_failures: usize,
+    /// Dense-component Cholesky shortcuts that declined. The component is routed
+    /// through block CG instead, so this is path telemetry; CG convergence and
+    /// its residual determine whether the resulting answer is sound.
+    pub dense_cholesky_declines: usize,
     /// Decoder columns whose block-CG solve ran on the device-resident CUDA
     /// backend. `0` on a CPU-only refresh — surfaced in the epoch heartbeat so
     /// a "device-resident" label can never silently cover a CPU reality
@@ -2187,7 +2194,7 @@ impl Default for DecoderSolveStats {
             cg_relative_residual: 0.0,
             cg_residual_stop: 0.0,
             cg_nonconverged_columns: 0,
-            dense_factorization_failures: 0,
+            dense_cholesky_declines: 0,
             device_refresh_columns: 0,
             cg_kappa_bound: None,
         }
@@ -2763,16 +2770,21 @@ fn solve_component(
                 rhs[[i, c]] = eq.b[[a, c]];
             }
         }
-        let Some(sol) = cholesky_solve_block(&mat, &rhs) else {
-            stats.dense_factorization_failures += 1;
-            return Ok(());
-        };
-        for (i, &a) in comp.iter().enumerate() {
-            for c in 0..p {
-                decoder[[a, c]] = sol[[i, c]] as f32;
+        if let Some(sol) = cholesky_solve_block(&mat, &rhs) {
+            for (i, &a) in comp.iter().enumerate() {
+                for c in 0..p {
+                    decoder[[a, c]] = sol[[i, c]] as f32;
+                }
             }
+            return Ok(());
         }
-        return Ok(());
+        // Dense Cholesky is the small-component fast path, not the component's
+        // only solver. Returning `Ok(())` here used to leave the decoder block
+        // untouched while claiming that the refresh succeeded. Record the
+        // declined shortcut, then fall through to the matrix-free block-CG path
+        // below, which solves the same normal equations and carries its own
+        // convergence and residual certificate.
+        stats.dense_cholesky_declines += 1;
     }
 
     // Default coupled path: one matrix-free BLOCK CG over all live columns.
@@ -3234,8 +3246,8 @@ fn kappa_from_cg_tridiagonal(alphas: &[f64], betas: &[f64]) -> Option<f64> {
 }
 
 /// Dense SPD solve `mat · X = rhs` (multiple RHS columns) via the stated matrix.
-/// A failed factorization is evidence that this subproblem was not solved; the
-/// caller records it and refuses convergence instead of changing the ridge.
+/// A failed factorization declines this fast path; the caller records it and
+/// routes the same component through residual-certified block CG.
 fn cholesky_solve_block(mat: &Array2<f64>, rhs: &Array2<f64>) -> Option<Array2<f64>> {
     use faer::Side;
     use gam_linalg::faer_ndarray::FaerCholesky;

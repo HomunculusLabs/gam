@@ -187,4 +187,27 @@ fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
     // The decoder is `K×P` (the dictionary itself), the only K-scaled state — and it
     // is P-wide, not N-wide, so no `N×K` object exists anywhere in the fit.
     assert_eq!(fit.decoder.dim(), (k_atoms, p_out));
+
+    // This fixture deliberately reaches the small-component Cholesky-decline
+    // route. Success must therefore prove that the declined shortcut did not
+    // become a silent no-op: block CG actually ran and certified its answer.
+    let solve = fit.decoder_solve_stats;
+    assert!(
+        solve.dense_cholesky_declines > 0,
+        "fixture must exercise at least one dense Cholesky decline"
+    );
+    assert!(
+        solve.cg_columns > 0,
+        "a declined dense Cholesky must route decoder columns through block CG"
+    );
+    assert_eq!(
+        solve.cg_nonconverged_columns, 0,
+        "fallback block CG must converge for every routed decoder column"
+    );
+    assert!(
+        solve.cg_relative_residual <= solve.cg_residual_stop,
+        "fallback block CG residual {:.3e} exceeds its {:.3e} stop",
+        solve.cg_relative_residual,
+        solve.cg_residual_stop
+    );
 }
