@@ -506,7 +506,13 @@ pub fn fit_tensor_surface(
     // is identically zero and PRSS_d→y_dᵀy_d. Choosing infinity is safe for
     // the algebra below (coefficients, EDF, and covariance all become zero) and
     // makes null recovery exact rather than a large-finite-λ approximation.
-    let lambda = if null_score >= search.optimum.value {
+    //
+    // The null side is EXACT and the interior side is not, so the search's own
+    // `value_uncertainty` — a certified bound on how much any cell it closed on
+    // the value side could still hide — sets the band in which the null wins.
+    // A finite λ is chosen only when it beats the exact null by more than what
+    // the search could not resolve.
+    let lambda = if null_score + search.value_uncertainty >= search.optimum.value {
         f64::INFINITY
     } else {
         d_max * search.optimum.x.exp()

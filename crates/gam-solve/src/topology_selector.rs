@@ -2706,10 +2706,25 @@ where
     let chi_squared = ChiSquared::new(1.0)
         .map_err(|error| format!("closure profile CI distribution: {error}"))?;
     let target = representative.tk_score + 0.5 * chi_squared.inverse_cdf(level);
+    // `closure_profile_ci_side` bisects between ADJACENT entries of this list on
+    // the strength of the score being monotone between them, so the list has to
+    // be a complete partition of the domain into monotone pieces — not merely
+    // the certified stationary points. A cell the search closed on the value
+    // side is either one-signed (monotone inside, so its endpoints suffice) or
+    // flat to roundoff at the resolution floor (nothing inside to cross), but
+    // in both cases the cell's endpoints are the partition boundaries and
+    // dropping them would let a bisection step span a piece the profile is not
+    // monotone across. Extra probes only refine the partition.
     let stationary_abscissae: Vec<f64> = search
         .stationary_points
         .iter()
         .map(|stationary| stationary.sample.x)
+        .chain(
+            search
+                .bounded_cells
+                .iter()
+                .flat_map(|closed| [closed.cell.lo, closed.cell.hi]),
+        )
         .collect();
     let evaluate_score = |gamma| evaluate(gamma).map(|point| point.tk_score);
     let (ci_lo, lo_at_bound) = if representative.gamma == 0.0 {

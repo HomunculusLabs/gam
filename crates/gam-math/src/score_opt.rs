@@ -22,10 +22,21 @@
 //! An interval is discarded only when its first-derivative enclosure excludes
 //! zero.  A stationary point is refined only after the second-derivative
 //! enclosure excludes zero, proving that the first derivative is monotone and
-//! hence that a straddling interval contains exactly one root.  Every other
-//! interval is subdivided.  If floating-point spacing or the caller-requested
-//! resolution is reached before either fact is proved, the result is a typed
-//! [`ScoreSearchError::Unresolved`] rather than a best-effort optimum.
+//! hence that a straddling interval contains exactly one root.
+//!
+//! Two intervals need neither fact, because the object being certified is the
+//! MAXIMUM and not the stationary structure: one whose derivative enclosure has
+//! a constant sign is monotone, so its maximum is an endpoint already in hand;
+//! and one already narrowed to the requested resolution over which the score
+//! varies by less than one unit in the last place of its own magnitude cannot
+//! be told from a constant by this arithmetic.  Both are closed as a
+//! [`BoundedCell`] carrying a certified bound on what they could still hide,
+//! summarized by [`ScoreSearchResult::value_uncertainty`].
+//!
+//! Every other interval is subdivided.  If floating-point spacing or the
+//! caller-requested resolution is reached before any of the above is proved,
+//! the result is a typed [`ScoreSearchError::Unresolved`] rather than a
+//! best-effort optimum.
 //!
 //! [`AffineRemlProfile`] supplies both the point jets and rigorous interval
 //! formulas for scores whose penalized Hessian has simultaneously diagonal
@@ -284,6 +295,11 @@ pub struct ScoreSearchResult {
     /// guarantee.  Otherwise it is the largest amount by which any cell closed
     /// on the value side could still hide a better point — a number the caller
     /// can compare its own tolerances against instead of having to assume one.
+    ///
+    /// It is stated in the currency the search works in: the score AS
+    /// EVALUATED.  Every comparison the search makes, this one included, is
+    /// between values the oracle returned, so the oracle's own error in the
+    /// VALUE is not represented here.  This is the uncertainty the SEARCH adds.
     pub value_uncertainty: f64,
 }
 
@@ -1671,12 +1687,15 @@ fn mode_ranges(gram: f64, penalty: f64, lambda: ClosedInterval) -> ModeRanges {
         // `k = w*(c-u)` is the ONE kernel with a cancelling subtraction: `c-u`
         // vanishes at `t = 1` while its own error does not, so `k` has no
         // bounded relative error and charging `|k|` would understate it by
-        // `1/|c-u|`.  The pre-cancellation magnitude is `|w|`, and
-        // `|c-u| <= 1`, so `2*gamma_8*|w/gram| = 2*gamma_8*|first|` bounds it.
-        second: RoundedRange::new(
-            inverse_gram.mul(kernels.k),
-            2.0 * gamma(8) * magnitude_of(first),
-        ),
+        // `1/|c-u|` — the trap #2513 records, where the first attempt was off
+        // by a factor of 1e16 at the far end of the domain.
+        //
+        // The pre-cancellation magnitude is `|w|`.  Chaining absolute bounds
+        // with `|c| , |u| , |c-u| <= 1`: `c-u` carries `2*gamma_5 + u <=
+        // gamma_12` absolute; `w*(c-u)` then carries
+        // `|w|*(gamma_12 + gamma_6) + u|w| <= |w|*gamma_20`; and the `1/gram`
+        // scaling makes it `|w/gram|*gamma_21 = |first|*gamma_21`.
+        second: RoundedRange::new(inverse_gram.mul(kernels.k), gamma(21) * magnitude_of(first)),
     }
 }
 
@@ -1903,6 +1922,45 @@ mod tests {
         assert!(result.optimum.x > 0.5 && result.optimum.x < 1.0);
         assert!(result.optimum.value > 2.9);
         assert_eq!(result.stationary_points.len(), 4);
+    }
+
+    /// Outward rounding is for operations the hardware cannot do exactly.
+    /// Applying it to ones it can costs the search real facts — most
+    /// importantly the one-signed derivative enclosure of a cell where a
+    /// kernel vanishes identically, which is the cheapest close it has.
+    #[test]
+    fn interval_primitives_do_not_widen_exact_operations() {
+        let zero = ClosedInterval::point(0.0);
+        assert_eq!(
+            zero.add(ClosedInterval::point(5.0)),
+            ClosedInterval::point(5.0)
+        );
+        assert_eq!(
+            zero.sub(ClosedInterval::point(5.0)),
+            ClosedInterval::point(-5.0)
+        );
+        assert_eq!(ClosedInterval::point(3.0).mul(zero), zero);
+        assert_eq!(
+            ClosedInterval::point(7.0).scale(1.0),
+            ClosedInterval::point(7.0)
+        );
+        assert_eq!(
+            ClosedInterval::point(7.0).div_positive(ClosedInterval::point(1.0)),
+            ClosedInterval::point(7.0)
+        );
+        assert_eq!(
+            ClosedInterval::new(-2.0, 3.0).neg(),
+            ClosedInterval::new(-3.0, 2.0)
+        );
+        // The #2513 case: `3*x^2` over a cell straddling the origin is
+        // nonnegative, and the enclosure has to say so.
+        let derivative = ClosedInterval::new(-1.0, 1.0).square().scale(3.0);
+        assert_eq!(derivative.lo, 0.0);
+        assert!(derivative.contains_zero());
+        // ... while a genuinely inexact primitive is still rounded outward.
+        let inexact = ClosedInterval::point(0.1).add(ClosedInterval::point(0.2));
+        assert!(inexact.lo < inexact.hi);
+        assert!(inexact.contains(0.1 + 0.2));
     }
 
     fn quartic_jet(x: f64) -> ScoreJet {
