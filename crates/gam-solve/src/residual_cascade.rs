@@ -201,6 +201,15 @@ const QUASI_UNIFORMITY_MAX_ASPECT: f64 = 1.0e3;
 /// breakdown).
 const SLQ_PROBES: usize = 24;
 const SLQ_LANCZOS_STEPS: usize = 48;
+/// Live bytes the profiled-residual quadrature's full-reorthogonalization basis
+/// may occupy past the dense cap (see [`Core::residual_quadrature_budget`]). The
+/// basis is `steps x rank` doubles, and it is the only quantity in that run that
+/// grows with both; the matvecs and the tridiagonal eigensolve are negligible
+/// beside it. 256 MiB keeps a full-rank run available for every design the
+/// iterative route sees just past `DENSE_GRAM_MAX` — where the rank is thousands,
+/// so exactness is reachable outright — while bounding the run on the
+/// hundred-thousand-column designs `MAX_CENTERS` permits.
+const RESIDUAL_QUADRATURE_BASIS_BYTES: usize = 256 << 20;
 
 /// Deterministic seed for the SLQ probes and posterior samples.
 const RNG_SEED: u64 = 0x1032_CA5C_ADE0_5EED;
@@ -388,6 +397,46 @@ pub enum LogdetMethod {
     Slq,
 }
 
+/// Route the profiled residual `R(λ)` and its three `log λ` derivative moments
+/// `S₂, S₃, S₄` took during REML selection — reported WITH the quantity that
+/// decided it, because two of the three arms are exact and the third is not, and
+/// which one a fit received is not otherwise readable from the outside.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResidualMomentMethod {
+    /// Read off the dense Schur eigenbasis under the sizing cap: exact, with no
+    /// linear solve at any λ.
+    DenseExact,
+    /// Golub–Meurant quadrature seeded with the whitened right-hand side, whose
+    /// Krylov space CLOSED inside its budget — so `S_k(λ)` is reproduced rather
+    /// than approximated, again with no solve at any λ.
+    ExhaustedKrylov {
+        /// Lanczos steps the run took before the Krylov space closed.
+        steps: usize,
+        /// Penalized Schur rank, the hard ceiling on `steps`.
+        rank: usize,
+        /// Step budget the run was allowed, before that ceiling.
+        budget: usize,
+        /// `‖r_m‖ / maxᵢ|αᵢ|` at closure — the evidence for the word "closed".
+        relative_tail: f64,
+        /// `|Σⱼ wⱼ / ‖β‖² − 1|`: a Gauss rule's weights sum to its measure's
+        /// mass, so this is a free end-to-end check on the Jacobi pipeline.
+        mass_defect: f64,
+        /// Fraction of `‖β‖²` that landed on sub-roundoff Ritz values and was
+        /// dropped as null-space mass. `β ⊥ null(B)` holds EXACTLY, so this is
+        /// roundoff, and its size is the evidence for that reading.
+        dropped_mass_fraction: f64,
+    },
+    /// The Krylov space did not close inside its budget, so `S₁..S₄` are
+    /// re-derived from two solves of `A = X'WX + λD` at every λ the search
+    /// visits. `relative_tail` is how far from closing the run got.
+    Solved {
+        steps: usize,
+        rank: usize,
+        budget: usize,
+        relative_tail: f64,
+    },
+}
+
 /// Computable certificates attached to a fit.
 #[derive(Clone, Copy, Debug)]
 pub struct CascadeCertificate {
@@ -399,6 +448,10 @@ pub struct CascadeCertificate {
     pub solve_iters: usize,
     /// Route the log-determinant took.
     pub logdet_method: LogdetMethod,
+    /// Route the profiled residual's `λ` moments took, on a fit whose `λ` was
+    /// SELECTED by the REML criterion. `None` on a fixed-λ fit, which evaluates
+    /// no criterion and therefore takes no such route.
+    pub residual_moments: Option<ResidualMomentMethod>,
 }
 
 /// Discretization certificate of the refinement loop: the exact upper bound
@@ -746,6 +799,33 @@ struct CascadeSpectralMode {
     weight: f64,
 }
 
+/// One Lanczos run's Jacobi matrix on the penalty-whitened Schur complement
+/// `B`, plus everything a Golub–Meurant quadrature rule needs from it.
+///
+/// See [`Core::schur_lanczos`]. `alpha` and `beta` are `T_m`'s diagonal and
+/// off-diagonal, with `beta.len() == alpha.len() - 1` whenever `alpha` is
+/// non-empty, which is the shape [`symmetric_tridiagonal_eigen`] reads.
+struct SchurLanczos {
+    /// `alpha_1..alpha_m` — the diagonal of `T_m`.
+    alpha: Vec<f64>,
+    /// `beta_1..beta_{m-1}` — the off-diagonal INSIDE `T_m`.
+    beta: Vec<f64>,
+    /// `||r_m||`, the `(m+1, m)` entry of the untruncated Jacobi matrix. It is
+    /// the residual of the Krylov approximation, so `tail == 0` means
+    /// `K_m(B, start)` is `B`-invariant and the Gauss rule is EXACT.
+    tail: f64,
+    /// `max_i |alpha_i|` — a Rayleigh-quotient lower bound on `||B||` over the
+    /// Krylov space, and the scale the invariance certificate is stated in.
+    spectral_scale: f64,
+    /// `||start||^2`, the total mass of the quadrature measure: `Sum_j w_j`.
+    start_norm_sq: f64,
+    /// `tail` sits at the run's own roundoff floor, or the run consumed the full
+    /// penalized rank. Either way `K_m(B, start)` is (numerically) invariant and
+    /// the Gauss rule reproduces `start' g(B) start` for EVERY analytic `g` and
+    /// every `lambda` — not approximately, but to the arithmetic's own floor.
+    invariant: bool,
+}
+
 /// Lambda-independent spectral representation of the profiled REML score.
 ///
 /// Partition the normal matrix into the polynomial null space `0` and the
@@ -826,22 +906,134 @@ impl CascadeResidualSpectrum {
     }
 }
 
+/// What the profiled-residual quadrature certified about ITSELF, past the dense
+/// cap.
+///
+/// The quadrature is admitted only when it is EXACT, so this is not a tolerance
+/// record — it is the evidence for that word. See
+/// [`Core::iterative_residual_spectrum`].
+#[derive(Clone, Copy, Debug)]
+struct ResidualQuadratureCertificate {
+    /// Lanczos steps the run took.
+    steps: usize,
+    /// Penalized Schur rank, the hard ceiling on `steps`.
+    rank: usize,
+    /// Budget the run was allowed, before the rank ceiling.
+    budget: usize,
+    /// `||r_m|| / max_i |alpha_i|`: the Krylov residual against the operator
+    /// scale. Zero (to roundoff) is what "invariant", and hence "exact", means.
+    relative_tail: f64,
+    /// `K_m(B, beta)` is `B`-invariant, so the Gauss rule reproduces every
+    /// `S_k(lambda)` rather than approximating it.
+    exact: bool,
+    /// `|sum_j w_j / ||beta||^2 - 1|` — the free mass self-check of a Gauss rule
+    /// (the weights of any Gauss rule sum to the measure's total mass).
+    mass_defect: f64,
+    /// Fraction of `||beta||^2` that landed on sub-roundoff Ritz values and was
+    /// dropped as null-space mass. `beta` is orthogonal to `null(B)` EXACTLY
+    /// (see [`Core::dense_cascade_spectrum`]), so a nonzero value here is
+    /// roundoff, and its size is the evidence for that reading.
+    dropped_mass_fraction: f64,
+}
+
+impl ResidualQuadratureCertificate {
+    /// This certificate as the route it authorizes.
+    fn method(&self) -> ResidualMomentMethod {
+        let Self {
+            steps,
+            rank,
+            budget,
+            relative_tail,
+            exact,
+            mass_defect,
+            dropped_mass_fraction,
+        } = *self;
+        if exact {
+            ResidualMomentMethod::ExhaustedKrylov {
+                steps,
+                rank,
+                budget,
+                relative_tail,
+                mass_defect,
+                dropped_mass_fraction,
+            }
+        } else {
+            ResidualMomentMethod::Solved {
+                steps,
+                rank,
+                budget,
+                relative_tail,
+            }
+        }
+    }
+}
+
 /// Where the profiled residual and its three log-lambda derivatives come from.
 ///
-/// Both arms describe the SAME function of lambda; they differ only in what the
-/// design's Schur decomposition left behind. Under the dense sizing cap the
+/// All three arms describe the SAME function of lambda; they differ only in what
+/// the design's Schur decomposition left behind. Under the dense sizing cap the
 /// determinant spectrum comes from a full eigendecomposition, so the eigen-BASIS
 /// exists and the residual is a closed-form sum over exactly the modes the
 /// determinant already uses — no linear solve at any lambda, and the whole score
 /// is O(rank) per trial after the one decomposition.
 ///
-/// Past the cap only a fixed-probe QUADRATURE of that spectrum exists (Ritz
-/// values and weights, with no basis to project the right-hand side onto), so
-/// there the residual is still obtained by solving, with both right-hand sides
-/// sharing one factorization or one preconditioner at that lambda.
+/// Past the cap the determinant is a fixed-probe Hutchinson quadrature whose
+/// nodes carry no basis to project the right-hand side onto — but the RESIDUAL
+/// does not need one. It is a single quadratic form of a single known vector, so
+/// one Lanczos run seeded with that vector gives the Golub–Meurant Gauss rule
+/// for `S_k(lambda) = beta'(B + lambda I)^-k beta`, in the same node/weight
+/// shape the dense route stores. When that run exhausts the Krylov space the
+/// rule is EXACT, and the whole score is again solve-free at every lambda; when
+/// it does not, the rule's derivative moments are not approximately right but
+/// useless (#2503), so the route falls back to solving rather than shipping a
+/// stationarity certificate stated in numbers that are 80% wrong.
 enum CascadeResidualForm {
+    /// Exact eigenbasis projection under the dense cap. Interval-extendable via
+    /// [`CascadeRemlProfile::affine_view`], because the determinant modes on
+    /// this route are the SAME unit-weight modes.
     Spectral(CascadeResidualSpectrum),
-    Solved,
+    /// The Golub–Meurant quadrature past the dense cap, WITH the certificate it
+    /// earned. `spectrum` is `Some` exactly when that certificate says the
+    /// Krylov space closed, and `None` — meaning "solve at every lambda" — when
+    /// it did not; the certificate travels either way, so the refusal to use a
+    /// quadrature carries the numbers that refused it.
+    ///
+    /// Never affine-viewable even when exact: this route's DETERMINANT modes are
+    /// Hutchinson Ritz nodes with fractional weights, unrelated to the residual
+    /// run's nodes.
+    Quadrature {
+        spectrum: Option<CascadeResidualSpectrum>,
+        certificate: ResidualQuadratureCertificate,
+    },
+}
+
+impl CascadeResidualForm {
+    /// The lambda-independent spectral form, when this route has one.
+    fn spectrum(&self) -> Option<&CascadeResidualSpectrum> {
+        match self {
+            Self::Spectral(spectrum) => Some(spectrum),
+            Self::Quadrature { spectrum, .. } => spectrum.as_ref(),
+        }
+    }
+
+    /// This route, as the fit certificate reports it.
+    fn method(&self) -> ResidualMomentMethod {
+        match self {
+            Self::Spectral(_) => ResidualMomentMethod::DenseExact,
+            Self::Quadrature { certificate, .. } => certificate.method(),
+        }
+    }
+}
+
+/// What a REML-SELECTED fit inherits from the profile that selected it: the
+/// normalized log-determinant already evaluated at the chosen λ (so the fit does
+/// not redo it), and the route the profiled residual's λ moments took (so the
+/// fit certificate can report which of the three it was). A fixed-λ fit
+/// evaluates no criterion and passes `None`.
+#[derive(Clone, Copy, Debug)]
+struct CascadeSelectionProvenance {
+    normalized_logdet: f64,
+    residual_moments: ResidualMomentMethod,
 }
 
 struct CascadeScoreEvaluation {
@@ -905,6 +1097,14 @@ impl CascadeRemlProfile<'_> {
     /// collapses with the cell; [`CascadeRemlProfile::enclose`] can only pad the
     /// endpoint jets with global Lipschitz constants, and that pad does not
     /// collapse — see its own note on why the search could not terminate.
+    ///
+    /// [`CascadeResidualForm::Quadrature`] is DELIBERATELY excluded even though
+    /// it carries the same spectral shape. `AffineRemlProfile` computes the
+    /// determinant from the modes it is handed — `sum_i log h_i - rank log
+    /// lambda` — and past the dense cap the determinant is a Hutchinson
+    /// quadrature over 24 independent probes with fractional weights, which is
+    /// neither the residual run's node set nor unit-weight. Handing it the
+    /// residual nodes would silently substitute one determinant for another.
     fn affine_view(&self) -> Result<Option<AffineRemlProfile<'_>>, String> {
         let CascadeResidualForm::Spectral(spectrum) = &self.residual else {
             return Ok(None);
@@ -974,13 +1174,16 @@ impl CascadeRemlProfile<'_> {
         // The third derivative is retained to justify the analytic enclosure
         // used below; it needs no third solve because the last quadratic is
         // u'Du for u=A^-1Dc.
-        let (rss, penalty_energy, inverse_penalty_energy, third_energy) = match &self.residual {
+        let (rss, penalty_energy, inverse_penalty_energy, third_energy) = match self
+            .residual
+            .spectrum()
+        {
             // The decomposition that produced the determinant modes produced
             // these three quadratic forms too. Reading them off it costs
             // O(rank); re-deriving them cost a fresh O(m^3) factorization of
             // `A = X'WX + λD` at EVERY λ the certified search visits.
-            CascadeResidualForm::Spectral(spectrum) => spectrum.moments(lambda),
-            CascadeResidualForm::Solved => {
+            Some(spectrum) => spectrum.moments(lambda),
+            None => {
                 // ONE factorization of `A` for BOTH right-hand sides below; the
                 // matrix is the same at this λ and only the right-hand side
                 // differs.
@@ -1364,6 +1567,139 @@ impl Core {
         }
     }
 
+    /// One full-reorthogonalization Lanczos run on the penalty-whitened Schur
+    /// complement `B`, from a caller-supplied start vector.
+    ///
+    /// The determinant sweep (a Rademacher probe per run) and the profiled
+    /// residual (one run seeded with the whitened right-hand side) are the same
+    /// Krylov process on the same operator, and they read the same Jacobi matrix
+    /// afterwards. Sharing ONE implementation is not tidiness: an accuracy gate
+    /// on the residual quadrature that measured a copy of this recurrence would
+    /// certify a routine that does not ship.
+    ///
+    /// The returned `T_m` is the Jacobi matrix of the Gauss quadrature rule for
+    /// the measure `mu` that `start` induces on the spectrum of `B`, so
+    /// `start' g(B) start ≈ ||start||^2 · e_1' g(T_m) e_1` for every analytic
+    /// `g` — the Golub–Meurant rule. [`Self::tail`] is the `(m+1, m)` entry the
+    /// truncation dropped, which is what decides whether that `≈` is an `=`.
+    fn schur_lanczos(
+        &self,
+        null_chol: &[f64],
+        start: &[f64],
+        max_steps: usize,
+    ) -> Result<SchurLanczos, String> {
+        let nullity = self.nullity();
+        let rank = self.m - nullity;
+        if start.len() != rank {
+            return Err(format!(
+                "residual cascade: Lanczos start vector carries {} entries against penalized \
+                 Schur rank {rank}",
+                start.len()
+            ));
+        }
+        // `Sum_j w_j = ||start||^2` exactly, which is the free mass self-check
+        // every caller applies to the weights it derives from this run.
+        let start_norm_sq = start.iter().map(|value| value * value).sum::<f64>();
+        let start_norm = start_norm_sq.sqrt();
+        if !(start_norm.is_finite() && start_norm > 0.0) {
+            return Err(format!(
+                "residual cascade: Lanczos start vector has non-positive norm {start_norm}"
+            ));
+        }
+        let steps = max_steps.min(rank);
+        let mut full = vec![0.0; self.m];
+        let mut gram_full = vec![0.0; self.m];
+        let mut projected_null = vec![0.0; self.m];
+        let mut matvec = vec![0.0; rank];
+        let mut basis: Vec<Vec<f64>> = Vec::with_capacity(steps);
+        let mut q: Vec<f64> = start.iter().map(|&value| value / start_norm).collect();
+        let mut q_previous: Option<Vec<f64>> = None;
+        let mut alpha: Vec<f64> = Vec::with_capacity(steps);
+        let mut beta: Vec<f64> = Vec::with_capacity(steps.saturating_sub(1));
+        // `max_i |alpha_i|` is a lower bound on `||B||` restricted to the Krylov
+        // space (every `alpha_i` is a Rayleigh quotient), and it only rises. The
+        // per-step break floor below is deliberately left on the CURRENT
+        // `alpha_i` — that is the arithmetic the determinant sweep shipped with —
+        // while the invariance certificate is stated against this running scale,
+        // which a single small Rayleigh quotient cannot deflate.
+        let mut spectral_scale = 0.0_f64;
+        let mut tail = 0.0_f64;
+        // A Krylov space that has consumed the whole rank IS invariant: it is the
+        // entire range the operator acts on.
+        let mut invariant = steps == rank;
+        for step in 0..steps {
+            self.schur_whitened_matvec(
+                null_chol,
+                &q,
+                &mut matvec,
+                &mut full,
+                &mut gram_full,
+                &mut projected_null,
+            );
+            let diagonal = matvec
+                .iter()
+                .zip(q.iter())
+                .map(|(&a, &b)| a * b)
+                .sum::<f64>();
+            alpha.push(diagonal);
+            spectral_scale = spectral_scale.max(diagonal.abs());
+            let mut residual = matvec.clone();
+            for i in 0..rank {
+                residual[i] -= diagonal * q[i];
+            }
+            if let Some(previous) = &q_previous {
+                let previous_beta = beta.last().copied().unwrap_or(0.0);
+                for i in 0..rank {
+                    residual[i] -= previous_beta * previous[i];
+                }
+            }
+            basis.push(q.clone());
+            for direction in &basis {
+                let projection = residual
+                    .iter()
+                    .zip(direction.iter())
+                    .map(|(&a, &b)| a * b)
+                    .sum::<f64>();
+                for i in 0..rank {
+                    residual[i] -= projection * direction[i];
+                }
+            }
+            let norm = residual
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            if !norm.is_finite() {
+                return Err(
+                    "residual cascade: Schur-spectrum Lanczos produced a non-finite norm".into(),
+                );
+            }
+            tail = norm;
+            let rounding_floor =
+                f64::EPSILON * rank.max(1) as f64 * diagonal.abs().max(f64::MIN_POSITIVE);
+            if norm <= rounding_floor {
+                invariant = true;
+                break;
+            }
+            if step + 1 == steps {
+                break;
+            }
+            beta.push(norm);
+            q_previous = Some(std::mem::replace(&mut q, residual));
+            for value in &mut q {
+                *value /= norm;
+            }
+        }
+        Ok(SchurLanczos {
+            alpha,
+            beta,
+            tail,
+            spectral_scale,
+            start_norm_sq,
+            invariant,
+        })
+    }
+
     /// Exact Schur spectrum under the dense sizing cap, WITH the eigenbasis it
     /// is computed from.
     ///
@@ -1508,84 +1844,20 @@ impl Core {
         let rank = self.m - q0;
         let steps = SLQ_LANCZOS_STEPS.min(rank);
         let mut modes = Vec::with_capacity(SLQ_PROBES * steps);
-        let mut full = vec![0.0; self.m];
-        let mut gram_full = vec![0.0; self.m];
-        let mut projected_null = vec![0.0; self.m];
-        let mut matvec = vec![0.0; rank];
-        let mut basis: Vec<Vec<f64>> = Vec::with_capacity(steps);
 
         for probe in 0..SLQ_PROBES {
             let mut rng =
                 SplitMix64::new(RNG_SEED ^ (probe as u64).wrapping_mul(0xD134_2543_DE82_EF95));
-            let inv_norm = 1.0 / (rank as f64).sqrt();
-            let mut q = (0..rank)
-                .map(|_| rng.next_sign() * inv_norm)
-                .collect::<Vec<_>>();
-            let mut q_previous: Option<Vec<f64>> = None;
-            let mut alpha = Vec::with_capacity(steps);
-            let mut beta = Vec::with_capacity(steps.saturating_sub(1));
-            basis.clear();
-
-            for _ in 0..steps {
-                self.schur_whitened_matvec(
-                    null_chol,
-                    &q,
-                    &mut matvec,
-                    &mut full,
-                    &mut gram_full,
-                    &mut projected_null,
-                );
-                let diagonal = matvec
-                    .iter()
-                    .zip(q.iter())
-                    .map(|(&a, &b)| a * b)
-                    .sum::<f64>();
-                alpha.push(diagonal);
-                let mut residual = matvec.clone();
-                for i in 0..rank {
-                    residual[i] -= diagonal * q[i];
-                }
-                if let Some(previous) = &q_previous {
-                    let previous_beta = beta.last().copied().unwrap_or(0.0);
-                    for i in 0..rank {
-                        residual[i] -= previous_beta * previous[i];
-                    }
-                }
-                basis.push(q.clone());
-                for direction in &basis {
-                    let projection = residual
-                        .iter()
-                        .zip(direction.iter())
-                        .map(|(&a, &b)| a * b)
-                        .sum::<f64>();
-                    for i in 0..rank {
-                        residual[i] -= projection * direction[i];
-                    }
-                }
-                let norm = residual
-                    .iter()
-                    .map(|value| value * value)
-                    .sum::<f64>()
-                    .sqrt();
-                if !norm.is_finite() {
-                    return Err(
-                        "residual cascade: Schur-spectrum Lanczos produced a non-finite norm"
-                            .into(),
-                    );
-                }
-                let rounding_floor =
-                    f64::EPSILON * rank.max(1) as f64 * diagonal.abs().max(f64::MIN_POSITIVE);
-                if norm <= rounding_floor {
-                    break;
-                }
-                beta.push(norm);
-                q_previous = Some(std::mem::replace(&mut q, residual));
-                for value in &mut q {
-                    *value /= norm;
-                }
-            }
-
-            beta.truncate(alpha.len().saturating_sub(1));
+            // Unit-entry Rademacher probe. `schur_lanczos` normalizes it, and
+            // `||probe||^2 = rank` exactly (a sum of `rank` ones), so the
+            // Hutchinson scaling below reads that norm rather than restating it.
+            let probe_vector = (0..rank).map(|_| rng.next_sign()).collect::<Vec<_>>();
+            let SchurLanczos {
+                alpha,
+                beta,
+                start_norm_sq,
+                ..
+            } = self.schur_lanczos(null_chol, &probe_vector, steps)?;
             let (eigenvalues, first_components) = symmetric_tridiagonal_eigen(&alpha, &beta)?;
             let scale = eigenvalues
                 .iter()
@@ -1601,7 +1873,7 @@ impl Core {
                         "residual cascade: Schur-spectrum Ritz value {index} is not positive semidefinite ({eigenvalue})"
                     ));
                 }
-                let weight = rank as f64 * first * first / SLQ_PROBES as f64;
+                let weight = start_norm_sq * first * first / SLQ_PROBES as f64;
                 if !(weight.is_finite() && weight >= 0.0) {
                     return Err(format!(
                         "residual cascade: invalid Schur-spectrum quadrature weight {weight}"
@@ -1627,15 +1899,206 @@ impl Core {
         Ok(modes)
     }
 
+    /// `beta = D^(-1/2)(b1 - G10 G00^(-1) b0)` and
+    /// `anchor_energy = y'Wy - b0' G00^(-1) b0`: the null-eliminated,
+    /// penalty-whitened right-hand side and the part of the profiled residual no
+    /// lambda can move.
+    ///
+    /// Identical in exact arithmetic to what [`Self::dense_cascade_spectrum`]
+    /// builds inline, but routed through [`Self::matvec`] instead of
+    /// `dense_gram_entry`, so it is available past the dense cap. `matvec(0, v)`
+    /// applies the FULL `X'WX`, and only its `1`-block rows are read — that is
+    /// `G10 (G00^(-1) b0)`, the cross term, with no dense Gram formed.
+    fn whitened_residual_rhs(&self, null_chol: &[f64]) -> (Vec<f64>, f64) {
+        let q = self.nullity();
+        let rank = self.m - q;
+        let null_coeff = chol_solve(null_chol, q, &self.rhs[..q]);
+        let mut full = vec![0.0; self.m];
+        full[..q].copy_from_slice(&null_coeff);
+        let mut cross = vec![0.0; self.m];
+        self.matvec(0.0, &full, &mut cross);
+        let beta = (0..rank)
+            .map(|i| (self.rhs[q + i] - cross[q + i]) / self.pen_diag[q + i].sqrt())
+            .collect::<Vec<_>>();
+        let anchor_energy = self.ytwy
+            - self.rhs[..q]
+                .iter()
+                .zip(null_coeff.iter())
+                .map(|(&b, &c)| b * c)
+                .sum::<f64>();
+        (beta, anchor_energy)
+    }
+
+    /// The profiled residual's spectral form past the dense cap, by Golub–Meurant
+    /// quadrature of the SAME Schur operator the determinant sweep runs on.
+    ///
+    /// `S_k(lambda) = beta'(B + lambda I)^-k beta` is `integral (theta +
+    /// lambda)^-k dmu(theta)` for the measure `mu` that `beta` induces on
+    /// `spec(B)`. One Lanczos run seeded with `beta` (rather than with a
+    /// Rademacher probe) returns the Jacobi matrix of the `m`-node Gauss rule for
+    /// that measure: nodes are the Ritz values `theta_j`, weights are
+    /// `||beta||^2 tau_j^2` with `tau_j` the first component of Ritz vector `j`.
+    /// Those are exactly the `(eigenvalue, projected_square)` pair
+    /// [`CascadeResidualSpectrum`] stores, so the iterative route populates the
+    /// same struct and inherits [`CascadeResidualSpectrum::moments`] unchanged —
+    /// the dense and iterative residuals are then one expression evaluated on two
+    /// node sets, not two formulas.
+    ///
+    /// ADMITTED ONLY WHEN EXACT. A Gauss rule that is accurate in VALUE is not
+    /// accurate in its lambda-DERIVATIVES: the nodes are placed to integrate one
+    /// kernel, and `(theta + lambda)^-k` grows more peaked at the bottom of the
+    /// spectrum with every power of `k`, which is where a truncated Krylov space
+    /// resolves nothing. Measured on a rank-134 design at 48 steps: `R` is right
+    /// to `6.2e-4` while `S_2, S_3, S_4` are wrong by 22%, 57% and 80% — and
+    /// those three are the score's first three `log lambda` derivatives, i.e. the
+    /// quantities the certified stationarity test is stated in. The same sweep at
+    /// 96 steps is exact to `2e-9`. There is no intermediate regime, because the
+    /// transition is not convergence of a rule but EXHAUSTION of the Krylov
+    /// space: once `K_m(B, beta)` is `B`-invariant, `(B + lambda I)^-k beta` lies
+    /// inside it for every `k` and every `lambda`, and the Gauss rule reproduces
+    /// the spectral sum outright. So the admission test is
+    /// [`SchurLanczos::invariant`] and nothing else — no tolerance is tuned here,
+    /// and an uncertified run is refused rather than shipped.
+    fn iterative_residual_spectrum(
+        &self,
+        null_chol: &[f64],
+        budget: usize,
+    ) -> Result<(CascadeResidualSpectrum, ResidualQuadratureCertificate), String> {
+        let rank = self.m - self.nullity();
+        let (beta, anchor_energy) = self.whitened_residual_rhs(null_chol);
+        if !(anchor_energy.is_finite() && beta.iter().all(|value| value.is_finite())) {
+            return Err(format!(
+                "residual cascade: non-finite whitened residual right-hand side (anchor \
+                 {anchor_energy})"
+            ));
+        }
+        let beta_norm_sq = beta.iter().map(|value| value * value).sum::<f64>();
+        if !(beta_norm_sq > 0.0) {
+            // No response energy outside the polynomial null space: the profiled
+            // residual is the anchor at every lambda. A zero measure is exactly
+            // integrated by the empty rule, so this is certified, not degraded.
+            return Ok((
+                CascadeResidualSpectrum {
+                    eigenvalue: Vec::new(),
+                    penalty: Vec::new(),
+                    projected_square: Vec::new(),
+                    anchor_energy: [anchor_energy],
+                },
+                ResidualQuadratureCertificate {
+                    steps: 0,
+                    rank,
+                    budget,
+                    relative_tail: 0.0,
+                    exact: true,
+                    mass_defect: 0.0,
+                    dropped_mass_fraction: 0.0,
+                },
+            ));
+        }
+        let run = self.schur_lanczos(null_chol, &beta, budget)?;
+        let (ritz, first_components) = symmetric_tridiagonal_eigen(&run.alpha, &run.beta)?;
+        let scale = ritz.iter().copied().map(f64::abs).fold(0.0, f64::max);
+        let roundoff = f64::EPSILON * run.alpha.len().max(1) as f64 * scale.max(f64::MIN_POSITIVE);
+
+        let mut eigenvalue = Vec::with_capacity(ritz.len());
+        let mut projected_square = Vec::with_capacity(ritz.len());
+        let mut total_mass = 0.0_f64;
+        let mut dropped_mass = 0.0_f64;
+        for (index, (&theta, &first)) in ritz.iter().zip(first_components.iter()).enumerate() {
+            if !theta.is_finite() || theta < -roundoff {
+                return Err(format!(
+                    "residual cascade: profiled-residual Ritz value {index} is not positive \
+                     semidefinite ({theta})"
+                ));
+            }
+            let weight = run.start_norm_sq * first * first;
+            if !(weight.is_finite() && weight >= 0.0) {
+                return Err(format!(
+                    "residual cascade: invalid profiled-residual quadrature weight {weight}"
+                ));
+            }
+            total_mass += weight;
+            // Same reading of the same floor as the dense route: a node inside
+            // the decomposition's own roundoff is a NULL direction of the
+            // whitened design, and a null direction carries no response energy
+            // exactly (`Bv = 0` gives `Zv = 0` and hence `v'beta = 0`). Keeping
+            // its roundoff-level weight would divide it by `theta + lambda`,
+            // which at the bottom of the search domain is smaller still.
+            if theta <= roundoff {
+                dropped_mass += weight;
+                eigenvalue.push(0.0);
+                projected_square.push(0.0);
+            } else {
+                eigenvalue.push(theta);
+                projected_square.push(weight);
+            }
+        }
+        // The weights of ANY Gauss rule sum to the measure's total mass, so
+        // `sum_j w_j = ||beta||^2` is a free self-check on the whole Jacobi
+        // pipeline — the recurrence, the reorthogonalization and the tridiagonal
+        // eigensolver at once. It is asserted against the accumulated rounding of
+        // the sum it checks, not against a tuned slack.
+        let mass_defect = ((total_mass - beta_norm_sq) / beta_norm_sq).abs();
+        let mass_tolerance = 8.0 * f64::EPSILON * ritz.len().max(1) as f64;
+        if !(mass_defect <= mass_tolerance) {
+            return Err(format!(
+                "residual cascade: profiled-residual quadrature weights sum to {total_mass} \
+                 against the measure mass {beta_norm_sq} (relative defect {mass_defect} over \
+                 tolerance {mass_tolerance}); the Gauss rule for a measure of mass m has weights \
+                 summing to m, so the Jacobi matrix or its eigendecomposition is wrong"
+            ));
+        }
+        let certificate = ResidualQuadratureCertificate {
+            steps: run.alpha.len(),
+            rank,
+            budget,
+            relative_tail: run.tail / run.spectral_scale.max(f64::MIN_POSITIVE),
+            exact: run.invariant,
+            mass_defect,
+            dropped_mass_fraction: dropped_mass / beta_norm_sq,
+        };
+        let modes = eigenvalue.len();
+        Ok((
+            CascadeResidualSpectrum {
+                eigenvalue,
+                penalty: vec![1.0; modes],
+                projected_square,
+                anchor_energy: [anchor_energy],
+            },
+            certificate,
+        ))
+    }
+
+    /// Lanczos steps the profiled-residual quadrature may take past the dense
+    /// cap, before the penalized rank caps it in turn.
+    ///
+    /// Not an accuracy dial — the rule is admitted only when the Krylov space is
+    /// exhausted, so this bounds how large a space we are willing to
+    /// REORTHOGONALIZE, and the binding resource is the basis itself
+    /// (`steps x rank` doubles held live). Stated as that memory bound so the
+    /// number that appears in the code is the one being reasoned about.
+    fn residual_quadrature_budget(&self) -> usize {
+        let rank = self.m - self.nullity();
+        let by_memory = RESIDUAL_QUADRATURE_BASIS_BYTES
+            / (size_of::<f64>() * rank.max(1)).max(1);
+        by_memory.max(SLQ_LANCZOS_STEPS).min(rank)
+    }
+
     fn reml_profile(&self) -> Result<CascadeRemlProfile<'_>, String> {
         let (null_chol, null_logdet) = self.null_gram_factor()?;
         let (modes, residual) = if self.dense_gram.is_some() {
             let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol)?;
             (modes, CascadeResidualForm::Spectral(spectrum))
         } else {
+            let modes = self.iterative_cascade_spectrum(&null_chol)?;
+            let (spectrum, certificate) =
+                self.iterative_residual_spectrum(&null_chol, self.residual_quadrature_budget())?;
             (
-                self.iterative_cascade_spectrum(&null_chol)?,
-                CascadeResidualForm::Solved,
+                modes,
+                CascadeResidualForm::Quadrature {
+                    spectrum: certificate.exact.then_some(spectrum),
+                    certificate,
+                },
             )
         };
         Ok(CascadeRemlProfile {
@@ -2720,7 +3183,7 @@ impl ResidualCascadeDesign {
         log_lambda: f64,
         sigma2: Option<f64>,
         warm: Option<&[f64]>,
-        profile_normalized_logdet: Option<f64>,
+        selection: Option<CascadeSelectionProvenance>,
     ) -> Result<ResidualCascadeFit, String> {
         let core = &self.core;
         let lambda = gam_problem::checked_exp_log_strength(log_lambda)
@@ -2745,7 +3208,7 @@ impl ResidualCascadeDesign {
             }
         };
         let r = (core.m - core.nullity()) as f64;
-        let (logdet, logdet_method) = match profile_normalized_logdet {
+        let (logdet, logdet_method) = match selection.map(|s| s.normalized_logdet) {
             Some(normalized) => (
                 normalized + r * log_lambda + core.pen_logdet_const,
                 if core.dense_gram.is_some() {
@@ -2779,6 +3242,7 @@ impl ResidualCascadeDesign {
                 solve_rel_residual: rel_res,
                 solve_iters: iters,
                 logdet_method,
+                residual_moments: selection.map(|s| s.residual_moments),
             },
             refinement: None,
         })
@@ -2829,7 +3293,10 @@ impl ResidualCascadeDesign {
             selected_log_lambda,
             None,
             None,
-            Some(selected.normalized_logdet),
+            Some(CascadeSelectionProvenance {
+                normalized_logdet: selected.normalized_logdet,
+                residual_moments: profile.residual.method(),
+            }),
         )
     }
 
@@ -3277,6 +3744,12 @@ impl ResidualCascadeFit {
                 solve_rel_residual: 0.0,
                 solve_iters: 0,
                 logdet_method: LogdetMethod::DenseExact,
+                // A core rebuilt from a persisted state carries no training
+                // design, so it can neither re-derive nor replay the criterion
+                // that selected this λ — the selection provenance is not
+                // reconstructible here and is reported as absent rather than
+                // guessed from the route the rebuilt core happens to be on.
+                residual_moments: None,
             },
             refinement: None,
         })
@@ -3897,4 +4370,85 @@ mod refinement_decision_tests {
             );
         }
     }
+    /// #2503 measurement — where the profiled-residual Golub–Meurant quadrature
+    /// becomes EXACT, against the penalized rank, on designs small enough that
+    /// the dense eigenbasis is an exact comparator.
+    ///
+    /// Reports, per fixture: the penalized rank, the step at which the Lanczos
+    /// run exhausted the Krylov space, and the worst relative gap over the whole
+    /// `log_lambda_domain` for `R`, `S2`, `S3`, `S4` at a ladder of step budgets.
+    #[test]
+    fn zz_measure_residual_quadrature_exactness_against_rank_2503() {
+        for (side, levels) in [(6usize, 2usize), (10, 2), (14, 2), (10, 3), (14, 3), (18, 3), (22, 3), (14, 4)] {
+            let (x1, x2, y) = dense_fixture(side);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let Ok(design) =
+                ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+            else {
+                println!("#2503 side={side} levels={levels}: design refused");
+                continue;
+            };
+            let core = &design.core;
+            if core.dense_gram.is_none() {
+                println!("#2503 side={side} levels={levels} m={} : past the dense cap, no exact comparator", core.m);
+                continue;
+            }
+            let (null_chol, _) = core.null_gram_factor().expect("null factor");
+            let (_, exact) = core
+                .dense_cascade_spectrum(&null_chol)
+                .expect("dense spectrum");
+            let profile = core.reml_profile().expect("profile");
+            let (lo, hi) = profile.log_lambda_domain().expect("domain");
+            let rank = core.m - core.nullity();
+
+            let full = core
+                .iterative_residual_spectrum(&null_chol, rank)
+                .expect("full-budget quadrature");
+            println!(
+                "#2503 side={side} levels={levels} n={} m={} rank={rank} nullity={} domain=[{lo:.3}, {hi:.3}] \
+                 exhausted_at={} exact={} rel_tail={:.3e} mass_defect={:.3e} dropped={:.3e}",
+                y.len(),
+                core.m,
+                core.nullity(),
+                full.1.steps,
+                full.1.exact,
+                full.1.relative_tail,
+                full.1.mass_defect,
+                full.1.dropped_mass_fraction,
+            );
+
+            let mut budgets: Vec<usize> = vec![12, 24, 48, 96, 192, 384];
+            budgets.push(full.1.steps);
+            budgets.push(rank);
+            budgets.sort_unstable();
+            budgets.dedup();
+            for budget in budgets {
+                if budget > rank {
+                    continue;
+                }
+                let (spectrum, certificate) = core
+                    .iterative_residual_spectrum(&null_chol, budget)
+                    .expect("quadrature");
+                let mut worst = [0.0_f64; 4];
+                for step in 0..=24 {
+                    let log_lambda = lo + (hi - lo) * step as f64 / 24.0;
+                    let lambda = log_lambda.exp();
+                    let truth = exact.moments(lambda);
+                    let got = spectrum.moments(lambda);
+                    let truth = [truth.0, truth.1, truth.2, truth.3];
+                    let got = [got.0, got.1, got.2, got.3];
+                    for k in 0..4 {
+                        let denominator = truth[k].abs().max(f64::MIN_POSITIVE);
+                        worst[k] = worst[k].max((got[k] - truth[k]).abs() / denominator);
+                    }
+                }
+                println!(
+                    "#2503   budget={budget:5} steps={:5} exact={:5} R={:.3e} S2={:.3e} S3={:.3e} S4={:.3e}",
+                    certificate.steps, certificate.exact, worst[0], worst[1], worst[2], worst[3]
+                );
+            }
+        }
+    }
+
 }
