@@ -38,6 +38,81 @@ impl std::fmt::Display for StationarityRung {
     }
 }
 
+/// What a non-convergence refusal was decided against (#2458/#2465).
+///
+/// A verdict is only falsifiable from the run record if it carries the quantity
+/// it was decided against, and for a stationarity refusal that quantity is two
+/// facts travelling together: the bound, and the rung that produced it. They
+/// used to be two independent fields — `stationarity_bound: f64` beside
+/// `stationarity_bound_rung: Option<StationarityRung>` — and the `Option` was a
+/// hole any call site with a number to hand could take. Twenty of the outer
+/// runner's thirty refusal paths took it.
+///
+/// Bundling the pair was not the whole defect. Most of those twenty refuse
+/// *before any stationarity comparison exists*: a failed terminal evaluation, a
+/// malformed gradient, a non-converged inner state. They reported the raw
+/// configured tolerance — a constant the point was never weighed against — in a
+/// sentence reading "projected gradient norm … against stationarity bound …",
+/// asserting a pairing the code does not have. Naming that constant with a rung
+/// makes the sentence *more* confident, not more honest; the fix is to report no
+/// bound, because none was applied.
+///
+/// [`Self::Measured`] therefore means something specific and checkable: the
+/// bound is a property of *this* point, derived from its own evidence by the
+/// named rung, and the reported residual is the quantity weighed against it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+// `StationarityRung::label` is a `&'static str` — a fixed vocabulary, not run
+// data — so a borrowing deserializer can only produce one from a `'static`
+// input. Stating that here keeps the rung's stable-label representation rather
+// than allocating a `String` per refusal to satisfy the derive.
+#[serde(bound(deserialize = "'de: 'static"))]
+pub enum StationarityStandard {
+    /// A stationarity residual measured at this point was weighed against
+    /// `bound`, which `rung` derived from this point's own evidence.
+    Measured {
+        bound: f64,
+        rung: StationarityRung,
+    },
+    /// The refusal was decided without any stationarity comparison — the
+    /// terminal evidence was rejected before a residual existed, or the
+    /// predicate was an identity/existence check rather than a bound test. The
+    /// refusal's `reason` carries the basis; no bound is reported because none
+    /// was applied.
+    NoComparison,
+}
+
+impl StationarityStandard {
+    /// The bound, when one was applied.
+    pub fn bound(&self) -> Option<f64> {
+        match self {
+            Self::Measured { bound, .. } => Some(*bound),
+            Self::NoComparison => None,
+        }
+    }
+
+    /// The rung that produced the bound, when one was applied.
+    pub fn rung(&self) -> Option<StationarityRung> {
+        match self {
+            Self::Measured { rung, .. } => Some(*rung),
+            Self::NoComparison => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StationarityStandard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Measured { bound, rung } => {
+                write!(f, "against stationarity bound {bound:.3e} ({rung})")
+            }
+            Self::NoComparison => f.write_str(
+                "against no stationarity bound: this refusal was decided by the reason \
+                 above, not by a stationarity comparison",
+            ),
+        }
+    }
+}
+
 /// Fixed-lambda solver stage that owns a resumable coefficient checkpoint.
 ///
 /// The multinomial fitter has two distinct objectives: the ordinary softmax
@@ -450,15 +525,11 @@ pub enum EstimationError {
     #[error(
         "Outer smoothing-parameter optimization did not certify a stationary optimum \
          ({context}): {reason} after {iterations} outer iteration(s); final objective \
-         {final_value:.6e}, projected gradient norm {} against stationarity bound \
-         {stationarity_bound:.3e} ({}). A fit is only minted from a converged optimization; \
-         the best iterate is carried as a checkpoint — resume by seeding the outer \
-         search at rho_checkpoint = {rho_checkpoint:?}.",
+         {final_value:.6e}, projected gradient norm {} {stationarity_standard}. A fit is \
+         only minted from a converged optimization; the best iterate is carried as a \
+         checkpoint — resume by seeding the outer search at rho_checkpoint = \
+         {rho_checkpoint:?}.",
         .projected_grad_norm.map_or_else(|| "unmeasured".to_string(), |g| format!("{g:.3e}")),
-        .stationarity_bound_rung.map_or_else(
-            || "rung=unrecorded".to_string(),
-            |rung| rung.to_string(),
-        )
     )]
     RemlDidNotConverge {
         /// Fit context label (the same string the outer runner logs under).
@@ -474,26 +545,12 @@ pub enum EstimationError {
         /// KKT-projected gradient norm at the best iterate, when the solver
         /// measured a gradient there (`None` for gradient-free exits).
         projected_grad_norm: Option<f64>,
-        /// Bound the projected gradient had to clear for the stationarity
-        /// certificate.
-        stationarity_bound: f64,
-        /// Which rung of the ladder produced `stationarity_bound` (#2458).
-        ///
-        /// `None` means the refusing route does not record its rung — which is
-        /// itself the finding, not a gap in the message: it marks exactly the
-        /// routes whose stationarity standard is still unobservable.
-        ///
-        /// Every route inside the outer ladder now records one, and so does the
-        /// closed-form Gaussian profiled search, which has its own standard
-        /// rather than one of the ladder's. The residue is narrower and more
-        /// specific than "routes without a standard": the two remaining `None`
-        /// producers both REBUILD a refusal out of an
-        /// `OuterCriterionCertificate`, and the certificate carries
-        /// `stationarity.bound()` without the rung that produced it. So
-        /// `rung=unrecorded` now means "reconstructed from a certificate that
-        /// does not carry its rung" — a carrier gap with one fix, not a set of
-        /// unclassified routes.
-        stationarity_bound_rung: Option<StationarityRung>,
+        /// The standard this refusal was decided against: the bound together
+        /// with the rung that produced it, or an explicit statement that no
+        /// stationarity comparison was made (#2458/#2465). They are ONE field
+        /// precisely so neither can be reported without the other, and so that
+        /// a route which never formed a bound cannot print one.
+        stationarity_standard: StationarityStandard,
         /// Best (lowest-objective feasible) outer iterate at exhaustion. This
         /// is work-preservation evidence for resume — it is NOT a fit and no
         /// fitted-model API is reachable from it.
@@ -702,16 +759,25 @@ mod tests {
 
     // ── stationarity rung provenance (#2458) ─────────────────────────────────
 
-    fn reml_refusal(rung: Option<StationarityRung>) -> EstimationError {
+    fn reml_refusal(standard: StationarityStandard) -> EstimationError {
         EstimationError::RemlDidNotConverge {
             context: "unit".to_string(),
             reason: "budget exhausted".to_string(),
             iterations: 7,
             final_value: -1.25,
             projected_grad_norm: Some(7.5e-1),
-            stationarity_bound: 1.0e-2,
-            stationarity_bound_rung: rung,
+            stationarity_standard: standard,
             rho_checkpoint: vec![0.5],
+        }
+    }
+
+    fn measured(label: &'static str, derived_standard: bool) -> StationarityStandard {
+        StationarityStandard::Measured {
+            bound: 1.0e-2,
+            rung: StationarityRung {
+                label,
+                derived_standard,
+            },
         }
     }
 
@@ -719,11 +785,7 @@ mod tests {
     /// held to, so a reader does not have to infer the rung from the numbers.
     #[test]
     fn refusal_message_carries_the_rung_and_whether_it_is_derived() {
-        let derived = reml_refusal(Some(StationarityRung {
-            label: "curvature-resolvability",
-            derived_standard: true,
-        }))
-        .to_string();
+        let derived = reml_refusal(measured("curvature-resolvability", true)).to_string();
         assert!(
             derived.contains("rung=curvature-resolvability"),
             "refusal must name its rung: {derived}"
@@ -733,11 +795,7 @@ mod tests {
             "refusal must say whether the rung is the derived standard: {derived}"
         );
 
-        let substitute = reml_refusal(Some(StationarityRung {
-            label: "solver-band",
-            derived_standard: false,
-        }))
-        .to_string();
+        let substitute = reml_refusal(measured("solver-band", false)).to_string();
         assert!(substitute.contains("rung=solver-band"), "{substitute}");
         assert!(
             substitute.contains("derived_standard=false"),
@@ -745,32 +803,47 @@ mod tests {
         );
     }
 
-    /// A route that does not record its rung says so, rather than defaulting to
-    /// a rung it never used. `rung=unrecorded` is the finding — it names a route
-    /// whose stationarity standard is still unstated.
-    ///
-    /// Scope, so this test is not read as covering more than it does: no route
-    /// in the outer ladder reaches `None` any more. What it pins is the
-    /// RENDERING of `None`, which is still reachable from the refusals rebuilt
-    /// out of a certificate that carries a bound without its rung.
+    /// A refusal reached before any stationarity comparison must not print a
+    /// bound. The old shape filled the field with the raw configured tolerance
+    /// and rendered "projected gradient norm … against stationarity bound …",
+    /// which reads as a comparison that never happened — and naming the
+    /// constant with a rung only made the false sentence more confident.
     #[test]
-    fn unrecorded_rung_is_stated_not_defaulted() {
-        let message = reml_refusal(None).to_string();
+    fn a_refusal_without_a_comparison_reports_no_bound() {
+        let message = reml_refusal(StationarityStandard::NoComparison).to_string();
         assert!(
-            message.contains("rung=unrecorded"),
-            "an unclassified bound must say so: {message}"
+            message.contains("against no stationarity bound"),
+            "a refusal that applied no bound must say so: {message}"
         );
         assert!(
-            !message.contains("derived_standard=true"),
-            "an unrecorded rung must never read as the derived standard: {message}"
+            !message.contains("rung="),
+            "no rung may be claimed where no bound was applied: {message}"
         );
+        assert!(
+            !message.contains("1.000e-2"),
+            "no bound value may appear where none was applied: {message}"
+        );
+    }
+
+    /// The carrier's whole purpose: a bound cannot be read without the rung that
+    /// produced it, and a route with neither reports neither.
+    #[test]
+    fn the_bound_and_its_rung_are_one_field() {
+        let standard = measured("probe-noise-floor", false);
+        assert_eq!(standard.bound(), Some(1.0e-2));
+        assert_eq!(
+            standard.rung().map(|rung| rung.label),
+            Some("probe-noise-floor")
+        );
+        assert_eq!(StationarityStandard::NoComparison.bound(), None);
+        assert_eq!(StationarityStandard::NoComparison.rung(), None);
     }
 
     /// The bound itself still reaches the message unchanged — the rung rides
     /// alongside it, it does not replace it.
     #[test]
     fn rung_rides_beside_the_bound_without_displacing_it() {
-        let message = reml_refusal(None).to_string();
+        let message = reml_refusal(measured("solver-band", false)).to_string();
         assert!(
             message.contains("1.000e-2"),
             "bound must survive: {message}"

@@ -19,7 +19,7 @@ use gam_linalg::utils::KahanSum;
 // `DeclaredHessianForm`/`Derivative` originate in `gam_problem` and are only
 // re-exported privately inside `gam_solve::rho_optimizer`; import them from the
 // canonical source, matching every other `gam-models` outer-objective site.
-use gam_problem::{DeclaredHessianForm, Derivative};
+use gam_problem::{DeclaredHessianForm, Derivative, StationarityStandard};
 use gam_solve::estimate::EstimationError;
 use gam_solve::rho_optimizer::{
     HessianValue, OuterCapability, OuterCriterionCertificate, OuterEval, OuterObjective,
@@ -520,13 +520,13 @@ pub fn fit_shared_tangent_reml(
                     .criterion_certificate
                     .as_ref()
                     .map(|value| value.stationarity.projected_norm()),
-                stationarity_bound: outer
-                    .criterion_certificate
-                    .as_ref()
-                    .map_or(0.0, |value| value.stationarity.bound()),
-                // The certificate carries the bound but not the rung that
-                // produced it, so this route cannot state its standard (#2458).
-                stationarity_bound_rung: None,
+                // The refusal predicate here is "the runner returned no
+                // certificate that certifies" — an existence check, not a
+                // stationarity comparison. Reporting the certificate's own
+                // bound (or `0.0` when there is no certificate at all) beside
+                // the words "against stationarity bound" named a comparison
+                // this route never made (#2458/#2465).
+                stationarity_standard: StationarityStandard::NoComparison,
                 rho_checkpoint: outer.rho.to_vec(),
             })?;
         (outer.rho, outer.iterations, certificate)

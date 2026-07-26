@@ -2329,26 +2329,22 @@ where
     // while adding nothing to point-identity (which bit equality decides
     // exactly). The evaluation itself is kept: it installs the inner state at
     // the shipped point and supplies the shipped value/gradient fields.
-    let (final_value, finalgrad, finalgrad_norm, stationarity_bound) = if final_rho.is_empty() {
-        (outer_result.final_value, Array1::zeros(0), 0.0, reml_tol)
+    let (final_value, finalgrad, finalgrad_norm) = if final_rho.is_empty() {
+        (outer_result.final_value, Array1::zeros(0), 0.0)
     } else {
         let (value, gradient) = reml_state.compute_cost_and_gradient(&final_rho)?;
         let lower = Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND);
         let upper = Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND);
-        // Compared against the certificate's own stationarity bound below, so
-        // it shares the certificate's rail-relaxed box (#2412).
+        // Shipped as the result's `final_grad_norm` and reported in the
+        // refusal below, so it uses the certificate's rail-relaxed box (#2412)
+        // -- the same projection the certified |Pg| was measured with, even
+        // though this gate never weighs one against the other.
         let projected = crate::rho_optimizer::rail_projected_gradient_norm(
             &final_rho,
             &gradient,
             Some(&(lower, upper)),
         );
-        let bound = outer_result
-            .criterion_certificate
-            .as_ref()
-            .map(|certificate| certificate.stationarity.bound())
-            .unwrap_or(reml_tol)
-            .max(f64::EPSILON);
-        (value, gradient, projected, bound)
+        (value, gradient, projected)
     };
     let shipped_point_is_certified = final_rho.len() == outer_result.rho.len()
         && final_rho
@@ -2381,11 +2377,15 @@ where
             iterations: outer_result.iterations,
             final_value,
             projected_grad_norm: finalgrad_norm.is_finite().then_some(finalgrad_norm),
-            stationarity_bound,
-            // The post-fit identity check compares the shipped point against
-            // the certificate; the rung that produced the bound is not carried
-            // on the certificate, so this route cannot state it (#2458).
-            stationarity_bound_rung: None,
+            // This gate deliberately does NOT weigh the re-drawn gradient
+            // against the certified band — see the comment above the
+            // re-evaluation: in the deep-smoothing regime that comparison
+            // refuses honest noise-band certificates by coin flip. What it
+            // checks is bitwise point identity plus the certificate's own
+            // verdict. Printing a bound beside "against stationarity bound"
+            // therefore named a comparison this route does not make
+            // (#2458/#2465).
+            stationarity_standard: gam_problem::StationarityStandard::NoComparison,
             rho_checkpoint: final_rho.to_vec(),
         });
     }
