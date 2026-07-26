@@ -1112,8 +1112,12 @@ pub fn reml_laml_evaluate(
                                     curvature_lambdas[idx],
                                 )
                             } else {
-                                ds.fused_logdet_gradient_minus_rank_deficient_block(
+                                let (range_root, root_start, root_end) =
+                                    coord.block_local_root()?;
+                                debug_assert_eq!((root_start, root_end), (start, end));
+                                ds.fused_logdet_gradient_minus_rank_from_root_chart(
                                     &s_block,
+                                    range_root,
                                     start,
                                     end,
                                     curvature_lambdas[idx],

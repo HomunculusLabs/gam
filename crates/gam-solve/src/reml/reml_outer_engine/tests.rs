@@ -446,6 +446,7 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
         [-1.0, 2.0, -1.0],
         [0.0, -1.0, 1.0],
     ];
+    let range_root = array![[1.0_f64, -1.0, 0.0], [0.0, 1.0, -1.0]];
     let width = 3usize;
     let rank = 2usize;
     let p = 5usize;
@@ -471,7 +472,13 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
     // Production naive form: full block trace, then subtract the integer rank.
     let naive = op.trace_logdet_block_local(&s_block, lambda, 0, width) - rank as f64;
     // Production fused (rank-deficient) form.
-    let fused = op.fused_logdet_gradient_minus_rank_deficient_block(&s_block, 0, width, lambda);
+    let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        &s_block,
+        &range_root,
+        0,
+        width,
+        lambda,
+    );
 
     // Compensated (Neumaier) reference over the SAME per-eigenpair terms the
     // fused method sums naively — ground truth for the gradient value. The
@@ -561,6 +568,44 @@ pub(crate) fn fused_rank_deficient_rail_gradient_beats_naive_trace_minus_rank() 
     );
 }
 
+// ─── The canonical root, not Gram roundoff, owns structural rank ────────────
+#[test]
+pub(crate) fn fused_rank_projector_uses_root_chart_when_gram_leaks_into_nullspace() {
+    use gam_linalg::faer_ndarray::FaerEigh;
+
+    let range_root = array![[1.0_f64, 1.0]];
+    let mut s_block = range_root.t().dot(&range_root);
+    // Emulate the null-direction leakage produced when a transformed root is
+    // materialized as RᵀR. The Gram now looks numerically rank 2 even though
+    // the canonical coordinate remains structurally rank 1.
+    s_block[[0, 0]] += 1.0e-12;
+    let (evals, _) = s_block
+        .eigh(faer::Side::Lower)
+        .expect("leaky Gram eigendecomposition");
+    let old_tol = 2.0 * f64::EPSILON * evals[1].max(1.0e-12);
+    assert!(
+        evals[0] > old_tol,
+        "fixture must promote the structural zero under Gram-based rank discovery"
+    );
+
+    let lambda = 10.0_f64;
+    let mut h = Array2::<f64>::eye(2);
+    h.scaled_add(lambda, &s_block);
+    let op = DenseSpectralOperator::from_symmetric(&h).expect("leaky Gram Hessian");
+    let naive = op.trace_logdet_block_local(&s_block, lambda, 0, 2) - 1.0;
+    let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        &s_block,
+        &range_root,
+        0,
+        2,
+        lambda,
+    );
+    assert!(
+        (fused - naive).abs() <= 1.0e-12 * (1.0 + naive.abs()),
+        "root-chart fusion must subtract structural rank 1: fused={fused:.15e} naive={naive:.15e}"
+    );
+}
+
 // ─── Fused rank-deficient reduces to the full-rank fusion on a full-rank block ─
 //
 // The rank-deficient method is the strict generalization of the full-rank one:
@@ -583,7 +628,13 @@ pub(crate) fn fused_rank_deficient_matches_full_block_on_full_rank_penalty() {
     }
     let op = DenseSpectralOperator::from_symmetric(&h).expect("full-rank fixture");
     let full = op.fused_logdet_gradient_minus_rank_full_block(&s_block, 0, 2, lambda);
-    let deficient = op.fused_logdet_gradient_minus_rank_deficient_block(&s_block, 0, 2, lambda);
+    let deficient = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        &s_block,
+        &Array2::<f64>::eye(2),
+        0,
+        2,
+        lambda,
+    );
     assert!(
         (full - deficient).abs() <= 1e-12 * (1.0 + full.abs()),
         "rank-deficient fusion diverged from full-rank fusion on a full-rank block: \
@@ -716,15 +767,21 @@ fn assert_weighted_fused_kernel_gate(
     );
 }
 
-fn second_difference_penalty(p: usize) -> Array2<f64> {
-    // Sᵀ = D₂ᵀD₂ with D₂ the (p-2)×p second-difference operator: rank p-2,
-    // null space = {constant, linear}.
+fn second_difference_root(p: usize) -> Array2<f64> {
     let mut d2 = Array2::<f64>::zeros((p.saturating_sub(2), p));
     for i in 0..p.saturating_sub(2) {
         d2[[i, i]] = 1.0;
         d2[[i, i + 1]] = -2.0;
         d2[[i, i + 2]] = 1.0;
     }
+    d2
+}
+
+fn second_difference_penalty(p: usize) -> Array2<f64> {
+    // S = D₂ᵀD₂ with structural root D₂: rank p-2 and null space
+    // {constant, linear}. Keep D₂ available because its row chart is the
+    // authoritative range representation; S must not be asked to rediscover it.
+    let d2 = second_difference_root(p);
     d2.t().dot(&d2)
 }
 
@@ -866,7 +923,13 @@ pub(crate) fn fused_rank_deficient_logdet_gradient_masked_null_matches_central_d
     );
 
     let s_block = second_difference_penalty(width);
-    let fused = op.fused_logdet_gradient_minus_rank_deficient_block(&s_block, 0, width, lambda0);
+    let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        &s_block,
+        &second_difference_root(width),
+        0,
+        width,
+        lambda0,
+    );
 
     // (1) Value identity with the masked naive `trace_active − rank`.
     let naive = op.trace_logdet_block_local(&s_block, lambda0, 0, width) - rank as f64;
@@ -1028,7 +1091,13 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
     // (2) Rank-deficient block: 3-wide second difference (rank 1), det = rank.
     let s_def = second_difference_penalty(3);
     let naive_def = op.trace_logdet_block_local(&s_def, 1.0, 0, 3) - 1.0;
-    let fused_def = op.fused_logdet_gradient_minus_rank_deficient_block(&s_def, 0, 3, 1.0);
+    let fused_def = op.fused_logdet_gradient_minus_rank_from_root_chart(
+        &s_def,
+        &second_difference_root(3),
+        0,
+        3,
+        1.0,
+    );
     assert!(
         (fused_def - naive_def).abs() <= tol(naive_def),
         "deficient fused {fused_def:.15e} vs masked naive {naive_def:.15e}"

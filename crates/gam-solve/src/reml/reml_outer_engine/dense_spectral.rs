@@ -360,31 +360,32 @@ impl DenseSpectralOperator {
     /// integer rank, matching the masked naive pairing and cancellation-free.
     /// Callers gate only on the det derivative being the integer rank
     /// (proportional singleton, so `−rank` is the exact det pairing).
-    pub(crate) fn fused_logdet_gradient_minus_rank_deficient_block(
+    pub(crate) fn fused_logdet_gradient_minus_rank_from_root_chart(
         &self,
         s_block: &Array2<f64>,
+        range_root: &Array2<f64>,
         start: usize,
         end: usize,
         scale: f64,
     ) -> f64 {
-        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerQr;
         let width = end - start;
-        // Orthonormal basis `Q` (width × r) of `range(S_k)` from the block
-        // eigenspectrum. The rank tolerance mirrors `penalty_matrix_root` so
-        // `r` matches the coordinate's own `rank()` (the det derivative the
-        // caller certified as the integer `−rank`).
-        let (evals, evecs) = s_block
-            .eigh(Side::Lower)
-            .expect("rank-deficient penalty block eigendecomposition");
-        let max_ev = evals.iter().copied().fold(0.0_f64, f64::max);
-        let tol = (width.max(1) as f64) * f64::EPSILON * max_ev.max(1e-12);
-        let active: Vec<usize> = evals
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| **v > tol)
-            .map(|(i, _)| i)
-            .collect();
-        let r = active.len();
+        assert_eq!(
+            range_root.ncols(),
+            width,
+            "penalty range root width must match its block chart"
+        );
+        let structural_rank = range_root.nrows();
+        let (range_q, _) = range_root
+            .t()
+            .to_owned()
+            .qr()
+            .expect("canonical penalty root QR");
+        assert_eq!(
+            range_q.ncols(),
+            structural_rank,
+            "canonical penalty root rows must be structurally independent"
+        );
 
         let g_block = self.g_factor.slice(ndarray::s![start..end, ..]);
         let u_block = self.eigenvectors.slice(ndarray::s![start..end, ..]);
@@ -393,12 +394,12 @@ impl DenseSpectralOperator {
         // Range coordinates of every eigenvector's block restriction:
         // `qt_u[:, j] = Qᵀ u_j^{blk}` (r × n), so `‖qt_u[:, j]‖²` is the mass of
         // `u_j^{blk}` inside `range(S_k)` — the per-eigenpair `−rank` share.
-        let mut qt_u = Array2::<f64>::zeros((r, self.n_dim));
-        for (out_row, &idx) in active.iter().enumerate() {
+        let mut qt_u = Array2::<f64>::zeros((structural_rank, self.n_dim));
+        for out_row in 0..structural_rank {
             for j in 0..self.n_dim {
                 let mut acc = 0.0;
                 for local in 0..width {
-                    acc += evecs[[local, idx]] * u_block[[local, j]];
+                    acc += range_q[[local, out_row]] * u_block[[local, j]];
                 }
                 qt_u[[out_row, j]] = acc;
             }
@@ -424,7 +425,7 @@ impl DenseSpectralOperator {
     /// blocks overlap (a full-span stabilization ridge, coalesced same-span pairs,
     /// or any post-reparam coupling). Neither the block-indicator fusion
     /// ([`fused_logdet_gradient_minus_rank_full_block`]) nor the range-projector
-    /// fusion ([`fused_logdet_gradient_minus_rank_deficient_block`]) applies there,
+    /// fusion ([`fused_logdet_gradient_minus_rank_from_root_chart`]) applies there,
     /// because both distribute an INTEGER `−rank`, whereas the joint det derivative
     /// is not the integer rank of `S_k`.
     ///

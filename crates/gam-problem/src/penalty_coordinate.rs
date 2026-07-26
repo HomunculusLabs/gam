@@ -169,6 +169,26 @@ impl PenaltyCoordinate {
         )
     }
 
+    /// Borrow the canonical penalty root in its native block chart.
+    ///
+    /// The root rows are the authoritative structural range coordinates: their
+    /// count is `rank()` and must not be rediscovered by eigendecomposing the
+    /// squared Gram `RᵀR`, which can promote roundoff in a structural zero.
+    pub fn block_local_root(&self) -> Option<(&Array2<f64>, usize, usize)> {
+        match self {
+            Self::DenseRoot(root) | Self::DenseRootCentered { root, .. } => {
+                Some((root, 0, root.ncols()))
+            }
+            Self::BlockRoot {
+                root, start, end, ..
+            }
+            | Self::BlockRootCentered {
+                root, start, end, ..
+            } => Some((root, *start, *end)),
+            Self::KroneckerMarginal { .. } => None,
+        }
+    }
+
     /// Restrict this penalty coordinate onto the free subspace spanned by the
     /// orthonormal columns of `z` (shape `p × m`, `m ≤ p`, `zᵀz = I`).
     ///
