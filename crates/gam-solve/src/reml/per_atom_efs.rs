@@ -796,6 +796,57 @@ mod tests {
     }
 
     #[test]
+    fn per_atom_backtracking_propagates_typed_value_failure() {
+        const SENTINEL: &str = "#2481 per-atom value artifact";
+
+        struct FailingCostObjective;
+
+        impl OuterObjective for FailingCostObjective {
+            fn capability(&self) -> OuterCapability {
+                OuterCapability {
+                    gradient: Derivative::Analytic,
+                    hessian: DeclaredHessianForm::Unavailable,
+                    n_params: 1,
+                    psi_dim: 0,
+                    fixed_point_available: true,
+                    barrier_config: None,
+                    prefer_gradient_only: false,
+                    disable_fixed_point: false,
+                }
+            }
+
+            fn eval_cost(&mut self, _: &Array1<f64>) -> Result<f64, EstimationError> {
+                Err(EstimationError::InvalidInput(SENTINEL.to_string()))
+            }
+
+            fn eval(&mut self, _: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+                Err(EstimationError::InvalidInput(SENTINEL.to_string()))
+            }
+
+            fn reset(&mut self) {}
+
+            fn seed_inner_state(
+                &mut self,
+                _: &Array1<f64>,
+            ) -> Result<SeedOutcome, EstimationError> {
+                Ok(SeedOutcome::NoSlot)
+            }
+        }
+
+        let mut objective = FailingCostObjective;
+        let error = backtrack_cost(
+            &mut objective,
+            &array![0.0],
+            &array![1.0],
+            1.0,
+            &wide_bounds(1),
+        )
+        .expect_err("a typed value failure must escape per-atom backtracking");
+        assert!(matches!(error, EstimationError::InvalidInput(_)));
+        assert!(error.to_string().contains(SENTINEL));
+    }
+
+    #[test]
     pub(crate) fn with_border_axes_sorts_dedups_and_validates() {
         let t = SharedBorderTopology::with_border_axes(8, vec![5, 1, 5, 3]).expect("topology");
         assert_eq!(t.border_axes(), &[1, 3, 5]);
