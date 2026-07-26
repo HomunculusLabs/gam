@@ -3948,6 +3948,7 @@ dependencies = [
  "gam-linalg",
  "gam-models",
  "gam-problem",
+ "gam-runtime",
  "gam-terms",
  "ndarray 0.17.2",
 ]

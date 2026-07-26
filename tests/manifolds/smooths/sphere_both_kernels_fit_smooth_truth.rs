@@ -98,12 +98,29 @@ fn rmse_budget(m: usize) -> f64 {
     }
 }
 
+/// The formula for the Sobolev arm at penalty order `m`.
+///
+/// `m = 1` needs an explicit `lmax=`: the untruncated Sobolev `K_1` is
+/// log-singular at coincidence, so it has no Gram diagonal and the basis
+/// builder refuses it (#2475). Stating a spectral resolution is the shipped
+/// remedy, and it is the honest one — a finite m=1 diagonal is a choice of
+/// resolution, so the choice belongs in the formula rather than in a float.
+/// The pseudo-spline arm needs no such thing: its m=1 diagonal is the finite
+/// closed form `1/4π`.
+fn sobolev_formula(m: usize) -> String {
+    if m == 1 {
+        "y ~ sphere(lat, lon, k=30, m=1, kernel=sobolev, lmax=200)".to_string()
+    } else {
+        format!("y ~ sphere(lat, lon, k=30, m={m}, kernel=sobolev)")
+    }
+}
+
 #[test]
 fn sphere_sobolev_kernel_fits_smooth_truth_for_all_m() {
     init_parallelism();
     let mut failures = Vec::new();
     for m in [1usize, 2, 3, 4] {
-        let formula = format!("y ~ sphere(lat, lon, k=30, m={m}, kernel=sobolev)");
+        let formula = sobolev_formula(m);
         match rmse_against_truth(&formula) {
             Ok(r) => {
                 let budget = rmse_budget(m);

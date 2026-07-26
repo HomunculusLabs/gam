@@ -44,6 +44,12 @@ const DEFAULT_BSPLINE_DEGREE: usize = 3;
 /// convention.
 const DEFAULT_PENALTY_ORDER: usize = 2;
 
+/// Admissible `lmax=` for the truncated Wahba sphere kernels, matching the
+/// documented range on [`SphereWahbaKernel::SobolevTruncated`]. The lower end
+/// keeps at least a few degrees of resolution; the upper end is the bound the
+/// device kernel bakes in as a compile-time `#define`.
+const SPHERE_TRUNCATION_LMAX_RANGE: std::ops::RangeInclusive<usize> = 5..=200;
+
 /// Default basis dimension for one-dimensional cyclic cubic P-splines.
 ///
 /// Periodic smooths spend no coefficients on free endpoints, so they should not
@@ -2660,6 +2666,9 @@ pub fn build_smooth_basis(
                     "l",
                     "max_degree",
                     "max-degree",
+                    "lmax",
+                    "l_max",
+                    "l-max",
                 ],
             )?;
             if cols.len() != 2 {
@@ -2708,6 +2717,45 @@ pub fn build_smooth_basis(
                     return Err(format!(
                         "unsupported sphere kernel '{other}'; expected sobolev, pseudo, or harmonic"
                     ));
+                }
+            };
+            // `lmax=` states a finite spectral resolution for a Wahba kernel,
+            // selecting the truncated variant `Σ_{ℓ=1..lmax} c_ℓ P_ℓ(cos γ)`
+            // instead of the closed form. This is the only route from the
+            // formula surface to `SobolevTruncated`/`PseudoTruncated`, and it
+            // is what makes `m=1` expressible at all: the untruncated Sobolev
+            // `m = 1` kernel is log-singular at coincidence, so it has no Gram
+            // diagonal and the basis builder refuses it (#2475). Before this
+            // option the refusal named a remedy no formula could reach.
+            let wahba_kernel = match option_usize_any(options, &["lmax", "l_max", "l-max"]) {
+                None => wahba_kernel,
+                Some(_) if matches!(method, SphereMethod::Harmonic) => {
+                    return Err(
+                        "sphere smooth: lmax= states the truncation of a Wahba reproducing kernel \
+                         and does not apply to kernel=harmonic; use degree=/max_degree= to set the \
+                         harmonic degree"
+                            .to_string(),
+                    );
+                }
+                Some(lmax) => {
+                    if !(SPHERE_TRUNCATION_LMAX_RANGE).contains(&lmax) {
+                        return Err(format!(
+                            "sphere smooth: lmax={lmax} is out of range; the truncated Wahba \
+                             kernels support lmax in {}..={} (the device kernel bakes it in as a \
+                             compile-time bound)",
+                            SPHERE_TRUNCATION_LMAX_RANGE.start(),
+                            SPHERE_TRUNCATION_LMAX_RANGE.end()
+                        ));
+                    }
+                    let lmax = lmax as u16;
+                    match wahba_kernel {
+                        SphereWahbaKernel::Sobolev | SphereWahbaKernel::SobolevTruncated { .. } => {
+                            SphereWahbaKernel::SobolevTruncated { lmax }
+                        }
+                        SphereWahbaKernel::Pseudo | SphereWahbaKernel::PseudoTruncated { .. } => {
+                            SphereWahbaKernel::PseudoTruncated { lmax }
+                        }
+                    }
                 }
             };
             let max_degree = if matches!(method, SphereMethod::Harmonic) {

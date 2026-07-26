@@ -133,7 +133,17 @@ fn harmonic_spec(max_degree: usize, penalty_order: usize) -> SphericalSplineBasi
 
 #[test]
 fn sobolev_jet_matches_finite_difference_all_orders() {
-    for m in [1usize, 2, 3] {
+    // Untruncated `m = 1` is refused at the matrix boundary (#2475): `K_1` is
+    // log-singular at coincidence, so it has no Gram diagonal and no design.
+    // `SobolevTruncated { lmax }` is the shipped m=1 route — a different
+    // evaluator (the Legendre recurrence and its exact derivative identity
+    // rather than the polylogarithm closed forms), so covering it here tests
+    // strictly more jet code than the old m=1 arm did.
+    assert_jet_matches_fd(
+        &wahba_spec(SphereWahbaKernel::SobolevTruncated { lmax: 32 }, 1),
+        "sobolev-truncated lmax=32 m=1",
+    );
+    for m in [2usize, 3] {
         assert_jet_matches_fd(
             &wahba_spec(SphereWahbaKernel::Sobolev, m),
             &format!("sobolev m={m}"),

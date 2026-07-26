@@ -5,19 +5,21 @@
 //! where γ = arc-distance(p, q) and P_l is the unnormalized Legendre
 //! polynomial of degree l. The l-th term scales like l^{1 − 2m}, so the
 //! series converges absolutely for m ≥ 2 and is only conditionally
-//! convergent (and divergent at γ = 0) for m = 1: at γ = 0 the m = 1
-//! sum behaves like (1 / 2π) · Σ 1/l, the harmonic series. For m = 1 we
-//! therefore probe at γ > 0 only; for m ≥ 2 truncating at L = 200 gives
-//! the "truth" against which the closed-form polynomial in
-//! `wahba_sphere_kernel_from_cos` is exact (up to an additive constant
-//! the closed form may subtract for normalization).
+//! convergent (and divergent at γ = 0) for m = 1. Truncating at the L below
+//! gives the "truth" against which the closed-form kernel is exact (up to an
+//! additive constant the closed form may subtract for normalization).
+//!
+//! `m = 1` has no untruncated closed form to test: it is refused at every
+//! public matrix entry point (#2475) because its Gram diagonal does not exist.
+//! Its two facts are carried separately below — the refusal itself, and the
+//! exactness of `SobolevTruncated { lmax }` against the same partial sum.
 //!
 //! For each m ∈ {1, 2, 3, 4} we evaluate at several γ angles and compare
 //!   closed_form(γ) − closed_form(π/2)  vs  spectral(γ) − spectral(π/2)
 //! The π/2 offset cancels any additive constant difference, isolating
 //! the shape-only error of the kernel implementation.
 
-use gam::basis::spherical_wahba_kernel_matrix;
+use gam::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
 use ndarray::array;
 
 fn legendre_p(l: usize, x: f64) -> f64 {
@@ -51,7 +53,7 @@ fn spectral_kernel(cos_gamma: f64, m: usize, l_max: usize) -> f64 {
 
 /// Use the public `spherical_wahba_kernel_matrix` to evaluate K(p, q) for a
 /// single (p, q) pair. We construct two single-row coordinate arrays.
-fn closed_form_kernel(cos_gamma: f64, m: usize) -> f64 {
+fn closed_form_kernel_with_kind(cos_gamma: f64, m: usize, kernel: SphereWahbaKernel) -> f64 {
     // Place point A at the north pole (lat=90°, lon=0°), point B at colatitude
     // γ measured from the pole. Then cos(angular_distance) = sin(latB) (the
     // colatitude formula). Pick latB such that sin(latB_rad) = cos_gamma.
@@ -59,34 +61,39 @@ fn closed_form_kernel(cos_gamma: f64, m: usize) -> f64 {
     let lat_b = cos_gamma.asin(); // radians
     let p = array![[std::f64::consts::FRAC_PI_2, 0.0_f64]];
     let q = array![[lat_b, 0.0_f64]];
-    let k = spherical_wahba_kernel_matrix(p.view(), q.view(), m, true).expect("kernel evaluation");
+    let k = spherical_wahba_kernel_matrix_with_kind(p.view(), q.view(), m, true, kernel)
+        .expect("kernel evaluation");
     k[(0, 0)]
 }
 
+fn closed_form_kernel(cos_gamma: f64, m: usize) -> f64 {
+    closed_form_kernel_with_kind(cos_gamma, m, SphereWahbaKernel::Sobolev)
+}
+
+/// The probe angles, shared by the untruncated shape comparison and the m=1
+/// truncated comparison. γ = 0 is excluded (the m=1 series diverges there and
+/// the closed form is +∞) and γ = π is a measure-zero exact match.
+const PROBE_GAMMAS: [f64; 7] = [
+    0.3,
+    0.6,
+    1.0,
+    std::f64::consts::FRAC_PI_2,
+    1.8,
+    2.4,
+    2.9,
+];
+
 fn run_compare(m: usize) -> f64 {
-    // Probe angles γ in (0, π); skip γ=0 (closed-form has its log singularity
-    // floor, spectral sum diverges as -log for m=1) and γ=π (point of
-    // measure zero, exact match anyway).
-    let gammas = [
-        0.3_f64,
-        0.6,
-        1.0,
-        std::f64::consts::FRAC_PI_2,
-        1.8,
-        2.4,
-        2.9,
-    ];
-    // L_MAX for the spectral reference: low-m series decays slowly (m=1
-    // is `(2l+1)/[l(l+1)] · P_l` ≈ 2/l, conditionally convergent). To
-    // pin down a reference good enough to compare against the *exact*
-    // closed form, the spectral truncation must be deep.  Choose:
-    //   m=1 → 100_000 (≈ 1e-5 abs tail at γ=π/2)
+    assert!(m >= 2, "m=1 has no untruncated closed form; see the m=1 tests");
+    // Probe angles γ in (0, π); skip γ=0 and γ=π (measure zero, exact match).
+    let gammas = PROBE_GAMMAS;
+    // L_MAX for the spectral reference, chosen so the reference's truncation
+    // tail sits below the tolerance each caller asserts:
     //   m=2 → 4_000   (≈ 1e-10)
     //   m=3 → 1_000   (≈ 1e-12)
     //   m≥4 →   200   (≈ 1e-14)
     let l_max = match m {
-        1 => 100_000_usize,
-        2 => 4_000,
+        2 => 4_000_usize,
         3 => 1_000,
         _ => 200,
     };
@@ -110,18 +117,67 @@ fn run_compare(m: usize) -> f64 {
     max_abs
 }
 
+/// The untruncated `m = 1` kernel has no public evaluator, and that is the
+/// point: `K_1 = (−ln u − 1)/4π` is log-singular at coincidence, so its Gram
+/// diagonal does not exist and every matrix entry point refuses the family
+/// (#2475). Equivalently, `H¹(S²)` has no bounded point evaluation — Sobolev
+/// embedding on a 2-manifold needs `s > 1` — so `m = 1` is not a reproducing
+/// kernel on S² and there is no truncation-free object to compare against.
+///
+/// What CAN be pinned exactly is the shipped alternative: at a stated
+/// resolution `lmax = L`, `SobolevTruncated { L }` must equal
+/// `Σ_{ℓ=1..L} (2ℓ+1)[ℓ(ℓ+1)]⁻¹ P_ℓ(cos γ) / 4π` — the same partial sum this
+/// file already computes independently through its own Legendre recurrence.
+/// Comparing at the SAME truncation removes the reference's truncation tail
+/// entirely, which is what made the old untruncated m=1 check a 1e-4 gate: the
+/// tolerance measured the reference, not the kernel. Here the only error left
+/// is roundoff in two different summation orders of the same L terms.
 #[test]
-fn wahba_m1_closed_matches_spectral_truth() {
-    // m=1 spectral reference truncated at L=100k still has ~1e-5 tail
-    // at γ=π/2 because the conditionally-convergent
-    // `(2l+1)/(l(l+1)) · P_l` series decays as 1/l. The closed form
-    // `K_1 = (-ln(u) - 1)/(4π)` (Beatson & zu Castell 2018) is exact;
-    // a 1e-4 tolerance here is dominated by the *reference's*
-    // truncation, not the closed form's error.
-    let err = run_compare(1);
+fn wahba_m1_truncated_matches_its_own_spectral_partial_sum() {
+    const LMAX: u16 = 200;
+    let mut worst_rel = 0.0_f64;
+    for gamma in PROBE_GAMMAS {
+        let cg = gamma.cos();
+        let shipped =
+            closed_form_kernel_with_kind(cg, 1, SphereWahbaKernel::SobolevTruncated { lmax: LMAX });
+        let reference = spectral_kernel(cg, 1, LMAX as usize);
+        let rel = (shipped - reference).abs() / reference.abs();
+        eprintln!(
+            "[wahba-m1-trunc] γ={gamma:.3} shipped={shipped:+.17e} reference={reference:+.17e} \
+             rel={rel:.3e}"
+        );
+        worst_rel = worst_rel.max(rel);
+    }
+    // Both sides run the same 3-term Legendre recurrence over L = 200 degrees.
+    // The recurrence's forward error grows with the number of steps, so the
+    // achievable bound is O(L·ε) rather than O(ε); 8·L·ε leaves the constant
+    // room without admitting a term-level disagreement.
+    let bound = 8.0 * f64::from(LMAX) * f64::EPSILON;
     assert!(
-        err < 1e-4,
-        "Wahba m=1 closed-form disagrees with spectral truth by {err:.3e}"
+        worst_rel <= bound,
+        "SobolevTruncated {{ lmax = {LMAX} }} disagrees with its own spectral partial sum by \
+         {worst_rel:.3e} > {bound:.3e}"
+    );
+}
+
+/// The untruncated `m = 1` family must be refused rather than silently given a
+/// diagonal — the contract this file's m=1 arm used to depend on.
+#[test]
+fn wahba_m1_untruncated_is_refused_with_its_remedy() {
+    let p = array![[std::f64::consts::FRAC_PI_2, 0.0_f64]];
+    let q = array![[0.5_f64, 0.0_f64]];
+    let error = spherical_wahba_kernel_matrix_with_kind(
+        p.view(),
+        q.view(),
+        1,
+        true,
+        SphereWahbaKernel::Sobolev,
+    )
+    .expect_err("untruncated Sobolev m=1 has no Gram diagonal");
+    let message = error.to_string();
+    assert!(
+        message.contains("log-singular") && message.contains("SobolevTruncated"),
+        "the refusal must name both the defect and the explicit-resolution remedy; got: {message}"
     );
 }
 

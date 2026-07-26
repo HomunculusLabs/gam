@@ -93,9 +93,18 @@ fn sphere_wahba_penalty_order_sweep_low_orders() {
     // has a numerical conditioning issue in the current implementation
     // where REML chooses an extremely large λ and the smooth contribution
     // collapses to zero — see the dedicated documented test below.
+    //
+    // m=1 carries an explicit `lmax=`. The untruncated Sobolev `K_1` is
+    // log-singular at coincidence, so it has no Gram diagonal and the basis
+    // builder refuses the family (#2475); `lmax=` is the shipped way to state
+    // the spectral resolution a finite m=1 diagonal implies.
     let mut failures = Vec::new();
     for m in [1usize, 2, 3] {
-        let formula = format!("y ~ sphere(lat, lon, k=30, m={m})");
+        let formula = if m == 1 {
+            "y ~ sphere(lat, lon, k=30, m=1, lmax=200)".to_string()
+        } else {
+            format!("y ~ sphere(lat, lon, k=30, m={m})")
+        };
         match run(&formula) {
             Ok((rmse, mn, mx)) => {
                 if rmse > 0.25 || mn < -5.0 || mx > 5.0 {

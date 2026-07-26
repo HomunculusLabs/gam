@@ -1,10 +1,37 @@
 // Numerical study: eigenspectrum of the Wahba spherical kernel Gram matrix
 // for penalty orders m ∈ {1, 2, 3, 4} on a quasi-uniform set of 30 S² points.
 
+//
+// `m = 1` is studied through `SobolevTruncated { lmax }` rather than the
+// untruncated closed form. `K_1 = (−ln u − 1)/4π` is log-singular at
+// coincidence, so an untruncated m=1 Gram matrix has no diagonal and every
+// public matrix entry point refuses the family (#2475). A Gram spectrum is
+// exactly the quantity that needs the diagonal, so the study states a spectral
+// resolution instead of implying one: at `lmax = L` the diagonal is the
+// finite partial sum `Σ_{l=1..L} (2l+1)/(4π·l(l+1)) ≈ ln(L)/2π`. The reported
+// m=1 conditioning is therefore a function of `L` and is labelled as such.
+
 use faer::Side;
-use gam::basis::spherical_wahba_kernel_matrix;
+use gam::basis::{SphereWahbaKernel, spherical_wahba_kernel_matrix_with_kind};
 use gam::faer_ndarray::FaerEigh;
 use ndarray::Array2;
+
+/// Stated spectral resolution for the `m = 1` row. 200 is the documented cap on
+/// `SobolevTruncated { lmax }` (the GPU kernel bakes it in as a compile-time
+/// `#define`), so it is the deepest resolution the shipped kernel offers.
+const M1_TRUNCATION_LMAX: u16 = 200;
+
+/// The kernel family used for each penalty order, with the m=1 resolution made
+/// explicit. See the module comment.
+fn kernel_for_order(m: usize) -> SphereWahbaKernel {
+    if m == 1 {
+        SphereWahbaKernel::SobolevTruncated {
+            lmax: M1_TRUNCATION_LMAX,
+        }
+    } else {
+        SphereWahbaKernel::Sobolev
+    }
+}
 
 fn quasi_uniform_sphere(n: usize) -> Array2<f64> {
     // Fibonacci / golden-angle layout in (lat, lon) radians.
@@ -41,8 +68,10 @@ fn wahba_kernel_spectrum_orders_1_to_4() {
     let mut results: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
 
     for m in 1..=4usize {
-        let kmat = spherical_wahba_kernel_matrix(centers.view(), centers.view(), m, true)
-            .unwrap_or_else(|e| panic!("{} failed: {:?}", "kernel matrix computation", e));
+        let kernel = kernel_for_order(m);
+        let kmat =
+            spherical_wahba_kernel_matrix_with_kind(centers.view(), centers.view(), m, true, kernel)
+                .unwrap_or_else(|e| panic!("{} failed: {:?}", "kernel matrix computation", e));
 
         // symmetry diagnostic
         let mut max_asym = 0.0_f64;
@@ -75,9 +104,14 @@ fn wahba_kernel_spectrum_orders_1_to_4() {
         let frob_sq: f64 = kmat.iter().map(|v| v * v).sum();
         let frob = frob_sq.sqrt();
 
+        let label = if m == 1 {
+            format!("{m}*")
+        } else {
+            m.to_string()
+        };
         println!(
             "{:>3} | {:>14.6e} {:>14.6e} {:>14.6e} {:>14.6e} {:>14.6e} {:>14.6e}",
-            m, max_eig, min_eig, min_pos, cond, trace, frob
+            label, max_eig, min_eig, min_pos, cond, trace, frob
         );
         println!(
             "      max |K_ij - K_ji| = {:.3e}; #(eig<0) = {}; #(|eig|<1e-12) = {}",
@@ -100,6 +134,10 @@ fn wahba_kernel_spectrum_orders_1_to_4() {
     let min_pos_m4 = results.iter().find(|r| r.0 == 4).map(|r| r.3).unwrap();
     let min_eig_m4 = results.iter().find(|r| r.0 == 4).map(|r| r.2).unwrap();
 
+    println!(
+        "\n  * m=1 uses SobolevTruncated {{ lmax = {M1_TRUNCATION_LMAX} }}; the untruncated m=1 \
+         Gram diagonal does not exist (#2475)."
+    );
     println!("\nSummary:");
     println!("  cond(m=4) / cond(m=2)  = {:.6e}", cond_m4 / cond_m2);
     println!("  m=4 min eigenvalue     = {:.6e}", min_eig_m4);
