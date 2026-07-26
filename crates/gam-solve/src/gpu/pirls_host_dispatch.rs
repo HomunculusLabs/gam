@@ -22,8 +22,8 @@ use crate::pirls::FIXED_STABILIZATION_RIDGE;
 #[cfg(target_os = "linux")]
 use crate::pirls::loop_driver::make_reparam_operator;
 use crate::pirls::{
-    GaussianFixedCache, LinearInequalityConstraints, PirlsConfig, PirlsCoordinateFrame,
-    PirlsPenalty, PirlsResult, WorkingModelPirlsResult,
+    GaussianFixedCache, GaussianFrozenRows, LinearInequalityConstraints, PirlsConfig,
+    PirlsCoordinateFrame, PirlsPenalty, PirlsResult, WorkingModelPirlsResult,
 };
 use gam_linalg::matrix::DesignMatrix;
 use gam_problem::LinkFunction;
@@ -59,6 +59,10 @@ pub(crate) fn try_gaussian_pls_gpu<F>(
     offset: ArrayView1<f64>,
     coordinate_frame: PirlsCoordinateFrame,
     linear_constraints: &Option<LinearInequalityConstraints>,
+    // gh#2544: the trial-invariant frozen-row bundle, when the caller is a
+    // value-only rho probe. Threaded through so this dispatch can take the
+    // same k-space synthesis #1868 installed on the branch it pre-empts.
+    cost_only_gaussian_rows: Option<&Arc<GaussianFrozenRows>>,
 ) -> Option<Result<(PirlsResult, WorkingModelPirlsResult), EstimationError>>
 where
     F: FnOnce() -> Result<ReparamResult, EstimationError>,
@@ -70,7 +74,8 @@ where
             "[PIRLS GPU Gaussian PLS] declined on non-linux \
              (link_bytes={}, max_iter={}, lower_bounds={}, original_constraints={}, \
              fixed_cache={}, dense_penalty={}, qs={}, x_ptr={:p}, sparse_native={}, p={}, \
-             callback_size={}, y_len={}, prior_len={}, offset_len={}, frame_bytes={}, constraints={})",
+             callback_size={}, y_len={}, prior_len={}, offset_len={}, frame_bytes={}, constraints={}, \
+             frozen_rows={})",
             std::mem::size_of_val(&link_function),
             config.max_iterations,
             penalty_coefficient_lower_bounds.is_some(),
@@ -87,6 +92,7 @@ where
             offset.len(),
             std::mem::size_of_val(&coordinate_frame),
             linear_constraints.is_some(),
+            cost_only_gaussian_rows.is_some(),
         );
     }
     #[cfg(target_os = "linux")]
@@ -136,6 +142,8 @@ where
                     x_transformed_design,
                     coordinate_frame,
                     linear_constraints: linear_constraints.clone(),
+                    centered_weighted_y_sq: cache.centered_weighted_y_sq,
+                    frozen_rows: cost_only_gaussian_rows.map(Arc::clone),
                 };
                 if let Some(result) = try_gpu_gaussian_pls_dispatch(gpu_input) {
                     return Some(result.map_err(|message| {

@@ -94,14 +94,15 @@ pub fn admission_for(
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use ndarray::{Array1, ArrayView1, ArrayView2};
+    use std::sync::Arc;
 
     use crate::active_set::compute_constraint_kkt_diagnostics;
     use crate::gpu::pirls_dispatch_wire::admission_for;
     use crate::gpu::pirls_gpu::{self, cuda};
     use crate::gpu_kernels::pirls_row::{CurvatureMode, PirlsRowFamily};
     use crate::pirls::{
-        ExportedLaplaceCurvature, FirthDiagnostics, HessianCurvatureKind, PirlsCoordinateFrame,
-        PirlsResult, PirlsStatus, WorkingModelPirlsResult, WorkingState,
+        ExportedLaplaceCurvature, FirthDiagnostics, GaussianFrozenRows, HessianCurvatureKind,
+        PirlsCoordinateFrame, PirlsResult, PirlsStatus, WorkingModelPirlsResult, WorkingState,
         compute_observed_hessian_curvature_arrays, computeworkingweight_derivatives_from_eta,
         pirls_data_log_kernel_from_eta,
     };
@@ -738,6 +739,14 @@ mod linux_impl {
         pub coordinate_frame: PirlsCoordinateFrame,
         /// Linear constraints (None when cache_eligible was true).
         pub linear_constraints: Option<LinearInequalityConstraints>,
+        /// `Σᵢ wᵢ(yᵢ − offsetᵢ)²` from the fixed-design cache. With the two
+        /// Gram statistics above this determines the weighted RSS — and hence
+        /// the deviance — without touching a single row (gh#2544).
+        pub centered_weighted_y_sq: f64,
+        /// Trial-invariant length-`n` row placeholders, when the caller is a
+        /// value-only ρ probe. `Some` means every row field below is an O(1)
+        /// `ArcArray1` clone instead of a fresh materialisation.
+        pub frozen_rows: Option<Arc<GaussianFrozenRows>>,
     }
 
     /// Cheap admission gate for the GPU Gaussian-identity exact PLS path.
@@ -813,24 +822,62 @@ mod linux_impl {
         } else {
             beta.clone()
         };
-        let mut eta = input.offset.to_owned();
-        eta += &input.x_original.apply(&qbeta);
-        let finalmu = eta.clone();
-        let finalz = input.y.to_owned();
-
-        // gradient_data = QsᵀXᵀ W (mu - y) in transformed coordinates.
-        let mut weighted_residual = finalmu.clone();
-        weighted_residual -= &finalz;
-        weighted_residual *= &input.priorweights;
-        // Xᵀ W r (in original coords) via DesignMatrix::transpose_vector_multiply.
-        let xt_wr_orig = input
-            .x_original
-            .transpose_vector_multiply(&weighted_residual);
-        // Rotate to transformed coords: QsᵀXᵀWr.
-        let gradient_data: Array1<f64> = if let Some(qs_v) = input.qs {
-            qs_v.t().dot(&xt_wr_orig)
+        // gh#2544: this dispatch admits on exactly the preconditions of the
+        // Gaussian-Identity zero-iteration path in `loop_driver`, and returns
+        // before it, so #1868's frozen-row synthesis never applied here — each
+        // ρ trial re-realised η, μ, z, the weighted residual and five working
+        // derivative arrays, plus `X·β` and `Xᵀ·(w⊙r)`. When the caller hands
+        // over the same trial-invariant bundle, take the same k-space route it
+        // installed on the other branch: the gradient is a contraction of the
+        // cached Gram statistics and every row array is an O(1) `ArcArray1`
+        // clone. One optimisation, both routes.
+        let frozen = input.frozen_rows.clone();
+        let (gradient_data, rows_eta, rows_mu, rows_z, rows_weights) = if let Some(bundle) =
+            frozen.as_ref()
+        {
+            // grad = Qsᵀ(XᵀWX·Qsβ − XᵀWy), identical to the row form by the
+            // normal equations, evaluated entirely in coefficient space.
+            let mut grad_orig = input.xtwx_orig.dot(&qbeta);
+            grad_orig -= &input.xtwy_orig;
+            let grad: Array1<f64> = if let Some(qs_v) = input.qs {
+                qs_v.t().dot(&grad_orig)
+            } else {
+                grad_orig
+            };
+            (
+                grad,
+                bundle.eta.clone(),
+                bundle.eta.clone(),
+                bundle.z.clone(),
+                bundle.weights.clone(),
+            )
         } else {
-            xt_wr_orig
+            let mut eta = input.offset.to_owned();
+            eta += &input.x_original.apply(&qbeta);
+            let finalmu = eta.clone();
+            let finalz = input.y.to_owned();
+
+            // gradient_data = QsᵀXᵀ W (mu - y) in transformed coordinates.
+            let mut weighted_residual = finalmu.clone();
+            weighted_residual -= &finalz;
+            weighted_residual *= &input.priorweights;
+            // Xᵀ W r (in original coords) via DesignMatrix::transpose_vector_multiply.
+            let xt_wr_orig = input
+                .x_original
+                .transpose_vector_multiply(&weighted_residual);
+            // Rotate to transformed coords: QsᵀXᵀWr.
+            let grad: Array1<f64> = if let Some(qs_v) = input.qs {
+                qs_v.t().dot(&xt_wr_orig)
+            } else {
+                xt_wr_orig
+            };
+            (
+                grad,
+                eta.into_shared(),
+                finalmu.into_shared(),
+                finalz.into_shared(),
+                input.priorweights.to_owned().into_shared(),
+            )
         };
         let score_norm = array1_l2_norm(&gradient_data);
 
@@ -870,25 +917,40 @@ mod linux_impl {
         }
 
         let gradient_norm = array1_l2_norm(&gradient);
-        let max_abs_eta = inf_norm(finalmu.iter().copied());
 
-        let deviance = calculate_deviance_from_eta(
-            input.y,
-            &eta,
-            input.likelihood,
-            input.inverse_link,
-            input.priorweights,
-        )
-        .map_err(|error| format!("GPU Gaussian deviance evaluation failed: {error}"))?;
-        let log_likelihood = pirls_data_log_kernel_from_eta(
-            input.y,
-            &eta,
-            input.likelihood,
-            input.inverse_link,
-            input.priorweights,
-            deviance,
-        )
-        .map_err(|error| format!("GPU Gaussian P-IRLS data-kernel evaluation failed: {error}"))?;
+        let (deviance, log_likelihood, max_abs_eta) = if let Some(bundle) = frozen.as_ref() {
+            // Weighted RSS from the Gram sufficient statistics:
+            //   Σw(y−off)² − 2·βᵀ(XᵀW(y−off)) + βᵀ(XᵀWX)β.
+            // Conventional Gaussian deviance IS the raw weighted RSS, and the
+            // data log-kernel and ‖η‖∞ are trial-invariant on the frozen rows.
+            let weighted_rss = (input.centered_weighted_y_sq - 2.0 * qbeta.dot(&input.xtwy_orig)
+                + qbeta.dot(&input.xtwx_orig.dot(&qbeta)))
+            .max(0.0);
+            (weighted_rss, bundle.log_likelihood, bundle.max_abs_eta)
+        } else {
+            let eta_owned = rows_eta.to_owned();
+            let deviance = calculate_deviance_from_eta(
+                input.y,
+                &eta_owned,
+                input.likelihood,
+                input.inverse_link,
+                input.priorweights,
+            )
+            .map_err(|error| format!("GPU Gaussian deviance evaluation failed: {error}"))?;
+            let log_likelihood = pirls_data_log_kernel_from_eta(
+                input.y,
+                &eta_owned,
+                input.likelihood,
+                input.inverse_link,
+                input.priorweights,
+                deviance,
+            )
+            .map_err(|error| {
+                format!("GPU Gaussian P-IRLS data-kernel evaluation failed: {error}")
+            })?;
+            let max_abs_eta = inf_norm(rows_mu.iter().copied());
+            (deviance, log_likelihood, max_abs_eta)
+        };
 
         // Stabilised Hessian = penalized_hessian + ridge_used·I.
         let mut stab = penalized_hessian.clone();
@@ -900,13 +962,20 @@ mod linux_impl {
         let penalized_hessian_sym = SymmetricMatrix::Dense(penalized_hessian.clone());
         let stabilizedhessian_sym = SymmetricMatrix::Dense(stab);
 
-        let priorweights_owned = input.priorweights.to_owned();
         let beta_coef = Coefficients::new(beta.clone());
 
         let zero_iter_penalized = deviance + penalty_term;
 
+        // On the frozen-row path the working η is a stale placeholder that no
+        // consumer of a value-only ρ probe reads, so it is not materialised —
+        // the same choice `loop_driver`'s skip arm makes, for the same reason.
+        let working_eta = if frozen.is_some() {
+            Array1::zeros(0)
+        } else {
+            rows_mu.to_owned()
+        };
         let working_state = WorkingState {
-            eta: LinearPredictor::new(finalmu.clone()),
+            eta: LinearPredictor::new(working_eta),
             gradient: gradient.clone(),
             hessian: penalized_hessian_sym.clone(),
             log_likelihood,
@@ -946,13 +1015,33 @@ mod linux_impl {
         };
 
         let (solve_c_array, solve_d_array, solve_dmu_deta, solve_d2mu_deta2, solve_d3mu_deta3) =
-            computeworkingweight_derivatives_from_eta(
-                input.likelihood,
-                input.inverse_link,
-                &eta,
-                input.priorweights,
-            )
-            .map_err(|e| format!("derivative computation failed: {e:?}"))?;
+            if let Some(bundle) = frozen.as_ref() {
+                // Constant Gaussian working-weight derivatives at η ≡ offset:
+                // five O(1) handle clones instead of five length-n builds.
+                (
+                    bundle.solve_c_array.clone(),
+                    bundle.solve_d_array.clone(),
+                    bundle.solve_dmu_deta.clone(),
+                    bundle.solve_d2mu_deta2.clone(),
+                    bundle.solve_d3mu_deta3.clone(),
+                )
+            } else {
+                let eta_owned = rows_eta.to_owned();
+                let (c, d, dmu, d2mu, d3mu) = computeworkingweight_derivatives_from_eta(
+                    input.likelihood,
+                    input.inverse_link,
+                    &eta_owned,
+                    input.priorweights,
+                )
+                .map_err(|e| format!("derivative computation failed: {e:?}"))?;
+                (
+                    c.into_shared(),
+                    d.into_shared(),
+                    dmu.into_shared(),
+                    d2mu.into_shared(),
+                    d3mu.into_shared(),
+                )
+            };
 
         let pirls_result = PirlsResult {
             likelihood: input.likelihood.clone(),
@@ -969,19 +1058,25 @@ mod linux_impl {
             stable_penalty_term: penalty_term,
             firth: FirthDiagnostics::Inactive,
             // #1868: length-n row fields are shared `ArcArray1` (O(1) move).
-            finalweights: priorweights_owned.clone().into_shared(),
-            final_offset: input.offset.to_owned().into_shared(),
-            final_eta: eta.clone().into_shared(),
-            finalmu: finalmu.clone().into_shared(),
-            solveweights: priorweights_owned.into_shared(),
-            solveworking_response: finalz.clone().into_shared(),
-            solvemu: finalmu.clone().into_shared(),
-            solve_dmu_deta: solve_dmu_deta.into_shared(),
-            solve_d2mu_deta2: solve_d2mu_deta2.into_shared(),
-            solve_d3mu_deta3: solve_d3mu_deta3.into_shared(),
-            solve_c_array: solve_c_array.into_shared(),
+            // gh#2544: on the frozen-row path they are O(1) clones of the
+            // once-built bundle, so nothing here is materialised per ρ trial.
+            finalweights: rows_weights.clone(),
+            final_offset: if frozen.is_some() {
+                rows_eta.clone()
+            } else {
+                input.offset.to_owned().into_shared()
+            },
+            final_eta: rows_eta.clone(),
+            finalmu: rows_mu.clone(),
+            solveweights: rows_weights.clone(),
+            solveworking_response: rows_z.clone(),
+            solvemu: rows_mu.clone(),
+            solve_dmu_deta,
+            solve_d2mu_deta2,
+            solve_d3mu_deta3,
+            solve_c_array,
             solve_c_nontrivial: false,
-            solve_d_array: solve_d_array.into_shared(),
+            solve_d_array,
             derivatives_unsupported: false,
             status: PirlsStatus::Converged,
             iteration: 1,

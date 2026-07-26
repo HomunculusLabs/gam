@@ -1191,6 +1191,11 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         offset,
         coordinate_frame,
         &linear_constraints,
+        // gh#2544: this dispatch pre-empts the Gaussian-Identity zero-iteration
+        // branch below on the same admission predicate, so the #1868 frozen-row
+        // bundle has to reach it too — otherwise the optimisation is live on the
+        // branch that never runs and dead on the one that does.
+        cost_only_gaussian_rows,
     ) {
         return result;
     }
