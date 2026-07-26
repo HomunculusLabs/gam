@@ -3011,9 +3011,15 @@ impl LinearOperator for BlockDesignOperator {
         // Bit-identity: `cross[a,b] = Σ_i w_i · X_i[i,a] · X_j[i,b]` is exactly
         // `(diag(w)·X_i)ᵀ · X_j`, so pre-scaling then GEMM is the same sum,
         // reassociated only by the matmul's blocking (≤1e-10).
+        // Only blocks that can appear on the LEFT of an `i < j` pair are ever
+        // read below, so the last block's weight-scaled copy would be a full
+        // n×p_last allocate-and-fill that nothing reads — the whole cost of
+        // this optimization with none of its benefit, once per assembly.
+        let cross_left_blocks = self.blocks.len().saturating_sub(1);
         let weighted_dense: Vec<Option<Array2<f64>>> = self
             .blocks
             .iter()
+            .take(cross_left_blocks)
             .map(|block| match block {
                 DesignBlock::Dense(d) => d.as_dense_ref().map(|x| {
                     // diag(w)·X computed once; signed w (no .max(0.0)) to match
@@ -3024,7 +3030,7 @@ impl LinearOperator for BlockDesignOperator {
             })
             .collect();
 
-        for i in 0..self.blocks.len() {
+        for i in 0..cross_left_blocks {
             for j in (i + 1)..self.blocks.len() {
                 let cross = match (&weighted_dense[i], &self.blocks[j]) {
                     // Fused Dense×Dense: single GEMM over the shared,
