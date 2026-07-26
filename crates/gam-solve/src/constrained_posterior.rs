@@ -943,7 +943,6 @@ fn assemble_retained_face(
 /// they were before. That is a narrower repair than "every dependent row", and
 /// deliberately so: a row depending on two or more accepted normals at once cuts
 /// the face along a diagonal, which no per-coordinate limit can represent.
-#[allow(clippy::too_many_arguments)]
 fn record_opposed_face_limit(
     row_index: usize,
     cross: &Array1<f64>,
