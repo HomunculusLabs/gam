@@ -411,6 +411,7 @@ mod tests {
             removed_normal_variance: array![[0.8, 0.1], [0.1, 0.5]],
             normal_mean_shift: array![0.2, 0.1],
             rows: vec![0, 1],
+            normal_upper_limits: vec![f64::INFINITY, f64::INFINITY],
         };
         correction.apply_to_covariance_in_place(&mut dense);
         let backend = PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(

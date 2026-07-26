@@ -137,11 +137,28 @@ pub struct ConstrainedPosteriorCorrection {
     /// the constraint-normal coordinates.
     pub removed_normal_variance: Array2<f64>,
     /// `E[u] − E_untrunc[u]`, `q`: how far truncation moves the posterior mean
-    /// in constraint-normal coordinates. Strictly positive componentwise for an
-    /// active face — the posterior mean is interior even when the mode is not.
+    /// in constraint-normal coordinates. Positive componentwise for a
+    /// half-line coordinate — the posterior mean is interior even when the mode
+    /// is not — and of either sign for a coordinate that also carries an upper
+    /// limit, where the far face pulls the mean back down.
     pub normal_mean_shift: Array1<f64>,
     /// Indices, into the caller's constraint system, of the rows retained.
     pub rows: Vec<usize>,
+    /// Upper limit on each retained coordinate: `u_k ≤ normal_upper_limits[k]`,
+    /// with `f64::INFINITY` where the coordinate is a half-line.
+    ///
+    /// A two-sided coefficient bound `l ≤ β_j ≤ u` arrives as two rows whose
+    /// normals are exactly anti-parallel. The second carries no constraint-normal
+    /// DIRECTION the first does not already carry, so the rank filter drops it —
+    /// correctly, as a direction. It is still a constraint, and this is where it
+    /// is kept (#2523).
+    ///
+    /// `#[serde(default)]` with an empty vector reading as "every retained
+    /// coordinate is a half-line" is the encoding of a model saved before upper
+    /// limits existed, which is exactly what those models meant. Live
+    /// constructions always carry one entry per retained row.
+    #[serde(default)]
+    pub normal_upper_limits: Vec<f64>,
 }
 
 impl ConstrainedPosteriorCorrection {
@@ -183,6 +200,16 @@ impl ConstrainedPosteriorCorrection {
     /// `E_π[β] = β_unc + G·(E[u] − E_untrunc[u])`.
     pub fn posterior_mean(&self, unconstrained_center: &Array1<f64>) -> Array1<f64> {
         unconstrained_center + &self.lift.dot(&self.normal_mean_shift)
+    }
+
+    /// Upper limit per retained coordinate, materializing the legacy encoding of
+    /// [`Self::normal_upper_limits`].
+    pub fn upper_limits(&self) -> Vec<f64> {
+        if self.normal_upper_limits.is_empty() {
+            vec![f64::INFINITY; self.rows.len()]
+        } else {
+            self.normal_upper_limits.clone()
+        }
     }
 }
 
@@ -295,6 +322,26 @@ impl ConstrainedPosteriorGeometry {
                 return Err(
                     "constrained posterior correction contains a non-finite value".to_string()
                 );
+            }
+            if !correction.normal_upper_limits.is_empty()
+                && correction.normal_upper_limits.len() != q
+            {
+                return Err(format!(
+                    "constrained posterior carries {} upper limits for {q} retained rows",
+                    correction.normal_upper_limits.len()
+                ));
+            }
+            // `+∞` is the half-line coordinate and is admissible; anything at or
+            // below the wall would make the retained region empty.
+            if correction
+                .normal_upper_limits
+                .iter()
+                .any(|limit| !(*limit > 0.0))
+            {
+                return Err(format!(
+                    "constrained posterior upper limits must be positive, got {:?}",
+                    correction.normal_upper_limits
+                ));
             }
         }
         Ok(())
@@ -412,6 +459,13 @@ pub fn constrained_projection_equal_tailed_interval(
     let residual_variance = residual_variance.max(0.0);
     let posterior_mean =
         ambient_mean + projection_lift.dot(&correction.normal_mean_shift);
+    let upper_limits = correction.upper_limits();
+    if upper_limits.len() != q {
+        return Err(format!(
+            "constrained projection interval: {q} retained rows carry {} upper limits",
+            upper_limits.len()
+        ));
+    }
     if q == 1 && residual_variance == 0.0 && projection_lift[0] != 0.0 {
         let scalar_quantile = |probability: f64| -> Result<f64, String> {
             let normal_probability = if projection_lift[0] > 0.0 {
@@ -419,9 +473,10 @@ pub fn constrained_projection_equal_tailed_interval(
             } else {
                 1.0 - probability
             };
-            let value = scalar_lower_truncated_quantile(
+            let value = scalar_truncated_quantile(
                 normal_center[0],
                 normal_covariance[[0, 0]],
+                upper_limits[0],
                 normal_probability,
             )?;
             Ok(ambient_mean + projection_lift[0] * (value - normal_center[0]))
@@ -431,6 +486,7 @@ pub fn constrained_projection_equal_tailed_interval(
     let nodes = converged_projection_nodes(
         &normal_center,
         &normal_covariance,
+        &upper_limits,
         &projection_lift,
         ambient_mean,
     )?;
@@ -451,9 +507,11 @@ pub fn constrained_projection_equal_tailed_interval(
     Ok((lower, upper))
 }
 
-fn scalar_lower_truncated_quantile(
+/// Quantile of `N(mean, variance)` restricted to `[0, upper]`.
+fn scalar_truncated_quantile(
     mean: f64,
     variance: f64,
+    upper: f64,
     probability: f64,
 ) -> Result<f64, String> {
     if !(variance.is_finite() && variance > 0.0) {
@@ -466,14 +524,44 @@ fn scalar_lower_truncated_quantile(
             "scalar truncated quantile probability must lie in (0, 1), got {probability}"
         ));
     }
+    if !(upper > 0.0) {
+        return Err(format!(
+            "scalar truncated quantile needs the upper limit above the wall, got {upper:?}"
+        ));
+    }
     let sd = variance.sqrt();
     let alpha = -mean / sd;
-    // P(Z > z | Z >= alpha) = (1-p) P(Z >= alpha). Work entirely in
-    // log-survival space so a deeply pinned face never forms `1-Phi(alpha)`.
-    let log_tail = (1.0 - probability).ln() + normal_logsf(alpha);
+    if !upper.is_finite() {
+        // P(Z > z | Z >= alpha) = (1-p) P(Z >= alpha). Work entirely in
+        // log-survival space so a deeply pinned face never forms `1-Phi(alpha)`.
+        let log_tail = (1.0 - probability).ln() + normal_logsf(alpha);
+        let z = -standard_normal_quantile_from_log_cdf(log_tail)
+            .map_err(|error| format!("scalar truncated quantile: {error}"))?;
+        return Ok(mean + sd * z);
+    }
+    let beta = (upper - mean) / sd;
+    // Same reflection as the moments: put the retained slab in the upper tail so
+    // its mass is a difference of directly-evaluated tail probabilities. Under
+    // the reflection the probability runs the other way.
+    let reflect = alpha + beta < 0.0;
+    let (low, high, probability) = if reflect {
+        (-beta, -alpha, 1.0 - probability)
+    } else {
+        (alpha, beta, probability)
+    };
+    let log_tail_low = normal_logsf(low);
+    let removed = normal_logsf(high) - log_tail_low;
+    // `Φ̄(z) = Φ̄(low)·(1 − p(1 − e^removed))`, the inversion the cubature uses.
+    let log_tail = log_tail_low + (-probability * -removed.exp_m1()).ln_1p();
     let z = -standard_normal_quantile_from_log_cdf(log_tail)
         .map_err(|error| format!("scalar truncated quantile: {error}"))?;
-    Ok(mean + sd * z)
+    let z = z.clamp(low, high);
+    // Reflected, `z` standardizes `−X` about `−mean`, so `X = mean − sd·z`.
+    Ok(if reflect {
+        mean - sd * z
+    } else {
+        mean + sd * z
+    })
 }
 
 /// Build the truncated-posterior correction for a fit carrying linear
@@ -610,7 +698,12 @@ pub fn constrained_posterior_correction(
     let mut demanded_accuracy = ORTHANT_MOMENT_RELATIVE_TOLERANCE;
     let mut first_pass = true;
     while demanded_accuracy >= f64::EPSILON {
-        let Some(face) = assemble_retained_face(&candidates, demanded_accuracy, constraints)?
+        let Some(face) = assemble_retained_face(
+            &candidates,
+            demanded_accuracy,
+            constraints,
+            unconstrained_center,
+        )?
         else {
             if first_pass {
                 return Ok(None);
@@ -648,8 +741,12 @@ pub fn constrained_posterior_correction(
                 constraints.a.row(row_index).dot(unconstrained_center) - constraints.b[row_index];
         }
 
-        let (normal_mean, normal_covariance) =
-            orthant_truncated_moments(&normal_center, &face.w, face.factor.view())?;
+        let (normal_mean, normal_covariance) = box_truncated_moments(
+            &normal_center,
+            &face.upper,
+            &face.w,
+            face.factor.view(),
+        )?;
 
         let mut removed = &face.w - &normal_covariance;
         symmetrize_in_place(&mut removed);
@@ -660,6 +757,7 @@ pub fn constrained_posterior_correction(
             removed_normal_variance: removed,
             normal_mean_shift: normal_mean - normal_center,
             rows: face.rows,
+            normal_upper_limits: face.upper,
         }));
     }
     Err(
@@ -677,6 +775,8 @@ struct RetainedFace {
     factor: Array2<f64>,
     w: Array2<f64>,
     sigma_at: Array2<f64>,
+    /// Upper limit per retained coordinate, `f64::INFINITY` for a half-line.
+    upper: Vec<f64>,
 }
 
 /// Greedy pivoted-Cholesky rank filter on `W = A Σ Aᵀ`, walking the candidates
@@ -690,9 +790,19 @@ fn assemble_retained_face(
     candidates: &[(usize, f64, Array1<f64>)],
     demanded_accuracy: f64,
     constraints: &LinearInequalityConstraints,
+    unconstrained_center: &Array1<f64>,
 ) -> Result<Option<RetainedFace>, String> {
+    let columns = constraints.a.ncols();
+    // Each of `cross[k]`, `W_kk` and `diagonal` is one length-`p` inner product
+    // of a constraint row against a `Σ` column, so each carries the standard
+    // `γ_p ≈ p·ε` dot-product rounding; the anti-parallel test below compares
+    // two products of such quantities, which propagates to about `4(p+1)ε`.
+    // Nothing here is fitted to a fixture: it is the resolution at which "the
+    // same direction, reversed" stops being decidable in double precision.
+    let antiparallel_tolerance = 4.0 * (columns as f64 + 1.0) * f64::EPSILON;
     let mut rows: Vec<usize> = Vec::new();
     let mut sigma_a_columns: Vec<Array1<f64>> = Vec::new();
+    let mut upper: Vec<f64> = Vec::new();
     let mut w_accepted = Array2::<f64>::zeros((0, 0));
     let mut factor = Array2::<f64>::zeros((0, 0));
     for (row_index, _, sigma_row) in candidates {
@@ -736,6 +846,30 @@ fn assemble_retained_face(
         // clear the floor while the face as a whole does not.
         let rank_floor = (accepted + 1) as f64 * f64::EPSILON * diagonal / demanded_accuracy;
         if !(pivot.is_finite() && pivot > rank_floor) {
+            // Redundant AS A DIRECTION. That is not the same as redundant as a
+            // CONSTRAINT, and the two come apart exactly at an anti-parallel
+            // row: `l ≤ β_j ≤ u` arrives as `e_jᵀβ ≥ l` and `−e_jᵀβ ≥ −u`, and
+            // the second adds no constraint-normal direction while halving the
+            // support. Dropping it reports a one-sided posterior for a
+            // two-sided bound (#2523).
+            //
+            // A row PARALLEL to an accepted one is genuinely implied, and the
+            // slack ordering is what makes that true rather than hoped: rows are
+            // walked by ascending standardized slack and `sd` scales with the
+            // row, so the accepted row's `slack/sd` is the smaller, which is
+            // exactly the statement that its wall is the binding one. Those
+            // still drop, unchanged.
+            record_opposed_face_limit(
+                *row_index,
+                &cross,
+                diagonal,
+                &w_accepted,
+                &rows,
+                constraints,
+                unconstrained_center,
+                antiparallel_tolerance,
+                &mut upper,
+            )?;
             continue;
         }
         let mut grown = Array2::<f64>::zeros((accepted + 1, accepted + 1));
@@ -761,6 +895,7 @@ fn assemble_retained_face(
 
         rows.push(*row_index);
         sigma_a_columns.push(sigma_row.clone());
+        upper.push(f64::INFINITY);
     }
     if rows.is_empty() {
         return Ok(None);
@@ -777,7 +912,94 @@ fn assemble_retained_face(
         factor,
         w: w_accepted,
         sigma_at,
+        upper,
     }))
+}
+
+/// Keep the far wall of a two-sided bound that the rank filter has just refused
+/// as a direction.
+///
+/// The refused row `a_r` carries no constraint-normal direction beyond the
+/// accepted ones. When it is the OPPOSITE face of one of them — `a_r = −γ a_k`
+/// for some `γ > 0`, up to a remainder with no posterior variance — it still
+/// bounds that coordinate, from above:
+///
+/// ```text
+/// a_rᵀβ ≥ b_r   ⟺   a_kᵀβ ≤ (ν − b_r)/γ   ⟺   u_k ≤ δ/γ,
+/// ```
+///
+/// with `u_k = a_kᵀβ − b_k`, `ν = (a_r + γ a_k)ᵀβ` (almost surely constant,
+/// precisely because its posterior variance is the pivot that just failed) and
+/// `δ = (a_rᵀβ_unc − b_r) + γ(a_kᵀβ_unc − b_k)`.
+///
+/// The test is run in the `Σ` metric on quantities the filter has already
+/// formed: `a_r = −γ a_k` makes the correlation `cross_k/√(W_kk·diagonal)`
+/// exactly `−1`, and `γ = −cross_k/W_kk`. Running it in that metric rather than
+/// on the raw rows is not a convenience — two rows that differ by a direction
+/// with no posterior spread impose the same constraint on this posterior, and
+/// the `Σ` metric is what sees that.
+///
+/// Rows that are refused for any other reason are left dropped, which is what
+/// they were before. That is a narrower repair than "every dependent row", and
+/// deliberately so: a row depending on two or more accepted normals at once cuts
+/// the face along a diagonal, which no per-coordinate limit can represent.
+#[allow(clippy::too_many_arguments)]
+fn record_opposed_face_limit(
+    row_index: usize,
+    cross: &Array1<f64>,
+    diagonal: f64,
+    w_accepted: &Array2<f64>,
+    rows: &[usize],
+    constraints: &LinearInequalityConstraints,
+    unconstrained_center: &Array1<f64>,
+    antiparallel_tolerance: f64,
+    upper: &mut [f64],
+) -> Result<(), String> {
+    let mut opposed: Option<(usize, f64, f64)> = None;
+    for position in 0..rows.len() {
+        let w_kk = w_accepted[[position, position]];
+        let scale = (w_kk * diagonal).sqrt();
+        if !(scale.is_finite() && scale > 0.0) {
+            continue;
+        }
+        let correlation = cross[position] / scale;
+        if correlation + 1.0 > antiparallel_tolerance {
+            continue;
+        }
+        let gamma = -cross[position] / w_kk;
+        if !(gamma.is_finite() && gamma > 0.0) {
+            continue;
+        }
+        // Two accepted rows cannot both be anti-parallel to this one without
+        // being parallel to each other, which the filter already refused; take
+        // the most opposed and let the identity gate catch a face that is not.
+        if opposed.is_none_or(|(_, best, _)| correlation < best) {
+            opposed = Some((position, correlation, gamma));
+        }
+    }
+    let Some((position, _, gamma)) = opposed else {
+        return Ok(());
+    };
+    let accepted_row = rows[position];
+    let delta = (constraints.a.row(row_index).dot(unconstrained_center)
+        - constraints.b[row_index])
+        + gamma
+            * (constraints.a.row(accepted_row).dot(unconstrained_center)
+                - constraints.b[accepted_row]);
+    let limit = delta / gamma;
+    if !(limit.is_finite() && limit > 0.0) {
+        return Err(format!(
+            "constraint rows {accepted_row} and {row_index} bound the same coefficient \
+             direction from opposite sides with no width between them (upper limit \
+             {limit:.6e} above the lower wall): the retained region is empty or a single \
+             point, which is an equality constraint and not a posterior this module can \
+             report moments for"
+        ));
+    }
+    if limit < upper[position] {
+        upper[position] = limit;
+    }
+    Ok(())
 }
 
 /// `max |A G - I|` over the retained rows.
@@ -896,30 +1118,45 @@ fn symmetrize_in_place(matrix: &mut Array2<f64>) {
     }
 }
 
-/// First two moments of `u ~ N(mean, covariance)` restricted to the orthant
-/// `u ≥ 0`.
+/// First two moments of `u ~ N(mean, covariance)` restricted to the box
+/// `0 ≤ u ≤ upper`, where `upper_i = f64::INFINITY` makes coordinate `i` the
+/// half-line the orthant is built from.
 ///
 /// One dimension has the closed form and is evaluated exactly. Higher
 /// dimensions use the Genz separation-of-variables transformation, under which
 /// EVERY moment is an integral of the same integrand over the unit cube — so a
-/// single cubature delivers the normalizing orthant probability, the mean and
-/// the second moment together, instead of the `O(q²)` separate orthant
-/// probabilities the Tallis face/edge recursion would need.
-fn orthant_truncated_moments(
+/// single cubature delivers the normalizing probability, the mean and the second
+/// moment together, instead of the `O(q²)` separate orthant probabilities the
+/// Tallis face/edge recursion would need. The transformation is already a
+/// product of intervals; a finite upper limit changes only where each interval
+/// ends, which is why a box costs the same cubature as an orthant.
+fn box_truncated_moments(
     mean: &Array1<f64>,
+    upper: &[f64],
     covariance: &Array2<f64>,
     factor: ArrayView2<'_, f64>,
 ) -> Result<(Array1<f64>, Array2<f64>), String> {
     let q = mean.len();
     if covariance.nrows() != q || covariance.ncols() != q {
         return Err(format!(
-            "orthant moments: mean has length {q} but the covariance is {}x{}",
+            "truncated moments: mean has length {q} but the covariance is {}x{}",
             covariance.nrows(),
             covariance.ncols()
         ));
     }
+    if upper.len() != q {
+        return Err(format!(
+            "truncated moments: mean has length {q} but {} upper limits were supplied",
+            upper.len()
+        ));
+    }
+    if upper.iter().any(|limit| !(*limit > 0.0)) {
+        return Err(format!(
+            "truncated moments: every upper limit must sit strictly above its wall, got {upper:?}"
+        ));
+    }
     if q == 1 {
-        return scalar_truncated_moments(mean[0], covariance[[0, 0]]);
+        return scalar_truncated_moments(mean[0], covariance[[0, 0]], upper[0]);
     }
     if factor.nrows() != q || factor.ncols() != q {
         return Err(format!(
@@ -940,7 +1177,15 @@ fn orthant_truncated_moments(
         } else {
             evaluated * 2
         };
-        accumulate_orthant_nodes(&mut accumulator, mean, factor, &generator, evaluated, target)?;
+        accumulate_orthant_nodes(
+            &mut accumulator,
+            mean,
+            upper,
+            factor,
+            &generator,
+            evaluated,
+            target,
+        )?;
         evaluated = target;
         let current = accumulator.moments()?;
         if let Some(ref last) = previous
@@ -955,7 +1200,7 @@ fn orthant_truncated_moments(
                 .map(|last| moment_relative_change(last, &current, covariance))
                 .unwrap_or(f64::INFINITY);
             return Err(format!(
-                "orthant moments for a {q}-dimensional constraint face did not converge: \
+                "truncated moments for a {q}-dimensional constraint face did not converge: \
                  relative moment change {change:.3e} still exceeds \
                  {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e} at {evaluated} cubature nodes"
             ));
@@ -1044,6 +1289,7 @@ impl OrthantNodeSink for OrthantAccumulator {
 fn accumulate_orthant_nodes<S: OrthantNodeSink>(
     accumulator: &mut S,
     mean: &Array1<f64>,
+    upper: &[f64],
     factor: ArrayView2<'_, f64>,
     generator: &[f64],
     first: usize,
@@ -1060,16 +1306,7 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
             for j in 0..i {
                 bound -= factor[[i, j]] * z[j];
             }
-            let lower = bound / factor[[i, i]];
-            let log_tail = normal_logsf(lower);
-            if !log_tail.is_finite() {
-                // The remaining feasible mass along this coordinate underflowed
-                // to zero: the node contributes nothing and cannot be
-                // renormalized, so drop it rather than propagate a NaN.
-                log_weight = f64::NEG_INFINITY;
-                break;
-            }
-            log_weight += log_tail;
+            let wall = bound / factor[[i, i]];
             // Tent-periodized Kronecker lattice. The raw sequence leaves the
             // integrand non-periodic across the cube face, which costs the
             // lattice rule most of its rate; folding `x ↦ 1 − |2x − 1|`
@@ -1079,21 +1316,88 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
                 let fractional = raw - raw.floor();
                 1.0 - (2.0 * fractional - 1.0).abs()
             };
-            // `Φ̄(z_i) = (1 − x_i)·Φ̄(lower)` inverted on the upper tail, so a
-            // deeply pinned coordinate never forms `1 − Φ(·)` in probability
-            // space. Both factors can round to one (an inactive coordinate at
-            // the very edge of the lattice cell), which would ask for `Φ̄⁻¹(1)`;
-            // the smallest representable log-probability answers that with the
-            // far-left endpoint, which is what the region actually is there.
-            let log_fraction = (1.0 - lattice).max(f64::MIN_POSITIVE).ln();
-            let log_upper_tail = log_fraction + log_tail;
+            if !upper[i].is_finite() {
+                let log_tail = normal_logsf(wall);
+                if !log_tail.is_finite() {
+                    // The remaining feasible mass along this coordinate
+                    // underflowed to zero: the node contributes nothing and
+                    // cannot be renormalized, so drop it rather than propagate a
+                    // NaN.
+                    log_weight = f64::NEG_INFINITY;
+                    break;
+                }
+                log_weight += log_tail;
+                // `Φ̄(z_i) = (1 − x_i)·Φ̄(lower)` inverted on the upper tail, so
+                // a deeply pinned coordinate never forms `1 − Φ(·)` in
+                // probability space. Both factors can round to one (an inactive
+                // coordinate at the very edge of the lattice cell), which would
+                // ask for `Φ̄⁻¹(1)`; the smallest representable log-probability
+                // answers that with the far-left endpoint, which is what the
+                // region actually is there.
+                let log_fraction = (1.0 - lattice).max(f64::MIN_POSITIVE).ln();
+                let log_upper_tail = log_fraction + log_tail;
+                let resolved = if log_upper_tail < 0.0 {
+                    log_upper_tail
+                } else {
+                    -f64::MIN_POSITIVE
+                };
+                z[i] = -standard_normal_quantile_from_log_cdf(resolved)
+                    .map_err(|error| format!("orthant cubature coordinate {i}: {error}"))?;
+                continue;
+            }
+
+            // Bounded coordinate. The conditional interval is `[wall, ceiling]`
+            // and `ceiling − wall = upper_i / L_ii` exactly, so the width never
+            // goes through a subtraction of two conditional means.
+            let ceiling = wall + upper[i] / factor[[i, i]];
+            // Reflect an interval that sits in the LOWER tail. Both `Φ̄` values
+            // are then within rounding of one and their difference — the
+            // interval's entire mass — would be computed as a cancellation
+            // between them. Under `z ↦ −z` the same interval is `[−ceiling,
+            // −wall]` with both endpoints in the upper tail, where `Φ̄` is
+            // evaluated directly. This is the regime a two-sided bound reaches
+            // whenever the unconstrained fit lands beyond the far wall, which is
+            // exactly when such a bound is worth declaring.
+            let reflect = wall + ceiling < 0.0;
+            let (low, high) = if reflect {
+                (-ceiling, -wall)
+            } else {
+                (wall, ceiling)
+            };
+            let log_tail_low = normal_logsf(low);
+            let log_tail_high = normal_logsf(high);
+            if !log_tail_low.is_finite() {
+                log_weight = f64::NEG_INFINITY;
+                break;
+            }
+            // `removed ≤ 0` is the log of the fraction of the half-line's mass
+            // that the far wall takes away.
+            let removed = log_tail_high - log_tail_low;
+            let log_mass = log_tail_low + log1mexp(removed);
+            if !log_mass.is_finite() {
+                // The slab is narrower than double precision can resolve at this
+                // conditional position; it carries no representable mass.
+                log_weight = f64::NEG_INFINITY;
+                break;
+            }
+            log_weight += log_mass;
+            // `Φ̄(z) = Φ̄(low)·(1 − x(1 − e^removed))`: the same upper-tail
+            // inversion as the half-line, with the retained fraction shortened
+            // to the slab.
+            let retained = (-lattice * (-removed.exp_m1())).ln_1p();
+            let log_upper_tail = log_tail_low + retained;
             let resolved = if log_upper_tail < 0.0 {
                 log_upper_tail
             } else {
                 -f64::MIN_POSITIVE
             };
-            z[i] = -standard_normal_quantile_from_log_cdf(resolved)
-                .map_err(|error| format!("orthant cubature coordinate {i}: {error}"))?;
+            let sampled = -standard_normal_quantile_from_log_cdf(resolved)
+                .map_err(|error| format!("truncated cubature coordinate {i}: {error}"))?;
+            // The inversion is exact in probability space, so an excursion past
+            // either endpoint is rounding in `Φ̄⁻¹` alone; the node belongs to
+            // the interval by construction and is placed there.
+            let clamped = sampled.clamp(low, high);
+            z[i] = if reflect { -clamped } else { clamped };
         }
         if !log_weight.is_finite() {
             continue;
@@ -1188,15 +1492,18 @@ impl OrthantNodeSink for ProjectionNodeAccumulator<'_> {
 fn converged_projection_nodes(
     mean: &Array1<f64>,
     covariance: &Array2<f64>,
+    upper: &[f64],
     projection_lift: &Array1<f64>,
     ambient_mean: f64,
 ) -> Result<Vec<WeightedProjectionNode>, String> {
     let q = mean.len();
-    if covariance.dim() != (q, q) || projection_lift.len() != q {
+    if covariance.dim() != (q, q) || projection_lift.len() != q || upper.len() != q {
         return Err(format!(
-            "orthant projection geometry mismatch: mean={q}, covariance={:?}, lift={}",
+            "truncated projection geometry mismatch: mean={q}, covariance={:?}, lift={}, \
+             upper limits={}",
             covariance.dim(),
-            projection_lift.len()
+            projection_lift.len(),
+            upper.len()
         ));
     }
     let factor = gam_linalg::triangular::cholesky_factor_in_place(
@@ -1220,6 +1527,7 @@ fn converged_projection_nodes(
         accumulate_orthant_nodes(
             &mut accumulator,
             mean,
+            upper,
             factor.view(),
             &generator,
             evaluated,
@@ -1320,10 +1628,36 @@ fn projection_quantile(
     }
 }
 
-/// Closed-form moments of `N(mean, variance)` restricted to `[0, ∞)`.
+/// `log(1 − exp(d))` for `d ≤ 0`, evaluated on whichever of the two branches
+/// keeps the cancellation out of the result.
+///
+/// `d` is always the log of the fraction of a half-line's mass that an upper
+/// limit removes, so `d = −∞` is the unbounded coordinate and returns exactly
+/// `0`. That exactness is what makes an infinite upper limit reproduce the
+/// half-line arithmetic bit for bit rather than merely closely.
+fn log1mexp(d: f64) -> f64 {
+    if d == f64::NEG_INFINITY {
+        return 0.0;
+    }
+    if d >= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if d > -std::f64::consts::LN_2 {
+        (-d.exp_m1()).ln()
+    } else {
+        (-d.exp()).ln_1p()
+    }
+}
+
+/// Closed-form moments of `N(mean, variance)` restricted to `[0, upper]`.
+///
+/// `upper = f64::INFINITY` is the half-line, and takes the inverse-Mills branch
+/// unchanged — a one-sided bound is not routed through the two-sided formula and
+/// then hoped to agree with itself.
 fn scalar_truncated_moments(
     mean: f64,
     variance: f64,
+    upper: f64,
 ) -> Result<(Array1<f64>, Array2<f64>), String> {
     if !(variance.is_finite() && variance > 0.0) {
         return Err(format!(
@@ -1335,22 +1669,68 @@ fn scalar_truncated_moments(
     // is `z ≥ alpha`, and `mills` is the inverse Mills ratio `φ(α)/Φ̄(α)`
     // obtained on the numerically stable `Φ` branch by reflection.
     let alpha = -mean / sd;
-    let mills = signed_probit_logcdf_and_mills_ratio(-alpha).1;
-    if !(mills.is_finite() && mills >= 0.0) {
-        return Err(format!(
-            "scalar truncated moments: inverse Mills ratio at {alpha} is {mills:?}"
+    if !upper.is_finite() {
+        let mills = signed_probit_logcdf_and_mills_ratio(-alpha).1;
+        if !(mills.is_finite() && mills >= 0.0) {
+            return Err(format!(
+                "scalar truncated moments: inverse Mills ratio at {alpha} is {mills:?}"
+            ));
+        }
+        let truncated_mean = mean + sd * mills;
+        let truncated_variance = variance * (1.0 + alpha * mills - mills * mills);
+        if !(truncated_variance.is_finite() && truncated_variance >= 0.0) {
+            return Err(format!(
+                "scalar truncated moments produced variance {truncated_variance:?} at \
+                 standardized truncation point {alpha}"
+            ));
+        }
+        return Ok((
+            Array1::from_elem(1, truncated_mean),
+            Array2::from_elem((1, 1), truncated_variance),
         ));
     }
-    let truncated_mean = mean + sd * mills;
-    let truncated_variance = variance * (1.0 + alpha * mills - mills * mills);
+    if !(upper > 0.0) {
+        return Err(format!(
+            "scalar truncated moments need the upper limit above the wall, got {upper:?}"
+        ));
+    }
+    let beta = (upper - mean) / sd;
+    // Reflect so the retained interval sits in the upper tail: every difference
+    // below is then between two directly-evaluated tail quantities instead of
+    // between two numbers within rounding of one.
+    let reflect = alpha + beta < 0.0;
+    let (low, high, centre) = if reflect {
+        (-beta, -alpha, -mean)
+    } else {
+        (alpha, beta, mean)
+    };
+    let log_tail_low = normal_logsf(low);
+    let log_tail_high = normal_logsf(high);
+    let log_mass = log_tail_low + log1mexp(log_tail_high - log_tail_low);
+    if !log_mass.is_finite() {
+        return Err(format!(
+            "scalar truncated moments: the interval [0, {upper:.6e}] around mean {mean:.6e} \
+             with standard deviation {sd:.6e} carries no representable mass"
+        ));
+    }
+    // `φ(high)/φ(low) = exp(½(low² − high²))`, factored as a difference of
+    // squares so the exponent is not the cancellation of two large numbers. The
+    // reflection above makes it non-positive.
+    let log_density_ratio = 0.5 * (low - high) * (low + high);
+    let density_ratio = log_density_ratio.exp();
+    let scale = (-0.5 * low * low - 0.5 * (2.0 * std::f64::consts::PI).ln() - log_mass).exp();
+    let first = scale * -log_density_ratio.exp_m1();
+    let second = scale * (low - high * density_ratio);
+    let truncated_mean = centre + sd * first;
+    let truncated_variance = variance * (1.0 + second - first * first);
     if !(truncated_variance.is_finite() && truncated_variance >= 0.0) {
         return Err(format!(
-            "scalar truncated moments produced variance {truncated_variance:?} at \
-             standardized truncation point {alpha}"
+            "scalar truncated moments produced variance {truncated_variance:?} on the \
+             standardized interval [{low}, {high}]"
         ));
     }
     Ok((
-        Array1::from_elem(1, truncated_mean),
+        Array1::from_elem(1, if reflect { -truncated_mean } else { truncated_mean }),
         Array2::from_elem((1, 1), truncated_variance),
     ))
 }
@@ -1450,7 +1830,7 @@ mod tests {
     #[test]
     fn scalar_truncated_moments_match_the_closed_form_at_every_regime() {
         // Mode exactly on the bound: half-normal, variance (1 - 2/pi) sigma^2.
-        let (mean, variance) = scalar_truncated_moments(0.0, 1.0).expect("half normal");
+        let (mean, variance) = scalar_truncated_moments(0.0, 1.0, f64::INFINITY).expect("half normal");
         let expected_mean = (2.0 / std::f64::consts::PI).sqrt();
         assert!(
             (mean[0] - expected_mean).abs() < 1e-12,
@@ -1475,7 +1855,7 @@ mod tests {
         // leading `sigma^2/alpha^2` term carries an O(alpha^-4) deficit that a
         // tolerance would have to absorb.
         for center in [-2.0, -4.0, -8.0] {
-            let (deep_mean, deep) = scalar_truncated_moments(center, 1.0).expect("deep tail");
+            let (deep_mean, deep) = scalar_truncated_moments(center, 1.0, f64::INFINITY).expect("deep tail");
             let (reference_mean, reference_variance) = quadrature_truncated_moments(center, 1.0);
             assert!(
                 (deep_mean[0] - reference_mean).abs() < 1e-9 * reference_mean.abs().max(1.0),
@@ -1495,7 +1875,7 @@ mod tests {
         }
         // ...and it does head to zero like sigma^2/alpha^2, which is the ONLY
         // limit in which the active-face answer becomes correct.
-        let (_, at_eight) = scalar_truncated_moments(-8.0, 1.0).expect("deep tail");
+        let (_, at_eight) = scalar_truncated_moments(-8.0, 1.0, f64::INFINITY).expect("deep tail");
         assert!(
             at_eight[[0, 0]] * 64.0 > 0.9 && at_eight[[0, 0]] * 64.0 < 1.0,
             "variance times alpha^2 should approach one from below, got {}",
@@ -1507,7 +1887,7 @@ mod tests {
         // a bound five standard deviations below the centre still moves the mean
         // by `sd·φ(5)/Φ(5) ≈ 3e-6`, which is exactly the smooth dependence on
         // slack that makes a tightness predicate unnecessary.
-        let (far_mean, far_variance) = scalar_truncated_moments(10.0, 4.0).expect("inactive");
+        let (far_mean, far_variance) = scalar_truncated_moments(10.0, 4.0, f64::INFINITY).expect("inactive");
         let (reference_mean, reference_variance) = quadrature_truncated_moments(10.0, 4.0);
         assert!(
             (far_mean[0] - reference_mean).abs() < 1e-9,
@@ -1822,11 +2202,11 @@ mod tests {
         )
         .expect("independent orthant covariance factors");
         let (moment_mean, moment_covariance) =
-            orthant_truncated_moments(&mean, &covariance, factor.view())
+            box_truncated_moments(&mean, &vec![f64::INFINITY; mean.len()], &covariance, factor.view())
                 .expect("independent orthant");
         for i in 0..3 {
             let (exact_mean, exact_variance) =
-                scalar_truncated_moments(mean[i], covariance[[i, i]]).expect("scalar");
+                scalar_truncated_moments(mean[i], covariance[[i, i]], f64::INFINITY).expect("scalar");
             let scale = covariance[[i, i]].sqrt();
             assert!(
                 (moment_mean[i] - exact_mean[0]).abs()
@@ -1983,6 +2363,438 @@ mod tests {
                 );
             }
         }
+    }
+    // ---------------------------------------------------------------- #2523
+
+    /// The two rows a `linear(min=l, max=u)` term emits: `+e_0ᵀβ ≥ l` and
+    /// `−e_0ᵀβ ≥ −u`, exactly as `gam-terms/src/smooth/term_design.rs` builds
+    /// them.
+    fn two_sided_bound_rows(lower: f64, upper: f64, columns: usize) -> LinearInequalityConstraints {
+        let mut a = Array2::<f64>::zeros((2, columns));
+        a[[0, 0]] = 1.0;
+        a[[1, 0]] = -1.0;
+        LinearInequalityConstraints::new(a, array![lower, -upper])
+            .expect("two-sided bound rows")
+    }
+
+    /// Independent reference: Simpson quadrature of `N(mean, variance)`
+    /// restricted to `[0, upper]`, built directly from the density rather than
+    /// from any tail function the code under test also uses.
+    fn quadrature_box_moments(mean: f64, variance: f64, upper: f64) -> (f64, f64) {
+        let sd = variance.sqrt();
+        let low = -mean / sd;
+        let high = (upper - mean) / sd;
+        let reference = if low <= 0.0 && 0.0 <= high {
+            0.0
+        } else if high < 0.0 {
+            high
+        } else {
+            low
+        };
+        let panels = 400_000usize;
+        let step = (high - low) / panels as f64;
+        let (mut mass, mut first, mut second) = (0.0f64, 0.0f64, 0.0f64);
+        for index in 0..=panels {
+            let z = low + step * index as f64;
+            let simpson = if index == 0 || index == panels {
+                1.0
+            } else if index % 2 == 1 {
+                4.0
+            } else {
+                2.0
+            };
+            let density = (-(z * z - reference * reference) / 2.0).exp();
+            mass += simpson * density;
+            first += simpson * density * z;
+            second += simpson * density * z * z;
+        }
+        let m1 = first / mass;
+        let m2 = second / mass;
+        (mean + sd * m1, variance * (m2 - m1 * m1))
+    }
+
+    /// The defect: a row that is anti-parallel to an accepted one carries no new
+    /// constraint-normal DIRECTION and is still a constraint. It must survive as
+    /// the coordinate's upper limit rather than be dropped as redundant.
+    ///
+    /// The fixture is the one measured on #2523 — `Σ = I`, `0 ≤ β₀ ≤ 2`, ambient
+    /// centre `0.6` — where both walls sit far inside the resolution horizon
+    /// (`0.6` and `1.4` standardized against `8.126`), so neither is discarded
+    /// as statistically irrelevant.
+    #[test]
+    fn two_sided_coefficient_bound_keeps_its_far_wall_2523() {
+        let columns = 3;
+        let covariance = Array2::<f64>::eye(columns);
+        let centre = array![0.6, 0.0, 0.0];
+        let constraints = two_sided_bound_rows(0.0, 2.0, columns);
+        let correction = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &constraints,
+        )
+        .expect("two-sided correction")
+        .expect("an active two-sided bound corrects the posterior");
+
+        assert_eq!(
+            correction.rows.len(),
+            1,
+            "the anti-parallel row adds no direction, so exactly one is retained"
+        );
+        let limits = correction.upper_limits();
+        assert_eq!(limits.len(), 1);
+        assert!(
+            (limits[0] - 2.0).abs() < 1e-12,
+            "the far wall of [0, 2] must arrive as the coordinate's upper limit, got {}",
+            limits[0]
+        );
+
+        // The retained law is now `u ~ N(0.6, 1)` on `[0, 2]`, not on `[0, ∞)`.
+        // Both moments must be the bounded ones.
+        let (bounded_mean, bounded_variance) =
+            quadrature_box_moments(0.6, 1.0, 2.0);
+        let (half_line_mean, half_line_variance) = quadrature_truncated_moments(0.6, 1.0);
+        let reported_mean = 0.6 + correction.normal_mean_shift[0];
+        let reported_variance = 1.0 - correction.removed_normal_variance[[0, 0]];
+        assert!(
+            (reported_mean - bounded_mean).abs() < 1e-6,
+            "reported mean {reported_mean} must be the [0,2] mean {bounded_mean}, \
+             not the [0,inf) mean {half_line_mean}"
+        );
+        assert!(
+            (reported_variance - bounded_variance).abs() < 1e-6,
+            "reported variance {reported_variance} must be the [0,2] variance \
+             {bounded_variance}, not the [0,inf) variance {half_line_variance}"
+        );
+        // Discrimination: the two laws are far apart, so agreeing with one is
+        // evidence against the other rather than a bound both would clear.
+        assert!(
+            (bounded_mean - half_line_mean).abs() > 0.1
+                && (bounded_variance - half_line_variance).abs() > 0.1,
+            "the fixture must separate the two answers: means {bounded_mean} vs \
+             {half_line_mean}, variances {bounded_variance} vs {half_line_variance}"
+        );
+    }
+
+    /// Control for the test above: push the far wall past the resolution horizon
+    /// and the answer must return to the half-line one BIT FOR BIT. A coordinate
+    /// with no reachable upper limit is not merely close to the old arithmetic,
+    /// it takes it.
+    #[test]
+    fn a_far_wall_beyond_the_horizon_restores_the_half_line_answer_exactly() {
+        let columns = 3;
+        let covariance = Array2::<f64>::eye(columns);
+        let centre = array![0.6, 0.0, 0.0];
+        let two_sided = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &two_sided_bound_rows(0.0, 40.0, columns),
+        )
+        .expect("wide two-sided correction")
+        .expect("the lower wall is still active");
+
+        let mut lower_only = Array2::<f64>::zeros((1, columns));
+        lower_only[[0, 0]] = 1.0;
+        let one_sided = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &LinearInequalityConstraints::new(lower_only, array![0.0]).expect("lower wall"),
+        )
+        .expect("one-sided correction")
+        .expect("an active lower bound corrects the posterior");
+
+        assert_eq!(two_sided.rows.len(), 1);
+        assert_eq!(
+            two_sided.upper_limits(),
+            vec![f64::INFINITY],
+            "a wall 39.4 standard deviations away is not a candidate at all"
+        );
+        assert_eq!(
+            two_sided.normal_mean_shift[0], one_sided.normal_mean_shift[0],
+            "no reachable upper limit must reproduce the half-line mean shift exactly"
+        );
+        assert_eq!(
+            two_sided.removed_normal_variance[[0, 0]],
+            one_sided.removed_normal_variance[[0, 0]],
+            "no reachable upper limit must reproduce the half-line variance exactly"
+        );
+    }
+
+    /// The regime a two-sided bound is declared FOR: the unconstrained fit lands
+    /// beyond the far wall, so the retained slab sits deep in a tail. This is
+    /// what the reflection inside the cubature and the closed form exist for; a
+    /// sign error there puts the posterior mean outside its own box.
+    #[test]
+    fn a_box_the_unconstrained_centre_overshoots_stays_inside_itself() {
+        let columns = 2;
+        let covariance = Array2::<f64>::eye(columns);
+        // Ambient centre at -3 with the box [-1, 1]: the coordinate
+        // `u = beta_0 + 1` has untruncated mean -2 and lives on [0, 2].
+        let centre = array![-3.0, 0.0];
+        let correction = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &two_sided_bound_rows(-1.0, 1.0, columns),
+        )
+        .expect("overshooting correction")
+        .expect("both walls bind");
+
+        let limits = correction.upper_limits();
+        assert!(
+            (limits[0] - 2.0).abs() < 1e-12,
+            "the slab is two units wide, got {}",
+            limits[0]
+        );
+        let reported_mean = -2.0 + correction.normal_mean_shift[0];
+        let reported_variance = 1.0 - correction.removed_normal_variance[[0, 0]];
+        assert!(
+            reported_mean > 0.0 && reported_mean < limits[0],
+            "the posterior mean of a law supported on [0, {}] cannot sit outside it, \
+             got {reported_mean}",
+            limits[0]
+        );
+        // Popoviciu: any law on an interval of width `w` has variance at most
+        // `w²/4`. A one-sided answer here would report ~0.06 on a coordinate the
+        // box confines to at most 1.0, so this separates them.
+        assert!(
+            reported_variance > 0.0 && reported_variance <= limits[0] * limits[0] / 4.0,
+            "variance {reported_variance} exceeds the width bound for [0, {}]",
+            limits[0]
+        );
+        let (expected_mean, expected_variance) = quadrature_box_moments(-2.0, 1.0, 2.0);
+        assert!(
+            (reported_mean - expected_mean).abs() < 1e-6
+                && (reported_variance - expected_variance).abs() < 1e-6,
+            "deep-tail slab moments {reported_mean}/{reported_variance} against the \
+             independent quadrature {expected_mean}/{expected_variance}"
+        );
+    }
+
+    /// The two branches of the scalar closed form are separate code, so they are
+    /// checked against each other where they must agree: an upper limit far
+    /// enough out that it removes no representable mass.
+    #[test]
+    fn the_two_sided_scalar_form_meets_the_mills_branch_at_a_distant_wall() {
+        for &(mean, variance) in &[(0.6f64, 1.0f64), (-2.5, 1.0), (0.0, 4.0), (3.0, 0.25)] {
+            let sd: f64 = variance.sqrt();
+            let distant = mean + 40.0 * sd;
+            let (bounded_mean, bounded_variance) =
+                scalar_truncated_moments(mean, variance, distant).expect("bounded");
+            let (open_mean, open_variance) =
+                scalar_truncated_moments(mean, variance, f64::INFINITY).expect("half line");
+            assert!(
+                (bounded_mean[0] - open_mean[0]).abs() <= 1e-12 * open_mean[0].abs().max(1.0),
+                "mean {} vs {} at mean={mean} variance={variance}",
+                bounded_mean[0],
+                open_mean[0]
+            );
+            assert!(
+                (bounded_variance[[0, 0]] - open_variance[[0, 0]]).abs()
+                    <= 1e-12 * open_variance[[0, 0]].abs().max(1.0),
+                "variance {} vs {} at mean={mean} variance={variance}",
+                bounded_variance[[0, 0]],
+                open_variance[[0, 0]]
+            );
+        }
+    }
+
+    /// The two-sided closed form across the regimes the reflection switches on,
+    /// against Simpson quadrature of the density itself.
+    #[test]
+    fn the_two_sided_scalar_form_matches_an_independent_quadrature() {
+        for &(mean, variance, upper) in &[
+            (0.6f64, 1.0f64, 2.0f64),
+            (-1.5, 1.0, 0.5),
+            (3.0, 0.25, 0.4),
+            (-4.0, 1.0, 0.2),
+            (0.05, 1.0, 0.1),
+            (-2.0, 1.0, 2.0),
+            (0.5, 9.0, 12.0),
+        ] {
+            let (moment_mean, moment_variance) =
+                scalar_truncated_moments(mean, variance, upper).expect("two-sided moments");
+            let (reference_mean, reference_variance) =
+                quadrature_box_moments(mean, variance, upper);
+            let scale = variance.sqrt();
+            assert!(
+                (moment_mean[0] - reference_mean).abs() < 1e-9 * scale,
+                "mean {} vs {reference_mean} at mean={mean} variance={variance} upper={upper}",
+                moment_mean[0]
+            );
+            assert!(
+                (moment_variance[[0, 0]] - reference_variance).abs() < 1e-9 * variance,
+                "variance {} vs {reference_variance} at mean={mean} variance={variance} \
+                 upper={upper}",
+                moment_variance[[0, 0]]
+            );
+            assert!(
+                moment_mean[0] > 0.0 && moment_mean[0] < upper,
+                "the mean of a law on [0, {upper}] must lie inside it, got {}",
+                moment_mean[0]
+            );
+        }
+    }
+
+    /// The multivariate cubature over a genuine box, against the same
+    /// coordinatewise reference on a product law where the two agree exactly.
+    /// A diagonal covariance makes the box-truncated joint the product of its
+    /// box-truncated marginals, so the reference needs no second cubature.
+    #[test]
+    fn the_box_cubature_reproduces_a_product_law_it_cannot_shortcut() {
+        let mean = array![0.4, -1.2, 0.9];
+        let covariance = Array2::from_diag(&array![1.0, 0.5, 2.0]);
+        let upper = vec![1.5, 0.8, f64::INFINITY];
+        let factor = gam_linalg::triangular::cholesky_factor_in_place(
+            covariance.view(),
+            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+        )
+        .expect("diagonal factor");
+        let (cubature_mean, cubature_covariance) =
+            box_truncated_moments(&mean, &upper, &covariance, factor.view()).expect("box moments");
+        for i in 0..mean.len() {
+            let (reference_mean, reference_variance) =
+                scalar_truncated_moments(mean[i], covariance[[i, i]], upper[i])
+                    .expect("marginal closed form");
+            let sd = covariance[[i, i]].sqrt();
+            assert!(
+                (cubature_mean[i] - reference_mean[0]).abs()
+                    < ORTHANT_MOMENT_RELATIVE_TOLERANCE * sd,
+                "coordinate {i} mean {} vs {}",
+                cubature_mean[i],
+                reference_mean[0]
+            );
+            assert!(
+                (cubature_covariance[[i, i]] - reference_variance[[0, 0]]).abs()
+                    < ORTHANT_MOMENT_RELATIVE_TOLERANCE * covariance[[i, i]],
+                "coordinate {i} variance {} vs {}",
+                cubature_covariance[[i, i]],
+                reference_variance[[0, 0]]
+            );
+        }
+        // Independence survives truncation to a product region, so every
+        // off-diagonal must vanish. This is what a mis-indexed upper limit would
+        // break first.
+        for i in 0..mean.len() {
+            for j in 0..mean.len() {
+                if i == j {
+                    continue;
+                }
+                let sd = (covariance[[i, i]] * covariance[[j, j]]).sqrt();
+                assert!(
+                    cubature_covariance[[i, j]].abs() < ORTHANT_MOMENT_RELATIVE_TOLERANCE * sd,
+                    "a product law truncated to a box stays a product law: entry ({i},{j}) \
+                     is {}",
+                    cubature_covariance[[i, j]]
+                );
+            }
+        }
+    }
+
+    /// The reflection inside the cubature, gated where it decides the answer
+    /// rather than where it is merely present.
+    ///
+    /// A slab sitting `d` standard deviations BELOW the mean has both endpoints
+    /// deep in the lower tail, where `Φ̄` is within rounding of one and the
+    /// slab's whole mass is the difference between them. Measured against a
+    /// Simpson reference on a diagonal `q = 2` law — where the box-truncated
+    /// joint is exactly the product of its box-truncated marginals, so the
+    /// reference needs no second cubature — the unreflected arithmetic holds to
+    /// `d = 9` and then fails completely: at `d = 12` it returns zero for a mean
+    /// of 1.9019, and by `d = 40` every node has underflowed and there is no
+    /// mass left to normalize. Reflected, the error is 2.2e-5 at `d = 12` and
+    /// keeps FALLING with depth, reaching 6.1e-6 at `d = 40`.
+    ///
+    /// `d = 12` is therefore the shallowest depth at which this test can tell
+    /// the two apart, which is why it is the depth used.
+    #[test]
+    fn a_slab_twelve_deviations_below_the_mean_keeps_its_mass() {
+        let depth = 12.0_f64;
+        let mean = array![depth, depth];
+        let covariance = Array2::<f64>::eye(2);
+        let upper = vec![2.0, 2.0];
+        let factor = gam_linalg::triangular::cholesky_factor_in_place(
+            covariance.view(),
+            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+        )
+        .expect("identity factor");
+        let (cubature_mean, cubature_covariance) =
+            box_truncated_moments(&mean, &upper, &covariance, factor.view())
+                .expect("a slab deep in a tail still carries mass");
+        let (reference_mean, reference_variance) = quadrature_box_moments(depth, 1.0, 2.0);
+        // The density rises across the whole slab, so the mean sits near the far
+        // wall; a lost slab would report 0 and a mis-signed reflection would
+        // report the mirror image near the near wall.
+        assert!(
+            reference_mean > 1.85 && reference_mean < 2.0,
+            "the fixture must place the mean near the far wall, got {reference_mean}"
+        );
+        for i in 0..2 {
+            assert!(
+                (cubature_mean[i] - reference_mean).abs() < 1e-3,
+                "coordinate {i} mean {} against the Simpson reference {reference_mean}",
+                cubature_mean[i]
+            );
+            assert!(
+                (cubature_covariance[[i, i]] - reference_variance).abs() < 1e-3,
+                "coordinate {i} variance {} against the Simpson reference {reference_variance}",
+                cubature_covariance[[i, i]]
+            );
+        }
+    }
+
+    /// A two-sided bound with no width between its walls is an equality
+    /// constraint, and this module reports moments of a density. It refuses
+    /// rather than reporting the moments of a point.
+    #[test]
+    fn coincident_two_sided_walls_are_refused_not_collapsed() {
+        let columns = 2;
+        let covariance = Array2::<f64>::eye(columns);
+        let centre = array![0.5, 0.0];
+        let error = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &two_sided_bound_rows(0.25, 0.25, columns),
+        )
+        .expect_err("an empty slab has no posterior to report");
+        assert!(
+            error.contains("no width between them"),
+            "the refusal must name the geometry, got: {error}"
+        );
+    }
+
+    /// The interval path reads the same box the moments do. An equal-tailed
+    /// interval for a bounded coordinate cannot leave the coordinate's own
+    /// bounds — which is exactly the confidently-wrong report #2523 describes.
+    #[test]
+    fn a_two_sided_projection_interval_stays_within_its_own_bounds() {
+        let columns = 2;
+        let covariance = Array2::<f64>::eye(columns);
+        let centre = array![0.6, 0.0];
+        let constraints = two_sided_bound_rows(0.0, 1.0, columns);
+        let correction = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &constraints,
+        )
+        .expect("correction")
+        .expect("active");
+        let geometry = ConstrainedPosteriorGeometry {
+            constraints,
+            mode: array![0.6, 0.0],
+            unconstrained_center: centre,
+            correction: Some(correction),
+        };
+        let (low, high) = constrained_projection_equal_tailed_interval(
+            &covariance,
+            &geometry,
+            &array![1.0, 0.0],
+            0.95,
+        )
+        .expect("two-sided projection interval");
+        assert!(
+            low >= -1e-9 && high <= 1.0 + 1e-9,
+            "a coefficient declared to lie in [0, 1] cannot be reported in [{low}, {high}]"
+        );
+        assert!(low < high, "the interval must be non-degenerate");
     }
 }
 
@@ -2453,4 +3265,5 @@ mod coverage_gate_tests {
             cell.full_space.mean_half_width()
         );
     }
+
 }
