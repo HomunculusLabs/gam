@@ -26,8 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       scope:
-        # On-demand wheel scope. Branch-push and tag releases always build the
-        # FULL matrix (this input only applies to a manual run):
+        # Select the exact artifact set for this explicit publication:
         #   full  — every platform (manylinux + musllinux x86_64/aarch64, macOS, Windows)
         #   linux — all Linux wheels (manylinux + musllinux, x86_64 + aarch64); skip macOS/Windows
         #   x86   — manylinux x86_64 ONLY (the biobank target); fastest, no native-ARM wait
@@ -94,8 +93,7 @@ jobs:
       matrix:
         # manylinux x86_64 (the glibc target the biobank box consumes) plus
         # native-ARM aarch64 — EXCEPT a manual `scope=x86` run, which builds
-        # x86_64 only (fastest, no native-ARM-runner wait). Branch-push and tag
-        # releases leave `scope` empty → both arches.
+        # x86_64 only (fastest, no native-ARM-runner wait).
         platform: ${{ github.event.inputs.scope == 'x86' && fromJSON('[{"runner":"ubuntu-24.04","target":"x86_64"}]') || fromJSON('[{"runner":"ubuntu-24.04","target":"x86_64"},{"runner":"ubuntu-24.04-arm","target":"aarch64"}]') }}
     steps:
       - uses: actions/checkout@v4
@@ -143,22 +141,28 @@ jobs:
               sccache --zero-stats
               local status=0
               command maturin "$@" || status=$?
-              local stats hits
+              local stats hits misses errors
               stats=$(sccache --show-stats)
               printf '%s\n' "$stats"
               hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+              misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "$stats")
+              errors=$(awk '$1 == "Cache" && ($2 == "errors" || $2 == "read" || $2 == "write") { total += $NF } END { print total + 0 }' <<< "$stats")
               if (( status != 0 )); then
                 return "$status"
               fi
-              if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
-                echo "::error::Could not read in-container sccache hit count; refusing an unmeasured wheel build."
+              if [[ ! "${hits:-}" =~ ^[0-9]+$ || ! "${misses:-}" =~ ^[0-9]+$ || ! "${errors:-}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not parse the complete in-container sccache receipt; refusing an unmeasured wheel build."
                 return 1
               fi
               if (( hits == 0 )); then
                 echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
                 return 1
               fi
-              echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
+              if (( errors != 0 )); then
+                echo "::error::Wheel target reported ${errors} cache error(s); refusing an incomplete warm-cache receipt."
+                return 1
+              fi
+              echo "Measured warm wheel build: hits=${hits}, misses=${misses}, cache errors=0."
             }
       - uses: actions/upload-artifact@v4
         with:
@@ -168,8 +172,7 @@ jobs:
 
   musllinux:
     needs: gate
-    # Built on every release EXCEPT a manual `scope=x86` run (musllinux is part
-    # of the Linux set). Branch-push/tag leave scope empty → runs.
+    # Built for the full and Linux scopes; the x86 scope is manylinux-only.
     if: github.event.inputs.scope != 'x86'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -219,22 +222,28 @@ jobs:
               sccache --zero-stats
               local status=0
               command maturin "$@" || status=$?
-              local stats hits
+              local stats hits misses errors
               stats=$(sccache --show-stats)
               printf '%s\n' "$stats"
               hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+              misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "$stats")
+              errors=$(awk '$1 == "Cache" && ($2 == "errors" || $2 == "read" || $2 == "write") { total += $NF } END { print total + 0 }' <<< "$stats")
               if (( status != 0 )); then
                 return "$status"
               fi
-              if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
-                echo "::error::Could not read in-container sccache hit count; refusing an unmeasured wheel build."
+              if [[ ! "${hits:-}" =~ ^[0-9]+$ || ! "${misses:-}" =~ ^[0-9]+$ || ! "${errors:-}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not parse the complete in-container sccache receipt; refusing an unmeasured wheel build."
                 return 1
               fi
               if (( hits == 0 )); then
                 echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
                 return 1
               fi
-              echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
+              if (( errors != 0 )); then
+                echo "::error::Wheel target reported ${errors} cache error(s); refusing an incomplete warm-cache receipt."
+                return 1
+              fi
+              echo "Measured warm wheel build: hits=${hits}, misses=${misses}, cache errors=0."
             }
       - uses: actions/upload-artifact@v4
         with:
@@ -244,8 +253,7 @@ jobs:
 
   macos:
     needs: gate
-    # Full only: skipped on a manual `scope=linux` or `scope=x86` run. Branch-push
-    # and tag releases leave scope empty → runs.
+    # Full only: skipped by the Linux and x86 scopes.
     if: github.event.inputs.scope != 'linux' && github.event.inputs.scope != 'x86'
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -291,15 +299,21 @@ jobs:
           stats=$(sccache --show-stats)
           printf '%s\n' "$stats"
           hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
-          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
-            echo "::error::Could not read sccache hit count; refusing an unmeasured wheel build."
+          misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "$stats")
+          errors=$(awk '$1 == "Cache" && ($2 == "errors" || $2 == "read" || $2 == "write") { total += $NF } END { print total + 0 }' <<< "$stats")
+          if [[ ! "${hits:-}" =~ ^[0-9]+$ || ! "${misses:-}" =~ ^[0-9]+$ || ! "${errors:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not parse the complete sccache receipt; refusing an unmeasured wheel build."
             exit 1
           fi
           if (( hits == 0 )); then
             echo "::error::Wheel target reused zero compiler objects; refusing a cold publication build."
             exit 1
           fi
-          echo "Measured warm wheel build: ${hits} cached compiler object(s) reused."
+          if (( errors != 0 )); then
+            echo "::error::Wheel target reported ${errors} cache error(s); refusing an incomplete warm-cache receipt."
+            exit 1
+          fi
+          echo "Measured warm wheel build: hits=${hits}, misses=${misses}, cache errors=0."
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
@@ -351,11 +365,273 @@ jobs:
         run: |
           $stats = (sccache --show-stats | Out-String)
           Write-Host $stats
-          $match = [regex]::Match($stats, '(?m)^Cache hits\s+(\d+)\s*$')
-          if (-not $match.Success) { throw 'Could not read sccache hit count; refusing an unmeasured wheel build.' }
-          $hits = [int]$match.Groups[1].Value
+          $hitMatch = [regex]::Match($stats, '(?m)^Cache hits\s+(\d+)\s*      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          maturin-version: v1.14.1
+          # `locked = true` lives in pyproject.toml so both `build` and
+          # `sdist` receive it in maturin's supported configuration layer.
+          args: --out dist --manifest-path crates/gam-pyffi/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Upload to PyPI
+    needs:
+      - linux
+      - musllinux
+      - macos
+      - windows
+      - sdist
+    # Full releases are atomic platform sets: every advertised wheel family must
+    # succeed. A cancelled job is not a deliverable and must never be treated like
+    # an intentional skip. Only a manually selected narrower scope may accept the
+    # exact jobs that scope deliberately skipped.
+    if: >-
+      ${{
+        always() &&
+        needs.linux.result == 'success' &&
+        needs.sdist.result == 'success' &&
+        (
+          (
+            github.event.inputs.scope == 'x86' &&
+            needs.musllinux.result == 'skipped' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'linux' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'full' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'success' &&
+            needs.windows.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Download all wheel + sdist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show what will be uploaded
+        run: ls -la dist
+      - name: Upload to PyPI via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --verbose --skip-existing --non-interactive dist/*
+)
+          $missMatch = [regex]::Match($stats, '(?m)^Cache misses\s+(\d+)\s*      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          maturin-version: v1.14.1
+          # `locked = true` lives in pyproject.toml so both `build` and
+          # `sdist` receive it in maturin's supported configuration layer.
+          args: --out dist --manifest-path crates/gam-pyffi/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Upload to PyPI
+    needs:
+      - linux
+      - musllinux
+      - macos
+      - windows
+      - sdist
+    # Full releases are atomic platform sets: every advertised wheel family must
+    # succeed. A cancelled job is not a deliverable and must never be treated like
+    # an intentional skip. Only a manually selected narrower scope may accept the
+    # exact jobs that scope deliberately skipped.
+    if: >-
+      ${{
+        always() &&
+        needs.linux.result == 'success' &&
+        needs.sdist.result == 'success' &&
+        (
+          (
+            github.event.inputs.scope == 'x86' &&
+            needs.musllinux.result == 'skipped' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'linux' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'full' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'success' &&
+            needs.windows.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Download all wheel + sdist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show what will be uploaded
+        run: ls -la dist
+      - name: Upload to PyPI via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --verbose --skip-existing --non-interactive dist/*
+)
+          $errorMatches = [regex]::Matches($stats, '(?m)^Cache (?:read |write )?errors\s+(\d+)\s*      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          maturin-version: v1.14.1
+          # `locked = true` lives in pyproject.toml so both `build` and
+          # `sdist` receive it in maturin's supported configuration layer.
+          args: --out dist --manifest-path crates/gam-pyffi/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Upload to PyPI
+    needs:
+      - linux
+      - musllinux
+      - macos
+      - windows
+      - sdist
+    # Full releases are atomic platform sets: every advertised wheel family must
+    # succeed. A cancelled job is not a deliverable and must never be treated like
+    # an intentional skip. Only a manually selected narrower scope may accept the
+    # exact jobs that scope deliberately skipped.
+    if: >-
+      ${{
+        always() &&
+        needs.linux.result == 'success' &&
+        needs.sdist.result == 'success' &&
+        (
+          (
+            github.event.inputs.scope == 'x86' &&
+            needs.musllinux.result == 'skipped' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'linux' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event.inputs.scope == 'full' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'success' &&
+            needs.windows.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Download all wheel + sdist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Show what will be uploaded
+        run: ls -la dist
+      - name: Upload to PyPI via twine
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload --verbose --skip-existing --non-interactive dist/*
+)
+          if (-not $hitMatch.Success -or -not $missMatch.Success -or $errorMatches.Count -ne 3) {
+            throw 'Could not parse the complete sccache receipt; refusing an unmeasured wheel build.'
+          }
+          $hits = [int]$hitMatch.Groups[1].Value
+          $misses = [int]$missMatch.Groups[1].Value
+          $errors = ($errorMatches | ForEach-Object { [int]$_.Groups[1].Value } | Measure-Object -Sum).Sum
           if ($hits -eq 0) { throw 'Wheel target reused zero compiler objects; refusing a cold publication build.' }
-          Write-Host "Measured warm wheel build: $hits cached compiler object(s) reused."
+          if ($errors -ne 0) { throw "Wheel target reported $errors cache error(s); refusing an incomplete warm-cache receipt." }
+          Write-Host "Measured warm wheel build: hits=$hits, misses=$misses, cache errors=0."
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.target }}
@@ -403,14 +679,12 @@ jobs:
         needs.sdist.result == 'success' &&
         (
           (
-            github.event_name == 'workflow_dispatch' &&
             github.event.inputs.scope == 'x86' &&
             needs.musllinux.result == 'skipped' &&
             needs.macos.result == 'skipped' &&
             needs.windows.result == 'skipped'
           ) ||
           (
-            github.event_name == 'workflow_dispatch' &&
             github.event.inputs.scope == 'linux' &&
             needs.musllinux.result == 'success' &&
             needs.macos.result == 'skipped' &&
