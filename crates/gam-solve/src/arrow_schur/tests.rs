@@ -1625,6 +1625,52 @@ pub(crate) fn sys_htbeta_materialize_row_sums_operator_and_dense_slab() {
     assert_eq!(htbeta, array![[2.25_f64, -0.5, 1.25]]);
 }
 
+#[test]
+fn sparse_htbeta_transpose_never_probes_the_forward_operator() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let forward_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let transpose_calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let mut sys = ArrowSchurSystem::new(1, 1, 3);
+    let forward_counter = std::sync::Arc::clone(&forward_calls);
+    let transpose_counter = std::sync::Arc::clone(&transpose_calls);
+    sys.set_row_htbeta_operator(
+        move |_row, x, out| {
+            forward_counter.fetch_add(1, Ordering::SeqCst);
+            out[0] = 2.0 * x[0] - x[1] + 0.5 * x[2];
+        },
+        move |_row, v, out| {
+            transpose_counter.fetch_add(1, Ordering::SeqCst);
+            out[0] += 2.0 * v[0];
+            out[1] -= v[0];
+            out[2] += 0.5 * v[0];
+        },
+    );
+
+    let mut direct = Array1::<f64>::zeros(3);
+    sys_htbeta_accumulate_transpose(&sys, 0, &sys.rows[0], array![3.0].view(), &mut direct);
+    assert_eq!(direct, array![6.0, -3.0, 1.5]);
+    assert_eq!(forward_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(transpose_calls.load(Ordering::SeqCst), 1);
+
+    let cache = ArrowHtbetaCache::Matvec {
+        op: std::sync::Arc::clone(sys.htbeta_matvec.as_ref().expect("forward")),
+        transpose_op: std::sync::Arc::clone(
+            sys.htbeta_transpose_matvec.as_ref().expect("transpose"),
+        ),
+        estimated_bytes: 3 * std::mem::size_of::<f64>(),
+    };
+    let mut cached = Array1::<f64>::zeros(3);
+    assert!(cache.apply_row_transpose_accumulate(0, array![4.0].view(), &mut cached, 1, 3, None,));
+    assert_eq!(cached, array![8.0, -4.0, 2.0]);
+    assert_eq!(
+        forward_calls.load(Ordering::SeqCst),
+        0,
+        "the O(K) forward-probe path must remain unreachable"
+    );
+    assert_eq!(transpose_calls.load(Ordering::SeqCst), 2);
+}
+
 /// Issue #195 / gam#578 / gam#845: when the per-row block is barely-PD at
 /// `ridge_t = 0` (a rank-deficient atom), the per-row factor must
 /// CONDITION it through the folded ridge escalation, and the full

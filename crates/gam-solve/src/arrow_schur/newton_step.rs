@@ -93,8 +93,16 @@ pub fn solve_arrow_newton_step_with_options(
     let htbeta_estimated_bytes =
         estimated_htbeta_bytes(sys.rows.len(), sys.d, sys.k).unwrap_or(usize::MAX);
     let htbeta = if let Some(op) = sys.htbeta_matvec.as_ref() {
+        let transpose_op = sys.htbeta_transpose_matvec.as_ref().ok_or_else(|| {
+            ArrowSchurError::SchurFactorFailed {
+                reason: "matrix-free H_tbeta factor cache requires the sparse transpose \
+                         installed by ArrowSchurSystem::set_row_htbeta_operator"
+                    .to_string(),
+            }
+        })?;
         ArrowHtbetaCache::Matvec {
             op: Arc::clone(op),
+            transpose_op: Arc::clone(transpose_op),
             estimated_bytes: htbeta_estimated_bytes,
         }
     } else if htbeta_estimated_bytes <= ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES {

@@ -2102,8 +2102,13 @@ pub(crate) fn sys_htbeta_accumulate_transpose(
     v: ArrayView1<'_, f64>,
     out: &mut Array1<f64>,
 ) {
-    if let Some(op) = sys.htbeta_matvec.as_ref() {
-        htbeta_probe_transpose(row_idx, op, v, out, v.len(), sys.k);
+    if let Some(op_t) = sys.htbeta_transpose_matvec.as_ref() {
+        op_t(row_idx, v, out);
+    } else if sys.htbeta_matvec.is_some() {
+        panic!(
+            "matrix-free H_tbeta requires its declared sparse transpose; \
+             install both through ArrowSchurSystem::set_row_htbeta_operator"
+        );
     }
     if (sys.htbeta_dense_supplement || sys.htbeta_matvec.is_none())
         && row.htbeta.dim() == (v.len(), sys.k)
@@ -2196,6 +2201,7 @@ pub enum ArrowHtbetaCache {
     },
     Matvec {
         op: RowHtbetaMatvec,
+        transpose_op: RowHtbetaTransposeMatvec,
         estimated_bytes: usize,
     },
     Disabled {
@@ -2300,10 +2306,8 @@ impl ArrowHtbetaCache {
                 }
                 true
             }
-            Self::Matvec { op, .. } => {
-                // Probe column-by-column: H_tβ^(row) e_a is column a.  dot(col_a, v)
-                // is entry a of H_βt^(row) v.
-                htbeta_probe_transpose(row, op, v, out, d, k);
+            Self::Matvec { transpose_op, .. } => {
+                transpose_op(row, v, out);
                 true
             }
             Self::Disabled { .. } => {
