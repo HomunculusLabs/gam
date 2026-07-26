@@ -8729,4 +8729,113 @@ mod tests {
             }
         }
     }
+
+    /// The primary-jet producer must REFUSE a non-finite operating coordinate
+    /// rather than carry it into the channels it returns.
+    ///
+    /// #2541 asked which producer level loses finiteness in the log-sigma
+    /// gradient. Part of that answer is negative and worth pinning: the boundary
+    /// this routine presents to its callers is sound, so a non-finite channel
+    /// downstream is GENERATED inside the row expression rather than inherited
+    /// from a diverged scale or location handed in by the caller. Without this
+    /// gate that distinction is re-derived by hand every time a row-named
+    /// refusal appears.
+    ///
+    /// `sigma == 0.0` is the one accepted degenerate input: it is the fixed
+    /// zero-frailty case `LatentSurvivalPrimaryPoint::log_sigma_factor`
+    /// documents, and it must return finite channels rather than refuse.
+    #[test]
+    fn latent_primary_jet_refuses_non_finite_operating_coordinates_2541() {
+        let quadctx = QuadratureContext::new();
+        let rows: [(&str, LatentSurvivalRow); 3] = [
+            (
+                "right",
+                LatentSurvivalRow::right_censored(0.3, 0.67, 0.01, 0.02),
+            ),
+            (
+                "exact",
+                LatentSurvivalRow::exact_event(0.3, 0.67, 0.01, 0.02, 0.73, 0.08),
+            ),
+            (
+                "interval",
+                LatentSurvivalRow::interval_censored(0.3, 0.67, 1.65, 0.01, 0.02, 0.05),
+            ),
+        ];
+        let healthy = LatentSurvivalPrimaryPoint {
+            q_entry: -1.2,
+            q_exit: -0.4,
+            qdot_exit: 0.73,
+            q_right: 0.5,
+            mu: -0.15,
+            sigma: 0.3_f64.exp(),
+        };
+        let refused: [(&str, LatentSurvivalPrimaryPoint); 8] = [
+            (
+                "sigma=NaN",
+                LatentSurvivalPrimaryPoint { sigma: f64::NAN, ..healthy },
+            ),
+            (
+                "sigma=+inf",
+                LatentSurvivalPrimaryPoint { sigma: f64::INFINITY, ..healthy },
+            ),
+            (
+                "sigma=-1",
+                LatentSurvivalPrimaryPoint { sigma: -1.0, ..healthy },
+            ),
+            (
+                "mu=NaN",
+                LatentSurvivalPrimaryPoint { mu: f64::NAN, ..healthy },
+            ),
+            (
+                "mu=+inf",
+                LatentSurvivalPrimaryPoint { mu: f64::INFINITY, ..healthy },
+            ),
+            (
+                "q_exit=NaN",
+                LatentSurvivalPrimaryPoint { q_exit: f64::NAN, ..healthy },
+            ),
+            (
+                "q_exit=+inf",
+                LatentSurvivalPrimaryPoint { q_exit: f64::INFINITY, ..healthy },
+            ),
+            (
+                "q_exit=-inf",
+                LatentSurvivalPrimaryPoint { q_exit: f64::NEG_INFINITY, ..healthy },
+            ),
+        ];
+        for (event, row) in &rows {
+            for (name, point) in refused {
+                let outcome =
+                    latent_survival_row_primary_gradient_hessian(&quadctx, row, point, true);
+                match outcome {
+                    Err(_) => {}
+                    Ok((value, gradient, hessian)) => panic!(
+                        "event={event}: the primary jet accepted {name} instead of refusing it; \
+                         value={value:?}, log-sigma gradient={:?}, log-sigma curvature={:?}",
+                        gradient[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA],
+                        hessian[[
+                            LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+                            LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                        ]],
+                    ),
+                }
+            }
+
+            // The documented degenerate case: fixed zero frailty is admissible
+            // and must produce finite channels, not a refusal.
+            let zero_scale = LatentSurvivalPrimaryPoint { sigma: 0.0, ..healthy };
+            let (value, gradient, hessian) =
+                latent_survival_row_primary_gradient_hessian(&quadctx, row, zero_scale, true)
+                    .unwrap_or_else(|error| {
+                        panic!("event={event}: fixed zero frailty must be admissible: {error}")
+                    });
+            assert!(
+                value.is_finite()
+                    && gradient.iter().all(|entry| entry.is_finite())
+                    && hessian.iter().all(|entry| entry.is_finite()),
+                "event={event}: fixed zero frailty produced a non-finite channel: \
+                 value={value:?}, gradient={gradient:?}"
+            );
+        }
+    }
 }
