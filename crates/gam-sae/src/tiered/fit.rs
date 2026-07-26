@@ -50,7 +50,8 @@ use crate::front_door::{SaeFitLane, admit_topk_manifold};
 use crate::manifold::{
     SaeSupportFixedPointReport, SaeSupportOuterRequest, SaeSupportSeedRequest,
     SaeSupportSparseTerm, SaeSupportTermSeedRequest, build_sae_support_seed,
-    build_sae_support_term_seed, run_sae_support_outer, sae_support_effective_atom_dims,
+    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, build_sae_support_term_seed,
+    run_sae_support_outer, sae_support_effective_atom_dims,
 };
 use crate::migration_ledger::{BirthSeed, MoveEvidence, MoveReason, MoveStage, SaeMigrationLedger};
 use crate::sparse_dict::{
@@ -151,7 +152,7 @@ impl Default for Tier2SupportConfig {
             support_k: 4,
             initial_smoothness: 1.0,
             max_outer_iter: 64,
-            max_inner_iter: 256,
+            max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
             inner_tolerance: 1.0e-8,
             trust_radius: 1.0,
             random_state: 0xC0FF_EE00_D15E_A5E5,

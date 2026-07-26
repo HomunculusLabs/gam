@@ -8,9 +8,9 @@
 
 use gam::terms::sae::front_door::{SaeFitLane, admit_topk_manifold};
 use gam::terms::sae::manifold::{
-    SaeSupportFixedPointReport, SaeSupportOuterRequest, SaeSupportSparseTerm,
-    SaeSupportTermSeedRequest, build_sae_support_seed, build_sae_support_term_seed,
-    run_sae_support_outer, sae_support_effective_atom_dims,
+    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportOuterRequest,
+    SaeSupportSparseTerm, SaeSupportTermSeedRequest, build_sae_support_seed,
+    build_sae_support_term_seed, run_sae_support_outer, sae_support_effective_atom_dims,
 };
 use gam::terms::sae::manifold::{SaeSupportSeedRequest, SaeSupportStationarity};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -471,7 +471,10 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         initial_smoothness: request.initial_smoothness,
         ard_precisions: ard_precisions.clone(),
         max_outer_iter: request.max_iter,
-        max_inner_iter: request.max_iter,
+        // `max_iter` is the caller's OUTER smoothing-search budget; the inner
+        // fixed point gets the engine's own, which the tiered driver already
+        // reads from the same declaration.
+        max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
         inner_tolerance: request.tolerance,
         trust_radius: request.trust_radius,
         random_state: request.random_state,

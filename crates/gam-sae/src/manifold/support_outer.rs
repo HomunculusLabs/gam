@@ -81,6 +81,24 @@ impl SaeSupportSmoothingLayout {
     }
 }
 
+/// Inner fixed-point iteration budget for the support-sparse engine.
+///
+/// This is a different quantity from the outer budget and must not be derived
+/// from it. `max_outer_iter` counts quasi-Newton steps of the grouped-LAML
+/// search over log-smoothing; `max_inner_iter` counts alternating
+/// decoder/coordinate cycles spent reaching a stationary point *within a single*
+/// outer evaluation. One outer step consumes a whole inner solve, so tying the
+/// two together silently caps the inner solve at the length of the outer search
+/// — and since [`SaeSupportSparseTerm::solve_fixed_point`] requires two
+/// consecutive candidate cycles before it may report success, a small outer
+/// budget then makes convergence unreachable rather than merely slow.
+///
+/// Both drivers of this engine read this one declaration: the tiered driver
+/// through `Tier2SupportConfig`, and the public support-sparse fit entry through
+/// its FFI request. They previously carried independent values, which is how they
+/// came to disagree 4:1.
+pub const SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER: usize = 256;
+
 pub struct SaeSupportOuterRequest {
     pub term: SaeSupportSparseTerm,
     pub target: Array2<f64>,
