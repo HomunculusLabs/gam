@@ -8156,150 +8156,59 @@ fn predict_columns(
     // boundary to linear_predictor / std_error, and effective_variance is
     // dropped (== std_error ** 2). The internal Rust fields keep their
     // theoretic names because they describe the math object.
-    let mut provenance = PredictColumnsCovarianceProvenance::default();
-    match (options.interval, uses_posterior_mean) {
-        (Some(confidence_level), true) => {
-            // Curved inverse link + interval: the canonical posterior-mean path
-            // returns the η-scale SE and the inverse-link-transformed credible
-            // bounds in one pass, on top of the same posterior-mean point as the
-            // no-interval branch. The `covariance_mode` and `observation_interval`
-            // knobs are threaded through here exactly as the sibling
-            // full-uncertainty arm does for the plug-in families: previously this
-            // arm ignored both, so binomial intervals silently dropped the
-            // observation band (#811) and the smoothing-parameter correction
-            // (#812). The posterior-mean *point* stays conditional regardless of
-            // mode (issue #398); only the reported uncertainty responds.
-            let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
-                .unwrap_or(gam_predict::InferenceCovarianceMode::SmoothingCorrected);
-            let posterior_options = gam_predict::PosteriorMeanOptions {
-                confidence_level: Some(confidence_level),
-                covariance_mode,
-                include_observation_interval: options.observation_interval.unwrap_or(false),
-            };
-            let prediction = predictor
-                .predict_posterior_mean(&predict_input, &fit, &posterior_options)
-                .map_err(|err| {
-                    format!("posterior-mean prediction with uncertainty failed: {err}")
-                })?;
-            provenance = PredictColumnsCovarianceProvenance {
-                point: Some(prediction.point_covariance_source),
-                uncertainty: prediction.uncertainty_covariance_source,
-            };
-            let (mean_lower, mean_upper) = prediction
-                .mean_lower
-                .zip(prediction.mean_upper)
-                .ok_or_else(|| {
-                    "posterior-mean prediction did not return confidence bounds".to_string()
-                })?;
-            columns.insert("linear_predictor".to_string(), prediction.eta.to_vec());
-            columns.insert("mean".to_string(), prediction.mean.to_vec());
-            // `std_error` is documented and laid out as the response-scale SE
-            // (beside the response-scale `mean`/`mean_lower`/`mean_upper`), so
-            // emit the response-scale `mean_standard_error` — the SE the band is
-            // built from — not the link-scale `eta_standard_error` (#1536). The
-            // posterior-mean path always populates it once an interval is
-            // requested; fall back to the link-scale SE only for the (here
-            // unreachable) point-only case.
-            let response_se = prediction
-                .mean_standard_error
-                .clone()
-                .unwrap_or_else(|| prediction.eta_standard_error.clone());
-            columns.insert("std_error".to_string(), response_se.to_vec());
-            columns.insert("mean_lower".to_string(), mean_lower.to_vec());
-            columns.insert("mean_upper".to_string(), mean_upper.to_vec());
-            // Observation (prediction) interval: present only when the request
-            // was made AND the family exposes a conditional response variance
-            // (Binomial `p(1−p)`). Emitting separate columns keeps the standard
-            // schema untouched when off and never overwrites the credible bounds.
-            if let (Some(obs_lower), Some(obs_upper)) =
-                (prediction.observation_lower, prediction.observation_upper)
-            {
-                columns.insert("observation_lower".to_string(), obs_lower.to_vec());
-                columns.insert("observation_upper".to_string(), obs_upper.to_vec());
-            }
-        }
-        (Some(confidence_level), false) => {
-            // Effectively-linear model + interval: plug-in == posterior mean, so
-            // the delta-method full-uncertainty path reports that same point and
-            // only widens the interval for smoothing uncertainty.
-            // `apply_bias_correction: false` keeps the point equal to the plain
-            // plug-in branch: recentring η by X·H⁻¹Sβ̂ would silently shift `mean`
-            // the moment an interval was requested (violating issue #398), is
-            // empirically worse against truth, and is inconsistent with the
-            // link-wiggle path that never bias-corrects; bias-aware coverage is
-            // already supplied by the smoothing-corrected covariance.
-            //
-            // CLI<->Python parity: `covariance_mode` (default smoothing-corrected,
-            // matching the prior hardcode) and `observation_interval` are now
-            // user-selectable, mirroring `gam predict --covariance-mode` and the
-            // engine's `includeobservation_interval` switch.
-            let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
-                .unwrap_or(gam_predict::InferenceCovarianceMode::SmoothingCorrected);
-            let includeobservation_interval = options.observation_interval.unwrap_or(false);
-            let uncertainty_options = gam_predict::PredictUncertaintyOptions {
-                confidence_level,
-                covariance_mode,
-                mean_interval_method: gam_predict::MeanIntervalMethod::TransformEta,
-                includeobservation_interval,
-                apply_bias_correction: false,
-                // Weighted-Gaussian observation band is heteroscedastic in the
-                // per-row prior weight `Var(y_i)=σ̂²/w_i` (#2077); unweighted fits
-                // pass `None` and stay byte-identical.
-                observation_prior_weights: observation_prior_weights.clone(),
-                ..gam_predict::PredictUncertaintyOptions::default()
-            };
-            let prediction = predictor
-                .predict_full_uncertainty(&predict_input, &fit, &uncertainty_options)
-                .map_err(|err| format!("prediction with uncertainty failed: {err}"))?;
-            provenance = PredictColumnsCovarianceProvenance {
-                // The linear-link plug-in point consults no coefficient
-                // covariance; only the band does.
-                point: None,
-                uncertainty: Some(prediction.covariance_source),
-            };
-            columns.insert("linear_predictor".to_string(), prediction.eta.to_vec());
-            columns.insert("mean".to_string(), prediction.mean.to_vec());
-            // Response-scale SE beside the response-scale mean/band (#1536):
-            // emit `mean_standard_error`, not the link-scale `eta_standard_error`.
-            columns.insert(
-                "std_error".to_string(),
-                prediction.mean_standard_error.to_vec(),
-            );
-            columns.insert("mean_lower".to_string(), prediction.mean_lower.to_vec());
-            columns.insert("mean_upper".to_string(), prediction.mean_upper.to_vec());
-            // Observation (prediction) interval: only present when the family
-            // and the `observation_interval` request both support it. Emitting
-            // it as separate columns keeps the standard schema untouched when
-            // off and never overwrites the credible `mean_lower`/`mean_upper`.
-            if let (Some(obs_lower), Some(obs_upper)) =
-                (prediction.observation_lower, prediction.observation_upper)
-            {
-                columns.insert("observation_lower".to_string(), obs_lower.to_vec());
-                columns.insert("observation_upper".to_string(), obs_upper.to_vec());
-            }
-        }
-        (None, true) => {
-            let prediction = predictor
-                .predict_posterior_mean(
-                    &predict_input,
-                    &fit,
-                    &gam_predict::PosteriorMeanOptions::point_only(),
-                )
-                .map_err(|err| format!("posterior-mean prediction failed: {err}"))?;
-            provenance = PredictColumnsCovarianceProvenance {
-                point: Some(prediction.point_covariance_source),
-                uncertainty: None,
-            };
-            columns.insert("linear_predictor".to_string(), prediction.eta.to_vec());
-            columns.insert("mean".to_string(), prediction.mean.to_vec());
-        }
-        (None, false) => {
-            let prediction = predictor
-                .predict_plugin_response(&predict_input)
-                .map_err(|err| format!("prediction failed: {err}"))?;
-            columns.insert("linear_predictor".to_string(), prediction.eta.to_vec());
-            columns.insert("mean".to_string(), prediction.mean.to_vec());
-        }
+    // The `(interval × curved link)` decision table is owned by
+    // `gam_predict::interval_policy::resolve_prediction_request` and shared with
+    // the CLI's `gam predict`. Both surfaces used to carry their own copy of
+    // these four arms and had diverged (issue #2470); the FFI's copy silently
+    // substituted the LINK-scale `eta_standard_error` when the response-scale SE
+    // was absent, emitting a dimensionally different quantity under the
+    // documented response-scale `std_error` column. The shared table refuses
+    // instead, which is the CLI's rule and the correct one.
+    let covariance_mode = parse_covariance_mode(options.covariance_mode.as_deref())?
+        .unwrap_or(gam_predict::InferenceCovarianceMode::SmoothingCorrected);
+    let request = gam_predict::interval_policy::PredictionRequest {
+        interval: options.interval,
+        covariance_mode,
+        observation_interval: options.observation_interval.unwrap_or(false),
+        // Weighted-Gaussian observation band is heteroscedastic in the per-row
+        // prior weight `Var(y_i) = σ̂²/w_i` (#2077); unweighted fits pass `None`
+        // and stay byte-identical.
+        observation_prior_weights: observation_prior_weights.clone(),
+        // This entry point exposes no plug-in switch, so a curved link always
+        // reports the posterior mean (SPEC: it is always the default).
+        point_estimate: gam_predict::interval_policy::PointEstimate::PosteriorMeanWhenCurved,
+    };
+    let resolved = gam_predict::interval_policy::resolve_prediction_request(
+        &*predictor,
+        &predict_input,
+        &fit,
+        uses_posterior_mean,
+        &request,
+    )
+    .map_err(|err| format!("prediction failed: {err}"))?;
+    let provenance = PredictColumnsCovarianceProvenance {
+        point: resolved.point_covariance_source,
+        uncertainty: resolved.uncertainty_covariance_source,
+    };
+    // User-facing column names follow issue #310: the engine's internal `eta`
+    // is renamed to `linear_predictor` at the FFI boundary, and the
+    // response-scale SE is published as `std_error`.
+    columns.insert("linear_predictor".to_string(), resolved.eta.to_vec());
+    columns.insert("mean".to_string(), resolved.mean.to_vec());
+    if let Some(standard_error) = resolved.mean_standard_error {
+        columns.insert("std_error".to_string(), standard_error.to_vec());
+    }
+    if let (Some(lower), Some(upper)) = (resolved.mean_lower, resolved.mean_upper) {
+        columns.insert("mean_lower".to_string(), lower.to_vec());
+        columns.insert("mean_upper".to_string(), upper.to_vec());
+    }
+    // Observation (prediction) interval: present only when the request was made
+    // AND the family exposes a conditional response variance. Separate columns
+    // keep the standard schema untouched when off and never overwrite the
+    // credible bounds.
+    if let (Some(lower), Some(upper)) = (resolved.observation_lower, resolved.observation_upper) {
+        columns.insert("observation_lower".to_string(), lower.to_vec());
+        columns.insert("observation_upper".to_string(), upper.to_vec());
     }
 
     // Issue #365 (secondary defect): location-scale / GAMLSS families fit a

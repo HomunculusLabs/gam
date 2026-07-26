@@ -974,6 +974,189 @@ pub fn predict_with_uncertainty_generic<T: PredictionTransform>(
     })
 }
 
+/// Which point estimate the caller will accept when the inverse link is curved.
+///
+/// SPEC: the posterior mean `E[g⁻¹(Xβ)]` is always the default. This exists only
+/// so the CLI's `--mode plugin` can ask for the cheaper plug-in `g⁻¹(η̂)`, and it
+/// is consulted **only on the point-only path**: once an interval is requested a
+/// curved link always reports the posterior mean, because the point prediction is
+/// a property of the model and the inputs and must never depend on whether an
+/// interval was asked for (#398, #1787).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointEstimate {
+    /// Posterior mean whenever the model's inverse link is curved.
+    PosteriorMeanWhenCurved,
+    /// Force the plug-in point even for a curved link.
+    ForcePlugin,
+}
+
+/// What a prediction surface asks for, independent of how it renders the answer.
+pub struct PredictionRequest {
+    /// `Some(level)` requests uncertainty at that central confidence level;
+    /// `None` is point-only.
+    pub interval: Option<f64>,
+    /// Covariance source for the reported SE / bounds / observation band.
+    pub covariance_mode: InferenceCovarianceMode,
+    /// Emit the response-scale observation (prediction) band in addition to the
+    /// credible band, for families exposing a conditional response variance.
+    pub observation_interval: bool,
+    /// Per-row prior weights for the heteroscedastic observation band
+    /// `Var(y_i) = σ̂²/w_i` (#2077). `None` is the unweighted case and keeps the
+    /// band byte-identical to a pooled scalar `σ̂²`.
+    pub observation_prior_weights: Option<Array1<f64>>,
+    /// Point-estimate policy for a curved inverse link.
+    pub point_estimate: PointEstimate,
+}
+
+/// The columns every prediction surface publishes, before it renames or
+/// serializes them.
+pub struct PredictionColumns {
+    pub eta: Array1<f64>,
+    pub mean: Array1<f64>,
+    /// Response-scale SE — the SE the response-scale band is built from, never
+    /// the link-scale `σ_η` (#1536).
+    pub mean_standard_error: Option<Array1<f64>>,
+    pub mean_lower: Option<Array1<f64>>,
+    pub mean_upper: Option<Array1<f64>>,
+    pub observation_lower: Option<Array1<f64>>,
+    pub observation_upper: Option<Array1<f64>>,
+    /// Covariance consulted to form the point. `None` for a plug-in point,
+    /// which consults none.
+    pub point_covariance_source: Option<InferenceCovarianceMode>,
+    /// Covariance consulted to form the reported uncertainty. `None` for a
+    /// point-only request.
+    pub uncertainty_covariance_source: Option<InferenceCovarianceMode>,
+}
+
+/// Resolve a [`PredictionRequest`] against a model: the `(interval × curved
+/// link)` decision table that selects among the four predictor entry points.
+///
+/// This table is the last piece of predict *policy* that was not centralized
+/// here, and it is the piece that drifted. The CLI and the Python FFI each held
+/// their own copy — the CLI's even carried comments reading "Mirror the Python
+/// FFI arm" and naming the sibling it was supposed to agree with — and they had
+/// diverged in three ways: the CLI hardcoded the observation-interval switch off
+/// so `gam predict --uncertainty` could never produce a prediction interval; the
+/// CLI never forwarded the #2077 per-row prior weights; and where the CLI refused
+/// a missing response-scale SE, the FFI silently substituted the *link-scale* SE
+/// under the response-scale `std_error` column name. A comment asserting parity
+/// with code it cannot call is not parity.
+///
+/// The refusal is now the single rule. `eta_standard_error` is a different
+/// quantity from `mean_standard_error` — it lives on the link scale, beside a
+/// response-scale `mean`/`mean_lower`/`mean_upper` — so emitting it under the
+/// response-scale column name is worse than reporting that the backend could not
+/// propagate coefficient uncertainty to the response scale.
+pub fn resolve_prediction_request(
+    predictor: &dyn crate::PredictableModel,
+    input: &PredictInput,
+    fit: &UnifiedFitResult,
+    uses_posterior_mean: bool,
+    request: &PredictionRequest,
+) -> Result<PredictionColumns, EstimationError> {
+    match (request.interval, uses_posterior_mean) {
+        // Curved inverse link + interval: add SE and bounds on top of the same
+        // posterior-mean point the no-interval branch reports.
+        (Some(level), true) => {
+            let options = PosteriorMeanOptions {
+                confidence_level: Some(level),
+                covariance_mode: request.covariance_mode,
+                include_observation_interval: request.observation_interval,
+            };
+            let prediction = predictor.predict_posterior_mean(input, fit, &options)?;
+            let mean_standard_error = prediction.mean_standard_error.ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "posterior-mean prediction returned no response-scale standard error, so \
+                     this model cannot report response-scale SE columns; the link-scale SE is \
+                     a different quantity and is not substituted for it"
+                        .to_string(),
+                )
+            })?;
+            let (mean_lower, mean_upper) =
+                prediction.mean_lower.zip(prediction.mean_upper).ok_or_else(|| {
+                    EstimationError::InvalidInput(
+                        "posterior-mean prediction did not return confidence bounds".to_string(),
+                    )
+                })?;
+            Ok(PredictionColumns {
+                eta: prediction.eta,
+                mean: prediction.mean,
+                mean_standard_error: Some(mean_standard_error),
+                mean_lower: Some(mean_lower),
+                mean_upper: Some(mean_upper),
+                observation_lower: prediction.observation_lower,
+                observation_upper: prediction.observation_upper,
+                point_covariance_source: Some(prediction.point_covariance_source),
+                uncertainty_covariance_source: prediction.uncertainty_covariance_source,
+            })
+        }
+        // Effectively-linear model + interval: the plug-in equals the posterior
+        // mean, so the delta-method path reports the same point as the plain
+        // branch and only adds the band. `apply_bias_correction: false` is what
+        // keeps that true — recentring η by `X·H⁻¹S(λ̂)β̂` would shift the
+        // reported point the moment an interval was requested (#398, #2115).
+        (Some(level), false) => {
+            let options = PredictUncertaintyOptions {
+                confidence_level: level,
+                covariance_mode: request.covariance_mode,
+                mean_interval_method: crate::MeanIntervalMethod::TransformEta,
+                includeobservation_interval: request.observation_interval,
+                apply_bias_correction: false,
+                observation_prior_weights: request.observation_prior_weights.clone(),
+                ..PredictUncertaintyOptions::default()
+            };
+            let prediction = predictor.predict_full_uncertainty(input, fit, &options)?;
+            Ok(PredictionColumns {
+                eta: prediction.eta,
+                mean: prediction.mean,
+                mean_standard_error: Some(prediction.mean_standard_error),
+                mean_lower: Some(prediction.mean_lower),
+                mean_upper: Some(prediction.mean_upper),
+                observation_lower: prediction.observation_lower,
+                observation_upper: prediction.observation_upper,
+                // A linear-link plug-in point consults no coefficient
+                // covariance; only the band does.
+                point_covariance_source: None,
+                uncertainty_covariance_source: Some(prediction.covariance_source),
+            })
+        }
+        // Point-only. A curved link still integrates the posterior mean unless
+        // the caller explicitly asked for the plug-in, but it must not ask the
+        // backend for interval quantities: passing a confidence level is the
+        // switch that populates SE/bounds, and the surfaces emit whatever
+        // optionals come back (#2136).
+        (None, true) if request.point_estimate == PointEstimate::PosteriorMeanWhenCurved => {
+            let prediction =
+                predictor.predict_posterior_mean(input, fit, &PosteriorMeanOptions::point_only())?;
+            Ok(PredictionColumns {
+                eta: prediction.eta,
+                mean: prediction.mean,
+                mean_standard_error: None,
+                mean_lower: None,
+                mean_upper: None,
+                observation_lower: None,
+                observation_upper: None,
+                point_covariance_source: Some(prediction.point_covariance_source),
+                uncertainty_covariance_source: None,
+            })
+        }
+        (None, _) => {
+            let prediction = predictor.predict_plugin_response(input)?;
+            Ok(PredictionColumns {
+                eta: prediction.eta,
+                mean: prediction.mean,
+                mean_standard_error: None,
+                mean_lower: None,
+                mean_upper: None,
+                observation_lower: None,
+                observation_upper: None,
+                point_covariance_source: None,
+                uncertainty_covariance_source: None,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod parity_tests {
     //! Parity of the shared engine against the per-predictor inline assembly it
