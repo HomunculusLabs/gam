@@ -63,23 +63,68 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/workflows/test.yml/runs?branch=${GITHUB_REF_NAME}&per_page=100"
           )
 
-          # The UTC date is the idempotency key. Even a cancelled ledger attempt
-          # counts here: retrying under an active external canceller would create
-          # an unbounded runner-spend loop and would only patch #2468's symptom.
-          existing=$(
-            jq -r --arg title "$ledger_title" \
-              '[.workflow_runs[] | select(.display_title == $title)][0]
-               | if . then "\(.id)\t\(.status)\t\(.html_url)" else empty end' \
+          # The UTC date is the idempotency key, but only an attempt that could
+          # still MEASURE something may satisfy it. A cancelled run measured
+          # nothing it can be held to, so counting it retires the day on the
+          # strength of a run that produced no verdict.
+          #
+          # This guard used to match on the title alone, which made it strictly
+          # weaker than the MASTER_FAILURES predicate further down and yet run
+          # first. Measured on 2026-07-26: ledger run 30195751223 was title-
+          # matched and cancelled with 7 of its 10 shards killed mid-flight, and
+          # its own artifact reports `workspace shards: **NOT MEASURED**`. The
+          # artifact predicate would have rejected it; the title check exited
+          # before that predicate could be reached. A cheap approximation of a
+          # precise test must not short-circuit the precise test.
+          #
+          # Replacing a cancelled attempt is not an unbounded retry loop:
+          # `max_attempts` caps the day's dispatches explicitly, so the spend
+          # bound holds no matter how many guardian events or manual dispatches
+          # arrive. The cap is the thing that bounds spend; the idempotency key
+          # is the thing that decides whether the day was measured. Conflating
+          # them is what lost 2026-07-26.
+          max_attempts=3
+
+          same_date=$(
+            jq --arg title "$ledger_title" \
+              '[.workflow_runs[] | select(.display_title == $title)]' \
               <<< "$runs"
           )
+          attempts=$(jq -r 'length' <<< "$same_date")
+
+          # `.conclusion` is null while a run is queued or in progress, and null
+          # is not "cancelled", so a live attempt still satisfies the key.
+          existing=$(
+            jq -r \
+              '[.[] | select(.conclusion != "cancelled")][0]
+               | if . then "\(.id)\t\(.status)\t\(.conclusion // "pending")\t\(.html_url)" else empty end' \
+              <<< "$same_date"
+          )
           if [[ -n "$existing" ]]; then
-            IFS=$'\t' read -r run_id run_status run_url <<< "$existing"
+            IFS=$'\t' read -r run_id run_status run_conclusion run_url <<< "$existing"
             {
               echo "### No-op: today's ledger was already dispatched"
               echo
               echo "- UTC ledger date: \`${ledger_date}\`"
               echo "- run: [\`${run_id}\`](${run_url})"
-              echo "- status: \`${run_status}\`"
+              echo "- status: \`${run_status}\` / conclusion: \`${run_conclusion}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Reaching here means every same-date attempt was cancelled, so
+          # `attempts` is the cancelled count.
+          if (( attempts >= max_attempts )); then
+            {
+              echo "### No-op: today's ledger attempts are exhausted"
+              echo
+              echo "- UTC ledger date: \`${ledger_date}\`"
+              echo "- cancelled attempts: \`${attempts}\` (cap \`${max_attempts}\`)"
+              echo
+              echo "Every attempt was cancelled before it could measure the workspace"
+              echo "shards. Dispatching again would spend another full matrix into the"
+              echo "same control-plane cancellation (#2468), so the day is left"
+              echo "explicitly unmeasured rather than retried without bound."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
