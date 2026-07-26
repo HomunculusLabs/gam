@@ -3832,7 +3832,7 @@ mod turning_tests {
 }
 
 #[cfg(test)]
-mod certified_diffeo_guard_tests_2518 {
+mod certified_diffeo_guard_2518_tests {
     use super::*;
 
     /// #2518 item 3 — the guard's contract is `det Dφ_θ > δ` EVERYWHERE, so its
