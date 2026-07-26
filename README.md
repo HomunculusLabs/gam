@@ -145,20 +145,26 @@ Each pair shows the noisy input (left) and the recovered smooth
 
 Manifold SAE dictionary. `sae_manifold_fit` decomposes an activation /
 embedding matrix into `K` sparse atoms, each a low-dimensional typed shape
-(line, circle, sphere, torus, or Euclidean patch) with a per-token
-coordinate. Cross-atom decoder incoherence (on by default) keeps co-firing
-atoms separable; the ordered Beta--Bernoulli gate adapts the number of active atoms per token
-with true zeros. A fresh fit reports, per atom, a closed-form posterior
-shape band (mean curve ± sd) and the typical coordinate range the atom is
-used over — where each manifold lives, what shape, and how confident.
+(line, open curve, circle, sphere, torus, graph, or Euclidean patch) with a
+per-token coordinate — a standard SAE direction is the degenerate special
+case. Each atom's topology is *adjudicated, not imposed*: by default the fit
+seeds a mixed portfolio and lets the support competition, the REML-selected
+smoothness, and the per-axis ARD prior decide which shapes survive, collapse
+to points, or die (a homogeneous cyclic topology by shorthand is rejected on
+overcomplete dictionaries — most features are not cyclic). Two lanes share
+one front door, chosen by admission: the dense small-`K` certification lane
+(`K ≤ p`, posterior shape bands, evidence-raced topologies) and the
+overcomplete hard-TopK support lane (`K > p`, per-token active set solved
+against the frozen dictionary, memory `O(N·top_k)` — the LLM-scale path).
+Fits mint only from a converged, certificate-checked optimization.
 
 ```python
-fit = gamfit.sae_manifold_fit(X=acts, K=16, d_atom=1, atom_topology="circle")
-recon = fit.reconstruct_training()     # exact stored (N, p) reconstruction
-atom = fit.atoms[0]
-band = (atom.shape_band_coords, atom.shape_band_mean, atom.shape_band_sd)
-extent = fit.coords[0].min(0), fit.coords[0].max(0)   # where atom 0 lives
-plan = fit.steer(0, 0, 1.0, np.array([0.0]), np.array([1.0]))
+fit = gamfit.sae_manifold_fit(X=acts, K=32_000, d_atom=1,
+                              assignment="topk", top_k=8)   # K >> p, topology=auto
+census = Counter(fit.atom_topologies)     # which shapes the evidence kept
+codes = fit.encode(acts_new)              # sparse support + amplitude + coordinate
+curve = fit.atom_curve(k, ts)             # the atom's decoded manifold, sampled
+plan = fit.steer(k, amplitude, t_from, t_to)   # on-manifold steering delta
 ```
 
 The dictionary supports four gating families (`assignment="ordered_beta_bernoulli"`,
