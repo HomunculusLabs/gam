@@ -5229,7 +5229,9 @@ mod tests {
              correction_error={correction_error:.6e} (sign-reversed={correction_reversed_error:.6e}), \
              total_error={total_error:.6e} (sign-reversed={total_reversed_error:.6e})"
         );
-    }    /// Two-ACTIVE-block variant of [`laml_fd_test_model`] (both penalty blocks
+    }
+
+    /// Two-ACTIVE-block variant of [`laml_fd_test_model`] (both penalty blocks
     /// carry `λ > 0`), so the active-ρ vector is 2-dimensional. This lets the
     /// FD gate probe the survival-transformation outer stall's structure — one
     /// coordinate driven to the over-smoothing rail, the other free — which the
