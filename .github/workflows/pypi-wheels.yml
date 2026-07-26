@@ -19,12 +19,16 @@ name: Publish to PyPI
 # `continue-on-error: true` is removed everywhere: real failures need to
 # fail loudly so the wheel slot doesn't silently disappear.
 
-# Publication is an explicit action pinned by GitHub to the selected ref's exact
-# commit. A version-file edit on a busy main branch must not implicitly launch a
-# six-platform release matrix.
+# Publication is explicit. The workflow itself is dispatched on main so GitHub's
+# branch-scoped compiler cache remains visible; every job checks out the required
+# immutable source commit instead of compiling the moving workflow ref.
 on:
   workflow_dispatch:
     inputs:
+      source_sha:
+        description: 'Exact 40-hex commit to package'
+        type: string
+        required: true
       scope:
         # Select the exact artifact set for this explicit publication:
         #   full  — every platform (manylinux + musllinux x86_64/aarch64, macOS, Windows)
@@ -61,11 +65,30 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  # Validate the exact dispatch commit before the matrix fans out.
+  # Validate the immutable source commit before the matrix fans out.
   gate:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Require an exact source commit
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_sha must be one exact lowercase 40-hex commit."
+            exit 1
+          fi
+          actual=$(git rev-parse HEAD)
+          if [[ "$actual" != "$SOURCE_SHA" ]]; then
+            echo "::error::Checkout resolved to $actual, not requested source $SOURCE_SHA."
+            exit 1
+          fi
+          echo "Release source is immutable commit $actual."
 
       # Resolve metadata once before the matrix fans out. Running without
       # --locked is deliberate in this ephemeral checkout: Cargo can reveal the
@@ -98,6 +121,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
       - uses: actions/setup-python@v5
         with:
@@ -186,6 +210,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
       - uses: actions/setup-python@v5
         with:
@@ -265,6 +290,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
       - uses: actions/setup-python@v5
         with:
@@ -332,6 +358,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_sha }}
           fetch-depth: 0 # #1458: full history so build.rs author gate resolves real last editor, not HEAD
       - uses: actions/setup-python@v5
         with:
@@ -388,6 +415,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
