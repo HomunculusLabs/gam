@@ -2062,7 +2062,26 @@ mod tests {
         let amps = vec![1.0; n];
         let cpu = emulate_certified_encode_batch(&dev, &rows, &amps);
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-            Ok(None) => return,
+            Ok(None) => {
+                // #2422: a bare `return` here reported `passed` with zero
+                // assertions on every device-free runner. `cpu` above is the
+                // emulator's answer and is already computed, so assert it is
+                // well-formed AND that the device entry REFUSES:
+                // `sae_certified_encode_device` opens with `backend()?`, so an
+                // `Ok` on a device-free host means it fabricated device state.
+                assert_eq!(
+                    cpu.len(),
+                    rows.len(),
+                    "the CPU encode emulator must answer for every row, or the \
+                     device-free half asserts nothing"
+                );
+                assert!(
+                    device::sae_certified_encode_device(&dev, &rows, &amps).is_err(),
+                    "no CUDA runtime on this host, yet the device encode entry returned \
+                     Ok -- the seam fabricated device state (#1551 class)"
+                );
+                return;
+            }
             Err(error) => panic!("sae_encode CUDA admission failed: {error}"),
             Ok(Some(_)) => {
                 let devout = device::sae_certified_encode_device(&dev, &rows, &amps)

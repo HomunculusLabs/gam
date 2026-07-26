@@ -1834,7 +1834,25 @@ mod tests {
     fn resident_arrow_device_matches_host_reduced_blocks_1017() {
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
             Ok(Some(_)) => {}
-            Ok(None) => return,
+            Ok(None) => {
+                // #2422: a bare `return` here reported `passed` with zero
+                // assertions on every device-free runner. Without a device the
+                // Device-path constructor must REFUSE -- `ResidentRowJetHandle::new`
+                // routes `SaeRowJetPath::Device` into
+                // `device::DeviceResidency::allocate`, which needs a backend, so an
+                // `Ok` would mean the handle fabricated device residency (#1551).
+                // The host path is constructed first so a fixture broken for an
+                // unrelated reason cannot make the refusal pass for the wrong reason.
+                let n = ARROW_REDUCTION_LEAF_ROWS + 1;
+                ResidentRowJetHandle::new(3, 6, 4, 3, 1.3, n, SaeRowJetPath::Cpu)
+                    .expect("the host resident-arrow handle must build on every host");
+                assert!(
+                    ResidentRowJetHandle::new(3, 6, 4, 3, 1.3, n, SaeRowJetPath::Device).is_err(),
+                    "no CUDA runtime on this host, yet the Device resident-arrow handle \
+                     constructed -- the seam fabricated device residency (#1551 class)"
+                );
+                return;
+            }
             Err(error) => panic!("resident arrow CUDA admission failed: {error}"),
         }
         let n = ARROW_REDUCTION_LEAF_ROWS * 5 + 3;

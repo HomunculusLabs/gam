@@ -1006,6 +1006,40 @@ mod tests {
     #[test]
     fn device_block_cg_matches_cpu_bitwise() {
         if !cuda_available_for_test("decoder_gpu::device_block_cg_matches_cpu_bitwise") {
+            // #2422: the bare `return` reported `passed` with zero assertions on
+            // every device-free runner. `DeviceBlockCgBackend::try_new` under
+            // `Required` routes through `GpuRuntime::require()`, so with no device
+            // it must return `Err`; an `Ok(Some(..))` would mean the backend
+            // fabricated device state (#1551 class). The CPU solve runs first so a
+            // fixture broken for an unrelated reason cannot make the refusal pass
+            // for the wrong reason.
+            let (m, t) = (64usize, 4usize);
+            let (row_ptr, cols, vals, diag, rhs) = fixture(m, t, 0x1017_2026);
+            let rel_tol = f64::EPSILON.sqrt();
+            let (cpu_results, _) = cpu_solve(&row_ptr, &cols, &vals, &diag, &rhs, rel_tol, m);
+            assert_eq!(
+                cpu_results.len(),
+                t,
+                "the CPU block-CG must answer for every column, or the device-free \
+                 half asserts nothing"
+            );
+            let initial = rhs.mapv(|value| 0.01 * value);
+            let preconditioner = parity_preconditioner(&diag);
+            assert!(
+                DeviceBlockCgBackend::try_new(
+                    gam_gpu::GpuPolicy::Required,
+                    &row_ptr,
+                    &cols,
+                    &vals,
+                    &diag,
+                    &rhs,
+                    &initial,
+                    &preconditioner,
+                )
+                .is_err(),
+                "no CUDA runtime on this host, yet the Required block-CG backend \
+                 constructed — the seam fabricated device state (#1551 class)"
+            );
             return;
         }
         let (m, t) = (997, 33);
