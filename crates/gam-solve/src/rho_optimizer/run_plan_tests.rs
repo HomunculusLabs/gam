@@ -4921,7 +4921,10 @@ struct ModelUpperMaskAudit {
 }
 
 fn model_upper_mask_audit_cost(
-    _state: &mut ModelUpperMaskAudit,
+    // Bare `_`, not `_state`: the audit records ORDERED evaluations, and a
+    // value-only cost call carries no mask decision to record. The ban scanner
+    // rejects a fake binding name for the same reason.
+    _: &mut ModelUpperMaskAudit,
     theta: &Array1<f64>,
 ) -> Result<f64, EstimationError> {
     Ok(-theta[0])
