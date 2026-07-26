@@ -91,7 +91,7 @@ mod tests {
     use super::*;
     use gam::terms::sae::manifold::{
         AtlasCoveringSide, AtomTopologyPersistence, BettiSignature, PersistenceBar,
-        PersistenceStabilityBand, SaeAtomBasisKind,
+        PersistenceStabilityBand, SaeAtomBasisKind, TopologyResolution,
     };
     use pyo3::types::PyList;
 
@@ -125,6 +125,7 @@ mod tests {
                 }],
                 h1: Vec::new(),
                 h2: Vec::new(),
+                resolution: TopologyResolution::Resolved,
                 contested: false,
                 note: "topology agrees".to_string(),
                 null_calibration: None,
