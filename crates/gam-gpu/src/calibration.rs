@@ -29,6 +29,9 @@ const _: () = assert!(
 );
 const _: () = assert!(POTRF_DIMS[0] == GpuDispatchPolicy::MIN_CALIBRATABLE_POTRF_P);
 const _: () = assert!(XTWX_DIMS[0].0 == GpuDispatchPolicy::MIN_CALIBRATABLE_ROW_KERNEL_N);
+const _: () = assert!(
+    XTWX_DIMS[0].0 * 2 == GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N
+);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CachedCalibration {

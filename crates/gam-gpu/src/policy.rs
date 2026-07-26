@@ -94,6 +94,17 @@ impl GpuDispatchPolicy {
     /// BEFORE probing the device.
     pub const MIN_CALIBRATABLE_ROW_KERNEL_N: usize = 2_048;
 
+    /// The smallest `fused_kernel_min_n` ANY production dispatch policy can
+    /// carry.
+    ///
+    /// Device calibration derives the fused-kernel crossover as twice its
+    /// measured row-kernel crossover. The calibration grid pins that row floor
+    /// to [`Self::MIN_CALIBRATABLE_ROW_KERNEL_N`], so a smaller fused batch is
+    /// inadmissible under every reachable policy and can remain on the CPU
+    /// without probing CUDA merely to discover the device-specific threshold.
+    pub const MIN_CALIBRATABLE_FUSED_KERNEL_N: usize =
+        2 * Self::MIN_CALIBRATABLE_ROW_KERNEL_N;
+
     /// Minimum problem dimension for the fp32+refinement path.
     ///
     /// Below this threshold the fp64 GEMV needed for the residual check costs

@@ -395,6 +395,25 @@ impl GpuRuntime {
         Self::resolve(policy)
     }
 
+    /// Size-gated [`Self::resolve`] for independent fused row kernels.
+    ///
+    /// Batches below
+    /// [`GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N`] cannot be
+    /// admitted by either the default or any device-calibrated policy. Refuse
+    /// them before availability resolution so a CPU-sized first call does not
+    /// create CUDA contexts and run calibration merely to learn that it should
+    /// stay on the CPU. At and above the universal floor, the concrete
+    /// runtime's calibrated policy remains authoritative.
+    pub fn resolve_if_fused_batch_exceeds_floor(
+        policy: super::GpuPolicy,
+        rows: usize,
+    ) -> Result<Option<&'static Self>, GpuError> {
+        if rows < GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N {
+            return Ok(None);
+        }
+        Self::resolve(policy)
+    }
+
     #[must_use]
     pub fn policy(&self) -> &GpuDispatchPolicy {
         &self.policy
@@ -692,6 +711,47 @@ mod laziness_gate_tests {
             before,
             "the size gate must short-circuit BEFORE resolution/probe for CPU-sized \
              work, so no CUDA context is ever created"
+        );
+    }
+
+    #[test]
+    fn cpu_sized_fused_batch_never_resolves_availability() {
+        let floor = GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N;
+        let before = GpuRuntime::resolution_call_count();
+        for _ in 0..COUNTER_PROBE_CALLS {
+            assert!(
+                GpuRuntime::resolve_if_fused_batch_exceeds_floor(
+                    super::super::GpuPolicy::Auto,
+                    floor - 1,
+                )
+                .expect("the below-floor fused-batch gate cannot probe or fail")
+                .is_none(),
+                "a universally CPU-sized fused batch must not select the device"
+            );
+        }
+        let below_floor_delta = GpuRuntime::resolution_call_count() - before;
+        assert!(
+            below_floor_delta < COUNTER_PROBE_CALLS,
+            "the fused-batch size gate must short-circuit before runtime resolution: \
+             {below_floor_delta} resolution entries during {COUNTER_PROBE_CALLS} \
+             below-floor calls"
+        );
+
+        let at_floor_before = GpuRuntime::resolution_call_count();
+        for _ in 0..COUNTER_PROBE_CALLS {
+            let runtime = GpuRuntime::resolve_if_fused_batch_exceeds_floor(
+                super::super::GpuPolicy::Auto,
+                floor,
+            )
+            .expect("a probe fault must fail the fused-batch boundary gate");
+            assert!(
+                runtime.is_none_or(|runtime| !runtime.devices.is_empty()),
+                "an available runtime must expose at least one usable device"
+            );
+        }
+        assert!(
+            GpuRuntime::resolution_call_count() - at_floor_before >= COUNTER_PROBE_CALLS,
+            "the fused-batch floor boundary must consult the runtime's calibrated policy"
         );
     }
 

@@ -488,22 +488,31 @@ pub fn draw_batch_cpu(input: &PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, S
     Ok(out)
 }
 
-/// Top-level entry point: dispatches to GPU when enabled and available,
-/// otherwise CPU.
+/// Top-level entry point: dispatches to GPU when enabled, available, and
+/// admitted by the calibrated fused-batch crossover; otherwise CPU.
 /// Both paths are deterministic for a fixed seed. The CPU path delegates to
 /// the upstream sampler while the CUDA path is independently validated against
 /// it in distribution. CUDA probe and execution faults are returned; only a
-/// lossless `Ok(None)` availability result selects the CPU implementation.
+/// size-policy refusal or lossless `Ok(None)` availability result selects the
+/// CPU implementation.
 pub fn draw_batch(input: PolyaGammaBatchInput<'_>) -> Result<Array1<f64>, String> {
     input.validate()?;
 
     #[cfg(target_os = "linux")]
     {
-        if gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())
+        if let Some(runtime) =
+            gam_gpu::device_runtime::GpuRuntime::resolve_if_fused_batch_exceeds_floor(
+                gam_gpu::global_policy(),
+                input.rows(),
+            )
             .map_err(String::from)?
-            .is_some()
         {
-            return linux_cuda::draw_batch_gpu(&input).map_err(String::from);
+            if runtime
+                .policy()
+                .polya_gamma_batch_target_is_gpu(input.rows())
+            {
+                return linux_cuda::draw_batch_gpu(&input).map_err(String::from);
+            }
         }
     }
 
@@ -1323,6 +1332,44 @@ mod tests {
             );
         }
         dispatched
+    }
+
+    /// #2504 production seam: a batch below the smallest crossover any
+    /// calibrated device can carry must take the host path on every machine,
+    /// including CUDA hosts. Fixed-seed bitwise equality proves which path the
+    /// public dispatcher actually selected; a distributional comparison would
+    /// not distinguish the two valid samplers.
+    #[test]
+    fn sub_crossover_batch_routes_to_cpu_bitwise_on_every_host() {
+        const N: usize = 16;
+        assert!(
+            N < gam_gpu::policy::GpuDispatchPolicy::MIN_CALIBRATABLE_FUSED_KERNEL_N,
+            "the fixture must remain below every reachable fused-kernel crossover"
+        );
+        let shapes = Array1::from_iter((0..N).map(|i| 1 + (i % 4) as u32));
+        let tilts = Array1::from_iter((0..N).map(|i| (i as f64 - 7.5) / 3.0));
+        let seed = PgSeed(0x2504_2504_2504_2504);
+        let dispatched = draw_batch(PolyaGammaBatchInput {
+            shapes: shapes.view(),
+            tilts: tilts.view(),
+            seed,
+        })
+        .expect("the production PG dispatcher must accept the small batch");
+        let cpu = draw_batch_cpu(&PolyaGammaBatchInput {
+            shapes: shapes.view(),
+            tilts: tilts.view(),
+            seed,
+        })
+        .expect("the CPU PG oracle must accept the small batch");
+
+        assert_eq!(dispatched.len(), cpu.len());
+        for (row, (actual, expected)) in dispatched.iter().zip(cpu.iter()).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "row {row}: a sub-crossover batch did not use the deterministic CPU path"
+            );
+        }
     }
 
     /// Assert the dispatch-worthiness claim these gates exist to make, and
