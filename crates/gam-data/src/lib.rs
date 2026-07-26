@@ -743,6 +743,10 @@ fn load_delimited_inferred(
 struct DelimitedInferenceState {
     all_numeric: bool,
     all_binary: bool,
+    /// At least one cell was actually present and parsed as a number. Without
+    /// it an all-missing column would keep `all_numeric` vacuously true and
+    /// become an all-NaN Binary column (#2495).
+    saw_numeric: bool,
 }
 
 impl Default for DelimitedInferenceState {
@@ -750,6 +754,7 @@ impl Default for DelimitedInferenceState {
         Self {
             all_numeric: true,
             all_binary: true,
+            saw_numeric: false,
         }
     }
 }
@@ -761,8 +766,15 @@ impl DelimitedInferenceState {
                 reason: format!("empty field at row {row}, column '{header}'"),
             });
         }
+        // #2495: a missing marker is neither a number nor a level — it must not
+        // drag the column out of `all_numeric` and into a factor over its own
+        // measurements. Same rule as `infer_schema_column`.
+        if is_missing_marker(raw) {
+            return Ok(());
+        }
         match raw.parse::<f64>() {
             Ok(value) => {
+                self.saw_numeric = true;
                 if !value.is_finite() {
                     return Err(DataError::InvalidValue {
                         reason: format!("non-finite value at row {row}, column '{header}'"),
@@ -781,7 +793,7 @@ impl DelimitedInferenceState {
     }
 
     fn kind(self, force_categorical: bool) -> ColumnKindTag {
-        if force_categorical || !self.all_numeric {
+        if force_categorical || !(self.all_numeric && self.saw_numeric) {
             ColumnKindTag::Categorical
         } else if self.all_binary {
             ColumnKindTag::Binary
@@ -791,11 +803,41 @@ impl DelimitedInferenceState {
     }
 }
 
+/// Is this cell a MISSING-VALUE marker rather than a value?
+///
+/// The tokens are the ones the tools gam ingests from actually write for a
+/// missing cell: `NA` is what R's `write.csv` emits and is by far the most
+/// common in practice; `N/A` comes out of spreadsheet exports; `NULL` out of SQL
+/// dumps. Matched case-insensitively because the same tools disagree on case.
+///
+/// Deliberately NOT here:
+/// * the empty field — it is already a hard `EmptyInput` error on every path,
+///   and relaxing that is a separate decision with its own blast radius;
+/// * `NaN` / `inf` — those *do* parse via `f64::from_str`, so they already hit
+///   the `!value.is_finite()` guard and raise `InvalidValue`. That is loud and
+///   correct, and must stay that way.
+///
+/// The silent-wrong-data class this exists to kill is exactly the tokens that
+/// neither parse as a number nor are a genuine category (#2495).
+fn is_missing_marker(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_uppercase().as_str(),
+        "NA" | "N/A" | "NULL"
+    )
+}
+
 fn parse_inferred_numeric_cell(raw: &str, row: usize, header: &str) -> Result<f64, DataError> {
     if raw.is_empty() {
         return Err(DataError::EmptyInput {
             reason: format!("empty field at row {row}, column '{header}'"),
         });
+    }
+    // A missing cell in a numeric column IS the missing value, not a parse
+    // failure. NaN is the representation callers already assume when they filter
+    // with `is_finite()`; before #2495 the column was re-typed categorical and
+    // the level index was handed back as the measurement.
+    if is_missing_marker(raw) {
+        return Ok(f64::NAN);
     }
     let value = raw
         .parse::<f64>()
@@ -1221,6 +1263,9 @@ fn parse_cell_with_schema(
     unseen_policy: &UnseenCategoryPolicy,
 ) -> Result<f64, DataError> {
     let val = match meta.kind {
+        // A schema-declared numeric column still has to accept the missing
+        // marker as the missing value (#2495), not fail to parse it.
+        ColumnKindTag::Continuous if is_missing_marker(raw) => f64::NAN,
         ColumnKindTag::Continuous => raw.parse::<f64>().map_err(|err| {
             DataError::SchemaMismatch {
                 reason: format!(
@@ -1229,6 +1274,7 @@ fn parse_cell_with_schema(
                 ),
             }
         })?,
+        ColumnKindTag::Binary if is_missing_marker(raw) => f64::NAN,
         ColumnKindTag::Binary => {
             let v = raw
                 .parse::<f64>()
@@ -1268,7 +1314,10 @@ fn parse_cell_with_schema(
             }
         }
     };
-    if !val.is_finite() {
+    // The NaN produced for a missing marker (#2495) IS the encoded value here,
+    // so it must not be re-rejected by the non-finite guard. Every other route
+    // to a non-finite value still fails loudly.
+    if !val.is_finite() && !is_missing_marker(raw) {
         return Err(DataError::InvalidValue {
             reason: format!("non-finite value at row {}, column '{}'", row, col_name),
         });
@@ -2047,8 +2096,11 @@ fn load_parquet_with_schema(
                             ),
                         });
                     }
+                    // NaN marks a missing cell (#2495), not a 0/1 violation.
                     if let Some(row) = values.column(j).iter().position(|value| {
-                        (*value - 0.0).abs() >= 1e-12 && (*value - 1.0).abs() >= 1e-12
+                        value.is_finite()
+                            && (*value - 0.0).abs() >= 1e-12
+                            && (*value - 1.0).abs() >= 1e-12
                     }) {
                         return Err(DataError::SchemaMismatch {
                             reason: format!(
@@ -2284,6 +2336,8 @@ fn encode_one_column(
             .into());
         }
         let val = match col_schema.kind {
+            // The missing marker is the missing value, not a parse failure (#2495).
+            ColumnKindTag::Continuous if is_missing_marker(raw) => f64::NAN,
             ColumnKindTag::Continuous => raw.parse::<f64>().map_err(|err| {
                 String::from(DataError::SchemaMismatch {
                     reason: format!(
@@ -2295,6 +2349,7 @@ fn encode_one_column(
                     ),
                 })
             })?,
+            ColumnKindTag::Binary if is_missing_marker(raw) => f64::NAN,
             ColumnKindTag::Binary => {
                 let v = raw.parse::<f64>().map_err(|err| {
                     String::from(DataError::SchemaMismatch {
@@ -2344,7 +2399,8 @@ fn encode_one_column(
                 }
             }
         };
-        if !val.is_finite() {
+        // NaN here is the encoded missing marker (#2495), not a bad value.
+        if !val.is_finite() && !is_missing_marker(raw) {
             return Err(DataError::InvalidValue {
                 reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
             }
@@ -2362,8 +2418,13 @@ fn infer_schema_column(
 ) -> Result<SchemaColumn, DataError> {
     let mut all_numeric = true;
     let mut all_binary = true;
+    let mut saw_numeric = false;
     let mut levels = Vec::<String>::new();
     let mut level_index = HashMap::<String, usize>::new();
+    // Cells that are missing markers, held aside during the scan. Whether they
+    // are levels or missing values is a property of the COLUMN, not the cell,
+    // and is only decidable once every cell has been seen — see below.
+    let mut missing_markers = Vec::<String>::new();
     for (i, rec) in records.iter().enumerate() {
         let raw = rec
             .get(col_idx)
@@ -2376,7 +2437,12 @@ fn infer_schema_column(
                 reason: format!("empty field at row {}, column '{}'", i + 1, name),
             });
         }
+        if is_missing_marker(raw) {
+            missing_markers.push(raw.to_string());
+            continue;
+        }
         if let Ok(v) = raw.parse::<f64>() {
+            saw_numeric = true;
             if !v.is_finite() {
                 return Err(DataError::InvalidValue {
                     reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
@@ -2395,7 +2461,29 @@ fn infer_schema_column(
             });
         }
     }
-    let kind = if all_numeric {
+    // #2495: a column whose present cells are all numeric is a NUMERIC column
+    // with missing values. It must never be re-typed categorical just because
+    // some cells are absent — that turned every distinct measurement into a
+    // factor level and handed the level INDEX back as the value.
+    //
+    // When the column is genuinely categorical (it has non-numeric cells that
+    // are not missing markers) the markers stay levels, exactly as before. That
+    // is deliberate: `NA` is a real category label in the wild (it is Namibia's
+    // ISO code), and only the numeric case is unambiguous enough to reinterpret.
+    // `saw_numeric` guards the all-missing column: with no present cell at all
+    // there is no evidence it is numeric, so it stays categorical (one degenerate
+    // level) rather than silently becoming an all-NaN Binary column.
+    let numeric_column = all_numeric && saw_numeric;
+    if !numeric_column {
+        for marker in missing_markers {
+            level_index.entry(marker.clone()).or_insert_with(|| {
+                let idx = levels.len();
+                levels.push(marker);
+                idx
+            });
+        }
+    }
+    let kind = if numeric_column {
         if all_binary {
             ColumnKindTag::Binary
         } else {
@@ -2462,6 +2550,8 @@ pub fn infer_and_encode_column_major(
     // (once to infer the schema, once to encode). `parsed[i]` is `Some(v)` iff
     // field `i` parsed as a finite f64; categorical columns ignore it.
     let mut parsed = Vec::<Option<f64>>::with_capacity(column.len());
+    let mut saw_numeric = false;
+    let mut missing_positions = Vec::<usize>::new();
     for (i, raw_field) in column.iter().enumerate() {
         // Strip the categorical marker (if any) so the recorded level label and
         // any numeric parse see the user's clean text, not the sentinel.
@@ -2476,7 +2566,17 @@ pub fn infer_and_encode_column_major(
         // When the source column is dtype-categorical, every cell is a level
         // regardless of whether its label parses as a number.
         if !force_categorical {
+            // #2495: hold missing markers aside without disturbing the numeric
+            // verdict. Whether they are levels or missing values depends on the
+            // whole column, so it is resolved after the scan.
+            if is_missing_marker(raw) {
+                missing_positions.push(i);
+                parsed.push(Some(f64::NAN));
+                trimmed.push(raw);
+                continue;
+            }
             if let Ok(v) = raw.parse::<f64>() {
+                saw_numeric = true;
                 if !v.is_finite() {
                     return Err(DataError::InvalidValue {
                         reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
@@ -2501,7 +2601,23 @@ pub fn infer_and_encode_column_major(
         parsed.push(None);
         trimmed.push(raw);
     }
-    let kind = if all_numeric {
+    // #2495, mirroring `infer_schema_column`: present cells all numeric => a
+    // numeric column with missing values, never a factor over its own
+    // measurements. Otherwise the markers are ordinary levels (`NA` is a real
+    // label in the wild), so put them back where the scan would have.
+    let numeric_column = all_numeric && saw_numeric;
+    if !numeric_column {
+        for &i in &missing_positions {
+            let raw = trimmed[i];
+            level_index.entry(raw.to_string()).or_insert_with(|| {
+                let idx = levels.len();
+                levels.push(raw.to_string());
+                idx
+            });
+            parsed[i] = None;
+        }
+    }
+    let kind = if numeric_column {
         if all_binary {
             ColumnKindTag::Binary
         } else {
@@ -2577,7 +2693,9 @@ pub fn infer_and_encode_column_major(
                         ),
                     })
                 })?;
-                if (v - 0.0).abs() >= 1e-12 && (v - 1.0).abs() >= 1e-12 {
+                // A missing cell carries NaN (#2495); that is absence, not a
+                // 0/1 violation.
+                if v.is_finite() && (v - 0.0).abs() >= 1e-12 && (v - 1.0).abs() >= 1e-12 {
                     return Err(DataError::SchemaMismatch {
                         reason: format!(
                             "column '{}' is binary in schema but row {} has value {}; expected 0 or 1",
@@ -2606,7 +2724,8 @@ pub fn infer_and_encode_column_major(
                 })?
             }
         };
-        if !val.is_finite() {
+        // NaN here is the encoded missing marker (#2495), not a bad value.
+        if !val.is_finite() && !is_missing_marker(raw) {
             return Err(DataError::InvalidValue {
                 reason: format!("non-finite value at row {}, column '{}'", i + 1, name),
             }
@@ -2615,6 +2734,111 @@ pub fn infer_and_encode_column_major(
         values.push(val);
     }
     Ok((schema, values))
+}
+
+#[cfg(test)]
+mod missing_value_inference_tests {
+    use super::*;
+
+    fn rows(cells: &[&[&str]]) -> Vec<StringRecord> {
+        cells.iter().map(|r| StringRecord::from(r.to_vec())).collect()
+    }
+
+    /// The #2495 defect, pinned. `parker` in `bench/datasets/wine.csv` is 29
+    /// Parker scores spanning 65.0–94.4 plus 18 `NA`s. Before the fix the single
+    /// non-parsing token re-typed the whole column CATEGORICAL, every distinct
+    /// score became a factor level, and `encode(raw) as f64` handed back the
+    /// level INDEX — so a 65–94 measurement arrived downstream as 0…29 and
+    /// `is_finite()` stopped being an NA test.
+    #[test]
+    fn a_numeric_column_containing_na_can_never_infer_categorical() {
+        let ds = encode_recordswith_inferred_schema(
+            vec!["parker".to_string()],
+            rows(&[&["94.4"], &["NA"], &["65.0"], &["88.0"], &["NA"]]),
+        )
+        .expect("encode a numeric column carrying NA");
+
+        assert_eq!(
+            ds.schema.columns[0].kind,
+            ColumnKindTag::Continuous,
+            "a column whose present cells are all numeric is numeric-with-missing, \
+             never a factor over its own measurements"
+        );
+        assert!(
+            ds.schema.columns[0].levels.is_empty(),
+            "measurements must not be recorded as factor levels"
+        );
+
+        // The values survive as themselves, and the missing cells are NaN — the
+        // representation callers already assume when they filter on is_finite().
+        let col: Vec<f64> = ds.values.column(0).to_vec();
+        assert_eq!(col[0], 94.4);
+        assert_eq!(col[2], 65.0);
+        assert_eq!(col[3], 88.0);
+        assert!(col[1].is_nan() && col[4].is_nan(), "NA must encode as NaN");
+        assert_eq!(
+            col.iter().filter(|v| v.is_finite()).count(),
+            3,
+            "is_finite() must count exactly the present cells"
+        );
+    }
+
+    /// The other half, and the reason the rule is about the COLUMN and not the
+    /// cell: `NA` is a real category label in the wild (Namibia's ISO code). In a
+    /// genuinely categorical column it must stay an ordinary level, not silently
+    /// become missing data.
+    #[test]
+    fn na_stays_a_level_in_a_genuinely_categorical_column() {
+        let ds = encode_recordswith_inferred_schema(
+            vec!["country".to_string()],
+            rows(&[&["NA"], &["ZA"], &["BW"], &["NA"]]),
+        )
+        .expect("encode a categorical column whose labels include NA");
+
+        assert_eq!(ds.schema.columns[0].kind, ColumnKindTag::Categorical);
+        assert!(
+            ds.schema.columns[0].levels.iter().any(|l| l == "NA"),
+            "NA is a country here, not missingness: levels were {:?}",
+            ds.schema.columns[0].levels
+        );
+        assert!(
+            ds.values.column(0).iter().all(|v| v.is_finite()),
+            "a categorical column carries level codes, never NaN"
+        );
+    }
+
+    /// Binary columns take the same rule: 0/1 with holes stays binary, and the
+    /// hole is not a 0/1 violation.
+    #[test]
+    fn a_binary_column_containing_na_stays_binary_with_nan_holes() {
+        let ds = encode_recordswith_inferred_schema(
+            vec!["event".to_string()],
+            rows(&[&["1"], &["NA"], &["0"], &["1"]]),
+        )
+        .expect("encode a binary column carrying NA");
+
+        assert_eq!(ds.schema.columns[0].kind, ColumnKindTag::Binary);
+        let col: Vec<f64> = ds.values.column(0).to_vec();
+        assert_eq!((col[0], col[2], col[3]), (1.0, 0.0, 1.0));
+        assert!(col[1].is_nan());
+    }
+
+    /// `NaN` and `inf` DO parse via `f64::from_str`, so they are not missing
+    /// markers — they hit the existing non-finite guard and fail loudly. That
+    /// distinction is the whole point: the silent class is the tokens that
+    /// neither parse as a number nor name a category.
+    #[test]
+    fn a_parsed_non_finite_literal_still_fails_loudly() {
+        let err = encode_recordswith_inferred_schema(
+            vec!["x".to_string()],
+            rows(&[&["1.0"], &["inf"], &["2.0"]]),
+        )
+        .expect_err("a literal infinity is a data error, not a missing value");
+        assert!(
+            err.contains("non-finite"),
+            "expected the non-finite guard, got: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
