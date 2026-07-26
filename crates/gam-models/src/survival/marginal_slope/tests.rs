@@ -8365,3 +8365,323 @@ fn logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars() {
         }
     }
 }
+
+/// Clamped degree-3 knot vector with no internal knots: `len = 8` gives
+/// `len - bs_degree - 1 - 1 = 3` monotone I-spline columns, the minimal valid
+/// degree-3 wiggle.
+fn timewiggle_test_knots() -> Array1<f64> {
+    Array1::from_vec(vec![-3.0, -3.0, -3.0, -3.0, 3.0, 3.0, 3.0, 3.0])
+}
+
+const TIMEWIGGLE_TEST_DEGREE: usize = 3;
+const TIMEWIGGLE_TEST_NCOLS: usize = 3;
+
+/// An n-row timewiggle-active family: `p_base` linear time columns followed by
+/// `TIMEWIGGLE_TEST_NCOLS` wiggle amplitudes, `p_m` marginal columns, and a
+/// `k`-dimensional log-slope carrying `covariance`.
+///
+/// The wiggle tail columns of the three time designs are zero. A wiggle
+/// amplitude enters `q` through the B-spline composition `q = h + B(h)·β_w`,
+/// not through a linear design column, which is why `time_wiggle_range` is a
+/// trailing slice of the time block rather than a separate block.
+fn make_timewiggle_test_family(
+    n: usize,
+    p_base: usize,
+    p_m: usize,
+    logslope_layout: LogslopeLayout,
+    z: Array2<f64>,
+    covariance: MarginalSlopeCovariance,
+) -> SurvivalMarginalSlopeFamily {
+    let p_time = p_base + TIMEWIGGLE_TEST_NCOLS;
+    let padded = |base: f64, scale: f64| {
+        let mut design = Array2::<f64>::zeros((n, p_time));
+        for row in 0..n {
+            for col in 0..p_base {
+                design[[row, col]] = base + scale * (((row * 7 + col * 3) as f64) * 0.6).sin();
+            }
+        }
+        DesignMatrix::from(design)
+    };
+
+    let event: Array1<f64> =
+        Array1::from_iter((0..n).map(|i| if (i * 31 + 7) % 5 >= 3 { 1.0 } else { 0.0 }));
+    let weights: Array1<f64> =
+        Array1::from_iter((0..n).map(|i| 0.5 + ((i * 13 + 4) % 5) as f64 * 0.1));
+    let offset_entry: Array1<f64> =
+        Array1::from_iter((0..n).map(|i| -0.30 + 0.11 * i as f64));
+    let offset_exit: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.15 + 0.09 * i as f64));
+    // qd1 must stay well above the derivative guard at every perturbed beta.
+    let derivative_offset_exit: Array1<f64> =
+        Array1::from_iter((0..n).map(|i| 0.8 + 0.05 * ((i * 23 + 1) % 3) as f64));
+    let marginal_design =
+        Array2::from_shape_fn((n, p_m), |(row, col)| 0.2 + 0.1 * (row + col) as f64 * 0.25);
+
+    SurvivalMarginalSlopeFamily {
+        n,
+        event: Arc::new(event),
+        weights: Arc::new(weights),
+        z: Arc::new(z),
+        score_covariance: covariance,
+        gaussian_frailty_sd: None,
+        family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
+        derivative_guard: 1e-6,
+        design_entry: padded(0.30, 0.10),
+        design_exit: padded(0.55, 0.15),
+        design_derivative_exit: padded(0.45, 0.05),
+        offset_entry: Arc::new(offset_entry),
+        offset_exit: Arc::new(offset_exit),
+        derivative_offset_exit: Arc::new(derivative_offset_exit),
+        marginal_design: DesignMatrix::from(marginal_design),
+        logslope_layout,
+        score_warp: None,
+        link_dev: None,
+        influence_absorber: None,
+        time_linear_constraints: None,
+        time_wiggle_knots: Some(timewiggle_test_knots()),
+        time_wiggle_degree: Some(TIMEWIGGLE_TEST_DEGREE),
+        time_wiggle_ncols: TIMEWIGGLE_TEST_NCOLS,
+        intercept_warm_starts: None,
+        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
+        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
+    }
+}
+
+/// The three blocks `current_identifiability_family_scalars` expects, in the
+/// order it indexes them: time, marginal, log-slope.
+///
+/// The marginal block's `eta` is NOT a placeholder and must equal
+/// `marginal_design · beta_marginal`. `row_dynamic_q_values` reads the marginal
+/// contribution to `h0`/`h1` from `block_states[1].eta[row]`, whereas
+/// `row_dynamic_q_gradient` differentiates through the marginal DESIGN. The two
+/// agree only for states whose `eta` is in sync with `beta` — which production
+/// states always are, and which a hand-built fixture must reproduce or the two
+/// routines silently disagree. A zeros `eta` here makes `q` independent of
+/// `beta_marginal`, so a finite difference in that direction is exactly `0`
+/// while the published gradient row is not: a fixture artifact that looks like
+/// a derivative bug.
+fn timewiggle_states(
+    family: &SurvivalMarginalSlopeFamily,
+    beta_time: &Array1<f64>,
+    beta_marginal: &Array1<f64>,
+    beta_logslope: &Array1<f64>,
+) -> Vec<ParameterBlockState> {
+    let n = family.n;
+    let eta_marginal =
+        Array1::from_shape_fn(n, |row| family.marginal_design.dot_row(row, beta_marginal));
+    vec![
+        ParameterBlockState {
+            beta: beta_time.clone(),
+            eta: Array1::zeros(n),
+        },
+        ParameterBlockState {
+            beta: beta_marginal.clone(),
+            eta: eta_marginal,
+        },
+        ParameterBlockState {
+            beta: beta_logslope.clone(),
+            eta: Array1::zeros(n),
+        },
+    ]
+}
+
+fn timewiggle_scalars(
+    family: &SurvivalMarginalSlopeFamily,
+    states: &[ParameterBlockState],
+) -> Arc<dyn std::any::Any + Send + Sync> {
+    <SurvivalMarginalSlopeFamily as CustomFamily>::current_identifiability_family_scalars(
+        family, states,
+    )
+    .expect("current scalars")
+    .expect("survival must expose current scalars")
+}
+
+/// gam#2473. At nonzero β the timewiggle block Jacobians no longer derive
+/// `∂q/∂β` themselves: `981c3174d` moved that derivation into the family's
+/// canonical `row_dynamic_q_gradient` and left the blocks scaling the rows the
+/// family publishes on `family_scalars`. This gate pins the derivation at its
+/// new home — the rows `current_identifiability_family_scalars` hands out must
+/// equal central differences of the family's own forward `q` at the same
+/// nonzero β, in both the time and marginal directions and on all three
+/// channels (`q0`, `q1`, `qd1`).
+///
+/// It lives in-crate because the derivation does. The two integration gates in
+/// `tests/basis_smooth/optimization/effective_jacobian_at_timewiggle.rs`
+/// construct the callbacks without a family at all, so the only
+/// `timewiggle_primary_rows` reachable from outside this crate are ones the
+/// test derives itself — and checking those against the test's own `q` says
+/// nothing about the derivation production runs.
+#[test]
+fn timewiggle_primary_rows_match_finite_differences_of_q_2473() {
+    let n = 4usize;
+    let p_base = 2usize;
+    let p_time = p_base + TIMEWIGGLE_TEST_NCOLS;
+    let p_m = 2usize;
+
+    let logslope_design = Array2::from_shape_fn((n, 1), |(row, _)| 0.4 + 0.2 * row as f64);
+    let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
+    let layout = LogslopeTopology::shared()
+        .materialize_identity(DesignMatrix::from(logslope_design), &logslope_offset)
+        .unwrap();
+    let z = Array2::from_shape_fn((n, 1), |(row, _)| -0.5 + 0.3 * row as f64);
+    let family = make_timewiggle_test_family(
+        n,
+        p_base,
+        p_m,
+        layout,
+        z,
+        MarginalSlopeCovariance::diagonal(array![1.0]).unwrap(),
+    );
+    assert!(
+        family.flex_timewiggle_active(),
+        "the fixture must reach the timewiggle branch or this gate is vacuous",
+    );
+
+    let beta_time = Array1::from_iter((0..p_time).map(|j| 0.18 - 0.05 * j as f64));
+    let beta_marginal = Array1::from_iter((0..p_m).map(|j| 0.09 + 0.04 * j as f64));
+    let beta_logslope = array![0.3];
+    assert!(
+        beta_time.iter().any(|value| *value != 0.0),
+        "β must be nonzero: the refusal this gate covers fires only off β = 0",
+    );
+
+    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_logslope);
+    let erased = timewiggle_scalars(&family, &states);
+    let scalars = erased
+        .downcast_ref::<SurvivalMarginalSlopeFamilyScalars>()
+        .expect("survival scalar type");
+    let (time_rows, marginal_rows) = scalars.timewiggle_primary_rows.as_ref().expect(
+        "a timewiggle-active family must publish canonical q-gradient rows; without them \
+         every nonzero-β block Jacobian refuses and the fit loses its analytic Jacobian",
+    );
+    assert_eq!(time_rows.dim(), (3 * n, p_time));
+    assert_eq!(marginal_rows.dim(), (3 * n, p_m));
+
+    let eps = 1e-6;
+    let tol = 1e-6;
+    for j in 0..p_time {
+        let mut plus = beta_time.clone();
+        let mut minus = beta_time.clone();
+        plus[j] += eps;
+        minus[j] -= eps;
+        let states_plus = timewiggle_states(&family, &plus, &beta_marginal, &beta_logslope);
+        let states_minus = timewiggle_states(&family, &minus, &beta_marginal, &beta_logslope);
+        for row in 0..n {
+            let hi = family
+                .row_dynamic_q_values(row, &states_plus)
+                .expect("forward q at +eps");
+            let lo = family
+                .row_dynamic_q_values(row, &states_minus)
+                .expect("forward q at -eps");
+            assert_close(
+                (hi.q0 - lo.q0) / (2.0 * eps),
+                time_rows[[row, j]],
+                tol,
+                &format!("dq0/dbeta_time[{j}] row {row}"),
+            );
+            assert_close(
+                (hi.q1 - lo.q1) / (2.0 * eps),
+                time_rows[[n + row, j]],
+                tol,
+                &format!("dq1/dbeta_time[{j}] row {row}"),
+            );
+            assert_close(
+                (hi.qd1 - lo.qd1) / (2.0 * eps),
+                time_rows[[2 * n + row, j]],
+                tol,
+                &format!("dqd1/dbeta_time[{j}] row {row}"),
+            );
+        }
+    }
+
+    for j in 0..p_m {
+        let mut plus = beta_marginal.clone();
+        let mut minus = beta_marginal.clone();
+        plus[j] += eps;
+        minus[j] -= eps;
+        let states_plus = timewiggle_states(&family, &beta_time, &plus, &beta_logslope);
+        let states_minus = timewiggle_states(&family, &beta_time, &minus, &beta_logslope);
+        for row in 0..n {
+            let hi = family
+                .row_dynamic_q_values(row, &states_plus)
+                .expect("forward q at +eps");
+            let lo = family
+                .row_dynamic_q_values(row, &states_minus)
+                .expect("forward q at -eps");
+            assert_close(
+                (hi.q0 - lo.q0) / (2.0 * eps),
+                marginal_rows[[row, j]],
+                tol,
+                &format!("dq0/dbeta_marginal[{j}] row {row}"),
+            );
+            assert_close(
+                (hi.q1 - lo.q1) / (2.0 * eps),
+                marginal_rows[[n + row, j]],
+                tol,
+                &format!("dq1/dbeta_marginal[{j}] row {row}"),
+            );
+            assert_close(
+                (hi.qd1 - lo.qd1) / (2.0 * eps),
+                marginal_rows[[2 * n + row, j]],
+                tol,
+                &format!("dqd1/dbeta_marginal[{j}] row {row}"),
+            );
+        }
+    }
+}
+
+/// gam#2473, the `K > 1` arm the two integration gates cannot reach.
+///
+/// At `K = 1` the pre-`981c3174d` `c_i = sqrt(1 + (s·g)²)` and the current
+/// `c_i = sqrt(1 + s²·gᵀΣg)` coincide for `Σ = [1]`, so a `P_G = 1` gate stays
+/// green over a restored scalar derivation that mis-scales every `K > 1` fit.
+/// This pins the vector form against a `Σ ≠ I` the scalar form cannot produce.
+#[test]
+fn current_scalars_use_the_vector_covariance_scale_at_k_two_2473() {
+    let n = 3usize;
+    let p_base = 2usize;
+    let p_time = p_base + TIMEWIGGLE_TEST_NCOLS;
+    let p_m = 2usize;
+
+    let logslope_design =
+        Array2::from_shape_fn((n, 2), |(row, col)| 1.0 + 0.5 * row as f64 + col as f64);
+    let z = Array2::from_shape_fn((n, 2), |(row, col)| -0.4 + 0.2 * row as f64 + 0.1 * col as f64);
+    let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
+    let logslope_offset: Array1<f64> = Array1::from_iter((0..n).map(|i| 0.10 + 0.03 * i as f64));
+    let layout = LogslopeTopology::per_score(vec![0..1, 1..2], 2)
+        .unwrap()
+        .materialize_identity(
+            DesignMatrix::from(logslope_design.clone()),
+            &logslope_offset,
+        )
+        .unwrap();
+    let family = make_timewiggle_test_family(n, p_base, p_m, layout, z, covariance);
+
+    let beta_time = Array1::from_iter((0..p_time).map(|j| 0.12 - 0.04 * j as f64));
+    let beta_marginal = Array1::from_iter((0..p_m).map(|j| 0.07 + 0.03 * j as f64));
+    let beta_logslope = array![0.25, -0.15];
+    let states = timewiggle_states(&family, &beta_time, &beta_marginal, &beta_logslope);
+    let erased = timewiggle_scalars(&family, &states);
+    let scalars = erased
+        .downcast_ref::<SurvivalMarginalSlopeFamilyScalars>()
+        .expect("survival scalar type");
+
+    let s = family.probit_frailty_scale();
+    for row in 0..n {
+        let g0 = logslope_design[[row, 0]] * beta_logslope[0] + logslope_offset[row];
+        let g1 = logslope_design[[row, 1]] * beta_logslope[1] + logslope_offset[row];
+        let quadratic = 2.0 * g0 * g0 + 0.5 * g1 * g1;
+        let expected = (1.0 + s * s * quadratic).sqrt();
+        assert_close(
+            scalars.c_i[row],
+            expected,
+            1e-12,
+            &format!("c_i at K=2 row {row}"),
+        );
+        let scalar_form = (1.0 + (s * g0).powi(2)).sqrt();
+        assert!(
+            (scalars.c_i[row] - scalar_form).abs() > 1e-6,
+            "the fixture must separate the vector and scalar c_i forms, otherwise this \
+             gate cannot see the drift it exists to catch (row {row})",
+        );
+    }
+}
