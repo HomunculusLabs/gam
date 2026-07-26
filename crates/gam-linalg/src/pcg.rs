@@ -27,6 +27,7 @@
 
 use ndarray::{Array1, ArrayView1, ArrayViewMut1, Zip};
 use rayon::prelude::*;
+use std::sync::Arc;
 
 /// Floor on the requested PCG relative tolerance. Asking for convergence tighter
 /// than this is below the achievable accuracy of the SPD energy minimization in
@@ -492,6 +493,221 @@ pub trait PcgBlockBackend {
     fn update_p(&mut self, beta: &[f64], active: &[bool]);
 }
 
+/// Symmetric positive-definite block preconditioner with a Jacobi base and an
+/// optional exact low-rank coarse correction.
+///
+/// The represented inverse is
+///
+/// ```text
+/// H = D⁻¹ + C Qᵀ,
+/// ```
+///
+/// where `D⁻¹` is the positive diagonal in `inverse_diagonal`. The only
+/// positive-rank constructor accepts a scaled subspace and its operator action,
+/// orthonormalizes it, proves the resulting Galerkin operator SPD by Cholesky,
+/// and privately forms `Q` and `C` as
+///
+/// ```text
+/// H = D⁻¹/² [I + U(E⁻¹ - I)Uᵀ] D⁻¹/²,
+/// E = UᵀD⁻¹/² A D⁻¹/²U,
+/// ```
+///
+/// with internally orthonormalized `U`. Consequently `H ≻ 0` is an invariant of
+/// the type rather than an unchecked caller promise: `E⁻¹ ≻ 0` on `span(U)` and
+/// the identity acts on its orthogonal complement. The private factors are
+/// shared so every RHS tile can reuse one setup without copying `rows × rank`
+/// storage.
+#[derive(Clone)]
+pub struct SymmetricLowRankPreconditioner {
+    inverse_diagonal: Arc<[f64]>,
+    projection: Arc<ndarray::Array2<f64>>,
+    correction: Arc<ndarray::Array2<f64>>,
+}
+
+impl SymmetricLowRankPreconditioner {
+    /// Pure Jacobi (`rank = 0`).
+    pub fn jacobi(inverse_diagonal: Vec<f64>) -> Self {
+        assert!(
+            inverse_diagonal.iter().all(|d| d.is_finite() && *d > 0.0),
+            "PCG inverse diagonal must be finite and positive"
+        );
+        let rows = inverse_diagonal.len();
+        Self {
+            inverse_diagonal: inverse_diagonal.into(),
+            projection: Arc::new(ndarray::Array2::zeros((rows, 0))),
+            correction: Arc::new(ndarray::Array2::zeros((rows, 0))),
+        }
+    }
+
+    /// Build Jacobi plus the exact inverse of a scaled Galerkin coarse operator.
+    ///
+    /// `scaled_candidates` contains candidate directions in the coordinates of
+    /// `S = D⁻¹/² A D⁻¹/²`. This method rank-reveals and orthonormalizes them,
+    /// passes the resulting `U` to `apply_scaled` to obtain `S U`, and admits a
+    /// positive-rank preconditioner only after Cholesky has proved
+    /// `E = Uᵀ S U` SPD. Thus callers never supply the private `C,Q` factors and
+    /// cannot construct a nonsymmetric or indefinite `H`; dependent candidates
+    /// cannot smuggle an arbitrary QR completion into the represented subspace.
+    pub fn from_scaled_subspace<F>(
+        inverse_diagonal: Vec<f64>,
+        scaled_candidates: ndarray::Array2<f64>,
+        apply_scaled: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&ndarray::Array2<f64>, &mut ndarray::Array2<f64>),
+    {
+        use crate::faer_ndarray::{
+            FaerCholesky, FaerQr, default_rrqr_rank_alpha, fast_ab_into,
+            fast_atb_with_parallelism, matmul_parallelism, rrqr_with_permutation,
+        };
+        use faer::Side;
+
+        let rows = inverse_diagonal.len();
+        if !inverse_diagonal
+            .iter()
+            .all(|d| d.is_finite() && *d > 0.0)
+        {
+            return Err("PCG inverse diagonal must be finite and positive".to_string());
+        }
+        if scaled_candidates.nrows() != rows {
+            return Err(format!(
+                "PCG scaled-subspace row count {} does not match diagonal length {rows}",
+                scaled_candidates.nrows()
+            ));
+        }
+        if scaled_candidates.ncols() == 0 {
+            return Err("PCG scaled subspace must contain at least one candidate".to_string());
+        }
+        if !scaled_candidates.iter().all(|value| value.is_finite()) {
+            return Err("PCG scaled-subspace candidates must be finite".to_string());
+        }
+
+        let rrqr =
+            rrqr_with_permutation(&scaled_candidates, default_rrqr_rank_alpha())
+                .map_err(|err| format!("PCG scaled-subspace RRQR failed: {err}"))?;
+        let rank = rrqr.rank;
+        if rank == 0 {
+            return Err("PCG scaled subspace has numerical rank zero".to_string());
+        }
+        let mut independent = ndarray::Array2::<f64>::zeros((rows, rank));
+        for q in 0..rank {
+            for i in 0..rows {
+                independent[[i, q]] =
+                    scaled_candidates[[i, rrqr.column_permutation[q]]];
+            }
+        }
+        drop(scaled_candidates);
+        let (mut scaled_basis, triangular) = independent
+            .qr()
+            .map_err(|err| format!("PCG scaled-subspace QR failed: {err}"))?;
+        drop(independent);
+        drop(triangular);
+        if scaled_basis.dim() != (rows, rank)
+            || !scaled_basis.iter().all(|value| value.is_finite())
+        {
+            return Err(
+                "PCG scaled-subspace QR did not produce a finite thin basis".to_string(),
+            );
+        }
+
+        let mut image = ndarray::Array2::<f64>::zeros((rows, rank));
+        apply_scaled(&scaled_basis, &mut image);
+        if !image.iter().all(|value| value.is_finite()) {
+            return Err("PCG scaled operator produced a non-finite coarse image".to_string());
+        }
+
+        let mut galerkin = fast_atb_with_parallelism(
+            &scaled_basis,
+            &image,
+            matmul_parallelism(rank, rank, rows),
+        );
+        drop(image);
+        if !galerkin.iter().all(|value| value.is_finite()) {
+            return Err("PCG Galerkin operator is non-finite".to_string());
+        }
+        let symmetry_factor = default_rrqr_rank_alpha()
+            * f64::EPSILON
+            * rows.max(rank).max(1) as f64;
+        for a in 0..rank {
+            for b in 0..a {
+                let skew = (galerkin[[a, b]] - galerkin[[b, a]]).abs();
+                let scale = galerkin[[a, b]]
+                    .abs()
+                    .max(galerkin[[b, a]].abs())
+                    .max(1.0);
+                if skew > symmetry_factor * scale {
+                    return Err(format!(
+                        "PCG Galerkin operator is not symmetric at ({a},{b}): \
+                         skew {skew:.3e} exceeds {:.3e}",
+                        symmetry_factor * scale
+                    ));
+                }
+                let value = 0.5 * (galerkin[[a, b]] + galerkin[[b, a]]);
+                galerkin[[a, b]] = value;
+                galerkin[[b, a]] = value;
+            }
+        }
+        let factor = galerkin.cholesky(Side::Lower).map_err(|err| {
+            format!("PCG Galerkin operator is not SPD at rank {rank}: {err}")
+        })?;
+        let mut inverse_correction =
+            factor.solve_mat(&ndarray::Array2::<f64>::eye(rank));
+        if !inverse_correction.iter().all(|value| value.is_finite()) {
+            return Err("PCG Galerkin inverse is non-finite".to_string());
+        }
+        for a in 0..rank {
+            for b in 0..a {
+                let value =
+                    0.5 * (inverse_correction[[a, b]] + inverse_correction[[b, a]]);
+                inverse_correction[[a, b]] = value;
+                inverse_correction[[b, a]] = value;
+            }
+            inverse_correction[[a, a]] -= 1.0;
+        }
+
+        // Convert the internally orthonormal U and U(E⁻¹-I) into physical
+        // coordinates. Keeping these factors private makes every subsequent
+        // hot-path application two deterministic contractions with no setup.
+        for i in 0..rows {
+            let inverse_sqrt = inverse_diagonal[i].sqrt();
+            for q in 0..rank {
+                scaled_basis[[i, q]] *= inverse_sqrt;
+            }
+        }
+        let mut correction = ndarray::Array2::<f64>::zeros((rows, rank));
+        fast_ab_into(&scaled_basis, &inverse_correction, &mut correction);
+        if !correction.iter().all(|value| value.is_finite()) {
+            return Err("PCG coarse correction is non-finite".to_string());
+        }
+
+        Ok(Self {
+            inverse_diagonal: inverse_diagonal.into(),
+            projection: Arc::new(scaled_basis),
+            correction: Arc::new(correction),
+        })
+    }
+
+    pub fn rows(&self) -> usize {
+        self.inverse_diagonal.len()
+    }
+
+    pub fn rank(&self) -> usize {
+        self.projection.ncols()
+    }
+
+    pub fn inverse_diagonal(&self) -> &[f64] {
+        &self.inverse_diagonal
+    }
+
+    pub fn projection(&self) -> &ndarray::Array2<f64> {
+        &self.projection
+    }
+
+    pub fn correction(&self) -> &ndarray::Array2<f64> {
+        &self.correction
+    }
+}
+
 /// Drive the shared CG recurrence over a block backend. Returns one
 /// [`PcgCoreResult`] per column.
 ///
@@ -706,7 +922,8 @@ where
     z: ndarray::Array2<f64>,
     p: ndarray::Array2<f64>,
     ap: ndarray::Array2<f64>,
-    inverse_diagonal: Vec<f64>,
+    coarse_coefficients: ndarray::Array2<f64>,
+    preconditioner: SymmetricLowRankPreconditioner,
     rhs_norm_squared: Vec<f64>,
     apply: F,
 }
@@ -722,13 +939,25 @@ where
         inverse_diagonal: Vec<f64>,
         apply: F,
     ) -> Self {
+        Self::new_with_preconditioner(
+            rhs_block,
+            initial_solution,
+            SymmetricLowRankPreconditioner::jacobi(inverse_diagonal),
+            apply,
+        )
+    }
+
+    /// Enter the exact PCG initial state with a validated symmetric
+    /// low-rank-corrected preconditioner.
+    pub fn new_with_preconditioner(
+        rhs_block: ndarray::Array2<f64>,
+        initial_solution: ndarray::Array2<f64>,
+        preconditioner: SymmetricLowRankPreconditioner,
+        apply: F,
+    ) -> Self {
         let (m, t) = rhs_block.dim();
         assert_eq!(initial_solution.dim(), (m, t));
-        assert_eq!(inverse_diagonal.len(), m);
-        assert!(
-            inverse_diagonal.iter().all(|d| d.is_finite() && *d > 0.0),
-            "PCG inverse diagonal must be finite and positive"
-        );
+        assert_eq!(preconditioner.rows(), m);
         let mut rhs_norm_squared = vec![0.0; t];
         Self::column_dots(&rhs_block, &rhs_block, &mut rhs_norm_squared);
         let mut ap = ndarray::Array2::zeros((m, t));
@@ -749,27 +978,23 @@ where
                     rrow[c] += -aprow[c];
                 }
             });
-        let mut z = r.clone();
-        z.as_slice_mut()
-            .expect("block backend state is standard layout")
-            .par_chunks_mut(t)
-            .zip(inverse_diagonal.par_iter())
-            .for_each(|(zrow, &scale)| {
-                for value in zrow {
-                    *value *= scale;
-                }
-            });
+        let z = ndarray::Array2::zeros((m, t));
         let p = z.clone();
-        Self {
+        let coarse_coefficients = ndarray::Array2::zeros((preconditioner.rank(), t));
+        let mut backend = Self {
             x: initial_solution,
             r,
             z,
             p,
             ap,
-            inverse_diagonal,
+            coarse_coefficients,
+            preconditioner,
             rhs_norm_squared,
             apply,
-        }
+        };
+        backend.apply_preconditioner();
+        backend.p.assign(&backend.z);
+        backend
     }
 
     /// The solution block `X` (`rows × columns`); column `c` is the final
@@ -781,6 +1006,65 @@ where
     /// Consume the backend and take the solution block without copying.
     pub fn into_solution(self) -> ndarray::Array2<f64> {
         self.x
+    }
+
+    /// `Z = H R` for the symmetric low-rank preconditioner. Every coarse
+    /// coefficient is a strict ascending-row fold and every expansion is an
+    /// ascending-rank fold. The CUDA backend mirrors these two orders exactly.
+    fn apply_preconditioner(&mut self) {
+        let (m, t) = self.r.dim();
+        let rank = self.preconditioner.rank();
+        let rs = self
+            .r
+            .as_slice()
+            .expect("block backend state is standard layout");
+        let projection = self
+            .preconditioner
+            .projection()
+            .as_slice()
+            .expect("PCG projection is standard layout");
+        let coefficients = self
+            .coarse_coefficients
+            .as_slice_mut()
+            .expect("PCG coarse coefficients are standard layout");
+        coefficients
+            .par_chunks_mut(t)
+            .enumerate()
+            .for_each(|(q, coefficient_row)| {
+                for c in 0..t {
+                    let mut acc = 0.0f64;
+                    for i in 0..m {
+                        acc += projection[i * rank + q] * rs[i * t + c];
+                    }
+                    coefficient_row[c] = acc;
+                }
+            });
+
+        let inverse_diagonal = self.preconditioner.inverse_diagonal();
+        let correction = self
+            .preconditioner
+            .correction()
+            .as_slice()
+            .expect("PCG correction is standard layout");
+        let coefficients = self
+            .coarse_coefficients
+            .as_slice()
+            .expect("PCG coarse coefficients are standard layout");
+        self.z
+            .as_slice_mut()
+            .expect("block backend state is standard layout")
+            .par_chunks_mut(t)
+            .enumerate()
+            .for_each(|(i, zrow)| {
+                let rrow = &rs[i * t..(i + 1) * t];
+                for c in 0..t {
+                    let mut acc = inverse_diagonal[i] * rrow[c];
+                    for q in 0..rank {
+                        acc += correction[i * rank + q] * coefficients[q * t + c];
+                    }
+                    zrow[c] = acc;
+                }
+            });
     }
 
     fn column_dots(a: &ndarray::Array2<f64>, b: &ndarray::Array2<f64>, out: &mut [f64]) {
@@ -865,23 +1149,7 @@ where
     }
 
     fn refresh_preconditioned_residual(&mut self) {
-        let t = self.r.ncols();
-        self.z
-            .as_slice_mut()
-            .expect("block backend state is standard layout")
-            .par_chunks_mut(t)
-            .zip(
-                self.r
-                    .as_slice()
-                    .expect("block backend state is standard layout")
-                    .par_chunks(t),
-            )
-            .zip(self.inverse_diagonal.par_iter())
-            .for_each(|((zrow, rrow), &scale)| {
-                for c in 0..t {
-                    zrow[c] = rrow[c] * scale;
-                }
-            });
+        self.apply_preconditioner();
     }
 
     fn update_p(&mut self, beta: &[f64], active: &[bool]) {
@@ -1353,6 +1621,98 @@ mod tests {
         assert!(
             identity_result[0].iterations > jacobi_result[0].iterations,
             "the cold identity recurrence must expose the diagonal condition spread"
+        );
+    }
+
+    #[test]
+    fn symmetric_low_rank_block_preconditioner_inverts_a_non_diagonal_mode() {
+        let (m, t) = (48usize, 5usize);
+        let eigenvalue = 1.0e-4f64;
+        let mut q = Array1::<f64>::zeros(m);
+        for i in 0..m {
+            q[i] = if i % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        q /= q.dot(&q).sqrt();
+
+        // A = I + (λ-1)qqᵀ: diagonal scaling cannot remove this dense
+        // non-diagonal outlier. The validating factory derives
+        // H = I + (λ⁻¹-1)qqᵀ, its exact inverse, from A's action on q.
+        let mut candidate = Array2::<f64>::zeros((m, 1));
+        for i in 0..m {
+            candidate[[i, 0]] = q[i];
+        }
+        let preconditioner = SymmetricLowRankPreconditioner::from_scaled_subspace(
+            vec![1.0; m],
+            candidate,
+            |basis, image| {
+                for c in 0..basis.ncols() {
+                    let mut qt_x = 0.0f64;
+                    for i in 0..m {
+                        qt_x += q[i] * basis[[i, c]];
+                    }
+                    for i in 0..m {
+                        image[[i, c]] =
+                            basis[[i, c]] + (eigenvalue - 1.0) * q[i] * qt_x;
+                    }
+                }
+            },
+        )
+        .expect("the exact scaled coarse operator is SPD");
+        let mut rhs = Array2::<f64>::zeros((m, t));
+        for i in 0..m {
+            for c in 0..t {
+                rhs[[i, c]] =
+                    ((i * 17 + c * 29 + 3) as f64).sin() + (c + 1) as f64 * q[i];
+            }
+        }
+        let apply = |x: &Array2<f64>, out: &mut Array2<f64>| {
+            for c in 0..t {
+                let mut qt_x = 0.0f64;
+                for i in 0..m {
+                    qt_x += q[i] * x[[i, c]];
+                }
+                for i in 0..m {
+                    out[[i, c]] = x[[i, c]] + (eigenvalue - 1.0) * q[i] * qt_x;
+                }
+            }
+        };
+        let mut backend = CpuPcgBlockBackend::new_with_preconditioner(
+            rhs,
+            Array2::zeros((m, t)),
+            preconditioner,
+            apply,
+        );
+        let results = pcg_multi_core(&mut backend, 1.0e-10, m, false);
+        assert!(
+            results
+                .iter()
+                .all(|result| result.stop == PcgStop::Converged && result.iterations <= 2),
+            "an exact non-diagonal spectral inverse must collapse the solve to rounding-scale work: \
+             {:?}",
+            results
+                .iter()
+                .map(|result| (result.stop, result.iterations))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn symmetric_low_rank_preconditioner_rejects_an_indefinite_coarse_operator() {
+        let mut candidate = Array2::<f64>::zeros((8, 1));
+        candidate[[3, 0]] = 1.0;
+        let err = SymmetricLowRankPreconditioner::from_scaled_subspace(
+            vec![1.0; 8],
+            candidate,
+            |basis, image| {
+                image.assign(basis);
+                image.mapv_inplace(|value| -value);
+            },
+        )
+        .err()
+        .expect("a negative Galerkin eigenvalue must not mint a preconditioner");
+        assert!(
+            err.contains("not SPD"),
+            "the rejected invariant should name the failed SPD proof: {err}"
         );
     }
 

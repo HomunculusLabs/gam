@@ -23,7 +23,9 @@
 use super::codes::{SparseCode, solve_row_codes};
 use super::scoring::{ScoreRoutePath, ScoreRouteStats, TileScorer};
 use super::{SparseDictConfig, SparseDictConvergence, SparseDictFit};
-use gam_linalg::pcg::{CpuPcgBlockBackend, PcgCoreResult, PcgStop, pcg_multi_core};
+use gam_linalg::pcg::{
+    CpuPcgBlockBackend, PcgCoreResult, PcgStop, SymmetricLowRankPreconditioner, pcg_multi_core,
+};
 use ndarray::{Array2, ArrayView2, Axis};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -595,6 +597,7 @@ pub(super) fn run(
     let mut score_route_stats = ScoreRouteStats::default();
     let mut epochs_run = 0usize;
     let mut decoder_solve_stats = DecoderSolveStats::default();
+    let mut decoder_recycle = DecoderRecycleSpace::new(k);
     let mut ev_residual = f64::INFINITY;
     let mut decoder_residual = f64::INFINITY;
     let mut routing_residual = f64::INFINITY;
@@ -671,12 +674,13 @@ pub(super) fn run(
         let mut normal_eq = DecoderNormalEq::zeros(k, p);
         normal_eq.accumulate(x, &certified_codes);
         let sigma = residual_scale(x, &codes, decoder.view());
-        let (stats, _gate) = solve_decoder_with_routability_gate(
+        let (stats, _gate) = solve_decoder_with_routability_gate_recycled(
             &mut decoder,
             &normal_eq,
             config.decoder_ridge as f64,
             sigma,
             config.score_mode,
+            &mut decoder_recycle,
         )?;
         decoder_solve_stats = stats;
         let refresh_secs = epoch_start.elapsed().as_secs_f64();
@@ -775,7 +779,7 @@ pub(super) fn run(
              routing_resid={:.3e} births={} revived={} live={}/{} no_growth={} \
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
              mean_degree={:.1} giant_fraction={:.4} max_component={} \
-             cg_columns={} cg_iterations={} device_cols={} \
+             cg_columns={} cg_iterations={} recycled_rank={} device_cols={} \
              cg_nonconverged={} cg_kappa_bound={:?} cg_relative_residual={:.3e}",
             epochs_run,
             config.max_epochs,
@@ -798,6 +802,7 @@ pub(super) fn run(
             decoder_solve_stats.max_component_size,
             decoder_solve_stats.cg_columns,
             decoder_solve_stats.cg_iterations,
+            decoder_solve_stats.cg_recycled_rank,
             decoder_solve_stats.device_refresh_columns,
             decoder_solve_stats.cg_nonconverged_columns,
             decoder_solve_stats.cg_kappa_bound,
@@ -1922,6 +1927,158 @@ impl DecoderNormalEq {
     }
 }
 
+/// Cross-refresh coarse space for the giant decoder solve.
+///
+/// A decoder correction is `δD = (A + ρI)⁻¹(B - (A + ρI)D₀)`: it amplifies
+/// precisely the low-energy non-diagonal modes that make a warm Jacobi solve
+/// expensive. We retain a memory-bounded reservoir of the previous refresh's
+/// globally hardest correction columns, rank-reveal it against each current
+/// component, and rebuild its exact Galerkin operator against the current normal
+/// equations. This is Krylov recycling without retaining a second copy of the
+/// normal equations or an epoch-specific factorization.
+///
+/// Directions use global atom coordinates so component splits/merges are safe:
+/// every current component restricts and re-orthogonalizes them before use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DecoderRecyclePriority {
+    /// Dominant scalar operator work spent on this column in the prior solve.
+    operator_work: u128,
+    iterations: usize,
+    component_anchor: usize,
+    column: usize,
+}
+
+impl Ord for DecoderRecyclePriority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.operator_work
+            .cmp(&other.operator_work)
+            .then_with(|| self.iterations.cmp(&other.iterations))
+            // Canonical smaller identifiers win exact work ties.
+            .then_with(|| other.component_anchor.cmp(&self.component_anchor))
+            .then_with(|| other.column.cmp(&self.column))
+    }
+}
+
+impl PartialOrd for DecoderRecyclePriority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct DecoderRecycleCandidate {
+    direction: Vec<f64>,
+    priority: DecoderRecyclePriority,
+}
+
+pub(super) struct DecoderRecycleSpace {
+    rows: usize,
+    directions: Vec<Vec<f64>>,
+    next_candidates: Vec<DecoderRecycleCandidate>,
+    next_capacity: usize,
+}
+
+impl DecoderRecycleSpace {
+    pub(super) fn new(rows: usize) -> Self {
+        Self {
+            rows,
+            directions: Vec::new(),
+            next_candidates: Vec::new(),
+            next_capacity: 0,
+        }
+    }
+
+    fn begin_refresh(&mut self, rows: usize) {
+        assert_eq!(
+            self.rows, rows,
+            "decoder recycle space must retain the dictionary row dimension"
+        );
+        self.next_candidates.clear();
+        self.next_capacity = 0;
+    }
+
+    fn finish_refresh(&mut self) {
+        if !self.next_candidates.is_empty() {
+            self.next_candidates
+                .sort_by(|left, right| right.priority.cmp(&left.priority));
+            self.directions = self
+                .next_candidates
+                .drain(..)
+                .map(|candidate| candidate.direction)
+                .collect();
+        }
+        self.next_capacity = 0;
+    }
+
+    /// Add one solved correction after weighted normalization.
+    ///
+    /// The `D` inner product is the Euclidean inner product after Jacobi
+    /// scaling (`y = D¹/²x`), exactly the coordinate used by the coarse
+    /// preconditioner. A bounded max-priority reservoir prevents an early
+    /// component from exhausting the refresh-wide history budget: later
+    /// candidates replace weaker entries by observed operator work, with stable
+    /// component/column tie breaks. Rank revelation is deferred to the next
+    /// current-operator setup, where one BLAS-3 pivoted QR handles all selected
+    /// columns together (including dependencies introduced by graph
+    /// splits/merges).
+    fn retain_component_correction(
+        &mut self,
+        comp: &[usize],
+        diagonal: &[f64],
+        correction: &[f64],
+        rank_bound: usize,
+        operator_entries: usize,
+        iterations: usize,
+        column: usize,
+    ) {
+        self.next_capacity = self.next_capacity.max(rank_bound);
+        if self.next_capacity == 0
+            || comp.is_empty()
+            || correction.len() != comp.len()
+            || diagonal.len() != comp.len()
+        {
+            return;
+        }
+        let norm = correction
+            .iter()
+            .zip(diagonal.iter())
+            .map(|(&x, &d)| d * x * x)
+            .sum::<f64>()
+            .sqrt();
+        if !norm.is_finite() || norm == 0.0 {
+            return;
+        }
+        let mut global = vec![0.0f64; self.rows];
+        for (i, &atom) in comp.iter().enumerate() {
+            global[atom] = correction[i] / norm;
+        }
+        let priority = DecoderRecyclePriority {
+            operator_work: (operator_entries as u128).saturating_mul(iterations as u128),
+            iterations,
+            component_anchor: comp[0],
+            column,
+        };
+        let candidate = DecoderRecycleCandidate {
+            direction: global,
+            priority,
+        };
+        if self.next_candidates.len() < self.next_capacity {
+            self.next_candidates.push(candidate);
+            return;
+        }
+
+        let weakest = self
+            .next_candidates
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.priority.cmp(&right.priority))
+            .map(|(index, _)| index)
+            .expect("positive recycle capacity has a full non-empty reservoir");
+        if priority > self.next_candidates[weakest].priority {
+            self.next_candidates[weakest] = candidate;
+        }
+    }
+}
+
 /// An atom is "dead" this epoch when its regularised self-energy `A_kk + ρ` is
 /// at or below this floor: it never fired (and, since couplings require two
 /// non-zero codes, it is then necessarily isolated). Such atoms keep their
@@ -1982,6 +2139,9 @@ pub struct DecoderSolveStats {
     pub cg_columns: usize,
     /// Total CG iterations across solved columns.
     pub cg_iterations: usize,
+    /// Largest recycled Galerkin coarse-space rank used by a CG component.
+    /// Zero is the first-refresh / no-independent-history case.
+    pub cg_recycled_rank: usize,
     /// Largest condition estimate recovered from CG's Lanczos tridiagonal.
     pub cg_kappa_hat: Option<f64>,
     /// Largest final relative normal-equation residual among CG solves.
@@ -2003,10 +2163,12 @@ pub struct DecoderSolveStats {
     /// a "device-resident" label can never silently cover a CPU reality
     /// (#1017's recurring misreporting pattern).
     pub device_refresh_columns: usize,
-    /// Largest a-priori Gershgorin condition-number bound over the CG-solved
-    /// components. This is the `κ̂` that sets the derived iteration cap
-    /// `⌈½√κ̂·ln(2√κ̂/ε)⌉` before any CG step runs, so an ill-conditioned block is
-    /// diagnosable up front (not only after the Lanczos estimate matures).
+    /// Largest a-priori Gershgorin condition-number bound for the Jacobi-scaled
+    /// operator over the CG-solved components. It sizes the first-refresh
+    /// Chebyshev cap and remains a directly comparable spectrum-drift diagnostic
+    /// after recycling engages; recycled solves use the algebraic `m`-step
+    /// finite-termination bound because this Jacobi bound no longer describes
+    /// their low-rank-corrected operator.
     pub cg_kappa_bound: Option<f64>,
 }
 
@@ -2019,6 +2181,7 @@ impl Default for DecoderSolveStats {
             max_component_size: 0,
             cg_columns: 0,
             cg_iterations: 0,
+            cg_recycled_rank: 0,
             cg_kappa_hat: None,
             cg_relative_residual: 0.0,
             cg_residual_stop: 0.0,
@@ -2143,16 +2306,17 @@ pub(super) fn routability_gate_decisions(
         .collect()
 }
 
-pub(super) fn solve_decoder_with_routability_gate(
+pub(super) fn solve_decoder_with_routability_gate_recycled(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
     ridge: f64,
     residual_scale: f64,
     gpu: gam_gpu::GpuPolicy,
+    recycle: &mut DecoderRecycleSpace,
 ) -> Result<(DecoderSolveStats, Vec<RoutabilityGateDecision>), String> {
     let gate = routability_gate_decisions(eq, residual_scale);
     let mut candidate = decoder.clone();
-    let stats = solve_decoder(&mut candidate, eq, ridge, gpu)?;
+    let stats = solve_decoder_recycled(&mut candidate, eq, ridge, gpu, recycle)?;
     for decision in gate.iter() {
         if !decision.refresh {
             // A deferred atom keeps its previous decoder row and accumulates
@@ -2179,6 +2343,25 @@ pub(super) fn solve_decoder_with_routability_gate(
         dst.assign(&src);
     }
     Ok((stats, gate))
+}
+
+#[cfg(test)]
+fn solve_decoder_with_routability_gate(
+    decoder: &mut Array2<f32>,
+    eq: &DecoderNormalEq,
+    ridge: f64,
+    residual_scale: f64,
+    gpu: gam_gpu::GpuPolicy,
+) -> Result<(DecoderSolveStats, Vec<RoutabilityGateDecision>), String> {
+    let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
+    solve_decoder_with_routability_gate_recycled(
+        decoder,
+        eq,
+        ridge,
+        residual_scale,
+        gpu,
+        &mut recycle,
+    )
 }
 
 /// Re-seed atoms that fired for no row this epoch (dead atoms) onto the current
@@ -2294,14 +2477,16 @@ fn revive_dead_atoms(
 /// sorted (canonical order) before solving so the result is bit-reproducible
 /// regardless of `HashMap` iteration order. Dead atoms ([`DEAD_DENOM`]) and
 /// atoms with no co-firing partner keep / take the trivial solve.
-pub(super) fn solve_decoder(
+fn solve_decoder_recycled(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
     ridge: f64,
     gpu: gam_gpu::GpuPolicy,
+    recycle: &mut DecoderRecycleSpace,
 ) -> Result<DecoderSolveStats, String> {
     let k = eq.diag.len();
     let p = eq.b.ncols();
+    recycle.begin_refresh(k);
 
     // Symmetric coupling adjacency, sorted per atom for deterministic assembly.
     let mut neigh: Vec<Vec<(u32, f64)>> = vec![Vec::new(); k];
@@ -2380,6 +2565,7 @@ pub(super) fn solve_decoder(
             direct_threshold,
             gpu,
             &mut stats,
+            recycle,
         )?;
     }
     if k > 0 {
@@ -2394,7 +2580,7 @@ pub(super) fn solve_decoder(
     log::debug!(
         "[SAE percolation] K={k} mean_degree={:.4} giant_fraction={:.4} \
          components={} max_component={} direct_threshold={direct_threshold} \
-         cg_columns={} cg_iterations={} cg_kappa_hat={:?} cg_kappa_bound={:?} \
+         cg_columns={} cg_iterations={} recycled_rank={} cg_kappa_hat={:?} cg_kappa_bound={:?} \
          cg_nonconverged_columns={} cg_relative_residual={:.3e} cg_residual_stop={:.3e}",
         stats.mean_cofiring_degree,
         stats.giant_component_fraction,
@@ -2402,13 +2588,176 @@ pub(super) fn solve_decoder(
         stats.max_component_size,
         stats.cg_columns,
         stats.cg_iterations,
+        stats.cg_recycled_rank,
         stats.cg_kappa_hat,
         stats.cg_kappa_bound,
         stats.cg_nonconverged_columns,
         stats.cg_relative_residual,
         stats.cg_residual_stop,
     );
+    recycle.finish_refresh();
     Ok(stats)
+}
+
+/// Test-only one-refresh entry point. Production owns a
+/// [`DecoderRecycleSpace`] across epochs and enters through
+/// [`solve_decoder_with_routability_gate_recycled`].
+#[cfg(test)]
+fn solve_decoder(
+    decoder: &mut Array2<f32>,
+    eq: &DecoderNormalEq,
+    ridge: f64,
+    gpu: gam_gpu::GpuPolicy,
+) -> Result<DecoderSolveStats, String> {
+    let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
+    solve_decoder_recycled(decoder, eq, ridge, gpu, &mut recycle)
+}
+
+/// Largest recycled rank whose apply work and resident storage are both
+/// dominated by objects this solve already owns.
+///
+/// A rank-`r` symmetric correction performs two `m×r×tile` contractions. The
+/// sparse operator performs `(m + nnz)×tile` multiply-adds, so
+/// `2mr ≤ m+nnz` prevents the preconditioner from costing more than the operator
+/// matvec it accompanies. Resident prior history plus the two current low-rank
+/// factors consumes `(K+2m)r` f64 values, and a tile also owns `r×tile` coarse
+/// coefficients; bounding those together by the already-materialized `K×P`
+/// right-hand side preserves the decoder lane's no-OOM scale contract. The next
+/// history is accumulated while solving and is independently bounded by the
+/// same `r≤P` contract; at refresh completion it replaces, rather than joins,
+/// the prior history.
+fn decoder_recycle_rank_bound(
+    k_total: usize,
+    p: usize,
+    m: usize,
+    nnz: usize,
+) -> usize {
+    if m == 0 {
+        return 0;
+    }
+    let work_bound = ((m as u128 + nnz as u128) / (2u128 * m as u128)) as usize;
+    let rhs_values = k_total as u128 * p as u128;
+    let one_column_state = 5 * m as u128;
+    let memory_bound = if rhs_values > one_column_state {
+        ((rhs_values - one_column_state) / (k_total as u128 + 2 * m as u128 + 1)) as usize
+    } else {
+        0
+    };
+    work_bound.min(memory_bound).min(m).min(p)
+}
+
+/// Build the exact Galerkin inverse on the previous refresh's correction
+/// subspace, expressed as a symmetric low-rank correction to Jacobi.
+fn recycled_component_preconditioner(
+    recycle: &DecoderRecycleSpace,
+    comp: &[usize],
+    row_ptr: &[u32],
+    csr_cols: &[u32],
+    csr_vals: &[f64],
+    diagonal: &[f64],
+    rank_bound: usize,
+) -> Result<SymmetricLowRankPreconditioner, String> {
+    use gam_linalg::faer_ndarray::{
+        default_rrqr_rank_alpha, rrqr_with_permutation,
+    };
+
+    let m = comp.len();
+    let inverse_diagonal: Vec<f64> = diagonal.iter().map(|&d| d.recip()).collect();
+    if rank_bound == 0 || recycle.directions.is_empty() {
+        return Ok(SymmetricLowRankPreconditioner::jacobi(
+            inverse_diagonal,
+        ));
+    }
+
+    // Current-coordinate basis U = orth(D¹/² Z). Restricting global recycled
+    // directions here makes component splits/merges exact rather than a stale
+    // graph-identity assumption. Column-pivoted Householder QR identifies any
+    // dependencies introduced by a split. The preconditioner's validating
+    // factory performs the second thin Householder QR itself, then proves the
+    // resulting Galerkin operator SPD before the private factors can exist.
+    // Do not truncate the global history before restriction. Directions from
+    // several old components are stored in one deterministic sequence; after a
+    // split, the first `rank_bound` entries can all belong to a different
+    // current component even though useful directions occur later. Restrict
+    // every direction that has support here, then let the *current* RRQR choose
+    // at most `rank_bound` independent columns.
+    let relevant: Vec<usize> = recycle
+        .directions
+        .iter()
+        .enumerate()
+        .filter_map(|(q, direction)| {
+            comp.iter()
+                .any(|&atom| direction[atom] != 0.0)
+                .then_some(q)
+        })
+        .collect();
+    if relevant.is_empty() {
+        return Ok(SymmetricLowRankPreconditioner::jacobi(
+            inverse_diagonal,
+        ));
+    }
+    let mut raw = Array2::<f64>::zeros((m, relevant.len()));
+    for (q, &source) in relevant.iter().enumerate() {
+        for (i, &atom) in comp.iter().enumerate() {
+            raw[[i, q]] = diagonal[i].sqrt() * recycle.directions[source][atom];
+        }
+    }
+    let rrqr = rrqr_with_permutation(&raw, default_rrqr_rank_alpha()).map_err(|err| {
+        format!("decoder recycled coarse-space RRQR failed: {err}")
+    })?;
+    let rank = rrqr.rank.min(rank_bound);
+    if rank == 0 {
+        return Ok(SymmetricLowRankPreconditioner::jacobi(
+            inverse_diagonal,
+        ));
+    }
+    let mut independent = Array2::<f64>::zeros((m, rank));
+    for q in 0..rank {
+        for i in 0..m {
+            independent[[i, q]] = raw[[i, rrqr.column_permutation[q]]];
+        }
+    }
+    drop(raw);
+
+    // S U for S = D⁻¹/²(A+ρI)D⁻¹/². The scaled diagonal is exactly one;
+    // neighbors retain the canonical CSR order used by the solve itself.
+    let inverse_sqrt: Vec<f64> = diagonal.iter().map(|&d| d.sqrt().recip()).collect();
+    SymmetricLowRankPreconditioner::from_scaled_subspace(
+        inverse_diagonal,
+        independent,
+        |basis, image| {
+            let rank = basis.ncols();
+            image
+                .as_slice_mut()
+                .expect("fresh Galerkin image is standard layout")
+                .par_chunks_mut(rank)
+                .enumerate()
+                .for_each(|(i, image_row)| {
+                    image_row.copy_from_slice(
+                        basis
+                            .row(i)
+                            .as_slice()
+                            .expect("Galerkin basis row is contiguous"),
+                    );
+                    // Walk the CSR structure once for the whole coarse block.
+                    // For every fixed q the additions remain in canonical
+                    // ascending-neighbor order, while structure is loaded once.
+                    for edge in row_ptr[i] as usize..row_ptr[i + 1] as usize {
+                        let j = csr_cols[edge] as usize;
+                        let scaled_value =
+                            csr_vals[edge] * inverse_sqrt[i] * inverse_sqrt[j];
+                        let neighbor_row = basis.row(j);
+                        let neighbor = neighbor_row
+                            .as_slice()
+                            .expect("Galerkin basis row is contiguous");
+                        for q in 0..rank {
+                            image_row[q] += scaled_value * neighbor[q];
+                        }
+                    }
+                });
+        },
+    )
+    .map_err(|err| format!("decoder recycled coarse preconditioner failed: {err}"))
 }
 
 /// Solve one connected component's block: dense SPD Cholesky when the block is
@@ -2428,8 +2777,8 @@ pub(super) fn solve_decoder(
 /// solve advances all columns together off one CSR traversal per iteration
 /// ([`pcg_multi_core`]), each column keeping its own `alpha`/`beta`/stopping
 /// state. The CPU and device backends are bit-identical to one another from the
-/// same cached decoder seed; both use the same Jacobi-preconditioned recurrence
-/// and unchanged residual certificate.
+/// same cached decoder seed; both use the same symmetric recycled-Galerkin
+/// preconditioner and unchanged residual certificate.
 fn solve_component(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
@@ -2440,6 +2789,7 @@ fn solve_component(
     direct_threshold: usize,
     gpu: gam_gpu::GpuPolicy,
     stats: &mut DecoderSolveStats,
+    recycle: &mut DecoderRecycleSpace,
 ) -> Result<(), String> {
     let m = comp.len();
     // Local atom -> block-row index map (comp is sorted, so this is canonical).
@@ -2540,7 +2890,7 @@ fn solve_component(
     // spinning. Exact CG terminates in at most `m` steps in exact arithmetic; a
     // cap hit in floating point is typed non-convergence.
     let chebyshev = 0.5 * root * (2.0 * root / residual_tolerance).ln();
-    let cap = (chebyshev.max(0.0).ceil() as usize).min(m).max(1);
+    let jacobi_cap = (chebyshev.max(0.0).ceil() as usize).min(m).max(1);
 
     // Split live columns from dead ones (right-hand-side norm at/below the
     // dead-denominator floor). The dead-column norm below is the same strict
@@ -2573,14 +2923,51 @@ fn solve_component(
             .filter_map(|(c, &live)| live.then_some(c))
             .collect()
     };
+    if live_columns.is_empty() {
+        return Ok(());
+    }
 
-    // Column-tile width: the block PCG holds five dense `m × tile` f64 buffers
-    // (`X`, `R`, `Z`, `P`, `AP`), so cap the tile at the footprint of the caller's
-    // own `K × P` normal-equation right-hand side — the refresh never
-    // allocates beyond the memory scale the accumulated normal equations
-    // already committed to (SPEC: never OOM on reasonably-resourced machines).
     let k_total = eq.diag.len();
-    let tile_columns = ((k_total * p) / (5 * m)).max(1);
+    let rank_bound = decoder_recycle_rank_bound(k_total, p, m, nnz);
+    let preconditioner = recycled_component_preconditioner(
+        recycle,
+        comp,
+        &row_ptr,
+        &csr_cols,
+        &csr_vals,
+        &diag_ridge,
+        rank_bound,
+    )?;
+    let recycled_rank = preconditioner.rank();
+    stats.cg_recycled_rank = stats.cg_recycled_rank.max(recycled_rank);
+
+    // The Jacobi Gershgorin/Chebyshev cap above does not describe the new
+    // low-rank-preconditioned operator. A recycled solve therefore uses CG's
+    // algebraic finite-termination bound `m`; stopping remains exclusively the
+    // unchanged residual certificate, and a floating-point cap hit remains typed
+    // non-convergence. The first refresh (rank zero) keeps the tighter proved
+    // Jacobi cap.
+    let cap = if recycled_rank == 0 {
+        jacobi_cap
+    } else {
+        m.max(1)
+    };
+
+    // Column-tile width: PCG owns five `m × tile` blocks (`X`, `R`, `Z`, `P`,
+    // `AP`). Recycling additionally retains `K × rank` history, two
+    // `m × rank` current factors, and `rank × tile` coarse coefficients. Their
+    // combined f64 count is bounded by the already-materialized `K × P`
+    // normal-equation RHS. The concurrently accumulated next history is itself
+    // at most `K × rank ≤ K × P` and replaces the prior history at refresh end,
+    // so recycling adds a bounded constant multiple of an allocation the caller
+    // has already proved feasible rather than an unbounded cache.
+    let rhs_values = k_total.saturating_mul(p);
+    let recycle_values = k_total
+        .saturating_add(2usize.saturating_mul(m))
+        .saturating_mul(recycled_rank);
+    let tile_state_per_column = 5usize.saturating_mul(m).saturating_add(recycled_rank);
+    let tile_columns =
+        (rhs_values.saturating_sub(recycle_values) / tile_state_per_column).max(1);
 
     for tile in live_columns.chunks(tile_columns) {
         let t = tile.len();
@@ -2614,11 +3001,52 @@ fn solve_component(
             &diag_ridge,
             rhs_block,
             initial_block,
+            preconditioner.clone(),
             residual_tolerance,
             cap,
         )?;
         if on_device {
             stats.device_refresh_columns += t;
+        }
+
+        // Retain a proportional share of each tile's hardest certified
+        // corrections, so the next epoch samples the whole decoder rather than
+        // whichever columns happened to occupy the first tile. Ties are broken
+        // by global decoder-column index.
+        let quota = if live_columns.is_empty() {
+            0
+        } else {
+            rank_bound
+                .saturating_mul(t)
+                .div_ceil(live_columns.len())
+        };
+        let mut hard_columns: Vec<usize> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(j, core)| (core.stop == PcgStop::Converged).then_some(j))
+            .collect();
+        hard_columns.sort_by(|&left, &right| {
+            results[right]
+                .iterations
+                .cmp(&results[left].iterations)
+                .then_with(|| tile[left].cmp(&tile[right]))
+        });
+        for &j in hard_columns.iter().take(quota) {
+            let c = tile[j];
+            let correction: Vec<f64> = comp
+                .iter()
+                .enumerate()
+                .map(|(i, &atom)| solution[[i, j]] - decoder[[atom, c]] as f64)
+                .collect();
+            recycle.retain_component_correction(
+                comp,
+                &diag_ridge,
+                &correction,
+                rank_bound,
+                m.saturating_add(nnz),
+                results[j].iterations,
+                c,
+            );
         }
 
         for (j, (&c, core)) in tile.iter().zip(results.iter()).enumerate() {
@@ -2675,10 +3103,10 @@ fn solve_block_cg(
     diag_ridge: &[f64],
     rhs_block: Array2<f64>,
     initial_block: Array2<f64>,
+    preconditioner: SymmetricLowRankPreconditioner,
     residual_tolerance: f64,
     cap: usize,
 ) -> Result<(Vec<PcgCoreResult>, Array2<f64>, bool), String> {
-    let inverse_diagonal: Vec<f64> = diag_ridge.iter().map(|&d| d.recip()).collect();
     #[cfg(target_os = "linux")]
     {
         if let Some(mut device) = super::decoder_gpu::DeviceBlockCgBackend::try_new(
@@ -2689,7 +3117,7 @@ fn solve_block_cg(
             diag_ridge,
             &rhs_block,
             &initial_block,
-            &inverse_diagonal,
+            &preconditioner,
         )? {
             let results = pcg_multi_core(&mut device, residual_tolerance, cap, true);
             let solution = device.take_solution()?;
@@ -2728,8 +3156,12 @@ fn solve_block_cg(
             }
         });
     };
-    let mut backend =
-        CpuPcgBlockBackend::new(rhs_block, initial_block, inverse_diagonal, apply);
+    let mut backend = CpuPcgBlockBackend::new_with_preconditioner(
+        rhs_block,
+        initial_block,
+        preconditioner,
+        apply,
+    );
     let results = pcg_multi_core(&mut backend, residual_tolerance, cap, true);
     let solution = backend.into_solution();
     Ok((results, solution, false))
@@ -3037,10 +3469,12 @@ fn pack_codes(codes: &[SparseCode], n: usize, s: usize) -> (Array2<u32>, Array2<
 #[cfg(test)]
 mod exact_solve_tests {
     use super::{
-        CgStop, DecoderNormalEq, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
-        LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, SparseDictionaryError, cg_solve,
-        explained_variance, kappa_from_cg_tridiagonal, open_round_is_stationary, pcg_multi_core,
-        route_and_code_all, run, solve_decoder, solve_decoder_with_routability_gate,
+        CgStop, DecoderNormalEq, DecoderRecycleSpace, EvPlateau,
+        LINEAR_EV_PLATEAU_FRACTION, LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth,
+        SparseDictionaryError, cg_solve, explained_variance, kappa_from_cg_tridiagonal,
+        open_round_is_stationary, pcg_multi_core, recycled_component_preconditioner,
+        route_and_code_all, run, solve_decoder, solve_decoder_recycled,
+        solve_decoder_with_routability_gate,
     };
     use crate::sparse_dict::codes::SparseCode;
     use crate::sparse_dict::scoring::TileScorer;
@@ -3792,6 +4226,250 @@ mod exact_solve_tests {
             "the warm solve must satisfy the same residual certificate: residual={:.3e} stop={:.3e}",
             warm.cg_relative_residual,
             warm.cg_residual_stop
+        );
+    }
+
+    /// A dense Gram spectrum with a constant diagonal isolates the remaining
+    /// #2441 mechanism: Jacobi is only a scalar, while the non-diagonal
+    /// eigenvalue spread worsens between epochs. The cached decoder is reset to
+    /// zero before every solve so this gate cannot pass from the already-proved
+    /// warm `X0`; only the recycled Galerkin subspace can remove the growth.
+    #[test]
+    fn recycled_coarse_space_flattens_non_diagonal_conditioning_drift() {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerCholesky;
+
+        let (k, p, hard_rank) = (64usize, 32usize, 8usize);
+        let inv_sqrt_k = (k as f64).sqrt().recip();
+        let hadamard = |row: usize, col: usize| {
+            if (row & col).count_ones() % 2 == 0 {
+                inv_sqrt_k
+            } else {
+                -inv_sqrt_k
+            }
+        };
+        let fixture = |condition: f64| {
+            let mut eigenvalues = vec![1.0f64; k];
+            for (q, value) in eigenvalues.iter_mut().take(hard_rank).enumerate() {
+                *value = condition.powf(-(q as f64) / (hard_rank - 1) as f64);
+            }
+            let mut dense = Array2::<f64>::zeros((k, k));
+            for i in 0..k {
+                for j in 0..k {
+                    let mut value = 0.0f64;
+                    for (q, &lambda) in eigenvalues.iter().enumerate() {
+                        value += hadamard(i, q) * lambda * hadamard(j, q);
+                    }
+                    dense[[i, j]] = value;
+                }
+            }
+            let mut off = HashMap::new();
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    if dense[[i, j]] != 0.0 {
+                        off.insert((i as u32, j as u32), dense[[i, j]]);
+                    }
+                }
+            }
+            let mut truth = Array2::<f64>::zeros((k, p));
+            let mut b = Array2::<f64>::zeros((k, p));
+            for c in 0..p {
+                for q in 0..hard_rank {
+                    let mix = if (q & c).count_ones() % 2 == 0 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    for i in 0..k {
+                        b[[i, c]] += hadamard(i, q) * mix;
+                        truth[[i, c]] += hadamard(i, q) * mix / eigenvalues[q];
+                    }
+                }
+            }
+            (
+                DecoderNormalEq {
+                    diag: (0..k).map(|i| dense[[i, i]]).collect(),
+                    b,
+                    off,
+                    firings: vec![k; k],
+                    amplitude_sum: vec![k as f64; k],
+                },
+                dense,
+                truth,
+            )
+        };
+
+        let conditions = [4.0f64, 1.0e3, 1.0e6];
+        let mut recycle = DecoderRecycleSpace::new(k);
+        let mut recycled_iterations = Vec::new();
+        let mut recycled_ranks = Vec::new();
+        let mut cold_iterations = Vec::new();
+        for &condition in &conditions {
+            let (eq, dense, truth) = fixture(condition);
+
+            let mut cold_decoder = Array2::<f32>::zeros((k, p));
+            let cold = solve_decoder(
+                &mut cold_decoder,
+                &eq,
+                0.0,
+                gam_gpu::GpuPolicy::Off,
+            )
+            .expect("Jacobi control solve");
+            cold_iterations.push(cold.cg_iterations);
+
+            // Deliberately erase the ordinary warm seed. The recycle state is
+            // the only information allowed to cross this boundary.
+            let mut decoder = Array2::<f32>::zeros((k, p));
+            let stats = solve_decoder_recycled(
+                &mut decoder,
+                &eq,
+                0.0,
+                gam_gpu::GpuPolicy::Off,
+                &mut recycle,
+            )
+            .expect("recycled solve");
+            assert_eq!(stats.cg_nonconverged_columns, 0);
+            assert!(stats.cg_relative_residual <= stats.cg_residual_stop);
+            recycled_iterations.push(stats.cg_iterations);
+            recycled_ranks.push(stats.cg_recycled_rank);
+
+            // Independent dense Cholesky oracle: recycling changes only the
+            // exact-solve path, never the solved normal equations.
+            let dense_solution = dense
+                .cholesky(Side::Lower)
+                .expect("fixture SPD")
+                .solve_mat(&eq.b);
+            let mut error2 = 0.0f64;
+            let mut oracle2 = 0.0f64;
+            let mut planted2 = 0.0f64;
+            for i in 0..k {
+                for c in 0..p {
+                    let got = decoder[[i, c]] as f64;
+                    error2 += (got - dense_solution[[i, c]]).powi(2);
+                    oracle2 += dense_solution[[i, c]].powi(2);
+                    planted2 += (dense_solution[[i, c]] - truth[[i, c]]).powi(2);
+                }
+            }
+            assert!(
+                (planted2 / oracle2).sqrt() <= 1.0e-8,
+                "dense oracle must recover the planted solution at condition={condition}"
+            );
+            assert!(
+                (error2 / oracle2).sqrt() <= 2.0e-5,
+                "recycled solve must retain dense exactness at condition={condition}: rel={:.3e}",
+                (error2 / oracle2).sqrt()
+            );
+        }
+
+        assert_eq!(
+            recycled_ranks[0], 0,
+            "the first refresh has no historical subspace"
+        );
+        assert!(
+            recycled_ranks[1..].iter().all(|&rank| rank >= hard_rank),
+            "the prior certified corrections must recover the complete hard subspace: \
+             {recycled_ranks:?}"
+        );
+        let post_recycle = &recycled_iterations[1..];
+        assert!(
+            post_recycle.iter().copied().max().unwrap()
+                <= post_recycle.iter().copied().min().unwrap() + p,
+            "conditioning drift must add at most one aggregate iteration per RHS after recycling: \
+             recycled={recycled_iterations:?}, cold={cold_iterations:?}"
+        );
+        assert!(
+            cold_iterations[2] > 2 * recycled_iterations[2],
+            "the high-condition Jacobi control must expose the non-diagonal cost removed by \
+             recycling: recycled={recycled_iterations:?}, cold={cold_iterations:?}"
+        );
+    }
+
+    #[test]
+    fn recycled_space_restricts_before_capping_after_a_graph_split() {
+        let recycle = DecoderRecycleSpace {
+            rows: 4,
+            // The first stored direction belongs to the other side of the
+            // split. Capping before restriction used to hide the useful second
+            // direction entirely when rank_bound == 1.
+            directions: vec![
+                vec![1.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 1.0, 0.0],
+            ],
+            next_candidates: Vec::new(),
+            next_capacity: 0,
+        };
+        let preconditioner = recycled_component_preconditioner(
+            &recycle,
+            &[2, 3],
+            &[0, 1, 2],
+            &[1, 0],
+            &[0.25, 0.25],
+            &[1.0, 1.0],
+            1,
+        )
+        .expect("current split component Galerkin preconditioner");
+        assert_eq!(
+            preconditioner.rank(),
+            1,
+            "a useful later global direction must survive component restriction"
+        );
+    }
+
+    #[test]
+    fn recycled_space_reservoir_keeps_global_hardness_not_visit_order() {
+        fn filled(reverse: bool) -> DecoderRecycleSpace {
+            let mut recycle = DecoderRecycleSpace::new(4);
+            recycle.begin_refresh(4);
+            let weak = || {
+                (
+                    vec![0usize, 1usize],
+                    vec![1.0f64, 1.0f64],
+                    vec![1.0f64, 0.0f64],
+                    2usize,
+                    3usize,
+                )
+            };
+            let hard = || {
+                (
+                    vec![2usize, 3usize],
+                    vec![1.0f64, 1.0f64],
+                    vec![1.0f64, 0.0f64],
+                    9usize,
+                    7usize,
+                )
+            };
+            let mut retain = |candidate: (Vec<usize>, Vec<f64>, Vec<f64>, usize, usize)| {
+                let (comp, diagonal, correction, iterations, column) = candidate;
+                recycle.retain_component_correction(
+                    &comp,
+                    &diagonal,
+                    &correction,
+                    1,
+                    4,
+                    iterations,
+                    column,
+                );
+            };
+            if reverse {
+                retain(hard());
+                retain(weak());
+            } else {
+                retain(weak());
+                retain(hard());
+            }
+            drop(retain);
+            recycle.finish_refresh();
+            recycle
+        }
+
+        let forward = filled(false);
+        let reverse = filled(true);
+        assert_eq!(forward.directions, reverse.directions);
+        assert_eq!(forward.directions.len(), 1);
+        assert_eq!(
+            forward.directions[0],
+            vec![0.0, 0.0, 1.0, 0.0],
+            "the later harder component must replace an earlier weaker candidate"
         );
     }
 

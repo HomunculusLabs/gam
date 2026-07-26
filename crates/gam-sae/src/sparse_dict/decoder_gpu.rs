@@ -25,9 +25,9 @@
 //! * the per-column inner products are strict ascending-row folds in ONE
 //!   thread per column (adjacent threads read adjacent addresses at each row,
 //!   so the walk is coalesced despite being sequential per column);
-//! * initial residual formation, Jacobi scaling, and the `X`/`R` and `P`
-//!   updates perform the same separately rounded arithmetic per element,
-//!   gated by the same per-column active mask.
+//! * initial residual formation, Jacobi-plus-recycled coarse projection, and
+//!   the `X`/`R` and `P` updates perform the same separately rounded arithmetic
+//!   in the same row/rank order, gated by the same per-column active mask.
 //!
 //! The `device_block_cg_matches_cpu_bitwise` test pins `to_bits` equality of
 //! the full solve against the CPU backend on a giant-scale fixture, so a CUDA
@@ -47,7 +47,7 @@
 
 #![cfg(target_os = "linux")]
 
-use gam_linalg::pcg::PcgBlockBackend;
+use gam_linalg::pcg::{PcgBlockBackend, SymmetricLowRankPreconditioner};
 use ndarray::Array2;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -138,6 +138,58 @@ extern "C" __global__ void sae_decoder_cg_precondition(
     for (int i = blockIdx.y; i < m; i += gridDim.y) {
         size_t idx = (size_t)i * t + c;
         z_blk[idx] = __dmul_rn(inverse_diagonal[i], r_blk[idx]);
+    }
+}
+
+extern "C" __global__ void sae_decoder_cg_project_coarse(
+    const double* __restrict__ r_blk,
+    const double* __restrict__ projection,
+    double* __restrict__ coefficients,
+    int m,
+    int t,
+    int rank)
+{
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= t) return;
+    for (int q = blockIdx.y; q < rank; q += (int)gridDim.y) {
+        double acc = 0.0;
+        for (int i = 0; i < m; ++i) {
+            acc = __dadd_rn(
+                acc,
+                __dmul_rn(projection[(size_t)i * rank + q], r_blk[(size_t)i * t + c]));
+        }
+        coefficients[(size_t)q * t + c] = acc;
+    }
+}
+
+extern "C" __global__ void sae_decoder_cg_expand_coarse(
+    const double* __restrict__ r_blk,
+    double* __restrict__ z_blk,
+    double* __restrict__ p_blk,
+    const double* __restrict__ inverse_diagonal,
+    const double* __restrict__ correction,
+    const double* __restrict__ coefficients,
+    int m,
+    int t,
+    int rank,
+    int initialize_p)
+{
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= t) return;
+    for (int i = blockIdx.y; i < m; i += gridDim.y) {
+        size_t idx = (size_t)i * t + c;
+        double acc = __dmul_rn(inverse_diagonal[i], r_blk[idx]);
+        for (int q = 0; q < rank; ++q) {
+            acc = __dadd_rn(
+                acc,
+                __dmul_rn(
+                    correction[(size_t)i * rank + q],
+                    coefficients[(size_t)q * t + c]));
+        }
+        z_blk[idx] = acc;
+        if (initialize_p != 0) {
+            p_blk[idx] = acc;
+        }
     }
 }
 
@@ -241,11 +293,15 @@ pub(super) struct DeviceBlockCgBackend {
     module: Arc<CudaModule>,
     m: usize,
     t: usize,
+    rank: usize,
     diag: CudaSlice<f64>,
     row_ptr: CudaSlice<u32>,
     cols: CudaSlice<u32>,
     vals: CudaSlice<f64>,
     inverse_diagonal: CudaSlice<f64>,
+    projection: Option<CudaSlice<f64>>,
+    correction: Option<CudaSlice<f64>>,
+    coarse_coefficients: Option<CudaSlice<f64>>,
     x: CudaSlice<f64>,
     r: CudaSlice<f64>,
     z: CudaSlice<f64>,
@@ -264,7 +320,8 @@ impl DeviceBlockCgBackend {
     /// it. `Ok(None)` is an ordinary Auto decline (absent device or a block
     /// below the break-even); `Err` is a Required-policy failure. The CG
     /// entry state is formed here: `X = initial_solution`,
-    /// `R = B - A·X`, `Z = D⁻¹R`, `P = Z`.
+    /// `R = B - A·X`, `Z = H·R`, `P = Z`, where `H` is the shared symmetric
+    /// Jacobi-plus-recycled coarse inverse.
     pub(super) fn try_new(
         gpu: gam_gpu::GpuPolicy,
         row_ptr: &[u32],
@@ -273,11 +330,11 @@ impl DeviceBlockCgBackend {
         diag_ridge: &[f64],
         rhs_block: &Array2<f64>,
         initial_solution: &Array2<f64>,
-        inverse_diagonal: &[f64],
+        preconditioner: &SymmetricLowRankPreconditioner,
     ) -> Result<Option<Self>, String> {
         let (m, t) = rhs_block.dim();
         assert_eq!(initial_solution.dim(), (m, t));
-        assert_eq!(inverse_diagonal.len(), m);
+        assert_eq!(preconditioner.rows(), m);
         match gpu {
             gam_gpu::GpuPolicy::Off => return Ok(None),
             gam_gpu::GpuPolicy::Auto => {
@@ -315,6 +372,7 @@ impl DeviceBlockCgBackend {
         let initial_host = initial_solution
             .as_slice()
             .expect("decoder block-CG initial solution is standard layout");
+        let rank = preconditioner.rank();
         let mut rhs_norm_squared = vec![0.0f64; t];
         for i in 0..m {
             let base = i * t;
@@ -328,8 +386,45 @@ impl DeviceBlockCgBackend {
             let cols = stream.clone_htod(csr_cols).gpu_ctx("htod cols")?;
             let vals = stream.clone_htod(csr_vals).gpu_ctx("htod vals")?;
             let inverse_diagonal = stream
-                .clone_htod(inverse_diagonal)
+                .clone_htod(preconditioner.inverse_diagonal())
                 .gpu_ctx("htod inverse diagonal")?;
+            let projection = if rank == 0 {
+                None
+            } else {
+                Some(
+                    stream
+                        .clone_htod(
+                            preconditioner
+                                .projection()
+                                .as_slice()
+                                .expect("PCG projection is standard layout"),
+                        )
+                        .gpu_ctx("htod coarse projection")?,
+                )
+            };
+            let correction = if rank == 0 {
+                None
+            } else {
+                Some(
+                    stream
+                        .clone_htod(
+                            preconditioner
+                                .correction()
+                                .as_slice()
+                                .expect("PCG correction is standard layout"),
+                        )
+                        .gpu_ctx("htod coarse correction")?,
+                )
+            };
+            let coarse_coefficients = if rank == 0 {
+                None
+            } else {
+                Some(
+                    stream
+                        .alloc_zeros::<f64>(rank * t)
+                        .gpu_ctx("alloc coarse coefficients")?,
+                )
+            };
             let x = stream.clone_htod(initial_host).gpu_ctx("htod x")?;
             let r = stream.clone_htod(rhs_host).gpu_ctx("htod r")?;
             let z = stream.alloc_zeros::<f64>(m * t).gpu_ctx("alloc z")?;
@@ -343,11 +438,15 @@ impl DeviceBlockCgBackend {
                 module,
                 m,
                 t,
+                rank,
                 diag,
                 row_ptr,
                 cols,
                 vals,
                 inverse_diagonal,
+                projection,
+                correction,
+                coarse_coefficients,
                 x,
                 r,
                 z,
@@ -367,6 +466,9 @@ impl DeviceBlockCgBackend {
             resident.apply_block();
         }
         resident.initialize_preconditioned_state();
+        if resident.rank > 0 {
+            resident.apply_preconditioner(true);
+        }
         Ok(Some(resident))
     }
 
@@ -395,6 +497,18 @@ impl DeviceBlockCgBackend {
         } else {
             1
         };
+        LaunchConfig {
+            grid_dim: (grid_x, grid_y, 1),
+            block_dim: (COLUMN_BLOCK_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    }
+
+    fn coarse_grid(&self) -> LaunchConfig {
+        let grid_x = u32::try_from(self.t.div_ceil(COLUMN_BLOCK_THREADS as usize))
+            .expect("decoder block-CG column grid overflows u32");
+        let grid_y = u32::try_from(self.rank.min(MAX_GRID_Y))
+            .expect("decoder block-CG coarse rank overflows u32");
         LaunchConfig {
             grid_dim: (grid_x, grid_y, 1),
             block_dim: (COLUMN_BLOCK_THREADS, 1, 1),
@@ -434,6 +548,87 @@ impl DeviceBlockCgBackend {
             "initialize launch",
             unsafe { builder.launch(cfg) }.gpu_ctx("launch initialize"),
         );
+    }
+
+    /// Apply the same symmetric Jacobi-plus-coarse inverse as the CPU backend.
+    /// The projection kernel assigns one thread to each `(coarse mode, column)`
+    /// and folds rows in ascending order; the expansion kernel assigns one
+    /// thread to each `(row, column)` and folds modes in ascending order.
+    fn apply_preconditioner(&mut self, initialize_p: bool) {
+        debug_assert!(self.rank > 0);
+        let project = complete(
+            "project_coarse load_function",
+            self.module
+                .load_function("sae_decoder_cg_project_coarse")
+                .gpu_ctx("load sae_decoder_cg_project_coarse"),
+        );
+        let expand = complete(
+            "expand_coarse load_function",
+            self.module
+                .load_function("sae_decoder_cg_expand_coarse")
+                .gpu_ctx("load sae_decoder_cg_expand_coarse"),
+        );
+        let (m_i32, t_i32) = self.dims_i32();
+        let rank_i32 =
+            i32::try_from(self.rank).expect("decoder block-CG coarse rank overflows i32");
+        let coarse_cfg = self.coarse_grid();
+        let row_cfg = self.launch_grid(true);
+        {
+            let projection = self
+                .projection
+                .as_ref()
+                .expect("positive-rank preconditioner has a projection");
+            let coefficients = self
+                .coarse_coefficients
+                .as_mut()
+                .expect("positive-rank preconditioner has coefficient storage");
+            let mut builder = self.stream.launch_builder(&project);
+            builder
+                .arg(&self.r)
+                .arg(projection)
+                .arg(coefficients)
+                .arg(&m_i32)
+                .arg(&t_i32)
+                .arg(&rank_i32);
+            // SAFETY: the grid covers exactly `rank × t` outputs. Each thread
+            // reads the resident `m × t` residual and `m × rank` projection,
+            // then writes one distinct coefficient.
+            complete(
+                "project_coarse launch",
+                unsafe { builder.launch(coarse_cfg) }.gpu_ctx("launch project_coarse"),
+            );
+        }
+        {
+            let correction = self
+                .correction
+                .as_ref()
+                .expect("positive-rank preconditioner has a correction");
+            let coefficients = self
+                .coarse_coefficients
+                .as_ref()
+                .expect("positive-rank preconditioner has coefficient storage");
+            let initialize_p_i32 = if initialize_p { 1i32 } else { 0i32 };
+            let mut builder = self.stream.launch_builder(&expand);
+            builder
+                .arg(&self.r)
+                .arg(&mut self.z)
+                .arg(&mut self.p)
+                .arg(&self.inverse_diagonal)
+                .arg(correction)
+                .arg(coefficients)
+                .arg(&m_i32)
+                .arg(&t_i32)
+                .arg(&rank_i32)
+                .arg(&initialize_p_i32);
+            // SAFETY: the row-strided grid covers exactly `m × t` outputs.
+            // Inputs are the resident diagonal, `m × rank` correction, and
+            // `rank × t` coefficients. `z` is written once per element; `p`
+            // is written on construction only.
+            complete(
+                "expand_coarse launch",
+                unsafe { builder.launch(row_cfg) }.gpu_ctx("launch expand_coarse"),
+            );
+        }
     }
 
     fn run_dot(&mut self, which: DotOperands, out: &mut [f64]) {
@@ -574,6 +769,10 @@ impl PcgBlockBackend for DeviceBlockCgBackend {
     }
 
     fn refresh_preconditioned_residual(&mut self) {
+        if self.rank > 0 {
+            self.apply_preconditioner(false);
+            return;
+        }
         let func = complete(
             "precondition load_function",
             self.module
@@ -728,9 +927,13 @@ mod tests {
                 });
         };
         let initial = rhs.mapv(|value| 0.01 * value);
-        let inverse_diagonal = diag.iter().map(|d| d.recip()).collect();
-        let mut backend =
-            CpuPcgBlockBackend::new(rhs.clone(), initial, inverse_diagonal, apply);
+        let preconditioner = parity_preconditioner(diag);
+        let mut backend = CpuPcgBlockBackend::new_with_preconditioner(
+            rhs.clone(),
+            initial,
+            preconditioner,
+            apply,
+        );
         let results = pcg_multi_core(&mut backend, rel_tol, cap, true);
         (results, backend.into_solution())
     }
@@ -745,7 +948,7 @@ mod tests {
         cap: usize,
     ) -> (Vec<gam_linalg::pcg::PcgCoreResult>, Array2<f64>) {
         let initial = rhs.mapv(|value| 0.01 * value);
-        let inverse_diagonal: Vec<f64> = diag.iter().map(|d| d.recip()).collect();
+        let preconditioner = parity_preconditioner(diag);
         let mut backend = DeviceBlockCgBackend::try_new(
             gam_gpu::GpuPolicy::Required,
             row_ptr,
@@ -754,13 +957,34 @@ mod tests {
             diag,
             rhs,
             &initial,
-            &inverse_diagonal,
+            &preconditioner,
         )
         .expect("device backend build")
         .expect("device backend admitted under Required");
         let results = pcg_multi_core(&mut backend, rel_tol, cap, true);
         let solution = backend.take_solution().expect("solution download");
         (results, solution)
+    }
+
+    /// Dense rank-one SPD correction, deliberately non-diagonal in physical
+    /// coordinates. In scaled coordinates its inverse is
+    /// `I - ½qqᵀ` (`‖q‖=1`), whose eigenvalues are `{1/2, 1, …, 1}`.
+    fn parity_preconditioner(diag: &[f64]) -> SymmetricLowRankPreconditioner {
+        let m = diag.len();
+        let q = (m as f64).sqrt().recip();
+        let mut candidate = Array2::<f64>::zeros((m, 1));
+        for i in 0..m {
+            candidate[[i, 0]] = q;
+        }
+        SymmetricLowRankPreconditioner::from_scaled_subspace(
+            diag.iter().map(|d| d.recip()).collect(),
+            candidate,
+            |basis, image| {
+                image.assign(basis);
+                image.mapv_inplace(|value| 2.0 * value);
+            },
+        )
+        .expect("parity fixture coarse operator is SPD")
     }
 
     /// The device-resident block CG must reproduce the CPU backend BIT-FOR-BIT:

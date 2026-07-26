@@ -38,8 +38,8 @@
 
 use super::scoring::TileScorer;
 use super::update::{
-    DEAD_DENOM, DecoderNormalEq, DecoderSolveStats, route_and_code_all, seed_decoder,
-    solve_decoder_with_routability_gate, unit_norm_rows,
+    DEAD_DENOM, DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, route_and_code_all,
+    seed_decoder, solve_decoder_with_routability_gate_recycled, unit_norm_rows,
 };
 use super::{ScoreRouteStats, SparseDictConfig};
 use ndarray::{Array2, ArrayView2};
@@ -208,6 +208,7 @@ pub struct SparseDictStreamState {
     converged: bool,
     score_route_stats: ScoreRouteStats,
     last_decoder_solve_stats: DecoderSolveStats,
+    decoder_recycle: DecoderRecycleSpace,
 }
 
 impl SparseDictStreamState {
@@ -258,6 +259,7 @@ impl SparseDictStreamState {
             converged: false,
             score_route_stats: ScoreRouteStats::default(),
             last_decoder_solve_stats: DecoderSolveStats::default(),
+            decoder_recycle: DecoderRecycleSpace::new(k),
         })
     }
 
@@ -387,12 +389,13 @@ impl SparseDictStreamState {
         // (c) routability-gated decoder refresh from accumulated normal equations,
         // then (d) unit-norm. Deferred atoms keep their evidence streaming.
         let sigma = (self.rss / (self.row_count * self.p) as f64).sqrt();
-        let (decoder_solve_stats, gate) = solve_decoder_with_routability_gate(
+        let (decoder_solve_stats, gate) = solve_decoder_with_routability_gate_recycled(
             &mut self.decoder,
             &self.eq,
             self.config.decoder_ridge as f64,
             sigma,
             self.config.score_mode,
+            &mut self.decoder_recycle,
         )?;
         self.eq.clear_refreshed_atoms(&gate);
         unit_norm_rows(&mut self.decoder)?;
