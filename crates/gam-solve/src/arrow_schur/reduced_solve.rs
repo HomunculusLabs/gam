@@ -1794,24 +1794,36 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
     // returns for `htbeta_matvec` systems. Declines (no device / shape / non-PD at
     // this ridge) fall through to the backend/CPU path. Non-Linux/CPU: this always
     // returns `None` (no `device_sae_pcg`), so the lane is byte-identical.
+    // `Unavailable` is the device saying "not this shape/config", which is a
+    // DECLINE and not a fault: every other exit from this function reports a
+    // decline as `Ok(None)`, the CPU lane, and the sibling device seam at
+    // `solve_reduced_beta_pcg` above already falls through on the same variant.
+    // Surfacing it as an error made a host WITH a GPU fail where a CPU-only host
+    // returned `Ok(None)` at the runtime probe and passed. Genuine faults
+    // (`RidgeBumpRequired`, `SchurFactorFailed`) still surface.
     if sys.device_sae_pcg.is_some() {
-        if let Some(matvec) =
-            crate::gpu_kernels::arrow_schur::build_framed_resident_evidence_matvec(
-                sys,
-                ridge_t,
-                ridge_beta,
-                apply_budget.max(1),
-            )
-            .map_err(|failure| {
-                device_failure_as_arrow_error("resident evidence matvec build", failure)
-            })?
-        {
-            return Ok(Some(matvec));
+        match crate::gpu_kernels::arrow_schur::build_framed_resident_evidence_matvec(
+            sys,
+            ridge_t,
+            ridge_beta,
+            apply_budget.max(1),
+        ) {
+            Ok(Some(matvec)) => return Ok(Some(matvec)),
+            Ok(None) => {}
+            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {}
+            Err(failure) => {
+                return Err(device_failure_as_arrow_error(
+                    "resident evidence matvec build",
+                    failure,
+                ));
+            }
         }
     }
-    crate::gpu_kernels::arrow_schur::gpu_schur_matvec_backend(sys, ridge_t, ridge_beta)
-        .map(Some)
-        .map_err(|failure| device_failure_as_arrow_error("evidence matvec build", failure))
+    match crate::gpu_kernels::arrow_schur::gpu_schur_matvec_backend(sys, ridge_t, ridge_beta) {
+        Ok(matvec) => Ok(Some(matvec)),
+        Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => Ok(None),
+        Err(failure) => Err(device_failure_as_arrow_error("evidence matvec build", failure)),
+    }
 }
 
 /// Fixed configuration for the #2080 rational-surrogate evidence lane: the probe
