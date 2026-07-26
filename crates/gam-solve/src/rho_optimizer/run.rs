@@ -2082,6 +2082,34 @@ impl std::fmt::Display for RailTest {
     }
 }
 
+/// The certificate-facing facts for `indices`: the interval and margin each
+/// railed coordinate was judged against (#2530).
+///
+/// Built from [`RailTest`], which is the single definition of railed, so the
+/// certificate reports what the predicate actually decided rather than a second
+/// derivation of it. A coordinate the configured box does not cover contributes
+/// nothing: it was not judged against an interval, so there is no interval to
+/// report.
+pub(crate) fn railed_coordinate_facts(
+    theta: &Array1<f64>,
+    indices: &[usize],
+    config: &OuterConfig,
+) -> Vec<RailedCoordinateFact> {
+    indices
+        .iter()
+        .filter_map(|&k| {
+            let test = RailTest::evaluate(theta, k, config);
+            test.box_bounds.map(|(lower, upper)| RailedCoordinateFact {
+                index: test.index,
+                theta: test.theta,
+                lower,
+                upper,
+                margin: test.margin,
+            })
+        })
+        .collect()
+}
+
 /// Render the rail tests for `indices`, so a refusal naming railed coordinates
 /// also states the interval and margin each was judged against (#2465).
 pub(crate) fn rail_test_summary(
@@ -2570,6 +2598,11 @@ fn certify_fixed_point_optimality(
         },
         hessian_psd: None,
         lambdas_railed: certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
+        railed_facts: railed_coordinate_facts(
+            &result.rho,
+            &certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
+            config,
+        ),
         curvature_floor: None,
     };
     result.criterion_certificate = Some(certificate.clone());
@@ -2733,6 +2766,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             curvature_floor: None,
         };
         result.final_value = value;
@@ -3295,6 +3329,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     },
                     hessian_psd: Some(true),
                     lambdas_railed: railed_lambda_block.clone(),
+                    railed_facts: railed_coordinate_facts(
+                        &result.rho,
+                        &railed_lambda_block,
+                        config,
+                    ),
                     curvature_floor: None,
                 };
                 // Move the certified curvature onto the result; the mint path returns
@@ -3444,6 +3483,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             certificate_hessian_is_psd_off_railed(hessian, &certificate_railed)
         }),
         lambdas_railed: railed_lambda_block.clone(),
+        railed_facts: railed_coordinate_facts(&result.rho, &railed_lambda_block, config),
         // The floor's verdict on that same curvature, recorded beside it.
         curvature_floor: analytic_hessian.as_ref().and_then(|hessian| {
             interior_curvature_floor_clearance(hessian, &certificate_railed, &projected_gradient)
@@ -3533,6 +3573,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     },
                     hessian_psd: Some(true),
                     lambdas_railed: railed_lambda_block.clone(),
+                    railed_facts: railed_coordinate_facts(
+                        &result.rho,
+                        &railed_lambda_block,
+                        config,
+                    ),
                     curvature_floor: None,
                 };
                 result.final_hessian = analytic_hessian;

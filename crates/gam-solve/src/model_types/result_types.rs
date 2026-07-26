@@ -788,6 +788,46 @@ pub struct CurvatureFloorClearance {
     pub cleared: bool,
 }
 
+
+/// One railed coordinate together with the interval and margin it was judged
+/// against (#2530).
+///
+/// `lambdas_railed` is a list of indices, and an index is not a verdict anyone
+/// can check: `ρ=29.994` is railed against `[-30, +30]` and interior to
+/// `[-100, +100]`. Recovering the interval for a single coordinate cost a
+/// thirteen-point seeding sweep on #2462, and that same issue then made the
+/// margin `coordinate_rail_margin(lo, hi)` — **width-capped per coordinate** —
+/// so two coordinates in one fit can be judged against different margins and
+/// `railed=[1, 3]` is not even one statement.
+///
+/// Carried beside `lambdas_railed` rather than replacing it: that field is the
+/// stable index report every consumer already reads, and widening its element
+/// type would churn ~45 call sites to deliver the same facts.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RailedCoordinateFact {
+    /// Index into the θ vector — the same index that appears in
+    /// `lambdas_railed` when the coordinate is in the ρ block.
+    pub index: usize,
+    /// The coordinate's value at the certified point.
+    pub theta: f64,
+    /// Lower box bound it was tested against.
+    pub lower: f64,
+    /// Upper box bound it was tested against.
+    pub upper: f64,
+    /// The width-capped margin in force for THIS coordinate.
+    pub margin: f64,
+}
+
+impl std::fmt::Display for RailedCoordinateFact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "#{} theta={:.6e} box=[{:.6e}, {:.6e}] margin={:.3e}",
+            self.index, self.theta, self.lower, self.upper, self.margin
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterCriterionCertificate {
     pub stationarity: OuterStationarityCertificate,
@@ -798,6 +838,12 @@ pub struct OuterCriterionCertificate {
     /// Leading smoothing coordinates (ρ block) pinned within
     /// [`CERTIFICATE_RAIL_MARGIN`] of either box bound at the optimum.
     pub lambdas_railed: Vec<usize>,
+    /// The interval and margin each railed coordinate was judged against
+    /// (#2530). Empty when nothing is railed. `#[serde(default)]` so a
+    /// certificate stored before this field existed still deserializes — those
+    /// carry no facts, which is honest: none were recorded.
+    #[serde(default)]
+    pub railed_facts: Vec<RailedCoordinateFact>,
     /// The gradient-residue floor's verdict on that same curvature, when it was
     /// computed. `hessian_psd` above stays the raw measurement; this records
     /// whether the most negative interior direction is below the instrument's
@@ -919,14 +965,27 @@ impl OuterCriterionCertificate {
                 )
             }
         };
+        let railed = if self.railed_facts.is_empty() {
+            format!("{:?}", self.lambdas_railed)
+        } else {
+            format!(
+                "{:?} [{}]",
+                self.lambdas_railed,
+                self.railed_facts
+                    .iter()
+                    .map(|fact| fact.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         format!(
-            "{stationarity} hessian_psd={} railed={:?} → {}",
+            "{stationarity} hessian_psd={} railed={} → {}",
             match self.hessian_psd {
                 Some(true) => "yes",
                 Some(false) => "NO",
                 None => "n/a",
             },
-            self.lambdas_railed,
+            railed,
             if self.certifies() {
                 "stationary"
             } else if self.is_stationary() {
@@ -1863,6 +1922,7 @@ mod assembly_inner_status_gate_tests {
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             curvature_floor: None,
         });
         parts.outer_gradient_norm = Some(0.0);

@@ -753,6 +753,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
                 },
                 hessian_psd: Some(true),
                 lambdas_railed: Vec::new(),
+                railed_facts: Vec::new(),
                 curvature_floor: None,
             }),
             ..Default::default()

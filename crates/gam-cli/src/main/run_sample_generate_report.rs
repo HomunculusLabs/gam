@@ -1062,6 +1062,11 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
                 stationarity,
                 hessian_psd: cert.hessian_psd,
                 lambdas_railed: cert.lambdas_railed.clone(),
+                railed_facts: cert
+                    .railed_facts
+                    .iter()
+                    .map(|fact| (fact.index, fact.theta, fact.lower, fact.upper, fact.margin))
+                    .collect(),
                 stationary: cert.is_stationary(),
                 clean: cert.is_clean(),
             }

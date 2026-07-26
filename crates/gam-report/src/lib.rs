@@ -164,6 +164,12 @@ pub struct CriterionCertificateRow {
     pub stationarity: CriterionStationarityRow,
     pub hessian_psd: Option<bool>,
     pub lambdas_railed: Vec<usize>,
+    /// Per railed coordinate, the interval and margin it was judged against
+    /// (#2530): `(index, theta, lower, upper, margin)`. Empty when the fit
+    /// predates the field or nothing is railed. Rendered beside the indices so
+    /// the warning a user reads is checkable — an index alone cannot say which
+    /// box it met, and since #2462 the margin is per-coordinate.
+    pub railed_facts: Vec<(usize, f64, f64, f64, f64)>,
     pub stationary: bool,
     pub clean: bool,
 }
@@ -542,10 +548,25 @@ pub fn render_html(input: &ReportInput) -> Result<String, String> {
                 flags.push("outer Hessian not positive semidefinite".to_string());
             }
             if !cert.lambdas_railed.is_empty() {
-                flags.push(format!(
-                    "\u{03BB} railed at bound: {:?}",
-                    cert.lambdas_railed
-                ));
+                let detail = cert
+                    .railed_facts
+                    .iter()
+                    .map(|(index, theta, lower, upper, margin)| {
+                        format!(
+                            "#{index} \u{3B8}={theta:.4e} box=[{lower:.4e}, {upper:.4e}] \
+                             margin={margin:.2e}"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                flags.push(if detail.is_empty() {
+                    format!("\u{03BB} railed at bound: {:?}", cert.lambdas_railed)
+                } else {
+                    format!(
+                        "\u{03BB} railed at bound: {:?} ({})",
+                        cert.lambdas_railed,
+                        detail.join("; ")
+                    )
+                });
             }
             format!(
                 "<span class=\"conv-warn\">\u{26A0} {}</span>",
@@ -1388,6 +1409,40 @@ mod tests {
         );
     }
 
+    /// #2530 acceptance: a railed warning states the interval and margin each
+    /// coordinate was judged against, not just its index.
+    ///
+    /// `railed=[3]` alone is not checkable — since #2462 the margin is
+    /// width-capped PER COORDINATE, so two coordinates in one fit can be judged
+    /// against different bands and the index cannot say which one this was.
+    #[test]
+    fn render_html_states_the_box_each_railed_coordinate_was_judged_against() {
+        let mut input = minimal_input("y ~ s(x)");
+        input.criterion_certificate = Some(CriterionCertificateRow {
+            stationarity: CriterionStationarityRow::AnalyticGradient {
+                grad_norm: 2.0e-9,
+                projected_grad_norm: 1.0e-9,
+                bound: 1.0e-8,
+            },
+            hessian_psd: Some(true),
+            lambdas_railed: vec![3],
+            railed_facts: vec![(3, 29.994, -30.0, 30.0, 0.5)],
+            stationary: true,
+            clean: false,
+        });
+        let html = render_html(&input).unwrap();
+        assert!(
+            html.contains("railed at bound"),
+            "the rail warning must still be raised: {html}"
+        );
+        for needle in ["#3", "2.9994e1", "-3.0000e1", "3.0000e1", "5.00e-1"] {
+            assert!(
+                html.contains(needle),
+                "the railed warning must state {needle} so the verdict is checkable"
+            );
+        }
+    }
+
     #[test]
     fn render_html_names_analytic_gradient_certificate_as_gradient() {
         let mut input = minimal_input("y ~ s(x)");
@@ -1399,6 +1454,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             stationary: true,
             clean: true,
         });
@@ -1419,6 +1475,7 @@ mod tests {
             },
             hessian_psd: None,
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             stationary: true,
             clean: true,
         });

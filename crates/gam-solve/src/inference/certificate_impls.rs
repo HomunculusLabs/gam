@@ -264,6 +264,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             curvature_floor: None,
         };
         assert_eq!(clean.verdict(), Verdict::Certified);
@@ -344,6 +345,7 @@ mod tests {
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
             curvature_floor: None,
         };
         let cert = CoresetCertificate::new(0.1, 0.0, 4, 32).expect("coreset");
