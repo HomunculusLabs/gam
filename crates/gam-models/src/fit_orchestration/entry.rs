@@ -1,5 +1,6 @@
 use super::*;
 use gam_linalg::matrix::LinearOperator;
+use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
 /// Request-specific inputs to the canonical standard-fit `FitOptions`.
 ///
@@ -664,11 +665,24 @@ fn deterministic_gaussian_standard_fit(
             // symmetric matrices); it must be stored as-is so `H·F = XᵀWX`
             // and per-term `tr(F_jj)` stay exact (see estimate.rs / #1027).
             let influence = chol.solve_mat(&xtwx);
-            let mut edf_by_block = vec![0.0_f64; n_penalties];
-            let mut penalty_block_trace = vec![0.0_f64; n_penalties];
+            let mut raw_traces = vec![0.0_f64; n_penalties];
+            let mut block_ranks = vec![0_usize; n_penalties];
             for (kk, block) in design.penalties.iter().enumerate() {
                 let r = block.col_range.clone();
                 let block_cols = r.len();
+                // The per-block ceiling is `rank(S_k)`, NOT the block's column
+                // count: they differ by `nullity(S_k)`, a whole integer of
+                // reported complexity for every penalized block, and the rank is
+                // what the REML criterion already prices as `rank(S_k)·ρ_k`
+                // (#2470). This path previously measured against `block_cols`
+                // and so reported each block with its penalty nullity added.
+                block_ranks[kk] = penalty_matrix_root(&block.local)
+                    .map_err(|reason| WorkflowError::IntegrationFailed {
+                        reason: format!(
+                            "deterministic Gaussian shortcut penalty {kk} rank factorization                              failed: {reason}"
+                        ),
+                    })?
+                    .nrows();
                 // tr(H⁻¹ S_k): solve `H Z = S_k` (embedded in the full p×block
                 // layout) and read the block diagonal of the solution.
                 let mut rhs = Array2::<f64>::zeros((p, block_cols));
@@ -682,20 +696,30 @@ fn deterministic_gaussian_standard_fit(
                 for j in 0..block_cols {
                     trace += sol[[r.start + j, j]];
                 }
-                let lam_trace = (lambda_full * trace).clamp(0.0, block_cols as f64);
-                penalty_block_trace[kk] = lam_trace;
-                edf_by_block[kk] = (block_cols as f64 - lam_trace).clamp(0.0, block_cols as f64);
+                raw_traces[kk] = lambda_full * trace;
             }
-            let edf_total = influence
-                .diag()
-                .iter()
-                .copied()
-                .sum::<f64>()
-                .clamp(0.0, p as f64);
+            // `unit_penalty` is `Σ_k S_k` by construction above, and
+            // `H = XᵀWX + λ·Σ_k S_k`, so `p − Σ_k λ·tr(H⁻¹S_k) = tr(F)` exactly
+            // — the shared accounting reports the same total this path used to
+            // read off the influence diagonal, now with the floor that total
+            // cannot legitimately fall below.
+            let joint_penalty_rank = penalty_matrix_root(&unit_penalty)
+                .map_err(|reason| WorkflowError::IntegrationFailed {
+                    reason: format!(
+                        "deterministic Gaussian shortcut joint penalty rank factorization                          failed: {reason}"
+                    ),
+                })?
+                .nrows();
+            let bundle = gam_solve::estimate::penalized_edf_bundle(
+                &raw_traces,
+                &block_ranks,
+                p,
+                (p - joint_penalty_rank.min(p)) as f64,
+            );
             (
-                edf_total,
-                edf_by_block,
-                penalty_block_trace,
+                bundle.edf_total,
+                bundle.edf_by_block,
+                bundle.penalty_block_trace,
                 Some(influence),
             )
         }
