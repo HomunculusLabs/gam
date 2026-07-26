@@ -4284,11 +4284,16 @@ fn validate_bounded_observation_inputs(
     }
     // Atomic whole-vector preflight: an invalid later weight wins before any
     // response or predictor row is inspected.
+    // The row index is 0-based, matching `bounded_row_error` below — which
+    // reports the same rows of the same vectors through the typed
+    // `PirlsRowGeometryUnrepresentable { row }` field a caller can use to index
+    // straight back into `y`/`weights`/`eta`. This message used to emit `i + 1`,
+    // so one function refused two kinds of bad row under two different index
+    // bases and a reader could not tell which one a given "row N" meant.
     for (i, &wi) in weights.iter().enumerate() {
         if !(wi.is_finite() && wi >= 0.0) {
             return Err(EstimationError::InvalidInput(format!(
-                "bounded-family row {} has invalid prior weight {wi:?}; expected finite weight >= 0",
-                i + 1
+                "bounded-family row {i} has invalid prior weight {wi:?}; expected finite weight >= 0"
             )));
         }
     }
@@ -8364,8 +8369,12 @@ mod glm_eta_observation_fd_tests {
             &array![f64::NAN, 0.2],
         )
         .expect_err("later invalid weight must refuse before row evaluation");
+        // The offending weight is `weights[1]`, and row indices here are 0-based
+        // (same base as the typed `PirlsRowGeometryUnrepresentable { row }` this
+        // function's other refusal carries). This expectation read `row 2` while
+        // the preflight emitted `i + 1`; both have been put on the 0-based base.
         assert!(
-            error.to_string().contains("row 2 has invalid prior weight"),
+            error.to_string().contains("row 1 has invalid prior weight"),
             "unexpected atomic preflight error: {error}"
         );
     }
