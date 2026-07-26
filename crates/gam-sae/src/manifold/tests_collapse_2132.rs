@@ -219,6 +219,7 @@ fn fit_circle_dictionary(
 
 #[test]
 fn zz_collapse_2132_heldout_ev_nondecreasing_and_beats_pca() {
+    gam_runtime::test_support::install_diagnostic_logger();
     const C: usize = 4;
     const P: usize = 24;
     const SIGMA: f64 = 0.05;

@@ -88,6 +88,7 @@ fn cold_oos_ev(
 
 #[test]
 fn zz_zoo_micro_local_full_fit_and_oos_discriminator() {
+    gam_runtime::test_support::install_diagnostic_logger();
     let train = zoo_fixture("train_3000x48_f64le.bin", 3000, 48);
     let test = zoo_fixture("test_1500x48_f64le.bin", 1500, 48);
 
@@ -225,6 +226,7 @@ fn rank_charge_zoo_arm(train: &Array2<f64>, test: &Array2<f64>) -> RankChargeArm
 #[test]
 // zz_measure: one full outer fit; focused runs select it by its zz_ name.
 fn zz_rank_charge_zoo_micro_2022() {
+    gam_runtime::test_support::install_diagnostic_logger();
     let train = zoo_fixture("train_3000x48_f64le.bin", 3000, 48);
     let test = zoo_fixture("test_1500x48_f64le.bin", 1500, 48);
 
