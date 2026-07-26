@@ -235,14 +235,33 @@ fn run_basis(basis_term: &str) {
             audit.psi_steps[j]
         );
         let scale = analytic.abs().max(fd.abs()).max(1e-6);
-        // Left at 5e-2 deliberately. The audit now Ridders-extrapolates and
-        // reports `psi_fd_uncertainty` (#2461), so this tolerance is no longer
-        // pinned by the oracle's truncation and the isotropic-kappa and
-        // constant-curvature siblings came down to 5e-3 on the strength of
-        // that. This lane is not tightened with them because its own
-        // convergence behaviour is the subject of #979 and a tightening here
-        // could not be told apart from that; the realized uncertainty is
-        // printed on failure so the next reader can make the call from data.
+        // Left at 5e-2, and it does not matter: BOTH arms fail it, and with
+        // the self-certifying audit (#2461) the failure is now attributable.
+        // Measured at this commit:
+        //
+        //   duchon(PC1,PC2,centers=4,order=1,ls=1.0)  psi 0
+        //     analytic = -1.015181e-4
+        //     fd       = +3.389311e-11  +/- 2.542e-11  (order 4, h=3.913e-3)
+        //     rel      =  1.000e0
+        //
+        //   matern(PC1,PC2,centers=4)                 psi 0
+        //     analytic = +3.659825e-4
+        //     fd       = +3.155800e-4  +/- 5.286e-11  (order 6, h=3.922e-3)
+        //     rel      =  1.377e-1
+        //
+        // On the Duchon arm the criterion is FLAT in psi to `2.5e-11` while the
+        // analytic gradient reports `-1.0e-4` -- six orders apart, with the
+        // oracle's own error six orders below the gap. On the Matern arm the
+        // two differ by 13.8% against an oracle uncertainty of `5.3e-11`, i.e.
+        // seven orders below the gap. Neither can be charged to the finite
+        // difference, which is the whole point of the ladder: this is the
+        // analytic marginal-slope psi gradient, and it is wrong.
+        //
+        // Not fixed here -- that is the #979 / #1040 lane, not #2461's -- but
+        // the numbers are recorded so it no longer has to be re-measured, and
+        // so nobody mistakes it for the fixed-step truncation class that #2461
+        // turned out to be. Tightening the tolerance is pointless until the
+        // gradient is repaired; loosening it past `1.0` would be a lie.
         assert!(
             gap / scale < 5e-2,
             "survival marginal-slope outer-gradient analytic!=FD for basis \
