@@ -1,4 +1,5 @@
 use super::*;
+use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
 pub(crate) fn survival_inverse_link_has_free_parameters(link: &InverseLink) -> bool {
     match link {
@@ -1652,21 +1653,38 @@ fn survival_edf_from_dense_hessian(
     let factor = h_sym.factorize().map_err(|error| {
         format!("survival edf: exact penalized-Hessian factorization failed: {error}")
     })?;
-    let mut edf_by_block = vec![0.0_f64; penalty_blocks.len()];
-    // Raw per-block penalty trace tr_kk = λ_kk·tr(H⁻¹S_kk) (issue #1219).
-    let mut penalty_block_trace = vec![0.0_f64; penalty_blocks.len()];
-    let mut total_trace = 0.0_f64;
+    // Raw per-block penalty traces and their ranks, handed to the shared
+    // accounting (#2470). The rank comes from the realized penalty root, NOT
+    // from the declared `block.nullspace_dim`: a declared nullity is a
+    // pre-transform statement that canonical pullback intentionally clears, so
+    // consulting it here can price a block against a rank the fitted penalty no
+    // longer has. `penalty_matrix_root` is the same oracle the REML criterion
+    // uses when it charges `rank(S_k)·rho_k`.
+    let mut raw_traces = vec![0.0_f64; penalty_blocks.len()];
+    let mut block_ranks = vec![0_usize; penalty_blocks.len()];
+    // `Σ_k S_k` in the joint layout. Summed UNSCALED on purpose: the penalty
+    // null space is a structural property of the penalty geometry, so the floor
+    // it induces must not move with `λ`.
+    let mut joint_penalty = Array2::<f64>::zeros((p, p));
     for (kk, block) in penalty_blocks.iter().enumerate() {
         let block_cols = block.range.end - block.range.start;
-        let penalty_rank = block_cols.checked_sub(block.nullspace_dim).ok_or_else(|| {
-            format!(
-                "survival edf: penalty {kk} nullity {} exceeds block width {block_cols}",
-                block.nullspace_dim
-            )
-        })?;
+        let penalty_rank = if block_cols == 0 {
+            0
+        } else {
+            penalty_matrix_root(&block.matrix)
+                .map_err(|error| {
+                    format!("survival edf: penalty {kk} rank factorization failed: {error}")
+                })?
+                .nrows()
+        };
+        block_ranks[kk] = penalty_rank;
+        if block_cols > 0 {
+            let r = block.range.start..block.range.end;
+            let mut target = joint_penalty.slice_mut(ndarray::s![r.clone(), r]);
+            target += &block.matrix;
+        }
         if block.lambda <= 0.0 || block_cols == 0 {
-            edf_by_block[kk] = penalty_rank as f64;
-            penalty_block_trace[kk] = 0.0;
+            raw_traces[kk] = 0.0;
             continue;
         }
         // RHS = S_k embedded into the full p×block_cols layout: column j holds
@@ -1717,18 +1735,23 @@ fn survival_edf_from_dense_hessian(
         for j in 0..block_cols {
             trace += sol[[block.range.start + j, j]];
         }
-        // Per-block penalty trace `λ_kk·tr(H⁻¹ S_kk)` is the penalized EDF of the
-        // block, bounded by `[0, rank(S_k)]`. A ceiling-`λ` redundant block
-        // (gam#1379) can otherwise overflow `λ·trace` to `+∞` on a ridge-
-        // stabilized Hessian; clamp to the valid interval so the stored trace and
-        // EDF stay finite. In-range traces pass through unchanged.
-        let penalty_rank = penalty_rank as f64;
-        let lam_trace = (block.lambda * trace).clamp(0.0, penalty_rank);
-        total_trace += lam_trace;
-        penalty_block_trace[kk] = lam_trace;
-        edf_by_block[kk] = (penalty_rank - lam_trace).clamp(0.0, penalty_rank);
+        // Raw product; the `[0, rank]` admission (which is what keeps a
+        // ceiling-`λ` redundant block's `+∞` from poisoning the stored trace,
+        // gam#1379) is applied by the shared accounting below.
+        raw_traces[kk] = block.lambda * trace;
     }
-    let edf_total = (p as f64 - total_trace).clamp(0.0, p as f64);
+    let joint_penalty_rank = penalty_matrix_root(&joint_penalty)
+        .map_err(|error| format!("survival edf: joint penalty rank failed: {error}"))?
+        .nrows();
+    let bundle = gam_solve::estimate::penalized_edf_bundle(
+        &raw_traces,
+        &block_ranks,
+        p,
+        (p - joint_penalty_rank.min(p)) as f64,
+    );
+    let edf_by_block = bundle.edf_by_block;
+    let penalty_block_trace = bundle.penalty_block_trace;
+    let edf_total = bundle.edf_total;
     if !edf_total.is_finite()
         || edf_by_block.iter().any(|v| !v.is_finite())
         || penalty_block_trace.iter().any(|v| !v.is_finite())
