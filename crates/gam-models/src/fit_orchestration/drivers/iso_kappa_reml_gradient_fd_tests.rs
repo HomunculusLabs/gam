@@ -2301,23 +2301,50 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
 }
 
 
-/// #2454 MEASUREMENT (reports, never fails): decompose the analytic ρ-gradient
-/// and the criterion VALUE into the SAME four additive parts, then
-/// finite-difference each part against the analytic part that owns it.
+/// One rung of the #2454 ladder: the analytic outer gradient, the central
+/// finite difference of the same criterion, and the two penalty-energy
+/// spellings behind the `fixed_beta` channel, at one ρ and one ρ-coordinate.
+#[derive(Clone, Copy, Debug)]
+struct RhoGradientLadderRow2454 {
+    rho: f64,
+    coordinate: usize,
+    lambda: f64,
+    cost: f64,
+    analytic_total: f64,
+    finite_difference_total: f64,
+    analytic_fixed_beta: f64,
+    finite_difference_fixed_beta: f64,
+    analytic_logdet_h: f64,
+    finite_difference_logdet_h: f64,
+    analytic_logdet_s: f64,
+    finite_difference_logdet_s: f64,
+    analytic_kkt: f64,
+    finite_difference_kkt: f64,
+    block_quadratic: f64,
+    penalty_energy_criterion: f64,
+    penalty_energy_blocks: f64,
+    penalized_rank: usize,
+    declared_null_dim: usize,
+    beta_null_energy: f64,
+}
+
+/// Run the #2454 ladder on the fixture the issue was opened against: the
+/// monotone spatial-length-scale spec (`matern` ν=5/2, `length_scale = 12.0`,
+/// 12 `FarthestPoint` centers, n=60, d=2, `double_penalty: true`,
+/// `CenterSumToZero`), put through the joint iso-κ evaluator so its gradient is
+/// finite-difference-checkable.
 ///
-/// Every prior #2454 measurement graded the SUM: `analytic − fd` on the total
-/// gradient, which established the excess is additive, exactly `∝ λ`,
-/// analytic-only, and invariant to the inner tolerance and the ρ-prior — but
-/// could not say WHICH term carries it. The typed ρ-block audit
-/// (`enable_rho_outer_audit`) emits, per outer evaluation, the criterion value
-/// split `(fixed_beta, logdet_h, logdet_s, kkt)` and the matching per-ρ
-/// gradient split. Central-differencing each VALUE component and comparing it
-/// against its own gradient part localises the defect to one channel in one
-/// run, with no instrumented build and no environment gate.
-#[test]
-fn zz_measure_rho_gradient_part_decomposition_2454() {
+/// Every ρ coordinate is held at the same `value` and each is differenced in
+/// turn. The typed ρ-block audit (`enable_rho_outer_audit`) supplies both the
+/// criterion VALUE split and the matching per-ρ analytic gradient split, so each
+/// component can be graded against the gradient part that owns it instead of
+/// only their sum.
+fn rho_gradient_part_ladder_2454(
+    rho_values: &[f64],
+    step: f64,
+) -> Vec<RhoGradientLadderRow2454> {
     use gam_solve::estimate::outer_eval_capture::{
-        enable_rho_outer_audit, take_rho_outer_audit, RhoOuterAudit,
+        enable_rho_outer_audit, take_rho_outer_audit, PenaltyEnergyAudit, RhoOuterAudit,
     };
 
     let n = 60usize;
@@ -2397,12 +2424,15 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
     )
     .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
 
-    // Cost-only evaluation that ALSO returns the criterion component split.
+    // Cost-only evaluation that ALSO returns the criterion component split and
+    // the two penalty-energy spellings.
     let cost_parts_at = |theta: &Array1<f64>,
                          cache: &mut SingleBlockExactJointDesignCache<'_>,
                          evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
-     -> (f64, [f64; 4], gam_solve::estimate::outer_eval_capture::PenaltyEnergyAudit) {
-        cache.ensure_theta(theta).unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+     -> (f64, [f64; 4], PenaltyEnergyAudit) {
+        cache
+            .ensure_theta(theta)
+            .unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
         enable_rho_outer_audit();
         let design = cache.design();
         let cost = evaluator
@@ -2426,13 +2456,17 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
             (audit_cost - cost).abs() <= 1e-9 * cost.abs().max(1.0),
             "audit cost {audit_cost:+.12e} disagrees with returned cost {cost:+.12e}"
         );
-        (cost, components, audit.penalty_energy.expect("penalty energy recorded"))
+        (
+            cost,
+            components,
+            audit.penalty_energy.expect("penalty energy recorded"),
+        )
     };
 
     let analytic_at = |theta: &Array1<f64>,
                        cache: &mut SingleBlockExactJointDesignCache<'_>,
                        evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
-     -> (f64, [f64; 4], Array1<f64>, RhoOuterAudit) {
+     -> (f64, RhoOuterAudit) {
         cache.ensure_theta(theta).expect("ensure_theta");
         let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
             data.view(),
@@ -2443,7 +2477,7 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
         .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
         .expect("hyper dirs present");
         enable_rho_outer_audit();
-        let (cost, grad, _h) = evaluate_joint_reml_outer_eval_at_theta(
+        let (cost, _grad, _h) = evaluate_joint_reml_outer_eval_at_theta(
             evaluator,
             cache.design(),
             theta,
@@ -2454,107 +2488,232 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
             None,
         )
         .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
-        let audit: RhoOuterAudit = take_rho_outer_audit().expect("rho audit armed");
-        let (_, components) = audit
-            .criterion
-            .expect("criterion components recorded for every eval");
-        (cost, components, grad, audit)
+        (cost, take_rho_outer_audit().expect("rho audit armed"))
     };
 
-    eprintln!("[zz-parts-2454] rho_dim={rho_dim} psi_dim={psi_dim} p={}", frozen_design.design.ncols());
-    let h = 3e-4_f64;
-    for value in [6.0_f64, 15.0] {
+    let mut rows = Vec::new();
+    for &value in rho_values {
         let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
         for j in 0..rho_dim {
             theta[j] = value;
         }
-        let (cost, _components, _grad, audit) = analytic_at(&theta, &mut cache, &mut evaluator);
-        let pe = audit.penalty_energy.expect("penalty energy recorded");
-        if let Some(frame) = audit.penalty_frame.as_ref() {
-            let sum = |v: &[f64]| -> f64 { v.iter().sum() };
-            eprintln!(
-                "[zz-parts-2454]  FRAME stable={:+.12e} qs_dev={:+.6e} frame={} \
-                 s_t_quad={:+.10e} s_t_quad_rot={:+.10e} e_t_quad={:+.10e} e_t_quad_rot={:+.10e}",
-                frame.stable_penalty_term, frame.qs_deviation_from_identity,
-                frame.coordinate_frame,
-                frame.s_transformed_quadratic, frame.s_transformed_quadratic_rotated,
-                frame.e_transformed_quadratic, frame.e_transformed_quadratic_rotated
-            );
-            let lambda = value.exp();
-            eprintln!(
-                "[zz-parts-2454]  FRAME p={} e_rows={} null_dim={} beta_null_energy={:+.6e}",
-                frame.p, frame.e_rows, frame.null_dim, frame.beta_null_energy
-            );
-            eprintln!(
-                "[zz-parts-2454]  FRAME original_sum={:+.12e} transformed_sum={:+.12e} \
-                 PROJECTED_sum={:+.12e}",
-                lambda * sum(&frame.original_frame_blocks),
-                lambda * sum(&frame.transformed_frame_blocks),
-                lambda * sum(&frame.projected_frame_blocks)
-            );
-            for (j, pq) in frame.projected_frame_blocks.iter().enumerate() {
-                eprintln!(
-                    "[zz-parts-2454]  FRAME j={j} lambda_q_projected={:+.10e}",
-                    lambda * pq
-                );
-            }
-            for (j, (o, t)) in frame
-                .original_frame_blocks
-                .iter()
-                .zip(frame.transformed_frame_blocks.iter())
-                .enumerate()
-            {
-                eprintln!(
-                    "[zz-parts-2454]  FRAME j={j} q_original={o:+.10e} q_transformed={t:+.10e} \
-                     lambda_q_transformed={:+.10e}",
-                    lambda * t
-                );
-            }
-        }
-        eprintln!(
-            "[zz-parts-2454] rho={value:5.1} COST={cost:+.12e} stable={:+.12e} block_sum={:+.12e} \
-             ratio={:+.9e} phi={:+.6e} dp_raw={:+.10e}",
-            pe.stable, pe.block_sum, pe.stable / pe.block_sum, pe.phi, pe.dp_raw
-        );
+        let (cost, audit) = analytic_at(&theta, &mut cache, &mut evaluator);
+        let energy = audit.penalty_energy.expect("penalty energy recorded");
+        let frame = audit.penalty_frame.as_ref();
         for j in 0..rho_dim {
             let mut plus = theta.clone();
-            plus[j] += h;
+            plus[j] += step;
             let mut minus = theta.clone();
-            minus[j] -= h;
-            let (cp, comp_p, pe_p) = cost_parts_at(&plus, &mut cache, &mut evaluator);
-            let (cm, comp_m, pe_m) = cost_parts_at(&minus, &mut cache, &mut evaluator);
-            let fd_total = (cp - cm) / (2.0 * h);
+            minus[j] -= step;
+            let (cost_plus, comp_plus, _) = cost_parts_at(&plus, &mut cache, &mut evaluator);
+            let (cost_minus, comp_minus, _) = cost_parts_at(&minus, &mut cache, &mut evaluator);
             let part = audit
                 .parts
                 .iter()
-                .find(|p| p.index == j)
+                .find(|part| part.index == j)
                 .copied()
                 .expect("rho gradient part recorded");
-            let fd_named = |idx: usize| (comp_p[idx] - comp_m[idx]) / (2.0 * h);
-            let fd_stable = (pe_p.stable - pe_m.stable) / (2.0 * h);
-            let fd_block_sum = (pe_p.block_sum - pe_m.block_sum) / (2.0 * h);
-            let lambda = part.lambda;
+            let fd = |idx: usize| (comp_plus[idx] - comp_minus[idx]) / (2.0 * step);
+            rows.push(RhoGradientLadderRow2454 {
+                rho: value,
+                coordinate: j,
+                lambda: part.lambda,
+                cost,
+                analytic_total: part.total,
+                finite_difference_total: (cost_plus - cost_minus) / (2.0 * step),
+                analytic_fixed_beta: part.fixed_beta,
+                finite_difference_fixed_beta: fd(0),
+                analytic_logdet_h: part.logdet_h,
+                finite_difference_logdet_h: fd(1),
+                analytic_logdet_s: part.logdet_s,
+                finite_difference_logdet_s: fd(2),
+                analytic_kkt: part.total
+                    - (part.fixed_beta + part.logdet_h + part.logdet_s),
+                finite_difference_kkt: fd(3),
+                block_quadratic: part.block_quadratic,
+                penalty_energy_criterion: energy.stable,
+                penalty_energy_blocks: energy.block_sum,
+                penalized_rank: frame.map_or(0, |f| f.e_rows),
+                declared_null_dim: frame.map_or(0, |f| f.null_dim),
+                beta_null_energy: frame.map_or(f64::NAN, |f| f.beta_null_energy),
+            });
+        }
+    }
+    rows
+}
+
+/// #2454 GATE: the outer ρ-gradient must differentiate the penalty the
+/// criterion applies, so its analytic-vs-FD error must NOT scale with λ.
+///
+/// The defect this pins was an additive `+5.0e-8·λ` in the `fixed_beta`
+/// channel: the criterion's penalty is the split-projected `S̃(λ) = E(λ)ᵀE(λ)`
+/// (the reparameterization keeps only balanced-penalty eigendirections above a
+/// relative rank tolerance, so `H`, `log|S|₊` and the inner solve share one rank
+/// structure), while the gradient read the UNPROJECTED blocks `S_k`, whose own
+/// root ranks exceed the split's penalized rank on this fixture. β̂ is
+/// unpenalized in the discarded directions, so `Σ_k λ_k β̂ᵀS_kβ̂` charged energy
+/// the criterion never paid — and `∂/∂ρ_k` multiplied that phantom by `λ_k`.
+///
+/// The gate is deliberately expressed as a SCALING statement rather than a
+/// tolerance on one rung. A tolerance at `ρ = 15` alone could be met by a
+/// coincidentally small coefficient; only "the error at λ = 3.3e6 is the same
+/// size as the error at λ = 4.0e2" rules out a term proportional to λ. The
+/// measured pre-fix ratio across this span was ~8000× (i.e. exactly `λ`); the
+/// post-fix ratio is ~1.7×, the central-difference truncation floor.
+#[test]
+fn outer_rho_gradient_error_does_not_scale_with_lambda_2454() {
+    let step = 3e-4_f64;
+    let rows = rho_gradient_part_ladder_2454(&[6.0, 9.0, 12.0, 15.0], step);
+    assert!(!rows.is_empty(), "ladder produced no rungs");
+    assert!(
+        rows.iter().all(|row| row.penalized_rank > 0),
+        "the penalty-frame audit did not report a penalized rank; the gate would \
+         then be grading an unarmed instrument"
+    );
+
+    let worst_at = |rho: f64| -> f64 {
+        rows.iter()
+            .filter(|row| row.rho == rho)
+            .map(|row| (row.analytic_total - row.finite_difference_total).abs())
+            .fold(0.0_f64, f64::max)
+    };
+    let low = worst_at(6.0);
+    let high = worst_at(15.0);
+    let lambda_ratio = 15.0_f64.exp() / 6.0_f64.exp();
+
+    let report = || -> String {
+        rows.iter()
+            .map(|row| {
+                format!(
+                    "rho={:5.1} j={} lambda={:.4e} an={:+.10e} fd={:+.10e} gap={:+.4e} \
+                     gap/lambda={:+.4e} | fixed_beta an={:+.6e} fd={:+.6e} | \
+                     energy criterion={:+.10e} blocks={:+.10e} ratio={:.9} | \
+                     penalized_rank={} null_dim={} beta_null_energy={:.4e}",
+                    row.rho,
+                    row.coordinate,
+                    row.lambda,
+                    row.analytic_total,
+                    row.finite_difference_total,
+                    row.analytic_total - row.finite_difference_total,
+                    (row.analytic_total - row.finite_difference_total) / row.lambda,
+                    row.analytic_fixed_beta,
+                    row.finite_difference_fixed_beta,
+                    row.penalty_energy_criterion,
+                    row.penalty_energy_blocks,
+                    row.penalty_energy_criterion / row.penalty_energy_blocks,
+                    row.penalized_rank,
+                    row.declared_null_dim,
+                    row.beta_null_energy,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    };
+
+    // 1. Absolute: the gradient must be usable in the saturated region at all.
+    //    Pre-fix this reached 1.63e-1 against a true gradient of -1.77, i.e. it
+    //    reported the wrong sign relative to FD.
+    const ABSOLUTE_GAP_BOUND: f64 = 1.0e-4;
+    assert!(
+        high <= ABSOLUTE_GAP_BOUND,
+        "#2454: worst |analytic - fd| at rho=15 is {high:.4e}, above {ABSOLUTE_GAP_BOUND:.1e}\n  {}",
+        report()
+    );
+
+    // 2. Scaling: the error must not grow like lambda. Allow a generous 50x
+    //    against a lambda ratio of 8103x, so the gate distinguishes "flat" from
+    //    "proportional to lambda" without being brittle about the FD floor.
+    const SCALING_HEADROOM: f64 = 50.0;
+    let floor = 1.0e-9;
+    assert!(
+        high <= SCALING_HEADROOM * low.max(floor),
+        "#2454: worst |analytic - fd| grew from {low:.4e} at rho=6 to {high:.4e} at rho=15 \
+         (ratio {:.1}x) while lambda grew {lambda_ratio:.0}x -- that is a gradient error \
+         proportional to lambda\n  {}",
+        high / low.max(floor),
+        report()
+    );
+
+    // 3. Structural: the two penalty-energy spellings must be ONE quantity. This
+    //    is the mechanism itself rather than its symptom, and it holds at every
+    //    lambda rather than only where the FD oracle is sharp.
+    for row in &rows {
+        let ratio = row.penalty_energy_criterion / row.penalty_energy_blocks;
+        assert!(
+            (ratio - 1.0).abs() <= 1.0e-9,
+            "#2454: the criterion's penalty energy {:.12e} and the gradient's block sum \
+             {:.12e} differ by {:.3e} relative at rho={:.1} -- the gradient is \
+             differentiating a penalty the criterion does not apply\n  {}",
+            row.penalty_energy_criterion,
+            row.penalty_energy_blocks,
+            ratio - 1.0,
+            row.rho,
+            report()
+        );
+    }
+}
+
+/// #2454 MEASUREMENT (reports, never fails): the full part decomposition.
+///
+/// Prints, per ρ and per ρ-coordinate, each criterion component's analytic
+/// gradient part beside the central difference of the component it owns. This is
+/// how the defect was localised to `fixed_beta` (its gap equalled the total's to
+/// every digit, while `kkt` was exactly zero on both sides), and it is kept so a
+/// future desync can be attributed to a channel in one run rather than graded
+/// only as a sum.
+#[test]
+fn zz_measure_rho_gradient_part_decomposition_2454() {
+    let rows = rho_gradient_part_ladder_2454(&[6.0, 9.0, 12.0, 15.0], 3e-4);
+    for row in &rows {
+        if row.coordinate == 0 {
             eprintln!(
-                "[zz-parts-2454]  j={j} rank={} dim={} lambda={lambda:.6e} q_k={:+.10e} \
-                 lambda_q={:+.10e}",
-                part.rank, part.dim, part.block_quadratic, lambda * part.block_quadratic
+                "[zz-parts-2454] rho={:5.1} COST={:+.12e} penalized_rank={} null_dim={} \
+                 beta_null_energy={:.4e} energy criterion={:+.12e} blocks={:+.12e} \
+                 ratio={:.10}",
+                row.rho,
+                row.cost,
+                row.penalized_rank,
+                row.declared_null_dim,
+                row.beta_null_energy,
+                row.penalty_energy_criterion,
+                row.penalty_energy_blocks,
+                row.penalty_energy_criterion / row.penalty_energy_blocks,
             );
+        }
+        eprintln!(
+            "[zz-parts-2454]  j={} lambda={:.6e} q_k={:+.10e} lambda_q={:+.10e}",
+            row.coordinate,
+            row.lambda,
+            row.block_quadratic,
+            row.lambda * row.block_quadratic,
+        );
+        for (name, analytic, fd) in [
+            ("total     ", row.analytic_total, row.finite_difference_total),
+            (
+                "fixed_beta",
+                row.analytic_fixed_beta,
+                row.finite_difference_fixed_beta,
+            ),
+            (
+                "logdet_h  ",
+                row.analytic_logdet_h,
+                row.finite_difference_logdet_h,
+            ),
+            (
+                "logdet_s  ",
+                row.analytic_logdet_s,
+                row.finite_difference_logdet_s,
+            ),
+            ("kkt       ", row.analytic_kkt, row.finite_difference_kkt),
+        ] {
             eprintln!(
-                "[zz-parts-2454]    d(stable)/drho_j={fd_stable:+.10e} \
-                 d(block_sum)/drho_j={fd_block_sum:+.10e} ratio={:+.6e}",
-                fd_stable / (lambda * part.block_quadratic)
-            );
-            eprintln!(
-                "[zz-parts-2454]    total an={:+.10e} fd={fd_total:+.10e} gap={:+.6e} \
-                 fixed_beta an={:+.10e} fd={:+.10e}",
-                part.total,
-                part.total - fd_total,
-                part.fixed_beta,
-                fd_named(0)
+                "[zz-parts-2454]    {name} an={analytic:+.10e} fd={fd:+.10e} \
+                 gap={:+.6e} gap_over_lambda={:+.6e}",
+                analytic - fd,
+                (analytic - fd) / row.lambda,
             );
         }
     }
-
 }
 
 }
