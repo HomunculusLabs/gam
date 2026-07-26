@@ -138,5 +138,57 @@ right.scatter(*tue, s=360, color=CMAP(tue_i / 7), edgecolors="white", lw=2.0, zo
 right.scatter(*wed, s=430, color=CMAP(wed_i / 7), edgecolors="#c6ffe9", lw=2.2, zorder=10)
 arrow(right, tue, wed, GREEN, width=4.2, mutation=27)
 
+# Why this edit is available: inference locates the current activation on the
+# learned coordinate loop, target examples locate Wednesday, and the chart
+# supplies the path between those coordinates.  The solid chord above is the
+# corresponding edit in activation space.
+arc_theta = np.linspace(day_theta[tue_i], day_theta[wed_i], 90)
+arc = np.column_stack(
+    [1.10 * rx * np.cos(arc_theta), 1.10 * ry * np.sin(arc_theta)]
+)
+right.plot(
+    arc[:, 0],
+    arc[:, 1],
+    color=GREEN,
+    lw=2.0,
+    ls=(0, (4, 3)),
+    alpha=0.82,
+    zorder=7,
+)
+arrow(right, arc[42], arc[50], GREEN, width=1.8, mutation=15, z=8)
+right.text(
+    2.72,
+    0.16,
+    "learned coordinate path",
+    color="#baffdf",
+    fontsize=10.5,
+    ha="left",
+    va="center",
+)
+right.annotate(
+    "encode current activation",
+    xy=tue,
+    xytext=(-1.45, 0.72),
+    color=TEXT,
+    fontsize=10.5,
+    ha="center",
+    va="center",
+    bbox={"boxstyle": "round,pad=0.30", "fc": "#111a2f", "ec": "#7085b8", "alpha": 0.94},
+    arrowprops={"arrowstyle": "->", "color": "#9eb0d8", "lw": 1.4},
+    zorder=12,
+)
+right.annotate(
+    "Wednesday examples\nlocate target coordinate",
+    xy=wed,
+    xytext=(-1.38, -0.62),
+    color=TEXT,
+    fontsize=10.5,
+    ha="center",
+    va="center",
+    bbox={"boxstyle": "round,pad=0.32", "fc": "#10261f", "ec": GREEN, "alpha": 0.94},
+    arrowprops={"arrowstyle": "->", "color": GREEN, "lw": 1.4},
+    zorder=12,
+)
+
 fig.savefig(OUT, facecolor=INK, dpi=200)
 print(OUT)

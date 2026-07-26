@@ -15,6 +15,8 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
 ROOT = Path("/private/tmp/claude-scratch-2502")
@@ -96,15 +98,20 @@ def fit_chart(anchor_id: int, neighbors: int = 180) -> dict:
         np.sum((local - plane) ** 2) - np.sum((local - fitted) ** 2)
     )
     curvature = float(np.linalg.norm(beta[3:]) / max(np.linalg.norm(beta[1:3]), 1e-12))
+    singular = np.linalg.svd(fitted - fitted.mean(axis=0), compute_uv=False)
+    sheet_ratio = float(singular[1] / max(singular[0], 1e-12))
+    bend_ratio = float(singular[2] / max(singular[1], 1e-12))
     return {
         "anchor": anchor_id,
         "rows": rows,
         "u": u,
         "beta": beta,
         "fitted": fitted,
-        "score": quadratic_gain * curvature,
+        "score": quadratic_gain * curvature * sheet_ratio,
         "gain": quadratic_gain,
         "curvature": curvature,
+        "sheet_ratio": sheet_ratio,
+        "bend_ratio": bend_ratio,
     }
 
 
@@ -186,48 +193,73 @@ surface_meta = []
 for surface_index, (ax, item, cmap_name) in enumerate(
     zip(surface_axes, surfaces, ["viridis", "magma"])
 ):
-    q = np.linspace(-2.45, 2.45, 35)
-    uu, vv = np.meshgrid(q, q)
-    mask = uu**2 + vv**2 <= 5.8
-    design = np.column_stack(
+    # Display only the data-supported patch.  Delaunay triangles are built in
+    # the learned intrinsic coordinates and decoded through the fitted chart;
+    # there is no rectangular grid extending beyond observed token support.
+    _, display_mean, display_basis = pca(item["fitted"], 3)
+    bead3 = (item["fitted"] - display_mean) @ display_basis.T
+    triangulation = mtri.Triangulation(item["u"][:, 0], item["u"][:, 1])
+    triangles = triangulation.triangles
+    intrinsic_vertices = item["u"][triangles]
+    edge_lengths = np.stack(
         [
-            np.ones(uu.size),
-            uu.ravel(),
-            vv.ravel(),
-            uu.ravel() ** 2,
-            (uu * vv).ravel(),
-            vv.ravel() ** 2,
+            np.linalg.norm(intrinsic_vertices[:, 0] - intrinsic_vertices[:, 1], axis=1),
+            np.linalg.norm(intrinsic_vertices[:, 1] - intrinsic_vertices[:, 2], axis=1),
+            np.linalg.norm(intrinsic_vertices[:, 2] - intrinsic_vertices[:, 0], axis=1),
+        ],
+        axis=1,
+    )
+    max_edge = edge_lengths.max(axis=1)
+    triangles = triangles[max_edge <= np.quantile(max_edge, 0.82)]
+    # Keep the largest locally connected patch.  Sparse peripheral points stay
+    # out of the rendered surface rather than being joined by visually
+    # misleading bridge triangles.
+    adjacency: dict[int, set[int]] = {}
+    for triangle in triangles:
+        for vertex in triangle:
+            adjacency.setdefault(int(vertex), set()).update(
+                int(other) for other in triangle if other != vertex
+            )
+    components: list[set[int]] = []
+    unseen = set(adjacency)
+    while unseen:
+        component: set[int] = set()
+        frontier = [unseen.pop()]
+        while frontier:
+            vertex = frontier.pop()
+            component.add(vertex)
+            for neighbor in adjacency.get(vertex, ()):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    frontier.append(neighbor)
+        components.append(component)
+    largest_component = max(components, key=len)
+    triangles = np.asarray(
+        [
+            triangle
+            for triangle in triangles
+            if all(int(vertex) in largest_component for vertex in triangle)
         ]
     )
-    mesh = (design @ item["beta"]).reshape(*uu.shape, -1)
-    all_points = np.vstack([mesh[mask], item["fitted"]])
-    display, display_mean, display_basis = pca(all_points, 3)
-    mesh3 = ((mesh.reshape(-1, 128) - display_mean) @ display_basis.T).reshape(
-        *uu.shape, 3
-    )
-    bead3 = (item["fitted"] - display_mean) @ display_basis.T
-    for axis in range(3):
-        layer = mesh3[:, :, axis]
-        layer[~mask] = np.nan
-    color_value = np.arctan2(vv, uu)
-    colors = plt.get_cmap(cmap_name)(
-        (color_value - np.nanmin(color_value)) / np.ptp(color_value)
-    )
-    colors[..., 3] = np.where(mask, 0.82, 0.0)
-    ax.plot_surface(
-        mesh3[:, :, 0],
-        mesh3[:, :, 1],
-        mesh3[:, :, 2],
-        facecolors=colors,
-        rstride=1,
-        cstride=1,
-        linewidth=0,
+    triangle_uv = item["u"][triangles].mean(axis=1)
+    phase = np.arctan2(triangle_uv[:, 1], triangle_uv[:, 0])
+    facecolors = plt.get_cmap(cmap_name)((phase + np.pi) / (2 * np.pi))
+    facecolors[:, 3] = 0.80
+    surface = Poly3DCollection(
+        bead3[triangles],
+        facecolors=facecolors,
+        edgecolors=(0.75, 0.84, 1.0, 0.10),
+        linewidths=0.24,
         antialiased=True,
-        shade=True,
-        alpha=0.82,
         zorder=2,
     )
-    keep = RNG.choice(len(bead3), min(105, len(bead3)), replace=False)
+    ax.add_collection3d(surface)
+    supported_vertices = np.unique(triangles)
+    keep = RNG.choice(
+        supported_vertices,
+        min(105, len(supported_vertices)),
+        replace=False,
+    )
     phase = np.arctan2(item["u"][:, 1], item["u"][:, 0])
     ax.scatter(
         bead3[keep, 0],
@@ -253,6 +285,9 @@ for surface_index, (ax, item, cmap_name) in enumerate(
             "intrinsic_dim": 2,
             "quadratic_sse_gain_over_plane": item["gain"],
             "curvature_score": item["curvature"],
+            "sheet_ratio": item["sheet_ratio"],
+            "bend_ratio": item["bend_ratio"],
+            "display_domain": "largest connected Delaunay patch of observed token coordinates; longest 18% boundary bridges removed",
         }
     )
 
