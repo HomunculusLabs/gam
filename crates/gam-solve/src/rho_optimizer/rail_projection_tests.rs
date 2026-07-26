@@ -12,11 +12,12 @@
 //! cap on points the certificate goes on to accept.
 
 use super::bridges::{
-    projected_gradient_norm, rail_projected_gradient_norm, rail_relaxed_bounds,
-    reduced_hessian_psd_at_point,
+    project_gradient_vector, projected_gradient_norm, rail_projected_gradient_norm,
+    rail_relaxed_bounds, reduced_hessian_psd_at_point,
 };
 use super::{
     OuterConfig, certificate_hessian_is_psd_off_railed, certificate_railed_coordinates,
+    interior_face_indices,
 };
 use crate::model_types::CERTIFICATE_RAIL_MARGIN;
 use gam_terms::smooth::CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
@@ -373,4 +374,84 @@ fn a_coordinate_outside_its_box_is_railed() {
         certificate_railed_coordinates(&array![12.0], &config),
         vec![0]
     );
+}
+
+// ─── #2471: the interior face PROJECTS railed rows, it does not DELETE them ──
+
+#[test]
+fn a_railed_coordinate_that_can_still_descend_stays_in_the_interior() {
+    // Coordinate 1 sits on its upper bound with a gradient pointing back INTO
+    // the box, so `project_gradient_vector` keeps it — that is feasible
+    // descent, not a KKT multiplier. Coordinate 2 sits on the same wall with
+    // its pull heading out, and is zeroed.
+    let bounds = (array![-30.0, -30.0, -30.0], array![30.0, 30.0, 30.0]);
+    let x = array![0.0, 30.0, 30.0];
+    let gradient = array![0.1, 12.018, -4.0];
+    let projected = project_gradient_vector(&x, &gradient, Some(&bounds));
+    assert_eq!(projected[1], 12.018, "inward pull at an upper bound survives");
+    assert_eq!(projected[2], 0.0, "outward pull at an upper bound is dropped");
+
+    // Both 1 and 2 are railed by the flag; only 2 has actually been pinned.
+    let railed = [1usize, 2];
+    assert_eq!(interior_face_indices(&projected, &railed), vec![0, 1]);
+}
+
+#[test]
+fn the_interior_face_norm_is_exactly_the_projected_gradient_norm() {
+    // The identity the fix rests on: the projection either keeps a component
+    // unchanged or zeroes it, never partially, so summing the kept indices
+    // reproduces |Pg| bit-for-bit. Deleting every railed row does not.
+    let bounds = (array![-30.0, -30.0, -30.0], array![30.0, 30.0, 30.0]);
+    let x = array![0.0, 30.0, -30.0];
+    let gradient = array![0.1986, 12.018, 3.5];
+    let projected = project_gradient_vector(&x, &gradient, Some(&bounds));
+    let railed = [1usize, 2];
+
+    let face = interior_face_indices(&projected, &railed);
+    let face_norm = face
+        .iter()
+        .map(|&k| projected[k] * projected[k])
+        .sum::<f64>()
+        .sqrt();
+    let pg_norm = projected_gradient_norm(&x, &gradient, Some(&bounds));
+    assert_eq!(
+        face_norm.to_bits(),
+        pg_norm.to_bits(),
+        "interior-face norm must BE |Pg|, not merely approximate it",
+    );
+
+    // What deletion reported instead, on this issue's own magnitudes.
+    let deleted_norm = (0..3)
+        .filter(|k| !railed.contains(k))
+        .map(|k| projected[k] * projected[k])
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        (deleted_norm - 0.1986).abs() < 1e-12 && face_norm > 12.0,
+        "deletion drops a coordinate carrying 60x the residual: \
+         deleted={deleted_norm:.4e} projected={face_norm:.4e}",
+    );
+}
+
+#[test]
+fn the_interior_face_can_only_grow_never_shrink() {
+    // The safety argument, made executable: whatever the railed set says, the
+    // projected face is a SUPERSET of the deleted one, so the residual and the
+    // sub-block Newton decrement can only rise. This judgment can refuse points
+    // it used to mint; it can never mint a point it used to refuse.
+    let bounds = (Array1::from_elem(6, -30.0), Array1::from_elem(6, 30.0));
+    for pattern in 0..64u32 {
+        let x = Array1::from_iter(
+            (0..6).map(|k| if pattern >> k & 1 == 1 { 30.0 } else { 0.0 }),
+        );
+        let gradient = array![1.0, -1.0, 0.0, 4.0, -4.0, 1e-13];
+        let projected = project_gradient_vector(&x, &gradient, Some(&bounds));
+        let railed: Vec<usize> = (0..6).filter(|&k| x[k] >= 30.0).collect();
+        let face = interior_face_indices(&projected, &railed);
+        let deleted: Vec<usize> = (0..6).filter(|k| !railed.contains(k)).collect();
+        assert!(
+            deleted.iter().all(|k| face.contains(k)),
+            "pattern {pattern}: deleted set {deleted:?} escaped the face {face:?}",
+        );
+    }
 }

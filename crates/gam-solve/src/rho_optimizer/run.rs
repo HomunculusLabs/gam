@@ -3735,9 +3735,8 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 // gradient-only BFGS objectives can rail incorrectly too, and
                 // withholding a valid pull-back merely because they do not
                 // materialize H would make recovery depend on solver class.
-                let interior_indices: Vec<usize> = (0..projected_gradient.len())
-                    .filter(|k| !certificate_railed.contains(k))
-                    .collect();
+                let interior_indices =
+                    interior_face_indices(&projected_gradient, &certificate_railed);
                 let interior_not_stationary = !interior_indices.is_empty()
                     && certify_interior_stationarity(
                         &projected_gradient,
@@ -3979,9 +3978,7 @@ fn try_certify_asymptote_rail(
     // than the loop's own cost resolution is at its interior optimum, and the
     // residual gradient is the deep-λ instrument noise floor (evaluations
     // beside a saturated rail share the rail's logdet noise).
-    let interior_indices: Vec<usize> = (0..projected_gradient.len())
-        .filter(|k| !railed.contains(k))
-        .collect();
+    let interior_indices = interior_face_indices(projected_gradient, railed);
     let (interior_projected_grad_norm, effective_interior_bound) =
         match certify_interior_stationarity(
             projected_gradient,
@@ -4324,6 +4321,39 @@ fn falsify_face_law(
         )));
     }
     Ok(Ok(()))
+}
+
+/// The coordinates a stationarity residual must still account for.
+///
+/// A coordinate leaves the interior only when the box has genuinely pinned it:
+/// railed AND the projection zeroed its gradient, i.e. its entire pull was the
+/// infeasible KKT multiplier. [`project_gradient_vector`] keeps a near-bound
+/// coordinate's INWARD component on purpose — that component is feasible
+/// descent — so dropping the row for *every* railed coordinate discards exactly
+/// what the projector was written to preserve.
+///
+/// Deleting agrees with this only when every railed gradient points strictly
+/// outward. `matern_nu_sweep_uniform_quality_on_sin1` is the counterexample
+/// (#2471): coordinate 3 was reported railed while `1.2018e1` of its projected
+/// gradient survived — 66.7x the stationarity bound, and 99.99% of the reported
+/// `|Pg|`. With it deleted the interior norm read `1.986e-1`, i.e. 1.10x the
+/// bound, which reads as "essentially converged" at a point still carrying that
+/// much feasible descent. The certificate refused anyway, so the number misled
+/// the reader rather than the verdict — but the ledger built on it classified a
+/// genuine non-convergence as a railed-coordinate accounting artifact.
+///
+/// Since the projection either keeps a component unchanged or zeroes it, the
+/// norm over these indices is exactly `‖Pg‖`. Where this differs from deleting
+/// it includes MORE coordinates, so both the residual and the sub-block Newton
+/// decrement can only grow: this judgment can refuse points it used to mint and
+/// can never mint a point it used to refuse.
+pub(crate) fn interior_face_indices(
+    projected_gradient: &Array1<f64>,
+    railed: &[usize],
+) -> Vec<usize> {
+    (0..projected_gradient.len())
+        .filter(|k| !railed.contains(k) || projected_gradient[*k] != 0.0)
+        .collect()
 }
 
 /// Two-stage interior stationarity judgment shared by the Inc 1 railed mint
@@ -4733,8 +4763,9 @@ fn try_tail_snap_to_rail(
         return Ok(TailSnapOutcome::Declined(reason));
     }
 
-    let interior_indices: Vec<usize> = (0..n)
-        .filter(|k| !inputs.railed.contains(k) && !candidates.iter().any(|(c, _)| c == k))
+    let interior_indices: Vec<usize> = interior_face_indices(gradient, inputs.railed)
+        .into_iter()
+        .filter(|k| !candidates.iter().any(|(c, _)| c == k))
         .collect();
     // #2348 Inc 2c: every candidate's confirmed tail already extrapolates
     // BELOW the stationarity bound at the current point — the fit is
