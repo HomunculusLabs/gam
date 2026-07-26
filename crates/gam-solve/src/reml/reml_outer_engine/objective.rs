@@ -1114,7 +1114,7 @@ pub fn reml_laml_evaluate(
                             } else {
                                 let (range_root, root_start, root_end) =
                                     coord.block_local_root()?;
-                                debug_assert_eq!((root_start, root_end), (start, end));
+                                assert_eq!((root_start, root_end), (start, end));
                                 ds.fused_logdet_gradient_minus_rank_from_root_chart(
                                     &s_block,
                                     range_root,
