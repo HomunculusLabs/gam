@@ -2407,15 +2407,50 @@ pub(crate) fn tweedie_exact_series_loglik_from_eta(
             budget: MAX_EXACT_TERMS,
         };
     let log_term = |k: f64| -> Result<f64, EstimationError> {
-        let components = [
-            -lambda,
-            k * log_lambda,
-            -ln_gamma(k + 1.0),
-            (k * alpha - 1.0) * log_y,
-            -y_over_scale,
-            -k * alpha * log_gamma_scale,
-            -ln_gamma(k * alpha),
-        ];
+        // Evaluate the mixture term as the sum of its Poisson log mass and
+        // Gamma log density. Above the Stirling threshold each factor is
+        // centered at its own mode through bd0, so the O(k log k) pieces cancel
+        // analytically instead of as seven independently rounded f64 values.
+        //
+        //   log Pois(k; lambda)
+        //     = -bd0(k, lambda) - 0.5 log(2 pi k) - stirling_correction(k)
+        //
+        // For a = k alpha and t = y / scale,
+        //
+        //   log GammaDensity(y; a, scale)
+        //     = -bd0(a, t) + 0.5 log(a / 2 pi)
+        //       - stirling_correction(a) - log(y).
+        //
+        // The direct formulas remain preferable below 8, where their inputs
+        // are small and the asymptotic correction is not admissible.
+        let poisson_log_mass = if k >= 8.0 {
+            -bd0(k, lambda)
+                - 0.5 * (LN_2PI + k.ln())
+                - log_gamma_stirling_correction(k)
+        } else {
+            stable_finite_signed_sum(
+                &[-lambda, k * log_lambda, -ln_gamma(k + 1.0)],
+                "exact Tweedie Poisson series factor",
+            )?
+        };
+        let gamma_shape = k * alpha;
+        let gamma_log_density = if gamma_shape >= 8.0 {
+            -bd0(gamma_shape, y_over_scale)
+                + 0.5 * (gamma_shape.ln() - LN_2PI)
+                - log_gamma_stirling_correction(gamma_shape)
+                - log_y
+        } else {
+            stable_finite_signed_sum(
+                &[
+                    gamma_shape * (log_y - log_gamma_scale),
+                    -y_over_scale,
+                    -ln_gamma(gamma_shape),
+                    -log_y,
+                ],
+                "exact Tweedie Gamma series factor",
+            )?
+        };
+        let components = [poisson_log_mass, gamma_log_density];
         let value = stable_finite_signed_sum(&components, "exact Tweedie series term")?;
         let absolute_sum: f64 = components.iter().map(|component| component.abs()).sum();
         let input_roundoff_bound = 16.0 * f64::EPSILON * absolute_sum;
