@@ -1,9 +1,10 @@
 name: Rolling wheel (warm-start artifact)
 
-# Permanent warm-start: every push to main rebuilds the x86_64 manylinux wheel
-# plus CLI and pins both to the rolling `wheel-latest` prerelease. Compute boxes
-# and validation workflows download one verified runtime in seconds instead of
-# paying a cold cargo build:
+# Permanent warm-start: pushes to main keep the x86_64 manylinux wheel plus CLI
+# pinned to the rolling `wheel-latest` prerelease. Exact-SHA consumers can also
+# commission one immutable runtime without publishing over that rolling channel.
+# Compute boxes and validation workflows download one verified runtime in seconds
+# instead of paying a cold cargo build:
 #
 #   gh release download wheel-latest --repo SauersML/gam -p 'gamfit-*.whl' -D dist/
 #   pip install --force-reinstall dist/gamfit-*.whl
@@ -11,8 +12,9 @@ name: Rolling wheel (warm-start artifact)
 # The wheel is built in a manylinux_2_28 container so it runs on MSI's Rocky 8
 # (glibc 2.28) as well as modern cloud images — a plain ubuntu-runner build
 # would tag manylinux_2_35 and refuse to install on the cluster. sccache keeps
-# rebuilds warm across runs. `concurrency` cancels superseded builds so only
-# the newest SHA spends minutes.
+# rebuilds warm across runs. `concurrency` cancels superseded rolling builds so
+# only the newest push spends minutes; commissioned exact-SHA builds are never
+# cancelled by another lane.
 #
 # This channel NEVER publishes to PyPI — pypi-wheels.yml stays the version-gated
 # release path; this is the fleet's iteration artifact. It builds under the
@@ -24,13 +26,19 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      build_sha:
+        description: "Exact lowercase 40-character commit to build. Empty = dispatch SHA."
+        type: string
+        default: ""
+        required: false
 
-# Main has one newest-writer lane, so superseded automatic builds are canceled.
-# An explicitly dispatched validation ref gets its own lane: main churn cannot
-# starve a proof build, and that branch never writes the rolling release.
+# Main has one newest-writer lane, so superseded automatic builds are cancelled.
+# A commissioned build is keyed by the exact commit it promises and is never
+# cancelled. An ordinary empty-input dispatch keeps the existing ref-keyed lane.
 concurrency:
-  group: runtime-${{ github.event_name == 'push' && 'main' || github.ref }}
-  cancel-in-progress: true
+  group: runtime-${{ github.event_name == 'push' && 'main' || github.event.inputs.build_sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event.inputs.build_sha == '' }}
 
 permissions:
   contents: write
@@ -39,8 +47,27 @@ jobs:
   wheel:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve the exact commit to build
+        id: target
+        shell: bash
+        env:
+          # `github` exists on every event; a missing nested property evaluates
+          # to the empty string on push. The `inputs` context itself is only
+          # available to workflow_dispatch/workflow_call runs.
+          REQUESTED_SHA: ${{ github.event.inputs.build_sha }}
+        run: |
+          set -euo pipefail
+          target_sha="${REQUESTED_SHA:-$GITHUB_SHA}"
+          if [[ ! "$target_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::build_sha must be one full lowercase 40-character commit SHA; got '${target_sha}'."
+            exit 1
+          fi
+          printf 'sha=%s\n' "$target_sha" >> "$GITHUB_OUTPUT"
+          echo "Building immutable runtime ${target_sha}."
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.target.outputs.sha }}
           # build.rs consults git history (author guard / SPEC HEAD-diff check);
           # a shallow clone with depth 2 keeps a parent commit available.
           fetch-depth: 2
@@ -73,17 +100,19 @@ jobs:
 
       - name: Seal exact runtime provenance
         shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
         run: |
           set -euo pipefail
           WHEEL=$(ls dist/gamfit-*.whl)
           test -x dist/gam
           {
-            echo "commit=${GITHUB_SHA}"
+            echo "commit=${TARGET_SHA}"
             (cd dist && sha256sum "$(basename "$WHEEL")" gam)
           } > dist/RUNTIME_PROVENANCE.txt
 
       - name: Pin newest main runtime to rolling release
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event.inputs.build_sha == '') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -99,7 +128,7 @@ jobs:
       - name: Also keep it as a run artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gamfit-runtime-${{ github.sha }}
+          name: gamfit-runtime-${{ steps.target.outputs.sha }}
           path: |
             dist/gamfit-*.whl
             dist/gam

@@ -14,10 +14,12 @@ name: Validate One
 # One NEVER rebuilds or relinks Rust tests. If no exact archive exists, it fails
 # immediately and tells the caller to dispatch Rust CI.
 #
-# Python and torch filters consume the exact-SHA manylinux wheel produced by
-# wheel-nightly.yml. They run from runner.temp so the checked-out source package
-# cannot shadow the installed wheel. Validate One therefore compiles nothing:
-# Rust uses a nextest archive; Python uses the rolling runtime artifact.
+# Python and torch filters consume an exact-SHA manylinux wheel from
+# wheel-nightly.yml. If that immutable artifact does not exist, Validate One
+# commissions precisely that commit and waits only for the synchronously returned
+# run ID. Tests run from runner.temp so the checked-out source package cannot
+# shadow the installed wheel. Validate One itself therefore compiles nothing:
+# Rust uses a nextest archive; Python uses the exact commissioned runtime.
 #
 # TORCH PATH (opt-in): torch is NOT installed by any CI workflow, so the
 # tests/torch/ suite (#1890/#1891/#1893/#1939/#1942/#2011/#2015/#2021/#2022/#2023
@@ -61,7 +63,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  actions: read
+  actions: write
   contents: read
 
 env:
@@ -71,7 +73,9 @@ jobs:
   validate:
     name: Validate one (issue ${{ github.event.inputs.issue }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Leave room for the wheel commission's explicit 30-minute deadline and the
+    # requested tests. The producer's measured maximum is under 15 minutes.
+    timeout-minutes: 45
     steps:
       - name: Resolve immutable evidence commit
         id: evidence
@@ -123,7 +127,8 @@ jobs:
           python -c "import numpy; print('numpy', numpy.__version__, numpy.get_include())"
 
       # ---- Python runtime: exact-SHA prebuilt wheel only ------------------
-      - name: Download and install exact-SHA rolling wheel
+      - name: Download or commission exact-SHA runtime
+        id: runtime
         if: ${{ github.event.inputs.py_filter != '' || github.event.inputs.torch_filter != '' }}
         shell: bash
         env:
@@ -132,42 +137,157 @@ jobs:
           set -euo pipefail
           artifact_name="gamfit-runtime-${TARGET_SHA}"
           run_id=""
-          while IFS=$'\t' read -r candidate candidate_sha; do
-            if [[ -z "$candidate" || "$candidate_sha" != "$TARGET_SHA" ]]; then
+          owned_run=false
+
+          # A build_sha dispatch runs on main's tip, so its Actions headSha is
+          # deliberately NOT the commit it builds. The exact artifact name is
+          # the lookup identity; the sealed provenance below is the content
+          # identity. Restrict candidates to this producer workflow before use.
+          wheel_workflow_id=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/wheel-nightly.yml" \
+            --jq .id)
+          artifacts=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${artifact_name}&per_page=100")
+          while IFS=$'\t' read -r candidate artifact_id; do
+            if [[ -z "$candidate" || -z "$artifact_id" ]]; then
               continue
             fi
-            artifact_count=$(gh api \
+            candidate_run=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}")
+            if [[ "$(jq -r .workflow_id <<< "$candidate_run")" != "$wheel_workflow_id" \
+              || "$(jq -r .status <<< "$candidate_run")" != "completed" \
+              || "$(jq -r .conclusion <<< "$candidate_run")" != "success" ]]
+            then
+              continue
+            fi
+            candidate_artifacts=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate}/artifacts?per_page=100" \
-              --jq ".artifacts | map(select(.name == \"${artifact_name}\" and (.expired == false))) | length")
-            if [[ "$artifact_count" -eq 1 ]]; then
+            )
+            matching_count=$(jq --arg name "$artifact_name" \
+              '[.artifacts[]
+                | select(.name == $name and (.expired | not))]
+               | length' <<< "$candidate_artifacts")
+            matching_id=$(jq -r --arg name "$artifact_name" \
+              '[.artifacts[]
+                | select(.name == $name and (.expired | not))][0].id
+               // empty' <<< "$candidate_artifacts")
+            if [[ "$matching_count" -eq 1 && "$matching_id" == "$artifact_id" ]]
+            then
               run_id="$candidate"
               break
             fi
-          done < <(gh run list --repo "$GITHUB_REPOSITORY" \
-            --workflow wheel-nightly.yml \
-            --commit "$TARGET_SHA" \
-            --limit 20 \
-            --json databaseId,headSha \
-            --jq '.[] | [.databaseId, .headSha] | @tsv')
+          done < <(
+            jq -r --arg name "$artifact_name" \
+              '.artifacts[]
+               | select(
+                   .name == $name
+                   and (.expired | not)
+                   and .workflow_run != null
+                 )
+               | [.workflow_run.id, .id]
+               | @tsv' <<< "$artifacts"
+          )
+
           if [[ -z "$run_id" ]]; then
-            echo "::error::No unexpired ${artifact_name} exists for exact commit ${TARGET_SHA}. Wait for wheel-nightly.yml; Validate One never builds an extension."
+            # `return_run_details=true` changes this endpoint from 204 No Content
+            # to a synchronous run-details response. That run ID is the ownership
+            # proof: after dispatch this step polls and consumes ONLY this run,
+            # and it never calls a cancellation endpoint.
+            dispatch=$(gh api --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/wheel-nightly.yml/dispatches" \
+              -f ref=main \
+              -f "inputs[build_sha]=${TARGET_SHA}" \
+              -F return_run_details=true)
+            run_id=$(jq -er '.workflow_run_id' <<< "$dispatch")
+            run_url=$(jq -er '.html_url' <<< "$dispatch")
+            owned_run=true
+            {
+              echo "### Commissioned exact-SHA runtime"
+              echo
+              echo "- commit: \`${TARGET_SHA}\`"
+              echo "- artifact: \`${artifact_name}\`"
+              echo "- owned run: [\`${run_id}\`](${run_url})"
+              echo
+              echo "The synchronous run ID is the ownership boundary; this step never cancels it."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            deadline=$(( $(date +%s) + 1800 ))
+            while true; do
+              owned=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}")
+              if [[ "$(jq -r .workflow_id <<< "$owned")" != "$wheel_workflow_id" ]]; then
+                echo "::error::Owned run ${run_id} does not belong to wheel-nightly.yml."
+                exit 1
+              fi
+              run_status=$(jq -r .status <<< "$owned")
+              if [[ "$run_status" == "completed" ]]; then
+                run_conclusion=$(jq -r .conclusion <<< "$owned")
+                if [[ "$run_conclusion" != "success" ]]; then
+                  echo "::error::Owned wheel run ${run_id} completed with conclusion '${run_conclusion}'."
+                  exit 1
+                fi
+                break
+              fi
+              if (( $(date +%s) >= deadline )); then
+                echo "::error::Owned wheel run ${run_id} did not complete inside 30 minutes; it was left running."
+                exit 1
+              fi
+              sleep 15
+            done
+          else
+            {
+              echo "### Reused exact-SHA runtime"
+              echo
+              echo "- commit: \`${TARGET_SHA}\`"
+              echo "- artifact: \`${artifact_name}\`"
+              echo "- producer run: \`${run_id}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Recheck the exact owned/reused run after any wait. There must be one
+          # unexpired artifact of the requested name and no rolling fallback.
+          final_artifacts=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100")
+          artifact_count=$(jq --arg name "$artifact_name" \
+            '[.artifacts[]
+              | select(.name == $name and (.expired | not))]
+             | length' <<< "$final_artifacts")
+          if [[ "$artifact_count" -ne 1 ]]; then
+            echo "::error::Run ${run_id} has ${artifact_count} unexpired ${artifact_name} artifacts; expected exactly one."
             exit 1
           fi
-          runtime_sha=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" \
-            --json headSha --jq .headSha)
-          if [[ "$runtime_sha" != "$TARGET_SHA" ]]; then
-            echo "::error::Rolling-wheel provenance mismatch: requested ${TARGET_SHA}, run ${run_id} is ${runtime_sha}."
-            exit 1
-          fi
+
+          printf 'run_id=%s\nowned=%s\n' "$run_id" "$owned_run" >> "$GITHUB_OUTPUT"
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
             --name "$artifact_name" --dir python-runtime
+          test "$(grep -c '^commit=' python-runtime/RUNTIME_PROVENANCE.txt)" -eq 1
           grep -Fx "commit=${TARGET_SHA}" python-runtime/RUNTIME_PROVENANCE.txt
-          wheel=$(find python-runtime -maxdepth 1 -type f -name 'gamfit-*.whl' -print -quit)
-          if [[ -z "$wheel" || ! -s "$wheel" ]]; then
-            echo "::error::Runtime artifact ${artifact_name} contains no non-empty gamfit wheel."
+          (
+            cd python-runtime
+            tail -n +2 RUNTIME_PROVENANCE.txt | sha256sum -c -
+          )
+          mapfile -t wheels < <(
+            find python-runtime -maxdepth 1 -type f -name 'gamfit-*.whl' -print
+          )
+          if [[ "${#wheels[@]}" -ne 1 || ! -s "${wheels[0]}" ]]; then
+            echo "::error::Runtime artifact ${artifact_name} must contain exactly one non-empty gamfit wheel."
             exit 1
           fi
-          python -m pip install --force-reinstall "$wheel"
+          python -m pip install --force-reinstall "${wheels[0]}"
           (
             cd "$RUNNER_TEMP"
             python -c "import gamfit, gamfit._rust; print('exact runtime import ok:', gamfit.__version__)"
