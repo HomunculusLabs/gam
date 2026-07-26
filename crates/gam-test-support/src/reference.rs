@@ -178,6 +178,67 @@ fn parse_emitted(text: &str) -> BTreeMap<String, Vec<f64>> {
     out
 }
 
+/// Canonical, machine-greppable prefix marking a failure caused by the
+/// reference toolchain being ABSENT or TOO OLD on this machine — never by
+/// anything gam computed (#2477).
+///
+/// A reference-comparison test on a box without `Rscript`, without `statsmodels`,
+/// or with a `scikit-learn` too old to export the symbol the body imports, is
+/// **not measured here**. It is neither passing nor failing as a statement about
+/// gam. Before this marker existed those failures panicked in prose that read
+/// exactly like a quality failure, so 36 of one ledger's 46 `gam::quality` reds
+/// were the absence of R — and the cluster that looks most alarming in a ledger
+/// is precisely the one most likely to be entirely environmental, because these
+/// tests exist to call external tools.
+///
+/// Deliberately NOT a skip and NOT a pass: the test still fails and still shows
+/// up red, so a deficient box can never look green (the zero-assertion
+/// false-green class, #2422). Only the *classification* becomes machine-readable.
+/// Aggregators split a ledger with:
+///
+/// ```text
+/// grep -c 'REFERENCE_ENV_MISSING:'
+/// ```
+///
+/// and the token after the colon names the tool or module that was missing.
+///
+/// This marker must never be emitted for a reference that RAN and disagreed —
+/// that is a real result and must stay indistinguishable from any other failure.
+pub const REFERENCE_ENV_MISSING: &str = "REFERENCE_ENV_MISSING";
+
+/// Identify a reference-script failure that is the *environment* missing a
+/// dependency rather than the reference body being wrong, returning the name of
+/// the offending module/package.
+///
+/// Matches the import-failure vocabulary of both interpreters. The
+/// `ImportError: cannot import name` case is deliberately included: a
+/// `scikit-learn` present but too old to export `SplineTransformer` is the same
+/// class of problem as one absent altogether — the box cannot run the
+/// comparison — and lumping it in with genuine reference errors is what let a
+/// version skew masquerade as a gam defect.
+fn missing_reference_dependency(stderr: &str) -> Option<String> {
+    // Python: "ModuleNotFoundError: No module named 'statsmodels'"
+    //         "ImportError: cannot import name 'SplineTransformer' from 'sklearn…'"
+    // R:      "Error in library(gamlss) : there is no package called 'gamlss'"
+    for (marker, open, close) in [
+        ("No module named ", '\'', '\''),
+        ("cannot import name ", '\'', '\''),
+        ("there is no package called ", '\u{2018}', '\u{2019}'),
+        ("there is no package called ", '\'', '\''),
+    ] {
+        if let Some(rest) = stderr.split(marker).nth(1)
+            && let Some(name) = rest
+                .trim_start()
+                .strip_prefix(open)
+                .and_then(|r| r.split(close).next())
+            && !name.is_empty()
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 /// Per-language specifics for a reference subprocess run: scratch-dir tag,
 /// script filename, the interpreter `Command` (with any fixed leading args
 /// already applied), the script preamble/epilogue wrapped around the test body,
@@ -191,8 +252,9 @@ struct ReferenceKind {
     preamble: &'static str,
     /// Code appended after the test body (e.g. Python's flush-to-file step).
     epilogue: &'static str,
-    /// `.expect` message text for the spawn failure.
-    spawn_expect: &'static str,
+    /// Interpreter binary this kind spawns, named in [`REFERENCE_ENV_MISSING`]
+    /// markers so a ledger can say WHICH tool the box was missing.
+    tool: &'static str,
     /// `.expect` message text for the script-write failure.
     write_expect: &'static str,
     /// Human-readable language name used in the non-zero-exit assertion.
@@ -213,7 +275,7 @@ emit <- function(key, x) {\n\
       file = .OUT, append = TRUE)\n\
 }\n",
             epilogue: "",
-            spawn_expect: "spawn Rscript (install R to run reference-comparison tests)",
+            tool: "Rscript",
             write_expect: "write reference R script",
             display: "R",
         }
@@ -252,7 +314,7 @@ emit <- function(key, x) {\n\
                 "    _lines.append(str(key) + ':' + ' '.join(repr(float(v)) for v in arr))\n",
             ),
             epilogue: "\nopen(_out, 'w').write('\\n'.join(_lines) + '\\n')\n",
-            spawn_expect: "spawn python3 (install python3 to run reference-comparison tests)",
+            tool: "python3",
             write_expect: "write reference python script",
             display: "Python",
         }
@@ -291,22 +353,61 @@ fn run_subprocess(kind: &ReferenceKind, columns: &[Column<'_>], body: &str) -> R
     let full = format!("{preamble}\n{body}\n{epilogue}");
     std::fs::write(&script, full).expect(kind.write_expect);
 
-    let output = kind
+    let spawned = kind
         .command()
         .arg(&script)
         .arg(&data_csv)
         .arg(&out_txt)
-        .output()
-        .expect(kind.spawn_expect);
+        .output();
+
+    // The interpreter itself is absent: this box cannot measure the comparison
+    // at all. Marked, not skipped — see `REFERENCE_ENV_MISSING`.
+    let output = match spawned {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let tool = kind.tool;
+            // SAFETY: test-support harness intentionally fails the test with the
+            // canonical environment marker; a missing interpreter must stay a
+            // visible red, never a silent skip.
+            panic!(
+                "{REFERENCE_ENV_MISSING}:{tool}: `{tool}` is not installed on this machine, so \
+                 this reference comparison was NOT MEASURED here — it is not a statement about \
+                 gam either way. Install {tool} and its packages to measure it. ({err})"
+            );
+        }
+        // SAFETY: test-support helper intentionally panics with spawn context;
+        // this arm is a real spawn fault (permissions, exec format), NOT an
+        // absent interpreter, so it deliberately carries no environment marker.
+        Err(err) => panic!("spawn {} reference interpreter: {err}", kind.tool),
+    };
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "reference {} body failed (status {:?})\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
-        kind.display,
-        output.status.code()
-    );
+    if !output.status.success() {
+        // A missing package/module is the same "not measured here" verdict as a
+        // missing interpreter; anything else is a real reference-body failure
+        // and must stay indistinguishable from any other test failure.
+        if let Some(dependency) = missing_reference_dependency(&stderr) {
+            let tool = kind.tool;
+            // SAFETY: test-support harness intentionally fails the test with the
+            // canonical environment marker naming the package the box lacks.
+            panic!(
+                "{REFERENCE_ENV_MISSING}:{dependency}: the {} reference needs `{dependency}`, \
+                 which this machine's {tool} cannot import, so this comparison was NOT MEASURED \
+                 here — it is not a statement about gam either way. Install or upgrade \
+                 `{dependency}` to measure it.\n--- stderr ---\n{stderr}",
+                kind.display
+            );
+        }
+        // SAFETY: test-support harness intentionally panics with the captured
+        // reference output. The reference RAN and failed on its own terms, so
+        // this carries NO environment marker — it is a real result.
+        panic!(
+            "reference {} body failed (status {:?})\n--- stderr ---\n{stderr}\n--- stdout ---\n{stdout}",
+            kind.display,
+            output.status.code()
+        );
+    }
 
     let emitted = std::fs::read_to_string(&out_txt).unwrap_or_default();
     let parsed = parse_emitted(&emitted);
@@ -978,6 +1079,79 @@ pub fn pearson(a: &[f64], b: &[f64]) -> f64 {
         sbb += db * db;
     }
     sab / (saa.sqrt() * sbb.sqrt()).max(1e-300)
+}
+
+#[cfg(test)]
+mod reference_env_marker_tests {
+    use super::missing_reference_dependency;
+
+    /// The exact stderr shapes that produced 36 of one ledger's 46
+    /// `gam::quality` reds (#2476/#2477). Each must be recognised as the
+    /// environment, and must name the offending package so a ledger can report
+    /// WHICH one to install.
+    #[test]
+    fn real_missing_dependency_stderr_is_recognised_and_named() {
+        let cases = [
+            (
+                "Traceback (most recent call last):\n  File \"script.py\", line 23, in <module>\n \
+                 import statsmodels.api as sm\nModuleNotFoundError: No module named 'statsmodels'\n",
+                "statsmodels",
+            ),
+            (
+                "  from geomstats.geometry.grassmannian import Grassmannian\n\
+                 ModuleNotFoundError: No module named 'geomstats'\n",
+                "geomstats",
+            ),
+            // A package PRESENT but too old to export the symbol is the same
+            // "this box cannot measure it" verdict as one absent altogether.
+            (
+                "ImportError: cannot import name 'SplineTransformer' from \
+                 'sklearn.preprocessing' (/usr/lib/python3/dist-packages/sklearn/preprocessing/__init__.py)\n",
+                "SplineTransformer",
+            ),
+            (
+                "Error in library(gamlss) : there is no package called 'gamlss'\nExecution halted\n",
+                "gamlss",
+            ),
+            // R quotes package names with typographic quotes under most locales.
+            (
+                "Error in library(flexsurv) : there is no package called \u{2018}flexsurv\u{2019}\n",
+                "flexsurv",
+            ),
+        ];
+        for (stderr, expected) in cases {
+            assert_eq!(
+                missing_reference_dependency(stderr).as_deref(),
+                Some(expected),
+                "should have been classified as a missing dependency: {stderr}"
+            );
+        }
+    }
+
+    /// The half that actually matters. A reference that RAN and failed on its
+    /// own terms is a real result; classifying it as "environment" would hide
+    /// exactly the defects this marker exists to stop hiding.
+    #[test]
+    fn a_genuine_reference_error_is_never_classified_as_environment() {
+        let genuine = [
+            // The wine.csv degenerate-response failure (#2476): a real data bug
+            // that must NOT be excused as a missing package.
+            "Traceback (most recent call last):\n  File \"script.py\", line 40, in <module>\n \
+             m = MNLogit(Ytr, Xtr)\nnumpy.exceptions.AxisError: axis 1 is out of bounds for \
+             array of dimension 1\n",
+            "Error in gam(y ~ s(x), data = df) : Model has more coefficients than data\n",
+            "ValueError: Input contains NaN, infinity or a value too large for dtype('float64').\n",
+            "LinAlgError: Singular matrix\n",
+            "",
+        ];
+        for stderr in genuine {
+            assert_eq!(
+                missing_reference_dependency(stderr),
+                None,
+                "a genuine reference failure was misclassified as environment: {stderr}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
