@@ -2236,9 +2236,18 @@ fn survival_unified_fit_result(
     // a fabricated nearby matrix.
     let covariance_conditional =
         survival_conditional_covariance_from_penalized_hessian(&penalized_hessian);
-    let beta_standard_errors = covariance_conditional.as_ref().map(|cov| {
-        Array1::from_iter((0..cov.nrows()).map(|i| cov[[i, i]].max(0.0).sqrt()))
-    });
+    // Standard errors come from the one gate that owns the negative-diagonal
+    // judgement (`gam_problem::se_from_covariance`), not a local `max(0, ·)`.
+    // A clamp reports a materially negative variance as `SE = 0` — an
+    // infinitely precise coefficient — where the shared gate refuses anything
+    // outside its dimension-scaled backward-error bound.
+    let beta_standard_errors = covariance_conditional
+        .as_ref()
+        .map(gam_problem::se_from_covariance)
+        .transpose()
+        .map_err(|reason| {
+            format!("survival transformation conditional standard errors are invalid: {reason}")
+        })?;
     let beta_covariance = covariance_conditional
         .clone()
         .map(gam_problem::dispersion_cov::PhiScaledCovariance::wrap);

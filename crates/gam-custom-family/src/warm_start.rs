@@ -448,6 +448,118 @@ fn require_converged_outer_for_assembly(outer_converged: bool) -> Result<(), Cus
     })
 }
 
+/// Assemble the first-order corrected covariance `V_c = V_cond + C` and the
+/// standard errors published beside it (#2346).
+///
+/// The standard errors go through `gam_problem::se_from_covariance` — the same
+/// gate the standard GAM lane, the GAMLSS builders and the penalty path already
+/// use — rather than a local `max(0, ·)` clamp. `V_c` is a *sum*, not a
+/// factorization, so a large negative correction on a weakly identified
+/// coefficient can drive a diagonal materially negative. A clamp publishes that
+/// coefficient with `SE = 0`, i.e. infinite precision and a Wald `p ≈ 0`;
+/// snapping a negative diagonal to zero is legitimate only inside the
+/// dimension-scaled backward-error bound, which is exactly the judgement
+/// `se_from_covariance` owns.
+fn corrected_covariance_and_standard_errors(
+    smoothing_corrected: Option<&(Array2<f64>, gam_solve::model_types::SmoothingCorrectionMethod)>,
+    covariance_conditional: Option<&Array2<f64>>,
+) -> Result<
+    (
+        Option<Array2<f64>>,
+        Option<gam_solve::model_types::SmoothingCorrectionMethod>,
+        Option<Array2<f64>>,
+        Option<Array1<f64>>,
+    ),
+    CustomFamilyError,
+> {
+    let (Some((correction, method)), Some(v_cond)) = (smoothing_corrected, covariance_conditional)
+    else {
+        return Ok((None, None, None, None));
+    };
+    if correction.dim() != v_cond.dim() {
+        return Ok((None, None, None, None));
+    }
+    let corrected = v_cond + correction;
+    let standard_errors = gam_problem::se_from_covariance(&corrected).map_err(|reason| {
+        CustomFamilyError::NumericalFailure {
+            reason: format!(
+                "corrected covariance V_c = V_cond + C has an invalid diagonal: {reason}"
+            ),
+        }
+    })?;
+    Ok((
+        Some(correction.clone()),
+        Some(*method),
+        Some(corrected),
+        Some(standard_errors),
+    ))
+}
+
+#[cfg(test)]
+mod corrected_covariance_tests {
+    use super::*;
+    use gam_solve::model_types::SmoothingCorrectionMethod;
+
+    fn first_order_method() -> SmoothingCorrectionMethod {
+        SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+            active_rank: 1,
+            rho_dimension: 1,
+        }
+    }
+
+    #[test]
+    fn corrected_standard_errors_are_the_covariance_diagonal_roots() {
+        let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0]));
+        let correction = Array2::from_diag(&Array1::from_vec(vec![5.0, 7.0]));
+        let (_, _, corrected, se) = corrected_covariance_and_standard_errors(
+            Some(&(correction, first_order_method())),
+            Some(&v_cond),
+        )
+        .expect("a positive-definite corrected covariance must be accepted");
+        let corrected = corrected.expect("corrected covariance is published");
+        assert_eq!(corrected[[0, 0]], 9.0);
+        assert_eq!(corrected[[1, 1]], 16.0);
+        let se = se.expect("corrected standard errors are published");
+        assert_eq!(se[0], 3.0);
+        assert_eq!(se[1], 4.0);
+    }
+
+    #[test]
+    fn a_materially_negative_corrected_diagonal_is_refused_not_clamped_to_zero() {
+        // `V_c = V_cond + C` with a correction that overwhelms the conditional
+        // variance of coefficient 1. The clamp this seam replaced published
+        // `SE = 0` here — an infinitely precise coefficient whose Wald p-value
+        // is 0 — so the guard is that assembly now fails instead.
+        let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 1.0]));
+        let correction = Array2::from_diag(&Array1::from_vec(vec![0.0, -3.0]));
+        let error = corrected_covariance_and_standard_errors(
+            Some(&(correction, first_order_method())),
+            Some(&v_cond),
+        )
+        .expect_err("a materially negative corrected diagonal must be refused");
+        assert!(matches!(
+            error,
+            CustomFamilyError::NumericalFailure { reason }
+                if reason.contains("V_c = V_cond + C has an invalid diagonal")
+        ));
+    }
+
+    #[test]
+    fn a_dimension_mismatched_correction_publishes_no_corrected_pair() {
+        let v_cond = Array2::from_diag(&Array1::from_vec(vec![4.0, 9.0]));
+        let correction = Array2::from_diag(&Array1::from_vec(vec![1.0]));
+        let (correction_out, method, corrected, se) = corrected_covariance_and_standard_errors(
+            Some(&(correction, first_order_method())),
+            Some(&v_cond),
+        )
+        .expect("a mismatched correction is a typed absence, not a failure");
+        assert!(correction_out.is_none());
+        assert!(method.is_none());
+        assert!(corrected.is_none());
+        assert!(se.is_none());
+    }
+}
+
 #[cfg(test)]
 mod assembly_convergence_tests {
     use super::*;
@@ -782,21 +894,10 @@ pub fn blockwise_fit_from_parts(
     // curvature supplied one — `V_c = V_cond + C`, with the correction matrix
     // and its typed method provenance carried exactly like the standard lane.
     let (smoothing_correction, smoothing_correction_method, corrected_cov, corrected_se) =
-        match (&smoothing_corrected, &covariance_conditional) {
-            (Some((correction, method)), Some(v_cond))
-                if correction.dim() == v_cond.dim() =>
-            {
-                let corrected = v_cond + correction;
-                let se = corrected.diag().mapv(|v| v.max(0.0).sqrt());
-                (
-                    Some(correction.clone()),
-                    Some(method.clone()),
-                    Some(corrected),
-                    Some(se),
-                )
-            }
-            _ => (None, None, None, None),
-        };
+        corrected_covariance_and_standard_errors(
+            smoothing_corrected.as_ref(),
+            covariance_conditional.as_ref(),
+        )?;
     let inference = Some(gam_solve::model_types::FitInference {
         edf_by_block: edf_by_penalty,
         penalty_block_trace: penalty_trace,
