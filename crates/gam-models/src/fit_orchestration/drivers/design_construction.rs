@@ -2758,20 +2758,6 @@ fn relax_smoothing_rho_prior(
 ) -> gam_spec::RhoPrior {
     use gam_terms::basis::BasisMetadata;
     let base = &options.rho_prior;
-    // Caller authority is the first invariant at this seam (#2463). `Flat`
-    // is the SPEC default and authorizes the library to synthesize only the
-    // coordinate-specific identifiability policies below. Every other variant
-    // is an explicit modelling choice; replacing it with `Flat`, a widened
-    // Normal, or a null-space PC prior silently changes the criterion.
-    //
-    // This also covers `Independent`: it is already coordinate-specific and
-    // must pass through byte-for-byte. A configured scalar Normal / Gamma / PC
-    // prior is equally authoritative even though it broadcasts to every outer
-    // coordinate. The relaxations remain active only for the unset/default
-    // `Flat` case that originally needed library policy.
-    if !matches!(base, gam_spec::RhoPrior::Flat) {
-        return base.clone();
-    }
     // AN EXPLICITLY CONFIGURED PRIOR IS HONOURED AS WRITTEN (#2463).
     //
     // Everything below this line derives a prior the CALLER did not ask for.

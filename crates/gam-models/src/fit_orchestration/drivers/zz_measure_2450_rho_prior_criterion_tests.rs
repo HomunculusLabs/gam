@@ -1,18 +1,12 @@
-// #2450/#2463 — which criterion does a `gam-models` fit minimize?
+// #2450/#2463 — paired measurement of the criterion a `gam-models` fit minimizes.
 //
-// SPEC makes `Flat` the REML/LAML default. A non-Flat `FitOptions::rho_prior`
-// is therefore an explicit caller request, and the fit must either minimize that
-// configured criterion or refuse it — never rewrite it silently.
-//
-// This paired A/B/C gate holds data, seed, spec, and every other option fixed:
-//
-//   * REML: `Flat`;
-//   * configured: `Normal { mean: 0, sd: 3 }`;
-//   * discriminator: `Normal { mean: -6, sd: 0.25 }`, which pins λ near e^-6.
-//
-// It exercises both the relaxable P-spline route and the moving-κ Matérn control.
-// Every measured cell must move under the discriminator. Bitwise-identical rho
-// means the caller's prior was discarded before reaching the criterion (#2463).
+// SPEC makes `Flat` the REML/LAML default. Holding data, seed, spec, and every
+// other option fixed, this instrument compares `Flat`, a configured
+// `Normal {0,3}`, and the discriminating `Normal {-6,0.25}` on the relaxable
+// P-spline route and the moving-κ Matérn control. The dedicated
+// `configured_rho_prior_reaches_criterion_2463` integration tests own the
+// executable caller-authority contract, including both canonical spellings of
+// an unset prior; this larger ladder remains the paired scientific measurement.
 //
 #[cfg(test)]
 mod zz_measure_2450_rho_prior_criterion_tests {
@@ -354,14 +348,6 @@ mod zz_measure_2450_rho_prior_criterion_tests {
                 } else {
                     "IS OVERRIDDEN before the fit (bitwise identical under an absurd prior)"
                 }
-            );
-            assert!(
-                honored,
-                "#2463: {family} n={n} frequency={frequency} accepted an explicit rho prior \
-                 but returned bitwise-identical rho under Normal{{-6,0.25}} and Flat",
-                family = cell.family,
-                n = cell.n,
-                frequency = cell.frequency,
             );
         }
         assert!(
