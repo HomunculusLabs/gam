@@ -1305,7 +1305,7 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
         coarse_steps,
         rank,
         budget,
-        agreement,
+        tail_estimate,
         target,
         mass_defect,
         dropped_mass_fraction,
@@ -1319,8 +1319,8 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
         );
     };
     assert!(
-        agreement <= target,
-        "admitted with the nested rules disagreeing by {agreement} against {target}"
+        tail_estimate <= target,
+        "admitted with an extrapolated remaining error of {tail_estimate} against {target}"
     );
     assert!(
         steps <= budget && coarse_steps <= steps,
@@ -1341,7 +1341,7 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
     );
     eprintln!(
         "[2503-SOLVEFREE] m={} rank={rank} steps={steps} coarse={coarse_steps} budget={budget} \
-         agreement={agreement:.3e} target={target:.3e} log_lambda={}",
+         tail_estimate={tail_estimate:.3e} target={target:.3e} log_lambda={}",
         design.num_coeffs(),
         fit.log_lambda()
     );

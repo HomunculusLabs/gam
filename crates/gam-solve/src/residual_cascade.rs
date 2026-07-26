@@ -62,6 +62,25 @@
 //! bounded-domain endpoints are compared exactly, with no basin-selecting
 //! lattice.
 //!
+//! The same elimination puts the profiled RESIDUAL in the same form, and this is
+//! what makes the criterion solve-free at every λ on BOTH routes. With
+//! `β = D^{−1/2}(b₁ − G₁₀G₀₀^{−1}b₀)` and `S_k(λ) = β'(B+λI)^{−k}β`, the residual
+//! is `R = anchor − S₁` and its three `log λ` derivatives are built from
+//! `S₂, S₃, S₄`; `anchor = y'Wy − b₀'G₀₀^{−1}b₀` is the part no λ can move. On
+//! the dense route the eigenbasis projects β directly. Past the cap, `S_k(λ)` is
+//! `∫(θ+λ)^{−k} dμ(θ)` for the measure β induces on `spec(B)`, so ONE Lanczos run
+//! seeded with β (rather than with a Rademacher probe) returns the Jacobi matrix
+//! of its Golub–Meurant Gauss rule — the same `(node, weight)` shape the dense
+//! route stores, so both routes then evaluate one expression. That rule is
+//! admitted only when it has earned it: either the Krylov space has consumed
+//! `rank(B) ≤ n − nullity` and is therefore invariant (the rule is then exact for
+//! every kernel), or two NESTED rules — free, since `T_m`'s leading block is
+//! `T_j` — agree to `√ε` over the whole domain, which for a completely monotone
+//! kernel bounds the coarser rule's error exactly. Uncertified, the route falls
+//! back to two PCG solves per λ and says so in the fit certificate: at the bottom
+//! of the domain `X'WX + λD` is numerically singular and no solve can be
+//! certified there, which is why the quadrature exists (#2503).
+//!
 //! Refinement certificate. After fitting L levels, the candidate level L+1
 //! is constructed (O(n)) and the EXACT objective decrease available from
 //! adding it is bounded: for the penalized objective `F(c) = ‖√W(y−Xc)‖² +
@@ -421,10 +440,11 @@ pub enum ResidualMomentMethod {
         rank: usize,
         /// Step budget the growth loop was allowed, before that ceiling.
         budget: usize,
-        /// Worst relative disagreement between the two nested rules over `S₁..S₄`
-        /// and the whole λ domain, against the resolution it had to reach.
-        agreement: f64,
-        /// The resolution `agreement` was charged against.
+        /// Conservative geometric extrapolation of the rule's REMAINING relative
+        /// error, over `S₁..S₄` and the whole λ domain, from three nested rules.
+        /// `0` when the Krylov space closed and the rule is exact outright.
+        tail_estimate: f64,
+        /// The resolution `tail_estimate` was charged against.
         target: f64,
         /// `‖r_m‖ / maxᵢ|αᵢ|`: the Krylov residual against the operator scale.
         /// At roundoff the space closed and the rule is exact outright.
@@ -443,7 +463,7 @@ pub enum ResidualMomentMethod {
         steps: usize,
         rank: usize,
         budget: usize,
-        agreement: f64,
+        tail_estimate: f64,
         target: f64,
         relative_tail: f64,
     },
@@ -944,10 +964,10 @@ struct ResidualQuadratureCertificate {
     /// `||r_m|| / max_i |alpha_i|`: the Krylov residual against the operator
     /// scale. At roundoff, `K_m(B, beta)` is invariant and the rule is exact.
     relative_tail: f64,
-    /// Worst relative disagreement of the two nested rules over `S_1..S_4` and
-    /// the whole lambda domain.
-    agreement: f64,
-    /// The resolution `agreement` had to reach.
+    /// Conservative geometric extrapolation of the rule's remaining relative
+    /// error over `S_1..S_4` and the whole lambda domain, from three nested rules.
+    tail_estimate: f64,
+    /// The resolution `tail_estimate` had to reach.
     target: f64,
     /// The rule may be used: it either closed the Krylov space or met `target`.
     certified: bool,
@@ -967,7 +987,7 @@ impl ResidualQuadratureCertificate {
             rank,
             budget,
             relative_tail,
-            agreement,
+            tail_estimate,
             target,
             certified,
             mass_defect,
@@ -979,7 +999,7 @@ impl ResidualQuadratureCertificate {
                 coarse_steps,
                 rank,
                 budget,
-                agreement,
+                tail_estimate,
                 target,
                 relative_tail,
                 mass_defect,
@@ -990,7 +1010,7 @@ impl ResidualQuadratureCertificate {
                 steps,
                 rank,
                 budget,
-                agreement,
+                tail_estimate,
                 target,
                 relative_tail,
             }
@@ -998,27 +1018,56 @@ impl ResidualQuadratureCertificate {
     }
 }
 
-/// Worst relative disagreement between two NESTED Gauss rules for the same
-/// measure, over `S_1..S_4` and the whole `log lambda` domain.
+/// Conservative upper estimate of the profiled-residual quadrature's REMAINING
+/// relative error, from three NESTED Gauss rules for the same measure, over
+/// `S_1..S_4` and the whole `log lambda` domain.
 ///
-/// The four moments are compared, not the profiled residual `R = anchor - S_1`.
-/// `R` is a difference of two positive numbers that can cancel to nine digits at
-/// the bottom of the domain (measured: `R = 1.4e-8` against `anchor = 11.8` on an
-/// over-complete cascade, where the basis nearly interpolates), so a RELATIVE
-/// criterion on `R` there measures the cancellation and not the rule. Each `S_k`
-/// is a sum of strictly positive terms with no cancellation at all, and an error
-/// of `sqrt(eps)` relative on `S_1` is an error of `sqrt(eps)*S_1 <= sqrt(eps) *
-/// anchor` absolute on `R` — which is the statement worth making about `R`.
+/// WHY NOT TWO RULES. `(theta + lambda)^-k` has positive even derivatives, so the
+/// standard Gauss error representation is one-signed and every rule
+/// UNDER-estimates its integral: `G_j <= S_k` for every `j`. Hence
+/// `G_m - G_{m/2} <= S_k - G_{m/2}` — the gap between two nested rules is an exact
+/// LOWER bound on the coarser one's error. That direction is rigorous and it is
+/// also not what a certificate needs: a small gap says the two errors are nearly
+/// EQUAL, which is equally consistent with both being small and with both being
+/// stuck. A two-rule agreement test is blind to stagnation by construction.
+///
+/// WHAT THREE RULES BUY. All the gaps are of one sign, so the remaining error is
+/// the TAIL of the gap series, and three rules are enough to fit the decay that
+/// tail obeys. The decay is not assumed: the Gauss-rule error for a resolvent
+/// falls like `((sqrt(kappa) - 1)/(sqrt(kappa) + 1))^{2m}` — geometric in the node
+/// count — so with `err(j) = C x^{4j/m}` sampled at `j = m/4, m/2, m` and
+/// `x = r^{m/4}`,
+///
+/// ```text
+/// g1 = G_{m/2} - G_{m/4} = C(x - x^2)      g2 = G_m - G_{m/2} = C(x^2 - x^4)
+/// rho = |g2|/|g1| = x(1 + x)               tail = C x^4 = |g2| * x^2/(1 - x^2)
+/// ```
+///
+/// so `x = (sqrt(1 + 4 rho) - 1)/2` recovers the rate from the two observed gaps
+/// and the tail follows in closed form. `x >= 1` — no contraction — is refused
+/// outright rather than extrapolated, which is the stagnation case a two-rule test
+/// cannot see. The direction of the residual approximation is the safe one: the
+/// effective rate IMPROVES with `m` once the extreme Ritz values converge, so a
+/// rate fitted on `[m/4, m/2]` over-states the tail beyond `m`.
+///
+/// A gap already at the arithmetic's own floor (`eps * m * |G_m|`, the rounding of
+/// the sum being compared) is converged, not stagnant, and contributes nothing.
+///
+/// WHICH QUANTITIES. The four moments, not the profiled residual `R = anchor -
+/// S_1`, and `S_1` is read directly rather than recovered from `R` — see
+/// [`CascadeResidualSpectrum::moment_sums`]. An error of `sqrt(eps)` relative on
+/// `S_1` is an error of at most `sqrt(eps) * anchor` absolute on `R`, which is the
+/// statement worth making about a difference that can cancel to nine digits.
 ///
 /// GRID. Each `S_k` is a positive mixture of `(theta + lambda)^-k`, so
-/// `|d log S_k / d log lambda| = k * (weighted mean of lambda/(theta+lambda)) <=
-/// k <= 4`: every moment moves by at most a factor `e^4` per e-fold of `lambda`,
-/// and the ratio of two of them is at least that smooth. Four samples per e-fold
-/// therefore resolve the disagreement's profile, and the endpoints are always
-/// sampled exactly.
-fn nested_moment_disagreement(
+/// `|d log S_k / d log lambda| = k * (weighted mean of lambda/(theta+lambda)) <= k
+/// <= 4`: every moment moves by at most a factor `e^4` per e-fold of `lambda`.
+/// Four samples per e-fold resolve that, and the endpoints are always sampled.
+fn residual_quadrature_tail_estimate(
     fine: &CascadeResidualSpectrum,
+    mid: &CascadeResidualSpectrum,
     coarse: &CascadeResidualSpectrum,
+    steps: usize,
     (lo, hi): (f64, f64),
 ) -> Result<f64, String> {
     if !(lo.is_finite() && hi.is_finite() && lo < hi) {
@@ -1033,6 +1082,7 @@ fn nested_moment_disagreement(
         ));
     }
     let cells = cells as usize;
+    let rounding = f64::EPSILON * steps.max(1) as f64;
     let mut worst = 0.0_f64;
     let mut sampled = 0usize;
     for step in 0..=cells {
@@ -1043,30 +1093,52 @@ fn nested_moment_disagreement(
         }
         sampled += 1;
         let fine_moments = fine.moment_sums(lambda);
+        let mid_moments = mid.moment_sums(lambda);
         let coarse_moments = coarse.moment_sums(lambda);
-        for (fine_value, coarse_value) in fine_moments.into_iter().zip(coarse_moments) {
-            if !(fine_value.is_finite() && coarse_value.is_finite()) {
+        for index in 0..4 {
+            let (value, previous, earlier) =
+                (fine_moments[index], mid_moments[index], coarse_moments[index]);
+            if !(value.is_finite() && previous.is_finite() && earlier.is_finite()) {
                 return Err(format!(
-                    "residual cascade: non-finite nested-rule moment at log lambda {log_lambda} \
-                     ({fine_value} versus {coarse_value})"
+                    "residual cascade: non-finite nested-rule moment S{} at log lambda \
+                     {log_lambda} ({value}, {previous}, {earlier})",
+                    index + 1
                 ));
             }
-            let denominator = fine_value.abs();
-            if !(denominator > 0.0) {
-                // Both rules report an identically zero moment: they agree.
-                if coarse_value != 0.0 {
+            let magnitude = value.abs();
+            if !(magnitude > 0.0) {
+                // All three rules report an identically zero moment: nothing is
+                // moving and there is nothing to extrapolate.
+                if previous != 0.0 || earlier != 0.0 {
                     return Ok(f64::INFINITY);
                 }
                 continue;
             }
-            worst = worst.max((fine_value - coarse_value).abs() / denominator);
+            let recent = (value - previous).abs();
+            if recent <= rounding * magnitude {
+                // The rule stopped moving at the arithmetic's own floor.
+                continue;
+            }
+            let older = (previous - earlier).abs();
+            let ratio = recent / older;
+            // `x` solves `x^2 + x = ratio`: the per-quarter-budget decay rate the
+            // two observed gaps imply.
+            let rate = 0.5 * ((1.0 + 4.0 * ratio).sqrt() - 1.0);
+            if !(rate < 1.0) {
+                // Not contracting. This is the case a two-rule agreement test
+                // cannot see, and it is refused rather than extrapolated.
+                return Ok(f64::INFINITY);
+            }
+            let square = rate * rate;
+            worst = worst.max(recent * square / ((1.0 - square) * magnitude));
         }
     }
     if sampled == 0 {
         // No representable `lambda` on the declared domain, so the rules were
         // never compared. Agreement on zero samples is not agreement.
         return Err(format!(
-            "residual cascade: the quadrature certification domain [{lo}, {hi}] contains no              representable lambda, so no nested-rule comparison was made"
+            "residual cascade: the quadrature certification domain [{lo}, {hi}] contains no \
+             representable lambda, so no nested-rule comparison was made"
         ));
     }
     Ok(worst)
@@ -2217,18 +2289,20 @@ impl Core {
     /// 1. THE KRYLOV SPACE CLOSED (`SchurLanczos::invariant`). Then
     ///    `(B + lambda I)^-k beta` lies inside `K_m` for every `k` and every
     ///    `lambda`, and the rule reproduces the spectral sum outright.
-    /// 2. TWO NESTED RULES AGREE. Every Gauss rule for a completely monotone
-    ///    kernel UNDER-estimates its integral (the `(2m)`-th derivative of
-    ///    `(theta+lambda)^-k` is positive, so the standard error representation is
-    ///    one-signed), so `S_k(j)` INCREASES with `j` toward `S_k` and the
-    ///    disagreement between the rules at `m/2` and `m` is an exact lower bound
-    ///    on the error at `m/2`. Requiring it below the resolution the score
-    ///    search itself works at — `sqrt(eps)`, the same constant
-    ///    `log_lambda_domain_from_modes` pads with and `fit_reml` refines to —
-    ///    places the error at `m/2` at that resolution and the error at `m`, one
-    ///    more step of a super-geometrically convergent sequence, far below it.
-    ///    Measured: where the `m/2` rule was at `sqrt(eps)`, the `m` rule agreed
-    ///    with the exact dense spectrum to `1e-12`.
+    /// 2. THE NESTED LADDER HAS CONTRACTED. Every Gauss rule for a completely
+    ///    monotone kernel UNDER-estimates its integral (the `(2m)`-th derivative
+    ///    of `(theta+lambda)^-k` is positive, so the standard error
+    ///    representation is one-signed), so the rules at `m/4`, `m/2`, `m` — free,
+    ///    since `T_m`'s leading block IS `T_j` — rise toward `S_k` with all their
+    ///    gaps of one sign, and the remaining error is the tail of those gaps.
+    ///    [`residual_quadrature_tail_estimate`] extrapolates that tail
+    ///    geometrically and REFUSES when the last two gaps do not contract, which
+    ///    is the stagnation case a bare two-rule agreement test cannot see. The
+    ///    estimate must fall below the resolution the score search itself works at
+    ///    — `sqrt(eps)`, the same constant `log_lambda_domain_from_modes` pads
+    ///    with and `fit_reml` refines to. Measured against the exact dense
+    ///    eigenbasis at every budget on this ladder, over three designs: where the
+    ///    estimate passed, the rule was within `1e-12`.
     ///
     /// The budget GROWS geometrically until one of those fires, so the accepted
     /// rule is the smallest that passes rather than the largest affordable. That
@@ -2272,7 +2346,7 @@ impl Core {
                     rank,
                     budget,
                     relative_tail: 0.0,
-                    agreement: 0.0,
+                    tail_estimate: 0.0,
                     target,
                     certified: true,
                     mass_defect: 0.0,
@@ -2285,19 +2359,27 @@ impl Core {
             let run = self.schur_lanczos(null_chol, &beta, steps, ceiling)?;
             let taken = run.alpha.len();
             let fine = self.residual_gauss_rule(&run, taken, anchor_energy, measure_mass)?;
-            let coarse_steps = taken / 2;
-            let agreement = if run.invariant {
+            let coarse_steps = taken / 4;
+            let tail_estimate = if run.invariant {
                 // A closed Krylov space makes the rule exact for every kernel;
                 // there is nothing left for a nested comparison to add.
                 0.0
             } else if coarse_steps == 0 {
-                // A one-node rule has no nested coarser rule to be charged
-                // against, and "no evidence" is not "agreement".
+                // Fewer than four nodes leaves no nested ladder to extrapolate
+                // along, and "no evidence" is not "converged".
                 f64::INFINITY
             } else {
+                let mid =
+                    self.residual_gauss_rule(&run, taken / 2, anchor_energy, measure_mass)?;
                 let coarse =
                     self.residual_gauss_rule(&run, coarse_steps, anchor_energy, measure_mass)?;
-                nested_moment_disagreement(&fine.spectrum, &coarse.spectrum, domain)?
+                residual_quadrature_tail_estimate(
+                    &fine.spectrum,
+                    &mid.spectrum,
+                    &coarse.spectrum,
+                    taken,
+                    domain,
+                )?
             };
             let certificate = ResidualQuadratureCertificate {
                 steps: taken,
@@ -2305,9 +2387,9 @@ impl Core {
                 rank,
                 budget,
                 relative_tail: run.tail / run.spectral_scale.max(f64::MIN_POSITIVE),
-                agreement,
+                tail_estimate,
                 target,
-                certified: run.invariant || agreement <= target,
+                certified: run.invariant || tail_estimate <= target,
                 mass_defect: fine.mass_defect,
                 dropped_mass_fraction: fine.dropped_mass_fraction,
             };
@@ -3455,6 +3537,11 @@ impl ResidualCascadeDesign {
     /// singular (#2503). A gate on "the criterion is evaluable everywhere the
     /// search will look" needs to know where that is, rather than hard-coding a λ
     /// read out of one failure's message.
+    ///
+    /// Rebuilds the whole REML profile, exactly as [`Self::criterion`] does — both
+    /// are single-shot oracles, not loop bodies. Past the dense cap that includes
+    /// the determinant sweep and the residual quadrature, so calling either in a λ
+    /// loop pays the profile per λ; [`Self::fit_reml`] builds it once.
     pub fn log_lambda_domain(&self) -> Result<(f64, f64), String> {
         self.core.reml_profile()?.log_lambda_domain()
     }
@@ -4736,14 +4823,14 @@ mod refinement_decision_tests {
             });
             println!(
                 "#2503 side={side} levels={levels} n={} m={} rank={rank} budget={} steps={} \
-                 coarse={} agreement={:.3e} target={:.3e} certified={} tail={:.2e} \
+                 coarse={} tail_estimate={:.3e} target={:.3e} certified={} tail={:.2e} \
                  mass_defect={:.2e} dropped={:.2e}",
                 y.len(),
                 core.m,
                 certificate.budget,
                 certificate.steps,
                 certificate.coarse_steps,
-                certificate.agreement,
+                certificate.tail_estimate,
                 certificate.target,
                 certificate.certified,
                 certificate.relative_tail,
@@ -4803,8 +4890,8 @@ mod refinement_decision_tests {
             certificate.steps
         );
         assert!(
-            certificate.agreement <= certificate.target,
-            "the nested rules must agree to the search resolution: {certificate:?}"
+            certificate.tail_estimate <= certificate.target,
+            "the extrapolated tail must reach the search resolution: {certificate:?}"
         );
         let spectrum = spectrum.expect("a certified rule is returned");
 
@@ -4834,6 +4921,92 @@ mod refinement_decision_tests {
                     (gauss - exact_value).abs() <= resolution * exact_value.abs(),
                     "{name} disagrees at log lambda {log_lambda}: {gauss} versus {exact_value} \
                      ({certificate:?})"
+                );
+            }
+        }
+    }
+
+    /// The admitted quadrature and the SOLVE it replaces are the same function of
+    /// λ, measured on the iterative route itself.
+    ///
+    /// Every other gate here charges the quadrature against the dense eigenbasis,
+    /// which means charging it on designs small enough to HAVE one. This one runs
+    /// past the dense sizing cap — where there is no eigenbasis, no `dense_gram`,
+    /// and the only other way to obtain `S₁..S₄` is the pair of PCG solves the
+    /// shipped route used to perform at every λ. If those two disagree, the REML
+    /// criterion is route-dependent, which is the defect the spectral form exists
+    /// to remove; and this is the only angle from which that can be checked where
+    /// it actually matters.
+    ///
+    /// The λ is chosen where PCG is well conditioned, because the comparator is
+    /// the thing with the error bar: `cond(B + λI) ≤ (θmax + λ)/λ`, and the solve
+    /// carries `CG_RTOL` backward error, so its forward error on `S₁` is about
+    /// `CG_RTOL · cond` and on `S₃, S₄` — which pass through a second solve —
+    /// about its square. The bound below is that product with the measured
+    /// conditioning substituted, not a widened number.
+    #[test]
+    fn the_quadrature_and_the_solve_it_replaces_agree_past_the_dense_cap_2503() {
+        let (x1, x2, y) = dense_fixture(56);
+        let design = cascade_core((&x1, &x2, &y), 6);
+        let core = &design.core;
+        assert!(
+            core.dense_gram.is_none(),
+            "premise: this fixture must be PAST the dense sizing cap (m = {}), or the solve is \
+             not the comparator this gate is about",
+            core.m
+        );
+        let (null_chol, _) = core.null_gram_factor().expect("null factor");
+        let modes = core
+            .iterative_cascade_spectrum(&null_chol)
+            .expect("determinant modes");
+        let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+        let (spectrum, certificate) = core
+            .iterative_residual_spectrum(&null_chol, domain)
+            .expect("quadrature");
+        let spectrum = spectrum.unwrap_or_else(|| {
+            panic!("the past-cap quadrature must certify on this fixture: {certificate:?}")
+        });
+        let theta_max = spectrum.eigenvalue.iter().copied().fold(0.0, f64::max);
+
+        for log_lambda in [0.0_f64, 1.0, 2.0, 3.0] {
+            let lambda = log_lambda.exp();
+            let quadrature = spectrum.moment_sums(lambda);
+
+            // Exactly what `CascadeRemlProfile::evaluate` does on the solve route.
+            let solver = core.coeff_solver(lambda).expect("iterative solver");
+            let coeff = solver
+                .solve(core, lambda, &core.rhs)
+                .expect("first certified solve");
+            let dc: Vec<f64> = coeff
+                .iter()
+                .zip(core.pen_diag.iter())
+                .map(|(&c, &d)| d * c)
+                .collect();
+            let u = solver
+                .solve(core, lambda, &dc)
+                .expect("second certified solve");
+            let anchor = spectrum.anchor_energy[0];
+            let solved = [
+                anchor - core.rss_pen(&coeff),
+                coeff.iter().zip(dc.iter()).map(|(&c, &v)| c * v).sum(),
+                dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum(),
+                u.iter()
+                    .zip(core.pen_diag.iter())
+                    .map(|(&v, &d)| d * v * v)
+                    .sum(),
+            ];
+
+            let conditioning = (theta_max + lambda) / lambda;
+            for (k, (&got, &comparator)) in quadrature.iter().zip(solved.iter()).enumerate() {
+                // One solve for `S_1, S_2`; two for `S_3, S_4`.
+                let solves = if k < 2 { 1u32 } else { 2 };
+                let bound = CG_RTOL * conditioning.powi(solves as i32) * comparator.abs();
+                assert!(
+                    (got - comparator).abs() <= bound,
+                    "S{} disagrees between the quadrature and the solve it replaces at log \
+                     lambda {log_lambda}: {got} versus {comparator} (bound {bound}, conditioning \
+                     {conditioning}, {certificate:?})",
+                    k + 1
                 );
             }
         }
@@ -5026,20 +5199,22 @@ mod refinement_decision_tests {
         }
     }
 
-    /// The admission rule's load-bearing claim: when two NESTED Gauss rules agree
-    /// to `sqrt(eps)` over the domain, the finer one agrees with the EXACT spectrum
-    /// at least that well.
+    /// The admission rule's load-bearing claim: when the geometric tail estimate
+    /// over three nested Gauss rules falls below `sqrt(eps)`, the finest rule
+    /// really is that close to the EXACT spectrum.
     ///
     /// The certificate is a self-comparison — it never sees the truth — so the
-    /// inference from "the rules agree" to "the rule is right" is the thing that
-    /// has to be measured. It rests on every Gauss rule for a completely monotone
-    /// kernel under-estimating its integral, so `S_k(j)` rises monotonically in `j`
-    /// and the `m/2`-to-`m` gap bounds the error at `m/2` exactly. This charges
-    /// that inference against the dense eigenbasis at every budget on the growth
-    /// ladder, over three designs — including the budgets the certificate REFUSES,
-    /// where it must be the refusal that is right.
+    /// inference from "the ladder has contracted" to "the rule is right" is the
+    /// thing that has to be measured. It rests on two facts and one model: every
+    /// Gauss rule for a completely monotone kernel under-estimates its integral,
+    /// so the ladder rises toward the truth; the gaps are therefore all of one
+    /// sign and the remaining error is their tail; and the tail is extrapolated
+    /// geometrically from the last two gaps, refusing outright when they do not
+    /// contract. This charges that inference against the dense eigenbasis at every
+    /// budget on the PRODUCTION ladder, over three designs — including the budgets
+    /// the certificate REFUSES, where it must be the refusal that is right.
     #[test]
-    fn nested_rule_agreement_predicts_the_error_against_the_exact_spectrum_2503() {
+    fn the_quadrature_tail_estimate_bounds_the_error_against_the_exact_spectrum_2503() {
         for (side, levels) in [(14usize, 4usize), (20, 5), (28, 5)] {
             let (x1, x2, y) = dense_fixture(side);
             let design = cascade_core((&x1, &x2, &y), levels);
@@ -5054,47 +5229,47 @@ mod refinement_decision_tests {
             let mass = beta.iter().map(|value| value * value).sum::<f64>();
             let rank = core.m - core.nullity();
             let target = f64::EPSILON.sqrt();
+            let ceiling = core.residual_krylov_ceiling();
+            let budget = core.residual_quadrature_budget();
             let mut certified_at_least_once = false;
             let mut refused_at_least_once = false;
 
-            // The ladder is production's own: the same start and the same
-            // geometric growth `iterative_residual_spectrum` walks, so what is
-            // charged here is what ships.
-            let budget = core.residual_quadrature_budget();
+            // The same start and the same geometric growth
+            // `iterative_residual_spectrum` walks, so what is charged here ships.
             let mut steps = SLQ_LANCZOS_STEPS.min(budget);
             loop {
                 let run = core
-                    .schur_lanczos(&null_chol, &beta, steps, core.residual_krylov_ceiling())
+                    .schur_lanczos(&null_chol, &beta, steps, ceiling)
                     .expect("lanczos");
                 let taken = run.alpha.len();
-                let fine = core
-                    .residual_gauss_rule(&run, taken, anchor, mass)
-                    .expect("fine rule");
-                let coarse = core
-                    .residual_gauss_rule(&run, taken / 2, anchor, mass)
-                    .expect("coarse rule");
-                let agreement =
-                    nested_moment_disagreement(&fine.spectrum, &coarse.spectrum, (lo, hi))
-                        .expect("agreement");
+                let rule = |nodes: usize| {
+                    core.residual_gauss_rule(&run, nodes, anchor, mass)
+                        .expect("gauss rule")
+                        .spectrum
+                };
+                let (fine, mid, coarse) = (rule(taken), rule(taken / 2), rule(taken / 4));
+                let estimate =
+                    residual_quadrature_tail_estimate(&fine, &mid, &coarse, taken, (lo, hi))
+                        .expect("tail estimate");
 
                 let mut worst = 0.0_f64;
                 for step in 0..=96 {
                     let lambda = (lo + (hi - lo) * step as f64 / 96.0).exp();
-                    let (r_exact, s2, s3, s4) = exact.moments(lambda);
-                    let (r_gauss, g2, g3, g4) = fine.spectrum.moments(lambda);
-                    worst = worst.max((r_gauss - r_exact).abs() / anchor.abs());
-                    for (truth, got) in [(s2, g2), (s3, g3), (s4, g4)] {
+                    let truth = exact.moment_sums(lambda);
+                    let got = fine.moment_sums(lambda);
+                    for (truth, got) in truth.into_iter().zip(got) {
                         worst = worst.max((got - truth).abs() / truth.abs().max(f64::MIN_POSITIVE));
                     }
                 }
 
-                if agreement <= target {
+                if run.invariant || estimate <= target {
                     certified_at_least_once = true;
                     assert!(
                         worst <= target,
-                        "side={side} levels={levels} steps={taken}: the nested rules agreed to \
-                         {agreement} (target {target}) but the rule is {worst} from the exact \
-                         spectrum — the admission rule's inference is unsound"
+                        "side={side} levels={levels} steps={taken}: the tail estimate was \
+                         {estimate} (target {target}, invariant {}) but the rule is {worst} from \
+                         the exact spectrum — the admission rule's inference is unsound",
+                        run.invariant
                     );
                 } else {
                     refused_at_least_once = true;
