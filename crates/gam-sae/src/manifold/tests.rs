@@ -2371,11 +2371,10 @@ pub(crate) fn fit_data_collapse_records_terminal_event_for_active_atom() {
     .unwrap();
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
     let target = array![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]];
-    let fitted = Array2::<f64>::zeros(target.dim());
-    let assignments = Array2::<f64>::ones((4, 1));
+    let rho = SaeManifoldRho::new(-0.3, 0.0, vec![array![0.0]]);
 
     let recorded = term
-        .record_fit_data_collapse_if_needed(target.view(), fitted.view(), assignments.view(), 7)
+        .record_fit_data_collapse_if_needed(target.view(), &rho, 7)
         .unwrap();
 
     assert!(recorded);
@@ -2387,7 +2386,7 @@ pub(crate) fn fit_data_collapse_records_terminal_event_for_active_atom() {
     assert_eq!(terminals.len(), 1);
     assert_eq!(terminals[0].atom, 0);
     assert_eq!(terminals[0].iteration, 7);
-    assert!(terminals[0].max_active_mass <= SAE_FIT_DATA_COLLAPSE_EV_FLOOR);
+    assert!(terminals[0].floor.is_finite() && terminals[0].floor >= 0.0);
 }
 
 pub(crate) fn deterministic_circle_noise(row: usize, col: usize) -> f64 {

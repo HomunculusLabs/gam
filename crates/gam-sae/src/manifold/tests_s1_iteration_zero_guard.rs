@@ -1,4 +1,4 @@
-//! `co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1`, split out of `tests.rs`
+//! `co_collapse_signal_arm_is_disarmed_at_iteration_zero_s1`, split out of `tests.rs`
 //! to keep that tracked file under the #780 10k-line gate. Declared as a sibling
 //! `#[cfg(test)] mod` in `mod.rs`; the shared `periodic_basis` fixture helper and
 //! the `TestPeriodicEvaluator` are sourced from the sibling `tests` module.
@@ -8,22 +8,16 @@ use super::*;
 use ndarray::{Array2, Array3, array};
 use std::sync::Arc;
 
-/// S1 (guard surgery) — the EV co-collapse arm must be DISARMED at iteration 0.
-/// The entry (iteration-0) guard call evaluates the cold SEED; a cold seed sits
-/// below any bar by definition, so evaluating the EV arm there made every real
-/// K≥2 fit open by burning the reseed budget and recording Terminal collapse
-/// events before the first Newton step (the "co-collapse" opening log). This pins
-/// the fix: a genuinely co-collapsed (output-vanished, no relative-norm breach)
+/// S1 (guard surgery) — the absolute co-collapse arm must be disarmed at iteration 0.
+/// The entry (iteration-0) guard call evaluates a cold seed before any optimizer
+/// progress exists. This pins the fix: a genuinely
+/// co-collapsed (signal-vanished, no relative-norm breach)
 /// dictionary is left UNTOUCHED at iteration 0, and the SAME state reseeds at
-/// iteration 1 — checking the seed against a bar checks coldness, not health.
+/// iteration 1.
 #[test]
-pub(crate) fn co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1() {
-    // Two periodic atoms with TINY-but-nonzero EQUAL decoders: median decoder norm
-    // is positive (so the `median == 0` cold-seed early return does NOT fire) and
-    // no atom is relatively behind its peer (no relative-norm breach), so the
-    // dictionary reaches the absolute-EV co-collapse arm — the arm the iteration-0
-    // gate protects. The output is ≈ 0, and the target has zero column means, so
-    // both the EV and the output energy sit at the null floor.
+pub(crate) fn co_collapse_signal_arm_is_disarmed_at_iteration_zero_s1() {
+    // Two periodic atoms with exactly zero decoders. No atom is relatively behind
+    // its peer, so iteration one reaches the typed all-signal-vanished arm.
     let coords0 = array![[0.05_f64], [0.20], [0.55], [0.80], [0.35], [0.65]];
     let coords1 = array![[0.15_f64], [0.30], [0.65], [0.90], [0.45], [0.10]];
     let (phi0, jet0) = periodic_basis(&coords0);
@@ -41,8 +35,8 @@ pub(crate) fn co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1() {
         .unwrap()
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator))
     };
-    let atom0 = make_atom("periodic0", phi0, jet0, 1.0e-5);
-    let atom1 = make_atom("periodic1", phi1, jet1, 1.1e-5);
+    let atom0 = make_atom("periodic0", phi0, jet0, 0.0);
+    let atom1 = make_atom("periodic1", phi1, jet1, 0.0);
     let logits = array![
         [0.6, -0.2],
         [0.1, 0.4],
@@ -62,9 +56,7 @@ pub(crate) fn co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1() {
     )
     .unwrap();
     let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
-    // Zero-column-mean target (p=3, three distinct residual PCs for the disjoint-PC
-    // reseed): a vanished dictionary (fitted ≈ 0 ≈ mean) then has ≈ zero EV AND
-    // ≈ zero output energy, both at or below the null floor `q / n`.
+    // Three distinct residual PCs let the iteration-one reseed diversify.
     let target = array![
         [0.40, -0.10, 0.05],
         [-0.20, 0.35, -0.15],
@@ -79,36 +71,18 @@ pub(crate) fn co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1() {
         vec![array![0.9_f64.ln()], array![1.1_f64.ln()]],
     );
 
-    // Precondition: genuinely co-collapsed (output-vanished) at the null floor.
-    let ev = term
-        .dictionary_reconstruction_ev(target.view(), &rho)
-        .expect("EV evaluates");
-    let fitted = term
-        .try_fitted_for_rho(&rho)
-        .expect("fitted reconstruction evaluates");
-    let out_ratio = term
-        .dictionary_reconstruction_output_energy_ratio_from_fitted(&fitted, target.view(), None)
-        .expect("output-energy ratio evaluates");
-    // Reconstruction-cache parity: deriving EV from the SHARED `fitted` matrix
-    // (the guard's dedup path) must be bit-for-bit the independent recompute via
-    // `dictionary_reconstruction_ev` (fresh `try_fitted_for_rho` + subtract).
-    let ev_shared = term
-        .dictionary_reconstruction_ev_from_fitted(&fitted, target.view(), None)
-        .expect("EV from shared fitted evaluates");
+    let verdict = term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("same-state collapse verdict evaluates");
+    assert!(verdict.proof_unavailable_reason().is_none());
+    assert!(verdict.all_decoders_vanished(term.k_atoms()));
+    assert!(verdict.degenerate(term.k_atoms()));
     assert_eq!(
-        ev_shared, ev,
-        "shared-fitted EV must equal the independent try_fitted recompute"
-    );
-    let q = crate::manifold::outer_objective::reachable_dictionary_rank(
-        &term.atoms,
-        term.n_obs(),
-        target.ncols(),
-    );
-    let floor = crate::manifold::outer_objective::absolute_degeneracy_ev_floor(target.view(), q);
-    assert!(
-        ev <= floor && out_ratio <= floor,
-        "precondition: co-collapsed state must sit at the null floor \
-         (EV={ev:.4}, out_ratio={out_ratio:.4}, floor={floor:.4})"
+        verdict
+            .decoder_vanishing
+            .max_signal_upper_bound()
+            .unwrap(),
+        0.0
     );
 
     let before: Vec<Array2<f64>> = term
@@ -117,12 +91,12 @@ pub(crate) fn co_collapse_ev_arm_is_disarmed_at_iteration_zero_s1() {
         .map(|a| a.decoder_coefficients.clone())
         .collect();
 
-    // ── iteration 0: the EV arm is DISARMED — no reseed, no event, state frozen ──
+    // ── iteration 0: the absolute arm is disarmed — no event, state frozen ──
     term.enforce_decoder_norm_guard(target.view(), 0, &rho, None)
         .expect("guard must not error at iteration 0");
     assert!(
         term.collapse_events().is_empty(),
-        "iteration-0 EV arm must record NO collapse event on a cold co-collapsed seed; \
+        "iteration-0 absolute arm must record no event on a cold co-collapsed seed; \
          events: {:?}",
         term.collapse_events()
     );

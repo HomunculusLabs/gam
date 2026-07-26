@@ -87,7 +87,8 @@ pub(crate) fn decoder_norm_guard_reseeds_collapsed_atom_to_distinct_nonzero() {
     );
 }
 
-/// decoder.
+/// #2362 — an amplitude-free shared output span must reseed every atom, even
+/// though no decoder is small relative to its peers.
 #[test]
 pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     // Three periodic (circle) atoms, p=3 output so three distinct residual PCs
@@ -98,12 +99,9 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     let (phi0, jet0) = periodic_basis(&coords0);
     let (phi1, jet1) = periodic_basis(&coords1);
     let (phi2, jet2) = periodic_basis(&coords2);
-    // Decoders are tiny-but-NONZERO and of comparable magnitude across atoms:
-    // the dictionary co-collapsed (EV ≈ 0) yet has a usable median scale, so it
-    // reaches the absolute-EV co-collapse arm (an exactly-zero dictionary would
-    // hit the `median == 0` early return — the cold-seed case, handled by the
-    // mass guard/inner solve, not here) and no atom is *relatively* behind its
-    // peers (all norms within ~1.5×, none below `1e-3·median`).
+    // Decoders are tiny-but-nonzero, comparable, and all aligned with the same
+    // output direction. No atom is relatively behind, while #2362's
+    // amplitude-free union-output-span arm proves structural co-collapse.
     let make_atom = |name: &str, phi: Array2<f64>, jet: Array3<f64>, scale: f64| {
         SaeManifoldAtom::new_with_provided_function_gram(
             name,
@@ -120,8 +118,7 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     let atom0 = make_atom("periodic0", phi0, jet0, 1.0e-5);
     let atom1 = make_atom("periodic1", phi1, jet1, 1.2e-5);
     let atom2 = make_atom("periodic2", phi2, jet2, 0.8e-5);
-    // Gates stay spread across rows/atoms — the gate-mass guard is satisfied,
-    // so only the absolute-EV co-collapse arm can catch this failure.
+    // Gates stay spread across rows/atoms, so the gate-mass guard is satisfied.
     let logits = array![
         [0.7, -0.2, 0.3],
         [0.1, 0.4, -0.1],
@@ -162,17 +159,19 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
         ],
     );
 
-    // Confirm the precondition: the dictionary is co-collapsed (EV below the
-    // floor) with NO atom relatively behind its peers (all norms ≈0).
+    let verdict_before = term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("same-state collapse verdict");
+    assert!(
+        verdict_before.structurally_collapsed(),
+        "aligned rank-one decoder frames must trigger #2362 structural collapse"
+    );
+    assert!(!verdict_before.all_decoders_vanished(term.k_atoms()));
     let ev_before = term
         .dictionary_reconstruction_ev(target.view(), &rho)
         .expect("EV evaluates");
-    assert!(
-        ev_before < 0.28_f64,
-        "test precondition: dictionary must start co-collapsed; EV={ev_before:.4}"
-    );
 
-    // S1: the EV co-collapse arm is armed only at iteration > 0 (iteration 0 = cold seed).
+    // S1: the absolute arm is armed only at iteration > 0.
     term.enforce_decoder_norm_guard(target.view(), 1, &rho, None)
         .expect("co-collapse guard must recover, not error");
 
@@ -231,18 +230,12 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     );
 }
 
-/// #1026 keep-best multi-start: the full-dictionary co-collapse reseed is a
-/// bounded multi-start over distinct residual subspaces, but successive reseeds
-/// can land in STRICTLY WORSE basins (real OLMo K=4: the seed explains EV 0.127
-/// while later reseeds fall to −1.0). A multi-start must return the BEST basin it
-/// visited, never the last. The guard retains the highest-EV state seen across
-/// the reseeds and restores it once the reseed budget is spent, so the final
-/// dictionary EV is no worse than the best intermediate attempt.
+/// #2498 — once a same-state collapse proof clears, low training EV must not
+/// spend the remaining dictionary multi-start budget.
 #[test]
-pub(crate) fn co_collapse_multistart_restores_best_basin_not_last_reseed() {
-    // Same co-collapsed K=3 periodic dictionary as
-    // `decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3`, driven
-    // through the WHOLE reseed budget so the budget-exhaustion restore fires.
+pub(crate) fn live_decoder_state_does_not_burn_cocollapse_multistart_budget() {
+    // Same initially aligned K=3 periodic dictionary as the structural-reseed
+    // test above.
     let coords0 = array![[0.05], [0.20], [0.55], [0.80], [0.35], [0.65]];
     let coords1 = array![[0.15], [0.30], [0.65], [0.90], [0.45], [0.10]];
     let coords2 = array![[0.25], [0.40], [0.75], [0.05], [0.60], [0.85]];
@@ -303,39 +296,31 @@ pub(crate) fn co_collapse_multistart_restores_best_basin_not_last_reseed() {
         ],
     );
 
-    // Drive the guard once per "outer iteration" through the whole multi-start
-    // budget plus the budget-exhaustion call, recording the dictionary EV the
-    // guard observes at the start of each call (the candidate basin it may bank).
-    // The guard reseeds in place, so each call's pre-reseed EV is a distinct
-    // multi-start attempt; the best of these is what the final state must match.
-    // S1: the EV arm is armed only at iteration > 0; drive 1..=BUDGET+1 (BUDGET reseeds + restore).
-    let mut best_seen = f64::NEG_INFINITY;
-    for iteration in 1..=(SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET + 1) {
-        let ev_at_entry = term
-            .dictionary_reconstruction_ev(target.view(), &rho)
-            .expect("EV evaluates");
-        if ev_at_entry < 0.28_f64 {
-            best_seen = best_seen.max(ev_at_entry);
-        }
-        term.enforce_decoder_norm_guard(target.view(), iteration, &rho, None)
-            .expect("co-collapse guard must recover, not error");
-    }
+    term.enforce_decoder_norm_guard(target.view(), 1, &rho, None)
+        .expect("initial structural collapse must reseed");
+    assert_eq!(term.dictionary_cocollapse_reseeds, 1);
 
-    // After the budget is spent the guard has restored the best basin it banked,
-    // so the final dictionary EV is at least the best attempt seen — never the
-    // (possibly catastrophic) last reseed.
-    let ev_final = term
-        .dictionary_reconstruction_ev(target.view(), &rho)
-        .expect("EV evaluates");
-    assert!(
-        best_seen.is_finite(),
-        "test precondition: at least one co-collapsed attempt must be observed"
-    );
-    assert!(
-        ev_final >= best_seen - 1e-9,
-        "multi-start must return its BEST basin, not the last reseed: \
-         final EV={ev_final:.6} < best seen={best_seen:.6}"
-    );
+    // Install an unequivocally live, axis-disjoint decoder state. Its achieved
+    // EV is irrelevant: all three atoms carry resolvable gated signal and the
+    // union output span has rank K.
+    for atom in 0..3 {
+        term.atoms[atom].decoder_coefficients.fill(0.0);
+        for basis in 0..3 {
+            term.atoms[atom].decoder_coefficients[[basis, atom]] = 0.3;
+        }
+    }
+    let live = term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("live same-state verdict");
+    assert!(!live.degenerate(term.k_atoms()));
+    let reseeds_before = term.dictionary_cocollapse_reseeds;
+    let events_before = term.collapse_events().len();
+    for iteration in 2..=(SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET + 2) {
+        term.enforce_decoder_norm_guard(target.view(), iteration, &rho, None)
+            .expect("live decoder state must be left to the optimizer");
+    }
+    assert_eq!(term.dictionary_cocollapse_reseeds, reseeds_before);
+    assert_eq!(term.collapse_events().len(), events_before);
 }
 
 /// #1026 decoder-repulsion gate safety: the collinearity gate must be a STRICT
@@ -2393,70 +2378,17 @@ fn zz_measure_tiny_fixture_target_rank_2253() {
     svd_report("hutchinson_small_two_atom", &tgt_h);
 }
 
-/// #2253/#2089 — the co-collapse verdict is ONE predicate, and reconstruction EV
-/// alone cannot be it.
-///
-/// Two reconstructions of the same target with the *identical* explained
-/// variance: one is the target's own column mean (the decoders produced
-/// nothing), the other is twice the centered target (the decoders are alive and
-/// overshooting). They are different states with different remedies, and
-/// [`SaeManifoldTerm::enforce_decoder_norm_guard`] says so in its own comment —
-/// "a present-decoder fit that merely reconstructs poorly keeps output energy
-/// and is left to the optimizer". The #2089 budget-exhaustion refusal used to
-/// decide on `ev <= ev_floor` alone, which cannot separate them, so it could
-/// raise "every atom's decoder co-vanished" on the second one while printing the
-/// non-zero norms that refute it.
-///
-/// Both arms are pinned, in both directions: the genuine co-vanish must still be
-/// a verdict, and the live-decoder arm must not be.
+/// #2253/#2089/#2498 — the collapse verdict must derive its reconstruction,
+/// gates, Grams, and decoders from one live state. A caller cannot splice a
+/// fabricated fitted matrix onto unrelated decoder frames.
 #[test]
-pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
-    // Ten rows against three M=3 periodic atoms: the concatenated chart design has
-    // rank well under n, so the signal-free floor renders a verdict at all (at
-    // rank q >= n it is NaN by the saturated-cover convention and there is
-    // nothing to test).
-    let coords0 = array![
-        [0.05],
-        [0.20],
-        [0.55],
-        [0.80],
-        [0.35],
-        [0.65],
-        [0.12],
-        [0.48],
-        [0.72],
-        [0.93]
-    ];
-    let coords1 = array![
-        [0.15],
-        [0.30],
-        [0.65],
-        [0.90],
-        [0.45],
-        [0.10],
-        [0.28],
-        [0.58],
-        [0.83],
-        [0.02]
-    ];
-    let coords2 = array![
-        [0.25],
-        [0.40],
-        [0.75],
-        [0.05],
-        [0.60],
-        [0.85],
-        [0.38],
-        [0.68],
-        [0.18],
-        [0.52]
-    ];
+pub(crate) fn same_state_gated_signal_separates_live_and_vanished_decoders_2253() {
+    let coords0 = array![[0.05], [0.20], [0.55], [0.80], [0.35], [0.65], [0.12], [0.48], [0.72], [0.93]];
+    let coords1 = array![[0.15], [0.30], [0.65], [0.90], [0.45], [0.10], [0.28], [0.58], [0.83], [0.02]];
+    let coords2 = array![[0.25], [0.40], [0.75], [0.05], [0.60], [0.85], [0.38], [0.68], [0.18], [0.52]];
     let (phi0, jet0) = periodic_basis(&coords0);
     let (phi1, jet1) = periodic_basis(&coords1);
     let (phi2, jet2) = periodic_basis(&coords2);
-    // Each atom decodes onto its OWN output axis, so the union decoder span has
-    // rank 3 = K and the #2362 structural arm short-circuits. This isolates the
-    // co-vanish arm, which is the one under test.
     let axis_decoder = |axis: usize| {
         Array2::<f64>::from_shape_fn((3, 3), |(_, col)| if col == axis { 0.30 } else { 0.0 })
     };
@@ -2496,7 +2428,7 @@ pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
         AssignmentMode::softmax(0.8),
     )
     .unwrap();
-    let term = SaeManifoldTerm::new(
+    let live_term = SaeManifoldTerm::new(
         vec![
             make_atom("periodic0", phi0, jet0, 0),
             make_atom("periodic1", phi1, jet1, 1),
@@ -2517,72 +2449,47 @@ pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
         [0.18, 0.22, -0.30],
         [-0.06, -0.25, 0.14]
     ];
+    let rho = SaeManifoldRho::new(
+        -0.3,
+        0.7_f64.ln(),
+        vec![array![-0.1], array![0.0], array![0.1]],
+    );
 
-    let mut col_means = vec![0.0_f64; target.ncols()];
-    for (col, mean) in col_means.iter_mut().enumerate() {
-        *mean = target.column(col).iter().sum::<f64>() / target.nrows() as f64;
+    let live = live_term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("live same-state verdict");
+    assert!(live.proof_unavailable_reason().is_none());
+    assert!(
+        !live.all_decoders_vanished(live_term.k_atoms()),
+        "nonzero axis-disjoint decoders carry resolvable gated signal"
+    );
+    assert!(
+        !live.structurally_collapsed(),
+        "three axis-disjoint decoder frames have union rank K"
+    );
+    assert!(!live.degenerate(live_term.k_atoms()));
+
+    let mut vanished_term = live_term.clone();
+    for atom in &mut vanished_term.atoms {
+        atom.decoder_coefficients.fill(0.0);
     }
-    // Arm A — the reconstruction IS the column mean: residual = centered target,
-    // so EV = 0 and the output carries no centered energy at all.
-    let vanished_fit = Array2::<f64>::from_shape_fn(target.dim(), |(_, col)| col_means[col]);
-    // Arm B — twice the centered target: residual is again exactly the centered
-    // target, so EV is the SAME 0, while the output carries 4x the total
-    // centered variance. Live decoders, aimed wrong.
-    let overshooting_fit = Array2::<f64>::from_shape_fn(target.dim(), |(row, col)| {
-        col_means[col] + 2.0 * (target[[row, col]] - col_means[col])
-    });
-
-    let vanished = term
-        .absolute_co_collapse_verdict(&vanished_fit, target.view(), None)
-        .expect("verdict evaluates on the mean reconstruction");
-    let overshooting = term
-        .absolute_co_collapse_verdict(&overshooting_fit, target.view(), None)
-        .expect("verdict evaluates on the overshooting reconstruction");
-
-    assert!(
-        vanished.ev_floor.is_finite(),
-        "fixture must render a verdict: reachable rank q={} against n={} left the floor at {}",
-        vanished.dictionary_rank,
-        target.nrows(),
-        vanished.ev_floor
+    let vanished = vanished_term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("vanished same-state verdict");
+    assert!(vanished.proof_unavailable_reason().is_none());
+    assert!(vanished.all_decoders_vanished(vanished_term.k_atoms()));
+    assert!(!vanished.structurally_collapsed());
+    assert!(vanished.degenerate(vanished_term.k_atoms()));
+    assert_eq!(
+        vanished
+            .decoder_vanishing
+            .max_signal_upper_bound()
+            .unwrap(),
+        0.0
     );
-    assert!(
-        (vanished.explained_variance - overshooting.explained_variance).abs() < 1e-12,
-        "the two arms must be indistinguishable BY EV — that is the whole point: {} vs {}",
-        vanished.explained_variance,
-        overshooting.explained_variance
-    );
-    assert!(
-        vanished.explained_variance <= vanished.ev_floor,
-        "both arms must sit at or below the signal-free null floor: EV={} floor={}",
-        vanished.explained_variance,
-        vanished.ev_floor
-    );
-    assert!(
-        !vanished.structurally_collapsed && !overshooting.structurally_collapsed,
-        "axis-disjoint decoders span rank K, so the structural arm must stand down"
-    );
-
-    assert!(
-        vanished.co_vanished && vanished.degenerate(),
-        "a reconstruction that is the bare column mean IS a co-vanish: \
-         out_energy={} floor={}",
-        vanished.output_energy_ratio,
-        vanished.ev_floor
-    );
-    assert!(
-        overshooting.output_energy_ratio > overshooting.ev_floor,
-        "precondition: the overshooting fit must keep output energy above the null level; \
-         got {} vs {}",
-        overshooting.output_energy_ratio,
-        overshooting.ev_floor
-    );
-    assert!(
-        !overshooting.co_vanished && !overshooting.degenerate(),
-        "a present-decoder fit that merely reconstructs poorly is not a co-collapse; \
-         EV={} floor={} out_energy={}",
-        overshooting.explained_variance,
-        overshooting.ev_floor,
-        overshooting.output_energy_ratio
-    );
+    let signal_boundary = vanished
+        .decoder_vanishing
+        .signal_vanish_boundary()
+        .unwrap();
+    assert!(signal_boundary.is_finite() && signal_boundary >= 0.0);
 }

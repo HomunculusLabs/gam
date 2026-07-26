@@ -15,9 +15,9 @@
 //! The size of that optimism is not hand-wavy. Fitting `q` freely-chosen linear
 //! reconstruction directions to `n` rows of a **signal-free** target captures,
 //! in expectation, a fraction `q / n` of the variance — the textbook null
-//! coefficient of determination (this is exactly the `q/n` collapse floor the
-//! outer wall already uses, see `SAE_FIT_DATA_COLLAPSE_EV_FLOOR`). So on pure
-//! noise the naive in-sample EV sits near `q/n > 0`, not at the honest `0`.
+//! coefficient of determination. So on pure noise the naive in-sample EV sits
+//! near `q/n > 0`, not at the honest `0`. This quantifies selection optimism; it
+//! is not a production decoder-disappearance verdict.
 //!
 //! # Cross-fitting
 //!

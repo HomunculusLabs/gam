@@ -48,147 +48,6 @@ pub(crate) fn reconstruction_explained_variance(
     }
 }
 
-/// S1 (guard surgery) — the ABSOLUTE-DEGENERACY explained-variance floor: a fit
-/// whose reconstruction EV sits at or below this value explains no more of the
-/// centered target than a SIGNAL-FREE dictionary of the same reachable rank would
-/// by finite-sample chance, so it is a structural collapse rather than a
-/// merely-uncompetitive fit. It is the SINGLE source both collapse-detection sites
-/// share (the fitted-data verdict feeding the outer wall, and the co-collapse
-/// reseed arm), so both measure degeneracy against one and the same threshold.
-///
-/// The floor is the classical null coefficient of determination `q / n`
-/// (`#free-reconstruction-directions / #observations`): fitting `q =
-/// dictionary_rank` arbitrary linear directions to `n` centered rows of a
-/// signal-free target captures, IN EXPECTATION, a fraction `q / n` of the variance
-/// (the textbook null-`R²` of a `q`-regressor / `n`-observation least squares). It
-/// is therefore a SAMPLING NOISE-FLOOR bound — the EV a collapsed dictionary
-/// reaches purely from finite-sample fitting noise — carrying no magnitude fit to
-/// any corpus and shrinking toward 0 as `n` grows, exactly as the null fitting
-/// noise does. `dictionary_rank` is the dictionary's GEOMETRICALLY REACHABLE rank
-/// (`reachable_dictionary_rank` = `rank([Φ_1 … Φ_K])`, read from the chart designs
-/// alone so a co-collapsed decoder still reports full reach), capped at the
-/// observation count `n` (NOT at the output dim `p` — see #F8 on
-/// `reachable_dictionary_rank`), so `q ≤ n` keeps the floor in `[0, 1]`.
-///
-/// This REPLACES the former `0.5 × rank-q PCA/Eckart-Young EV ceiling` bar, which
-/// compared a `k_active`-SPARSE fit against a DENSE rank-`q` linear ceiling and so
-/// sat ABOVE the honest sparse optimum on real (non-sparse) activations, flagging
-/// healthy-but-below-ceiling fits as collapses (the K≥2-real-data false positive
-/// that opened every fit with a spurious "co-collapse"). A degeneracy detector may
-/// catch only states from which descent cannot recover — EV at the null floor AND
-/// the decoder output co-vanished (the original #853/#976 meaning) — never a
-/// merely-uncompetitive state, which is the optimizer's job mid-fit and the
-/// evidence framework's job after convergence. `f64::NAN` when there are no rows
-/// (`n == 0`), which the callers' `ev <= floor` comparison treats as "no verdict".
-pub(crate) fn absolute_degeneracy_ev_floor(
-    target: ArrayView2<'_, f64>,
-    dictionary_rank: usize,
-) -> f64 {
-    let n = target.nrows();
-    if n == 0 {
-        return f64::NAN;
-    }
-    // Saturated floor = no verdict. When the reachable rank q >= n, colspan(Φ)
-    // is ALL of R^n, so the signal-free least-squares fit reproduces the target
-    // EXACTLY: the null floor is 1, every possible EV sits at or below it, and
-    // the statistic carries ZERO evidence about degeneracy. Returning 1.0 here
-    // branded EV = 0.999 fits on small-n/basis-rich fixtures as co-collapsed
-    // ("EV 0.9990 at or below the signal-free null floor 1.0000", 2026-07-10).
-    // NaN is the established "no verdict" convention (see n == 0 above): both
-    // caller arms compare `<= floor`, which is false on NaN, so the absolute
-    // arm stands down and degeneracy detection falls to the relative-norm arm.
-    if dictionary_rank >= n {
-        return f64::NAN;
-    }
-    dictionary_rank as f64 / n as f64
-}
-
-/// #1610 — the GEOMETRICALLY REACHABLE linear rank of a dictionary, used as the
-/// rank `q` in the signal-free null degeneracy floor
-/// (`absolute_degeneracy_ev_floor(target, reachable_dictionary_rank(...))` = `q / n`).
-///
-/// The null floor scales with the number of directions the dictionary can reach.
-/// The previous `q = Σ_k basis_size_k` (nominal
-/// coefficient count) is biased HIGH for a NONLINEAR dictionary: a curved
-/// `latent_dim = d` atom decoded through a smooth chart does not linearly span
-/// all `basis_size_k` of its coefficient directions in the output — its decoded
-/// image `Φ_k B_k` lies inside `colspan(Φ_k)`, whose dimension is the realized
-/// chart rank `rank(Φ_k) ≤ basis_size_k`. Summing the per-atom REALIZED chart
-/// ranks gives the linear dimension the dictionary's union of chart images can
-/// actually reach on this sample, which is the principled rank for the linear
-/// PCA ceiling that the bar uses.
-///
-/// The charts are read from the CHART design alone (not the decoder magnitude),
-/// so a co-collapsed atom (`‖B_k‖ → 0`) still reports its full geometric reach
-/// — the collapse guard must NOT silently lower its own bar at the very
-/// degenerate state it exists to catch.
-///
-/// #C5: `q` is the rank of the HORIZONTALLY CONCATENATED realized chart design
-/// `[Φ_1 … Φ_K]` (`n × Σ_k M_k`), NOT `Σ_k rank(Φ_k)`. `rank([Φ_1 … Φ_K]) ≤
-/// Σ_k rank(Φ_k)`, with equality only when the atoms' column spaces are linearly
-/// INDEPENDENT; summing double-counts shared directions (two identical atoms:
-/// true reachable rank 1, the sum claims 2), biasing the null floor `q/n` upward
-/// and manufacturing false collapse verdicts. The number of FREE reconstruction
-/// directions a signal-free dictionary fits is exactly this concatenated rank.
-///
-/// #F8: `q` is capped at the OBSERVATION count `n`, NOT at the output dim `p`.
-/// The signal-free reconstruction is `X̂ = Φ·B` with `Φ = [Φ_1 … Φ_K]` (`n × Σ_k
-/// M_k`) fixed and the decoder `B` (`Σ_k M_k × p`) free, so each of the `p` target
-/// columns is least-squares projected onto `colspan(Φ) ⊆ Rⁿ` — a subspace of
-/// dimension `q = rank(Φ) ≤ min(n, Σ_k M_k)`. The expected captured fraction is
-/// `tr(P)/n = q/n` for EVERY column, so the null `R²` is `q/n` INDEPENDENT of `p`
-/// (the `p` output columns cancel between the Frobenius numerator and
-/// denominator). An OVERCOMPLETE dictionary (`Σ_k M_k > p`) can therefore reach
-/// `q > p` free directions; the old `min(n, p)` cap under-counted `q`, LOWERED the
-/// floor, and made the collapse detector LENIENT exactly for overcomplete
-/// dictionaries. `q ≤ n` still keeps the floor in `[0, 1]`. If any atom's design
-/// is non-finite or the concatenated SVD fails, the whole function degrades to the
-/// historical summed per-atom ranks rather than corrupting `q`.
-pub(crate) fn reachable_dictionary_rank(atoms: &[SaeManifoldAtom], n: usize, p: usize) -> usize {
-    if atoms.is_empty() || n == 0 || p == 0 {
-        return 0;
-    }
-    // Historical Σ_k rank(Φ_k) (each capped at p) — the graceful-degradation
-    // fallback when the concatenated design cannot be formed or decomposed.
-    let summed_fallback = || -> usize {
-        atoms
-            .iter()
-            .map(|atom| match atom.realized_chart_image_rank() {
-                Ok(r) => r,
-                Err(_) => atom.basis_size().min(p),
-            })
-            .sum::<usize>()
-            .min(n)
-    };
-    let total_cols: usize = atoms.iter().map(|atom| atom.basis_values.ncols()).sum();
-    if total_cols == 0 {
-        return 0;
-    }
-    let mut concat = Array2::<f64>::zeros((n, total_cols));
-    let mut col = 0usize;
-    for atom in atoms {
-        let phi = &atom.basis_values;
-        // A shape mismatch or a non-finite entry would poison the joint SVD;
-        // degrade to the per-atom summed ranks instead.
-        if phi.nrows() != n || !phi.iter().all(|v| v.is_finite()) {
-            return summed_fallback();
-        }
-        let m = phi.ncols();
-        concat.slice_mut(s![.., col..col + m]).assign(phi);
-        col += m;
-    }
-    let sv = match concat.svd(false, false) {
-        Ok((_, sv, _)) => sv,
-        Err(_) => return summed_fallback(),
-    };
-    let max_sv = sv.iter().copied().fold(0.0_f64, f64::max);
-    if !(max_sv > 0.0) {
-        return 0;
-    }
-    let tol = SAE_MANIFOLD_SPECTRAL_RANK_CUTOFF * max_sv;
-    sv.iter().filter(|&&v| v > tol).count().min(n)
-}
-
 /// Observable telemetry for the amortized basin-entry accelerator: attempted
 /// evaluations, positive and zero-row certificates, and failures. Failures are
 /// propagated by the caller and never converted into a different solve path.
@@ -2340,12 +2199,9 @@ impl SaeManifoldOuterObjective {
     /// ledger; it is not a smooth term and therefore cannot be added to a cost
     /// that is paired with the analytic derivative of the penalized quasi-Laplace scalar (#2253).
     fn record_fit_data_collapse_verdict(&mut self, rho: &SaeManifoldRho) -> Result<(), String> {
-        let fitted = self.term.try_fitted_for_rho(rho)?;
-        let assignments = self.term.assignment.try_assignments()?;
         self.term.record_fit_data_collapse_if_needed(
             self.target.view(),
-            fitted.view(),
-            assignments.view(),
+            rho,
             self.inner_max_iter,
         )?;
         Ok(())
@@ -2398,12 +2254,11 @@ impl SaeManifoldOuterObjective {
             // turns atoms on rather than treating it as a finite objective value
             // with "no candidate seeds passed outer startup validation".
             || err.contains("gated off at every row (all-zero gated design)")
-            // #2089 — a ρ whose smoothing / sparsity penalty is strong enough to
-            // crush the WHOLE dictionary to the signal-free null floor (every
-            // decoder co-vanishes and the bounded co-collapse reseed multi-start
-            // cannot re-anchor `K` distinct charts) is a GENUINE INFEASIBILITY OF
-            // THAT ρ — the same class as the non-PD Hessian / all-zero gated-design
-            // probes above. A neighbouring, weaker-penalty ρ admits a non-degenerate
+            // #2089 — a ρ whose smoothing / sparsity penalty makes every gated
+            // decoder numerically disappear, or produces #2362 structural
+            // co-collapse, after the bounded reseed multi-start is a genuine
+            // infeasibility of that ρ — the same class as the non-PD Hessian /
+            // all-zero gated-design probes above. A neighbouring, weaker-penalty ρ admits a non-degenerate
             // fit, so the outer optimizer must read this as an infeasible trial
             // (+∞) and steer ρ back toward the feasible region
             // NOT abort the entire alpha="auto" search the first time a line search
@@ -2413,8 +2268,8 @@ impl SaeManifoldOuterObjective {
             // behaviour) is exactly what thrashed the host to an OOM / watchdog
             // SIGKILL (exit 137). `run_joint_fit_arrow_schur` emits this DISTINCT
             // "did not escape total co-collapse" marker only after the reseed budget
-            // is spent AND the fit is still at/below the null floor, so a healthy or
-            // merely-uncompetitive fit never trips it.
+            // is spent and same-state disappearance is still certified, so a
+            // healthy or merely-uncompetitive fit never trips it.
             || err.contains("did not escape total co-collapse")
     }
 
@@ -5196,12 +5051,9 @@ mod linear_parity_anchor_1026_tests {
 
     /// Rank-`q` PCA / Eckart-Young explained-variance ceiling of a column-centered
     /// `target` — the best reconstruction EV any rank-`q` LINEAR dictionary can
-    /// reach. S1 (guard surgery): this is now a TEST ORACLE only. It was the
-    /// reference for the retired `0.5 × ceiling` collapse bar; the live collapse
-    /// detector keys on the signal-free null floor
-    /// (`super::absolute_degeneracy_ev_floor` = `q / n`), so no production code
-    /// consumes this ceiling. The linear-anchor parity tests below still compare the
-    /// anchor's reconstruction against it, so it lives here as their oracle. Returns
+    /// reach. This is a test oracle only; no production collapse verdict consumes
+    /// a PCA ceiling or training-EV null. The linear-anchor parity tests below
+    /// still compare the anchor's reconstruction against it. Returns
     /// `[0, 1]` on a finite target; `f64::NAN` on SVD failure / zero-variance target.
     fn pca_ev_ceiling(target: ArrayView2<'_, f64>, q: usize) -> f64 {
         let (n, p) = target.dim();

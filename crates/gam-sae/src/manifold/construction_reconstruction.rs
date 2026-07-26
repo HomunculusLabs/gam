@@ -376,29 +376,6 @@ pub fn reconstruct_persisted_atom_set(
 }
 
 impl SaeManifoldTerm {
-    /// Lower bound on every valid reconstruction dispersion at this fitted
-    /// state. The dispersion denominator is residual degrees of freedom and
-    /// cannot exceed the scalar observation count `N*P`; therefore the
-    /// criterion's authoritative RSS divided by `N*P` is the bound. The
-    /// whitening/raw-frame choice is shared with [`Self::reconstruction_dispersion`]
-    /// so the structural rank decision cannot price another likelihood.
-    pub(crate) fn reconstruction_dispersion_lower_bound(
-        &self,
-        loss: &SaeManifoldLoss,
-        residual: Option<ArrayView2<'_, f64>>,
-    ) -> Result<f64, String> {
-        let n_scalar = self.n_obs().checked_mul(self.output_dim()).ok_or_else(|| {
-            "reconstruction_dispersion_lower_bound: scalar observation count overflowed".to_string()
-        })?;
-        if n_scalar == 0 {
-            return Err(
-                "reconstruction_dispersion_lower_bound: scalar observation count is zero"
-                    .to_string(),
-            );
-        }
-        Ok(self.reconstruction_residual_sum_squares(loss, residual)? / n_scalar as f64)
-    }
-
     fn reconstruction_residual_sum_squares(
         &self,
         loss: &SaeManifoldLoss,

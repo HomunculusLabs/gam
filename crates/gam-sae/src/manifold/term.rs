@@ -142,11 +142,10 @@ impl SaeBetaPenaltyAssembly {
 /// a tenth of the variance or it is structurally degenerate" floor for those
 /// post-convergence quality checks; it is NOT a tuned operating point.
 ///
-/// S1 (guard surgery) — this is NO LONGER used by the collapse DETECTOR: the
-/// co-collapse verdict and reseed arm now key on the signal-free null floor
-/// ([`super::outer_objective::absolute_degeneracy_ev_floor`] = `q / n`), not on any
-/// fraction of a dense PCA ceiling. This constant survives only where a fixed
-/// "worse than the mean" reference is genuinely wanted (arrival / incumbent gates).
+/// This is not used by the collapse detector. That detector requires actual
+/// same-state decoder disappearance or #2362 structural evidence. This constant
+/// survives only where a fixed "worse than the mean" reference is genuinely
+/// wanted (arrival / incumbent gates).
 pub(crate) const SAE_FIT_DATA_COLLAPSE_EV_FLOOR: f64 = 0.10;
 
 /// #1026 — reconstruction EV-improvement / EV-degradation tolerance for the

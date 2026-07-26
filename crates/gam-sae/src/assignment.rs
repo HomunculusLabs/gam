@@ -184,7 +184,7 @@ pub(crate) const SAE_ATOM_COLLAPSE_RESEED_BUDGET: usize = 1;
 pub(crate) const SAE_ATOM_DECODER_NORM_COLLAPSE_RATIO: f64 = 1.0e-3;
 
 /// #976 / #1117 K>1 robustness: bounded DICTIONARY-level multi-start budget for
-/// the simultaneous co-collapse arm (the EV-floor branch of
+/// the simultaneous co-collapse arm of
 /// [`crate::manifold::SaeManifoldTerm::enforce_decoder_norm_guard`]).
 /// Distinct from the per-atom [`SAE_ATOM_COLLAPSE_RESEED_BUDGET`] (= 1): that
 /// budget governs reseeding ONE atom's gate logits against an optimizer that
@@ -194,15 +194,11 @@ pub(crate) const SAE_ATOM_DECODER_NORM_COLLAPSE_RATIO: f64 = 1.0e-3;
 /// recomputed residual, so successive attempts explore genuinely different
 /// basins. A single such reseed empirically cannot always break a K≥3 three-way
 /// basin (identical (K, seed) flips EV≈0.40 ↔ 0.00), so this arm gets a small
-/// bounded budget of independent multi-starts. S1 (guard surgery): it is consumed
-/// ONLY at iteration > 0 when the whole dictionary's reconstruction EV is at or
-/// below the SIGNAL-FREE null floor (`absolute_degeneracy_ev_floor` = `q / n`, the
-/// classical null-`R²`) AND the reconstruction OUTPUT has co-vanished (output
-/// energy at or below the same null level). Both hold only in a genuine #853/#976
-/// co-collapse; a healthy fit (real OLMo K=1 ~0.22, K=2 ~0.40) and a
-/// merely-uncompetitive present-decoder fit keep output energy and never consume
-/// the budget — the former `0.5 × dense PCA ceiling` bar that tripped on those has
-/// been retired.
+/// bounded budget of independent multi-starts. It is consumed only after
+/// iteration zero when the same-state certificate proves that all gated decoder
+/// signals disappeared at floating-point resolution or #2362 proves structural
+/// union-output-span collapse. Training EV is telemetry, so a healthy or merely
+/// uncompetitive live-decoder fit never consumes this budget.
 pub(crate) const SAE_DICTIONARY_COCOLLAPSE_RESEED_BUDGET: usize = 3;
 
 /// Assignment prior/relaxation used by [`SaeAssignment`].

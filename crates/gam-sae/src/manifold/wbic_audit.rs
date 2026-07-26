@@ -7,9 +7,10 @@
 //! `d_eff = rank_chargeable · basis_edf`. Two integer ranks must not be
 //! conflated. `rank_mp` is the Marchenko–Pastur hard count of reconstruction-
 //! Gram eigenvalues above the noise edge. Production uses `rank_chargeable`:
-//! it equals `rank_mp` when any direction clears the edge, promotes an MP-rank-zero but
-//! numerically alive decoder to rank one, and leaves only a genuinely vanished
-//! decoder at zero (#2258). The `½·(·)·log n` Laplace charge is the correct
+//! it equals `rank_mp` when any direction clears the edge, promotes an MP-rank-zero
+//! but positive spectrum to rank one, and leaves only an exactly zero spectrum
+//! at zero (#2258). Stronger state-aware disappearance is certified upstream.
+//! The `½·(·)·log n` Laplace charge is the correct
 //! free-energy penalty ONLY for a
 //! REGULAR statistical model, where the log-likelihood has a non-degenerate
 //! Hessian at the MLE and the marginal likelihood expands as
@@ -69,8 +70,8 @@
 //! ```text
 //! rank_mp = Σ_k 1[μ_k > e]                         (integer MP reconstruction count)
 //! rank_chargeable = rank_mp,                         if rank_mp > 0
-//!                 = 1,                               if max μ > 10⁻⁹ R
-//!                 = 0,                               otherwise
+//!                 = 1,                               if max μ > 0
+//!                 = 0,                               if every μ = 0
 //! rank_soft = Σ_k μ_k/(μ_k + e·log n_eff)          (WBIC tempered count)
 //! C_mp   = ½ · rank_mp         · basis_edf · log N_eff (diagnostic)
 //! C_prod = ½ · rank_chargeable · basis_edf · log N_eff (production)
@@ -131,9 +132,6 @@ pub struct ReconSpectrum {
     mu: Vec<f64>,
     /// Marchenko–Pastur noise edge the hard rank count thresholds on.
     edge: f64,
-    /// Reconstruction dispersion `R`, used by the production vanished-decoder
-    /// threshold `RANK_VANISHED_REL·R`.
-    dispersion: f64,
     /// `tr(G(G+λS)⁻¹)` — the graded effective basis-function count.
     basis_edf: f64,
     /// Effective sample size `Σ_row a²`.
@@ -142,7 +140,7 @@ pub struct ReconSpectrum {
 
 impl ReconSpectrum {
     fn rank_classification(&self) -> super::construction::ReconstructionRankClassification {
-        super::construction::classify_reconstruction_rank(&self.mu, self.edge, self.dispersion)
+        super::construction::classify_reconstruction_rank(&self.mu, self.edge)
     }
 
     /// Validated per-observation reconstruction-Gram eigenvalues.
@@ -190,8 +188,9 @@ impl ReconSpectrum {
     /// the ρ-derivative MUST take the same branch or the value/gradient pair
     /// desyncs (measured: real-GPT-2 fit priced finite by the promoted value
     /// path, then refused by the derivative's independent rank-zero invariant).
-    /// Only a VANISHED decoder (top μ ≤ `RANK_VANISHED_REL`·R — the
-    /// Laplace-invalid regime) stays at rank 0.
+    /// Only an exactly zero reconstruction spectrum stays at rank 0 here.
+    /// The stronger state-aware vanished-atom certificate runs before evidence
+    /// pricing and may categorically refuse roundoff-indistinguishable signal.
     pub fn production_chargeable_rank(&self) -> usize {
         self.rank_classification().production_chargeable_rank
     }
@@ -300,7 +299,6 @@ pub fn recon_spectrum(
         return Ok(ReconSpectrum {
             mu: Vec::new(),
             edge: 0.0,
-            dispersion: r_floor,
             basis_edf: 0.0,
             n_eff,
         });
@@ -348,7 +346,6 @@ pub fn recon_spectrum(
     Ok(ReconSpectrum {
         mu,
         edge,
-        dispersion: r_floor,
         basis_edf,
         n_eff,
     })
@@ -736,7 +733,6 @@ mod tests {
         let spec = ReconSpectrum {
             mu: vec![scale],
             edge: scale,
-            dispersion: 1.0,
             basis_edf: 1.0,
             n_eff: f64::MAX,
         };
@@ -920,8 +916,8 @@ mod tests {
     /// (c) A WEAK circle whose spectrum sits just below the edge exposes the key
     /// semantic split: MP reconstruction rank is zero, production chargeable rank is
     /// one, and WBIC still pays fractional directions. (d) A noise-only fitted
-    /// decoder has the same reconstruction-rank/chargeability split; only an exactly
-    /// vanished decoder has production rank zero.
+    /// decoder has the same reconstruction-rank/chargeability split; only an
+    /// exactly zero spectrum has production rank zero.
     #[test]
     fn wbic_audit_disagreement_table() {
         let mut rows: Vec<AuditRow> = Vec::new();
@@ -1061,14 +1057,13 @@ mod tests {
             rows.push(AuditRow::from_spectrum("gaussian blend (noise)", &spec, n));
         }
 
-        // (7) EXACT VANISHING — only this degeneracy branch remains production
-        // rank zero. It is distinct from a vanished decoder.
+        // (7) EXACT ZERO SPECTRUM — only this classifier branch remains rank
+        // zero. State-aware numerical disappearance is certified upstream.
         rows.push(AuditRow::from_spectrum(
             "decoder vanished",
             &ReconSpectrum {
                 mu: vec![0.0; 7],
                 edge: 0.01 * (1.0 + (p as f64 / n as f64).sqrt()).powi(2),
-                dispersion: 0.01,
                 basis_edf: 7.0,
                 n_eff: n as f64,
             },
@@ -1138,8 +1133,8 @@ mod tests {
             near.production_chargeable_rank,
             near.rank_soft
         );
-        // (d) A fitted noise decoder is alive even below the MP rank edge; an exactly
-        // vanished decoder, and only that fixture, stays production rank zero.
+        // (d) A fitted noise decoder is alive even below the MP rank edge; an
+        // exactly zero spectrum, and only that fixture, stays production rank zero.
         assert!(
             blend.mp_reconstruction_rank == 0
                 && blend.production_chargeable_rank == 1
@@ -1252,7 +1247,6 @@ mod tests {
         let spec = ReconSpectrum {
             mu: vec![10.0, 0.01],
             edge: 1.0,
-            dispersion: 1.0,
             basis_edf: 3.0,
             n_eff: 50.0,
         };

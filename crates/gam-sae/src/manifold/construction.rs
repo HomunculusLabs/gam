@@ -64,22 +64,22 @@ pub struct StreamingRankInputs {
 ///     `(λ,U)=eigh(gram)`; count those above `R·(1+√(p/n_eff))²` (a real rank-2 circle
 ///     → 2). `rank_eff` is the production chargeable rank: it equals
 ///     `rank_reconstructed` unless the #2258 alive-below-edge rule promotes 0 to 1;
-///     only a vanished decoder remains 0. [#1893/#11]
+///     only an exact zero spectrum remains 0 in this classifier. [#1893/#11]
 ///   * `basis_edf = tr(gram·(gram+λS)⁻¹)`.
 /// This is the source of truth the term-level `rank_dof_from_grams` (dense + #9
 /// streaming) loops, AND that the #2023 migration gate prices linear/curved candidates
 /// through — so PROMOTE (birth) and DEMOTE (hybrid split) adjudicate in ONE currency.
-/// #2258 reconstruction-rank-vs-degeneracy threshold: a rank-0 atom whose top
-/// reconstruction-Gram eigenvalue exceeds `RANK_VANISHED_REL · R` is ALIVE
-/// (below the MP reconstruction-rank edge, not degenerate) and is promoted to the
-/// minimum chargeable rank 1; at or below it the decoder has genuinely
-/// vanished and the categorical Laplace-validity veto applies. Shared by the
-/// value path here, the WBIC diagnostic, and the ρ-derivative through
-/// [`classify_reconstruction_rank`], so the three views cannot desync.
-pub(crate) const RANK_VANISHED_REL: f64 = 1.0e-9;
+/// #2258 reconstruction-rank-vs-degeneracy split: a positive reconstruction
+/// eigenvalue below the MP edge is unresolved, not vanished, and is promoted to
+/// the minimum chargeable rank 1. Numerical disappearance is certified
+/// separately, before rank charging, by
+/// [`SaeManifoldTerm::vanished_atoms_from_signal_upper_bound`]. That certificate
+/// compares a rigorous upper bound on the atom's gated reconstruction energy
+/// with the explicit backward-error envelope of the residual-energy reduction;
+/// there is no corpus-independent `c·R` cutoff hidden in the rank classifier.
 
-/// Non-empty, canonical set of numerical atom slots whose realised decoder
-/// rank is exactly zero at a converged fixed-`rho` inner state.
+/// Non-empty, canonical set of atom slots whose realised gated decoder signal
+/// is numerically unobservable at a converged fixed-`rho` inner state.
 ///
 /// This is a structural boundary of the fixed-`K` model, not a floating-point
 /// value and not a numerical failure.  Keeping the slots sorted and unique
@@ -111,6 +111,113 @@ impl VanishedAtoms {
 
     pub(crate) fn as_btree_set(&self) -> std::collections::BTreeSet<usize> {
         self.iter().collect()
+    }
+}
+
+/// Numerical proof returned by
+/// [`SaeManifoldTerm::vanished_atoms_from_signal_upper_bound`].
+///
+/// `Certified` carries the complete per-atom gated-signal upper bounds, the
+/// residual-reduction backward-error floor, and the signal boundary derived from
+/// the full residual perturbation inequality. An atom is listed only when its
+/// true reconstruction energy is bounded above by an amount that cannot change
+/// the floating-point residual energy at this state. If the
+/// standard `γ_k = kε/(1-kε)` bound cannot be formed (dimension arithmetic
+/// overflow or `kε >= 1`), the result is explicitly `Unavailable`; callers must
+/// not silently reinterpret that as either live or vanished.
+#[derive(Clone, Debug)]
+pub(crate) enum VanishedAtomsProof {
+    Certified {
+        atoms: Option<VanishedAtoms>,
+        signal_upper_bounds: Box<[f64]>,
+        residual_scale_upper: f64,
+        residual_roundoff_floor: f64,
+        signal_vanish_boundary: f64,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl VanishedAtomsProof {
+    pub(crate) fn vanished_atoms(&self) -> Option<&VanishedAtoms> {
+        match self {
+            Self::Certified { atoms, .. } => atoms.as_ref(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn all_atoms_vanished(&self, atom_count: usize) -> bool {
+        self.vanished_atoms()
+            .is_some_and(|atoms| atoms.len() == atom_count)
+    }
+
+    pub(crate) fn max_signal_upper_bound(&self) -> Option<f64> {
+        match self {
+            Self::Certified {
+                signal_upper_bounds,
+                ..
+            } => Some(
+                signal_upper_bounds
+                    .iter()
+                    .copied()
+                    .fold(0.0_f64, f64::max),
+            ),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn residual_roundoff_floor(&self) -> Option<f64> {
+        match self {
+            Self::Certified {
+                residual_roundoff_floor,
+                ..
+            } => Some(*residual_roundoff_floor),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn residual_scale_upper(&self) -> Option<f64> {
+        match self {
+            Self::Certified {
+                residual_scale_upper,
+                ..
+            } => Some(*residual_scale_upper),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn signal_vanish_boundary(&self) -> Option<f64> {
+        match self {
+            Self::Certified {
+                signal_vanish_boundary,
+                ..
+            } => Some(*signal_vanish_boundary),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Certified { .. } => None,
+            Self::Unavailable { reason } => Some(reason),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VanishingResidualEnergy {
+    sum_squares: f64,
+    scalar_count: usize,
+}
+
+impl VanishingResidualEnergy {
+    pub(crate) fn sum_squares(self) -> f64 {
+        self.sum_squares
+    }
+
+    pub(crate) fn mean_square(self) -> f64 {
+        self.sum_squares / self.scalar_count as f64
     }
 }
 
@@ -233,16 +340,25 @@ pub(super) fn normalized_reconstruction_energy(
     Ok(energy)
 }
 
+/// Standard floating-point accumulation factor `γ_k = kε/(1-kε)`.
+///
+/// `None` means the first-order backward-error model is not informative for the
+/// requested operation count; callers surface proof-unavailable rather than
+/// widening a numerical-zero threshold.
+fn floating_point_accumulation_gamma(rounded_operations: usize) -> Option<f64> {
+    let k_epsilon = rounded_operations as f64 * f64::EPSILON;
+    (k_epsilon < 1.0).then(|| k_epsilon / (1.0 - k_epsilon))
+}
+
 /// Single source of truth for MP reconstruction rank versus production chargeability.
 ///
 /// Callers supply the per-observation reconstruction-Gram eigenvalues `mu`, the
-/// MP reconstruction-rank `edge`, and the reconstruction dispersion `r_floor`. Inputs are
-/// validated by [`validate_rank_charge_problem`] before production reaches this
-/// helper; [`super::wbic_audit::ReconSpectrum`] stores the same validated values.
+/// MP reconstruction-rank `edge`. Inputs are validated by
+/// [`validate_rank_charge_problem`] before production reaches this helper;
+/// [`super::wbic_audit::ReconSpectrum`] stores the same validated values.
 pub(super) fn classify_reconstruction_rank(
     mu: &[f64],
     edge: f64,
-    r_floor: f64,
 ) -> ReconstructionRankClassification {
     let mut mp_reconstruction_rank = 0usize;
     let mut top_signal = 0.0_f64;
@@ -254,7 +370,7 @@ pub(super) fn classify_reconstruction_rank(
     }
     let production_chargeable_rank = if mp_reconstruction_rank > 0 {
         mp_reconstruction_rank
-    } else if top_signal > RANK_VANISHED_REL * r_floor {
+    } else if top_signal > 0.0 {
         1
     } else {
         0
@@ -489,15 +605,15 @@ pub(crate) fn realised_rank_charge_dof(
         .map(|&singular_value| normalized_reconstruction_energy(singular_value, n_eff))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("realised_rank_charge_dof: {error}"))?;
-    let rank = classify_reconstruction_rank(&mu, edge, r_floor);
+    let rank = classify_reconstruction_rank(&mu, edge);
     // RECONSTRUCTION RANK vs DEGENERACY (#2258 real-activation class). MP rank zero
     // conflated two regimes with opposite correct handling:
-    //   · VANISHED decoder (a²‖B‖² → 0): the β-mode is degenerate, the
+    //   · EXACT zero reconstruction spectrum: the β-mode is degenerate, the
     //     β-Schur log-det → −∞ is the Laplace approximation BREAKING DOWN,
     //     and the RLCT argument above makes the categorical +∞ veto the only
     //     valid pricing. This is the regime the veto was built for (births on
     //     featureless residuals).
-    //   · BELOW the MP RECONSTRUCTION-RANK EDGE but numerically alive: in a p ≈ n_eff
+    //   · POSITIVE but below the MP reconstruction-rank edge: in a p ≈ n_eff
     //     regime the edge is ≈ 4R (measured on real GPT-2 activations:
     //     R=1.005, n_eff=84, p=64 ⇒ edge=3.53 vs top signal 0.32–0.84), so a
     //     genuine fitted decoder simply isn't separable from noise AT THIS
@@ -519,9 +635,9 @@ pub(crate) fn realised_rank_charge_dof(
         );
     } else if rank.production_chargeable_rank == 0 {
         log::debug!(
-            "realised_rank_charge_dof: VANISHED decoder (categorical veto upstream) — \
-             top sv²/n_eff={:.6e} ≤ {RANK_VANISHED_REL:.0e}·R (R={r_floor:.6e}, \
-             n_eff={n_eff:.3e}, p_out={p_out})",
+            "realised_rank_charge_dof: exactly zero reconstruction spectrum \
+             (categorical vanished-atom certificate belongs upstream) — \
+             top sv²/n_eff={:.6e} (R={r_floor:.6e}, n_eff={n_eff:.3e}, p_out={p_out})",
             rank.top_signal
         );
     }
@@ -572,10 +688,11 @@ pub(crate) fn coordinate_block_log_det(cache: &ArrowFactorCache) -> Result<f64, 
 ///
 /// Dense, streaming, and criterion-as-atoms assembly all call this function so
 /// the value cannot retain the full coordinate logdet after the analytic
-/// gradient has switched to the realised-rank charge. A zero realised rank is
-/// the categorical Laplace-invalid boundary and is returned as a typed
-/// [`VanishedAtoms`] event. It is never laundered into a floating-point
-/// sentinel.
+/// gradient has switched to the realised-rank charge. Decoder disappearance is
+/// not re-adjudicated here from a scalar DOF: each production criterion first
+/// runs the same-state gated-signal certificate, and only that certificate may
+/// return [`SaeCriterionError::VanishedAtoms`]. A zero DOF that reaches this
+/// arithmetic seam therefore contributes exactly zero charge.
 pub(crate) fn rank_adjusted_quasi_laplace_complexity(
     log_det: f64,
     log_det_tt: f64,
@@ -596,7 +713,6 @@ pub(crate) fn rank_adjusted_quasi_laplace_complexity(
         )));
     }
     let mut rank_charge = 0.0_f64;
-    let mut vanished = Vec::new();
     for (atom, (&dof, &occupancy)) in d_eff.iter().zip(n_eff.iter()).enumerate() {
         if !(dof.is_finite() && dof >= 0.0) {
             return Err(SaeCriterionError::Numerical(format!(
@@ -608,14 +724,7 @@ pub(crate) fn rank_adjusted_quasi_laplace_complexity(
                 "rank_adjusted_quasi_laplace_complexity: atom {atom} has invalid effective sample size {occupancy}"
             )));
         }
-        if dof == 0.0 {
-            vanished.push(atom);
-            continue;
-        }
         rank_charge += 0.5 * dof * occupancy.max(1.0).ln();
-    }
-    if let Some(atoms) = VanishedAtoms::from_slots(vanished) {
-        return Err(SaeCriterionError::VanishedAtoms(atoms));
     }
     let value = 0.5 * (log_det - log_det_tt) + rank_charge;
     if value.is_finite() {
@@ -1650,22 +1759,75 @@ impl SaeManifoldTerm {
             .collect()
     }
 
+    /// Raw output-frame residual energy used by the decoder-disappearance
+    /// certificate. The typed result exposes the identical positive reduction
+    /// as either a sum (EV telemetry) or mean square (the certificate), avoiding
+    /// a second `N×p` pass. Keeping it beside the certificate prevents row loss
+    /// weights or a likelihood-whitening metric from being compared with an
+    /// unweighted decoder Gram.
+    pub(crate) fn residual_energy_for_vanishing(
+        &self,
+        residual: ArrayView2<'_, f64>,
+    ) -> Result<VanishingResidualEnergy, String> {
+        if residual.dim() != (self.n_obs(), self.output_dim()) {
+            return Err(format!(
+                "decoder-vanishing residual shape {:?} does not match ({}, {})",
+                residual.dim(),
+                self.n_obs(),
+                self.output_dim(),
+            ));
+        }
+        let scalar_count = self
+            .n_obs()
+            .checked_mul(self.output_dim())
+            .ok_or_else(|| "decoder-vanishing residual scalar count overflowed usize".to_string())?;
+        if scalar_count == 0 {
+            return Err("decoder-vanishing residual scalar count is zero".to_string());
+        }
+        let mut sum_squares = 0.0_f64;
+        for &value in residual.iter() {
+            if !value.is_finite() {
+                return Err("decoder-vanishing residual must be finite".to_string());
+            }
+            sum_squares += value * value;
+        }
+        if !sum_squares.is_finite() {
+            return Err("decoder-vanishing residual squared norm is not finite".to_string());
+        }
+        Ok(VanishingResidualEnergy {
+            sum_squares,
+            scalar_count,
+        })
+    }
+
     /// Certify decoder disappearance without consulting the joint inverse.
     ///
-    /// Every reconstruction-Gram eigenvalue of atom `k` is bounded by
-    /// `||G_k||_2 ||D_k||_F^2 / N_eff,k`, which is in turn bounded by
-    /// `||G_k||_inf ||D_k||_F^2 / N_eff,k`. If that upper bound is already at
-    /// or below `RANK_VANISHED_REL * dispersion_lower_bound`, the atom is
-    /// vanished for every admissible dispersion. This one-sided certificate
-    /// belongs before ARD EDF: the null stratum makes the joint decoder mode
-    /// degenerate, while disappearance itself depends only on the fitted
-    /// function image and likelihood scale.
+    /// The atom's mean per-scalar reconstruction energy is bounded by
+    /// `S_k = tr(G_k) ||D_k||_F^2 / (N p)` because `G_k` is positive semidefinite.
+    /// The trace and decoder norm are positive reductions, so their
+    /// accumulated floating-point error is bounded with the standard
+    /// `γ_s = sε/(1-sε)` model.
+    ///
+    /// Removing the atom can change mean residual energy by at most
+    /// `2 sqrt(R S_k) + S_k`, including the residual–decoder cross term. The
+    /// largest signal whose complete perturbation fits inside the independently
+    /// derived `γ_{3Np+2}` residual backward-error envelope `δ_R` is
+    /// `S_* = (δ_R / (sqrt(R + δ_R) + sqrt(R)))²`. An atom vanishes only when
+    /// its inflated signal upper bound is at most `S_*`. This makes "vanished"
+    /// mean numerically unobservable at this exact fitted state, rather than
+    /// `signal <= c·noise` for an arbitrary constant `c`.
+    ///
+    /// If a sound `γ_s` cannot be formed, returns
+    /// [`VanishedAtomsProof::Unavailable`] rather than silently declaring the
+    /// atom live. This one-sided certificate belongs before ARD EDF: the null
+    /// stratum makes the joint decoder mode degenerate, while disappearance
+    /// itself depends only on the fitted function image and likelihood scale.
     pub(crate) fn vanished_atoms_from_signal_upper_bound(
         &self,
         grams: &[Array2<f64>],
         n_eff: &[f64],
-        dispersion_lower_bound: f64,
-    ) -> Result<Option<VanishedAtoms>, String> {
+        residual_mean_square: f64,
+    ) -> Result<VanishedAtomsProof, String> {
         if grams.len() != self.k_atoms() || n_eff.len() != self.k_atoms() {
             return Err(format!(
                 "vanished_atoms_from_signal_upper_bound: expected {} Gram/sample blocks; got {} and {}",
@@ -1674,13 +1836,66 @@ impl SaeManifoldTerm {
                 n_eff.len(),
             ));
         }
-        if !(dispersion_lower_bound.is_finite() && dispersion_lower_bound >= 0.0) {
+        if !(residual_mean_square.is_finite() && residual_mean_square >= 0.0) {
             return Err(format!(
-                "vanished_atoms_from_signal_upper_bound: dispersion lower bound must be finite and non-negative; got {dispersion_lower_bound}"
+                "vanished_atoms_from_signal_upper_bound: residual mean square must be finite and non-negative; got {residual_mean_square}"
             ));
         }
 
+        let n = self.n_obs();
+        let p = self.output_dim();
+        let scalar_count = n.checked_mul(p);
+        let Some(scalar_count) = scalar_count else {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: "residual scalar count overflowed usize".to_string(),
+            });
+        };
+        if scalar_count == 0 {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: "residual scalar count is zero".to_string(),
+            });
+        }
+        let residual_operations = scalar_count
+            .checked_mul(3)
+            .and_then(|count| count.checked_add(2));
+        let Some(residual_operations) = residual_operations else {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: "residual reduction operation count overflowed usize".to_string(),
+            });
+        };
+        let Some(residual_gamma) = floating_point_accumulation_gamma(residual_operations) else {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: format!(
+                    "residual reduction has {residual_operations} rounded operations, so k*epsilon >= 1"
+                ),
+            });
+        };
+        let residual_scale_upper = if residual_mean_square == 0.0 {
+            0.0
+        } else {
+            residual_mean_square / (1.0 - residual_gamma)
+        };
+        let residual_roundoff_floor = residual_gamma * residual_scale_upper;
+        if !residual_roundoff_floor.is_finite() {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: "residual backward-error floor is not finite".to_string(),
+            });
+        }
+        let signal_vanish_boundary = if residual_roundoff_floor == 0.0 {
+            0.0
+        } else {
+            let relative_amplitude =
+                residual_gamma / ((1.0 + residual_gamma).sqrt() + 1.0);
+            residual_scale_upper * relative_amplitude * relative_amplitude
+        };
+        if !signal_vanish_boundary.is_finite() {
+            return Ok(VanishedAtomsProof::Unavailable {
+                reason: "derived decoder-signal vanish boundary is not finite".to_string(),
+            });
+        }
+
         let mut vanished = Vec::new();
+        let mut signal_upper_bounds = Vec::with_capacity(self.k_atoms());
         for atom in 0..self.k_atoms() {
             let gram = &grams[atom];
             let decoder = &self.atoms[atom].decoder_coefficients;
@@ -1708,24 +1923,96 @@ impl SaeManifoldTerm {
             }
             if occupancy == 0.0 {
                 vanished.push(atom);
+                signal_upper_bounds.push(0.0);
+                continue;
+            }
+            if decoder.iter().all(|value| *value == 0.0) {
+                vanished.push(atom);
+                signal_upper_bounds.push(0.0);
                 continue;
             }
 
-            let gram_inf_norm = (0..m)
-                .map(|row| (0..m).map(|col| gram[[row, col]].abs()).sum::<f64>())
-                .fold(0.0_f64, f64::max);
+            let mut gram_trace = 0.0_f64;
+            for axis in 0..m {
+                let diagonal = gram[[axis, axis]];
+                if diagonal < 0.0 {
+                    return Err(format!(
+                        "vanished_atoms_from_signal_upper_bound: atom {atom} Gram diagonal \
+                         {axis} is negative ({diagonal})"
+                    ));
+                }
+                gram_trace += diagonal;
+            }
             let decoder_frobenius_squared = decoder.iter().map(|value| value * value).sum::<f64>();
-            let signal_upper_bound = gram_inf_norm * decoder_frobenius_squared / occupancy;
+            if gram_trace == 0.0 {
+                return Ok(VanishedAtomsProof::Unavailable {
+                    reason: format!(
+                        "atom {atom} has positive occupancy and a nonzero decoder but its \
+                         computed Gram trace is zero"
+                    ),
+                });
+            }
+            if decoder_frobenius_squared == 0.0 {
+                return Ok(VanishedAtomsProof::Unavailable {
+                    reason: format!(
+                        "atom {atom} has nonzero decoder coefficients whose squared norm \
+                         underflowed to zero"
+                    ),
+                });
+            }
+            let state_operations = n
+                .checked_mul(m)
+                .and_then(|count| count.checked_mul(4))
+                .and_then(|count| {
+                    n.checked_mul(3)
+                        .and_then(|occupancy_ops| count.checked_add(occupancy_ops))
+                })
+                .and_then(|count| {
+                    m.checked_mul(p)
+                        .and_then(|mp| mp.checked_mul(2))
+                        .and_then(|decoder_ops| count.checked_add(decoder_ops))
+                })
+                .and_then(|count| count.checked_add(m))
+                .and_then(|count| count.checked_add(8));
+            let Some(state_operations) = state_operations else {
+                return Ok(VanishedAtomsProof::Unavailable {
+                    reason: format!("atom {atom} signal-bound operation count overflowed usize"),
+                });
+            };
+            let Some(state_gamma) = floating_point_accumulation_gamma(state_operations) else {
+                return Ok(VanishedAtomsProof::Unavailable {
+                    reason: format!(
+                        "atom {atom} signal bound has {state_operations} rounded operations, so k*epsilon >= 1"
+                    ),
+                });
+            };
+            let raw_signal_upper_bound =
+                gram_trace * decoder_frobenius_squared / scalar_count as f64;
+            if raw_signal_upper_bound == 0.0 {
+                return Ok(VanishedAtomsProof::Unavailable {
+                    reason: format!(
+                        "atom {atom} gated-signal bound underflowed to zero"
+                    ),
+                });
+            }
+            let signal_upper_bound = raw_signal_upper_bound / (1.0 - state_gamma);
             if !signal_upper_bound.is_finite() {
                 return Err(format!(
                     "vanished_atoms_from_signal_upper_bound: atom {atom} signal upper bound is not finite"
                 ));
             }
-            if signal_upper_bound <= RANK_VANISHED_REL * dispersion_lower_bound {
+            signal_upper_bounds.push(signal_upper_bound);
+            if signal_upper_bound <= signal_vanish_boundary {
                 vanished.push(atom);
             }
         }
-        Ok(VanishedAtoms::from_slots(vanished))
+        Ok(VanishedAtomsProof::Certified {
+            atoms: VanishedAtoms::from_slots(vanished),
+            signal_upper_bounds: signal_upper_bounds.into_boxed_slice(),
+            residual_scale_upper,
+            residual_roundoff_floor,
+            signal_vanish_boundary,
+        })
     }
 
     /// Shared rank-charge DOF core (#11): `d_eff_k = rank_eff_k · basis_edf_k` from the

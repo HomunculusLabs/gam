@@ -470,28 +470,11 @@ pub(crate) fn read_npy_f32_2d(path: &std::path::Path) -> Array2<f64> {
     out
 }
 
-/// S1 (guard surgery) — the fitted-data collapse verdict fires on ABSOLUTE
-/// degeneracy, NOT on a fit that is merely below a dense-PCA competitiveness
-/// ceiling. This is the CONVERSE of the retired #1522 behavior: the former
-/// `0.5 × rank-K PCA EV ceiling` bar flagged a present-decoder fit that explains
-/// only 30% of the variance as a "structural collapse", which is the exact
-/// false-positive that walled every real K≥2 fit. The corrected detector requires
-/// BOTH the reconstruction EV at or below the signal-free null floor
-/// (`absolute_degeneracy_ev_floor` = `q / n`) AND the reconstruction OUTPUT
-/// co-vanished, so:
-///   * a PRESENT-decoder fit (`fitted = 0.837 · target`, EV ≈ 0.30, output energy
-///     ≈ 0.70 of the variance) is NOT a collapse — its decoders carry real signal;
-///     the optimizer, not the guard, owns a merely-uncompetitive fit;
-///   * a genuinely VANISHED dictionary (`fitted ≈ column mean`) at the SAME K/data
-///     IS a collapse — EV ≈ 0 AND output energy ≈ 0.
-///
-/// The collapse guard reads only `target`, `fitted`, `assignments`, the per-atom
-/// chart geometry and `k_atoms()` — it never EVALUATES the basis — so the atom is
-/// built with a raw periodic basis (`basis_size = 3`) and no evaluator.
+/// #2498 — the final fitted-data verdict accepts no externally fabricated
+/// reconstruction or assignments. It derives all evidence from the live term,
+/// and records an event exactly when that same state's decoder disappears.
 #[test]
-pub(crate) fn fit_data_collapse_verdict_is_absolute_degeneracy_not_competitiveness_s1() {
-    // Raw periodic basis Φ = [1, sin(2πt), cos(2πt)] on 4 sample coords;
-    // `basis_size = 3`, so the single-atom dictionary rank is min(rank(Φ), n, p).
+pub(crate) fn fit_data_collapse_verdict_uses_one_self_consistent_state_s1() {
     let coords = array![[0.0_f64], [0.25], [0.5], [0.75]];
     let n = coords.nrows();
     let mut phi = Array2::<f64>::zeros((n, 3));
@@ -504,13 +487,16 @@ pub(crate) fn fit_data_collapse_verdict_is_absolute_degeneracy_not_competitivene
         jet[[row, 1, 0]] = 2.0 * std::f64::consts::PI * angle.cos();
         jet[[row, 2, 0]] = -2.0 * std::f64::consts::PI * angle.sin();
     }
+    let mut live_decoder = Array2::<f64>::zeros((3, 2));
+    live_decoder[[2, 0]] = 1.0;
+    live_decoder[[1, 1]] = 1.0;
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "circle",
         SaeAtomBasisKind::Periodic,
         1,
         phi,
         jet,
-        Array2::<f64>::zeros((3, 2)),
+        live_decoder,
         Array2::<f64>::eye(3),
     )
     .unwrap();
@@ -521,94 +507,53 @@ pub(crate) fn fit_data_collapse_verdict_is_absolute_degeneracy_not_competitivene
         AssignmentMode::softmax(1.0),
     )
     .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let mut live_term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
 
     let target = array![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]];
-    let assignments = Array2::<f64>::ones((n, 1));
+    let rho = SaeManifoldRho::new(-0.3, 0.0, vec![array![0.0]]);
 
-    // The reachable rank and hence the null floor `q / n` the production verdict
-    // keys on. On this rank-2 target (n=4, p=2) q is capped at min(n,p)=2, so the
-    // floor is 2/4 = 0.5.
-    let dictionary_rank = crate::manifold::outer_objective::reachable_dictionary_rank(
-        &term.atoms,
-        target.nrows(),
-        target.ncols(),
-    );
-    let floor = crate::manifold::outer_objective::absolute_degeneracy_ev_floor(
-        target.view(),
-        dictionary_rank,
-    );
-
-    // ── CONVERSE: a present-decoder, MISALIGNED fit is NOT a collapse ──
-    // A fit whose decoders carry FULL output energy but point partly the wrong way
-    // reconstructs poorly (low / negative EV) yet is trivially recoverable by the
-    // optimizer (rotate the decoders) — it is NOT a structural collapse. Build it
-    // by negating two of the four rows of the unit-circle `target`: the output
-    // energy is preserved exactly (`out_ratio = 1`, well above the null floor),
-    // while the misalignment pushes EV below the floor (here EV = −1). Column means
-    // are 0, so all energies are taken about 0.
-    let fitted_present = array![[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]];
-    let sst: f64 = target.iter().map(|t| t * t).sum();
-    let ssr: f64 = target
-        .iter()
-        .zip(fitted_present.iter())
-        .map(|(t, f)| (t - f) * (t - f))
-        .sum();
-    let ev_present = 1.0 - ssr / sst;
-    let out_energy_present = fitted_present.iter().map(|f| f * f).sum::<f64>() / sst;
-    assert!(
-        ev_present <= floor && out_energy_present > floor,
-        "fixture invariants: EV {ev_present} must be ≤ the null floor {floor} while output \
-         energy {out_energy_present} must exceed it, so only the output-co-vanished half fails"
-    );
-    let recorded_present = term
-        .record_fit_data_collapse_if_needed(
-            target.view(),
-            fitted_present.view(),
-            assignments.view(),
-            3,
-        )
+    let live_verdict = live_term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("live verdict");
+    assert!(!live_verdict.all_decoders_vanished(1));
+    assert!(!live_verdict.degenerate(1));
+    let recorded_live = live_term
+        .record_fit_data_collapse_if_needed(target.view(), &rho, 3)
         .unwrap();
     assert!(
-        !recorded_present,
-        "a present-decoder fit (EV {ev_present}, output energy {out_energy_present} of the \
-         variance) is merely uncompetitive, NOT a structural collapse — the retired \
-         `0.5 × PCA ceiling` bar's false-positive must be gone"
+        !recorded_live,
+        "a live decoder must not produce a terminal collapse event"
     );
     assert!(
-        !term
+        !live_term
             .collapse_events()
             .iter()
             .any(|e| e.action == CollapseAction::Terminal),
-        "no terminal collapse event may be recorded for a present-decoder fit"
+        "no terminal event may be recorded for a live decoder"
     );
 
-    // ── DIRECT: a genuinely vanished dictionary at the same K IS a collapse ──
-    let fitted_vanished = Array2::<f64>::zeros(target.dim()); // ≈ column mean (means are 0)
-    let recorded_vanished = term
-        .record_fit_data_collapse_if_needed(
-            target.view(),
-            fitted_vanished.view(),
-            assignments.view(),
-            7,
-        )
+    let mut vanished_term = live_term.clone();
+    vanished_term.atoms[0].decoder_coefficients.fill(0.0);
+    let vanished_verdict = vanished_term
+        .dictionary_collapse_verdict(target.view(), &rho, None)
+        .expect("vanished verdict");
+    assert!(vanished_verdict.all_decoders_vanished(1));
+    assert!(vanished_verdict.degenerate(1));
+    let recorded_vanished = vanished_term
+        .record_fit_data_collapse_if_needed(target.view(), &rho, 7)
         .unwrap();
     assert!(
         recorded_vanished,
-        "a vanished dictionary (fitted ≈ column mean, EV ≈ 0 AND output energy ≈ 0) is a \
-         genuine #853/#976 co-collapse and must be recorded"
+        "an exactly vanished decoder is a genuine #853/#976 co-collapse"
     );
-    let terminal = term
+    let terminal = vanished_term
         .collapse_events()
         .iter()
         .find(|e| e.action == CollapseAction::Terminal)
         .expect("a terminal collapse event must be recorded for the vanished dictionary");
-    // The recorded ledger event reports the reconstruction EV (≈ 0) in its
-    // `max_active_mass` slot; it is at or below the null floor by construction.
     assert!(
-        terminal.max_active_mass <= floor,
-        "ledger EV {} for the vanished dictionary must be at or below the null floor {floor}",
-        terminal.max_active_mass
+        terminal.floor.is_finite() && terminal.floor >= 0.0,
+        "the event carries the derived signal boundary, never a NaN sentinel"
     );
 }
 

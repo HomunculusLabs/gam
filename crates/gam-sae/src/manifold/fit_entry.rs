@@ -1266,16 +1266,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
             pass += 1;
         }
     }
-    {
-        let assignments = term.assignment.assignments();
-        let fitted = term.try_fitted_target_aware(z.view(), Some(&rho))?;
-        term.record_fit_data_collapse_if_needed(
-            z.view(),
-            fitted.view(),
-            assignments.view(),
-            max_iter,
-        )?;
-    }
+    term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
 
     // #977 / #997 — evidence-guarded structure search around the production fit:
     // the genuine dictionary learner. Harvest deaths (diverged ARD ∪ terminal
@@ -1464,7 +1455,7 @@ fn run_sae_manifold_fit_on_target(request: SaeFitRequest) -> Result<SaeFitOutcom
         .collect();
     let assignments = term.assignment.assignments();
     let fitted = term.try_fitted_target_aware(z.view(), Some(&rho))?;
-    term.record_fit_data_collapse_if_needed(z.view(), fitted.view(), assignments.view(), max_iter)?;
+    term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
     let trust_diagnostics = term.trust_diagnostics_report(assignments.view())?;
     // Assignment-support diagnostics read the exact assignments used by the
     // reconstruction and objective.
@@ -1681,16 +1672,7 @@ pub fn run_sae_manifold_certify(
     let penalized_quasi_laplace_criterion = fitted_result.penalized_quasi_laplace_criterion;
     let outer_termination = fitted_result.termination;
 
-    {
-        let assignments = term.assignment.assignments();
-        let fitted = term.try_fitted_target_aware(z.view(), Some(&rho))?;
-        term.record_fit_data_collapse_if_needed(
-            z.view(),
-            fitted.view(),
-            assignments.view(),
-            max_iter,
-        )?;
-    }
+    term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
 
     term.clear_row_loss_weights();
     term.set_certificate_dispersion(shape_uncertainty.dispersion)?;
@@ -1840,7 +1822,7 @@ pub fn run_sae_manifold_certify(
         .collect();
     let assignments = term.assignment.assignments();
     let fitted = term.try_fitted_target_aware(z.view(), Some(&rho))?;
-    term.record_fit_data_collapse_if_needed(z.view(), fitted.view(), assignments.view(), max_iter)?;
+    term.record_fit_data_collapse_if_needed(z.view(), &rho, max_iter)?;
     let trust_diagnostics = term.trust_diagnostics_report(assignments.view())?;
     let fit_diagnostics = term.fit_diagnostics_report(
         Some(&ard_variances),

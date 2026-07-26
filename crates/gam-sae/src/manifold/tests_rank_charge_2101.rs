@@ -1,6 +1,7 @@
 //! #5/(B) rank-charge criterion tests: the honest realised-rank BIC charge
-//! (i) ACCEPTS a real rank-2 circle, (ii) NEUTRALISES a vanishing decoder
-//! (co-collapse fix), and the canonical criterion is dense/streaming invariant.
+//! (i) accepts a real rank-2 circle, (ii) assigns rank zero only to the exact
+//! zero spectrum while the state-aware layer refuses certified disappearance,
+//! and the canonical criterion is dense/streaming invariant.
 
 use crate::manifold::{
     AssignmentMode, PeriodicHarmonicEvaluator, SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator,
@@ -82,10 +83,10 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
 }
 
 /// (i) real rank-2 circle → d_eff in the BIC-accept range (rank≈2 × basis-EDF),
-/// AND (ii) a decoder scaled far enough below the explicit degeneracy threshold
-/// `RANK_VANISHED_REL·R` → d_eff=0 (co-collapse neutralised).
+/// AND (ii) an exactly zero decoder → d_eff=0. Numerical disappearance of a
+/// nonzero decoder is certified separately from the rank classifier.
 #[test]
-fn rank_charge_deff_accepts_circle_and_neutralises_vanishing() {
+fn rank_charge_deff_accepts_circle_and_classifies_exact_zero_spectrum() {
     let (mut term, rho) = fitted_circle_term(80, 16);
     // Dispersion (noise floor R) from a reml pass.
     let (_v, loss, cache) = term
@@ -123,65 +124,12 @@ fn rank_charge_deff_accepts_circle_and_neutralises_vanishing() {
         0.5 * d_real[0] * (80f64).ln()
     );
 
-    // Vanishing is NOT synonymous with merely falling below the MP reconstruction-rank
-    // edge. The latter is an alive-but-unresolved atom and production correctly
-    // promotes it to chargeable rank 1. Derive a scale with a factor-four safety
-    // margin below the separate categorical threshold instead of guessing an
-    // absolute multiplier: under D↦cD every reconstruction eigenvalue obeys
-    // μ_k(c)=c²μ_k(1).
     let saved = term.atoms[0].decoder_coefficients.clone();
-    let mut grams = term.empty_decoder_gram_accumulator();
-    term.accumulate_decoder_gram(&mut grams)
-        .expect("decoder-Gram accumulation must preserve CUDA failures");
-    let n_eff: f64 = term
-        .assignment
-        .assignments()
-        .column(0)
-        .iter()
-        .map(|&a| a * a)
-        .sum();
-    let lam = rho.lambda_smooth_vec().unwrap();
-    let spectrum = super::wbic_audit::recon_spectrum(
-        &grams[0],
-        &saved,
-        n_eff,
-        term.output_dim() as f64,
-        disp,
-        lam[0],
-        Some(term.atoms[0].smooth_penalty()),
-    )
-    .unwrap();
-    let top_signal = spectrum
-        .reconstruction_energies()
-        .iter()
-        .copied()
-        .fold(0.0_f64, f64::max);
-    let vanished_edge = super::construction::RANK_VANISHED_REL * disp;
-    assert!(
-        top_signal > vanished_edge && vanished_edge > 0.0,
-        "the fitted circle must begin alive before the vanishing-scale certificate: \
-         top μ={top_signal:.6e}, vanished edge={vanished_edge:.6e}"
-    );
-    let vanished_scale = 0.5 * (vanished_edge / top_signal).sqrt();
-    let certified_top_signal = vanished_scale * vanished_scale * top_signal;
-    assert!(
-        certified_top_signal < 0.5 * vanished_edge,
-        "derived vanishing scale must retain its factor-four analytic threshold margin \
-         after floating-point evaluation"
-    );
-    term.atoms[0]
-        .decoder_coefficients
-        .assign(&(&saved * vanished_scale));
+    term.atoms[0].decoder_coefficients.fill(0.0);
     let d_vanish = term.per_atom_realised_rank_dof(&rho, disp).unwrap();
-    eprintln!(
-        "[rank-charge] vanishing (decoder×{vanished_scale:.3e}) \
-         top μ≤{certified_top_signal:.3e} < {vanished_edge:.3e}; \
-         d_eff={:.5} → charge=0 (neutral)",
-        d_vanish[0],
-    );
     assert_eq!(
         d_vanish[0], 0.0,
-        "decoder certified below RANK_VANISHED_REL·R must give d_eff=0; got {:.4}",
+        "an exactly zero reconstruction spectrum must give d_eff=0; got {:.4}",
         d_vanish[0],
     );
     term.atoms[0].decoder_coefficients.assign(&saved);
@@ -582,9 +530,10 @@ fn rank_charge_vetoes_zero_realised_rank_atom() {
         "real rank-2 circle must NOT be vetoed: {v_real}"
     );
 
-    // A vanishing decoder (×1e-6 → rank_eff=0, d_eff=0) is a typed structural
-    // boundary in both storage routes, never an Ok(+inf) scalar.
-    term.atoms[0].decoder_coefficients.assign(&(&saved * 1e-6));
+    // An exactly vanished decoder is a typed structural boundary in both
+    // storage routes, never an Ok(+inf) scalar. Positive sub-edge spectra are
+    // unresolved-but-alive and belong to the rank-one branch instead.
+    term.atoms[0].decoder_coefficients.fill(0.0);
     let dense = term
         .penalized_quasi_laplace_criterion_with_cache(tgt.view(), &rho, None, 0, 1.0, 1e-6, 1e-6)
         .unwrap_err();
@@ -609,7 +558,16 @@ fn rank_charge_vetoes_zero_realised_rank_atom() {
 }
 
 #[test]
-fn rank_charge_does_not_mask_invalid_dof_behind_vanishing_atom() {
+fn rank_charge_prices_zero_dof_without_re_adjudicating_disappearance() {
+    let zero_charge = super::construction::rank_adjusted_quasi_laplace_complexity(
+        1.0,
+        0.5,
+        &[0.0],
+        &[10.0],
+    )
+    .expect("the upstream same-state signal proof owns decoder disappearance");
+    assert_eq!(zero_charge, 0.25);
+
     let error = super::construction::rank_adjusted_quasi_laplace_complexity(
         1.0,
         0.5,
@@ -658,10 +616,9 @@ fn unit_target(term: &SaeManifoldTerm) -> Array2<f64> {
 /// monotone integer-rank transition; away from those crossings the charge is
 /// exactly constant. The old log-volume proxy `½·ln‖D‖²` instead shifts
 /// continuously by `ln c` under the same rescale — the scale degeneracy #2022
-/// wanted out of the evidence. As `c→0`, the final transition is the separate
-/// degeneracy cutoff `max μ(c)≤RANK_VANISHED_REL·R`, where `d_eff=0` and the
-/// categorical veto applies. Convergence-independent (prices the primitive
-/// directly, no fit).
+/// wanted out of the evidence. Every positive scale below the MP edge is
+/// unresolved-but-alive and charges rank one; only the exact zero spectrum has
+/// rank zero. Convergence-independent (prices the primitive directly, no fit).
 #[test]
 fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099() {
     let (mut term, rho) = fitted_circle_term(80, 16);
@@ -768,8 +725,6 @@ fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099()
         .iter()
         .copied()
         .fold(0.0_f64, f64::max);
-    let vanished_edge = super::construction::RANK_VANISHED_REL * disp;
-    let vanished_transition = (vanished_edge / top_mu).sqrt();
     let mut hard_transitions: Vec<f64> = base_spectrum
         .reconstruction_energies()
         .iter()
@@ -778,10 +733,7 @@ fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099()
         .map(|mu| (base_spectrum.mp_reconstruction_rank_edge() / mu).sqrt())
         .collect();
     hard_transitions.sort_by(f64::total_cmp);
-    assert!(
-        vanished_transition < hard_transitions[0],
-        "the degeneracy boundary must lie below the first MP reconstruction-rank crossing"
-    );
+    assert!(top_mu > 0.0 && !hard_transitions.is_empty());
 
     // The base scale's plateau is bounded by the nearest MP crossings. Probe two
     // interior scales, never a guessed multiplier that might cross an edge.
@@ -805,15 +757,16 @@ fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099()
         );
     }
 
-    // Finally probe one point in every non-empty interval cut out by the
-    // categorical and MP thresholds. The production value must equal the rank
+    let zero_d_eff = d_eff(&Array2::<f64>::zeros(base_decoder.dim()));
+    assert_eq!(zero_d_eff, 0.0, "the exact zero spectrum is rank zero");
+
+    // Finally probe one point in every non-empty interval cut out by the MP
+    // thresholds. The production value must equal the rank
     // predicted directly from μ(c)=c²μ(1), and those ranks may only increase as
     // decoder scale increases. Near-coincident MP crossings intentionally have
     // no unstable microscopic probe between them; the adjacent safe intervals
     // still certify their combined integer jump.
-    let mut transitions = vec![vanished_transition];
-    transitions.extend(hard_transitions.iter().copied());
-    transitions.sort_by(f64::total_cmp);
+    let transitions = hard_transitions;
     let mut probes = vec![0.5 * transitions[0]];
     for pair in transitions.windows(2) {
         if pair[1] > pair[0] * (1.0 + 1.0e-8) {
@@ -833,11 +786,9 @@ fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099()
             .count();
         let expected_rank = if hard_rank > 0 {
             hard_rank
-        } else if c2 * top_mu > vanished_edge {
+        } else {
             saw_alive_below_mp = true;
             1
-        } else {
-            0
         };
         let d_c = d_eff(&base_decoder.mapv(|value| c * value));
         let expected_d_eff = expected_rank as f64 * base_spectrum.basis_edf();

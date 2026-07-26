@@ -372,23 +372,34 @@ impl SaeManifoldTerm {
             // over-charging real atoms + rewarding a²‖B‖²→0) lives ENTIRELY in the
             // coordinate block (`H_tt ∝ ‖B‖²`); the β/Schur block is
             // ‖B‖-independent (ρ⁰ coupling) and stays. `d_eff` is rotation-
-            // invariant, so it accepts a real rank-2 circle and neutralises a
-            // vanishing atom — but does NOT distinguish clean-vs-blend (producer's
-            // job).
-            // Noise floor R = residual dispersion φ (per-fit, noise-relative — NOT a
-            // hardcoded/self-relative floor). If it cannot be computed the vanishing-
-            // atom detection silently degrades (R→0 keeps rank_eff≈rank), so surface
-            // it loudly rather than hiding a re-admitted co-collapse.
+            // invariant, so it accepts a real rank-2 circle but does not
+            // distinguish clean-vs-blend (producer's job). A certified vanished
+            // atom is a typed boundary before rank pricing.
+            // Decoder disappearance is certified first from the raw output-frame
+            // residual and gated decoder Grams. It has no tuned noise multiple:
+            // the boundary is derived from the residual reduction's floating-point
+            // backward error, and proof-unavailable is surfaced loudly.
             let residual = self.reconstruction_residual(target, rho)?;
             let mut grams = self.empty_decoder_gram_accumulator();
             self.accumulate_decoder_gram(&mut grams)?;
             let n_eff = self.per_atom_effective_sample_size();
-            let dispersion_lower_bound =
-                self.reconstruction_dispersion_lower_bound(&loss, Some(residual.view()))?;
-            if let Some(atoms) =
-                self.vanished_atoms_from_signal_upper_bound(&grams, &n_eff, dispersion_lower_bound)?
-            {
-                return Err(SaeCriterionError::VanishedAtoms(atoms));
+            let residual_energy =
+                self.residual_energy_for_vanishing(residual.view())?;
+            match self.vanished_atoms_from_signal_upper_bound(
+                &grams,
+                &n_eff,
+                residual_energy.mean_square(),
+            )? {
+                VanishedAtomsProof::Certified {
+                    atoms: Some(atoms),
+                    ..
+                } => return Err(SaeCriterionError::VanishedAtoms(atoms)),
+                VanishedAtomsProof::Certified { atoms: None, .. } => {}
+                VanishedAtomsProof::Unavailable { reason } => {
+                    return Err(SaeCriterionError::Numerical(format!(
+                        "decoder-vanishing proof unavailable: {reason}"
+                    )));
+                }
             }
             let disp = self
                 .reconstruction_dispersion(&loss, &cache, rho, Some(residual.view()))
@@ -402,34 +413,12 @@ impl SaeManifoldTerm {
             // per-atom BIC log-scale (same quantity `per_atom_realised_rank_dof` uses
             // internally for the MP edge; recomputed here — a cheap Σa² — to price the
             // charge in the same currency).
-            // #5 VETO — categorical Laplace-VALIDITY condition (blend-null null-license
-            // fix, recov matrix 12484591): an atom with rank_eff==0 (⟺ d_eff==0)
-            // reconstructs NOTHING. Its quasi-Laplace score is not "small" — it is INVALID:
-            // the vanishing decoder makes the β-mode degenerate, and the β-Schur log-det
-            // → −∞ is the approximation BREAKING DOWN, not a real reward (which is why a
-            // zero-‖B‖ atom got "born" on a featureless blend-null residual while the
-            // rank charge only neutralised — charge 0 — its coordinate block). Such an
-            // atom is unbirthable: reject CATEGORICALLY (v → +∞) rather than pricing a
-            // degenerate Laplace term. No tuned constant — a validity condition, not a
-            // penalty. rank_eff is an integer MP count so ==0 is crisp; a real rank-2
-            // circle (rank_eff=2) is untouched. This is #10's "make the degenerate class
-            // unbirthable" at the birth gate. TRAILHEAD: the deeper fix is a floor on the
-            // β-Schur decoder-curvature block (assemble_arrow_schur) so a vanishing β
-            // doesn't drive its Schur log-det → −∞; deferred (touches the shipped Schur
-            // path); the birth-gate veto here is the guard.
-            //
-            // #2b — RLCT justification (why the veto is a VALIDITY condition, not a
-            // heuristic): the null atom (truth B*=0) sits at a singularity of the model
-            // — the product form a²‖B‖² makes the Fisher information degenerate there —
-            // and singular learning theory gives it real log-canonical threshold (RLCT)
-            // λ=½: the leading zeta pole of ∫(a²‖B‖²)^s comes from the amplitude at s=½,
-            // independent of M,p,d. So the null's asymptotic evidence cost is only
-            // ½·ln n per e-fold, and NO Θ(log n) rank charge can separate a null birth
-            // from a real one AT the singular point. The categorical veto (v→+∞ when
-            // rank_eff==0) is therefore the only valid way to keep the degenerate class
-            // unbirthable; a finite penalty could not.
+            // #5/#2498 — the same-state gated-signal certificate above owns the
+            // categorical Laplace-validity boundary. Do not manufacture a second
+            // disappearance verdict from `d_eff == 0`: DOF also contains the
+            // smooth-basis charge and is not a physical reconstruction signal.
             // #2a — occupancy-aware BIC/Laplace scale. The shared scalar helper
-            // owns both the rank-zero veto and the exact replacement
+            // owns the exact replacement
             // `0.5 log|H| - 0.5 log|H_tt| + rank_charge`; dense, streaming, and
             // criterion-as-atoms assembly therefore cannot drift apart.
             // log_det (= log|A|) and log_det_tt (= log|A_tt|) are produced together
@@ -2689,14 +2678,23 @@ impl SaeManifoldTerm {
             // chunk-accumulated Grams. The β/Schur block (the ‖B‖-independent part
             // of log_det) is untouched — bit-identical dense↔streaming by design.
             let residual = self.reconstruction_residual(target, rho)?;
-            let dispersion_lower_bound =
-                self.reconstruction_dispersion_lower_bound(&loss, Some(residual.view()))?;
-            if let Some(atoms) = self.vanished_atoms_from_signal_upper_bound(
+            let residual_energy =
+                self.residual_energy_for_vanishing(residual.view())?;
+            match self.vanished_atoms_from_signal_upper_bound(
                 &ri.grams,
                 &ri.n_eff,
-                dispersion_lower_bound,
+                residual_energy.mean_square(),
             )? {
-                return Err(SaeCriterionError::VanishedAtoms(atoms));
+                VanishedAtomsProof::Certified {
+                    atoms: Some(atoms),
+                    ..
+                } => return Err(SaeCriterionError::VanishedAtoms(atoms)),
+                VanishedAtomsProof::Certified { atoms: None, .. } => {}
+                VanishedAtomsProof::Unavailable { reason } => {
+                    return Err(SaeCriterionError::Numerical(format!(
+                        "streaming decoder-vanishing proof unavailable: {reason}"
+                    )));
+                }
             }
             let disp = self
                 .reconstruction_dispersion(
@@ -2711,11 +2709,9 @@ impl SaeManifoldTerm {
                     )
                 })?;
             let d_eff = self.rank_dof_from_grams(&ri.grams, &ri.n_eff, rho, disp)?;
-            // #5 VETO (streaming): categorical Laplace-validity condition — a
-            // rank_eff==0 (d_eff==0) atom reconstructs nothing, so its evidence is
-            // INVALID (degenerate β-mode / β-Schur log-det → −∞), not payable. Reject
-            // categorically (v → +∞). Same guard as the dense path; see the dense
-            // penalized_quasi_laplace_criterion for the full rationale + β-Schur-floor trailhead.
+            // #5/#2498: the typed gated-signal proof above is the sole
+            // disappearance verdict. The scalar rank-charge seam only prices the
+            // already-certified live state.
             let quasi_laplace_complexity =
                 rank_adjusted_quasi_laplace_complexity(log_det, ri.log_det_tt, &d_eff, &ri.n_eff)?;
             loss.total() + extra_penalty_energy + quasi_laplace_complexity - occam
