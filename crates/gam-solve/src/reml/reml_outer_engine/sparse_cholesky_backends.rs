@@ -608,9 +608,11 @@ pub struct DenseCholeskyValueOnlyOperator {
 impl DenseCholeskyValueOnlyOperator {
     /// Factorize `h` (assumed SPD) via LLT and cache the log-determinant.
     ///
-    /// Returns `Err` if `h` is not square, not SPD, or contains non-finite
-    /// entries. Callers should fall back to [`DenseSpectralOperator`] on
-    /// failure (e.g. near-singular Hessians that need soft regularization).
+    /// Returns `Err` if `h` is not square, not SPD, contains non-finite
+    /// entries, **or** if its exact log-determinant would not agree with the
+    /// smooth-floored one every derivative lane prices (gam#2457, below).
+    /// Callers fall back to [`DenseSpectralOperator`] on failure, which is the
+    /// operator that owns the floored convention.
     pub fn from_spd(h: &Array2<f64>) -> Result<Self, String> {
         use faer::Side;
         use gam_linalg::faer_ndarray::FaerCholesky;
@@ -628,6 +630,56 @@ impl DenseCholeskyValueOnlyOperator {
             .map_err(|e| format!("DenseCholeskyValueOnlyOperator LLT failed: {e}"))?;
         let diag = chol.diag();
         let cached_logdet = 2.0 * diag.iter().map(|&d| d.ln()).sum::<f64>();
+
+        // gam#2457 — THIS OPERATOR AND THE SPECTRAL ONE PRICE DIFFERENT SCALARS.
+        //
+        // The LLT returns the exact `Σ ln σ_j`.  Every derivative-bearing lane
+        // reaches [`DenseSpectralOperator`] instead, whose smooth floor makes
+        // its log-determinant `Σ ln r_ε(σ_j)` with
+        // `r_ε(σ) = ½(σ + √(σ² + 4ε²))` and `ε = spectral_epsilon` — and the
+        // analytic gradient `tr(G_ε Ḣ)` and its Hessian are the exact
+        // derivatives of THAT floored object.  So the floored log-determinant
+        // is the criterion, and this fast path is a legitimate shortcut only
+        // where the two coincide.  Where they do not, the outer objective
+        // returns one value to `OuterEvalOrder::Value` (line-search probes,
+        // the terminal value certificate) and another to `ValueAndGradient`
+        // (the trust-region model, the certificate's analytic sample) at the
+        // SAME ρ — measured at 663× the value-agreement envelope on
+        // `kappa_zero_fit_recovers_planted_flat_signal`, whose `H = XᵀWX + S_λ`
+        // carries an eigenvalue at ≈7ε once λ = e^−8.9 stops regularizing it.
+        //
+        // The gap is bounded without ever forming the spectrum.  For SPD `H`,
+        // `√(1 + 4t) ≤ 1 + 2t` gives `r_ε(σ)/σ ≤ 1 + ε²/σ²`, and `ln(1+t) ≤ t`,
+        // so
+        //
+        //     0 ≤ Σ_j ln(r_ε(σ_j)/σ_j) ≤ ε² · Σ_j σ_j⁻² = ε² · tr(H⁻²)
+        //
+        // and `tr(H⁻²) = ‖H⁻¹‖_F²` comes straight out of the factorization
+        // already in hand.  The bound is tight in the regime that matters (a
+        // single near-floor eigenvalue dominates both sides), so gating on it
+        // costs the speedup only where the floor genuinely bites.
+        //
+        // Admit the fast path exactly when that certified gap is inside the
+        // same relative envelope the outer audit applies to the scalar this
+        // log-determinant feeds — ONE predicate, named once, reused rather than
+        // re-derived.  The decline is one-sided: it can cost an LLT speedup, it
+        // can never admit a value the derivative lanes disagree with.  Both
+        // call sites already handle `Err` by building the spectral operator.
+        let epsilon = spectral_epsilon_for_dim(n);
+        let h_inverse = chol.solve_mat(&Array2::<f64>::eye(n));
+        let floor_gap_bound =
+            epsilon * epsilon * h_inverse.iter().map(|entry| entry * entry).sum::<f64>();
+        let agreement_envelope =
+            crate::rho_optimizer::outer_value_agreement_bound(cached_logdet, cached_logdet);
+        if !(floor_gap_bound <= agreement_envelope) {
+            return Err(format!(
+                "DenseCholeskyValueOnlyOperator declines a {n}-dimensional Hessian: its exact \
+                 log-determinant can differ from the smooth-floored log|H| the derivative lanes \
+                 price by up to {floor_gap_bound:.3e}, above the {agreement_envelope:.3e} \
+                 value-agreement envelope (spectral floor eps={epsilon:.3e})"
+            ));
+        }
+
         Ok(Self {
             chol,
             cached_logdet,

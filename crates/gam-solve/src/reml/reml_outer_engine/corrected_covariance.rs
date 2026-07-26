@@ -577,5 +577,19 @@ pub fn spectral_regularize(sigma: f64, epsilon: f64) -> f64 {
 /// problems have min σ ≫ ε and are unaffected).
 #[inline]
 pub fn spectral_epsilon(eigenvalues: &[f64]) -> f64 {
-    f64::EPSILON.sqrt() * (eigenvalues.len() as f64).max(1.0)
+    spectral_epsilon_for_dim(eigenvalues.len())
+}
+
+/// [`spectral_epsilon`] for a caller holding a factorization rather than an
+/// eigendecomposition.
+///
+/// The regularization scale is deliberately a function of the matrix dimension
+/// alone (see [`spectral_epsilon`]), so a Cholesky-backed operator can name the
+/// SAME floor the spectral operator will apply without ever forming the
+/// spectrum.  One definition behind two entry points: a second literal here
+/// would reintroduce exactly the two-quantities-under-one-name drift that
+/// gam#2457 was.
+#[inline]
+pub fn spectral_epsilon_for_dim(dim: usize) -> f64 {
+    f64::EPSILON.sqrt() * (dim as f64).max(1.0)
 }

@@ -217,4 +217,6 @@ pub use sparse_cholesky_backends::*;
 pub use stochastic_trace::*;
 
 #[cfg(test)]
+mod logdet_lane_agreement_2457_tests;
+#[cfg(test)]
 mod tests;
