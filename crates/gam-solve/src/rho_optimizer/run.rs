@@ -2841,17 +2841,21 @@ fn certify_outer_optimality_at_terminal_fidelity(
         }
     }
 
-    // #2458 -- the bound's own provenance, emitted UNCONDITIONALLY rather than only
-    // when a rung happens to widen. A certificate that does not carry which of its
-    // five terms decided it can only be re-derived from source, never audited; the
-    // same complaint this file's refusal messages make about the fits they refuse.
-    // `derived_standard=false` is the actionable bit: it says this verdict rests on
-    // a gradient-magnitude substitute because the resolvability form was
+    // #2458/#2479 -- the bound's own provenance, emitted UNCONDITIONALLY rather
+    // than only when a rung happens to widen. A certificate that does not carry
+    // which of its five terms decided it can only be re-derived from source,
+    // never audited; the same complaint this file's refusal messages make about
+    // the fits they refuse. Fidelity and the exact rho identify whether a
+    // screening verdict and the terminal mint measured the same candidate.
+    // `derived_standard=false` is the actionable bit: it says this verdict rests
+    // on a gradient-magnitude substitute because the resolvability form was
     // unavailable on this route, not because the problem called for it.
     log::info!(
-        "[CERTIFICATE-BOUND] {context}: bound {stationarity_bound:.6e} set by {} \
-         (derived_standard={}, |Pg|={projected_grad_norm:.6e}, |g|={grad_norm:.6e}, \
+        "[CERTIFICATE-BOUND] {context}: fidelity={fidelity:?}, rho={:?}, \
+         bound {stationarity_bound:.6e} set by {} (derived_standard={}, \
+         |Pg|={projected_grad_norm:.6e}, |g|={grad_norm:.6e}, \
          solver_band={solver_bound:.6e}, cost={:.6e})",
+        result.rho.to_vec(),
         bound_source.label(),
         bound_source.is_derived_standard(),
         evaluation.cost,
