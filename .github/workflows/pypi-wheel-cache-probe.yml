@@ -29,6 +29,7 @@ env:
 
 jobs:
   probe:
+    timeout-minutes: 8
     name: Probe ${{ inputs.target }} at ${{ inputs.source_ref }}
     runs-on: ${{ endsWith(inputs.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     env:
@@ -88,8 +89,47 @@ jobs:
                 return 1
               fi
 
+              # The full wheel build uses Cargo's dependency view of gam-linalg.
+              # Selecting that dependency as a top-level package makes Cargo 1.97
+              # request a harmless lock rewrite before rustc starts, so --locked
+              # cannot serve as the probe. Instead, continuously police both
+              # invariants while the small build runs: the lockfile must remain
+              # byte-identical and sccache must never observe a miss or error.
+              local build_log=/tmp/gam-linalg-cache-probe.log
+              cargo build \
+                --profile release-pypi \
+                --target "${TARGET_TRIPLE}" \
+                -p gam-linalg >"${build_log}" 2>&1 &
+              local build_pid=$!
               local build_status=0
-              cargo build                 --locked                 --profile release-pypi                 --target "${TARGET_TRIPLE}"                 -p gam-linalg || build_status=$?
+
+              while kill -0 "${build_pid}" 2>/dev/null; do
+                if ! git diff --quiet -- Cargo.lock; then
+                  kill "${build_pid}" 2>/dev/null || true
+                  wait "${build_pid}" 2>/dev/null || true
+                  cat "${build_log}"
+                  git diff -- Cargo.lock
+                  echo "::error::Cargo attempted to mutate the release lockfile; probe terminated before publication."
+                  return 1
+                fi
+
+                local poll_stats poll_misses poll_errors
+                poll_stats=$(sccache --show-stats)
+                poll_misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "${poll_stats}")
+                poll_errors=$(awk '$1 == "Cache" && ($2 == "errors" || $2 == "read" || $2 == "write") { total += $NF } END { print total + 0 }' <<< "${poll_stats}")
+                if (( ${poll_misses:-0} != 0 || ${poll_errors:-0} != 0 )); then
+                  kill "${build_pid}" 2>/dev/null || true
+                  wait "${build_pid}" 2>/dev/null || true
+                  cat "${build_log}"
+                  printf '%s\n' "${poll_stats}"
+                  echo "::error::Cold compiler work detected; probe terminated on the first miss/error and no wheel was built."
+                  return 1
+                fi
+                sleep 1
+              done
+
+              wait "${build_pid}" || build_status=$?
+              cat "${build_log}"
 
               local stats hits misses errors
               stats=$(sccache --show-stats)
