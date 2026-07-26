@@ -21,11 +21,11 @@ env:
   # repo, so warming sccache here is what makes every later run — and, via a
   # shared SCCACHE_BUCKET, local build.sh — start warm instead of cold. sccache
   # keys on flags too, so each matrix target keeps its own entries.
-  # RUSTC_WRAPPER is set per job after a backend probe, not here: sccache aborts
-  # at server startup if its cache backend is unreachable, so an unconditional
-  # wrapper turns a GitHub Actions cache outage into a hard build failure (it
-  # took down every release build during one such outage). See "Enable sccache
-  # only if its cache backend is reachable".
+  # RUSTC_WRAPPER is set only after the job proves that the shared backend is
+  # reachable. Release binaries are never produced by an unmeasured cold build:
+  # each target zeroes its own counters and must report real cache reuse after
+  # compilation. A cold target may seed the content-addressed cache, but it
+  # cannot publish in that run.
   SCCACHE_GHA_ENABLED: "true"
 
 permissions:
@@ -164,21 +164,18 @@ jobs:
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.6
 
-      - name: Enable sccache only if its cache backend is reachable
-        # The compiler cache is a speedup, never a hard build dependency.
-        # sccache runs a storage check when its server starts and aborts the
-        # process if the backend (the GitHub Actions cache) is unreachable;
-        # with RUSTC_WRAPPER=sccache that would fail the build at the first
-        # `cargo` call. Probe the backend once by starting the server and wire
-        # the wrapper in only on success, so an outage degrades to a cold-but-
-        # green build instead of a hard failure.
+      - name: Require reachable shared compiler cache
         shell: bash
         run: |
-          if sccache --start-server; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          else
-            echo "::warning::sccache cache backend unreachable; compiling without the compiler cache"
+          set -euo pipefail
+          if ! sccache --start-server; then
+            echo "::error::Shared sccache backend is unreachable; refusing a cold release build."
+            exit 1
           fi
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          sccache --show-stats
+          # Attribute the post-build receipt to this target only.
+          sccache --zero-stats
 
       - name: Install NVIDIA CUDA Toolkit
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -215,6 +212,23 @@ jobs:
           # Embed commit-addressable release tag in binary for version command
           GAM_RELEASE_TAG: "main-${{ github.sha }}"
         run: cargo +nightly build --release --target ${{ matrix.target }} -p gam-cli
+
+      - name: Require measured warm compiler-cache reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          stats=$(sccache --show-stats)
+          printf '%s\n' "$stats"
+          hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
+          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Could not read sccache hit count; refusing an unmeasured release build."
+            exit 1
+          fi
+          if (( hits == 0 )); then
+            echo "::error::Release target ${{ matrix.target }} reused zero compiler objects; cache was seeded but this cold build cannot publish."
+            exit 1
+          fi
+          echo "Release target ${{ matrix.target }} reused ${hits} cached compiler object(s)."
 
 
       - name: Package (Unix)
