@@ -2207,6 +2207,28 @@ impl<'a> RemlState<'a> {
             result.cost,
             components,
         );
+        // The audit's OTHER half. `record_outer_selected_mode` was emitted only
+        // from the custom-family evaluator, so on every standard fit
+        // `capture_outer_gradient_fd_at_seed` failed with "received no analytic
+        // selected coefficient mode" before it differenced anything — the
+        // Matérn, constant-curvature and survival outer-gradient FD gates could
+        // not produce a record at all, whatever their tolerance said. The
+        // standard path has both halves of the evidence right here, so it
+        // records them beside the criterion components exactly as the
+        // custom-family path does. Guarded on `..._armed()` so an ordinary fit
+        // pays a thread-local read rather than a coefficient clone per outer
+        // evaluation. (#2461 needed this to verify its own change; #2460 owns
+        // the audit.)
+        if crate::estimate::outer_eval_capture::outer_gradient_fd_capture_armed() {
+            let ext_cols = result
+                .ext_mode_response_cols
+                .as_ref()
+                .and_then(|cols| self.mode_response_cols_for_warm_start(bundle, cols));
+            crate::estimate::outer_eval_capture::record_outer_selected_mode(
+                solution_beta.clone(),
+                ext_cols,
+            );
+        }
         crate::estimate::outer_eval_capture::record_rho_outer_criterion(result.cost, components);
         // This value/derivative tuple is the genuine REML/LAML criterion. An
         // optimizer-only diagnostic must never mutate it: a former hard-gated
