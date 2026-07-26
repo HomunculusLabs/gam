@@ -957,43 +957,31 @@ pub(crate) fn joint_outer_evaluate(
         && include_logdet_h
         && include_logdet_s
         && pseudo_logdet_mode == PseudoLogdetMode::Smooth;
-    // TRUST-REGION GATE on the second-order completion (gam#979, gam#1607). The
-    // completion is the true-Hessian remainder of the Φ-augmented inner objective
-    // and refines the bounded, PSD divided-difference `H_Φ` into the exact mode-
-    // response curvature — but ONLY inside the second-order expansion's trust
-    // region. In the near-separable regime the remainder `−½ tr(K·D_ab)` explodes
-    // negative, cancels `H_Φ`, and leaves `H_Φ + completion` strongly indefinite
-    // (measured: `H_Φ` spectrum `8e-9 … 1e10`; `H_Φ + completion` spectrum
-    // `−3.3e9 … 9e-3`). As the mode-response operator `M = H + S_λ + H_Φ + comp`,
-    // that indefinite curvature is not a legitimate Hessian: the smooth pseudo-
-    // logdet regularizes its large negative eigenvalue to a near-zero pivot, so the
-    // IFT solve `v_k = −M⁻¹ Ṡ_k β̂` amplifies by `~1/ε²` and the outer gradient
-    // explodes, after which the envelope tripwire suppresses the Hessian entirely
-    // (`HessianValue::Unavailable`). When the completed curvature is NOT PSD we
-    // keep the bounded PSD `H_Φ` — which is exactly the curvature the criterion's
-    // value (`½log|H+S_λ+H_Φ|`) and trace kernel already use, so the operator and
-    // the criterion agree. The decision is all-or-nothing per evaluation:
-    // PSD-projecting the indefinite sum would collapse the `O(1e10)` curvature
-    // scale to the surviving positive dregs and re-singularize the operator.
+    // The IFT operator differentiates the SELECTED INNER STATIONARITY system.
+    // Its curvature is therefore the complete coefficient Hessian
+    //
+    //     M_true = H + S_λ + H_Φ + completion,
+    //
+    // not the divided-difference `H_Φ` used by the deliberately distinct
+    // projected-logdet value/trace kernel. Whether `H_Φ + completion` is PSD
+    // in isolation is irrelevant: an additive component of a valid Hessian may
+    // be indefinite, and replacing it because of that changes `dβ̂/dθ`.
+    // gam#2460 measured exactly that desynchronization on the selected Matérn
+    // profile (6.0% / 22.1% coefficient-response error). The full penalized
+    // operator below is the object whose solve decides the mode response.
+    //
+    // When no projected logdet owns the scalar criterion, `hessian_op` remains
+    // the value/trace object and completion stays out: introducing it there
+    // without its third-order drift would define a different scalar. Under the
+    // projected route, however, the scalar and IFT kernels are already separate,
+    // so every available completion belongs in the IFT operator unconditionally.
     let robust_jeffreys_hphi_for_operator: Option<Array2<f64>> = match (
         robust_jeffreys_hphi.as_ref(),
         robust_jeffreys_completion
             .as_ref()
             .filter(|_| completion_in_operator),
     ) {
-        (Some(hphi), Some(completion))
-            if custom_family_jeffreys_completion_preserves_psd(hphi, completion) =>
-        {
-            Some(hphi + completion)
-        }
-        (Some(hphi), Some(_)) => {
-            // Completion left its trust region; fall back to the bounded PSD base.
-            log::debug!(
-                "[OUTER jeffreys] second-order completion would make the mode-response \
-                 operator indefinite; keeping the divided-difference H_Φ"
-            );
-            Some(hphi.clone())
-        }
+        (Some(hphi), Some(completion)) => Some(hphi + completion),
         (Some(hphi), None) => Some(hphi.clone()),
         (None, _) => None,
     };
