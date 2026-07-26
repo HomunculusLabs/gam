@@ -2718,6 +2718,48 @@ fn certify_outer_optimality_at_terminal_fidelity(
         Some(&rail_projection_bounds),
     );
     let projected_grad_norm = projected_gradient.iter().map(|v| v * v).sum::<f64>().sqrt();
+    // #2514: preserve the literal first-order geometry used by this pass without
+    // dumping an O(p) vector for large outer problems. A temporary active-set
+    // search box can differ from the model's feasible box; when that happens,
+    // screening and mint may otherwise print identical rho/raw gradients while
+    // silently projecting against different faces. Record every detector-active
+    // or actually projected coordinate, capped only in the log payload.
+    if log::log_enabled!(log::Level::Info) {
+        const PROJECTION_RECORD_LIMIT: usize = 32;
+        let mut active_or_projected = 0usize;
+        let mut projection_records = Vec::new();
+        for k in 0..result.rho.len() {
+            let detector_railed = outer_coordinate_is_railed(&result.rho, k, config);
+            let raw = evaluation.gradient[k];
+            let projected = projected_gradient[k];
+            if detector_railed || raw.to_bits() != projected.to_bits() {
+                active_or_projected += 1;
+                if projection_records.len() < PROJECTION_RECORD_LIMIT {
+                    projection_records.push((
+                        k,
+                        result.rho[k],
+                        bounds.0[k],
+                        bounds.1[k],
+                        rail_projection_bounds.0[k],
+                        rail_projection_bounds.1[k],
+                        raw,
+                        projected,
+                        detector_railed,
+                    ));
+                }
+            }
+        }
+        if active_or_projected > 0 {
+            log::info!(
+                "[CERTIFICATE-PROJECTION] {context}: fidelity={fidelity:?},                  active_or_projected={active_or_projected},                  records(index,rho,model_lo,model_hi,projection_lo,projection_hi,raw_g,projected_g,detector_railed)={projection_records:?}{}",
+                if active_or_projected > projection_records.len() {
+                    " (truncated)"
+                } else {
+                    ""
+                },
+            );
+        }
+    }
     let solver_bound = outer_gradient_tolerance(config).threshold(evaluation.cost, grad_norm);
     let mut bound_source = StationarityBoundSource::SolverBand;
     let mut stationarity_bound = if matches!(
