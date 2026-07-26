@@ -3747,6 +3747,133 @@ fn analytic_outer_gradient_with_bundle_matches_dense_assembly() {
     );
 }
 
+/// #2499 spin-off measurement. `analytic_outer_gradient_with_bundle_matches_dense_assembly`
+/// desyncs on `logdet-trace coordinate 1 (smooth atom 0)` by `1.23e-1`. The two
+/// smoothness-EDF routes it compares are NOT the same operator whenever a
+/// β-Schur direction deflates:
+///
+/// * `decoder_smoothness_effective_dof_with_solver_per_atom` goes through
+///   `cache.schur_deflated_applier()`, the #2253/#2228 spectral PSEUDO-inverse, in
+///   which a doubly-null direction contributes exactly 0 dof;
+/// * `decoder_smoothness_effective_dof_per_atom_from_probes` contracts whatever
+///   `S⁻¹` the caller's bundle carries, and the parity gate hands it
+///   `cache.schur_inverse_apply` — the PLAIN inverse, with no deflation.
+///
+/// The sibling channel in the same all-or-nothing cluster
+/// (`ard_log_precision_hessian_trace_from_probes`) hard-refuses a deflated row for
+/// exactly this reason and routes the fit to the dense channel; the smoothness
+/// channel has no such refusal. This prints the two block traces side by side so
+/// the desync is attributed to deflation or exonerated of it, rather than argued.
+#[test]
+fn zz_measure_smoothness_dof_bundle_vs_deflated_2499() {
+    let n = 24usize;
+    let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
+    let (phi, jet) = periodic_basis(&coords);
+    let decoder = array![[0.30, -0.10], [1.20, 0.20], [0.10, 1.10]];
+    let mut target = phi.dot(&decoder);
+    for row in 0..n {
+        target[[row, 0]] += 1.0e-3 * (0.37 * row as f64).sin();
+        target[[row, 1]] += 1.0e-3 * (0.29 * row as f64).cos();
+    }
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "periodic",
+        SaeAtomBasisKind::Periodic,
+        1,
+        phi,
+        jet,
+        decoder,
+        Array2::<f64>::eye(3),
+    )
+    .unwrap()
+    .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((n, 1)),
+        vec![coords],
+        vec![LatentManifold::Circle { period: 1.0 }],
+        AssignmentMode::softmax(1.0),
+    )
+    .unwrap();
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![250.0_f64.ln()]]);
+    let sys = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .unwrap();
+    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_dt, _db, cache) = solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
+
+    let k = cache.k;
+    let lambda_smooth = rho.lambda_smooth_vec().unwrap();
+    let plain = cache.schur_inverse_block(0..k).unwrap();
+    let deflated = cache.schur_inverse_block_deflated(0..k).unwrap();
+    let mut max_abs = 0.0_f64;
+    for i in 0..k {
+        for j in 0..k {
+            max_abs = max_abs.max((plain[[i, j]] - deflated[[i, j]]).abs());
+        }
+    }
+    let sqrt_k = (k as f64).sqrt();
+    let probes: Vec<Array1<f64>> = (0..k)
+        .map(|j| {
+            let mut v = Array1::<f64>::zeros(k);
+            v[j] = sqrt_k;
+            v
+        })
+        .collect();
+    let sinv: Vec<Array1<f64>> = probes
+        .iter()
+        .map(|v| cache.schur_inverse_apply(v.view()).unwrap())
+        .collect();
+    let from_probes = term
+        .decoder_smoothness_effective_dof_per_atom_from_probes(&probes, &sinv, &lambda_smooth)
+        .unwrap();
+    let dense_deflated = term
+        .decoder_smoothness_effective_dof_per_atom(&cache, &lambda_smooth)
+        .unwrap();
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let with_solver = term
+        .decoder_smoothness_effective_dof_with_solver_per_atom(&cache, &solver, &lambda_smooth)
+        .unwrap();
+    println!(
+        "[#2499 smoothness-dof] k={k} max|S^-1_plain - S^-1_deflated|={max_abs:.6e}\n\
+         from_probes={from_probes:?}\n dense_deflated={dense_deflated:?}\n with_solver={with_solver:?}\n\
+         plain_selected_inverse_available={}",
+        solver.plain_selected_inverse_available()
+    );
+
+    // The three routes agree bitwise here, so the parity desync is NOT the
+    // deflated-vs-plain selected inverse. Reproduce the gate's exact call
+    // sequence — which interposes `term.loss(...)` — and read the channel back
+    // out of the assembled components instead of re-deriving it.
+    let loss = term.loss(target.view(), &rho).unwrap();
+    let after_loss = term
+        .decoder_smoothness_effective_dof_with_solver_per_atom(&cache, &solver, &lambda_smooth)
+        .unwrap();
+    let dense_components = term
+        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &solver)
+        .unwrap();
+    let bundled_components = term
+        .analytic_outer_rho_gradient_components_with_bundle(
+            target.view(),
+            &rho,
+            &loss,
+            &cache,
+            &solver,
+            Some((&probes, &sinv)),
+            None,
+        )
+        .unwrap();
+    let smooth_index = rho.smooth_flat_index(0);
+    println!(
+        "[#2499 smoothness-dof] after term.loss(): with_solver={after_loss:?}\n\
+         logdet_trace[smooth {smooth_index}] dense={:.17e} bundled={:.17e}\n\
+         half-of-with_solver={:.17e}  half-of-from_probes={:.17e}",
+        dense_components.logdet_trace[smooth_index],
+        bundled_components.logdet_trace[smooth_index],
+        0.5 * after_loss[0],
+        0.5 * from_probes[0],
+    );
+}
+
 /// #2080(A) clobber-armor: the single adjoint solve that collapses the
 /// per-coordinate IFT correction `−½·⟨Γ, A⁺ g_ρ_l⟩` into `−½·⟨A⁺Γ, g_ρ_l⟩`
 /// (`analytic_outer_rho_gradient_components_with_bundle`, dropping the outer IFT
