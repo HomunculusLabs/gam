@@ -454,6 +454,7 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
             eta: Array1::zeros(1),
         }],
         terminal_working_sets: None,
+        terminal_likelihood_score: None,
         active_sets: vec![None],
         log_likelihood: 0.0,
         penalty_value: 0.5 * beta.dot(&fast_av(&s_lambda, &beta)),
@@ -631,6 +632,7 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
             eta: Array1::zeros(1),
         }],
         terminal_working_sets: None,
+        terminal_likelihood_score: None,
         active_sets: vec![None],
         log_likelihood: 0.0,
         penalty_value: 0.5 * beta.dot(&fast_av(&s_lambda, &beta)),
@@ -770,6 +772,7 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
                 eta: Array1::zeros(1),
             }],
             terminal_working_sets: None,
+            terminal_likelihood_score: None,
             active_sets: vec![None],
             log_likelihood: 0.0,
             penalty_value: 0.5 * lam * beta.dot(&fast_av(&s_unit, &beta)),
@@ -1127,6 +1130,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
             },
         ],
         terminal_working_sets: None,
+        terminal_likelihood_score: None,
         active_sets: vec![None, None, None],
         log_likelihood: 0.0,
         penalty_value: 0.5
@@ -5010,6 +5014,7 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         Some(&hessian),
         evaluated.inner.terminal_working_sets.as_deref(),
         evaluated.inner.joint_workspace.as_ref(),
+        evaluated.inner.terminal_likelihood_score.as_ref(),
     )
     .expect("joint terminal posterior");
     let covariance = posterior

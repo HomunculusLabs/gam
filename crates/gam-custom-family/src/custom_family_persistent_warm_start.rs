@@ -470,6 +470,7 @@ pub(crate) fn load_persistent_custom_family_warm_start<F: CustomFamily + ?Sized>
         kkt_residual: None,
         active_constraints: None,
         terminal_working_sets: None,
+        terminal_likelihood_score: None,
     });
     let inner_status = cached_inner.as_ref().map_or("missing", |inner| {
         if inner.converged {

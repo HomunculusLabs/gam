@@ -1866,6 +1866,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 return Ok(BlockwiseInnerResult {
                     block_states: states,
                     terminal_working_sets: cached.terminal_working_sets.clone(),
+                    terminal_likelihood_score: cached.terminal_likelihood_score.clone(),
                     active_sets: normalize_active_sets(cached_active_sets),
                     log_likelihood: cached.log_likelihood,
                     penalty_value: cached.penalty_value,
@@ -7452,11 +7453,23 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // no rows are currently active at the cert point; in either
             // case the consumer-side `with_active_constraints` helper
             // degrades back to the bare penalty-projected pseudo-inverse.
+            // The joint score is reloaded immediately after every accepted
+            // step and beta is restored before every rejected one, so the
+            // vector held here belongs to the states being returned. Bind
+            // the operating point with it so the consumer checks that
+            // rather than trusting the loop ordering (gam#2474).
+            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
+                TerminalLikelihoodScore {
+                    beta: TerminalLikelihoodScore::joint_beta(&states),
+                    score: score.clone(),
+                }
+            });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
                     .as_ref()
                     .map(|eval| eval.blockworking_sets.clone()),
+                terminal_likelihood_score: retained_likelihood_score,
                 active_sets: normalize_active_sets(cached_active_sets),
                 log_likelihood: current_log_likelihood,
                 penalty_value,
@@ -7657,11 +7670,23 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             } else {
                 (None, None)
             };
+            // The joint score is reloaded immediately after every accepted
+            // step and beta is restored before every rejected one, so the
+            // vector held here belongs to the states being returned. Bind
+            // the operating point with it so the consumer checks that
+            // rather than trusting the loop ordering (gam#2474).
+            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
+                TerminalLikelihoodScore {
+                    beta: TerminalLikelihoodScore::joint_beta(&states),
+                    score: score.clone(),
+                }
+            });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
                     .as_ref()
                     .map(|eval| eval.blockworking_sets.clone()),
+                terminal_likelihood_score: retained_likelihood_score,
                 active_sets: normalize_active_sets(cached_active_sets),
                 log_likelihood: current_log_likelihood,
                 penalty_value,
@@ -7723,11 +7748,23 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 )
                 .map(std::sync::Arc::new)
             };
+            // The joint score is reloaded immediately after every accepted
+            // step and beta is restored before every rejected one, so the
+            // vector held here belongs to the states being returned. Bind
+            // the operating point with it so the consumer checks that
+            // rather than trusting the loop ordering (gam#2474).
+            let retained_likelihood_score = cached_joint_gradient.as_ref().map(|score| {
+                TerminalLikelihoodScore {
+                    beta: TerminalLikelihoodScore::joint_beta(&states),
+                    score: score.clone(),
+                }
+            });
             return Ok(BlockwiseInnerResult {
                 block_states: states,
                 terminal_working_sets: cached_eval
                     .as_ref()
                     .map(|eval| eval.blockworking_sets.clone()),
+                terminal_likelihood_score: retained_likelihood_score,
                 active_sets: normalize_active_sets(cached_active_sets),
                 log_likelihood: current_log_likelihood,
                 penalty_value,
@@ -8780,6 +8817,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
     Ok(BlockwiseInnerResult {
         block_states: states,
         terminal_working_sets: Some(cached_eval.blockworking_sets.clone()),
+        terminal_likelihood_score: None,
         active_sets: normalize_active_sets(cached_active_sets),
         log_likelihood: cached_eval.log_likelihood,
         penalty_value,

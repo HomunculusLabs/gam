@@ -1531,36 +1531,78 @@ fn terminal_score_from_working_sets(
     Ok(score)
 }
 
+/// Check a candidate joint score against the block layout it must index.
+fn validated_joint_score(
+    score: Array1<f64>,
+    specs: &[ParameterBlockSpec],
+    source: &str,
+) -> Result<Array1<f64>, String> {
+    let total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
+    if score.len() != total || score.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "terminal {source} has length {} with finite={}, expected {total}",
+            score.len(),
+            score.iter().all(|value| value.is_finite()),
+        ));
+    }
+    Ok(score)
+}
+
+/// The exact `∇ℓ(β̂)` at the certified mode, from whichever evidence the inner
+/// solve retained.
+///
+/// The three sources are the same quantity in the same layout — block-major,
+/// `spec.design.ncols()` wide, each block's log-likelihood score. They are
+/// tried in the order that leaves every previously-succeeding assembly on the
+/// source it already used: working sets, then the joint workspace, then the
+/// score the inner solve carried out. The carried score therefore runs only
+/// where this function used to return an error.
+///
+/// It is what makes the lookup total. A family with an analytic joint gradient
+/// produces no `FamilyEvaluation` at all, so `load_joint_gradient_evaluation`
+/// hands back a gradient and no evaluation and there are no working sets; and
+/// the joint workspace is retained only when the inner solve requested one,
+/// which a `use_joint_newton` family without a workspace source never does.
+/// Those two facts together left the score unreachable for exactly the
+/// families that compute it most directly — a converged, certified
+/// constrained mode discarded for want of a vector the solve had already
+/// computed (gam#2474).
 fn terminal_likelihood_score(
     workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
     working_sets: Option<&[BlockWorkingSet]>,
+    retained_score: Option<&TerminalLikelihoodScore>,
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
 ) -> Result<Array1<f64>, String> {
     if let Some(working_sets) = working_sets {
         return terminal_score_from_working_sets(working_sets, specs, states);
     }
-    let workspace = workspace.ok_or_else(|| {
-        "constrained posterior requires the exact terminal likelihood score, but the certified \
-         mode retained neither working sets nor a joint workspace"
-            .to_string()
-    })?;
-    let evaluation = workspace.joint_gradient_evaluation()?.ok_or_else(|| {
-        "constrained posterior requires the exact terminal likelihood score, but the sole \
-         retained joint workspace exposes no gradient evaluation"
-            .to_string()
-    })?;
-    let total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
-    if evaluation.gradient.len() != total
-        || evaluation.gradient.iter().any(|value| !value.is_finite())
+    if let Some(evaluation) = workspace
+        .map(|workspace| workspace.joint_gradient_evaluation())
+        .transpose()?
+        .flatten()
     {
-        return Err(format!(
-            "terminal workspace gradient has length {} with finite={}, expected {total}",
-            evaluation.gradient.len(),
-            evaluation.gradient.iter().all(|value| value.is_finite()),
-        ));
+        return validated_joint_score(evaluation.gradient, specs, "workspace gradient");
     }
-    Ok(evaluation.gradient)
+    let retained = retained_score.ok_or_else(|| {
+        "constrained posterior requires the exact terminal likelihood score, but the certified \
+         mode retained no working sets, no carried joint score, and no joint workspace exposing \
+         a gradient evaluation"
+            .to_string()
+    })?;
+    if !retained.evaluated_at(states) {
+        return Err(
+            "constrained posterior requires the exact terminal likelihood score, but the \
+             retained joint score was evaluated at a different coefficient vector than the \
+             mode being assembled"
+                .to_string(),
+        );
+    }
+    validated_joint_score(
+        retained.score.clone(),
+        specs,
+        "retained joint likelihood score",
+    )
 }
 
 /// Assemble the one terminal posterior identity consumed by reporting,
@@ -1580,6 +1622,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
     preferred_unpenalized_hessian: Option<&Array2<f64>>,
     preferred_working_sets: Option<&[BlockWorkingSet]>,
     preferred_workspace: Option<&Arc<dyn ExactNewtonJointHessianWorkspace>>,
+    preferred_likelihood_score: Option<&TerminalLikelihoodScore>,
 ) -> Result<JointPosteriorAssembly, String> {
     if specs.len() != per_block_log_lambdas.len() {
         return Err(format!(
@@ -1757,6 +1800,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
             let likelihood_score = terminal_likelihood_score(
                 preferred_workspace,
                 preferred_working_sets,
+                preferred_likelihood_score,
                 specs,
                 states,
             )?;
@@ -2313,6 +2357,7 @@ mod required_covariance_tests {
             Some(&unpenalized),
             None,
             None,
+            None,
         )
         .expect(
             "a converged constrained fit whose ambient precision is indefinite must still \
@@ -2357,6 +2402,7 @@ mod required_covariance_tests {
             &per_block,
             &options,
             Some(&unpenalized),
+            None,
             None,
             None,
         );
@@ -2407,6 +2453,7 @@ mod required_covariance_tests {
             Some(&unpenalized),
             None,
             None,
+            None,
         );
         match result {
             Ok(JointPosteriorAssembly {
@@ -2437,6 +2484,7 @@ mod required_covariance_tests {
             &per_block,
             &options,
             Some(&unpenalized),
+            None,
             None,
             None,
         );
@@ -2486,6 +2534,7 @@ mod required_covariance_tests {
             Some(&array![[1.0]]),
             Some(working_sets.as_slice()),
             None,
+            None,
         )
         .expect("proper lower-truncated Gaussian posterior");
         let constrained = posterior
@@ -2508,6 +2557,124 @@ mod required_covariance_tests {
             variance > 0.0 && variance < 1.0,
             "finite inequality multiplier must leave variance strictly between the active-face \
              zero and the ambient variance one, got {variance}",
+        );
+    }
+
+    /// The fixture of the two preceding assertions, differing only in which
+    /// piece of retained evidence carries the score.
+    fn lower_bounded_unit_fixture() -> (ParameterBlockSpec, Vec<ParameterBlockState>) {
+        let spec = ParameterBlockSpec {
+            name: "lower-bounded".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                Array2::zeros((1, 1)),
+            )),
+            offset: Array1::zeros(1),
+            penalties: vec![],
+            nullspace_dims: vec![],
+            initial_log_lambdas: array![],
+            initial_beta: Some(array![0.0]),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let states = vec![ParameterBlockState {
+            beta: array![0.0],
+            eta: array![0.0],
+        }];
+        (spec, states)
+    }
+
+    fn lower_bounded_posterior(
+        spec: ParameterBlockSpec,
+        states: &[ParameterBlockState],
+        working_sets: Option<&[BlockWorkingSet]>,
+        score: Option<&TerminalLikelihoodScore>,
+    ) -> Result<JointPosteriorAssembly, String> {
+        compute_joint_posterior(
+            &LowerBoundedQuadratic,
+            &[spec],
+            states,
+            &[Array1::<f64>::zeros(0)],
+            &BlockwiseFitOptions {
+                compute_covariance: true,
+                ..BlockwiseFitOptions::default()
+            },
+            Some(&array![[1.0]]),
+            working_sets,
+            None,
+            score,
+        )
+    }
+
+    /// gam#2474: a family with an analytic joint gradient produces no
+    /// `FamilyEvaluation`, so it retains no working sets; and a
+    /// Jeffreys-augmented family skips the returned-mode curvature
+    /// certificate, so it retains no joint workspace either. The score the
+    /// inner solve already loaded is the only evidence left, and the
+    /// constrained posterior must assemble from it — identically to the
+    /// working-set route, which is the same numbers by construction.
+    #[test]
+    fn retained_joint_score_alone_assembles_the_constrained_posterior() {
+        let (spec, states) = lower_bounded_unit_fixture();
+        let working_sets = vec![BlockWorkingSet::ExactNewton {
+            gradient: array![-1.0],
+            hessian: SymmetricMatrix::Dense(array![[1.0]]),
+        }];
+        let from_working_sets = lower_bounded_posterior(
+            spec.clone(),
+            &states,
+            Some(working_sets.as_slice()),
+            None,
+        )
+        .expect("working-set route");
+
+        let retained = TerminalLikelihoodScore {
+            beta: array![0.0],
+            score: array![-1.0],
+        };
+        let from_score = lower_bounded_posterior(spec, &states, None, Some(&retained))
+            .expect("the retained joint score is sufficient evidence for the truncated posterior");
+
+        let center_ws = from_working_sets
+            .geometry
+            .constrained_posterior
+            .as_ref()
+            .expect("exact inequality geometry")
+            .unconstrained_center
+            .clone();
+        let center_score = from_score
+            .geometry
+            .constrained_posterior
+            .as_ref()
+            .expect("exact inequality geometry")
+            .unconstrained_center
+            .clone();
+        assert_eq!(
+            center_ws, center_score,
+            "the two routes read the same score, so the truncation center must be identical",
+        );
+        assert_eq!(
+            from_working_sets.reported_beta, from_score.reported_beta,
+            "posterior mean must not depend on which retained evidence carried the score",
+        );
+    }
+
+    /// The carried score is only the terminal score at the coefficient vector
+    /// it was evaluated at. A mismatch is a solver-ordering defect, so it is
+    /// refused by name rather than silently used at the wrong operating point.
+    #[test]
+    fn retained_joint_score_from_a_different_operating_point_is_refused() {
+        let (spec, states) = lower_bounded_unit_fixture();
+        let stale = TerminalLikelihoodScore {
+            beta: array![0.25],
+            score: array![-1.0],
+        };
+        let error = lower_bounded_posterior(spec, &states, None, Some(&stale))
+            .expect_err("a score from another beta cannot certify this mode");
+        assert!(
+            error.contains("evaluated at a different coefficient vector"),
+            "the refusal must name the operating-point mismatch, got: {error}",
         );
     }
 }

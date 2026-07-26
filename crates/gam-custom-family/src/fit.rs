@@ -1433,6 +1433,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             Some(&hessian),
             inner.terminal_working_sets.as_deref(),
             inner.joint_workspace.as_ref(),
+            inner.terminal_likelihood_score.as_ref(),
         )
         .map_err(|reason| CustomFamilyError::Optimization {
             context: "fit_custom_family no-smoothing terminal posterior",
@@ -2269,6 +2270,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         Some(&hessian),
         inner.terminal_working_sets.as_deref(),
         inner.joint_workspace.as_ref(),
+        inner.terminal_likelihood_score.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family final posterior assembly",
@@ -2600,6 +2602,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         Some(&hessian),
         inner.terminal_working_sets.as_deref(),
         inner.joint_workspace.as_ref(),
+        inner.terminal_likelihood_score.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas terminal posterior",
@@ -2824,6 +2827,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
         Some(&hessian),
         inner.terminal_working_sets.as_deref(),
         inner.joint_workspace.as_ref(),
+        inner.terminal_likelihood_score.as_ref(),
     )
     .map_err(|reason| CustomFamilyError::Optimization {
         context: "fit_custom_family_fixed_log_lambdas_from_owned_mode posterior",

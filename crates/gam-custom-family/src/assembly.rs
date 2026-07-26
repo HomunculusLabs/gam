@@ -2463,6 +2463,45 @@ pub(crate) fn assemble_block_local_s_psi_psi(
     }
 }
 
+/// A joint likelihood score together with the operating point it was
+/// evaluated at.
+///
+/// The inner solve reloads `∇ℓ` immediately after every accepted step and
+/// never moves β afterwards without reloading, so at a convergence exit the
+/// score belongs to the returned `block_states`. Carrying `beta` alongside it
+/// makes that an assertion the consumer checks rather than a property of how
+/// the loop happens to be ordered.
+#[derive(Clone)]
+pub(crate) struct TerminalLikelihoodScore {
+    /// Concatenated block coefficients, block-major.
+    pub(crate) beta: Array1<f64>,
+    /// `∇ℓ(beta)` in the same layout.
+    pub(crate) score: Array1<f64>,
+}
+
+impl TerminalLikelihoodScore {
+    /// Concatenate block coefficients in the layout the joint score uses.
+    pub(crate) fn joint_beta(states: &[ParameterBlockState]) -> Array1<f64> {
+        let total = states.iter().map(|state| state.beta.len()).sum::<usize>();
+        let mut beta = Array1::<f64>::zeros(total);
+        let mut offset = 0usize;
+        for state in states {
+            let end = offset + state.beta.len();
+            beta.slice_mut(s![offset..end]).assign(&state.beta);
+            offset = end;
+        }
+        beta
+    }
+
+    /// Whether this score was evaluated at exactly `states`.
+    ///
+    /// Bitwise: the states are carried out of the solve unmodified after the
+    /// reload, so any difference at all means the score is stale.
+    pub(crate) fn evaluated_at(&self, states: &[ParameterBlockState]) -> bool {
+        self.beta == Self::joint_beta(states)
+    }
+}
+
 #[derive(Clone)]
 pub struct BlockwiseInnerResult {
     pub block_states: Vec<ParameterBlockState>,
@@ -2470,6 +2509,17 @@ pub struct BlockwiseInnerResult {
     /// solve. `None` only when an owned exact-Hessian workspace was the sole
     /// family evaluation source.
     pub(crate) terminal_working_sets: Option<Vec<BlockWorkingSet>>,
+    /// Joint likelihood score the inner solve last loaded, carried with the
+    /// coefficient vector it was evaluated at.
+    ///
+    /// This is the same vector the projected KKT residual is computed from, so
+    /// wherever `kkt_residual` certifies the iterate this score is the gradient
+    /// that certified it. It exists because a family with an analytic joint
+    /// gradient never produces working sets — `load_joint_gradient_evaluation`
+    /// returns the gradient and no `FamilyEvaluation` — so reconstructing the
+    /// score downstream from `terminal_working_sets` is impossible for exactly
+    /// the families that compute it most directly.
+    pub(crate) terminal_likelihood_score: Option<TerminalLikelihoodScore>,
     pub active_sets: Vec<Option<Vec<usize>>>,
     pub log_likelihood: f64,
     pub penalty_value: f64,
@@ -2539,4 +2589,5 @@ pub(crate) struct CachedInnerMode {
     pub(crate) kkt_residual: Option<ProjectedKktResidual>,
     pub(crate) active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
     pub(crate) terminal_working_sets: Option<Vec<BlockWorkingSet>>,
+    pub(crate) terminal_likelihood_score: Option<TerminalLikelihoodScore>,
 }
