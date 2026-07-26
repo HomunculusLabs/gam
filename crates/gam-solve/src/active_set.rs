@@ -1437,11 +1437,11 @@ pub(crate) struct CompressedActiveWorkingSet {
 /// distributed/phantom multiplier).
 ///
 /// `active_pos` is an ACTIVE-SET POSITION: an index into the caller's `active`
-/// slice, so the original constraint id is `active[active_pos]` (see
-/// [`compress_active_working_set`], which seeds `groups` with exactly these
-/// positions). It is NOT a constraint-row id and NOT a coefficient index. The
-/// reduced-face op reports its dependents in constraint-row space instead and
-/// therefore uses its own [`ConstraintRowDependence`] — the two must not be
+/// slice, so the original constraint id is `active[active_pos]`. Working-face
+/// rank reduction seeds each group with these positions before collapsing
+/// dependent rows. It is NOT a constraint-row id and NOT a coefficient index.
+/// The reduced-face op reports its dependents in constraint-row space instead
+/// and therefore uses its own [`ConstraintRowDependence`] — the two must not be
 /// interchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct ActiveRowDependence {
@@ -1932,46 +1932,6 @@ impl CompressedActiveWorkingSet {
         }
         best.map(|(_, _, group_pos)| self.groups[group_pos].clone())
     }
-}
-
-pub(crate) fn compress_active_working_set(
-    x: &Array1<f64>,
-    constraints: &LinearInequalityConstraints,
-    active: &[usize],
-) -> Result<CompressedActiveWorkingSet, EstimationError> {
-    let p = constraints.a.ncols();
-    if x.len() != p {
-        crate::bail_invalid_estim!("active working-set compression dimension mismatch");
-    }
-
-    let mut a_out = Array2::<f64>::zeros((active.len(), p));
-    let mut b_out = Array1::<f64>::zeros(active.len());
-    let mut groups_out: Vec<Vec<usize>> = Vec::with_capacity(active.len());
-    for (pos, &idx) in active.iter().enumerate() {
-        if idx >= constraints.a.nrows() {
-            crate::bail_invalid_estim!(
-                "active working-set index {} out of bounds for {} constraints",
-                idx,
-                constraints.a.nrows()
-            );
-        }
-        a_out.row_mut(pos).assign(&constraints.a.row(idx));
-        b_out[pos] = constraints.b[idx];
-        groups_out.push(vec![pos]);
-    }
-
-    // The parallel-dependent map (4th return) is in ACTIVE-SET-POSITION space,
-    // not the constraint-row space of the `ReducedFace` op; the working-set
-    // release adjudicates whole representative groups, so it is not stored here.
-    let (a_out, b_out, groups_out, _) =
-        rank_reduce_rows_pivoted_qr_with_dependence(a_out, b_out, groups_out);
-
-    Ok(CompressedActiveWorkingSet {
-        constraints: LinearInequalityConstraints::new(a_out, b_out)
-            .expect("compressed active constraint shape invariant"),
-        groups: groups_out,
-        original_active_count: active.len(),
-    })
 }
 
 fn identity_multiplier_dependence(groups: &[Vec<usize>]) -> Vec<Vec<ActiveRowDependence>> {
@@ -2465,8 +2425,7 @@ impl<'a> ConstraintSetOps<'a> {
         Ok(gathered)
     }
 
-    /// Rank-reduced compressed working set over the gathered unit rows —
-    /// the operator analogue of [`compress_active_working_set`].
+    /// Rank-reduced compressed working face over the gathered unit rows.
     fn compress_working(
         &self,
         active: &[usize],

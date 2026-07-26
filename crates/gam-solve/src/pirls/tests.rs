@@ -3327,30 +3327,6 @@ mod tests {
         assert_eq!(kkt.n_active, 3);
     }
 
-    #[test]
-    pub(crate) fn compress_activeworking_set_groups_near_collinearrows() {
-        let constraints = LinearInequalityConstraints {
-            a: array![
-                [0.0, 0.5, 0.0],
-                [0.0, 0.50000000000003, 0.0],
-                [1.0, 0.0, 0.0]
-            ],
-            b: array![1e-8, 1.00000000000005e-8, 0.2],
-        };
-        let x = array![0.0, 0.0, 0.0];
-        let active = vec![0, 1, 2];
-
-        let compressed = active_set::compress_active_working_set(&x, &constraints, &active)
-            .expect("compress working set");
-
-        assert_eq!(compressed.constraints.a.nrows(), 2);
-        assert_eq!(compressed.groups.len(), 2);
-        assert!(
-            compressed.groups.iter().any(|g| g == &vec![0, 1]),
-            "near-collinear rows should be grouped together: {:?}",
-            compressed.groups
-        );
-    }
 
     #[test]
     pub(crate) fn lower_bound_active_set_releases_stalewarm_boundary_hint() {
