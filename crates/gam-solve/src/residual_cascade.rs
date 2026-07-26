@@ -1859,7 +1859,15 @@ impl Core {
         let mut gram_full = vec![0.0; self.m];
         let mut projected_null = vec![0.0; self.m];
         let mut matvec = vec![0.0; rank];
-        let mut basis: Vec<Vec<f64>> = Vec::with_capacity(steps);
+        // The reorthogonalization basis, `steps x rank` row-major in ONE allocation
+        // rather than a `Vec` of `Vec`s. This is the run's whole memory footprint
+        // (see `RESIDUAL_QUADRATURE_BASIS_BYTES`) and, at these sizes, its whole
+        // cost: the loop below streams it end to end at every step, so it is
+        // bandwidth-bound and the per-vector indirection was pure overhead.
+        // Reserving it up front also removes the reallocation-and-copy that a
+        // growing `Vec` of a few hundred megabytes otherwise pays repeatedly. The
+        // arithmetic and its ORDER are unchanged, so this is bit-identical.
+        let mut basis: Vec<f64> = Vec::with_capacity(steps.saturating_mul(rank));
         let mut q: Vec<f64> = start.iter().map(|&value| value / start_norm).collect();
         let mut q_previous: Option<Vec<f64>> = None;
         let mut alpha: Vec<f64> = Vec::with_capacity(steps);
@@ -1912,15 +1920,15 @@ impl Core {
                     residual[i] -= previous_beta * previous[i];
                 }
             }
-            basis.push(q.clone());
-            for direction in &basis {
+            basis.extend_from_slice(&q);
+            for direction in basis.chunks_exact(rank) {
                 let projection = residual
                     .iter()
                     .zip(direction.iter())
                     .map(|(&a, &b)| a * b)
                     .sum::<f64>();
-                for i in 0..rank {
-                    residual[i] -= projection * direction[i];
+                for (value, &component) in residual.iter_mut().zip(direction) {
+                    *value -= projection * component;
                 }
             }
             let norm = residual
