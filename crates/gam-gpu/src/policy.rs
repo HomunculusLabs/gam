@@ -164,6 +164,37 @@ impl GpuDispatchPolicy {
         h_resident && p >= self.potrf_min_p
     }
 
+    /// Whether a batched Pólya-Gamma draw of `n` rows is worth dispatching to
+    /// the device.
+    ///
+    /// A PG batch is a fused elementwise kernel: one independent rejection
+    /// sampler per row, no reduction and no cross-row reuse. So the row count
+    /// *is* the work, and what the device has to overcome is launch latency
+    /// plus the `n·(4 + 8)` bytes staged in and `n·8` staged back out — a
+    /// transfer/launch amortisation question rather than an arithmetic-intensity
+    /// one. That is exactly what `fused_kernel_min_n` carries: calibration sets
+    /// it to twice the device's *measured* XtWX crossover row count, so the
+    /// crossover is a per-device measurement rather than a tuned literal, and a
+    /// faster host CPU moves it up on that host instead of failing the kernel.
+    #[inline]
+    pub const fn polya_gamma_batch_target_is_gpu(&self, n: usize) -> bool {
+        n >= self.fused_kernel_min_n
+    }
+
+    /// Whether a batched per-row BMS kernel over `n` design rows is worth
+    /// dispatching to the device.
+    ///
+    /// The flex-row HVP and dense-block builders are batched over rows with the
+    /// per-row frames staged once, which is the same shape `row_kernel_min_n`
+    /// is calibrated for (it is set directly from the measured XtWX crossover
+    /// row count). Keyed on rows rather than a wall-clock ratio so the decision
+    /// is a property of the workload and the device, not of whoever else is on
+    /// the box.
+    #[inline]
+    pub const fn row_batch_target_is_gpu(&self, n: usize) -> bool {
+        n >= self.row_kernel_min_n
+    }
+
     pub const fn dense_hessian_work_target_is_gpu(&self, n: usize, p: usize) -> bool {
         n > 0
             && p >= Self::DEVICE_LOOP_MIN_P
@@ -909,6 +940,68 @@ mod refinement_policy_tests {
             ..Default::default()
         };
         assert!(!pol.iterative_refinement_should_attempt(1024));
+    }
+}
+
+#[cfg(test)]
+mod fused_batch_dispatch_tests {
+    use super::*;
+
+    /// The dominant large-scale PG draw shape — one variate per data row per
+    /// Gibbs iteration — is admitted, and a batch small enough that launch and
+    /// staging dominate is refused. The refusal is the load-bearing half: a
+    /// predicate that admitted everything would let a dispatch-worthiness test
+    /// pass without saying anything about the shape it ran.
+    #[test]
+    fn polya_gamma_admits_large_batch_and_refuses_small() {
+        let pol = GpuDispatchPolicy::default();
+        assert!(pol.polya_gamma_batch_target_is_gpu(200_000));
+        assert!(pol.polya_gamma_batch_target_is_gpu(pol.fused_kernel_min_n));
+        assert!(!pol.polya_gamma_batch_target_is_gpu(pol.fused_kernel_min_n - 1));
+        assert!(!pol.polya_gamma_batch_target_is_gpu(16));
+        assert!(!pol.polya_gamma_batch_target_is_gpu(0));
+    }
+
+    /// Same contract for the batched per-row BMS kernels.
+    #[test]
+    fn row_batch_admits_large_and_refuses_small() {
+        let pol = GpuDispatchPolicy::default();
+        assert!(pol.row_batch_target_is_gpu(pol.row_kernel_min_n));
+        assert!(!pol.row_batch_target_is_gpu(pol.row_kernel_min_n - 1));
+        assert!(!pol.row_batch_target_is_gpu(0));
+    }
+
+    /// Both predicates are monotone in the row count: work only ever moves a
+    /// shape toward the device, never away from it. This is what lets a test
+    /// assert the decision once and have it hold for any larger fixture.
+    #[test]
+    fn both_predicates_are_monotone_in_rows() {
+        let pol = GpuDispatchPolicy::default();
+        for n in [0usize, 1, 1_000, 49_999, 50_000, 99_999, 100_000, 1_000_000] {
+            if pol.polya_gamma_batch_target_is_gpu(n) {
+                assert!(pol.polya_gamma_batch_target_is_gpu(n + 1));
+            }
+            if pol.row_batch_target_is_gpu(n) {
+                assert!(pol.row_batch_target_is_gpu(n + 1));
+            }
+        }
+    }
+
+    /// A device whose calibration measured a *faster* host CPU carries a higher
+    /// crossover, and the same fixture is then honestly refused rather than
+    /// reported as a kernel regression. This is the property the wall-clock
+    /// ratio gates could not express: they read the box and were credited to
+    /// the code.
+    #[test]
+    fn a_faster_host_cpu_raises_the_crossover_rather_than_failing_the_kernel() {
+        let fast_host = GpuDispatchPolicy {
+            fused_kernel_min_n: 4_000_000,
+            row_kernel_min_n: 4_000_000,
+            ..Default::default()
+        };
+        assert!(!fast_host.polya_gamma_batch_target_is_gpu(200_000));
+        assert!(!fast_host.row_batch_target_is_gpu(200_000));
+        assert!(fast_host.polya_gamma_batch_target_is_gpu(4_000_000));
     }
 }
 

@@ -3687,6 +3687,41 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
+    /// Assert the dispatch-worthiness claim and record the timings without
+    /// asserting on them (#2487, SPEC rule 19).
+    ///
+    /// These gates asserted `cpu_median / gpu_median >= 2.0` (walked down from
+    /// 5× and 10× calibration-box ratios). A ratio of two wall-clock medians is
+    /// a property of whoever else is on the box, not of the kernel: under
+    /// co-tenancy the device arm degrades harder than the host arm, so the
+    /// ratio collapses toward 1 exactly when the fleet is busiest, and the red
+    /// gets read as a code regression. The claim these gates exist to make —
+    /// "this shape belongs on the device" — is decided instead by the
+    /// calibrated policy, whose row crossover is a per-device *measurement*.
+    ///
+    /// The medians stay in the log as the hill-climbing perf record, which is
+    /// what a timing is good for.
+    #[cfg(target_os = "linux")]
+    fn assert_row_batch_dispatch_worthy(
+        label: &str,
+        policy: &gam_gpu::policy::GpuDispatchPolicy,
+        n: usize,
+    ) {
+        assert!(
+            policy.row_batch_target_is_gpu(n),
+            "{label}: n={n} rows is below this device's calibrated row-kernel \
+             crossover ({}), so the fixture no longer exercises a shape the \
+             dispatch policy would send to the device — grow the fixture rather \
+             than lowering the crossover",
+            policy.row_kernel_min_n
+        );
+        assert!(
+            !policy.row_batch_target_is_gpu(0),
+            "{label}: the dispatch predicate admitted an empty batch, so the \
+             assertion above proves nothing about n={n}"
+        );
+    }
+
     fn cuda_runtime_for_test(
         test_name: &str,
     ) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
@@ -5883,20 +5918,22 @@ mod tests {
     ///     `exact_newton_joint_hessian_matvec_from_cache` (which uses
     ///     `ROW_CHUNK_SIZE` chunked `into_par_iter()` for the same
     ///     contraction).
-    ///   * Ratio = cpu_median / gpu_median; assert ratio >= 5.
+    ///   * The gate is the calibrated policy's decision that this row count
+    ///     belongs on the device; cpu_median / gpu_median is a printed perf
+    ///     record. It asserted `ratio >= 5` until #2487.
     ///
     /// Skips on non-Linux / no-CUDA hosts.
     #[test]
-    pub(crate) fn bms_flex_row_hvp_v100_hill_climb_5x_vs_cpu_at_large_scale() {
+    pub(crate) fn bms_flex_row_hvp_dispatch_worthiness_at_large_scale() {
         #[cfg(not(target_os = "linux"))]
         {
             eprintln!("[bms_flex_row hvp hill-climb] non-Linux host — skipping V100 perf gate");
         }
         #[cfg(target_os = "linux")]
         {
-            if cuda_runtime_for_test("bms_flex_row hvp hill-climb").is_none() {
+            let Some(runtime) = cuda_runtime_for_test("bms_flex_row hvp hill-climb") else {
                 return;
-            }
+            };
             let n = 195_000_usize;
             let p_m = 14_usize;
             let p_g = 12_usize;
@@ -6082,22 +6119,12 @@ mod tests {
             eprintln!(
                 "[bms_flex_row hvp hill-climb] large-scale n={n} r={r} p={p_total}: \
                  cpu_median={cpu_median}us gpu_median={gpu_median}us \
-                 speedup={speedup:.2}× (charter target ≥ 5×)"
+                 speedup={speedup:.2}× (perf record; the gate is the policy decision)"
             );
-            // Dispatch-worthiness gate, not a hardware bet (#2313 hardware
-            // sweep): a fixed 5× floor asserts the calibration box's CPU/GPU
-            // pair and fails a healthy kernel next to a fast host CPU. The
-            // property the kernel must keep is that the device path
-            // comfortably beats the SAME box's CPU (a serialized/faked path
-            // shows ~1×); the calibrated dispatch policy owns the real
-            // CPU/GPU decision, and the printed medians remain the perf
-            // record for hill-climbing.
-            assert!(
-                speedup >= 2.0,
-                "large-scale HVP dispatch-worthiness gate: GPU only {speedup:.2}× \
-                 faster than CPU on this box (cpu_median={cpu_median}us, \
-                 gpu_median={gpu_median}us) — a healthy kernel must clearly beat \
-                 the same-box CPU."
+            assert_row_batch_dispatch_worthy(
+                "large-scale HVP dispatch-worthiness gate",
+                runtime.policy(),
+                n,
             );
         }
     }
@@ -6107,7 +6134,7 @@ mod tests {
     /// shape. The dense build is `O(n * r² * p_total)` work for both
     /// paths so the ratio is well-defined.
     #[test]
-    pub(crate) fn bms_flex_row_dense_block_v100_hill_climb_10x_vs_cpu_at_large_scale() {
+    pub(crate) fn bms_flex_row_dense_block_dispatch_worthiness_at_large_scale() {
         #[cfg(not(target_os = "linux"))]
         {
             eprintln!(
@@ -6116,9 +6143,10 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            if cuda_runtime_for_test("bms_flex_row dense_block hill-climb").is_none() {
+            let Some(runtime) = cuda_runtime_for_test("bms_flex_row dense_block hill-climb")
+            else {
                 return;
-            }
+            };
             let n = 195_000_usize;
             let p_m = 14_usize;
             let p_g = 12_usize;
@@ -6337,15 +6365,12 @@ mod tests {
             eprintln!(
                 "[bms_flex_row dense_block hill-climb] large-scale n={n} r={r} p={p_total}: \
                  cpu_median={cpu_median}us gpu_median={gpu_median}us \
-                 speedup={speedup:.2}× (charter target ≥ 10×)"
+                 speedup={speedup:.2}× (perf record; the gate is the policy decision)"
             );
-            // Same dispatch-worthiness contract as the HVP gate above
-            // (previously a 10× calibration-box ratio).
-            assert!(
-                speedup >= 2.0,
-                "large-scale dense-H dispatch-worthiness gate: GPU only \
-                 {speedup:.2}× faster than CPU on this box \
-                 (cpu_median={cpu_median}us, gpu_median={gpu_median}us)."
+            assert_row_batch_dispatch_worthy(
+                "large-scale dense-H dispatch-worthiness gate",
+                runtime.policy(),
+                n,
             );
         }
     }
