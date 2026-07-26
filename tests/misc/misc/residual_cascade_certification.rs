@@ -1296,7 +1296,9 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
         );
     }
 
-    let fit = design.fit_reml().expect("REML selection past the dense cap");
+    let fit = design
+        .fit_reml()
+        .expect("REML selection past the dense cap");
     assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
     let Some(ResidualMomentMethod::ConvergedQuadrature {
         steps,

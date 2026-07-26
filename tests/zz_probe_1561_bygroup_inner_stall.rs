@@ -175,7 +175,6 @@ fn zz_probe_bygroup_inner_stall_trace() {
     eprintln!("[zz1561bg] done");
 }
 
-
 // ---------------------------------------------------------------------------
 // #1561 log-sigma lane: WHY does the by-group SCALE block lose when the pooled
 // and cyclic scale blocks WIN? Reports the structure predictions (1) and (2)
@@ -184,10 +183,18 @@ fn zz_probe_bygroup_inner_stall_trace() {
 // recovery over paired seeds.
 // ---------------------------------------------------------------------------
 
-fn sigma_a_t(x: f64) -> f64 { 0.10 + 0.10 * (std::f64::consts::PI * x).sin() }
-fn sigma_b_t(x: f64) -> f64 { 0.12 + 0.08 * x }
-fn mean_a_t(x: f64) -> f64 { (2.0 * std::f64::consts::PI * x).sin() }
-fn mean_b_t(x: f64) -> f64 { 0.5 + 0.3 * (3.0 * std::f64::consts::PI * x).sin() }
+fn sigma_a_t(x: f64) -> f64 {
+    0.10 + 0.10 * (std::f64::consts::PI * x).sin()
+}
+fn sigma_b_t(x: f64) -> f64 {
+    0.12 + 0.08 * x
+}
+fn mean_a_t(x: f64) -> f64 {
+    (2.0 * std::f64::consts::PI * x).sin()
+}
+fn mean_b_t(x: f64) -> f64 {
+    0.5 + 0.3 * (3.0 * std::f64::consts::PI * x).sin()
+}
 
 #[test]
 fn zz_probe_bygroup_sigma_block_structure() {
@@ -211,13 +218,21 @@ fn zz_probe_bygroup_sigma_block_structure() {
                 let x = ux.sample(&mut rng);
                 let y = mean_a_t(x) + sigma_a_t(x) * sn.sample(&mut rng);
                 xs_a.push(x);
-                rows.push(StringRecord::from(vec![y.to_string(), x.to_string(), "A".to_string()]));
+                rows.push(StringRecord::from(vec![
+                    y.to_string(),
+                    x.to_string(),
+                    "A".to_string(),
+                ]));
             }
             for _ in 0..n_per {
                 let x = ux.sample(&mut rng);
                 let y = mean_b_t(x) + sigma_b_t(x) * sn.sample(&mut rng);
                 xs_b.push(x);
-                rows.push(StringRecord::from(vec![y.to_string(), x.to_string(), "B".to_string()]));
+                rows.push(StringRecord::from(vec![
+                    y.to_string(),
+                    x.to_string(),
+                    "B".to_string(),
+                ]));
             }
             let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode");
             let cfg = FitConfig {
@@ -228,21 +243,34 @@ fn zz_probe_bygroup_sigma_block_structure() {
             match fit_from_formula("y ~ s(x, bs='tp', by=group)", &ds, &cfg) {
                 Err(e) => {
                     let m = e.to_string();
-                    eprintln!("[zz1561sig] {label} seed={seed} REFUSED: {}", &m[..m.len().min(120)]);
+                    eprintln!(
+                        "[zz1561sig] {label} seed={seed} REFUSED: {}",
+                        &m[..m.len().min(120)]
+                    );
                 }
                 Ok(res) => {
                     let gam::FitResult::GaussianLocationScale(fit) = res else {
                         eprintln!("[zz1561sig] {label} seed={seed} unexpected fit kind");
                         continue;
                     };
-                    let loc = fit.fit.fit.block_by_role(gam::solver::estimate::BlockRole::Location);
-                    let sca = fit.fit.fit.block_by_role(gam::solver::estimate::BlockRole::Scale);
+                    let loc = fit
+                        .fit
+                        .fit
+                        .block_by_role(gam::solver::estimate::BlockRole::Location);
+                    let sca = fit
+                        .fit
+                        .fit
+                        .block_by_role(gam::solver::estimate::BlockRole::Scale);
                     match (loc, sca) {
                         (Some(l), Some(s)) => eprintln!(
                             "[zz1561sig] {label} seed={seed} | SCALE p={} edf={:.4} lambdas={:?} \
                              | LOC p={} edf={:.4} nlam={}",
-                            s.beta.len(), s.edf, s.lambdas.to_vec(),
-                            l.beta.len(), l.edf, l.lambdas.len()
+                            s.beta.len(),
+                            s.edf,
+                            s.lambdas.to_vec(),
+                            l.beta.len(),
+                            l.edf,
+                            l.lambdas.len()
                         ),
                         _ => eprintln!("[zz1561sig] {label} seed={seed} missing block"),
                     }
