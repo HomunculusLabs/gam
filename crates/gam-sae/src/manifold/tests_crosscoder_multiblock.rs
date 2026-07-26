@@ -205,11 +205,13 @@ fn bit_identical(a: &Array2<f64>, b: &Array2<f64>) -> bool {
 }
 
 /// #2512 — a joint fit is a function of its inputs, including above the
-/// reported 61→62-row transition. Four independently constructed terms receive
-/// the same finite target, rho, and one-iteration grant; every fitted decoder
-/// coefficient must therefore recur bit-for-bit. This deliberately exercises
-/// the cold-start chart placement and entry block sweep before Arrow–Schur
-/// assembly as well as the Newton step itself.
+/// reported 61→62-row transition. Four independently constructed, concurrently
+/// live terms receive the same finite target, rho, and one-iteration grant; every
+/// fitted decoder coefficient must therefore recur bit-for-bit. Keeping every
+/// term alive is essential: it forces distinct live allocation graphs instead of
+/// letting the allocator recycle the just-dropped predecessor's addresses. This
+/// deliberately exercises the cold-start chart placement and entry block sweep
+/// before Arrow–Schur assembly as well as the Newton step itself.
 #[test]
 fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     let n = 62usize;
@@ -243,13 +245,14 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     let blocks = vec![OutputBlock::new("behavior", behavior.target, 0.0).unwrap()];
     let target = stack_augmented_target(z.view(), &blocks).unwrap();
     let p_tot = target.ncols();
-    let mut decoders = Vec::with_capacity(4);
-    for _ in 0..4 {
-        let (mut term, mut rho) = build_k1(&evaluator, &coords, p_tot);
+    let mut fits: Vec<(SaeManifoldTerm, SaeManifoldRho)> = (0..4)
+        .map(|_| build_k1(&evaluator, &coords, p_tot))
+        .collect();
+    for (term, rho) in &mut fits {
         term.set_guards_enabled(false);
         term.run_joint_fit_arrow_schur(
             target.view(),
-            &mut rho,
+            rho,
             None,
             1,
             1.0,
@@ -257,16 +260,17 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
             1.0e-6,
         )
         .unwrap();
-        decoders.push(term.atoms[0].decoder_coefficients.clone());
     }
 
-    let reference_norm = decoders[0].iter().map(|value| value * value).sum::<f64>().sqrt();
+    let reference = &fits[0].0.atoms[0].decoder_coefficients;
+    let reference_norm = reference.iter().map(|value| value * value).sum::<f64>().sqrt();
     assert!(
         reference_norm > 1.0,
         "#2512 fixture must exercise a real fitted decoder, got norm {reference_norm:.6e}"
     );
-    for (rep, decoder) in decoders.iter().enumerate().skip(1) {
-        let differing = decoders[0]
+    for (rep, (term, _rho)) in fits.iter().enumerate().skip(1) {
+        let decoder = &term.atoms[0].decoder_coefficients;
+        let differing = reference
             .iter()
             .zip(decoder.iter())
             .filter(|(left, right)| left.to_bits() != right.to_bits())
