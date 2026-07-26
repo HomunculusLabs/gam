@@ -189,9 +189,12 @@ fn run_basis(basis_term: &str) {
     for j in 0..audit.psi_dim {
         eprintln!(
             "[FD-DIAG] psi_i={j} analytic atoms: fixed_beta={:+.6e} \
-             logdet_h={:+.6e} logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
+             logdet_h={:+.6e} (frozen={:+.6e} mode_response={:+.6e}) \
+             logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
             audit.fixed_beta_psi_gradient[j],
             audit.logdet_h_psi_gradient[j],
+            audit.frozen_logdet_h_psi_gradient[j],
+            audit.mode_response_logdet_h_psi_gradient[j],
             audit.logdet_s_psi_gradient[j],
             audit.kkt_psi_gradient[j],
             audit.fixed_beta_psi_gradient[j]

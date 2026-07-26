@@ -184,10 +184,14 @@ fn capture_outer_gradient_fd_at_seed(
         Array1::from_iter(components.iter().map(|component| component.0));
     let logdet_h_psi_gradient =
         Array1::from_iter(components.iter().map(|component| component.1));
-    let logdet_s_psi_gradient =
+    let frozen_logdet_h_psi_gradient =
         Array1::from_iter(components.iter().map(|component| component.2));
-    let kkt_psi_gradient =
+    let mode_response_logdet_h_psi_gradient =
         Array1::from_iter(components.iter().map(|component| component.3));
+    let logdet_s_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.4));
+    let kkt_psi_gradient =
+        Array1::from_iter(components.iter().map(|component| component.5));
     let (analytic_component_cost, analytic_cost_components) =
         crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
             EstimationError::InvalidInput(
@@ -283,6 +287,8 @@ fn capture_outer_gradient_fd_at_seed(
             psi_steps,
             fixed_beta_psi_gradient,
             logdet_h_psi_gradient,
+            frozen_logdet_h_psi_gradient,
+            mode_response_logdet_h_psi_gradient,
             logdet_s_psi_gradient,
             kkt_psi_gradient,
             finite_difference_fixed_beta_psi_gradient:

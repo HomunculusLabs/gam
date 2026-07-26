@@ -45,6 +45,8 @@ pub struct OuterGradientFdRecord {
     pub psi_steps: Array1<f64>,
     pub fixed_beta_psi_gradient: Array1<f64>,
     pub logdet_h_psi_gradient: Array1<f64>,
+    pub frozen_logdet_h_psi_gradient: Array1<f64>,
+    pub mode_response_logdet_h_psi_gradient: Array1<f64>,
     pub logdet_s_psi_gradient: Array1<f64>,
     pub kkt_psi_gradient: Array1<f64>,
     pub finite_difference_fixed_beta_psi_gradient: Array1<f64>,
@@ -61,7 +63,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 struct OuterGradientFdCapture {
     min_psi_dim: usize,
     record: Option<OuterGradientFdRecord>,
-    components: Vec<(f64, f64, f64, f64)>,
+    components: Vec<(f64, f64, f64, f64, f64, f64)>,
     criterion_components: Option<(f64, [f64; 4])>,
 }
 
@@ -106,9 +108,20 @@ pub(crate) fn begin_outer_gradient_component_capture() {
     });
 }
 
+pub(crate) fn outer_gradient_component_capture_enabled() -> bool {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.record.is_none())
+    })
+}
+
 pub(crate) fn record_outer_gradient_component(
     fixed_beta: f64,
     logdet_h: f64,
+    frozen_logdet_h: f64,
+    mode_response_logdet_h: f64,
     logdet_s: f64,
     kkt: f64,
 ) {
@@ -116,14 +129,19 @@ pub(crate) fn record_outer_gradient_component(
         if let Some(state) = capture.borrow_mut().as_mut()
             && state.record.is_none()
         {
-            state
-                .components
-                .push((fixed_beta, logdet_h, logdet_s, kkt));
+            state.components.push((
+                fixed_beta,
+                logdet_h,
+                frozen_logdet_h,
+                mode_response_logdet_h,
+                logdet_s,
+                kkt,
+            ));
         }
     });
 }
 
-pub(crate) fn take_outer_gradient_components() -> Vec<(f64, f64, f64, f64)> {
+pub(crate) fn take_outer_gradient_components() -> Vec<(f64, f64, f64, f64, f64, f64)> {
     FD_CAPTURE.with(|capture| {
         capture
             .borrow_mut()

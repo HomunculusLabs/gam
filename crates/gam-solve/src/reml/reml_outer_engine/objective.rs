@@ -1447,7 +1447,23 @@ pub fn reml_laml_evaluate(
     // All extended coordinates store canonical fixed-β stationarity
     // derivatives g_i = F_{βi}. IFT gives β_i = -H^{-1}g_i, exactly like
     // the ρ block.
-    let ext_grad_entries: Result<Vec<(usize, f64, f64, f64, f64)>, String> = (0..ext_dim)
+    let trace_logdet_drift = |drift: &DriftDerivResult| match (
+        &solution.penalty_subspace_trace,
+        drift,
+    ) {
+        (Some(kernel), DriftDerivResult::Dense(matrix)) => {
+            kernel.trace_projected_logdet(matrix)
+        }
+        (Some(kernel), DriftDerivResult::Operator(op)) => {
+            kernel.trace_operator(op.as_ref())
+        }
+        (None, DriftDerivResult::Dense(matrix)) => hop.trace_logdet_h_k(matrix, None),
+        (None, DriftDerivResult::Operator(op)) => hop.trace_logdet_operator(op.as_ref()),
+    };
+    let capture_logdet_trace_parts =
+        crate::estimate::outer_eval_capture::outer_gradient_component_capture_enabled();
+    type ExtGradientParts = (usize, f64, f64, f64, f64, f64, f64);
+    let ext_grad_entries: Result<Vec<ExtGradientParts>, String> = (0..ext_dim)
         .into_par_iter()
         .map(|ext_idx| {
             let coord = &solution.ext_coords[ext_idx];
@@ -1519,6 +1535,17 @@ pub fn reml_laml_evaluate(
             } else {
                 0.0
             };
+            let (frozen_logdet_h_component, mode_response_logdet_h_component) =
+                if incl_logdet_h && capture_logdet_trace_parts {
+                    let frozen = hyper_coord_total_drift_result(&coord.drift, None, hop.dim());
+                    let frozen_trace = trace_logdet_drift(&frozen);
+                    let mode_response_trace = ext_corrections[ext_idx]
+                        .as_ref()
+                        .map_or(0.0, |drift| trace_logdet_drift(drift));
+                    (0.5 * frozen_trace, 0.5 * mode_response_trace)
+                } else {
+                    (0.0, 0.0)
+                };
             let logdet_s_component = if incl_logdet_s {
                 -0.5 * coord.ld_s
             } else {
@@ -1548,11 +1575,22 @@ pub fn reml_laml_evaluate(
                 value,
                 fixed_beta_component,
                 logdet_h_component,
+                frozen_logdet_h_component,
+                mode_response_logdet_h_component,
                 logdet_s_component,
             ))
         })
         .collect();
-    for (idx, value, fixed_beta, logdet_h, logdet_s) in ext_grad_entries? {
+    for (
+        idx,
+        value,
+        fixed_beta,
+        logdet_h,
+        frozen_logdet_h,
+        mode_response_logdet_h,
+        logdet_s,
+    ) in ext_grad_entries?
+    {
         // ACCUMULATE, do not overwrite: the unified `kkt_theta_corrections`
         // block above already folded the ψ/ext KKT-residual correction
         // `−coord.gᵀH⁻¹r + ½(H⁻¹r)ᵀB(H⁻¹r)` into `grad[k + ext_idx]`. A plain
@@ -1565,7 +1603,12 @@ pub fn reml_laml_evaluate(
         // skipped), so `+=` is byte-identical to the old assignment there.
         let kkt = grad[idx];
         crate::estimate::outer_eval_capture::record_outer_gradient_component(
-            fixed_beta, logdet_h, logdet_s, kkt,
+            fixed_beta,
+            logdet_h,
+            frozen_logdet_h,
+            mode_response_logdet_h,
+            logdet_s,
+            kkt,
         );
         grad[idx] += value;
     }
