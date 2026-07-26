@@ -442,14 +442,38 @@ jobs:
       - macos
       - windows
       - sdist
-    # Publish whenever the manylinux x86_64 wheel + sdist succeed. On a manual
-    # `scope=linux`/`scope=x86` run the musllinux/macOS/Windows jobs are SKIPPED
-    # — a default `needs` would skip this upload too (a job whose needs are
-    # skipped is skipped), so the scoped path would build but never publish. Gate
-    # on actual results instead: require linux+sdist success, allow the extras to
-    # be skipped (just not failed). The gate's `should_run=false` path skips the
-    # wheel jobs, so their result is `skipped` and this stays off.
-    if: ${{ !cancelled() && needs.linux.result == 'success' && needs.sdist.result == 'success' && needs.musllinux.result != 'failure' && needs.macos.result != 'failure' && needs.windows.result != 'failure' }}
+    # Full releases are atomic platform sets: every advertised wheel family must
+    # succeed. A cancelled job is not a deliverable and must never be treated like
+    # an intentional skip. Only a manually selected narrower scope may accept the
+    # exact jobs that scope deliberately skipped.
+    if: >-
+      ${{
+        always() &&
+        needs.linux.result == 'success' &&
+        needs.sdist.result == 'success' &&
+        (
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.scope == 'x86' &&
+            needs.musllinux.result == 'skipped' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            github.event_name == 'workflow_dispatch' &&
+            github.event.inputs.scope == 'linux' &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'skipped' &&
+            needs.windows.result == 'skipped'
+          ) ||
+          (
+            (github.event_name != 'workflow_dispatch' || github.event.inputs.scope == 'full') &&
+            needs.musllinux.result == 'success' &&
+            needs.macos.result == 'success' &&
+            needs.windows.result == 'success'
+          )
+        )
+      }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/setup-python@v5
