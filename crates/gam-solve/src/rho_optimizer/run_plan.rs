@@ -103,17 +103,30 @@ fn retain_best_outer_checkpoint(slot: &mut Option<OuterResult>, candidate: Outer
     }
 }
 
+/// One finite-difference probe: the criterion value, and its atom breakdown
+/// where the evaluator publishes one.
+///
+/// `decompose` carries the verdict reached at the analytic seed. Once an
+/// evaluator has shown it decomposes, every probe of the same objective must
+/// decompose too, and a probe that stops publishing is a defect rather than a
+/// route difference — so the demand is unchanged there. Where the seed showed
+/// the criterion is not assembled from atoms (#2460), the probe supplies the
+/// value alone and the atom stencils are not formed.
 fn evaluate_fd_cost_with_criterion_components(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
     context: &str,
     inner_seed: &Array1<f64>,
     theta: &Array1<f64>,
-) -> Result<(f64, [f64; 4], Array1<f64>), EstimationError> {
+    decompose: bool,
+) -> Result<(f64, Option<([f64; 4], Array1<f64>)>), EstimationError> {
     obj.reset();
     install_matching_initial_inner_seed(obj, config, inner_seed, context)?;
     crate::estimate::outer_eval_capture::begin_outer_criterion_component_capture();
     let cost = obj.eval_cost(theta)?;
+    if !decompose {
+        return Ok((cost, None));
+    }
     let (component_cost, components) =
         crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
             EstimationError::InvalidInput(
@@ -132,7 +145,7 @@ fn evaluate_fd_cost_with_criterion_components(
                 "outer-gradient FD capture received no selected coefficient mode".to_string(),
             )
         })?;
-    Ok((cost, components, beta))
+    Ok((cost, Some((components, beta))))
 }
 
 fn capture_outer_gradient_fd_at_seed(
@@ -177,62 +190,97 @@ fn capture_outer_gradient_fd_at_seed(
     let analytic_psi_gradient =
         Array1::from_iter((0..psi_dim).map(|psi_j| analytic.gradient[rho_dim + psi_j]));
     let components = crate::estimate::outer_eval_capture::take_outer_gradient_components();
-    if components.len() != psi_dim {
-        return Err(EstimationError::InvalidInput(format!(
-            "outer-gradient FD capture received {} ψ component rows, expected {psi_dim}",
-            components.len()
-        )));
-    }
-    let fixed_beta_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.0));
-    let logdet_h_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.1));
-    let frozen_logdet_h_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.2));
-    let mode_response_logdet_h_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.3));
-    let logdet_s_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.4));
-    let kkt_psi_gradient =
-        Array1::from_iter(components.iter().map(|component| component.5));
-    let (analytic_component_cost, analytic_cost_components) =
-        crate::estimate::outer_eval_capture::take_outer_criterion_components().ok_or_else(|| {
-            EstimationError::InvalidInput(
-                "outer-gradient FD capture received no analytic scalar criterion components"
-                    .to_string(),
-            )
-        })?;
-    if analytic_component_cost.to_bits() != analytic.cost.to_bits() {
-        return Err(EstimationError::InvalidInput(format!(
-            "outer-gradient FD analytic scalar-component cost mismatch: objective={:.17e} \
-             components={analytic_component_cost:.17e}",
-            analytic.cost
-        )));
-    }
-    let (analytic_beta, analytic_ext_mode_response_cols) =
-        crate::estimate::outer_eval_capture::take_outer_selected_mode().ok_or_else(|| {
-            EstimationError::InvalidInput(
-                "outer-gradient FD capture received no analytic selected coefficient mode"
-                    .to_string(),
-            )
-        })?;
-    let analytic_ext_mode_response_cols =
-        analytic_ext_mode_response_cols.ok_or_else(|| {
+    let mut criterion_components =
+        crate::estimate::outer_eval_capture::take_outer_criterion_components();
+    let mut selected_mode = crate::estimate::outer_eval_capture::take_outer_selected_mode();
+    // #2460: does this objective's criterion decompose into REML atoms at all?
+    //
+    // The three publications are one fact, so the question has only two honest
+    // answers. All three present is a decomposing evaluator; NONE present is a
+    // route that computes its criterion directly — the constant-curvature fair
+    // profile returns `(value, derivative)` in closed form and never reaches a
+    // REML assembly, so it has no atoms, no scalar components, and no selected
+    // coefficient mode to difference.
+    //
+    // Anything in between is an evaluator that MEANS to decompose and stopped
+    // partway, which is a defect and must not be laundered into a decline. It
+    // falls through to the same demands as before, and fails naming the half
+    // that went missing.
+    let decompose =
+        !components.is_empty() || criterion_components.is_some() || selected_mode.is_some();
+    let zeros = || Array1::<f64>::zeros(psi_dim);
+    let (
+        fixed_beta_psi_gradient,
+        logdet_h_psi_gradient,
+        frozen_logdet_h_psi_gradient,
+        mode_response_logdet_h_psi_gradient,
+        logdet_s_psi_gradient,
+        kkt_psi_gradient,
+    ) = if decompose {
+        if components.len() != psi_dim {
+            return Err(EstimationError::InvalidInput(format!(
+                "outer-gradient FD capture received {} ψ component rows, expected {psi_dim}",
+                components.len()
+            )));
+        }
+        (
+            Array1::from_iter(components.iter().map(|component| component.0)),
+            Array1::from_iter(components.iter().map(|component| component.1)),
+            Array1::from_iter(components.iter().map(|component| component.2)),
+            Array1::from_iter(components.iter().map(|component| component.3)),
+            Array1::from_iter(components.iter().map(|component| component.4)),
+            Array1::from_iter(components.iter().map(|component| component.5)),
+        )
+    } else {
+        (zeros(), zeros(), zeros(), zeros(), zeros(), zeros())
+    };
+    let analytic_cost_components: [f64; 4] = if decompose {
+        let (analytic_component_cost, analytic_cost_components) =
+            criterion_components.take().ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "outer-gradient FD capture received no analytic scalar criterion components"
+                        .to_string(),
+                )
+            })?;
+        if analytic_component_cost.to_bits() != analytic.cost.to_bits() {
+            return Err(EstimationError::InvalidInput(format!(
+                "outer-gradient FD analytic scalar-component cost mismatch: objective={:.17e} \
+                 components={analytic_component_cost:.17e}",
+                analytic.cost
+            )));
+        }
+        analytic_cost_components
+    } else {
+        [0.0; 4]
+    };
+    let (analytic_beta, analytic_ext_mode_response_cols) = if decompose {
+        let (analytic_beta, analytic_ext_mode_response_cols) =
+            selected_mode.take().ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "outer-gradient FD capture received no analytic selected coefficient mode"
+                        .to_string(),
+                )
+            })?;
+        let analytic_ext_mode_response_cols = analytic_ext_mode_response_cols.ok_or_else(|| {
             EstimationError::InvalidInput(
                 "outer-gradient FD capture received no analytic extended-coordinate mode responses"
                     .to_string(),
             )
         })?;
-    if analytic_ext_mode_response_cols.nrows() != analytic_beta.len()
-        || analytic_ext_mode_response_cols.ncols() != psi_dim
-    {
-        return Err(EstimationError::InvalidInput(format!(
-            "outer-gradient FD mode-response layout mismatch: beta_dim={} response_shape={}x{} psi_dim={psi_dim}",
-            analytic_beta.len(),
-            analytic_ext_mode_response_cols.nrows(),
-            analytic_ext_mode_response_cols.ncols(),
-        )));
-    }
+        if analytic_ext_mode_response_cols.nrows() != analytic_beta.len()
+            || analytic_ext_mode_response_cols.ncols() != psi_dim
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "outer-gradient FD mode-response layout mismatch: beta_dim={} response_shape={}x{} psi_dim={psi_dim}",
+                analytic_beta.len(),
+                analytic_ext_mode_response_cols.nrows(),
+                analytic_ext_mode_response_cols.ncols(),
+            )));
+        }
+        (analytic_beta, Some(analytic_ext_mode_response_cols))
+    } else {
+        (Array1::<f64>::zeros(0), None)
+    };
     let mut finite_difference_psi_gradient = Array1::<f64>::zeros(psi_dim);
     let mut finite_difference_component_psi_gradients: [Array1<f64>; 4] =
         std::array::from_fn(|_| Array1::<f64>::zeros(psi_dim));
@@ -247,6 +295,13 @@ fn capture_outer_gradient_fd_at_seed(
         |psi_j: usize,
          finite_difference_beta_dot: &Array1<f64>|
          -> Result<(), EstimationError> {
+            // Only a decomposing evaluator publishes response columns; without
+            // them there is no analytic mode response to compare against, and
+            // the caller never forms a `beta_dot` to pass here (#2460).
+            let Some(analytic_ext_mode_response_cols) = analytic_ext_mode_response_cols.as_ref()
+            else {
+                return Ok(());
+            };
             if finite_difference_beta_dot.len() != analytic_beta.len() {
                 return Err(EstimationError::InvalidInput(format!(
                     "outer-gradient FD coefficient-response length mismatch: analytic={} finite_difference={}",
@@ -323,8 +378,10 @@ fn capture_outer_gradient_fd_at_seed(
             }
             let mut theta = seed.clone();
             theta[j] += offset;
-            match evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &theta) {
-                Ok((cost, _, _)) => cost,
+            match evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &theta, decompose,
+            ) {
+                Ok((cost, _)) => cost,
                 Err(error) => {
                     *fd_error = Some(error);
                     f64::NAN
@@ -356,24 +413,29 @@ fn capture_outer_gradient_fd_at_seed(
             let mut minus = seed.clone();
             plus[j] += step;
             minus[j] -= step;
-            let (_cost_plus, components_plus, beta_plus) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &plus)?;
-            let (_cost_minus, components_minus, beta_minus) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &minus)?;
+            let (_cost_plus, parts_plus) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &plus, decompose,
+            )?;
+            let (_cost_minus, parts_minus) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &minus, decompose,
+            )?;
             finite_difference_psi_gradient[psi_j] = measured.value;
             psi_fd_uncertainty[psi_j] = measured.uncertainty;
             psi_fd_orders[psi_j] = measured.order;
-            for atom in 0..4 {
-                finite_difference_component_psi_gradients[atom][psi_j] =
-                    (components_plus[atom] - components_minus[atom]) / (2.0 * step);
+            if let (Some((components_plus, beta_plus)), Some((components_minus, beta_minus))) =
+                (parts_plus, parts_minus)
+            {
+                for atom in 0..4 {
+                    finite_difference_component_psi_gradients[atom][psi_j] =
+                        (components_plus[atom] - components_minus[atom]) / (2.0 * step);
+                }
+                let beta_dot = Array1::from_iter(
+                    beta_plus.iter().zip(beta_minus.iter()).map(
+                        |(&plus_value, &minus_value)| (plus_value - minus_value) / (2.0 * step),
+                    ),
+                );
+                record_mode_response(psi_j, &beta_dot)?;
             }
-            let beta_dot = Array1::from_iter(
-                beta_plus
-                    .iter()
-                    .zip(beta_minus.iter())
-                    .map(|(&plus_value, &minus_value)| (plus_value - minus_value) / (2.0 * step)),
-            );
-            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else if right_room >= left_room && right_room > 0.0 {
             // Pinned against the LOWER face: only the forward three-point rule
@@ -404,29 +466,35 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] += step;
             two[j] += 2.0 * step;
-            let (_cost_one, components_one, beta_one) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (_cost_two, components_two, beta_two) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
+            let (_cost_one, parts_one) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &one, decompose,
+            )?;
+            let (_cost_two, parts_two) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &two, decompose,
+            )?;
             finite_difference_psi_gradient[psi_j] = measured.value;
             psi_fd_uncertainty[psi_j] = measured.uncertainty;
             psi_fd_orders[psi_j] = measured.order;
-            for atom in 0..4 {
-                finite_difference_component_psi_gradients[atom][psi_j] =
-                    (-3.0 * analytic_cost_components[atom] + 4.0 * components_one[atom]
-                        - components_two[atom])
-                        / (2.0 * step);
+            if let (Some((components_one, beta_one)), Some((components_two, beta_two))) =
+                (parts_one, parts_two)
+            {
+                for atom in 0..4 {
+                    finite_difference_component_psi_gradients[atom][psi_j] =
+                        (-3.0 * analytic_cost_components[atom] + 4.0 * components_one[atom]
+                            - components_two[atom])
+                            / (2.0 * step);
+                }
+                let beta_dot = Array1::from_iter(
+                    analytic_beta
+                        .iter()
+                        .zip(beta_one.iter())
+                        .zip(beta_two.iter())
+                        .map(|((&base_value, &one_value), &two_value)| {
+                            (-3.0 * base_value + 4.0 * one_value - two_value) / (2.0 * step)
+                        }),
+                );
+                record_mode_response(psi_j, &beta_dot)?;
             }
-            let beta_dot = Array1::from_iter(
-                analytic_beta
-                    .iter()
-                    .zip(beta_one.iter())
-                    .zip(beta_two.iter())
-                    .map(|((&base_value, &one_value), &two_value)| {
-                        (-3.0 * base_value + 4.0 * one_value - two_value) / (2.0 * step)
-                    }),
-            );
-            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else if left_room > 0.0 {
             // Pinned against the UPPER face: the backward three-point mirror of
@@ -455,29 +523,35 @@ fn capture_outer_gradient_fd_at_seed(
             let mut two = seed.clone();
             one[j] -= step;
             two[j] -= 2.0 * step;
-            let (_cost_one, components_one, beta_one) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (_cost_two, components_two, beta_two) =
-                evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
+            let (_cost_one, parts_one) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &one, decompose,
+            )?;
+            let (_cost_two, parts_two) = evaluate_fd_cost_with_criterion_components(
+                obj, config, context, seed, &two, decompose,
+            )?;
             finite_difference_psi_gradient[psi_j] = measured.value;
             psi_fd_uncertainty[psi_j] = measured.uncertainty;
             psi_fd_orders[psi_j] = measured.order;
-            for atom in 0..4 {
-                finite_difference_component_psi_gradients[atom][psi_j] =
-                    (3.0 * analytic_cost_components[atom] - 4.0 * components_one[atom]
-                        + components_two[atom])
-                        / (2.0 * step);
+            if let (Some((components_one, beta_one)), Some((components_two, beta_two))) =
+                (parts_one, parts_two)
+            {
+                for atom in 0..4 {
+                    finite_difference_component_psi_gradients[atom][psi_j] =
+                        (3.0 * analytic_cost_components[atom] - 4.0 * components_one[atom]
+                            + components_two[atom])
+                            / (2.0 * step);
+                }
+                let beta_dot = Array1::from_iter(
+                    analytic_beta
+                        .iter()
+                        .zip(beta_one.iter())
+                        .zip(beta_two.iter())
+                        .map(|((&base_value, &one_value), &two_value)| {
+                            (3.0 * base_value - 4.0 * one_value + two_value) / (2.0 * step)
+                        }),
+                );
+                record_mode_response(psi_j, &beta_dot)?;
             }
-            let beta_dot = Array1::from_iter(
-                analytic_beta
-                    .iter()
-                    .zip(beta_one.iter())
-                    .zip(beta_two.iter())
-                    .map(|((&base_value, &one_value), &two_value)| {
-                        (3.0 * base_value - 4.0 * one_value + two_value) / (2.0 * step)
-                    }),
-            );
-            record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else {
             return Err(EstimationError::InvalidInput(format!(
@@ -497,24 +571,39 @@ fn capture_outer_gradient_fd_at_seed(
             psi_steps,
             psi_fd_uncertainty,
             psi_fd_orders,
-            fixed_beta_psi_gradient,
-            logdet_h_psi_gradient,
-            frozen_logdet_h_psi_gradient,
-            mode_response_logdet_h_psi_gradient,
-            analytic_mode_response_norm,
-            finite_difference_mode_response_norm,
-            mode_response_relative_error,
-            mode_response_max_abs_error,
-            logdet_s_psi_gradient,
-            kkt_psi_gradient,
-            finite_difference_fixed_beta_psi_gradient:
-                finite_difference_component_psi_gradients[0].clone(),
-            finite_difference_logdet_h_psi_gradient:
-                finite_difference_component_psi_gradients[1].clone(),
-            finite_difference_logdet_s_psi_gradient:
-                finite_difference_component_psi_gradients[2].clone(),
-            finite_difference_kkt_psi_gradient:
-                finite_difference_component_psi_gradients[3].clone(),
+            decomposition: if decompose {
+                crate::estimate::OuterGradientFdDecomposition::Decomposed(Box::new(
+                    crate::estimate::OuterGradientFdAtoms {
+                        fixed_beta_psi_gradient,
+                        logdet_h_psi_gradient,
+                        frozen_logdet_h_psi_gradient,
+                        mode_response_logdet_h_psi_gradient,
+                        analytic_mode_response_norm,
+                        finite_difference_mode_response_norm,
+                        mode_response_relative_error,
+                        mode_response_max_abs_error,
+                        logdet_s_psi_gradient,
+                        kkt_psi_gradient,
+                        finite_difference_fixed_beta_psi_gradient:
+                            finite_difference_component_psi_gradients[0].clone(),
+                        finite_difference_logdet_h_psi_gradient:
+                            finite_difference_component_psi_gradients[1].clone(),
+                        finite_difference_logdet_s_psi_gradient:
+                            finite_difference_component_psi_gradients[2].clone(),
+                        finite_difference_kkt_psi_gradient:
+                            finite_difference_component_psi_gradients[3].clone(),
+                    },
+                ))
+            } else {
+                crate::estimate::OuterGradientFdDecomposition::NotDecomposed {
+                    reason: format!(
+                        "{context}: this outer objective published no ψ gradient atoms, no scalar \
+                         criterion components and no selected coefficient mode, so its criterion \
+                         is not assembled from REML atoms; the ψ gradient and its \
+                         Ridders-certified finite difference above are the whole audit"
+                    ),
+                }
+            },
         },
     );
     Ok(())

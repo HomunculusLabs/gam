@@ -55,6 +55,60 @@ pub struct OuterGradientFdRecord {
     /// component says nothing about the analytic gradient.
     pub psi_fd_uncertainty: Array1<f64>,
     pub psi_fd_orders: Vec<usize>,
+    /// The per-atom breakdown of the same comparison, when the objective's
+    /// criterion is assembled from atoms at all.
+    pub decomposition: OuterGradientFdDecomposition,
+}
+
+/// Whether the audited criterion decomposes into REML atoms, and the evidence
+/// either way (#2460).
+///
+/// The comparison above — one analytic ψ gradient against one Ridders-certified
+/// finite difference of the same objective — is available from any outer
+/// objective that declares a ψ block, because it needs only `eval_cost` and
+/// `eval_with_order`. The breakdown below is not: it exists where the criterion
+/// is `fixed-β likelihood + ½log|H| − ½log|S|₊ + KKT residual` and the evaluator
+/// publishes those atoms as it assembles them.
+///
+/// Routes that evaluate a criterion directly — the constant-curvature fair
+/// profile computes its value and derivative in closed form and never enters a
+/// REML assembly — have no atoms to publish and no selected coefficient mode to
+/// difference. Making the breakdown a PRECONDITION of the measurement is what
+/// left those routes with no audit at all, which is the wrong way round: a
+/// hand-derived derivative on a bespoke profile is the one that most wants
+/// checking.
+#[derive(Clone, Debug)]
+pub enum OuterGradientFdDecomposition {
+    /// The evaluator published every atom, and each is differenced at the step
+    /// the Ridders ladder accepted for the total.
+    Decomposed(Box<OuterGradientFdAtoms>),
+    /// The evaluator published no atoms, no scalar criterion components and no
+    /// selected coefficient mode. `reason` names the objective so a consumer
+    /// reports which route it got rather than an empty array.
+    ///
+    /// A PARTIAL publication is never reported here — it is a defect in an
+    /// evaluator that means to decompose, and the capture still fails loudly.
+    NotDecomposed { reason: String },
+}
+
+impl OuterGradientFdDecomposition {
+    /// The atoms, or `None` where the criterion does not decompose.
+    pub fn atoms(&self) -> Option<&OuterGradientFdAtoms> {
+        match self {
+            Self::Decomposed(atoms) => Some(atoms),
+            Self::NotDecomposed { .. } => None,
+        }
+    }
+}
+
+/// Per-atom analytic-vs-finite-difference evidence, in ψ-local order.
+///
+/// This is what localizes a total mismatch to a term: the survival marginal-slope
+/// gate reads it to separate an agreeing fixed-β atom from a disagreeing
+/// moving-Hessian chain, which is a different bug report from "the gradient is
+/// wrong".
+#[derive(Clone, Debug)]
+pub struct OuterGradientFdAtoms {
     pub fixed_beta_psi_gradient: Array1<f64>,
     pub logdet_h_psi_gradient: Array1<f64>,
     pub frozen_logdet_h_psi_gradient: Array1<f64>,

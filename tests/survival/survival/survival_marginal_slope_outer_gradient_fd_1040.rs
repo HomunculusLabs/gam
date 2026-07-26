@@ -186,41 +186,53 @@ fn run_basis(basis_term: &str) {
         audit.rho_dim, audit.psi_dim, worst.0, worst.1, worst.2, worst.3
     );
 
+    // This gate's whole value is the ATOM breakdown — it is what separated an
+    // agreeing fixed-β term from a disagreeing moving-Hessian chain, which is a
+    // different bug report from "the gradient is wrong". A survival marginal
+    // slope is assembled by the REML evaluator, so a missing breakdown here is
+    // a regression in the audit, not a route that has no atoms (#2460).
+    let atoms = audit.decomposition.atoms().unwrap_or_else(|| {
+        panic!(
+            "the survival marginal-slope criterion IS a REML assembly, so its audit must carry \
+             the atom breakdown; got: {:?}",
+            audit.decomposition
+        )
+    });
     for j in 0..audit.psi_dim {
         eprintln!(
             "[FD-DIAG] psi_i={j} analytic atoms: fixed_beta={:+.6e} \
              logdet_h={:+.6e} (frozen={:+.6e} mode_response={:+.6e}) \
              logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
-            audit.fixed_beta_psi_gradient[j],
-            audit.logdet_h_psi_gradient[j],
-            audit.frozen_logdet_h_psi_gradient[j],
-            audit.mode_response_logdet_h_psi_gradient[j],
-            audit.logdet_s_psi_gradient[j],
-            audit.kkt_psi_gradient[j],
-            audit.fixed_beta_psi_gradient[j]
-                + audit.logdet_h_psi_gradient[j]
-                + audit.logdet_s_psi_gradient[j]
-                + audit.kkt_psi_gradient[j],
+            atoms.fixed_beta_psi_gradient[j],
+            atoms.logdet_h_psi_gradient[j],
+            atoms.frozen_logdet_h_psi_gradient[j],
+            atoms.mode_response_logdet_h_psi_gradient[j],
+            atoms.logdet_s_psi_gradient[j],
+            atoms.kkt_psi_gradient[j],
+            atoms.fixed_beta_psi_gradient[j]
+                + atoms.logdet_h_psi_gradient[j]
+                + atoms.logdet_s_psi_gradient[j]
+                + atoms.kkt_psi_gradient[j],
         );
         eprintln!(
             "[FD-DIAG] psi_i={j} scalar-FD atoms: fixed_beta={:+.6e} \
              logdet_h={:+.6e} logdet_s={:+.6e} kkt={:+.6e} sum={:+.6e}",
-            audit.finite_difference_fixed_beta_psi_gradient[j],
-            audit.finite_difference_logdet_h_psi_gradient[j],
-            audit.finite_difference_logdet_s_psi_gradient[j],
-            audit.finite_difference_kkt_psi_gradient[j],
-            audit.finite_difference_fixed_beta_psi_gradient[j]
-                + audit.finite_difference_logdet_h_psi_gradient[j]
-                + audit.finite_difference_logdet_s_psi_gradient[j]
-                + audit.finite_difference_kkt_psi_gradient[j],
+            atoms.finite_difference_fixed_beta_psi_gradient[j],
+            atoms.finite_difference_logdet_h_psi_gradient[j],
+            atoms.finite_difference_logdet_s_psi_gradient[j],
+            atoms.finite_difference_kkt_psi_gradient[j],
+            atoms.finite_difference_fixed_beta_psi_gradient[j]
+                + atoms.finite_difference_logdet_h_psi_gradient[j]
+                + atoms.finite_difference_logdet_s_psi_gradient[j]
+                + atoms.finite_difference_kkt_psi_gradient[j],
         );
         eprintln!(
             "[FD-DIAG] psi_i={j} coefficient response: analytic_norm={:.6e} \
              fd_norm={:.6e} relative_error={:.3e} max_abs_error={:.3e}",
-            audit.analytic_mode_response_norm[j],
-            audit.finite_difference_mode_response_norm[j],
-            audit.mode_response_relative_error[j],
-            audit.mode_response_max_abs_error[j],
+            atoms.analytic_mode_response_norm[j],
+            atoms.finite_difference_mode_response_norm[j],
+            atoms.mode_response_relative_error[j],
+            atoms.mode_response_max_abs_error[j],
         );
     }
 

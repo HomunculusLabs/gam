@@ -129,6 +129,21 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
         audit.psi_dim >= 1,
         "constant-curvature smooth must enroll kappa as a psi coordinate"
     );
+    // κ here is selected by `constant_curvature_kappa_fair_optimum`, which
+    // computes the curvature-fair evidence and its derivative in closed form
+    // and never enters a REML assembly — so it publishes no atoms, and the
+    // audit says so by name instead of failing (#2460). Surfaced rather than
+    // asserted: what this gate grades is the hand-derived derivative below, and
+    // the day that route acquires an atom breakdown is not the day this gate
+    // should go red.
+    match &audit.decomposition {
+        gam::estimate::OuterGradientFdDecomposition::Decomposed(_) => {
+            eprintln!("[FD-DIAG] constant-curvature audit carries an atom breakdown")
+        }
+        gam::estimate::OuterGradientFdDecomposition::NotDecomposed { reason } => {
+            eprintln!("[FD-DIAG] constant-curvature audit is top-line only: {reason}")
+        }
+    }
     for j in 0..audit.psi_dim {
         let analytic = audit.analytic_psi_gradient[j];
         let fd = audit.finite_difference_psi_gradient[j];
@@ -140,23 +155,14 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
         let scale = analytic.abs().max(fd.abs()).max(1e-6);
         // Still 5e-2, deliberately, unlike the two Matern siblings.
         //
-        // The audit now Ridders-extrapolates and reports `psi_fd_uncertainty`
+        // The audit Ridders-extrapolates and reports `psi_fd_uncertainty`
         // (#2461), which is what let `matern_2d_iso_kappa_outer_gradient_
         // matches_fd` and its anisotropic sibling come down to 5e-3 and add an
-        // oracle-resolution assertion. This gate cannot follow them yet,
-        // because it does not RUN: measured at this commit it dies upstream of
-        // every tolerance with
-        //
-        //     outer-gradient FD capture received 0 psi component rows, expected 1
-        //
-        // `record_outer_gradient_component` fires from the ext-coordinate
-        // gradient loop in `reml_outer_engine::objective`, and the
-        // ConstantCurvature psi coordinate (#944 stage 3, whose psi is the raw
-        // curvature rather than log-kappa) never reaches it. That is a third
-        // missing audit emitter, distinct from the selected-mode one this run
-        // supplied, and it belongs to #2460. Tightening a number in a test that
-        // cannot reach it would be a claim with no measurement behind it, so
-        // the number stays and the uncertainty is merely reported.
+        // oracle-resolution assertion. Until this gate has RUN and reported an
+        // uncertainty on this route, following them would be a claim with no
+        // measurement behind it, so the number stays and the uncertainty is
+        // merely reported. Tighten it from the first green run's numbers, not
+        // from the siblings'.
         assert!(
             gap / scale < 5e-2,
             "kappa outer-gradient analytic!=FD on coordinate {j}: \
