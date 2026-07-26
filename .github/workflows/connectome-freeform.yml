@@ -203,8 +203,19 @@ jobs:
         run: |
           set -uo pipefail
           [ -d "$DATA_DIR" ] || { echo "no data dir; nothing to save"; exit 0; }
-          # Never persist the live IPC socket or transient logs.
+
+          # Persist MEMORY, not process residue. Three classes get pruned:
+          #   ipc.sock  — a live socket, meaningless once the run ends.
+          #   LOCK      — a store mutex held by a process that no longer
+          #               exists; restoring it risks a stale lock blocking
+          #               the next run's open.
+          #   *.log / llm-calls*.jsonl — per-run logs. The llm-calls file is
+          #               ~126 KB and its name carries a timestamp, so every
+          #               run would add a NEW blob git cannot dedupe: ~6 MB a
+          #               day at a 30-minute cadence, unbounded. The run log
+          #               in Actions already holds this.
           rm -f "$DATA_DIR/ipc.sock"
+          find "$DATA_DIR" \( -name 'LOCK' -o -name '*.log' -o -name 'llm-calls*.jsonl' \) -type f -delete 2>/dev/null || true
           size=$(du -sm "$DATA_DIR" | cut -f1)
           echo "store size: ${size} MB, $(find "$DATA_DIR" -type f | wc -l) files"
           if [ "$size" -gt 1024 ]; then
