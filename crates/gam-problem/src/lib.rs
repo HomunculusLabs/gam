@@ -92,6 +92,7 @@ pub use estimation_error::{
     FixedLambdaStallReason, FixedLambdaStationarityEvidence, StationarityRung,
     StationarityStandard,
 };
+pub use estimation_error::FitStationarityEvidence;
 pub use execution_path::ExecutionPath;
 pub use family_options::{ExactNewtonOuterObjective, ExactOuterDerivativeOrder};
 pub use finite_validation::{

@@ -8,7 +8,8 @@ use gam_linalg::utils::stack_offsets;
 use gam_problem::{
     GlmLikelihoodSpec, InverseLink, LatentCLogLogState, LikelihoodScaleMetadata, LikelihoodSpec,
     LogLikelihoodNormalization, MixtureLinkSpec, MixtureLinkState, ResponseFamily, SasLinkSpec,
-    SasLinkState, StabilizationLedger, StandardLink, StationarityRung,
+    FitStationarityEvidence, SasLinkState, StabilizationLedger, StandardLink,
+    StationarityRung,
 };
 
 pub use gam_problem::ExecutionPath;
@@ -2009,12 +2010,22 @@ impl FitConvergenceEvidence {
             outer_status,
             outer_iterations: parts.outer_iterations,
             final_value: parts.reml_score,
-            stationarity_residual: certificate
-                .map(|value| value.stationarity.projected_norm())
-                .or(parts.outer_gradient_norm),
-            stationarity_bound: certificate.map(|value| value.stationarity.bound()),
-            step_residual: None,
-            step_bound: None,
+            // Both halves from the SAME certificate or neither. The residual
+            // used to fall back to `parts.outer_gradient_norm` while the bound
+            // had no fallback, so a run with no certificate reported a residual
+            // against nothing -- `Some(0.0) against None`, recorded on #2471.
+            // A norm of different provenance is not a degraded version of the
+            // certified residual; it is a different quantity.
+            stationarity: certificate.map_or(
+                FitStationarityEvidence::NoComparison,
+                |value| FitStationarityEvidence::Certified {
+                    residual: value.stationarity.projected_norm(),
+                    bound: value.stationarity.bound(),
+                },
+            ),
+            // The solver exports no accepted-step residual on this path, so
+            // there is no step comparison to report either.
+            step: FitStationarityEvidence::NoComparison,
             rho_checkpoint: parts.log_lambdas.to_vec(),
             resume_token: None,
         }

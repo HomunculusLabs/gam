@@ -127,6 +127,42 @@ impl std::fmt::Display for StationarityStandard {
     }
 }
 
+/// What an assembly-time convergence gate weighed (#2427/#2530).
+///
+/// A residual and the bound it was weighed against are one fact, not two. They
+/// used to be two independent `Option<f64>` fields filled from DIFFERENT
+/// sources with asymmetric fallbacks: the residual fell back to the exported
+/// outer gradient norm when no certificate existed, the bound had no fallback.
+/// A run with no certificate therefore rendered `stationarity residual
+/// Some(0.0) against None` -- a residual weighed against nothing, printed as
+/// though a comparison had happened, and recorded verbatim on #2471.
+///
+/// [`EstimationError::RemlDidNotConverge`] already forbids that shape one
+/// variant up. This is the same repair here, and it REMOVES the fallback
+/// rather than symmetrising it: if no certificate was assembled then no
+/// first-order comparison was made, and substituting a norm of different
+/// provenance is an absent measurement scored as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum FitStationarityEvidence {
+    /// A residual measured at the rejected point, weighed against `bound`.
+    /// Both come from the SAME certificate, so they are one comparison.
+    Certified { residual: f64, bound: f64 },
+    /// No comparison was made: there was no certificate to take a residual and
+    /// a bound from. The refusal's status strings carry the basis.
+    NoComparison,
+}
+
+impl std::fmt::Display for FitStationarityEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Certified { residual, bound } => {
+                write!(f, "residual {residual:.3e} against bound {bound:.3e}")
+            }
+            Self::NoComparison => f.write_str("not compared: no certificate was assembled"),
+        }
+    }
+}
+
 /// Fixed-lambda solver stage that owns a resumable coefficient checkpoint.
 ///
 /// The multinomial fitter has two distinct objectives: the ordinary softmax
@@ -574,9 +610,8 @@ pub enum EstimationError {
     #[error(
         "Fit assembly rejected a non-converged optimization state: inner status \
          {inner_status}, outer status {outer_status}, after {outer_iterations} outer \
-         iteration(s); final objective {final_value:.6e}; stationarity residual \
-         {stationarity_residual:?} against {stationarity_bound:?}, step residual \
-         {step_residual:?} against {step_bound:?}. The best rho checkpoint is \
+         iteration(s); final objective {final_value:.6e}; stationarity {stationarity}, \
+         step {step}. The best rho checkpoint is \
          {rho_checkpoint:?} and the resume token is {resume_token:?}; no fitted-model \
          API was constructed."
     )]
@@ -591,15 +626,14 @@ pub enum EstimationError {
         outer_iterations: usize,
         /// Objective value at the best available checkpoint.
         final_value: f64,
-        /// Exact analytic first-order gradient or root-equivalent fixed-point
-        /// residual, when it was measured.
-        stationarity_residual: Option<f64>,
-        /// Bound the first-order residual had to clear.
-        stationarity_bound: Option<f64>,
-        /// Final accepted-step residual, when the solver exported it.
-        step_residual: Option<f64>,
-        /// Bound the step residual had to clear.
-        step_bound: Option<f64>,
+        /// The first-order residual together with the bound it was weighed
+        /// against, or an explicit statement that no comparison was made.
+        stationarity: FitStationarityEvidence,
+        /// The accepted-step residual and its bound, same rule. Currently
+        /// always `NoComparison` at the sole production site -- which is what
+        /// the type should say, rather than leaving two independent `Option`s
+        /// armed with the identical hazard for whoever wires them up.
+        step: FitStationarityEvidence,
         /// Work-preserving smoothing checkpoint; this is not a fit.
         rho_checkpoint: Vec<f64>,
         /// Opaque durable-cache resume token, when checkpoint persistence was
