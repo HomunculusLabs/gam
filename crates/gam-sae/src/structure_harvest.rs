@@ -3169,6 +3169,58 @@ fn torus_metric_penalty_and_coordinate_derivative(
     }
 }
 
+/// `|dA/d(coordinate)|` — the magnitude of the chain factor each family's
+/// optimized coordinate carries into the reported gradient.
+///
+/// The reported stationarity residual is `dS/d(coordinate) = (dS/dA)·(dA/d(coordinate))`,
+/// and that factor is not close to constant: it runs over 23 orders across the
+/// flat family's domain `[ε, 1]` and 19 across the donut's. An absolute
+/// convergence tolerance calibrated from the residual at the domain ENDS is
+/// therefore unreachable wherever the factor is larger than it is there, which
+/// is what exhausted the refinement on #2554 — the solve was sitting on
+/// `dS/dA = −1.0e-6`, an excellent answer, and could not say so because the
+/// factor at that point was `5.87e5` and inflated it to `+0.588` against a
+/// tolerance of `5.1e-7`.
+///
+/// Dividing the residual by this magnitude measures stationarity against the
+/// aspect ratio, which is what the penalty is actually built from, and leaves
+/// the bracket, the bisection and the returned coordinate untouched. Taking the
+/// MAGNITUDE rather than the signed factor keeps the residual's sign exactly as
+/// it is today — both families' factors are strictly negative on their open
+/// domains, so the sign structure the bracket certificate rests on is preserved
+/// rather than flipped.
+fn torus_metric_aspect_derivative_magnitude(
+    family: TorusMetricFamily,
+    coordinate: f64,
+) -> Result<f64, String> {
+    let derivative = match family {
+        TorusMetricFamily::Flat => {
+            if !(coordinate.is_finite() && coordinate > 0.0 && coordinate <= 1.0) {
+                return Err(format!(
+                    "flat torus inverse-aspect-squared coordinate must lie in (0, 1], got {coordinate}"
+                ));
+            }
+            -0.5 * coordinate.powf(-1.5)
+        }
+        TorusMetricFamily::EmbeddedDonut => {
+            if !(coordinate.is_finite() && coordinate > 0.0 && coordinate < 1.0) {
+                return Err(format!(
+                    "embedded donut beta coordinate must lie in (0, 1), got {coordinate}"
+                ));
+            }
+            0.5 * (1.0 - coordinate.recip().powi(2))
+        }
+    };
+    let magnitude = derivative.abs();
+    if !(magnitude.is_finite() && magnitude > 0.0) {
+        return Err(format!(
+            "{family:?} torus aspect derivative at {coordinate} is {derivative}, which cannot \
+             rescale a stationarity residual"
+        ));
+    }
+    Ok(magnitude)
+}
+
 fn evaluate_torus_metric_profile(
     phi: ArrayView2<'_, f64>,
     target: ArrayView2<'_, f64>,
@@ -3262,20 +3314,48 @@ fn optimize_torus_metric_coordinate(
             }
         }
         (false, false) => {
+            // Refine on stationarity measured against the ASPECT RATIO rather
+            // than against the optimized coordinate. The two differ only by the
+            // chain factor `dA/d(coordinate)`, which is strictly signed and so
+            // moves no root and no sign — but its MAGNITUDE spans 23 orders
+            // across this domain, and an absolute tolerance taken from the
+            // residual at the domain ends is unreachable wherever the factor is
+            // larger than it is there. That is what exhausted this refinement on
+            // #2554 rather than any ill-posedness in the problem (#2455's genus:
+            // the criterion measures a quantity that does not shrink the way it
+            // assumes).
+            //
+            // Dividing by the magnitude leaves the sign structure identical to
+            // the coordinate residual, so the negative-to-positive bracket
+            // certificate established above carries over unchanged.
+            let aspect_residual = |candidate: f64, coordinate_gradient: f64| {
+                torus_metric_aspect_derivative_magnitude(family, candidate)
+                    .map(|magnitude| coordinate_gradient / magnitude)
+                    .map_err(ObjectiveEvalError::fatal)
+            };
+            let lower_aspect = aspect_residual(lower, lower_gradient)
+                .map_err(|error| format!("{family:?} torus lower-endpoint aspect residual: {error}"))?;
+            let upper_aspect = aspect_residual(upper, upper_gradient)
+                .map_err(|error| format!("{family:?} torus upper-endpoint aspect residual: {error}"))?;
+            // The tolerance follows the residual into its new scale; reusing the
+            // coordinate-scaled one would be the same mismatch in the other
+            // direction.
+            let aspect_scale = lower_aspect.abs().max(upper_aspect.abs()).max(1.0);
             let config = BracketedRootConfig::new(
                 position_tolerance,
-                gradient_tolerance,
+                position_tolerance * aspect_scale,
                 f64::MANTISSA_DIGITS as usize,
             );
             find_root_bracketed(
                 |candidate| {
-                    if candidate == lower {
-                        Ok(lower_gradient)
+                    let coordinate_gradient = if candidate == lower {
+                        lower_gradient
                     } else if candidate == upper {
-                        Ok(upper_gradient)
+                        upper_gradient
                     } else {
-                        evaluate(candidate).map(|sample| sample.gradient[0])
-                    }
+                        evaluate(candidate)?.gradient[0]
+                    };
+                    aspect_residual(candidate, coordinate_gradient)
                 },
                 lower,
                 upper,
@@ -7205,3 +7285,137 @@ mod tests_atlas_prior_2280 {
         );
     }
 }
+
+#[cfg(test)]
+mod tests_torus_metric_residual_scale_2554 {
+    use super::*;
+
+    /// The four `(coordinate, dS/dcoordinate)` samples the #2554 failure
+    /// reported: the two domain endpoints from its endpoint profile, and the
+    /// two ends of the bracket the refinement exhausted on.
+    const REPORTED: [(f64, f64); 4] = [
+        (2.220446049250313e-16, -10.870223764685393),
+        (0.00008987029644979831, -89016.42875485175),
+        (0.00009002448793615778, 0.587801723293678),
+        (1.0, 34.2821344402842),
+    ];
+
+    /// The chain factor is what varies, not the stationarity.
+    ///
+    /// Rescaling the reported residuals by `|dA/dq|` turns a sequence spanning
+    /// 1.5e5 into one whose sign structure is identical and whose magnitude
+    /// near the root is ordinary. This is the whole content of #2554: the
+    /// refinement was holding `dS/dA = -1.0e-6` — a good answer — and could not
+    /// report it, because the factor there was 5.9e5 and inflated it past a
+    /// tolerance calibrated where the factor is 0.5.
+    #[test]
+    fn rescaling_by_the_chain_factor_makes_the_2554_tolerance_reachable() {
+        let mut rescaled = Vec::new();
+        for (coordinate, coordinate_gradient) in REPORTED {
+            let magnitude =
+                torus_metric_aspect_derivative_magnitude(TorusMetricFamily::Flat, coordinate)
+                    .expect("every reported coordinate is inside the flat domain");
+            let residual = coordinate_gradient / magnitude;
+            assert_eq!(
+                residual.signum(),
+                coordinate_gradient.signum(),
+                "dividing by a magnitude must not move a sign: {coordinate_gradient} at \
+                 {coordinate} became {residual}"
+            );
+            rescaled.push(residual);
+        }
+
+        // The bracket the refinement exhausted on is a GENUINE sign change, not
+        // a pole: the rescaled residual crosses zero between its two ends.
+        assert!(
+            rescaled[1] < 0.0 && rescaled[2] > 0.0,
+            "the exhausted bracket must still enclose a sign change after rescaling, got \
+             {} and {}",
+            rescaled[1],
+            rescaled[2]
+        );
+
+        let position_tolerance = f64::EPSILON.sqrt();
+
+        // Before: the tolerance comes from the endpoint residuals in the
+        // coordinate, and the bracket end is four orders above it.
+        let coordinate_scale = REPORTED[0].1.abs().max(REPORTED[3].1.abs()).max(1.0);
+        let coordinate_tolerance = position_tolerance * coordinate_scale;
+        assert!(
+            REPORTED[2].1.abs() > 1.0e3 * coordinate_tolerance,
+            "the failure this gate encodes requires the coordinate residual to be far above \
+             its own tolerance: {} vs {coordinate_tolerance}",
+            REPORTED[2].1.abs()
+        );
+
+        // After: same construction in the rescaled coordinate is met.
+        let aspect_scale = rescaled[0].abs().max(rescaled[3].abs()).max(1.0);
+        let aspect_tolerance = position_tolerance * aspect_scale;
+        assert!(
+            rescaled[2].abs() <= aspect_tolerance,
+            "the rescaled residual {} must satisfy the tolerance {aspect_tolerance} its own \
+             endpoints imply",
+            rescaled[2].abs()
+        );
+    }
+
+    /// Why an absolute tolerance cannot serve this domain, stated as a
+    /// measurement rather than an assertion in a comment: the factor's span is
+    /// the size of the mismatch, and it is enormous for BOTH families. The
+    /// donut arm has not been driven into the failure yet; it is not immune.
+    #[test]
+    fn the_chain_factor_spans_orders_across_both_family_domains() {
+        let flat_low =
+            torus_metric_aspect_derivative_magnitude(TorusMetricFamily::Flat, f64::EPSILON)
+                .expect("flat lower wall");
+        let flat_high = torus_metric_aspect_derivative_magnitude(TorusMetricFamily::Flat, 1.0)
+            .expect("flat upper wall");
+        assert!(
+            (flat_low / flat_high).log10() > 20.0,
+            "flat chain factor span {} orders",
+            (flat_low / flat_high).log10()
+        );
+
+        let resolution = f64::EPSILON.sqrt();
+        let donut_low =
+            torus_metric_aspect_derivative_magnitude(TorusMetricFamily::EmbeddedDonut, resolution)
+                .expect("donut lower wall");
+        let donut_high = torus_metric_aspect_derivative_magnitude(
+            TorusMetricFamily::EmbeddedDonut,
+            1.0 - resolution.sqrt(),
+        )
+        .expect("donut upper wall");
+        assert!(
+            (donut_low / donut_high).log10() > 15.0,
+            "donut chain factor span {} orders",
+            (donut_low / donut_high).log10()
+        );
+    }
+
+    /// The factor is strictly signed on each open domain, which is what lets
+    /// the rescaling preserve the bracket certificate. A zero would move a
+    /// sign and a non-finite one would destroy the residual.
+    #[test]
+    fn the_chain_factor_is_finite_and_nonzero_across_each_domain() {
+        for step in 1..64 {
+            let flat = f64::from(step) / 64.0;
+            let magnitude = torus_metric_aspect_derivative_magnitude(TorusMetricFamily::Flat, flat)
+                .expect("interior flat coordinate");
+            assert!(magnitude.is_finite() && magnitude > 0.0, "flat at {flat}");
+            let donut =
+                torus_metric_aspect_derivative_magnitude(TorusMetricFamily::EmbeddedDonut, flat)
+                    .expect("interior donut coordinate");
+            assert!(donut.is_finite() && donut > 0.0, "donut at {flat}");
+        }
+        assert!(
+            torus_metric_aspect_derivative_magnitude(TorusMetricFamily::Flat, 0.0).is_err(),
+            "the flat domain is open at zero"
+        );
+        assert!(
+            torus_metric_aspect_derivative_magnitude(TorusMetricFamily::EmbeddedDonut, 1.0)
+                .is_err(),
+            "the donut domain is open at one, where the factor vanishes"
+        );
+    }
+}
+
