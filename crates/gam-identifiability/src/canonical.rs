@@ -1231,16 +1231,36 @@ fn canonicalize_for_identifiability_inner(
         let r_map = nk.max(stacked_rows);
         // Dense stacked designs (k_s·n × p_b) for the observation-band detection
         // and stacked packing.
+        // A refusal here is fatal rather than a fallback (gam#2465). Dropping a
+        // stacked design to `None` does not disable this check — it silently
+        // runs it on the wrong geometry: `r_map` is still sized from the
+        // stacked row count, but the block gets packed at `n` rows instead of
+        // its native `k_s·n`, so the cross-channel column span this check
+        // exists to see is exactly the one it stops seeing. That is the
+        // gam#1197 false-null-direction failure, reached by a route that
+        // reports nothing. The refusal string carries the byte counts and the
+        // detected availability that explain the decision, so it is propagated
+        // rather than discarded.
         let stacked_dense: Vec<Option<Array2<f64>>> = specs
             .iter()
             .map(|s| {
-                s.stacked_design.as_ref().and_then(|d| {
-                    d.try_to_dense_arc("canonicalize_rank_check stacked")
-                        .ok()
-                        .map(|a| a.as_ref().clone())
-                })
+                s.stacked_design
+                    .as_ref()
+                    .map(|d| {
+                        d.try_to_dense_arc("canonicalize_rank_check stacked")
+                            .map(|a| a.as_ref().clone())
+                            .map_err(|reason| CustomFamilyError::DimensionMismatch {
+                                reason: format!(
+                                    "canonicalize_for_identifiability: the MAP-uniqueness check \
+                                     could not materialise the stacked design for block '{}', so \
+                                     its cross-channel span cannot be seen: {reason}",
+                                    s.name,
+                                ),
+                            })
+                    })
+                    .transpose()
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         let k_bands = (r_map / n_rows).max(1);
         let observation_bands: Vec<usize> = if k_bands <= 1 {
             vec![0]
