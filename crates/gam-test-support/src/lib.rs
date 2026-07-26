@@ -23,6 +23,15 @@ pub mod reference;
 // out of the crate that owns the types.
 pub use gam_linalg::test_support::no_densify_design;
 
+// The stderr backend for production's `log::info!` diagnostics is `log` in,
+// stderr out — it owns no model-layer type, so by the rule above it lives in
+// `gam-runtime` (which already owns `span`/`process_monitor`/`loop_progress` and
+// already depends on `log`) and is re-exported here. Without a backend installed
+// the `log` facade DROPS every record, which is why the BMS intercept counters,
+// the GL-ladder histogram and the certificate-bound discriminator have all been
+// emitting into nothing in every test binary.
+pub use gam_runtime::test_support::install_diagnostic_logger;
+
 // Finite-difference derivative checking is `ndarray` in, `ndarray` out: it owns
 // no model-layer type, so it lives in `gam-linalg`.
 pub use gam_linalg::test_support::fd_checker;
