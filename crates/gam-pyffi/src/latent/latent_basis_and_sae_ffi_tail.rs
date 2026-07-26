@@ -657,7 +657,12 @@ fn sae_manifold_fit_model<'py>(
                 initial_smoothness: smoothness,
                 max_iter,
                 trust_radius: resolved_learning_rate,
-                tolerance: 1.0e-6,
+                // eps^(1/4)-scale RELATIVE first-order tolerance for the
+                // support fixed point (the solver certifies |g|_inf <=
+                // tol*max(1,|f|) and reports the achieved value): 1e-6 relative
+                // is unreachable for an alternating inner solve on real
+                // irreducible-residual data (#2517).
+                tolerance: 1.0e-4,
                 random_state,
             },
         );

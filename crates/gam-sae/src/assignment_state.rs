@@ -452,6 +452,102 @@ impl SaeAssignmentState {
     /// operation required by support-sparse line searches: applying a negated
     /// step is not an inverse retraction at interval boundaries or on curved
     /// manifolds, so rollback must restore the accepted point itself.
+    /// Move the per-row coordinate storage out for a disjoint-rows parallel
+    /// sweep: rows own non-overlapping blocks, so a parallel solver may take
+    /// the storage, hand each row its own block mutably, and put it back with
+    /// [`Self::restore_coords`]. While taken, coordinate reads must go through
+    /// the caller-held blocks.
+    pub fn take_coords(&mut self) -> Vec<Vec<f64>> {
+        std::mem::take(&mut self.coords)
+    }
+
+    /// Restore storage taken by [`Self::take_coords`].
+    pub fn restore_coords(&mut self, coords: Vec<Vec<f64>>) -> Result<(), String> {
+        if coords.len() != self.n_obs {
+            return Err(format!(
+                "SaeAssignmentState::restore_coords: {} rows != N={}",
+                coords.len(),
+                self.n_obs
+            ));
+        }
+        self.coords = coords;
+        Ok(())
+    }
+
+    /// [`Self::apply_row_coord_step`] against a caller-held coordinate block —
+    /// the identical per-atom retraction.
+    pub fn retract_row_coords(
+        &self,
+        row: usize,
+        coords: &mut [f64],
+        delta: &[f64],
+    ) -> Result<(), String> {
+        if delta.len() != coords.len() {
+            return Err(format!(
+                "SaeAssignmentState::retract_row_coords: row {row} delta width {} != compact coordinate width {}",
+                delta.len(),
+                coords.len()
+            ));
+        }
+        let mut cursor = 0usize;
+        for slot in 0..self.indices[row].len() {
+            let atom = self.indices[row][slot] as usize;
+            let meta = &self.atom_coord_meta[atom];
+            let end = cursor + meta.latent_dim;
+            let mut current = Array1::from_vec(coords[cursor..end].to_vec());
+            let step = Array1::from_vec(delta[cursor..end].to_vec());
+            if meta.retraction.is_all_euclidean() {
+                current = meta.manifold.retract(current.view(), step.view());
+            } else {
+                meta.retraction
+                    .retract(&mut current.view_mut(), step.view());
+            }
+            coords[cursor..end]
+                .copy_from_slice(current.as_slice().expect("retraction is contiguous"));
+            cursor = end;
+        }
+        Ok(())
+    }
+
+    /// [`Self::set_row_coords`] against a caller-held coordinate block — the
+    /// identical validation and per-atom manifold projection.
+    pub fn project_row_coords(
+        &self,
+        row: usize,
+        values: &[f64],
+        coords: &mut [f64],
+    ) -> Result<(), String> {
+        if row >= self.n_obs {
+            return Err(format!(
+                "SaeAssignmentState::project_row_coords: row {row} out of range N={}",
+                self.n_obs
+            ));
+        }
+        if values.len() != coords.len() {
+            return Err(format!(
+                "SaeAssignmentState::project_row_coords: row {row} value width {} != compact coordinate width {}",
+                values.len(),
+                coords.len()
+            ));
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "SaeAssignmentState::project_row_coords: row {row} contains a non-finite coordinate"
+            ));
+        }
+        let mut cursor = 0usize;
+        for &atom in &self.indices[row] {
+            let meta = &self.atom_coord_meta[atom as usize];
+            let end = cursor + meta.latent_dim;
+            let candidate = Array1::from_vec(values[cursor..end].to_vec());
+            let projected = meta.manifold.project_point(candidate.view());
+            coords[cursor..end]
+                .copy_from_slice(projected.as_slice().expect("projection is contiguous"));
+            cursor = end;
+        }
+        Ok(())
+    }
+
     pub fn set_row_coords(&mut self, row: usize, values: &[f64]) -> Result<(), String> {
         if row >= self.n_obs {
             return Err(format!(

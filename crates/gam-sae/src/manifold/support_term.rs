@@ -10,6 +10,7 @@ use crate::assignment::AssignmentMode;
 use crate::assignment_state::{SaeAssignmentAtomSpec, SaeAssignmentState};
 use gam_linalg::utils::KahanSum;
 use ndarray::{Array1, Array2, ArrayView2};
+use rayon::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -858,206 +859,300 @@ impl SaeSupportSparseTerm {
                 "SaeSupportSparseTerm::coordinate_sweep: stationarity tolerance must be finite and positive; got {stationarity_tolerance}"
             ));
         }
+        // Rows are independent given the frozen decoder: each owns a disjoint
+        // coordinate block. Take the storage so rows solve in parallel with
+        // `self` shared-read, then put it back (also on a row error).
+        let mut coords_rows = self.assignment.take_coords();
+        let row_results: Vec<Result<f64, String>> = coords_rows
+            .par_iter_mut()
+            .enumerate()
+            .map(|(row, coords_row)| {
+                self.row_coordinate_solve(
+                    row,
+                    coords_row,
+                    target,
+                    ard_precisions,
+                    trust_radius,
+                    stationarity_tolerance,
+                )
+            })
+            .collect();
+        self.assignment.restore_coords(coords_rows)?;
         let mut max_change = 0.0_f64;
-        for row in 0..self.n_obs() {
-            let q = self.assignment.coords_row(row).len();
-            let mut fitted = Array1::<f64>::zeros(self.output_dim);
-            let mut jacobian = Array2::<f64>::zeros((q, self.output_dim));
-            let mut active_evals = Vec::with_capacity(self.assignment.support_indices(row).len());
-            let mut cursor = 0;
-            for slot in 0..self.assignment.support_indices(row).len() {
-                let active = self.evaluate_active(row, slot)?;
-                fitted += &active.decoded;
-                let d = active.jacobian.nrows();
-                for axis in 0..d {
-                    jacobian
-                        .row_mut(cursor + axis)
-                        .assign(&active.jacobian.row(axis));
+        for row_result in row_results {
+            max_change = max_change.max(row_result?);
+        }
+        Ok(max_change)
+    }
+
+    /// Per-slot offset ranges into a row's compact coordinate block.
+    fn slot_offsets(&self, row: usize) -> Vec<Range<usize>> {
+        let mut out = Vec::with_capacity(self.assignment.support_indices(row).len());
+        let mut cursor = 0usize;
+        for &atom in self.assignment.support_indices(row) {
+            let d = self.assignment.atom_coord_dim(atom as usize);
+            out.push(cursor..cursor + d);
+            cursor += d;
+        }
+        out
+    }
+
+    /// [`Self::evaluate_active`] against a caller-held coordinate slice.
+    fn evaluate_active_at(
+        &self,
+        row: usize,
+        slot: usize,
+        slot_coords: &[f64],
+    ) -> Result<ActiveAtomEval, String> {
+        let atom_idx = self.assignment.support_indices(row)[slot] as usize;
+        let atom = &self.atoms[atom_idx];
+        let d = atom.latent_dim();
+        let coords = Array2::from_shape_vec((1, d), slot_coords.to_vec())
+            .map_err(|error| format!("SaeSupportSparseTerm::evaluate_active_at: {error}"))?;
+        let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
+            format!("SaeSupportSparseTerm::evaluate_active_at: atom {atom_idx} has no evaluator")
+        })?;
+        let (phi, jet) = evaluator.evaluate(coords.view())?;
+        let m = atom.basis_size();
+        if phi.dim() != (1, m) || jet.dim() != (1, m, d) {
+            return Err(format!(
+                "SaeSupportSparseTerm::evaluate_active_at: atom {atom_idx} evaluator shapes Phi={:?}, jet={:?}, expected (1,{m}) and (1,{m},{d})",
+                phi.dim(),
+                jet.dim()
+            ));
+        }
+        let phi = phi.row(0).to_owned();
+        let decoded = phi.dot(&atom.decoder_coefficients);
+        let mut jacobian = Array2::<f64>::zeros((d, self.output_dim));
+        for axis in 0..d {
+            for basis in 0..m {
+                let weight = jet[[0, basis, axis]];
+                for output in 0..self.output_dim {
+                    jacobian[[axis, output]] += weight * atom.decoder_coefficients[[basis, output]];
                 }
-                cursor += d;
-                active_evals.push(active);
             }
-            let residual = &target.row(row) - &fitted;
-            let mut row_objective_scale =
-                1.0 + 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
-            let mut rhs_vector = jacobian.dot(&residual);
-            let mut gram = jacobian.dot(&jacobian.t());
-            let mut prior_cursor = 0usize;
+        }
+        Ok(ActiveAtomEval {
+            phi,
+            decoded,
+            jacobian,
+        })
+    }
+
+    /// One row's exact Gauss-Newton coordinate step with manifold-aware
+    /// backtracking, on the row's caller-held coordinate block. The body is
+    /// the serial sweep's row iteration, transformed to read and write ONLY
+    /// `coords_row`; rows share no mutable state.
+    fn row_coordinate_solve(
+        &self,
+        row: usize,
+        coords_row: &mut Vec<f64>,
+        target: ArrayView2<'_, f64>,
+        ard_precisions: &[Vec<f64>],
+        trust_radius: f64,
+        stationarity_tolerance: f64,
+    ) -> Result<f64, String> {
+        let mut max_change = 0.0_f64;
+        let offsets = self.slot_offsets(row);
+        let q = coords_row.len();
+        let mut fitted = Array1::<f64>::zeros(self.output_dim);
+        let mut jacobian = Array2::<f64>::zeros((q, self.output_dim));
+        let mut active_evals = Vec::with_capacity(self.assignment.support_indices(row).len());
+        let mut cursor = 0;
+        for slot in 0..self.assignment.support_indices(row).len() {
+            let active = self.evaluate_active_at(row, slot, &coords_row[offsets[slot].clone()])?;
+            fitted += &active.decoded;
+            let d = active.jacobian.nrows();
+            for axis in 0..d {
+                jacobian
+                    .row_mut(cursor + axis)
+                    .assign(&active.jacobian.row(axis));
+            }
+            cursor += d;
+            active_evals.push(active);
+        }
+        let residual = &target.row(row) - &fitted;
+        let mut row_objective_scale =
+            1.0 + 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
+        let mut rhs_vector = jacobian.dot(&residual);
+        let mut gram = jacobian.dot(&jacobian.t());
+        let mut prior_cursor = 0usize;
+        for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
+            let atom = atom as usize;
+            let periods = self.assignment.atom_axis_periods(atom);
+            for axis in 0..self.assignment.atom_coord_dim(atom) {
+                let prior = ArdAxisPrior::eval(
+                    ard_precisions[atom][axis],
+                    coords_row[offsets[slot].start + axis],
+                    periods[axis],
+                );
+                row_objective_scale += prior.value.abs();
+                rhs_vector[prior_cursor] -= prior.grad;
+                gram[[prior_cursor, prior_cursor]] += prior.psd_majorizer_hess();
+                prior_cursor += 1;
+            }
+        }
+        let raw_gradient_max = rhs_vector
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        // A row already satisfying the caller's KKT request is a certified
+        // fixed point of this coordinate block. The row gradient scales
+        // with the row's own residual energy, so the skip threshold is
+        // relative to the row objective (mirroring the solve-level
+        // certificate); an absolute threshold left every near-converged
+        // row re-solving its trust region on every cycle.
+        if raw_gradient_max <= stationarity_tolerance * row_objective_scale {
+            return Ok(0.0);
+        }
+        let delta = gam_linalg::psd_trust_region::solve_psd_trust_region(
+            gram.view(),
+            rhs_vector.view(),
+            trust_radius,
+        )
+        .map_err(|error| format!("SaeSupportSparseTerm::coordinate_sweep: {error}"))?;
+        let directional = rhs_vector.dot(&delta);
+        let delta_max = delta
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        if !directional.is_finite() || directional < 0.0 {
+            return Err(format!(
+                "SaeSupportSparseTerm::coordinate_sweep: trust-region step is not a finite descent direction (rhs_dot_delta={directional})"
+            ));
+        }
+        // `rhsᵀ delta` is quadratic in the gradient near a stationary point.
+        // Comparing it with an absolute machine epsilon therefore invents a
+        // sqrt(EPSILON) gradient floor (~1.5e-8 for f64), preventing tighter
+        // KKT tolerances from ever being reached. Exact zero is the only
+        // no-direction case; any positive value remains a valid descent
+        // certificate regardless of magnitude.
+        if directional == 0.0 {
+            return Ok(0.0);
+        }
+        let old_coords = coords_row.clone();
+        let mut accepted = None;
+        let mut best_gap = f64::INFINITY;
+        let mut best_step = 0.0_f64;
+        let mut best_objective_delta = f64::NAN;
+        let mut best_armijo_bound = f64::NAN;
+        let evaluation_ops = 1usize
+            + self.output_dim
+            + q
+            + active_evals
+                .iter()
+                .map(|active| active.phi.len() * self.output_dim)
+                .sum::<usize>();
+        let gamma =
+            evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
+        let objective_resolution = gamma * row_objective_scale;
+        for halving in 0..=24 {
+            self.assignment.project_row_coords(row, &old_coords, coords_row)?;
+            let step = 2.0_f64.powi(-(halving as i32));
+            let trial_delta = delta.iter().map(|value| step * value).collect::<Vec<_>>();
+            self.assignment.retract_row_coords(row, coords_row, &trial_delta)?;
+            // Evaluate f(trial) - f(old) directly. Near stationarity the
+            // decrease is O(||g||^2), so subtracting two O(1) objective
+            // values loses the Armijo signal at exactly sqrt(EPSILON).
+            // For r = y-f and prediction change d, the data-loss increment
+            // is -r'd + 1/2 d'd; the prior authority supplies equally stable
+            // per-axis energy increments. Kahan accumulation preserves their
+            // first-order cancellation in a wide output/coordinate block.
+            let mut objective_delta = KahanSum::default();
+            let mut fitted_delta = vec![KahanSum::default(); self.output_dim];
+            let mut trial_evals = Vec::with_capacity(active_evals.len());
+            for (slot, old_active) in active_evals.iter().enumerate() {
+                let atom = self.assignment.support_indices(row)[slot] as usize;
+                let trial_active = self.evaluate_active_at(row, slot, &coords_row[offsets[slot].clone()])?;
+                for basis in 0..old_active.phi.len() {
+                    // Subtract basis values before multiplying by decoder
+                    // coefficients. This cancels shared constant/intercept
+                    // components before rounding, instead of subtracting two
+                    // already-decoded O(1) predictions to recover an O(step)
+                    // difference.
+                    let phi_delta = trial_active.phi[basis] - old_active.phi[basis];
+                    for output in 0..self.output_dim {
+                        fitted_delta[output].add(
+                            phi_delta * self.atoms[atom].decoder_coefficients[[basis, output]],
+                        );
+                    }
+                }
+                trial_evals.push(trial_active);
+            }
+            for (output, delta_sum) in fitted_delta.into_iter().enumerate() {
+                let fitted_delta = delta_sum.sum();
+                objective_delta
+                    .add(fitted_delta.mul_add(0.5 * fitted_delta - residual[output], 0.0));
+            }
+            let mut coord_cursor = 0usize;
             for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
                 let atom = atom as usize;
                 let periods = self.assignment.atom_axis_periods(atom);
                 for axis in 0..self.assignment.atom_coord_dim(atom) {
-                    let prior = ArdAxisPrior::eval(
+                    objective_delta.add(ArdAxisPrior::value_delta(
                         ard_precisions[atom][axis],
-                        self.assignment.coords_for_slot(row, slot)[axis],
+                        old_coords[coord_cursor],
+                        coords_row[offsets[slot].start + axis],
                         periods[axis],
-                    );
-                    row_objective_scale += prior.value.abs();
-                    rhs_vector[prior_cursor] -= prior.grad;
-                    gram[[prior_cursor, prior_cursor]] += prior.psd_majorizer_hess();
-                    prior_cursor += 1;
-                }
-            }
-            let raw_gradient_max = rhs_vector
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            // A row already satisfying the caller's raw KKT request is a
-            // certified fixed point of this coordinate block. Do not manufacture
-            // a sub-ulp step and then ask an objective line search to distinguish
-            // it from the same represented point.
-            if raw_gradient_max <= stationarity_tolerance {
-                continue;
-            }
-            let delta = gam_linalg::psd_trust_region::solve_psd_trust_region(
-                gram.view(),
-                rhs_vector.view(),
-                trust_radius,
-            )
-            .map_err(|error| format!("SaeSupportSparseTerm::coordinate_sweep: {error}"))?;
-            let directional = rhs_vector.dot(&delta);
-            let delta_max = delta
-                .iter()
-                .map(|value| value.abs())
-                .fold(0.0_f64, f64::max);
-            if !directional.is_finite() || directional < 0.0 {
-                return Err(format!(
-                    "SaeSupportSparseTerm::coordinate_sweep: trust-region step is not a finite descent direction (rhs_dot_delta={directional})"
-                ));
-            }
-            // `rhsᵀ delta` is quadratic in the gradient near a stationary point.
-            // Comparing it with an absolute machine epsilon therefore invents a
-            // sqrt(EPSILON) gradient floor (~1.5e-8 for f64), preventing tighter
-            // KKT tolerances from ever being reached. Exact zero is the only
-            // no-direction case; any positive value remains a valid descent
-            // certificate regardless of magnitude.
-            if directional == 0.0 {
-                continue;
-            }
-            let old_coords = self.assignment.coords_row(row).to_vec();
-            let mut accepted = None;
-            let mut best_gap = f64::INFINITY;
-            let mut best_step = 0.0_f64;
-            let mut best_objective_delta = f64::NAN;
-            let mut best_armijo_bound = f64::NAN;
-            let evaluation_ops = 1usize
-                + self.output_dim
-                + q
-                + active_evals
-                    .iter()
-                    .map(|active| active.phi.len() * self.output_dim)
-                    .sum::<usize>();
-            let gamma =
-                evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
-            let objective_resolution = gamma * row_objective_scale;
-            for halving in 0..=24 {
-                self.assignment.set_row_coords(row, &old_coords)?;
-                let step = 2.0_f64.powi(-(halving as i32));
-                let trial_delta = delta.iter().map(|value| step * value).collect::<Vec<_>>();
-                self.assignment.apply_row_coord_step(row, &trial_delta)?;
-                // Evaluate f(trial) - f(old) directly. Near stationarity the
-                // decrease is O(||g||^2), so subtracting two O(1) objective
-                // values loses the Armijo signal at exactly sqrt(EPSILON).
-                // For r = y-f and prediction change d, the data-loss increment
-                // is -r'd + 1/2 d'd; the prior authority supplies equally stable
-                // per-axis energy increments. Kahan accumulation preserves their
-                // first-order cancellation in a wide output/coordinate block.
-                let mut objective_delta = KahanSum::default();
-                let mut fitted_delta = vec![KahanSum::default(); self.output_dim];
-                let mut trial_evals = Vec::with_capacity(active_evals.len());
-                for (slot, old_active) in active_evals.iter().enumerate() {
-                    let atom = self.assignment.support_indices(row)[slot] as usize;
-                    let trial_active = self.evaluate_active(row, slot)?;
-                    for basis in 0..old_active.phi.len() {
-                        // Subtract basis values before multiplying by decoder
-                        // coefficients. This cancels shared constant/intercept
-                        // components before rounding, instead of subtracting two
-                        // already-decoded O(1) predictions to recover an O(step)
-                        // difference.
-                        let phi_delta = trial_active.phi[basis] - old_active.phi[basis];
-                        for output in 0..self.output_dim {
-                            fitted_delta[output].add(
-                                phi_delta * self.atoms[atom].decoder_coefficients[[basis, output]],
-                            );
-                        }
-                    }
-                    trial_evals.push(trial_active);
-                }
-                for (output, delta_sum) in fitted_delta.into_iter().enumerate() {
-                    let fitted_delta = delta_sum.sum();
-                    objective_delta
-                        .add(fitted_delta.mul_add(0.5 * fitted_delta - residual[output], 0.0));
-                }
-                let mut coord_cursor = 0usize;
-                for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
-                    let atom = atom as usize;
-                    let periods = self.assignment.atom_axis_periods(atom);
-                    for axis in 0..self.assignment.atom_coord_dim(atom) {
-                        objective_delta.add(ArdAxisPrior::value_delta(
-                            ard_precisions[atom][axis],
-                            old_coords[coord_cursor],
-                            self.assignment.coords_for_slot(row, slot)[axis],
-                            periods[axis],
-                        ));
-                        coord_cursor += 1;
-                    }
-                }
-                let objective_delta = objective_delta.sum();
-                let armijo_bound = -1.0e-4 * step * directional;
-                let gap = objective_delta - armijo_bound;
-                if gap.is_finite() && gap < best_gap {
-                    best_gap = gap;
-                    best_step = step;
-                    best_objective_delta = objective_delta;
-                    best_armijo_bound = armijo_bound;
-                }
-                let mut trial_fitted = Array1::<f64>::zeros(self.output_dim);
-                for active in &trial_evals {
-                    trial_fitted += &active.decoded;
-                }
-                let trial_residual = &target.row(row) - &trial_fitted;
-                let mut trial_gradient_max = 0.0_f64;
-                for (slot, active) in trial_evals.iter().enumerate() {
-                    let atom = self.assignment.support_indices(row)[slot] as usize;
-                    let periods = self.assignment.atom_axis_periods(atom);
-                    for axis in 0..active.jacobian.nrows() {
-                        let likelihood_gradient = -active.jacobian.row(axis).dot(&trial_residual);
-                        let gradient = likelihood_gradient
-                            + ArdAxisPrior::eval(
-                                ard_precisions[atom][axis],
-                                self.assignment.coords_for_slot(row, slot)[axis],
-                                periods[axis],
-                            )
-                            .grad;
-                        trial_gradient_max = trial_gradient_max.max(gradient.abs());
-                    }
-                }
-                let armijo_accept = objective_delta.is_finite() && objective_delta <= armijo_bound;
-                let roundoff_tie_accept = objective_delta.is_finite()
-                    && objective_delta.abs() <= objective_resolution
-                    && trial_gradient_max < raw_gradient_max;
-                if armijo_accept || roundoff_tie_accept {
-                    accepted = Some(step);
-                    break;
-                }
-            }
-            match accepted {
-                Some(step) => {
-                    for value in delta.iter() {
-                        max_change = max_change.max((step * value).abs());
-                    }
-                }
-                None => {
-                    self.assignment.set_row_coords(row, &old_coords)?;
-                    return Err(format!(
-                        "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
-                         (raw KKT max={raw_gradient_max:.17e}, rhs_dot_delta={directional:.17e}, \
-                         delta_max={delta_max:.17e}, best_step={best_step:.17e}, \
-                         best_objective_delta={best_objective_delta:.17e}, \
-                         best_armijo_bound={best_armijo_bound:.17e}, gap={best_gap:.17e}, \
-                         objective_resolution={objective_resolution:.17e})"
                     ));
+                    coord_cursor += 1;
                 }
+            }
+            let objective_delta = objective_delta.sum();
+            let armijo_bound = -1.0e-4 * step * directional;
+            let gap = objective_delta - armijo_bound;
+            if gap.is_finite() && gap < best_gap {
+                best_gap = gap;
+                best_step = step;
+                best_objective_delta = objective_delta;
+                best_armijo_bound = armijo_bound;
+            }
+            let mut trial_fitted = Array1::<f64>::zeros(self.output_dim);
+            for active in &trial_evals {
+                trial_fitted += &active.decoded;
+            }
+            let trial_residual = &target.row(row) - &trial_fitted;
+            let mut trial_gradient_max = 0.0_f64;
+            for (slot, active) in trial_evals.iter().enumerate() {
+                let atom = self.assignment.support_indices(row)[slot] as usize;
+                let periods = self.assignment.atom_axis_periods(atom);
+                for axis in 0..active.jacobian.nrows() {
+                    let likelihood_gradient = -active.jacobian.row(axis).dot(&trial_residual);
+                    let gradient = likelihood_gradient
+                        + ArdAxisPrior::eval(
+                            ard_precisions[atom][axis],
+                            coords_row[offsets[slot].start + axis],
+                            periods[axis],
+                        )
+                        .grad;
+                    trial_gradient_max = trial_gradient_max.max(gradient.abs());
+                }
+            }
+            let armijo_accept = objective_delta.is_finite() && objective_delta <= armijo_bound;
+            let roundoff_tie_accept = objective_delta.is_finite()
+                && objective_delta.abs() <= objective_resolution
+                && trial_gradient_max < raw_gradient_max;
+            if armijo_accept || roundoff_tie_accept {
+                accepted = Some(step);
+                break;
+            }
+        }
+        match accepted {
+            Some(step) => {
+                for value in delta.iter() {
+                    max_change = max_change.max((step * value).abs());
+                }
+            }
+            None => {
+                self.assignment.project_row_coords(row, &old_coords, coords_row)?;
+                return Err(format!(
+                    "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
+                     (raw KKT max={raw_gradient_max:.17e}, rhs_dot_delta={directional:.17e}, \
+                     delta_max={delta_max:.17e}, best_step={best_step:.17e}, \
+                     best_objective_delta={best_objective_delta:.17e}, \
+                     best_armijo_bound={best_armijo_bound:.17e}, gap={best_gap:.17e}, \
+                     objective_resolution={objective_resolution:.17e})"
+                ));
             }
         }
         Ok(max_change)
@@ -1217,11 +1312,17 @@ impl SaeSupportSparseTerm {
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
             let (coordinate_l2, coordinate_max_abs) =
                 self.raw_coordinate_stationarity(target, ard_precisions)?;
-            let candidate = max_change <= tolerance && coordinate_max_abs <= tolerance;
+            // Same scale-invariant certificate as solve_fixed_point: the raw
+            // coordinate KKT sums data gradients over the full output width,
+            // so it is certified relative to max(1, |objective|).
+            let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
+            let kkt_scale = objective.abs().max(1.0);
+            let candidate =
+                max_change <= tolerance && coordinate_max_abs <= tolerance * kkt_scale;
             if candidate && previous_candidate {
                 return Ok(SaeSupportCoordinateFixedPointReport {
                     iterations: iteration,
-                    objective: self.frozen_decoder_coordinate_objective(target, ard_precisions)?,
+                    objective,
                     coordinate_l2,
                     coordinate_max_abs,
                     max_recurrence_change: max_change,
@@ -1231,8 +1332,10 @@ impl SaeSupportSparseTerm {
             previous_candidate = candidate;
         }
         let (_, coordinate_max_abs) = self.raw_coordinate_stationarity(target, ard_precisions)?;
+        let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
         Err(format!(
-            "SaeSupportSparseTerm::solve_coordinates_fixed_decoder did not recur within {max_iter} cycles (raw coordinate KKT max={coordinate_max_abs:.6e})"
+            "SaeSupportSparseTerm::solve_coordinates_fixed_decoder did not recur within {max_iter} cycles (raw coordinate KKT max={coordinate_max_abs:.6e}, relative to objective {objective:.6e}: {:.6e})",
+            coordinate_max_abs / objective.abs().max(1.0)
         ))
     }
 
@@ -1266,11 +1369,27 @@ impl SaeSupportSparseTerm {
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
             let max_change = decoder_change.max(coordinate_change);
             let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
-            let candidate = max_change <= tolerance && stationarity.max_abs() <= tolerance;
+            // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
+            // gradients over every row on the atom's support, so its natural
+            // scale grows with rows-per-atom x residual scale. Certify the
+            // scale-invariant first-order condition |g|_inf <= tol * max(1, |f|)
+            // instead of an absolute bound an irreducible-residual problem can
+            // never meet at any cycle budget.
+            let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+            let kkt_scale = objective.abs().max(1.0);
+            let candidate =
+                max_change <= tolerance && stationarity.max_abs() <= tolerance * kkt_scale;
+            log::info!(
+                "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} max_change={:.3e} objective={:.6e}",
+                stationarity.max_abs(),
+                stationarity.max_abs() / kkt_scale,
+                max_change,
+                objective
+            );
             if candidate && previous_candidate {
                 return Ok(SaeSupportFixedPointReport {
                     iterations: iteration,
-                    objective: self.penalized_objective(target, lambda_smooth, ard_precisions)?,
+                    objective,
                     stationarity,
                     max_recurrence_change: max_change,
                     recurred: true,
@@ -1279,9 +1398,12 @@ impl SaeSupportSparseTerm {
             previous_candidate = candidate;
         }
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
+        let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
         Err(format!(
-            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles (raw KKT max={:.6e})",
-            stationarity.max_abs()
+            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e})",
+            stationarity.max_abs(),
+            objective,
+            stationarity.max_abs() / objective.abs().max(1.0)
         ))
     }
 }
