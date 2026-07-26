@@ -640,7 +640,17 @@ pub(crate) fn seed_is_oversmoothing_boundary(
 pub(crate) fn candidate_improves_best(candidate: &OuterResult, best: Option<&OuterResult>) -> bool {
     match best {
         None => true,
-        Some(best) if candidate.converged() != best.converged() => candidate.converged(),
+        // The SOLVER CLAIM, not the analytic certificate. Keep-best ranks
+        // candidates DURING the search, where certification has not run yet
+        // and every result is `Exhausted` or `SolverClaimed` — reading
+        // `converged()` (i.e. `termination.is_certified()`) here makes the
+        // precedence vacuous, and the cheaper stalled candidate wins after
+        // all. `keep_best_ranks_convergence_above_value` is that failure.
+        Some(best)
+            if candidate.solver_claimed_convergence() != best.solver_claimed_convergence() =>
+        {
+            candidate.solver_claimed_convergence()
+        }
         Some(best) => candidate.final_value < best.final_value,
     }
 }
