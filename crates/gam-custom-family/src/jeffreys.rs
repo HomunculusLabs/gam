@@ -254,86 +254,6 @@ pub(crate) const JEFFREYS_CONDITIONING_GATE_ABSOLUTE_CLEAR: f64 = 16.0;
 
 pub(crate) const JEFFREYS_CONDITIONING_GATE_RELATIVE_CLEAR: f64 = 1e-6;
 
-/// Trust-region tolerance for folding the second-order completion into the
-/// mode-response operator. The completion is the true-Hessian remainder of the
-/// Φ-augmented inner objective and is accurate ONLY where the second-order
-/// expansion is valid. The divided-difference base `H_Φ` is bounded and PSD; the
-/// completed curvature `H_Φ + completion` must remain PSD (a legitimate Hessian
-/// of the convex Firth-augmented penalty over the under-identified span) for the
-/// expansion to be trusted. We tolerate negative excursions only up to this
-/// fraction of `H_Φ`'s own curvature scale — benign float rounding, never the
-/// `O(λ_max)` sign-flip the near-separable cancellation produces (measured:
-/// `H_Φ` spectrum `8e-9 … 1e10` but `H_Φ + completion` spectrum `−3.3e9 … 9e-3`,
-/// a 33%-of-`λ_max` negative excursion AND a collapse of the curvature scale).
-pub(crate) const JEFFREYS_COMPLETION_PSD_REL_TOL: f64 = 1e-8;
-
-/// Decide whether the second-order completion may be folded into the
-/// mode-response operator without destroying its positive semidefiniteness.
-///
-/// `H_Φ` (PSD, bounded) is the divided-difference curvature the value/logdet/trace
-/// path uses; `completion` refines it into the TRUE Hessian of the Φ-augmented
-/// inner objective, but only inside the second-order expansion's trust region. In
-/// the near-degenerate regime the completion's `−½ tr(K·D_ab)` remainder explodes
-/// negative and cancels `H_Φ`, leaving `H_Φ + completion` strongly indefinite. As
-/// the mode-response operator `M = H + S_λ + H_Φ + completion`, that indefinite
-/// curvature is not a legitimate Hessian: under the smooth pseudo-logdet
-/// regularization a large negative eigenvalue regularizes to a near-zero pivot, so
-/// the IFT solve `v_k = −M⁻¹ Ṡ_k β̂` amplifies by `~1/ε²` and the outer gradient
-/// explodes (then the envelope tripwire suppresses the Hessian → `Unavailable`).
-///
-/// Returns `true` only when the completed curvature `H_Φ + completion` stays
-/// positive semidefinite to within [`JEFFREYS_COMPLETION_PSD_REL_TOL`] of `H_Φ`'s
-/// own eigenvalue scale — i.e. the completion is a small correction, not a
-/// sign-flipping cancellation. When `false`, the caller keeps the bounded PSD
-/// `H_Φ`, which is exactly the curvature the criterion's value and traces use, so
-/// the operator and the criterion agree. PSD-PROJECTING the indefinite sum is the
-/// wrong fix: it collapses the `O(1e10)` curvature scale to the surviving positive
-/// dregs (`9e-3`), re-singularizing the operator. The trust decision is therefore
-/// all-or-nothing per evaluation.
-pub(crate) fn custom_family_jeffreys_completion_preserves_psd(
-    hphi: &Array2<f64>,
-    completion: &Array2<f64>,
-) -> bool {
-    if hphi.dim() != completion.dim() {
-        return false;
-    }
-    let p = hphi.nrows();
-    if p == 0 {
-        return true;
-    }
-    // Symmetrize both before any spectral query: the divided-difference assembly
-    // and the contracted-trace completion are each symmetric up to rounding, and
-    // `eigh` reads only one triangle, so a tiny asymmetry must not leak in.
-    let sym = |m: &Array2<f64>| -> Array2<f64> {
-        let mut out = Array2::<f64>::zeros((p, p));
-        for i in 0..p {
-            for j in 0..p {
-                out[[i, j]] = 0.5 * (m[[i, j]] + m[[j, i]]);
-            }
-        }
-        out
-    };
-    let hphi_sym = sym(hphi);
-    let combined = sym(&(hphi + completion));
-    let Ok((hphi_evals, _)) = hphi_sym.eigh(Side::Lower) else {
-        // Cannot certify PSD ⇒ refuse the completion (keep the bounded base).
-        return false;
-    };
-    let Ok((combined_evals, _)) = combined.eigh(Side::Lower) else {
-        return false;
-    };
-    let hphi_lambda_max = hphi_evals.iter().copied().fold(0.0_f64, f64::max);
-    if !hphi_lambda_max.is_finite() || hphi_lambda_max <= 0.0 {
-        // Degenerate / zero base curvature: any completion is untrustworthy here.
-        return false;
-    }
-    let combined_lambda_min = combined_evals.iter().copied().fold(f64::INFINITY, f64::min);
-    if !combined_lambda_min.is_finite() {
-        return false;
-    }
-    combined_lambda_min >= -JEFFREYS_COMPLETION_PSD_REL_TOL * hphi_lambda_max
-}
-
 #[inline]
 pub(crate) fn custom_family_jeffreys_cap(floor: f64) -> f64 {
     JEFFREYS_CONDITIONING_GATE_ABSOLUTE_CLEAR.max(floor)
@@ -448,6 +368,19 @@ pub(crate) fn custom_family_joint_jeffreys_contract_weight(
     Ok(Some((gate_weight, weight_full)))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JeffreysCompletionAssembly {
+    /// Use only the family's fused contracted-trace implementation. This is the
+    /// outer-profile route, where the completion is an optional response
+    /// acceleration and a pairwise row stream would change the cost class.
+    Contracted,
+    /// Produce the exact objective Hessian. If the family has no fused
+    /// contracted implementation, assemble the mathematically identical
+    /// pairwise second-directional form. Returned-mode certification and the
+    /// inner Newton endgame use this authority and may not omit a term.
+    Exact,
+}
+
 pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -456,13 +389,13 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
     specs: &[ParameterBlockSpec],
     h_joint: &Array2<f64>,
     z_joint: &Array2<f64>,
-    allow_pairwise_fallback: bool,
+    assembly: JeffreysCompletionAssembly,
 ) -> Result<Option<Array2<f64>>, String> {
     let p = h_joint.nrows();
     let Some((gate_weight, trace_weight)) =
         custom_family_joint_jeffreys_contract_weight(h_joint.view(), z_joint.view())?
     else {
-        return if allow_pairwise_fallback {
+        return if assembly == JeffreysCompletionAssembly::Exact {
             Ok(Some(Array2::zeros((p, p))))
         } else {
             Ok(None)
@@ -483,7 +416,7 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
             contracted.mapv_inplace(|value| -0.5 * gate_weight * value);
             Ok(Some(contracted))
         }
-        None if allow_pairwise_fallback => {
+        None if assembly == JeffreysCompletionAssembly::Exact => {
             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_second_order_completion(
                 h_joint.view(),
                 z_joint.view(),
@@ -556,7 +489,7 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     //     on `M_DD`).
     // Callers therefore fold this term into the mode-response OPERATOR only.
     // The contracted trace hook may supply it in one family pass. The generic
-    // pairwise `p(p+1)/2` fallback is intentionally not selected here: in
+    // pairwise `p(p+1)/2` assembly is intentionally not selected here: in
     // production large-n fits a "small" p still means hundreds of row-streamed
     // second-directional Hessian passes. `None` degrades to the
     // divided-difference solve, preserving the value/gradient contract.
@@ -577,7 +510,12 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
         && h_joint.ncols() == total_p
     {
         completion = custom_family_joint_jeffreys_second_order_completion(
-            family, states, specs, &h_joint, &z_joint, false,
+            family,
+            states,
+            specs,
+            &h_joint,
+            &z_joint,
+            JeffreysCompletionAssembly::Contracted,
         )?;
     }
     Ok(Some((phi, hphi, completion)))

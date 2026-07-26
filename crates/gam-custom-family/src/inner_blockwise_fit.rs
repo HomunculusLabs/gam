@@ -19,6 +19,10 @@ pub(crate) struct ExactJointModeCurvatureCertificate {
     pub(crate) workspace: Option<Arc<dyn ExactNewtonJointHessianWorkspace>>,
     pub(crate) minimum_whitened_eigenvalue: f64,
     pub(crate) numerical_floor: f64,
+    /// Whether this certificate actually assembled the active Jeffreys
+    /// second-order completion. This is causal accounting, not a proxy based
+    /// only on the family's capability flag.
+    pub(crate) jeffreys_completion_assembled: bool,
     /// Coefficient-space direction of the minimum-curvature mode, expressed in
     /// the FULL joint layout (mapped through the active-face tangent when the
     /// mode was certified on a reduced face). Populated only when the mode has
@@ -991,6 +995,161 @@ pub(crate) fn fused_first_attempt_log_likelihood<
     }
 }
 
+/// The exact Jeffreys second-order remainder at one coefficient vector.
+///
+/// Once `H_Φ` is active, omitting this term changes the Hessian of the inner
+/// objective. Returned-mode certification therefore requires an exact
+/// completion: a fused contracted implementation when the family supplies one,
+/// otherwise the mathematically identical pairwise directional assembly. An
+/// unavailable completion is a derivative-contract error, never permission to
+/// certify a different objective.
+fn exact_joint_jeffreys_completion_at<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    z_joint: &Array2<f64>,
+    total_p: usize,
+    context: &str,
+) -> Result<Array2<f64>, String> {
+    let h_information = family
+        .joint_jeffreys_information_with_specs(states, specs)?
+        .ok_or_else(|| format!("{context}: active Jeffreys term has no information matrix"))?;
+    if h_information.dim() != (total_p, total_p) {
+        return Err(format!(
+            "{context}: Jeffreys information shape {:?}, expected ({total_p}, {total_p})",
+            h_information.dim(),
+        ));
+    }
+    let completion = custom_family_joint_jeffreys_second_order_completion(
+        family,
+        states,
+        specs,
+        &h_information,
+        z_joint,
+        JeffreysCompletionAssembly::Exact,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "{context}: active Jeffreys term did not supply its exact second-order completion"
+        )
+    })?;
+    if completion.dim() != (total_p, total_p)
+        || completion.iter().any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "{context}: Jeffreys completion is non-finite or has shape {:?}, expected ({total_p}, {total_p})",
+            completion.dim(),
+        ));
+    }
+    Ok(completion)
+}
+
+/// Assemble the one authoritative Hessian of the coefficient objective:
+///
+/// `M_true = H_likelihood + S_lambda + H_Φ + H_completion`.
+///
+/// `H_Φ` and its completion are an atomic pair. A caller may assemble the
+/// unaugmented objective by passing neither, but it may not certify a
+/// Jeffreys-augmented objective with only the divided-difference component.
+fn assemble_true_joint_objective_hessian(
+    mut likelihood_hessian: Array2<f64>,
+    ranges: &[(usize, usize)],
+    s_lambdas: &[Array2<f64>],
+    joint_mode_diagonal_ridge: f64,
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    hphi: Option<&Array2<f64>>,
+    completion: Option<&Array2<f64>>,
+    context: &str,
+) -> Result<Array2<f64>, String> {
+    let total_p = likelihood_hessian.nrows();
+    if likelihood_hessian.ncols() != total_p {
+        return Err(format!(
+            "{context}: likelihood Hessian is not square: {:?}",
+            likelihood_hessian.dim(),
+        ));
+    }
+    add_joint_penalty_to_matrix(
+        &mut likelihood_hessian,
+        ranges,
+        s_lambdas,
+        joint_mode_diagonal_ridge,
+        joint_bundle,
+    );
+    match (hphi, completion) {
+        (None, None) => {}
+        (Some(hphi), Some(completion))
+            if hphi.dim() == (total_p, total_p)
+                && completion.dim() == (total_p, total_p) =>
+        {
+            likelihood_hessian += hphi;
+            likelihood_hessian += completion;
+        }
+        (Some(hphi), Some(completion)) => {
+            return Err(format!(
+                "{context}: Jeffreys curvature shape mismatch: H_phi={:?}, completion={:?}, expected ({total_p}, {total_p})",
+                hphi.dim(),
+                completion.dim(),
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "{context}: H_phi and its exact second-order completion must be supplied together"
+            ));
+        }
+    }
+    symmetrize_dense_in_place(&mut likelihood_hessian);
+    if likelihood_hessian
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(format!(
+            "{context}: exact joint objective Hessian contains a non-finite value"
+        ));
+    }
+    Ok(likelihood_hessian)
+}
+
+fn symmetric_eigen_extremes(
+    matrix: &Array2<f64>,
+    context: &str,
+) -> Result<(f64, f64), String> {
+    let (eigenvalues, _) = matrix
+        .eigh(Side::Lower)
+        .map_err(|error| format!("{context}: symmetric eigendecomposition failed: {error}"))?;
+    Ok((
+        eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min),
+        eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+    ))
+}
+
+fn linearized_residual_contraction(
+    matrix: &Array2<f64>,
+    rhs: &Array1<f64>,
+    delta: &Array1<f64>,
+) -> f64 {
+    let denominator = rhs
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+    let residual = rhs - &matrix.dot(delta);
+    residual
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max)
+        / denominator
+}
+
 /// Rebuild the exact penalized coefficient Hessian at the coefficient vector
 /// that an inner solve is about to return.
 ///
@@ -998,9 +1157,10 @@ pub(crate) fn fused_first_attempt_log_likelihood<
 /// nonconvex family: the cycle's spectrum belongs to its head β, while an
 /// accepted step changes β before several later exits can fire. This fresh
 /// certificate uses the same structural dense materialization required by the
-/// Laplace log-determinant, adds only penalties that belong to the objective,
-/// and tests inertia in the scale-aware trust metric. Solver stabilization,
-/// reflected curvature, and trace-only ridge are deliberately excluded.
+/// Laplace log-determinant, assembles the complete coefficient-objective
+/// Hessian `H + S + H_Φ + completion`, and tests its inertia in the scale-aware
+/// trust metric. Solver stabilization, reflected curvature, trace-only ridge,
+/// and component-wise PSD projections are deliberately excluded.
 pub(crate) fn exact_joint_mode_curvature_certificate<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -1026,7 +1186,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         )?,
         None => None,
     };
-    let mut hessian = match source {
+    let likelihood_hessian = match source {
         Some(source) => materialize_joint_hessian_source(
             &source,
             total_p,
@@ -1044,7 +1204,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         })?,
     };
     let mut metric = joint_penalty_preconditioner_diag(
-        &hessian.diag().to_owned(),
+        &likelihood_hessian.diag().to_owned(),
         ranges,
         s_lambdas,
         joint_mode_diagonal_ridge,
@@ -1059,19 +1219,41 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
             }
         }
     }
-    add_joint_penalty_to_matrix(
-        &mut hessian,
+    let jeffreys_curvature = if family.joint_jeffreys_term_required() {
+        let z_joint = build_joint_jeffreys_subspace(specs, ranges)?.ok_or_else(|| {
+            "fresh exact joint-mode curvature certificate: Jeffreys family has no coefficient subspace"
+                .to_string()
+        })?;
+        match custom_family_joint_jeffreys_term(family, states, specs, ranges, &z_joint)? {
+            Some((_phi, _gradient, hphi)) => {
+                let completion = exact_joint_jeffreys_completion_at(
+                    family,
+                    states,
+                    specs,
+                    &z_joint,
+                    total_p,
+                    "fresh exact joint-mode curvature certificate",
+                )?;
+                Some((hphi, completion))
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let jeffreys_completion_assembled = jeffreys_curvature.is_some();
+    let hessian = assemble_true_joint_objective_hessian(
+        likelihood_hessian,
         ranges,
         s_lambdas,
         joint_mode_diagonal_ridge,
         joint_bundle,
-    );
-    if hessian.iter().any(|value| !value.is_finite()) {
-        return Err(
-            "fresh exact joint-mode curvature certificate found a non-finite penalized Hessian"
-                .to_string(),
-        );
-    }
+        jeffreys_curvature.as_ref().map(|(hphi, _)| hphi),
+        jeffreys_curvature
+            .as_ref()
+            .map(|(_, completion)| completion),
+        "fresh exact joint-mode curvature certificate",
+    )?;
     // Constrained modes are certified on the active-face TANGENT null(A_act) —
     // the same geometry the terminal determinant integrates over
     // (`active_face_logdet_with_ridge_policy`). Curvature normal to the face
@@ -1092,6 +1274,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
                     workspace,
                     minimum_whitened_eigenvalue: f64::INFINITY,
                     numerical_floor: 0.0,
+                    jeffreys_completion_assembled,
                     negative_curvature_direction: None,
                 });
             }
@@ -1120,6 +1303,16 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         KKT_REFUSAL_RANK_TOL,
     )?;
     let minimum_whitened_eigenvalue = spectrum.gamma.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum_whitened_eigenvalue = spectrum
+        .gamma
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    log::info!(
+        "[979-MODE-HESSIAN] eig(M_true_tangent_whitened)=[{minimum_whitened_eigenvalue:.6e},{maximum_whitened_eigenvalue:.6e}] numerical_floor={:.6e} tangent_dim={}",
+        spectrum.numerical_floor,
+        certificate_matrix.nrows(),
+    );
     // A strict saddle exposes a resolvable negative-curvature eigenvector. Map
     // that whitened mode back to the raw coefficient direction `δ = D^{-1/2} v`
     // (curvature `δᵀ H_pen δ = γ_min` for the unit eigenvector `v`), then lift it
@@ -1159,6 +1352,7 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
         workspace,
         minimum_whitened_eigenvalue,
         numerical_floor: spectrum.numerical_floor,
+        jeffreys_completion_assembled,
         negative_curvature_direction,
     })
 }
@@ -1214,6 +1408,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     cached_active_sets: &[Option<Vec<usize>>],
     saddle_escapes_used: usize,
     objective_tol: f64,
+    jeffreys_completion_calls: &mut usize,
 ) -> Result<ConstrainedModeResolution, String> {
     // Certify on the tangent of every NUMERICALLY-TIGHT constraint, not only the
     // QP's recorded active set. At a degenerate binding vertex the QP can leave a
@@ -1247,6 +1442,9 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         total_p,
         mode_active_block.as_ref(),
     )?;
+    if certificate.jeffreys_completion_assembled {
+        *jeffreys_completion_calls += 1;
+    }
     let lambda_min = certificate.minimum_whitened_eigenvalue;
     let numerical_floor = certificate.numerical_floor;
     if !certificate.has_resolvable_negative_curvature() {
@@ -1600,12 +1798,24 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 &local_ranges,
                 total_joint_p,
             )?;
+            let mode_active_block = if joint_constraints.is_some() {
+                let tight_sets = crate::blockwise_solve::widen_active_sets_to_tight_face(
+                    &block_constraints,
+                    &states,
+                    &cached_active_sets,
+                )?;
+                assemble_active_constraint_block(
+                    &block_constraints,
+                    &tight_sets,
+                    &local_ranges,
+                    total_joint_p,
+                )
+            } else {
+                None
+            };
             let mut cached_mode_acceptable = true;
             let mut certified_workspace = cached.joint_workspace.clone();
-            if has_joint_exacthessian
-                && joint_constraints.is_none()
-                && !family.joint_jeffreys_term_required()
-            {
+            if has_joint_exacthessian {
                 match exact_joint_mode_curvature_certificate(
                     family,
                     &states,
@@ -1616,7 +1826,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     local_joint_mode_diagonal_ridge,
                     joint_bundle,
                     total_joint_p,
-                    None,
+                    mode_active_block.as_ref(),
                 ) {
                     Ok(certificate) => {
                         cached_mode_acceptable = !certificate.has_resolvable_negative_curvature();
@@ -2215,6 +2425,12 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // `JEFFREYS_COMPLETION_RESIDUAL_BAND × residual_tol`, consumed by the
         // next cycle's dense-spectral step assembly.
         let mut jeffreys_completion_endgame = false;
+        // Exact completion accounting is part of the causal #979 evidence: a
+        // correct quadratic endgame should form the completion only after the
+        // residual-band latch (or for a returned-mode certificate), then need
+        // only a handful of true-Hessian cycles.
+        let mut jeffreys_completion_calls = 0usize;
+        let mut jeffreys_true_hessian_probe_logged = false;
         // Total descent budget across the joint-Newton loop, used by
         // the end-of-loop summary to report `descent_total`.
         let initial_joint_objective: f64 = lastobjective;
@@ -2292,6 +2508,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     &cached_active_sets,
                     saddle_escapes_used,
                     escape_objective_tol,
+                    &mut jeffreys_completion_calls,
                 )? {
                     ConstrainedModeResolution::Certified { workspace } => {
                         cached_joint_workspace = workspace;
@@ -2417,23 +2634,18 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             macro_rules! finish_post_step_convergence {
                 () => {{
                     converged = true;
-                    if joint_constraints.is_none() && joint_jeffreys_subspace.is_none() {
+                    if joint_constraints.is_none() {
                         returned_mode_curvature_pending = true;
                         returned_mode_curvature_certified = false;
                         continue 'joint_newton_cycles;
                     }
-                    // Constrained (non-Jeffreys) first-order convergence is
-                    // tentative until the next cycle head certifies the
-                    // active-face-tangent curvature and, on a strict saddle,
-                    // escapes along it (gam#979). Jeffreys-augmented families keep
-                    // their first-order contract and their own augmented-objective
-                    // certificate, so they still break straight to the post-loop.
-                    if joint_jeffreys_subspace.is_none() {
-                        returned_constrained_mode_pending = true;
-                        returned_mode_curvature_certified = false;
-                        continue 'joint_newton_cycles;
-                    }
-                    break;
+                    // Every constrained first-order convergence event is
+                    // tentative until the next cycle head certifies M_true on
+                    // the numerically-tight active-face tangent. Jeffreys modes
+                    // are not a separate objective or a certificate exemption.
+                    returned_constrained_mode_pending = true;
+                    returned_mode_curvature_certified = false;
+                    continue 'joint_newton_cycles;
                 }};
             }
             if cycle_log && cycle == 0 {
@@ -2746,6 +2958,39 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 } else {
                     None
                 };
+            // The divided-difference H_Φ is sufficient for globalization away
+            // from the mode. Once the residual-band latch arms the Newton
+            // endgame, or a first-order exit asks to certify the returned beta,
+            // form the exact second-order remainder exactly once at this beta.
+            // There is no component-wise PSD gate: only the spectrum of the
+            // complete objective Hessian has mathematical authority.
+            let true_jeffreys_hessian_required =
+                (jeffreys_completion_endgame || returned_mode_curvature_pending)
+                    && head_jeffreys_term.is_some();
+            let head_jeffreys_completion = if true_jeffreys_hessian_required {
+                let z_joint = joint_jeffreys_subspace.as_ref().ok_or_else(|| {
+                    "joint Newton true Jeffreys Hessian requested without a coefficient subspace"
+                        .to_string()
+                })?;
+                jeffreys_completion_calls += 1;
+                Some(exact_joint_jeffreys_completion_at(
+                    family,
+                    &states,
+                    specs,
+                    z_joint,
+                    total_p,
+                    "joint Newton true-Hessian endgame",
+                )?)
+            } else {
+                None
+            };
+            let head_jeffreys_curvature = head_jeffreys_term.as_ref().map(|(_, hphi)| {
+                let mut curvature = hphi.clone();
+                if let Some(completion) = head_jeffreys_completion.as_ref() {
+                    curvature += completion;
+                }
+                curvature
+            });
             // Fold the Firth/Jeffreys score `∇Φ` into the head-of-cycle KKT
             // residual when the term is armed, for the same reason as the
             // post-step residual below: the inner objective is `−ℓ + ½βᵀSβ − Φ`,
@@ -2856,14 +3101,31 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     Ok(matrix) => matrix,
                     Err(_) => break,
                 };
-                let mut exact_lhs = lhs.clone();
-                add_joint_penalty_to_matrix(
-                    &mut exact_lhs,
-                    &ranges,
-                    &s_lambdas,
-                    joint_mode_diagonal_ridge,
-                    joint_bundle,
-                );
+                let exact_lhs = if true_jeffreys_hessian_required {
+                    assemble_true_joint_objective_hessian(
+                        lhs.clone(),
+                        &ranges,
+                        &s_lambdas,
+                        joint_mode_diagonal_ridge,
+                        joint_bundle,
+                        head_jeffreys_term.as_ref().map(|(_, hphi)| hphi),
+                        head_jeffreys_completion.as_ref(),
+                        "joint Newton constrained true-Hessian endgame",
+                    )?
+                } else {
+                    let mut matrix = lhs.clone();
+                    add_joint_penalty_to_matrix(
+                        &mut matrix,
+                        &ranges,
+                        &s_lambdas,
+                        joint_mode_diagonal_ridge,
+                        joint_bundle,
+                    );
+                    if let Some(curvature) = head_jeffreys_curvature.as_ref() {
+                        matrix += curvature;
+                    }
+                    matrix
+                };
                 add_joint_penalty_to_matrix(
                     &mut lhs,
                     &ranges,
@@ -2911,24 +3173,18 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // gam#826/#872/#715). Skipped when the cheap pre-check certifies
                 // well-conditioning: ∇Φ = 0 and H_Φ = 0 there, so neither
                 // rhs_step nor lhs change.
-                // PSD PROJECTION (gam#979). The exact divided-difference H_Φ is
-                // indefinite exactly where Φ is (mixed-sign reduced spectrum at
-                // off-mode trial points). The unconstrained dense-spectral path
-                // consumes it exactly — the Moré–Sorensen subproblem handles
-                // indefiniteness rigorously — but THIS active-set QP requires a
-                // convex model (an indefinite QP cycles its active set and the
-                // inner grinds the budget). Use the PSD part of H_Φ here: honest
-                // magnitudes (unlike the old `K²` vec-Gram phantom), guaranteed
-                // solvable QP, and the exact ∇Φ in the rhs keeps the fixed point
-                // unchanged — only the convergence rate on indefinite stretches
-                // degrades to the damped-Newton rate the constrained path always
-                // had.
+                // The QP is convexified only after every objective component is
+                // assembled. Projecting H_Φ by itself is not legitimate:
+                // H_Φ+completion may be indefinite while H+S stabilizes the full
+                // objective, or vice versa. The reduced-face and ambient spectra
+                // below retain `exact_lhs`; the QP receives a full-matrix
+                // modified-Newton geometry solely for globalization.
                 if let Some((grad_phi, hphi)) = head_jeffreys_term.as_ref()
                     && grad_phi.len() == rhs_step.len()
                 {
                     rhs_step += grad_phi;
-                    exact_lhs += hphi;
-                    lhs += &symmetric_psd_projection(hphi);
+                    let curvature = head_jeffreys_curvature.as_ref().unwrap_or(hphi);
+                    lhs += curvature;
                 }
                 // The constrained QP cannot drop ker(H_pen) the way the
                 // spectral range solve does. A numerical gauge therefore
@@ -2994,7 +3250,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     "joint Newton ambient spectrum cycle={cycle} p={total_p}"
                 ));
                 if let Ok(spectrum) = whitened_spectrum::WhitenedHessianSpectrum::decompose(
-                    &lhs,
+                    &exact_lhs,
                     &rhs_step,
                     &joint_trust_metric_diag,
                     KKT_REFUSAL_RANK_TOL,
@@ -3170,27 +3426,17 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 );
                 let mut rhs = &grad_joint - &penalty_beta;
                 // Universal robustness: fold the family-general
-                // Jeffreys/Firth curvature `H_Φ` and score `∇Φ` into BOTH the
-                // matrix-free PCG step AND the dense spectral fallback below,
-                // scoped to the full-span basis `Z_J`. Computed ONCE here
-                // so the matvec closure and the RHS share the SAME term and the
-                // fallback does not recompute it. The inner objective is
+                // Jeffreys/Firth curvature `H_Φ` and score `∇Φ` into the dense
+                // spectral step below, scoped to the full-span basis `Z_J`.
+                // Computed ONCE here so the RHS and curvature share the SAME
+                // term. The inner objective is
                 // `−ℓ + ½βᵀSβ − Φ`, so the Newton system the step must solve is
                 //   (H + S_λ + H_Φ) δ = (∇ℓ − S_λβ) + ∇Φ.
-                // Previously the PCG matvec applied only `H + S_λ` and its RHS
-                // omitted `∇Φ`, so on the matrix-free path (large p / large n)
-                // Firth was a SILENT NO-OP: the proper-prior never reached the
-                // step that actually moves β, leaving separation/under-
-                // identification uncured exactly where the dense route is not
-                // taken. The dense route (small p, e.g. BMS p≈51) was already
-                // correct. `H_Φ` is the full-span Gauss-Newton surrogate
-                // `½ J H_id⁻¹ Jᵀ` (Z_J = identity ⇒ p×p, not low-rank), but the
-                // conditioning gate in `joint_jeffreys_term` returns the zero
-                // term on every well-conditioned fit, so this only arms on the
-                // near-separating span
-                // — and `hphi` is materialized once per cycle regardless, so the
-                // matvec adds only one O(p²) HVP, preserving the matrix-free
-                // path's asymptotics where Firth is negligible (term = `None`).
+                // An active H_Φ can be indefinite, so it cannot be projected by
+                // itself and handed to SPD-only CG. Active Jeffreys cycles route
+                // to the exact dense Moré–Sorensen spectrum; well-conditioned
+                // cycles are certified as exact-zero by the pre-check and keep
+                // the matrix-free PCG path.
                 // Cheap pre-check certified well-conditioned ⇒ the exact term
                 // is the zero contribution (∇Φ = 0, H_Φ = 0). Short-circuit to
                 // `None` WITHOUT materializing the dense joint Hessian or running
@@ -3208,19 +3454,12 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         }
                         _ => None,
                     };
-                // PSD PROJECTION for the SPD-PCG matvec (gam#979): the exact
-                // divided-difference H_Φ can be indefinite at off-mode trial
-                // points, which breaks the SPD-CG contract. The matvec uses its
-                // PSD part; the dense spectral fallback below keeps the EXACT
-                // (possibly indefinite) H_Φ — the Moré–Sorensen subproblem
-                // handles it rigorously.
-                let inner_jeffreys_hphi: Option<Arc<Array2<f64>>> = inner_jeffreys_term
-                    .as_ref()
-                    .map(|(_grad_phi, hphi)| Arc::new(symmetric_psd_projection(hphi)));
                 let pcg_started = std::time::Instant::now();
                 let pcg_requested = matrix_free_joint_requested
                     && !joint_hessian_is_dense
-                    && !returned_mode_curvature_pending;
+                    && !returned_mode_curvature_pending
+                    && !true_jeffreys_hessian_required
+                    && inner_jeffreys_term.is_none();
                 let mut spectral_nullity_for_step = 0usize;
                 let mut delta = if pcg_requested {
                     let preconditioner_diag = match &joint_hessian_source {
@@ -3249,13 +3488,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     // borrow of captures) and we need interior mutability
                     // to write into the workspace.
                     let penalty_workspace = RefCell::new(Array1::<f64>::zeros(total_p));
-                    // Capture the Jeffreys/Firth curvature for the matvec. When
-                    // armed (and nonzero past the conditioning gate) the PCG
-                    // operator becomes `H + S_λ + H_Φ`, matching the augmented
-                    // RHS `(∇ℓ − S_λβ) + ∇Φ` set above and the dense spectral
-                    // fallback. `None` keeps the unaugmented matvec.
-                    let pcg_hphi_dense = inner_jeffreys_hphi.clone();
-                    let pcg_hphi_op = inner_jeffreys_hphi.clone();
                     match &joint_hessian_source {
                         JointHessianSource::Dense(h_joint) => {
                             gam_linalg::utils::solve_spd_pcg_with_info_into(
@@ -3276,9 +3508,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                                         joint_bundle,
                                     );
                                     *out += &*pen;
-                                    if let Some(hphi) = pcg_hphi_dense.as_ref() {
-                                        *out += &hphi.dot(v);
-                                    }
                                 },
                                 &rhs,
                                 &preconditioner_diag,
@@ -3316,9 +3545,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                                         joint_bundle,
                                     );
                                     *out += &*pen;
-                                    if let Some(hphi) = pcg_hphi_op.as_ref() {
-                                        *out += &hphi.dot(v);
-                                    }
                                 },
                                 &rhs,
                                 &preconditioner_diag,
@@ -3354,7 +3580,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     if pcg_requested {
                         break;
                     }
-                    let mut lhs_true = match materialize_joint_hessian_source(
+                    let likelihood_hessian = match materialize_joint_hessian_source(
                         &joint_hessian_source,
                         total_p,
                         "joint Newton inner dense fallback Hessian materialization",
@@ -3370,31 +3596,53 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     // source is an `Operator` — a `Dense` source already gives
                     // those matvecs the fast path, so cloning would be waste.
                     if matches!(&joint_hessian_source, JointHessianSource::Operator { .. }) {
-                        materialized_dense_unpenalized = Some(lhs_true.clone());
+                        materialized_dense_unpenalized = Some(likelihood_hessian.clone());
                     }
-                    // Snapshot the Jeffreys information matrix only when a
-                    // family supplies the contracted completion. The generic
-                    // pairwise fallback costs p(p+1)/2 full second-directional
-                    // Hessian passes; at biobank scale (BMS p=35, n≈196k) it
-                    // turns a near-converged polishing cycle into ~50s of row
-                    // work. Without a contracted hook the divided-difference
-                    // H_phi model remains first-order correct and the KKT
-                    // certificate owns convergence.
-                    let jeffreys_completion_requested =
-                        family.joint_jeffreys_information_contracted_trace_hessian_available();
-                    let h_info_for_completion = (jeffreys_completion_endgame
-                        && inner_jeffreys_term.is_some()
-                        && jeffreys_completion_requested)
-                        .then(|| family.joint_jeffreys_information_with_specs(&states, specs))
-                        .transpose()?
-                        .flatten();
-                    add_joint_penalty_to_matrix(
-                        &mut lhs_true,
-                        &ranges,
-                        &s_lambdas,
-                        joint_mode_diagonal_ridge,
-                        joint_bundle,
-                    );
+                    let m_dd_for_probe = if true_jeffreys_hessian_required
+                        && !jeffreys_true_hessian_probe_logged
+                        && log::log_enabled!(log::Level::Info)
+                    {
+                        let mut matrix = likelihood_hessian.clone();
+                        add_joint_penalty_to_matrix(
+                            &mut matrix,
+                            &ranges,
+                            &s_lambdas,
+                            joint_mode_diagonal_ridge,
+                            joint_bundle,
+                        );
+                        if let Some((_gradient, hphi)) = inner_jeffreys_term.as_ref() {
+                            matrix += hphi;
+                        }
+                        symmetrize_dense_in_place(&mut matrix);
+                        Some(matrix)
+                    } else {
+                        None
+                    };
+                    let lhs_true = if true_jeffreys_hessian_required {
+                        assemble_true_joint_objective_hessian(
+                            likelihood_hessian,
+                            &ranges,
+                            &s_lambdas,
+                            joint_mode_diagonal_ridge,
+                            joint_bundle,
+                            inner_jeffreys_term.as_ref().map(|(_, hphi)| hphi),
+                            head_jeffreys_completion.as_ref(),
+                            "joint Newton unconstrained true-Hessian endgame",
+                        )?
+                    } else {
+                        let mut matrix = likelihood_hessian;
+                        add_joint_penalty_to_matrix(
+                            &mut matrix,
+                            &ranges,
+                            &s_lambdas,
+                            joint_mode_diagonal_ridge,
+                            joint_bundle,
+                        );
+                        if let Some((_gradient, hphi)) = inner_jeffreys_term.as_ref() {
+                            matrix += hphi;
+                        }
+                        matrix
+                    };
                     // Universal robustness: add the
                     // family-general Jeffreys curvature `H_Phi` to the
                     // penalized Hessian. This is the Tier-B coupled-Newton form
@@ -3410,48 +3658,10 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     // dense fallback and the matrix-free PCG step now solve the
                     // SAME Jeffreys-augmented Newton system.
                     let spectral_rhs = rhs.clone();
-                    if let Some((_grad_phi, hphi)) = inner_jeffreys_term.as_ref() {
-                        lhs_true += hphi;
-                        // ENDGAME EXACTNESS (gam#979). The divided-difference
-                        // H_Φ omits the second-directional-Hessian remainder
-                        // `½ tr(K · D_ab)`; near a Firth-active mode that
-                        // remainder is comparable to the kept curvature, so
-                        // Newton converges only linearly (a residual sawtooth
-                        // plateauing just above the certificate tolerance —
-                        // enough mode noise to swamp outer finite differences
-                        // and feed the IFT near-flat-kernel amplification).
-                        // Once the residual enters the convergence band, add
-                        // the exact completion so the model is the true
-                        // Hessian of the Φ-augmented objective and the endgame
-                        // is quadratic. A family contracted trace hook can
-                        // supply it at any width; the pairwise `p(p+1)/2`
-                        // fallback remains limited to moderate p. `None`
-                        // degrades safely to the divided-difference model.
-                        if let (Some(h_info), Some(z_joint)) = (
-                            h_info_for_completion.as_ref(),
-                            joint_jeffreys_subspace.as_ref(),
-                        ) && let Some(completion) =
-                            custom_family_joint_jeffreys_second_order_completion(
-                                family, &states, specs, h_info, z_joint, false,
-                            )?
-                        {
-                            // TRUST-REGION GATE (gam#1607): fold the completion
-                            // only when `H_Φ + completion` stays PSD. In the
-                            // near-separable regime the `−½ tr(K·D_ab)` remainder
-                            // explodes negative and cancels `H_Φ`, leaving the
-                            // augmented inner Hessian strongly indefinite. The
-                            // trust-region spectral solve below would reflect those
-                            // negative modes, but that turns the quadratic endgame
-                            // back into a reflected-descent crawl that plateaus
-                            // above the certificate tolerance ("inner solve exited
-                            // before convergence"). Keeping the bounded PSD `H_Φ`
-                            // model preserves the linear-but-monotone endgame the
-                            // divided-difference solve already certifies.
-                            if custom_family_jeffreys_completion_preserves_psd(hphi, &completion) {
-                                lhs_true += &completion;
-                            }
-                        }
-                    }
+                    // ENDGAME EXACTNESS (gam#979). Outside the endgame the
+                    // matrix above is M_DD = H+S+H_Φ. Once armed it is M_true,
+                    // assembled by `assemble_true_joint_objective_hessian` from
+                    // H+S+H_Φ+completion with no component-only PSD authority.
                     // Single metric-whitened eigendecomposition drives BOTH the
                     // seed step and every trust-region re-solve this cycle
                     // (gam#979). The prior code ran a SECOND O(p³)
@@ -3473,14 +3683,62 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         &joint_trust_metric_diag,
                         KKT_REFUSAL_RANK_TOL,
                     )?;
-                    // Seed = the unconstrained (Moore–Penrose, range-restricted)
-                    // exact step, so cycle 0 can take the full Newton step on a
-                    // well-conditioned model (the cycle-0 radius bump below relies
-                    // on this); the trust loop re-solves at finite radius for every
-                    // subsequent attempt. An indefinite model reflects negative
-                    // curvature to |λ|, exactly as the prior spectral solve did.
-                    let spectral_step = spectrum.trust_region_step(f64::INFINITY);
+                    // A positive-definite M_true owns the exact Newton step and
+                    // therefore the quadratic endgame. An indefinite M_true is
+                    // not reflected into a fake local minimum: start directly
+                    // with the finite-radius Moré–Sorensen solution (including
+                    // its hard-case negative-eigenspace component), then let the
+                    // ordinary trust loop accept, shrink, or escape it.
+                    let spectral_step = if true_jeffreys_hessian_required
+                        && spectrum.has_resolvable_negative_curvature()
+                    {
+                        spectrum.trust_region_step(joint_trust_radius)
+                    } else {
+                        spectrum.trust_region_step(f64::INFINITY)
+                    };
                     spectral_nullity_for_step = spectral_step.nullity;
+                    if let Some(m_dd) = m_dd_for_probe.as_ref() {
+                        let component = head_jeffreys_curvature.as_ref().ok_or_else(|| {
+                            "true-Hessian diagnostic is missing Jeffreys curvature".to_string()
+                        })?;
+                        let (component_min, component_max) = symmetric_eigen_extremes(
+                            component,
+                            "true-Hessian Jeffreys component spectrum",
+                        )?;
+                        let (m_dd_min, m_dd_max) =
+                            symmetric_eigen_extremes(m_dd, "divided-difference Hessian spectrum")?;
+                        let (m_true_min, m_true_max) =
+                            symmetric_eigen_extremes(&lhs_true, "true objective Hessian spectrum")?;
+                        let dd_spectrum = whitened_spectrum::WhitenedHessianSpectrum::decompose(
+                            m_dd,
+                            &spectral_rhs,
+                            &joint_trust_metric_diag,
+                            KKT_REFUSAL_RANK_TOL,
+                        )?;
+                        let dd_step = dd_spectrum.trust_region_step(f64::INFINITY);
+                        let dd_contraction = linearized_residual_contraction(
+                            &lhs_true,
+                            &spectral_rhs,
+                            &dd_step.delta,
+                        );
+                        let true_contraction = linearized_residual_contraction(
+                            &lhs_true,
+                            &spectral_rhs,
+                            &spectral_step.delta,
+                        );
+                        log::info!(
+                            "[979-TRUE-HESSIAN] cycle={cycle} completion_call={} \
+                             eig(H_phi+completion)=[{component_min:.6e},{component_max:.6e}] \
+                             eig(M_DD)=[{m_dd_min:.6e},{m_dd_max:.6e}] \
+                             eig(M_true)=[{m_true_min:.6e},{m_true_max:.6e}] \
+                             current_dd_contraction={dd_contraction:.6e} \
+                             true_contraction={true_contraction:.6e} \
+                             true_indefinite={} trust_radius={joint_trust_radius:.6e}",
+                            jeffreys_completion_calls,
+                            spectrum.has_resolvable_negative_curvature(),
+                        );
+                        jeffreys_true_hessian_probe_logged = true;
+                    }
                     // gam#979: Levenberg shift-to-PD of the SEED search direction on
                     // the rigid ill-conditioned path. When the whitened inner Hessian
                     // is indefinite the Moré–Sorensen step reflects the negative
@@ -3507,7 +3765,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     const JOINT_REFLECTED_CONVEXIFY_STALL_WINDOW: usize = 3;
                     const JOINT_REFLECTED_CONVEXIFY_MARGIN: f64 = 1.5;
                     let mut seed_delta = spectral_step.delta;
-                    if family.levenberg_on_ill_conditioning()
+                    if !true_jeffreys_hessian_required
+                        && family.levenberg_on_ill_conditioning()
                         && spectral_step.reflected_negative_modes > 0
                         && cycles_since_residual_improved >= JOINT_REFLECTED_CONVEXIFY_STALL_WINDOW
                         && spectral_step.most_negative_eigenvalue.is_finite()
@@ -3781,12 +4040,25 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .is_some_and(|spectrum| spectrum.has_resolvable_negative_curvature());
             if returned_mode_curvature_pending {
                 returned_mode_curvature_pending = false;
-                if joint_spectrum.is_none() {
-                    return Err(
-                        "returned-mode curvature cycle did not produce the required exact joint spectrum"
-                            .to_string(),
-                    );
-                }
+                let returned_spectrum = joint_spectrum.as_ref().ok_or_else(|| {
+                    "returned-mode curvature cycle did not produce the required exact joint spectrum"
+                        .to_string()
+                })?;
+                let returned_min = returned_spectrum
+                    .gamma
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                let returned_max = returned_spectrum
+                    .gamma
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                log::info!(
+                    "[979-MODE-HESSIAN] eig(M_true_tangent_whitened)=[{returned_min:.6e},{returned_max:.6e}] numerical_floor={:.6e} tangent_dim={}",
+                    returned_spectrum.numerical_floor,
+                    total_p,
+                );
                 if has_resolvable_negative_curvature {
                     log::info!(
                         "[PIRLS/joint-Newton mode certificate] tentative first-order convergence revoked at returned beta; continuing this exact spectral cycle through the finite-radius negative-curvature hard case"
@@ -3840,11 +4112,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // full per-row kernel cache at the same β.
                 cached_joint_workspace = hessian_workspace_for_cycle.take();
                 cycles_done = cycle;
-                converged = true;
-                returned_mode_curvature_certified = joint_constraints.is_none()
-                    && joint_jeffreys_subspace.is_none()
-                    && joint_spectrum.is_some();
-                break;
+                finish_post_step_convergence!();
             }
             if current_stationarity_residual <= residual_tol
                 && step_inf <= step_tol
@@ -3936,7 +4204,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // byte-identical. `None` outside the damped phase (λ_N below the
             // quadratic-phase threshold), where plain Newton owns the endgame.
             let self_concordant_damping: Option<f64> =
-                if family.inner_objective_is_self_concordant() {
+                if !true_jeffreys_hessian_required
+                    && family.inner_objective_is_self_concordant()
+                {
                     joint_spectrum.as_ref().and_then(|spectrum| {
                         self_concordant_damped_step_alpha(spectrum.newton_decrement())
                     })
@@ -4483,9 +4753,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // merit the accept test uses, so the step is accepted and the
                 // residual descends. No-op when the term is condition-gated (∇Φ=0,
                 // H_Φ=0) or unavailable.
-                if let Some((_grad_phi, hphi)) = head_jeffreys_term.as_ref() {
-                    let hphi_delta = hphi.dot(&trial_delta);
-                    hpen_delta += &hphi_delta;
+                if let Some(curvature) = head_jeffreys_curvature.as_ref() {
+                    let jeffreys_delta = curvature.dot(&trial_delta);
+                    hpen_delta += &jeffreys_delta;
                 }
                 let predicted_reduction =
                     joint_quadratic_predicted_reduction(&rhs, &hpen_delta, &trial_delta);
@@ -4953,21 +5223,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     }
                     refresh_all_block_etas(family, specs, &mut states)?;
                     last_joint_math = Some(joint_math);
-                    accepted = true;
-                    converged = true;
-                    returned_mode_curvature_certified = joint_constraints.is_none()
-                        && joint_jeffreys_subspace.is_none()
-                        && joint_spectrum.is_some();
-                    // Constrained (non-Jeffreys) acceptance is tentative until the
-                    // next cycle head certifies the active-face-tangent curvature
-                    // and escapes a strict saddle (gam#979). A trust-floor accept
-                    // is a common saddle signature (negative curvature keeps every
-                    // step rejected), so it must route through the same check.
-                    if joint_constraints.is_some() && joint_jeffreys_subspace.is_none() {
-                        returned_constrained_mode_pending = true;
-                        continue 'joint_newton_cycles;
-                    }
-                    break;
+                    // A trust-floor accept is a common saddle signature
+                    // (negative curvature keeps every step rejected), so it
+                    // routes through the same M_true certificate as every other
+                    // tentative convergence event.
+                    finish_post_step_convergence!();
                 }
                 if secondary_ok {
                     if let Some(sig) = tr_log_sig.take() {
@@ -5147,16 +5407,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // than fail the outer "inner solve did not converge"
                 // panic on a fully resolved fit.
                 if last_cycle_residual_below_tol && last_cycle_obj_change_below_tol {
-                    converged = true;
-                    // Constrained (non-Jeffreys) acceptance is tentative until the
-                    // next cycle head certifies the active-face-tangent curvature
-                    // and escapes a strict saddle (gam#979).
-                    if joint_constraints.is_some() && joint_jeffreys_subspace.is_none() {
-                        returned_constrained_mode_pending = true;
-                        returned_mode_curvature_certified = false;
-                        continue 'joint_newton_cycles;
-                    }
-                    break;
+                    finish_post_step_convergence!();
                 }
                 // Fully-rejected stall guard. See the constant declaration
                 // at the top of this function for the full rationale. The
@@ -6937,10 +7188,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // critical-cone surrogate under strict complementarity) — the same
             // Z the terminal determinant uses, so a mode this certificate
             // accepts can never fail the downstream SPD logdet on curvature
-            // grounds. Jeffreys-augmented families still require their own
-            // augmented-objective certificate and retain the first-order
-            // contract here.
-            if !returned_mode_curvature_certified && joint_jeffreys_subspace.is_none() {
+            // grounds. The same M_true certificate includes Jeffreys curvature;
+            // Jeffreys families are never exempt from second-order stationarity.
+            if !returned_mode_curvature_certified {
                 let mode_active_block = if joint_constraints.is_some() {
                     // Certify on the full numerically-tight face, not only the
                     // QP-recorded rows — see widen_active_sets_to_tight_face.
@@ -6970,6 +7220,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     total_p,
                     mode_active_block.as_ref(),
                 )?;
+                if certificate.jeffreys_completion_assembled {
+                    jeffreys_completion_calls += 1;
+                }
                 let has_negative_curvature = certificate.has_resolvable_negative_curvature();
                 let minimum_whitened_eigenvalue = certificate.minimum_whitened_eigenvalue;
                 let numerical_floor = certificate.numerical_floor;
@@ -7063,6 +7316,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 || (converged && min_certified_residual <= last_residual_tol);
             let verdict = format!(
                 "[PIRLS/joint-Newton terminal] converged={} terminator={} cycles={}/{} \
+                 jeffreys_completion_calls={} \
                  solve_wall={:.3}s best_residual_inf={:.3e} (tol={:.3e}) last_residual_below_tol={} \
                  last_obj_change_below_tol={} objective={:.6e}; this is the status the inner \
                  solve reports to the outer REML/LAML evaluation — a non-converged exit \
@@ -7071,6 +7325,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 terminator,
                 cycles_done,
                 inner_max_cycles,
+                jeffreys_completion_calls,
                 inner_started.elapsed().as_secs_f64(),
                 min_certified_residual,
                 last_residual_tol,
@@ -8413,6 +8668,24 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
     let block_constraints = collect_block_linear_constraints(family, &states, specs)?;
     let joint_constraints =
         assemble_joint_linear_constraints(&block_constraints, &local_ranges, local_total_p)?;
+    let active_constraints = if joint_constraints.is_some() {
+        // Full numerically-tight face, not only the QP-recorded rows — see
+        // widen_active_sets_to_tight_face (gam#979).
+        let tight_sets = crate::blockwise_solve::widen_active_sets_to_tight_face(
+            &block_constraints,
+            &states,
+            &cached_active_sets,
+        )?;
+        assemble_active_constraint_block(
+            &block_constraints,
+            &tight_sets,
+            &local_ranges,
+            local_total_p,
+        )
+        .map(std::sync::Arc::new)
+    } else {
+        None
+    };
     let joint_mode_diagonal_ridge = if ridge > 0.0 && options.ridge_policy.accounts_for_objective()
     {
         ridge
@@ -8420,11 +8693,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         0.0
     };
     let mut certified_workspace = None;
-    if converged
-        && exact_joint_curvature_available
-        && joint_constraints.is_none()
-        && !family.joint_jeffreys_term_required()
-    {
+    if converged && exact_joint_curvature_available {
         let certificate = exact_joint_mode_curvature_certificate(
             family,
             &states,
@@ -8435,7 +8704,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
             joint_mode_diagonal_ridge,
             joint_bundle,
             local_total_p,
-            None,
+            active_constraints.as_deref(),
         )?;
         let has_negative_curvature = certificate.has_resolvable_negative_curvature();
         let minimum_whitened_eigenvalue = certificate.minimum_whitened_eigenvalue;
@@ -8464,22 +8733,6 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         Some(specs),
     );
 
-    let active_constraints = {
-        // Full numerically-tight face, not only the QP-recorded rows — see
-        // widen_active_sets_to_tight_face (gam#979).
-        let tight_sets = crate::blockwise_solve::widen_active_sets_to_tight_face(
-            &block_constraints,
-            &states,
-            &cached_active_sets,
-        )?;
-        assemble_active_constraint_block(
-            &block_constraints,
-            &tight_sets,
-            &local_ranges,
-            local_total_p,
-        )
-        .map(std::sync::Arc::new)
-    };
     let (block_logdet_h, block_logdet_s) = if converged {
         let (h, s) = blockwise_logdet_terms_with_workspace(
             family,

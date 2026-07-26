@@ -3501,3 +3501,181 @@ fn bernoulli_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
         );
     }
 }
+
+/// One fixed-hyperparameter c12 inner solve for the #979 true-Hessian endgame.
+///
+/// This is deliberately not an outer fit: both smoothing coordinates are fixed
+/// at `rho=-4`, so every emitted cycle belongs to one coefficient objective.
+/// Twelve deterministic Matérn-5/2 radial directions seed each BMS block.
+/// The marginal block alone owns the shared intercept. The log-slope chart uses
+/// genuinely distinct covariate geometry and is sample-orthogonalized against
+/// the complete marginal chart, then internally orthonormalized. Thus it is a
+/// full-rank c12 chart in the quotient by the marginal sample space, rather
+/// than twelve phase-shifted copies of nearly the same positive radial columns.
+/// The deterministic labels are separated by a smooth latent surface, keeping
+/// the Jeffreys term active at the finite Firth mode.
+///
+/// The MSI harness runs this ignored probe with info logging and requires the
+/// production `[979-TRUE-HESSIAN]` line (component, M_DD, and M_true spectra plus
+/// current-vs-true contraction), the returned-mode tangent spectrum, and the
+/// terminal completion-call/cycle ledger.
+#[test]
+#[ignore = "focused MSI causal probe; not part of routine unit-test latency"]
+fn bms_true_hessian_fixed_theta_c12_probe() {
+    const N: usize = 2_500;
+    const CENTERS: usize = 12;
+    const MARGINAL_P: usize = CENTERS + 1;
+
+    gam_runtime::test_support::install_diagnostic_logger();
+    let x1 = Array1::from_shape_fn(N, |row| {
+        -2.0 + 4.0 * (((row * 37 + 11) % N) as f64 + 0.5) / N as f64
+    });
+    let x2 = Array1::from_shape_fn(N, |row| {
+        -2.0 + 4.0 * (((row * 91 + 29) % N) as f64 + 0.5) / N as f64
+    });
+    let u1 = Array1::from_shape_fn(N, |row| {
+        -2.0 + 4.0 * (((row * 137 + 43) % N) as f64 + 0.5) / N as f64
+    });
+    let u2 = Array1::from_shape_fn(N, |row| {
+        -2.0 + 4.0 * (((row * 211 + 97) % N) as f64 + 0.5) / N as f64
+    });
+    let make_radial_design = |covariate_x: &Array1<f64>,
+                              covariate_y: &Array1<f64>,
+                              phase: f64| {
+        Array2::from_shape_fn((N, CENTERS), |(row, column)| {
+            let angle = std::f64::consts::TAU * column as f64 / CENTERS as f64 + phase;
+            let center_x = 1.55 * angle.cos();
+            let center_y = 1.55 * angle.sin();
+            let dx = covariate_x[row] - center_x;
+            let dy = covariate_y[row] - center_y;
+            let radius = (dx * dx + dy * dy).sqrt() / 1.1;
+            let scaled = 5.0_f64.sqrt() * radius;
+            (1.0 + scaled + 5.0 * radius * radius / 3.0) * (-scaled).exp()
+        })
+    };
+    let marginal_radial = make_radial_design(&x1, &x2, 0.0);
+    let marginal_design = Array2::from_shape_fn((N, MARGINAL_P), |(row, column)| {
+        if column == 0 {
+            1.0
+        } else {
+            marginal_radial[[row, column - 1]]
+        }
+    });
+    let logslope_raw = make_radial_design(&u1, &u2, 0.31);
+
+    // The identifiability contract is about realized sample-space directions,
+    // not center labels. Build an orthonormal frame for the complete marginal
+    // chart, then place each raw log-slope radial direction in its orthogonal
+    // complement. A second modified-Gram-Schmidt pass controls round-off for
+    // the strongly overlapping positive Matérn columns. Appending each accepted
+    // log-slope direction to the frame also makes the resulting c12 block
+    // internally full rank. Unit empirical RMS keeps its numerical scale
+    // comparable to the marginal chart without changing orthogonality.
+    let orthogonalize = |mut direction: Array1<f64>, basis: &[Array1<f64>]| {
+        let input_norm = direction.dot(&direction).sqrt();
+        for _ in 0..2 {
+            for unit in basis {
+                let projection = direction.dot(unit);
+                for row in 0..N {
+                    direction[row] -= projection * unit[row];
+                }
+            }
+        }
+        let residual_norm = direction.dot(&direction).sqrt();
+        assert!(
+            residual_norm.is_finite()
+                && residual_norm > f64::EPSILON.sqrt() * input_norm.max(1.0),
+            "deterministic radial direction collapsed in sample-space orthogonalization: \
+             input_norm={input_norm:.6e} residual_norm={residual_norm:.6e}"
+        );
+        direction.mapv_inplace(|value| value / residual_norm);
+        direction
+    };
+    let mut sample_frame: Vec<Array1<f64>> =
+        Vec::with_capacity(MARGINAL_P + CENTERS);
+    for column in 0..MARGINAL_P {
+        let unit = orthogonalize(marginal_design.column(column).to_owned(), &sample_frame);
+        sample_frame.push(unit);
+    }
+    let empirical_scale = (N as f64).sqrt();
+    let mut logslope_design = Array2::<f64>::zeros((N, CENTERS));
+    for column in 0..CENTERS {
+        let unit = orthogonalize(logslope_raw.column(column).to_owned(), &sample_frame);
+        for row in 0..N {
+            logslope_design[[row, column]] = empirical_scale * unit[row];
+        }
+        sample_frame.push(unit);
+    }
+    let z = Array1::from_shape_fn(N, |row| {
+        -2.5 + 5.0 * (((row * 53 + 7) % N) as f64 + 0.5) / N as f64
+    });
+    let latent = Array1::from_shape_fn(N, |row| {
+        3.2 * (marginal_design[[row, 1]] - marginal_design[[row, 7]])
+            + (0.35 + 0.8 * logslope_design[[row, 4]]).exp() * z[row]
+    });
+    let y = latent.mapv(|value| if value >= 0.0 { 1.0 } else { 0.0 });
+    let weights = Array1::ones(N);
+    let family = test_family_with_dense_designs(
+        y,
+        weights,
+        z,
+        marginal_design.clone(),
+        logslope_design.clone(),
+    );
+
+    let make_spec = |name: &str, design: Array2<f64>, owns_intercept: bool| {
+        let p = design.ncols();
+        let first_penalized = usize::from(owns_intercept);
+        let mut smooth_penalty = Array2::<f64>::zeros((p, p));
+        for column in first_penalized..p {
+            let frequency = (column - first_penalized + 1) as f64;
+            smooth_penalty[[column, column]] = (frequency / CENTERS as f64).powi(4);
+        }
+        ParameterBlockSpec {
+            name: name.to_string(),
+            design: dense_design(design),
+            offset: Array1::zeros(N),
+            penalties: vec![PenaltyMatrix::Dense(smooth_penalty)],
+            nullspace_dims: vec![first_penalized],
+            initial_log_lambdas: array![-4.0],
+            initial_beta: Some(Array1::zeros(p)),
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        }
+    };
+    let specs = vec![
+        make_spec("marginal_c12", marginal_design, true),
+        make_spec("logslope_c12", logslope_design, false),
+    ];
+    let options = BlockwiseFitOptions {
+        inner_tol: 1.0e-6,
+        inner_max_cycles: 200,
+        compute_covariance: false,
+        use_outer_hessian: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let fit = crate::custom_family::fit_custom_family_fixed_log_lambdas(
+        &family,
+        &specs,
+        &options,
+        None,
+    )
+    .expect("fixed-theta c12 BMS mode must converge and certify M_true");
+    assert!(
+        fit.inner_cycles < options.inner_max_cycles,
+        "true-Hessian c12 endgame must certify before exhausting the inner budget"
+    );
+    eprintln!(
+        "[979-FIXED-THETA-C12] n={N} centers={CENTERS} theta=[-4,-4] \
+         inner_cycles={} beta_inf={:.6e}",
+        fit.inner_cycles,
+        fit.beta.iter().copied().map(f64::abs).fold(0.0_f64, f64::max),
+    );
+    assert_eq!(
+        gam_runtime::test_support::diagnostic_write_failures(),
+        0,
+        "the causal probe must not lose production diagnostics"
+    );
+}

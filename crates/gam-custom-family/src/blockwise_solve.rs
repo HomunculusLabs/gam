@@ -2326,28 +2326,6 @@ pub(crate) fn strict_exact_pseudo_logdet(
         .sum())
 }
 
-/// PSD part of a symmetric matrix: eigendecompose and clamp negative
-/// eigenvalues to zero. Used by the step consumers that REQUIRE a convex
-/// model (the constrained active-set QP and the SPD-PCG matvec) when folding
-/// the exact divided-difference Jeffreys curvature `H_Φ`, which is indefinite
-/// exactly where `Φ` is (gam#979). On a PSD input this is the identity (up to
-/// eigendecomposition round-off). Falls back to the zero matrix if the
-/// eigendecomposition fails — the safe unaugmented step, never a wrong one.
-pub(crate) fn symmetric_psd_projection(matrix: &Array2<f64>) -> Array2<f64> {
-    let p = matrix.nrows();
-    let mut sym = matrix.clone();
-    symmetrize_dense_in_place(&mut sym);
-    let Ok((evals, evecs)) = FaerEigh::eigh(&sym, Side::Lower) else {
-        return Array2::zeros((p, p));
-    };
-    if evals.iter().all(|lam| *lam >= 0.0) {
-        return sym;
-    }
-    let clamped = Array1::from_iter(evals.iter().map(|lam| lam.max(0.0)));
-    let scaled = &evecs * &clamped.view().insert_axis(ndarray::Axis(0));
-    scaled.dot(&evecs.t())
-}
-
 pub(crate) struct ConstrainedHessianGeometry {
     pub(crate) matrix: Array2<f64>,
     pub(crate) nullity: usize,
@@ -2388,8 +2366,8 @@ pub(crate) struct ConstrainedHessianGeometry {
 /// μ·I shift that is tiny relative to the most-negative eigenvalue leaves the
 /// model indefinite, and a μ large enough to flip it would bias the converged β.
 ///
-/// Reflecting (not merely clamping-to-zero as `symmetric_psd_projection` does)
-/// preserves the curvature MAGNITUDE on negative modes, so the modified-Newton
+/// Reflecting (not merely clamping negative modes to zero) preserves the
+/// curvature MAGNITUDE on negative modes, so the modified-Newton
 /// step length matches the dense-spectral path's and the QP stays bounded (a
 /// clamp-to-zero null mode would make the QP unbounded along that direction). At
 /// a genuine optimum the constrained Hessian over the identified subspace is PSD,

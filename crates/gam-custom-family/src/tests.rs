@@ -3638,7 +3638,12 @@ pub(crate) fn jeffreys_second_order_completion_prefers_contracted_hook() {
     let h_joint = array![[1.0e-4, 0.0], [0.0, 1.0]];
     let z_joint = Array2::<f64>::eye(2);
     let completion = custom_family_joint_jeffreys_second_order_completion(
-        &family, &states, &specs, &h_joint, &z_joint, true,
+        &family,
+        &states,
+        &specs,
+        &h_joint,
+        &z_joint,
+        JeffreysCompletionAssembly::Exact,
     )
     .expect("completion")
     .expect("completion present");
@@ -3655,9 +3660,9 @@ pub(crate) fn jeffreys_second_order_completion_prefers_contracted_hook() {
     }
 }
 
-/// gam#1020: family without a contracted hook — the completion must fall
-/// back to the exact pairwise second-directional path, and must return
-/// `None` when the pairwise fallback is not allowed (width cap exceeded).
+/// gam#1020: for a family without a contracted hook, exact assembly dispatches
+/// to the mathematically identical pairwise second-directional path. The
+/// contracted-only policy must decline because that family contract is absent.
 #[derive(Clone)]
 struct PairwiseJeffreysSeamFamily;
 
@@ -3691,7 +3696,7 @@ impl CustomFamily for PairwiseJeffreysSeamFamily {
 }
 
 #[test]
-pub(crate) fn jeffreys_second_order_completion_pairwise_fallback_when_hook_absent() {
+pub(crate) fn jeffreys_second_order_completion_exact_pairwise_when_hook_absent() {
     let family = PairwiseJeffreysSeamFamily;
     let specs = vec![jeffreys_seam_spec(2)];
     let states = vec![jeffreys_seam_state(Array1::zeros(2))];
@@ -3699,7 +3704,12 @@ pub(crate) fn jeffreys_second_order_completion_pairwise_fallback_when_hook_absen
     let z_joint = Array2::<f64>::eye(2);
 
     let completion = custom_family_joint_jeffreys_second_order_completion(
-        &family, &states, &specs, &h_joint, &z_joint, true,
+        &family,
+        &states,
+        &specs,
+        &h_joint,
+        &z_joint,
+        JeffreysCompletionAssembly::Exact,
     )
     .expect("completion")
     .expect("completion present");
@@ -3717,20 +3727,25 @@ pub(crate) fn jeffreys_second_order_completion_pairwise_fallback_when_hook_absen
         .expect("direct pairwise completion present");
     assert_eq!(
         completion, direct,
-        "fallback must be the exact pairwise completion"
+        "exact assembly must equal the direct pairwise completion"
     );
     assert!(
         completion.iter().any(|value| value.abs() > 0.0),
         "pairwise completion should be nonzero on this gated fixture"
     );
 
-    let blocked = custom_family_joint_jeffreys_second_order_completion(
-        &family, &states, &specs, &h_joint, &z_joint, false,
+    let contracted_only = custom_family_joint_jeffreys_second_order_completion(
+        &family,
+        &states,
+        &specs,
+        &h_joint,
+        &z_joint,
+        JeffreysCompletionAssembly::Contracted,
     )
-    .expect("blocked completion");
+    .expect("contracted-only completion");
     assert!(
-        blocked.is_none(),
-        "completion must decline (None) when the pairwise fallback is disallowed and no hook exists"
+        contracted_only.is_none(),
+        "contracted-only assembly must decline when the family has no contracted hook"
     );
 }
 
