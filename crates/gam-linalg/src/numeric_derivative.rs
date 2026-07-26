@@ -193,6 +193,28 @@ pub fn ridders_derivative<F>(mut f: F, config: RiddersConfig) -> FdDerivative
 where
     F: FnMut(f64) -> f64,
 {
+    ridders_from_stencil(|h| (f(h) - f(-h)) / (2.0 * h), config)
+}
+
+/// [`ridders_derivative`] over an arbitrary `O(h²)` derivative stencil.
+///
+/// `stencil(h)` must return an estimate of the same derivative whose leading
+/// error term is `c·h²` — the central difference `(f(h) − f(−h))/2h` is the
+/// usual one, but the one-sided three-point rules
+/// `(−3f₀ + 4f₁ − f₂)/2h` and `(3f₀ − 4f₁ + f₂)/2h` qualify too, which is what
+/// lets a coordinate pinned against a box face be measured with the same
+/// self-certification as an interior one instead of being differenced once at a
+/// guessed step and reported as fact.
+///
+/// The Neville recurrence below cancels `h²`, then `h⁴`, and so on, so it is
+/// valid for any stencil whose error expansion is in even powers of `h`. A
+/// stencil with an `O(h)` term would need ratio `r` rather than `r²` per stage;
+/// passing one here silently under-cancels, which the uncertainty estimate then
+/// reports as poor agreement rather than hiding.
+pub fn ridders_from_stencil<F>(mut stencil: F, config: RiddersConfig) -> FdDerivative
+where
+    F: FnMut(f64) -> f64,
+{
     assert!(
         config.initial_step > 0.0 && config.initial_step.is_finite(),
         "ridders_derivative: initial_step must be finite and positive"
@@ -204,7 +226,7 @@ where
     assert!(config.rungs >= 2, "ridders_derivative: need at least 2 rungs");
 
     // `tableau[i][j]` is the order-`2(j+1)` extrapolant built from rungs
-    // `i-j ..= i`. Column 0 is the raw central difference at step `h_i`.
+    // `i-j ..= i`. Column 0 is the raw stencil value at step `h_i`.
     let mut tableau: Vec<Vec<f64>> = Vec::with_capacity(config.rungs);
     let mut ladder: Vec<(f64, f64)> = Vec::with_capacity(config.rungs);
     let mut best = FdDerivative {
@@ -218,7 +240,7 @@ where
 
     let mut h = config.initial_step;
     for i in 0..config.rungs {
-        let d = (f(h) - f(-h)) / (2.0 * h);
+        let d = stencil(h);
         ladder.push((h, d));
         let mut row = vec![d];
         if i > 0 {
@@ -421,6 +443,31 @@ mod tests {
             },
         );
         assert_eq!(reaching.judge(exact, 1e-3, 1e-6), FdVerdict::Agree);
+    }
+
+    /// The one-sided three-point stencil is `O(h²)` too, so the same ladder
+    /// certifies a coordinate pinned against a box face. Pinned coordinates are
+    /// exactly where the production outer-gradient audit has to fall back to a
+    /// one-sided rule, and where "measured once at a guessed step, reported as
+    /// fact" is least defensible.
+    #[test]
+    fn ridders_certifies_a_one_sided_stencil() {
+        let f = |t: f64| (0.7 + t).exp() * (1.0 + t).sqrt();
+        let exact = {
+            let e = 0.7_f64.exp();
+            e * 1.0 + e * 0.5
+        };
+        let measured = ridders_from_stencil(
+            |h| (-3.0 * f(0.0) + 4.0 * f(h) - f(2.0 * h)) / (2.0 * h),
+            RiddersConfig::default(),
+        );
+        assert_eq!(measured.judge(exact, 1e-6, 1e-12), FdVerdict::Agree);
+        assert!(
+            (measured.value - exact).abs() < 1e-8,
+            "one-sided value {:.12e} vs exact {exact:.12e} (unc {:.3e})",
+            measured.value,
+            measured.uncertainty
+        );
     }
 
     /// The ladder is reported coarsest-first with exactly `rungs` entries, so a

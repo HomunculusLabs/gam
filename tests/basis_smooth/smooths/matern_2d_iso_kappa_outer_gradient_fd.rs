@@ -147,12 +147,33 @@ fn matern_2d_iso_kappa_outer_gradient_matches_fd() {
         "non-finite Matérn log-kappa gradient: analytic={analytic} fd={fd}"
     );
     let scale = analytic.abs().max(fd.abs()).max(1e-6);
+    // 5e-3, not the 5e-2 this gate shipped with. The old number was not a
+    // statement about the gradient: the audit differenced the criterion once at
+    // `eps^0.25·(1+|ψ|)`, and at the production init `log κ ≈ 2.5` the operator
+    // triplet scales like `κ^{2m}` with `m = ν + d/2 = 3.5`, so `V(ψ)` has a
+    // third derivative large enough that the ORACLE's own truncation was ~1.6e-3
+    // (the residual gap `iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic` was
+    // written to explain). The audit now Ridders-extrapolates and reports its own
+    // uncertainty, so the tolerance can describe the gradient again. #2461.
     assert!(
-        gap / scale < 5e-2,
+        gap / scale < 5e-3,
         "Matérn iso-kappa outer-gradient analytic!=FD: analytic={analytic:.6e} \
-         fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e}",
+         fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e} oracle_unc={:.3e} order={}",
         gap / scale,
         audit.psi_steps[0],
+        audit.psi_fd_uncertainty[0],
+        audit.psi_fd_orders[0],
+    );
+    // The oracle must also have RESOLVED the component: an unresolved finite
+    // difference agrees with everything, so a gate that only checks the gap can
+    // pass on a measurement that measured nothing.
+    assert!(
+        audit.psi_fd_uncertainty[0] <= 5e-3 * fd.abs().max(1e-6),
+        "outer-gradient FD oracle did not resolve the Matérn ψ component: \
+         fd={fd:.6e} uncertainty={:.3e} at step {:.3e} (order {})",
+        audit.psi_fd_uncertainty[0],
+        audit.psi_steps[0],
+        audit.psi_fd_orders[0],
     );
 }
 
@@ -269,9 +290,9 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
          fd_contrast={fd_contrast:.6e}"
     );
 
-    for (axis, a, fd) in [
-        ("signal", g_signal, fd_signal),
-        ("noise", g_noise, fd_noise),
+    for (psi_j, axis, a, fd) in [
+        (0usize, "signal", g_signal, fd_signal),
+        (1, "noise", g_noise, fd_noise),
     ] {
         assert!(
             a.is_finite() && fd.is_finite(),
@@ -279,11 +300,23 @@ fn aniso_matern_theta0_eta_contrast_gradient_is_fd_visible() {
         );
         let scale = a.abs().max(fd.abs()).max(1e-6);
         let gap = (a - fd).abs();
+        // See the ψ-tolerance note on the isotropic gate above: 5e-2 was the
+        // fixed-step oracle's error budget, not the gradient's. #2461.
         assert!(
-            gap / scale < 5e-2,
+            gap / scale < 5e-3,
             "anisotropic eta outer-gradient analytic!=FD on {axis}: analytic={a:.6e} \
-             fd={fd:.6e} gap={gap:.3e} rel={:.3e}",
-            gap / scale
+             fd={fd:.6e} gap={gap:.3e} rel={:.3e} oracle_unc={:.3e} order={}",
+            gap / scale,
+            audit.psi_fd_uncertainty[psi_j],
+            audit.psi_fd_orders[psi_j],
+        );
+        assert!(
+            audit.psi_fd_uncertainty[psi_j] <= 5e-3 * fd.abs().max(1e-6),
+            "outer-gradient FD oracle did not resolve the {axis} eta component: \
+             fd={fd:.6e} uncertainty={:.3e} at step {:.3e} (order {})",
+            audit.psi_fd_uncertainty[psi_j],
+            audit.psi_steps[psi_j],
+            audit.psi_fd_orders[psi_j],
         );
     }
     assert!(

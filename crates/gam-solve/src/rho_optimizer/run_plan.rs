@@ -237,6 +237,8 @@ fn capture_outer_gradient_fd_at_seed(
     let mut finite_difference_component_psi_gradients: [Array1<f64>; 4] =
         std::array::from_fn(|_| Array1::<f64>::zeros(psi_dim));
     let mut psi_steps = Array1::<f64>::zeros(psi_dim);
+    let mut psi_fd_uncertainty = Array1::<f64>::from_elem(psi_dim, f64::INFINITY);
+    let mut psi_fd_orders = vec![0usize; psi_dim];
     let mut analytic_mode_response_norm = Array1::<f64>::zeros(psi_dim);
     let mut finite_difference_mode_response_norm = Array1::<f64>::zeros(psi_dim);
     let mut mode_response_relative_error = Array1::<f64>::zeros(psi_dim);
@@ -275,48 +277,140 @@ fn capture_outer_gradient_fd_at_seed(
             mode_response_max_abs_error[psi_j] = max_abs_error;
             Ok(())
         };
+    // The ψ finite difference is SELF-CERTIFYING (#2461).
+    //
+    // This audit used to difference the criterion once at
+    // `eps^0.25 · (1 + |ψ|) ≈ 1.2e-4` and report the result as fact. A central
+    // difference's error is `ν/h + h²·V‴/6`, and on a REML criterion evaluated
+    // through an inner profile NEITHER coefficient is known: at the ψ-saturated
+    // rungs measured in #2461 the criterion's third derivative is `~9e7`, which
+    // costs a fixed `1.2e-4` step a relative error of `(h/s)²/6` — larger than
+    // any tolerance a gradient gate would want to set, and constant in every
+    // parameter except `h`, so it reads as a formula error. That is why the
+    // consumers of this record grade it at `5e-2`: the oracle's own error, not
+    // the gradient's, set the floor.
+    //
+    // `ridders_from_stencil` runs a shrinking ladder of the SAME stencil this
+    // branch would have used once, Neville-extrapolates across it, and reports
+    // the extrapolant with an estimate of its own error. The record then carries
+    // `psi_fd_uncertainty`, so a gate can judge `|analytic − fd|` against a band
+    // widened by what the measurement actually knows, and can decline to judge a
+    // component the ladder could not resolve.
+    //
+    // The ladder is kept strictly inside the box, and the per-atom component
+    // stencils and the coefficient mode response are then evaluated ONCE at the
+    // step the ladder accepted, so every number in the record is taken at a step
+    // something justified rather than at a step something guessed.
+    let ladder_rungs = 10usize;
+    let ladder_shrink = 2.0_f64;
     for psi_j in 0..psi_dim {
         let j = rho_dim + psi_j;
         let nominal_step = f64::EPSILON.powf(0.25) * (1.0 + seed[j].abs());
         let left_room = (seed[j] - lower[j]).max(0.0);
         let right_room = (upper[j] - seed[j]).max(0.0);
+        // A ladder rung must be evaluable, so the coarsest step has to fit in
+        // the room the box leaves. `1e-2 · (1 + |ψ|)` is the nominal start; the
+        // box shrinks it when it must, and the ladder still spans
+        // `shrink^(rungs-1) = 512` from there.
+        let ladder_start = |room: f64| (1.0e-2 * (1.0 + seed[j].abs())).min(0.5 * room);
+        let mut fd_error: Option<EstimationError> = None;
+        let probe = |offset: f64,
+                     obj: &mut dyn OuterObjective,
+                     fd_error: &mut Option<EstimationError>|
+         -> f64 {
+            if fd_error.is_some() {
+                return f64::NAN;
+            }
+            let mut theta = seed.clone();
+            theta[j] += offset;
+            match evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &theta) {
+                Ok((cost, _, _)) => cost,
+                Err(error) => {
+                    *fd_error = Some(error);
+                    f64::NAN
+                }
+            }
+        };
         if left_room >= nominal_step && right_room >= nominal_step {
+            let measured = gam_linalg::numeric_derivative::ridders_from_stencil(
+                |h| {
+                    (probe(h, &mut *obj, &mut fd_error)
+                        - probe(-h, &mut *obj, &mut fd_error))
+                        / (2.0 * h)
+                },
+                gam_linalg::numeric_derivative::RiddersConfig {
+                    initial_step: ladder_start(left_room.min(right_room)),
+                    shrink: ladder_shrink,
+                    rungs: ladder_rungs,
+                },
+            );
+            if let Some(error) = fd_error.take() {
+                return Err(error);
+            }
+            let step = if measured.step.is_finite() && measured.step > 0.0 {
+                measured.step
+            } else {
+                nominal_step
+            };
             let mut plus = seed.clone();
             let mut minus = seed.clone();
-            plus[j] += nominal_step;
-            minus[j] -= nominal_step;
-            let (cost_plus, components_plus, beta_plus) =
+            plus[j] += step;
+            minus[j] -= step;
+            let (_cost_plus, components_plus, beta_plus) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &plus)?;
-            let (cost_minus, components_minus, beta_minus) =
+            let (_cost_minus, components_minus, beta_minus) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &minus)?;
-            finite_difference_psi_gradient[psi_j] =
-                (cost_plus - cost_minus) / (2.0 * nominal_step);
+            finite_difference_psi_gradient[psi_j] = measured.value;
+            psi_fd_uncertainty[psi_j] = measured.uncertainty;
+            psi_fd_orders[psi_j] = measured.order;
             for atom in 0..4 {
                 finite_difference_component_psi_gradients[atom][psi_j] =
-                    (components_plus[atom] - components_minus[atom]) / (2.0 * nominal_step);
+                    (components_plus[atom] - components_minus[atom]) / (2.0 * step);
             }
             let beta_dot = Array1::from_iter(
                 beta_plus
                     .iter()
                     .zip(beta_minus.iter())
-                    .map(|(&plus_value, &minus_value)| {
-                        (plus_value - minus_value) / (2.0 * nominal_step)
-                    }),
+                    .map(|(&plus_value, &minus_value)| (plus_value - minus_value) / (2.0 * step)),
             );
             record_mode_response(psi_j, &beta_dot)?;
-            psi_steps[psi_j] = nominal_step;
+            psi_steps[psi_j] = step;
         } else if right_room >= left_room && right_room > 0.0 {
-            let step = nominal_step.min(0.5 * right_room);
+            // Pinned against the LOWER face: only the forward three-point rule
+            // is evaluable. Its error is `O(h²)` like the central difference,
+            // so the same ladder certifies it (`ridders_certifies_a_one_sided_
+            // stencil`). The coarsest rung must fit `2h` inside the room.
+            let measured = gam_linalg::numeric_derivative::ridders_from_stencil(
+                |h| {
+                    (-3.0 * analytic.cost + 4.0 * probe(h, &mut *obj, &mut fd_error)
+                        - probe(2.0 * h, &mut *obj, &mut fd_error))
+                        / (2.0 * h)
+                },
+                gam_linalg::numeric_derivative::RiddersConfig {
+                    initial_step: ladder_start(0.5 * right_room),
+                    shrink: ladder_shrink,
+                    rungs: ladder_rungs,
+                },
+            );
+            if let Some(error) = fd_error.take() {
+                return Err(error);
+            }
+            let step = if measured.step.is_finite() && measured.step > 0.0 {
+                measured.step
+            } else {
+                nominal_step.min(0.5 * right_room)
+            };
             let mut one = seed.clone();
             let mut two = seed.clone();
             one[j] += step;
             two[j] += 2.0 * step;
-            let (cost_one, components_one, beta_one) =
+            let (_cost_one, components_one, beta_one) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (cost_two, components_two, beta_two) =
+            let (_cost_two, components_two, beta_two) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
-            finite_difference_psi_gradient[psi_j] =
-                (-3.0 * analytic.cost + 4.0 * cost_one - cost_two) / (2.0 * step);
+            finite_difference_psi_gradient[psi_j] = measured.value;
+            psi_fd_uncertainty[psi_j] = measured.uncertainty;
+            psi_fd_orders[psi_j] = measured.order;
             for atom in 0..4 {
                 finite_difference_component_psi_gradients[atom][psi_j] =
                     (-3.0 * analytic_cost_components[atom] + 4.0 * components_one[atom]
@@ -335,17 +429,39 @@ fn capture_outer_gradient_fd_at_seed(
             record_mode_response(psi_j, &beta_dot)?;
             psi_steps[psi_j] = step;
         } else if left_room > 0.0 {
-            let step = nominal_step.min(0.5 * left_room);
+            // Pinned against the UPPER face: the backward three-point mirror of
+            // the branch above, certified by the same ladder.
+            let measured = gam_linalg::numeric_derivative::ridders_from_stencil(
+                |h| {
+                    (3.0 * analytic.cost - 4.0 * probe(-h, &mut *obj, &mut fd_error)
+                        + probe(-2.0 * h, &mut *obj, &mut fd_error))
+                        / (2.0 * h)
+                },
+                gam_linalg::numeric_derivative::RiddersConfig {
+                    initial_step: ladder_start(0.5 * left_room),
+                    shrink: ladder_shrink,
+                    rungs: ladder_rungs,
+                },
+            );
+            if let Some(error) = fd_error.take() {
+                return Err(error);
+            }
+            let step = if measured.step.is_finite() && measured.step > 0.0 {
+                measured.step
+            } else {
+                nominal_step.min(0.5 * left_room)
+            };
             let mut one = seed.clone();
             let mut two = seed.clone();
             one[j] -= step;
             two[j] -= 2.0 * step;
-            let (cost_one, components_one, beta_one) =
+            let (_cost_one, components_one, beta_one) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &one)?;
-            let (cost_two, components_two, beta_two) =
+            let (_cost_two, components_two, beta_two) =
                 evaluate_fd_cost_with_criterion_components(obj, config, context, seed, &two)?;
-            finite_difference_psi_gradient[psi_j] =
-                (3.0 * analytic.cost - 4.0 * cost_one + cost_two) / (2.0 * step);
+            finite_difference_psi_gradient[psi_j] = measured.value;
+            psi_fd_uncertainty[psi_j] = measured.uncertainty;
+            psi_fd_orders[psi_j] = measured.order;
             for atom in 0..4 {
                 finite_difference_component_psi_gradients[atom][psi_j] =
                     (3.0 * analytic_cost_components[atom] - 4.0 * components_one[atom]
@@ -379,6 +495,8 @@ fn capture_outer_gradient_fd_at_seed(
             analytic_psi_gradient,
             finite_difference_psi_gradient,
             psi_steps,
+            psi_fd_uncertainty,
+            psi_fd_orders,
             fixed_beta_psi_gradient,
             logdet_h_psi_gradient,
             frozen_logdet_h_psi_gradient,

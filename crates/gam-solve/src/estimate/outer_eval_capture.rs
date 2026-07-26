@@ -43,6 +43,18 @@ pub struct OuterGradientFdRecord {
     pub analytic_psi_gradient: Array1<f64>,
     pub finite_difference_psi_gradient: Array1<f64>,
     pub psi_steps: Array1<f64>,
+    /// Ridders' estimate of each ψ finite difference's OWN error, and the
+    /// truncation order of the accepted extrapolant (`2` is a raw stencil, `4`
+    /// one Richardson stage, …).
+    ///
+    /// Present because a finite difference is an estimator: without it a
+    /// consumer cannot tell an analytic-gradient defect from its own oracle's
+    /// truncation, and has to grade at whatever tolerance the worst step
+    /// happens to need — which is how these gates ended up at `5e-2` (#2461).
+    /// `f64::INFINITY` marks a coordinate the ladder could not resolve; such a
+    /// component says nothing about the analytic gradient.
+    pub psi_fd_uncertainty: Array1<f64>,
+    pub psi_fd_orders: Vec<usize>,
     pub fixed_beta_psi_gradient: Array1<f64>,
     pub logdet_h_psi_gradient: Array1<f64>,
     pub frozen_logdet_h_psi_gradient: Array1<f64>,
