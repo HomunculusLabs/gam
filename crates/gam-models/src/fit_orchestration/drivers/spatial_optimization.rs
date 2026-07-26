@@ -2828,6 +2828,17 @@ struct SpatialJointContext<'d> {
     /// O(outer steps), not O(trials). `None` until the first compute / when no
     /// frozen-W inputs are installed.
     frozen_glm_weight_memo: Option<(Array1<f64>, Array1<f64>)>,
+    /// #2481: value probes that returned `+∞` because the EVALUATOR failed at
+    /// that θ, not because the point is infeasible. `eval_cost` hands the line
+    /// search a bare `f64`, so a realizer or evaluation error is indistinguishable
+    /// from genuine infeasibility once it crosses that boundary — and the gradient
+    /// lane treats the same condition as fatal (`is_recoverable_trial_point_error`
+    /// keeps layout/topology invariants non-recoverable). Counting the two error
+    /// kinds separately is what lets a run's narrative say "the objective is a
+    /// wall here" apart from "N trials never evaluated". Split by kind because
+    /// they fail at different stages and a fix for one does not touch the other.
+    value_realization_failures: usize,
+    value_evaluation_failures: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3418,7 +3429,37 @@ impl<'d> SpatialJointContext<'d> {
             self.cache.store_cost_at(theta, f64::INFINITY);
             return f64::INFINITY;
         }
-        if !skip_value_realization && self.cache.ensure_theta(theta).is_err() {
+        // #2481: `ensure_theta` failing is a statement about the EVALUATOR at this
+        // θ, not about the point. Both are reported to the line search as `+∞`
+        // because that is the only value this signature can carry, but the reason
+        // is no longer destroyed: the first one warns with the θ that produced it,
+        // the rest are counted and reported in `[KAPPA-PHASE-SUMMARY]`. Note the
+        // asymmetry with the coverage refusal above, which memoizes its `∞` — a
+        // point outside the ψ window has that cost, whereas a failed realization
+        // may succeed on a later attempt and must not be cached as a value.
+        if !skip_value_realization && let Err(err) = self.cache.ensure_theta(theta) {
+            self.value_realization_failures += 1;
+            let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
+            if self.value_realization_failures == 1 {
+                log::warn!(
+                    "[STAGE] {} value-probe: design realization FAILED at theta_norm={:.4e} \
+                     log_kappa_norm={:.4e} ({err}); reporting +inf to the line search, which \
+                     cannot distinguish this from genuine infeasibility (#2481). Further \
+                     occurrences are counted, not logged.",
+                    self.kind.label(),
+                    theta_norm,
+                    log_kappa_norm,
+                );
+            } else {
+                log::debug!(
+                    "[STAGE] {} value-probe: design realization FAILED (occurrence {}) at \
+                     theta_norm={:.4e} log_kappa_norm={:.4e} ({err})",
+                    self.kind.label(),
+                    self.value_realization_failures,
+                    theta_norm,
+                    log_kappa_norm,
+                );
+            }
             return f64::INFINITY;
         }
         // #1033 penalty lane: stage the EXACT n-free `S(ψ)` for this probe's ψ so
@@ -3492,7 +3533,31 @@ impl<'d> SpatialJointContext<'d> {
                 self.cache.store_cost_at(theta, cost);
                 cost
             }
-            Err(_) => f64::INFINITY,
+            // #2481: same reasoning as the realization failure above — the
+            // evaluator refused, the line search can only be told `+∞`, so the
+            // reason is logged once and counted rather than discarded. Not
+            // memoized: this is a failure to produce the value, not the value.
+            Err(err) => {
+                self.value_evaluation_failures += 1;
+                let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
+                if self.value_evaluation_failures == 1 {
+                    log::warn!(
+                        "[STAGE] {cost_label} value-probe: cost evaluation FAILED at \
+                         theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} \
+                         ({err}); reporting +inf to the line search, which cannot distinguish \
+                         this from genuine infeasibility (#2481). Further occurrences are \
+                         counted, not logged.",
+                    );
+                } else {
+                    log::debug!(
+                        "[STAGE] {cost_label} value-probe: cost evaluation FAILED (occurrence \
+                         {}) at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} \
+                         ({err})",
+                        self.value_evaluation_failures,
+                    );
+                }
+                f64::INFINITY
+            }
         }
     }
 
@@ -3615,6 +3680,8 @@ fn run_exact_joint_spatial_optimization(
         data,
         rho_dim,
         kind,
+        value_realization_failures: 0,
+        value_evaluation_failures: 0,
         cache: SingleBlockExactJointDesignCache::new_with_policy(
             data,
             resolvedspec.clone(),
@@ -4216,7 +4283,7 @@ fn run_exact_joint_spatial_optimization(
     let kphase_nfree_skip_touches = gam_solve::pirls::nfree_skip_row_element_touches()
         .saturating_sub(kphase_nfree_skip_touches_start);
     log::info!(
-        "[KAPPA-PHASE-SUMMARY] n_rows={} log_kappa_dim={} n_cost={} cost_total_s={:.4} n_eval={} eval_total_s={:.4} n_efs={} efs_total_s={:.4} slow_path_resets={} design_revision_delta={} nfree_skip_row_touches={} nfree_miss_shape={} nfree_miss_value={} nfree_miss_gradient={} nfree_miss_penalty={} nfree_miss_revision={} nfree_miss_second_order={} nfree_miss_other={} optim_total_s={:.4}",
+        "[KAPPA-PHASE-SUMMARY] n_rows={} log_kappa_dim={} n_cost={} cost_total_s={:.4} n_eval={} eval_total_s={:.4} n_efs={} efs_total_s={:.4} value_realization_failures={} value_evaluation_failures={} slow_path_resets={} design_revision_delta={} nfree_skip_row_touches={} nfree_miss_shape={} nfree_miss_value={} nfree_miss_gradient={} nfree_miss_penalty={} nfree_miss_revision={} nfree_miss_second_order={} nfree_miss_other={} optim_total_s={:.4}",
         data.nrows(),
         kphase_log_kappa_dim,
         kphase_cost_calls.get(),
@@ -4225,6 +4292,8 @@ fn run_exact_joint_spatial_optimization(
         kphase_eval_total_s.get(),
         kphase_efs_calls.get(),
         kphase_efs_total_s.get(),
+        ctx.value_realization_failures,
+        ctx.value_evaluation_failures,
         kphase_slow_resets,
         kphase_design_revision_delta,
         kphase_nfree_skip_touches,
