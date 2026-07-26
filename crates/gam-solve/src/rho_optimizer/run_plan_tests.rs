@@ -8031,7 +8031,7 @@ fn certify_mints_saddle_escape_reseed_at_interior_saddle() {
         "the gradient must clear the stationarity band at the saddle"
     );
     assert_eq!(
-        cert.hessian_psd,
+        cert.hessian_psd(),
         Some(false),
         "the saddle Hessian must read indefinite"
     );
@@ -8131,7 +8131,7 @@ fn certify_mints_saddle_escape_reseed_at_railed_saddle_2155() {
         "the interior gradient must clear the stationarity band at the railed saddle"
     );
     assert_eq!(
-        cert.hessian_psd,
+        cert.hessian_psd(),
         Some(false),
         "the REDUCED (off-railed) Hessian must read indefinite"
     );
@@ -8194,7 +8194,7 @@ fn outer_search_escapes_railed_saddle_and_certifies_minimum_2155() {
         result
             .criterion_certificate
             .as_ref()
-            .is_some_and(|c| c.certifies() && c.hessian_psd == Some(true)),
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
         "the escaped minimum must carry a reduced-PSD certificate",
     );
 }
@@ -8233,7 +8233,7 @@ fn outer_search_escapes_interior_saddle_and_certifies_minimum() {
         result
             .criterion_certificate
             .as_ref()
-            .is_some_and(|c| c.certifies() && c.hessian_psd == Some(true)),
+            .is_some_and(|c| c.certifies() && c.hessian_psd() == Some(true)),
         "the escaped minimum must carry a PSD certificate",
     );
 }

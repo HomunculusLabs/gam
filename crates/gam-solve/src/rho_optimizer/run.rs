@@ -2591,7 +2591,9 @@ fn certify_fixed_point_optimality(
             rung: StationarityBoundSource::FixedPointResidual.provenance().into(),
             covered_coordinates: layout.n_params,
         },
-        hessian_psd: None,
+        // The EFS/fixed-point route exposes no analytic Hessian, so there was
+        // a curvature question and nothing could answer it (#2561).
+        curvature: CurvatureEvidence::NotAvailable,
         lambdas_railed: certificate_railed_lambdas(&result.rho, layout.rho_dim(), config),
         railed_facts: railed_coordinate_facts(
             &result.rho,
@@ -2762,7 +2764,9 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 // construction, not by clearing this band (#2530).
                 rung: StationarityRung::EMPTY_ESTIMAND.into(),
             },
-            hessian_psd: None,
+            // No estimand, so no curvature exists to be admissible — the
+            // second-order twin of the EMPTY_ESTIMAND rung above (#2561).
+            curvature: CurvatureEvidence::NoEstimand,
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
             curvature_floor: None,
@@ -3326,7 +3330,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         rung: effective_interior_bound.rung().into(),
                         rails,
                     },
-                    hessian_psd: Some(true),
+                    curvature: CurvatureEvidence::Measured { psd: true },
                     lambdas_railed: railed_lambda_block.clone(),
                     railed_facts: railed_coordinate_facts(
                         &result.rho,
@@ -3479,9 +3483,21 @@ fn certify_outer_optimality_at_terminal_fidelity(
         },
         // The RAW measurement — unchanged, and what every consumer that asks
         // for a genuine PSD certificate keeps receiving.
-        hessian_psd: analytic_hessian.as_ref().and_then(|hessian| {
-            certificate_hessian_is_psd_off_railed(hessian, &certificate_railed)
-        }),
+        curvature: match analytic_hessian.as_ref() {
+            Some(hessian) => CurvatureEvidence::from_measurement(
+                certificate_hessian_is_psd_off_railed(hessian, &certificate_railed),
+            ),
+            // A screening pass deliberately declines the order-four ladder
+            // (the documented design at `CertificationFidelity`); a Mint pass
+            // reaching here simply has no analytic Hessian to test. Those were
+            // the same `None` before #2561, which is why the design's own
+            // promise — the winner's verdict is the one that mints — could not
+            // be checked by anyone.
+            None if matches!(fidelity, CertificationFidelity::Screening) => {
+                CurvatureEvidence::NotSpent
+            }
+            None => CurvatureEvidence::NotAvailable,
+        },
         lambdas_railed: railed_lambda_block.clone(),
         railed_facts: railed_coordinate_facts(&result.rho, &railed_lambda_block, config),
         // The floor's verdict on that same curvature, recorded beside it.
@@ -3572,7 +3588,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         rung: effective_interior_bound.rung().into(),
                         rails,
                     },
-                    hessian_psd: Some(true),
+                    curvature: CurvatureEvidence::Measured { psd: true },
                     lambdas_railed: railed_lambda_block.clone(),
                     railed_facts: railed_coordinate_facts(
                         &result.rho,

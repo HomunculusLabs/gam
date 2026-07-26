@@ -511,7 +511,7 @@ fn print_gradient_certificate(label: &str, certificate: Option<&OuterCriterionCe
             );
             println!(
                 "{label}_dual_oracle_gradient_certificate_hessian_psd={}",
-                optional_bool(cert.hessian_psd)
+                optional_bool(cert.hessian_psd())
             );
             println!(
                 "{label}_dual_oracle_gradient_certificate_lambdas_railed={:?}",

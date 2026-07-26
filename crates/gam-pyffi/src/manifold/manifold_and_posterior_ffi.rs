@@ -1666,7 +1666,7 @@ fn summary_convergence(fit: &gam::solver::estimate::UnifiedFitResult) -> Summary
         gradient_norm: certificate.stationarity.raw_norm(),
         projected_gradient_norm: certificate.stationarity.projected_norm(),
         stationarity_bound: certificate.stationarity.bound(),
-        hessian_psd: certificate.hessian_psd,
+        hessian_psd: certificate.hessian_psd(),
         lambdas_railed: certificate.lambdas_railed.clone(),
     });
     SummaryConvergence {

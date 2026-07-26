@@ -72,7 +72,7 @@ impl Certificate for OuterCriterionCertificate {
         e.insert("stationarity_kind", self.stationarity.kind_label().into());
         e.insert(
             "hessian_psd",
-            match self.hessian_psd {
+            match self.hessian_psd() {
                 Some(psd) => psd.into(),
                 None => "n/a".into(),
             },
@@ -269,7 +269,7 @@ mod tests {
                 }
                 .into(),
             },
-            hessian_psd: Some(true),
+            curvature: crate::model_types::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
             curvature_floor: None,
@@ -360,7 +360,7 @@ mod tests {
                 }
                 .into(),
             },
-            hessian_psd: Some(true),
+            curvature: crate::model_types::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
             curvature_floor: None,

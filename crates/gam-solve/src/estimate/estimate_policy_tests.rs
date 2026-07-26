@@ -755,7 +755,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
                         derived_standard: false,
                     },
                 },
-                hessian_psd: Some(true),
+                curvature: crate::model_types::CurvatureEvidence::Measured { psd: true },
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
                 curvature_floor: None,

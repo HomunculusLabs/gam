@@ -2706,7 +2706,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
                 if matches!(
                     curvature_requirement,
                     OwnedModeCurvatureRequirement::CertifiedLocalMinimum
-                ) && outer.criterion_certificate().hessian_psd != Some(true)
+                ) && outer.criterion_certificate().hessian_psd() != Some(true)
                 {
                     return Err(CustomFamilyError::Optimization {
                         context:

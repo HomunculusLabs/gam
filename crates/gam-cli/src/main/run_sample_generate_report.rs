@@ -1066,7 +1066,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
             };
             report::CriterionCertificateRow {
                 stationarity,
-                hessian_psd: cert.hessian_psd,
+                hessian_psd: cert.hessian_psd(),
                 lambdas_railed: cert.lambdas_railed.clone(),
                 railed_facts: cert
                     .railed_facts

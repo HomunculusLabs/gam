@@ -64,7 +64,8 @@ mod seed_screening;
 pub(crate) use crate::model_types::CERTIFICATE_RAIL_MARGIN;
 pub use crate::model_types::{
     CurvatureFloorClearance, OuterCriterionCertificate, OuterStationarityCertificate,
-    CertifiedRung, RailCoordinate, RailTailEvidence, RailedCoordinateFact,
+    CertifiedRung, CurvatureEvidence, RailCoordinate, RailTailEvidence,
+    RailedCoordinateFact,
 };
 pub(crate) use bridges::*;
 // The score-relative flat-valley stationarity band, public so integration

@@ -982,13 +982,114 @@ impl std::fmt::Display for CertifiedRung {
     }
 }
 
+/// What curvature evidence a certificate actually has (#2561).
+///
+/// This was `Option<bool>`, and its `None` carried FOUR structurally different
+/// meanings that [`OuterCriterionCertificate::curvature_admissible`] accepted
+/// alike:
+///
+/// 1. a multi-start screening pass deliberately declined to spend the
+///    order-four derivative ladder ([`Self::NotSpent`]);
+/// 2. the route exposes no analytic Hessian at all ([`Self::NotAvailable`]);
+/// 3. the EFS/fixed-point route, which has none by construction (same);
+/// 4. there is no outer estimand to have curvature ([`Self::NoEstimand`]).
+///
+/// Case 1 is deliberate and documented — screening is a first-order gate, and
+/// "the one order-four evaluation belongs to the winner". But that design also
+/// promises the winner's verdict is the one that mints, and while `None` meant
+/// all four things at once, nothing could check it: a Mint-fidelity refusal to
+/// measure was byte-identical to a screening pass that chose not to. Naming the
+/// states makes that promise assertable.
+///
+/// Acceptance is unchanged. Only [`Self::Measured`] with `psd: false` is a
+/// negative verdict; every other state passes, exactly as `!= Some(false)` did.
+///
+/// # Serialized form
+///
+/// Serializes as the legacy `Option<bool>` under the legacy key, because
+/// `hessian_psd` is a published Python contract (`gamfit/_summary.py`) whose
+/// domain is `null | true | false`, and because stored model bytes carry this
+/// field with no version tag. The round trip is therefore deliberately LOSSY:
+/// `NotSpent` and `NoEstimand` both reload as `NotAvailable`. That is sound
+/// because the three are acceptance-identical, and screening certificates are
+/// never persisted — only the winner mints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Option<bool>", into = "Option<bool>")]
+pub enum CurvatureEvidence {
+    /// A Hessian existed at the certified point and was tested.
+    Measured { psd: bool },
+    /// A screening pass declined to spend the order-four ladder. A certificate
+    /// minted at `CertificationFidelity::Mint` must never carry this.
+    NotSpent,
+    /// The route exposes no analytic Hessian, so there was nothing to test.
+    NotAvailable,
+    /// A zero-dimensional outer problem: no estimand, so no curvature exists
+    /// to be admissible or otherwise. Distinct from [`Self::NotAvailable`],
+    /// which means a curvature question existed and could not be answered.
+    NoEstimand,
+}
+
+impl CurvatureEvidence {
+    /// The raw PSD verdict when one was measured, `None` otherwise — the
+    /// legacy projection, and what the published `hessian_psd` surface shows.
+    pub fn psd(self) -> Option<bool> {
+        match self {
+            Self::Measured { psd } => Some(psd),
+            Self::NotSpent | Self::NotAvailable | Self::NoEstimand => None,
+        }
+    }
+
+    /// Whether a curvature question was actually answered here.
+    pub fn was_measured(self) -> bool {
+        matches!(self, Self::Measured { .. })
+    }
+
+    /// Build from a raw optional measurement: `Some` was measured, `None`
+    /// means the route had no analytic Hessian to test. Sites that mean
+    /// [`Self::NotSpent`] or [`Self::NoEstimand`] must say so explicitly —
+    /// that is the point of the type.
+    pub fn from_measurement(psd: Option<bool>) -> Self {
+        match psd {
+            Some(psd) => Self::Measured { psd },
+            None => Self::NotAvailable,
+        }
+    }
+}
+
+impl From<Option<bool>> for CurvatureEvidence {
+    fn from(psd: Option<bool>) -> Self {
+        Self::from_measurement(psd)
+    }
+}
+
+impl From<CurvatureEvidence> for Option<bool> {
+    fn from(evidence: CurvatureEvidence) -> Self {
+        evidence.psd()
+    }
+}
+
+impl std::fmt::Display for CurvatureEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `yes`/`NO` are asserted on downstream (run_plan_tests) and read by
+        // humans in refusal text; they must not drift.
+        f.write_str(match self {
+            Self::Measured { psd: true } => "yes",
+            Self::Measured { psd: false } => "NO",
+            Self::NotSpent => "not-spent",
+            Self::NotAvailable => "n/a",
+            Self::NoEstimand => "no-estimand",
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterCriterionCertificate {
     pub stationarity: OuterStationarityCertificate,
-    /// Whether the final outer Hessian is positive semidefinite (within a
-    /// scaled tolerance) at θ̂, when the solver tracked one (`None` when no
-    /// final Hessian was available).
-    pub hessian_psd: Option<bool>,
+    /// What curvature evidence this certificate has, and why it has no more
+    /// than that (#2561). Serializes as the legacy `hessian_psd` optional
+    /// bool; read the raw verdict through [`Self::hessian_psd`].
+    #[serde(rename = "hessian_psd")]
+    pub curvature: CurvatureEvidence,
     /// Leading smoothing coordinates (ρ block) pinned within
     /// [`CERTIFICATE_RAIL_MARGIN`] of either box bound at the optimum.
     pub lambdas_railed: Vec<usize>,
@@ -1014,6 +1115,13 @@ impl OuterCriterionCertificate {
             && self.stationarity.projected_norm() <= self.stationarity.bound()
     }
 
+    /// The raw PSD verdict, `None` when no curvature question was answered
+    /// — the legacy `hessian_psd` projection every existing consumer wants.
+    /// Ask [`Self::curvature`] directly to learn WHY there is no verdict.
+    pub fn hessian_psd(&self) -> Option<bool> {
+        self.curvature.psd()
+    }
+
     /// Second-order admissibility: a certified optimum must not sit on
     /// genuinely indefinite analytic curvature. A nearby box rail is only a
     /// diagnostic; it cannot waive negative curvature in unrelated free
@@ -1023,7 +1131,7 @@ impl OuterCriterionCertificate {
         // The raw measurement decides it whenever it is not a refusal. Only a
         // measured `false` consults the floor, and then only to ask whether
         // that negative direction was distinguishable from zero at all.
-        self.hessian_psd != Some(false)
+        self.curvature.psd() != Some(false)
             || self
                 .curvature_floor
                 .is_some_and(|clearance| clearance.cleared)
@@ -1076,7 +1184,7 @@ impl OuterCriterionCertificate {
     /// Whether every audited fact is clean (stationary, PSD-or-untracked
     /// curvature, no railed smoothing coordinate) — the report-level verdict.
     pub fn is_clean(&self) -> bool {
-        self.certifies() && self.hessian_psd != Some(false) && self.lambdas_railed.is_empty()
+        self.certifies() && self.curvature.psd() != Some(false) && self.lambdas_railed.is_empty()
     }
 
     /// One-line human-readable rendering for logs and reports.
@@ -1145,11 +1253,7 @@ impl OuterCriterionCertificate {
         };
         format!(
             "{stationarity} hessian_psd={} railed={} → {}",
-            match self.hessian_psd {
-                Some(true) => "yes",
-                Some(false) => "NO",
-                None => "n/a",
-            },
+            self.curvature,
             railed,
             if self.certifies() {
                 "stationary"
@@ -1365,7 +1469,8 @@ impl Default for FitOptions {
 #[cfg(test)]
 mod rail_tail_evidence_tests {
     use super::{
-        OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate, RailTailEvidence,
+        CurvatureEvidence, OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate,
+        RailTailEvidence,
     };
     use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
 
@@ -1395,7 +1500,7 @@ mod rail_tail_evidence_tests {
                 .into(),
                 rails,
             },
-            hessian_psd: Some(true),
+            curvature: CurvatureEvidence::Measured { psd: true },
             lambdas_railed: vec![0, 1],
             railed_facts: Vec::new(),
             curvature_floor: None,
@@ -2212,7 +2317,7 @@ mod assembly_inner_status_gate_tests {
                 // construction, not by clearing a band (#2530).
                 rung: StationarityRung::EMPTY_ESTIMAND.into(),
             },
-            hessian_psd: None,
+            curvature: CurvatureEvidence::NoEstimand,
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
             curvature_floor: None,

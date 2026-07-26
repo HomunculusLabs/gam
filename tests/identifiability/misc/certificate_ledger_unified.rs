@@ -21,7 +21,7 @@ fn clean_criterion() -> OuterCriterionCertificate {
                 derived_standard: false,
             },
         },
-        hessian_psd: Some(true),
+        curvature: gam::solver::rho_optimizer::CurvatureEvidence::Measured { psd: true },
         lambdas_railed: Vec::new(),
         railed_facts: Vec::new(),
         curvature_floor: None,

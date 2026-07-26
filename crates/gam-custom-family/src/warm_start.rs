@@ -651,7 +651,7 @@ mod assembly_convergence_tests {
                         derived_standard: false,
                     },
                 },
-            hessian_psd: Some(true),
+            curvature: gam_solve::rho_optimizer::CurvatureEvidence::Measured { psd: true },
             lambdas_railed: Vec::new(),
             railed_facts: Vec::new(),
             curvature_floor: None,

@@ -484,7 +484,11 @@ pub fn fit_shared_tangent_reml(
                         // comparison that never ran (#2530).
                         rung: gam_problem::StationarityRung::EMPTY_ESTIMAND.into(),
                     },
-                hessian_psd: Some(true),
+                // A parametric model has no smoothing estimand, so there is
+                // no outer Hessian and never was — `Some(true)` claimed a
+                // measurement that never ran, the second-order twin of the
+                // rung mistake the comment above already avoids (#2561).
+                curvature: gam_solve::rho_optimizer::CurvatureEvidence::NoEstimand,
                 lambdas_railed: Vec::new(),
                 railed_facts: Vec::new(),
                 curvature_floor: None,
