@@ -37,7 +37,9 @@ Usage:
 """
 from __future__ import annotations
 
+import csv
 import math
+import os
 import re
 import sys
 from collections import defaultdict
@@ -115,6 +117,55 @@ _NEXTEST = re.compile(
     r"\[[^\]]*\]\s+\S*quality\S*\s+(?P<path>\S+)"
 )
 _NEXTEST_PASS = {"PASS", "FLAKY"}
+
+# `reference-quality.yml` does NOT run nextest: it builds the grouped `quality`
+# binary once and executes each libtest case directly, writing every outcome to
+# `quality_results.tsv` (columns: idx, outcome, cause, test, rc, ...). So the
+# nextest scrape above finds nothing there and the attrition guard silently
+# switches itself off — which is how 46 GAM_ERROR tests (38 of them emitting no
+# pair at all) sat outside the significance set with nothing in the report
+# saying so. That TSV is the authoritative execution record for that runner, so
+# read it directly when it is available.
+_TSV_PASS = {"PASS"}
+
+
+def _parse_outcome_tsv(path: str) -> dict[str, dict]:
+    """Per-category executed/failed counts from a `quality_results.tsv`.
+
+    Same return shape as [`_parse_nextest`]. Anything whose outcome is not PASS
+    counts as a failure for attrition purposes, including REF_ERROR: a reference
+    tool that could not run is still a test that produced no comparable pair,
+    and the report distinguishes the causes by name.
+    """
+    by_cat: dict[str, dict] = defaultdict(
+        lambda: {"executed": 0, "failed": 0, "failed_paths": []}
+    )
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            test = (row.get("test") or "").strip()
+            outcome = (row.get("outcome") or "").strip()
+            if not test or not outcome:
+                continue
+            category = test.split("::", 1)[0]
+            rec = by_cat[category]
+            rec["executed"] += 1
+            if outcome not in _TSV_PASS:
+                rec["failed"] += 1
+                cause = (row.get("cause") or "").strip()
+                rec["failed_paths"].append(
+                    f"{outcome}{f'/{cause}' if cause else ''} {test}"
+                )
+    return dict(by_cat)
+
+
+def _default_outcome_tsv(log_path: str) -> str | None:
+    """`quality_results.tsv` sitting beside the log, as the workflow writes it."""
+    if log_path == "-":
+        return None
+    sibling = os.path.join(os.path.dirname(os.path.abspath(log_path)), "quality_results.tsv")
+    return sibling if os.path.exists(sibling) else None
+
 
 
 def _parse_nextest(lines: list[str]) -> dict[str, dict]:
@@ -222,13 +273,21 @@ def _summarize(label: str, rows: list[dict]) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         raise SystemExit(__doc__)
     src = sys.stdin if sys.argv[1] == "-" else open(sys.argv[1])
     with src if src is not sys.stdin else _nullctx(src):
         lines = src.readlines()
     rows = _parse(lines)
+    # Execution record, for the silent-attrition guard. nextest output is the
+    # historical source; the reference-quality workflow instead writes a
+    # `quality_results.tsv`, passed explicitly or found beside the log.
     nextest = _parse_nextest(lines)
+    if not nextest:
+        tsv = sys.argv[2] if len(sys.argv) == 3 else _default_outcome_tsv(sys.argv[1])
+        if tsv:
+            nextest = _parse_outcome_tsv(tsv)
+            print(f"execution record: {tsv}")
     if not rows:
         raise SystemExit(
             "no [QUALITY_PAIR] lines found. Ensure the quality tests emit "
