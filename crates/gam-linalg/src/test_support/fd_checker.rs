@@ -85,24 +85,72 @@ pub struct FdDerivative {
     pub ladder: Vec<(f64, f64)>,
 }
 
+/// What a self-certifying oracle is entitled to conclude about one analytic
+/// derivative component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FdVerdict {
+    /// The oracle resolved the component and the analytic value sits inside the
+    /// tolerance band widened by the oracle's own uncertainty.
+    Agree,
+    /// The oracle resolved the component and the analytic value is outside that
+    /// band. This is the only verdict that indicts the analytic derivative.
+    Disagree,
+    /// The oracle's own uncertainty is wider than the tolerance band, so it
+    /// cannot tell agreement from disagreement. A statement about the
+    /// OBJECTIVE at this point — too noisy, or too sharply curved to difference
+    /// — not about the analytic gradient. Reporting it as a gradient violation
+    /// is a category error.
+    Unresolved,
+}
+
 impl FdDerivative {
-    /// Whether the oracle resolved the derivative to a useful precision:
-    /// `uncertainty ≤ rel_tol·|value| + abs_floor`.
+    /// The tolerance band a component of this size is judged against:
+    /// `rel_tol · max(|value|, |analytic|, abs_floor)`.
+    pub fn band(&self, analytic: f64, rel_tol: f64, abs_floor: f64) -> f64 {
+        rel_tol * self.value.abs().max(analytic.abs()).max(abs_floor)
+    }
+
+    /// Whether the oracle resolved the derivative sharply enough to judge the
+    /// band it will judge against: `uncertainty ≤ band`.
     ///
-    /// A caller that gates a gradient check must consult this first. An
-    /// unresolved component is a statement about the OBJECTIVE (too noisy or
-    /// too sharply curved to difference at this point), not about the analytic
-    /// gradient, and reporting it as a gradient violation is a category error.
-    pub fn resolved(&self, rel_tol: f64, abs_floor: f64) -> bool {
-        self.uncertainty.is_finite() && self.uncertainty <= rel_tol * self.value.abs() + abs_floor
+    /// Deliberately relative to the BAND rather than to the value. An oracle
+    /// that knows a `1.1e-3` derivative to `±4.8e-4` has measured something,
+    /// but not to a precision that can decide a `5e-6` question, and pretending
+    /// otherwise is how a conditioning limit becomes a "gradient defect".
+    pub fn resolved(&self, analytic: f64, rel_tol: f64, abs_floor: f64) -> bool {
+        self.uncertainty.is_finite() && self.uncertainty <= self.band(analytic, rel_tol, abs_floor)
     }
 
     /// The largest `|analytic − value|` this measurement is compatible with at
-    /// the requested tolerance: `rel_tol · max(|value|, |analytic|, abs_floor)`
-    /// widened by the oracle's own uncertainty.
+    /// the requested tolerance: the band widened by the oracle's own
+    /// uncertainty.
     pub fn agreement_bound(&self, analytic: f64, rel_tol: f64, abs_floor: f64) -> f64 {
-        let denom = self.value.abs().max(analytic.abs()).max(abs_floor);
-        rel_tol * denom + self.uncertainty
+        self.band(analytic, rel_tol, abs_floor) + self.uncertainty
+    }
+
+    /// The single place that decides whether an analytic derivative component
+    /// agrees with this measurement. Callers should route every comparison
+    /// through it rather than re-deriving the three-way rule, which is easy to
+    /// state as two-way and thereby convert every unmeasurable component into a
+    /// false violation.
+    pub fn judge(&self, analytic: f64, rel_tol: f64, abs_floor: f64) -> FdVerdict {
+        if !self.value.is_finite() || !self.resolved(analytic, rel_tol, abs_floor) {
+            return FdVerdict::Unresolved;
+        }
+        if (analytic - self.value).abs() > self.agreement_bound(analytic, rel_tol, abs_floor) {
+            FdVerdict::Disagree
+        } else {
+            FdVerdict::Agree
+        }
+    }
+
+    /// The ladder rendered for a diagnostic line: `h=… D=…` coarsest first.
+    pub fn ladder_report(&self) -> String {
+        self.ladder
+            .iter()
+            .map(|(h, d)| format!("h={h:.2e} D={d:+.10e}"))
+            .collect::<Vec<_>>()
+            .join("  ")
     }
 }
 
@@ -513,10 +561,11 @@ mod tests {
             exact
         );
         assert!(
-            measured.resolved(1e-8, 1e-12),
+            measured.resolved(exact, 1e-8, 1e-12),
             "uncertainty {:.3e} should certify a smooth objective",
             measured.uncertainty
         );
+        assert_eq!(measured.judge(exact, 1e-8, 1e-12), FdVerdict::Agree);
         assert!(
             measured.order >= 4,
             "a smooth objective should accept an extrapolated entry, got order {}",
@@ -569,7 +618,14 @@ mod tests {
             measured.uncertainty,
             (measured.value - exact).abs()
         );
-        assert!(measured.resolved(1e-6, 1e-12));
+        assert!(measured.resolved(exact, 1e-6, 1e-12));
+        assert_eq!(measured.judge(exact, 1e-6, 1e-12), FdVerdict::Agree);
+        // A wrong analytic value at the same rung must still be indicted: the
+        // widened band must not have swallowed the whole comparison.
+        assert_eq!(
+            measured.judge(exact * 1.01, 1e-6, 1e-12),
+            FdVerdict::Disagree
+        );
     }
 
     /// An objective whose value carries a noise floor cannot be differentiated
@@ -598,8 +654,9 @@ mod tests {
         const NOISE: f64 = 1.0e-9;
         let noisy = |t: f64| SLOPE * t + NOISE * jitter(t);
         let measured = ridders_derivative(noisy, RiddersConfig::default());
-        assert!(
-            !measured.resolved(1e-3, 1e-9),
+        assert_eq!(
+            measured.judge(SLOPE, 1e-3, 1e-9),
+            FdVerdict::Unresolved,
             "a noise-dominated component must not be certified: value={:.3e} uncertainty={:.3e}",
             measured.value,
             measured.uncertainty
@@ -608,8 +665,9 @@ mod tests {
         // The discrimination has to cut both ways: the SAME objective without
         // the noise channel, at the same tolerance, must resolve and be right.
         let clean = ridders_derivative(|t| SLOPE * t, RiddersConfig::default());
-        assert!(
-            clean.resolved(1e-3, 1e-9),
+        assert_eq!(
+            clean.judge(SLOPE, 1e-3, 1e-9),
+            FdVerdict::Agree,
             "the noise-free objective must certify: uncertainty={:.3e}",
             clean.uncertainty
         );

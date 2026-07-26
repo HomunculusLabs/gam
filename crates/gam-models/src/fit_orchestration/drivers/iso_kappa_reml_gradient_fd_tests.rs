@@ -493,35 +493,42 @@ fn iso_kappa_fd_variant_driver_on(
                 ridders,
             );
             let fd = measured.value;
-            let denom = fd.abs().max(grad_an[j].abs()).max(abs_floor);
-            let gap = (grad_an[j] - fd).abs();
+            let analytic = grad_an[j];
+            let denom = fd.abs().max(analytic.abs()).max(abs_floor);
+            let gap = (analytic - fd).abs();
             let rel = gap / denom;
-            let resolved = measured.resolved(rel_tol, abs_floor);
+            let verdict = measured.judge(analytic, rel_tol, abs_floor);
             let kind = if is_psi { "psi" } else { "rho" };
             eprintln!(
-                "[{label} {probe}] {kind} j={j} an={:+.4e} fd={:+.4e} rel={:.3e} \
-                 unc={:.3e} step={:.1e} order={} {}",
-                grad_an[j],
-                fd,
-                rel,
-                measured.uncertainty,
-                measured.step,
-                measured.order,
-                if resolved { "resolved" } else { "UNRESOLVED" }
+                "[{label} {probe}] {kind} j={j} an={analytic:+.4e} fd={fd:+.4e} rel={rel:.3e} \
+                 unc={:.3e} step={:.1e} order={} {verdict:?}",
+                measured.uncertainty, measured.step, measured.order,
             );
-            if !resolved {
-                unresolved += 1;
-                continue;
+            if verdict != gam_linalg::test_support::fd_checker::FdVerdict::Agree {
+                // The ladder is the evidence for whichever way the verdict
+                // went; printing it here is what let #2461 be settled from a
+                // log instead of a re-run.
+                eprintln!(
+                    "[{label} {probe}] {kind} j={j} LADDER {}",
+                    measured.ladder_report()
+                );
+            }
+            match verdict {
+                gam_linalg::test_support::fd_checker::FdVerdict::Unresolved => {
+                    unresolved += 1;
+                    continue;
+                }
+                gam_linalg::test_support::fd_checker::FdVerdict::Disagree => {
+                    violations.push(format!(
+                        "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
+                         rel={rel:.3e} (oracle unc={:.3e} at h={:.1e}, order {})",
+                        measured.uncertainty, measured.step, measured.order
+                    ));
+                }
+                gam_linalg::test_support::fd_checker::FdVerdict::Agree => {}
             }
             if is_psi && rel > worst_psi_rel {
                 worst_psi_rel = rel;
-            }
-            if gap >= measured.agreement_bound(grad_an[j], rel_tol, abs_floor) {
-                violations.push(format!(
-                    "{probe} {kind} j={j}: analytic={:+.6e} fd={:+.6e} rel={:.3e} \
-                     (oracle unc={:.3e} at h={:.1e}, order {})",
-                    grad_an[j], fd, rel, measured.uncertainty, measured.step, measured.order
-                ));
             }
         }
     }
@@ -1655,6 +1662,153 @@ fn zz_measure_duchon_psi_fd_step_law_at_rho1_2461() {
         );
         previous = Some((h, fd));
     }
+}
+
+/// #2461, executable: the Duchon iso-κ ψ-gradient must be CERTIFIED at the
+/// saturated rung the issue measured — and the fixture must still be a place
+/// where a fixed step is not good enough, or the gate is vacuous.
+///
+/// Two assertions, and the second is the one that keeps the first honest.
+///
+///  1. `ridders_derivative` — which chooses its own step and reports its own
+///     uncertainty — must RESOLVE the ψ component at `duchon_gaussian rho1@15`
+///     and AGREE with the analytic gradient. The reported 0.54% is not a
+///     property of the gradient, so no tolerance is being widened to admit it:
+///     the realized agreement is ~1e-7 relative, four orders inside the band.
+///
+///  2. A central difference at the ladder's historical fixed `h = 3e-4` must
+///     still be wrong here by more than `rel_tol`. Without this the gate would
+///     silently stop testing anything the day the fixture stopped being sharp
+///     in ψ, and the regression it guards — a fixed-step oracle reporting its
+///     own truncation as a gradient defect — would become invisible again.
+#[test]
+fn iso_kappa_duchon_psi_gradient_is_certified_at_a_saturated_rho_2461() {
+    use gam_linalg::test_support::fd_checker::{FdVerdict, RiddersConfig, ridders_derivative};
+
+    const RUNG: f64 = 15.0;
+    const REL_TOL: f64 = 5e-3;
+    const ABS_FLOOR: f64 = 1e-3;
+    // The step the driver used to hard-wire, kept as a literal because
+    // assertion 2 is precisely a statement ABOUT that step.
+    const RETIRED_FIXED_STEP: f64 = 3e-4;
+
+    let fixture = build_iso_kappa_fixture(
+        "duchon_gaussian",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+    );
+    let rho_dim = fixture.rho_dim;
+    let external_opts = fixture.external_opts();
+    let mut cache = fixture.cache();
+    let mut evaluator = fixture.evaluator(&external_opts);
+    let data = fixture.data.view();
+
+    let mut theta = Array1::<f64>::zeros(rho_dim + fixture.psi_dim);
+    for j in 0..rho_dim {
+        theta[j] = 0.2 - 0.1 * j as f64;
+    }
+    theta[1] = RUNG;
+    let coord = rho_dim;
+
+    let mut cost_at = |theta: &Array1<f64>,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> f64 {
+        cache
+            .ensure_theta(theta)
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "ensure_theta", e));
+        let design = cache.design();
+        evaluator
+            .evaluate_cost_only(
+                &design.design,
+                &design.penalties,
+                &design.nullspace_dims,
+                design.linear_constraints.clone(),
+                theta,
+                rho_dim,
+                None,
+                "#2461 certified psi gate",
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "cost-only eval", e))
+    };
+
+    let analytic = {
+        cache.ensure_theta(&theta).expect("ensure_theta");
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data,
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "hyper dirs build", e))
+        .expect("hyper dirs present");
+        let (_, grad, _) = evaluate_joint_reml_outer_eval_at_theta(
+            &mut evaluator,
+            cache.design(),
+            &theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "outer eval", e));
+        grad[coord]
+    };
+
+    let probe_at = |t: f64,
+                    cache: &mut SingleBlockExactJointDesignCache<'_>,
+                    evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>,
+                    cost_at: &mut dyn FnMut(
+        &Array1<f64>,
+        &mut SingleBlockExactJointDesignCache<'_>,
+        &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>,
+    ) -> f64|
+     -> f64 {
+        let mut probe = theta.clone();
+        probe[coord] += t;
+        cost_at(&probe, cache, evaluator)
+    };
+
+    let measured = ridders_derivative(
+        |t| probe_at(t, &mut cache, &mut evaluator, &mut cost_at),
+        RiddersConfig::default(),
+    );
+    eprintln!(
+        "[#2461-gate] rho1@{RUNG} psi: analytic={analytic:+.10e} certified={:+.10e} \
+         unc={:.3e} step={:.1e} order={}",
+        measured.value, measured.uncertainty, measured.step, measured.order
+    );
+    assert_eq!(
+        measured.judge(analytic, REL_TOL, ABS_FLOOR),
+        FdVerdict::Agree,
+        "certified oracle must agree with the analytic psi gradient at rho1@{RUNG}: \
+         analytic={analytic:+.6e} fd={:+.6e} unc={:.3e}\n  ladder: {}",
+        measured.value,
+        measured.uncertainty,
+        measured.ladder_report()
+    );
+
+    let fixed = (probe_at(
+        RETIRED_FIXED_STEP,
+        &mut cache,
+        &mut evaluator,
+        &mut cost_at,
+    ) - probe_at(
+        -RETIRED_FIXED_STEP,
+        &mut cache,
+        &mut evaluator,
+        &mut cost_at,
+    )) / (2.0 * RETIRED_FIXED_STEP);
+    let fixed_rel = (analytic - fixed).abs() / analytic.abs().max(fixed.abs()).max(ABS_FLOOR);
+    eprintln!("[#2461-gate] fixed h={RETIRED_FIXED_STEP:.1e} fd={fixed:+.6e} rel={fixed_rel:.3e}");
+    assert!(
+        fixed_rel > REL_TOL,
+        "this rung must still DEFEAT a fixed step, or the gate above proves nothing: \
+         fixed-step rel={fixed_rel:.3e} is now inside rel_tol={REL_TOL:.1e}"
+    );
 }
 
 /// Behavioral pin for the iso-κ Duchon ψ-axis under BinomialProbit: the
