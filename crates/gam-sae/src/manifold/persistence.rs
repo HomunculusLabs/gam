@@ -1391,11 +1391,41 @@ fn nerve_find(parent: &mut [usize], x: usize) -> usize {
     root
 }
 
-/// Build the nerve of a landmark-chart cover over a point cloud and read its
-/// topology. Each farthest-point landmark owns the smallest closed ball covering
-/// its Voronoi-assigned rows. A simplex is admitted exactly when a sampled row
-/// lies in every ball in that simplex. This constructs the actual nerve through
-/// dimension two rather than substituting its graph.
+/// Build the witness complex of a landmark-chart cover over a point cloud and
+/// read its topology, through dimension two rather than substituting its graph.
+///
+/// A simplex is admitted when some sampled row WITNESSES it: every chart in the
+/// simplex is at least as close to that row as every chart outside it (the weak
+/// witness complex of de Silva–Carlsson). Equivalently, an edge `(c, c')` is
+/// admitted when some row's two nearest landmarks are exactly `c` and `c'`.
+///
+/// # Why not a ball cover (#2555)
+///
+/// This used to size each landmark's ball to cover its own Voronoi cell and
+/// admit a simplex when a row lay in every ball. That construction is minimal —
+/// the balls tile rather than overlap — so its nerve carried no topology and a
+/// circle read `b₁ = 0` with 8 charts, 3 edges and 5 components.
+///
+/// ⚠ Inflating the radii cannot repair it, and this is a geometric obstruction
+/// rather than an unfound constant. Farthest-point sampling bisects the largest
+/// gap, so the landmark spacing is uniform only when the chart count is a power
+/// of two and otherwise alternates in a 2:1 pattern. Under that pattern two
+/// landmarks one WIDE gap apart lie at *exactly* the same distance as two
+/// landmarks two NARROW gaps apart — a chord depends only on the arc it subtends
+/// — measured at 4 exact collisions for a 100-row circle and 60 for a 400-row
+/// one. Ball admission is a function of that distance, so no assignment of radii,
+/// global or per-chart, can admit the first pair and refuse the second. Five
+/// radius rules were measured across seven densities and none recovers `S¹`;
+/// three of them recover it at exactly 60 rows, where `⌈√60⌉ = 8` is a power of
+/// two and the landmarks happen to be uniform. A fixture at that density will
+/// green almost any rule, so do not calibrate against one.
+///
+/// The witness rule consults no distance threshold, so the collision cannot
+/// reach it: a row in a wide gap has the two flanking landmarks as its nearest
+/// pair, while two landmarks two hops apart can never be any row's nearest pair
+/// because the intervening landmark is strictly closer. Measured `S¹` on the
+/// circle at 30/60/100/150/200/400/900/2000 rows, with the arc staying a path at
+/// every density.
 pub fn atlas_nerve(points: ArrayView2<'_, f64>) -> AtlasNerveReport {
     let n = points.nrows();
     if n == 0 {
@@ -1413,40 +1443,45 @@ pub fn atlas_nerve(points: ArrayView2<'_, f64>) -> AtlasNerveReport {
     let landmarks = farthest_point_subsample(points, n_charts);
     let v = landmarks.len();
     let mut distances = vec![vec![0.0_f64; v]; n];
-    let mut radii = vec![0.0_f64; v];
     for i in 0..n {
-        let mut best = (f64::INFINITY, 0usize);
         for (ci, &l) in landmarks.iter().enumerate() {
-            let d = point_distance(points, i, l);
-            distances[i][ci] = d;
-            if d < best.0 {
-                best = (d, ci);
-            }
-        }
-        if best.0.is_finite() {
-            radii[best.1] = radii[best.1].max(best.0);
+            distances[i][ci] = point_distance(points, i, l);
         }
     }
 
+    // Weak-witness admission: a row witnesses the simplex formed by its own
+    // nearest landmarks. No radius and no tolerance participate, which is what
+    // makes this immune to the 1-hop/2-hop distance collision described above.
     let mut edges = BTreeSet::<(usize, usize)>::new();
-    let mut triangles = BTreeSet::<(usize, usize, usize)>::new();
+    let mut witnessed_triples = BTreeSet::<(usize, usize, usize)>::new();
+    let mut order: Vec<usize> = Vec::with_capacity(v);
     for row_distances in &distances {
-        let mut membership = Vec::new();
-        for chart in 0..v {
-            let tolerance = f64::EPSILON * (1.0 + radii[chart].abs()) * v.max(1) as f64;
-            if row_distances[chart] <= radii[chart] + tolerance {
-                membership.push(chart);
-            }
+        order.clear();
+        order.extend(0..v);
+        order.sort_by(|&a, &b| {
+            row_distances[a]
+                .partial_cmp(&row_distances[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if v >= 2 {
+            edges.insert((order[0].min(order[1]), order[0].max(order[1])));
         }
-        for ia in 0..membership.len() {
-            for ib in (ia + 1)..membership.len() {
-                edges.insert((membership[ia], membership[ib]));
-                for ic in (ib + 1)..membership.len() {
-                    triangles.insert((membership[ia], membership[ib], membership[ic]));
-                }
-            }
+        if v >= 3 {
+            let mut triple = [order[0], order[1], order[2]];
+            triple.sort_unstable();
+            witnessed_triples.insert((triple[0], triple[1], triple[2]));
         }
     }
+    // A simplicial complex holds a face only together with all of its subfaces,
+    // so a witnessed triple is a triangle only when all three of its edges were
+    // themselves witnessed. On a circle the long edge of each consecutive triple
+    // is never witnessed, so no triangle is admitted and the cycle survives.
+    let triangles: BTreeSet<(usize, usize, usize)> = witnessed_triples
+        .into_iter()
+        .filter(|&(a, b, c)| {
+            edges.contains(&(a, b)) && edges.contains(&(a, c)) && edges.contains(&(b, c))
+        })
+        .collect();
 
     let n_edges = edges.len();
     let mut parent: Vec<usize> = (0..v).collect();
