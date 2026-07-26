@@ -646,6 +646,36 @@ pub(crate) fn validate_lat_lon_matrix(
     Ok(())
 }
 
+fn validate_spherical_wahba_gram_request(
+    penalty_order: usize,
+    kernel: SphereWahbaKernel,
+) -> Result<(), BasisError> {
+    if !(1..=4).contains(&penalty_order) {
+        crate::bail_invalid_basis!(
+            "spherical spline penalty_order must be one of 1, 2, 3, 4; got {penalty_order}"
+        );
+    }
+    if matches!(kernel, SphereWahbaKernel::Sobolev) && penalty_order == 1 {
+        // K_1 = (-ln(u) - 1)/(4π), u = (1 - cos(γ))/2, is log-singular
+        // at coincidence. A finite Gram diagonal therefore cannot be inferred
+        // from this closed form: the old epsilon floor silently selected one,
+        // equivalent to an unstated spectral resolution of about 3.8e9.
+        crate::bail_invalid_basis!(
+            "the m = 1 Sobolev sphere kernel is log-singular at coincident points, so its Gram \
+             diagonal does not exist and any finite value is a choice of resolution rather than a \
+             limit; use SobolevTruncated {{ lmax }} (the same kernel with the resolution stated, \
+             diagonal ~ ln(lmax)/2pi) or penalty_order >= 2, whose diagonals are finite closed \
+             forms (1/(4pi) at m = 2, (2*zeta3 - 2)/(4pi) at m = 3)"
+        );
+    }
+    Ok(())
+}
+
+/// Build a Wahba S² kernel matrix with the untruncated Sobolev kernel.
+///
+/// Untruncated Sobolev `m = 1` is refused because its coincident-point value
+/// diverges; use [`SphereWahbaKernel::SobolevTruncated`] with
+/// [`spherical_wahba_kernel_matrix_with_kind`] to state a finite resolution.
 pub fn spherical_wahba_kernel_matrix(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -661,6 +691,12 @@ pub fn spherical_wahba_kernel_matrix(
     )
 }
 
+/// Build a Wahba S² kernel matrix with an explicit kernel family.
+///
+/// Untruncated [`SphereWahbaKernel::Sobolev`] at `m = 1` is refused before
+/// either GPU dispatch or CPU scalar/SIMD evaluation. Its Gram diagonal does
+/// not exist; [`SphereWahbaKernel::SobolevTruncated`] is the explicit-
+/// resolution alternative.
 pub fn spherical_wahba_kernel_matrix_with_kind(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -668,6 +704,7 @@ pub fn spherical_wahba_kernel_matrix_with_kind(
     radians: bool,
     kernel: SphereWahbaKernel,
 ) -> Result<Array2<f64>, BasisError> {
+    validate_spherical_wahba_gram_request(penalty_order, kernel)?;
     validate_lat_lon_matrix(data, "spherical spline data", radians)?;
     validate_lat_lon_matrix(centers, "spherical spline centers", radians)?;
     // GPU fast path for the truncated-spectral kernels. The CPU SIMD loop
@@ -691,13 +728,17 @@ pub fn spherical_wahba_kernel_matrix_with_kind(
         })?;
         return Ok(gpu_matrix);
     }
-    spherical_wahba_kernel_matrix_cpu(data, centers, penalty_order, radians, kernel)
+    spherical_wahba_kernel_matrix_cpu_validated(data, centers, penalty_order, radians, kernel)
 }
 
 /// CPU oracle for the Wahba S² kernel design matrix — the bit-defining
 /// reference the GPU truncated path is held to. Always evaluates on host,
 /// regardless of the GPU dispatch decision, so parity tests and any caller that
 /// needs the deterministic reference can bypass device routing entirely.
+///
+/// It enforces the same kernel/order contract as
+/// [`spherical_wahba_kernel_matrix_with_kind`]; bypassing device routing does
+/// not bypass mathematical validation.
 pub fn spherical_wahba_kernel_matrix_cpu(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -705,8 +746,19 @@ pub fn spherical_wahba_kernel_matrix_cpu(
     radians: bool,
     kernel: SphereWahbaKernel,
 ) -> Result<Array2<f64>, BasisError> {
+    validate_spherical_wahba_gram_request(penalty_order, kernel)?;
     validate_lat_lon_matrix(data, "spherical spline data", radians)?;
     validate_lat_lon_matrix(centers, "spherical spline centers", radians)?;
+    spherical_wahba_kernel_matrix_cpu_validated(data, centers, penalty_order, radians, kernel)
+}
+
+fn spherical_wahba_kernel_matrix_cpu_validated(
+    data: ArrayView2<'_, f64>,
+    centers: ArrayView2<'_, f64>,
+    penalty_order: usize,
+    radians: bool,
+    kernel: SphereWahbaKernel,
+) -> Result<Array2<f64>, BasisError> {
     let n = data.nrows();
     let k = centers.nrows();
     let deg = if radians {
@@ -813,6 +865,93 @@ pub fn spherical_wahba_kernel_matrix_cpu(
         crate::bail_invalid_basis!("spherical spline kernel produced a non-finite value");
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod spherical_wahba_kernel_contract_2475_tests {
+    use super::*;
+    use ndarray::array;
+
+    fn assert_sobolev_m1_refusal(
+        entry_point: &str,
+        result: Result<Array2<f64>, BasisError>,
+    ) {
+        let error = result.expect_err("untruncated Sobolev m=1 has no Gram diagonal");
+        let message = error.to_string();
+        assert!(
+            message.contains("log-singular") && message.contains("SobolevTruncated"),
+            "{entry_point} must identify both the mathematical defect and the explicit-resolution \
+             remedy; got: {message}"
+        );
+    }
+
+    #[test]
+    fn all_public_matrix_entry_points_refuse_untruncated_sobolev_m1() {
+        // Deliberately use distinct points. Refusal is a structural property of
+        // the requested Gram-kernel family, not a floating-point coincidence test.
+        let data = array![[0.0, 0.0]];
+        let centers = array![[35.0, 70.0]];
+
+        assert_sobolev_m1_refusal(
+            "spherical_wahba_kernel_matrix",
+            spherical_wahba_kernel_matrix(data.view(), centers.view(), 1, false),
+        );
+        assert_sobolev_m1_refusal(
+            "spherical_wahba_kernel_matrix_with_kind",
+            spherical_wahba_kernel_matrix_with_kind(
+                data.view(),
+                centers.view(),
+                1,
+                false,
+                SphereWahbaKernel::Sobolev,
+            ),
+        );
+        assert_sobolev_m1_refusal(
+            "spherical_wahba_kernel_matrix_cpu",
+            spherical_wahba_kernel_matrix_cpu(
+                data.view(),
+                centers.view(),
+                1,
+                false,
+                SphereWahbaKernel::Sobolev,
+            ),
+        );
+    }
+
+    #[test]
+    fn explicit_resolution_and_finite_diagonal_m1_kernels_remain_available() {
+        let point = array![[0.0, 0.0]];
+
+        let pseudo = spherical_wahba_kernel_matrix_with_kind(
+            point.view(),
+            point.view(),
+            1,
+            false,
+            SphereWahbaKernel::Pseudo,
+        )
+        .expect("pseudo-Wahba m=1 has a finite analytic coincident-point value");
+        assert_eq!(
+            pseudo[(0, 0)],
+            1.0 / (4.0 * std::f64::consts::PI),
+            "the refusal must not absorb valid pseudo-Wahba m=1"
+        );
+
+        let truncated = spherical_wahba_kernel_matrix_with_kind(
+            point.view(),
+            point.view(),
+            1,
+            false,
+            SphereWahbaKernel::SobolevTruncated { lmax: 16 },
+        )
+        .expect("explicitly truncated Sobolev m=1 has a stated finite resolution");
+        assert!(
+            truncated[(0, 0)].is_finite(),
+            "a stated spectral resolution must produce a finite Gram diagonal"
+        );
+
+        spherical_wahba_kernel_matrix(point.view(), point.view(), 2, false)
+            .expect("untruncated Sobolev m=2 has a finite closed-form diagonal");
+    }
 }
 
 pub(crate) fn weighted_coefficient_sum_to_zero_transform(
