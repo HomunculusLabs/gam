@@ -1922,4 +1922,213 @@ fn zz_measure_monotone_fixture_through_checkable_evaluator_2454() {
     }
 }
 
+
+/// #2454 MEASUREMENT (reports, never fails): decompose the analytic ρ-gradient
+/// and the criterion VALUE into the SAME four additive parts, then
+/// finite-difference each part against the analytic part that owns it.
+///
+/// Every prior #2454 measurement graded the SUM: `analytic − fd` on the total
+/// gradient, which established the excess is additive, exactly `∝ λ`,
+/// analytic-only, and invariant to the inner tolerance and the ρ-prior — but
+/// could not say WHICH term carries it. The typed ρ-block audit
+/// (`enable_rho_outer_audit`) emits, per outer evaluation, the criterion value
+/// split `(fixed_beta, logdet_h, logdet_s, kkt)` and the matching per-ρ
+/// gradient split. Central-differencing each VALUE component and comparing it
+/// against its own gradient part localises the defect to one channel in one
+/// run, with no instrumented build and no environment gate.
+#[test]
+fn zz_measure_rho_gradient_part_decomposition_2454() {
+    use gam_solve::estimate::outer_eval_capture::{
+        enable_rho_outer_audit, take_rho_outer_audit, RhoOuterAudit,
+    };
+
+    let n = 60usize;
+    let d = 2usize;
+    let mut data = Array2::<f64>::zeros((n, d));
+    let mut y = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let x0 = i as f64 / (n as f64 - 1.0);
+        let x1 = (i as f64 * 0.17).sin();
+        data[[i, 0]] = x0;
+        data[[i, 1]] = x1;
+        y[i] = (3.0 * x0).cos() + 0.35 * x1;
+    }
+    let weights = Array1::ones(n);
+    let offset = Array1::zeros(n);
+    let spec = TermCollectionSpec {
+        linear_terms: vec![],
+        random_effect_terms: vec![],
+        smooth_terms: vec![SmoothTermSpec {
+            name: "matern".to_string(),
+            basis: SmoothBasisSpec::Matern {
+                feature_cols: vec![0, 1],
+                spec: MaternBasisSpec {
+                    periodic: None,
+                    center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                    length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                    nu: MaternNu::FiveHalves,
+                    include_intercept: false,
+                    double_penalty: true,
+                    identifiability: MaternIdentifiability::CenterSumToZero,
+                    aniso_log_scales: None,
+                },
+                input_scale: None,
+            },
+            shape: ShapeConstraint::None,
+            joint_null_rotation: None,
+        }],
+    };
+    let fit_opts = FitOptions {
+        compute_inference: false,
+        max_iter: 200,
+        tol: 1e-12,
+        penalty_shrinkage_floor: None,
+        ..FitOptions::default()
+    };
+    let family = LikelihoodSpec::gaussian_identity();
+
+    let design = build_term_collection_design(data.view(), &spec)
+        .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+    let frozen = freeze_term_collection_from_design(&spec, &design)
+        .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
+    let frozen_design = build_term_collection_design(data.view(), &frozen)
+        .unwrap_or_else(|e| panic!("frozen design failed: {e:?}"));
+    let spatial_terms = spatial_length_scale_term_indices(&frozen);
+    let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
+    let rho_dim = frozen_design.penalties.len();
+    let psi_dim: usize = dims_per_term.iter().sum();
+
+    let external_opts = external_opts_for_design(&family, &frozen_design, &fit_opts);
+    let mut cache = SingleBlockExactJointDesignCache::new(
+        data.view(),
+        frozen.clone(),
+        frozen_design.clone(),
+        spatial_terms.clone(),
+        rho_dim,
+        dims_per_term.clone(),
+    )
+    .unwrap_or_else(|e| panic!("cache failed: {e:?}"));
+    let mut evaluator = gam_solve::estimate::ExternalJointHyperEvaluator::new(
+        y.view(),
+        weights.view(),
+        &frozen_design.design,
+        offset.view(),
+        &frozen_design.penalties,
+        &external_opts,
+        "#2454 part decomposition",
+    )
+    .unwrap_or_else(|e| panic!("evaluator failed: {e:?}"));
+
+    // Cost-only evaluation that ALSO returns the criterion component split.
+    let cost_parts_at = |theta: &Array1<f64>,
+                         cache: &mut SingleBlockExactJointDesignCache<'_>,
+                         evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> (f64, [f64; 4]) {
+        cache.ensure_theta(theta).unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
+        enable_rho_outer_audit();
+        let design = cache.design();
+        let cost = evaluator
+            .evaluate_cost_only(
+                &design.design,
+                &design.penalties,
+                &design.nullspace_dims,
+                design.linear_constraints.clone(),
+                theta,
+                rho_dim,
+                None,
+                "#2454 cost-only parts",
+                None,
+            )
+            .unwrap_or_else(|e| panic!("cost-only: {e:?}"));
+        let audit: RhoOuterAudit = take_rho_outer_audit().expect("rho audit armed");
+        let (audit_cost, components) = audit
+            .criterion
+            .expect("criterion components recorded for every eval");
+        assert!(
+            (audit_cost - cost).abs() <= 1e-9 * cost.abs().max(1.0),
+            "audit cost {audit_cost:+.12e} disagrees with returned cost {cost:+.12e}"
+        );
+        (cost, components)
+    };
+
+    let analytic_at = |theta: &Array1<f64>,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> (f64, [f64; 4], Array1<f64>, RhoOuterAudit) {
+        cache.ensure_theta(theta).expect("ensure_theta");
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data.view(),
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("hyper dirs: {e:?}"))
+        .expect("hyper dirs present");
+        enable_rho_outer_audit();
+        let (cost, grad, _h) = evaluate_joint_reml_outer_eval_at_theta(
+            evaluator,
+            cache.design(),
+            theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("outer eval: {e:?}"));
+        let audit: RhoOuterAudit = take_rho_outer_audit().expect("rho audit armed");
+        let (_, components) = audit
+            .criterion
+            .expect("criterion components recorded for every eval");
+        (cost, components, grad, audit)
+    };
+
+    eprintln!("[zz-parts-2454] rho_dim={rho_dim} psi_dim={psi_dim} p={}", frozen_design.design.ncols());
+    let h = 3e-4_f64;
+    for value in [6.0_f64, 9.0, 12.0, 15.0] {
+        let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
+        for j in 0..rho_dim {
+            theta[j] = value;
+        }
+        let (cost, _components, _grad, audit) = analytic_at(&theta, &mut cache, &mut evaluator);
+        for j in 0..rho_dim.min(1) {
+            let mut plus = theta.clone();
+            plus[j] += h;
+            let mut minus = theta.clone();
+            minus[j] -= h;
+            let (cp, comp_p) = cost_parts_at(&plus, &mut cache, &mut evaluator);
+            let (cm, comp_m) = cost_parts_at(&minus, &mut cache, &mut evaluator);
+            let fd_total = (cp - cm) / (2.0 * h);
+            let part = audit
+                .parts
+                .iter()
+                .find(|p| p.index == j)
+                .copied()
+                .expect("rho gradient part recorded");
+            let an_kkt = part.total - (part.fixed_beta + part.logdet_h + part.logdet_s);
+            let fd_named = |idx: usize| (comp_p[idx] - comp_m[idx]) / (2.0 * h);
+            let lambda = value.exp();
+            eprintln!(
+                "[zz-parts-2454] rho={value:5.1} j={j} lambda={lambda:.6e} COST={cost:+.12e} \
+                 q_k={:+.12e}",
+                part.block_quadratic
+            );
+            for (name, an, fd) in [
+                ("total     ", part.total, fd_total),
+                ("fixed_beta", part.fixed_beta, fd_named(0)),
+                ("logdet_h  ", part.logdet_h, fd_named(1)),
+                ("logdet_s  ", part.logdet_s, fd_named(2)),
+                ("kkt       ", an_kkt, fd_named(3)),
+            ] {
+                let gap = an - fd;
+                eprintln!(
+                    "[zz-parts-2454]   {name} an={an:+.10e} fd={fd:+.10e} gap={gap:+.6e} \
+                     gap_over_lambda={:+.6e}",
+                    gap / lambda
+                );
+            }
+        }
+    }
+}
+
 }

@@ -244,6 +244,100 @@ pub(crate) fn record_outer_gradient_fd(record: OuterGradientFdRecord) {
     });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  ρ-block outer audit (#2454)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The ψ block has carried a typed analytic-vs-FD record since #2460; the ρ
+// block had none, so every large-λ smoothing-gradient investigation had to
+// scrape `log::trace!` lines or bolt an environment-gated instrument onto the
+// evaluator. This channel closes that asymmetry: it emits, per outer
+// evaluation, the SAME four-way additive decomposition the criterion VALUE
+// carries (`RemlCriterionComponents`) but for each ρ coordinate's analytic
+// gradient — so a caller can finite-difference each criterion component and
+// grade the gradient part that owns it, instead of grading only their sum.
+//
+// Thread-local and disabled by default, matching the ψ channel: a parallel
+// integration test can neither consume nor overwrite another test's audit.
+
+/// One ρ coordinate's analytic gradient, split into the additive parts that
+/// match the criterion-value components of [`RemlCriterionComponents`].
+///
+/// `fixed_beta + logdet_h + logdet_s` is the envelope gradient entry as
+/// assembled; `total` additionally carries any IFT/KKT correction folded in
+/// afterwards, so `total − (fixed_beta + logdet_h + logdet_s)` is the `kkt`
+/// part. `lambda` and `block_quadratic` are the two raw inputs the
+/// `fixed_beta` part is built from (`½·λ_k·q_k`, scaled by the dispersion
+/// channel), retained because a defect that is proportional to `λ_k` is only
+/// diagnosable against the `λ_k` it was multiplied by.
+#[derive(Clone, Copy, Debug)]
+pub struct RhoGradientParts {
+    pub index: usize,
+    pub lambda: f64,
+    pub block_quadratic: f64,
+    pub fixed_beta: f64,
+    pub logdet_h: f64,
+    pub logdet_s: f64,
+    pub total: f64,
+}
+
+/// One outer evaluation's ρ-block audit: the criterion value decomposition and
+/// the per-coordinate analytic gradient decomposition that pairs with it.
+#[derive(Clone, Debug, Default)]
+pub struct RhoOuterAudit {
+    /// `(cost, [fixed_beta, logdet_h, logdet_s, kkt])` for the criterion VALUE.
+    pub criterion: Option<(f64, [f64; 4])>,
+    /// Per-ρ-coordinate analytic gradient parts, in coordinate order.
+    pub parts: Vec<RhoGradientParts>,
+}
+
+thread_local! {
+    static RHO_AUDIT: RefCell<Option<RhoOuterAudit>> = const { RefCell::new(None) };
+}
+
+/// Arm the ρ-block audit on this thread, discarding any previous window.
+///
+/// Every subsequent outer evaluation on this thread overwrites the window, so
+/// the caller reads the audit for the LAST evaluation it triggered — which is
+/// the contract a probe wants when it evaluates at one θ at a time.
+pub fn enable_rho_outer_audit() {
+    RHO_AUDIT.with(|audit| *audit.borrow_mut() = Some(RhoOuterAudit::default()));
+}
+
+/// Disarm the ρ-block audit and take the last evaluation's window.
+pub fn take_rho_outer_audit() -> Option<RhoOuterAudit> {
+    RHO_AUDIT.with(|audit| audit.borrow_mut().take())
+}
+
+pub(crate) fn rho_outer_audit_enabled() -> bool {
+    RHO_AUDIT.with(|audit| audit.borrow().is_some())
+}
+
+/// Start a fresh window for one outer evaluation (no-op when disarmed).
+pub(crate) fn begin_rho_outer_audit_eval() {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            *state = RhoOuterAudit::default();
+        }
+    });
+}
+
+pub(crate) fn record_rho_outer_criterion(cost: f64, components: [f64; 4]) {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            state.criterion = Some((cost, components));
+        }
+    });
+}
+
+pub(crate) fn record_rho_gradient_parts(parts: Vec<RhoGradientParts>) {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            state.parts = parts;
+        }
+    });
+}
+
 /// Record one outer evaluation when capture is enabled (no-op otherwise). Only
 /// the first [`MAX_CAPTURED`] evaluations of a window are retained.
 pub(crate) fn record_outer_eval(theta: &Array1<f64>, cost: f64, gradient: &Array1<f64>) {

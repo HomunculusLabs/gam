@@ -1965,6 +1965,7 @@ impl<'a> RemlState<'a> {
         mode: super::reml_outer_engine::EvalMode,
         assembly: super::assembly::InnerAssembly<'static>,
     ) -> Result<super::reml_outer_engine::RemlLamlResult, EstimationError> {
+        crate::estimate::outer_eval_capture::begin_rho_outer_audit_eval();
         let prior = self.build_prior(rho, mode);
         self.validate_tk_ext_coords(mode, &assembly.ext_coords)?;
         let tk_atom = self.tierney_kadane_terms(rho, bundle, mode, &assembly.ext_coords)?;
@@ -1996,15 +1997,17 @@ impl<'a> RemlState<'a> {
             block_terms,
         );
         let result = self.apply_theta_correction_atom_to_result(result, &block_atom)?;
+        let components = [
+            result.criterion_components.fixed_beta,
+            result.criterion_components.logdet_h,
+            result.criterion_components.logdet_s,
+            result.criterion_components.kkt,
+        ];
         crate::estimate::outer_eval_capture::record_outer_criterion_components(
             result.cost,
-            [
-                result.criterion_components.fixed_beta,
-                result.criterion_components.logdet_h,
-                result.criterion_components.logdet_s,
-                result.criterion_components.kkt,
-            ],
+            components,
         );
+        crate::estimate::outer_eval_capture::record_rho_outer_criterion(result.cost, components);
         // This value/derivative tuple is the genuine REML/LAML criterion. An
         // optimizer-only diagnostic must never mutate it: a former hard-gated
         // ALO augmentation introduced a finite objective jump when leverage

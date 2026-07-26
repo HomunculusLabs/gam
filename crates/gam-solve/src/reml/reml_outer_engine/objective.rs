@@ -1208,7 +1208,13 @@ pub fn reml_laml_evaluate(
         None
     };
 
-    let rho_grad_entries: Vec<(usize, f64)> = (0..k)
+    // #2454: the ρ-block audit needs each entry split into the SAME additive
+    // parts the criterion value carries, not just their sum. Computed inside
+    // the parallel map and returned alongside the entry (rayon workers cannot
+    // see the requesting thread's thread-local window).
+    let capture_rho_parts = crate::estimate::outer_eval_capture::rho_outer_audit_enabled();
+    type RhoGradEntry = (usize, f64, f64, f64, f64, f64, f64);
+    let rho_grad_entries: Vec<RhoGradEntry> = (0..k)
         .into_par_iter()
         .map(|idx| {
             // Active upper-bound projection (Option A in #197):
@@ -1231,7 +1237,7 @@ pub fn reml_laml_evaluate(
                     "[RHO-GRAD] idx={} value=0.0 (upper-bound projection, see #197)",
                     idx
                 );
-                return (idx, 0.0);
+                return (idx, 0.0, lambdas[idx], 0.0, 0.0, 0.0, 0.0);
             }
 
             // Cost derivative for the shifted penalty:
@@ -1334,11 +1340,61 @@ pub fn reml_laml_evaluate(
                 "[RHO-GRAD] idx={} value={:+.6e} a_i={:+.6e} trace_logdet={:+.6e} ld_s={:+.6e} fused={} incl_h={} incl_s={}",
                 idx, value, a_i, trace_logdet_i, ld_s_i, fused_logdet_minus_rank[idx].is_some(), incl_logdet_h, incl_logdet_s
             );
-            (idx, value)
+            // Split into the criterion-value components. `fixed_beta` is the
+            // dispersion-scaled penalty quadratic derivative; `logdet_h` /
+            // `logdet_s` are the two determinant channels. The fused (a2) route
+            // returns `tr(G_ε·Ḣ_k) − rank` as one number, so it is attributed
+            // whole to `logdet_h` with `logdet_s = 0` — exactly how the entry
+            // itself is assembled.
+            let (part_fixed_beta, part_logdet_h, part_logdet_s) = if capture_rho_parts {
+                (
+                    outer_gradient_entry(
+                        a_i,
+                        0.0,
+                        0.0,
+                        &solution.dispersion,
+                        dp_cgrad,
+                        profiled_scale,
+                        false,
+                        false,
+                    ),
+                    if incl_logdet_h { 0.5 * trace_logdet_i } else { 0.0 },
+                    if incl_logdet_s { -0.5 * ld_s_i } else { 0.0 },
+                )
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+            let block_quadratic = if capture_rho_parts && idx < penalty_quad_atom.lambdas.len() {
+                penalty_quad_atom.block_quadratics[idx]
+            } else {
+                0.0
+            };
+            (
+                idx,
+                value,
+                lambdas[idx],
+                block_quadratic,
+                part_fixed_beta,
+                part_logdet_h,
+                part_logdet_s,
+            )
         })
         .collect();
-    for (idx, value) in rho_grad_entries {
+    let mut rho_audit_parts: Vec<crate::estimate::outer_eval_capture::RhoGradientParts> =
+        Vec::new();
+    for (idx, value, lambda, block_quadratic, fixed_beta, ld_h, ld_s) in rho_grad_entries {
         grad[idx] = value;
+        if capture_rho_parts {
+            rho_audit_parts.push(crate::estimate::outer_eval_capture::RhoGradientParts {
+                index: idx,
+                lambda,
+                block_quadratic,
+                fixed_beta,
+                logdet_h: ld_h,
+                logdet_s: ld_s,
+                total: value,
+            });
+        }
     }
 
     // ─── Implicit-function-theorem gradient correction ───
@@ -1455,6 +1511,16 @@ pub fn reml_laml_evaluate(
     };
     if let Some(corrections) = kkt_theta_corrections.as_ref() {
         grad += &corrections.gradient;
+    }
+
+    // #2454: publish the ρ-block audit AFTER the KKT/IFT fold, so `total` is
+    // the gradient entry the caller actually consumes and
+    // `total − (fixed_beta + logdet_h + logdet_s)` is the `kkt` part.
+    if capture_rho_parts {
+        for part in rho_audit_parts.iter_mut() {
+            part.total = grad[part.index];
+        }
+        crate::estimate::outer_eval_capture::record_rho_gradient_parts(rho_audit_parts);
     }
 
     // Extended hyperparameter gradient (ψ/τ coordinates).
