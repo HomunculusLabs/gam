@@ -111,16 +111,6 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Try to build gamfit from source (non-fatal)
-        continue-on-error: true
-        run: |
-          set -uxo pipefail
-          python -m pip install --upgrade pip maturin
-          python -m pip install numpy pandas scipy scikit-learn pyarrow requests
-          python -m pip install . && \
-            (cd /tmp && python -c "import gamfit; print('gamfit ok')") || \
-            echo "::warning::gamfit source build failed — the gam CLI still works"
-
       - name: Install connectome-host
         run: |
           set -euxo pipefail
@@ -193,16 +183,26 @@ jobs:
           set -uo pipefail
           cd "$HOST_DIR"
           bun src/index.ts "$AGENT_REPO_DIR/.github/connectome/recipe.json" \
-            --headless --exit-when-idle > "$RUNNER_TEMP/host.log" 2>&1 &
+            --headless > "$RUNNER_TEMP/host.log" 2>&1 &
           HOST_PID=$!
           echo "host pid $HOST_PID"
 
-          node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || true
+          driver_status=0
+          node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || driver_status=$?
 
-          # The host exits on its own once the agent is quiescent.
-          wait "$HOST_PID" || echo "::warning::host exited non-zero"
+          host_status=0
+          wait "$HOST_PID" || host_status=$?
           echo "=== tail of host log ==="
-          tail -60 "$RUNNER_TEMP/host.log" || true
+          tail -120 "$RUNNER_TEMP/host.log" || true
+
+          if [ "$driver_status" -ne 0 ]; then
+            echo "::error::Connectome driver failed with status $driver_status"
+            exit "$driver_status"
+          fi
+          if [ "$host_status" -ne 0 ]; then
+            echo "::error::Connectome host failed with status $host_status"
+            exit "$host_status"
+          fi
 
       # Save the agent's past even if the run failed or timed out — a crashed
       # run still lived through something.
@@ -235,11 +235,10 @@ jobs:
             echo "::warning::memory store is ${size} MB — consider pruning old Chronicle branches"
           fi
 
-          # `mktemp` (no -u) CREATES the file, and git rejects a zero-byte
-          # index with "index file smaller than expected" -- which is exactly
-          # how the first cutover run staged nothing, reported success, and
-          # lost the agent's entire memory. -u yields an unused NAME.
-          idx=$(mktemp -u)
+          # Git requires the index path not to exist yet. Put that path inside
+          # a private temporary directory instead of using racy `mktemp -u`.
+          index_dir=$(mktemp -d)
+          idx="$index_dir/index"
           export GIT_INDEX_FILE="$idx"
           export GIT_DIR="$AGENT_REPO_DIR/.git"
           export GIT_WORK_TREE="$DATA_DIR"
@@ -253,6 +252,7 @@ jobs:
             commit=$(git commit-tree "$tree" -m "$msg")
           fi
           unset GIT_WORK_TREE GIT_INDEX_FILE
+          rm -rf "$index_dir"
 
           # 1. This run's own lineage. The ref name contains the run id, so no
           #    concurrent run can ever contend for it and this push cannot fail
@@ -269,7 +269,8 @@ jobs:
           #    contend; every future run unions all shards, so a fact learned
           #    in a lineage that loses the pointer race still reaches everyone.
           if [ -s "$DATA_DIR/lessons.json" ]; then
-            lidx=$(mktemp -u)
+            lessons_index_dir=$(mktemp -d)
+            lidx="$lessons_index_dir/index"
             if GIT_INDEX_FILE="$lidx" GIT_DIR="$AGENT_REPO_DIR/.git" GIT_WORK_TREE="$DATA_DIR" \
                  git add -- lessons.json 2>/dev/null; then
               ltree=$(GIT_INDEX_FILE="$lidx" GIT_DIR="$AGENT_REPO_DIR/.git" git write-tree)
@@ -281,6 +282,7 @@ jobs:
                 echo "::error::could not save lessons shard"
               fi
             fi
+            rm -rf "$lessons_index_dir"
           else
             echo "no lessons.json produced this run"
           fi
