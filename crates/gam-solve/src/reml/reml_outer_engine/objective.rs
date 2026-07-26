@@ -119,21 +119,6 @@ pub fn reml_laml_evaluate(
         0.5 * solution.penalty_quadratic,
     );
     let penalty_quad_value = penalty_quad_value_atom.value();
-    // ZZ2454 TEMPORARY INSTRUMENT — remove before commit.
-    if std::env::var("ZZ2454_PARTS").is_ok() && !rho.is_empty() {
-        eprintln!(
-            "[ZZ2454-PARTS] rho={:?} log_det_h={:+.17e} log_det_s={:+.17e} pen_quad={:+.17e} \
-             loglik={:+.17e} ld_s_first={:?} nulldim={} hcorr={:+.6e}",
-            rho.to_vec(),
-            log_det_h,
-            log_det_s,
-            penalty_quad_value,
-            solution.log_likelihood,
-            solution.penalty_logdet.first.to_vec(),
-            solution.nullspace_dim,
-            solution.hessian_logdet_correction,
-        );
-    }
     let (cost, profiled_scale, dp_cgrad, _dp_cgrad2) = match &solution.dispersion {
         DispersionHandling::ProfiledGaussian => {
             // Gaussian REML with profiled scale:
@@ -513,26 +498,6 @@ pub fn reml_laml_evaluate(
         &solution.beta,
     )?
     .with_stable_value(0.5 * solution.penalty_quadratic);
-    // ZZ2454 TEMPORARY INSTRUMENT — remove before commit.
-    if std::env::var("ZZ2454_PENQ").is_ok() {
-        let orig_sum: f64 = 0.5
-            * penalty_quad_atom
-                .lambdas
-                .iter()
-                .zip(penalty_quad_atom.block_quadratics.iter())
-                .map(|(&l, &q)| l * q)
-                .sum::<f64>();
-        eprintln!(
-            "[ZZ2454-PENQ] rho0={:+.4} stable_half={:+.17e} orig_half_sum={:+.17e} diff={:+.6e} \
-             q_k={:?} lam0={:.6e}",
-            rho[0],
-            0.5 * solution.penalty_quadratic,
-            orig_sum,
-            orig_sum - 0.5 * solution.penalty_quadratic,
-            penalty_quad_atom.block_quadratics.to_vec(),
-            lambdas[0],
-        );
-    }
     let curvature_penalty_quad_atom =
         crate::estimate::reml::atoms::PenaltyQuadAtom::from_penalty_coords(
             &curvature_lambdas,
@@ -1352,14 +1317,6 @@ pub fn reml_laml_evaluate(
                 "[RHO-GRAD] idx={} value={:+.6e} a_i={:+.6e} trace_logdet={:+.6e} ld_s={:+.6e} fused={} incl_h={} incl_s={}",
                 idx, value, a_i, trace_logdet_i, ld_s_i, fused_logdet_minus_rank[idx].is_some(), incl_logdet_h, incl_logdet_s
             );
-            // ZZ2454 TEMPORARY INSTRUMENT — remove before commit.
-            if std::env::var("ZZ2454_PARTS").is_ok() {
-                eprintln!(
-                    "[ZZ2454-GRAD] rho0={:+.6} idx={idx} value={:+.17e} a_i={:+.17e} \
-                     trace_logdet={:+.17e} ld_s={:+.17e} phi={:+.6e} dp_cgrad={:+.6e}",
-                    rho[0], value, a_i, trace_logdet_i, ld_s_i, profiled_scale, dp_cgrad,
-                );
-            }
             (idx, value)
         })
         .collect();
