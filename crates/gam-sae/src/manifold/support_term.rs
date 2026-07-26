@@ -660,10 +660,15 @@ impl SaeSupportSparseTerm {
     }
 
     /// Direct active-row reconstruction. No K-wide gate or basis row exists.
+    /// Rows are independent reads of shared state, so they decode in parallel.
     pub fn reconstruct(&self) -> Result<Array2<f64>, String> {
+        let rows = (0..self.n_obs())
+            .into_par_iter()
+            .map(|row| self.reconstruct_row(row))
+            .collect::<Result<Vec<_>, String>>()?;
         let mut fitted = Array2::<f64>::zeros((self.n_obs(), self.output_dim));
-        for row in 0..self.n_obs() {
-            fitted.row_mut(row).assign(&self.reconstruct_row(row)?);
+        for (row, decoded) in rows.into_iter().enumerate() {
+            fitted.row_mut(row).assign(&decoded);
         }
         Ok(fitted)
     }
@@ -735,6 +740,18 @@ impl SaeSupportSparseTerm {
         self.validate_smoothing(lambda_smooth)?;
         self.validate_ard(ard_precisions)?;
         let residual = self.raw_residual(target)?;
+        self.penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)
+    }
+
+    /// [`Self::penalized_objective`] against a caller-supplied residual.
+    pub fn penalized_objective_with_residual(
+        &self,
+        residual: &Array2<f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<f64, String> {
+        self.validate_smoothing(lambda_smooth)?;
+        self.validate_ard(ard_precisions)?;
         let mut value = 0.5 * residual.iter().map(|entry| entry * entry).sum::<f64>();
         for (atom, &lambda) in self.atoms.iter().zip(lambda_smooth) {
             let sb = atom.smooth_penalty().dot(&atom.decoder_coefficients);
@@ -747,18 +764,25 @@ impl SaeSupportSparseTerm {
                     .map(|(left, right)| left * right)
                     .sum::<f64>();
         }
-        for row in 0..self.n_obs() {
-            for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
-                let atom = atom as usize;
-                let periods = self.assignment.atom_axis_periods(atom);
-                for axis in 0..self.assignment.atom_coord_dim(atom) {
-                    value += ArdAxisPrior::eval(
-                        ard_precisions[atom][axis],
-                        self.assignment.coords_for_slot(row, slot)[axis],
-                        periods[axis],
-                    )
-                    .value;
+        value += (0..self.n_obs())
+            .into_par_iter()
+            .map(|row| {
+                let mut row_value = 0.0_f64;
+                for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
+                    let atom = atom as usize;
+                    let periods = self.assignment.atom_axis_periods(atom);
+                    for axis in 0..self.assignment.atom_coord_dim(atom) {
+                        row_value += ArdAxisPrior::eval(
+                            ard_precisions[atom][axis],
+                            self.assignment.coords_for_slot(row, slot)[axis],
+                            periods[axis],
+                        )
+                        .value;
+                    }
                 }
+                row_value
+            })
+            .sum::<f64>();
             }
         }
         if value.is_finite() {
@@ -1259,51 +1283,81 @@ impl SaeSupportSparseTerm {
         lambda_smooth: &[f64],
         ard_precisions: &[Vec<f64>],
     ) -> Result<SaeSupportStationarity, String> {
+        let residual = self.raw_residual(target)?;
+        self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)
+    }
+
+    /// [`Self::raw_stationarity`] against a caller-supplied residual, so one
+    /// residual pass per fixed-point cycle serves both the certificate and the
+    /// objective. Atoms and rows are independent reads of shared state; both
+    /// reductions run in parallel.
+    pub fn raw_stationarity_with_residual(
+        &self,
+        residual: &Array2<f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<SaeSupportStationarity, String> {
         self.validate_smoothing(lambda_smooth)?;
         self.validate_ard(ard_precisions)?;
-        let residual = self.raw_residual(target)?;
-        let mut decoder_sq = 0.0_f64;
-        let mut decoder_max = 0.0_f64;
-        for atom_idx in 0..self.k_atoms() {
-            let atom = &self.atoms[atom_idx];
-            let mut gradient =
-                atom.smooth_penalty().dot(&atom.decoder_coefficients) * lambda_smooth[atom_idx];
-            for &(row, slot) in &self.atom_rows[atom_idx] {
-                let active = self.evaluate_active(row, slot)?;
-                for basis in 0..atom.basis_size() {
-                    for output in 0..self.output_dim {
-                        gradient[[basis, output]] -= active.phi[basis] * residual[[row, output]];
+        if residual.dim() != (self.n_obs(), self.output_dim) {
+            return Err(format!(
+                "SaeSupportSparseTerm::raw_stationarity_with_residual: residual {:?} != ({}, {})",
+                residual.dim(),
+                self.n_obs(),
+                self.output_dim
+            ));
+        }
+        let (decoder_sq, decoder_max) = (0..self.k_atoms())
+            .into_par_iter()
+            .map(|atom_idx| -> Result<(f64, f64), String> {
+                let atom = &self.atoms[atom_idx];
+                let mut gradient = atom.smooth_penalty().dot(&atom.decoder_coefficients)
+                    * lambda_smooth[atom_idx];
+                for &(row, slot) in &self.atom_rows[atom_idx] {
+                    let active = self.evaluate_active(row, slot)?;
+                    for basis in 0..atom.basis_size() {
+                        for output in 0..self.output_dim {
+                            gradient[[basis, output]] -=
+                                active.phi[basis] * residual[[row, output]];
+                        }
                     }
                 }
-            }
-            for value in gradient {
-                decoder_sq += value * value;
-                decoder_max = decoder_max.max(value.abs());
-            }
-        }
-        let mut coordinate_sq = 0.0_f64;
-        let mut coordinate_max = 0.0_f64;
-        for row in 0..self.n_obs() {
-            for slot in 0..self.assignment.support_indices(row).len() {
-                let atom = self.assignment.support_indices(row)[slot] as usize;
-                let active = self.evaluate_active(row, slot)?;
-                let periods = self.assignment.atom_axis_periods(atom);
-                for axis in 0..active.jacobian.nrows() {
-                    let mut gradient = 0.0;
-                    for output in 0..self.output_dim {
-                        gradient -= active.jacobian[[axis, output]] * residual[[row, output]];
-                    }
-                    gradient += ArdAxisPrior::eval(
-                        ard_precisions[atom][axis],
-                        self.assignment.coords_for_slot(row, slot)[axis],
-                        periods[axis],
-                    )
-                    .grad;
-                    coordinate_sq += gradient * gradient;
-                    coordinate_max = coordinate_max.max(gradient.abs());
+                let mut sq = 0.0_f64;
+                let mut max = 0.0_f64;
+                for value in gradient {
+                    sq += value * value;
+                    max = max.max(value.abs());
                 }
-            }
-        }
+                Ok((sq, max))
+            })
+            .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
+        let (coordinate_sq, coordinate_max) = (0..self.n_obs())
+            .into_par_iter()
+            .map(|row| -> Result<(f64, f64), String> {
+                let mut sq = 0.0_f64;
+                let mut max = 0.0_f64;
+                for slot in 0..self.assignment.support_indices(row).len() {
+                    let atom = self.assignment.support_indices(row)[slot] as usize;
+                    let active = self.evaluate_active(row, slot)?;
+                    let periods = self.assignment.atom_axis_periods(atom);
+                    for axis in 0..active.jacobian.nrows() {
+                        let mut gradient = 0.0;
+                        for output in 0..self.output_dim {
+                            gradient -= active.jacobian[[axis, output]] * residual[[row, output]];
+                        }
+                        gradient += ArdAxisPrior::eval(
+                            ard_precisions[atom][axis],
+                            self.assignment.coords_for_slot(row, slot)[axis],
+                            periods[axis],
+                        )
+                        .grad;
+                        sq += gradient * gradient;
+                        max = max.max(gradient.abs());
+                    }
+                }
+                Ok((sq, max))
+            })
+            .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
         Ok(SaeSupportStationarity {
             decoder_l2: decoder_sq.sqrt(),
             decoder_max_abs: decoder_max,
@@ -1470,14 +1524,17 @@ impl SaeSupportSparseTerm {
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
             let max_change = decoder_change.max(coordinate_change);
             last_max_change = max_change;
-            let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
+            let residual = self.raw_residual(target)?;
+            let stationarity =
+                self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
             // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
             // gradients over every row on the atom's support, so its natural
             // scale grows with rows-per-atom x residual scale. Certify the
             // scale-invariant first-order condition |g|_inf <= tol * max(1, |f|)
             // instead of an absolute bound an irreducible-residual problem can
             // never meet at any cycle budget.
-            let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+            let objective =
+                self.penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)?;
             let kkt_scale = objective.abs().max(1.0);
             // Both certificate limbs are relative AND gauge-invariant: the KKT
             // against the objective scale, and the OBJECTIVE's own recurrence
