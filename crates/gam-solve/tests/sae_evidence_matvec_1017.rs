@@ -22,8 +22,8 @@ use gam_solve::arrow_schur::{
     FactoredFrameGBlock,
 };
 use gam_solve::gpu_kernels::arrow_schur::{
-    build_framed_resident_evidence_matvec, framed_reduced_schur_det_once_on_device,
-    sae_framed_schur_matvec_cpu,
+    ArrowSchurGpuFailure, build_framed_resident_evidence_matvec,
+    framed_reduced_schur_det_once_on_device, sae_framed_schur_matvec_cpu,
 };
 
 // Device presence is detected via the one-shot probe itself: for a well-formed
@@ -220,6 +220,44 @@ fn cpu_oracle(
     out
 }
 
+/// #2422 device-free half of [`evidence_matvec_deterministic_and_matches_cpu`].
+///
+/// With no CUDA device that test used to return before its first assertion, so
+/// on every CPU-only runner — which is all of CI — it reported `passed` having
+/// measured nothing. The determinism contract it exists to defend is not
+/// device-specific: `sae_framed_schur_matvec_cpu` is the operator the evidence
+/// lane falls back to, and it must be finite and run-to-run bit-identical on
+/// exactly the probes the device arm would have used. Asserting that here means
+/// a device-free run still proves the half of the contract it can reach.
+fn assert_cpu_evidence_lane_is_deterministic(
+    sys: &ArrowSchurSystem,
+    data: &DeviceSaePcgData,
+    ridge_t: f64,
+    ridge_beta: f64,
+    probes: &[Array1<f64>],
+) {
+    assert!(
+        !probes.is_empty(),
+        "#1017 device-free half: no probes, so this would assert nothing"
+    );
+    for (pi, x) in probes.iter().enumerate() {
+        let first = cpu_oracle(sys, data, ridge_t, ridge_beta, x);
+        let second = cpu_oracle(sys, data, ridge_t, ridge_beta, x);
+        for (coord, (&u, &v)) in first.iter().zip(&second).enumerate() {
+            assert!(
+                u.is_finite(),
+                "#1017 CPU evidence lane: probe {pi} coord {coord} is not finite: {u:e}"
+            );
+            assert_eq!(
+                u.to_bits(),
+                v.to_bits(),
+                "#1017 determinism on the CPU evidence lane: probe {pi} coord {coord} differs \
+                 run-to-run: {u:e} vs {v:e}"
+            );
+        }
+    }
+}
+
 /// (1) parity vs the CPU oracle ≤1e-9 and (2) run-to-run bit-identical, via the
 /// one-shot device probe. Fails loud if CUDA is present but the seam declines.
 #[test]
@@ -239,9 +277,22 @@ fn evidence_matvec_deterministic_and_matches_cpu() {
         let dev1 =
             match framed_reduced_schur_det_once_on_device(&sys, &data, ridge_t, ridge_beta, x) {
                 Ok(out) => out,
-                // For this well-formed fixture the probe declines only when CUDA is
-                // absent — a clean off-device skip.
-                Err(_) => return,
+                // `Unavailable` is the only off-device reason for this
+                // well-formed fixture. Every other variant is a real seam
+                // failure, and the `Err(_)` this replaces swallowed all of them
+                // into a `passed` with zero assertions executed (#2422) — a
+                // rank-deficient Schur factor and a capability mismatch were
+                // both indistinguishable from having no GPU.
+                Err(ArrowSchurGpuFailure::Unavailable) => {
+                    assert_cpu_evidence_lane_is_deterministic(
+                        &sys, &data, ridge_t, ridge_beta, &probes,
+                    );
+                    return;
+                }
+                Err(other) => panic!(
+                    "#1017 probe {pi}: the device evidence-matvec failed for a reason that is \
+                     not device absence: {other:?}"
+                ),
             };
         let dev2 = framed_reduced_schur_det_once_on_device(&sys, &data, ridge_t, ridge_beta, x)
             .expect("second deterministic matvec");

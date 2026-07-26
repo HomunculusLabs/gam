@@ -3722,13 +3722,66 @@ mod tests {
         );
     }
 
+    /// #2422 device-free half, run by [`cuda_runtime_for_test`] on every host
+    /// that has no CUDA device.
+    ///
+    /// Every CUDA-gated test in this module early-returns when the runtime is
+    /// absent, and that return happens before the test's first assertion — so
+    /// the test reports `passed` having executed nothing. Because every CI
+    /// runner is device-free, that is the state this entire module has been in.
+    ///
+    /// The contract that IS checkable without a device is the production
+    /// entry's refusal. `launch_bms_flex_row_kernel` validates its inputs and
+    /// then reaches `launch_linux`, which opens with `RowKernelBackend::probe()?`;
+    /// with no device that probe fails, so the entry must return `Err` carrying
+    /// the device-absence reason. An entry that returns `Ok` on a device-free
+    /// host has fabricated device state — the #1551 silent-fallback class, and
+    /// exactly what a `return` before the first assertion could never see.
+    fn assert_row_kernel_seam_declines_without_cuda() {
+        let buffers = make_buffers(1, 4, 1, 1);
+        // The fixture must be one the entry ACCEPTS. `launch_bms_flex_row_kernel`
+        // rejects malformed inputs with `Err` as well, so an invalid fixture
+        // would satisfy the refusal check below without the device seam ever
+        // being reached — the assertion would hold for the wrong reason.
+        minimal_inputs(&buffers)
+            .validate()
+            .expect("the device-free half must present inputs the row-kernel entry accepts");
+
+        match launch_bms_flex_row_kernel(minimal_inputs(&buffers)) {
+            Ok(_) => panic!(
+                "no CUDA runtime on this host, yet the BMS FLEX row-kernel entry returned Ok \
+                 — the seam fabricated device state (#1551 class)"
+            ),
+            Err(GpuError::DriverCallFailed { reason }) if reason.contains("s_f") => panic!(
+                "the row-kernel entry refused over its INPUTS rather than the absent device, \
+                 so this proves nothing about the device seam: {reason}"
+            ),
+            Err(_) => {}
+        }
+    }
+
+    /// Resolve the CUDA runtime for a device-gated test.
+    ///
+    /// `Err` is a real driver fault and fails loudly — it must never be
+    /// confused with device absence. `None` means the host genuinely has no
+    /// device, and before handing that back this asserts the device-free half
+    /// of the caller's contract, so a caller that early-returns on `None` still
+    /// proves something real instead of reporting `passed` with zero assertions
+    /// executed (#2422). Curing it here rather than at each call site is
+    /// deliberate: all eight CUDA-gated tests in this module route through this
+    /// one function, and a fix applied per-site is a fix with a 1-in-8 success
+    /// rate the moment a ninth is written.
     fn cuda_runtime_for_test(
         test_name: &str,
     ) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
         match gam_gpu::device_runtime::GpuRuntime::resolve(GpuPolicy::Auto) {
             Ok(Some(runtime)) => Some(runtime),
             Ok(None) => {
-                eprintln!("[{test_name}] no CUDA device — skipping");
+                eprintln!(
+                    "[{test_name}] no CUDA device — asserting the device-free seam contract \
+                     instead of skipping"
+                );
+                assert_row_kernel_seam_declines_without_cuda();
                 None
             }
             Err(error) => panic!("[{test_name}] CUDA probe failed: {error}"),
