@@ -140,4 +140,7 @@ mod zz_measure_2445_tests;
 mod zz_measure_2475_tests;
 
 #[cfg(test)]
+mod zz_measure_2489_tests;
+
+#[cfg(test)]
 mod zz_measure_polar_harmonic_jet_tests;
