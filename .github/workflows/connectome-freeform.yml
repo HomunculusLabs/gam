@@ -140,6 +140,10 @@ jobs:
           if git fetch --quiet origin "+$MEMORY_REF:$MEMORY_REF" 2>/dev/null \
              && git rev-parse --verify -q "$MEMORY_REF" >/dev/null; then
             git archive "$MEMORY_REF" | tar -x -C "$DATA_DIR"
+            # A lineage saved before the prune landed can still carry a LOCK
+            # whose owning process died with that runner. Drop it on the way in
+            # too, so an old pointer cannot wedge a new run's store open.
+            find "$DATA_DIR" -name 'LOCK' -type f -delete 2>/dev/null || true
             echo "restored lineage from $(git log -1 --format='%h %ad %s' --date=iso "$MEMORY_REF")"
             echo "store: $(du -sh "$DATA_DIR" | cut -f1), $(find "$DATA_DIR" -type f | wc -l) files"
           else
@@ -158,7 +162,10 @@ jobs:
           # a malformed refspec whose failure the redirect would hide, leaving
           # the union silently empty.)
           git fetch --quiet origin '+refs/agent-memory/lessons/*:refs/agent-memory/lessons/*' 2>/dev/null || true
-          shards=$(git for-each-ref --format='%(refname)' 'refs/agent-memory/lessons/*' 2>/dev/null | sort -t/ -k4 -rn | head -300)
+          # `|| true`: under `set -o pipefail`, `head` closing the pipe early
+          # can SIGPIPE `sort` once the namespace exceeds 300 refs, which would
+          # abort this step and kill the run before the agent ever starts.
+          shards=$(git for-each-ref --format='%(refname)' 'refs/agent-memory/lessons/*' 2>/dev/null | sort -t/ -k4 -rn | head -300 || true)
           if [ -n "$shards" ]; then
             echo "unioning $(printf '%s\n' "$shards" | wc -l | tr -d ' ') lesson shard(s)"
             tmp=$(mktemp -d)
