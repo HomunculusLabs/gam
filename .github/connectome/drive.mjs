@@ -9,7 +9,7 @@
 // shutdown.
 
 import { connect } from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DATA_DIR = process.env.DATA_DIR || './data';
@@ -17,6 +17,13 @@ const SOCKET = process.env.IPC_SOCKET || join(DATA_DIR, 'ipc.sock');
 const READY_TIMEOUT_MS = Number(process.env.READY_TIMEOUT_MS || 180_000);
 const IDLE_SETTLE_MS = Number(process.env.IDLE_SETTLE_MS || 5_000);
 const RUN_ID = process.env.GITHUB_RUN_ID || 'unknown';
+const RUN_MARKER = process.env.RUN_MARKER;
+const HOST_PID = Number(process.env.CONNECTOME_HOST_PID);
+
+if (!RUN_MARKER || !Number.isSafeInteger(HOST_PID) || HOST_PID <= 0) {
+  console.error('[drive] RUN_MARKER and a valid CONNECTOME_HOST_PID are required');
+  process.exit(1);
+}
 
 const KICKOFF =
   process.env.KICKOFF_MESSAGE ||
@@ -35,6 +42,12 @@ async function waitForSocket() {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (existsSync(SOCKET)) return;
+    // The workflow runs on Linux, so procfs gives us a read-only liveness
+    // check. A startup crash should surface in one polling interval, without
+    // sending any signal to the Claude host.
+    if (!existsSync(`/proc/${HOST_PID}`)) {
+      throw new Error(`host process ${HOST_PID} exited before opening ${SOCKET}`);
+    }
     await sleep(500);
   }
   throw new Error(`socket never appeared at ${SOCKET} after ${READY_TIMEOUT_MS} ms`);
@@ -120,6 +133,7 @@ function kickOnce(reason) {
 
 sock.on('connect', () => {
   console.log(`[drive] connected to ${SOCKET}`);
+  writeFileSync(RUN_MARKER, `${RUN_ID}\n`, { flag: 'wx' });
   send({
     type: 'subscribe',
     events: ['lifecycle', 'inference:*', 'tool:*', 'command-output'],

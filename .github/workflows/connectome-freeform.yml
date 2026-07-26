@@ -63,6 +63,7 @@ jobs:
           set -euo pipefail
           echo "DATA_DIR=$RUNNER_TEMP/connectome-data" >> "$GITHUB_ENV"
           echo "HOST_DIR=$RUNNER_TEMP/connectome-host" >> "$GITHUB_ENV"
+          echo "RUN_MARKER=$RUNNER_TEMP/connectome-run-${GITHUB_RUN_ID}.opened" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
@@ -100,7 +101,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.3.14"
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -114,10 +115,13 @@ jobs:
       - name: Install connectome-host
         run: |
           set -euxo pipefail
-          git clone --depth 1 https://github.com/anima-research/connectome-host.git "$HOST_DIR"
+          host_revision=03d60fe59a658275b0e7960206d79cff79d085ca
+          install -d "$HOST_DIR"
+          curl -fsSL "https://github.com/anima-research/connectome-host/archive/${host_revision}.tar.gz" \
+            | tar -xz --strip-components=1 -C "$HOST_DIR"
           cd "$HOST_DIR"
-          bun install
-          echo "connectome-host at $(git -C "$HOST_DIR" rev-parse --short HEAD)"
+          bun install --frozen-lockfile
+          echo "connectome-host at $host_revision"
 
       # Restore the agent's past. Absent on the very first run, which is the
       # only run that is allowed to start as a stranger.
@@ -188,7 +192,8 @@ jobs:
           echo "host pid $HOST_PID"
 
           driver_status=0
-          node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || driver_status=$?
+          CONNECTOME_HOST_PID="$HOST_PID" \
+            node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || driver_status=$?
 
           host_status=0
           wait "$HOST_PID" || host_status=$?
@@ -216,19 +221,31 @@ jobs:
         run: |
           set -uo pipefail
           [ -d "$DATA_DIR" ] || { echo "no data dir; nothing to save"; exit 0; }
+          [ -f "$RUN_MARKER" ] || {
+            echo "::error::Connectome never opened the Chronicle store; refusing to persist or advance it"
+            exit 1
+          }
 
-          # Persist MEMORY, not process residue. Three classes get pruned:
+          # Persist MEMORY, not process residue. Only exact, known-transient
+          # paths are pruned:
           #   ipc.sock  — a live socket, meaningless once the run ends.
           #   LOCK      — a store mutex held by a process that no longer
           #               exists; restoring it risks a stale lock blocking
           #               the next run's open.
-          #   *.log / llm-calls*.jsonl — per-run logs. The llm-calls file is
+          #   headless.log / llm-calls*.jsonl — per-run diagnostics. The
+          #               llm-calls file is
           #               ~126 KB and its name carries a timestamp, so every
           #               run would add a NEW blob git cannot dedupe: ~6 MB a
           #               day at a 30-minute cadence, unbounded. The run log
           #               in Actions already holds this.
-          rm -f "$DATA_DIR/ipc.sock"
-          find "$DATA_DIR" \( -name 'LOCK' -o -name '*.log' -o -name 'llm-calls*.jsonl' \) -type f -delete 2>/dev/null || true
+          #
+          # Never glob `*.log`: Chronicle's durable event store is
+          # `sessions/*/records.log`. Deleting it while retaining `state.bin`
+          # creates a torn snapshot whose state offsets point past log length
+          # zero — the exact corruption diagnosed in run 30188081780.
+          rm -f "$DATA_DIR/ipc.sock" "$DATA_DIR/headless.log"
+          find "$DATA_DIR" -name 'LOCK' -type f -delete 2>/dev/null || true
+          find "$DATA_DIR" -maxdepth 1 -name 'llm-calls*.jsonl' -type f -delete 2>/dev/null || true
           size=$(du -sm "$DATA_DIR" | cut -f1)
           echo "store size: ${size} MB, $(find "$DATA_DIR" -type f | wc -l) files"
           if [ "$size" -gt 1024 ]; then
