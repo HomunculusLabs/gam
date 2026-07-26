@@ -1208,7 +1208,11 @@ mod tests {
         // 2^popcount of its submasks.
         let full_convolution_terms = |n_dirs: u32| -> u64 {
             (2..=4u32)
-                .map(|k| (k..=n_dirs).map(|p| binom(n_dirs, p) * (1u64 << p)).sum::<u64>())
+                .map(|k| {
+                    (k..=n_dirs)
+                        .map(|p| binom(n_dirs, p) * (1u64 << p))
+                        .sum::<u64>()
+                })
                 .sum()
         };
 

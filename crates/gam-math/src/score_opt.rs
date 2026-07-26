@@ -378,12 +378,8 @@ where
     // needs the endpoint jets and nothing else, so this is what makes it free:
     // the oracle reads `left`/`right` instead of re-evaluating the criterion at
     // two points it has already evaluated.
-    let enclosure =
-        enclose(node.left, node.right).map_err(|source| ScoreSearchError::EnclosureEvaluation {
-            lo,
-            hi,
-            source,
-        })?;
+    let enclosure = enclose(node.left, node.right)
+        .map_err(|source| ScoreSearchError::EnclosureEvaluation { lo, hi, source })?;
     if !(enclosure.derivative.is_valid() && enclosure.curvature.is_valid()) {
         return Err(ScoreSearchError::InvalidEnclosure { lo, hi, enclosure });
     }
@@ -794,7 +790,6 @@ pub struct AffineRemlProfile<'a> {
     projected_rhs_squared: &'a [f64],
     response_energy: &'a [f64],
     residual_dof: f64,
-    determinant_rank: usize,
     logdet_constant: f64,
 }
 
@@ -873,7 +868,6 @@ impl<'a> AffineRemlProfile<'a> {
             projected_rhs_squared,
             response_energy,
             residual_dof,
-            determinant_rank,
             logdet_constant,
         })
     }
@@ -888,8 +882,27 @@ impl<'a> AffineRemlProfile<'a> {
         self.response_energy.len()
     }
 
-    /// Exact score value, first derivative, and second derivative in
-    /// `log(lambda)`.
+    /// Score value, first derivative, and second derivative in `log(lambda)`.
+    ///
+    /// Every quantity is formed through the SAME normalized mode variable
+    /// `t = lambda*s/g` that [`Self::enclose`] evaluates on intervals, so the
+    /// point evaluator and the interval extension are one expression graph
+    /// walked two ways rather than two independent derivations that happen to
+    /// agree in the middle of the domain.  Three cancellations that the
+    /// textbook form carries are absent as a result, and all three used to be
+    /// fatal at the ends of the representable log-lambda domain:
+    ///
+    /// * `sum_i log h_i - rank*log(lambda)` differences two numbers of size
+    ///   `rank*|log lambda|` (up to ~2100 at the domain edge) to recover a
+    ///   result of size `e^-|log lambda|`.  Per mode this is instead
+    ///   `log(h/lambda) = log(g/lambda + s)`, evaluated in whichever of its two
+    ///   factorizations keeps the added term below one.
+    /// * `sum_i u_i - rank` differences `rank` from a sum of numbers that each
+    ///   round to exactly `1.0` once `lambda*s >> g`, so the result is a
+    ///   multiple of `rank*eps` where the true value is `sum_i g_i/h_i`.  Per
+    ///   mode this is instead `-c_i` with `c_i = 1 - u_i = g_i/h_i` computed
+    ///   from `t` directly.
+    /// * `u(1-u)` recovers nothing once `u` rounds to one; it is `u*c` here.
     pub fn evaluate(&self, log_lambda: f64) -> Result<ScoreJet, AffineRemlError> {
         if !log_lambda.is_finite() {
             return Err(AffineRemlError::InvalidLogLambda { value: log_lambda });
@@ -899,42 +912,44 @@ impl<'a> AffineRemlProfile<'a> {
             return Err(AffineRemlError::InvalidLogLambda { value: log_lambda });
         }
 
-        let mut logdet = self.logdet_constant;
-        let mut determinant_derivative = -(self.determinant_rank as f64);
+        let modes = self.num_modes();
+        let mut normalized_logdet = self.logdet_constant;
+        let mut determinant_derivative = 0.0;
         let mut determinant_curvature = 0.0;
+        // Mode-major so the kernels are formed once and shared by every
+        // response, instead of once per (mode, response) pair.
+        let mut residual: Vec<f64> = self.response_energy.to_vec();
+        let mut first = vec![0.0_f64; residual.len()];
+        let mut second = vec![0.0_f64; residual.len()];
         for (index, (&gram, &penalty)) in self.gram_modes.iter().zip(self.penalty_modes).enumerate()
         {
-            let h = lambda.mul_add(penalty, gram);
-            if !(h.is_finite() && h > 0.0) {
+            let point = mode_point(gram, penalty, lambda, log_lambda);
+            if !(point.determinant_first.is_finite()
+                && point.determinant_second.is_finite()
+                && point.normalized_log_h.is_finite())
+            {
                 return Err(AffineRemlError::NonPositiveMode {
                     index,
                     log_lambda,
-                    value: h,
+                    value: lambda.mul_add(penalty, gram),
                 });
             }
-            let u = lambda * penalty / h;
-            logdet += h.ln();
-            determinant_derivative += u;
-            determinant_curvature += u * (1.0 - u);
+            normalized_logdet += point.normalized_log_h;
+            determinant_derivative += point.determinant_first;
+            determinant_curvature += point.determinant_second;
+            for output in 0..residual.len() {
+                let projected_square = self.projected_rhs_squared[output * modes + index];
+                residual[output] -= projected_square * point.fitted;
+                first[output] += projected_square * point.first;
+                second[output] += projected_square * point.second;
+            }
         }
-        logdet -= (self.determinant_rank as f64) * log_lambda;
 
-        let modes = self.num_modes();
         let mut residual_log_sum = 0.0;
         let mut residual_derivative_sum = 0.0;
         let mut residual_curvature_sum = 0.0;
-        for (output, &energy) in self.response_energy.iter().enumerate() {
-            let mut residual = energy;
-            let mut first = 0.0;
-            let mut second = 0.0;
-            for i in 0..modes {
-                let h = lambda.mul_add(self.penalty_modes[i], self.gram_modes[i]);
-                let u = lambda * self.penalty_modes[i] / h;
-                let projected_square = self.projected_rhs_squared[output * modes + i];
-                residual -= projected_square / h;
-                first += projected_square * u / h;
-                second += projected_square * u * (1.0 - 2.0 * u) / h;
-            }
+        for output in 0..residual.len() {
+            let residual = residual[output];
             if !(residual.is_finite() && residual > 0.0) {
                 return Err(AffineRemlError::NonPositiveResidual {
                     output,
@@ -942,15 +957,15 @@ impl<'a> AffineRemlProfile<'a> {
                     value: residual,
                 });
             }
-            let log_derivative = first / residual;
+            let log_derivative = first[output] / residual;
             residual_log_sum += (residual / self.residual_dof).ln();
             residual_derivative_sum += log_derivative;
-            residual_curvature_sum += second / residual - log_derivative * log_derivative;
+            residual_curvature_sum += second[output] / residual - log_derivative * log_derivative;
         }
 
         let outputs = self.num_responses() as f64;
         Ok(ScoreJet {
-            value: -0.5 * (outputs * logdet + self.residual_dof * residual_log_sum),
+            value: -0.5 * (outputs * normalized_logdet + self.residual_dof * residual_log_sum),
             derivative: -0.5
                 * (outputs * determinant_derivative + self.residual_dof * residual_derivative_sum),
             curvature: -0.5
@@ -974,35 +989,32 @@ impl<'a> AffineRemlProfile<'a> {
             return Err(AffineRemlError::InvalidLogLambdaInterval { lo, hi });
         }
 
+        let modes = self.num_modes();
         let mut determinant_first = ClosedInterval::point(0.0);
         let mut determinant_second = ClosedInterval::point(0.0);
-        for i in 0..self.num_modes() {
-            let ranges = mode_ranges(self.gram_modes[i], self.penalty_modes[i], 0.0, lambda);
-            determinant_first = determinant_first.add(ranges.u);
-            determinant_second = determinant_second.add(ranges.w);
+        let mut fitted_quadratic = vec![ClosedInterval::point(0.0); self.num_responses()];
+        let mut response_first = vec![ClosedInterval::point(0.0); self.num_responses()];
+        let mut response_second = vec![ClosedInterval::point(0.0); self.num_responses()];
+        for i in 0..modes {
+            let ranges = mode_ranges(self.gram_modes[i], self.penalty_modes[i], lambda);
+            determinant_first = determinant_first.add(ranges.determinant_first);
+            determinant_second = determinant_second.add(ranges.determinant_second);
+            for output in 0..self.num_responses() {
+                let projected =
+                    ClosedInterval::point(self.projected_rhs_squared[output * modes + i]);
+                fitted_quadratic[output] =
+                    fitted_quadratic[output].add(projected.mul(ranges.fitted));
+                response_first[output] = response_first[output].add(projected.mul(ranges.first));
+                response_second[output] = response_second[output].add(projected.mul(ranges.second));
+            }
         }
-        determinant_first =
-            determinant_first.sub(ClosedInterval::point(self.determinant_rank as f64));
 
         let mut residual_first_sum = ClosedInterval::point(0.0);
         let mut residual_second_sum = ClosedInterval::point(0.0);
-        let modes = self.num_modes();
         for (output, &energy) in self.response_energy.iter().enumerate() {
-            let mut fitted_quadratic = ClosedInterval::point(0.0);
-            let mut first = ClosedInterval::point(0.0);
-            let mut second = ClosedInterval::point(0.0);
-            for i in 0..modes {
-                let ranges = mode_ranges(
-                    self.gram_modes[i],
-                    self.penalty_modes[i],
-                    self.projected_rhs_squared[output * modes + i],
-                    lambda,
-                );
-                fitted_quadratic = fitted_quadratic.add(ranges.v);
-                first = first.add(ranges.p);
-                second = second.add(ranges.q);
-            }
-            let residual = ClosedInterval::point(energy).sub(fitted_quadratic);
+            let first = response_first[output];
+            let second = response_second[output];
+            let residual = ClosedInterval::point(energy).sub(fitted_quadratic[output]);
             if !(residual.lo > 0.0 && residual.is_valid()) {
                 return Err(AffineRemlError::NonPositiveResidualInterval {
                     output,
@@ -1046,72 +1058,183 @@ impl<'a> AffineRemlProfile<'a> {
     }
 }
 
+/// One mode's contribution to the score jet, per unit `projected_square`.
+///
+/// The interval counterpart is [`ModeRanges`], field for field.
 #[derive(Clone, Copy)]
-struct ModeRanges {
-    /// `u = lambda s / h`.
-    u: ClosedInterval,
-    /// `u(1-u)`.
-    w: ClosedInterval,
-    /// `projected_square / h`.
-    v: ClosedInterval,
-    /// First derivative of the residual contribution:
-    /// `projected_square * lambda s / h^2`.
-    p: ClosedInterval,
-    /// Second derivative of the residual contribution:
-    /// `projected_square * lambda s (g-lambda s) / h^3`.
-    q: ClosedInterval,
+struct ModePoint {
+    /// Contribution to `d/dlog(lambda) [sum_i log h_i - rank*log lambda]`,
+    /// namely `u - 1 = -c` for a penalized mode and `0` otherwise.
+    determinant_first: f64,
+    /// Contribution to its second derivative, `u*c`.
+    determinant_second: f64,
+    /// `log(h/lambda)` for a penalized mode, `log h` for an unpenalized one;
+    /// summing this over the modes gives `sum_i log h_i - rank*log lambda`
+    /// with no cancellation to undo.
+    normalized_log_h: f64,
+    /// `1/h`: the fitted-energy weight, per unit `projected_square`.
+    fitted: f64,
+    /// `lambda s / h^2`, per unit `projected_square`.
+    first: f64,
+    /// `lambda s (g - lambda s) / h^3`, per unit `projected_square`.
+    second: f64,
 }
 
-fn mode_ranges(
-    gram: f64,
-    penalty: f64,
-    projected_square: f64,
-    lambda: ClosedInterval,
-) -> ModeRanges {
+fn mode_point(gram: f64, penalty: f64, lambda: f64, log_lambda: f64) -> ModePoint {
     if penalty == 0.0 {
-        let v = ClosedInterval::point(projected_square)
-            .div_positive(ClosedInterval::point(gram))
-            .nonnegative();
+        return ModePoint {
+            determinant_first: 0.0,
+            determinant_second: 0.0,
+            normalized_log_h: gram.ln(),
+            fitted: 1.0 / gram,
+            first: 0.0,
+            second: 0.0,
+        };
+    }
+    if gram == 0.0 {
+        let fitted = 1.0 / (lambda * penalty);
+        return ModePoint {
+            determinant_first: 0.0,
+            determinant_second: 0.0,
+            normalized_log_h: penalty.ln(),
+            fitted,
+            first: fitted,
+            second: -fitted,
+        };
+    }
+
+    let t = lambda * (penalty / gram);
+    let kernels = kernel_point(t);
+    // `log(h/lambda) = log(g/lambda + s)`.  Both factorizations below add a
+    // term bounded by one to a logarithm, so neither cancels: `t <= 1` is the
+    // small-lambda half where `g/lambda` dominates, `t > 1` the large-lambda
+    // half where `s` does.  Neither forms `g/lambda` itself, which overflows
+    // at the bottom of the log-lambda domain.
+    let normalized_log_h = if t <= 1.0 {
+        gram.ln() - log_lambda + t.ln_1p()
+    } else {
+        penalty.ln() + (1.0 / t).ln_1p()
+    };
+    ModePoint {
+        determinant_first: -kernels.c,
+        determinant_second: kernels.w,
+        normalized_log_h,
+        fitted: kernels.c / gram,
+        first: kernels.w / gram,
+        second: kernels.k / gram,
+    }
+}
+
+/// The four normalized mode kernels at one `t = lambda*s/g`.
+///
+/// `c` is the complement `1 - u`, returned in its own right rather than
+/// recovered by subtraction: past `t ~ 1/eps` the double `u` IS exactly one and
+/// `1 - u` carries no digits of `c` at all, while `c = 1/(1+t)` keeps its own
+/// relative accuracy across the whole domain.  Every kernel that a difference
+/// would otherwise destroy — `w = u*c` and `k = w*(c-u)` — is built from `c`.
+/// `u` itself is deliberately NOT a field: nothing outside this function needs
+/// it, and handing it out is how the subtraction gets reintroduced.
+#[derive(Clone, Copy)]
+struct KernelPoint {
+    /// `c = 1/(1+t)`.
+    c: f64,
+    /// `w = u*c = t/(1+t)^2`.
+    w: f64,
+    /// `k = w*(c-u) = t(1-t)/(1+t)^3`.
+    k: f64,
+}
+
+fn kernel_point(t: f64) -> KernelPoint {
+    if t.is_infinite() {
+        // The `t -> infinity` limits, exactly. Reached when `lambda*s/g`
+        // overflows, which the score's own limit does not care about.
+        return KernelPoint {
+            c: 0.0,
+            w: 0.0,
+            k: 0.0,
+        };
+    }
+    let (u, c) = if t <= 1.0 {
+        let c = 1.0 / (1.0 + t);
+        (t * c, c)
+    } else {
+        // Mirror image: `1/t` is the quantity below one here, so the SAME
+        // three roundings deliver `c` to its own relative accuracy.
+        let inverse = 1.0 / t;
+        let denominator = 1.0 + inverse;
+        (1.0 / denominator, inverse / denominator)
+    };
+    let w = u * c;
+    KernelPoint {
+        c,
+        w,
+        k: w * (c - u),
+    }
+}
+
+/// One mode's contribution to the score jet over a `lambda` cell, per unit
+/// `projected_square`.  Field for field the interval image of [`ModePoint`].
+#[derive(Clone, Copy)]
+struct ModeRanges {
+    determinant_first: ClosedInterval,
+    determinant_second: ClosedInterval,
+    fitted: ClosedInterval,
+    first: ClosedInterval,
+    second: ClosedInterval,
+}
+
+fn mode_ranges(gram: f64, penalty: f64, lambda: ClosedInterval) -> ModeRanges {
+    let zero = ClosedInterval::point(0.0);
+    if penalty == 0.0 {
         return ModeRanges {
-            u: ClosedInterval::point(0.0),
-            w: ClosedInterval::point(0.0),
-            v,
-            p: ClosedInterval::point(0.0),
-            q: ClosedInterval::point(0.0),
+            determinant_first: zero,
+            determinant_second: zero,
+            fitted: ClosedInterval::point(1.0)
+                .div_positive(ClosedInterval::point(gram))
+                .nonnegative(),
+            first: zero,
+            second: zero,
         };
     }
     if gram == 0.0 {
         let h = lambda.mul(ClosedInterval::point(penalty)).nonnegative();
-        let v = ClosedInterval::point(projected_square)
-            .div_positive(h)
-            .nonnegative();
+        // `lambda*s` can underflow to zero at the bottom of the domain even
+        // though `1/h` is a perfectly good real number there.  A reciprocal
+        // that cannot be bounded is reported as the entire line: useless to
+        // the search, which will subdivide, but never a false enclosure and
+        // never a panic inside `div_positive`.
+        let fitted = if h.lo > 0.0 {
+            ClosedInterval::point(1.0).div_positive(h).nonnegative()
+        } else {
+            ClosedInterval::new(0.0, f64::INFINITY)
+        };
         return ModeRanges {
-            u: ClosedInterval::point(1.0),
-            w: ClosedInterval::point(0.0),
-            v,
-            p: v,
-            q: v.neg(),
+            determinant_first: zero,
+            determinant_second: zero,
+            fitted,
+            first: fitted,
+            second: fitted.neg(),
         };
     }
 
     // Normalize by g: h = g(1+t), t = lambda*s/g.  The four kernels below
     // have known global critical points, so endpoint evaluation plus any
     // critical point contained by the t-window gives an exact real range;
-    // interval arithmetic rounds every primitive outward.
-    let t = lambda
-        .mul(ClosedInterval::point(penalty))
-        .div_positive(ClosedInterval::point(gram))
-        .nonnegative();
-    let scale = ClosedInterval::point(projected_square)
+    // interval arithmetic rounds every primitive outward.  The association is
+    // `lambda*(s/g)`, matching [`mode_point`], because `lambda*s` alone
+    // overflows at the top of the domain for a well-scaled `s/g`.
+    let ratio = ClosedInterval::point(penalty).div_positive(ClosedInterval::point(gram));
+    let t = lambda.mul(ratio).nonnegative();
+    let inverse_gram = ClosedInterval::point(1.0)
         .div_positive(ClosedInterval::point(gram))
         .nonnegative();
     let kernels = kernel_ranges(t);
     ModeRanges {
-        u: kernels.u,
-        w: kernels.w,
-        v: scale.mul(kernels.v).nonnegative(),
-        p: scale.mul(kernels.w).nonnegative(),
-        q: scale.mul(kernels.k),
+        determinant_first: kernels.c.neg(),
+        determinant_second: kernels.w,
+        fitted: inverse_gram.mul(kernels.c).nonnegative(),
+        first: inverse_gram.mul(kernels.w).nonnegative(),
+        second: inverse_gram.mul(kernels.k),
     }
 }
 
@@ -1120,28 +1243,39 @@ struct KernelRanges {
     /// `t/(1+t)`.
     u: ClosedInterval,
     /// `1/(1+t)`.
-    v: ClosedInterval,
+    c: ClosedInterval,
     /// `t/(1+t)^2`.
     w: ClosedInterval,
     /// `t(1-t)/(1+t)^3`.
     k: ClosedInterval,
 }
 
+/// [`kernel_point`] on a POINT interval, primitive for primitive.  Called only
+/// with degenerate or ulp-wide arguments, so no dependency is lost to the
+/// `c - u` difference.
 fn kernel_at(t: ClosedInterval) -> KernelRanges {
+    if t.lo.is_infinite() {
+        return KernelRanges {
+            u: ClosedInterval::point(1.0),
+            c: ClosedInterval::point(0.0),
+            w: ClosedInterval::point(0.0),
+            k: ClosedInterval::point(0.0),
+        };
+    }
     let one = ClosedInterval::point(1.0);
     let denom = one.add(t);
-    let v = one.div_positive(denom).nonnegative();
-    let u = t.mul(v).nonnegative();
-    let w = u.mul(v).nonnegative();
-    let k = w.mul(one.sub(t)).div_positive(denom);
-    KernelRanges { u, v, w, k }
+    let c = one.div_positive(denom).nonnegative();
+    let u = t.mul(c).nonnegative();
+    let w = u.mul(c).nonnegative();
+    let k = w.mul(c.sub(u));
+    KernelRanges { u, c, w, k }
 }
 
 fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
     let left = kernel_at(ClosedInterval::point(t.lo));
     let right = kernel_at(ClosedInterval::point(t.hi));
     let mut u = ClosedInterval::new(left.u.lo, right.u.hi).nonnegative();
-    let mut v = ClosedInterval::new(right.v.lo, left.v.hi).nonnegative();
+    let mut c = ClosedInterval::new(right.c.lo, left.c.hi).nonnegative();
     let mut w = left.w.hull(right.w).nonnegative();
     let mut k = left.k.hull(right.k);
 
@@ -1168,9 +1302,9 @@ fn kernel_ranges(t: ClosedInterval) -> KernelRanges {
     // interval evaluation, but retain outward endpoint arithmetic.
     u.lo = u.lo.max(0.0);
     u.hi = u.hi.min(next_up(1.0));
-    v.lo = v.lo.max(0.0);
-    v.hi = v.hi.min(next_up(1.0));
-    KernelRanges { u, v, w, k }
+    c.lo = c.lo.max(0.0);
+    c.hi = c.hi.min(next_up(1.0));
+    KernelRanges { u, c, w, k }
 }
 
 /// Next representable number below `value`, used for directed outward
@@ -1393,6 +1527,117 @@ mod tests {
                 jet.curvature,
                 enclosure.curvature
             );
+        }
+    }
+
+    /// The fixture behind #2513, in the shape `ridge_reml_select_weight`
+    /// builds: one spectral direction normalized to `gamma = 1`, duplicated
+    /// once per response, one pooled residual.
+    fn tail_fixture() -> AffineRemlProfile<'static> {
+        const G: &[f64] = &[1.0, 1.0, 1.0];
+        const S: &[f64] = &[1.0, 1.0, 1.0];
+        const Q: &[f64] = &[4.0 / 3.0, 4.0 / 3.0, 4.0 / 3.0];
+        const Y2: &[f64] = &[10.0];
+        AffineRemlProfile::new(G, S, Q, Y2, 15.0, 3, 0.0).expect("valid fixture")
+    }
+
+    /// Closed form for [`tail_fixture`], written out by hand in the
+    /// complement variable `c = 1/(1+lambda)` so the REFERENCE never
+    /// differences two numbers that round to the same double.
+    fn tail_reference(log_lambda: f64) -> (f64, f64, f64) {
+        let lambda = log_lambda.exp();
+        let c = 1.0 / (1.0 + lambda);
+        let u = lambda / (1.0 + lambda);
+        let normalized_logdet = 3.0 * (1.0 / lambda).ln_1p();
+        let residual = 10.0 - 4.0 * c;
+        let first = 4.0 * u * c;
+        let second = 4.0 * u * c * (c - u);
+        let log_derivative = first / residual;
+        (
+            -0.5 * (normalized_logdet + 15.0 * (residual / 15.0).ln()),
+            -0.5 * (-3.0 * c + 15.0 * log_derivative),
+            -0.5 * (3.0 * u * c + 15.0 * (second / residual - log_derivative * log_derivative)),
+        )
+    }
+
+    /// #2513: the shipped jet formed `sum_i log h_i - rank*log lambda` and
+    /// `sum_i u_i - rank`, both of which difference numbers of size
+    /// `rank*|log lambda|` and `rank` to recover results of size `e^-rho`.
+    /// Past `rho ~ 36` that left the derivative and the curvature quantized to
+    /// multiples of `rank*eps` — 100% error on their own scale — which is what
+    /// made an exact-range enclosure unable to contain them.
+    #[test]
+    fn affine_reml_jet_keeps_relative_accuracy_across_the_whole_log_lambda_domain() {
+        let profile = tail_fixture();
+        for rho in [
+            f64::MIN_POSITIVE.ln(),
+            -300.0,
+            -1.0,
+            0.0,
+            1.0,
+            30.0,
+            37.0,
+            40.0,
+            80.0,
+            300.0,
+            700.0,
+            (f64::MAX / 2.0).ln(),
+        ] {
+            let jet = profile.evaluate(rho).expect("finite jet");
+            let (value, derivative, curvature) = tail_reference(rho);
+            // Eight roundings is the whole budget of either evaluation path;
+            // the shipped form was off by a FACTOR at the tail rungs.
+            let tolerance = 8.0 * f64::EPSILON;
+            assert!(
+                (jet.value - value).abs() <= tolerance * value.abs(),
+                "value at rho={rho}: {} vs reference {value}",
+                jet.value
+            );
+            assert!(
+                (jet.derivative - derivative).abs() <= tolerance * derivative.abs(),
+                "derivative at rho={rho}: {} vs reference {derivative} (relative {})",
+                jet.derivative,
+                (jet.derivative - derivative).abs() / derivative.abs()
+            );
+            assert!(
+                (jet.curvature - curvature).abs() <= tolerance * curvature.abs(),
+                "curvature at rho={rho}: {} vs reference {curvature} (relative {})",
+                jet.curvature,
+                (jet.curvature - curvature).abs() / curvature.abs()
+            );
+        }
+    }
+
+    /// The four cells `ridge_reml_select_weight` actually refused on, by
+    /// abscissa. An exact-range enclosure has to contain the range of the
+    /// exact score derivatives; it is only obliged to contain the POINT jet
+    /// once the point jet is accurate on its own scale.
+    #[test]
+    fn affine_reml_enclosure_contains_the_tail_jets_it_certifies_against() {
+        let profile = tail_fixture();
+        for (lo, hi) in [
+            (37.029560487247664_f64, 37.72169231549234_f64),
+            (36.337428659002995, 37.72169231549234),
+            (33.45338621883019, 33.45338622914376),
+            (700.0, (f64::MAX / 2.0).ln()),
+            (f64::MIN_POSITIVE.ln(), -700.0),
+        ] {
+            let enclosure = profile.enclose(lo, hi).expect("enclosure");
+            for x in [lo, hi] {
+                let jet = profile.evaluate(x).expect("jet");
+                assert!(
+                    enclosure.derivative.contains(jet.derivative),
+                    "derivative {} at {x} outside {:?} on [{lo}, {hi}]",
+                    jet.derivative,
+                    enclosure.derivative
+                );
+                assert!(
+                    enclosure.curvature.contains(jet.curvature),
+                    "curvature {} at {x} outside {:?} on [{lo}, {hi}]",
+                    jet.curvature,
+                    enclosure.curvature
+                );
+            }
         }
     }
 
