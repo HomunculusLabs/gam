@@ -1109,7 +1109,12 @@ fn scan_for_non_latest_gamfit_versions(
 
     visit_files(root, root, &mut |rel, content| {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if rel_str == "build.rs" {
+        // JSON files are immutable data/provenance records: a
+        // `gamfit_version` there names the runtime that produced the recorded
+        // result. Rewriting it during a release would falsify provenance.
+        // Executable version contracts belong in source or manifests, which
+        // remain covered by this scan and the two structural checks above.
+        if rel_str == "build.rs" || rel.extension().and_then(OsStr::to_str) == Some("json") {
             return;
         }
         scan_gamfit_version_content(rel, content, latest, offenders);
