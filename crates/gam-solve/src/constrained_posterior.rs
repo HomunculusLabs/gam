@@ -2753,6 +2753,113 @@ mod tests {
         }
     }
 
+    /// Independent reference: Simpson CDF of `N(mean, variance)` restricted to
+    /// `[0, upper]`, evaluated at `x`. Built from the density, so it shares no
+    /// tail function with the quantile under test.
+    fn quadrature_box_cdf(mean: f64, variance: f64, upper: f64, x: f64) -> f64 {
+        let sd = variance.sqrt();
+        let low = -mean / sd;
+        let high = (upper - mean) / sd;
+        let point = (x - mean) / sd;
+        let reference = if low <= 0.0 && 0.0 <= high {
+            0.0
+        } else if high < 0.0 {
+            high
+        } else {
+            low
+        };
+        let mass = |from: f64, to: f64| -> f64 {
+            let panels = 200_000usize;
+            let step = (to - from) / panels as f64;
+            let mut total = 0.0f64;
+            for index in 0..=panels {
+                let z = from + step * index as f64;
+                let simpson = if index == 0 || index == panels {
+                    1.0
+                } else if index % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                total += simpson * (-(z * z - reference * reference) / 2.0).exp();
+            }
+            total * step
+        };
+        mass(low, point) / mass(low, high)
+    }
+
+    /// The quantile's reflection is a SEPARATE sign from the mass's, and a
+    /// mass-only gate passes straight over a broken one.
+    ///
+    /// Credit to the #2529 lane, who hit exactly this: their first deep-tail
+    /// interval returned the upper endpoint for every requested fraction — a
+    /// perfectly in-bounds, monotone-looking answer — while the mass beside it
+    /// stayed correct, and every case shallower than about 9σ passed. This
+    /// module has a clamp into `[low, high]` on the inverted quantile, which is
+    /// justified as rounding but is exactly the construct that would render
+    /// such a collapse as a clean in-range number.
+    ///
+    /// So this asserts the round trip rather than the range: distinct, strictly
+    /// increasing answers, strictly interior, and `F(Q(f)) = f` against a
+    /// Simpson CDF built from the density. At `d = 12` the reported errors are
+    /// at 1e-14; a collapse would show as equal answers and `F` pinned at one.
+    #[test]
+    fn the_deep_tail_quantile_round_trips_rather_than_collapsing_to_an_endpoint() {
+        let mean = 12.0_f64;
+        let variance = 1.0_f64;
+        let upper = 2.0_f64;
+        let fractions = [0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99];
+        let mut previous = 0.0_f64;
+        for &fraction in &fractions {
+            let point = scalar_truncated_quantile(mean, variance, upper, fraction)
+                .expect("a slab deep in a tail still has quantiles");
+            assert!(
+                point > 0.0 && point < upper,
+                "the {fraction} quantile of a law on [0, {upper}] must be interior, got {point}"
+            );
+            assert!(
+                point > previous,
+                "quantiles must be strictly increasing in the probability; {fraction} gave \
+                 {point} against {previous} for the fraction before it, which is what a \
+                 collapse to one endpoint looks like"
+            );
+            previous = point;
+            let recovered = quadrature_box_cdf(mean, variance, upper, point);
+            assert!(
+                (recovered - fraction).abs() < 1e-6,
+                "round trip at {fraction}: the quantile returned {point}, whose independent \
+                 Simpson CDF is {recovered}"
+            );
+        }
+        // The span is bracketed rather than merely bounded below, because a
+        // degenerate rule can be increasing and interior and still useless, and
+        // a rule with the wrong scale can be wide.
+        //
+        // The bracket is derived, not chosen. Across a slab this far into a
+        // tail the Gaussian log-density is very nearly linear, with slope
+        // `(mean - x)/variance` — steepest at the near wall, shallowest at the
+        // far one. An exponential law of rate `λ` puts its 1%-99% span at
+        // `ln(99)/λ`, so the true span must sit between the values those two
+        // slopes give. At `mean = 12`, `variance = 1`, `upper = 2` that is
+        // `[ln(99)/12, ln(99)/10] = [0.3829, 0.4595]`, and the rule returns
+        // 0.4453. The first version of this assertion used `0.25 * upper`, a
+        // guess, and it was wrong in the direction that would have made the
+        // test reject a correct answer — the span is set by the density's
+        // steepness, not by the width of the box.
+        let first = scalar_truncated_quantile(mean, variance, upper, 0.01).expect("low");
+        let last = scalar_truncated_quantile(mean, variance, upper, 0.99).expect("high");
+        let span = last - first;
+        let steepest = mean / variance;
+        let shallowest = (mean - upper) / variance;
+        let narrowest = 99.0_f64.ln() / steepest;
+        let widest = 99.0_f64.ln() / shallowest;
+        assert!(
+            span >= narrowest && span <= widest,
+            "the 1%-99% span {span} is outside the [{narrowest}, {widest}] the log-density's \
+             own slopes allow across this slab"
+        );
+    }
+
     /// A two-sided bound with no width between its walls is an equality
     /// constraint, and this module reports moments of a density. It refuses
     /// rather than reporting the moments of a point.
