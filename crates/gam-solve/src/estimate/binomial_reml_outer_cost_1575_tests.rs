@@ -210,13 +210,17 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
     );
     // The genuinely expensive work is the count of cache-missing full-n inner
     // P-IRLS solves (`outer_cost_evals` counts outer *requests*, cache hits
-    // included, and under-counts the real solve budget). The seed-grid prepass
-    // dominates this count; memoizing its criterion-ranked coordinate-descent
-    // probes (which re-draw the same ρ across sweeps) removed the redundant
-    // re-solves bit-identically, taking this fixture from ~74 to ~65. Pin a
-    // guard above the observed value so a regression that reintroduces the
-    // duplicate grid probes (or a wider unbounded outer loop) fails loudly,
-    // while leaving headroom for benign scheduling variation.
+    // included, and under-counts the real solve budget). History: the
+    // coordinate-descent seed-grid prepass once dominated this count (~74→~65
+    // after memoizing its probes); that prepass was replaced by the analytic
+    // seed in c9e1fba5e and deleted in ddd8af9cd, so it no longer exists to
+    // dominate anything. Measured 2026-07-26 at 90ed57c6f the count is 119,
+    // 86% of it BFGS/Wolfe line-search solves on a trajectory that walks to
+    // the ρ ceiling and collapses every smooth onto its penalty null space
+    // (edf 18.5 → 7.00, REML 503.7 → 605.0) — a fit regression, not a
+    // counting artifact. This bound is deliberately NOT recalibrated to the
+    // regressed trajectory: the red points at #2519 (the null-space collapse),
+    // and relaxing it would launder that regression into a green.
     assert!(
         fit.inner_pirls_solves <= 90,
         "cache-missing inner P-IRLS solves = {} — expected the deduplicated \
