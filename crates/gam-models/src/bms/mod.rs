@@ -27,7 +27,7 @@ use crate::model_types::UnifiedFitResult;
 use crate::outer_subsample::WeightedOuterRow;
 use crate::parameter_block::ParameterBlockInput;
 use crate::probability::{
-    normal_cdf, normal_logcdf, normal_pdf, signed_probit_logcdf_and_mills_ratio,
+    normal_cdf, normal_logcdf, normal_pdf, normal_sf, signed_probit_logcdf_and_mills_ratio,
     standard_normal_quantile,
 };
 use crate::row_kernel::{
@@ -1470,9 +1470,21 @@ pub(crate) fn robust_conditional_score_pvalue(
     if !(d_stat.is_finite() && d_stat >= 0.0) {
         return Ok(None);
     }
-    // p = 1 − CDF_{χ²_rank}(D) = 1 − P(rank/2, D/2) (regularized lower gamma).
-    let p_lower = statrs::function::gamma::gamma_lr(rank as f64 / 2.0, d_stat / 2.0);
-    let p_value = (1.0 - p_lower).clamp(0.0, 1.0);
+    // `Q(a, 0) = 1`, but statrs rejects `x <= 0` and `gamma_ur`/`gamma_lr` both
+    // unwrap that rejection, so a score statistic of exactly zero -- which the
+    // check above admits, and which a null-at-the-boundary score produces --
+    // panics inside the library. Answer it here, where it is a one-line theorem.
+    if d_stat == 0.0 {
+        return Ok(Some(1.0));
+    }
+    // p = 1 − CDF_{χ²_rank}(D) IS the regularized UPPER gamma Q(rank/2, D/2), so
+    // take it from `gamma_ur` rather than from `1 - gamma_lr` (#2562). The
+    // complement saturates to exactly zero once the tail drops below half an ulp
+    // of one -- for rank 1 that is D ≈ 68, an ordinary score statistic. The gate
+    // below only compares against a fixed alpha, so a saturated zero still
+    // decides the same way; the reason to compute it properly is that a p-value
+    // that reads 0 cannot be reported, combined, or ranked against another.
+    let p_value = statrs::function::gamma::gamma_ur(rank as f64 / 2.0, d_stat / 2.0).clamp(0.0, 1.0);
     Ok(Some(p_value))
 }
 
@@ -1862,8 +1874,12 @@ pub(crate) fn latent_z_is_standard_normal_enough(
     let tail_mass_4 = weighted_tail_mass(z, weights, weight_sum, AUTO_Z_NORMAL_TAIL_SIGMA_INNER);
     let tail_mass_6 = weighted_tail_mass(z, weights, weight_sum, AUTO_Z_NORMAL_TAIL_SIGMA_OUTER);
     let max_abs_z = z.iter().fold(0.0_f64, |acc, &zi| acc.max(zi.abs()));
-    let normal_tail_4 = 2.0 * (1.0 - normal_cdf(AUTO_Z_NORMAL_TAIL_SIGMA_INNER));
-    let normal_tail_6 = 2.0 * (1.0 - normal_cdf(AUTO_Z_NORMAL_TAIL_SIGMA_OUTER));
+    // Two-sided reference tail masses, taken from the upper tail directly (#2562).
+    // At 6 sigma `1 - normal_cdf` is already 5.6e-8 relative; these are compared
+    // against empirical tail masses so the old form was not wrong enough to
+    // matter, but there is no reason to keep a lossy form of an exact identity.
+    let normal_tail_4 = 2.0 * normal_sf(AUTO_Z_NORMAL_TAIL_SIGMA_INNER);
+    let normal_tail_6 = 2.0 * normal_sf(AUTO_Z_NORMAL_TAIL_SIGMA_OUTER);
     Ok(mean.abs() <= mean_tol
         && (sd - 1.0).abs() <= sd_tol
         && skew.is_finite()
