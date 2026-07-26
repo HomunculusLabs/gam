@@ -556,9 +556,16 @@ pub(crate) fn run_outer_with_plan(
         )));
     }
 
-    let (lower, upper) = outer_search_bounds_template(config, cap.n_params);
-    crate::estimate::reml::outer_eval::record_current_outer_rho_upper_bounds_for_ift(&upper);
-    let bounds_template = (lower, upper);
+    // Derivative/IFT masking belongs to the model domain, never to a temporary
+    // active-set search face. In particular, freezing a model-lower-rail
+    // coordinate creates a singleton search interval whose "upper" endpoint
+    // is still the MODEL LOWER bound; recording it as an active model upper
+    // bound silently erases the feasible inward derivative (#2514).
+    let model_domain_bounds = outer_model_domain_bounds_template(config, cap.n_params);
+    crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
+        &model_domain_bounds.1,
+    );
+    let bounds_template = outer_search_bounds_template(config, cap.n_params);
     let mut projected_seeds = Vec::with_capacity(seeds.len());
     for seed in seeds {
         let projected = project_to_bounds(&seed, Some(&bounds_template));

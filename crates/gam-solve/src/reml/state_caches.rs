@@ -545,12 +545,38 @@ pub(crate) fn joint_ift_cache_matches_theta(
     true
 }
 
+/// The canonical model-domain upper face owned by the current outer problem.
+///
+/// This is deliberately not an `Array1<f64>` in the TLS slot. Temporary
+/// active-set search boxes have the same representation, and storing one there
+/// changes the derivative problem by pretending a frozen search coordinate is
+/// an active model upper bound. The private constructor keeps that semantic
+/// distinction at the state boundary; callers can only install it through the
+/// explicitly model-domain-named recording function below.
+#[derive(Clone)]
+pub(crate) struct OuterRhoModelUpperBounds {
+    values: Array1<f64>,
+}
+
+impl OuterRhoModelUpperBounds {
+    fn from_model_domain(upper: &Array1<f64>) -> Option<Self> {
+        (!upper.is_empty() && upper.iter().all(|value| value.is_finite())).then(|| Self {
+            values: upper.clone(),
+        })
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<f64> {
+        self.values.get(index).copied()
+    }
+}
+
 thread_local! {
     pub(crate) static IFT_LATEST_OUTER_THETA: std::cell::RefCell<Option<Array1<f64>>> =
         const { std::cell::RefCell::new(None) };
 
-    pub(crate) static IFT_LATEST_OUTER_RHO_UPPER_BOUNDS: std::cell::RefCell<Option<Array1<f64>>> =
-        const { std::cell::RefCell::new(None) };
+    static IFT_CURRENT_OUTER_RHO_MODEL_UPPER_BOUNDS:
+        std::cell::RefCell<Option<OuterRhoModelUpperBounds>> =
+            const { std::cell::RefCell::new(None) };
 }
 
 pub(crate) fn record_current_outer_theta_for_ift(theta: &Array1<f64>) {
@@ -562,17 +588,14 @@ pub(crate) fn record_current_outer_theta_for_ift(theta: &Array1<f64>) {
     IFT_LATEST_OUTER_THETA.with(|slot| *slot.borrow_mut() = value);
 }
 
-pub(crate) fn record_current_outer_rho_upper_bounds_for_ift(upper: &Array1<f64>) {
-    let value = if upper.is_empty() || upper.iter().any(|v| !v.is_finite()) {
-        None
-    } else {
-        Some(upper.clone())
-    };
-    IFT_LATEST_OUTER_RHO_UPPER_BOUNDS.with(|slot| *slot.borrow_mut() = value);
+pub(crate) fn record_current_outer_rho_model_upper_bounds_for_ift(upper: &Array1<f64>) {
+    let value = OuterRhoModelUpperBounds::from_model_domain(upper);
+    IFT_CURRENT_OUTER_RHO_MODEL_UPPER_BOUNDS.with(|slot| *slot.borrow_mut() = value);
 }
 
-pub(crate) fn latest_outer_rho_upper_bounds_for_ift() -> Option<Array1<f64>> {
-    IFT_LATEST_OUTER_RHO_UPPER_BOUNDS.with(|slot| slot.borrow().clone())
+pub(crate) fn current_outer_rho_model_upper_bounds_for_ift(
+) -> Option<OuterRhoModelUpperBounds> {
+    IFT_CURRENT_OUTER_RHO_MODEL_UPPER_BOUNDS.with(|slot| slot.borrow().clone())
 }
 
 pub(crate) fn latest_outer_theta_for_ift() -> Option<Array1<f64>> {

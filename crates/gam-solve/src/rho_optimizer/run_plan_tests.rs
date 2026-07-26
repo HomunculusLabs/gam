@@ -4907,6 +4907,273 @@ fn active_set_search_box_never_redefines_the_model_kkt_face_2514() {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ModelUpperMaskAuditCall {
+    order: OuterEvalOrder,
+    theta: f64,
+    active_model_upper: bool,
+    derivative: f64,
+}
+
+#[derive(Default)]
+struct ModelUpperMaskAudit {
+    calls: Vec<ModelUpperMaskAuditCall>,
+}
+
+fn model_upper_mask_audit_cost(
+    _state: &mut ModelUpperMaskAudit,
+    theta: &Array1<f64>,
+) -> Result<f64, EstimationError> {
+    Ok(-theta[0])
+}
+
+fn model_upper_mask_audit_ordered_eval(
+    state: &mut ModelUpperMaskAudit,
+    theta: &Array1<f64>,
+    order: OuterEvalOrder,
+) -> Result<OuterEval, EstimationError> {
+    let cost = -theta[0];
+    if order == OuterEvalOrder::Value {
+        return Ok(OuterEval::value_only(cost, theta.len(), None));
+    }
+    let active_model_upper =
+        crate::estimate::reml::reml_outer_engine::active_upper_rho_mask(
+            theta
+                .as_slice()
+                .expect("the one-coordinate audit point must be contiguous"),
+        )[0];
+    // Isolate the KKT-residual/IFT derivative channel controlled by the mask.
+    // The underlying analytic derivative is nonzero; only a genuine active
+    // MODEL upper face may freeze its mode response.
+    let derivative = if active_model_upper { 0.0 } else { -4.0 };
+    state.calls.push(ModelUpperMaskAuditCall {
+        order,
+        theta: theta[0],
+        active_model_upper,
+        derivative,
+    });
+    Ok(OuterEval {
+        cost,
+        gradient: array![derivative],
+        hessian: match order {
+            OuterEvalOrder::ValueGradientHessian => HessianValue::Dense(array![[1.0]]),
+            OuterEvalOrder::Value | OuterEvalOrder::ValueAndGradient => {
+                HessianValue::Unavailable
+            }
+        },
+        inner_beta_hint: None,
+    })
+}
+
+fn model_upper_mask_audit_eager_eval(
+    state: &mut ModelUpperMaskAudit,
+    theta: &Array1<f64>,
+) -> Result<OuterEval, EstimationError> {
+    model_upper_mask_audit_ordered_eval(
+        state,
+        theta,
+        OuterEvalOrder::ValueGradientHessian,
+    )
+}
+
+fn one_seed_config() -> gam_problem::SeedConfig {
+    gam_problem::SeedConfig {
+        max_seeds: 1,
+        seed_budget: 1,
+        ..Default::default()
+    }
+}
+
+fn record_other_model_upper_bound(upper: f64) {
+    let other_model = OuterConfig {
+        model_domain_bounds: Some((array![-10.0], array![upper])),
+        ..OuterConfig::default()
+    };
+    let other_model_bounds = outer_model_domain_bounds_template(&other_model, 1);
+    crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
+        &other_model_bounds.1,
+    );
+}
+
+#[test]
+fn lower_model_rail_singleton_search_preserves_derivative_in_screening_and_mint_2514() {
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_bounds(array![-5.0], array![5.0])
+        .with_initial_rho(array![-5.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(one_seed_config());
+    let mut objective = problem.build_objective_with_eval_order(
+        ModelUpperMaskAudit::default(),
+        model_upper_mask_audit_cost,
+        model_upper_mask_audit_eager_eval,
+        model_upper_mask_audit_ordered_eval,
+        None::<fn(&mut ModelUpperMaskAudit)>,
+        None::<
+            fn(
+                &mut ModelUpperMaskAudit,
+                &Array1<f64>,
+            ) -> Result<EfsEval, EstimationError>,
+        >,
+    );
+    let mut config = problem.config();
+    config.search_bounds_override = Some((array![-5.0], array![-5.0]));
+    let capability = objective.capability();
+    let the_plan = plan(&capability);
+
+    let mut checkpoint = match run_outer_with_plan(
+        &mut objective,
+        &config,
+        "lower-model-rail singleton search #2514",
+        &capability,
+        &the_plan,
+        false,
+    )
+    .expect("the singleton solve must return its honestly refused checkpoint")
+    {
+        PlanRunOutcome::Exhausted(checkpoint) => checkpoint,
+        PlanRunOutcome::Converged(_) => {
+            panic!("model-feasible inward descent must not pass candidate screening")
+        }
+    };
+    assert!(
+        objective.state.calls.iter().any(|call| {
+            call.order == OuterEvalOrder::ValueAndGradient
+                && call.theta.to_bits() == (-5.0_f64).to_bits()
+                && !call.active_model_upper
+                && call.derivative.to_bits() == (-4.0_f64).to_bits()
+        }),
+        "real candidate screening must retain the lower-rail inward derivative: {:?}",
+        objective.state.calls,
+    );
+
+    // Simulate unrelated model-domain state left on this worker thread. Mint
+    // owns its model and must reinstall upper=+5 before its derivative eval;
+    // if it merely inherits this legitimate prior model's upper=-5, the lower
+    // rail is again misclassified as an active upper face.
+    record_other_model_upper_bound(-5.0);
+    let calls_before_mint = objective.state.calls.len();
+    certify_outer_optimality_with_fidelity(
+        &mut objective,
+        &config,
+        "lower-model-rail terminal mint #2514",
+        &mut checkpoint,
+        CertificationFidelity::Mint,
+    )
+    .expect_err("terminal mint must refuse the same model-feasible inward derivative");
+    let refused_certificate = checkpoint
+        .criterion_certificate
+        .as_ref()
+        .expect("the mint refusal must retain its measured certificate");
+    assert_eq!(
+        refused_certificate.stationarity.raw_norm().to_bits(),
+        4.0_f64.to_bits()
+    );
+    assert_eq!(
+        refused_certificate
+            .stationarity
+            .projected_norm()
+            .to_bits(),
+        4.0_f64.to_bits()
+    );
+    let mint_calls = &objective.state.calls[calls_before_mint..];
+    assert!(
+        mint_calls.iter().any(|call| {
+            call.order == OuterEvalOrder::ValueGradientHessian
+                && call.theta.to_bits() == (-5.0_f64).to_bits()
+                && !call.active_model_upper
+                && call.derivative.to_bits() == (-4.0_f64).to_bits()
+        }),
+        "terminal mint must reinstall the current model upper face and retain \
+         the same inward derivative seen by screening: {mint_calls:?}",
+    );
+}
+
+#[test]
+fn model_upper_rail_masks_derivative_in_screening_and_mint_2514() {
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense)
+        .with_bounds(array![-5.0], array![5.0])
+        .with_initial_rho(array![5.0])
+        .with_screen_initial_rho(false)
+        .with_seed_config(one_seed_config());
+    let mut objective = problem.build_objective_with_eval_order(
+        ModelUpperMaskAudit::default(),
+        model_upper_mask_audit_cost,
+        model_upper_mask_audit_eager_eval,
+        model_upper_mask_audit_ordered_eval,
+        None::<fn(&mut ModelUpperMaskAudit)>,
+        None::<
+            fn(
+                &mut ModelUpperMaskAudit,
+                &Array1<f64>,
+            ) -> Result<EfsEval, EstimationError>,
+        >,
+    );
+    let mut config = problem.config();
+    config.search_bounds_override = Some((array![5.0], array![5.0]));
+    let capability = objective.capability();
+    let the_plan = plan(&capability);
+
+    let mut result = match run_outer_with_plan(
+        &mut objective,
+        &config,
+        "model-upper-rail singleton search #2514",
+        &capability,
+        &the_plan,
+        false,
+    )
+    .expect("the genuine model-upper face must screen")
+    {
+        PlanRunOutcome::Converged(result) => result,
+        PlanRunOutcome::Exhausted(_) => {
+            panic!("a derivative frozen on the genuine model upper face must screen")
+        }
+    };
+    assert!(
+        objective.state.calls.iter().any(|call| {
+            call.order == OuterEvalOrder::ValueAndGradient
+                && call.theta.to_bits() == 5.0_f64.to_bits()
+                && call.active_model_upper
+                && call.derivative.to_bits() == 0.0_f64.to_bits()
+        }),
+        "screening must still mask a derivative on the genuine model upper face: {:?}",
+        objective.state.calls,
+    );
+
+    // The inverse stale-state discriminator: a prior model with upper=+10
+    // would leave theta=+5 interior. Terminal mint must reinstall this model's
+    // upper=+5 and preserve the legitimate active-upper mask.
+    record_other_model_upper_bound(10.0);
+    let calls_before_mint = objective.state.calls.len();
+    let certificate = certify_outer_optimality_with_fidelity(
+        &mut objective,
+        &config,
+        "model-upper-rail terminal mint #2514",
+        &mut result,
+        CertificationFidelity::Mint,
+    )
+    .expect("terminal mint must retain the genuine model-upper mask");
+    assert!(certificate.certifies());
+    assert_eq!(
+        certificate.stationarity.raw_norm().to_bits(),
+        0.0_f64.to_bits()
+    );
+    let mint_calls = &objective.state.calls[calls_before_mint..];
+    assert!(
+        mint_calls.iter().any(|call| {
+            call.order == OuterEvalOrder::ValueGradientHessian
+                && call.theta.to_bits() == 5.0_f64.to_bits()
+                && call.active_model_upper
+                && call.derivative.to_bits() == 0.0_f64.to_bits()
+        }),
+        "terminal mint must reinstall the current model upper face before its \
+         order-four derivative evaluation: {mint_calls:?}",
+    );
+}
+
 #[test]
 fn custom_box_and_seed_are_intersected_with_both_objective_faces() {
     let problem = OuterProblem::new(1)

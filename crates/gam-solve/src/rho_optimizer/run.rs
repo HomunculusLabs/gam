@@ -2534,6 +2534,18 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 "{context}: invalid outer certificate point: {err}"
             ))
         })?;
+    // Certification is an ownership boundary: reinstall the model-domain
+    // derivative face before either screening or mint evaluates the selected
+    // point. This makes the terminal audit independent of whichever
+    // canonicalized plan or prior fit last touched this thread's IFT state, and
+    // prevents an active-set search override from surviving as derivative
+    // geometry. Screening and mint can differ in derivative order, never in the
+    // model whose feasible directions they differentiate (#2514).
+    let model_domain_bounds_for_derivatives =
+        outer_model_domain_bounds_template(config, layout.n_params);
+    crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
+        &model_domain_bounds_for_derivatives.1,
+    );
     if result.rho.iter().any(|value| !value.is_finite()) {
         return Err(outer_nonconvergence_error(
             context,
@@ -6058,6 +6070,10 @@ pub(crate) fn run_per_atom_efs_if_frontier(
     let the_plan = plan(&cap);
     let rho_dim = cap.theta_layout().rho_dim();
 
+    let model_domain_bounds = outer_model_domain_bounds_template(config, cap.n_params);
+    crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
+        &model_domain_bounds.1,
+    );
     let (lower, upper) = outer_search_bounds_template(config, cap.n_params);
 
     // Seed: cache/explicit initial ρ if present, otherwise the first generated

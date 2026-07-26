@@ -246,6 +246,11 @@ pub(crate) fn solve_kkt_residual_kernel(
     }
 }
 
+/// Freeze residual/IFT response only on the model's canonical upper face.
+///
+/// A singleton active-set search interval is solver geometry, not a model
+/// constraint. Letting its upper endpoint enter this mask erases a real inward
+/// derivative at a model lower rail (#2514).
 pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
     let latest_theta = outer_eval::latest_outer_theta_for_ift();
     let matching_outer_theta = latest_theta.as_ref().is_some_and(|theta| {
@@ -256,16 +261,15 @@ pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
                 .zip(rho.iter())
                 .all(|(&recorded, &current)| recorded.to_bits() == current.to_bits())
     });
-    let upper_bounds = matching_outer_theta
-        .then(outer_eval::latest_outer_rho_upper_bounds_for_ift)
+    let model_upper_bounds = matching_outer_theta
+        .then(outer_eval::current_outer_rho_model_upper_bounds_for_ift)
         .flatten();
     rho.iter()
         .enumerate()
         .map(|(idx, &value)| {
-            let upper = upper_bounds
+            let upper = model_upper_bounds
                 .as_ref()
                 .and_then(|bounds| bounds.get(idx))
-                .copied()
                 .unwrap_or(crate::estimate::RHO_BOUND);
             upper.is_finite() && value >= upper - 1.0e-8
         })

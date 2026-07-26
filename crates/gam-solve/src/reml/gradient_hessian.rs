@@ -8200,12 +8200,11 @@ pub(crate) fn predict_warm_start_beta_ift_inner_with_outcome(
     // as the directions we keep, and a clipped predictor is harder to
     // reason about than a clean fallback.
     let mut max_abs_drho = 0.0_f64;
-    let upper_bounds = latest_outer_rho_upper_bounds_for_ift();
+    let model_upper_bounds = current_outer_rho_model_upper_bounds_for_ift();
     let upper_active = |idx: usize| -> bool {
-        let upper = upper_bounds
+        let upper = model_upper_bounds
             .as_ref()
             .and_then(|bounds| bounds.get(idx))
-            .copied()
             .unwrap_or(RHO_BOUND);
         upper.is_finite() && cache.rho[idx] >= upper - 1.0e-8
     };
@@ -8458,12 +8457,11 @@ pub(crate) fn predict_warm_start_beta_ift_from_mode_response_cols(
     }
 
     let mut max_abs_drho = 0.0_f64;
-    let upper_bounds = latest_outer_rho_upper_bounds_for_ift();
+    let model_upper_bounds = current_outer_rho_model_upper_bounds_for_ift();
     let upper_active = |idx: usize| -> bool {
-        let upper = upper_bounds
+        let upper = model_upper_bounds
             .as_ref()
             .and_then(|bounds| bounds.get(idx))
-            .copied()
             .unwrap_or(RHO_BOUND);
         upper.is_finite() && cache.rho[idx] >= upper - 1.0e-8
     };
