@@ -943,4 +943,173 @@ mod tests {
         assert!((out[0] - 6.0).abs() < 1e-12);
         assert!((out[1] - 8.0).abs() < 1e-12);
     }
+    // ─── #2454: null-split projection ───────────────────────────────────────
+
+    /// `Π S Π` must be the penalty the criterion applies, and the quadratic at
+    /// any β must equal the quadratic of the UNprojected penalty at `Πβ`.
+    ///
+    /// That identity is the whole reason the projection is legitimate: it lets
+    /// the outer ρ-derivative multiply `q_k` by `λ_k` and still be the exact
+    /// derivative of the criterion's own penalty energy.
+    #[test]
+    fn projection_equals_the_unprojected_quadratic_at_the_projected_beta() {
+        // A rank-2 penalty on R^3 whose range deliberately overlaps the
+        // direction that will be declared null.
+        let root = array![[1.0_f64, 2.0, 0.5], [0.0, 1.0, -3.0]];
+        let coord = PenaltyCoordinate::from_dense_root(root);
+        // One orthonormal declared-null direction.
+        let n = 1.0_f64 / 3.0_f64.sqrt();
+        let null_basis = array![[n], [n], [n]];
+
+        let projected = coord.project_out_null_directions(null_basis.view());
+        let beta = array![0.7_f64, -1.3, 2.1];
+        let coefficient = null_basis.column(0).dot(&beta);
+        let beta_projected = &beta - &(&null_basis.column(0).to_owned() * coefficient);
+
+        let via_projected_penalty = projected.quadratic(&beta, 1.0);
+        let via_projected_beta = coord.quadratic(&beta_projected, 1.0);
+        assert!(
+            (via_projected_penalty - via_projected_beta).abs()
+                <= 1e-12 * via_projected_beta.abs().max(1.0),
+            "Pi S Pi at beta = {via_projected_penalty:.12e} must equal S at Pi beta = \
+             {via_projected_beta:.12e}"
+        );
+
+        // And it must actually have removed something: the declared-null
+        // direction now costs nothing.
+        let null_direction = null_basis.column(0).to_owned();
+        assert!(
+            coord.quadratic(&null_direction, 1.0) > 1e-6,
+            "fixture must have real support on the direction being projected out"
+        );
+        assert!(
+            projected.quadratic(&null_direction, 1.0) <= 1e-24,
+            "projected penalty must annihilate the declared-null direction, got {:.3e}",
+            projected.quadratic(&null_direction, 1.0)
+        );
+    }
+
+    /// The projected block sum must reproduce the projected TOTAL, which is the
+    /// identity `Σ_k λ_k Π S_k Π = Π (Σ_k λ_k S_k) Π` the outer gradient relies
+    /// on. Checked with unequal λ so a per-block scaling error cannot hide.
+    #[test]
+    fn projected_block_sum_reproduces_the_projected_total() {
+        let coords = [
+            PenaltyCoordinate::from_dense_root(array![[1.0_f64, 0.3, -0.2], [0.0, 1.0, 0.7]]),
+            PenaltyCoordinate::from_dense_root(array![[0.4_f64, -1.1, 2.0]]),
+        ];
+        let lambdas = [7.5_f64, 0.125];
+        let n = 1.0_f64 / 2.0_f64.sqrt();
+        let null_basis = array![[n], [-n], [0.0]];
+        let beta = array![1.9_f64, 0.4, -2.6];
+
+        let coefficient = null_basis.column(0).dot(&beta);
+        let beta_projected = &beta - &(&null_basis.column(0).to_owned() * coefficient);
+
+        let block_sum: f64 = coords
+            .iter()
+            .zip(lambdas.iter())
+            .map(|(coord, &lambda)| {
+                coord
+                    .project_out_null_directions(null_basis.view())
+                    .quadratic(&beta, lambda)
+            })
+            .sum();
+        let total_projected: f64 = coords
+            .iter()
+            .zip(lambdas.iter())
+            .map(|(coord, &lambda)| coord.quadratic(&beta_projected, lambda))
+            .sum();
+        assert!(
+            (block_sum - total_projected).abs() <= 1e-12 * total_projected.abs().max(1.0),
+            "projected block sum {block_sum:.12e} must equal the projected total \
+             {total_projected:.12e}"
+        );
+    }
+
+    /// A block-local null basis must leave a block-local coordinate block-local.
+    ///
+    /// The non-overlapping reparameterization path builds `q_null` with strictly
+    /// block-local columns, so this is the common case; forcing a dense p-wide
+    /// root there would cost every block-local trace fast path for nothing.
+    #[test]
+    fn block_local_null_basis_preserves_the_block_chart() {
+        let coord = PenaltyCoordinate::from_block_root(
+            array![[1.0_f64, 1.0], [0.0, 2.0]],
+            1,
+            3,
+            5,
+        );
+        let n = 1.0_f64 / 2.0_f64.sqrt();
+        // Supported only on columns 1..3 — the coordinate's own block.
+        let null_basis = array![[0.0_f64], [n], [-n], [0.0], [0.0]];
+
+        let projected = coord.project_out_null_directions(null_basis.view());
+        assert!(
+            matches!(
+                projected,
+                PenaltyCoordinate::BlockRoot { start: 1, end: 3, .. }
+            ),
+            "a block-local null basis must not densify the coordinate"
+        );
+        assert_eq!(projected.dim(), 5);
+
+        // A null basis that straddles blocks genuinely cannot stay block-local.
+        let straddling = array![[n], [n], [0.0], [0.0], [0.0]];
+        let densified = coord.project_out_null_directions(straddling.view());
+        assert!(
+            matches!(densified, PenaltyCoordinate::DenseRoot(_)),
+            "a straddling null basis must produce a dense coordinate rather than \
+             silently dropping the out-of-block support"
+        );
+        assert_eq!(densified.dim(), 5);
+        // Same identity as above must still hold on the densified route.
+        let beta = array![0.5_f64, -1.5, 2.25, 3.0, -0.75];
+        let coefficient = straddling.column(0).dot(&beta);
+        let beta_projected = &beta - &(&straddling.column(0).to_owned() * coefficient);
+        assert!(
+            (densified.quadratic(&beta, 1.0) - coord.quadratic(&beta_projected, 1.0)).abs()
+                <= 1e-12
+        );
+    }
+
+    /// An empty null basis is the identity, bit-for-bit — every penalty whose
+    /// numerical rank agrees with the split's must be untouched.
+    #[test]
+    fn empty_null_basis_is_the_identity() {
+        let coord = PenaltyCoordinate::from_block_root(array![[1.0_f64, -0.25]], 0, 2, 4);
+        let projected = coord.project_out_null_directions(Array2::zeros((4, 0)).view());
+        let beta = array![1.0_f64, 2.0, 3.0, 4.0];
+        assert_eq!(projected.quadratic(&beta, 3.0), coord.quadratic(&beta, 3.0));
+        assert!(matches!(
+            projected,
+            PenaltyCoordinate::BlockRoot { start: 0, end: 2, .. }
+        ));
+    }
+
+    /// A centered coordinate keeps its prior mean under projection: the
+    /// quadratic stays `‖RΠ(β − μ)‖²`, which is what the shifted penalty
+    /// channel and the IFT score both read.
+    #[test]
+    fn projection_carries_the_prior_mean() {
+        let coord = PenaltyCoordinate::from_dense_root_with_mean(
+            array![[1.0_f64, 0.5, -1.0], [0.0, 2.0, 0.25]],
+            array![0.1_f64, -0.2, 0.3],
+        );
+        let n = 1.0_f64 / 3.0_f64.sqrt();
+        let null_basis = array![[n], [n], [n]];
+        let projected = coord.project_out_null_directions(null_basis.view());
+        let beta = array![1.4_f64, -0.6, 0.9];
+
+        // `Π S Π` applied to the CENTERED coefficient.
+        let centered = array![beta[0] - 0.1, beta[1] + 0.2, beta[2] - 0.3];
+        let coefficient = null_basis.column(0).dot(&centered);
+        let centered_projected = &centered - &(&null_basis.column(0).to_owned() * coefficient);
+        let expected = coord.quadratic(&centered_projected, 1.0);
+        let got = projected.shifted_quadratic(&beta, 1.0);
+        assert!(
+            (got - expected).abs() <= 1e-12 * expected.abs().max(1.0),
+            "shifted quadratic after projection = {got:.12e}, expected {expected:.12e}"
+        );
+    }
 }
