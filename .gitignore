@@ -226,3 +226,8 @@ scripts/*verify*fresh*.sh
 experiments/spectrometer/*.npy
 
 *.sbatch
+
+*artifacts*
+*artifacts
+*artifacts/**
+artifacts/*
