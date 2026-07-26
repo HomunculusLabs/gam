@@ -9,18 +9,37 @@
 //! were. Both are known at the call site.
 //!
 //! The bound is Wilkinson's, in the form given by Higham (*Accuracy and
-//! Stability of Numerical Algorithms*, 2nd ed., SIAM 2002, Lemma 3.1): the
-//! floating-point evaluation of a sum or inner product of `n` terms satisfies
+//! Stability of Numerical Algorithms*, 2nd ed., SIAM 2002, Lemma 3.1 and §3.1):
 //!
 //! ```text
-//! |fl(s) − s|  ≤  γ_n · Σ|terms|,      γ_n = n·u / (1 − n·u),
+//! |fl(s) − s|  ≤  γ_k · Σ|terms|,      γ_k = k·u / (1 − k·u),
 //! ```
 //!
-//! with `u` the unit roundoff. Writing a bare multiple of `EPSILON` instead
-//! substitutes a constant for `γ_n`, which is wrong in both directions as `n`
+//! with `u` the unit roundoff and `k` the number of rounded operations on an
+//! accumulation path. Writing a bare multiple of `EPSILON` instead substitutes
+//! a constant for `γ_k`, which is wrong in both directions as the problem size
 //! moves — too tight for long accumulations, so exact-arithmetic-zero
 //! quantities get rejected as materially nonzero, and needlessly loose for
 //! short ones.
+//!
+//! # `k` is not always `n`
+//!
+//! The two accumulations that look alike carry different depths, and conflating
+//! them is the easiest way to get a bound that is wrong by one factor of `u`:
+//!
+//! * An **inner product** of length `n` forms `n` products and then sums them
+//!   with `n − 1` additions, so `k = n` — this is [`accumulation_band`].
+//! * A **sum of terms that are already formed** commits only the `n − 1`
+//!   additions, so `k = n − 1`. That is the form carried by
+//!   [`crate::decision::ShadowSum`], which accumulates `Σ|xᵢ|` and the term
+//!   count as it goes and reports the floor from them; a caller that already
+//!   holds both quantities and is summing pre-formed terms should pass
+//!   `n - 1` to [`accumulation_growth`] directly rather than using
+//!   [`accumulation_band`].
+//!
+//! `ShadowSum` additionally supports a **tree** reduction, whose depth is
+//! `⌈log₂ n⌉` rather than `n − 1`; that is a genuinely tighter bound and the
+//! right one whenever the reduction is pairwise.
 
 /// Unit roundoff `u = EPSILON/2`.
 ///
@@ -45,12 +64,16 @@ pub fn accumulation_growth(operations: usize) -> f64 {
     scaled / (1.0 - scaled)
 }
 
-/// Backward-error band of a `terms`-term accumulation whose summands have
-/// absolute sum `absolute_sum`.
+/// Backward-error band of an inner product of length `terms` whose summands
+/// have absolute sum `absolute_sum`: `γ_terms · absolute_sum`.
 ///
 /// This is the magnitude below which the computed result is indistinguishable
-/// from zero: a sum whose exact value is zero can be computed as anything
-/// within `±accumulation_band(n, Σ|terms|)`, and nothing outside it.
+/// from zero: an inner product whose exact value is zero can be computed as
+/// anything within `±accumulation_band(n, Σ|xᵢyᵢ|)`, and nothing outside it.
+///
+/// The depth is `terms`, not `terms − 1`, because forming each product rounds
+/// once before any addition happens. For a sum of pre-formed terms see the
+/// module documentation.
 pub fn accumulation_band(terms: usize, absolute_sum: f64) -> f64 {
     accumulation_growth(terms) * absolute_sum
 }
