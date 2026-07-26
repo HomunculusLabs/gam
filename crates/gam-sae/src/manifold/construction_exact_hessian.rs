@@ -2998,224 +2998,46 @@ impl SaeManifoldTerm {
     ) -> Result<Array2<f64>, String> {
         self.assignment.validate_rho_domain(rho)?;
         let n_params = rho.to_flat().len();
-        let total_t = cache.delta_t_len();
-        let k = cache.k;
-        let dim = total_t + k;
+        let dim = cache.delta_t_len() + cache.k;
         let solver = DeflatedArrowSolver::plain(cache);
+        // The full joint inverse `G = H⁻¹` and the block-diagonal row-local
+        // t-inverse `H_bd⁻¹` are the two shared helpers whose own docs already say
+        // "Shared by ch4 and ch5"; ch4 had kept inline copies of both (#2500).
+        let g = self.materialize_joint_inverse(cache, &solver)?;
+        let h_bd = self.materialize_block_diag_t_inverse(cache);
 
-        // Full joint inverse G = H⁻¹ (dim×dim), materialized column by column by
-        // solving the arrow system against each unit arrow basis vector.
-        let mut g = Array2::<f64>::zeros((dim, dim));
-        let mut rhs_t = Array1::<f64>::zeros(total_t);
-        let rhs_beta_zero = Array1::<f64>::zeros(k);
-        for col in 0..total_t {
-            rhs_t[col] = 1.0;
-            let sol = solver.solve(rhs_t.view(), rhs_beta_zero.view())?;
-            rhs_t[col] = 0.0;
-            for r in 0..total_t {
-                g[[r, col]] = sol.t[r];
-            }
-            for r in 0..k {
-                g[[total_t + r, col]] = sol.beta[r];
-            }
-        }
-        let rhs_t_zero = Array1::<f64>::zeros(total_t);
-        let mut rhs_beta = Array1::<f64>::zeros(k);
-        for col in 0..k {
-            rhs_beta[col] = 1.0;
-            let sol = solver.solve(rhs_t_zero.view(), rhs_beta.view())?;
-            rhs_beta[col] = 0.0;
-            for r in 0..total_t {
-                g[[r, total_t + col]] = sol.t[r];
-            }
-            for r in 0..k {
-                g[[total_t + r, total_t + col]] = sol.beta[r];
-            }
-        }
-        // H⁻¹ is self-adjoint; symmetrize away solver round-off asymmetry.
-        for a in 0..dim {
-            for b in (a + 1)..dim {
-                let avg = 0.5 * (g[[a, b]] + g[[b, a]]);
-                g[[a, b]] = avg;
-                g[[b, a]] = avg;
-            }
-        }
 
-        // Block-diagonal row-local t-inverse H_bd⁻¹ (dim×dim; β block zero) — the
-        // inverse the rank-charge coordinate-block trace subtracts, built from the
-        // same per-row undamped Cholesky factors `coordinate_block_ard_...` uses.
-        let mut h_bd = Array2::<f64>::zeros((dim, dim));
-        for row in 0..self.n_obs() {
-            let q = cache.row_dims[row];
-            let base = cache.row_offsets[row];
-            let factor = cache.undamped_factor(row);
-            let mut unit = Array1::<f64>::zeros(q);
-            for col in 0..q {
-                unit.fill(0.0);
-                unit[col] = 1.0;
-                let solved = cholesky_solve_vector(factor, unit.view());
-                for r in 0..q {
-                    h_bd[[base + r, base + col]] = solved[r];
-                }
-            }
+        // #2500 — ch4 and ch5 read ONE operator map. The doc on
+        // `penalty_curvature_operators_by_flat` has always claimed it was
+        // "Extracted from `logdet_daleckii_krein_hessian` (ch4) so ch4's
+        // Daleckii–Krein trace and ch5's forward-sensitivity twist read ONE
+        // operator map", but the extraction was never finished: ch4 kept a
+        // 103-line verbatim copy, which is how the two channels came to hold two
+        // independent per-family enumerations of the sparse operator and two
+        // separately-worded refusals for the same unmodelled case.
+        //
+        // The one place the channels legitimately differ is the ordered
+        // Beta--Bernoulli sparse coordinate. Its `∂A/∂ρ_sparse` is the cross-row
+        // integrated-marginal logit Hessian, which the shared map deliberately
+        // does not emit because ch5's caller adds it directly through
+        // `dense_exact_a_ordered_bb_sparse_trace`. This Hessian channel has no
+        // such sibling, so a silently-zero sparse ROW would reach a curvature
+        // block ARC then inverts. Refuse before assembling, naming the operator
+        // rather than the family.
+        if rho.sparse_flat_index().is_some()
+            && matches!(
+                self.assignment.mode,
+                AssignmentMode::OrderedBetaBernoulli { .. }
+            )
+        {
+            return Err(format!(
+                "logdet_daleckii_krein_hessian: the {} sparse log-strength operator is the \
+                 cross-row integrated-marginal logit Hessian, which this channel has no \
+                 sibling for; refusing to assemble a Hessian with a silently-zero sparse row",
+                self.assignment.mode.family_label()
+            ));
         }
-
-        // ∂H/∂ρ operators Cᵢ for the smoothing (β-block) and ARD (t-diagonal)
-        // coordinates, keyed by flat outer index (shared-ARD axes accumulate).
-        let mut c_by_flat: std::collections::BTreeMap<usize, Array2<f64>> =
-            std::collections::BTreeMap::new();
-
-        // Smoothing: Cₐ = (λ_a·½(Sₐ+Sₐᵀ)) ⊗ I on atom a's β-block, the exact
-        // operator `decoder_smoothness_effective_dof_with_solver_per_atom` traces.
-        let lambda_smooth = rho.lambda_smooth_vec()?;
-        let p = self.output_dim();
-        let frames_active = self.frames_active();
-        let (beta_offsets, beta_out_dim): (Vec<usize>, Box<dyn Fn(usize) -> usize>) =
-            if frames_active {
-                let ranks: Vec<usize> = self.atoms.iter().map(|a| a.border_frame_rank()).collect();
-                (
-                    self.factored_beta_offsets(),
-                    Box::new(move |kk: usize| ranks[kk]),
-                )
-            } else {
-                (self.beta_offsets(), Box::new(move |_kk: usize| p))
-            };
-        for a in 0..rho.log_lambda_smooth.len() {
-            let atom = &self.atoms[a];
-            let s = atom.smooth_penalty();
-            let m = atom.basis_size();
-            let off = beta_offsets[a];
-            let r = beta_out_dim(a);
-            let lambda = lambda_smooth[a];
-            let flat = rho.smooth_flat_index(a);
-            let c = c_by_flat
-                .entry(flat)
-                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-            for mu in 0..m {
-                for nu in 0..m {
-                    let s_sym = 0.5 * (s[[nu, mu]] + s[[mu, nu]]);
-                    let val = lambda * s_sym;
-                    if val == 0.0 {
-                        continue;
-                    }
-                    for oc in 0..r {
-                        c[[total_t + off + nu * r + oc, total_t + off + mu * r + oc]] += val;
-                    }
-                }
-            }
-        }
-
-        // ARD: C_{k,axis} = w_row·max(α cos κt, 0) (periodic) / w_row·α (Euclidean)
-        // on the row-local t-slot for (atom k, axis) — the exact PSD-majorizer
-        // curvature `ard_log_precision_hessian_trace` differentiates. The slot
-        // layout mirrors that trace (compact top-k vs dense per-atom offsets).
-        let ard_precisions = self.validated_ard_precisions(rho)?;
-        let row_w = self.row_loss_weights.as_deref();
-        let coord_offsets = self.assignment.coord_offsets();
-        let periods: Vec<Vec<Option<f64>>> = self
-            .assignment
-            .coords
-            .iter()
-            .map(LatentCoordValues::effective_axis_periods)
-            .collect();
-        for row in 0..self.n_obs() {
-            let w_row = row_w.map_or(1.0, |w| w[row]);
-            let base = cache.row_offsets[row];
-            match self.last_row_layout {
-                Some(ref layout) => {
-                    for (pos, &kk) in layout.active_atoms[row].iter().enumerate() {
-                        if rho.log_ard[kk].is_empty() {
-                            continue;
-                        }
-                        let start = layout.coord_starts[row][pos];
-                        let coord = &self.assignment.coords[kk];
-                        for axis in 0..coord.latent_dim() {
-                            let alpha = ard_precisions[kk][axis];
-                            let t = coord.row(row)[axis];
-                            let hess = w_row
-                                * ArdAxisPrior::eval(alpha, t, periods[kk][axis])
-                                    .psd_majorizer_hess();
-                            if hess == 0.0 {
-                                continue;
-                            }
-                            let flat = rho.ard_flat_index(kk, axis);
-                            let c = c_by_flat
-                                .entry(flat)
-                                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                            let g_idx = base + start + axis;
-                            c[[g_idx, g_idx]] += hess;
-                        }
-                    }
-                }
-                None => {
-                    for kk in 0..self.k_atoms() {
-                        if rho.log_ard[kk].is_empty() {
-                            continue;
-                        }
-                        let coord = &self.assignment.coords[kk];
-                        for axis in 0..coord.latent_dim() {
-                            let alpha = ard_precisions[kk][axis];
-                            let t = coord.row(row)[axis];
-                            let hess = w_row
-                                * ArdAxisPrior::eval(alpha, t, periods[kk][axis])
-                                    .psd_majorizer_hess();
-                            if hess == 0.0 {
-                                continue;
-                            }
-                            let flat = rho.ard_flat_index(kk, axis);
-                            let c = c_by_flat
-                                .entry(flat)
-                                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                            let g_idx = base + coord_offsets[kk] + axis;
-                            c[[g_idx, g_idx]] += hess;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sparse (assignment log-strength): the SAME operator ch5's map installs and
-        // `assignment_log_strength_hessian_trace` traces, read from the single
-        // authority (#2500). Both diagonal families are degree-one in
-        // `λ_sparse = e^ρ` exactly like the smoothing and ARD operators, so
-        // `∂C_sparse/∂ρ_sparse = C_sparse`, and the only ρ-dependence is that
-        // prefactor — softmax's `sign(H_kj)` kink and the threshold gate's `1−2a`
-        // sign both live in the LOGITS, which a ρ perturbation never moves, so the
-        // branch is invariant at the fixed stratum. The `H_bd⁻¹` leg then reproduces
-        // the gradient's `coordinate_block_assignment_...` subtraction with no extra
-        // math, and the cross terms against smooth/ARD fall out of the same uniform
-        // formula.
-        if let Some(sparse_flat) = rho.sparse_flat_index() {
-            match self.sparse_logit_curvature_rho_derivative(rho, cache)? {
-                // K ≤ 1 softmax / TopK / frozen routing have no free logit: the
-                // gradient's sparse logdet trace is identically zero, so a zero row
-                // here is the CORRECT curvature.
-                SparseLogitCurvature::Inert => {}
-                SparseLogitCurvature::Diagonal(entries) => {
-                    let c = c_by_flat
-                        .entry(sparse_flat)
-                        .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                    for (slot, value) in entries {
-                        c[[slot, slot]] += value;
-                    }
-                }
-                SparseLogitCurvature::CrossRowOwnedElsewhere => {
-                    // Unlike ch5's gradient map — whose caller adds the exact
-                    // cross-row trace through `dense_exact_a_ordered_bb_sparse_trace`
-                    // — this Hessian channel has NO sibling for that operator, so
-                    // emitting nothing would leave a silently-zero sparse ROW in a
-                    // curvature block ARC would then invert. Refuse instead, naming
-                    // the operator rather than the family.
-                    return Err(format!(
-                        "logdet_daleckii_krein_hessian: the {} sparse log-strength operator is \
-                         the cross-row integrated-marginal logit Hessian, which this channel \
-                         has no sibling for; refusing to assemble a Hessian with a \
-                         silently-zero sparse row",
-                        self.assignment.mode.family_label()
-                    ));
-                }
-            }
-        }
+        let c_by_flat = self.penalty_curvature_operators_by_flat(rho, cache)?;
 
         // Precompute G·Cᵢ, H_bd⁻¹·Cᵢ, and their traces for each flat coordinate.
         let flats: Vec<usize> = c_by_flat.keys().copied().collect();

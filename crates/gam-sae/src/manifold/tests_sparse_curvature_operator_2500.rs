@@ -506,3 +506,48 @@ fn deflation_map_applies_to_every_row_local_curvature_coordinate_2500() {
          deflating fixture; worst normalized error {worst:.3} at {label}"
     );
 }
+
+/// #2500 GATE 7 — the issue's actual ask, end to end: a ThresholdGate fit whose
+/// ρ carries a sparse log-strength coordinate must be EVALUABLE by the outer
+/// solver, not aborted at the outer-BFGS seed evaluation by
+/// "penalty_curvature_operators_by_flat: rho carries a sparse log-strength
+/// coordinate under an assignment prior whose ∂H/∂ρ_sparse operator this map does
+/// not model".
+///
+/// The gate is deliberately about REACHABILITY, not fit quality: it asserts the
+/// cascade never reports that refusal (nor its ch4/ch1 siblings), whatever else
+/// the fit decides. A fixture-specific numerical outcome would make this test a
+/// hostage to the seeding cascade; the refusal class is what #2500 is about.
+#[test]
+fn threshold_gate_outer_solve_is_not_aborted_by_an_unmodelled_sparse_operator_2500() {
+    use gam_solve::rho_optimizer::OuterProblem;
+    use gam_solve::seeding::SeedConfig;
+
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
+    let init_flat = rho.to_flat();
+    let n_params = init_flat.len();
+    let mut objective =
+        SaeManifoldOuterObjective::new(term, target, None, rho, 8, 0.04, 1.0e-6, 1.0e-6);
+    let result = OuterProblem::new(n_params)
+        .with_initial_rho(init_flat)
+        .with_seed_config(SeedConfig {
+            max_seeds: 1,
+            seed_budget: 1,
+            ..Default::default()
+        })
+        .run(&mut objective, "SAE manifold");
+    if let Err(err) = &result {
+        let msg = err.to_string();
+        for marker in [
+            "operator this map does not model",
+            "majorizer operator this channel does not yet model",
+            "explicit second derivative this channel does not yet model",
+        ] {
+            assert!(
+                !msg.contains(marker),
+                "#2500: a ThresholdGate outer solve must not abort on an unmodelled sparse \
+                 log-strength operator ({marker}); got: {msg}"
+            );
+        }
+    }
+}
