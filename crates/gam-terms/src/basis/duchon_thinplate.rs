@@ -1909,6 +1909,37 @@ pub fn create_thin_plate_spline_basiswithworkspace(
     create_thin_plate_spline_basis_scaledwithworkspace(data, knots, 1.0, None, workspace)
 }
 
+/// Evaluates a thin-plate basis at `data` in a radial chart supplied by the
+/// caller, rather than one chosen from `data` itself.
+///
+/// [`create_thin_plate_spline_basis`] selects its radial chart `V` from the rows
+/// it is handed: since #1347 the reparameterization is taken in the *realized
+/// data metric* `G_c = (K Z)ᵀ (K Z)`, so two different row sets over the same
+/// knots yield two different `V`, and the design columns `Φ Z V` are two
+/// different coordinate systems for the same model space. A coefficient vector
+/// fitted against one therefore does not describe the same function against the
+/// other — silently, since both designs have the same shape.
+///
+/// Scoring a fit on rows it was not fitted to must consequently replay the
+/// training chart: pass the [`ThinPlateSplineBasis::radial_reparam`] of the
+/// basis the coefficients were fitted against. The knots must be the same ones,
+/// as usual; the chart is checked against the side-constrained radial dimension
+/// and a mismatch is a typed error rather than a wrong answer.
+pub fn create_thin_plate_spline_basis_in_chart(
+    data: ArrayView2<f64>,
+    knots: ArrayView2<f64>,
+    radial_reparam: &Array2<f64>,
+) -> Result<ThinPlateSplineBasis, BasisError> {
+    let mut workspace = BasisWorkspace::default();
+    create_thin_plate_spline_basis_scaledwithworkspace(
+        data,
+        knots,
+        1.0,
+        Some(radial_reparam),
+        &mut workspace,
+    )
+}
+
 pub(crate) fn create_thin_plate_spline_basis_scaledwithworkspace(
     data: ArrayView2<f64>,
     knots: ArrayView2<f64>,

@@ -185,18 +185,63 @@ fn thin_plate_fit_gam_gaussian_simulated_train_test() {
             - 0.30 * x2
             + 0.25 * x1 * x2;
     }
-    let tps_test = gam::basis::create_thin_plate_spline_basis(x_test.view(), knots.view())
-        .expect("TPS test basis");
+    let tps_test = gam::basis::create_thin_plate_spline_basis_in_chart(
+        x_test.view(),
+        knots.view(),
+        &tps_train.radial_reparam,
+    )
+    .expect("TPS test basis");
     let pred_mean = tps_test.basis.dot(&fit.beta);
 
     let mse_test = (&pred_mean - &y_test_true)
         .mapv(|v| v * v)
         .mean()
         .unwrap_or(f64::INFINITY);
+
+    // Two independent ways this assertion can fail, separated so the message
+    // says which. (a) TRANSPORT: `beta` is fitted against `tps_train.basis` but
+    // scored against a design built from a DIFFERENT set of rows. For `beta` to
+    // mean the same function in both, the map `x -> basis row` must depend only
+    // on `(x, knots)` and not on which other rows share the batch. Rebuilding
+    // the same rows would only prove determinism, so instead rebuild a strict
+    // SUBSET of the training rows and compare it against those same rows of the
+    // full design: any nonzero deviation means the chart moves with the row set
+    // and no `beta` can transport between train and test. (b) FIT: `beta` may
+    // simply be a poor minimizer, which the training error shows on the very
+    // rows it was fitted to.
+    let subset_rows = n_test.min(n_train);
+    let x_subset = x_train.slice(ndarray::s![..subset_rows, ..]).to_owned();
+    let tps_subset = gam::basis::create_thin_plate_spline_basis_in_chart(
+        x_subset.view(),
+        knots.view(),
+        &tps_train.radial_reparam,
+    )
+    .expect("TPS subset-row basis");
+    let design_chart_max_dev = tps_subset
+        .basis
+        .indexed_iter()
+        .fold(0.0_f64, |m, ((i, j), v)| {
+            m.max((v - tps_train.basis[[i, j]]).abs())
+        });
+    assert!(
+        design_chart_max_dev < 1e-10,
+        "thin-plate design chart does not transport across row sets: rebuilding \
+         {subset_rows} training rows in the training chart deviates by \
+         {design_chart_max_dev:.3e}, so a fitted beta describes a different \
+         function on held-out rows than on the rows it was fitted to"
+    );
+    let mse_train = (&tps_train.basis.dot(&fit.beta) - &y_train_true)
+        .mapv(|v| v * v)
+        .mean()
+        .unwrap_or(f64::INFINITY);
     assert!(
         mse_test < mse_test_bound,
         "TPS simulated integration test is too inaccurate: \
-         mse_test={mse_test:.6e}, bound={mse_test_bound:.6e}"
+         mse_test={mse_test:.6e}, bound={mse_test_bound:.6e}; \
+         mse_train={mse_train:.6e} (same beta, same rows it was fitted to); \
+         lambdas={:?} edf_total={:?}",
+        fit.lambdas,
+        fit.edf_total()
     );
 
     // --- Baseline-beating contract ---
@@ -226,8 +271,12 @@ fn thin_plate_fit_gam_gaussian_simulated_train_test() {
     ];
     let probe = Array2::from_shape_vec((3, 2), probe_xs.iter().flatten().copied().collect())
         .expect("probe matrix shape");
-    let probe_basis = gam::basis::create_thin_plate_spline_basis(probe.view(), knots.view())
-        .expect("TPS probe basis");
+    let probe_basis = gam::basis::create_thin_plate_spline_basis_in_chart(
+        probe.view(),
+        knots.view(),
+        &tps_train.radial_reparam,
+    )
+    .expect("TPS probe basis");
     let probe_pred_mean = probe_basis.basis.dot(&fit.beta);
     let center_pred = probe_pred_mean[0];
     let corner_pred_a = probe_pred_mean[1];
@@ -354,16 +403,52 @@ fn thin_plate_fit_gam_gaussian_3d_simulated_train_test() {
             + 0.15 * x3;
     }
 
-    let tps_test = gam::basis::create_thin_plate_spline_basis(x_test.view(), knots.view())
-        .expect("3D test basis");
+    let tps_test = gam::basis::create_thin_plate_spline_basis_in_chart(
+        x_test.view(),
+        knots.view(),
+        &tps_train.radial_reparam,
+    )
+    .expect("3D test basis");
     let pred_mean = tps_test.basis.dot(&fit.beta);
 
     let mse_test = (&pred_mean - &y_test_true)
         .mapv(|v| v * v)
         .mean()
         .unwrap_or(f64::INFINITY);
+    // Same transport-vs-fit split as the 2-D case above: a strict SUBSET of the
+    // training rows, rebuilt on its own, must agree with those rows of the full
+    // design or no `beta` transports between train and test.
+    let subset_rows = n_test.min(n_train);
+    let x_subset = x_train.slice(ndarray::s![..subset_rows, ..]).to_owned();
+    let tps_subset = gam::basis::create_thin_plate_spline_basis_in_chart(
+        x_subset.view(),
+        knots.view(),
+        &tps_train.radial_reparam,
+    )
+    .expect("3D TPS subset-row basis");
+    let design_chart_max_dev = tps_subset
+        .basis
+        .indexed_iter()
+        .fold(0.0_f64, |m, ((i, j), v)| {
+            m.max((v - tps_train.basis[[i, j]]).abs())
+        });
+    assert!(
+        design_chart_max_dev < 1e-10,
+        "thin-plate design chart does not transport across row sets: rebuilding \
+         {subset_rows} training rows in the training chart deviates by \
+         {design_chart_max_dev:.3e}, so a fitted beta describes a different \
+         function on held-out rows than on the rows it was fitted to"
+    );
+    let mse_train = (&tps_train.basis.dot(&fit.beta) - &y_train_true)
+        .mapv(|v| v * v)
+        .mean()
+        .unwrap_or(f64::INFINITY);
     assert!(
         mse_test < 0.09,
-        "3D TPS simulated integration test is too inaccurate: mse_test={mse_test:.6e}"
+        "3D TPS simulated integration test is too inaccurate: mse_test={mse_test:.6e}; \
+         mse_train={mse_train:.6e}; \
+         lambdas={:?} edf_total={:?}",
+        fit.lambdas,
+        fit.edf_total()
     );
 }
