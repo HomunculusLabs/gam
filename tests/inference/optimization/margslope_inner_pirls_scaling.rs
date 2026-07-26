@@ -23,13 +23,20 @@
 //!    runs at every inner-PIRLS iteration. This is the large-scale
 //!    production setup; this probe times its scaling.
 //!
-//! Run with:
+//! Both probes run in the ordinary suite: `#[ignore]` is a hard build abort in
+//! this workspace (`build.rs` "#[ignore] test" rule, enforcing SPEC.md's ban on
+//! the XFAIL pattern), so there is no skip to opt out of. Reading their output
+//! means asking for it:
+//!
 //! ```text
-//! cargo test --release --test margslope_inner_pirls_scaling \
-//!     -- --ignored --nocapture margslope_inner_pirls_scaling_law
-//! cargo test --release --test margslope_inner_pirls_scaling \
-//!     -- --ignored --nocapture margslope_inner_pirls_flex_scaling_law
+//! cargo test --release --test inference \
+//!     -- --nocapture margslope_inner_pirls_scaling_law
+//! cargo test --release --test inference \
+//!     -- --nocapture margslope_inner_pirls_flex_scaling_law
 //! ```
+//!
+//! Note the binary is `inference`, not this file: #1146 grouped these modules
+//! into one integration binary rooted at `tests/inference/main.rs`.
 //!
 //! The `[MS-INNER-SCALING]` / `[MS-INNER-FLEX-SCALING]` lines in the output
 //! are pivotable: parse them into (n, total_s, outer_iters, inner_cycles)
@@ -224,6 +231,7 @@ fn run_fit(n: usize, flex: bool) -> Row {
 
 #[test]
 fn margslope_inner_pirls_scaling_law() {
+    gam::test_support::install_diagnostic_logger();
     gam::init_parallelism();
 
     // RIGID probit: closed-form vectorized inner solve. Negative control
@@ -335,6 +343,7 @@ fn margslope_inner_pirls_scaling_law() {
 
 #[test]
 fn margslope_inner_pirls_flex_scaling_law() {
+    gam::test_support::install_diagnostic_logger();
     gam::init_parallelism();
     // Warm up: a single small fit so the first measured timing isn't
     // dominated by Rayon pool init / faer factorization JIT / page

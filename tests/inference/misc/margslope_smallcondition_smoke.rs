@@ -4,11 +4,14 @@
 //! This is a guard against regressions in the inner-Newton / outer-κ
 //! interplay that turn small problems into slow problems. The large-scale
 //! reproducers (`tests/large_scale_margslope_repro.rs`,
-//! `tests/margslope_inner_pirls_scaling.rs`) are `#[ignore]`d because they
-//! sweep n up to 100k+ — this file runs a single n=2000 fit and asserts
-//! both convergence and a wall-clock budget that is generous for a healthy
-//! solver but tight enough to catch a slow-loop regression like the CTN
-//! exact-fn rejection cycle that recently cost ≥14h of CI.
+//! `tests/inference/optimization/margslope_inner_pirls_scaling.rs`) sweep n up
+//! to 100k+; they are NOT skipped — `#[ignore]` is a hard build abort here
+//! (`build.rs` "#[ignore] test" rule, enforcing SPEC.md's ban on the XFAIL
+//! pattern) — so this file is not a stand-in for a disabled sibling. It is the
+//! cheap always-on guard: a single n=2000 fit asserting both convergence and a
+//! wall-clock budget that is generous for a healthy solver but tight enough to
+//! catch a slow-loop regression like the CTN exact-fn rejection cycle that
+//! recently cost ≥14h of CI.
 
 use gam::ResourcePolicy;
 use gam::families::bms::{BernoulliMarginalSlopeTermSpec, DeviationBlockConfig, LatentZPolicy};
@@ -136,6 +139,13 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
 }
 
 fn run_one(flex: bool, label: &str, budget_s: f64) {
+    // A slow-loop regression is diagnosed from the per-cycle instrumentation
+    // the flex path already emits — the intercept seed short-circuit counters
+    // and the cell-moment LRU hit rate — and the `log` facade drops every one
+    // of those records until a backend is installed. Without this call the
+    // budget assertion below can only report THAT the fit was slow, never
+    // which of the two loops it was.
+    gam::test_support::install_diagnostic_logger();
     gam::init_parallelism();
     let (data, spec) = build_problem(2000, flex);
     let options = BlockwiseFitOptions::default();
