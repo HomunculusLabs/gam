@@ -14,10 +14,17 @@
 //! machinery, NOT the basis.
 //!
 //! `margslope_duchon_above_cliff` is the #979 binary-arm regression guard: a
-//! full `fit_model` that must complete under a generous wall budget.
-//! `duchon_gaussian_smooth_baseline_is_fast` is the control: the identical
-//! Duchon basis on a plain Gaussian smooth must finish quickly, proving the
-//! basis itself is cheap.
+//! full `fit_model` whose outer solve must certify rather than exhaust its
+//! iteration budget. `duchon_gaussian_smooth_baseline_is_fast` is the control:
+//! the identical Duchon basis on a plain Gaussian smooth must certify too,
+//! proving the basis itself is healthy and isolating any blowup to the
+//! marginal-slope machinery.
+//!
+//! Both guards are stated in iterations and certificates, never seconds
+//! (#2507): a second count measures the host and its neighbours, and the
+//! harness's per-test cap kills an over-budget fit before a wall-clock
+//! assertion can evaluate — so a stopwatch cannot distinguish a slow fit from a
+//! non-terminating one. Elapsed time is still printed, as a diagnostic.
 //!
 //! Invoke directly:
 //!   cargo test --release --test bug_hunt_979_margslope_duchon_slowdown \
@@ -159,9 +166,10 @@ fn build_margslope(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalS
 
 /// #979 binary-arm regression guard: bernoulli marginal-slope over a pure
 /// Duchon basis (the actual released-wheel failing case). At n=2000, centers=10,
-/// d=2 this timed out at 600s. Asserts the full fit completes under a generous
-/// wall budget. While the bug is unfixed this test is slow/fails — the
-/// coordinator's fix makes it pass.
+/// d=2 this timed out at 600s. Asserts the fit completes, is finite, and that
+/// its outer solve certified a stationary optimum inside its configured
+/// iteration budget — the #979 fingerprint is an outer loop that exhausts that
+/// budget instead.
 #[test]
 fn margslope_duchon_above_cliff() {
     gam::init_parallelism();
@@ -173,10 +181,14 @@ fn margslope_duchon_above_cliff() {
     let n = 600;
     let centers = 10;
     let (data, spec) = build_margslope(n, centers);
+    let options = BlockwiseFitOptions::default();
+    // The outer cap this fit is actually configured with; the guard below reads
+    // it rather than naming a second number that could drift away from it.
+    let outer_max_iter = options.outer_max_iter;
     let request = FitRequest::BernoulliMarginalSlope(BernoulliMarginalSlopeFitRequest {
         data: data.view(),
         spec,
-        options: BlockwiseFitOptions::default(),
+        options,
         kappa_options: SpatialLengthScaleOptimizationOptions::default(),
         policy: ResourcePolicy::default_library(),
     });
@@ -210,19 +222,34 @@ fn margslope_duchon_above_cliff() {
             .all(|v| v.is_finite()),
         "margslope Duchon fit produced non-finite coefficients (#979 binary arm)"
     );
-    // Wall-clock guard: the #979 binary-arm slowdown is pathological, so even at
-    // the CI-affordable n a healthy fit is far under budget; a >120s fit is the
-    // regression fingerprint.
+    // Cost guard, in iterations rather than seconds (#2507). A raw second count
+    // is a property of the host and its neighbours, not of the code under test,
+    // and under the harness's own per-test cap an over-budget fit is killed
+    // before any wall-clock assertion can run — so the guard could not tell a
+    // slow-but-terminating fit from one that never terminates, which is the two
+    // things it exists to separate. Outer iterations are deterministic and
+    // host-independent, and the #979 fingerprint is an outer loop that exhausts
+    // its budget rather than certifying.
+    // Convergence itself is already asserted above: a `FitResult` only exists
+    // for a converged mode (SPEC 20), so reaching this line IS the certificate.
+    // What the wall-clock line used to add was a COST bound, and that is the
+    // part restated here in a deterministic unit — the #979 fingerprint is an
+    // outer loop that burns its whole budget.
     assert!(
-        elapsed < 120.0,
-        "margslope Duchon fit took {elapsed:.1}s at n={n} centers={centers} (budget 120s) — #979 binary slowdown"
+        out.fit.outer_iterations < outer_max_iter,
+        "margslope Duchon fit used {} of {outer_max_iter} outer iterations at n={n} \
+         centers={centers} (grad_norm={:?}) — the outer loop exhausted its budget \
+         rather than settling (#979 binary slowdown)",
+        out.fit.outer_iterations,
+        out.fit.outer_gradient_norm
     );
 }
 
 /// Control: the IDENTICAL pure-Duchon basis (centers=10, d=2) fitting a plain
-/// Gaussian smooth on the SAME n=2000 data. The issue measured this at ~2s. We
-/// assert <30s. This proves the basis itself is cheap and isolates the blowup to
-/// the marginal-slope machinery, exactly matching the issue's measurement.
+/// Gaussian smooth on the SAME data. The issue measured this at ~2s against a
+/// margslope arm that never finished; the durable form of that contrast is that
+/// this arm certifies its outer solve, which isolates any blowup to the
+/// marginal-slope machinery without asserting on the clock.
 #[test]
 fn duchon_gaussian_smooth_baseline_is_fast() {
     gam::init_parallelism();
@@ -288,10 +315,11 @@ fn duchon_gaussian_smooth_baseline_is_fast() {
         !fit.fit.beta.is_empty() && fit.fit.beta.iter().all(|v| v.is_finite()),
         "plain Gaussian Duchon smooth produced non-finite coefficients (#979 control)"
     );
-    // Wall-clock control: the plain Duchon basis must stay cheap even at the
-    // CI-affordable n; a >30s fit here is a control-side regression.
-    assert!(
-        elapsed < 30.0,
-        "plain Gaussian Duchon smooth took {elapsed:.1}s at n={n} centers={centers} (budget 30s) — the basis itself must be cheap (#979 control)"
-    );
+    // The wall-clock control that used to sit here is gone (#2507). What this
+    // arm has to establish is that the identical basis is healthy on its own, so
+    // any blowup can be attributed to the marginal-slope machinery — and the
+    // guard above already establishes it: a fit only exists for a converged mode
+    // (SPEC 20), so a returned, finite fit IS that statement. A stopwatch
+    // reading added nothing about the basis, only about what the box was doing
+    // at the time.
 }
