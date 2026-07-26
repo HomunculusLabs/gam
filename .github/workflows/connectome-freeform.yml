@@ -44,14 +44,19 @@ jobs:
     timeout-minutes: 360
 
     env:
-      # Both kept OUTSIDE the checkout so neither can be swept into the
-      # agent's own commits.
-      DATA_DIR: ${{ runner.temp }}/connectome-data
-      HOST_DIR: ${{ runner.temp }}/connectome-host
       AGENT_REPO_DIR: ${{ github.workspace }}
       MEMORY_REF: refs/agent-memory/store
 
     steps:
+      # The `runner` context is not available in job-level `env:`, so the two
+      # runner-temp paths are exported here instead. Both live OUTSIDE the
+      # checkout so neither can be swept into the agent's own commits.
+      - name: Resolve paths
+        run: |
+          set -euo pipefail
+          echo "DATA_DIR=$RUNNER_TEMP/connectome-data" >> "$GITHUB_ENV"
+          echo "HOST_DIR=$RUNNER_TEMP/connectome-host" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
