@@ -2415,6 +2415,42 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .as_ref()
                 .and_then(|c| extract_simple_lower_bounds(c, total_p).ok().flatten())
                 .map(|b| b.lower_bounds);
+
+            // Every convergence exit from this loop routes through here. The
+            // definition must sit AFTER `joint_constraints` is bound (macro_rules
+            // hygiene resolves free locals in the DEFINITION scope, not at the call
+            // site) and BEFORE the first call site — which since #2485 is the
+            // stall-guard certificate below, earlier in the body than the post-step
+            // sites this used to sit beside.
+            //
+            // Note it does not simply `break`: for an unconstrained, non-Jeffreys
+            // fit, first-order convergence is TENTATIVE. The macro hands control
+            // back to the next cycle head to certify the returned mode's curvature
+            // and, on a strict saddle, escape along it (gam#979). Anything that
+            // certifies convergence must inherit that — which is exactly why the
+            // stall-guard site calls this instead of assigning `converged` itself.
+            macro_rules! finish_post_step_convergence {
+                () => {{
+                    converged = true;
+                    if joint_constraints.is_none() && joint_jeffreys_subspace.is_none() {
+                        returned_mode_curvature_pending = true;
+                        returned_mode_curvature_certified = false;
+                        continue 'joint_newton_cycles;
+                    }
+                    // Constrained (non-Jeffreys) first-order convergence is
+                    // tentative until the next cycle head certifies the
+                    // active-face-tangent curvature and, on a strict saddle,
+                    // escapes along it (gam#979). Jeffreys-augmented families keep
+                    // their first-order contract and their own augmented-objective
+                    // certificate, so they still break straight to the post-loop.
+                    if joint_jeffreys_subspace.is_none() {
+                        returned_constrained_mode_pending = true;
+                        returned_mode_curvature_certified = false;
+                        continue 'joint_newton_cycles;
+                    }
+                    break;
+                }};
+            }
             if cycle_log && cycle == 0 {
                 log::info!(
                     "[STAGE] PIRLS/inner step=cycle0 block+joint constraints elapsed={:.3}s n={} p={}",
@@ -5230,6 +5266,81 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     || consecutive_identical_rejected_cycles >= IDENTICAL_REJECTED_STALL_MAX_CYCLES
                     || collapsed_floor_exit
                 {
+                    // #2485. "Every trust-region attempt was rejected" and "no
+                    // model-resolvable step lowers the objective by more than
+                    // tolerance" are the SAME observation, and the second one is a
+                    // convergence CERTIFICATE (Conn–Gould–Toint 6.4.6) — the very
+                    // certificate this loop already issues ~600 lines below. This
+                    // guard used to `break` with `converged = false` before that
+                    // code could run, so on an iterate that has descended to the
+                    // floating-point noise floor the certificate never fired: β is
+                    // reverted every attempt precisely BECAUSE there is nothing
+                    // left to descend. Measured on the by-group location-scale fit
+                    // that motivated this: predicted decrease 1e-23, objective
+                    // change ±1e-13 with an oscillating sign, |∇Φ|∞ = 0, zero
+                    // nullity, and a strict residual 1.56× over a tolerance that
+                    // no representable step could close.
+                    //
+                    // So ask the shared stopping rule BEFORE conceding. Where the
+                    // decrement is genuinely large — a fit one resolvable step from
+                    // the optimum, or one whose local model disagrees with the
+                    // objective — the predicate is false and this guard returns
+                    // non-converged exactly as before, so a stuck solve cannot be
+                    // laundered into a certificate by stalling.
+                    //
+                    // `objective_tol` is rebuilt from `lastobjective` with the same
+                    // formula the certificate site uses. On a fully-rejected cycle β
+                    // is reverted and `lastobjective` is unchanged by construction,
+                    // so both sites are evaluating the tolerance at the same iterate.
+                    let stall_objective_tol = inner_tol * (1.0 + lastobjective.abs());
+                    let stall_decrement = joint_spectrum
+                        .as_ref()
+                        .map(|spectrum| spectrum.newton_decrement());
+                    let stall_weak_decrement = joint_spectrum
+                        .as_ref()
+                        .map(|spectrum| spectrum.weakly_identified_decrement());
+                    // Why the certificate did NOT fire is as diagnosable as why it
+                    // did: without a spectrum there is no decrement to test, and a
+                    // decrement above tolerance is a genuinely reducible iterate.
+                    // Both cases fall through to the refusal below, whose message
+                    // carries `last_newton_math`; this line names the missing input.
+                    log::debug!(
+                        "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | #2485 stall-certificate \
+                         inputs: spectrum={} decrement={:?} weak_decrement={:?} \
+                         objective_tol={stall_objective_tol:.3e}",
+                        joint_spectrum.is_some(),
+                        stall_decrement,
+                        stall_weak_decrement,
+                    );
+                    if let (Some(decrement), Some(weak_decrement)) =
+                        (stall_decrement, stall_weak_decrement)
+                        && joint_newton_decrement_certifies(
+                            decrement,
+                            weak_decrement,
+                            stall_objective_tol,
+                        )
+                    {
+                        log::info!(
+                            "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | fully-rejected \
+                             stall CERTIFIED (#2485): every trust-region attempt was rejected at \
+                             joint trust radius {joint_trust_radius:.3e}, and the unconstrained \
+                             modified-Newton step's predicted objective decrease (Newton decrement \
+                             ½gᵀH⁻¹g over identified modes)={decrement:.3e} — with the \
+                             weakly-identified-band decrement {weak_decrement:.3e} — is within \
+                             objective_tol={stall_objective_tol:.3e}. No model-resolvable step \
+                             lowers the penalized objective by more than tolerance, so the rejected \
+                             steps mean this iterate IS the optimum on the identifiable subspace \
+                             (Conn–Gould–Toint Thm 6.4.6), not that the solve is stuck. Returning \
+                             CONVERGED rather than treating an exhausted descent search as failure."
+                        );
+                        // Same exit every other certificate takes — so this one is
+                        // ALSO tentative until the next cycle head has certified the
+                        // returned mode's curvature. On a strict saddle that head
+                        // revokes it and resets every stall counter, so certifying
+                        // here cannot short-circuit the gam#979 escape and cannot
+                        // spin: the guard's streak starts over.
+                        finish_post_step_convergence!();
+                    }
                     let last_math_summary = last_joint_math
                         .as_ref()
                         .map(|math| {
@@ -5400,28 +5511,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .fold(0.0_f64, f64::max);
             cycles_done = cycle + 1;
 
-            macro_rules! finish_post_step_convergence {
-                () => {{
-                    converged = true;
-                    if joint_constraints.is_none() && joint_jeffreys_subspace.is_none() {
-                        returned_mode_curvature_pending = true;
-                        returned_mode_curvature_certified = false;
-                        continue 'joint_newton_cycles;
-                    }
-                    // Constrained (non-Jeffreys) first-order convergence is
-                    // tentative until the next cycle head certifies the
-                    // active-face-tangent curvature and, on a strict saddle,
-                    // escapes along it (gam#979). Jeffreys-augmented families keep
-                    // their first-order contract and their own augmented-objective
-                    // certificate, so they still break straight to the post-loop.
-                    if joint_jeffreys_subspace.is_none() {
-                        returned_constrained_mode_pending = true;
-                        returned_mode_curvature_certified = false;
-                        continue 'joint_newton_cycles;
-                    }
-                    break;
-                }};
-            }
 
             // Check convergence via joint stationarity. When the family-general
             // Firth/Jeffreys term is armed, the penalized objective the inner
@@ -5875,30 +5964,18 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             const DECREMENT_STALL_WINDOW: usize = 3;
             let decrement_precondition = cycles_since_residual_improved >= DECREMENT_STALL_WINDOW
                 || objective_change <= objective_tol;
+            // Conditioning-robust safety (gam#1449) and the raw decrement bound are
+            // BOTH in `joint_newton_decrement_certifies`, which is also what the
+            // fully-rejected stall guard consults before conceding (#2485) — one
+            // stopping rule, one place, so the two sites cannot disagree again.
             if decrement_precondition
                 && let Some(decrement) = joint_spectrum
                     .as_ref()
                     .map(|spectrum| spectrum.newton_decrement())
-                && decrement.is_finite()
-                && decrement <= objective_tol
-                // Conditioning-robust safety (gam#1449): the raw decrement above
-                // excludes every `|γ_k| ≤ null_cutoff = max(rank_tol·λ_max,
-                // numerical_floor)` mode. On a badly-scaled penalized Hessian
-                // `rank_tol·λ_max` can swallow a mode with small-but-REAL curvature
-                // AND real signal — a weakly-identified direction, not gauge —
-                // whose achievable improvement `c²/(2|γ|)` the raw decrement then
-                // silently ignores. Require that improvement, measured over the
-                // genuinely-curved band (above the machine-rank `numerical_floor`,
-                // a conditioning-robust cutoff that does NOT scale with λ_max), to
-                // ALSO be within tolerance before certifying. The genuine numerical
-                // null space (below `numerical_floor`) still contributes nothing,
-                // and the step is unchanged; this only HARDENS the stopping test so
-                // a weakly-identified real mode blocks premature certification.
                 && let Some(weak_decrement) = joint_spectrum
                     .as_ref()
                     .map(|spectrum| spectrum.weakly_identified_decrement())
-                && weak_decrement.is_finite()
-                && weak_decrement <= objective_tol
+                && joint_newton_decrement_certifies(decrement, weak_decrement, objective_tol)
             {
                 // Audit witness (#1082): the residual mass this certificate
                 // EXCLUDES as gauge-null. The decrement bound is sound only when
