@@ -155,10 +155,14 @@ jobs:
           sudo rm -rf "${AGENT_TOOLSDIRECTORY:-}" || true
           df -h /
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install pinned Rust toolchain
+        # A moving nightly changes rustc's content hash every day and therefore
+        # invalidates every compiler-cache object. Pin the exact toolchain that
+        # seeded the release cache; toolchain upgrades are explicit cache
+        # migrations, never an accidental cold build on the first run of a day.
+        uses: dtolnay/rust-toolchain@4fd1da8b0805d2d2e936788875a7d65dbd677dc2
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-25
           targets: ${{ matrix.target }}
 
       - name: Set up cache-service-v2 sccache
@@ -188,16 +192,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
           # Keep rustup/cargo shims owned by the toolchain setup step. Caching
-          # ~/.cargo/bin can restore macOS runner rustup-init stubs over them,
-          # which breaks `cargo +nightly`.
+          # ~/.cargo/bin can restore macOS runner rustup-init stubs over them.
           cache-bin: false
+          # A deliberately rejected cold run is the cache seeder. Persist its
+          # dependency artifacts so the next run is warm instead of repeating
+          # the same full compilation before failing at the publication gate.
+          cache-on-failure: true
 
       - name: Verify Rust toolchain
         shell: bash
         run: |
           rustup --version
-          rustc +nightly --version
-          cargo +nightly --version
+          rustc +nightly-2026-07-25 --version
+          cargo +nightly-2026-07-25 --version
 
       - name: Remove local cargo config
         # Prevent .cargo/config.toml's target-cpu=native from interfering with release builds
@@ -211,7 +218,7 @@ jobs:
           RUSTFLAGS: "-C target-cpu=${{ matrix.cpu }}"
           # Embed commit-addressable release tag in binary for version command
           GAM_RELEASE_TAG: "main-${{ github.sha }}"
-        run: cargo +nightly build --release --target ${{ matrix.target }} -p gam-cli
+        run: cargo +nightly-2026-07-25 build --release --target ${{ matrix.target }} -p gam-cli
 
       - name: Require measured warm compiler-cache reuse
         shell: bash
@@ -220,15 +227,25 @@ jobs:
           stats=$(sccache --show-stats)
           printf '%s\n' "$stats"
           hits=$(awk '$1 == "Cache" && $2 == "hits" { print $3; exit }' <<< "$stats")
-          if [[ ! "${hits:-}" =~ ^[0-9]+$ ]]; then
-            echo "::error::Could not read sccache hit count; refusing an unmeasured release build."
-            exit 1
-          fi
+          misses=$(awk '$1 == "Cache" && $2 == "misses" { print $3; exit }' <<< "$stats")
+          read_errors=$(awk '$1 == "Cache" && $2 == "read" && $3 == "errors" { print $4; exit }' <<< "$stats")
+          write_errors=$(awk '$1 == "Cache" && $2 == "write" && $3 == "errors" { print $4; exit }' <<< "$stats")
+          cache_errors=$(awk '$1 == "Cache" && $2 == "errors" { print $3; exit }' <<< "$stats")
+          for value in "$hits" "$misses" "$read_errors" "$write_errors" "$cache_errors"; do
+            if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+              echo "::error::Could not parse the complete sccache receipt; refusing an unmeasured release build."
+              exit 1
+            fi
+          done
           if (( hits == 0 )); then
-            echo "::error::Release target ${{ matrix.target }} reused zero compiler objects; cache was seeded but this cold build cannot publish."
+            echo "::error::Release target ${{ matrix.target }} reused zero compiler objects; its dependency artifacts were saved, but this cold build cannot publish."
             exit 1
           fi
-          echo "Release target ${{ matrix.target }} reused ${hits} cached compiler object(s)."
+          if (( read_errors != 0 || write_errors != 0 || cache_errors != 0 )); then
+            echo "::error::Release target ${{ matrix.target }} had cache errors (read=${read_errors}, write=${write_errors}, other=${cache_errors}); refusing an incomplete warm-cache receipt."
+            exit 1
+          fi
+          echo "Measured warm release target ${{ matrix.target }}: hits=${hits}, misses=${misses}, cache errors=0."
 
 
       - name: Package (Unix)
