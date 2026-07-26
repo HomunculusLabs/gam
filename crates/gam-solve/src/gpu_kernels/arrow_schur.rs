@@ -2893,68 +2893,130 @@ extern "C" __global__ void arrow_sae_apply_ainv(
     v[row * max_q + c] = acc;
 }
 
-extern "C" __global__ void arrow_sae_scatter_sub(
+/* #2512 DETERMINISTIC legacy row-Schur scatter, STAGE 1 (partials).
+
+   `arrow_sae_scatter_sub` above ran one block per row and folded the rows into
+   `out` with `atomicAdd`, so the summation order was the block scheduler's and
+   the matvec returned a different value on every launch. Here thread `(oc,
+   chunk)` owns output channel `oc` over the contiguous row range
+   [chunk·rows_per_chunk, …) and walks its rows in fixed index order, so the
+   reassociation is a property of the shape rather than of the schedule.
+
+   The thread may write `partial[cbase + beta_base[e] + oc]` for several `e`
+   without colliding with any other thread because every `beta_base` is a
+   multiple of `p`: the host builds the support as
+   `a_phi.push((atom_beta_off + basis_col * p, w))` and each atom's border block
+   is `M_k · p` wide, so the entries a thread touches are exactly the indices
+   congruent to `oc` modulo `p`. That is also why the thread can zero its own
+   progression first and needs no separate clearing pass or barrier. */
+extern "C" __global__ void arrow_sae_scatter_sub_det_partial(
     const double* __restrict__ v,
     const int* __restrict__ jac_ptr,
     const double* __restrict__ jac,
     const int* __restrict__ row_ptr,
     const int* __restrict__ beta_base,
     const double* __restrict__ phi,
-    double* __restrict__ out,
+    double* __restrict__ partial,
     int p,
+    int k,
     int max_q,
-    int n_rows
+    int n_rows,
+    int rows_per_chunk
 ) {
-    int row = blockIdx.y;
     int oc = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= n_rows || oc >= p) {
-        return;
+    if (oc >= p) { return; }
+    int chunk = blockIdx.y;
+    long long cbase = (long long)chunk * k;
+    for (int i = oc; i < k; i += p) {
+        partial[cbase + i] = 0.0;
     }
-    int jstart = jac_ptr[row];
-    int q = (jac_ptr[row + 1] - jstart) / p;
-    double lt_v = 0.0;
-    for (int c = 0; c < q; ++c) {
-        lt_v += jac[jstart + c * p + oc] * v[row * max_q + c];
-    }
-    int start = row_ptr[row];
-    int end = row_ptr[row + 1];
-    for (int e = start; e < end; ++e) {
-        atomicAdd(&out[beta_base[e] + oc], -phi[e] * lt_v);
+    int row0 = chunk * rows_per_chunk;
+    int row1 = row0 + rows_per_chunk;
+    if (row1 > n_rows) { row1 = n_rows; }
+    for (int row = row0; row < row1; ++row) {
+        int jstart = jac_ptr[row];
+        int q = (jac_ptr[row + 1] - jstart) / p;
+        double lt_v = 0.0;
+        for (int c = 0; c < q; ++c) {
+            lt_v += jac[jstart + c * p + oc] * v[row * max_q + c];
+        }
+        int start = row_ptr[row];
+        int end = row_ptr[row + 1];
+        for (int e = start; e < end; ++e) {
+            partial[cbase + beta_base[e] + oc] -= phi[e] * lt_v;
+        }
     }
 }
 
-extern "C" __global__ void arrow_sae_diag_sub(
-    double* __restrict__ diag,
+/* #2512 STAGE 2 (reduce): out[a] += Σ_chunk partial[chunk][a], chunks summed in
+   fixed order 0..n_chunks. One thread per output coord `a`, so no two threads
+   touch the same `out[a]`. */
+extern "C" __global__ void arrow_sae_scatter_sub_det_reduce(
+    const double* __restrict__ partial,
+    double* __restrict__ out,
+    int k,
+    int n_chunks
+) {
+    int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= k) { return; }
+    double acc = 0.0;
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        acc += partial[(long long)chunk * k + a];
+    }
+    out[a] += acc;
+}
+
+/* #2512 DETERMINISTIC Jacobi-diagonal subtraction, STAGE 1 (partials).
+
+   The former kernel ran one block per row and folded the rows into `diag` with
+   `atomicAdd`, so the PRECONDITIONER was a fresh draw per call — and a moved
+   preconditioner moves the whole CG trajectory, not merely the last bits of one
+   matvec. Thread `(oc, chunk)` owns output channel `oc` over a contiguous row
+   range and walks it in fixed index order; as in the scatter, every `beta_base`
+   is a multiple of `p`, so the indices a thread touches are exactly those
+   congruent to `oc` modulo `p` and it can clear its own progression first.
+   Stage 2 is the shared `arrow_sae_scatter_sub_det_reduce`. */
+extern "C" __global__ void arrow_sae_diag_sub_det_partial(
     const double* __restrict__ ainv,
     const int* __restrict__ jac_ptr,
     const double* __restrict__ jac,
     const int* __restrict__ row_ptr,
     const int* __restrict__ beta_base,
     const double* __restrict__ phi,
+    double* __restrict__ partial,
     int p,
+    int k,
     int max_q,
-    int n_rows
+    int n_rows,
+    int rows_per_chunk
 ) {
-    int row = blockIdx.y;
     int oc = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= n_rows || oc >= p) {
-        return;
+    if (oc >= p) { return; }
+    int chunk = blockIdx.y;
+    long long cbase = (long long)chunk * k;
+    for (int i = oc; i < k; i += p) {
+        partial[cbase + i] = 0.0;
     }
-    int jstart = jac_ptr[row];
-    int q = (jac_ptr[row + 1] - jstart) / p;
-    int abase = row * max_q * max_q;
-    double quad = 0.0;
-    for (int c = 0; c < q; ++c) {
-        double lc = jac[jstart + c * p + oc];
-        for (int d = 0; d < q; ++d) {
-            quad += lc * ainv[abase + c * max_q + d] * jac[jstart + d * p + oc];
+    int row0 = chunk * rows_per_chunk;
+    int row1 = row0 + rows_per_chunk;
+    if (row1 > n_rows) { row1 = n_rows; }
+    for (int row = row0; row < row1; ++row) {
+        int jstart = jac_ptr[row];
+        int q = (jac_ptr[row + 1] - jstart) / p;
+        int abase = row * max_q * max_q;
+        double quad = 0.0;
+        for (int c = 0; c < q; ++c) {
+            double lc = jac[jstart + c * p + oc];
+            for (int d = 0; d < q; ++d) {
+                quad += lc * ainv[abase + c * max_q + d] * jac[jstart + d * p + oc];
+            }
         }
-    }
-    int start = row_ptr[row];
-    int end = row_ptr[row + 1];
-    for (int e = start; e < end; ++e) {
-        double pe = phi[e];
-        atomicAdd(&diag[beta_base[e] + oc], -(pe * pe) * quad);
+        int start = row_ptr[row];
+        int end = row_ptr[row + 1];
+        for (int e = start; e < end; ++e) {
+            double pe = phi[e];
+            partial[cbase + beta_base[e] + oc] -= (pe * pe) * quad;
+        }
     }
 }
 
@@ -3098,35 +3160,12 @@ extern "C" __global__ void arrow_sae_frame_apply_ainv(
     svec[row * max_q + c] = acc;
 }
 
-extern "C" __global__ void arrow_sae_frame_scatter_h(
-    const double* __restrict__ svec,
-    const int* __restrict__ htb_ptr,
-    const double* __restrict__ htb,
-    const int* __restrict__ q_of,
-    double* __restrict__ out,
-    int k,
-    int max_q,
-    int n_rows
-) {
-    int row = blockIdx.y;
-    int a = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= n_rows || a >= k) { return; }
-    int q = q_of[row];
-    int hbase = htb_ptr[row];
-    double acc = 0.0;
-    for (int c = 0; c < q; ++c) {
-        acc += htb[hbase + c * k + a] * svec[row * max_q + c];
-    }
-    atomicAdd(&out[a], -acc);
-}
-
 /* #1017 evidence-lane DETERMINISTIC reduced-Schur scatter:
    out[a] = -Σ_i Σ_c H_tβ[i][c,a]·svec[i,c]. One thread owns output coord `a` and
    sums the rows in fixed index order 0..n_rows — NO atomics, so the result is
-   run-to-run bit-stable (the SLQ log|S| determinism contract). Same arithmetic as
-   arrow_sae_frame_scatter_h; only the reduction order is pinned (there the sum
-   over rows is an atomicAdd race). The shared atomic kernel is left untouched —
-   the step-PCG relies on it. `out` is fully assigned (no init needed). */
+   run-to-run bit-stable (the SLQ log|S| determinism contract): the reduction
+   order over rows is pinned rather than decided by the block scheduler.
+   `out` is fully assigned (no init needed). */
 extern "C" __global__ void arrow_sae_frame_scatter_h_det(
     const double* __restrict__ svec,
     const int* __restrict__ htb_ptr,
@@ -3187,6 +3226,27 @@ extern "C" __global__ void arrow_sae_frame_scatter_h_det_partial(
         }
     }
     partial[(long long)chunk * k + a] = acc;
+}
+
+/* #2512 STAGE 2, ACCUMULATING form: out[a] -= Σ_chunk partial[chunk][a], chunks
+   summed in fixed order 0..n_chunks. Identical reduction to
+   `arrow_sae_frame_scatter_h_det_reduce`, but subtracts into an `out` that the
+   penalty and data-Gram matvecs have already written, which is what the step-PCG
+   matvec needs. One thread per output coord `a`, so no two threads touch the same
+   `out[a]` and the result is run-to-run bit-stable. */
+extern "C" __global__ void arrow_sae_frame_scatter_h_det_reduce_sub(
+    const double* __restrict__ partial,
+    double* __restrict__ out,
+    int k,
+    int n_chunks
+) {
+    int a = blockIdx.x * blockDim.x + threadIdx.x;
+    if (a >= k) { return; }
+    double acc = 0.0;
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        acc += partial[(long long)chunk * k + a];
+    }
+    out[a] -= acc;
 }
 
 /* #1017 STAGE 2 (reduce): out[a] = -Σ_chunk partial[chunk][a], chunks summed in
@@ -3364,6 +3424,10 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         u: CudaSlice<f64>,
         w: CudaSlice<f64>,
         v: CudaSlice<f64>,
+        /// #2512 two-stage deterministic scatter scratch: `partial[n_chunks × k]`.
+        scatter_partial: CudaSlice<f64>,
+        scatter_n_chunks: usize,
+        scatter_rows_per_chunk: usize,
         n_rows: usize,
         p: usize,
         k: usize,
@@ -3447,6 +3511,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             return Err(ArrowSchurGpuFailure::Unavailable);
         }
 
+        let (scatter_rows_per_chunk, scatter_n_chunks) = scatter_chunking(n_rows);
         let mut row_ptr_host = Vec::with_capacity(n_rows + 1);
         let mut beta_base_host = Vec::<i32>::new();
         let mut phi_host = Vec::<f64>::new();
@@ -3611,6 +3676,11 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             v: stream
                 .alloc_zeros::<f64>(n_rows * max_q)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            scatter_partial: stream
+                .alloc_zeros::<f64>(scatter_n_chunks * k)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            scatter_n_chunks,
+            scatter_rows_per_chunk,
             n_rows,
             p,
             k,
@@ -3807,11 +3877,30 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             unsafe { builder.launch(cfg_q_rows) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
 
-        let scatter = module
-            .load_function("arrow_sae_scatter_sub")
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        // #2512 — fold the per-row contributions into `out` through a fixed
+        // reassociation instead of `atomicAdd`. Stage 1 sums each contiguous row
+        // chunk in fixed index order into `scatter_partial`; stage 2 reduces the
+        // chunks in fixed order. The former single kernel let the block scheduler
+        // pick the row order, which made this matvec — and therefore the Newton
+        // step and the fitted decoder — a different value on every call.
+        let k_i32 = checked_i32(buffers.k)?;
+        let rows_per_chunk_i32 = checked_i32(buffers.scatter_rows_per_chunk)?;
+        let n_chunks_i32 = checked_i32(buffers.scatter_n_chunks)?;
+        let k_blocks = ((buffers.k as u32).saturating_add(255) / 256).max(1);
         {
-            let mut builder = stream.launch_builder(&scatter);
+            let kernel = module
+                .load_function("arrow_sae_scatter_sub_det_partial")
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let cfg = LaunchConfig {
+                grid_dim: (
+                    ((buffers.p as u32).saturating_add(255) / 256).max(1),
+                    n_chunks_i32 as u32,
+                    1,
+                ),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut builder = stream.launch_builder(&kernel);
             builder
                 .arg(&buffers.v)
                 .arg(&buffers.jac_ptr)
@@ -3819,14 +3908,36 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .arg(&buffers.row_ptr)
                 .arg(&buffers.beta_base)
                 .arg(&buffers.phi)
-                .arg(out)
+                .arg(&mut buffers.scatter_partial)
                 .arg(&p_i32)
+                .arg(&k_i32)
                 .arg(&max_q_i32)
-                .arg(&n_rows_i32);
-            // SAFETY: `v`, Jacobian metadata, row pointers, beta offsets, basis
-            // rows, and `out` are live buffers for `n_rows` by `p`; scatter
-            // indices are checked against row and channel bounds in the kernel.
-            unsafe { builder.launch(cfg_p_rows) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                .arg(&n_rows_i32)
+                .arg(&rows_per_chunk_i32);
+            // SAFETY: `v`, Jacobian metadata, row pointers, beta offsets and basis
+            // rows are live buffers for `n_rows` by `p`; `scatter_partial` is sized
+            // `n_chunks · k` and each thread clears then writes only the indices of
+            // its own chunk congruent to its channel modulo `p`.
+            unsafe { builder.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        }
+        {
+            let kernel = module
+                .load_function("arrow_sae_scatter_sub_det_reduce")
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let cfg = LaunchConfig {
+                grid_dim: (k_blocks, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut builder = stream.launch_builder(&kernel);
+            builder
+                .arg(&buffers.scatter_partial)
+                .arg(&mut *out)
+                .arg(&k_i32)
+                .arg(&n_chunks_i32);
+            // SAFETY: `scatter_partial` is sized `n_chunks · k` and `out` is sized
+            // `k`; exactly one thread updates each in-bounds `out[a]`.
+            unsafe { builder.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         Ok(())
     }
@@ -3834,42 +3945,73 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
     fn launch_sae_diag_sub(
         stream: &Arc<CudaStream>,
         module: &Arc<CudaModule>,
-        buffers: &DeviceSaePcgBuffers,
+        buffers: &mut DeviceSaePcgBuffers,
         diag: &mut CudaSlice<f64>,
     ) -> Result<(), ArrowSchurGpuFailure> {
-        let kernel = module
-            .load_function("arrow_sae_diag_sub")
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         let p_i32 = checked_i32(buffers.p)?;
+        let k_i32 = checked_i32(buffers.k)?;
         let max_q_i32 = checked_i32(buffers.max_q)?;
         let n_rows_i32 = checked_i32(buffers.n_rows)?;
-        let cfg = LaunchConfig {
-            grid_dim: (
-                ((buffers.p as u32).saturating_add(255) / 256).max(1),
-                checked_i32(buffers.n_rows)? as u32,
-                1,
-            ),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        let mut builder = stream.launch_builder(&kernel);
-        builder
-            .arg(diag)
-            .arg(&buffers.ainv)
-            .arg(&buffers.jac_ptr)
-            .arg(&buffers.jac)
-            .arg(&buffers.row_ptr)
-            .arg(&buffers.beta_base)
-            .arg(&buffers.phi)
-            .arg(&p_i32)
-            .arg(&max_q_i32)
-            .arg(&n_rows_i32);
-        // SAFETY: diagonal output and all read-only SAE row metadata buffers are
-        // live on `stream` with sizes matching `n_rows`, `p`, and `max_q`; the
-        // kernel bounds-checks its flattened work index.
-        unsafe { builder.launch(cfg) }
-            .map(drop)
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+        let rows_per_chunk_i32 = checked_i32(buffers.scatter_rows_per_chunk)?;
+        let n_chunks_i32 = checked_i32(buffers.scatter_n_chunks)?;
+        {
+            let kernel = module
+                .load_function("arrow_sae_diag_sub_det_partial")
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let cfg = LaunchConfig {
+                grid_dim: (
+                    ((buffers.p as u32).saturating_add(255) / 256).max(1),
+                    n_chunks_i32 as u32,
+                    1,
+                ),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut builder = stream.launch_builder(&kernel);
+            builder
+                .arg(&buffers.ainv)
+                .arg(&buffers.jac_ptr)
+                .arg(&buffers.jac)
+                .arg(&buffers.row_ptr)
+                .arg(&buffers.beta_base)
+                .arg(&buffers.phi)
+                .arg(&mut buffers.scatter_partial)
+                .arg(&p_i32)
+                .arg(&k_i32)
+                .arg(&max_q_i32)
+                .arg(&n_rows_i32)
+                .arg(&rows_per_chunk_i32);
+            // SAFETY: every read-only SAE row metadata buffer is live on `stream`
+            // with sizes matching `n_rows`, `p` and `max_q`; `scatter_partial` is
+            // sized `n_chunks · k` and each thread clears then writes only the
+            // indices of its own chunk congruent to its channel modulo `p`.
+            unsafe { builder.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        }
+        {
+            let kernel = module
+                .load_function("arrow_sae_scatter_sub_det_reduce")
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let cfg = LaunchConfig {
+                grid_dim: (
+                    ((buffers.k as u32).saturating_add(255) / 256).max(1),
+                    1,
+                    1,
+                ),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut builder = stream.launch_builder(&kernel);
+            builder
+                .arg(&buffers.scatter_partial)
+                .arg(diag)
+                .arg(&k_i32)
+                .arg(&n_chunks_i32);
+            // SAFETY: `scatter_partial` is sized `n_chunks · k` and `diag` is sized
+            // `k`; exactly one thread updates each in-bounds `diag[a]`.
+            unsafe { builder.launch(cfg) }
+                .map(drop)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+        }
     }
 
     fn launch_sae_matvec(
@@ -5213,22 +5355,59 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             // and n_rows·max_q; the kernel guards row/coord bounds.
             unsafe { b.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
+        // #2512 — subtract the reduced-Schur term through the SAME two-stage
+        // atomics-free scatter the evidence lane uses. The former single-kernel
+        // form accumulated with `atomicAdd(double*, double)`, whose summation
+        // order is chosen by the block scheduler; floating-point addition is not
+        // associative, so the matvec — and with it the Newton step and the fitted
+        // decoder — took a different value on every call. That made every fit
+        // whose shape clears `reduced_schur_matvec_should_offload` irreproducible
+        // on any host with a CUDA device, and reproducible on any host without
+        // one. Stage 1 sums each contiguous row chunk in fixed index order and
+        // stage 2 reduces the chunks in fixed order, so the reassociation is a
+        // property of the shape rather than of the schedule.
+        let k_blocks = ((buffers.k as u32).saturating_add(255) / 256).max(1);
         {
             let kernel = module
-                .load_function("arrow_sae_frame_scatter_h")
+                .load_function("arrow_sae_frame_scatter_h_det_partial")
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let cfg = frame_grid(buffers.k, buffers.n_rows)?;
+            let rows_per_chunk_i32 = checked_i32(buffers.rows_per_chunk)?;
+            let cfg = LaunchConfig {
+                grid_dim: (k_blocks, checked_i32(buffers.n_chunks)? as u32, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
             let mut b = stream.launch_builder(&kernel);
             b.arg(&buffers.svec)
                 .arg(&buffers.htb_ptr)
                 .arg(&buffers.htb)
                 .arg(&buffers.q_of)
-                .arg(out)
+                .arg(&mut buffers.scatter_partial)
                 .arg(&k_i32)
                 .arg(&max_q_i32)
-                .arg(&n_rows_i32);
-            // SAFETY: svec/cross-block/out are live buffers; the kernel atomically
-            // accumulates into out[a] for a<k and reads c<q_i.
+                .arg(&n_rows_i32)
+                .arg(&rows_per_chunk_i32);
+            // SAFETY: svec/cross-block are live buffers; scatter_partial is sized
+            // n_chunks·k; each thread writes one in-bounds partial[chunk·k+a], a<k.
+            unsafe { b.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        }
+        {
+            let kernel = module
+                .load_function("arrow_sae_frame_scatter_h_det_reduce_sub")
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let n_chunks_i32 = checked_i32(buffers.n_chunks)?;
+            let cfg = LaunchConfig {
+                grid_dim: (k_blocks, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut b = stream.launch_builder(&kernel);
+            b.arg(&buffers.scatter_partial)
+                .arg(&mut *out)
+                .arg(&k_i32)
+                .arg(&n_chunks_i32);
+            // SAFETY: scatter_partial sized n_chunks·k, out sized k; one in-bounds
+            // out[a] updated per a<k, by exactly one thread.
             unsafe { b.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         Ok(())
@@ -6034,7 +6213,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         let mut diag_dev = stream
             .clone_htod(&diag_host)
             .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-        launch_sae_diag_sub(&stream, vector_module, &buffers, &mut diag_dev)?;
+        launch_sae_diag_sub(&stream, vector_module, &mut buffers, &mut diag_dev)?;
         let diag_host = stream
             .clone_dtoh(&diag_dev)
             .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
