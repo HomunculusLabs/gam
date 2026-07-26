@@ -105,6 +105,140 @@ fn penalized_hessian_spectrum(
     Some((min, max, negative))
 }
 
+/// #1561 arm C′ — the cross-block Schur deficit, measured on the UNMODIFIED solve.
+///
+/// The criterion's ρ_j derivative reads `((H+S_λ)⁻¹)_jj`; a block-diagonal
+/// criterion would read `(H_jj + λ_j S_j)⁻¹`. Because `S_λ` is block-diagonal,
+/// the `jj` block of the reported `penalized_hessian` IS `H_jj + λ_j S_j`, so
+/// both operators are recoverable from one matrix and the deficit
+/// `(M⁻¹)_jj − (M_jj)⁻¹` needs no penalties at all.
+///
+/// This changes nothing about the fit: it reads the converged geometry and does
+/// its own linear algebra, so it cannot perturb what it measures.
+///
+/// Reported per block: `lambda_min` of the deficit (a Schur THEOREM for PD `M`,
+/// so it is a positive-definiteness precondition check, not a hypothesis test),
+/// its `lambda_max` (the magnitude, which is the open question), and the
+/// relative size against the block operator itself. A block whose factorization
+/// FAILS is reported as FAILED, never skipped — an absent row on exactly the
+/// fixtures where the deficit is largest would bias the reading toward
+/// "no effect".
+fn schur_deficit_report(
+    fit: &gam_solve::model_types::UnifiedFitResult,
+    p_mu: usize,
+    mean_penalties: &[gam_terms::smooth::BlockwisePenalty],
+    noise_penalties: &[gam_terms::smooth::BlockwisePenalty],
+    lambdas: &[f64],
+) -> String {
+    let Some(geometry) = fit.geometry.as_ref() else {
+        return "GEOMETRY_ABSENT".to_string();
+    };
+    let m = geometry.penalized_hessian.as_array();
+    let p = m.nrows();
+    if p_mu == 0 || p_mu >= p {
+        return format!("BLOCK_SPLIT_DEGENERATE p_mu={p_mu} p={p}");
+    }
+
+    // Precondition: the Schur argument is void for an indefinite M, and the
+    // location-scale observed information is structurally indefinite off the
+    // truth (#2387/#2442), so this is reported rather than assumed.
+    let Ok((m_eigs, m_vecs)) = m.eigh(Side::Lower) else {
+        return "M_EIGH_FAILED".to_string();
+    };
+    let m_min = m_eigs.iter().copied().fold(f64::INFINITY, f64::min);
+    if !(m_min > 0.0) {
+        return format!("M_NOT_PD lambda_min={m_min:.6e} (Schur bound void)");
+    }
+
+    // M^-1 by spectral inverse, then its jj blocks.
+    let mut m_inv = Array2::<f64>::zeros((p, p));
+    for k in 0..p {
+        let inv_lambda = 1.0 / m_eigs[k];
+        for i in 0..p {
+            let vik = m_vecs[[i, k]];
+            if vik == 0.0 {
+                continue;
+            }
+            for j in 0..p {
+                m_inv[[i, j]] += inv_lambda * vik * m_vecs[[j, k]];
+            }
+        }
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for (label, lo, hi) in [("mu", 0usize, p_mu), ("ls", p_mu, p)] {
+        let width = hi - lo;
+        let inv_block = m_inv.slice(ndarray::s![lo..hi, lo..hi]).to_owned();
+        let m_block = m.slice(ndarray::s![lo..hi, lo..hi]).to_owned();
+        // (M_jj)^-1 — this is the block-diagonal criterion's operator.
+        let Ok((b_eigs, b_vecs)) = m_block.eigh(Side::Lower) else {
+            out.push(format!("{label}=FACTORIZATION_FAILED(eigh)"));
+            continue;
+        };
+        let b_min = b_eigs.iter().copied().fold(f64::INFINITY, f64::min);
+        if !(b_min > 0.0) {
+            // A diagonal block can fail to be PD where the joint succeeds.
+            out.push(format!(
+                "{label}=FACTORIZATION_FAILED(block_not_pd lambda_min={b_min:.3e})"
+            ));
+            continue;
+        }
+        let mut b_inv = Array2::<f64>::zeros((width, width));
+        for k in 0..width {
+            let inv_lambda = 1.0 / b_eigs[k];
+            for i in 0..width {
+                let vik = b_vecs[[i, k]];
+                if vik == 0.0 {
+                    continue;
+                }
+                for j in 0..width {
+                    b_inv[[i, j]] += inv_lambda * vik * b_vecs[[j, k]];
+                }
+            }
+        }
+        let deficit = &inv_block - &b_inv;
+        let Ok((d_eigs, _)) = deficit.eigh(Side::Lower) else {
+            out.push(format!("{label}=DEFICIT_EIGH_FAILED"));
+            continue;
+        };
+        let d_min = d_eigs.iter().copied().fold(f64::INFINITY, f64::min);
+        let d_max = d_eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let b_inv_max = 1.0 / b_min;
+        let rel = if b_inv_max > 0.0 { d_max / b_inv_max } else { f64::NAN };
+        // S_j-weighted trace: the dV/drho_j currency. A deficit sitting in
+        // S_k's null space charges nothing however large its eigenvalues are,
+        // so this is the number the criterion sees and the eigenvalue ratios
+        // above are not.
+        let (pens, lam_offset) = if label == "mu" {
+            (mean_penalties, 0usize)
+        } else {
+            (noise_penalties, mean_penalties.len())
+        };
+        let mut weighted: Vec<String> = Vec::new();
+        for (k, pen) in pens.iter().enumerate() {
+            let lam = lambdas.get(lam_offset + k).copied().unwrap_or(f64::NAN);
+            let r = &pen.col_range;
+            if r.end > width {
+                weighted.push(format!("S{k}=RANGE_OUT_OF_BLOCK({:?} width={width})", r));
+                continue;
+            }
+            let mut trace = 0.0_f64;
+            for (i, gi) in r.clone().enumerate() {
+                for (j, gj) in r.clone().enumerate() {
+                    trace += deficit[[gi, gj]] * pen.local[[j, i]];
+                }
+            }
+            weighted.push(format!("S{k}: lambda={lam:.6e} dTrace={:.6e}", lam * trace));
+        }
+        out.push(format!(
+            "{label}: deficit_min={d_min:.6e} deficit_max={d_max:.6e} \
+             rel_to_block_inv={rel:.6e} block_lambda_min={b_min:.6e} [{}]",
+            weighted.join("; ")
+        ));
+    }
+    format!("M_lambda_min={m_min:.6e} | {}", out.join(" | "))
+}
+
 fn run_case(label: &str, mean_formula: &str, noise_formula: &str, n: usize) -> f64 {
     let (x, y) = locscale_data(n);
     let headers = vec!["x".to_string(), "y".to_string()];
@@ -170,6 +304,15 @@ fn run_case(label: &str, mean_formula: &str, noise_formula: &str, n: usize) -> f
         (vec![], f64::NAN)
     };
     let spectrum = penalized_hessian_spectrum(&fit.fit);
+    // #1561 arm C': the cross-block Schur deficit on the unmodified solve.
+    let schur = schur_deficit_report(
+        &fit.fit,
+        beta_loc.len(),
+        &fit.mean_design.penalties,
+        &fit.noise_design.penalties,
+        &fit.fit.lambdas.to_vec(),
+    );
+    eprintln!("[{label}] SCHUR_C3 {schur}");
 
     eprintln!(
         "[{label}] pearson={corr:.5} rmse_ls={rmse_ls:.5} rmse_mu={rmse_mu:.5} reml={reml:.4} \
