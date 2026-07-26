@@ -1393,6 +1393,7 @@ mod tests {
     ///
     /// The medians stay in the output as the hill-climbing perf record, which
     /// is where a timing belongs — a trend line, not a pass/fail.
+    #[cfg(target_os = "linux")]
     fn assert_dispatch_worthy_and_report(
         label: &str,
         policy: &gam_gpu::policy::GpuDispatchPolicy,
