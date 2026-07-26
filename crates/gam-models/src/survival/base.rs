@@ -5603,6 +5603,34 @@ mod tests {
     }
 
     #[test]
+    fn survival_laml_refuses_nonstationary_inner_state() {
+        let rho0 = -0.35_f64;
+        let beta0 = array![-2.5_f64, 1.0];
+        let model = laml_fd_test_model(rho0.exp());
+        let (model, beta_hat) = model
+            .reconverge_survival_inner_mode(&[rho0], &beta0)
+            .expect("converge reference survival mode");
+
+        // Move along the intercept only, preserving derivative feasibility while
+        // making the likelihood score unambiguously nonstationary.
+        let mut beta_off_mode = beta_hat;
+        beta_off_mode[0] += 0.25;
+        let state = model
+            .update_state(&beta_off_mode)
+            .expect("off-mode state remains in the survival domain");
+        let rho = array![rho0];
+        let error = model
+            .unified_lamlobjective_and_rhogradient(&beta_off_mode, &state, &rho)
+            .expect_err("LAML must refuse a nonstationary inner state");
+        assert!(
+            error
+                .to_string()
+                .contains("survival LAML requires a stationary inner mode"),
+            "unexpected off-mode refusal: {error}"
+        );
+    }
+
+    #[test]
     fn structural_monotonicgradient_matchesobjectivefd() {
         let age_entry = array![1.0_f64, 1.3_f64, 1.8_f64];
         let age_exit = array![1.6_f64, 2.1_f64, 2.7_f64];
