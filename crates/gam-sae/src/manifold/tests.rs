@@ -3683,14 +3683,55 @@ fn analytic_outer_gradient_with_bundle_matches_dense_assembly() {
         .zip(bundled.logdet_trace.iter())
         .enumerate()
     {
-        assert_abs_diff_eq!(d, b, epsilon = 1.0e-9);
         assert!(
             d.is_finite() && b.is_finite(),
             "logdet-trace coordinate {i} must be finite (dense={d}, bundled={b})"
         );
+        // Name the coordinate. `sparse_flat_index` / `smooth_flat_index` /
+        // `ard_flat_index` are the layout's own accessors, so this cannot drift
+        // from `to_flat` — and a bare "0.159 vs 0.282" costs the next reader the
+        // whole layout walk to find out which channel desynced.
+        let role = if Some(i) == rho.sparse_flat_index() {
+            "assignment log-strength".to_string()
+        } else if i >= rho.smooth_flat_start() && i < rho.smooth_flat_start() + rho.k_atoms() {
+            format!("smooth atom {}", i - rho.smooth_flat_start())
+        } else {
+            format!("ard flat {i}")
+        };
+        assert!(
+            (d - b).abs() <= 1.0e-9,
+            "logdet-trace coordinate {i} ({role}) desynced between the dense \
+             selected inverse and the bundle route: dense={d}, bundled={b}, \
+             |Δ|={:.6e}",
+            (d - b).abs()
+        );
     }
     // …and the FULLY ASSEMBLED gradient (all channels summed) must agree, since every
     // other channel is fed identical inputs.
+    //
+    // Per-CHANNEL first, so a divergence names the channel that produced it rather
+    // than only the summed number (#2465). `logdet_trace` is checked above; the
+    // bundle also routes the #1006 envelope Γ, which lands in
+    // `third_order_correction`, and that one had no assertion of its own — a
+    // desync there could only ever surface as an unattributed total.
+    for (label, d, b) in [
+        ("explicit", &dense.explicit, &bundled.explicit),
+        ("occam", &dense.occam, &bundled.occam),
+        (
+            "third_order_correction",
+            &dense.third_order_correction,
+            &bundled.third_order_correction,
+        ),
+    ] {
+        assert_eq!(d.len(), b.len(), "{label} length");
+        for (i, (dv, bv)) in d.iter().zip(b.iter()).enumerate() {
+            assert_abs_diff_eq!(dv, bv, epsilon = 1.0e-9);
+            assert!(
+                dv.is_finite() && bv.is_finite(),
+                "{label} coordinate {i} must be finite (dense={dv}, bundled={bv})"
+            );
+        }
+    }
     let dense_grad = dense.gradient();
     let bundled_grad = bundled.gradient();
     assert_eq!(dense_grad.len(), bundled_grad.len());

@@ -174,10 +174,17 @@ pub(super) fn certified_ard_axis_edf(
 /// interval it cannot increase squared error. This is deliberately distinct
 /// from the exact-trace certificate above and is used only on the declared
 /// massive-K stochastic trace lane.
+///
+/// `shrinkage_trace_estimate` is the stochastic
+/// [`SaeManifoldTerm::ard_shrinkage_traces`] — carrying the per-row prior
+/// curvature factor, so `alpha * estimate` is `Σ_i P_i·[H⁻¹]_ii` and the
+/// interval it is projected onto is the one the quantity actually lives in
+/// (#2499). Projecting an `α·tr(H⁻¹)` estimate here would clamp a structurally
+/// out-of-range value to a boundary and report it as sampling noise.
 fn projected_hutchinson_ard_axis_edf(
     n_active: f64,
     alpha: f64,
-    inverse_trace_estimate: f64,
+    shrinkage_trace_estimate: f64,
     atom: usize,
     axis: usize,
 ) -> Result<f64, String> {
@@ -185,15 +192,15 @@ fn projected_hutchinson_ard_axis_edf(
         && n_active >= 0.0
         && alpha.is_finite()
         && alpha > 0.0
-        && inverse_trace_estimate.is_finite())
+        && shrinkage_trace_estimate.is_finite())
     {
         return Err(format!(
             "reconstruction_dispersion: stochastic ARD EDF inputs at atom {atom}, axis \
              {axis} must be finite with non-negative active count and positive precision; \
-             got n_active={n_active}, alpha={alpha}, trace={inverse_trace_estimate}"
+             got n_active={n_active}, alpha={alpha}, trace={shrinkage_trace_estimate}"
         ));
     }
-    let estimate = n_active - alpha * inverse_trace_estimate;
+    let estimate = n_active - alpha * shrinkage_trace_estimate;
     if !estimate.is_finite() {
         return Err(format!(
             "reconstruction_dispersion: stochastic ARD EDF estimate is unrepresentable at \
@@ -450,12 +457,14 @@ impl SaeManifoldTerm {
     /// Below the declared massive-K threshold the coordinate term is the exact
     /// ARD-shrunk effective dof of the latent block: along axis `(k,j)` the
     /// MacKay/Fellner-Schall edf is
-    /// `n_active_k − α_{kj}·tr_{kj}(H⁻¹)`, the well-determined-direction count
-    /// after the ARD prior `α_{kj}` shrinks each coordinate. `tr_{kj}(H⁻¹)` is
-    /// the same posterior-variance trace [`Self::ard_inverse_traces`] assembles
-    /// for the EFS ARD step (reused here, not recomputed), so the dispersion is
-    /// consistent with the precision update `α_new = n/(‖t‖²+tr(H⁻¹))`. The
-    /// per-axis scalar count `n_active_k` must match the support the trace sums
+    /// `n_active_k − α_{kj}·τ_{kj}`, the well-determined-direction count
+    /// after the ARD prior `α_{kj}` shrinks each coordinate. `τ_{kj}` is the
+    /// SHRINKAGE trace [`Self::ard_shrinkage_traces`], NOT the posterior-variance
+    /// trace [`Self::ard_inverse_traces`] the EFS ARD step consumes: the two
+    /// coincide on a Euclidean axis and differ on a periodic one, where the prior
+    /// curvature the arrow carries is the PSD majorizer `α·softplus(cos κt) ≤ α`
+    /// rather than `α` (#2499). Only the former makes `α·τ ∈ [0, n_active_k]`.
+    /// The per-axis scalar count `n_active_k` must match the support the trace sums
     /// over: `n` for the dense full-support layout, or the number of rows where
     /// atom `k` is active for the compact active-set layout (inactive
     /// prior-dominated coordinates contribute 0 to both the trace and the
