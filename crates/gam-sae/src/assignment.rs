@@ -2021,14 +2021,35 @@ pub(crate) fn assignment_prior_grad_hdiag_weighted(
             //
             // The ρ-gradient is CORRECT under that deflation — #2500's
             // `row_deflation_map_derivative` differentiates the conditioned block —
-            // but the conditioning itself is the #1419 pathology (a deflated
+            // but the conditioning itself is the #1419 pathology: a deflated
             // direction is a data-relevant logit direction the solver then takes no
-            // step along). Majorizing this diagonal into `B` and carrying the
-            // negative remainder in `ΔC`, exactly as `ArdAxisPrior`'s
-            // `psd_majorizer_hess` / `negative_hessian_remainder` pair does, would
-            // remove the deflation at its source and leave `A = B + ΔC` unchanged.
-            // That moves the `½log|B|` criterion of every ThresholdGate fit, so it
-            // is deliberately NOT bundled with the #2500 gradient fix.
+            // step along, so the gates cannot move and the atoms cannot
+            // differentiate.
+            //
+            // MEASURED, on #1782's `planted_circle_multi_atom_threshold_gate_...`
+            // startup-validation fixture (logits all `0.5`, threshold `0`, so
+            // `a = σ(0.5) = 0.62 > ½` on EVERY gate): all 120 logit entries carry
+            // negative prior curvature at the seed, and the exact `A` is already
+            // `IndefiniteObservedInformation{joint}` there. Clamping this diagonal
+            // to its positive part removes the fixture's "dictionary did not escape
+            // total co-collapse" refusal outright — the fit runs 194s instead of
+            // dying at 35s — and surfaces a separate downstream shape defect
+            // ("could not broadcast array from shape: [2, 6] to: [1, 6]"). So the
+            // missing majorizer, not the missing operator, is what keeps that gate
+            // unevaluable.
+            //
+            // The full fix is three coupled pieces, not one clamp: majorize into
+            // `B`; carry the negative remainder in `ΔC` so `A = B + ΔC` stays the
+            // EXACT signed curvature (`ArdAxisPrior`'s
+            // `psd_majorizer_hess` / `negative_hessian_remainder` pair is the
+            // template); and add that remainder to
+            // `materialize_ard_concave_clamp_diagonal` so a mode whose only
+            // indefiniteness is the gate's own concave half is PRICED at its basin
+            // curvature under #2336's E-attributability rule rather than refused —
+            // structurally the same bounded, exactly-known `E ⪰ 0` the periodic-ARD
+            // clamp already contributes. That moves the `½log|B|` criterion of every
+            // ThresholdGate fit, so it wants its own pre-registered A/B and is
+            // deliberately NOT bundled with the #2500 gradient fix.
             let sparsity_strength = rho.lambda_sparse()?;
             let inv_tau = 1.0 / temperature;
             let inv_tau2 = inv_tau * inv_tau;
