@@ -16,8 +16,9 @@ use super::bridges::{
     rail_relaxed_bounds, reduced_hessian_psd_at_point,
 };
 use super::{
-    OuterConfig, certificate_hessian_is_psd_off_railed, certificate_railed_coordinates,
-    interior_face_indices,
+    OuterConfig, StationarityBound, StationarityBoundSource, certificate_hessian_is_psd_off_railed,
+    certificate_railed_coordinates, certify_interior_stationarity, interior_face_indices,
+    newton_predicted_decrease,
 };
 use crate::model_types::CERTIFICATE_RAIL_MARGIN;
 use gam_terms::smooth::CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
@@ -434,11 +435,135 @@ fn the_interior_face_norm_is_exactly_the_projected_gradient_norm() {
 }
 
 #[test]
+fn a_full_space_curvature_rung_cannot_bypass_the_active_face_decrement_2559() {
+    // Coordinate 1 is a KKT-pinned rail: its projected residual is exactly
+    // zero, but its enormous curvature controls the FULL decrement's shared
+    // regularization shift. That makes the full-space decrement appear below
+    // objective resolution while coordinate 0 still carries order-one descent
+    // on the exact active face.
+    let projected = array![1.0, 0.0];
+    let hessian = array![[1.0, 0.0], [0.0, 1.0e16]];
+    let objective_tol = 1.0e-6;
+    let full_decrement =
+        newton_predicted_decrease(&hessian, &projected).expect("full PD decrement");
+    assert!(
+        full_decrement <= objective_tol,
+        "the fixture must make the full-space curvature rung admissible: \
+         decrement={full_decrement:.3e}"
+    );
+    let projected_norm = projected.dot(&projected).sqrt();
+    let full_curvature_bound = projected_norm * (objective_tol / full_decrement).sqrt();
+    assert!(
+        projected_norm <= full_curvature_bound,
+        "control: the old early return must accept this full-space rung"
+    );
+
+    let face = interior_face_indices(&projected, &[1]);
+    assert_eq!(face, vec![0]);
+    let face_decrement =
+        newton_predicted_decrease(&array![[1.0]], &array![1.0]).expect("face PD decrement");
+    assert!(
+        face_decrement > objective_tol,
+        "the exact active face must retain resolvable descent: \
+         decrement={face_decrement:.3e}"
+    );
+    let refusal = certify_interior_stationarity(
+        &projected,
+        &hessian,
+        &face,
+        StationarityBound::from_ladder(
+            full_curvature_bound,
+            StationarityBoundSource::CurvatureResolvability,
+        ),
+        objective_tol,
+    )
+    .expect_err("full-space curvature evidence must not certify a different face");
+    assert!(
+        refusal.contains("active-face Newton decrement")
+            && refusal.contains("curvature-resolvability"),
+        "the refusal must name the face-local evidence and rejected currency: {refusal}"
+    );
+}
+
+#[test]
+fn an_admissible_curvature_rung_is_reminted_from_the_active_face_2559() {
+    // Both spaces have a sub-resolution decrement, but the railed coordinate's
+    // scale makes their bounds observably different. The certificate must
+    // publish the bound formed from H_face/g_face, never the caller's value.
+    let projected = array![1.0, 0.0];
+    let hessian = array![[1.0e8, 0.0], [0.0, 1.0e16]];
+    let objective_tol = 1.0e-6;
+    let full_decrement =
+        newton_predicted_decrease(&hessian, &projected).expect("full PD decrement");
+    let full_curvature_bound = (objective_tol / full_decrement).sqrt();
+    let face = interior_face_indices(&projected, &[1]);
+    let face_decrement =
+        newton_predicted_decrease(&array![[1.0e8]], &array![1.0]).expect("face PD decrement");
+    assert!(face_decrement <= objective_tol);
+    let expected_face_bound = (objective_tol / face_decrement).sqrt();
+    assert_ne!(
+        full_curvature_bound.to_bits(),
+        expected_face_bound.to_bits(),
+        "the fixture must distinguish the full-space and active-face currencies"
+    );
+
+    let (face_norm, effective_bound) = certify_interior_stationarity(
+        &projected,
+        &hessian,
+        &face,
+        StationarityBound::from_ladder(
+            full_curvature_bound,
+            StationarityBoundSource::CurvatureResolvability,
+        ),
+        objective_tol,
+    )
+    .expect("a sub-resolution active-face decrement must certify");
+    assert_eq!(face_norm.to_bits(), 1.0_f64.to_bits());
+    assert_eq!(
+        effective_bound.value().to_bits(),
+        expected_face_bound.to_bits(),
+        "the emitted bound must be recomputed from the active-face decrement"
+    );
+    assert_eq!(effective_bound.rung().label, "curvature-resolvability");
+    assert!(effective_bound.rung().derived_standard);
+}
+
+#[test]
+fn a_gradient_magnitude_rung_remains_direct_first_order_currency_2559() {
+    // The exact face residual is already the same gradient-magnitude currency
+    // as a solver band. Its own configured first-order authority may admit the
+    // point without consulting the optional curvature widening; the caller's
+    // separate reduced-PSD gate still owns second-order admissibility.
+    let projected = array![1.0e-6, 0.0];
+    let hessian = array![[1.0e-12, 0.0], [0.0, 1.0e16]];
+    let face = interior_face_indices(&projected, &[1]);
+    let objective_tol = 1.0e-12;
+    let face_decrement =
+        newton_predicted_decrease(&array![[1.0e-12]], &array![1.0e-6]).expect("face PD decrement");
+    assert!(
+        face_decrement > objective_tol,
+        "the fixture must distinguish first-order authority from curvature widening"
+    );
+    let solver_bound = 2.0e-6;
+    let (_, effective_bound) = certify_interior_stationarity(
+        &projected,
+        &hessian,
+        &face,
+        StationarityBound::from_ladder(solver_bound, StationarityBoundSource::SolverBand),
+        objective_tol,
+    )
+    .expect("a same-currency gradient band must remain authoritative");
+    assert_eq!(effective_bound.value().to_bits(), solver_bound.to_bits());
+    assert_eq!(effective_bound.rung().label, "solver-band");
+    assert!(!effective_bound.rung().derived_standard);
+}
+
+#[test]
 fn the_interior_face_can_only_grow_never_shrink() {
     // The safety argument, made executable: whatever the railed set says, the
-    // projected face is a SUPERSET of the deleted one, so the residual and the
-    // sub-block Newton decrement can only rise. This judgment can refuse points
-    // it used to mint; it can never mint a point it used to refuse.
+    // projected face is a SUPERSET of the deleted one, so no nonzero KKT
+    // residual disappears. Curvature is not inferred from that set relation:
+    // the consumer recomputes it on the exact face (#2559).
     let bounds = (Array1::from_elem(6, -30.0), Array1::from_elem(6, 30.0));
     for pattern in 0..64u32 {
         let x = Array1::from_iter(

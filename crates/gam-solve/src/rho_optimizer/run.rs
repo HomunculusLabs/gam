@@ -2323,6 +2323,13 @@ impl StationarityBound {
         self.value
     }
 
+    /// Whether this value was derived by mapping the caller's residual through
+    /// the caller's Hessian. Such a value cannot cross into a reduced face:
+    /// the face must mint its own bound from its own Hessian and residual.
+    pub(crate) fn requires_face_local_derivation(self) -> bool {
+        self.source.is_derived_standard()
+    }
+
     pub(crate) fn rung(self) -> StationarityRung {
         self.source.provenance()
     }
@@ -3932,9 +3939,11 @@ struct AsymptoteRailInputs<'a> {
     bounds: &'a (Array1<f64>, Array1<f64>),
     terminal_beta: Option<&'a Array1<f64>>,
     /// The ladder bound the full problem was judged against, carrying the rung
-    /// that set it. The interior judgment may REPLACE it with its own
-    /// sub-block curvature bound, and the replacement's rung is what the
-    /// resulting certificate — or refusal — must report (#2458).
+    /// that set it. A gradient-magnitude rung is already in the exact projected
+    /// residual currency used on the face. A curvature-derived rung is not:
+    /// the interior judgment must REPLACE it with its own sub-block curvature
+    /// bound, and the replacement's rung is what the resulting certificate —
+    /// or refusal — must report (#2458/#2559).
     stationarity_bound: StationarityBound,
     /// The run's relative objective tolerance resolved at the certified cost —
     /// the same flat-valley floor the cost-stall guard and the curvature-scaled
@@ -3989,12 +3998,13 @@ fn try_certify_asymptote_rail(
     // The interior (non-railed) coordinates must be stationary in their own
     // right: the asymptote certificate speaks only to the railed directions,
     // never rescues a still-descending interior. Judged by the SAME two-stage
-    // criterion as the Inc 2c at-point mint: the raw bound first, then the
-    // curvature-scaled flat-valley bound on the interior sub-block — a fit
-    // whose remaining interior Newton step would improve the cost by less
-    // than the loop's own cost resolution is at its interior optimum, and the
-    // residual gradient is the deep-λ instrument noise floor (evaluations
-    // beside a saturated rail share the rail's logdet noise).
+    // criterion as the Inc 2c at-point mint: a gradient-magnitude bound may
+    // judge the exact KKT-projected residual directly; a curvature-derived
+    // bound is reminted from the interior sub-block before it may admit
+    // anything. A fit whose remaining interior Newton step would improve the
+    // cost by less than the loop's own cost resolution is at its interior
+    // optimum, and the residual gradient is the deep-λ instrument noise floor
+    // (evaluations beside a saturated rail share the rail's logdet noise).
     let interior_indices = interior_face_indices(projected_gradient, railed);
     let (interior_projected_grad_norm, effective_interior_bound) =
         match certify_interior_stationarity(
@@ -4365,9 +4375,9 @@ fn falsify_face_law(
 ///
 /// Since the projection either keeps a component unchanged or zeroes it, the
 /// norm over these indices is exactly `‖Pg‖`. Where this differs from deleting
-/// it includes MORE coordinates, so both the residual and the sub-block Newton
-/// decrement can only grow: this judgment can refuse points it used to mint and
-/// can never mint a point it used to refuse.
+/// it includes MORE residual coordinates. Curvature evidence is deliberately
+/// recomputed on that exact set: unlike the residual norm, a Newton decrement
+/// is not transferable across Hessian subspaces or their regularization scales.
 pub(crate) fn interior_face_indices(
     projected_gradient: &Array1<f64>,
     railed: &[usize],
@@ -4377,18 +4387,23 @@ pub(crate) fn interior_face_indices(
         .collect()
 }
 
-/// Two-stage interior stationarity judgment shared by the Inc 1 railed mint
-/// and the Inc 2c at-point mint (#2348): the raw stationarity bound first,
-/// then the curvature-scaled flat-valley bound on the interior sub-block.
+/// Interior stationarity judgment shared by the Inc 1 railed mint and the
+/// Inc 2c at-point mint (#2348/#2559).
 ///
-/// The second stage certifies a point whose full interior Newton step would
-/// improve the objective by less than `objective_tol` — the loop's own cost
-/// resolution — so the point is cost-indistinguishable from the interior
-/// optimum and the measured gradient is resolution noise, not slope. Returns
-/// `Ok((interior_grad_norm, effective_bound))` when certified (the bound
-/// that admitted the norm: raw, or the curvature-scaled widening); `Err`
-/// carries the measured evidence when real interior descent remains, so a
-/// refused mint explains WHICH interior stage failed and by how much.
+/// The supplied indices make `interior_grad_norm` the exact KKT-projected
+/// residual of the face being judged: normally [`interior_face_indices`]
+/// itself, and with already-proven tail coordinates removed on the Inc 2c
+/// route. A gradient-magnitude ladder rung can therefore judge it directly.
+/// [`StationarityBoundSource::CurvatureResolvability`] is different: its value
+/// contains the caller's Hessian and Newton decrement, so reusing it here would
+/// make the ordinary rail path's early comparison reduce to the caller's own
+/// `Δpred <= objective_tol` test. It must instead be derived from `sub_h` and
+/// `sub_g`. Exact zero is stationary without a curvature scale.
+///
+/// The face-local curvature path certifies only when the active-face Newton
+/// step would improve the objective by at most `objective_tol` — the loop's
+/// own cost resolution. Returns the bound that actually admitted the norm;
+/// `Err` carries both caller and face-local evidence when descent remains.
 pub(crate) fn certify_interior_stationarity(
     gradient: &Array1<f64>,
     hessian: &Array2<f64>,
@@ -4401,7 +4416,10 @@ pub(crate) fn certify_interior_stationarity(
         .map(|&k| gradient[k] * gradient[k])
         .sum::<f64>()
         .sqrt();
-    if interior_grad_norm <= stationarity_bound.value() {
+    if interior_grad_norm <= stationarity_bound.value()
+        && (interior_grad_norm == 0.0
+            || !stationarity_bound.requires_face_local_derivation())
+    {
         return Ok((interior_grad_norm, stationarity_bound));
     }
     let m = interior_indices.len();
@@ -4433,13 +4451,19 @@ pub(crate) fn certify_interior_stationarity(
                 }
             }
             Err(format!(
-                "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound                  {:.3e}, sub-block Newton decrement                  {predicted_decrease:.3e} > cost resolution {objective_tol:.3e}",
-                stationarity_bound.value()
+                "interior not stationary: active-face |Pg|={interior_grad_norm:.3e}, \
+                 caller bound {:.3e} from {}; active-face Newton decrement \
+                 {predicted_decrease:.3e} > cost resolution {objective_tol:.3e}",
+                stationarity_bound.value(),
+                stationarity_bound.rung().label,
             ))
         }
         _ => Err(format!(
-            "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound              {:.3e} and the interior sub-block yields no PD Newton              decrement",
-            stationarity_bound.value()
+            "interior not stationary: active-face |Pg|={interior_grad_norm:.3e}, \
+             caller bound {:.3e} from {}; the active-face Hessian and residual \
+             yield no positive finite PD Newton decrement",
+            stationarity_bound.value(),
+            stationarity_bound.rung().label,
         )),
     }
 }
