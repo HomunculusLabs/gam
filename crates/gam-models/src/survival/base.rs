@@ -2625,6 +2625,51 @@ impl WorkingModelSurvival {
         }
         let k_count = active_penalty_blocks.len();
 
+        // The Laplace/LAML envelope is defined at a stationary inner mode.
+        // Certify that primary precondition before constructing penalty roots,
+        // reparameterizing, or factorizing the observed Hessian. An arbitrary
+        // off-mode point can also be indefinite, but it is not yet a candidate
+        // Laplace mode; reporting or computing the secondary spectral condition
+        // first both obscures the root refusal and wastes the expensive setup. A
+        // one-step Newton residual surrogate is not an interchangeable
+        // criterion when the likelihood Hessian moves with beta: its scalar
+        // moving-Hessian response requires higher-order rho derivatives that
+        // the survival provider does not emit. Attaching that partial surrogate
+        // made the value and gradient different functions at rho=4 (#2491).
+        //
+        // Certify the active-set-projected KKT condition in the RAW frame. A
+        // binding monotonicity constraint contributes r = A^T lambda and must
+        // be projected out before the stationarity decision. Once certified,
+        // the exact envelope has no residual term; the transformed assembly
+        // therefore carries kkt_residual=None deliberately.
+        let relative_projected_norm = {
+            let raw = state.gradient.clone();
+            let projected = match self.monotonicity_linear_constraints() {
+                Some(constraints) => {
+                    let constraints = ConstraintSet::Dense(constraints);
+                    projected_linear_constraint_stationarity_vector(&raw, beta, &constraints, None)
+                        .ok_or_else(|| {
+                            EstimationError::InvalidInput(
+                                "survival LAML could not project the monotonicity KKT residual"
+                                    .to_string(),
+                            )
+                        })?
+                }
+                None => raw,
+            };
+            state.relative_gradient_norm(array1_l2_norm(&projected))
+        };
+        if !relative_projected_norm.is_finite()
+            || relative_projected_norm > SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "survival LAML requires a stationary inner mode: projected relative KKT \
+                 residual {relative_projected_norm:.3e} exceeds \
+                 {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
+                 surrogate is not a differentiable substitute for the Laplace mode"
+            )));
+        }
+
         // λ_k = e^{ρ_k}, in active-block (== ρ) order. Shared by the joint
         // normalizer and the Wood reparameterization below.
         let lambdas: Vec<f64> = rho.iter().map(|&r| r.exp()).collect();
@@ -2765,46 +2810,6 @@ impl WorkingModelSurvival {
         // It is a scalar and invariant under the orthogonal transform
         // (β′ᵀS′β′ = βᵀSβ), so it carries over unchanged.
         let penalty_quadratic = state.penalty_term;
-
-        // The Laplace/LAML envelope is defined at a stationary inner mode. A
-        // one-step Newton residual surrogate is not an interchangeable
-        // criterion when the likelihood Hessian moves with beta: its scalar
-        // moving-Hessian response requires higher-order rho derivatives that
-        // the survival provider does not emit. Attaching that partial surrogate
-        // made the value and gradient different functions at rho=4 (#2491).
-        //
-        // Certify the active-set-projected KKT condition in the RAW frame. A
-        // binding monotonicity constraint contributes r = A^T lambda and must
-        // be projected out before the stationarity decision. Once certified,
-        // the exact envelope has no residual term; the transformed assembly
-        // therefore carries kkt_residual=None deliberately.
-        let relative_projected_norm = {
-            let raw = state.gradient.clone();
-            let projected = match self.monotonicity_linear_constraints() {
-                Some(constraints) => {
-                    let constraints = ConstraintSet::Dense(constraints);
-                    projected_linear_constraint_stationarity_vector(&raw, beta, &constraints, None)
-                        .ok_or_else(|| {
-                            EstimationError::InvalidInput(
-                                "survival LAML could not project the monotonicity KKT residual"
-                                    .to_string(),
-                            )
-                        })?
-                }
-                None => raw,
-            };
-            state.relative_gradient_norm(array1_l2_norm(&projected))
-        };
-        if !relative_projected_norm.is_finite()
-            || relative_projected_norm > SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL
-        {
-            return Err(EstimationError::InvalidInput(format!(
-                "survival LAML requires a stationary inner mode: projected relative KKT \
-                 residual {relative_projected_norm:.3e} exceeds \
-                 {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
-                 surrogate is not a differentiable substitute for the Laplace mode"
-            )));
-        }
 
         let result = InnerAssembly {
             log_likelihood: state.log_likelihood,
