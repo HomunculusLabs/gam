@@ -179,11 +179,14 @@ mod profiled_outer_payload_tests {
 
 /// Inner-PIRLS controls shared by the survival-transformation baseline and
 /// smoothing-coordinate eval closures. The baseline geometry is mildly
-/// nonlinear, so the iteration budget is generous; the convergence/step floors
-/// match the working-model PIRLS contract used throughout the survival path.
+/// nonlinear, so the iteration budget is generous. The convergence target is
+/// the same projected-KKT contract required by the survival LAML envelope; an
+/// inner solve that only satisfies a looser tolerance is a checkpoint, not a
+/// derivative-bearing objective sample.
 const SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS: usize = 400;
 
-const SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL: f64 = 1e-6;
+const SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL: f64 =
+    crate::survival::SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL;
 
 const SURVIVAL_TRANSFORMATION_PIRLS_MAX_STEP_HALVING: usize = 40;
 
