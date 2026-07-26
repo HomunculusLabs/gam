@@ -40,8 +40,8 @@ mod duchon_psi_derivatives;
 mod duchon_thinplate;
 mod implicit_psi_derivative;
 pub mod input_loc_derivatives;
-mod invariant_tie_break;
 mod internal;
+mod invariant_tie_break;
 pub mod matern_gradient;
 mod matern_kernel;
 mod periodic_duchon;
@@ -134,3 +134,6 @@ mod tests;
 
 #[cfg(test)]
 mod zz_measure_2445_tests;
+
+#[cfg(test)]
+mod zz_measure_2475_tests;

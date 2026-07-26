@@ -12,11 +12,63 @@ use super::sphere_spectral::{
     sphere_truncated_spectral_derivative_eval, sphere_truncated_spectral_eval,
 };
 
+/// Exact coincident-point value `K_m^{pseudo}(γ = 0)` of the pseudo-spline
+/// Wahba kernel, in closed form.
+///
+/// Unlike the Sobolev kernel at `m = 1`, this limit is FINITE and known
+/// exactly, so the diagonal of a pseudo-spline Gram matrix is a theorem rather
+/// than a regularization choice. From the spectral coefficients that
+/// [`super::sphere_spectral::pseudo_s2_truncated_coefficients`] builds,
+///
+/// ```text
+/// K_m(0) = Σ_{ℓ≥1} c_ℓ,   c_ℓ = 2 / (4π · Π_{k=1..m+1} (ℓ + k)),
+/// ```
+///
+/// and the reciprocal-Pochhammer sum telescopes
+/// (`Σ_{j≥0} 1/((j+a)···(j+a+p−1)) = 1 / ((p−1)·(a)···(a+p−2))`, here with
+/// `a = 2` and `p = m+1`) to `Σ_{ℓ≥1} 1/((ℓ+1)···(ℓ+m+1)) = 1/(m·(m+1)!)`.
+/// Hence
+///
+/// ```text
+/// K_m^{pseudo}(0) = 1 / (2π · m · (m+1)!)
+/// ```
+///
+/// giving `1/(4π)`, `1/(24π)`, `1/(144π)`, `1/(960π)` for `m = 1..4`. Each was
+/// checked against the truncated spectral sum to its own truncation tail.
+///
+/// `m` is clamped to `4` for `m > 4` so this agrees with the `_` fallback arm
+/// of [`wahba_sphere_kernel_pseudo_from_cos`], which evaluates the `m = 4`
+/// polynomial for any `m ≥ 4`.
+#[inline]
+pub(crate) fn wahba_sphere_kernel_pseudo_coincident(m: usize) -> f64 {
+    let m_eff = m.clamp(1, 4);
+    let factorial = (1..=(m_eff + 1)).map(|k| k as f64).product::<f64>();
+    1.0 / (2.0 * std::f64::consts::PI * (m_eff as f64) * factorial)
+}
+
 /// Pseudo-spline Wahba kernel on S² (mgcv `makeR`-style closed form).
 #[inline]
 pub(crate) fn wahba_sphere_kernel_pseudo_from_cos(cos_gamma: f64, m: usize) -> f64 {
     let cg = cos_gamma.clamp(-1.0, 1.0);
-    let z = (1.0 - cg).max(f64::EPSILON * 1.0e-4);
+    let z = 1.0 - cg;
+    // Coincident points are the ONLY inputs the old `z.max(f64::EPSILON*1e-4)`
+    // floor could ever bind on, and there the kernel has an exact finite limit.
+    // By Sterbenz's lemma `1.0 - cg` is computed exactly for `cg ∈ [0.5, 1]`,
+    // and the representable spacing below `1.0` is `2⁻⁵³`, so a positive `z` is
+    // at least `2⁻⁵³ ≈ 1.11e-16` — nine orders above that floor, which sat at
+    // `2.22e-20`. Taking the analytic limit here is therefore bit-identical to
+    // the floored form at every input except exact coincidence, where it
+    // replaces a 4.2e-10 relative error (the floor's `-2√w` term, `O(√floor)`)
+    // with the exact value.
+    //
+    // Shrinking the floor rather than removing it would also have recovered
+    // the limits (down to `f64::MIN_POSITIVE`), but not unconditionally: half
+    // a step further, at the smallest subnormal, `w = 0.5 * z` underflows to
+    // zero, `1.0/c0` is `+∞`, and the `2·a·w` term becomes `∞ · 0 = NaN`. The
+    // analytic limit has no such cliff, and needs no constant to state.
+    if z <= 0.0 {
+        return wahba_sphere_kernel_pseudo_coincident(m);
+    }
     let w = 0.5 * z;
     let c0 = w.sqrt();
     let a = (1.0 + 1.0 / c0).ln();
