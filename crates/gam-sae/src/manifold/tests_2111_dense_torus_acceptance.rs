@@ -30,9 +30,9 @@
 //! backfit) — the failure mode is the finding.
 
 use crate::manifold::{
-    AssignmentMode, PeriodicHarmonicEvaluator, SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator,
-    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, StagewiseConfig, StagewiseStop,
-    fit_stagewise,
+    AssignmentMode, BirthCandidateDecision, BirthRejection, PeriodicHarmonicEvaluator,
+    SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator, SaeManifoldAtom, SaeManifoldRho,
+    SaeManifoldTerm, StagewiseConfig, StagewiseStop, fit_stagewise,
 };
 use gam_linalg::faer_ndarray::FaerSvd;
 use gam_terms::latent::LatentManifold;
@@ -280,25 +280,76 @@ fn dense_torus_integrated_birth_recovery_2111() {
     );
     eprintln!("[#2111] birth ledger:");
     for (r, br) in result.report.birth_records.iter().enumerate() {
-        // #2556: `dEV` is now the candidate's REAL delta on both branches, and the
-        // outcome carries the clause that decided the round. This line used to
-        // print `dEV=0.00000` on every rejection because the record fabricated it,
-        // which is what made "an exact zero improvement from a candidate carrying
-        // energy" a readable — and wrong — inference.
         eprintln!(
-            "   round {r}: outcome={:?} kind={:?} dEV={} criterion_after={} factor_energy={:.5}",
-            br.outcome,
-            br.kind,
-            br
-                .delta_ev
-                .map(|d| format!("{d:.5}"))
-                .unwrap_or_else(|| "none".to_string()),
-            br
-                .joint_penalized_quasi_laplace_after
-                .map(|c| format!("{c:.5}"))
-                .unwrap_or_else(|| "none".to_string()),
-            br.factor_energy
+            "   round {r}: before={:.5} min_effect_ev={:.5} accepted={}",
+            br.joint_penalized_quasi_laplace_before,
+            br.min_effect_ev,
+            br.accepted_count(),
         );
+        for (candidate, record) in br.candidates.iter().enumerate() {
+            match &record.decision {
+                BirthCandidateDecision::FitFailed(_) => {
+                    assert_eq!(record.delta_ev, None);
+                    assert_eq!(record.joint_penalized_quasi_laplace, None);
+                }
+                decision => {
+                    let delta_ev = record
+                        .delta_ev
+                        .expect("every measured birth candidate must retain its ΔEV");
+                    let criterion = record.joint_penalized_quasi_laplace.expect(
+                        "every measured birth candidate must retain its joint criterion",
+                    );
+                    match decision {
+                        BirthCandidateDecision::GateRejected(
+                            BirthRejection::NonFiniteCriterion,
+                        ) => assert!(!criterion.is_finite()),
+                        BirthCandidateDecision::GateRejected(
+                            BirthRejection::EvidenceNotImproved {
+                                criterion: rejected,
+                                must_be_below,
+                            },
+                        ) => {
+                            assert_eq!(criterion, *rejected);
+                            assert_eq!(
+                                br.joint_penalized_quasi_laplace_before,
+                                *must_be_below
+                            );
+                            assert!(!(criterion < *must_be_below));
+                        }
+                        BirthCandidateDecision::GateRejected(BirthRejection::NonFiniteEv) => {
+                            assert!(!delta_ev.is_finite())
+                        }
+                        BirthCandidateDecision::GateRejected(
+                            BirthRejection::EffectBelowFloor {
+                                delta_ev: rejected,
+                                floor,
+                            },
+                        ) => {
+                            assert_eq!(delta_ev, *rejected);
+                            assert_eq!(br.min_effect_ev, *floor);
+                            assert!(!(delta_ev >= *floor));
+                        }
+                        BirthCandidateDecision::Accepted
+                        | BirthCandidateDecision::Outranked
+                        | BirthCandidateDecision::DeferredByBatchSelection => assert!(
+                            criterion.is_finite()
+                                && criterion < br.joint_penalized_quasi_laplace_before
+                                && delta_ev >= br.min_effect_ev
+                        ),
+                        BirthCandidateDecision::FitFailed(_) => unreachable!(),
+                    }
+                }
+            }
+            eprintln!(
+                "      candidate {candidate}: decision={:?} kind={:?} dEV={:?} \
+                 factor_energy={:.5} joint_penalized_quasi_laplace={:?}",
+                record.decision,
+                record.kind,
+                record.delta_ev,
+                record.factor_energy,
+                record.joint_penalized_quasi_laplace,
+            );
+        }
     }
 
     // ── The #2111 acceptance bar ────────────────────────────────────────────────

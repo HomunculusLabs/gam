@@ -160,58 +160,73 @@ pub enum StagewiseStop {
     Cancelled,
 }
 
-/// One birth round's outcome, recorded for the honesty surface (never silent).
-#[derive(Clone, Copy, Debug)]
+/// One birth round's complete candidate ledger (never silent).
+///
+/// Measurements belong to candidates, not merely to a winner. A rejected round
+/// therefore retains every attempted arm, every construction error, and the
+/// exact gate or selection decision for every measured candidate. Batched
+/// co-acceptance is one round and consequently one record, regardless of how
+/// many disjoint candidates it installs.
+#[derive(Clone, Debug, PartialEq)]
 pub struct BirthRecord {
-    /// The winning candidate kind (only meaningful when accepted).
-    pub kind: BirthKind,
-    /// ΔEV of the candidate this round was DECIDED ON — the accepted one, or on a
-    /// rejection the best candidate the gate actually examined.
-    ///
-    /// `None` in exactly one case: no candidate could be constructed, so no ΔEV
-    /// exists to report. It used to be a hardcoded `0.0` on both rejection
-    /// branches (#2556), which is indistinguishable from a measured zero and is
-    /// therefore worse than an absence — a reader who took `dEV = 0.00000` at
-    /// face value concluded something false about the candidate.
-    pub delta_ev: Option<f64>,
-    /// Explained residual energy `‖Λ_:,0‖²` of the top factor the seed came from
-    /// — the birth's dose, reported so a trivial-but-real wiggle is visible.
-    pub factor_energy: f64,
     /// Frozen joint penalized quasi-Laplace criterion before the round (lower is better).
     pub joint_penalized_quasi_laplace_before: f64,
-    /// Frozen joint penalized quasi-Laplace criterion of the candidate this round
-    /// was decided on. `None` under the same single condition as
-    /// [`Self::delta_ev`]: no candidate existed. It used to be set to the
-    /// pre-round value on rejection, so `before == after` looked like a measured
-    /// no-op rather than an absent measurement.
-    pub joint_penalized_quasi_laplace_after: Option<f64>,
-    /// What happened, as ONE field.
-    ///
-    /// Not an `accepted: bool` beside an `Option<reason>`: two fields for one
-    /// fact is the state #2479's genus is about, and it would let a record claim
-    /// acceptance while carrying a rejection reason. Read the boolean through
-    /// [`Self::accepted`].
-    pub outcome: BirthOutcome,
+    /// Exact minimum-effect floor used to adjudicate every measured candidate.
+    pub min_effect_ev: f64,
+    /// Attempted candidates in deterministic serial-arm or batch-harvest order.
+    pub candidates: Vec<BirthCandidateRecord>,
 }
 
 impl BirthRecord {
-    /// Whether a candidate cleared BOTH the evidence clause and the
-    /// minimum-effect floor and was adopted.
+    /// Whether this round installed at least one candidate.
     pub fn accepted(&self) -> bool {
-        matches!(self.outcome, BirthOutcome::Accepted)
+        self.candidates
+            .iter()
+            .any(|candidate| matches!(&candidate.decision, BirthCandidateDecision::Accepted))
+    }
+
+    /// Number of disjoint candidates installed by this round.
+    pub fn accepted_count(&self) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| matches!(&candidate.decision, BirthCandidateDecision::Accepted))
+            .count()
     }
 }
 
-/// The outcome of one birth round.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum BirthOutcome {
-    /// A candidate cleared the gate and was adopted.
-    Accepted,
-    /// No candidate was adopted, and this is why.
-    Rejected(BirthRejection),
+/// Lossless evidence and disposition for one attempted birth candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BirthCandidateRecord {
+    /// Candidate arm. Batched rounds contain one `NewAtom` entry per harvested seed.
+    pub kind: BirthKind,
+    /// Measured ΔEV over the pre-round state. This is `None` exactly when fitting
+    /// failed before EV could be measured; non-finite measurements remain `Some`.
+    pub delta_ev: Option<f64>,
+    /// Explained residual energy `‖Λ_:,0‖²` of the factor which seeded this arm.
+    pub factor_energy: f64,
+    /// Frozen joint penalized quasi-Laplace criterion of this candidate. This is
+    /// `None` exactly when fitting failed before the criterion could be measured.
+    pub joint_penalized_quasi_laplace: Option<f64>,
+    /// The candidate's exact gate, ranking, selection, or fit disposition.
+    pub decision: BirthCandidateDecision,
 }
 
-/// Why a birth round adopted nothing — the clause that decided it, carrying the
+/// What happened to one attempted candidate in a birth round.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BirthCandidateDecision {
+    /// The candidate cleared the gate and was installed.
+    Accepted,
+    /// The candidate reached the gate and its exact first failing clause rejected it.
+    GateRejected(BirthRejection),
+    /// The candidate cleared the gate but a lower-criterion serial arm won.
+    Outranked,
+    /// The candidate cleared the gate but could not join this disjoint batch.
+    DeferredByBatchSelection,
+    /// Construction or fitting failed before evidence could be measured.
+    FitFailed(String),
+}
+
+/// The first birth-gate clause that rejected a measured candidate, carrying the
 /// quantity it was decided against.
 ///
 /// #2556: a rejection record that fabricates its decision quantity is the same
@@ -221,9 +236,6 @@ pub enum BirthOutcome {
 /// the general rule: a refusal carries the quantity it was decided against.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BirthRejection {
-    /// No candidate could be constructed this round. The ONLY state in which
-    /// there is no ΔEV or criterion to report.
-    NoCandidate,
     /// The candidate's joint criterion was not finite.
     NonFiniteCriterion,
     /// The candidate's explained variance was not finite.
@@ -243,25 +255,13 @@ pub enum BirthRejection {
         /// `config.min_effect_ev`.
         floor: f64,
     },
-    /// The candidate CLEARED the gate but the disjoint batch selection did not
-    /// take it — the birth budget was exhausted, or every remaining candidate
-    /// overlapped an accepted one on rows or output dims. Distinguished from the
-    /// gate clauses because it says nothing about the candidate's quality, and
-    /// collapsing it into one of them would be exactly the mislabelling #2556 is
-    /// about.
-    NotSelectedInBatch {
-        /// The candidate's joint criterion.
-        criterion: f64,
-        /// The realised `ev - cur_ev`.
-        delta_ev: f64,
-    },
 }
 
 /// Classify one candidate against the birth gate.
 ///
-/// `None` means it passes. This is the SINGLE definition of the gate: the
-/// `passes` predicate below is written in terms of it, so the accept/reject
-/// decision and the reason reported for a rejection cannot drift apart.
+/// `None` means it passes. This is the single definition used by serial
+/// selection, batch selection, and durable ledger construction, so an adoption
+/// decision and its reported reason cannot drift apart.
 fn classify_birth_candidate(
     criterion: f64,
     ev: f64,
@@ -294,6 +294,155 @@ fn classify_birth_candidate(
         });
     }
     None
+}
+
+/// Candidate evidence at the decision boundary, before the round's accepted set
+/// is known. Keeping the error arm here prevents serial `.ok()` and batched
+/// `filter_map(Result::ok)` from erasing failed attempts before telemetry exists.
+enum BirthCandidateAttempt {
+    Measured {
+        kind: BirthKind,
+        factor_energy: f64,
+        criterion: f64,
+        ev: f64,
+    },
+    FitFailed {
+        kind: BirthKind,
+        factor_energy: f64,
+        error: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum PassingCandidateDisposition {
+    Outranked,
+    DeferredByBatchSelection,
+}
+
+/// Select the gate-passing serial candidate with the lowest criterion. Ties
+/// retain deterministic arm order.
+fn best_passing_birth_candidate(
+    attempts: &[BirthCandidateAttempt],
+    cur_ev: f64,
+    current_criterion: f64,
+    min_effect_ev: f64,
+) -> Option<usize> {
+    attempts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attempt)| match attempt {
+            BirthCandidateAttempt::Measured { criterion, ev, .. }
+                if classify_birth_candidate(
+                    *criterion,
+                    *ev,
+                    cur_ev,
+                    current_criterion,
+                    min_effect_ev,
+                )
+                .is_none() =>
+            {
+                Some((index, *criterion))
+            }
+            _ => None,
+        })
+        .min_by(|(left_index, left), (right_index, right)| {
+            left.partial_cmp(right)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left_index.cmp(right_index))
+        })
+        .map(|(index, _)| index)
+}
+
+/// Materialize the durable candidate ledger from the exact attempted set and
+/// the indices the driver selected. Every selected index must name a measured
+/// candidate which cleared the shared classifier; violation is an internal
+/// decision-boundary inconsistency and is surfaced instead of fabricated.
+fn record_birth_candidates(
+    attempts: &[BirthCandidateAttempt],
+    selected_indices: &[usize],
+    passing_disposition: PassingCandidateDisposition,
+    cur_ev: f64,
+    current_criterion: f64,
+    min_effect_ev: f64,
+) -> Result<Vec<BirthCandidateRecord>, String> {
+    let mut selected = vec![false; attempts.len()];
+    for &index in selected_indices {
+        let Some(slot) = selected.get_mut(index) else {
+            return Err(format!(
+                "birth candidate selection index {index} is outside {} attempts",
+                attempts.len()
+            ));
+        };
+        if *slot {
+            return Err(format!(
+                "birth candidate selection index {index} was selected twice"
+            ));
+        }
+        *slot = true;
+    }
+
+    attempts
+        .iter()
+        .enumerate()
+        .map(|(index, attempt)| match attempt {
+            BirthCandidateAttempt::FitFailed {
+                kind,
+                factor_energy,
+                error,
+            } => {
+                if selected[index] {
+                    return Err(format!(
+                        "birth candidate selection index {index} names a failed fit"
+                    ));
+                }
+                Ok(BirthCandidateRecord {
+                    kind: *kind,
+                    delta_ev: None,
+                    factor_energy: *factor_energy,
+                    joint_penalized_quasi_laplace: None,
+                    decision: BirthCandidateDecision::FitFailed(error.clone()),
+                })
+            }
+            BirthCandidateAttempt::Measured {
+                kind,
+                factor_energy,
+                criterion,
+                ev,
+            } => {
+                let rejection = classify_birth_candidate(
+                    *criterion,
+                    *ev,
+                    cur_ev,
+                    current_criterion,
+                    min_effect_ev,
+                );
+                if selected[index] && rejection.is_some() {
+                    return Err(format!(
+                        "birth candidate selection index {index} did not clear the birth gate"
+                    ));
+                }
+                let decision = match rejection {
+                    Some(reason) => BirthCandidateDecision::GateRejected(reason),
+                    None if selected[index] => BirthCandidateDecision::Accepted,
+                    None => match passing_disposition {
+                        PassingCandidateDisposition::Outranked => {
+                            BirthCandidateDecision::Outranked
+                        }
+                        PassingCandidateDisposition::DeferredByBatchSelection => {
+                            BirthCandidateDecision::DeferredByBatchSelection
+                        }
+                    },
+                };
+                Ok(BirthCandidateRecord {
+                    kind: *kind,
+                    delta_ev: Some(*ev - cur_ev),
+                    factor_energy: *factor_energy,
+                    joint_penalized_quasi_laplace: Some(*criterion),
+                    decision,
+                })
+            }
+        })
+        .collect()
 }
 
 /// The full SAC report: the birth ledger, the by-construction-monotone EV traces,
@@ -1425,30 +1574,28 @@ pub fn fit_stagewise(
                 std::slice::from_ref(&seed.decoder),
             ),
         };
-        let mut cand_a = born_move
-            .and_then(|(mut cand_term, mut cand_rho)| {
-                cand_term.set_guards_enabled(false);
-                let born = cand_term.k_atoms() - 1;
-                fit_single_atom_response_in_place(
-                    &mut cand_term,
-                    &mut cand_rho,
-                    born,
-                    residual.view(),
-                    registry,
-                    config,
-                )?;
-                let (penalized_quasi_laplace, _) = frozen_joint_penalized_quasi_laplace(
-                    &mut cand_term,
-                    target,
-                    &cand_rho,
-                    registry,
-                    config,
-                )?;
-                let ev = ev_of(&cand_term, target);
-                Ok((cand_term, cand_rho, penalized_quasi_laplace, ev))
-            })
-            .ok();
-        if let Some((cand_term, cand_rho, penalized_quasi_laplace, ev)) = cand_a.as_ref() {
+        let cand_a = born_move.and_then(|(mut cand_term, mut cand_rho)| {
+            cand_term.set_guards_enabled(false);
+            let born = cand_term.k_atoms() - 1;
+            fit_single_atom_response_in_place(
+                &mut cand_term,
+                &mut cand_rho,
+                born,
+                residual.view(),
+                registry,
+                config,
+            )?;
+            let (penalized_quasi_laplace, _) = frozen_joint_penalized_quasi_laplace(
+                &mut cand_term,
+                target,
+                &cand_rho,
+                registry,
+                config,
+            )?;
+            let ev = ev_of(&cand_term, target);
+            Ok((cand_term, cand_rho, penalized_quasi_laplace, ev))
+        });
+        if let Ok((cand_term, cand_rho, penalized_quasi_laplace, ev)) = cand_a.as_ref() {
             emit_stagewise_progress(
                 &mut progress,
                 StagewiseProgress {
@@ -1483,7 +1630,7 @@ pub fn fit_stagewise(
                     k_atoms: term.k_atoms(),
                     births_accepted,
                     births_rejected,
-                    ev: Some(cur_ev),
+                    ev: None,
                     factor_energy: Some(factor_energy),
                     joint_penalized_quasi_laplace_before: Some(current_penalized_quasi_laplace),
                     joint_penalized_quasi_laplace_after: None,
@@ -1497,7 +1644,7 @@ pub fn fit_stagewise(
         // Candidate B — extend the previous atom's chart (arc-tiling). Refit the
         // last atom on its LOO residual so it can absorb the residual it left
         // behind; K does NOT grow.
-        let mut cand_b = if term.k_atoms() > 1 {
+        let cand_b = if term.k_atoms() > 1 {
             emit_stagewise_progress(
                 &mut progress,
                 StagewiseProgress {
@@ -1551,8 +1698,7 @@ pub fn fit_stagewise(
                 let ev = ev_of(&cand_term, target);
                 Ok((cand_term, cand_rho, penalized_quasi_laplace, ev))
             })();
-            let out = built.ok();
-            if let Some((cand_term, cand_rho, penalized_quasi_laplace, ev)) = out.as_ref() {
+            if let Ok((cand_term, cand_rho, penalized_quasi_laplace, ev)) = built.as_ref() {
                 emit_stagewise_progress(
                     &mut progress,
                     StagewiseProgress {
@@ -1587,7 +1733,7 @@ pub fn fit_stagewise(
                         k_atoms: term.k_atoms(),
                         births_accepted,
                         births_rejected,
-                        ev: Some(cur_ev),
+                        ev: None,
                         factor_energy: Some(factor_energy),
                         joint_penalized_quasi_laplace_before: Some(current_penalized_quasi_laplace),
                         joint_penalized_quasi_laplace_after: None,
@@ -1597,7 +1743,7 @@ pub fn fit_stagewise(
                     },
                 )?;
             }
-            out
+            Some(built)
         } else {
             // With K=1 the "chart extension" arm is exactly the seed fit repeated
             // against the same target under the same ρ. Skipping it removes one
@@ -1607,115 +1753,125 @@ pub fn fit_stagewise(
             None
         };
 
-        // Gate: strictly-improved joint evidence AND ΔEV ≥ the minimum-effect
-        // floor. Among the candidates that clear both gates, the lower penalized quasi-Laplace wins.
-        // ONE definition of the gate (#2556): the predicate is the classifier's
-        // "no complaint" case, so a rejection's reported reason is by construction
-        // the reason the gate actually used.
-        let passes = |penalized_quasi_laplace: f64, ev: f64| -> bool {
-            classify_birth_candidate(
-                penalized_quasi_laplace,
-                ev,
-                cur_ev,
-                current_penalized_quasi_laplace,
-                config.min_effect_ev,
-            )
-            .is_none()
-        };
-        let a_ok = cand_a
-            .as_ref()
-            .map(|&(_, _, r, e)| passes(r, e))
-            .unwrap_or(false);
-        let b_ok = cand_b
-            .as_ref()
-            .map(|&(_, _, r, e)| passes(r, e))
-            .unwrap_or(false);
-
-        let choose_a = match (a_ok, b_ok) {
-            (true, true) => {
-                let ar = cand_a.as_ref().unwrap().2;
-                let br = cand_b.as_ref().unwrap().2;
-                ar <= br
-            }
-            (true, false) => true,
-            (false, true) => false,
-            (false, false) => {
-                births_rejected += 1;
-                consecutive_rejections += 1;
-                // Report the candidate the gate would have CHOSEN had one passed —
-                // the lower-criterion of the constructible pair — together with the
-                // clause that actually rejected it. Before #2556 this wrote a
-                // literal `delta_ev: 0.0` and `after == before`, so a rejection
-                // reported numbers that looked measured and were not.
-                let best = [cand_a.as_ref(), cand_b.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .min_by(|l, r| l.2.total_cmp(&r.2));
-                let (delta_ev, criterion_after, rejection) = match best {
-                    Some(&(_, _, criterion, ev)) => (
-                        Some(ev - cur_ev),
-                        Some(criterion),
-                        classify_birth_candidate(
-                            criterion,
-                            ev,
-                            cur_ev,
-                            current_penalized_quasi_laplace,
-                            config.min_effect_ev,
-                        )
-                        .unwrap_or(BirthRejection::NoCandidate),
-                    ),
-                    None => (None, None, BirthRejection::NoCandidate),
-                };
-                birth_records.push(BirthRecord {
-                    kind: BirthKind::NewAtom,
-                    delta_ev,
+        // One decision boundary for selection and telemetry: preserve every arm
+        // in stable order, choose the lowest-criterion gate-passing arm, and then
+        // materialize each exact gate/ranking disposition from that same choice.
+        let mut attempts = vec![match cand_a.as_ref() {
+            Ok((_, _, criterion, ev)) => BirthCandidateAttempt::Measured {
+                kind: BirthKind::NewAtom,
+                factor_energy,
+                criterion: *criterion,
+                ev: *ev,
+            },
+            Err(error) => BirthCandidateAttempt::FitFailed {
+                kind: BirthKind::NewAtom,
+                factor_energy,
+                error: error.clone(),
+            },
+        }];
+        if let Some(attempt) = cand_b.as_ref() {
+            attempts.push(match attempt {
+                Ok((_, _, criterion, ev)) => BirthCandidateAttempt::Measured {
+                    kind: BirthKind::ChartExtension,
                     factor_energy,
-                    joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                    joint_penalized_quasi_laplace_after: criterion_after,
-                    outcome: BirthOutcome::Rejected(rejection),
-                });
-                emit_stagewise_progress(
-                    &mut progress,
-                    StagewiseProgress {
-                        event: StagewiseEventKind::BirthRejected,
-                        birth_round: round,
-                        backfit_sweep: 0,
-                        candidate: None,
-                        accepted: Some(false),
-                        checkpoint: true,
-                        k_atoms: term.k_atoms(),
-                        births_accepted,
-                        births_rejected,
-                        ev: Some(cur_ev),
-                        factor_energy: Some(factor_energy),
-                        joint_penalized_quasi_laplace_before: Some(current_penalized_quasi_laplace),
-                        joint_penalized_quasi_laplace_after: Some(current_penalized_quasi_laplace),
-                        terminal_joint_penalized_quasi_laplace: None,
-                        term: &term,
-                        rho: &rho,
-                    },
-                )?;
-                continue;
-            }
+                    criterion: *criterion,
+                    ev: *ev,
+                },
+                Err(error) => BirthCandidateAttempt::FitFailed {
+                    kind: BirthKind::ChartExtension,
+                    factor_energy,
+                    error: error.clone(),
+                },
+            });
+        }
+        let selected_index = best_passing_birth_candidate(
+            &attempts,
+            cur_ev,
+            current_penalized_quasi_laplace,
+            config.min_effect_ev,
+        );
+        let selected_indices = match selected_index {
+            Some(index) => vec![index],
+            None => Vec::new(),
+        };
+        let candidates = record_birth_candidates(
+            &attempts,
+            &selected_indices,
+            PassingCandidateDisposition::Outranked,
+            cur_ev,
+            current_penalized_quasi_laplace,
+            config.min_effect_ev,
+        )?;
+        birth_records.push(BirthRecord {
+            joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
+            min_effect_ev: config.min_effect_ev,
+            candidates,
+        });
+
+        let Some(selected_index) = selected_index else {
+            births_rejected += 1;
+            consecutive_rejections += 1;
+            emit_stagewise_progress(
+                &mut progress,
+                StagewiseProgress {
+                    event: StagewiseEventKind::BirthRejected,
+                    birth_round: round,
+                    backfit_sweep: 0,
+                    candidate: None,
+                    accepted: Some(false),
+                    checkpoint: true,
+                    k_atoms: term.k_atoms(),
+                    births_accepted,
+                    births_rejected,
+                    ev: Some(cur_ev),
+                    factor_energy: Some(factor_energy),
+                    joint_penalized_quasi_laplace_before: Some(
+                        current_penalized_quasi_laplace,
+                    ),
+                    // A rejected round has no candidate "after". The incumbent
+                    // remains available as the explicit `before` measurement.
+                    joint_penalized_quasi_laplace_after: None,
+                    terminal_joint_penalized_quasi_laplace: None,
+                    term: &term,
+                    rho: &rho,
+                },
+            )?;
+            continue;
         };
 
-        let (kind, (cand_term, cand_rho, penalized_quasi_laplace_after, ev_after)) = if choose_a {
-            (BirthKind::NewAtom, cand_a.take().unwrap())
-        } else {
-            (BirthKind::ChartExtension, cand_b.take().unwrap())
-        };
+        let (kind, (cand_term, cand_rho, penalized_quasi_laplace_after, ev_after)) =
+            match selected_index {
+                0 => match cand_a {
+                    Ok(candidate) => (BirthKind::NewAtom, candidate),
+                    Err(error) => {
+                        return Err(format!(
+                            "serial birth selected failed candidate A: {error}"
+                        ));
+                    }
+                },
+                1 => match cand_b {
+                    Some(Ok(candidate)) => (BirthKind::ChartExtension, candidate),
+                    Some(Err(error)) => {
+                        return Err(format!(
+                            "serial birth selected failed candidate B: {error}"
+                        ));
+                    }
+                    None => {
+                        return Err(
+                            "serial birth selected candidate B without attempting it".to_string()
+                        );
+                    }
+                },
+                _ => {
+                    return Err(format!(
+                        "serial birth selected candidate index {selected_index} outside two arms"
+                    ));
+                }
+            };
         term = cand_term;
         rho = cand_rho;
         births_accepted += 1;
         consecutive_rejections = 0;
-        birth_records.push(BirthRecord {
-            kind,
-            delta_ev: Some(ev_after - cur_ev),
-            factor_energy,
-            joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-            joint_penalized_quasi_laplace_after: Some(penalized_quasi_laplace_after),
-            outcome: BirthOutcome::Accepted,
-        });
         ev_trace.push(ev_after);
         emit_stagewise_progress(
             &mut progress,
@@ -2371,14 +2527,44 @@ pub fn fit_stagewise_batched(
         // (par_pairwise_sum / tests_parallelism_invariance_1557), so
         // serializing the outer loop changes no candidate's result — it only
         // re-enables the wide, high-efficiency row fan inside each one.
-        // A candidate whose fit errors is dropped (mirrors the serial
-        // `.ok()`), never aborting the round.
-        let raced: Vec<RacedCandidate> = seeds
+        // A candidate fit error does not abort the round, but it remains in the
+        // durable ledger at its exact harvest position.
+        let raced_attempts: Vec<Result<RacedCandidate, String>> = seeds
             .iter()
-            .filter_map(|s| {
-                race_birth_seed(&term, &rho, s, residual.view(), target, registry, base).ok()
+            .map(|seed| {
+                race_birth_seed(
+                    &term,
+                    &rho,
+                    seed,
+                    residual.view(),
+                    target,
+                    registry,
+                    base,
+                )
             })
             .collect();
+        let mut raced = Vec::with_capacity(raced_attempts.len());
+        let mut source_index_by_raced = Vec::with_capacity(raced_attempts.len());
+        let mut attempts = Vec::with_capacity(raced_attempts.len());
+        for (source_index, attempt) in raced_attempts.into_iter().enumerate() {
+            match attempt {
+                Ok(candidate) => {
+                    attempts.push(BirthCandidateAttempt::Measured {
+                        kind: BirthKind::NewAtom,
+                        factor_energy: candidate.energy,
+                        criterion: candidate.penalized_quasi_laplace,
+                        ev: candidate.ev,
+                    });
+                    source_index_by_raced.push(source_index);
+                    raced.push(candidate);
+                }
+                Err(error) => attempts.push(BirthCandidateAttempt::FitFailed {
+                    kind: BirthKind::NewAtom,
+                    factor_energy: seeds[source_index].energy,
+                    error,
+                }),
+            }
+        }
 
         // Birth gate: strictly-improved joint evidence AND ΔEV ≥ the minimum-effect
         // floor. This was a hand-copied duplicate of the serial `passes` predicate
@@ -2415,6 +2601,25 @@ pub fn fit_stagewise_batched(
         // budget. Each accepted atom is appended by its already-raced fit.
         let remaining = base.max_births.saturating_sub(births_accepted);
         let (accepted_idx, requeued_overlap) = select_disjoint_batch(&raced, &order, remaining);
+        let accepted_source_indices: Vec<usize> = accepted_idx
+            .iter()
+            .map(|&index| {
+                source_index_by_raced.get(index).copied().ok_or_else(|| {
+                    format!(
+                        "batched birth selected raced index {index} outside {} successful races",
+                        source_index_by_raced.len()
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let candidates = record_birth_candidates(
+            &attempts,
+            &accepted_source_indices,
+            PassingCandidateDisposition::DeferredByBatchSelection,
+            cur_ev,
+            current_penalized_quasi_laplace,
+            base.min_effect_ev,
+        )?;
         let mut co_accepted = 0usize;
         for &idx in &accepted_idx {
             let c = &raced[idx];
@@ -2432,17 +2637,6 @@ pub fn fit_stagewise_batched(
             births_accepted += 1;
             co_accepted += 1;
             let running_ev = ev_of(&term, target);
-            birth_records.push(BirthRecord {
-                kind: BirthKind::NewAtom,
-                // Charge this birth exactly what the serial loop would: its own
-                // K+1 joint-evidence delta over the round's reference (additive
-                // across the disjoint batch).
-                delta_ev: Some(c.ev - cur_ev),
-                factor_energy: c.energy,
-                joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                joint_penalized_quasi_laplace_after: Some(c.penalized_quasi_laplace),
-                outcome: BirthOutcome::Accepted,
-            });
             ev_trace.push(running_ev);
         }
 
@@ -2452,42 +2646,15 @@ pub fn fit_stagewise_batched(
             co_accepted,
             requeued_overlap,
         });
+        birth_records.push(BirthRecord {
+            joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
+            min_effect_ev: base.min_effect_ev,
+            candidates,
+        });
 
         if co_accepted == 0 {
             births_rejected += 1;
             consecutive_reject_rounds += 1;
-            // `co_accepted == 0` has TWO causes and they mean opposite things:
-            // the best candidate failed the gate, or it PASSED and the disjoint
-            // selection could not take it (budget exhausted / every remaining
-            // candidate overlapped an accepted one). Reporting the second as a
-            // gate rejection would be the same mislabelling #2556 is about, so
-            // the classifier decides and `NotSelectedInBatch` names the other.
-            let (delta_ev, criterion_after, rejection) = match raced.first() {
-                Some(c) => (
-                    Some(c.ev - cur_ev),
-                    Some(c.penalized_quasi_laplace),
-                    classify_birth_candidate(
-                        c.penalized_quasi_laplace,
-                        c.ev,
-                        cur_ev,
-                        current_penalized_quasi_laplace,
-                        base.min_effect_ev,
-                    )
-                    .unwrap_or(BirthRejection::NotSelectedInBatch {
-                        criterion: c.penalized_quasi_laplace,
-                        delta_ev: c.ev - cur_ev,
-                    }),
-                ),
-                None => (None, None, BirthRejection::NoCandidate),
-            };
-            birth_records.push(BirthRecord {
-                kind: BirthKind::NewAtom,
-                delta_ev,
-                factor_energy: raced.first().map(|c| c.energy).unwrap_or(0.0),
-                joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                joint_penalized_quasi_laplace_after: criterion_after,
-                outcome: BirthOutcome::Rejected(rejection),
-            });
         } else {
             consecutive_reject_rounds = 0;
         }
@@ -4113,6 +4280,175 @@ mod birth_rejection_reason_tests {
         assert!(
             classify_birth_candidate(1.0, 0.5, f64::NAN, 2.0, 0.0).is_some(),
             "a NaN ΔEV must be rejected, not passed"
+        );
+    }
+
+    #[test]
+    fn serial_birth_ledger_retains_errors_and_selects_the_best_arm_2556() {
+        let current_criterion = 10.0;
+        let cur_ev = 0.5;
+        let floor = 0.1;
+        let passing = vec![
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::NewAtom,
+                factor_energy: 1.0,
+                criterion: 8.0,
+                ev: 0.8,
+            },
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::ChartExtension,
+                factor_energy: 2.0,
+                criterion: 7.0,
+                ev: 0.9,
+            },
+        ];
+        let selected =
+            best_passing_birth_candidate(&passing, cur_ev, current_criterion, floor);
+        assert_eq!(
+            selected,
+            Some(1),
+            "the lower-criterion second arm, not generation-order arm zero, must win"
+        );
+        let ledger = record_birth_candidates(
+            &passing,
+            &[selected.expect("one serial arm must pass")],
+            PassingCandidateDisposition::Outranked,
+            cur_ev,
+            current_criterion,
+            floor,
+        )
+        .expect("a valid serial decision must produce a ledger");
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger[0].decision, BirthCandidateDecision::Outranked);
+        assert_eq!(ledger[1].decision, BirthCandidateDecision::Accepted);
+        assert_eq!(ledger[0].delta_ev, Some(0.8 - cur_ev));
+        assert_eq!(ledger[1].joint_penalized_quasi_laplace, Some(7.0));
+
+        let failed_and_rejected = vec![
+            BirthCandidateAttempt::FitFailed {
+                kind: BirthKind::NewAtom,
+                factor_energy: 3.0,
+                error: "new-atom fit refused".to_string(),
+            },
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::ChartExtension,
+                factor_energy: 4.0,
+                criterion: current_criterion,
+                ev: 0.9,
+            },
+        ];
+        assert_eq!(
+            best_passing_birth_candidate(
+                &failed_and_rejected,
+                cur_ev,
+                current_criterion,
+                floor,
+            ),
+            None
+        );
+        let rejected_ledger = record_birth_candidates(
+            &failed_and_rejected,
+            &[],
+            PassingCandidateDisposition::Outranked,
+            cur_ev,
+            current_criterion,
+            floor,
+        )
+        .expect("failed and gate-rejected arms are valid durable outcomes");
+        assert_eq!(rejected_ledger[0].delta_ev, None);
+        assert_eq!(rejected_ledger[0].joint_penalized_quasi_laplace, None);
+        assert_eq!(
+            rejected_ledger[0].decision,
+            BirthCandidateDecision::FitFailed("new-atom fit refused".to_string())
+        );
+        assert_eq!(
+            rejected_ledger[1].decision,
+            BirthCandidateDecision::GateRejected(BirthRejection::EvidenceNotImproved {
+                criterion: current_criterion,
+                must_be_below: current_criterion,
+            })
+        );
+    }
+
+    #[test]
+    fn batch_birth_ledger_preserves_harvest_order_and_exact_dispositions_2556() {
+        let current_criterion = 10.0;
+        let cur_ev = 0.5;
+        let floor = 0.1;
+        let attempts = vec![
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::NewAtom,
+                factor_energy: 1.0,
+                criterion: current_criterion,
+                ev: 0.8,
+            },
+            BirthCandidateAttempt::FitFailed {
+                kind: BirthKind::NewAtom,
+                factor_energy: 2.0,
+                error: "seed one failed".to_string(),
+            },
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::NewAtom,
+                factor_energy: 3.0,
+                criterion: 6.0,
+                ev: 0.9,
+            },
+            BirthCandidateAttempt::Measured {
+                kind: BirthKind::NewAtom,
+                factor_energy: 4.0,
+                criterion: 7.0,
+                ev: 0.85,
+            },
+        ];
+        assert_eq!(
+            best_passing_birth_candidate(&attempts, cur_ev, current_criterion, floor),
+            Some(2),
+            "the first harvested candidate is not a proxy for the best adjudicated candidate"
+        );
+        let ledger = record_birth_candidates(
+            &attempts,
+            &[2],
+            PassingCandidateDisposition::DeferredByBatchSelection,
+            cur_ev,
+            current_criterion,
+            floor,
+        )
+        .expect("a valid batch selection must produce a ledger");
+        assert_eq!(
+            ledger
+                .iter()
+                .map(|candidate| candidate.factor_energy)
+                .collect::<Vec<_>>(),
+            vec![1.0, 2.0, 3.0, 4.0],
+            "fit failures must not compact or reorder the harvest ledger"
+        );
+        assert_eq!(
+            ledger[0].decision,
+            BirthCandidateDecision::GateRejected(BirthRejection::EvidenceNotImproved {
+                criterion: current_criterion,
+                must_be_below: current_criterion,
+            })
+        );
+        assert_eq!(
+            ledger[1].decision,
+            BirthCandidateDecision::FitFailed("seed one failed".to_string())
+        );
+        assert_eq!(ledger[2].decision, BirthCandidateDecision::Accepted);
+        assert_eq!(
+            ledger[3].decision,
+            BirthCandidateDecision::DeferredByBatchSelection
+        );
+        assert!(
+            record_birth_candidates(
+                &attempts,
+                &[0],
+                PassingCandidateDisposition::DeferredByBatchSelection,
+                cur_ev,
+                current_criterion,
+                floor,
+            )
+            .is_err(),
+            "the ledger must refuse a selected index which did not clear the gate"
         );
     }
 }
