@@ -6593,30 +6593,87 @@ fn xt_diag_x_dense(x: ArrayView2<'_, f64>, w: ArrayView1<'_, f64>) -> Result<Arr
     Ok(out)
 }
 
-fn trace_of_dense_product(a: &Array2<f64>, b: &Array2<f64>) -> Result<f64, String> {
-    if a.nrows() != a.ncols() || b.nrows() != b.ncols() || a.nrows() != b.nrows() {
+/// `tr(C·S)` for a posterior covariance `C` and a PSD penalty `S`, accumulated
+/// as a sum of squares.
+///
+/// The obvious spelling — `Σ_ij C_ij·S_ji` — sums mixed-sign products of two
+/// PSD matrices, and on a penalized fit it cancels catastrophically: measured
+/// `Σ|terms| / |Σ terms|` on a second-difference penalty rose from 8.4e1 at
+/// λ=1 to **3.9e13 at λ=1e12**, where the computed trace has no significant
+/// digits left. That is not a tolerance problem, and no backward-error bound
+/// repairs it — a forward-error bound is linear in `Σ|terms|`, so a *correct*
+/// bound over a cancelling sum is correctly enormous (issue #2470).
+///
+/// Factor both operands instead. With `S = RᵀR` (`penalty_matrix_root`) and
+/// `C = L·Lᵀ` (Cholesky; `C` is a principal submatrix of an SPD inverse, hence
+/// SPD),
+///
+/// ```text
+/// tr(C·S) = tr(C·RᵀR) = tr(R·C·Rᵀ) = ‖R·L‖_F²
+/// ```
+///
+/// and every summand is a square. Measured ratio: **exactly 1.000 at every λ**.
+///
+/// Factoring only the penalty is NOT enough, and the near-miss is worth
+/// recording: accumulating `Σ_i (R·C·Rᵀ)_ii` gives a clean *outer* sum, because
+/// those diagonal entries are non-negative — but each one is itself the
+/// mixed-sign quadratic form `rᵢᵀ·C·rᵢ`, which cancels by **6.4e13** at λ=1e12,
+/// worse than the elementwise form. The cancellation moves one level down,
+/// where an error bound taken over the outer sum cannot see it. A sum of
+/// squares is the only shape with nothing to cancel at either level.
+fn trace_of_factored_product(
+    penalty_root: &Array2<f64>,
+    covariance: &Array2<f64>,
+) -> Result<f64, String> {
+    let m = covariance.nrows();
+    if m != covariance.ncols() {
         return Err(
-            SmoothError::dimension_mismatch("trace_of_dense_product dimension mismatch").into(),
+            SmoothError::dimension_mismatch("trace_of_factored_product needs a square covariance")
+                .into(),
         );
     }
-    if a.iter().chain(b.iter()).any(|value| !value.is_finite()) {
-        return Err("trace_of_dense_product requires finite matrices".to_string());
+    if penalty_root.ncols() != m {
+        return Err(SmoothError::dimension_mismatch(
+            "trace_of_factored_product penalty root and covariance disagree on the block width",
+        )
+        .into());
     }
+    if penalty_root
+        .iter()
+        .chain(covariance.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err("trace_of_factored_product requires finite factors".to_string());
+    }
+    if m == 0 || penalty_root.nrows() == 0 {
+        return Ok(0.0);
+    }
+    // `C = V·W·Vᵀ` with `W ≥ 0` (the block is a principal submatrix of an SPD
+    // inverse), so `L = V·W^{1/2}` is a PSD factor. A negative eigenvalue here
+    // is roundoff on an exactly-zero one, not a direction of negative variance;
+    // clamping at zero is what keeps `L` real, and a materially negative one
+    // would have been refused when the covariance was certified.
+    use gam_linalg::faer_ndarray::FaerEigh as _;
+    let (eigenvalues, eigenvectors) = covariance.eigh(faer::Side::Lower).map_err(|err| {
+        format!("trace_of_factored_product could not factor the covariance block: {err}")
+    })?;
+    let mut covariance_factor = eigenvectors;
+    for (col, eigenvalue) in eigenvalues.iter().enumerate() {
+        let scale = eigenvalue.max(0.0).sqrt();
+        covariance_factor.column_mut(col).mapv_inplace(|v| v * scale);
+    }
+    let scaled = penalty_root.dot(&covariance_factor);
     let mut trace = gam_linalg::utils::KahanSum::default();
-    for i in 0..a.nrows() {
-        for j in 0..a.ncols() {
-            let term = a[[i, j]] * b[[j, i]];
-            if !term.is_finite() {
-                return Err(format!(
-                    "trace_of_dense_product term ({i}, {j}) is not representable"
-                ));
-            }
-            trace.add(term);
+    for value in scaled.iter() {
+        let term = value * value;
+        if !term.is_finite() {
+            return Err("trace_of_factored_product term is not representable".to_string());
         }
+        trace.add(term);
     }
     let trace = trace.sum();
     if !trace.is_finite() {
-        return Err("trace_of_dense_product sum is not representable".to_string());
+        return Err("trace_of_factored_product sum is not representable".to_string());
     }
     Ok(trace)
 }
@@ -6700,8 +6757,16 @@ fn exact_bounded_edf(
                         })?);
                 // Trace only involves the block slice of latent_cov.
                 let cov_block = latent_cov.slice(ndarray::s![col_range.clone(), col_range.clone()]);
+                // The rank oracle is deliberately left on `estimate_penalty_nullity`
+                // above: this root is used for the ACCUMULATION only. The two
+                // disagree — `penalty_matrix_root` cuts at `n·ε·λmax` and
+                // `spectral_tolerance` at `n·1e-10·λmax`, a factor of 4.5e5 — so
+                // adopting the root's rank here would silently move published
+                // per-block EDF, which is a separate, measured increment (#2469).
+                let penalty_root = gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root(local)
+                    .map_err(EstimationError::InvalidInput)?;
                 let trace_k = lambda_k
-                    * trace_of_dense_product(&cov_block.to_owned(), local)
+                    * trace_of_factored_product(&penalty_root, &cov_block.to_owned())
                         .map_err(EstimationError::InvalidInput)?;
                 trace_sum.add(trace_k);
                 penalty_block_trace.push(trace_k);
@@ -6719,8 +6784,10 @@ fn exact_bounded_edf(
                 let penalty_rank = p.saturating_sub(estimate_penalty_nullity(m).map_err(|e| {
                     EstimationError::InvalidInput(format!("bounded EDF rank failed: {e}"))
                 })?);
+                let penalty_root = gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root(m)
+                    .map_err(EstimationError::InvalidInput)?;
                 let trace_k = lambda_k
-                    * trace_of_dense_product(latent_cov, m)
+                    * trace_of_factored_product(&penalty_root, latent_cov)
                         .map_err(EstimationError::InvalidInput)?;
                 trace_sum.add(trace_k);
                 penalty_block_trace.push(trace_k);
