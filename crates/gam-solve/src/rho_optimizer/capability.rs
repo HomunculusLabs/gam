@@ -38,6 +38,34 @@ impl OuterThetaLayout {
         self.n_params.saturating_sub(self.psi_dim)
     }
 
+    /// Does outer coordinate `k` parameterize a smoothing parameter as
+    /// `λ = e^ρ`?
+    ///
+    /// The θ vector is one contiguous array under one box, and every layer
+    /// that reasons about a *bound* — the projector, the active set, the PSD
+    /// sub-block — is right to treat all of it alike: a box constraint is a
+    /// statement about a coordinate, not about what the coordinate means.
+    ///
+    /// The asymptote/tail law is not that kind of rule. `ĉ = ∓e^{±ρ}·∂V/∂ρ`
+    /// is derived from `λ = e^ρ` together with the REML criterion's `O(1/λ)`
+    /// behaviour, and it exists because the ρ box is a **proxy** for a limit
+    /// the search can never actually reach: `λ = ∞` is at `ρ = ∞`, so the
+    /// remaining gap to the optimum has to be extrapolated rather than
+    /// observed. A ψ coordinate is a different quantity — a sectional
+    /// curvature, a log length-scale, a measure exponent — and its box is a
+    /// **real** constraint (chart validity, `s ∈ (0, 2)`) whose endpoint a
+    /// point can sit exactly on. There the ordinary complementarity the
+    /// projector already applies IS the first-order certificate, and
+    /// exponentiating the coordinate has no derivation at all (#2453).
+    ///
+    /// Answering this question by position is exactly what makes it a
+    /// question about the quantity: `psi_dim` is declared by the call site
+    /// that knows what it put in each slot, and the trailing block is the ψ
+    /// block by construction.
+    pub const fn coordinate_is_log_smoothing(&self, k: usize) -> bool {
+        k < self.rho_dim()
+    }
+
     fn validate_capability(&self, context: &str) -> Result<(), EstimationError> {
         if self.psi_dim > self.n_params {
             return Err(EstimationError::RemlOptimizationFailed(format!(

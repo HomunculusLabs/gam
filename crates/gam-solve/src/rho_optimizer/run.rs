@@ -3236,6 +3236,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     rho: &result.rho,
                     projected_gradient: &projected_gradient,
                     railed: &certificate_railed,
+                    layout,
                     hessian,
                     bounds: &bounds,
                     terminal_beta: terminal_beta.as_ref(),
@@ -3477,6 +3478,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 rho: &result.rho,
                 projected_gradient: &projected_gradient,
                 railed: &certificate_railed,
+                layout,
                 hessian,
                 bounds: &bounds,
                 terminal_beta: terminal_beta.as_ref(),
@@ -3868,6 +3870,10 @@ struct AsymptoteRailInputs<'a> {
     rho: &'a Array1<f64>,
     projected_gradient: &'a Array1<f64>,
     railed: &'a [usize],
+    /// Which slots of `rho` carry `log λ`. The active-set half of the
+    /// certificate reads `railed` as-is; the tail law reads it through
+    /// [`tail_law_coordinates`], which is the whole difference.
+    layout: OuterThetaLayout,
     hessian: &'a Array2<f64>,
     bounds: &'a (Array1<f64>, Array1<f64>),
     terminal_beta: Option<&'a Array1<f64>>,
@@ -3884,6 +3890,28 @@ struct AsymptoteRailInputs<'a> {
     /// full matrix non-PD).
     objective_tol: f64,
     context: &'a str,
+}
+
+impl AsymptoteRailInputs<'_> {
+    /// Split the railed set into the coordinates the exponential tail law
+    /// speaks for and the ones it does not (#2453).
+    ///
+    /// Both halves stay in the active set: they are equally deleted from the
+    /// interior gradient and the interior Hessian sub-block, because that
+    /// reasoning is about a bound and not about a quantity. Only the first
+    /// half may be *certified* by — or *required* to produce — a tail, since
+    /// [`OuterThetaLayout::coordinate_is_log_smoothing`] is what makes
+    /// `ĉ = ∓e^{±ρ}·∂V/∂ρ` a theorem rather than an arithmetic accident.
+    ///
+    /// The second half needs no tail: its bound is attainable, so the
+    /// outward-gradient complementarity the projector already enforces is a
+    /// complete first-order certificate there.
+    fn tail_law_coordinates(&self) -> (Vec<usize>, Vec<usize>) {
+        self.railed
+            .iter()
+            .copied()
+            .partition(|&k| self.layout.coordinate_is_log_smoothing(k))
+    }
 }
 
 /// Attempt the typed stationary-at-asymptote rail certificate (#2348 Inc 1).
@@ -3953,6 +3981,31 @@ fn try_certify_asymptote_rail(
     tol.tail_drift_rel = TAIL_SNAP_DRIFT_REL;
     let (lower, upper) = inputs.bounds;
 
+    // #2453: only the log-λ coordinates go to the tail law. A ψ rail stays in
+    // the active set above (it is excluded from the interior gradient and the
+    // interior sub-block just like any other bound-active coordinate) but is
+    // certified by complementarity, not by an asymptote it does not have.
+    let (tail_railed, box_railed) = inputs.tail_law_coordinates();
+    if tail_railed.is_empty() {
+        return Ok(Err(format!(
+            "no railed coordinate parameterizes log λ; {} bound-active ψ coordinate(s) {:?} carry \
+             no exponential tail to certify",
+            box_railed.len(),
+            box_railed,
+        )));
+    }
+    if !box_railed.is_empty() {
+        log::info!(
+            "[CERTIFICATE] {}: {} bound-active ψ coordinate(s) {:?} held out of the tail law \
+             (their box endpoints are attainable, so complementarity certifies them); tail law \
+             runs on log-λ coordinate(s) {:?}",
+            inputs.context,
+            box_railed.len(),
+            box_railed,
+            tail_railed,
+        );
+    }
+
     // #2348 Inc 5 — the ANALYTIC face proof, first resort.
     //
     // Measuring a tail beside the ρ box asks the criterion for derivative
@@ -3963,7 +4016,7 @@ fn try_certify_asymptote_rail(
     // positive definiteness proves the whole face against every way of coming
     // off it. When the objective cannot form that limit, or the proof does not
     // hold, the measured-tail path below is unchanged.
-    match try_certify_face_analytically(obj, inputs, estimand_tol)? {
+    match try_certify_face_analytically(obj, inputs, &tail_railed, estimand_tol)? {
         Ok((rails, proof)) => {
             log::info!(
                 "[CERTIFICATE] {}: analytic λ=∞ face proof on {} coordinate(s): λ_min(C)={:.6e} \
@@ -3993,7 +4046,7 @@ fn try_certify_asymptote_rail(
     let mut rails: Vec<RailCoordinate> = Vec::new();
     let mut decline: Option<String> = None;
     let mut probed_any = false;
-    for &k in railed.iter() {
+    for &k in tail_railed.iter() {
         if k >= rho.len() || k >= lower.len() || k >= upper.len() {
             decline = Some(format!("railed coordinate {k} outside the box layout"));
             break;
@@ -4079,6 +4132,7 @@ const FACE_LAW_ORDER_BAND: f64 = 0.5;
 fn try_certify_face_analytically(
     obj: &mut dyn OuterObjective,
     inputs: &AsymptoteRailInputs<'_>,
+    tail_railed: &[usize],
     estimand_tol: f64,
 ) -> Result<Result<(Vec<RailCoordinate>, RailFaceProof), String>, EstimationError> {
     let rho = inputs.rho;
@@ -4086,7 +4140,7 @@ fn try_certify_face_analytically(
     // The analytic limit is the INFINITE-smoothing face. A coordinate railed at
     // the zero-smoothing bound is the opposite limit (the penalty leaves the
     // model rather than pinning it) and belongs to the measured-tail path.
-    for &k in inputs.railed.iter() {
+    for &k in tail_railed.iter() {
         if k >= rho.len() || k >= lower.len() || k >= upper.len() {
             return Ok(Err("railed coordinate outside the box layout".to_string()));
         }
@@ -4097,7 +4151,7 @@ fn try_certify_face_analytically(
             )));
         }
     }
-    let limit = match obj.rail_face_limit(rho, inputs.railed)? {
+    let limit = match obj.rail_face_limit(rho, tail_railed)? {
         RailFaceLimitOutcome::Available(limit) => *limit,
         // The decline is typed, and the distinction is worth carrying into the
         // refusal: "outside this closed form" invites a different one, while
@@ -4394,6 +4448,19 @@ fn try_tail_snap_to_rail(
     let mut rejected: Vec<String> = Vec::new();
     for k in 0..n {
         if inputs.railed.contains(&k) {
+            continue;
+        }
+        // #2453: snapping a coordinate to its bound and declaring the fit
+        // finished is an act the tail law authorizes and nothing else does.
+        // For a ψ coordinate — a curvature, a log length-scale — there is no
+        // `λ = e^ρ` behind the box, so a gradient pointing at the endpoint is
+        // just an unfinished search along that quantity, and pinning it there
+        // would manufacture an optimum out of an arithmetic coincidence.
+        if !inputs.layout.coordinate_is_log_smoothing(k) {
+            rejected.push(format!(
+                "k={k}: psi coordinate (rho_dim={}), no exponential tail law",
+                inputs.layout.rho_dim()
+            ));
             continue;
         }
         let g_k = gradient[k];
@@ -6811,6 +6878,7 @@ mod asymptote_rail_certify_tests {
                 rho: &rho,
                 projected_gradient: &gradient,
                 railed: &[],
+                layout: OuterThetaLayout::new(2, 0),
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
@@ -7084,6 +7152,7 @@ mod asymptote_rail_certify_tests {
                 rho: &rho,
                 projected_gradient: &gradient,
                 railed: &[],
+                layout: OuterThetaLayout::new(2, 0),
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
@@ -7147,6 +7216,7 @@ mod asymptote_rail_certify_tests {
                 rho: &rho,
                 projected_gradient: &gradient,
                 railed: &[],
+                layout: OuterThetaLayout::new(2, 0),
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
@@ -7213,6 +7283,7 @@ mod asymptote_rail_certify_tests {
                 rho: &rho,
                 projected_gradient: &gradient,
                 railed: &[],
+                layout: OuterThetaLayout::new(2, 0),
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
@@ -7335,6 +7406,7 @@ mod asymptote_rail_certify_tests {
             rho: &rho,
             projected_gradient: &projected,
             railed: &railed,
+            layout: OuterThetaLayout::new(2, 0),
             hessian: &hessian_psd,
             bounds: &bounds,
             terminal_beta: None,
@@ -7370,6 +7442,108 @@ mod asymptote_rail_certify_tests {
             reason.contains("not PSD") || reason.contains("interior"),
             "the decline must name the refusing gate, got: {reason}"
         );
+    }
+
+    /// #2453: what authorizes the asymptote certificate is the coordinate
+    /// being `log λ`, not the numbers looking exponential.
+    ///
+    /// Holding the fixture bit-identical — same objective, same ρ, same
+    /// gradient, same PSD Hessian, same box, same railed set, the same
+    /// textbook-clean `ĉ·e^{−ρ}` tail that the test above mints on — and
+    /// flipping ONE declared fact, that the coordinate carries a sectional
+    /// curvature rather than a log-smoothing parameter, must refuse. The
+    /// alternative is a certificate that reports `value_gap = ĉ·e^{−κ}` as
+    /// "the exact remaining criterion value-gap" for a quantity that is not
+    /// in an exponent of anything.
+    #[test]
+    fn asymptote_rail_refuses_a_psi_coordinate_with_a_perfect_tail() {
+        let rho = array![29.9, 0.0];
+        let projected = array![0.0, 0.0];
+        let bounds = (array![-30.0, -30.0], array![30.0, 30.0]);
+        let railed = [0usize];
+        let hessian = array![[1.0, 0.0], [0.0, 2.0]];
+
+        let mut obj = upper_tail_with_interior(6723.0, 1.0);
+        let as_psi = AsymptoteRailInputs {
+            rho: &rho,
+            projected_gradient: &projected,
+            railed: &railed,
+            // Both slots declared ψ: rho_dim = 0, so coordinate 0 is a
+            // design-moving quantity whose box endpoint is attainable.
+            layout: OuterThetaLayout::new(2, 2),
+            hessian: &hessian,
+            bounds: &bounds,
+            terminal_beta: None,
+            stationarity_bound: StationarityBound::from_ladder(
+                1.0e-6,
+                StationarityBoundSource::SolverBand,
+            ),
+            objective_tol: 1.0e-5,
+            context: "asymptote-rail psi-identity test",
+        };
+        let refused =
+            try_certify_asymptote_rail(&mut obj, &as_psi).expect("certification must not error");
+        let reason = refused.expect_err(
+            "a psi coordinate must not be certified at an asymptote it has no law for",
+        );
+        assert!(
+            reason.contains("parameterizes log λ"),
+            "the decline must name the coordinate's identity as the refusing gate, got: {reason}"
+        );
+
+        // The control: the identical numbers under a log-λ declaration still
+        // mint, so the refusal above is the identity and nothing else.
+        let as_rho = AsymptoteRailInputs {
+            layout: OuterThetaLayout::new(2, 0),
+            ..as_psi
+        };
+        let minted = try_certify_asymptote_rail(&mut obj, &as_rho)
+            .expect("certification must not error")
+            .expect("the same tail under a log-λ declaration must mint");
+        assert_eq!(minted.2.len(), 1);
+        assert_eq!(minted.2[0].index, 0);
+    }
+
+    /// #2453: the same identity gate on the snap path. Tail-snap MOVES the
+    /// coordinate to its bound and republishes that as the search's next
+    /// point, so applying it to a ψ coordinate does not just mislabel an
+    /// optimum — it relocates the fit to one.
+    #[test]
+    fn tail_snap_refuses_a_psi_coordinate() {
+        let c = 6723.0_f64;
+        let mut obj = upper_tail_with_interior(c, 1.0);
+        let rho = array![8.0_f64, 0.0];
+        let tail_gradient = -c * (-rho[0]).exp();
+        let gradient = array![tail_gradient, 0.0];
+        let hessian = array![[tail_gradient.abs(), 0.0], [0.0, 1.0]];
+        let bounds = (Array1::from_elem(2, -12.0), Array1::from_elem(2, 12.0));
+
+        let outcome = try_tail_snap_to_rail(
+            &mut obj,
+            &AsymptoteRailInputs {
+                rho: &rho,
+                projected_gradient: &gradient,
+                railed: &[],
+                layout: OuterThetaLayout::new(2, 2),
+                hessian: &hessian,
+                bounds: &bounds,
+                terminal_beta: None,
+                stationarity_bound: StationarityBound::from_ladder(
+                    1.0e-3,
+                    StationarityBoundSource::SolverBand,
+                ),
+                objective_tol: 1.0e-8,
+                context: "tail-snap psi-identity test",
+            },
+        )
+        .expect("tail snap must not error");
+        match outcome {
+            TailSnapOutcome::Declined(reason) => assert!(
+                reason.contains("psi coordinate"),
+                "the decline must name the coordinate's identity, got: {reason}"
+            ),
+            other => panic!("a psi coordinate must never be snapped to its bound, got {other:?}"),
+        }
     }
 }
 
