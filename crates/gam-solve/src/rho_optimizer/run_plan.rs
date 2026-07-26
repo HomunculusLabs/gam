@@ -571,6 +571,8 @@ fn capture_outer_gradient_fd_at_seed(
             psi_steps,
             psi_fd_uncertainty,
             psi_fd_orders,
+            psi_gram_anchor_deltas:
+                crate::estimate::outer_eval_capture::take_psi_gram_anchor_deltas(),
             decomposition: if decompose {
                 crate::estimate::OuterGradientFdDecomposition::Decomposed(Box::new(
                     crate::estimate::OuterGradientFdAtoms {

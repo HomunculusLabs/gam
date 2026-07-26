@@ -55,6 +55,22 @@ pub struct OuterGradientFdRecord {
     /// component says nothing about the analytic gradient.
     pub psi_fd_uncertainty: Array1<f64>,
     pub psi_fd_orders: Vec<usize>,
+
+    /// Max-abs of the `#1033b` psi-Gram anchor correction applied to the
+    /// criterion's VALUE at this seed, as `(gram_delta, rhs_delta)`.
+    ///
+    /// `joint_hyper` pins the n-free tensor to the exactly streamed statistics
+    /// by adding a constant offset measured at one reference psi, then installs
+    /// the derivative of the UNCORRECTED tensor. A constant removes nothing from
+    /// a derivative, so a non-zero value here is the tensor's own value error at
+    /// this seed and its SLOPE error is loose in the gradient lane (#2464).
+    ///
+    /// `None` means the correction never ran on this seed -- NOT that it ran and
+    /// was zero. The distinction is the whole point of the field: a probe that
+    /// reports `0.0` for "never fired" is unfalsifiable, and reading an absent
+    /// emission as a measured zero is exactly how this quantity was first
+    /// mis-measured.
+    pub psi_gram_anchor_deltas: Option<(f64, f64)>,
     /// The per-atom breakdown of the same comparison, when the objective's
     /// criterion is assembled from atoms at all.
     pub decomposition: OuterGradientFdDecomposition,
@@ -135,6 +151,7 @@ struct OuterGradientFdCapture {
     record: Option<OuterGradientFdRecord>,
     components: Vec<(f64, f64, f64, f64, f64, f64)>,
     criterion_components: Option<(f64, [f64; 4])>,
+    psi_gram_anchor_deltas: Option<(f64, f64)>,
     selected_mode: Option<(Array1<f64>, Option<Array2<f64>>)>,
 }
 
@@ -167,6 +184,7 @@ pub fn enable_outer_gradient_fd_capture(min_psi_dim: usize) {
             record: None,
             components: Vec::new(),
             criterion_components: None,
+            psi_gram_anchor_deltas: None,
             selected_mode: None,
         });
     });
@@ -226,6 +244,7 @@ pub(crate) fn begin_outer_criterion_component_capture() {
     FD_CAPTURE.with(|capture| {
         if let Some(state) = capture.borrow_mut().as_mut() {
             state.criterion_components = None;
+            state.psi_gram_anchor_deltas = None;
             state.selected_mode = None;
         }
     });
@@ -245,6 +264,32 @@ pub fn record_outer_criterion_components(cost: f64, components: [f64; 4]) {
             state.criterion_components = Some((cost, components));
         }
     });
+}
+
+/// Report the psi-Gram anchor correction's magnitude for an armed audit.
+///
+/// Public for the same reason as [`record_outer_criterion_components`]: the
+/// correction is applied in the evaluator, not in the outer runner that builds
+/// the record. No-op unless [`enable_outer_gradient_fd_capture`] armed this
+/// thread. Called on every application, so the LAST application before the
+/// record is finalized is the one reported -- the seed the audit grades.
+pub fn record_psi_gram_anchor_deltas(gram_delta_max_abs: f64, rhs_delta_max_abs: f64) {
+    FD_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut()
+            && state.record.is_none()
+        {
+            state.psi_gram_anchor_deltas = Some((gram_delta_max_abs, rhs_delta_max_abs));
+        }
+    });
+}
+
+pub(crate) fn take_psi_gram_anchor_deltas() -> Option<(f64, f64)> {
+    FD_CAPTURE.with(|capture| {
+        capture
+            .borrow_mut()
+            .as_mut()
+            .and_then(|state| state.psi_gram_anchor_deltas.take())
+    })
 }
 
 pub(crate) fn take_outer_criterion_components() -> Option<(f64, [f64; 4])> {
