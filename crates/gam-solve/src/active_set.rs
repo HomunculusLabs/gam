@@ -3405,25 +3405,36 @@ pub fn project_point_strictly_into_feasible_constraint_set(
 /// phase has a deterministic anti-cycling pivot rule.
 fn refine_operator_metric_face(
     hessian: &Array2<f64>,
+    rhs: &Array1<f64>,
     unconstrained: &Array1<f64>,
     ops: &ConstraintSetOps<'_>,
     active: &mut Vec<usize>,
     is_active: &mut [bool],
     transitions: &mut usize,
 ) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
-    let p = unconstrained.len();
     loop {
         if active.is_empty() {
             return Ok((unconstrained.clone(), Array1::zeros(0)));
         }
         let rows = ops.gather_unit_rows(active)?;
-        let active_residual = &rows.b - &rows.a.dot(unconstrained);
-        let zero_gradient = Array1::<f64>::zeros(p);
-        let (correction, system_multipliers) = solve_kkt_direction(
+        // Solve for the absolute endpoint, not a correction to the free point.
+        // The correction is routinely the negation of an O(1) free point while
+        // the constrained endpoint is O(eps) or smaller. Forming
+        // `unconstrained + correction` then loses absolute digits to
+        // cancellation that no subsequent face solve can recover, and an
+        // active row can drift by O(eps) even though its endpoint-scale
+        // representable residual is O(eps²). The original quadratic is
+        //
+        //     1/2 beta' H beta - rhs' beta,
+        //
+        // so solving it directly with `A beta = b` is algebraically identical
+        // and preserves the endpoint's own scale.
+        let objective_gradient = -rhs;
+        let (candidate, system_multipliers) = solve_kkt_direction(
             hessian,
-            &zero_gradient,
+            &objective_gradient,
             &rows.a,
-            Some(&active_residual),
+            Some(&rows.b),
         )?;
         let refined_multipliers = -system_multipliers;
         let leaving_position = refined_multipliers
@@ -3435,7 +3446,7 @@ fn refine_operator_metric_face(
             .min_by_key(|(position, _)| active[*position])
             .map(|(position, _)| position);
         let Some(leaving_position) = leaving_position else {
-            return Ok((unconstrained + &correction, refined_multipliers));
+            return Ok((candidate, refined_multipliers));
         };
         let leaving_row = active.remove(leaving_position);
         is_active[leaving_row] = false;
@@ -3455,13 +3466,6 @@ fn refine_operator_metric_face(
 /// must be classified DEPENDENT (and handled by a dual drop), never handed a
 /// spurious enormous step length.
 const ACTIVE_SET_DUAL_DEPENDENCE_TOL: f64 = 1e-11;
-
-/// Maximum conditioned re-solve rounds after the dual iteration reports primal
-/// feasibility. The conditioned solve is exact on its face, so one round is the
-/// expected cost; a second is possible if conditioning releases a multiplier.
-/// More than a few means the face itself is still moving, which is a typed
-/// refusal rather than an unbounded loop.
-const ACTIVE_SET_DUAL_CONDITIONING_ROUNDS: usize = 4;
 
 /// Thin QR by reorthogonalized modified Gram--Schmidt: `columns = Q R` with `Q`
 /// orthonormal (returned as its column list) and `R` upper triangular.
@@ -3527,13 +3531,30 @@ struct ViolatedConstraintRow {
     violation: f64,
 }
 
-/// Full-set primal scan: worst scaled violation over every row, the row that
-/// attains it, and the INACTIVE rows that breach the feasibility contract.
+/// Full-set primal scan.
+///
+/// `worst` owns the one-sided public feasibility decision over EVERY row, while
+/// `inactive` contains only rows the dual iteration can admit. Active rows obey
+/// a stronger, two-sided equality contract that is certified separately after
+/// the original-metric face solve. Keeping primal feasibility and separator
+/// admission in distinct fields prevents an empty inactive queue from being
+/// mistaken for an all-row certificate (#979).
+struct OperatorViolationScan {
+    worst: ViolatedConstraintRow,
+    inactive: Vec<ViolatedConstraintRow>,
+}
+
+impl OperatorViolationScan {
+    fn is_primal_feasible(&self) -> bool {
+        self.worst.violation <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
+    }
+}
+
 fn scan_operator_violations(
     ops: &ConstraintSetOps<'_>,
     values: &Array1<f64>,
     is_active: &[bool],
-) -> Result<(f64, usize, Vec<ViolatedConstraintRow>), EstimationError> {
+) -> Result<OperatorViolationScan, EstimationError> {
     if values.len() != ops.nrows() || is_active.len() != ops.nrows() {
         crate::bail_invalid_estim!(
             "operator violation scan dimension mismatch: values={}, active_mask={}, rows={}",
@@ -3544,7 +3565,7 @@ fn scan_operator_violations(
     }
     let mut worst = 0.0_f64;
     let mut worst_row = 0usize;
-    let mut violated = Vec::<ViolatedConstraintRow>::new();
+    let mut inactive = Vec::<ViolatedConstraintRow>::new();
     for row in 0..ops.nrows() {
         if ops.norms[row] <= 0.0 {
             // A vacuous row constrains nothing unless its bound is positive, in
@@ -3564,10 +3585,16 @@ fn scan_operator_violations(
             worst_row = row;
         }
         if violation > ACTIVE_SET_PRIMAL_FEASIBILITY_TOL && !is_active[row] {
-            violated.push(ViolatedConstraintRow { row, violation });
+            inactive.push(ViolatedConstraintRow { row, violation });
         }
     }
-    Ok((worst, worst_row, violated))
+    Ok(OperatorViolationScan {
+        worst: ViolatedConstraintRow {
+            row: worst_row,
+            violation: worst,
+        },
+        inactive,
+    })
 }
 
 /// Goldfarb--Idnani dual active-set solve of the strictly convex operator
@@ -3590,9 +3617,10 @@ fn scan_operator_violations(
 ///
 /// The dual method removes that failure mode *structurally*:
 ///
-/// * its iterate `(β, μ)` is always the exact minimizer subject to the active
-///   rows held as EQUALITIES, with `μ ≥ 0` — dual feasible throughout, primal
-///   feasible only at the end;
+/// * between separators, `(β, μ)` is the exact minimizer subject to the active
+///   rows held as EQUALITIES, with `μ ≥ 0`; during a separator pivot, its
+///   cumulative pending multiplier is part of that same primal/dual
+///   representation until the row is fully admitted;
 /// * an entering row is closed by a step `t = min(t₁, t₂)` along
 ///   `z = H⁻¹(n_p − Nᵀr)`, where `t₂` reaches that row's boundary and `t₁` is the
 ///   largest step keeping every multiplier nonnegative;
@@ -3650,11 +3678,11 @@ fn solve_operator_metric_projection_dual_active_set(
         }
     }
 
-    // Backstops, not working limits: the finiteness argument above bounds the
-    // real iteration count by the number of distinct active sets visited, each
-    // entered at a strictly larger dual objective. Crossing either cap means
-    // floating point has broken an exact-arithmetic invariant — a refusal, not a
-    // retry.
+    // Operational bounded-work limits, not a finite-termination theorem. Exact
+    // arithmetic cannot revisit a face after a strict dual improvement, but the
+    // number of distinct faces is not bounded by a polynomial in `p`. Reaching
+    // either limit therefore surfaces an explicit refusal without diagnosing
+    // its cause as floating-point breakdown.
     let max_transitions = 8usize
         .saturating_mul(p.saturating_add(2))
         .saturating_mul(p.saturating_add(2))
@@ -3662,24 +3690,27 @@ fn solve_operator_metric_projection_dual_active_set(
     let max_refills = 4usize.saturating_mul(p).saturating_add(32);
     let mut transitions = 0usize;
     let mut refills = 0usize;
-    let mut conditioning_rounds = 0usize;
-    let mut refine_transitions = 0usize;
 
     let (candidate, refined_multipliers) = loop {
         'dual: loop {
             let Some(entering) = queue.pop_front() else {
                 let values = ops.values(&beta)?;
-                let (_, _, violated) = scan_operator_violations(ops, &values, &is_active)?;
-                if violated.is_empty() {
+                let scan = scan_operator_violations(ops, &values, &is_active)?;
+                if scan.inactive.is_empty() {
+                    // No row remains that this phase can admit. An active row
+                    // may have accumulated forward-error drift, so this is a
+                    // transition to original-metric face conditioning, not a
+                    // claim that the all-row primal certificate passed.
                     break 'dual;
                 }
                 refills += 1;
                 if refills > max_refills {
                     return Err(EstimationError::ParameterConstraintViolation(format!(
-                        "operator metric projection exceeded {max_refills} separator scans with \
-                         {} rows still violated (worst {:.3e}); the dual iteration is not closing",
-                        violated.len(),
-                        violated
+                        "operator metric projection reached its bounded-work limit of \
+                         {max_refills} separator scans with {} rows still violated \
+                         (worst {:.3e})",
+                        scan.inactive.len(),
+                        scan.inactive
                             .iter()
                             .map(|entry| entry.violation)
                             .fold(0.0_f64, f64::max),
@@ -3700,7 +3731,7 @@ fn solve_operator_metric_projection_dual_active_set(
                     p.saturating_sub(active.len()),
                 )?;
                 if batch.is_empty() {
-                    let mut ordered = violated;
+                    let mut ordered = scan.inactive;
                     ordered.sort_unstable_by(|left, right| {
                         right
                             .violation
@@ -3735,13 +3766,22 @@ fn solve_operator_metric_projection_dual_active_set(
 
             // Inner dual loop: hold `entering` fixed and take dual steps until it
             // is admitted (full step) or proven inadmissible (no drop available).
+            //
+            // A partial step already adds a positive multiplier for `entering`
+            // to the primal representation while releasing one old row. The
+            // separator must therefore remain pending across every partial
+            // drop, even if its remaining violation falls inside the public
+            // primal tolerance. Abandoning it there leaves `beta` carrying an
+            // unrecorded normal component; terminal face conditioning erases
+            // that component and recreates the same violation (#979).
+            let mut remaining_violation = bound - normal.dot(&beta);
+            if remaining_violation <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+                // The iterate moved since this row was queued; no dual step
+                // for this separator has begun, so it is safe to discard.
+                continue 'dual;
+            }
+            let mut entering_multiplier = 0.0_f64;
             loop {
-                let violation = bound - normal.dot(&beta);
-                if violation <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
-                    // The iterate moved since this row was queued; it is
-                    // satisfied now and carries no dual step.
-                    continue 'dual;
-                }
                 let (dual_direction, tangent) = if active.is_empty() {
                     (Array1::<f64>::zeros(0), whitened_normal.clone())
                 } else {
@@ -3775,7 +3815,7 @@ fn solve_operator_metric_projection_dual_active_set(
                 let rate = tangent.dot(&tangent);
                 let dependence_floor = ACTIVE_SET_DUAL_DEPENDENCE_TOL * whitened_scale;
                 let full_step = if rate > dependence_floor * dependence_floor {
-                    violation / rate
+                    remaining_violation / rate
                 } else {
                     f64::INFINITY
                 };
@@ -3805,8 +3845,8 @@ fn solve_operator_metric_projection_dual_active_set(
                 if !full_step.is_finite() && blocking.is_none() {
                     return Err(EstimationError::ParameterConstraintViolation(format!(
                         "operator metric projection proved its constraint set infeasible: row \
-                         {entering} is violated by {violation:.3e} and lies in the span of the \
-                         {} active normals with no releasable multiplier",
+                         {entering} is violated by {remaining_violation:.3e} and lies in the span \
+                         of the {} active normals with no releasable multiplier",
                         active.len(),
                     )));
                 }
@@ -3832,13 +3872,19 @@ fn solve_operator_metric_projection_dual_active_set(
                         *multiplier = (*multiplier - step * direction).max(0.0);
                     }
                 }
+                entering_multiplier += step;
+                if !entering_multiplier.is_finite() {
+                    crate::bail_invalid_estim!(
+                        "operator metric projection accumulated a non-finite multiplier for \
+                         entering row {entering}"
+                    );
+                }
 
                 transitions += 1;
                 if transitions > max_transitions {
                     return Err(EstimationError::ParameterConstraintViolation(format!(
-                        "operator metric projection exceeded {max_transitions} dual transitions \
-                         with {} active rows; a strictly increasing dual objective cannot revisit \
-                         a face, so this is a floating-point breakdown",
+                        "operator metric projection reached its bounded-work limit of \
+                         {max_transitions} active-set transitions with {} active rows",
                         active.len(),
                     )));
                 }
@@ -3847,9 +3893,16 @@ fn solve_operator_metric_projection_dual_active_set(
                     active.push(entering);
                     is_active[entering] = true;
                     whitened_active.push(whitened_normal);
-                    multipliers.push(step);
+                    multipliers.push(entering_multiplier);
                     continue 'dual;
                 }
+                // For a partial step, `step < remaining_violation / rate`,
+                // hence this quantity is strictly positive in exact
+                // arithmetic. Track that algebraic residual instead of
+                // re-reading a cancellation-prone row dot-product; terminal
+                // original-metric conditioning owns the forward-error repair.
+                remaining_violation =
+                    (-step).mul_add(rate, remaining_violation).max(0.0);
                 let leaving = blocking.expect("a finite partial step names a blocking row");
                 let leaving_row = active.remove(leaving);
                 whitened_active.remove(leaving);
@@ -3868,41 +3921,60 @@ fn solve_operator_metric_projection_dual_active_set(
         // iteration from the conditioned face rather than being certified.
         let refined = refine_operator_metric_face(
             hessian,
+            rhs,
             unconstrained,
             ops,
             &mut active,
             &mut is_active,
-            &mut refine_transitions,
+            &mut transitions,
         )?;
+        if transitions > max_transitions {
+            return Err(EstimationError::ParameterConstraintViolation(format!(
+                "operator metric projection reached its bounded-work limit of \
+                 {max_transitions} active-set transitions during original-metric face \
+                 conditioning with {} active rows",
+                active.len(),
+            )));
+        }
+        if !active.is_empty() {
+            let active_rows = ops.gather_unit_rows(&active)?;
+            let equality =
+                certify_active_equalities(&active_rows.a, &active_rows.b, &refined.0);
+            if !equality.is_certified() {
+                return Err(EstimationError::ParameterConstraintViolation(format!(
+                    "operator metric projection conditioned face failed its active-equality \
+                     certificate at constraint row {} (active position {}): absolute residual \
+                     {:.3e} exceeds roundoff bound {:.3e} over {} active rows",
+                    active[equality.worst_row],
+                    equality.worst_row,
+                    equality.residual,
+                    equality.allowed,
+                    active.len(),
+                )));
+            }
+        }
         let values = ops.values(&refined.0)?;
-        let (worst, worst_row, violated) = scan_operator_violations(ops, &values, &is_active)?;
-        if worst <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+        let scan = scan_operator_violations(ops, &values, &is_active)?;
+        if scan.is_primal_feasible() {
             break refined;
         }
-        conditioning_rounds += 1;
-        if conditioning_rounds > ACTIVE_SET_DUAL_CONDITIONING_ROUNDS {
-            // Whether the surviving row is ACTIVE decides between two opposite
-            // defects, and the reader cannot infer it from anything else here:
-            // an ACTIVE row violated this far contradicts the dual method's
-            // stated invariant that the iterate is the exact minimizer subject
-            // to the active rows held as equalities, while an INACTIVE one says
-            // the row was never admitted despite being violated across every
-            // conditioning round. Same number, same message, different bug.
-            let worst_membership = if is_active[worst_row] {
-                "ACTIVE"
-            } else {
-                "inactive"
-            };
+        if scan.inactive.is_empty() {
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "operator metric projection could not condition its terminal face: scaled \
-                 violation {worst:.3e} at row {worst_row} ({worst_membership}) survives \
-                 {ACTIVE_SET_DUAL_CONDITIONING_ROUNDS} conditioned re-solves over {} active rows",
+                "operator metric projection found all-row scaled violation {:.3e} at row {} \
+                 after certifying {} active equalities, but found no inactive separator",
+                scan.worst.violation,
+                scan.worst.row,
                 active.len(),
             )));
         }
         // The conditioned face solve is itself a valid dual state — `β` is the
         // exact equality-constrained minimizer and every multiplier is
-        // nonnegative — so the dual iteration resumes from it directly.
+        // nonnegative — so the dual iteration resumes from it directly. There
+        // is no separate conditioning-round budget: every nonterminal scan now
+        // contains an inactive separator, and the pending-separator invariant
+        // guarantees that processing it records a transition or returns a typed
+        // refusal. The counters above bound operational work; they are not the
+        // exact-arithmetic finite-termination proof.
         beta = refined.0;
         multipliers = refined.1.to_vec();
         whitened_active.clear();
@@ -3916,7 +3988,7 @@ fn solve_operator_metric_projection_dual_active_set(
             }
         }
         queue.clear();
-        queue.extend(violated.iter().map(|entry| entry.row));
+        queue.extend(scan.inactive.iter().map(|entry| entry.row));
     };
 
     let active_ids = active.clone();
@@ -4167,7 +4239,7 @@ mod tests {
         project_stationarity_residual_on_constraint_cone,
         project_stationarity_residual_on_constraint_set,
         rank_reduce_rows_pivoted_qr_with_dependence, record_active_working_set,
-        scaled_constraint_slack, solve_kkt_direction,
+        scaled_constraint_slack, scan_operator_violations, solve_kkt_direction,
         solve_newton_direction_with_linear_constraints, solve_quadratic_with_constraint_set,
         solve_quadratic_with_linear_constraints,
         working_set_kkt_diagnostics_from_multipliers,
@@ -5708,6 +5780,126 @@ mod tests {
             active.len(),
             p,
             "the returned face must contain one representative per independent coordinate"
+        );
+    }
+
+    #[test]
+    fn operator_scan_separates_primal_feasibility_from_active_equality_979() {
+        let psi = array![[1.0_f64, 0.0], [0.0, 1.0]];
+        let cone = KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+            .expect("two-row operator cone");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let ops = ConstraintSetOps::new(&set, 0.0).expect("operator geometry");
+        // Row zero has drifted to the feasible side of its nominal equality.
+        // This is public-primal feasible but not a certified active face: the
+        // two contracts must remain distinct.
+        let beta = array![2.0 * ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, 1.0];
+        let values = ops.values(&beta).expect("operator values");
+        let scan = scan_operator_violations(&ops, &values, &[true, false])
+            .expect("full-set violation scan");
+
+        assert!(
+            scan.inactive.is_empty(),
+            "an active equality is not an admissible entering separator"
+        );
+        assert!(
+            scan.is_primal_feasible(),
+            "positive active-row slack is feasible for the one-sided public contract"
+        );
+        assert_relative_eq!(scan.worst.violation, 0.0, epsilon = 0.0);
+
+        let active_rows = ops
+            .gather_unit_rows(&[0])
+            .expect("one-row active equality");
+        let equality = certify_active_equalities(&active_rows.a, &active_rows.b, &beta);
+        assert_eq!(
+            equality.worst_row, 0,
+            "the only active row must own the equality residual"
+        );
+        assert!(
+            !equality.is_certified(),
+            "feasible-side drift must still fail the two-sided active-equality certificate"
+        );
+        assert!(
+            equality.residual > equality.allowed,
+            "active equality residual {:.3e} must exceed its roundoff bound {:.3e}",
+            equality.residual,
+            equality.allowed,
+        );
+    }
+
+    #[test]
+    fn operator_metric_projection_finishes_a_separator_after_partial_drop_979() {
+        // Unit normals n0=(1,0) and n1=(c,s), with H=I. The free point is
+        // chosen so admitting n0 first and then pivoting toward n1 releases n0
+        // with only half the public feasibility tolerance left on n1.
+        //
+        // The pre-fix dual loop abandoned n1 at that point. Its partial step
+        // had already added a positive n1 multiplier to beta, but n1 was not
+        // recorded in the active state; terminal conditioning therefore reset
+        // to the free point and row-order refill repeated the same two pivots
+        // through every conditioning round. The true unique optimum has only
+        // n1 active and n0 strictly feasible.
+        let sine = 0.1_f64;
+        let cosine = (1.0 - sine * sine).sqrt();
+        let residual_after_drop = 0.5 * ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+        let psi = array![[1.0_f64, 0.0], [cosine, sine]];
+        let cone = KhatriRaoConeConstraints::new(std::sync::Arc::new(psi), vec![0], 1)
+            .expect("partial-drop operator cone");
+        let set = ConstraintSet::KhatriRaoCone(cone);
+        let hessian = Array2::<f64>::eye(2);
+        let unconstrained = array![
+            -1.0_f64,
+            -sine / cosine - residual_after_drop / sine
+        ];
+        let beta_start = Array1::<f64>::zeros(2);
+
+        let (candidate, active) = solve_quadratic_with_constraint_set(
+            &hessian,
+            &unconstrained,
+            &beta_start,
+            &set,
+            Some(&[0]),
+        )
+        .expect("a pending separator must survive its partial dual drop");
+
+        let normal = array![cosine, sine];
+        let multiplier = -normal.dot(&unconstrained);
+        let expected = &unconstrained + &(&normal * multiplier);
+        assert!(
+            residual_after_drop <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL,
+            "the fixture must leave the pending separator inside the public tolerance after \
+             its partial drop"
+        );
+        assert!(
+            multiplier > 1.0,
+            "the true multiplier must be cumulative, not the tolerance-sized final step: \
+             {multiplier:.3e}"
+        );
+        for (&actual, &oracle) in candidate.iter().zip(expected.iter()) {
+            assert_relative_eq!(actual, oracle, epsilon = 5e-14);
+        }
+        let gradient = &candidate - &unconstrained;
+        let expected_gradient = &normal * multiplier;
+        for (&actual, &oracle) in gradient.iter().zip(expected_gradient.iter()) {
+            assert_relative_eq!(actual, oracle, epsilon = 5e-14);
+        }
+        assert_eq!(
+            active,
+            vec![1],
+            "the unique optimum is supported by the second normal only"
+        );
+        let values = set.values(candidate.view()).expect("candidate values");
+        let scan = scan_operator_violations(
+            &ConstraintSetOps::new(&set, 0.0).expect("operator geometry"),
+            &values,
+            &[false, true],
+        )
+        .expect("candidate feasibility");
+        assert!(scan.is_primal_feasible());
+        assert!(
+            candidate[0] > 0.0,
+            "released row zero must be strictly feasible at the optimum"
         );
     }
 
