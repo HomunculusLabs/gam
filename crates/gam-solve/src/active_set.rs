@@ -4686,9 +4686,21 @@ fn solve_operator_metric_projection_dual_active_set(
         }
         conditioning_rounds += 1;
         if conditioning_rounds > ACTIVE_SET_DUAL_CONDITIONING_ROUNDS {
+            // Whether the surviving row is ACTIVE decides between two opposite
+            // defects, and the reader cannot infer it from anything else here:
+            // an ACTIVE row violated this far contradicts the dual method's
+            // stated invariant that the iterate is the exact minimizer subject
+            // to the active rows held as equalities, while an INACTIVE one says
+            // the row was never admitted despite being violated across every
+            // conditioning round. Same number, same message, different bug.
+            let worst_membership = if is_active[worst_row] {
+                "ACTIVE"
+            } else {
+                "inactive"
+            };
             return Err(EstimationError::ParameterConstraintViolation(format!(
                 "operator metric projection could not condition its terminal face: scaled \
-                 violation {worst:.3e} at row {worst_row} survives \
+                 violation {worst:.3e} at row {worst_row} ({worst_membership}) survives \
                  {ACTIVE_SET_DUAL_CONDITIONING_ROUNDS} conditioned re-solves over {} active rows",
                 active.len(),
             )));
