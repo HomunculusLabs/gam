@@ -1492,62 +1492,61 @@ pub fn fit_response_curvature(
     let mut a = kappa_min;
     let mut b = kappa_max;
     let mut iterations = 0_usize;
-    let (jet, railed_at_resolution_limit, railed_at_hyperbolic_resolution_limit) = if lower.score
-        >= 0.0
-    {
-        // V'(κ_min) ≥ 0: the constrained minimum sits ON the hyperbolic
-        // chart-domain bound — the criterion is still improving as κ decreases
-        // past the limit where the cloud fills the hyperbolic ball of its own
-        // spread. Exactly symmetric to the spherical rail below (#2351): κ̂ is
-        // an UPPER bound on κ, not a resolved point estimate, and must be
-        // reported as railed rather than as a confident hyperbolic verdict.
-        (lower, false, true)
-    } else if upper.score <= 0.0 {
-        // V'(κ_max)≤0 means the criterion is still improving at the
-        // spherical chart-resolution limit.
-        (upper, true, false)
-    } else {
-        let mut current = flat_jet;
-        while iterations < max_iter {
-            iterations += 1;
-            if normalized_kkt(current.kappa, current.score) <= tol && current.curvature > 0.0 {
-                break;
-            }
-            if current.score < 0.0 {
-                a = current.kappa;
-            } else {
-                b = current.kappa;
-            }
+    let (jet, railed_at_resolution_limit, railed_at_hyperbolic_resolution_limit) =
+        if lower.score >= 0.0 {
+            // V'(κ_min) ≥ 0: the constrained minimum sits ON the hyperbolic
+            // chart-domain bound — the criterion is still improving as κ decreases
+            // past the limit where the cloud fills the hyperbolic ball of its own
+            // spread. Exactly symmetric to the spherical rail below (#2351): κ̂ is
+            // an UPPER bound on κ, not a resolved point estimate, and must be
+            // reported as railed rather than as a confident hyperbolic verdict.
+            (lower, false, true)
+        } else if upper.score <= 0.0 {
+            // V'(κ_max)≤0 means the criterion is still improving at the
+            // spherical chart-resolution limit.
+            (upper, true, false)
+        } else {
+            let mut current = flat_jet;
+            while iterations < max_iter {
+                iterations += 1;
+                if normalized_kkt(current.kappa, current.score) <= tol && current.curvature > 0.0 {
+                    break;
+                }
+                if current.score < 0.0 {
+                    a = current.kappa;
+                } else {
+                    b = current.kappa;
+                }
 
-            // Newton's score step supplies local quadratic convergence; the
-            // analytic sign bracket safeguards it globally. An inadmissible
-            // Newton point is replaced by the strictly contracting midpoint.
-            let newton = current.kappa - current.score / current.curvature;
-            let next = if current.curvature > 0.0 && newton.is_finite() && newton > a && newton < b
-            {
-                newton
-            } else {
-                0.5 * (a + b)
-            };
-            current = response_curvature_criterion_jet(values, dim, next)?;
-        }
-        let residual = normalized_kkt(current.kappa, current.score);
-        if residual > tol || current.curvature <= 0.0 {
-            return Err(ResponseGeometryError::CurvatureNonConvergence {
-                iterations,
-                max_iter,
-                bracket_lo: a,
-                bracket_hi: b,
-                kappa: current.kappa,
-                criterion: current.value,
-                score: current.score,
-                curvature: current.curvature,
-                kkt_residual: residual,
-                tolerance: tol,
-            });
-        }
-        (current, false, false)
-    };
+                // Newton's score step supplies local quadratic convergence; the
+                // analytic sign bracket safeguards it globally. An inadmissible
+                // Newton point is replaced by the strictly contracting midpoint.
+                let newton = current.kappa - current.score / current.curvature;
+                let next =
+                    if current.curvature > 0.0 && newton.is_finite() && newton > a && newton < b {
+                        newton
+                    } else {
+                        0.5 * (a + b)
+                    };
+                current = response_curvature_criterion_jet(values, dim, next)?;
+            }
+            let residual = normalized_kkt(current.kappa, current.score);
+            if residual > tol || current.curvature <= 0.0 {
+                return Err(ResponseGeometryError::CurvatureNonConvergence {
+                    iterations,
+                    max_iter,
+                    bracket_lo: a,
+                    bracket_hi: b,
+                    kappa: current.kappa,
+                    criterion: current.value,
+                    score: current.score,
+                    curvature: current.curvature,
+                    kkt_residual: residual,
+                    tolerance: tol,
+                });
+            }
+            (current, false, false)
+        };
     let kappa_hat = jet.kappa;
     // #2351: the hyperbolic rail flag must also fire on the BOUNDARY-LAYER
     // interior optimum. Near the chart-domain edge the conformal restoring
@@ -2318,22 +2317,19 @@ mod tests {
         // numerical identity. This is the direct regression guard for the
         // ambient-origin κ_min/conformal-term bug.
         let values = synth_cloud(dim, 0.6, n, sigma, 0xC0FFEE ^ 4);
-        let fit = fit_response_curvature(values.view(), dim, 0.95, 1e-12, 256)
-            .expect("untranslated fit");
+        let fit =
+            fit_response_curvature(values.view(), dim, 0.95, 1e-12, 256).expect("untranslated fit");
         let shifted = &values + 10.0;
-        let fit_shifted = fit_response_curvature(shifted.view(), dim, 0.95, 1e-12, 256)
-            .expect("translated fit");
+        let fit_shifted =
+            fit_response_curvature(shifted.view(), dim, 0.95, 1e-12, 256).expect("translated fit");
         assert!(
-            (fit.kappa_hat - fit_shifted.kappa_hat).abs()
-                <= 1.0e-9 * (1.0 + fit.kappa_hat.abs()),
+            (fit.kappa_hat - fit_shifted.kappa_hat).abs() <= 1.0e-9 * (1.0 + fit.kappa_hat.abs()),
             "κ̂ moved under pure translation: {} vs {}",
             fit.kappa_hat,
             fit_shifted.kappa_hat
         );
         assert_eq!(fit.profile_ci.verdict, fit_shifted.profile_ci.verdict);
-        assert!(
-            (fit.kappa_r2 - fit_shifted.kappa_r2).abs() <= 1.0e-9 * (1.0 + fit.kappa_r2.abs())
-        );
+        assert!((fit.kappa_r2 - fit_shifted.kappa_r2).abs() <= 1.0e-9 * (1.0 + fit.kappa_r2.abs()));
         assert_eq!(
             fit.railed_at_resolution_limit,
             fit_shifted.railed_at_resolution_limit

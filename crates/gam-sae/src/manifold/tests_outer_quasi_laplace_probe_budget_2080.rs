@@ -485,7 +485,9 @@ fn run_wide_outer_fit(
         "#2080 wide-p acceptance requires a CONVERGED outer penalized quasi-Laplace optimum, not a \
          finite max-iteration/line-search incumbent: iterations={}, final_value={:.6e}, \
          final_grad_norm={:?}",
-        result.iterations, result.final_value, result.final_grad_norm,
+        result.iterations,
+        result.final_value,
+        result.final_grad_norm,
     );
     let telemetry = objective.probe_telemetry();
     objective
@@ -528,7 +530,9 @@ fn run_k1_generated_seed_outer_fit(
         result.converged(),
         "#2153 K=1 acceptance requires a converged outer optimum: iterations={}, \
          final_value={:.6e}, final_grad_norm={:?}",
-        result.iterations, result.final_value, result.final_grad_norm,
+        result.iterations,
+        result.final_value,
+        result.final_grad_norm,
     );
     let telemetry = objective.probe_telemetry();
     objective
@@ -1000,7 +1004,9 @@ fn entangled_two_circle_outer_reml_separates_2080() {
         result.converged(),
         "#2080 entangled acceptance requires a converged outer penalized quasi-Laplace optimum: \
          iterations={}, final_value={:.6e}, final_grad_norm={:?}",
-        result.iterations, result.final_value, result.final_grad_norm,
+        result.iterations,
+        result.final_value,
+        result.final_grad_norm,
     );
     objective
         .certify_outer_result(&result)
@@ -1340,7 +1346,10 @@ fn zz_measure_2439_value_vs_gradient_inner_mode() {
         );
         match (&a.inner_beta_hint, &b.inner_beta_hint) {
             (Some(bv), Some(bg)) if bv.len() == bg.len() => {
-                let identical = bv.iter().zip(bg.iter()).all(|(x, y)| x.to_bits() == y.to_bits());
+                let identical = bv
+                    .iter()
+                    .zip(bg.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits());
                 let max_abs = bv
                     .iter()
                     .zip(bg.iter())
@@ -1654,7 +1663,8 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
         .map(|(v, g)| (v - g).abs())
         .fold(0.0_f64, f64::max);
     assert_eq!(
-        beta_gap, 0.0,
+        beta_gap,
+        0.0,
         "#2228/#2439: the gradient lane must differentiate AT the mode the Value lane priced,          not at one it re-solved for itself; max|Δβ|={beta_gap:.6e} over {} coordinates",
         value_beta.len()
     );

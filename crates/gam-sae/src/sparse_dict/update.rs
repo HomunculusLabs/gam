@@ -635,8 +635,9 @@ pub(super) fn run(
     // arithmetic can express (#2396). A `config.tolerance` of `0.0` asks for the
     // tightest achievable fixed point, which in floating point is the rounding
     // floor of the residual reductions, not literal zero.
-    let fixed_point_tol =
-        config.tolerance.max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
+    let fixed_point_tol = config
+        .tolerance
+        .max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
     // Captured-fraction EV-plateau detector (arm 2 best-effort): "how big was
     // this round's move against the climb achieved since entry". Stationary
     // rounds within a trailing window mark the achievable plateau; the window
@@ -903,8 +904,8 @@ pub(super) fn run(
             plateau_flags.iter().filter(|&&s| s).count() >= LINEAR_EV_PLATEAU_MIN_ROUNDS;
 
         if best_effort_open {
-            let best = best_open
-                .expect("a confirmed plateau has observed at least one returnable round");
+            let best =
+                best_open.expect("a confirmed plateau has observed at least one returnable round");
             let (indices, code_mat) = pack_codes(&best.codes, n, s);
             return Ok(SparseDictIterate {
                 decoder: best.decoder,
@@ -2593,12 +2594,7 @@ fn solve_decoder_recycled(
 /// history is accumulated while solving and is independently bounded by the
 /// same `r≤P` contract; at refresh completion it replaces, rather than joins,
 /// the prior history.
-fn decoder_recycle_rank_bound(
-    k_total: usize,
-    p: usize,
-    m: usize,
-    nnz: usize,
-) -> usize {
+fn decoder_recycle_rank_bound(k_total: usize, p: usize, m: usize, nnz: usize) -> usize {
     if m == 0 {
         return 0;
     }
@@ -2624,16 +2620,12 @@ fn recycled_component_preconditioner(
     diagonal: &[f64],
     rank_bound: usize,
 ) -> Result<SymmetricLowRankPreconditioner, String> {
-    use gam_linalg::faer_ndarray::{
-        default_rrqr_rank_alpha, rrqr_with_permutation,
-    };
+    use gam_linalg::faer_ndarray::{default_rrqr_rank_alpha, rrqr_with_permutation};
 
     let m = comp.len();
     let inverse_diagonal: Vec<f64> = diagonal.iter().map(|&d| d.recip()).collect();
     if rank_bound == 0 || recycle.directions.is_empty() {
-        return Ok(SymmetricLowRankPreconditioner::jacobi(
-            inverse_diagonal,
-        ));
+        return Ok(SymmetricLowRankPreconditioner::jacobi(inverse_diagonal));
     }
 
     // Current-coordinate basis U = orth(D¹/² Z). Restricting global recycled
@@ -2652,16 +2644,10 @@ fn recycled_component_preconditioner(
         .directions
         .iter()
         .enumerate()
-        .filter_map(|(q, direction)| {
-            comp.iter()
-                .any(|&atom| direction[atom] != 0.0)
-                .then_some(q)
-        })
+        .filter_map(|(q, direction)| comp.iter().any(|&atom| direction[atom] != 0.0).then_some(q))
         .collect();
     if relevant.is_empty() {
-        return Ok(SymmetricLowRankPreconditioner::jacobi(
-            inverse_diagonal,
-        ));
+        return Ok(SymmetricLowRankPreconditioner::jacobi(inverse_diagonal));
     }
     let mut raw = Array2::<f64>::zeros((m, relevant.len()));
     for (q, &source) in relevant.iter().enumerate() {
@@ -2669,14 +2655,11 @@ fn recycled_component_preconditioner(
             raw[[i, q]] = diagonal[i].sqrt() * recycle.directions[source][atom];
         }
     }
-    let rrqr = rrqr_with_permutation(&raw, default_rrqr_rank_alpha()).map_err(|err| {
-        format!("decoder recycled coarse-space RRQR failed: {err}")
-    })?;
+    let rrqr = rrqr_with_permutation(&raw, default_rrqr_rank_alpha())
+        .map_err(|err| format!("decoder recycled coarse-space RRQR failed: {err}"))?;
     let rank = rrqr.rank.min(rank_bound);
     if rank == 0 {
-        return Ok(SymmetricLowRankPreconditioner::jacobi(
-            inverse_diagonal,
-        ));
+        return Ok(SymmetricLowRankPreconditioner::jacobi(inverse_diagonal));
     }
     let mut independent = Array2::<f64>::zeros((m, rank));
     for q in 0..rank {
@@ -2711,8 +2694,7 @@ fn recycled_component_preconditioner(
                     // ascending-neighbor order, while structure is loaded once.
                     for edge in row_ptr[i] as usize..row_ptr[i + 1] as usize {
                         let j = csr_cols[edge] as usize;
-                        let scaled_value =
-                            csr_vals[edge] * inverse_sqrt[i] * inverse_sqrt[j];
+                        let scaled_value = csr_vals[edge] * inverse_sqrt[i] * inverse_sqrt[j];
                         let neighbor_row = basis.row(j);
                         let neighbor = neighbor_row
                             .as_slice()
@@ -2866,17 +2848,14 @@ fn solve_component(
     // exactly as before — never enter CG or the solve statistics.
     let live_columns: Vec<usize> = {
         let mut live_flags = vec![false; p];
-        live_flags
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(c, live)| {
-                let mut bnorm2 = 0.0f64;
-                for &a in comp {
-                    let b = eq.b[[a, c]];
-                    bnorm2 += b * b;
-                }
-                *live = bnorm2.sqrt() > DEAD_DENOM;
-            });
+        live_flags.par_iter_mut().enumerate().for_each(|(c, live)| {
+            let mut bnorm2 = 0.0f64;
+            for &a in comp {
+                let b = eq.b[[a, c]];
+                bnorm2 += b * b;
+            }
+            *live = bnorm2.sqrt() > DEAD_DENOM;
+        });
         for (c, &live) in live_flags.iter().enumerate() {
             if !live {
                 for &a in comp {
@@ -2933,8 +2912,7 @@ fn solve_component(
         .saturating_add(2usize.saturating_mul(m))
         .saturating_mul(recycled_rank);
     let tile_state_per_column = 5usize.saturating_mul(m).saturating_add(recycled_rank);
-    let tile_columns =
-        (rhs_values.saturating_sub(recycle_values) / tile_state_per_column).max(1);
+    let tile_columns = (rhs_values.saturating_sub(recycle_values) / tile_state_per_column).max(1);
 
     for tile in live_columns.chunks(tile_columns) {
         let t = tile.len();
@@ -2983,9 +2961,7 @@ fn solve_component(
         let quota = if live_columns.is_empty() {
             0
         } else {
-            rank_bound
-                .saturating_mul(t)
-                .div_ceil(live_columns.len())
+            rank_bound.saturating_mul(t).div_ceil(live_columns.len())
         };
         let mut hard_columns: Vec<usize> = results
             .iter()
@@ -3102,9 +3078,7 @@ fn solve_block_cg(
 
     let apply = |pblk: &Array2<f64>, apblk: &mut Array2<f64>| {
         let t = pblk.ncols();
-        let ps = pblk
-            .as_slice()
-            .expect("block CG state is standard layout");
+        let ps = pblk.as_slice().expect("block CG state is standard layout");
         let out = apblk
             .as_slice_mut()
             .expect("block CG state is standard layout");
@@ -3436,11 +3410,10 @@ fn pack_codes(codes: &[SparseCode], n: usize, s: usize) -> (Array2<u32>, Array2<
 #[cfg(test)]
 mod exact_solve_tests {
     use super::{
-        CgStop, DecoderNormalEq, DecoderRecycleSpace, EvPlateau,
-        LINEAR_EV_PLATEAU_FRACTION, LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth,
-        SparseDictionaryError, cg_solve, explained_variance, kappa_from_cg_tridiagonal,
-        open_round_is_stationary, pcg_multi_core, recycled_component_preconditioner,
-        route_and_code_all, run, solve_decoder_recycled,
+        CgStop, DecoderNormalEq, DecoderRecycleSpace, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
+        LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, SparseDictionaryError, cg_solve,
+        explained_variance, kappa_from_cg_tridiagonal, open_round_is_stationary, pcg_multi_core,
+        recycled_component_preconditioner, route_and_code_all, run, solve_decoder_recycled,
         solve_decoder_with_routability_gate_recycled,
     };
     use crate::sparse_dict::codes::SparseCode;
@@ -3989,9 +3962,14 @@ mod exact_solve_tests {
         let mut decoder = Array2::<f32>::zeros((2, 2));
         decoder[[0, 1]] = 1.0;
         decoder[[1, 0]] = 1.0;
-        let (_stats, gate) =
-            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
-                .expect("decoder refresh");
+        let (_stats, gate) = solve_decoder_with_routability_gate(
+            &mut decoder,
+            &eq,
+            0.0,
+            1.0,
+            gam_gpu::GpuPolicy::Auto,
+        )
+        .expect("decoder refresh");
 
         assert!(gate[0].refresh, "well-fired atom must refresh");
         assert!(
@@ -4020,9 +3998,14 @@ mod exact_solve_tests {
         decoder[[0, 1]] = 1.0;
 
         accumulate_constant_rows(&mut eq, 0, 1, 1.0, [3.0, 0.0]);
-        let (_stats_first, first_gate) =
-            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
-                .expect("decoder refresh");
+        let (_stats_first, first_gate) = solve_decoder_with_routability_gate(
+            &mut decoder,
+            &eq,
+            0.0,
+            1.0,
+            gam_gpu::GpuPolicy::Auto,
+        )
+        .expect("decoder refresh");
         eq.clear_refreshed_atoms(&first_gate);
 
         assert!(!first_gate[0].refresh, "single firing should defer");
@@ -4036,9 +4019,14 @@ mod exact_solve_tests {
         );
 
         accumulate_constant_rows(&mut eq, 0, 63, 1.0, [3.0, 0.0]);
-        let (_stats_second, second_gate) =
-            solve_decoder_with_routability_gate(&mut decoder, &eq, 0.0, 1.0, gam_gpu::GpuPolicy::Auto)
-                .expect("decoder refresh");
+        let (_stats_second, second_gate) = solve_decoder_with_routability_gate(
+            &mut decoder,
+            &eq,
+            0.0,
+            1.0,
+            gam_gpu::GpuPolicy::Auto,
+        )
+        .expect("decoder refresh");
         eq.clear_refreshed_atoms(&second_gate);
 
         assert!(
@@ -4095,8 +4083,7 @@ mod exact_solve_tests {
         );
 
         let mut decoder = Array2::<f32>::zeros((k, p));
-        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto)
-            .expect("decoder refresh");
+        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto).expect("decoder refresh");
 
         // The internal solve is f64 (Cholesky residual ~1e-15), but the returned
         // decoder is f32, so the measurable relative residual bottoms out at the f32
@@ -4125,8 +4112,7 @@ mod exact_solve_tests {
         let eq = assemble_normal_eq(x.view(), &codes, k, p);
 
         let mut decoder = Array2::<f32>::zeros((k, p));
-        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto)
-            .expect("decoder refresh");
+        solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Auto).expect("decoder refresh");
 
         // Dense full system (A + ρI) D = B, solved independently.
         let mut mat = Array2::<f64>::zeros((k, k));
@@ -4312,13 +4298,8 @@ mod exact_solve_tests {
             let (eq, dense, truth) = fixture(condition);
 
             let mut cold_decoder = Array2::<f32>::zeros((k, p));
-            let cold = solve_decoder(
-                &mut cold_decoder,
-                &eq,
-                0.0,
-                gam_gpu::GpuPolicy::Off,
-            )
-            .expect("Jacobi control solve");
+            let cold = solve_decoder(&mut cold_decoder, &eq, 0.0, gam_gpu::GpuPolicy::Off)
+                .expect("Jacobi control solve");
             cold_iterations.push(cold.cg_iterations);
 
             // Deliberately erase the ordinary warm seed. The recycle state is
@@ -4395,10 +4376,7 @@ mod exact_solve_tests {
             // The first stored direction belongs to the other side of the
             // split. Capping before restriction used to hide the useful second
             // direction entirely when rank_bound == 1.
-            directions: vec![
-                vec![1.0, 0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 1.0, 0.0],
-            ],
+            directions: vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 1.0, 0.0]],
             next_candidates: Vec::new(),
             next_capacity: 0,
         };
@@ -4652,7 +4630,8 @@ mod exact_solve_tests {
         assert!(
             stats.cg_relative_residual <= stats.cg_residual_stop,
             "the resolved block's relative residual {:.3e} must sit at/below the √ε stop {:.3e}",
-            stats.cg_relative_residual, stats.cg_residual_stop
+            stats.cg_relative_residual,
+            stats.cg_residual_stop
         );
         assert!(
             decoder.iter().all(|v| v.is_finite()),
@@ -5027,8 +5006,9 @@ mod exact_solve_tests {
             score_mode: gam_gpu::GpuPolicy::Off,
         };
 
-        let fit = run_linear_reml_schedule(x.view(), &config)
-            .expect("the schedule must terminate (return), not loop, on a noise-floored interior ρ");
+        let fit = run_linear_reml_schedule(x.view(), &config).expect(
+            "the schedule must terminate (return), not loop, on a noise-floored interior ρ",
+        );
         assert!(
             fit.convergence.outer_iterations >= 1
                 && fit.convergence.outer_iterations <= super::REML_SCHEDULE_MAX_OUTER_ITERS,
@@ -5054,8 +5034,7 @@ mod exact_solve_tests {
             "a K >> rank best-effort inner solve yields an OPEN schedule certificate"
         );
         assert!(
-            fit.convergence.outer_tolerance
-                >= super::reml_schedule_rho_log_tol(config.tolerance),
+            fit.convergence.outer_tolerance >= super::reml_schedule_rho_log_tol(config.tolerance),
             "the best-effort band must be at least the machine-precision √tolerance band"
         );
     }
@@ -5390,8 +5369,7 @@ mod exact_solve_tests {
         // exact property that an absolute `tolerance == 0.0` could never satisfy
         // before the machine-precision floor.
         assert!(
-            fit.convergence.inner_ev_residual < 1.0e-9
-                && fit.convergence.inner_ev_residual >= 0.0,
+            fit.convergence.inner_ev_residual < 1.0e-9 && fit.convergence.inner_ev_residual >= 0.0,
             "certified EV residual must be finite and at the rounding floor; got {:.3e}",
             fit.convergence.inner_ev_residual
         );
@@ -5420,7 +5398,11 @@ mod exact_solve_tests {
         // to the target.
         for a in 0..k {
             let b = (a + 1) % k;
-            let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
+            let key = if a < b {
+                (a as u32, b as u32)
+            } else {
+                (b as u32, a as u32)
+            };
             let v = 0.25 * next();
             off.insert(key, v);
             row_abs[a] += v.abs();
@@ -5441,7 +5423,11 @@ mod exact_solve_tests {
             if a == b {
                 continue;
             }
-            let key = if a < b { (a as u32, b as u32) } else { (b as u32, a as u32) };
+            let key = if a < b {
+                (a as u32, b as u32)
+            } else {
+                (b as u32, a as u32)
+            };
             if off.contains_key(&key) {
                 continue;
             }
@@ -5504,7 +5490,10 @@ mod exact_solve_tests {
             cpu_stats.max_component_size, k,
             "fixture must percolate into one giant component"
         );
-        assert_eq!(cpu_stats.cg_nonconverged_columns, 0, "cpu block CG must converge");
+        assert_eq!(
+            cpu_stats.cg_nonconverged_columns, 0,
+            "cpu block CG must converge"
+        );
         assert!(cpu_stats.cg_relative_residual <= cpu_stats.cg_residual_stop);
 
         let device_present = cfg!(target_os = "linux")
@@ -5528,7 +5517,10 @@ mod exact_solve_tests {
             dev_stats.cg_iterations,
             cpu_secs / dev_secs.max(1e-9),
         );
-        assert_eq!(dev_stats.cg_nonconverged_columns, 0, "device block CG must converge");
+        assert_eq!(
+            dev_stats.cg_nonconverged_columns, 0,
+            "device block CG must converge"
+        );
         assert_eq!(
             dev_stats.device_refresh_columns, dev_stats.cg_columns,
             "Required refresh must run every live column on the device"

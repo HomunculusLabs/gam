@@ -191,9 +191,10 @@ fn survival_posterior_mean_se_covers_true_survival_probability_at_nominal() {
             with_uncertainty: true,
             estimand: SurvivalPredictEstimand::PosteriorMean,
         };
-        let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional).unwrap_or_else(|e| {
-            panic!("posterior-mean survival predict failed (rep {rep}): {e:?}")
-        });
+        let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
+            .unwrap_or_else(|e| {
+                panic!("posterior-mean survival predict failed (rep {rep}): {e:?}")
+            });
         let s_hat = result.survival[[0, 0]];
         let se = result.survival_se.unwrap_or_else(|| {
             panic!("with_uncertainty=true but survival_se was None (rep {rep})")
@@ -369,9 +370,10 @@ fn survival_location_scale_delta_method_se_covers_true_survival_probability_at_n
             with_uncertainty: true,
             estimand: SurvivalPredictEstimand::Plugin,
         };
-        let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional).unwrap_or_else(|e| {
-            panic!("location-scale delta-method survival predict failed (rep {rep}): {e:?}")
-        });
+        let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
+            .unwrap_or_else(|e| {
+                panic!("location-scale delta-method survival predict failed (rep {rep}): {e:?}")
+            });
         let s_hat = result.survival[[0, 0]];
         let se = result.survival_se.unwrap_or_else(|| {
             panic!("with_uncertainty=true but survival_se was None (location-scale, rep {rep})")

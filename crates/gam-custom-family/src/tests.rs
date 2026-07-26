@@ -1290,15 +1290,16 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
         inner_max_cycles: 100,
         ..BlockwiseFitOptions::default()
     };
-    let (tightened, _) =
-        derivative_quality_options_and_warm_start(&outer_is_stricter, None, true);
+    let (tightened, _) = derivative_quality_options_and_warm_start(&outer_is_stricter, None, true);
     assert_eq!(tightened.inner_tol, outer_is_stricter.outer_tol);
     assert_eq!(tightened.inner_max_cycles, 200);
 
-    let (rho_only, _) =
-        derivative_quality_options_and_warm_start(&outer_is_stricter, None, false);
+    let (rho_only, _) = derivative_quality_options_and_warm_start(&outer_is_stricter, None, false);
     assert_eq!(rho_only.inner_tol, outer_is_stricter.inner_tol);
-    assert_eq!(rho_only.inner_max_cycles, outer_is_stricter.inner_max_cycles);
+    assert_eq!(
+        rho_only.inner_max_cycles,
+        outer_is_stricter.inner_max_cycles
+    );
 
     let explicitly_tight = BlockwiseFitOptions {
         inner_tol: 1e-12,
@@ -1306,10 +1307,12 @@ pub(crate) fn direct_joint_hyper_never_loosens_caller_inner_tolerance() {
         inner_max_cycles: 100,
         ..BlockwiseFitOptions::default()
     };
-    let (preserved, _) =
-        derivative_quality_options_and_warm_start(&explicitly_tight, None, true);
+    let (preserved, _) = derivative_quality_options_and_warm_start(&explicitly_tight, None, true);
     assert_eq!(preserved.inner_tol, explicitly_tight.inner_tol);
-    assert_eq!(preserved.inner_max_cycles, explicitly_tight.inner_max_cycles);
+    assert_eq!(
+        preserved.inner_max_cycles,
+        explicitly_tight.inner_max_cycles
+    );
 }
 
 #[test]
@@ -3373,18 +3376,16 @@ fn outer_jeffreys_geometry_is_derivative_order_invariant() {
     let states = vec![jeffreys_seam_state(array![0.0])];
     let ranges = block_param_ranges(&specs);
 
-    let (_, _, completion) =
-        custom_family_outer_jeffreys_hphi(&family, &states, &specs, &ranges)
-            .expect("Jeffreys term")
-            .expect("active Jeffreys term");
+    let (_, _, completion) = custom_family_outer_jeffreys_hphi(&family, &states, &specs, &ranges)
+        .expect("Jeffreys term")
+        .expect("active Jeffreys term");
     assert!(completion.is_some());
     assert_eq!(information_calls.load(Ordering::Relaxed), 2);
     assert_eq!(axis_batch_calls.load(Ordering::Relaxed), 1);
     assert_eq!(completion_calls.load(Ordering::Relaxed), 1);
 
-    let drift =
-        custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
-            .expect("Jeffreys drift construction");
+    let drift = custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
+        .expect("Jeffreys drift construction");
     assert!(
         drift.is_some(),
         "active Jeffreys geometry must expose one lazy drift independent of derivative order",
@@ -4866,10 +4867,7 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
             true
         }
 
-        fn hessian_matvec(
-            &self,
-            direction: &Array1<f64>,
-        ) -> Result<Option<Array1<f64>>, String> {
+        fn hessian_matvec(&self, direction: &Array1<f64>) -> Result<Option<Array1<f64>>, String> {
             assert_eq!(direction.len(), 2);
             Ok(Some(direction.clone()))
         }
@@ -5138,14 +5136,10 @@ pub(crate) fn owned_mode_finalizer_preserves_prior_and_active_jeffreys_without_r
         beta: beta.clone(),
         eta: specs[0].design.apply(&beta),
     }];
-    let (phi, _, _) = custom_family_outer_jeffreys_hphi(
-        &family,
-        &states,
-        &specs,
-        &block_param_ranges(&specs),
-    )
-    .expect("Jeffreys profile probe")
-    .expect("absolute curvature below one must arm the Jeffreys profile");
+    let (phi, _, _) =
+        custom_family_outer_jeffreys_hphi(&family, &states, &specs, &block_param_ranges(&specs))
+            .expect("Jeffreys profile probe")
+            .expect("absolute curvature below one must arm the Jeffreys profile");
     assert_ne!(phi.to_bits(), 0.0_f64.to_bits());
     let evaluations_before_finalization = family.evaluations.load(Ordering::Relaxed);
 

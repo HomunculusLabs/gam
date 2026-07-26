@@ -67,9 +67,7 @@ pub fn solve_psd_trust_region(
             "PSD trust-region radius must be finite and positive, got {radius}"
         )));
     }
-    if gram.iter().any(|value| !value.is_finite())
-        || rhs.iter().any(|value| !value.is_finite())
-    {
+    if gram.iter().any(|value| !value.is_finite()) || rhs.iter().any(|value| !value.is_finite()) {
         return Err(LinalgError::InvalidInput(
             "PSD trust-region inputs must be finite".to_string(),
         ));
@@ -105,14 +103,9 @@ pub fn solve_psd_trust_region(
     // Try the canonical interior Moore–Penrose solution. A material RHS in a
     // numerical-null mode makes the unconstrained model unbounded, so it must go
     // through the finite-radius boundary solve below.
-    let null_rhs_norm = scaled_norm(
-        eigenvalues
-            .iter()
-            .zip(projected.iter())
-            .filter_map(|(&eigenvalue, &coefficient)| {
-                (eigenvalue <= rank_tolerance).then_some(coefficient)
-            }),
-    );
+    let null_rhs_norm = scaled_norm(eigenvalues.iter().zip(projected.iter()).filter_map(
+        |(&eigenvalue, &coefficient)| (eigenvalue <= rank_tolerance).then_some(coefficient),
+    ));
     let rhs_tolerance = dimension as f64 * f64::EPSILON * rhs_norm;
     if null_rhs_norm <= rhs_tolerance {
         let mut spectral_step = Array1::<f64>::zeros(dimension);
@@ -214,8 +207,7 @@ pub fn solve_psd_trust_region(
             // derivative through normalized y avoids squaring a huge near-pole step.
             let inverse_norm = 1.0 / norm;
             let mut weighted_inverse_denominator = 0.0_f64;
-            for (&coefficient, &eigenvalue) in scaled_rhs.iter().zip(scaled_eigenvalues.iter())
-            {
+            for (&coefficient, &eigenvalue) in scaled_rhs.iter().zip(scaled_eigenvalues.iter()) {
                 let denominator = eigenvalue + shift;
                 let normalized = (coefficient / denominator) * inverse_norm;
                 weighted_inverse_denominator += normalized * normalized / denominator;
@@ -237,9 +229,7 @@ pub fn solve_psd_trust_region(
         scaled_rhs
             .iter()
             .zip(scaled_eigenvalues.iter())
-            .map(|(&coefficient, &eigenvalue)| {
-                radius * coefficient / (eigenvalue + upper)
-            }),
+            .map(|(&coefficient, &eigenvalue)| radius * coefficient / (eigenvalue + upper)),
     );
     let step = eigenvectors.dot(&spectral_step);
     if step.iter().any(|value| !value.is_finite()) {
@@ -285,8 +275,7 @@ mod tests {
     fn boundary_solution_is_scale_equivariant_and_satisfies_common_shift_kkt() {
         let base_gram = array![[1.0, 0.0], [0.0, 4.0]];
         let base_rhs = array![2.0, 1.0];
-        let reference =
-            solve_psd_trust_region(base_gram.view(), base_rhs.view(), 0.5).unwrap();
+        let reference = solve_psd_trust_region(base_gram.view(), base_rhs.view(), 0.5).unwrap();
         assert!((norm(&reference) - 0.5).abs() < 1.0e-13);
         let shift_0 = (base_rhs[0] - base_gram[[0, 0]] * reference[0]) / reference[0];
         let shift_1 = (base_rhs[1] - base_gram[[1, 1]] * reference[1]) / reference[1];

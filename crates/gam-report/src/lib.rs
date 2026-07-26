@@ -139,7 +139,11 @@ impl CriterionStationarityRow {
                 let rail_list = rails
                     .iter()
                     .map(|r| {
-                        let side = if r.upper { "\u{03bb}\u{2192}\u{221e}" } else { "\u{03bb}\u{2192}0" };
+                        let side = if r.upper {
+                            "\u{03bb}\u{2192}\u{221e}"
+                        } else {
+                            "\u{03bb}\u{2192}0"
+                        };
                         format!("#{} ({side}, tail={:.3e})", r.index, r.tail_constant)
                     })
                     .collect::<Vec<_>>()

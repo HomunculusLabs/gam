@@ -245,8 +245,8 @@ mod tests {
             let mut k = 0usize;
             loop {
                 let a = (2 * k + 1) as f64;
-                let term =
-                    a / (2.0 * std::f64::consts::PI * t.powi(3)).sqrt() * (-a * a / (8.0 * t)).exp();
+                let term = a / (2.0 * std::f64::consts::PI * t.powi(3)).sqrt()
+                    * (-a * a / (8.0 * t)).exp();
                 sum += if k % 2 == 0 { term } else { -term };
                 if term <= 1e-18 {
                     break;
@@ -353,7 +353,10 @@ mod tests {
             prev = f;
             x += 1e-3;
         }
-        assert!(pg1_untilted_cdf(50.0) > 1.0 - 1e-9, "right tail must reach 1");
+        assert!(
+            pg1_untilted_cdf(50.0) > 1.0 - 1e-9,
+            "right tail must reach 1"
+        );
     }
 
     #[test]

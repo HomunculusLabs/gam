@@ -1429,14 +1429,18 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         } = posterior;
         let geometry = Some(geometry);
         let reml_term = if options.use_remlobjective {
-            let logdet_h = inner.block_logdet_h.ok_or_else(|| CustomFamilyError::Optimization {
-                context: "fit_custom_family no-smoothing inner solve",
-                reason: "certified inner mode is missing its Hessian logdet".to_string(),
-            })?;
-            let logdet_s = inner.block_logdet_s.ok_or_else(|| CustomFamilyError::Optimization {
-                context: "fit_custom_family no-smoothing inner solve",
-                reason: "certified inner mode is missing its penalty logdet".to_string(),
-            })?;
+            let logdet_h = inner
+                .block_logdet_h
+                .ok_or_else(|| CustomFamilyError::Optimization {
+                    context: "fit_custom_family no-smoothing inner solve",
+                    reason: "certified inner mode is missing its Hessian logdet".to_string(),
+                })?;
+            let logdet_s = inner
+                .block_logdet_s
+                .ok_or_else(|| CustomFamilyError::Optimization {
+                    context: "fit_custom_family no-smoothing inner solve",
+                    reason: "certified inner mode is missing its penalty logdet".to_string(),
+                })?;
             0.5 * (logdet_h - logdet_s)
         } else {
             0.0
@@ -1571,7 +1575,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // df reaches one. This is both the optimizer's upper bound and — because
     // every term sits on its penalty nullspace there, leaving a unique
     // parametric mode — the anchor of the #2366 continuation below.
-    let rho_upper_bounds = effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?;
+    let rho_upper_bounds =
+        effective_df_floor_rho_upper_bounds(specs, &label_layout, n_rho, rho_box)?;
 
     // #2366: for a family whose joint likelihood Hessian depends on β the inner
     // problem is nonconvex, so `argmin_θ ℓ_p(θ, ρ)` is a set and the outer
@@ -2187,8 +2192,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     if !inner.converged {
         return Err(CustomFamilyError::Optimization {
             context: "fit_custom_family terminal mode ownership",
-            reason: "the certified terminal coefficient mode was not converged; no fit was assembled"
-                .to_string(),
+            reason:
+                "the certified terminal coefficient mode was not converged; no fit was assembled"
+                    .to_string(),
         });
     }
     let per_block = split_labeled_log_lambdas(&rho_star, &label_layout)?;
@@ -2449,15 +2455,16 @@ fn pulled_back_joint_penalty_specs<F: CustomFamily + Clone + Send + Sync + 'stat
                 // first coordinate has nullity 0, not 1) — so the declared
                 // raw nullity is recomputed on the pulled-back operator
                 // instead of being capped at the reduced total.
-                let (evals, _) = pulled.eigh(Side::Lower).map_err(|e| {
-                    CustomFamilyError::Optimization {
-                        context: "fit_custom_family joint penalty pullback rank",
-                        reason: format!(
-                            "eigendecomposition of pulled-back joint penalty '{}' failed: {e}",
-                            spec.label.as_deref().unwrap_or("<unlabeled>"),
-                        ),
-                    }
-                })?;
+                let (evals, _) =
+                    pulled
+                        .eigh(Side::Lower)
+                        .map_err(|e| CustomFamilyError::Optimization {
+                            context: "fit_custom_family joint penalty pullback rank",
+                            reason: format!(
+                                "eigendecomposition of pulled-back joint penalty '{}' failed: {e}",
+                                spec.label.as_deref().unwrap_or("<unlabeled>"),
+                            ),
+                        })?;
                 let evals_slice =
                     evals
                         .as_slice()
@@ -2555,13 +2562,7 @@ fn fit_custom_family_user_fixed_log_lambdas_impl<
         reason,
     })?;
     refresh_all_block_etas(family, specs, &mut inner.block_states)?;
-    audit_converged_identifiability(
-        family,
-        raw_specs,
-        &canonical,
-        &inner.block_states,
-        0,
-    )?;
+    audit_converged_identifiability(family, raw_specs, &canonical, &inner.block_states, 0)?;
     let hessian = materialize_owned_terminal_unpenalized_hessian(
         family,
         specs,
@@ -2685,9 +2686,7 @@ fn fit_custom_family_fixed_log_lambdas_from_owned_mode_with_provenance<
                     || selected_theta
                         .iter()
                         .zip(outer.rho().iter())
-                        .any(|(selected, certified)| {
-                            selected.to_bits() != certified.to_bits()
-                        })
+                        .any(|(selected, certified)| selected.to_bits() != certified.to_bits())
                 {
                     return Err(CustomFamilyError::InvalidInput {
                         context:
@@ -3035,13 +3034,12 @@ fn materialize_outer_criterion_diagnostics(
     eval: OuterObjectiveEvalResult,
     context: &'static str,
 ) -> Result<OuterCriterionDiagnostics, CustomFamilyError> {
-    let outer_hessian = eval
-        .outer_hessian
-        .materialize_dense()
-        .map_err(|reason| CustomFamilyError::Optimization {
+    let outer_hessian = eval.outer_hessian.materialize_dense().map_err(|reason| {
+        CustomFamilyError::Optimization {
             context,
             reason: reason.to_string(),
-        })?;
+        }
+    })?;
     Ok(OuterCriterionDiagnostics {
         objective: eval.objective,
         gradient: eval.gradient,
@@ -3078,10 +3076,7 @@ pub fn evaluate_rho_outer_criterion_for_diagnostics<
         context: "evaluate_rho_outer_criterion_for_diagnostics",
         reason,
     })?;
-    materialize_outer_criterion_diagnostics(
-        eval,
-        "evaluate_rho_outer_criterion_for_diagnostics",
-    )
+    materialize_outer_criterion_diagnostics(eval, "evaluate_rho_outer_criterion_for_diagnostics")
 }
 
 /// Diagnostic-only entry: evaluate the SAME labeled outer criterion and

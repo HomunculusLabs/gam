@@ -1,6 +1,7 @@
 //! #2500 — the assignment prior's sparse log-strength curvature operator
 //! `∂H_tt/∂ρ_sparse` must be MODELLED for every family that mints a sparse outer
-//! coordinate, not only for softmax.
+//! coordinate, not only for softmax — and it must be the derivative of the
+//! operator the solver actually installs.
 //!
 //! `AssignmentStrengthLayout` mints a sparse outer coordinate for exactly three
 //! families: `Softmax` (`SoftmaxEntropy`) and `OrderedBetaBernoulli` /
@@ -11,12 +12,13 @@
 //! `assignment_prior_log_strength_hdiag_weighted` has always computed it exactly
 //! and the arrow assembly writes precisely that diagonal into `block.htt`.
 //!
-//! These gates pin the three properties the fix must have:
-//!   1. the operator map assembles at all for a ThresholdGate ρ (RED before);
-//!   2. the sparse block IS `∂H_tt/∂ρ_sparse` of the ASSEMBLED operator, checked
-//!      by central finite difference of the cache's own undamped row factors;
-//!   3. the dense-route analytic outer gradient — the production consumer that
-//!      aborted the outer-BFGS seed evaluation — runs to a finite result.
+//! Installing it is necessary but NOT sufficient. The threshold gate is the only
+//! family whose installed curvature `w·λ·s·(1−2a)/τ²` is SIGNED (every sibling is
+//! PSD-majorized: `λS⊗I`, `α·softplus(cos κt)`, the softmax Gershgorin radius),
+//! so wherever the gate sits above its threshold the per-row `H_tt` block goes
+//! indefinite and the factorization spectrally deflates that direction to
+//! ρ-independent unit stiffness. The raw operator then over-claims curvature on
+//! exactly those directions. These gates pin both halves.
 
 use super::*;
 use ndarray::{Array1, Array2};
@@ -26,12 +28,18 @@ use ndarray::{Array1, Array2};
 /// SAME gate the fit uses (`a_k = σ((ℓ_k − θ)/τ)`), so the inner state is a real
 /// fit rather than a mismatched-forward artefact.
 ///
-/// The logits straddle the threshold on purpose: even rows sit BELOW it
-/// (`a < ½` ⇒ prior curvature `λ·s·(1−2a)/τ² > 0`) and odd rows ABOVE it
-/// (`a > ½` ⇒ curvature `< 0`). The ThresholdGate prior Hessian is signed, and a
-/// fixture that only sampled one side would leave the sign of the operator
-/// unexercised.
-pub(crate) fn threshold_gate_tiny_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
+/// `straddle` selects the two strata this defect lives on:
+///
+/// * `true` — logits straddle the threshold, so half the free logits carry
+///   NEGATIVE prior curvature (`1−2a < 0`). Measured: all ten rows spectrally
+///   deflate exactly one direction each. This is the stratum the raw operator
+///   gets wrong.
+/// * `false` — every logit sits below the threshold, so all prior curvature is
+///   positive and NO row deflates. This is the stratum where the raw operator is
+///   already exact, and it isolates the two mechanisms from each other.
+pub(crate) fn threshold_gate_tiny_fixture(
+    straddle: bool,
+) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
     let n = 10usize;
     let p = 3usize;
     let k_atoms = 2usize;
@@ -58,9 +66,13 @@ pub(crate) fn threshold_gate_tiny_fixture() -> (SaeManifoldTerm, Array2<f64>, Sa
         let phase = (row as f64 + 0.35) / n as f64;
         coords[0][[row, 0]] = phase;
         coords[1][[row, 0]] = (phase + 0.21).fract();
-        // Straddle the gate: below the threshold on even rows, above it on odd.
-        logits[[row, 0]] = if row % 2 == 0 { -0.8 } else { 0.9 };
-        logits[[row, 1]] = if row % 2 == 0 { 0.7 } else { -0.5 };
+        if straddle {
+            logits[[row, 0]] = if row % 2 == 0 { -0.8 } else { 0.9 };
+            logits[[row, 1]] = if row % 2 == 0 { 0.7 } else { -0.5 };
+        } else {
+            logits[[row, 0]] = -0.8;
+            logits[[row, 1]] = -0.5;
+        }
         for atom in 0..k_atoms {
             let gate = 1.0 / (1.0 + (-(logits[[row, atom]] - threshold) / tau).exp());
             let theta = std::f64::consts::TAU * coords[atom][[row, 0]];
@@ -136,6 +148,15 @@ fn frozen_cache(
     (loss, cache)
 }
 
+/// Total number of spectrally/gauge deflated per-row directions in a cache. The
+/// FD gates below are only valid on a fixed DISCRETE stratum, so this doubles as
+/// the branch-identity check across the ±h endpoints.
+fn deflated_direction_count(term: &SaeManifoldTerm, cache: &ArrowFactorCache) -> usize {
+    (0..term.n_obs())
+        .map(|row| cache.deflated_row_directions[row].len())
+        .sum()
+}
+
 /// The flat logit slot `(row, atom)`'s global index in the cache's t-layout.
 /// ThresholdGate always uses the dense (full-support) layout, where the row's
 /// free logits occupy the first `assignment_coord_dim()` positions of the block.
@@ -160,7 +181,7 @@ fn logit_slots(term: &SaeManifoldTerm, cache: &ArrowFactorCache) -> Vec<(usize, 
 /// silently-zero operator the refusal existed to prevent.
 #[test]
 fn threshold_gate_sparse_curvature_operator_is_modelled_2500() {
-    let (term, target, rho) = threshold_gate_tiny_fixture();
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
     let (_loss, cache) = frozen_cache(&term, &target, &rho);
     let sparse = rho
         .sparse_flat_index()
@@ -180,20 +201,14 @@ fn threshold_gate_sparse_curvature_operator_is_modelled_2500() {
          max|entry| = {mass}"
     );
 
-    // The operator is signed: the fixture straddles the gate, so both curvature
-    // signs must be present. A one-sided fixture would let a `max(·,0)`-style
-    // clamp ride through unnoticed.
-    let mut saw_positive = false;
-    let mut saw_negative = false;
-    for (_row, _atom, slot) in logit_slots(&term, &cache) {
-        let v = block[[slot, slot]];
-        if v > 1.0e-8 {
-            saw_positive = true;
-        }
-        if v < -1.0e-8 {
-            saw_negative = true;
-        }
-    }
+    // The RAW prior curvature is signed: the fixture straddles the gate, so both
+    // signs must be present in the quantity the operator is built from. A
+    // one-sided fixture would leave the whole deflation half of this defect
+    // unexercised.
+    let raw =
+        crate::assignment::assignment_prior_log_strength_hdiag(&term.assignment, &rho).unwrap();
+    let saw_positive = raw.iter().any(|v| *v > 1.0e-8);
+    let saw_negative = raw.iter().any(|v| *v < -1.0e-8);
     assert!(
         saw_positive && saw_negative,
         "#2500: the ThresholdGate prior curvature is SIGNED (λ·s·(1−2a)/τ²); the fixture \
@@ -201,99 +216,211 @@ fn threshold_gate_sparse_curvature_operator_is_modelled_2500() {
     );
 }
 
-/// #2500 GATE 2 — the modelled operator must BE the ρ_sparse-derivative of the
-/// operator the arrow assembly actually installs, checked against a central
-/// finite difference of the cache's own undamped per-row factors at frozen θ̂.
+/// #2500 GATE 2 — the modelled operator must BE `∂A/∂ρ_sparse` of the EXACT
+/// stationarity Hessian the dense route materializes and ranks, entry by entry,
+/// on BOTH strata: the deflation-free one and the one where every row deflates.
 ///
-/// This is the property the refusal was protecting: an operator that assembles
-/// but does not differentiate the installed `H` is worse than a refusal, because
-/// it silently desyncs the ρ-gradient from the criterion.
+/// This is the property the refusal was protecting. An operator that assembles
+/// but does not differentiate the installed `A` is worse than a refusal, because
+/// it silently desyncs the ρ-gradient from the criterion — and that is exactly
+/// what the RAW prior diagonal does here: `apply_cached_arrow_hessian` reads the
+/// cache's CONDITIONED row factors, so on a deflated direction the installed
+/// curvature is ρ-independent unit stiffness while the raw diagonal claims
+/// `w·λ·s·(1−2a)/τ²`.
 #[test]
-fn threshold_gate_sparse_curvature_operator_matches_finite_difference_2500() {
-    let (term, target, rho) = threshold_gate_tiny_fixture();
-    let (_loss, cache) = frozen_cache(&term, &target, &rho);
-    let sparse = rho
-        .sparse_flat_index()
-        .expect("a ThresholdGate rho must carry a sparse log-strength coordinate");
-    let operators = term
-        .penalty_curvature_operators_by_flat(&rho, &cache)
-        .expect("#2500: the ThresholdGate sparse curvature operator must be modelled");
-    let block = operators
-        .get(&sparse)
-        .expect("#2500: the sparse coordinate must own a curvature operator");
+fn threshold_gate_sparse_operator_is_the_installed_exact_a_derivative_2500() {
+    for straddle in [false, true] {
+        let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
+        let (_loss, cache) = frozen_cache(&term, &target, &rho);
+        let sparse = rho
+            .sparse_flat_index()
+            .expect("a ThresholdGate rho must carry a sparse log-strength coordinate");
+        let operators = term
+            .penalty_curvature_operators_by_flat(&rho, &cache)
+            .expect("#2500: the ThresholdGate sparse curvature operator must be modelled");
+        let block = operators
+            .get(&sparse)
+            .expect("#2500: the sparse coordinate must own a curvature operator");
+        // The exact-minus-majorizer delta has no threshold-gate part (the assembly
+        // installs the exact signed prior curvature, unmajorized), so
+        // `∂A/∂ρ_sparse` is the operator alone. Pin that rather than assume it.
+        let deltas = term
+            .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &cache)
+            .expect("exact-minus-majorizer delta map");
+        assert!(
+            !deltas.contains_key(&sparse),
+            "#2500: ΔC carries no threshold-gate sparse part, so ∂A/∂ρ_sparse is the \
+             operator alone; a delta appearing here means this gate is comparing the \
+             wrong object"
+        );
 
-    // `H_tt^(row) = L Lᵀ` from the cache's UNDAMPED factor: the operator the
-    // Laplace normalizer and every ρ-trace are taken against.
-    let htt_diag_at = |rho: &SaeManifoldRho| -> Vec<f64> {
-        let (_loss, c) = frozen_cache(&term, &target, rho);
-        let mut out = Vec::new();
-        for row in 0..term.n_obs() {
-            let l = c.undamped_factor(row);
-            let q = c.row_dims[row];
-            for slot in 0..q {
-                // (L Lᵀ)_{slot,slot} = Σ_j L[slot, j]².
-                let mut acc = 0.0_f64;
-                for j in 0..=slot {
-                    acc += l[[slot, j]] * l[[slot, j]];
+        let deflated = deflated_direction_count(&term, &cache);
+        if straddle {
+            assert!(
+                deflated > 0,
+                "#2500: the straddling arm must actually exercise the spectral-deflation \
+                 stratum (the raw operator is exact without it, so a zero here would make \
+                 this arm a duplicate of the other)"
+            );
+        } else {
+            assert_eq!(
+                deflated, 0,
+                "#2500: the below-threshold arm must be deflation-free, so it isolates the \
+                 operator from the deflation map"
+            );
+        }
+
+        let dense_a = |r: &SaeManifoldRho| -> (Array2<f64>, usize) {
+            let (_l, c) = frozen_cache(&term, &target, r);
+            let a = term
+                .materialize_exact_hessian_dense(r, target.view(), &c)
+                .expect("dense exact A");
+            let count = deflated_direction_count(&term, &c);
+            (a, count)
+        };
+        let base = rho.to_flat();
+        let h = 1.0e-5;
+        let mut plus_flat = base.clone();
+        plus_flat[sparse] += h;
+        let mut minus_flat = base.clone();
+        minus_flat[sparse] -= h;
+        let (a_plus, deflated_plus) = dense_a(&rho.from_flat(plus_flat.view()).unwrap());
+        let (a_minus, deflated_minus) = dense_a(&rho.from_flat(minus_flat.view()).unwrap());
+        // Branch identity: a central difference across a change in the deflated
+        // dimension is a difference of two different operators, not a derivative.
+        assert!(
+            deflated_plus == deflated && deflated_minus == deflated,
+            "#2500: the ±h endpoints must sit on the SAME discrete deflation stratum \
+             (base={deflated}, +h={deflated_plus}, -h={deflated_minus})"
+        );
+
+        let dim = a_plus.nrows();
+        let mut worst = 0.0_f64;
+        let mut worst_label = String::new();
+        for i in 0..dim {
+            for j in 0..dim {
+                let fd = (a_plus[[i, j]] - a_minus[[i, j]]) / (2.0 * h);
+                let analytic = block[[i, j]];
+                let err = (fd - analytic).abs();
+                let tol = 1.0e-7 + 1.0e-5 * analytic.abs();
+                if err / tol > worst {
+                    worst = err / tol;
+                    worst_label =
+                        format!("[{i},{j}] analytic={analytic:.12e} fd={fd:.12e} tol={tol:.3e}");
                 }
-                out.push(acc);
             }
         }
-        out
-    };
+        assert!(
+            worst <= 1.0,
+            "#2500 (straddle={straddle}, {deflated} deflated directions): the sparse \
+             curvature operator must equal dA/drho_sparse of the INSTALLED exact Hessian; \
+             worst normalized error {worst:.3} at {worst_label}"
+        );
+    }
+}
 
-    let base = rho.to_flat();
-    let h = 1.0e-5;
-    let shifted = |sign: f64| -> SaeManifoldRho {
-        let mut flat = base.clone();
-        flat[sparse] += sign * h;
-        rho.from_flat(flat.view()).expect("shifted rho")
-    };
-    let plus = htt_diag_at(&shifted(1.0));
-    let minus = htt_diag_at(&shifted(-1.0));
-    assert_eq!(
-        plus.len(),
-        minus.len(),
-        "#2500: the ±h caches must share one row layout (else the FD compares two strata)"
-    );
+/// #2500 GATE 3 — the deflation map must not be a silent no-op. On the
+/// straddling stratum the operator the map returns has to DIFFER from the raw
+/// prior diagonal, and a row with no deflation has to pass through untouched.
+///
+/// Without this, GATE 2 could be satisfied by a bug that made both sides wrong in
+/// the same way, and a future refactor that dropped
+/// `apply_row_deflation_map_derivative` would still pass every gate anchored on
+/// the deflation-free arm.
+#[test]
+fn threshold_gate_sparse_operator_is_not_the_raw_prior_on_deflated_rows_2500() {
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
+    let (_loss, cache) = frozen_cache(&term, &target, &rho);
+    let sparse = rho.sparse_flat_index().expect("sparse coordinate");
+    let mut operators = term
+        .penalty_curvature_operators_by_flat(&rho, &cache)
+        .expect("operator map");
+    let block = operators.remove(&sparse).expect("sparse operator");
+    let raw =
+        crate::assignment::assignment_prior_log_strength_hdiag(&term.assignment, &rho).unwrap();
+    let k_atoms = term.k_atoms();
 
-    let mut worst = 0.0_f64;
-    let mut worst_label = String::new();
-    let mut exercised = 0usize;
+    let mut max_gap_on_deflated = 0.0_f64;
+    let mut max_gap_on_kept = 0.0_f64;
     for (row, atom, slot) in logit_slots(&term, &cache) {
-        let fd = (plus[slot] - minus[slot]) / (2.0 * h);
-        let analytic = block[[slot, slot]];
-        if analytic.abs() > 1.0e-8 {
-            exercised += 1;
-        }
-        let err = (analytic - fd).abs();
-        let tol = 1.0e-7 + 1.0e-5 * analytic.abs();
-        if err / tol > worst {
-            worst = err / tol;
-            worst_label =
-                format!("row {row} atom {atom}: analytic={analytic:.12e} fd={fd:.12e} tol={tol:.3e}");
+        let gap = (block[[slot, slot]] - raw[row * k_atoms + atom]).abs();
+        if cache.deflated_row_directions[row].is_empty() {
+            max_gap_on_kept = max_gap_on_kept.max(gap);
+        } else {
+            max_gap_on_deflated = max_gap_on_deflated.max(gap);
         }
     }
     assert!(
-        exercised >= 2,
-        "#2500: the FD gate must touch at least two live logit slots, else it is vacuous \
-         (exercised = {exercised})"
+        max_gap_on_deflated > 1.0e-4,
+        "#2500: on a spectrally-deflated row the installed operator is unit stiffness, so \
+         the modelled dH/drho must depart from the raw prior diagonal there; max gap = \
+         {max_gap_on_deflated:.3e} (the deflation map is a no-op)"
     );
     assert!(
-        worst <= 1.0,
-        "#2500: the sparse curvature operator must equal ∂H_tt/∂ρ_sparse of the ASSEMBLED \
-         operator; worst normalized error {worst:.3} at {worst_label}"
+        max_gap_on_kept <= 1.0e-12,
+        "#2500: a row with NO deflation must pass through bit-for-bit; max gap = \
+         {max_gap_on_kept:.3e}"
     );
 }
 
-/// #2500 GATE 3 — the production consumer. `dense_exact_a_logdet_channels` (and
+/// #2500 GATE 4 — the end-to-end contract, and the one that catches the 13%
+/// error the raw operator produced: the dense exact-A sparse log-determinant
+/// trace `½[tr(A⁺ ∂A/∂ρ) − tr(A_tt⁺ ∂A/∂ρ)]` must be the central finite
+/// difference of the PRODUCTION value it differentiates,
+/// `½(log|A| − log|A_tt|)` from `exact_observed_information_log_dets`.
+///
+/// Measured before the deflation map: 4.40108e-1 analytic against 5.08109e-1 FD
+/// on the straddling arm (stable across four decades of `h`, so not FD noise),
+/// and exact on the deflation-free arm.
+#[test]
+fn threshold_gate_dense_exact_a_sparse_logdet_trace_matches_finite_difference_2500() {
+    for straddle in [false, true] {
+        let (term, target, rho) = threshold_gate_tiny_fixture(straddle);
+        let (loss, cache) = frozen_cache(&term, &target, &rho);
+        let sparse = rho.sparse_flat_index().expect("sparse coordinate");
+        let (trace, _gamma) = term
+            .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &cache)
+            .expect("#2500: the dense exact-A logdet channels must assemble");
+        assert!(
+            trace[sparse].abs() > 1.0e-3,
+            "#2500: the sparse logdet trace must be materially live on this fixture, else \
+             the FD comparison is a zero-vs-zero gate: {}",
+            trace[sparse]
+        );
+
+        let log_dets = |r: &SaeManifoldRho| -> (f64, f64) {
+            let (_l, c) = frozen_cache(&term, &target, r);
+            term.exact_observed_information_log_dets(r, target.view(), &c)
+                .expect("production exact-A log dets")
+        };
+        let base = rho.to_flat();
+        let h = 1.0e-5;
+        let mut plus_flat = base.clone();
+        plus_flat[sparse] += h;
+        let mut minus_flat = base.clone();
+        minus_flat[sparse] -= h;
+        let (joint_plus, tt_plus) = log_dets(&rho.from_flat(plus_flat.view()).unwrap());
+        let (joint_minus, tt_minus) = log_dets(&rho.from_flat(minus_flat.view()).unwrap());
+        let fd = 0.5 * ((joint_plus - joint_minus) - (tt_plus - tt_minus)) / (2.0 * h);
+        let err = (trace[sparse] - fd).abs();
+        let tol = 1.0e-6 + 1.0e-5 * fd.abs();
+        assert!(
+            err <= tol,
+            "#2500 (straddle={straddle}): the sparse logdet trace must differentiate the \
+             ranked value; analytic={:.9e} fd={fd:.9e} err={err:.3e} tol={tol:.3e}",
+            trace[sparse]
+        );
+    }
+}
+
+/// #2500 GATE 5 — the production consumer. `dense_exact_a_logdet_channels` (and
 /// therefore `analytic_outer_rho_gradient_components`, and therefore every outer
 /// BFGS seed evaluation) reads the operator map on the dense route. Before the
 /// fix a ThresholdGate fit aborted there with a fatal
 /// "Fatal outer-objective evaluation failure (outer BFGS seed evaluation)".
 #[test]
 fn threshold_gate_analytic_outer_gradient_assembles_2500() {
-    let (term, target, rho) = threshold_gate_tiny_fixture();
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
     let (loss, cache) = frozen_cache(&term, &target, &rho);
     let sparse = rho
         .sparse_flat_index()
@@ -311,5 +438,71 @@ fn threshold_gate_analytic_outer_gradient_assembles_2500() {
         grad[sparse].abs() > 0.0,
         "#2500: the sparse coordinate must carry a live gradient component, not a \
          structurally-zero one: {grad:?}"
+    );
+}
+
+/// #2500 GATE 6 — the deflation map is coordinate-agnostic, so the ARD operator
+/// must pass through it too. A ρ_ard perturbation on the straddling (deflating)
+/// fixture is the same test as GATE 2 for a coordinate that has nothing to do
+/// with the assignment prior; before the map it was wrong there for the same
+/// reason, silently, and only the threshold gate made the stratum reachable.
+#[test]
+fn deflation_map_applies_to_every_row_local_curvature_coordinate_2500() {
+    let (term, target, rho) = threshold_gate_tiny_fixture(true);
+    let (_loss, cache) = frozen_cache(&term, &target, &rho);
+    assert!(
+        deflated_direction_count(&term, &cache) > 0,
+        "#2500: this gate needs the deflating stratum"
+    );
+    let operators = term
+        .penalty_curvature_operators_by_flat(&rho, &cache)
+        .expect("operator map");
+    let deltas = term
+        .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &cache)
+        .expect("delta map");
+
+    let base = rho.to_flat();
+    let h = 1.0e-5;
+    let total_t = cache.delta_t_len();
+    let coord = rho.ard_flat_index(0, 0);
+    let block = operators
+        .get(&coord)
+        .expect("#2500: the ARD coordinate must own a curvature operator");
+    let expected = match deltas.get(&coord) {
+        Some(delta) => block + delta,
+        None => block.clone(),
+    };
+    let dense_a = |flat: &Array1<f64>| -> Array2<f64> {
+        let r = rho.from_flat(flat.view()).unwrap();
+        let (_l, c) = frozen_cache(&term, &target, &r);
+        term.materialize_exact_hessian_dense(&r, target.view(), &c)
+            .expect("dense exact A")
+    };
+    let mut plus_flat = base.clone();
+    plus_flat[coord] += h;
+    let mut minus_flat = base.clone();
+    minus_flat[coord] -= h;
+    let a_plus = dense_a(&plus_flat);
+    let a_minus = dense_a(&minus_flat);
+    // Restrict to the t-block: the deflation map acts on the row-local latent
+    // slots, which is where the ARD operator lives.
+    let mut worst = 0.0_f64;
+    let mut label = String::new();
+    for i in 0..total_t {
+        for j in 0..total_t {
+            let fd = (a_plus[[i, j]] - a_minus[[i, j]]) / (2.0 * h);
+            let analytic = expected[[i, j]];
+            let tol = 1.0e-6 + 1.0e-4 * analytic.abs();
+            let ratio = (fd - analytic).abs() / tol;
+            if ratio > worst {
+                worst = ratio;
+                label = format!("[{i},{j}] analytic={analytic:.9e} fd={fd:.9e}");
+            }
+        }
+    }
+    assert!(
+        worst <= 1.0,
+        "#2500: the ARD curvature operator must equal dA/drho on the t-block of a \
+         deflating fixture; worst normalized error {worst:.3} at {label}"
     );
 }

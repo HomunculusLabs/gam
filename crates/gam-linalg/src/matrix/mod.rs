@@ -132,23 +132,20 @@ fn governed_dense_operator_to_dense_by_chunks<O: DenseDesignOperator + ?Sized>(
             limit_bytes: effective_policy.max_single_dense_bytes,
         });
     }
-    let reservation = match MemoryGovernor::global().try_reserve_dense_f64(
-        op.nrows(),
-        op.ncols(),
-        context,
-    ) {
-        Ok(reservation) => reservation,
-        Err(err) => {
-            crate::governed_capture::record_governed_decision(
-                context,
-                op.nrows(),
-                op.ncols(),
-                Some(bytes),
-                crate::governed_capture::GovernedArm::Refused,
-            );
-            return Err(err.into());
-        }
-    };
+    let reservation =
+        match MemoryGovernor::global().try_reserve_dense_f64(op.nrows(), op.ncols(), context) {
+            Ok(reservation) => reservation,
+            Err(err) => {
+                crate::governed_capture::record_governed_decision(
+                    context,
+                    op.nrows(),
+                    op.ncols(),
+                    Some(bytes),
+                    crate::governed_capture::GovernedArm::Refused,
+                );
+                return Err(err.into());
+            }
+        };
     crate::governed_capture::record_governed_decision(
         context,
         op.nrows(),
@@ -970,9 +967,9 @@ impl SparseDesignMatrix {
         let csr = self.to_csr_arc()?;
         // First writer wins; a racing writer built from the same immutable
         // matrix, so either pattern is correct and identical.
-        let sym = self.hessian_pattern_cache.get_or_init(|| {
-            SparseHessianAccumulator::build_symbolic(&[&csr], self.matrix.ncols())
-        });
+        let sym = self
+            .hessian_pattern_cache
+            .get_or_init(|| SparseHessianAccumulator::build_symbolic(&[&csr], self.matrix.ncols()));
         Some(SparseHessianAccumulator::from_symbolic(Arc::clone(sym)))
     }
 

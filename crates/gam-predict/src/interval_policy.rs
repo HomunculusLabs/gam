@@ -1079,8 +1079,10 @@ pub fn resolve_prediction_request(
                         .to_string(),
                 )
             })?;
-            let (mean_lower, mean_upper) =
-                prediction.mean_lower.zip(prediction.mean_upper).ok_or_else(|| {
+            let (mean_lower, mean_upper) = prediction
+                .mean_lower
+                .zip(prediction.mean_upper)
+                .ok_or_else(|| {
                     EstimationError::InvalidInput(
                         "posterior-mean prediction did not return confidence bounds".to_string(),
                     )
@@ -1133,8 +1135,11 @@ pub fn resolve_prediction_request(
         // switch that populates SE/bounds, and the surfaces emit whatever
         // optionals come back (#2136).
         (None, true) if request.point_estimate == PointEstimate::PosteriorMeanWhenCurved => {
-            let prediction =
-                predictor.predict_posterior_mean(input, fit, &PosteriorMeanOptions::point_only())?;
+            let prediction = predictor.predict_posterior_mean(
+                input,
+                fit,
+                &PosteriorMeanOptions::point_only(),
+            )?;
             Ok(PredictionColumns {
                 eta: prediction.eta,
                 mean: prediction.mean,

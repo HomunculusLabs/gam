@@ -921,12 +921,12 @@ mod tests {
     /// exact first-order estimate that was computed and available all along.
     #[test]
     fn corrected_edf_uses_retained_first_order_pair_when_primary_method_is_cubature() {
+        use gam_problem::{LikelihoodScaleMetadata, LogLikelihoodNormalization};
         use gam_solve::model_types::{
             Dispersion, FitArtifacts, FitInference, FittedBlock, FittedLinkState,
             UnifiedFitResultParts,
         };
         use gam_solve::pirls::PirlsStatus;
-        use gam_problem::{LikelihoodScaleMetadata, LogLikelihoodNormalization};
 
         // Distinct matrices for the primary (cubature) vs retained (first-order)
         // corrections so the test can prove which one the channel actually used.
@@ -981,11 +981,12 @@ mod tests {
                 smoothing_correction_method: Some(SmoothingCorrectionMethod::SigmaPointCubature {
                     rank: 1,
                     n_points: 2,
-                    rho_hessian_stabilization: gam_problem::StabilizationLedger::approximation_only(
-                        1.0e-8,
-                        gam_problem::StabilizationRule::FixedConstant,
-                    )
-                    .expect("valid test cubature ridge"),
+                    rho_hessian_stabilization:
+                        gam_problem::StabilizationLedger::approximation_only(
+                            1.0e-8,
+                            gam_problem::StabilizationRule::FixedConstant,
+                        )
+                        .expect("valid test cubature ridge"),
                 }),
                 // RETAINED: the exact first-order correction computed before
                 // the escalation decision, never discarded (#946).
@@ -1035,8 +1036,9 @@ mod tests {
         let y = array![0.1, 0.2, 0.3];
         let eta_hat = array![0.05, 0.15, 0.35];
         let weights = Array1::<f64>::ones(3);
-        let cmp = model_comparison_from_unified(&fit, y.view(), eta_hat.view(), weights.view(), None)
-            .expect("construct comparison for the cubature-vs-first-order fixture");
+        let cmp =
+            model_comparison_from_unified(&fit, y.view(), eta_hat.view(), weights.view(), None)
+                .expect("construct comparison for the cubature-vs-first-order fixture");
 
         let corrected = cmp
             .edf

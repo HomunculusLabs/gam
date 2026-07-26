@@ -722,7 +722,9 @@ mod tests {
     /// diagnose from the outside.
     #[test]
     fn both_xtwx_routes_agree_so_the_memory_governor_cannot_change_the_answer() {
-        use crate::faer_ndarray::{CrossprodAccum, CrossprodStructure, stream_weighted_crossprod_into};
+        use crate::faer_ndarray::{
+            CrossprodAccum, CrossprodStructure, stream_weighted_crossprod_into,
+        };
         use faer::sparse::{SparseColMat, Triplet};
 
         // Dense-regime shape (`4·avg_nnz_row ≥ p`), and wide enough that the
@@ -770,7 +772,10 @@ mod tests {
         let mut worst_at = (0, 0);
         for a in 0..p {
             for b in 0..p {
-                let scale = via_dense[[a, b]].abs().max(via_sparse[[a, b]].abs()).max(1.0);
+                let scale = via_dense[[a, b]]
+                    .abs()
+                    .max(via_sparse[[a, b]].abs())
+                    .max(1.0);
                 let rel = (via_dense[[a, b]] - via_sparse[[a, b]]).abs() / scale;
                 if rel > worst {
                     worst = rel;
@@ -861,4 +866,3 @@ mod tests {
         }
     }
 }
-

@@ -631,10 +631,7 @@ impl EstimationError {
     /// as a finite API outcome (`+inf` / `OuterEval::infeasible`); an `Err`
     /// means the evaluation artifact itself could not be constructed and must
     /// never be retried as another numerical point.
-    pub fn fatal_outer_evaluation(
-        context: impl Into<String>,
-        source: EstimationError,
-    ) -> Self {
+    pub fn fatal_outer_evaluation(context: impl Into<String>, source: EstimationError) -> Self {
         if matches!(
             &source,
             EstimationError::OuterObjectiveEvaluationFailed { .. }
@@ -758,7 +755,10 @@ mod tests {
     #[test]
     fn rung_rides_beside_the_bound_without_displacing_it() {
         let message = reml_refusal(None).to_string();
-        assert!(message.contains("1.000e-2"), "bound must survive: {message}");
+        assert!(
+            message.contains("1.000e-2"),
+            "bound must survive: {message}"
+        );
         assert!(
             message.contains("7.500e-1"),
             "projected gradient norm must survive: {message}"

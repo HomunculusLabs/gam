@@ -5,9 +5,7 @@
 //! Each test below is intentionally adversarial: representation must never be
 //! selected by statistical significance or approximate numerical rank.
 
-use gam::families::bms::{
-    MarginalSlopeCovarianceShape, marginal_slope_covariance_from_scores,
-};
+use gam::families::bms::{MarginalSlopeCovarianceShape, marginal_slope_covariance_from_scores};
 use ndarray::{Array1, Array2, ArrayView2};
 
 // ---------- inline RNG: splitmix64 + Box-Muller -------------------------

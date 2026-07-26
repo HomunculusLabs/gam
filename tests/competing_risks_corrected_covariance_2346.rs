@@ -89,11 +89,10 @@ fn competing_risks_fit_carries_smoothing_corrected_covariance_2346() {
     };
 
     // (1) Presence: corrected covariance + typed provenance.
-    let conditional = fit
-        .fit
-        .covariance_conditional
-        .as_ref()
-        .expect("#2346: a converged competing-risks REML fit carries the conditional covariance");
+    let conditional =
+        fit.fit.covariance_conditional.as_ref().expect(
+            "#2346: a converged competing-risks REML fit carries the conditional covariance",
+        );
     let corrected = fit.fit.beta_covariance_corrected().expect(
         "#2346: a converged competing-risks REML fit must carry the smoothing-corrected \
          covariance so DEFAULT-mode interval requests stop hard-erroring",

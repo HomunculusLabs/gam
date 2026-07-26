@@ -160,7 +160,8 @@ fn weibull_survival_predict_surface_is_not_degenerate_unit_survival() {
         with_uncertainty: false,
         estimand: gam::families::survival::predict::SurvivalPredictEstimand::Plugin,
     };
-    let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional).expect("library Weibull survival predict");
+    let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
+        .expect("library Weibull survival predict");
 
     assert_eq!(result.survival.nrows(), 1, "expected one prediction row");
     assert_eq!(

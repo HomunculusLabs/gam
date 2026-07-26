@@ -17,11 +17,11 @@
 //! disguised by an in-process threshold that cannot interrupt a blocked fit.
 
 use csv::StringRecord;
+use gam::terms::basis::{CenterStrategy, MaternLengthScale, MaternNu};
+use gam::terms::smooth::{SmoothBasisSpec, TermCollectionSpec};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
-use gam::terms::basis::{CenterStrategy, MaternLengthScale, MaternNu};
-use gam::terms::smooth::{SmoothBasisSpec, TermCollectionSpec};
 use std::time::Instant;
 
 const N: usize = 2_500;
@@ -184,8 +184,7 @@ fn survival_marginal_slope_auto_matern_logslope_centers12_converges() {
         panic!("expected a SurvivalMarginalSlope fit result");
     };
 
-    let marginal_scale =
-        resolved_auto_matern_scale(&fit.marginalspec_resolved, "marginal channel");
+    let marginal_scale = resolved_auto_matern_scale(&fit.marginalspec_resolved, "marginal channel");
     let logslope_scale =
         resolved_auto_matern_scale(&fit.logslopespec_resolved, "log-slope channel");
 

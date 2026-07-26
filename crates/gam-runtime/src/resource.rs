@@ -1,7 +1,7 @@
 use crate::cgroup_memory::detect_cgroup_memory;
 pub use crate::cgroup_memory::{
-    CgroupMemoryAvailability, CgroupMemoryLimit, CgroupMemoryObservation,
-    CgroupMemoryProbeFailure, CgroupMemoryProbeFailureKind,
+    CgroupMemoryAvailability, CgroupMemoryLimit, CgroupMemoryObservation, CgroupMemoryProbeFailure,
+    CgroupMemoryProbeFailureKind,
 };
 
 /// The library-default streamed row-chunk target (8 MiB), shared as a `const`
@@ -78,15 +78,11 @@ pub struct MemoryAvailability {
 }
 
 impl MemoryAvailability {
-    fn from_observation(
-        host_available_bytes: u64,
-        cgroup: CgroupMemoryObservation,
-    ) -> Self {
+    fn from_observation(host_available_bytes: u64, cgroup: CgroupMemoryObservation) -> Self {
         use std::cmp::Ordering;
 
         let (available_bytes, limiting_source) = match &cgroup {
-            CgroupMemoryObservation::NotPresent
-            | CgroupMemoryObservation::V2Unbounded { .. } => {
+            CgroupMemoryObservation::NotPresent | CgroupMemoryObservation::V2Unbounded { .. } => {
                 (host_available_bytes, MemoryAvailabilitySource::Host)
             }
             CgroupMemoryObservation::V2Limited(observation)
@@ -100,9 +96,7 @@ impl MemoryAvailability {
                         host_available_bytes,
                         MemoryAvailabilitySource::HostAndCgroup,
                     ),
-                    Ordering::Greater => {
-                        (host_available_bytes, MemoryAvailabilitySource::Host)
-                    }
+                    Ordering::Greater => (host_available_bytes, MemoryAvailabilitySource::Host),
                 }
             }
             CgroupMemoryObservation::ProbeFailed(_) => {
@@ -1326,10 +1320,8 @@ mod resource_policy_tests {
 
     #[test]
     fn memory_availability_distinguishes_host_cgroup_and_exhaustion() {
-        let host_only = MemoryAvailability::from_observation(
-            1_000,
-            CgroupMemoryObservation::NotPresent,
-        );
+        let host_only =
+            MemoryAvailability::from_observation(1_000, CgroupMemoryObservation::NotPresent);
         assert_eq!(host_only.available_bytes(), 1_000);
         assert_eq!(host_only.limiting_source(), MemoryAvailabilitySource::Host);
         assert_eq!(governor_budget_from_availability(&host_only), 750);
@@ -1453,10 +1445,7 @@ mod resource_policy_tests {
         );
         assert_eq!(unlimited.available_bytes(), 2_430_926_848);
         assert_eq!(unlimited.limiting_source(), MemoryAvailabilitySource::Host);
-        assert_eq!(
-            governor_budget_from_availability(&unlimited),
-            1_823_195_136
-        );
+        assert_eq!(governor_budget_from_availability(&unlimited), 1_823_195_136);
         assert!(format!("{unlimited}").contains("unbounded cgroup-v2"));
     }
 

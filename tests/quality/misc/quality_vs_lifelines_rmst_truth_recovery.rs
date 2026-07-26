@@ -157,7 +157,8 @@ fn gam_rmst(model: &FittedModel, dataset: &EncodedDataset, grid: &[f64], tau: f6
         with_uncertainty: false,
         estimand: gam::families::survival::predict::SurvivalPredictEstimand::Plugin,
     };
-    let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional).expect("RMST capability: predict survival surface");
+    let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
+        .expect("RMST capability: predict survival surface");
     let rmst = result
         .restricted_mean_survival_time(tau)
         .expect("restricted_mean_survival_time must return an RMST vector");

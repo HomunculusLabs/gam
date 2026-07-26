@@ -77,10 +77,7 @@ fn locscale_mu_smooth_reaches_interior_reml_optimum_not_the_over_smoothing_rail(
     let headers = vec!["x".to_string(), "y".to_string()];
     let rows: Vec<csv::StringRecord> = (0..n)
         .map(|i| {
-            csv::StringRecord::from(vec![
-                format!("{:.17e}", xs[i]),
-                format!("{:.17e}", ys[i]),
-            ])
+            csv::StringRecord::from(vec![format!("{:.17e}", xs[i]), format!("{:.17e}", ys[i])])
         })
         .collect();
     let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode plain arm");
@@ -109,10 +106,7 @@ fn locscale_mu_smooth_reaches_interior_reml_optimum_not_the_over_smoothing_rail(
 
     // The tp mean smooth carries two penalties [wiggliness, null-space ridge];
     // the wiggliness penalty is the one that railed at the old e^10 ceiling.
-    let lambda_wiggle = lambda_mu
-        .iter()
-        .cloned()
-        .fold(0.0f64, f64::max);
+    let lambda_wiggle = lambda_mu.iter().cloned().fold(0.0f64, f64::max);
     let rho_wiggle = lambda_wiggle.ln();
 
     // μ-RMSE-to-truth on a dense off-training grid.

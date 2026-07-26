@@ -176,7 +176,9 @@ fn unsupported_nullspace_is_still_selected_out() {
     // structure the P-spline can resolve. n = 12 is under-determined (< 2·p).
     let n = 12usize;
     let xs: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
-    let ys: Vec<f64> = (0..n).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+    let ys: Vec<f64> = (0..n)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
     let edf = fit_edf(&xs, &ys);
     eprintln!("#2355 unsupported-nullspace guard: n={n} edf={edf:.4}");
 

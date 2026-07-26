@@ -88,10 +88,10 @@
 use faer::Side;
 use ndarray::{Array1, Array2};
 
+use crate::families::compiler::RANK_DECISION_GAP;
 use gam_linalg::faer_ndarray::{
     FaerEigh, default_rrqr_rank_alpha, fast_atb, rrqr_with_permutation,
 };
-use crate::families::compiler::RANK_DECISION_GAP;
 use gam_problem::{
     EstimationError, FamilyLinearizationState, JointRankCertificate, ParameterBlockSpec,
 };
@@ -2869,7 +2869,9 @@ fn channel_aware_penalty_aware_joint_rank(
     let sigma_max = spectrum.first().copied().unwrap_or(0.0);
     let tol = default_rrqr_rank_alpha()
         * f64::EPSILON
-        * ((n_design_rows + n_penalty_rows).max(equilibrated.ncols()).max(1) as f64)
+        * ((n_design_rows + n_penalty_rows)
+            .max(equilibrated.ncols())
+            .max(1) as f64)
         * sigma_max.max(1.0);
     Ok((
         rank,

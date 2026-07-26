@@ -7,9 +7,10 @@ use std::thread;
 #[test]
 fn gpu_runtime_probe_returns_typed_availability_without_fault() {
     match GpuRuntime::probe() {
-        Ok(gam::gpu::GpuAvailability::Available(_)
-        | gam::gpu::GpuAvailability::Absent(_)) => {}
-        Err(error) => panic!("GpuRuntime::probe faulted instead of returning availability: {error}"),
+        Ok(gam::gpu::GpuAvailability::Available(_) | gam::gpu::GpuAvailability::Absent(_)) => {}
+        Err(error) => {
+            panic!("GpuRuntime::probe faulted instead of returning availability: {error}")
+        }
     }
 }
 
@@ -23,10 +24,16 @@ fn gpu_policy_auto_falls_back_to_cpu_when_runtime_is_unavailable_and_sets_cpu_re
     )
     .unwrap_or_else(|error| panic!("GPU decision fault in policy test: {error}"));
     if availability.is_none() {
-        assert!(!decision.use_gpu, "typed absence under Auto must select CPU");
+        assert!(
+            !decision.use_gpu,
+            "typed absence under Auto must select CPU"
+        );
         assert!(decision.reason.contains("cpu"));
     } else {
-        assert!(decision.use_gpu, "available eligible runtime must select GPU");
+        assert!(
+            decision.use_gpu,
+            "available eligible runtime must select GPU"
+        );
     }
 }
 

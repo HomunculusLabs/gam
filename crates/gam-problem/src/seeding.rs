@@ -141,12 +141,14 @@ impl OrderedRhoBounds {
     /// endpoints. `lo == hi` is a valid degenerate single-point box.
     pub fn new(lo: f64, hi: f64) -> Result<Self, crate::estimation_error::EstimationError> {
         if !lo.is_finite() || !hi.is_finite() || lo > hi {
-            return Err(crate::estimation_error::EstimationError::InvalidInput(format!(
-                "seed ρ-box is inverted or non-finite: lower={lo}, upper={hi}; an \
+            return Err(crate::estimation_error::EstimationError::InvalidInput(
+                format!(
+                    "seed ρ-box is inverted or non-finite: lower={lo}, upper={hi}; an \
                  inverted box means the ρ lower wall and the over-smoothing ceiling \
                  have drifted apart (cf. #2370) — refusing rather than silently \
                  reordering the interval (#2379)"
-            )));
+                ),
+            ));
         }
         Ok(Self { lo, hi })
     }
@@ -284,8 +286,14 @@ mod tests {
             crate::estimation_error::EstimationError::InvalidInput(msg) => {
                 // Both endpoints are named, so a drift is diagnosable from the error.
                 assert!(msg.contains("-10"), "error names the lower bound: {msg}");
-                assert!(msg.contains("-11.855"), "error names the upper bound: {msg}");
-                assert!(msg.contains("invert"), "error explains the inversion: {msg}");
+                assert!(
+                    msg.contains("-11.855"),
+                    "error names the upper bound: {msg}"
+                );
+                assert!(
+                    msg.contains("invert"),
+                    "error explains the inversion: {msg}"
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }

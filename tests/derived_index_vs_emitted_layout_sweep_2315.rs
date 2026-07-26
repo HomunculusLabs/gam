@@ -28,8 +28,8 @@
 use std::collections::BTreeMap;
 
 use gam::families::custom_family::{
-    CoefficientGroupSpec, ParameterBlockSpec, PenaltyMatrix,
-    coefficient_label, realize_coefficient_groups_for_custom_family,
+    CoefficientGroupSpec, ParameterBlockSpec, PenaltyMatrix, coefficient_label,
+    realize_coefficient_groups_for_custom_family,
 };
 use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use gam::terms::basis::{
@@ -65,7 +65,12 @@ fn fixed(p: usize, log_lambda: f64) -> PenaltyMatrix {
     plain(p).with_fixed_log_lambda(log_lambda)
 }
 
-fn block(name: &str, p: usize, penalties: Vec<PenaltyMatrix>, base_lambda: f64) -> ParameterBlockSpec {
+fn block(
+    name: &str,
+    p: usize,
+    penalties: Vec<PenaltyMatrix>,
+    base_lambda: f64,
+) -> ParameterBlockSpec {
     let k = penalties.len();
     let initial_log_lambdas = Array1::from_iter((0..k).map(|j| base_lambda + j as f64 * 0.25));
     ParameterBlockSpec {
@@ -79,10 +84,7 @@ fn block(name: &str, p: usize, penalties: Vec<PenaltyMatrix>, base_lambda: f64) 
     }
 }
 
-fn with_initial_log_lambdas(
-    mut spec: ParameterBlockSpec,
-    values: &[f64],
-) -> ParameterBlockSpec {
+fn with_initial_log_lambdas(mut spec: ParameterBlockSpec, values: &[f64]) -> ParameterBlockSpec {
     assert_eq!(spec.penalties.len(), values.len());
     spec.initial_log_lambdas = Array1::from_vec(values.to_vec());
     spec
@@ -91,7 +93,10 @@ fn with_initial_log_lambdas(
 fn flat_group(label: &str, coords: Vec<(&str, usize)>, mean: f64) -> CoefficientGroupSpec {
     let mut g = CoefficientGroupSpec::new(
         label,
-        coords.into_iter().map(|(b, c)| coefficient_label(b, c)).collect(),
+        coords
+            .into_iter()
+            .map(|(b, c)| coefficient_label(b, c))
+            .collect(),
     )
     .with_prior(CoefficientGroupPrior::NormalLogPrecision { mean, sd: 2.0 });
     g.initial_log_precision = Some(mean / 10.0);
@@ -153,12 +158,7 @@ fn layout_zoo() -> Vec<LayoutCase> {
         },
         LayoutCase {
             name: "fixed_penalty_between_optimized",
-            specs: vec![block(
-                "m",
-                2,
-                vec![plain(2), fixed(2, 1.0), plain(2)],
-                -1.0,
-            )],
+            specs: vec![block("m", 2, vec![plain(2), fixed(2, 1.0), plain(2)], -1.0)],
             groups: vec![],
             base_prior: scalar(),
         },
@@ -337,11 +337,7 @@ fn candidate(diag: &[f64], scale: f64, tag: &str) -> (PenaltyCandidate, bool, us
     (cand, is_zero, rank, dense)
 }
 
-fn assert_matrix_roundoff_equal(
-    actual: &Array2<f64>,
-    expected: &Array2<f64>,
-    context: &str,
-) {
+fn assert_matrix_roundoff_equal(actual: &Array2<f64>, expected: &Array2<f64>, context: &str) {
     assert_eq!(actual.dim(), expected.dim(), "{context}: shape mismatch");
     let scale = expected
         .iter()
@@ -415,7 +411,10 @@ fn filter_zoo() -> Vec<FilterCase> {
 #[test]
 fn dropped_candidates_never_shift_active_penalty_original_index_sweep_2315() {
     let zoo = filter_zoo();
-    assert!(zoo.len() >= 5, "the filter zoo must sweep several drop patterns");
+    assert!(
+        zoo.len() >= 5,
+        "the filter zoo must sweep several drop patterns"
+    );
 
     for case in &zoo {
         // Build candidates and record the ground-truth per-position expectation.

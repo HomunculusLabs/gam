@@ -187,4 +187,3 @@ fn audit_marginal_logslope_not_aliased_under_nontrivial_sf() {
         audit.dropped_columns,
     );
 }
-

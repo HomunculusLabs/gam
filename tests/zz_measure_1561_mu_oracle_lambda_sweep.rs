@@ -500,7 +500,11 @@ fn run_arm(arm: Arm) {
         .zip(beta_mu.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
-    let beta_scale: f64 = beta_mu.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1e-12);
+    let beta_scale: f64 = beta_mu
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0f64, f64::max)
+        .max(1e-12);
     let recon_rel = recon_linf / beta_scale;
     eprintln!(
         "[{}] ρ=0 reconstruction: ‖β_μ(0)−β̂_μ‖∞={recon_linf:.3e} (rel {recon_rel:.3e}) \
@@ -634,12 +638,7 @@ fn run_arm(arm: Arm) {
     eprintln!(
         "[{}] edf span over the swept window: frozen-σ̂ {:.3} at ρ*={:.2} vs {:.3} at fit; \
          truth-σ {:.3} at ρ*={:.2}",
-        arm.label,
-        best_hat.2,
-        best_hat.1,
-        edf_mu,
-        best_true.2,
-        best_true.1
+        arm.label, best_hat.2, best_hat.1, edf_mu, best_true.2, best_true.1
     );
 
     // The ONLY validity assert: the frozen-σ̂ WLS at ρ=0 must reproduce the
@@ -737,7 +736,10 @@ fn fit_joint_sigma_and_mu(arm: &Arm) -> (Vec<f64>, f64, Vec<f64>, f64) {
         panic!("expected a GaussianLocationScale fit");
     };
     let c = response_scale;
-    let loc = fit.fit.block_by_role(BlockRole::Location).expect("location");
+    let loc = fit
+        .fit
+        .block_by_role(BlockRole::Location)
+        .expect("location");
     let beta_mu = loc.beta.clone();
     let edf_mu = loc.edf;
     let lambda_mu = loc.lambdas.to_vec();

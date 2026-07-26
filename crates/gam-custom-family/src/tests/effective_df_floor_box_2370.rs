@@ -101,8 +101,8 @@ fn crossing_between_neg_ceiling_and_the_box_floor_keeps_the_ceiling_2370() {
         "fixture must sit in the (-ceiling, lower) window: ceiling={ceiling}, lower={lower}"
     );
     let (specs, layout) = two_dir_term(-11.0);
-    let upper = upper_bounds_for(&specs, &layout, ceiling, lower)
-        .expect("bounds derivation must succeed");
+    let upper =
+        upper_bounds_for(&specs, &layout, ceiling, lower).expect("bounds derivation must succeed");
 
     // The invariant #2370 forbids violating. Pre-fix this returned -11.0.
     assert!(
@@ -126,8 +126,8 @@ fn interior_crossing_still_tightens_the_upper_bound_2370() {
     let lower = production_lower();
     let ceiling = EFFECTIVE_DF_CEILING;
     let (specs, layout) = two_dir_term(0.0);
-    let upper = upper_bounds_for(&specs, &layout, ceiling, lower)
-        .expect("bounds derivation must succeed");
+    let upper =
+        upper_bounds_for(&specs, &layout, ceiling, lower).expect("bounds derivation must succeed");
     assert!(
         upper[0] > lower && upper[0] < ceiling,
         "an interior crossing must yield an interior upper bound, got {}",

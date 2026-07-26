@@ -5936,7 +5936,9 @@ impl SaeManifoldTerm {
             // termination paired with a move is only readable once you know
             // WHICH of the four out-of-loop sites fired.
             EvidenceFixedPointGap::StateMoved(
-                outcome.moved_at.unwrap_or(StateMoveSite::AcceptedNewtonStep),
+                outcome
+                    .moved_at
+                    .unwrap_or(StateMoveSite::AcceptedNewtonStep),
             )
         } else if !entry_state_recurred {
             EvidenceFixedPointGap::StateNotRecurred

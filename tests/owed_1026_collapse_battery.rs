@@ -401,7 +401,9 @@ fn collapse_verdict_observable_when_reconstruction_is_bit_identical_2394() {
     // trivial all-zero map.
     let amps = Array2::from_shape_fn((n, 1), |(i, _)| 0.5 + 0.1 * i as f64);
 
-    let collapsed = term.reconstruct_from_assignments(amps.view(), true).unwrap();
+    let collapsed = term
+        .reconstruct_from_assignments(amps.view(), true)
+        .unwrap();
     let uncollapsed = term
         .reconstruct_from_assignments(amps.view(), false)
         .unwrap();
@@ -571,11 +573,33 @@ fn repulsion_is_radially_inert_barrier_sets_net_radial_2343() {
     const P: usize = 3;
     let eps = 1e-7_f64;
 
-    let coords0 = array![[0.05],[0.22],[0.55],[0.81],[0.34],[0.66],[0.12],[0.90]];
-    let coords1 = array![[0.15],[0.31],[0.64],[0.92],[0.47],[0.09],[0.73],[0.40]];
+    let coords0 = array![
+        [0.05],
+        [0.22],
+        [0.55],
+        [0.81],
+        [0.34],
+        [0.66],
+        [0.12],
+        [0.90]
+    ];
+    let coords1 = array![
+        [0.15],
+        [0.31],
+        [0.64],
+        [0.92],
+        [0.47],
+        [0.09],
+        [0.73],
+        [0.40]
+    ];
     let n = coords0.nrows();
     let target = Array2::<f64>::zeros((n, P));
-    let rho = SaeManifoldRho::new((1e-4_f64).ln(), (1e-4_f64).ln(), vec![Array1::<f64>::zeros(0); 2]);
+    let rho = SaeManifoldRho::new(
+        (1e-4_f64).ln(),
+        (1e-4_f64).ln(),
+        vec![Array1::<f64>::zeros(0); 2],
+    );
 
     // Shared real atom 0 on channel 0.
     let mut dec0 = Array2::<f64>::zeros((M, P));
@@ -591,16 +615,28 @@ fn repulsion_is_radially_inert_barrier_sets_net_radial_2343() {
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             logits,
             vec![coords0.clone(), coords1.clone()],
-            vec![LatentManifold::Circle { period: 1.0 }, LatentManifold::Circle { period: 1.0 }],
+            vec![
+                LatentManifold::Circle { period: 1.0 },
+                LatentManifold::Circle { period: 1.0 },
+            ],
             AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
-        ).unwrap();
+        )
+        .unwrap();
         let mut term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
-        let sys = term.assemble_arrow_schur(target.view(), &rho, None).expect("assembly");
+        let sys = term
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("assembly");
         let atom1_start = M * P;
         let mut dir = vec![0.0_f64; M * P];
-        for a in 0..M { for o in 0..P { dir[a * P + o] = dec1[[a, o]]; } }
+        for a in 0..M {
+            for o in 0..P {
+                dir[a * P + o] = dec1[[a, o]];
+            }
+        }
         let dnorm = (dir.iter().map(|v| v * v).sum::<f64>()).sqrt();
-        for v in dir.iter_mut() { *v /= dnorm; }
+        for v in dir.iter_mut() {
+            *v /= dnorm;
+        }
         (0..M * P).map(|j| sys.gb[atom1_start + j] * dir[j]).sum()
     };
 
@@ -618,7 +654,10 @@ fn repulsion_is_radially_inert_barrier_sets_net_radial_2343() {
 
     // Both must be strictly outward (barrier), and equal to each other to within
     // the sub-barrier smoothness residual — i.e. the repulsion added ZERO radially.
-    assert!(radial_collinear < 0.0 && radial_ortho < 0.0, "both must be outward");
+    assert!(
+        radial_collinear < 0.0 && radial_ortho < 0.0,
+        "both must be outward"
+    );
     let denom = radial_ortho.abs().max(1.0);
     let rel = (radial_collinear - radial_ortho).abs() / denom;
     assert!(

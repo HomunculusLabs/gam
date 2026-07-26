@@ -152,10 +152,7 @@ fn gam_cyclic_predicts_nottem_seasonal_cycle_vs_mgcv() {
     }
 
     // ---- mgcv on the SAME K partitions (full data.frame + K fold masks) ----
-    let mut columns: Vec<Column> = vec![
-        Column::new("month", &month),
-        Column::new("temp", &temp),
-    ];
+    let mut columns: Vec<Column> = vec![Column::new("month", &month), Column::new("temp", &temp)];
     for (name, data) in fold_names.iter().zip(fold_data.iter()) {
         columns.push(Column::new(name, data));
     }

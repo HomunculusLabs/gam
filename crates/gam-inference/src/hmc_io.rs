@@ -1754,7 +1754,8 @@ mod tests {
             // promoted an IEEE sign bit into a correctness claim; `== 0.0`
             // still rejects every nonzero, including subnormals.
             assert_eq!(
-                score[0], 0.0,
+                score[0],
+                0.0,
                 "{} must erase a zero-weight row's score exactly",
                 likelihood.spec.pretty_name()
             );

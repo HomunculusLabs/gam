@@ -226,7 +226,10 @@ where
     // Four, not two: an extrapolant is only accepted once TWO same-order
     // extrapolants one and two rungs coarser exist to compare it against (see
     // below), and the first of those appears at `i = 3`.
-    assert!(config.rungs >= 4, "ridders_derivative: need at least 4 rungs");
+    assert!(
+        config.rungs >= 4,
+        "ridders_derivative: need at least 4 rungs"
+    );
 
     // `tableau[i][j]` is the order-`2(j+1)` extrapolant built from rungs
     // `i-j ..= i`. Column 0 is the raw stencil value at step `h_i`.
@@ -623,5 +626,4 @@ mod tests {
         assert!((measured.ladder[0].0 - 1.0e-2).abs() < 1e-18);
         assert!(measured.ladder_report().starts_with("h=1.00e-2 D="));
     }
-
 }

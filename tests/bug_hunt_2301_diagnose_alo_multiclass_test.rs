@@ -184,11 +184,20 @@ fn diagnose_alo_supports_location_scale_and_survival_2301() {
 
 /// Encode in-memory numeric rows exactly as the fitted CSV was encoded, so the
 /// ALO input matches the training data row-for-row.
-fn encode_numeric_dataset(headers: &[&str], rows: &[Vec<f64>]) -> (Array2<f64>, HashMap<String, usize>) {
+fn encode_numeric_dataset(
+    headers: &[&str],
+    rows: &[Vec<f64>],
+) -> (Array2<f64>, HashMap<String, usize>) {
     let header_owned: Vec<String> = headers.iter().map(|name| (*name).to_string()).collect();
     let records: Vec<StringRecord> = rows
         .iter()
-        .map(|row| StringRecord::from(row.iter().map(|value| format!("{value:.10}")).collect::<Vec<_>>()))
+        .map(|row| {
+            StringRecord::from(
+                row.iter()
+                    .map(|value| format!("{value:.10}"))
+                    .collect::<Vec<_>>(),
+            )
+        })
         .collect();
     let dataset =
         encode_recordswith_inferred_schema(header_owned, records).expect("encode ALO dataset");
@@ -439,9 +448,7 @@ fn diagnose_alo_marginal_slope_matches_brute_force_loo_2301() {
     let zs: Vec<f64> = raw_z.iter().map(|z| (z - z_mean) / z_sd).collect();
 
     let headers = ["disease", "x", "z"];
-    let rows: Vec<Vec<f64>> = (0..n)
-        .map(|i| vec![disease[i], xs[i], zs[i]])
-        .collect();
+    let rows: Vec<Vec<f64>> = (0..n).map(|i| vec![disease[i], xs[i], zs[i]]).collect();
 
     let fit_formula = "disease ~ s(x)";
     let full_csv = dir.path().join("ms_full.csv");
@@ -565,7 +572,10 @@ fn diagnose_alo_transformation_normal_matches_brute_force_loo_2301() {
             .arg("--transformation-normal")
             .arg("--out")
             .arg(&refit_model);
-        run_or_panic(refit, "gam refit transformation-normal leave-one-out fold (#2301)");
+        run_or_panic(
+            refit,
+            "gam refit transformation-normal leave-one-out fold (#2301)",
+        );
         let refit =
             FittedModel::load_from_path(&refit_model).expect("load transformation-normal refit");
         let brute = fitted_leading_coordinate_at(&refit, &data, &col_map, i);

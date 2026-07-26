@@ -52,8 +52,7 @@ fn erf_approx(x: f64) -> f64 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * x);
-    let polynomial = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
-        - 0.284496736)
+    let polynomial = (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736)
         * t
         + 0.254829592)
         * t;
@@ -181,16 +180,10 @@ fn fit_issue_case(centers: usize) {
         panic!("expected a BernoulliMarginalSlope fit result");
     };
 
-    let marginal_scale = resolved_auto_matern_scale(
-        &fit.marginalspec_resolved,
-        "marginal channel",
-        centers,
-    );
-    let logslope_scale = resolved_auto_matern_scale(
-        &fit.logslopespec_resolved,
-        "log-slope channel",
-        centers,
-    );
+    let marginal_scale =
+        resolved_auto_matern_scale(&fit.marginalspec_resolved, "marginal channel", centers);
+    let logslope_scale =
+        resolved_auto_matern_scale(&fit.logslopespec_resolved, "log-slope channel", centers);
     for block in &fit.fit.blocks {
         for &coefficient in block.beta.iter() {
             assert!(

@@ -292,12 +292,9 @@ fn owed_1395_pseudo_laplace_psi_objective_keeps_full_logdet() {
 
     for (psi, expected) in cases {
         let family = ScalarPseudoLaplacePsiFamily { psi };
-        let hyper_layout = CustomFamilyHyperLayout::new(
-            vec![vec![deriv.clone()]],
-            vec![],
-            array![psi],
-        )
-        .expect("single psi-axis hyper layout");
+        let hyper_layout =
+            CustomFamilyHyperLayout::new(vec![vec![deriv.clone()]], vec![], array![psi])
+                .expect("single psi-axis hyper layout");
         let result = evaluate_custom_family_joint_hyper(
             &family,
             std::slice::from_ref(&spec),

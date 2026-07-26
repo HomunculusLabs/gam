@@ -2500,9 +2500,9 @@ impl GlmLikelihoodSpec {
                     estimated: false,
                 })
             }
-            (ResponseFamily::Beta { .. }, _) => {
-                Err(mismatch("matching EstimatedBetaPhi or FixedBetaPhi metadata"))
-            }
+            (ResponseFamily::Beta { .. }, _) => Err(mismatch(
+                "matching EstimatedBetaPhi or FixedBetaPhi metadata",
+            )),
 
             (
                 ResponseFamily::NegativeBinomial {

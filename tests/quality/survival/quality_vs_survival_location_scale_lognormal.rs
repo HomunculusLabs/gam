@@ -286,9 +286,7 @@ fn gam_lognormal_location_scale_aft_smooth_matches_survreg() {
     // location predictors carry an unidentifiable additive gauge offset, so we
     // mean-center every quantity before measuring recovery. Reuses the SAME
     // `z_effect_truth` the data-generating loop used, so the truth is exact.
-    let truth: Vec<f64> = (0..n)
-        .map(|i| 0.8 * x[i] + z_effect_truth(z[i]))
-        .collect();
+    let truth: Vec<f64> = (0..n).map(|i| 0.8 * x[i] + z_effect_truth(z[i])).collect();
     let truth_mean = truth.iter().sum::<f64>() / n as f64;
     let truth_c: Vec<f64> = truth.iter().map(|&m| m - truth_mean).collect();
 

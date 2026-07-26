@@ -89,14 +89,14 @@ impl CustomFamilyHyperLayout {
                 ));
             }
         }
-        let design_axis_count = design_derivative_blocks.iter().try_fold(
-            0usize,
-            |count, derivatives| {
-                count.checked_add(derivatives.len()).ok_or_else(|| {
-                    "custom-family hyper layout design-axis count exceeds usize".to_string()
-                })
-            },
-        )?;
+        let design_axis_count =
+            design_derivative_blocks
+                .iter()
+                .try_fold(0usize, |count, derivatives| {
+                    count.checked_add(derivatives.len()).ok_or_else(|| {
+                        "custom-family hyper layout design-axis count exceeds usize".to_string()
+                    })
+                })?;
         let axis_count = design_axis_count
             .checked_add(family_axes.len())
             .ok_or_else(|| "custom-family hyper layout axis count exceeds usize".to_string())?;
@@ -165,11 +165,8 @@ impl CustomFamilyHyperLayout {
     pub fn axis(&self, global_index: usize) -> Option<CustomFamilyHyperAxis> {
         if global_index < self.design_axis_count {
             let mut remaining = global_index;
-            return self
-                .design_derivative_blocks
-                .iter()
-                .enumerate()
-                .find_map(|(block, derivatives)| {
+            return self.design_derivative_blocks.iter().enumerate().find_map(
+                |(block, derivatives)| {
                     if remaining < derivatives.len() {
                         Some(CustomFamilyHyperAxis::DesignPenalty {
                             block,
@@ -179,7 +176,8 @@ impl CustomFamilyHyperLayout {
                         remaining -= derivatives.len();
                         None
                     }
-                });
+                },
+            );
         }
         let family_offset = global_index.checked_sub(self.design_axis_count)?;
         self.family_axes

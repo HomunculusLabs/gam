@@ -131,9 +131,7 @@ impl Truth {
         match self {
             Truth::Fundamental => 0.15 + 0.1 * x.cos(),
             // min over the circle is 0.15 - 0.07 - 0.04 = 0.04 > 0.
-            Truth::AboveFundamental => {
-                0.15 + 0.07 * x.cos() + 0.04 * (2.0 * x - 0.4).cos()
-            }
+            Truth::AboveFundamental => 0.15 + 0.07 * x.cos() + 0.04 * (2.0 * x - 0.4).cos(),
         }
     }
 }
@@ -403,7 +401,10 @@ fn run_cyclic_location_scale_arm(truth: Truth) {
         "{}",
         ls_panel.report(&format!("cyclic_ls::{label}::log_sigma"))
     );
-    eprintln!("{}", joint_panel.report(&format!("cyclic_ls::{label}::joint")));
+    eprintln!(
+        "{}",
+        joint_panel.report(&format!("cyclic_ls::{label}::joint"))
+    );
     eprintln!(
         "{}",
         QualityPair::paired(

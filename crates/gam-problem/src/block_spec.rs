@@ -81,7 +81,6 @@ pub trait FamilyChannelHessian: Send + Sync {
         }
         out
     }
-
 }
 
 /// β-linearization state passed to [`BlockEffectiveJacobian::effective_jacobian_at`].

@@ -67,24 +67,22 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     // `∂_ρ_i Hdot[e_a]|_β` (the family's ψ-Hessian directional derivative). `None`
     // unless the family uses the Jeffreys term and exposes a dense joint Hessian, so
     // every non-Jeffreys / operator-only family is byte-unchanged.
-    let jeffreys_hphi_ctx: Option<(Array2<f64>, Array2<f64>)> = if family
-        .joint_jeffreys_term_required()
-        && !hyper_layout.is_empty()
-    {
-        match (
-            build_joint_jeffreys_subspace(specs, &ranges)?,
-            family.joint_jeffreys_information_with_specs(synced_states, specs)?,
-        ) {
-            (Some(z), Some(h))
-                if z.nrows() == total && h.nrows() == total && h.ncols() == total =>
-            {
-                Some((z, h))
+    let jeffreys_hphi_ctx: Option<(Array2<f64>, Array2<f64>)> =
+        if family.joint_jeffreys_term_required() && !hyper_layout.is_empty() {
+            match (
+                build_joint_jeffreys_subspace(specs, &ranges)?,
+                family.joint_jeffreys_information_with_specs(synced_states, specs)?,
+            ) {
+                (Some(z), Some(h))
+                    if z.nrows() == total && h.nrows() == total && h.ncols() == total =>
+                {
+                    Some((z, h))
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // Whether the Jeffreys information `H_info` depends EXPLICITLY on ψ
     // (gam#1607). When `false` (penalty/prior ψ that leave the design — hence
@@ -115,12 +113,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 )?,
             }
         } else {
-            family.exact_newton_joint_psi_terms(
-                synced_states,
-                specs,
-                hyper_layout,
-                psi_global,
-            )?
+            family.exact_newton_joint_psi_terms(synced_states, specs, hyper_layout, psi_global)?
         };
         let psi_terms = match (axis, psi_terms) {
             (_, Some(terms)) => terms,
@@ -137,18 +130,16 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
         // 2. Assemble generic penalty motion only for a typed design/penalty
         // axis. Family axes have no fabricated block owner and therefore carry
         // exactly zero S_i.
-        let penalty_motion = hyper_layout.design_derivative(psi_global).map(
-            |(block_idx, _, deriv)| {
-                let (start, end) = ranges[block_idx];
-                let p_block = end - start;
-                let s_psi_local = assemble_block_local_s_psi(
-                    deriv,
-                    &per_block_lambdas[block_idx],
-                    p_block,
-                );
-                (block_idx, start, end, s_psi_local)
-            },
-        );
+        let penalty_motion =
+            hyper_layout
+                .design_derivative(psi_global)
+                .map(|(block_idx, _, deriv)| {
+                    let (start, end) = ranges[block_idx];
+                    let p_block = end - start;
+                    let s_psi_local =
+                        assemble_block_local_s_psi(deriv, &per_block_lambdas[block_idx], p_block);
+                    (block_idx, start, end, s_psi_local)
+                });
 
         // 3. Build HyperCoord using block-local S_ψ when present.
         let mut a = psi_terms.objective_psi;
@@ -162,80 +153,79 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                 .assign(&s_psi_beta_local);
         }
 
-            // EXPLICIT Firth VALUE ψ-derivative (gam#1607). The outer LAML cost folds
-            // `−Φ(β̂)` where `Φ = ½ log|Z_Jᵀ H_info Z_J|₊` (gated), and the Jeffreys
-            // information `H_info` is the data joint Hessian — so for a ψ hyperparameter
-            // that reshapes the design (matern/duchon length-scale) it depends on ψ
-            // EXPLICITLY, with `∂_ψ H_info|_β` the family's ψ-Hessian derivative (the
-            // dense `hessian_psi`, or the materialized operator when the workspace path
-            // streams it). The companion CURVATURE term `∂_ψ H_Φ` is added to the dense
-            // drift below (gam#854); but the VALUE term `−∂_ψΦ` was dropped on EVERY ψ
-            // axis (and entirely on the operator path), leaving the outer ψ-gradient
-            // short by the full Firth value motion (dominant on the spatial axis). The
-            // helper returns `0.0` when the conditioning gate skips the term, so a clean
-            // / well-conditioned fit is byte-unchanged.
-            // `∂_ψ H_info|_β` (the explicit ψ-derivative of the Jeffreys information),
-            // materialized once and reused for BOTH the VALUE gradient term `−∂_ψΦ`
-            // (here) and the Hessian β-coupling term `−∂_β∂_ψΦ` (the score below).
-            let firth_pert_info: Option<Array2<f64>> =
-                if jeffreys_hphi_ctx.is_some() && jeffreys_info_depends_on_psi {
-                    if let Some(op) = psi_terms.hessian_psi_operator.as_ref() {
-                        Some(op.mul_mat(&ndarray::Array2::<f64>::eye(total)))
-                    } else if psi_terms.hessian_psi.nrows() == total
-                        && psi_terms.hessian_psi.ncols() == total
-                    {
-                        Some(psi_terms.hessian_psi.clone())
-                    } else {
-                        None
-                    }
+        // EXPLICIT Firth VALUE ψ-derivative (gam#1607). The outer LAML cost folds
+        // `−Φ(β̂)` where `Φ = ½ log|Z_Jᵀ H_info Z_J|₊` (gated), and the Jeffreys
+        // information `H_info` is the data joint Hessian — so for a ψ hyperparameter
+        // that reshapes the design (matern/duchon length-scale) it depends on ψ
+        // EXPLICITLY, with `∂_ψ H_info|_β` the family's ψ-Hessian derivative (the
+        // dense `hessian_psi`, or the materialized operator when the workspace path
+        // streams it). The companion CURVATURE term `∂_ψ H_Φ` is added to the dense
+        // drift below (gam#854); but the VALUE term `−∂_ψΦ` was dropped on EVERY ψ
+        // axis (and entirely on the operator path), leaving the outer ψ-gradient
+        // short by the full Firth value motion (dominant on the spatial axis). The
+        // helper returns `0.0` when the conditioning gate skips the term, so a clean
+        // / well-conditioned fit is byte-unchanged.
+        // `∂_ψ H_info|_β` (the explicit ψ-derivative of the Jeffreys information),
+        // materialized once and reused for BOTH the VALUE gradient term `−∂_ψΦ`
+        // (here) and the Hessian β-coupling term `−∂_β∂_ψΦ` (the score below).
+        let firth_pert_info: Option<Array2<f64>> =
+            if jeffreys_hphi_ctx.is_some() && jeffreys_info_depends_on_psi {
+                if let Some(op) = psi_terms.hessian_psi_operator.as_ref() {
+                    Some(op.mul_mat(&ndarray::Array2::<f64>::eye(total)))
+                } else if psi_terms.hessian_psi.nrows() == total
+                    && psi_terms.hessian_psi.ncols() == total
+                {
+                    Some(psi_terms.hessian_psi.clone())
                 } else {
                     None
-                };
-            if let (Some((z_j, h_joint)), Some(pert_info)) =
-                (jeffreys_hphi_ctx.as_ref(), firth_pert_info.as_ref())
-            {
-                let phi_psi =
+                }
+            } else {
+                None
+            };
+        if let (Some((z_j, h_joint)), Some(pert_info)) =
+            (jeffreys_hphi_ctx.as_ref(), firth_pert_info.as_ref())
+        {
+            let phi_psi =
                     gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_derivative(
                         h_joint.view(),
                         z_j.view(),
                         pert_info,
                     )?;
-                a -= phi_psi;
-            }
+            a -= phi_psi;
+        }
         let mut g = &psi_terms.score_psi + &s_psi_beta;
 
-            // EXPLICIT Firth Hessian β-COUPLING (gam#1607). The outer Hessian's
-            // mode-response term is `−g_ψ·β̇`, with the coord score `g_ψ = ∂_β∂_ψV|_β`.
-            // The Firth value `−Φ(β̂)` contributes `−∂_β∂_ψΦ` to that score (β̂ moves
-            // with ψ as the length-scale reshapes the design, so the Firth value's
-            // ψ-gradient has a genuine β-response), EXACTLY mirroring the ρ-coord path
-            // (`g_j -= gphi_τ`, gam#854/#979). The per-β-axis mixed second derivative
-            // `∂_β_a∂_ψΦ` is the validated explicit second-derivative helper applied to
-            // the perturbation pair `(∂_ψH_info, ∂_β_a H_info = Hdot[e_a])` with mixed
-            // `∂_ψ∂_β_a H_info = ∂_ψHdot[e_a]` — the SAME family directional derivatives
-            // the `∂_ψH_Φ` curvature term consumes. The helper returns `0.0` when the
-            // conditioning gate skips the term, so a clean fit is byte-unchanged.
-            if let (Some((z_j, h_joint)), Some(pert_info)) =
-                (jeffreys_hphi_ctx.as_ref(), firth_pert_info.as_ref())
-            {
-                for a_idx in 0..total {
-                    let mut e_a = Array1::<f64>::zeros(total);
-                    e_a[a_idx] = 1.0;
-                    let hdot_a = family
-                        .joint_jeffreys_information_directional_derivative_with_specs(
-                            synced_states,
-                            specs,
-                            &e_a,
-                        )?;
-                    let psi_hdot_a = family.exact_newton_joint_psihessian_directional_derivative(
-                        synced_states,
-                        specs,
-                        hyper_layout,
-                        psi_global,
-                        &e_a,
-                    )?;
-                    if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
-                        let phi_psi_beta_a =
+        // EXPLICIT Firth Hessian β-COUPLING (gam#1607). The outer Hessian's
+        // mode-response term is `−g_ψ·β̇`, with the coord score `g_ψ = ∂_β∂_ψV|_β`.
+        // The Firth value `−Φ(β̂)` contributes `−∂_β∂_ψΦ` to that score (β̂ moves
+        // with ψ as the length-scale reshapes the design, so the Firth value's
+        // ψ-gradient has a genuine β-response), EXACTLY mirroring the ρ-coord path
+        // (`g_j -= gphi_τ`, gam#854/#979). The per-β-axis mixed second derivative
+        // `∂_β_a∂_ψΦ` is the validated explicit second-derivative helper applied to
+        // the perturbation pair `(∂_ψH_info, ∂_β_a H_info = Hdot[e_a])` with mixed
+        // `∂_ψ∂_β_a H_info = ∂_ψHdot[e_a]` — the SAME family directional derivatives
+        // the `∂_ψH_Φ` curvature term consumes. The helper returns `0.0` when the
+        // conditioning gate skips the term, so a clean fit is byte-unchanged.
+        if let (Some((z_j, h_joint)), Some(pert_info)) =
+            (jeffreys_hphi_ctx.as_ref(), firth_pert_info.as_ref())
+        {
+            for a_idx in 0..total {
+                let mut e_a = Array1::<f64>::zeros(total);
+                e_a[a_idx] = 1.0;
+                let hdot_a = family.joint_jeffreys_information_directional_derivative_with_specs(
+                    synced_states,
+                    specs,
+                    &e_a,
+                )?;
+                let psi_hdot_a = family.exact_newton_joint_psihessian_directional_derivative(
+                    synced_states,
+                    specs,
+                    hyper_layout,
+                    psi_global,
+                    &e_a,
+                )?;
+                if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
+                    let phi_psi_beta_a =
                             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
                                 h_joint.view(),
                                 z_j.view(),
@@ -243,10 +233,10 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                                 &hdot_a,
                                 &psi_hdot_a,
                             )?;
-                        g[a_idx] -= phi_psi_beta_a;
-                    }
+                    g[a_idx] -= phi_psi_beta_a;
                 }
             }
+        }
         let ld_s = match (s_logdet_blocks, penalty_motion.as_ref()) {
             (Some(blocks), Some((block_idx, _, _, s_psi_local))) => {
                 blocks[*block_idx].tau_gradient_component(s_psi_local)
@@ -261,14 +251,13 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
         // this only in the dense branch and used the penalty-augmented `dense_b`
         // as ∂ψH_info; operator-backed spatial axes therefore omitted the term
         // entirely, while dense axes could contaminate it with ∂ψS.
-        let explicit_jeffreys_hphi =
-            if let (Some((z_j, h_joint)), Some(pert_info)) = (
-                jeffreys_hphi_ctx
-                    .as_ref()
-                    .filter(|_| jeffreys_info_depends_on_psi),
-                firth_pert_info.as_ref(),
-            ) {
-                Some(
+        let explicit_jeffreys_hphi = if let (Some((z_j, h_joint)), Some(pert_info)) = (
+            jeffreys_hphi_ctx
+                .as_ref()
+                .filter(|_| jeffreys_info_depends_on_psi),
+            firth_pert_info.as_ref(),
+        ) {
+            Some(
                     gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_hphi_explicit_param_derivative(
                         h_joint.view(),
                         z_j.view(),
@@ -291,9 +280,9 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                         },
                     )?,
                 )
-            } else {
-                None
-            };
+        } else {
+            None
+        };
 
         // Build drift: use block-local representation when possible to avoid
         // materializing full p×p dense matrices.
@@ -642,8 +631,7 @@ pub fn build_contracted_psi_hook(
                 if aj == 0.0 || axis_j.block != axis_i.block {
                     continue;
                 }
-                let deriv_i =
-                    &hyper_layout.design_derivative_blocks()[axis_i.block][axis_i.local];
+                let deriv_i = &hyper_layout.design_derivative_blocks()[axis_i.block][axis_i.local];
                 let s_ij = assemble_block_local_s_psi_psi(
                     deriv_i,
                     axis_j.local,
@@ -956,7 +944,10 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
     // typed error.  The immutable workspace may cache the corresponding row
     // program, so the callback's later lookup remains cheap.
     let mut family_pair_cache =
-        vec![vec![None::<ExactNewtonJointPsiSecondOrderTerms>; hyper_layout.len()]; hyper_layout.len()];
+        vec![
+            vec![None::<ExactNewtonJointPsiSecondOrderTerms>; hyper_layout.len()];
+            hyper_layout.len()
+        ];
     for i in 0..hyper_layout.len() {
         for j in i..hyper_layout.len() {
             if hyper_layout.family_axis(i).is_none() && hyper_layout.family_axis(j).is_none() {
@@ -974,9 +965,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                 )?
             };
             let pair = pair.ok_or_else(|| {
-                format!(
-                    "typed family hyper pair ({i}, {j}) has no exact V_ij/g_ij/H_ij terms"
-                )
+                format!("typed family hyper pair ({i}, {j}) has no exact V_ij/g_ij/H_ij terms")
             })?;
             family_pair_cache[i][j] = Some(pair.clone());
             family_pair_cache[j][i] = Some(pair);
@@ -1000,101 +989,101 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
 
         Box::new(
             move |psi_i: usize, psi_j: usize| -> Result<HyperCoordPair, String> {
-            if psi_i >= hyper_layout.len() || psi_j >= hyper_layout.len() {
-                return Err(format!(
-                    "typed hyper pair index out of bounds: ({psi_i}, {psi_j}) for {} axes",
-                    hyper_layout.len()
-                ));
-            }
-            let cache_i = psi_penalty_cache[psi_i].as_ref();
-            let cache_j = psi_penalty_cache[psi_j].as_ref();
+                if psi_i >= hyper_layout.len() || psi_j >= hyper_layout.len() {
+                    return Err(format!(
+                        "typed hyper pair index out of bounds: ({psi_i}, {psi_j}) for {} axes",
+                        hyper_layout.len()
+                    ));
+                }
+                let cache_i = psi_penalty_cache[psi_i].as_ref();
+                let cache_j = psi_penalty_cache[psi_j].as_ref();
 
-            // Get family-provided second-order likelihood terms.
-            let family_pair_required = hyper_layout.family_axis(psi_i).is_some()
-                || hyper_layout.family_axis(psi_j).is_some();
-            let psi2 = if family_pair_required {
-                Some(family_pair_cache[psi_i][psi_j].clone().ok_or_else(|| {
+                // Get family-provided second-order likelihood terms.
+                let family_pair_required = hyper_layout.family_axis(psi_i).is_some()
+                    || hyper_layout.family_axis(psi_j).is_some();
+                let psi2 = if family_pair_required {
+                    Some(family_pair_cache[psi_i][psi_j].clone().ok_or_else(|| {
                     format!(
                         "typed family hyper pair ({psi_i}, {psi_j}) was not retained by its validated pair cache"
                     )
                 })?)
-            } else {
-                let terms = if let Some(workspace) = psi_workspace.as_ref() {
-                    workspace.second_order_terms(psi_i, psi_j)
                 } else {
-                    family_arc.exact_newton_joint_psisecond_order_terms(
-                        &synced_arc,
-                        &specs_arc,
-                        &hyper_layout,
-                        psi_i,
-                        psi_j,
-                    )
-                };
-                terms.map_err(|error| {
+                    let terms = if let Some(workspace) = psi_workspace.as_ref() {
+                        workspace.second_order_terms(psi_i, psi_j)
+                    } else {
+                        family_arc.exact_newton_joint_psisecond_order_terms(
+                            &synced_arc,
+                            &specs_arc,
+                            &hyper_layout,
+                            psi_i,
+                            psi_j,
+                        )
+                    };
+                    terms.map_err(|error| {
                     format!(
                         "typed design hyper pair ({psi_i}, {psi_j}) failed during immutable Hessian assembly: {error}"
                     )
                 })?
-            };
+                };
 
-            let (obj_ll, score_ll, hess_ll, hess_ll_op) = match psi2 {
-                Some(t) => (
-                    t.objective_psi_psi,
-                    t.score_psi_psi,
-                    t.hessian_psi_psi,
-                    t.hessian_psi_psi_operator,
-                ),
-                None => (
-                    0.0,
-                    Array1::zeros(total),
-                    Array2::zeros((total, total)),
-                    None,
-                ),
-            };
+                let (obj_ll, score_ll, hess_ll, hess_ll_op) = match psi2 {
+                    Some(t) => (
+                        t.objective_psi_psi,
+                        t.score_psi_psi,
+                        t.hessian_psi_psi,
+                        t.hessian_psi_psi_operator,
+                    ),
+                    None => (
+                        0.0,
+                        Array1::zeros(total),
+                        Array2::zeros((total, total)),
+                        None,
+                    ),
+                };
 
-            let mut a = obj_ll;
-            let mut g = score_ll;
-            let mut b_mat = hess_ll;
-            let mut b_operator = hess_ll_op;
-            if g.len() != total {
-                return Err(format!(
-                    "typed hyper pair ({psi_i}, {psi_j}) returned score length {}, expected {total}",
-                    g.len()
-                ));
-            }
-            if b_mat.dim() != (0, 0) && b_mat.dim() != (total, total) {
-                return Err(format!(
-                    "typed hyper pair ({psi_i}, {psi_j}) returned dense Hessian shape {:?}, expected (0, 0) or ({total}, {total})",
-                    b_mat.dim()
-                ));
-            }
+                let mut a = obj_ll;
+                let mut g = score_ll;
+                let mut b_mat = hess_ll;
+                let mut b_operator = hess_ll_op;
+                if g.len() != total {
+                    return Err(format!(
+                        "typed hyper pair ({psi_i}, {psi_j}) returned score length {}, expected {total}",
+                        g.len()
+                    ));
+                }
+                if b_mat.dim() != (0, 0) && b_mat.dim() != (total, total) {
+                    return Err(format!(
+                        "typed hyper pair ({psi_i}, {psi_j}) returned dense Hessian shape {:?}, expected (0, 0) or ({total}, {total})",
+                        b_mat.dim()
+                    ));
+                }
 
-            // EXPLICIT Firth/Jeffreys ψψ VALUE second derivative (gam#1607):
-            //   a -= ∂_{ψ_i}∂_{ψ_j}Φ
-            // the per-pair companion to the gradient term `−∂_{ψ_i}Φ` added to each
-            // coord's `a` in `build_psi_hyper_coords` (and to the contracted-hook
-            // `objective[i]` in `build_contracted_psi_hook`). Computed from the
-            // β-fixed perturbations `∂_{ψ_i}H_info` / `∂_{ψ_j}H_info` (pert_first) and
-            // the UNPENALIZED mixed second `∂_{ψ_i}∂_{ψ_j}H_info` (`b_mat`/`b_operator`
-            // captured HERE, before the `S_{ψ_i ψ_j}` penalty drift is folded in below
-            // — the Jeffreys info is the unpenalized data Hessian). The helper returns
-            // `0.0` when the conditioning gate skips the term, so a clean fit is
-            // byte-unchanged. Invalid shape/eigensystem evidence propagates through
-            // the pair callback together with workspace failures.
-            if let Some((z_j, h_joint, pert_first)) = firth_pair_ctx.as_ref()
-                && psi_i < pert_first.len()
-                && psi_j < pert_first.len()
-            {
-                let pert_ij_opt: Option<Array2<f64>> =
-                    if b_mat.nrows() == total && b_mat.ncols() == total {
-                        Some(b_mat.clone())
-                    } else {
-                        b_operator
-                            .as_ref()
-                            .map(|op| op.mul_mat(&Array2::<f64>::eye(total)))
-                    };
-                if let Some(pert_ij) = pert_ij_opt {
-                    let phi_psi_psi =
+                // EXPLICIT Firth/Jeffreys ψψ VALUE second derivative (gam#1607):
+                //   a -= ∂_{ψ_i}∂_{ψ_j}Φ
+                // the per-pair companion to the gradient term `−∂_{ψ_i}Φ` added to each
+                // coord's `a` in `build_psi_hyper_coords` (and to the contracted-hook
+                // `objective[i]` in `build_contracted_psi_hook`). Computed from the
+                // β-fixed perturbations `∂_{ψ_i}H_info` / `∂_{ψ_j}H_info` (pert_first) and
+                // the UNPENALIZED mixed second `∂_{ψ_i}∂_{ψ_j}H_info` (`b_mat`/`b_operator`
+                // captured HERE, before the `S_{ψ_i ψ_j}` penalty drift is folded in below
+                // — the Jeffreys info is the unpenalized data Hessian). The helper returns
+                // `0.0` when the conditioning gate skips the term, so a clean fit is
+                // byte-unchanged. Invalid shape/eigensystem evidence propagates through
+                // the pair callback together with workspace failures.
+                if let Some((z_j, h_joint, pert_first)) = firth_pair_ctx.as_ref()
+                    && psi_i < pert_first.len()
+                    && psi_j < pert_first.len()
+                {
+                    let pert_ij_opt: Option<Array2<f64>> =
+                        if b_mat.nrows() == total && b_mat.ncols() == total {
+                            Some(b_mat.clone())
+                        } else {
+                            b_operator
+                                .as_ref()
+                                .map(|op| op.mul_mat(&Array2::<f64>::eye(total)))
+                        };
+                    if let Some(pert_ij) = pert_ij_opt {
+                        let phi_psi_psi =
                         gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
                             h_joint.view(),
                             z_j.view(),
@@ -1107,63 +1096,64 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "typed hyper pair ({psi_i}, {psi_j}) Jeffreys second derivative failed: {error}"
                             )
                         })?;
-                    a -= phi_psi_psi;
+                        a -= phi_psi_psi;
+                    }
                 }
-            }
 
-            // Assemble S_{ψ_i ψ_j} only on the touched block.
-            let ld_s = if let (Some(cache_i), Some(cache_j)) = (cache_i, cache_j)
-                && cache_i.block_idx == cache_j.block_idx
-            {
-                let p_block = cache_i.end - cache_i.start;
-                let deriv_i = &hyper_layout.design_derivative_blocks()[cache_i.block_idx]
-                    [cache_i.local_idx];
-                let s_local = assemble_block_local_s_psi_psi(
-                    deriv_i,
-                    cache_j.local_idx,
-                    &per_block_lambdas[cache_i.block_idx],
-                    p_block,
-                );
-
-                let beta_block = beta_arc.slice(s![cache_i.start..cache_i.end]).to_owned();
-                let s_ij_beta_local = s_local.dot(&beta_block);
-                a += 0.5 * beta_block.dot(&s_ij_beta_local);
+                // Assemble S_{ψ_i ψ_j} only on the touched block.
+                let ld_s = if let (Some(cache_i), Some(cache_j)) = (cache_i, cache_j)
+                    && cache_i.block_idx == cache_j.block_idx
                 {
-                    let mut g_local = g.slice_mut(s![cache_i.start..cache_i.end]);
-                    g_local += &s_ij_beta_local;
-                }
-                // The S_{ψ_i ψ_j} block contribution attaches to the dense
-                // Hessian when the family returned a dense `b_mat`, and to
-                // the operator-backed Hessian (via a `BlockLocalDrift`
-                // composite) when the family returned `hessian_psi_psi`
-                // empty alongside an operator. Slicing into a `(0, 0)`
-                // dense matrix would otherwise panic in the matrix-free
-                // path that survival-marginal-slope and other operator-
-                // backed families use.
-                if b_mat.nrows() > 0 {
-                    let mut b_local =
-                        b_mat.slice_mut(s![cache_i.start..cache_i.end, cache_i.start..cache_i.end]);
-                    b_local += &s_local;
-                } else {
-                    let block_drift: Arc<dyn HyperOperator> = Arc::new(BlockLocalDrift {
-                        local: s_local.clone(),
-                        start: cache_i.start,
-                        end: cache_i.end,
-                        total_dim: total,
-                    });
-                    b_operator = Some(match b_operator.take() {
-                        Some(existing) => Arc::new(CompositeHyperOperator {
-                            dense: None,
-                            operators: vec![existing, block_drift],
-                            dim_hint: total,
-                        }) as Arc<dyn HyperOperator>,
-                        None => block_drift,
-                    });
-                }
+                    let p_block = cache_i.end - cache_i.start;
+                    let deriv_i = &hyper_layout.design_derivative_blocks()[cache_i.block_idx]
+                        [cache_i.local_idx];
+                    let s_local = assemble_block_local_s_psi_psi(
+                        deriv_i,
+                        cache_j.local_idx,
+                        &per_block_lambdas[cache_i.block_idx],
+                        p_block,
+                    );
 
-                if let Some(ref logdet_blocks) = *s_logdet_block_cache {
-                    let pld = &logdet_blocks[cache_i.block_idx];
-                    let s_psi_i = cache_i
+                    let beta_block = beta_arc.slice(s![cache_i.start..cache_i.end]).to_owned();
+                    let s_ij_beta_local = s_local.dot(&beta_block);
+                    a += 0.5 * beta_block.dot(&s_ij_beta_local);
+                    {
+                        let mut g_local = g.slice_mut(s![cache_i.start..cache_i.end]);
+                        g_local += &s_ij_beta_local;
+                    }
+                    // The S_{ψ_i ψ_j} block contribution attaches to the dense
+                    // Hessian when the family returned a dense `b_mat`, and to
+                    // the operator-backed Hessian (via a `BlockLocalDrift`
+                    // composite) when the family returned `hessian_psi_psi`
+                    // empty alongside an operator. Slicing into a `(0, 0)`
+                    // dense matrix would otherwise panic in the matrix-free
+                    // path that survival-marginal-slope and other operator-
+                    // backed families use.
+                    if b_mat.nrows() > 0 {
+                        let mut b_local = b_mat
+                            .slice_mut(s![cache_i.start..cache_i.end, cache_i.start..cache_i.end]);
+                        b_local += &s_local;
+                    } else {
+                        let block_drift: Arc<dyn HyperOperator> = Arc::new(BlockLocalDrift {
+                            local: s_local.clone(),
+                            start: cache_i.start,
+                            end: cache_i.end,
+                            total_dim: total,
+                        });
+                        b_operator = Some(match b_operator.take() {
+                            Some(existing) => Arc::new(CompositeHyperOperator {
+                                dense: None,
+                                operators: vec![existing, block_drift],
+                                dim_hint: total,
+                            })
+                                as Arc<dyn HyperOperator>,
+                            None => block_drift,
+                        });
+                    }
+
+                    if let Some(ref logdet_blocks) = *s_logdet_block_cache {
+                        let pld = &logdet_blocks[cache_i.block_idx];
+                        let s_psi_i = cache_i
                         .s_local
                         .as_ref()
                         .ok_or_else(|| {
@@ -1171,7 +1161,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "typed hyper axis {psi_i} has no cached S_psi for active penalty logdet"
                             )
                         })?;
-                    let s_psi_j = cache_j
+                        let s_psi_j = cache_j
                         .s_local
                         .as_ref()
                         .ok_or_else(|| {
@@ -1179,23 +1169,24 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "typed hyper axis {psi_j} has no cached S_psi for active penalty logdet"
                             )
                         })?;
-                    // τ-Hessian: tr(S⁺ S_{ψi ψj}) − tr(S⁺ S_ψi S⁺ S_ψj) + 2 tr(Σ₊⁻² L_i L_j^T)
-                    pld.tau_hessian_component(s_psi_i, s_psi_j, Some(&s_local))
+                        // τ-Hessian: tr(S⁺ S_{ψi ψj}) − tr(S⁺ S_ψi S⁺ S_ψj) + 2 tr(Σ₊⁻² L_i L_j^T)
+                        pld.tau_hessian_component(s_psi_i, s_psi_j, Some(&s_local))
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
-                }
-            } else {
-                0.0
-            };
+                };
 
-            Ok(HyperCoordPair {
-                a,
-                g,
-                b_mat,
-                b_operator,
-                ld_s,
-            })
-        }) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+                Ok(HyperCoordPair {
+                    a,
+                    g,
+                    b_mat,
+                    b_operator,
+                    ld_s,
+                })
+            },
+        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
     };
 
     // ρ-ψ pair callback
@@ -1209,71 +1200,71 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
 
         Box::new(
             move |rho_k: usize, psi_j: usize| -> Result<HyperCoordPair, String> {
-            if rho_k >= rho_penalty_cache.len() || psi_j >= hyper_layout.len() {
-                return Err(format!(
-                    "rho×typed-hyper pair index out of bounds: ({rho_k}, {psi_j}) for {} rho and {} non-rho axes",
-                    rho_penalty_cache.len(),
-                    hyper_layout.len()
-                ));
-            }
-            let rho_cache = &rho_penalty_cache[rho_k];
-            let psi_cache = psi_penalty_cache[psi_j].as_ref();
-            let mut a = 0.0;
-            let mut g = Array1::<f64>::zeros(total);
-            let mut b_mat = Array2::<f64>::zeros((total, total));
-
-            // S_{ρ_k, ψ_j} = λ_k ∂S_k/∂ψ_j.
-            // Only nonzero when both coordinates share the same block and the
-            // ψ derivative touches the k-th penalty.
-            let ld_s = if let Some(psi_cache) = psi_cache
-                && rho_cache.block_idx == psi_cache.block_idx
-            {
-                let p_block = rho_cache.end - rho_cache.start;
-                let deriv = &hyper_layout.design_derivative_blocks()[psi_cache.block_idx]
-                    [psi_cache.local_idx];
-                let lambda_k = per_block_lambdas[rho_cache.block_idx][rho_cache.penalty_idx];
-                let local = if let Some(ref components) = deriv.s_psi_penalty_components {
-                    let mut m = Array2::<f64>::zeros((p_block, p_block));
-                    for (penalty_idx, s_part) in components {
-                        if *penalty_idx == rho_cache.penalty_idx {
-                            s_part.add_scaled_to(lambda_k, &mut m);
-                        }
-                    }
-                    m
-                } else if let Some(ref components) = deriv.s_psi_components {
-                    let mut m = Array2::<f64>::zeros((p_block, p_block));
-                    for (penalty_idx, s_part) in components {
-                        if *penalty_idx == rho_cache.penalty_idx {
-                            m.scaled_add(lambda_k, s_part);
-                        }
-                    }
-                    m
-                } else if deriv.penalty_index == Some(rho_cache.penalty_idx) {
-                    deriv.s_psi.mapv(|v| lambda_k * v)
-                } else {
-                    Array2::<f64>::zeros((p_block, p_block))
-                };
-
-                let beta_block = beta_arc
-                    .slice(s![rho_cache.start..rho_cache.end])
-                    .to_owned();
-                let s_kj_beta_local = local.dot(&beta_block);
-                a = 0.5 * beta_block.dot(&s_kj_beta_local);
-                {
-                    let mut g_local = g.slice_mut(s![rho_cache.start..rho_cache.end]);
-                    g_local += &s_kj_beta_local;
+                if rho_k >= rho_penalty_cache.len() || psi_j >= hyper_layout.len() {
+                    return Err(format!(
+                        "rho×typed-hyper pair index out of bounds: ({rho_k}, {psi_j}) for {} rho and {} non-rho axes",
+                        rho_penalty_cache.len(),
+                        hyper_layout.len()
+                    ));
                 }
-                {
-                    let mut b_local = b_mat.slice_mut(s![
-                        rho_cache.start..rho_cache.end,
-                        rho_cache.start..rho_cache.end
-                    ]);
-                    b_local += &local;
-                }
+                let rho_cache = &rho_penalty_cache[rho_k];
+                let psi_cache = psi_penalty_cache[psi_j].as_ref();
+                let mut a = 0.0;
+                let mut g = Array1::<f64>::zeros(total);
+                let mut b_mat = Array2::<f64>::zeros((total, total));
 
-                if let Some(ref logdet_blocks) = *s_logdet_block_cache {
-                    let pld = &logdet_blocks[rho_cache.block_idx];
-                    let s_psi_j = psi_cache
+                // S_{ρ_k, ψ_j} = λ_k ∂S_k/∂ψ_j.
+                // Only nonzero when both coordinates share the same block and the
+                // ψ derivative touches the k-th penalty.
+                let ld_s = if let Some(psi_cache) = psi_cache
+                    && rho_cache.block_idx == psi_cache.block_idx
+                {
+                    let p_block = rho_cache.end - rho_cache.start;
+                    let deriv = &hyper_layout.design_derivative_blocks()[psi_cache.block_idx]
+                        [psi_cache.local_idx];
+                    let lambda_k = per_block_lambdas[rho_cache.block_idx][rho_cache.penalty_idx];
+                    let local = if let Some(ref components) = deriv.s_psi_penalty_components {
+                        let mut m = Array2::<f64>::zeros((p_block, p_block));
+                        for (penalty_idx, s_part) in components {
+                            if *penalty_idx == rho_cache.penalty_idx {
+                                s_part.add_scaled_to(lambda_k, &mut m);
+                            }
+                        }
+                        m
+                    } else if let Some(ref components) = deriv.s_psi_components {
+                        let mut m = Array2::<f64>::zeros((p_block, p_block));
+                        for (penalty_idx, s_part) in components {
+                            if *penalty_idx == rho_cache.penalty_idx {
+                                m.scaled_add(lambda_k, s_part);
+                            }
+                        }
+                        m
+                    } else if deriv.penalty_index == Some(rho_cache.penalty_idx) {
+                        deriv.s_psi.mapv(|v| lambda_k * v)
+                    } else {
+                        Array2::<f64>::zeros((p_block, p_block))
+                    };
+
+                    let beta_block = beta_arc
+                        .slice(s![rho_cache.start..rho_cache.end])
+                        .to_owned();
+                    let s_kj_beta_local = local.dot(&beta_block);
+                    a = 0.5 * beta_block.dot(&s_kj_beta_local);
+                    {
+                        let mut g_local = g.slice_mut(s![rho_cache.start..rho_cache.end]);
+                        g_local += &s_kj_beta_local;
+                    }
+                    {
+                        let mut b_local = b_mat.slice_mut(s![
+                            rho_cache.start..rho_cache.end,
+                            rho_cache.start..rho_cache.end
+                        ]);
+                        b_local += &local;
+                    }
+
+                    if let Some(ref logdet_blocks) = *s_logdet_block_cache {
+                        let pld = &logdet_blocks[rho_cache.block_idx];
+                        let s_psi_j = psi_cache
                         .s_local
                         .as_ref()
                         .ok_or_else(|| {
@@ -1281,34 +1272,35 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
                                 "typed hyper axis {psi_j} has no cached S_psi for active penalty logdet"
                             )
                         })?;
-                    // ∂S_k/∂ψ_j (unscaled): extract from local by dividing out λ_k.
-                    let ds_k_dpsi = if lambda_k.abs() > 1e-300 {
-                        Some(local.mapv(|v| v / lambda_k))
+                        // ∂S_k/∂ψ_j (unscaled): extract from local by dividing out λ_k.
+                        let ds_k_dpsi = if lambda_k.abs() > 1e-300 {
+                            Some(local.mapv(|v| v / lambda_k))
+                        } else {
+                            None
+                        };
+                        // Mixed ρ×τ Hessian: λ_k [tr(S⁺ ∂S_k/∂ψ_j) − tr(S⁺ S_k S⁺ S_ψj)]
+                        pld.rho_tau_hessian_component(
+                            &rho_cache.s_k_unscaled,
+                            lambda_k,
+                            s_psi_j,
+                            ds_k_dpsi.as_ref(),
+                        )
                     } else {
-                        None
-                    };
-                    // Mixed ρ×τ Hessian: λ_k [tr(S⁺ ∂S_k/∂ψ_j) − tr(S⁺ S_k S⁺ S_ψj)]
-                    pld.rho_tau_hessian_component(
-                        &rho_cache.s_k_unscaled,
-                        lambda_k,
-                        s_psi_j,
-                        ds_k_dpsi.as_ref(),
-                    )
+                        0.0
+                    }
                 } else {
                     0.0
-                }
-            } else {
-                0.0
-            };
+                };
 
-            Ok(HyperCoordPair {
-                a,
-                g,
-                b_mat,
-                b_operator: None,
-                ld_s,
-            })
-        }) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
+                Ok(HyperCoordPair {
+                    a,
+                    g,
+                    b_mat,
+                    b_operator: None,
+                    ld_s,
+                })
+            },
+        ) as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
     };
 
     Ok((ext_ext, rho_ext))
@@ -2668,9 +2660,7 @@ pub fn evaluate_custom_family_joint_hyper<F: CustomFamily + Clone + Send + Sync 
 
 /// Evaluate a joint hyperparameter point and retain the exact coefficient mode
 /// that produced its objective and derivative payload.
-pub fn evaluate_custom_family_joint_hyper_owned<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
+pub fn evaluate_custom_family_joint_hyper_owned<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
@@ -2697,9 +2687,7 @@ pub fn evaluate_custom_family_joint_hyper_owned<
         gam_problem::RhoPrior::Flat,
         eval_mode,
     )?;
-    Ok(outer_eval_result_into_joint_hyper_owned_result(
-        eval_result,
-    ))
+    Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
 }
 
 pub fn evaluate_custom_family_joint_hyper_shared<
@@ -2758,9 +2746,7 @@ pub fn evaluate_custom_family_joint_hyper_owned_shared<
         eval_mode,
         None,
     )?;
-    Ok(outer_eval_result_into_joint_hyper_owned_result(
-        eval_result,
-    ))
+    Ok(outer_eval_result_into_joint_hyper_owned_result(eval_result))
 }
 
 pub struct CustomFamilyJointHyperModeSelection {
@@ -2788,8 +2774,7 @@ fn canonicalize_screened_objective(
     derivative_sample: f64,
     selected_candidate: usize,
 ) -> Result<f64, CustomFamilyError> {
-    let bound =
-        gam_solve::rho_optimizer::outer_value_agreement_bound(screened, derivative_sample);
+    let bound = gam_solve::rho_optimizer::outer_value_agreement_bound(screened, derivative_sample);
     let disagreement = (screened - derivative_sample).abs();
     if !screened.is_finite()
         || !derivative_sample.is_finite()
@@ -2964,8 +2949,7 @@ pub fn evaluate_custom_family_joint_hyper_best_mode_shared<
         derivative_objective,
         selected_candidate,
     )?;
-    derivative_eval.criterion_components[0] +=
-        derivative_eval.objective - derivative_objective;
+    derivative_eval.criterion_components[0] += derivative_eval.objective - derivative_objective;
     validate_requested_best_mode_derivatives(
         &derivative_eval,
         eval_mode,
@@ -3551,29 +3535,28 @@ pub fn evaluate_custom_family_joint_hyper_efs_owned_shared<
         );
     }
     let hyper_values = hyper_layout.values().clone();
-    let (efs_eval, warm_start, inner_converged, inner) =
-        if hyper_layout.is_empty() {
-            outerobjectiveefs(
-                family,
-                specs,
-                options,
-                &penalty_counts,
-                rho_current,
-                warm_start.map(|w| &w.inner),
-                gam_problem::RhoPrior::Flat,
-            )
-            .map_err(CustomFamilyError::from)?
-        } else {
-            evaluate_custom_family_joint_hyper_efs_internal_shared(
-                family,
-                specs,
-                options,
-                &penalty_counts,
-                rho_current,
-                Arc::clone(&hyper_layout),
-                warm_start.map(|w| &w.inner),
-            )?
-        };
+    let (efs_eval, warm_start, inner_converged, inner) = if hyper_layout.is_empty() {
+        outerobjectiveefs(
+            family,
+            specs,
+            options,
+            &penalty_counts,
+            rho_current,
+            warm_start.map(|w| &w.inner),
+            gam_problem::RhoPrior::Flat,
+        )
+        .map_err(CustomFamilyError::from)?
+    } else {
+        evaluate_custom_family_joint_hyper_efs_internal_shared(
+            family,
+            specs,
+            options,
+            &penalty_counts,
+            rho_current,
+            Arc::clone(&hyper_layout),
+            warm_start.map(|w| &w.inner),
+        )?
+    };
     let mode = CustomFamilyOwnedMode {
         objective: efs_eval.cost,
         rho: warm_start.rho.clone(),

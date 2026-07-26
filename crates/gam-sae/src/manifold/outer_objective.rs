@@ -3915,34 +3915,35 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // stationary factor cache for the analytic gradient below (see
         // `ProbeConvergedHandoff`). The pending seeded-β hint was already applied
         // by that probe pre-convergence, so it is consumed with the handoff.
-        let probe_handoff_installed =
-            if let Some(converged) = self.take_probe_converged_handoff(rho.view()) {
-                self.term = converged;
-                self.seeded_beta = None;
-                true
-            } else {
-                // #2087/#2253/#2510 envelope-consistency — every outer lane
-                // prices the basin lower envelope min_b V_b(rho). An empty
-                // bundle means the envelope has not been seeded yet; it must
-                // never select a different, single-trajectory objective. On
-                // any exact-rho handoff miss, run the authoritative selector
-                // at this rho. The selector owns dense discovery/member
-                // reconvergence and the streaming/freeze bypass, and every
-                // finite outcome must park its exact-rho argmin handoff.
-                let probe_cost = match self.authoritative_envelope_value_probe(rho.view()) {
-                    Ok((cost, _beta)) => cost,
-                    Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
-                        self.probe_telemetry.record_refusal_kind(&err);
-                        log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
-                        self.probe_telemetry.infeasible_criterion_evals += 1;
-                        return Ok(OuterEval::infeasible(rho.len()));
-                    }
-                    Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
-                };
-                if Self::probe_value_is_infeasible(probe_cost) {
+        let probe_handoff_installed = if let Some(converged) =
+            self.take_probe_converged_handoff(rho.view())
+        {
+            self.term = converged;
+            self.seeded_beta = None;
+            true
+        } else {
+            // #2087/#2253/#2510 envelope-consistency — every outer lane
+            // prices the basin lower envelope min_b V_b(rho). An empty
+            // bundle means the envelope has not been seeded yet; it must
+            // never select a different, single-trajectory objective. On
+            // any exact-rho handoff miss, run the authoritative selector
+            // at this rho. The selector owns dense discovery/member
+            // reconvergence and the streaming/freeze bypass, and every
+            // finite outcome must park its exact-rho argmin handoff.
+            let probe_cost = match self.authoritative_envelope_value_probe(rho.view()) {
+                Ok((cost, _beta)) => cost,
+                Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
+                    self.probe_telemetry.record_refusal_kind(&err);
+                    log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
+                    self.probe_telemetry.infeasible_criterion_evals += 1;
                     return Ok(OuterEval::infeasible(rho.len()));
                 }
-                let converged = self
+                Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
+            };
+            if Self::probe_value_is_infeasible(probe_cost) {
+                return Ok(OuterEval::infeasible(rho.len()));
+            }
+            let converged = self
                     .take_probe_converged_handoff(rho.view())
                     .ok_or_else(|| {
                         EstimationError::RemlOptimizationFailed(
@@ -3950,10 +3951,10 @@ impl OuterObjective for SaeManifoldOuterObjective {
                                 .to_string(),
                         )
                     })?;
-                self.term = converged;
-                self.seeded_beta = None;
-                true
-            };
+            self.term = converged;
+            self.seeded_beta = None;
+            true
+        };
         if let Some(beta) = self.seeded_beta.take() {
             if beta.len() != self.term.beta_dim() {
                 return Err(EstimationError::RemlOptimizationFailed(format!(
@@ -4742,12 +4743,13 @@ pub(crate) fn batched_smooth_sb(
     // The op a group's device tile actually issues: one strided-batched
     // `A·Bᵀ` with `A = S_k` (m×m) and `B = B_kᵀ` (p×m), i.e. `batch = |group|`,
     // `m = m_k`, `n = p`, `k = m_k`.
-    let group_op = |atoms: usize, m: usize, p: usize| crate::gpu::linalg_dispatch::DispatchOp::BatchedGemm {
-        batch: atoms,
-        m,
-        n: p,
-        k: m,
-    };
+    let group_op =
+        |atoms: usize, m: usize, p: usize| crate::gpu::linalg_dispatch::DispatchOp::BatchedGemm {
+            batch: atoms,
+            m,
+            n: p,
+            k: m,
+        };
 
     // Size gate BEFORE the device probe (startup-tax ordering fix): when NO
     // group's tile op could be admitted by any reachable policy, every atom

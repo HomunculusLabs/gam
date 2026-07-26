@@ -413,13 +413,12 @@ mod tests {
             rows: vec![0, 1],
         };
         correction.apply_to_covariance_in_place(&mut dense);
-        let backend =
-            PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
-                SymmetricMatrix::Dense(precision),
-                phi,
-                Some(&correction),
-            )
-            .expect("factorized constrained covariance");
+        let backend = PredictionCovarianceBackend::from_factorized_hessian_scaled_with_correction(
+            SymmetricMatrix::Dense(precision),
+            phi,
+            Some(&correction),
+        )
+        .expect("factorized constrained covariance");
         let rhs = array![[1.0, -0.5], [0.2, 2.0], [-0.7, 0.3]];
         let actual = backend.apply_columns(&rhs).expect("covariance columns");
         let expected = dense.dot(&rhs);

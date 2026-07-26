@@ -27,10 +27,7 @@ use ndarray::{Array1, Array2};
 // helper: the outer-gradient FD audit inside the optimizer differences the
 // real criterion with it. It lives in `gam_linalg::numeric_derivative` and is
 // re-exported here so the test-level checkers keep one path to it.
-pub use crate::numeric_derivative::{
-    FdDerivative, FdVerdict, RiddersConfig, ridders_derivative,
-};
-
+pub use crate::numeric_derivative::{FdDerivative, FdVerdict, RiddersConfig, ridders_derivative};
 
 /// [`ridders_derivative`] applied to coordinate `coord` of a scalar objective
 /// at `x`.

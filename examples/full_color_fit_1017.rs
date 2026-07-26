@@ -228,7 +228,8 @@ fn run() -> Result<(), String> {
         return Err(format!(
             "outer optimizer returned without a convergence certificate: \
              converged={} via={:?}",
-            outer.converged(), outer.converged_via()
+            outer.converged(),
+            outer.converged_via()
         ));
     }
     objective

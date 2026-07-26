@@ -673,8 +673,7 @@ fn sample_standard(
 ) -> Result<NutsResult, String> {
     let fit = fit_result_from_saved_model_for_prediction(model)?;
     let saved_spec = model.resolved_termspec.as_ref().ok_or_else(|| {
-        "standard posterior sampling requires a frozen fitted term specification; refit"
-            .to_string()
+        "standard posterior sampling requires a frozen fitted term specification; refit".to_string()
     })?;
     let has_bounded = saved_spec.linear_terms.iter().any(|term| {
         matches!(
@@ -978,8 +977,7 @@ fn sample_standard_truncated(
     // inequalities and precision live in the gauge's active frame, so sample
     // there and then apply the exact affine section β_saved = Tθ_active + a.
     // Identity gauges move the allocation unchanged and remain bit-for-bit.
-    let samples =
-        lift_active_samples_to_saved(active_samples, &geometry.coefficient_gauge)?;
+    let samples = lift_active_samples_to_saved(active_samples, &geometry.coefficient_gauge)?;
     let raw_p = samples.ncols();
     if raw_p != fit.beta.len() {
         return Err(format!(
@@ -1472,12 +1470,8 @@ mod tests {
             ndarray::array![[1.0, 0.0], [0.0, 2.0], [1.0, -1.0]],
             ndarray::array![0.5, -1.0, 3.0],
         );
-        let saved =
-            lift_active_samples_to_saved(active, &gauge).expect("valid affine sample lift");
-        assert_eq!(
-            saved,
-            ndarray::array![[1.5, 3.0, 2.0], [-2.5, 7.0, -4.0]]
-        );
+        let saved = lift_active_samples_to_saved(active, &gauge).expect("valid affine sample lift");
+        assert_eq!(saved, ndarray::array![[1.5, 3.0, 2.0], [-2.5, 7.0, -4.0]]);
     }
 
     struct ChunkOnlySampleDesign {

@@ -277,13 +277,9 @@ impl PenaltyCoordinate {
         if stays_block_local {
             let block = projected.slice(ndarray::s![.., start..end]).to_owned();
             match prior_mean {
-                Some(mean) => Self::from_block_root_with_mean(
-                    block,
-                    start,
-                    end,
-                    total_dim,
-                    mean.to_owned(),
-                ),
+                Some(mean) => {
+                    Self::from_block_root_with_mean(block, start, end, total_dim, mean.to_owned())
+                }
                 None => Self::from_block_root(block, start, end, total_dim),
             }
         } else {
@@ -1034,12 +1030,7 @@ mod tests {
     /// root there would cost every block-local trace fast path for nothing.
     #[test]
     fn block_local_null_basis_preserves_the_block_chart() {
-        let coord = PenaltyCoordinate::from_block_root(
-            array![[1.0_f64, 1.0], [0.0, 2.0]],
-            1,
-            3,
-            5,
-        );
+        let coord = PenaltyCoordinate::from_block_root(array![[1.0_f64, 1.0], [0.0, 2.0]], 1, 3, 5);
         let n = 1.0_f64 / 2.0_f64.sqrt();
         // Supported only on columns 1..3 — the coordinate's own block.
         let null_basis = array![[0.0_f64], [n], [-n], [0.0], [0.0]];
@@ -1048,7 +1039,11 @@ mod tests {
         assert!(
             matches!(
                 projected,
-                PenaltyCoordinate::BlockRoot { start: 1, end: 3, .. }
+                PenaltyCoordinate::BlockRoot {
+                    start: 1,
+                    end: 3,
+                    ..
+                }
             ),
             "a block-local null basis must not densify the coordinate"
         );
@@ -1083,7 +1078,11 @@ mod tests {
         assert_eq!(projected.quadratic(&beta, 3.0), coord.quadratic(&beta, 3.0));
         assert!(matches!(
             projected,
-            PenaltyCoordinate::BlockRoot { start: 0, end: 2, .. }
+            PenaltyCoordinate::BlockRoot {
+                start: 0,
+                end: 2,
+                ..
+            }
         ));
     }
 

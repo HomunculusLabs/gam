@@ -956,7 +956,11 @@ fn keep_positive_eigenspace(
         // host-unstable; we do NOT refuse here — we log the payload so we can
         // measure Ambiguous frequency before enforcing a refusal path in stage 2
         // — and fall back to the preserved threshold count.
-        match certified_rank(evals_eq.as_slice().unwrap_or(&[]), tau_eq, RANK_DECISION_GAP) {
+        match certified_rank(
+            evals_eq.as_slice().unwrap_or(&[]),
+            tau_eq,
+            RANK_DECISION_GAP,
+        ) {
             RankDecision::Certified { rank, .. } => rank,
             RankDecision::Ambiguous {
                 rank_floor,

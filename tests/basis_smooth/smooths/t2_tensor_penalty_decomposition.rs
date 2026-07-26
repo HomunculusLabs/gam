@@ -119,12 +119,9 @@ fn t2_uses_separable_penalty_decomposition_not_te_marginal_alias() {
 
     let t2_width = t2_term.coeff_range.len();
     assert!(
-        t2_term
-            .active_penalties
-            .iter()
-            .all(|penalty| {
-                penalty.matrix.nrows() == t2_width && penalty.matrix.ncols() == t2_width
-            }),
+        t2_term.active_penalties.iter().all(|penalty| {
+            penalty.matrix.nrows() == t2_width && penalty.matrix.ncols() == t2_width
+        }),
         "every active t2 penalty must live in the transformed term coefficient space"
     );
 }

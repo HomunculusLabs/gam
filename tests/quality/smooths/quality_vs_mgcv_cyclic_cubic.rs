@@ -93,7 +93,10 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine() {
     for s in 0..K_SPLITS {
         let mut rng = StdRng::seed_from_u64(42 + s as u64);
         let noise = Normal::new(0.0, 1.0).expect("normal");
-        let h: Vec<f64> = t.iter().map(|&ti| ti.sin() + sigma * noise.sample(&mut rng)).collect();
+        let h: Vec<f64> = t
+            .iter()
+            .map(|&ti| ti.sin() + sigma * noise.sample(&mut rng))
+            .collect();
 
         let headers: Vec<String> = vec!["t".to_string(), "h".to_string()];
         let rows = t
@@ -154,7 +157,11 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine() {
         ),
     );
     let mgcv_rmses = r.vector("mgcv_rmses");
-    assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-seed rmse count mismatch");
+    assert_eq!(
+        mgcv_rmses.len(),
+        K_SPLITS,
+        "mgcv per-seed rmse count mismatch"
+    );
 
     // Seed `s` drew the SAME response vector for both tools, so the truth-recovery
     // comparison is paired seed by seed; the common noise draw cancels.
@@ -284,10 +291,7 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
     }
 
     // ---- mgcv on the SAME K partitions (full data.frame + K fold masks) ----
-    let mut columns: Vec<Column> = vec![
-        Column::new("month", &month),
-        Column::new("temp", &temp),
-    ];
+    let mut columns: Vec<Column> = vec![Column::new("month", &month), Column::new("temp", &temp)];
     for (name, data) in fold_names.iter().zip(fold_data.iter()) {
         columns.push(Column::new(name, data));
     }
@@ -312,7 +316,11 @@ fn gam_cyclic_cubic_matches_mgcv_on_sine_on_real_data() {
         ),
     );
     let mgcv_rmses = r.vector("mgcv_rmses");
-    assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-split rmse count mismatch");
+    assert_eq!(
+        mgcv_rmses.len(),
+        K_SPLITS,
+        "mgcv per-split rmse count mismatch"
+    );
 
     let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
     let gam_test_r2 = mean(&gam_r2s);

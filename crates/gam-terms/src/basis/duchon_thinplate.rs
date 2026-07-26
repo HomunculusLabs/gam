@@ -3294,7 +3294,8 @@ mod knot_selection_tie_break_cost_tests {
                 let chosen = select_with_profile_count(&data, k);
                 assert_eq!(chosen.rows.len(), k, "knot budget (n={n}, d={d}, k={k})");
                 assert_eq!(
-                    chosen.profile_builds, 0,
+                    chosen.profile_builds,
+                    0,
                     "no row ties the maximin key on an asymmetric cloud, so the profile \
                      tie-break must never be built (n={n}, d={d}, k={k}); the replaced \
                      comparator scan built {}",

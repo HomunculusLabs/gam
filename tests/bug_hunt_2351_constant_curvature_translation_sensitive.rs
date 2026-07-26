@@ -138,7 +138,10 @@ fn constant_curvature_verdict_is_translation_invariant() {
     // with a resolved CI (this is implied by the equality assert above, but
     // spelled out because it's the user-visible symptom from the issue).
     let contradicts = matches!(
-        (at_origin.profile_ci.verdict, away_from_origin.profile_ci.verdict),
+        (
+            at_origin.profile_ci.verdict,
+            away_from_origin.profile_ci.verdict
+        ),
         (CurvatureVerdict::Spherical, CurvatureVerdict::Hyperbolic)
             | (CurvatureVerdict::Hyperbolic, CurvatureVerdict::Spherical)
     );

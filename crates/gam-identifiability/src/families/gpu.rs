@@ -85,18 +85,12 @@ pub fn try_primary_state_gram_cuda(
     }
     #[cfg(target_os = "linux")]
     {
-        let Some(runtime) =
-            gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())?
+        let Some(runtime) = gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::global_policy())?
         else {
             return Ok(None);
         };
-        primary_state_gram_cuda_with_runtime(
-            runtime,
-            channel_blocks,
-            h_packed,
-            raw_block_ranges,
-        )
-        .map(Some)
+        primary_state_gram_cuda_with_runtime(runtime, channel_blocks, h_packed, raw_block_ranges)
+            .map(Some)
     }
 }
 
@@ -107,12 +101,11 @@ fn primary_state_gram_cuda_with_runtime(
     h_packed: &Array2<f64>,
     raw_block_ranges: &[Range<usize>],
 ) -> Result<GramBundle, gam_gpu::gpu_error::GpuError> {
-    let workspace =
-        cuda_impl::WorkspaceInner::try_new(runtime, channel_blocks, raw_block_ranges)
+    let workspace = cuda_impl::WorkspaceInner::try_new(runtime, channel_blocks, raw_block_ranges)
         .ok_or_else(|| gam_gpu::gpu_error::GpuError::DriverCallFailed {
-            reason: "identifiability GPU Gram workspace construction failed after CUDA admission"
-                .to_string(),
-        })?;
+        reason: "identifiability GPU Gram workspace construction failed after CUDA admission"
+            .to_string(),
+    })?;
     workspace.compute_grams(h_packed).ok_or_else(|| {
         gam_gpu::gpu_error::GpuError::DriverCallFailed {
             reason: "identifiability GPU Gram execution failed after CUDA admission".to_string(),
@@ -800,21 +793,20 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let runtime = match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
-                Ok(Some(runtime)) => runtime,
-                Ok(None) => {
-                    eprintln!("[identifiability_compile] no CUDA device — skipping parity check");
-                    return;
-                }
-                Err(error) => panic!("[identifiability_compile] CUDA probe failed: {error}"),
-            };
-            let bundle = primary_state_gram_cuda_with_runtime(
-                runtime,
-                &channel_blocks,
-                &h_packed,
-                &ranges,
-            )
-            .expect("CUDA primary-state Gram dispatch must succeed after Auto admission");
+            let runtime =
+                match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
+                    Ok(Some(runtime)) => runtime,
+                    Ok(None) => {
+                        eprintln!(
+                            "[identifiability_compile] no CUDA device — skipping parity check"
+                        );
+                        return;
+                    }
+                    Err(error) => panic!("[identifiability_compile] CUDA probe failed: {error}"),
+                };
+            let bundle =
+                primary_state_gram_cuda_with_runtime(runtime, &channel_blocks, &h_packed, &ranges)
+                    .expect("CUDA primary-state Gram dispatch must succeed after Auto admission");
             let (cpu_h, cpu_s) = cpu_oracle(&channel_blocks, &h_packed, &ranges);
             let tol_abs = 1e-9_f64;
             let tol_rel = 1e-9_f64;

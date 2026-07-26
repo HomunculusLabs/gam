@@ -64,7 +64,10 @@ fn sorted_profile_row_parallel<K>(n: usize, anchor: usize, pair_key: &K) -> Vec<
 where
     K: Fn(usize, usize) -> f64 + Sync,
 {
-    let mut profile: Vec<f64> = (0..n).into_par_iter().map(|row| pair_key(anchor, row)).collect();
+    let mut profile: Vec<f64> = (0..n)
+        .into_par_iter()
+        .map(|row| pair_key(anchor, row))
+        .collect();
     profile.par_sort_by(f64::total_cmp);
     profile
 }
@@ -216,11 +219,15 @@ mod tests {
     #[test]
     fn a_singleton_tie_class_builds_no_profile() {
         let mut builds = 0usize;
-        let got = resolve_sorted_profile_tie(1_000, &[7], |i, j| (i as f64) - (j as f64), &mut |b| {
-            builds += b
-        });
+        let got =
+            resolve_sorted_profile_tie(1_000, &[7], |i, j| (i as f64) - (j as f64), &mut |b| {
+                builds += b
+            });
         assert_eq!(got, vec![7]);
-        assert_eq!(builds, 0, "a lone candidate needs no profile to win a refinement");
+        assert_eq!(
+            builds, 0,
+            "a lone candidate needs no profile to win a refinement"
+        );
     }
 
     /// A real class charges exactly one profile per candidate — used for both the

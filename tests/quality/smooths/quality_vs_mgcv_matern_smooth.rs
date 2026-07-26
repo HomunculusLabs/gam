@@ -321,7 +321,11 @@ fn gam_matern_smooth_recovers_truth_on_real_data() {
     );
     let mgcv_rmses = r.vector("mgcv_rmses");
     let mgcv_r2s = r.vector("mgcv_r2s");
-    assert_eq!(mgcv_rmses.len(), K_SPLITS, "mgcv per-split rmse count mismatch");
+    assert_eq!(
+        mgcv_rmses.len(),
+        K_SPLITS,
+        "mgcv per-split rmse count mismatch"
+    );
     assert_eq!(mgcv_r2s.len(), K_SPLITS, "mgcv per-split r2 count mismatch");
 
     // Split `s` was the SAME split for both tools, so the comparison is paired.

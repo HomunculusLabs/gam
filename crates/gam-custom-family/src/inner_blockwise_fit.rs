@@ -184,9 +184,7 @@ fn generalized_trust_region_reduced_metric(
     let metric_sqrt = metric_sqrt_columns.dot(&metric_eigenvectors.t());
     let metric_inv_sqrt = metric_inv_sqrt_columns.dot(&metric_eigenvectors.t());
 
-    let mut whitened_hessian = metric_inv_sqrt
-        .dot(reduced_hessian)
-        .dot(&metric_inv_sqrt);
+    let mut whitened_hessian = metric_inv_sqrt.dot(reduced_hessian).dot(&metric_inv_sqrt);
     symmetrize_dense_in_place(&mut whitened_hessian);
     let (generalized_eigenvalues, generalized_eigenvectors) =
         FaerEigh::eigh(&whitened_hessian, faer::Side::Lower).map_err(|error| {
@@ -207,8 +205,7 @@ fn generalized_trust_region_reduced_metric(
         .iter()
         .map(|value| value.abs())
         .fold(0.0_f64, f64::max);
-    let numerical_floor =
-        joint_hessian_numerical_eigenvalue_floor(lambda_max_abs, dimension);
+    let numerical_floor = joint_hessian_numerical_eigenvalue_floor(lambda_max_abs, dimension);
     let null_cutoff = (KKT_REFUSAL_RANK_TOL * lambda_max_abs).max(numerical_floor);
     let spectrum = whitened_spectrum::WhitenedHessianSpectrum {
         gamma: generalized_eigenvalues.clone(),
@@ -249,9 +246,7 @@ fn generalized_trust_region_reduced_metric(
         }
     }
     let whitened_shifted = shifted_columns.dot(&generalized_eigenvectors.t());
-    let mut metric = metric_sqrt
-        .dot(&whitened_shifted)
-        .dot(&metric_sqrt);
+    let mut metric = metric_sqrt.dot(&whitened_shifted).dot(&metric_sqrt);
     symmetrize_dense_in_place(&mut metric);
     if metric.iter().any(|value| !value.is_finite()) {
         return Err("generalized trust-region reduced metric is non-finite".into());
@@ -361,57 +356,53 @@ fn certified_reduced_face_candidate(
     for index in 0..p {
         trust_metric[[index, index]] = trust_metric_diag[index];
     }
-    let (mut face_metric, exact_positive_curvature, candidate_kind) =
-        if let Some(tangent) = tangent.as_ref() {
-            let mut reduced_hessian = tangent.t().dot(exact_hessian).dot(tangent);
-            symmetrize_dense_in_place(&mut reduced_hessian);
-            let mut reduced_trust_metric = tangent.t().dot(&trust_metric).dot(tangent);
-            symmetrize_dense_in_place(&mut reduced_trust_metric);
-            let reduced_rhs = tangent.t().dot(rhs);
-            let (trust_region_reduced_metric, exact_positive_curvature) =
-                generalized_trust_region_reduced_metric(
-                    &reduced_hessian,
-                    &reduced_trust_metric,
-                    &reduced_rhs,
-                    trust_radius,
-                )
-                .map_err(|error| {
-                    format!(
-                        "reduced-face generalized trust-region metric failed \
-                         (ambient_dim={p}, tangent_dim={}): {error}",
-                        tangent.ncols(),
-                    )
-                })?;
-
-            // Lift the completed reduced metric into the accessible tangent.
-            // Add N D N only on the inaccessible Euclidean-normal subspace so
-            // the ambient QP is unique without changing a single tangent mode.
-            let tangent_projector = tangent.dot(&tangent.t());
-            let mut normal_projector = Array2::<f64>::eye(p) - &tangent_projector;
-            symmetrize_dense_in_place(&mut normal_projector);
-            let normal_metric = normal_projector
-                .dot(&trust_metric)
-                .dot(&normal_projector);
-            let metric = tangent
-                .dot(&trust_region_reduced_metric)
-                .dot(&tangent.t())
-                + normal_metric;
-            let kind = if exact_positive_curvature {
-                ReducedFaceCandidateKind::ReducedNewton
-            } else {
-                ReducedFaceCandidateKind::RegularizedNewton
-            };
-            (metric, exact_positive_curvature, kind)
-        } else {
-            // With no tangent space, D-projection is the only face-aware
-            // first-order step and can release active rows with invalid
-            // multipliers.
-            (
-                trust_metric,
-                false,
-                ReducedFaceCandidateKind::ProjectedGradient,
+    let (mut face_metric, exact_positive_curvature, candidate_kind) = if let Some(tangent) =
+        tangent.as_ref()
+    {
+        let mut reduced_hessian = tangent.t().dot(exact_hessian).dot(tangent);
+        symmetrize_dense_in_place(&mut reduced_hessian);
+        let mut reduced_trust_metric = tangent.t().dot(&trust_metric).dot(tangent);
+        symmetrize_dense_in_place(&mut reduced_trust_metric);
+        let reduced_rhs = tangent.t().dot(rhs);
+        let (trust_region_reduced_metric, exact_positive_curvature) =
+            generalized_trust_region_reduced_metric(
+                &reduced_hessian,
+                &reduced_trust_metric,
+                &reduced_rhs,
+                trust_radius,
             )
+            .map_err(|error| {
+                format!(
+                    "reduced-face generalized trust-region metric failed \
+                         (ambient_dim={p}, tangent_dim={}): {error}",
+                    tangent.ncols(),
+                )
+            })?;
+
+        // Lift the completed reduced metric into the accessible tangent.
+        // Add N D N only on the inaccessible Euclidean-normal subspace so
+        // the ambient QP is unique without changing a single tangent mode.
+        let tangent_projector = tangent.dot(&tangent.t());
+        let mut normal_projector = Array2::<f64>::eye(p) - &tangent_projector;
+        symmetrize_dense_in_place(&mut normal_projector);
+        let normal_metric = normal_projector.dot(&trust_metric).dot(&normal_projector);
+        let metric = tangent.dot(&trust_region_reduced_metric).dot(&tangent.t()) + normal_metric;
+        let kind = if exact_positive_curvature {
+            ReducedFaceCandidateKind::ReducedNewton
+        } else {
+            ReducedFaceCandidateKind::RegularizedNewton
         };
+        (metric, exact_positive_curvature, kind)
+    } else {
+        // With no tangent space, D-projection is the only face-aware
+        // first-order step and can release active rows with invalid
+        // multipliers.
+        (
+            trust_metric,
+            false,
+            ReducedFaceCandidateKind::ProjectedGradient,
+        )
+    };
     symmetrize_dense_in_place(&mut face_metric);
     drop(metric_scope);
     let metric_elapsed = metric_started.elapsed();
@@ -432,22 +423,21 @@ fn certified_reduced_face_candidate(
         active_rows.len(),
         constraints.nrows(),
     ));
-    let (candidate, next_active) =
-        gam_solve::active_set::solve_quadratic_with_constraint_set(
-            &face_metric,
-            &rhs_beta,
-            beta,
-            constraints,
-            Some(active_rows),
-        )
-        .map_err(|error| {
-            format!(
-                "reduced-face constrained metric projection failed \
+    let (candidate, next_active) = gam_solve::active_set::solve_quadratic_with_constraint_set(
+        &face_metric,
+        &rhs_beta,
+        beta,
+        constraints,
+        Some(active_rows),
+    )
+    .map_err(|error| {
+        format!(
+            "reduced-face constrained metric projection failed \
                  (ambient_dim={p}, warm_active_rows={}, constraint_rows={}): {error}",
-                active_rows.len(),
-                constraints.nrows(),
-            )
-        })?;
+            active_rows.len(),
+            constraints.nrows(),
+        )
+    })?;
     drop(projection_scope);
     let projection_elapsed = projection_started.elapsed();
     if projection_elapsed >= std::time::Duration::from_secs(1) {
@@ -474,8 +464,8 @@ fn certified_reduced_face_candidate(
     // already certify optimality, while this gate independently ensures the
     // returned point actually improves the quadratic over the feasible seed.
     let model_decrease = directional_descent - 0.5 * metric_norm_squared;
-    let projection_tolerance = 1.0e-8
-        * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
+    let projection_tolerance =
+        1.0e-8 * (1.0 + directional_descent.abs().max(metric_norm_squared.abs()));
     if !(directional_descent.is_finite()
         && metric_norm_squared.is_finite()
         && model_decrease.is_finite()
@@ -498,7 +488,10 @@ fn certified_reduced_face_candidate(
              step_inf={:.6e}, active_rows={}, \
              base_scaled_violation={base_violation:.6e}@{base_worst_row:?}, \
              candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})",
-            delta.iter().map(|value| value.abs()).fold(0.0_f64, f64::max),
+            delta
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max),
             next_active.len(),
         ));
     }
@@ -516,12 +509,10 @@ fn certified_reduced_face_candidate(
             let final_rows = constraints
                 .gather_rows(&next_active)
                 .map_err(|error| format!("final active-face row gather failed: {error}"))?;
-            let Some((projected, _multipliers)) =
-                project_stationarity_residual_on_constraint_cone(
-                    &quadratic_gradient,
-                    &final_rows.a,
-                )
-            else {
+            let Some((projected, _multipliers)) = project_stationarity_residual_on_constraint_cone(
+                &quadratic_gradient,
+                &final_rows.a,
+            ) else {
                 return Err(format!(
                     "reduced-face original-Hessian KKT projection failed \
                      on {} terminal active rows",
@@ -712,8 +703,7 @@ mod exact_face_newton_tests {
         // Lands in the working-face band (scaled |slack| ≤ WORKING_FACE_TOL),
         // not merely inside the looser feasibility band.
         assert!(
-            (0.5 - candidate[1]).abs()
-                <= gam_solve::active_set::ACTIVE_SET_WORKING_FACE_TOL,
+            (0.5 - candidate[1]).abs() <= gam_solve::active_set::ACTIVE_SET_WORKING_FACE_TOL,
             "candidate must land inside the working-face band (y={})",
             candidate[1]
         );
@@ -771,9 +761,7 @@ mod exact_face_newton_tests {
             candidate[1],
             1.0e5 - candidate[1],
         );
-        assert!(
-            candidate[1] <= 1.0e5 + gam_solve::active_set::ACTIVE_SET_WORKING_FACE_TOL
-        );
+        assert!(candidate[1] <= 1.0e5 + gam_solve::active_set::ACTIVE_SET_WORKING_FACE_TOL);
     }
 
     #[test]
@@ -851,25 +839,26 @@ mod exact_face_newton_tests {
         )
         .expect("reduced face classification")
         .expect("regularized reduced step is feasible");
-        let (strong_candidate, strong_active, strong_kind) =
-            certified_reduced_face_candidate(
-                &strongly_indefinite_hessian,
-                &rhs,
-                &beta,
-                &constraints,
-                &[0],
-                &metric,
-                2.0,
-            )
-            .expect("strongly indefinite face classification")
-            .expect("regularized reduced step reaches the same endpoint");
+        let (strong_candidate, strong_active, strong_kind) = certified_reduced_face_candidate(
+            &strongly_indefinite_hessian,
+            &rhs,
+            &beta,
+            &constraints,
+            &[0],
+            &metric,
+            2.0,
+        )
+        .expect("strongly indefinite face classification")
+        .expect("regularized reduced step reaches the same endpoint");
         assert!(candidate[0].abs() <= 1e-12);
         assert!((candidate[1] - 1.0).abs() <= 1e-12);
         assert_eq!(active, vec![0, 1]);
         assert_eq!(strong_active, active);
-        assert!((&strong_candidate - &candidate)
-            .iter()
-            .all(|difference| difference.abs() <= 1e-12));
+        assert!(
+            (&strong_candidate - &candidate)
+                .iter()
+                .all(|difference| difference.abs() <= 1e-12)
+        );
         assert_eq!(kind, ReducedFaceCandidateKind::RegularizedNewton);
         assert_eq!(strong_kind, ReducedFaceCandidateKind::RegularizedNewton);
     }
@@ -909,11 +898,8 @@ mod exact_face_newton_tests {
         let beta = array![0.0_f64, 0.0];
         let metric = array![1.0_f64, 1.0];
         let constraints = ConstraintSet::Dense(
-            LinearInequalityConstraints::new(
-                array![[1.0_f64, 0.0], [0.0, 1.0]],
-                array![0.0, 0.0],
-            )
-            .expect("nonnegative quadrant"),
+            LinearInequalityConstraints::new(array![[1.0_f64, 0.0], [0.0, 1.0]], array![0.0, 0.0])
+                .expect("nonnegative quadrant"),
         );
         let (candidate, active, kind) = certified_reduced_face_candidate(
             &hessian,
@@ -986,7 +972,6 @@ mod exact_face_newton_tests {
             .expect("damped phase just above threshold");
         assert!((alpha - 1.0 / 1.4).abs() <= 1e-15);
     }
-
 }
 
 pub(crate) fn fused_first_attempt_log_likelihood<
@@ -3094,13 +3079,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 } else {
                     None
                 };
-                let reduced_face_kind =
-                    exact_face_candidate.as_ref().map(|(_, _, kind)| *kind);
+                let reduced_face_kind = exact_face_candidate.as_ref().map(|(_, _, kind)| *kind);
                 let metric_projection_started = std::time::Instant::now();
-                let metric_projection_scope =
-                    gam_runtime::process_monitor::track_scope(format!(
-                        "joint Newton metric projection cycle={cycle} p={total_p}"
-                    ));
+                let metric_projection_scope = gam_runtime::process_monitor::track_scope(format!(
+                    "joint Newton metric projection cycle={cycle} p={total_p}"
+                ));
                 let solve_result = if let Some((candidate, active, _)) = exact_face_candidate {
                     Ok((candidate, active))
                 } else if let Some(bounds) = lower_bounds.as_ref() {
@@ -5511,7 +5494,6 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .fold(0.0_f64, f64::max);
             cycles_done = cycle + 1;
 
-
             // Check convergence via joint stationarity. When the family-general
             // Firth/Jeffreys term is armed, the penalized objective the inner
             // Newton actually optimizes is `−ℓ + ½βᵀSβ − Φ`, so its KKT
@@ -6694,8 +6676,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             // `inner_max_cycles` ceiling remains the hard backstop.
             // Effective cap defers to the caller's remaining `inner_max_cycles`
             // budget (floored at the historic 100) — see the const doc.
-            let effective_projection_cap =
-                inner_max_cycles.saturating_sub(cycle).max(LINEAR_RATE_PROJECTION_CAP);
+            let effective_projection_cap = inner_max_cycles
+                .saturating_sub(cycle)
+                .max(LINEAR_RATE_PROJECTION_CAP);
             let residual_tol_reachable_within_cap = residual_rate_history.len()
                 > LINEAR_RATE_WINDOW
                 && !gam_solve::loop_guard::slow_geometric_rate_exceeds_projection_cap(
@@ -6902,8 +6885,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 // The cap defers to the caller's remaining budget (floored at the
                 // historic 100) so a solve that can reach tol within its own
                 // `inner_max_cycles` is not cut off — see the const doc.
-                let effective_projection_cap =
-                    inner_max_cycles.saturating_sub(cycle).max(LINEAR_RATE_PROJECTION_CAP);
+                let effective_projection_cap = inner_max_cycles
+                    .saturating_sub(cycle)
+                    .max(LINEAR_RATE_PROJECTION_CAP);
                 let too_slow = gam_solve::loop_guard::slow_geometric_rate_exceeds_projection_cap(
                     residual,
                     oldest,
@@ -7134,13 +7118,8 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     &states,
                     &cached_active_sets,
                 )?;
-                assemble_active_constraint_block(
-                    &block_constraints,
-                    &tight_sets,
-                    &ranges,
-                    total_p,
-                )
-                .map(std::sync::Arc::new)
+                assemble_active_constraint_block(&block_constraints, &tight_sets, &ranges, total_p)
+                    .map(std::sync::Arc::new)
             };
             let (block_logdet_h, block_logdet_s) = blockwise_logdet_terms_with_workspace(
                 family,

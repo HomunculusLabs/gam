@@ -3,7 +3,8 @@ use gam::custom_family::{
     ParameterBlockState, PenaltyMatrix,
 };
 use gam::families::custom_family::{
-    CustomFamilyBlockPsiDerivative, CustomFamilyHyperLayout, ExactNewtonOuterObjective, evaluate_custom_family_joint_hyper,
+    CustomFamilyBlockPsiDerivative, CustomFamilyHyperLayout, ExactNewtonOuterObjective,
+    evaluate_custom_family_joint_hyper,
 };
 use gam::matrix::SymmetricMatrix;
 use gam_problem::ExactNewtonJointPsiTerms;
@@ -24,7 +25,6 @@ fn design_hyper_layout(
     )
     .expect("test design-hyper layout must satisfy the typed axis contract")
 }
-
 
 #[derive(Clone)]
 struct ScalarPseudoLaplaceRhoFamily {

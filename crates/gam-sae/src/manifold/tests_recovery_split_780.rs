@@ -1743,7 +1743,8 @@ fn certified_central_logdet_difference_refuses_floor_clamp_crossing_2398() {
         .or_else(|| panic.downcast_ref::<&str>().copied())
         .expect("refusal panic must carry a string message");
     assert!(
-        message.contains("finite-difference endpoint crossed a nondifferentiable structural stratum")
+        message
+            .contains("finite-difference endpoint crossed a nondifferentiable structural stratum")
     );
     assert!(message.contains("changed_fields=[\"row_spectral_conditioning\"]"));
     assert!(message.contains("spectral-floor stratum #2398 (-h)"));

@@ -483,9 +483,8 @@ pub fn validate_finite_symmetric_matrix(
             // Each factor is square-rooted before multiplying so a large finite
             // diagonal cannot overflow the product.
             let pair_scale = lower.abs().max(upper.abs());
-            let gram_scale = (matrix[[row, row]].abs().sqrt()
-                * matrix[[col, col]].abs().sqrt())
-            .min(f64::MAX);
+            let gram_scale =
+                (matrix[[row, row]].abs().sqrt() * matrix[[col, col]].abs().sqrt()).min(f64::MAX);
             let tolerance = SYMMETRY_ULP_ALLOWANCE * positive_ulp(pair_scale.max(gram_scale));
             if defect > tolerance {
                 return Err(CertifiedSymmetricSolveError::NotSymmetric {
@@ -1548,10 +1547,9 @@ mod certified_inverse_tests {
         let asymmetric = array![[2.0, 0.25], [0.5, 2.0]];
         for exponent in [-200_i32, -37, 0, 37, 200] {
             let scale = 2.0_f64.powi(exponent);
-            validate_finite_symmetric_matrix(&(&benign * scale), "rescaled benign")
-                .unwrap_or_else(|error| {
-                    panic!("benign roundoff rejected at 2^{exponent}: {error}")
-                });
+            validate_finite_symmetric_matrix(&(&benign * scale), "rescaled benign").unwrap_or_else(
+                |error| panic!("benign roundoff rejected at 2^{exponent}: {error}"),
+            );
             assert!(
                 matches!(
                     validate_finite_symmetric_matrix(&(&asymmetric * scale), "rescaled asymmetric"),

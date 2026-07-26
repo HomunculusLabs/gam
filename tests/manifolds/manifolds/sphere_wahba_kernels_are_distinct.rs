@@ -143,7 +143,9 @@ fn sobolev_kernel_at_north_pole_matches_paper_closed_form() {
         .expect("untruncated Sobolev m>=2 has a finite closed-form diagonal");
         let got = k[[0, 0]];
         let rel = (got - expected).abs() / expected.abs();
-        eprintln!("[sob-closed] K_sob(γ=π/6, m={m}) = {got:.17e}, paper = {expected:.17e} rel={rel:.2e}");
+        eprintln!(
+            "[sob-closed] K_sob(γ=π/6, m={m}) = {got:.17e}, paper = {expected:.17e} rel={rel:.2e}"
+        );
         // The evaluation is a handful of polylogarithm calls and O(1)
         // arithmetic on quantities of size ~1, so the achievable bound is a few
         // ulps of the result. 16·f64::EPSILON leaves room for that without

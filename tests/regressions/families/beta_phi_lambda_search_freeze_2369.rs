@@ -97,9 +97,7 @@ fn make_pure_noise_dataset() -> (Vec<f64>, Vec<f64>) {
     let mut y = Vec::with_capacity(N);
     for _ in 0..N {
         x.push(rng.normal());
-        let yi = rng
-            .beta(MU * PHI, (1.0 - MU) * PHI)
-            .clamp(1e-6, 1.0 - 1e-6);
+        let yi = rng.beta(MU * PHI, (1.0 - MU) * PHI).clamp(1e-6, 1.0 - 1e-6);
         y.push(yi);
     }
     (y, x)

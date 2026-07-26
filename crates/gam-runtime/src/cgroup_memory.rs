@@ -71,11 +71,7 @@ impl CgroupMemoryProbeFailure {
 
 impl fmt::Display for CgroupMemoryProbeFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} at {}: {}",
-            self.kind, self.path, self.detail
-        )
+        write!(formatter, "{} at {}: {}", self.kind, self.path, self.detail)
     }
 }
 
@@ -291,11 +287,8 @@ mod linux {
     }
 
     pub(super) fn detect() -> CgroupMemoryObservation {
-        detect_from_proc_files(
-            Path::new(PROC_SELF_CGROUP),
-            Path::new(PROC_SELF_MOUNTINFO),
-        )
-        .unwrap_or_else(CgroupMemoryObservation::ProbeFailed)
+        detect_from_proc_files(Path::new(PROC_SELF_CGROUP), Path::new(PROC_SELF_MOUNTINFO))
+            .unwrap_or_else(CgroupMemoryObservation::ProbeFailed)
     }
 
     fn detect_from_proc_files(
@@ -341,8 +334,7 @@ mod linux {
             let hierarchy = fields.next();
             let controllers = fields.next();
             let path = fields.next();
-            let (Some(hierarchy), Some(controllers), Some(path)) =
-                (hierarchy, controllers, path)
+            let (Some(hierarchy), Some(controllers), Some(path)) = (hierarchy, controllers, path)
             else {
                 return Err(failure(
                     CgroupMemoryProbeFailureKind::MalformedMembership,
@@ -567,8 +559,7 @@ mod linux {
                                         "finite memory.max requires memory.current",
                                     )
                                 })?;
-                            let current_before =
-                                parse_counter(&current_before_raw, &current_path)?;
+                            let current_before = parse_counter(&current_before_raw, &current_path)?;
                             let stat_raw = read_optional(&stat_path)?.ok_or_else(|| {
                                 failure(
                                     CgroupMemoryProbeFailureKind::MissingCounter,
@@ -591,8 +582,7 @@ mod linux {
                                         "memory.current disappeared during cgroup probe",
                                     )
                                 })?;
-                            let current_after =
-                                parse_counter(&current_after_raw, &current_path)?;
+                            let current_after = parse_counter(&current_after_raw, &current_path)?;
                             let current_bytes = current_before.max(current_after);
                             if inactive_file_bytes > current_bytes {
                                 return Err(failure(
@@ -741,9 +731,10 @@ mod linux {
                     "memory counters became inconsistent during construction",
                 )
             })?;
-            if binding.as_ref().is_none_or(|current| {
-                candidate.available_bytes() < current.available_bytes()
-            }) {
+            if binding
+                .as_ref()
+                .is_none_or(|current| candidate.available_bytes() < current.available_bytes())
+            {
                 binding = Some(candidate);
             }
 
@@ -855,11 +846,7 @@ mod linux {
     }
 
     fn io_failure(path: &Path, error: io::Error) -> CgroupMemoryProbeFailure {
-        failure(
-            CgroupMemoryProbeFailureKind::Io,
-            path,
-            error.to_string(),
-        )
+        failure(CgroupMemoryProbeFailureKind::Io, path, error.to_string())
     }
 
     fn failure(
@@ -867,11 +854,7 @@ mod linux {
         path: &Path,
         detail: impl Into<Box<str>>,
     ) -> CgroupMemoryProbeFailure {
-        CgroupMemoryProbeFailure::new(
-            kind,
-            path.display().to_string().into_boxed_str(),
-            detail,
-        )
+        CgroupMemoryProbeFailure::new(kind, path.display().to_string().into_boxed_str(), detail)
     }
 
     #[cfg(test)]
@@ -893,8 +876,7 @@ mod linux {
                 let mount = temp.path().join("cgroup2");
                 fs::create_dir_all(&mount).expect("fixture mount");
                 let cgroup_file = temp.path().join("self.cgroup");
-                fs::write(&cgroup_file, format!("0::{membership}\n"))
-                    .expect("fixture membership");
+                fs::write(&cgroup_file, format!("0::{membership}\n")).expect("fixture membership");
                 let mountinfo_file = temp.path().join("self.mountinfo");
                 fs::write(
                     &mountinfo_file,
@@ -948,10 +930,8 @@ mod linux {
         #[test]
         fn cgroup_v2_root_accounting_without_memory_max_is_unbounded() {
             let fixture = Fixture::new("/");
-            fs::write(fixture.mount.join("memory.current"), "1000\n")
-                .expect("root current");
-            fs::write(fixture.mount.join("memory.stat"), "inactive_file 700\n")
-                .expect("root stat");
+            fs::write(fixture.mount.join("memory.current"), "1000\n").expect("root current");
+            fs::write(fixture.mount.join("memory.stat"), "inactive_file 700\n").expect("root stat");
             assert!(matches!(
                 fixture.observe(),
                 CgroupMemoryObservation::V2Unbounded {
@@ -1016,8 +996,7 @@ mod linux {
             fs::create_dir_all(narrow.join("leaf")).expect("narrow leaf");
             fs::write(narrow.join("leaf/memory.max"), "512\n").expect("max");
             fs::write(narrow.join("leaf/memory.current"), "256\n").expect("current");
-            fs::write(narrow.join("leaf/memory.stat"), "inactive_file 64\n")
-                .expect("stat");
+            fs::write(narrow.join("leaf/memory.stat"), "inactive_file 64\n").expect("stat");
             let cgroup_file = temp.path().join("self.cgroup");
             fs::write(&cgroup_file, "0::/tenant/leaf\n").expect("membership");
             let mountinfo_file = temp.path().join("self.mountinfo");
@@ -1051,10 +1030,7 @@ mod linux {
             let CgroupMemoryObservation::ProbeFailed(failure) = fixture.observe() else {
                 panic!("malformed active controller must fail closed");
             };
-            assert_eq!(
-                failure.kind(),
-                CgroupMemoryProbeFailureKind::InvalidCounter
-            );
+            assert_eq!(failure.kind(), CgroupMemoryProbeFailureKind::InvalidCounter);
         }
 
         #[test]
@@ -1119,11 +1095,8 @@ mod linux {
                 "inactive_file 256\ntotal_inactive_file 256\n",
             )
             .expect("stat");
-            fs::write(
-                &fixture.cgroup_file,
-                "0::/tenant/leaf\n4:memory:/legacy\n",
-            )
-            .expect("hybrid membership");
+            fs::write(&fixture.cgroup_file, "0::/tenant/leaf\n4:memory:/legacy\n")
+                .expect("hybrid membership");
             let original = fs::read_to_string(&fixture.mountinfo_file).expect("mountinfo");
             fs::write(
                 &fixture.mountinfo_file,
@@ -1152,9 +1125,6 @@ mod non_linux_tests {
 
     #[test]
     fn non_linux_platform_has_no_cgroup_controller() {
-        assert_eq!(
-            detect_cgroup_memory(),
-            CgroupMemoryObservation::NotPresent
-        );
+        assert_eq!(detect_cgroup_memory(), CgroupMemoryObservation::NotPresent);
     }
 }

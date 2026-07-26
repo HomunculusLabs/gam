@@ -7,9 +7,9 @@ use gam::solver::arrow_schur::ArrowSolveOptions;
 use gam::solver::estimate::EstimationError;
 use gam::solver::gpu_kernels::arrow_schur::solve_reduced_beta_pcg_with_diagnostics;
 use gam::solver::gpu_kernels::sae_resident::{
-    DeviceResidentArrowError, DeviceResidentArrowShape, DeviceResidentInnerOptions, ResidencyReport,
-    SweepVariant, build_sweep_workspaces, qwen_non_gating_fixture, qwen_non_gating_fixture_seeded,
-    run_resident_fits_multiplexed, run_resident_fits_sequential,
+    DeviceResidentArrowError, DeviceResidentArrowShape, DeviceResidentInnerOptions,
+    ResidencyReport, SweepVariant, build_sweep_workspaces, qwen_non_gating_fixture,
+    qwen_non_gating_fixture_seeded, run_resident_fits_multiplexed, run_resident_fits_sequential,
 };
 use gam::solver::rho_optimizer::{
     EfsEval, OuterCapability, OuterEval, OuterObjective, OuterProblem, SeedOutcome,
@@ -129,7 +129,6 @@ impl OuterObjective for CountingObjective {
         self.seed_count += 1;
         self.inner.seed_inner_state(beta)
     }
-
 }
 
 fn shape_named(name: &str) -> Option<Shape> {
@@ -414,9 +413,12 @@ fn run_residency_sweep() -> Result<(), String> {
         // solve. The dense reference above is a correctness oracle whose wall
         // clock no production host would pay.
         let arrow_start = Instant::now();
-        let arrow = workspace
-            .cpu_arrow_fit(&opts)
-            .map_err(|err| format!("residency sweep CPU arrow baseline failed at p={}: {err}", dim.p))?;
+        let arrow = workspace.cpu_arrow_fit(&opts).map_err(|err| {
+            format!(
+                "residency sweep CPU arrow baseline failed at p={}: {err}",
+                dim.p
+            )
+        })?;
         let arrow_ms = ms(arrow_start);
 
         let device_start = Instant::now();
@@ -956,10 +958,9 @@ fn run(shape: Shape) -> Result<(), String> {
             ),
         ),
         Err(error) => {
-            return Err(format!(
-                "penalized quasi-Laplace criterion evaluation failed: {error}"
-            )
-            .into());
+            return Err(
+                format!("penalized quasi-Laplace criterion evaluation failed: {error}").into(),
+            );
         }
     }
 

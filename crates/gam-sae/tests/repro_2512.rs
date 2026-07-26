@@ -5,9 +5,8 @@
 
 use gam_sae::basis::{PeriodicHarmonicEvaluator, SaeBasisEvaluator};
 use gam_sae::manifold::{
-    AssignmentMode, BehaviorBlock, LatentManifold, OutputBlock, SaeAssignment,
-    SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm,
-    stack_augmented_target,
+    AssignmentMode, BehaviorBlock, LatentManifold, OutputBlock, SaeAssignment, SaeAtomBasisKind,
+    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, stack_augmented_target,
 };
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
@@ -18,7 +17,10 @@ fn softmax(logits: &[f64]) -> Vec<f64> {
     let maximum = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let exponentials: Vec<f64> = logits.iter().map(|value| (value - maximum).exp()).collect();
     let total: f64 = exponentials.iter().sum();
-    exponentials.into_iter().map(|value| value / total).collect()
+    exponentials
+        .into_iter()
+        .map(|value| value / total)
+        .collect()
 }
 
 fn noise_stream(seed: u64) -> impl FnMut() -> f64 {
@@ -117,16 +119,8 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
         }
         for (term, rho) in &mut fits {
             term.set_guards_enabled(false);
-            term.run_joint_fit_arrow_schur(
-                target.view(),
-                rho,
-                None,
-                1,
-                1.0,
-                1.0e-6,
-                1.0e-6,
-            )
-            .unwrap();
+            term.run_joint_fit_arrow_schur(target.view(), rho, None, 1, 1.0, 1.0e-6, 1.0e-6)
+                .unwrap();
         }
 
         let reference = &fits[0].0.atoms[0].decoder_coefficients;

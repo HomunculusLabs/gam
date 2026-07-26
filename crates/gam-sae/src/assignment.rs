@@ -267,6 +267,19 @@ pub enum RoutingPredictor {
 }
 
 impl AssignmentMode {
+    /// The family's stable snake_case name, for refusal text and provenance.
+    /// Matching on the enum here means a family added later cannot be reported
+    /// as an anonymous "non-softmax prior" by any message that uses this.
+    #[must_use]
+    pub fn family_label(&self) -> &'static str {
+        match self {
+            Self::Softmax { .. } => "softmax",
+            Self::OrderedBetaBernoulli { .. } => "ordered_beta_bernoulli",
+            Self::ThresholdGate { .. } => "threshold_gate",
+            Self::TopK { .. } => "topk",
+        }
+    }
+
     #[must_use]
     pub fn softmax(temperature: f64) -> Self {
         Self::Softmax {

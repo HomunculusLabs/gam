@@ -1703,8 +1703,7 @@ mod sphere_gpu_tests {
                     centers_latlon[(j, 1)] * to_radians,
                 );
                 let separation = half_angle_separation_scalar(point, center);
-                let expected =
-                    sphere_truncated_spectral_eval(separation.cos_gamma(), coeffs);
+                let expected = sphere_truncated_spectral_eval(separation.cos_gamma(), coeffs);
                 max_abs = max_abs.max((kernel_matrix[(i, j)] - expected).abs());
             }
         }
@@ -1888,14 +1887,9 @@ mod sphere_gpu_tests {
         // Recompute cos gamma through the stable half-angle geometry, not the
         // dot-product route whose near-coincident loss this contract must catch.
         let to_radians = std::f64::consts::PI / 180.0;
-        let point = SphereTrig::from_radians(
-            data[(0, 0)] * to_radians,
-            data[(0, 1)] * to_radians,
-        );
-        let center = SphereTrig::from_radians(
-            centers[(0, 0)] * to_radians,
-            centers[(0, 1)] * to_radians,
-        );
+        let point = SphereTrig::from_radians(data[(0, 0)] * to_radians, data[(0, 1)] * to_radians);
+        let center =
+            SphereTrig::from_radians(centers[(0, 0)] * to_radians, centers[(0, 1)] * to_radians);
         let expected = sphere_truncated_spectral_eval(
             half_angle_separation_scalar(point, center).cos_gamma(),
             &coeffs,
@@ -2015,12 +2009,7 @@ mod sphere_gpu_tests {
 
         // EVERY HOST: the oracle the device is graded against must itself
         // equal the elementwise truncated-spectral definition.
-        assert_cpu_kernel_matches_stable_spectral_definition(
-            &cpu,
-            &data_ll,
-            &centers_ll,
-            &coeffs,
-        );
+        assert_cpu_kernel_matches_stable_spectral_definition(&cpu, &data_ll, &centers_ll, &coeffs);
 
         if !cuda_available_for_test("raw-kernel parity") {
             assert_sphere_decision_declines_without_device(n, m, lmax);

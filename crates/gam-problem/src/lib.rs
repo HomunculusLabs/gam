@@ -20,6 +20,7 @@ pub mod block_count_error;
 pub mod block_role;
 pub mod block_spec;
 pub mod coefficient_prior_mean;
+mod constraint_set;
 pub mod custom_family_blockwise;
 pub mod custom_family_error;
 pub mod diagnostics;
@@ -33,7 +34,6 @@ pub mod fisher_rao;
 pub mod gauge;
 pub mod identifiability_audit;
 pub mod joint_penalty;
-mod constraint_set;
 mod linear_constraints;
 pub mod log_strength;
 pub mod monotone_root_error;
@@ -76,6 +76,9 @@ pub use block_spec::{
     ParameterBlockSpec, ParameterBlockState, RowScaledJacobian,
 };
 pub use coefficient_prior_mean::{CoefficientPriorMean, PriorMeanError};
+pub use constraint_set::{
+    ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, PlacedConstraintBlock,
+};
 pub use custom_family_blockwise::{
     CUSTOM_FAMILY_RIDGE_FLOOR, ExactNewtonOuterCurvature, validate_blockspec_consistency,
 };
@@ -105,9 +108,6 @@ pub use identifiability_audit::{
     MapUniquenessError,
 };
 pub use joint_penalty::{JointPenaltyBundle, JointPenaltyError, JointPenaltySpec};
-pub use constraint_set::{
-    ConstraintRowId, ConstraintSet, KhatriRaoConeConstraints, PlacedConstraintBlock,
-};
 pub use linear_constraints::LinearInequalityConstraints;
 pub use log_strength::{
     IndexedLogStrengthDomainError, LOG_STRENGTH_MAX, LOG_STRENGTH_MIN, LogStrengthDomainError,

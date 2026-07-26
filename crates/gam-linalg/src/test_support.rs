@@ -57,11 +57,7 @@ pub struct PairedHoldout {
 /// The returned row indices retain source order. A quality test must use the
 /// same returned partition for both the implementation under test and its
 /// reference tool.
-pub fn paired_holdout_partition(
-    n: usize,
-    holdout_fraction: f64,
-    split_key: u64,
-) -> PairedHoldout {
+pub fn paired_holdout_partition(n: usize, holdout_fraction: f64, split_key: u64) -> PairedHoldout {
     assert!(n >= 2, "paired holdout needs at least two rows, got {n}");
     assert!(
         holdout_fraction.is_finite() && 0.0 < holdout_fraction && holdout_fraction < 1.0,
@@ -132,7 +128,10 @@ pub const RESOLUTION_TAIL: f64 = 0.005;
 /// and `P(T <= t) = (1 + sign(t) * P(|T| <= |t|)) / 2`.
 pub fn student_t_cdf(t: f64, df: usize) -> f64 {
     assert!(df >= 1, "Student-t needs at least one degree of freedom");
-    assert!(t.is_finite(), "Student-t CDF needs a finite quantile, got {t}");
+    assert!(
+        t.is_finite(),
+        "Student-t CDF needs a finite quantile, got {t}"
+    );
 
     let theta = (t.abs() / (df as f64).sqrt()).atan();
     let (sin_theta, cos_theta) = theta.sin_cos();
@@ -648,12 +647,18 @@ mod tests {
         }
         // Symmetry and monotonicity on both parities.
         for df in 1..=12 {
-            assert!((student_t_cdf(0.0, df) - 0.5).abs() < 1e-15, "median df={df}");
+            assert!(
+                (student_t_cdf(0.0, df) - 0.5).abs() < 1e-15,
+                "median df={df}"
+            );
             assert!(
                 (student_t_cdf(1.7, df) + student_t_cdf(-1.7, df) - 1.0).abs() < 1e-14,
                 "symmetry df={df}"
             );
-            assert!(student_t_cdf(0.9, df) < student_t_cdf(1.1, df), "monotone df={df}");
+            assert!(
+                student_t_cdf(0.9, df) < student_t_cdf(1.1, df),
+                "monotone df={df}"
+            );
         }
         // Published one-sided quantiles (Student-t tables).
         for &(df, tail, want) in &[
@@ -702,7 +707,11 @@ mod tests {
             consistent.effect_sem,
             consistent.unpaired_sem
         );
-        assert!(consistent.gam_resolved_worse(), "{}", consistent.report("consistent"));
+        assert!(
+            consistent.gam_resolved_worse(),
+            "{}",
+            consistent.report("consistent")
+        );
         assert!(!consistent.gam_resolved_better());
         assert_eq!(consistent.verdict(), "gam_resolved_worse");
         // The unpaired view of the SAME data cannot see it: comparing two

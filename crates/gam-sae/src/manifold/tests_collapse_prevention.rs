@@ -2415,9 +2415,42 @@ pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
     // rank well under n, so the signal-free floor renders a verdict at all (at
     // rank q >= n it is NaN by the saturated-cover convention and there is
     // nothing to test).
-    let coords0 = array![[0.05], [0.20], [0.55], [0.80], [0.35], [0.65], [0.12], [0.48], [0.72], [0.93]];
-    let coords1 = array![[0.15], [0.30], [0.65], [0.90], [0.45], [0.10], [0.28], [0.58], [0.83], [0.02]];
-    let coords2 = array![[0.25], [0.40], [0.75], [0.05], [0.60], [0.85], [0.38], [0.68], [0.18], [0.52]];
+    let coords0 = array![
+        [0.05],
+        [0.20],
+        [0.55],
+        [0.80],
+        [0.35],
+        [0.65],
+        [0.12],
+        [0.48],
+        [0.72],
+        [0.93]
+    ];
+    let coords1 = array![
+        [0.15],
+        [0.30],
+        [0.65],
+        [0.90],
+        [0.45],
+        [0.10],
+        [0.28],
+        [0.58],
+        [0.83],
+        [0.02]
+    ];
+    let coords2 = array![
+        [0.25],
+        [0.40],
+        [0.75],
+        [0.05],
+        [0.60],
+        [0.85],
+        [0.38],
+        [0.68],
+        [0.18],
+        [0.52]
+    ];
     let (phi0, jet0) = periodic_basis(&coords0);
     let (phi1, jet1) = periodic_basis(&coords1);
     let (phi2, jet2) = periodic_basis(&coords2);
@@ -2491,8 +2524,7 @@ pub(crate) fn ev_at_the_null_floor_alone_is_not_a_co_collapse_verdict_2253() {
     }
     // Arm A — the reconstruction IS the column mean: residual = centered target,
     // so EV = 0 and the output carries no centered energy at all.
-    let vanished_fit =
-        Array2::<f64>::from_shape_fn(target.dim(), |(_, col)| col_means[col]);
+    let vanished_fit = Array2::<f64>::from_shape_fn(target.dim(), |(_, col)| col_means[col]);
     // Arm B — twice the centered target: residual is again exactly the centered
     // target, so EV is the SAME 0, while the output carries 4x the total
     // centered variance. Live decoders, aimed wrong.

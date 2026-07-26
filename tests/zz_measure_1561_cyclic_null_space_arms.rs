@@ -174,7 +174,8 @@ fn fit_one(arm: Arm, seed: u64, echo_data: bool) -> FitReadout {
         &cfg,
     )
     .expect("gam cyclic location-scale fit");
-    let FitResult::GaussianLocationScale(GaussianLocationScaleFitResult { fit, .. }) = result else {
+    let FitResult::GaussianLocationScale(GaussianLocationScaleFitResult { fit, .. }) = result
+    else {
         panic!("expected a GaussianLocationScale fit");
     };
 

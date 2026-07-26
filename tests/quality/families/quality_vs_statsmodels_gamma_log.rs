@@ -30,9 +30,7 @@
 use csv::StringRecord;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
-use gam::test_support::reference::{
-    Column, QualityPair, pearson, relative_l2, rmse, run_python,
-};
+use gam::test_support::reference::{Column, QualityPair, pearson, relative_l2, rmse, run_python};
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };

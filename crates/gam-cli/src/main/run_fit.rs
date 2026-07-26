@@ -1692,7 +1692,8 @@ pub(crate) fn validate_fit_args_preflight(
     if args.request.is_some() {
         let is_survival = parse_surv_response(&parsed.response)?.is_some();
         if is_survival {
-            let likelihood = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
+            let likelihood =
+                parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
             gam::families::fit_orchestration::validate_survival_baseline_config(
                 likelihood,
                 &fit_config.baseline_target,
@@ -1800,8 +1801,11 @@ pub(crate) fn validate_fit_args_preflight(
         return Err("--negative-binomial-theta requires --family negative-binomial".to_string());
     }
     let is_survival = parse_surv_response(&parsed.response)?.is_some();
-    let survival_likelihood = parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
-    let survival_likelihood_raw = fit_config.resolved_survival_likelihood().to_ascii_lowercase();
+    let survival_likelihood =
+        parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
+    let survival_likelihood_raw = fit_config
+        .resolved_survival_likelihood()
+        .to_ascii_lowercase();
     let baseline_target_raw = fit_config.baseline_target.trim().to_ascii_lowercase();
     let time_basis_raw = fit_config.time_basis.trim().to_ascii_lowercase();
     if is_survival {

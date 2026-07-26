@@ -136,10 +136,7 @@ fn classify_error(err: &str) -> &'static str {
 /// operating point (log-λ vector, outer iterations, REML score, |g|) — the smooth
 /// or wiggly ρ the fit actually landed on; on refusal the exit class, cycle
 /// count, and rho_checkpoint.
-fn summarize_locscale(
-    result: Result<FitResult, String>,
-    wall_ms: f64,
-) -> String {
+fn summarize_locscale(result: Result<FitResult, String>, wall_ms: f64) -> String {
     match result {
         Ok(FitResult::SurvivalLocationScale(fit)) => {
             let u = &fit.fit.fit;

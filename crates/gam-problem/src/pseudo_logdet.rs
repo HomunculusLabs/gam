@@ -31,9 +31,6 @@ mod tests {
             PseudoLogdetMode::HardPseudo,
             PseudoLogdetMode::PositiveDefinite
         );
-        assert_ne!(
-            PseudoLogdetMode::PositiveDefinite,
-            PseudoLogdetMode::Smooth
-        );
+        assert_ne!(PseudoLogdetMode::PositiveDefinite, PseudoLogdetMode::Smooth);
     }
 }

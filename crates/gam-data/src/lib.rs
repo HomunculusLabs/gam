@@ -2741,7 +2741,10 @@ mod missing_value_inference_tests {
     use super::*;
 
     fn rows(cells: &[&[&str]]) -> Vec<StringRecord> {
-        cells.iter().map(|r| StringRecord::from(r.to_vec())).collect()
+        cells
+            .iter()
+            .map(|r| StringRecord::from(r.to_vec()))
+            .collect()
     }
 
     /// The #2495 defect, pinned. `parker` in `bench/datasets/wine.csv` is 29

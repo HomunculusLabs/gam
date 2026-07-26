@@ -1969,8 +1969,7 @@ fn constrained_linear_predictor_intervals(
     let n_rows = design.nrows();
     let mut lower = Array1::<f64>::zeros(n_rows);
     let mut upper = Array1::<f64>::zeros(n_rows);
-    let chunk_rows =
-        prediction_chunk_rows(geometry.coefficient_gauge.reduced_total(), 1, n_rows);
+    let chunk_rows = prediction_chunk_rows(geometry.coefficient_gauge.reduced_total(), 1, n_rows);
     for start in (0..n_rows).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(n_rows);
         let rows = design_row_chunk(design, start..end).map_err(EstimationError::InvalidInput)?;
@@ -3440,14 +3439,13 @@ pub fn coefficient_uncertaintywith_mode(
                 .t_full
                 .row(coefficient)
                 .to_owned();
-            let (active_lower, active_upper) =
-                constrained_projection_equal_tailed_interval(
-                    &ambient_covariance,
-                    posterior,
-                    &contrast,
-                    confidence_level,
-                )
-                .map_err(EstimationError::InvalidInput)?;
+            let (active_lower, active_upper) = constrained_projection_equal_tailed_interval(
+                &ambient_covariance,
+                posterior,
+                &contrast,
+                confidence_level,
+            )
+            .map_err(EstimationError::InvalidInput)?;
             let shift = geometry.coefficient_gauge.affine_shift[coefficient];
             lower[coefficient] = active_lower + shift;
             upper[coefficient] = active_upper + shift;
@@ -3693,11 +3691,8 @@ mod tests {
 
     fn half_normal_constrained_fit() -> UnifiedFitResult {
         let ambient_covariance = array![[1.0]];
-        let constraints = gam_problem::LinearInequalityConstraints::new(
-            array![[1.0]],
-            array![0.0],
-        )
-        .expect("constraint");
+        let constraints = gam_problem::LinearInequalityConstraints::new(array![[1.0]], array![0.0])
+            .expect("constraint");
         let correction =
             gam_solve::constrained_posterior::constrained_posterior_correction_from_covariance(
                 &ambient_covariance,

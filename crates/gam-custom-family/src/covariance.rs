@@ -514,60 +514,60 @@ pub fn projected_linear_constraint_stationarity_vector(
     // membership table preserves canonical row order.
     let mut in_active = vec![false; n_rows];
     for row in 0..n_rows {
-            let bound = constraints.bound(row).ok()?;
-            if bound == f64::NEG_INFINITY {
-                continue;
-            }
-            if !bound.is_finite() {
-                return None;
-            }
-            let value = values[row];
-            let slack = value - bound;
-            if !slack.is_finite() {
-                return None;
-            }
-            // Active-row inclusion band for the stationarity-residual cone projection.
-            // A constraint binding at the constrained optimum carries a Lagrange
-            // multiplier whose mass IS the stationarity residual (`r = A_activeᵀ λ`,
-            // λ >= 0); to project it out, every genuinely tight row must be a candidate.
-            // The constrained QP only reports rows it drove tight during a
-            // non-degenerate step, so monotone derivative-guard rows tight at the
-            // optimum but never explicitly stepped sit just above the old `1e-6·scale`
-            // band, get excluded, and leave the multiplier unresolved — tripping the
-            // `active_set_incomplete` refusal on an exactly constrained-stationary
-            // iterate (gam#797 survival time block). Widen the band so every near-tight
-            // row is a CANDIDATE; over-inclusion is safe because the downstream NNLS
-            // (`project_stationarity_residual_on_constraint_cone`) assigns λ = 0 to any
-            // candidate carrying no multiplier mass, so a non-binding row cannot
-            // spuriously shrink the residual.
-            let scale = value.abs().max(bound.abs()).max(1.0);
-            let beta_inf = beta
-                .iter()
-                .map(|v| v.abs())
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            // ℓ¹ row norm bounded below by the Euclidean norm the carrier exposes;
-            // for the factored cone the Euclidean norm is exact and the ℓ¹ norm is
-            // within √p of it, so the slack band keeps its magnitude semantics.
-            let row_norm1 = constraints.row_norm(row).ok()?.max(1.0);
-            // A row that is mathematically binding can appear a small positive
-            // distance inside the feasible cone after repeated dense/spectral
-            // Newton projections on a flat baseline-hazard valley: the objective is
-            // insensitive along that direction, so round-off in the derivative-basis
-            // coordinates dominates the true slack.  The active-set QP reports only
-            // rows it explicitly pivoted on, so the KKT residual projection must also
-            // recover these numerically-pinned rows from primal slack.  Use a
-            // coefficient-space slack band, scaled by the row norm and coefficient
-            // magnitude, not just by `Aβ` (which is exactly zero for monotone
-            // derivative constraints with `b=0`).  Over-inclusion is safe because the
-            // downstream nonnegative cone projection assigns λ=0 to rows that do not
-            // carry multiplier mass; under-inclusion leaves a genuine multiplier in
-            // the residual and falsely reports `active_set_incomplete` (#1793/#1040).
-            let coordinate_slack_tol = 5e-3 * row_norm1 * beta_inf + 1e-8;
-            let active_tol = (1e-3 * scale + 1e-8).max(coordinate_slack_tol);
-            if slack <= active_tol {
-                in_active[row] = true;
-            }
+        let bound = constraints.bound(row).ok()?;
+        if bound == f64::NEG_INFINITY {
+            continue;
+        }
+        if !bound.is_finite() {
+            return None;
+        }
+        let value = values[row];
+        let slack = value - bound;
+        if !slack.is_finite() {
+            return None;
+        }
+        // Active-row inclusion band for the stationarity-residual cone projection.
+        // A constraint binding at the constrained optimum carries a Lagrange
+        // multiplier whose mass IS the stationarity residual (`r = A_activeᵀ λ`,
+        // λ >= 0); to project it out, every genuinely tight row must be a candidate.
+        // The constrained QP only reports rows it drove tight during a
+        // non-degenerate step, so monotone derivative-guard rows tight at the
+        // optimum but never explicitly stepped sit just above the old `1e-6·scale`
+        // band, get excluded, and leave the multiplier unresolved — tripping the
+        // `active_set_incomplete` refusal on an exactly constrained-stationary
+        // iterate (gam#797 survival time block). Widen the band so every near-tight
+        // row is a CANDIDATE; over-inclusion is safe because the downstream NNLS
+        // (`project_stationarity_residual_on_constraint_cone`) assigns λ = 0 to any
+        // candidate carrying no multiplier mass, so a non-binding row cannot
+        // spuriously shrink the residual.
+        let scale = value.abs().max(bound.abs()).max(1.0);
+        let beta_inf = beta
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        // ℓ¹ row norm bounded below by the Euclidean norm the carrier exposes;
+        // for the factored cone the Euclidean norm is exact and the ℓ¹ norm is
+        // within √p of it, so the slack band keeps its magnitude semantics.
+        let row_norm1 = constraints.row_norm(row).ok()?.max(1.0);
+        // A row that is mathematically binding can appear a small positive
+        // distance inside the feasible cone after repeated dense/spectral
+        // Newton projections on a flat baseline-hazard valley: the objective is
+        // insensitive along that direction, so round-off in the derivative-basis
+        // coordinates dominates the true slack.  The active-set QP reports only
+        // rows it explicitly pivoted on, so the KKT residual projection must also
+        // recover these numerically-pinned rows from primal slack.  Use a
+        // coefficient-space slack band, scaled by the row norm and coefficient
+        // magnitude, not just by `Aβ` (which is exactly zero for monotone
+        // derivative constraints with `b=0`).  Over-inclusion is safe because the
+        // downstream nonnegative cone projection assigns λ=0 to rows that do not
+        // carry multiplier mass; under-inclusion leaves a genuine multiplier in
+        // the residual and falsely reports `active_set_incomplete` (#1793/#1040).
+        let coordinate_slack_tol = 5e-3 * row_norm1 * beta_inf + 1e-8;
+        let active_tol = (1e-3 * scale + 1e-8).max(coordinate_slack_tol);
+        if slack <= active_tol {
+            in_active[row] = true;
+        }
     }
     let active_rows: Vec<usize> = (0..n_rows).filter(|&row| in_active[row]).collect();
     if active_rows.is_empty() {
@@ -1504,9 +1504,7 @@ fn terminal_score_from_working_sets(
             } => {
                 let design = spec.solver_design();
                 let n = design.nrows();
-                if working_response.len() != n
-                    || working_weights.len() != n
-                    || state.eta.len() != n
+                if working_response.len() != n || working_weights.len() != n || state.eta.len() != n
                 {
                     return Err(format!(
                         "terminal score block {block_idx} has z/w/eta lengths {}/{}/{}, expected {n}",
@@ -1573,9 +1571,7 @@ fn terminal_likelihood_score(
 /// dense covariance are computed once in the same active coefficient frame.
 /// This prevents the former split path from certifying one operator for
 /// geometry while inverting a different active-face operator for covariance.
-pub(crate) fn compute_joint_posterior<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
+pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
     states: &[ParameterBlockState],
@@ -1623,8 +1619,7 @@ pub(crate) fn compute_joint_posterior<
         let jeffreys_ranges = block_param_ranges(specs);
         if let Some(z_joint) =
             crate::jeffreys::build_joint_jeffreys_subspace(specs, &jeffreys_ranges)?
-            && let Some((_, gradient, hphi)) =
-                crate::jeffreys::custom_family_joint_jeffreys_term(
+            && let Some((_, gradient, hphi)) = crate::jeffreys::custom_family_joint_jeffreys_term(
                 family,
                 states,
                 specs,
@@ -1652,10 +1647,12 @@ pub(crate) fn compute_joint_posterior<
         match preferred_working_sets {
             None => None,
             Some(
-                [BlockWorkingSet::Diagonal {
-                    working_response,
-                    working_weights,
-                }],
+                [
+                    BlockWorkingSet::Diagonal {
+                        working_response,
+                        working_weights,
+                    },
+                ],
             ) => Some(WorkingGeometry {
                 weights: working_weights.clone(),
                 response: working_response.clone(),
@@ -1675,132 +1672,124 @@ pub(crate) fn compute_joint_posterior<
     let p = precision.nrows();
     let block_constraints = collect_block_linear_constraints(family, states, specs)?;
     let ranges = block_param_ranges(specs);
-    let joint_constraints = crate::blockwise_solve::assemble_joint_linear_constraints(
-        &block_constraints,
-        &ranges,
-        p,
-    )?;
+    let joint_constraints =
+        crate::blockwise_solve::assemble_joint_linear_constraints(&block_constraints, &ranges, p)?;
 
     let block_widths = specs
         .iter()
         .map(|spec| spec.design.ncols())
         .collect::<Vec<_>>();
-    let (covariance_conditional, constrained_posterior, reported_beta) =
-        match joint_constraints {
-            None => {
-                let covariance = options
-                    .compute_covariance
-                    .then(|| {
-                        spd_covariance_from_precision(
-                            &precision,
-                            p,
-                            "full posterior precision H + S_λ + H_Φ",
-                        )
-                    })
-                    .transpose()?;
-                (covariance, None, None)
-            }
-            Some(constraints) => {
-                let constraints = constraints.to_dense()?;
-                // #2442: this route reaches the truncated posterior only through
-                // `Σ = (H + S_λ + H_Φ)⁻¹`, so it needs a PROPER ambient Gaussian.
-                // A constrained mode is not obliged to supply one. Constrained
-                // optimality requires `dᵀHd > 0` only along the FEASIBLE cone —
-                // copositivity — and the Gaussian location-scale observed
-                // information is structurally indefinite off it (its per-row
-                // block `[[κ, 2rκ],[2rκ, 2r²κ]]` has determinant `−2r²κ² < 0`,
-                // the case #2387 documents). There the cone-truncated posterior
-                // still EXISTS and is proper; this decomposition simply cannot
-                // reach its moments.
-                //
-                // So decline the COVARIANCE CHANNEL, not the fit. The
-                // optimization converged and its coefficients are honest; a
-                // derived quantity being unreachable by one particular route is
-                // not a fit-quality failure, and promoting it to one deletes a
-                // converged model.
-                //
-                // Do NOT substitute the active-face reduction here. It is the
-                // `λ → ∞` endpoint of the very formula below and reports exactly
-                // zero variance in every constraint-normal direction — the #748
-                // fabrication this path exists to remove. A visible decline
-                // beats a silent wrong number.
-                let ambient = match spd_covariance_from_precision(
-                    &precision,
-                    p,
-                    "ambient constrained-posterior precision H + S_λ + H_Φ",
-                ) {
-                    Ok(ambient) => ambient,
-                    Err(reason) => {
-                        log::warn!(
-                            "[custom-family covariance] constrained fit converged, but its \
+    let (covariance_conditional, constrained_posterior, reported_beta) = match joint_constraints {
+        None => {
+            let covariance = options
+                .compute_covariance
+                .then(|| {
+                    spd_covariance_from_precision(
+                        &precision,
+                        p,
+                        "full posterior precision H + S_λ + H_Φ",
+                    )
+                })
+                .transpose()?;
+            (covariance, None, None)
+        }
+        Some(constraints) => {
+            let constraints = constraints.to_dense()?;
+            // #2442: this route reaches the truncated posterior only through
+            // `Σ = (H + S_λ + H_Φ)⁻¹`, so it needs a PROPER ambient Gaussian.
+            // A constrained mode is not obliged to supply one. Constrained
+            // optimality requires `dᵀHd > 0` only along the FEASIBLE cone —
+            // copositivity — and the Gaussian location-scale observed
+            // information is structurally indefinite off it (its per-row
+            // block `[[κ, 2rκ],[2rκ, 2r²κ]]` has determinant `−2r²κ² < 0`,
+            // the case #2387 documents). There the cone-truncated posterior
+            // still EXISTS and is proper; this decomposition simply cannot
+            // reach its moments.
+            //
+            // So decline the COVARIANCE CHANNEL, not the fit. The
+            // optimization converged and its coefficients are honest; a
+            // derived quantity being unreachable by one particular route is
+            // not a fit-quality failure, and promoting it to one deletes a
+            // converged model.
+            //
+            // Do NOT substitute the active-face reduction here. It is the
+            // `λ → ∞` endpoint of the very formula below and reports exactly
+            // zero variance in every constraint-normal direction — the #748
+            // fabrication this path exists to remove. A visible decline
+            // beats a silent wrong number.
+            let ambient = match spd_covariance_from_precision(
+                &precision,
+                p,
+                "ambient constrained-posterior precision H + S_λ + H_Φ",
+            ) {
+                Ok(ambient) => ambient,
+                Err(reason) => {
+                    log::warn!(
+                        "[custom-family covariance] constrained fit converged, but its \
                              ambient posterior precision is not positive definite, so the \
                              inequality-truncated covariance is unreachable by this route \
                              ({reason}); reporting the fit WITHOUT a posterior covariance \
                              rather than refusing the fit or substituting the zero-variance \
                              active-face answer (#2442)"
-                        );
-                        // KNOWN GAP (#2442): a consumer cannot tell this state
-                        // apart from an unconstrained fit — both carry
-                        // `constrained_posterior: None` — and here the caller
-                        // keeps the constrained MODE as its coefficient vector
-                        // because the posterior mean is a function of the same
-                        // unreachable covariance. That is the mode/mean
-                        // conflation `FitGeometry` warns about, reachable only
-                        // on this decline. Distinguishing it properly needs a
-                        // typed decline on the wire schema rather than a third
-                        // meaning for `None`; recorded rather than papered over.
-                        return Ok(JointPosteriorAssembly {
-                            covariance_conditional: None,
-                            geometry: FitGeometry {
-                                coefficient_gauge: gam_problem::gauge::Gauge::identity(
-                                    &block_widths,
-                                ),
-                                penalized_hessian: precision.into(),
-                                constrained_posterior: None,
-                                working,
-                            },
-                            reported_beta: None,
-                        });
-                    }
-                };
-                let likelihood_score = terminal_likelihood_score(
-                    preferred_workspace,
-                    preferred_working_sets,
-                    specs,
-                    states,
+                    );
+                    // KNOWN GAP (#2442): a consumer cannot tell this state
+                    // apart from an unconstrained fit — both carry
+                    // `constrained_posterior: None` — and here the caller
+                    // keeps the constrained MODE as its coefficient vector
+                    // because the posterior mean is a function of the same
+                    // unreachable covariance. That is the mode/mean
+                    // conflation `FitGeometry` warns about, reachable only
+                    // on this decline. Distinguishing it properly needs a
+                    // typed decline on the wire schema rather than a third
+                    // meaning for `None`; recorded rather than papered over.
+                    return Ok(JointPosteriorAssembly {
+                        covariance_conditional: None,
+                        geometry: FitGeometry {
+                            coefficient_gauge: gam_problem::gauge::Gauge::identity(&block_widths),
+                            penalized_hessian: precision.into(),
+                            constrained_posterior: None,
+                            working,
+                        },
+                        reported_beta: None,
+                    });
+                }
+            };
+            let likelihood_score = terminal_likelihood_score(
+                preferred_workspace,
+                preferred_working_sets,
+                specs,
+                states,
+            )?;
+            let penalized_gradient = &penalty_score - &likelihood_score - &jeffreys_gradient;
+            let unconstrained_center = &mode - &ambient.dot(&penalized_gradient);
+            let correction =
+                gam_solve::constrained_posterior::constrained_posterior_correction_from_covariance(
+                    &ambient,
+                    &unconstrained_center,
+                    &constraints,
                 )?;
-                let penalized_gradient =
-                    &penalty_score - &likelihood_score - &jeffreys_gradient;
-                let unconstrained_center = &mode - &ambient.dot(&penalized_gradient);
-                let correction =
-                    gam_solve::constrained_posterior::constrained_posterior_correction_from_covariance(
-                        &ambient,
-                        &unconstrained_center,
-                        &constraints,
-                    )?;
-                let constrained =
-                    gam_solve::constrained_posterior::ConstrainedPosteriorGeometry {
-                        constraints,
-                        mode,
-                        unconstrained_center,
-                        correction,
-                    };
-                constrained.validate_for_dimension(p)?;
-                let reported = constrained.posterior_mean();
-                let covariance = if options.compute_covariance {
-                    Some(
-                        constrained
-                            .correction
-                            .as_ref()
-                            .map(|value| value.apply_to_covariance(&ambient))
-                            .unwrap_or(ambient),
-                    )
-                } else {
-                    None
-                };
-                (covariance, Some(constrained), Some(reported))
-            }
-        };
+            let constrained = gam_solve::constrained_posterior::ConstrainedPosteriorGeometry {
+                constraints,
+                mode,
+                unconstrained_center,
+                correction,
+            };
+            constrained.validate_for_dimension(p)?;
+            let reported = constrained.posterior_mean();
+            let covariance = if options.compute_covariance {
+                Some(
+                    constrained
+                        .correction
+                        .as_ref()
+                        .map(|value| value.apply_to_covariance(&ambient))
+                        .unwrap_or(ambient),
+                )
+            } else {
+                None
+            };
+            (covariance, Some(constrained), Some(reported))
+        }
+    };
 
     Ok(JointPosteriorAssembly {
         covariance_conditional,
@@ -1814,9 +1803,7 @@ pub(crate) fn compute_joint_posterior<
     })
 }
 
-pub(crate) fn install_reported_posterior_mean<
-    F: CustomFamily + Clone + Send + Sync + 'static,
->(
+pub(crate) fn install_reported_posterior_mean<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
     states: &mut [ParameterBlockState],
@@ -2165,10 +2152,7 @@ mod required_covariance_tests {
     struct LowerBoundedQuadratic;
 
     impl CustomFamily for LowerBoundedQuadratic {
-        fn evaluate(
-            &self,
-            states: &[ParameterBlockState],
-        ) -> Result<FamilyEvaluation, String> {
+        fn evaluate(&self, states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
             let beta = states[0].beta[0];
             Ok(FamilyEvaluation {
                 log_likelihood: -0.5 * (beta + 1.0).powi(2),

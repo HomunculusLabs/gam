@@ -73,18 +73,13 @@ fn closed_form_kernel(cos_gamma: f64, m: usize) -> f64 {
 /// The probe angles, shared by the untruncated shape comparison and the m=1
 /// truncated comparison. γ = 0 is excluded (the m=1 series diverges there and
 /// the closed form is +∞) and γ = π is a measure-zero exact match.
-const PROBE_GAMMAS: [f64; 7] = [
-    0.3,
-    0.6,
-    1.0,
-    std::f64::consts::FRAC_PI_2,
-    1.8,
-    2.4,
-    2.9,
-];
+const PROBE_GAMMAS: [f64; 7] = [0.3, 0.6, 1.0, std::f64::consts::FRAC_PI_2, 1.8, 2.4, 2.9];
 
 fn run_compare(m: usize) -> f64 {
-    assert!(m >= 2, "m=1 has no untruncated closed form; see the m=1 tests");
+    assert!(
+        m >= 2,
+        "m=1 has no untruncated closed form; see the m=1 tests"
+    );
     // Probe angles γ in (0, π); skip γ=0 and γ=π (measure zero, exact match).
     let gammas = PROBE_GAMMAS;
     // L_MAX for the spectral reference, chosen so the reference's truncation

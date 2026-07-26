@@ -50,9 +50,7 @@ use gam::families::survival::construction::{
 use gam::families::survival::location_scale::{
     SurvivalLocationScalePredictInput, predict_survival_location_scale,
 };
-use gam::test_support::reference::{
-    Column, QualityPair, pearson, relative_l2, rmse, run_python,
-};
+use gam::test_support::reference::{Column, QualityPair, pearson, relative_l2, rmse, run_python};
 use gam::types::InverseLink;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,

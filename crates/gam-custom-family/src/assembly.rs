@@ -1433,45 +1433,40 @@ pub(crate) fn joint_outer_evaluate(
     } else {
         None
     };
-    let (
-        objective,
-        grad,
-        outer_hessian,
-        criterion_components,
-        ext_mode_response_cols,
-    ) = unified_joint_cost_gradient(
-        inner,
-        specs,
-        per_block,
-        rho,
-        beta_flat,
-        hessian_op,
-        ranges,
-        total,
-        ridge,
-        rho_curvature_scale,
-        hessian_logdet_correction,
-        penalty_subspace_trace,
-        include_logdet_h,
-        include_logdet_s,
-        options,
-        rho_prior,
-        provider_box,
-        eval_mode,
-        ext_bundle.map(|bundle| bundle.scaled(rho_curvature_scale)),
-        // Option C: when the caller already has the batched first-order
-        // logdet traces, let the unified VGH path keep all mode-response,
-        // second-order, and Hessian work, but short-circuit only the
-        // soon-discarded first-order trace calls. The projected-subspace
-        // trace path is left untouched because the Hessian shares that
-        // kernel and it is not routed through HessianFactorization trace methods.
-        if has_penalty_subspace_trace {
-            None
-        } else {
-            first_order_trace_skip
-        },
-        robust_jeffreys_phi,
-    )?;
+    let (objective, grad, outer_hessian, criterion_components, ext_mode_response_cols) =
+        unified_joint_cost_gradient(
+            inner,
+            specs,
+            per_block,
+            rho,
+            beta_flat,
+            hessian_op,
+            ranges,
+            total,
+            ridge,
+            rho_curvature_scale,
+            hessian_logdet_correction,
+            penalty_subspace_trace,
+            include_logdet_h,
+            include_logdet_s,
+            options,
+            rho_prior,
+            provider_box,
+            eval_mode,
+            ext_bundle.map(|bundle| bundle.scaled(rho_curvature_scale)),
+            // Option C: when the caller already has the batched first-order
+            // logdet traces, let the unified VGH path keep all mode-response,
+            // second-order, and Hessian work, but short-circuit only the
+            // soon-discarded first-order trace calls. The projected-subspace
+            // trace path is left untouched because the Hessian shares that
+            // kernel and it is not routed through HessianFactorization trace methods.
+            if has_penalty_subspace_trace {
+                None
+            } else {
+                first_order_trace_skip
+            },
+            robust_jeffreys_phi,
+        )?;
     if !objective.is_finite() {
         log::warn!(
             "joint outer evaluation produced non-finite objective: log_likelihood={} penalty_value={} block_logdet_h={:?} block_logdet_s={:?} include_logdet_h={} include_logdet_s={} rho_curvature_scale={}",

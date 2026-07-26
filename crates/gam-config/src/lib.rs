@@ -34,9 +34,7 @@ pub enum CliHazardLoading {
     LoadedVsUnloaded,
 }
 
-const DEFAULT_LEARNED_FRAILTY_SCALE: FrailtyScale = FrailtyScale::Learned {
-    initial_sigma: 0.5,
-};
+const DEFAULT_LEARNED_FRAILTY_SCALE: FrailtyScale = FrailtyScale::Learned { initial_sigma: 0.5 };
 
 impl CtnStage1Document {
     fn into_recipe(self) -> Result<CtnStage1Recipe, String> {
@@ -557,10 +555,7 @@ fn parse_json_frailty_spec(
                         ));
                     }
                 };
-                FrailtySpec::HazardMultiplier {
-                    scale,
-                    loading,
-                }
+                FrailtySpec::HazardMultiplier { scale, loading }
             }
             "gaussian-shift" => {
                 if hazard_loading.is_some() {
@@ -674,25 +669,15 @@ mod tests {
     #[test]
     fn frailty_resolvers_preserve_fixed_vs_learned_scale_mode() {
         assert_eq!(
-            resolve_cli_frailty_spec(
-                Some(CliFrailtyKind::GaussianShift),
-                Some(0.3),
-                None,
-                "test",
-            )
-            .unwrap(),
+            resolve_cli_frailty_spec(Some(CliFrailtyKind::GaussianShift), Some(0.3), None, "test",)
+                .unwrap(),
             FrailtySpec::GaussianShift {
                 scale: FrailtyScale::Fixed { sigma: 0.3 },
             }
         );
         assert_eq!(
-            resolve_cli_frailty_spec(
-                Some(CliFrailtyKind::GaussianShift),
-                None,
-                None,
-                "test",
-            )
-            .unwrap(),
+            resolve_cli_frailty_spec(Some(CliFrailtyKind::GaussianShift), None, None, "test",)
+                .unwrap(),
             FrailtySpec::GaussianShift {
                 scale: DEFAULT_LEARNED_FRAILTY_SCALE,
             }

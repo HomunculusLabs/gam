@@ -833,7 +833,10 @@ mod tests {
         let borrowed = gauge.restrict_design(&raw_design);
         let raw_ptr = raw_design.as_ptr();
         let owned = gauge.restrict_design_owned(raw_design.clone());
-        assert_eq!(owned, borrowed, "owned and borrowed forms must agree exactly");
+        assert_eq!(
+            owned, borrowed,
+            "owned and borrowed forms must agree exactly"
+        );
         assert!(
             owned.is_standard_layout(),
             "consumers rely on the standard layout `to_owned` would have produced"
@@ -842,7 +845,8 @@ mod tests {
         // The move path: the returned buffer IS the one that was handed in.
         let moved = gauge.restrict_design_owned(raw_design);
         assert_eq!(
-            moved.as_ptr(), raw_ptr,
+            moved.as_ptr(),
+            raw_ptr,
             "a trivial section must return the caller's own buffer, not a copy of it"
         );
 
@@ -863,11 +867,9 @@ mod tests {
     #[test]
     fn owned_restrict_design_normalises_a_non_standard_layout() {
         let gauge = Gauge::identity(&[3]);
-        let column_major = Array2::<f64>::from_shape_vec(
-            (4, 3).f(),
-            (0..12).map(|v| v as f64 * 0.5).collect(),
-        )
-        .expect("column-major fixture");
+        let column_major =
+            Array2::<f64>::from_shape_vec((4, 3).f(), (0..12).map(|v| v as f64 * 0.5).collect())
+                .expect("column-major fixture");
         assert!(!column_major.is_standard_layout());
 
         let owned = gauge.restrict_design_owned(column_major.clone());

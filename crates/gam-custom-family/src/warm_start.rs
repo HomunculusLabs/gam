@@ -103,15 +103,15 @@ pub(crate) fn inner_penalized_objective(
     context: &str,
 ) -> Result<f64, String> {
     let reml_term = if include_logdet_h {
-        0.5 * inner.block_logdet_h.ok_or_else(|| {
-            format!("{context}: certified Hessian logdet is unavailable")
-        })?
+        0.5 * inner
+            .block_logdet_h
+            .ok_or_else(|| format!("{context}: certified Hessian logdet is unavailable"))?
     } else {
         0.0
     } - if include_logdet_s {
-        0.5 * inner.block_logdet_s.ok_or_else(|| {
-            format!("{context}: certified penalty logdet is unavailable")
-        })?
+        0.5 * inner
+            .block_logdet_s
+            .ok_or_else(|| format!("{context}: certified penalty logdet is unavailable"))?
     } else {
         0.0
     };
@@ -482,7 +482,10 @@ fn require_converged_outer_for_assembly(outer_converged: bool) -> Result<(), Cus
 /// dimension-scaled backward-error bound, which is exactly the judgement
 /// `se_from_covariance` owns.
 fn corrected_covariance_and_standard_errors(
-    smoothing_corrected: Option<&(Array2<f64>, gam_solve::model_types::SmoothingCorrectionMethod)>,
+    smoothing_corrected: Option<&(
+        Array2<f64>,
+        gam_solve::model_types::SmoothingCorrectionMethod,
+    )>,
     covariance_conditional: Option<&Array2<f64>>,
 ) -> Result<
     (
@@ -786,7 +789,8 @@ pub fn blockwise_fit_from_parts(
             .to_string(),
     })?;
     {
-        geom.validate_numeric_finiteness().map_err(|e| e.to_string())?;
+        geom.validate_numeric_finiteness()
+            .map_err(|e| e.to_string())?;
         let mut raw_block_starts = Vec::with_capacity(block_states.len() + 1);
         raw_block_starts.push(0usize);
         for state in &block_states {
@@ -855,35 +859,33 @@ pub fn blockwise_fit_from_parts(
     // (CTN transformation-normal, Dirichlet, …) reports `edf_total` /
     // per-block `edf` like the standard GAM path, instead of leaving inference
     // unpopulated. Optional row evidence is not part of this calculation.
-    let (edf_total, edf_by_penalty, block_edf, penalty_trace): (
-        f64,
-        Vec<f64>,
-        Vec<f64>,
-        Vec<f64>,
-    ) = match precomputed_edf {
-        // Reduced-space edf supplied by the caller (the principled path:
-        // the trace is computed where the Hessian is full rank, then
-        // reported on the raw fit — exact because the trace edf is
-        // reparameterization-invariant).
-        Some((edf_total, edf_by_penalty, block_edf, penalty_trace)) => {
-            (edf_total, edf_by_penalty, block_edf, penalty_trace)
-        }
-        // Compute from coefficient precision when the caller did not already
-        // supply the basis-invariant reduced-space traces.
-        None => {
-            let (edf_total, edf_by_penalty, block_edf, penalty_trace) =
-                custom_family_blockwise_edf(
-                    geom.penalized_hessian.as_array(),
-                    specs,
-                    &lambdas.view(),
-                )
-                .map_err(|reason| CustomFamilyError::Optimization {
-                    context: "blockwise_fit_from_parts coefficient-geometry EDF",
-                    reason: format!("{reason}; refusing to assemble a fit without EDF/inference"),
-                })?;
-            (edf_total, edf_by_penalty, block_edf, penalty_trace)
-        }
-    };
+    let (edf_total, edf_by_penalty, block_edf, penalty_trace): (f64, Vec<f64>, Vec<f64>, Vec<f64>) =
+        match precomputed_edf {
+            // Reduced-space edf supplied by the caller (the principled path:
+            // the trace is computed where the Hessian is full rank, then
+            // reported on the raw fit — exact because the trace edf is
+            // reparameterization-invariant).
+            Some((edf_total, edf_by_penalty, block_edf, penalty_trace)) => {
+                (edf_total, edf_by_penalty, block_edf, penalty_trace)
+            }
+            // Compute from coefficient precision when the caller did not already
+            // supply the basis-invariant reduced-space traces.
+            None => {
+                let (edf_total, edf_by_penalty, block_edf, penalty_trace) =
+                    custom_family_blockwise_edf(
+                        geom.penalized_hessian.as_array(),
+                        specs,
+                        &lambdas.view(),
+                    )
+                    .map_err(|reason| CustomFamilyError::Optimization {
+                        context: "blockwise_fit_from_parts coefficient-geometry EDF",
+                        reason: format!(
+                            "{reason}; refusing to assemble a fit without EDF/inference"
+                        ),
+                    })?;
+                (edf_total, edf_by_penalty, block_edf, penalty_trace)
+            }
+        };
 
     let mut lambda_offset = 0usize;
     let blocks: Vec<FittedBlock> = block_states

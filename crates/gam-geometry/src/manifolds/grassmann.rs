@@ -1041,7 +1041,10 @@ mod parallel_transport_tests {
         let t1_mat = from_flat(t1.view(), 6, 2).expect("ΓH1 as n×k");
         let zt_t1 = z.t().dot(&t1_mat);
         for v in zt_t1.iter() {
-            assert!(v.abs() < 1e-9, "ΓH1 is not horizontal at Z: ZᵀΓH1 has entry {v:.3e}");
+            assert!(
+                v.abs() < 1e-9,
+                "ΓH1 is not horizontal at Z: ZᵀΓH1 has entry {v:.3e}"
+            );
         }
     }
 

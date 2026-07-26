@@ -1287,7 +1287,9 @@ mod tests {
     use super::*;
 
     #[cfg(target_os = "linux")]
-    fn cuda_runtime_for_test(test_name: &str) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
+    fn cuda_runtime_for_test(
+        test_name: &str,
+    ) -> Option<&'static gam_gpu::device_runtime::GpuRuntime> {
         match gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto) {
             Ok(Some(runtime)) => Some(runtime),
             Ok(None) => {
@@ -2032,7 +2034,8 @@ mod tests {
         }
         let seed = PgSeed(0xDEAD_BEEF_CAFE_BABE);
 
-        let Some(runtime) = cuda_runtime_for_test("polya_gamma_dispatch_worthiness_mixed_nb") else {
+        let Some(runtime) = cuda_runtime_for_test("polya_gamma_dispatch_worthiness_mixed_nb")
+        else {
             // #2422: same split as the PG(1) gate — the ratio is device-only,
             // the decline contract and the mixed-regime moment contract are not.
             let cpu_draws = assert_draw_batch_declines_to_cpu(&shapes, &tilts, seed);

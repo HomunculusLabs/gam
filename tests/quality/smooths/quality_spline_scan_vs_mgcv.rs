@@ -14,9 +14,7 @@
 //! with an honest message — when `Rscript`/`mgcv` is genuinely absent.
 
 use csv::StringRecord;
-use gam::test_support::reference::{
-    Column, QualityPair, pad_to, r_package_available, rmse, run_r,
-};
+use gam::test_support::reference::{Column, QualityPair, pad_to, r_package_available, rmse, run_r};
 use gam::{
     FitConfig, encode_recordswith_inferred_schema, fit_spline_scan_from_formula, init_parallelism,
 };

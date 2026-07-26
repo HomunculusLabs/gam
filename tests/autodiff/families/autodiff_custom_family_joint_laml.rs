@@ -31,7 +31,6 @@ fn design_hyper_layout(
     .expect("test design-hyper layout must satisfy the typed axis contract")
 }
 
-
 fn stateless_ad_output<T>(freeze: bool, output: T) -> Vec<T> {
     match freeze {
         true | false => vec![output],

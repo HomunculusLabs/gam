@@ -328,15 +328,15 @@ fn numerical_rank(a: &Array2<f64>) -> usize {
 struct Reconstructed {
     label: &'static str,
     n: usize,
-    x_mu: Array2<f64>,      // n × p_mu (training)
-    x_sigma: Array2<f64>,   // n × p_sigma (training)
-    o_mu: Array1<f64>,      // μ affine offset (training)
-    o_sigma: Array1<f64>,   // η_σ affine offset (training)
+    x_mu: Array2<f64>,    // n × p_mu (training)
+    x_sigma: Array2<f64>, // n × p_sigma (training)
+    o_mu: Array1<f64>,    // μ affine offset (training)
+    o_sigma: Array1<f64>, // η_σ affine offset (training)
     y: Array1<f64>,
-    s_mu: Array2<f64>,      // Σ_k (λ̂_μk/c²) S_μk  (raw-space base μ penalty at ρ=0)
+    s_mu: Array2<f64>, // Σ_k (λ̂_μk/c²) S_μk  (raw-space base μ penalty at ρ=0)
     s_mu_blocks: Vec<Array2<f64>>, // individual λ̂_μk/c² S_μk (independent scaling)
-    s_sigma: Array2<f64>,   // Σ_k λ̂_σk S_σk  (raw-space σ penalty)
-    r_mu: usize,            // rank of the base μ penalty
+    s_sigma: Array2<f64>, // Σ_k λ̂_σk S_σk  (raw-space σ penalty)
+    r_mu: usize,       // rank of the base μ penalty
     // production fit references
     beta_mu: Array1<f64>,
     beta_sigma: Array1<f64>,
@@ -400,8 +400,7 @@ fn reconstruct(arm: &Arm) -> Reconstructed {
         .unwrap_or_else(|| "<no outer certificate>".to_string());
     eprintln!(
         "[{}] OUTER CONVERGENCE CERTIFICATE: {cert_summary}  (outer_iters={})",
-        arm.label,
-        fit.fit.outer_iterations
+        arm.label, fit.fit.outer_iterations
     );
     let loc = fit.fit.block_by_role(BlockRole::Location).expect("loc");
     let sca = fit.fit.block_by_role(BlockRole::Scale).expect("scale");
@@ -438,10 +437,18 @@ fn reconstruct(arm: &Arm) -> Reconstructed {
     let o_mu = md.affine_offset.clone();
     let o_sigma = nd.affine_offset.clone();
 
-    let embed = |dm: &gam::smooth::TermCollectionDesign, p: usize, lambdas: &[f64], div_c2: bool| -> Array2<f64> {
+    let embed = |dm: &gam::smooth::TermCollectionDesign,
+                 p: usize,
+                 lambdas: &[f64],
+                 div_c2: bool|
+     -> Array2<f64> {
         let mut s = Array2::<f64>::zeros((p, p));
         for (k, bp) in dm.penalties.iter().enumerate() {
-            let coef = if div_c2 { lambdas[k] / (c * c) } else { lambdas[k] };
+            let coef = if div_c2 {
+                lambdas[k] / (c * c)
+            } else {
+                lambdas[k]
+            };
             for (a, gi) in bp.col_range.clone().enumerate() {
                 for (b, gj) in bp.col_range.clone().enumerate() {
                     s[[gi, gj]] += coef * bp.local[[a, b]];
@@ -515,14 +522,14 @@ struct SolveOut {
     edf_mu: f64,
     /// negative log-likelihood value at the mode (raw Gaussian loc-scale).
     neg_ll: f64,
-    penalty_quad: f64, // β_μᵀ(e^{ρ}S_μ)β_μ + β_σᵀS_σβ_σ
-    logdet_h_joint: f64,   // log|H_joint + S|  (Cholesky/jitter — PD assumption)
-    logdet_h_abs: f64,     // Σ log|λ_i(H_joint+S)|  (abs-eigenvalue pseudo-logdet)
-    logdet_h_floor: f64,   // Σ log(max(λ_i, floor))  (smooth positive floor)
-    hj_min_eig: f64,       // min eigenvalue of H_joint+S
-    hj_neg_count: usize,   // # negative eigenvalues of H_joint+S
-    logdet_hmumu: f64,     // log|X_μᵀWX_μ + e^{ρ}S_μ|
-    logdet_a_sigma: f64,   // log|A_σ|  (nested σ curvature)
+    penalty_quad: f64,   // β_μᵀ(e^{ρ}S_μ)β_μ + β_σᵀS_σβ_σ
+    logdet_h_joint: f64, // log|H_joint + S|  (Cholesky/jitter — PD assumption)
+    logdet_h_abs: f64,   // Σ log|λ_i(H_joint+S)|  (abs-eigenvalue pseudo-logdet)
+    logdet_h_floor: f64, // Σ log(max(λ_i, floor))  (smooth positive floor)
+    hj_min_eig: f64,     // min eigenvalue of H_joint+S
+    hj_neg_count: usize, // # negative eigenvalues of H_joint+S
+    logdet_hmumu: f64,   // log|X_μᵀWX_μ + e^{ρ}S_μ|
+    logdet_a_sigma: f64, // log|A_σ|  (nested σ curvature)
 }
 
 /// σ from η in the raw-exp convention: σ = c·FLOOR + exp(η).
@@ -543,13 +550,17 @@ struct MuProfile {
     beta_mu: Array1<f64>,
     sigma: Array1<f64>,
     kappa: Array1<f64>,
-    b: Array1<f64>,     // r²/σ²
+    b: Array1<f64>, // r²/σ²
     edf_mu: f64,
     hmumu: Array2<f64>, // X_μᵀWX_μ
     h_lev: Array1<f64>, // per-row leverage h_i = W_i x_μiᵀ(H_μμ+λS_μ)⁻¹x_μi
 }
 
-fn profile_mu(rec: &Reconstructed, beta_sigma: &Array1<f64>, s_mu_scaled: &Array2<f64>) -> MuProfile {
+fn profile_mu(
+    rec: &Reconstructed,
+    beta_sigma: &Array1<f64>,
+    s_mu_scaled: &Array2<f64>,
+) -> MuProfile {
     let n = rec.n;
     let eta_sigma = rec.x_sigma.dot(beta_sigma) + &rec.o_sigma;
     let sigma: Array1<f64> = eta_sigma.mapv(|e| sigma_of(e, rec.c));
@@ -576,7 +587,9 @@ fn profile_mu(rec: &Reconstructed, beta_sigma: &Array1<f64>, s_mu_scaled: &Array
     let beta_mu = chol_solve_vec(&l_pen, &rhs);
     let mu = rec.x_mu.dot(&beta_mu) + &rec.o_mu;
     let resid = &rec.y - &mu;
-    let b: Array1<f64> = (0..n).map(|i| (resid[i] * resid[i]) / (sigma[i] * sigma[i])).collect();
+    let b: Array1<f64> = (0..n)
+        .map(|i| (resid[i] * resid[i]) / (sigma[i] * sigma[i]))
+        .collect();
     let edf_mu = trace_ainv_b(&l_pen, &hmumu);
     // leverage h_i = W_i x_μiᵀ (H_μμ+λS_μ)⁻¹ x_μi
     let quad = row_quadratic_forms(&l_pen, &rec.x_mu);
@@ -614,7 +627,12 @@ fn sigma_gradient(
     g
 }
 
-fn solve_mode(rec: &Reconstructed, rho_mu: f64, use_h: bool, beta_sigma0: &Array1<f64>) -> SolveOut {
+fn solve_mode(
+    rec: &Reconstructed,
+    rho_mu: f64,
+    use_h: bool,
+    beta_sigma0: &Array1<f64>,
+) -> SolveOut {
     let s_mu_scaled = &rec.s_mu * rho_mu.exp();
     solve_mode_with_penalty(rec, &s_mu_scaled, use_h, beta_sigma0)
 }
@@ -627,7 +645,10 @@ fn logdet_pseudo(s: &Array2<f64>) -> f64 {
     if max == 0.0 {
         return 0.0;
     }
-    ev.iter().filter(|&&v| v > 1e-8 * max).map(|&v| v.ln()).sum()
+    ev.iter()
+        .filter(|&&v| v > 1e-8 * max)
+        .map(|&v| v.ln())
+        .sum()
 }
 
 fn solve_mode_with_penalty(
@@ -808,11 +829,7 @@ fn solve_mode_with_penalty(
 /// `rho` (λ_μk = λ̂_μk·e^{rho_k}), λ_σ fixed. Includes the exact −½log|S_μ|₊
 /// pseudo-determinant so the value is comparable across the 2-D penalty space.
 /// Returns (V, edf_μ, converged β_σ).
-fn full_v_joint(
-    rec: &Reconstructed,
-    rho: &[f64],
-    bs0: &Array1<f64>,
-) -> (f64, f64, Array1<f64>) {
+fn full_v_joint(rec: &Reconstructed, rho: &[f64], bs0: &Array1<f64>) -> (f64, f64, Array1<f64>) {
     let p_mu = rec.x_mu.ncols();
     let mut s_mu = Array2::<f64>::zeros((p_mu, p_mu));
     for (k, blk) in rec.s_mu_blocks.iter().enumerate() {
@@ -938,11 +955,9 @@ fn run_arm(arm: &Arm) {
         let v_abs = base + 0.5 * j.logdet_h_abs;
         let v_floor = base + 0.5 * j.logdet_h_floor;
         // Nested criterion, ABS pseudo-logdet on the μ-block + σ curvature.
-        let v_nested = nst.neg_ll
-            + 0.5 * nst.penalty_quad
-            + 0.5 * nst.logdet_hmumu
-            + 0.5 * nst.logdet_a_sigma
-            - 0.5 * (rec.r_mu as f64) * rho;
+        let v_nested =
+            nst.neg_ll + 0.5 * nst.penalty_quad + 0.5 * nst.logdet_hmumu + 0.5 * nst.logdet_a_sigma
+                - 0.5 * (rec.r_mu as f64) * rho;
         let rmse_j = grid_mu_rmse(&rec, &j.beta_mu);
         let rmse_n = grid_mu_rmse(&rec, &nst.beta_mu);
         assert!(

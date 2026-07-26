@@ -647,17 +647,13 @@ impl ExtCoordBundle {
             Box::new(move |i: usize, j: usize| {
                 callback(i, j).map(|pair| scale_hypercoord_pair(pair, scale))
             })
-                as Box<
-                    dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync,
-                >
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
         });
         let rho_ext_fn = self.rho_ext_fn.map(|callback| {
             Box::new(move |i: usize, j: usize| {
                 callback(i, j).map(|pair| scale_hypercoord_pair(pair, scale))
             })
-                as Box<
-                    dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync,
-                >
+                as Box<dyn Fn(usize, usize) -> Result<HyperCoordPair, String> + Send + Sync>
         });
         let drift_fn = self.drift_fn.map(|callback| {
             Box::new(move |ext_idx: usize, direction: &Array1<f64>| {

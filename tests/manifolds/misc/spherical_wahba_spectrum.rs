@@ -69,9 +69,14 @@ fn wahba_kernel_spectrum_orders_1_to_4() {
 
     for m in 1..=4usize {
         let kernel = kernel_for_order(m);
-        let kmat =
-            spherical_wahba_kernel_matrix_with_kind(centers.view(), centers.view(), m, true, kernel)
-                .unwrap_or_else(|e| panic!("{} failed: {:?}", "kernel matrix computation", e));
+        let kmat = spherical_wahba_kernel_matrix_with_kind(
+            centers.view(),
+            centers.view(),
+            m,
+            true,
+            kernel,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "kernel matrix computation", e));
 
         // symmetry diagnostic
         let mut max_asym = 0.0_f64;

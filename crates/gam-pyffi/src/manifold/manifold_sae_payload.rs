@@ -345,9 +345,9 @@ impl ManifoldSaePayload {
         }
         for (index, plan) in payload.geometry_plans.iter().enumerate() {
             let latent_dim = plan.latent_dim();
-            let basis_size = plan
-                .basis_size()
-                .map_err(|error| format!("ManifoldSAE.from_json: geometry_plans[{index}]: {error}"))?;
+            let basis_size = plan.basis_size().map_err(|error| {
+                format!("ManifoldSAE.from_json: geometry_plans[{index}]: {error}")
+            })?;
             let coords = &payload.coords[index];
             if coords.len() != n_obs
                 || coords.iter().any(|row| {
@@ -376,9 +376,10 @@ impl ManifoldSaePayload {
                     row.len() != latent_dim || !row.iter().all(|value| value.is_finite())
                 })
                 || atom.decoder_coefficients.len() != basis_size
-                || atom.decoder_coefficients.iter().any(|row| {
-                    row.len() != p_out || !row.iter().all(|value| value.is_finite())
-                })
+                || atom
+                    .decoder_coefficients
+                    .iter()
+                    .any(|row| row.len() != p_out || !row.iter().all(|value| value.is_finite()))
             {
                 return Err(format!(
                     "ManifoldSAE.from_json: atoms[{index}] numeric shapes must agree with its ({n_obs}, {latent_dim}, {basis_size}, {p_out}) geometry plan"
@@ -511,10 +512,7 @@ mod manifold_sae_payload_serde_tests {
         let mut invalid_geometry = load_value("golden_full.json");
         invalid_geometry["geometry_plans"][0]["latent_dim"] = Value::from(2);
         let error = roundtrip_json(&serde_json::to_string(&invalid_geometry).unwrap()).unwrap_err();
-        assert!(
-            error.contains("invalid atom geometry tuple"),
-            "{error}"
-        );
+        assert!(error.contains("invalid atom geometry tuple"), "{error}");
 
         let mut assignment_alias = load_value("golden_full.json");
         assignment_alias["assignment_label"] = Value::String("TopK".to_string());

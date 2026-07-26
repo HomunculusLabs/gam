@@ -165,7 +165,11 @@ fn zz_probe_bygroup_inner_stall_trace() {
     for (label, ok, head) in &verdicts {
         eprintln!(
             "[zz1561bg] {label} -> {}",
-            if *ok { "FIT".to_string() } else { format!("REFUSE ({head})") }
+            if *ok {
+                "FIT".to_string()
+            } else {
+                format!("REFUSE ({head})")
+            }
         );
     }
     eprintln!("[zz1561bg] done");

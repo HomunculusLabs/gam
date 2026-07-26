@@ -123,7 +123,11 @@ fn write_survival_csv(path: &Path) {
         let exit = t_latent.min(censor);
         let event = if t_latent <= censor { 1.0 } else { 0.0 };
         writer
-            .write_record([format!("{exit:.10}"), format!("{event:.1}"), format!("{x:.10}")])
+            .write_record([
+                format!("{exit:.10}"),
+                format!("{event:.1}"),
+                format!("{x:.10}"),
+            ])
             .expect("write survival row");
     }
     writer.flush().expect("flush survival csv");

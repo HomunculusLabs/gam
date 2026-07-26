@@ -372,7 +372,11 @@ fn max_abs_rel_diff(recon: &Array1<f64>, target: &Array1<f64>) -> (f64, f64) {
         .zip(target.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
-    let scale = target.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1e-12);
+    let scale = target
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0f64, f64::max)
+        .max(1e-12);
     (linf, linf / scale)
 }
 
@@ -417,7 +421,10 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
         .fit
         .block_by_role(BlockRole::Location)
         .expect("location block");
-    let scale_block = fit.fit.block_by_role(BlockRole::Scale).expect("scale block");
+    let scale_block = fit
+        .fit
+        .block_by_role(BlockRole::Scale)
+        .expect("scale block");
     let beta_mu = loc_block.beta.clone();
     let beta_sigma = scale_block.beta.clone();
     let lambda_mu: Vec<f64> = loc_block.lambdas.to_vec();
@@ -480,23 +487,44 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
     let (x_grid_sig_b, off_grid_sig_b) = make_grid_sig_design(&d.grid_b, 1.0);
 
     // Grid μ-RMSE-to-truth for a μ coefficient vector, per group.
-    let grid_mu_rmse_a =
-        |beta: &Array1<f64>| rmse(&(x_grid_mu_a.dot(beta) + &off_grid_mu_a).to_vec(), &d.truth_mu_a);
-    let grid_mu_rmse_b =
-        |beta: &Array1<f64>| rmse(&(x_grid_mu_b.dot(beta) + &off_grid_mu_b).to_vec(), &d.truth_mu_b);
+    let grid_mu_rmse_a = |beta: &Array1<f64>| {
+        rmse(
+            &(x_grid_mu_a.dot(beta) + &off_grid_mu_a).to_vec(),
+            &d.truth_mu_a,
+        )
+    };
+    let grid_mu_rmse_b = |beta: &Array1<f64>| {
+        rmse(
+            &(x_grid_mu_b.dot(beta) + &off_grid_mu_b).to_vec(),
+            &d.truth_mu_b,
+        )
+    };
     // Grid logσ-RMSE-to-truth for a σ coefficient vector, per group.
     let logsig = |x: &Array2<f64>, off: &Array1<f64>, beta: &Array1<f64>| -> Vec<f64> {
         let eta = x.dot(beta) + off;
-        eta.iter().map(|&e| (c * LOGB_SIGMA_FLOOR + e.exp()).ln()).collect()
+        eta.iter()
+            .map(|&e| (c * LOGB_SIGMA_FLOOR + e.exp()).ln())
+            .collect()
     };
-    let grid_logsig_rmse_a =
-        |beta: &Array1<f64>| rmse(&logsig(&x_grid_sig_a, &off_grid_sig_a, beta), &d.truth_logsig_a);
-    let grid_logsig_rmse_b =
-        |beta: &Array1<f64>| rmse(&logsig(&x_grid_sig_b, &off_grid_sig_b, beta), &d.truth_logsig_b);
+    let grid_logsig_rmse_a = |beta: &Array1<f64>| {
+        rmse(
+            &logsig(&x_grid_sig_a, &off_grid_sig_a, beta),
+            &d.truth_logsig_a,
+        )
+    };
+    let grid_logsig_rmse_b = |beta: &Array1<f64>| {
+        rmse(
+            &logsig(&x_grid_sig_b, &off_grid_sig_b, beta),
+            &d.truth_logsig_b,
+        )
+    };
 
     // ---- frozen σ̂ and truth-σ weights (raw units) ---------------------------
     let eta_sigma = x_sig.dot(&beta_sigma) + &sig_offset;
-    let sigma_hat: Vec<f64> = eta_sigma.iter().map(|&e| c * LOGB_SIGMA_FLOOR + e.exp()).collect();
+    let sigma_hat: Vec<f64> = eta_sigma
+        .iter()
+        .map(|&e| c * LOGB_SIGMA_FLOOR + e.exp())
+        .collect();
     let w_hat: Vec<f64> = sigma_hat.iter().map(|&s| 1.0 / (s * s)).collect();
     let w_true: Vec<f64> = (0..n)
         .map(|i| {
@@ -637,7 +665,10 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
             let beta_t = mu_solve_at(&xtwx_true, &xtwr_true, &scale);
             let rh = rmse_of(&beta_h);
             let rt = rmse_of(&beta_t);
-            assert!(rh.is_finite() && rt.is_finite(), "non-finite μ-RMSE at rho={rho}");
+            assert!(
+                rh.is_finite() && rt.is_finite(),
+                "non-finite μ-RMSE at rho={rho}"
+            );
             if rh < best_hat.0 {
                 best_hat = (rh, rho);
             }
@@ -690,8 +721,14 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
          (gain {:.1}% of prod {prod_mu_rmse_b:.4}) | truth-σ ρ*={rho_b_true:+.2} rmse*={rmse_b_true:.4}",
         100.0 * gain_b
     );
-    eprintln!("[zz1561:bygroup] μ VERDICT A: {}", verdict_mu(rho_a_hat, gain_a));
-    eprintln!("[zz1561:bygroup] μ VERDICT B: {}", verdict_mu(rho_b_hat, gain_b));
+    eprintln!(
+        "[zz1561:bygroup] μ VERDICT A: {}",
+        verdict_mu(rho_a_hat, gain_a)
+    );
+    eprintln!(
+        "[zz1561:bygroup] μ VERDICT B: {}",
+        verdict_mu(rho_b_hat, gain_b)
+    );
     let h2_a = if (rho_a_hat - rho_a_true).abs() < 0.75 {
         "H2 UNLIKELY (σ̂ vs σ_true μ-optima agree — biased weights not the driver)"
     } else {
@@ -766,34 +803,32 @@ fn zz_measure_1561_bygroup_oracle_lambda_sweep() {
         grid_logsig_rmse_b(&beta_sig_recon)
     );
 
-    let sweep_sig = |group: &str,
-                     sweep_idx: usize,
-                     rmse_of: &dyn Fn(&Array1<f64>) -> f64|
-     -> (f64, f64) {
-        // Same widened upper bound as the μ sweep: the σ block has to be driven
-        // onto its null space inside the window or a flat curve is unreadable.
-        let n_grid = 129usize;
-        let (rho_lo, rho_hi) = (-8.0, 24.0);
-        let mut best = (f64::INFINITY, 0.0f64);
-        eprintln!(
-            "[zz1561:bygroup] σ sweep group {group} (λ_{{σ,{group}}} scaled):  rho | logσ-rmse"
-        );
-        for g in 0..n_grid {
-            let rho = rho_lo + (rho_hi - rho_lo) * (g as f64) / ((n_grid - 1) as f64);
-            let mut scale = vec![1.0; lambda_sigma.len()];
-            scale[sweep_idx] = rho.exp();
-            let beta = sig_solve_at(&scale);
-            let r = rmse_of(&beta);
-            assert!(r.is_finite(), "non-finite logσ-RMSE at rho={rho}");
-            if r < best.0 {
-                best = (r, rho);
+    let sweep_sig =
+        |group: &str, sweep_idx: usize, rmse_of: &dyn Fn(&Array1<f64>) -> f64| -> (f64, f64) {
+            // Same widened upper bound as the μ sweep: the σ block has to be driven
+            // onto its null space inside the window or a flat curve is unreadable.
+            let n_grid = 129usize;
+            let (rho_lo, rho_hi) = (-8.0, 24.0);
+            let mut best = (f64::INFINITY, 0.0f64);
+            eprintln!(
+                "[zz1561:bygroup] σ sweep group {group} (λ_{{σ,{group}}} scaled):  rho | logσ-rmse"
+            );
+            for g in 0..n_grid {
+                let rho = rho_lo + (rho_hi - rho_lo) * (g as f64) / ((n_grid - 1) as f64);
+                let mut scale = vec![1.0; lambda_sigma.len()];
+                scale[sweep_idx] = rho.exp();
+                let beta = sig_solve_at(&scale);
+                let r = rmse_of(&beta);
+                assert!(r.is_finite(), "non-finite logσ-RMSE at rho={rho}");
+                if r < best.0 {
+                    best = (r, rho);
+                }
+                if g % 4 == 0 || g == n_grid - 1 {
+                    eprintln!("[zz1561:bygroup]   {group} {rho:6.2} |  {r:.5}");
+                }
             }
-            if g % 4 == 0 || g == n_grid - 1 {
-                eprintln!("[zz1561:bygroup]   {group} {rho:6.2} |  {r:.5}");
-            }
-        }
-        (best.1, best.0)
-    };
+            (best.1, best.0)
+        };
 
     let (rho_sig_a, rmse_sig_a) = sweep_sig("A", sig_a_idx, &grid_logsig_rmse_a);
     let (rho_sig_b, rmse_sig_b) = sweep_sig("B", sig_b_idx, &grid_logsig_rmse_b);

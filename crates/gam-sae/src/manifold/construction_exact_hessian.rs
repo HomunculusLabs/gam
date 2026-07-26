@@ -326,7 +326,208 @@ struct PatchDResidualCtx<'a> {
     inv_tau: f64,
 }
 
+/// #2500 — what the assignment prior's sparse log-strength curvature operator
+/// `∂H_tt/∂ρ_sparse` IS for the family in play, produced by the single authority
+/// [`SaeManifoldTerm::sparse_logit_curvature_rho_derivative`].
+///
+/// Before this type existed, three channels each re-derived that operator by
+/// matching on [`AssignmentMode`] independently — the arrow assembly (which
+/// INSTALLS it into `block.htt`), ch4's Daleckii–Krein Hessian, and ch5's
+/// forward-sensitivity operator map — and the two derivative channels shared a
+/// catch-all `_ =>` refusal. The catch-all is what made `ThresholdGate` unfittable
+/// on the dense route: its operator was never hard, it was simply absent from an
+/// enumeration, while `assignment_prior_log_strength_hdiag_weighted` had been
+/// computing it exactly the whole time for the gradient's trace channel. One
+/// quantity with two implementations, and the matrix-valued one declined the case
+/// the trace-valued one already computed.
+///
+/// The three outcomes are exhaustive over `AssignmentMode`, so a family added
+/// later cannot fall through to a silently-zero operator: it has to name itself
+/// here, and each consumer then decides what to do with the answer.
+enum SparseLogitCurvature {
+    /// There is no operator to install and a zero row is CORRECT: no sparse outer
+    /// coordinate at all (`TopK` is `FixedSupport`), no free logit (`K ≤ 1`
+    /// softmax), or a frozen/ungated routing whose prior is inert.
+    Inert,
+    /// The operator is DIAGONAL on the cache's global logit `t`-slots, as
+    /// `(global slot, ∂H_{slot,slot}/∂ρ_sparse)`. Every installed assignment-prior
+    /// curvature is diagonal in the free-logit chart — softmax writes the
+    /// Gershgorin majorizer `D = diag(Σ_j|H_kj|)` (`row_psd_majorizer` is a
+    /// diagonal matrix), threshold-gate writes the exact per-logit
+    /// `w·λ·s·(1−2a)/τ²` — and both are degree-one in `λ_sparse = e^{ρ_sparse}`,
+    /// so the derivative equals the installed entry itself.
+    Diagonal(Vec<(usize, f64)>),
+    /// The operator is NOT diagonal and is owned elsewhere: the ordered
+    /// Beta--Bernoulli integrated marginal couples every row in an atom column, so
+    /// `∂A/∂ρ_sparse` is a cross-row Hessian supplied by
+    /// [`SaeManifoldTerm::dense_exact_a_ordered_bb_sparse_trace`]. A consumer that
+    /// has that channel emits nothing here; a consumer that does NOT must refuse,
+    /// because a diagonal-only stand-in would be a wrong operator rather than a
+    /// missing one.
+    CrossRowOwnedElsewhere,
+}
+
 impl SaeManifoldTerm {
+    /// #2500 — the ONE authority for `∂H_tt/∂ρ_sparse` on the free-logit slots.
+    /// See [`SparseLogitCurvature`] for why this exists and what each outcome
+    /// obliges a consumer to do.
+    ///
+    /// Both diagonal families are degree-one in `λ_sparse = e^{ρ_sparse}` at a
+    /// frozen inner state, so the derivative IS the installed entry:
+    ///
+    /// * softmax — `D_k = Σ_j soft|scale·H_kj|` with `scale = λ_sparse·s/τ²`; the
+    ///   soft-abs seam is positively homogeneous of degree one in `scale`
+    ///   (`ε_k² = ε₀²Σ_l H_kl²` scales with it), and its `sign(H_kj)` kink lives in
+    ///   the LOGITS, which a ρ perturbation never moves;
+    /// * threshold gate — `w·λ_sparse·s·(1−2a)/τ²` with `a = σ((ℓ−θ)/τ)`,
+    ///   `s = a(1−a)`, read from `assignment_prior_log_strength_hdiag_weighted`,
+    ///   which is the SAME builder `assignment_prior_grad_hdiag_weighted` supplies
+    ///   to the arrow assembly and already carries the `#991` row weights, the
+    ///   `#Bug4` fixed-logit mask, and the frozen-routing zeroing.
+    ///
+    /// Note the threshold-gate operator is SIGNED (`1−2a` flips at the threshold):
+    /// unlike softmax's Gershgorin radius and the ARD `max(·,0)` majorizer, no
+    /// clamp is interposed on this family — the assembly installs the exact prior
+    /// curvature (`construction_arrow_schur_assembly.rs`, the `raw` branch), so the
+    /// exact-minus-majorizer delta `ΔC` has no threshold-gate part and
+    /// `∂A/∂ρ_sparse = ∂B/∂ρ_sparse` here.
+    fn sparse_logit_curvature_rho_derivative(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+    ) -> Result<SparseLogitCurvature, String> {
+        if rho.sparse_flat_index().is_none() {
+            return Ok(SparseLogitCurvature::Inert);
+        }
+        let k_atoms = self.k_atoms();
+        let row_w = self.row_loss_weights.as_deref();
+        let assignment_dim = self.assignment.assignment_coord_dim();
+        // Only hard-TopK mints a compact row layout, and TopK carries no sparse
+        // coordinate — but a FORCED layout can still reach here, and the compact
+        // slot map is not the dense `base + atom` chart these operators are written
+        // in. Refuse for any family rather than write into the wrong slots.
+        let compact_layout_refusal = || {
+            format!(
+                "sparse_logit_curvature_rho_derivative: the compact top-k row layout is not \
+                 covered by the sparse log-strength operator ({}); refusing to assemble a \
+                 curvature operator with an unmodelled sparse row",
+                self.assignment.mode.family_label()
+            )
+        };
+        match self.assignment.mode {
+            AssignmentMode::TopK { .. } => Ok(SparseLogitCurvature::Inert),
+            AssignmentMode::OrderedBetaBernoulli { .. } => {
+                Ok(SparseLogitCurvature::CrossRowOwnedElsewhere)
+            }
+            // K ≤ 1 softmax has no free logit: the gradient's sparse logdet trace
+            // is identically zero, so a zero operator is the CORRECT curvature.
+            AssignmentMode::Softmax { .. } if k_atoms <= 1 => Ok(SparseLogitCurvature::Inert),
+            AssignmentMode::Softmax {
+                temperature,
+                sparsity,
+            } => {
+                if self.last_row_layout.is_some() {
+                    return Err(compact_layout_refusal());
+                }
+                let inv_tau = 1.0 / temperature;
+                let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
+                let penalty = gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
+                    k_atoms,
+                    temperature,
+                );
+                let mut entries = Vec::new();
+                for row in 0..self.n_obs() {
+                    let w_row = row_w.map_or(1.0, |w| w[row]);
+                    let base = cache.row_offsets[row];
+                    let logit_dim = assignment_dim.min(cache.row_dims[row]);
+                    let row_logits: Vec<f64> = (0..k_atoms)
+                        .map(|atom| self.assignment.logits[[row, atom]])
+                        .collect();
+                    let d = penalty.psd_majorizer_abs_row_sums(&row_logits, scale);
+                    for atom in 0..logit_dim {
+                        entries.push((base + atom, w_row * d[atom]));
+                    }
+                }
+                Ok(SparseLogitCurvature::Diagonal(entries))
+            }
+            AssignmentMode::ThresholdGate { .. } => {
+                if self.last_row_layout.is_some() {
+                    return Err(compact_layout_refusal());
+                }
+                let hdiag = crate::assignment::assignment_prior_log_strength_hdiag_weighted(
+                    &self.assignment,
+                    rho,
+                    row_w,
+                )?;
+                if hdiag.is_empty() {
+                    return Ok(SparseLogitCurvature::Inert);
+                }
+                let mut entries = Vec::new();
+                for row in 0..self.n_obs() {
+                    let base = cache.row_offsets[row];
+                    let logit_dim = assignment_dim.min(cache.row_dims[row]);
+                    for atom in 0..logit_dim {
+                        entries.push((base + atom, hdiag[row * k_atoms + atom]));
+                    }
+                }
+                Ok(SparseLogitCurvature::Diagonal(entries))
+            }
+        }
+    }
+
+    /// #2500 — push every per-flat-coordinate curvature operator through the
+    /// per-row spectral-deflation map's differential in place, so the map returns
+    /// `∂Φ(H_raw)/∂ρ` (the derivative of the operator the factors carry) rather
+    /// than `∂H_raw/∂ρ`. A row with no deflation is untouched, bit-for-bit.
+    ///
+    /// The map is block-diagonal over rows and acts on the `t`-slots only, so the
+    /// β border and the decoder-smoothness operators (which live entirely in the
+    /// β block) pass through unchanged.
+    fn apply_row_deflation_map_derivative(
+        &self,
+        cache: &ArrowFactorCache,
+        operators: &mut std::collections::BTreeMap<usize, Array2<f64>>,
+    ) -> Result<(), String> {
+        if operators.is_empty() {
+            return Ok(());
+        }
+        for row in 0..cache.n_rows() {
+            let dirs = cache
+                .deflated_row_directions
+                .get(row)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref);
+            if dirs.is_empty() && spectrum.is_none() {
+                continue;
+            }
+            let q = cache.row_dims[row];
+            let base = cache.row_offsets[row];
+            for operator in operators.values_mut() {
+                let block = operator.slice(s![base..base + q, base..base + q]).to_owned();
+                if block.iter().all(|value| *value == 0.0) {
+                    continue;
+                }
+                let Some(mapped) = Self::row_deflation_map_derivative(&block, dirs, spectrum)
+                else {
+                    return Err(format!(
+                        "apply_row_deflation_map_derivative: row {row} reports spectral \
+                         deflation but its eigenbasis is not {q}×{q}; refusing to contract a \
+                         curvature operator against a conditioned block whose deflation-map \
+                         derivative cannot be formed"
+                    ));
+                };
+                operator
+                    .slice_mut(s![base..base + q, base..base + q])
+                    .assign(&mapped);
+            }
+        }
+        Ok(())
+    }
+
     /// #1418: apply the EXACT stationarity-Jacobian correction `ΔC·v = (A − B)·v`
     /// to a joint `(t, β)` vector, matrix-free via row-local work and ordered
     /// prior column reductions.
@@ -986,51 +1187,23 @@ impl SaeManifoldTerm {
             }
         }
 
-        // Sparse (assignment log-strength): the softmax Gershgorin PSD majorizer
-        // `w_row·diag(Σ_j|H_kj|)` at `scale = λ_sparse·s/τ²`, written into the
-        // logit slots — degree-one in `λ_sparse = e^ρ` exactly like smoothing/ARD.
+        // Sparse (assignment log-strength): whatever the single authority says the
+        // installed logit-slot curvature's ρ-derivative is (#2500). Softmax reads
+        // its Gershgorin majorizer `w_row·diag(Σ_j|H_kj|)`, the threshold gate its
+        // exact `w_row·λ·s·(1−2a)/τ²` — both degree-one in `λ_sparse = e^ρ` exactly
+        // like smoothing/ARD, so the derivative is the installed entry itself.
         if let Some(sparse_flat) = rho.sparse_flat_index() {
-            let k_atoms = self.k_atoms();
-            match self.assignment.mode {
-                AssignmentMode::Softmax {
-                    temperature,
-                    sparsity,
-                } if k_atoms > 1 => {
-                    if self.last_row_layout.is_some() {
-                        return Err(
-                            "penalty_curvature_operators_by_flat: the compact top-k softmax row \
-                             layout is not covered by the sparse log-strength operator; refusing \
-                             to assemble a curvature operator with an unmodelled sparse row"
-                                .to_string(),
-                        );
-                    }
-                    let inv_tau = 1.0 / temperature;
-                    let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
-                    let penalty =
-                        gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                            k_atoms,
-                            temperature,
-                        );
-                    let assignment_dim = self.assignment.assignment_coord_dim();
+            match self.sparse_logit_curvature_rho_derivative(rho, cache)? {
+                SparseLogitCurvature::Inert => {}
+                SparseLogitCurvature::Diagonal(entries) => {
                     let c = c_by_flat
                         .entry(sparse_flat)
                         .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                    for row in 0..self.n_obs() {
-                        let w_row = row_w.map_or(1.0, |w| w[row]);
-                        let base = cache.row_offsets[row];
-                        let q = cache.row_dims[row];
-                        let logit_dim = assignment_dim.min(q);
-                        let row_logits: Vec<f64> = (0..k_atoms)
-                            .map(|atom| self.assignment.logits[[row, atom]])
-                            .collect();
-                        let d = penalty.psd_majorizer_abs_row_sums(&row_logits, scale);
-                        for atom in 0..logit_dim {
-                            c[[base + atom, base + atom]] += w_row * d[atom];
-                        }
+                    for (slot, value) in entries {
+                        c[[slot, slot]] += value;
                     }
                 }
-                AssignmentMode::Softmax { .. } => {}
-                AssignmentMode::OrderedBetaBernoulli { .. } => {
+                SparseLogitCurvature::CrossRowOwnedElsewhere => {
                     // #2330: the ordered-Beta–Bernoulli sparse ∂A/∂ρ_sparse is the
                     // EXACT integrated-marginal logit Hessian (cross-row), supplied
                     // by `dense_exact_a_ordered_bb_sparse_trace`, NOT a diagonal
@@ -1038,16 +1211,25 @@ impl SaeManifoldTerm {
                     // (the dense-A gradient adds that coordinate's trace directly)
                     // rather than a wrong diagonal-only operator.
                 }
-                _ => {
-                    return Err(
-                        "penalty_curvature_operators_by_flat: rho carries a sparse log-strength \
-                         coordinate under an assignment prior whose ∂H/∂ρ_sparse operator this \
-                         map does not model; refusing to assemble a silently-zero sparse operator"
-                            .to_string(),
-                    );
-                }
             }
         }
+
+        // #2500 — every operator above differentiates the RAW per-row block, but
+        // the block the arrow factors carry (and hence `apply_cached_arrow_hessian`,
+        // `A = B + ΔC`, and every inverse built on them) is the spectrally
+        // CONDITIONED `Φ(H_raw)`: each eigen-direction at or below the deflation
+        // floor — which INCLUDES every negative one — is replaced by the
+        // ρ-independent unit stiffness. So the derivative of the installed operator
+        // is the Daleckii–Krein differential `DΦ[∂H_raw/∂ρ]`, not `∂H_raw/∂ρ`, and a
+        // raw operator over-claims curvature on exactly the deflated directions.
+        //
+        // This is the operator form of the correction the B-majorizer trace channels
+        // already subtract (`deflation_block_correction`), applied here once for
+        // EVERY coordinate rather than per channel — measured on a straddling
+        // threshold-gate fixture the raw operator missed the dense exact-A sparse
+        // logdet trace by 13% (0.4401 analytic vs 0.5081 FD) with all ten rows
+        // deflated, and matched to nine digits with none.
+        self.apply_row_deflation_map_derivative(cache, &mut c_by_flat)?;
 
         Ok(c_by_flat)
     }
@@ -2728,18 +2910,29 @@ impl SaeManifoldTerm {
             }
         }
 
-        // Sparse (assignment log-strength). For softmax the gradient's
-        // `explicit[sparse]` is `assignment_prior_log_strength_derivative_weighted`
-        // = the prior VALUE = `λ_sparse · E(logits)` (assignment.rs:1690), which is
-        // degree-one in `λ_sparse = e^ρ_sparse` (the concentration multiplies the
-        // logit penalty linearly). So `∂²/∂ρ_sparse² = ∂/∂ρ_sparse(λ_sparse·E) =
-        // λ_sparse·E` — the SAME scalar the gradient reports — and there is no cross
-        // term (it depends only on `λ_sparse` and the frozen logits, not on
-        // smooth/ARD). K=1 softmax and frozen routing return 0, so the diagonal is
-        // correctly zero there.
+        // Sparse (assignment log-strength). The gradient's `explicit[sparse]` is
+        // `assignment_prior_log_strength_derivative_weighted`, which for BOTH
+        // penalty-weight families whose concentration multiplies the logit penalty
+        // linearly returns the prior VALUE:
+        //
+        //   softmax          λ_sparse·s · E_entropy(logits)          (assignment.rs, `penalty.value`)
+        //   threshold gate   λ_sparse · Σ_i w_i·σ((ℓ_i−θ)/τ)         (assignment.rs, `sparsity_strength * acc`)
+        //
+        // Both are degree-one in `λ_sparse = e^ρ_sparse`, so
+        // `∂²/∂ρ_sparse² = ∂/∂ρ_sparse(λ_sparse·E) = λ_sparse·E` — the SAME scalar
+        // the gradient reports — and there is no cross term (it depends only on
+        // `λ_sparse` and the frozen logits, not on smooth/ARD). K=1 softmax and
+        // frozen routing return 0, so the diagonal is correctly zero there. TopK
+        // mints no sparse coordinate at all.
+        //
+        // Ordered Beta--Bernoulli is the one family this identity does NOT cover:
+        // under a learnable concentration the sparse slot holds `log α`, not
+        // `log λ`, and `assignment_prior_log_strength_derivative_weighted` switches
+        // to `grad_rho` — a genuinely nonlinear concentration derivative whose
+        // second derivative is not the first. Refuse there, naming the reason.
         if let Some(sparse_index) = rho.sparse_flat_index() {
             match self.assignment.mode {
-                AssignmentMode::Softmax { .. } => {
+                AssignmentMode::Softmax { .. } | AssignmentMode::ThresholdGate { .. } => {
                     hessian[[sparse_index, sparse_index]] +=
                         crate::assignment::assignment_prior_log_strength_derivative_weighted(
                             &self.assignment,
@@ -2747,14 +2940,16 @@ impl SaeManifoldTerm {
                             self.row_loss_weights.as_deref(),
                         )?;
                 }
-                _ => {
-                    return Err(
-                        "outer_explicit_smoothness_ard_hessian: rho carries a sparse \
-                         log-strength coordinate under a non-softmax assignment prior, whose \
-                         explicit second derivative this channel does not yet model; refusing \
-                         to assemble a Hessian with a silently-zero sparse explicit term"
-                            .to_string(),
-                    );
+                AssignmentMode::TopK { .. } => {}
+                AssignmentMode::OrderedBetaBernoulli { .. } => {
+                    return Err(format!(
+                        "outer_explicit_smoothness_ard_hessian: the {} sparse log-strength \
+                         explicit term is not degree-one in its coordinate (the concentration \
+                         derivative is nonlinear), so its second derivative is not the \
+                         gradient's own value; refusing to assemble a Hessian with a \
+                         silently-zero sparse explicit term",
+                        self.assignment.mode.family_label()
+                    ));
                 }
             }
         }
@@ -2979,68 +3174,45 @@ impl SaeManifoldTerm {
             }
         }
 
-        // Sparse (assignment log-strength): C_sparse = the softmax Gershgorin PSD
-        // majorizer `w_row · D`, `D = diag(Σ_j|H_kj|)` at `scale = λ_sparse·s/τ²`,
-        // written into H_tt's logit slots by the assembly — the SAME operator
-        // `assignment_log_strength_hessian_trace` traces. `|scale·H_kj| = scale·|H_kj|`
-        // for `scale > 0`, so `D` is degree-one in `λ_sparse = e^ρ` exactly like the
-        // smoothing and ARD operators, and `∂C_sparse/∂ρ_sparse = C_sparse`. Its
-        // `sign(H_kj)` kink lives in the LOGITS, which a ρ perturbation never moves,
-        // so the active branch is invariant at the fixed stratum. The `H_bd⁻¹` leg
-        // then reproduces the gradient's `coordinate_block_assignment_...` subtraction
-        // with no extra math, and the cross terms against smooth/ARD fall out of the
-        // same uniform formula.
+        // Sparse (assignment log-strength): the SAME operator ch5's map installs and
+        // `assignment_log_strength_hessian_trace` traces, read from the single
+        // authority (#2500). Both diagonal families are degree-one in
+        // `λ_sparse = e^ρ` exactly like the smoothing and ARD operators, so
+        // `∂C_sparse/∂ρ_sparse = C_sparse`, and the only ρ-dependence is that
+        // prefactor — softmax's `sign(H_kj)` kink and the threshold gate's `1−2a`
+        // sign both live in the LOGITS, which a ρ perturbation never moves, so the
+        // branch is invariant at the fixed stratum. The `H_bd⁻¹` leg then reproduces
+        // the gradient's `coordinate_block_assignment_...` subtraction with no extra
+        // math, and the cross terms against smooth/ARD fall out of the same uniform
+        // formula.
         if let Some(sparse_flat) = rho.sparse_flat_index() {
-            let k_atoms = self.k_atoms();
-            match self.assignment.mode {
-                AssignmentMode::Softmax {
-                    temperature,
-                    sparsity,
-                } if k_atoms > 1 => {
-                    if self.last_row_layout.is_some() {
-                        return Err(
-                            "logdet_daleckii_krein_hessian: the compact top-k softmax row \
-                             layout is not covered by the sparse log-strength operator; \
-                             refusing to assemble a Hessian with an unmodelled sparse row"
-                                .to_string(),
-                        );
-                    }
-                    let inv_tau = 1.0 / temperature;
-                    let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
-                    let penalty =
-                        gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                            k_atoms,
-                            temperature,
-                        );
-                    let assignment_dim = self.assignment.assignment_coord_dim();
+            match self.sparse_logit_curvature_rho_derivative(rho, cache)? {
+                // K ≤ 1 softmax / TopK / frozen routing have no free logit: the
+                // gradient's sparse logdet trace is identically zero, so a zero row
+                // here is the CORRECT curvature.
+                SparseLogitCurvature::Inert => {}
+                SparseLogitCurvature::Diagonal(entries) => {
                     let c = c_by_flat
                         .entry(sparse_flat)
                         .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
-                    for row in 0..self.n_obs() {
-                        let w_row = row_w.map_or(1.0, |w| w[row]);
-                        let base = cache.row_offsets[row];
-                        let q = cache.row_dims[row];
-                        let logit_dim = assignment_dim.min(q);
-                        let row_logits: Vec<f64> = (0..k_atoms)
-                            .map(|atom| self.assignment.logits[[row, atom]])
-                            .collect();
-                        let d = penalty.psd_majorizer_abs_row_sums(&row_logits, scale);
-                        for atom in 0..logit_dim {
-                            c[[base + atom, base + atom]] += w_row * d[atom];
-                        }
+                    for (slot, value) in entries {
+                        c[[slot, slot]] += value;
                     }
                 }
-                // K ≤ 1 softmax has no free logit: the gradient's sparse logdet trace
-                // is identically zero, so a zero row here is the CORRECT curvature.
-                AssignmentMode::Softmax { .. } => {}
-                _ => {
-                    return Err(
-                        "logdet_daleckii_krein_hessian: rho carries a sparse log-strength \
-                         coordinate under a non-softmax assignment prior, whose ∂H/∂ρ_sparse \
-                         majorizer operator this channel does not yet model; refusing to \
-                         assemble a Hessian with a silently-zero sparse row"
-                            .to_string(),
-                    );
+                SparseLogitCurvature::CrossRowOwnedElsewhere => {
+                    // Unlike ch5's gradient map — whose caller adds the exact
+                    // cross-row trace through `dense_exact_a_ordered_bb_sparse_trace`
+                    // — this Hessian channel has NO sibling for that operator, so
+                    // emitting nothing would leave a silently-zero sparse ROW in a
+                    // curvature block ARC would then invert. Refuse instead, naming
+                    // the operator rather than the family.
+                    return Err(format!(
+                        "logdet_daleckii_krein_hessian: the {} sparse log-strength operator is \
+                         the cross-row integrated-marginal logit Hessian, which this channel \
+                         has no sibling for; refusing to assemble a Hessian with a \
+                         silently-zero sparse row",
+                        self.assignment.mode.family_label()
+                    ));
                 }
             }
         }

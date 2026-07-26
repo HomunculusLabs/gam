@@ -61,7 +61,9 @@ fn fixture_latlon_grid(n_lat: usize, n_lon: usize) -> Array2<f64> {
 fn latlon_cloud(n: usize) -> Array2<f64> {
     Array2::from_shape_fn((n, 2), |(row, col)| {
         if col == 0 {
-            (1.0 - 2.0 * hashed_unit(2 * row as u64)).asin().to_degrees()
+            (1.0 - 2.0 * hashed_unit(2 * row as u64))
+                .asin()
+                .to_degrees()
         } else {
             360.0 * hashed_unit(2 * row as u64 + 1) - 180.0
         }
@@ -100,7 +102,10 @@ fn main() {
     let side = (n as f64).sqrt().round().max(2.0) as usize;
     for (label, data) in [
         ("regular lat/lon grid", latlon_grid(n)),
-        ("sphere_gpu fixture grid", fixture_latlon_grid(side, n / side.max(1))),
+        (
+            "sphere_gpu fixture grid",
+            fixture_latlon_grid(side, n / side.max(1)),
+        ),
         ("irregular cloud", latlon_cloud(n)),
     ] {
         let start = Instant::now();

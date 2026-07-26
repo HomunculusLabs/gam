@@ -1002,9 +1002,8 @@ mod right_preconditioned_gmres_tests {
                 beta: Array1::zeros(0),
             })
         };
-        let identity = |value: &SaeArrowVector| -> Result<SaeArrowVector, String> {
-            Ok(value.clone())
-        };
+        let identity =
+            |value: &SaeArrowVector| -> Result<SaeArrowVector, String> { Ok(value.clone()) };
 
         let (solved, iterations) =
             solve_b_preconditioned_gmres_from(&rhs, &exact, apply_a, identity)

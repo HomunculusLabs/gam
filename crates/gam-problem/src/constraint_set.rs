@@ -84,12 +84,8 @@ impl KhatriRaoConeConstraints {
             }
             seen[k] = true;
         }
-        let factor_row_norms = Array1::from_iter(
-            factor
-                .rows()
-                .into_iter()
-                .map(|row| row.dot(&row).sqrt()),
-        );
+        let factor_row_norms =
+            Array1::from_iter(factor.rows().into_iter().map(|row| row.dot(&row).sqrt()));
         Ok(Self {
             factor,
             factor_row_norms,
@@ -124,10 +120,10 @@ impl KhatriRaoConeConstraints {
             ));
         }
         let n = self.factor.nrows();
-        let bounds = self.bounds.as_ref().map(|all| {
-            all.slice(ndarray::s![slot * n..(slot + 1) * n])
-                .to_owned()
-        });
+        let bounds = self
+            .bounds
+            .as_ref()
+            .map(|all| all.slice(ndarray::s![slot * n..(slot + 1) * n]).to_owned());
         Ok(Self {
             factor: Arc::clone(&self.factor),
             factor_row_norms: self.factor_row_norms.clone(),
@@ -387,12 +383,11 @@ impl ConstraintSet {
                 let mut offset = 0usize;
                 for block in blocks {
                     let width = block.set.ncols();
-                    let local = beta.slice(ndarray::s![
-                        block.col_start..block.col_start + width
-                    ]);
+                    let local = beta.slice(ndarray::s![block.col_start..block.col_start + width]);
                     let values = block.set.values(local)?;
                     let rows = values.len();
-                    out.slice_mut(ndarray::s![offset..offset + rows]).assign(&values);
+                    out.slice_mut(ndarray::s![offset..offset + rows])
+                        .assign(&values);
                     offset += rows;
                 }
                 Ok(out)
@@ -403,14 +398,12 @@ impl ConstraintSet {
     /// Right-hand sides (`b` dense; cone bounds are zero unless delta-shifted).
     pub fn bound(&self, row: usize) -> Result<f64, String> {
         match self {
-            ConstraintSet::Dense(dense) => {
-                dense.b.get(row).copied().ok_or_else(|| {
-                    format!(
-                        "ConstraintSet: row {row} out of range ({} rows)",
-                        dense.b.len()
-                    )
-                })
-            }
+            ConstraintSet::Dense(dense) => dense.b.get(row).copied().ok_or_else(|| {
+                format!(
+                    "ConstraintSet: row {row} out of range ({} rows)",
+                    dense.b.len()
+                )
+            }),
             ConstraintSet::KhatriRaoCone(cone) => cone.bound(row),
             ConstraintSet::BlockDiagonal { blocks, .. } => {
                 let (block, local) = Self::block_for_row(blocks, row)?;
@@ -507,9 +500,7 @@ impl ConstraintSet {
                 let mut shifted_blocks = Vec::with_capacity(blocks.len());
                 for block in blocks {
                     let width = block.set.ncols();
-                    let local = beta.slice(ndarray::s![
-                        block.col_start..block.col_start + width
-                    ]);
+                    let local = beta.slice(ndarray::s![block.col_start..block.col_start + width]);
                     shifted_blocks.push(PlacedConstraintBlock {
                         col_start: block.col_start,
                         set: block.set.shifted_to_delta(local)?,
@@ -761,11 +752,7 @@ mod tests {
     fn cone_row_norms_are_factor_row_norms_for_every_slot() {
         let cone = cone_fixture();
         let set = ConstraintSet::KhatriRaoCone(cone);
-        let expected = [
-            (1.0_f64 + 0.25).sqrt(),
-            (4.0_f64 + 1.0).sqrt(),
-            3.0_f64,
-        ];
+        let expected = [(1.0_f64 + 0.25).sqrt(), (4.0_f64 + 1.0).sqrt(), 3.0_f64];
         for slot in 0..2 {
             for i in 0..3 {
                 let norm = set.row_norm(slot * 3 + i).expect("norm");
@@ -781,7 +768,11 @@ mod tests {
         let beta = beta_fixture();
         let (violation, row) = set.max_scaled_violation(beta.view()).expect("violation");
         // Dense oracle: canonicalize, then measure b − Aβ on unit rows.
-        let dense = cone.to_dense().expect("dense").canonicalized().expect("canon");
+        let dense = cone
+            .to_dense()
+            .expect("dense")
+            .canonicalized()
+            .expect("canon");
         let values = dense.a.dot(&beta);
         let mut worst = 0.0_f64;
         let mut worst_row = None;
@@ -841,9 +832,7 @@ mod tests {
     fn constructor_rejects_bad_coupled_rows() {
         let psi = array![[1.0_f64, 0.0], [0.0, 1.0]];
         assert!(KhatriRaoConeConstraints::new(Arc::new(psi.clone()), vec![3], 3).is_err());
-        assert!(
-            KhatriRaoConeConstraints::new(Arc::new(psi.clone()), vec![1, 1], 3).is_err()
-        );
+        assert!(KhatriRaoConeConstraints::new(Arc::new(psi.clone()), vec![1, 1], 3).is_err());
         assert!(KhatriRaoConeConstraints::new(Arc::new(psi), vec![], 3).is_err());
     }
 

@@ -137,7 +137,11 @@ fn double_well_options() -> BlockwiseFitOptions {
 /// Solve the inner problem at `rho` exactly the way the outer search does, from
 /// the seed carried in `specs` — i.e. the pre-#2366 "whatever the caller handed
 /// us" mode.
-fn cold_direct_mode(family: &TiltedDoubleWellFamily, specs: &[ParameterBlockSpec], rho: f64) -> f64 {
+fn cold_direct_mode(
+    family: &TiltedDoubleWellFamily,
+    specs: &[ParameterBlockSpec],
+    rho: f64,
+) -> f64 {
     let options = double_well_options();
     let penalty_counts: Vec<usize> = specs.iter().map(|spec| spec.penalties.len()).collect();
     let layout = penalty_label_layout_with_joint(specs, penalty_counts, Vec::new())
@@ -153,11 +157,18 @@ fn cold_direct_mode(family: &TiltedDoubleWellFamily, specs: &[ParameterBlockSpec
         EvalMode::ValueOnly,
     )
     .expect("cold-direct inner solve");
-    assert!(eval.inner_converged, "cold-direct inner solve must converge");
+    assert!(
+        eval.inner_converged,
+        "cold-direct inner solve must converge"
+    );
     eval.warm_start.block_beta[0][0]
 }
 
-fn continuation_mode(family: &TiltedDoubleWellFamily, specs: &[ParameterBlockSpec], rho: f64) -> f64 {
+fn continuation_mode(
+    family: &TiltedDoubleWellFamily,
+    specs: &[ParameterBlockSpec],
+    rho: f64,
+) -> f64 {
     let options = double_well_options();
     let penalty_counts: Vec<usize> = specs.iter().map(|spec| spec.penalties.len()).collect();
     let layout = penalty_label_layout_with_joint(specs, penalty_counts, Vec::new())

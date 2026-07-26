@@ -372,9 +372,8 @@ fn validate_constraint_geometry(
         for mut draw in reconstructed.rows_mut() {
             draw += &gauge.affine_shift;
         }
-        let operation_count = 64.0
-            * (gauge.raw_total() + gauge.reduced_total() + 1) as f64
-            * f64::EPSILON;
+        let operation_count =
+            64.0 * (gauge.raw_total() + gauge.reduced_total() + 1) as f64 * f64::EPSILON;
         for ((draw, coefficient), &actual) in draws.indexed_iter() {
             let rebuilt = reconstructed[[draw, coefficient]];
             let residual = (rebuilt - actual).abs();

@@ -150,7 +150,13 @@ fn zz_measure_2445_rank_test_frame_moves_with_psi() {
         eprintln!(
             "[2445] psi={psi:+.1e} ({label}): rank-test null dim={} ridge_norm={:.6e}",
             null.ncols(),
-            ridge.matrix.dense().iter().map(|v| v * v).sum::<f64>().sqrt(),
+            ridge
+                .matrix
+                .dense()
+                .iter()
+                .map(|v| v * v)
+                .sum::<f64>()
+                .sqrt(),
         );
         frames.push(null);
         ridges.push(ridge.matrix.dense().to_owned());
@@ -182,8 +188,9 @@ fn zz_measure_2445_rank_test_frame_moves_with_psi() {
     // eigenvector of the shipped block) against the structural transport.
     if let Some(t) = transform.as_ref() {
         let kernel_rows_t = t.slice(s![..kernel_cols, ..]).t().to_owned();
-        let (structural, rank) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(&kernel_rows_t, 1.0)
-            .expect("structural transport nullspace");
+        let (structural, rank) =
+            gam_linalg::faer_ndarray::rrqr_nullspace_basis(&kernel_rows_t, 1.0)
+                .expect("structural transport nullspace");
         eprintln!(
             "[2445] structural transported frame: rank(T_kernel)={rank} dim={} (expected {})",
             structural.ncols(),
@@ -243,8 +250,7 @@ fn duchon_trend_ridge_topology_is_kappa_invariant_2445() {
             transform.as_ref(),
         )
         .expect("native penalty candidates");
-        let filtered =
-            filter_penalty_candidates(candidates).expect("filter penalty candidates");
+        let filtered = filter_penalty_candidates(candidates).expect("filter penalty candidates");
         let trend_retained = filtered
             .active
             .iter()

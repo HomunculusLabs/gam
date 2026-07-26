@@ -158,16 +158,18 @@ fn assert_gaussian_regime(
         ),
     );
     let mgcv_rmses = r.vector("mgcv_rmses");
-    assert_eq!(mgcv_rmses.len(), K_SEEDS, "mgcv per-seed rmse count mismatch");
+    assert_eq!(
+        mgcv_rmses.len(),
+        K_SEEDS,
+        "mgcv per-seed rmse count mismatch"
+    );
 
     // Seed `s` drew the SAME response vector for both tools, so the truth-recovery
     // comparison is paired seed by seed and the common noise draw cancels.
     let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
     let gam_rmse_avg = panel.gam_mean;
 
-    eprintln!(
-        "duchon-regime[{label}] #2395 K={K_SEEDS}-seed paired: n={n} k={k} sigma={sigma}"
-    );
+    eprintln!("duchon-regime[{label}] #2395 K={K_SEEDS}-seed paired: n={n} k={k} sigma={sigma}");
     eprintln!("{}", panel.report(&format!("duchon_regimes::{label}")));
     eprintln!(
         "{}",
@@ -273,12 +275,11 @@ fn gam_duchon_1d_poisson_log_mean_recovery_matches_mgcv() {
             .zip(count.iter())
             .map(|(a, c)| csv::StringRecord::from(vec![a.to_string(), c.to_string()]))
             .collect();
-        let ds =
-            encode_recordswith_inferred_schema(headers, rows).expect("encode poisson dataset");
+        let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode poisson dataset");
         let x_idx = ds.column_map()["x"];
 
-        let result = fit_from_formula("count ~ duchon(x, k=20)", &ds, &cfg)
-            .expect("gam poisson duchon fit");
+        let result =
+            fit_from_formula("count ~ duchon(x, k=20)", &ds, &cfg).expect("gam poisson duchon fit");
         let FitResult::Standard(fit) = result else {
             panic!("expected a standard GAM fit for a Poisson Duchon smooth");
         };
@@ -339,7 +340,11 @@ fn gam_duchon_1d_poisson_log_mean_recovery_matches_mgcv() {
         ),
     );
     let mgcv_rmses = r.vector("mgcv_rmses");
-    assert_eq!(mgcv_rmses.len(), K_SEEDS, "mgcv per-seed rmse count mismatch");
+    assert_eq!(
+        mgcv_rmses.len(),
+        K_SEEDS,
+        "mgcv per-seed rmse count mismatch"
+    );
 
     let panel = PairedFoldComparison::new(&gam_rmses, mgcv_rmses, true);
     let gam_mu_rmse_avg = panel.gam_mean;

@@ -2369,11 +2369,8 @@ pub fn build_duchon_native_penalty_psi_derivatives(
     // whole 2.3e-6 FD residue of #2444.) With no outer chart the projected
     // jet already lives in `span(F)`, so the sandwich is exactly the
     // identity there and only the charted path moves.
-    let structural_frame = duchon_structural_trend_null_frame(
-        kernel_cols,
-        total_cols,
-        identifiability_transform,
-    )?;
+    let structural_frame =
+        duchon_structural_trend_null_frame(kernel_cols, total_cols, identifiability_transform)?;
     let structural_sandwich = |x: &Array2<f64>| -> Array2<f64> {
         if structural_frame.ncols() == 0 {
             return Array2::<f64>::zeros(x.raw_dim());
@@ -2381,8 +2378,10 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         let middle = structural_frame.t().dot(x).dot(&structural_frame);
         symmetrize(&structural_frame.dot(&middle).dot(&structural_frame.t()))
     };
-    let mut trend_value =
-        structural_sandwich(&project_penalty_matrix(&trend_jet.value, identifiability_transform));
+    let mut trend_value = structural_sandwich(&project_penalty_matrix(
+        &trend_jet.value,
+        identifiability_transform,
+    ));
     let mut trend_first = structural_sandwich(&project_penalty_matrix(
         &trend_jet.first_a,
         identifiability_transform,

@@ -163,8 +163,7 @@ fn gs_kfold_lidar(
 fn gam_smooth_predicts_lidar_better_than_baseline() {
     init_parallelism();
 
-    let (panel, gam_r2, gam_edf) =
-        gs_kfold_lidar("logratio ~ s(range)", "logratio ~ s(range)", 0);
+    let (panel, gam_r2, gam_edf) = gs_kfold_lidar("logratio ~ s(range)", "logratio ~ s(range)", 0);
     eprintln!(
         "lidar s(range) #2395 K={K_SPLITS}-split paired (seed base 0): \
          gam_edf(split0)={gam_edf:.3} gam_test_R2_avg={gam_r2:.4}"

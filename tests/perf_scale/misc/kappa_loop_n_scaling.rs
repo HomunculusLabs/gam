@@ -963,11 +963,9 @@ fn kappa_glm_poisson_loop_n_scaling_report() {
     for &n in &ns {
         let kappa = run_fit_poisson(n, bounds)
             .unwrap_or_else(|reason| panic!("[kappa-glm] n={n}: fit failed: {reason}"));
-        let timing = kappa
-            .kappa_timing
-            .unwrap_or_else(|| {
-                panic!("[kappa-glm] n={n}: κ optimizer reported no internal timing")
-            });
+        let timing = kappa.kappa_timing.unwrap_or_else(|| {
+            panic!("[kappa-glm] n={n}: κ optimizer reported no internal timing")
+        });
         let calls = (timing.cost_calls + timing.eval_calls + timing.efs_calls).max(1);
         let per_cb = (timing.trial_total_s().max(0.0)) / calls as f64;
         callback_avg.push(per_cb.max(1e-6));

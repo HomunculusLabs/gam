@@ -285,7 +285,10 @@ fn rho_outer_loop_is_n_independent() {
              any ratio from it. per_trial_ms={:?}",
             1e3 * pair[0],
             1e3 * pair[1],
-            per_trial.iter().map(|v| (v * 1e6).round() / 1e3).collect::<Vec<_>>()
+            per_trial
+                .iter()
+                .map(|v| (v * 1e6).round() / 1e3)
+                .collect::<Vec<_>>()
         );
     }
 

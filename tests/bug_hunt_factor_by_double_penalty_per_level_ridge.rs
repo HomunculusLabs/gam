@@ -103,14 +103,9 @@ fn factor_by_double_penalty_ridge_is_per_level_in_constrained_chart() {
         .terms
         .iter()
         .filter(|t| {
-            t.active_penalties
-                .iter()
-                .any(|penalty| {
-                    matches!(
-                        &penalty.info.source,
-                        PenaltySource::DoublePenaltyNullspace
-                    )
-                })
+            t.active_penalties.iter().any(|penalty| {
+                matches!(&penalty.info.source, PenaltySource::DoublePenaltyNullspace)
+            })
         })
         .collect();
 

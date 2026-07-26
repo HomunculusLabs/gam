@@ -3575,11 +3575,7 @@ mod function_space_null_shrinkage_tests {
             [0.0, (1.0 - component * component).sqrt()],
             [0.0, -component]
         ];
-        let raw_dense = array![
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0e-8]
-        ];
+        let raw_dense = array![[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0e-8]];
         let raw = ConstructiveQuadratic::try_from_dense_psd(raw_dense.clone(), "#2433 raw penalty")
             .expect("PSD raw penalty");
 
@@ -3615,9 +3611,7 @@ mod function_space_null_shrinkage_tests {
         ] {
             let null = constructive_nullspace_basis(quadratic)
                 .expect("constructive null revelation")
-                .unwrap_or_else(|| {
-                    panic!("{label}: the constrained penalty has a null direction")
-                });
+                .unwrap_or_else(|| panic!("{label}: the constrained penalty has a null direction"));
             assert_eq!(
                 null.ncols(),
                 1,

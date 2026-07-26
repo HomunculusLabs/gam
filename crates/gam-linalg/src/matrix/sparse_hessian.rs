@@ -177,7 +177,6 @@ impl SparseHessianAccumulator {
         }
     }
 
-
     // ── accumulation ─────────────────────────────────────────────────
 
     /// Add `val` to the upper-triangle entry `(r, c)`.

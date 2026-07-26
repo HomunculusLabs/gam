@@ -35,8 +35,8 @@
 use std::collections::BTreeMap;
 
 use gam::families::custom_family::{
-    CoefficientGroupSpec, ParameterBlockSpec, PenaltyMatrix,
-    coefficient_label, realize_coefficient_groups_for_custom_family,
+    CoefficientGroupSpec, ParameterBlockSpec, PenaltyMatrix, coefficient_label,
+    realize_coefficient_groups_for_custom_family,
 };
 use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
 use gam_problem::RhoPrior;
@@ -74,10 +74,14 @@ fn fixed(p: usize, log_lambda: f64) -> PenaltyMatrix {
 
 /// Build a `p`-column block whose penalties carry distinct sentinel initial
 /// log-lambdas (so any coordinate mis-indexing shifts an observable value).
-fn block(name: &str, p: usize, penalties: Vec<PenaltyMatrix>, base_lambda: f64) -> ParameterBlockSpec {
+fn block(
+    name: &str,
+    p: usize,
+    penalties: Vec<PenaltyMatrix>,
+    base_lambda: f64,
+) -> ParameterBlockSpec {
     let k = penalties.len();
-    let initial_log_lambdas =
-        Array1::from_iter((0..k).map(|j| base_lambda + j as f64 * 0.5));
+    let initial_log_lambdas = Array1::from_iter((0..k).map(|j| base_lambda + j as f64 * 0.5));
     ParameterBlockSpec {
         name: name.to_string(),
         design: DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::eye(p))),
@@ -137,10 +141,38 @@ fn composed_zoo() -> Vec<ComposedSpec> {
                 block("scale", 3, vec![plain(3), plain(3)], 2.0),
             ],
             groups: vec![
-                GroupSeed { label: "leaf_a", coords: vec![("mean", 0)], parent: Some("parent_g"), mean: 10.0, sd: 1.0, init_log_precision: 4.0 },
-                GroupSeed { label: "leaf_b", coords: vec![("mean", 1)], parent: Some("parent_g"), mean: 20.0, sd: 2.0, init_log_precision: 5.0 },
-                GroupSeed { label: "parent_g", coords: vec![("mean", 0), ("mean", 1)], parent: Some("grand_g"), mean: 30.0, sd: 3.0, init_log_precision: 6.0 },
-                GroupSeed { label: "grand_g", coords: vec![("mean", 0), ("mean", 1)], parent: None, mean: 40.0, sd: 4.0, init_log_precision: 7.0 },
+                GroupSeed {
+                    label: "leaf_a",
+                    coords: vec![("mean", 0)],
+                    parent: Some("parent_g"),
+                    mean: 10.0,
+                    sd: 1.0,
+                    init_log_precision: 4.0,
+                },
+                GroupSeed {
+                    label: "leaf_b",
+                    coords: vec![("mean", 1)],
+                    parent: Some("parent_g"),
+                    mean: 20.0,
+                    sd: 2.0,
+                    init_log_precision: 5.0,
+                },
+                GroupSeed {
+                    label: "parent_g",
+                    coords: vec![("mean", 0), ("mean", 1)],
+                    parent: Some("grand_g"),
+                    mean: 30.0,
+                    sd: 3.0,
+                    init_log_precision: 6.0,
+                },
+                GroupSeed {
+                    label: "grand_g",
+                    coords: vec![("mean", 0), ("mean", 1)],
+                    parent: None,
+                    mean: 40.0,
+                    sd: 4.0,
+                    init_log_precision: 7.0,
+                },
             ],
             base_prior: RhoPrior::Normal { mean: 0.0, sd: 2.0 },
         },
@@ -154,11 +186,35 @@ fn composed_zoo() -> Vec<ComposedSpec> {
                 block("disp", 2, vec![labeled(2, "tied"), fixed(2, 1.5)], -1.5),
             ],
             groups: vec![
-                GroupSeed { label: "child_g", coords: vec![("loc", 0)], parent: Some("parent_g"), mean: 11.0, sd: 1.0, init_log_precision: 3.0 },
-                GroupSeed { label: "parent_g", coords: vec![("loc", 0)], parent: Some("grand_g"), mean: 22.0, sd: 2.0, init_log_precision: 4.0 },
-                GroupSeed { label: "grand_g", coords: vec![("loc", 0)], parent: None, mean: 33.0, sd: 3.0, init_log_precision: 5.0 },
+                GroupSeed {
+                    label: "child_g",
+                    coords: vec![("loc", 0)],
+                    parent: Some("parent_g"),
+                    mean: 11.0,
+                    sd: 1.0,
+                    init_log_precision: 3.0,
+                },
+                GroupSeed {
+                    label: "parent_g",
+                    coords: vec![("loc", 0)],
+                    parent: Some("grand_g"),
+                    mean: 22.0,
+                    sd: 2.0,
+                    init_log_precision: 4.0,
+                },
+                GroupSeed {
+                    label: "grand_g",
+                    coords: vec![("loc", 0)],
+                    parent: None,
+                    mean: 33.0,
+                    sd: 3.0,
+                    init_log_precision: 5.0,
+                },
             ],
-            base_prior: RhoPrior::Normal { mean: -1.0, sd: 1.5 },
+            base_prior: RhoPrior::Normal {
+                mean: -1.0,
+                sd: 1.5,
+            },
         },
         // C: two independent hierarchies (a branching depth-3 on block "a" and a
         // depth-2 chain on block "b"), 3 base penalties per block including a
@@ -170,12 +226,54 @@ fn composed_zoo() -> Vec<ComposedSpec> {
                 block("b", 4, vec![plain(4), plain(4), plain(4)], 1.0),
             ],
             groups: vec![
-                GroupSeed { label: "la", coords: vec![("a", 0)], parent: Some("pa"), mean: 10.0, sd: 1.0, init_log_precision: 2.0 },
-                GroupSeed { label: "lb", coords: vec![("a", 1)], parent: Some("pa"), mean: 12.0, sd: 1.5, init_log_precision: 2.5 },
-                GroupSeed { label: "pa", coords: vec![("a", 0), ("a", 1)], parent: Some("ga"), mean: 14.0, sd: 2.0, init_log_precision: 3.0 },
-                GroupSeed { label: "ga", coords: vec![("a", 0), ("a", 1)], parent: None, mean: 16.0, sd: 2.5, init_log_precision: 3.5 },
-                GroupSeed { label: "lc", coords: vec![("b", 0)], parent: Some("pb"), mean: 20.0, sd: 3.0, init_log_precision: 4.0 },
-                GroupSeed { label: "pb", coords: vec![("b", 0)], parent: None, mean: 22.0, sd: 3.5, init_log_precision: 4.5 },
+                GroupSeed {
+                    label: "la",
+                    coords: vec![("a", 0)],
+                    parent: Some("pa"),
+                    mean: 10.0,
+                    sd: 1.0,
+                    init_log_precision: 2.0,
+                },
+                GroupSeed {
+                    label: "lb",
+                    coords: vec![("a", 1)],
+                    parent: Some("pa"),
+                    mean: 12.0,
+                    sd: 1.5,
+                    init_log_precision: 2.5,
+                },
+                GroupSeed {
+                    label: "pa",
+                    coords: vec![("a", 0), ("a", 1)],
+                    parent: Some("ga"),
+                    mean: 14.0,
+                    sd: 2.0,
+                    init_log_precision: 3.0,
+                },
+                GroupSeed {
+                    label: "ga",
+                    coords: vec![("a", 0), ("a", 1)],
+                    parent: None,
+                    mean: 16.0,
+                    sd: 2.5,
+                    init_log_precision: 3.5,
+                },
+                GroupSeed {
+                    label: "lc",
+                    coords: vec![("b", 0)],
+                    parent: Some("pb"),
+                    mean: 20.0,
+                    sd: 3.0,
+                    init_log_precision: 4.0,
+                },
+                GroupSeed {
+                    label: "pb",
+                    coords: vec![("b", 0)],
+                    parent: None,
+                    mean: 22.0,
+                    sd: 3.5,
+                    init_log_precision: 4.5,
+                },
             ],
             base_prior: RhoPrior::Normal { mean: 0.5, sd: 2.0 },
         },
@@ -189,9 +287,30 @@ fn composed_zoo() -> Vec<ComposedSpec> {
                 block("second", 2, vec![plain(2), plain(2)], 0.0),
             ],
             groups: vec![
-                GroupSeed { label: "span_leaf", coords: vec![("first", 0), ("second", 0)], parent: Some("span_parent"), mean: 30.0, sd: 2.0, init_log_precision: 6.0 },
-                GroupSeed { label: "span_parent", coords: vec![("first", 0), ("second", 0)], parent: Some("span_grand"), mean: 31.0, sd: 2.0, init_log_precision: 6.5 },
-                GroupSeed { label: "span_grand", coords: vec![("first", 0), ("second", 0)], parent: None, mean: 32.0, sd: 2.0, init_log_precision: 7.0 },
+                GroupSeed {
+                    label: "span_leaf",
+                    coords: vec![("first", 0), ("second", 0)],
+                    parent: Some("span_parent"),
+                    mean: 30.0,
+                    sd: 2.0,
+                    init_log_precision: 6.0,
+                },
+                GroupSeed {
+                    label: "span_parent",
+                    coords: vec![("first", 0), ("second", 0)],
+                    parent: Some("span_grand"),
+                    mean: 31.0,
+                    sd: 2.0,
+                    init_log_precision: 6.5,
+                },
+                GroupSeed {
+                    label: "span_grand",
+                    coords: vec![("first", 0), ("second", 0)],
+                    parent: None,
+                    mean: 32.0,
+                    sd: 2.0,
+                    init_log_precision: 7.0,
+                },
             ],
             // Four base optimizer coordinates: first{p0,p1}, second{p0,p1}.
             base_prior: RhoPrior::Independent(vec![
@@ -242,21 +361,27 @@ fn rederive_layout(specs: &[ParameterBlockSpec]) -> (Vec<String>, Vec<String>) {
 
 /// Nesting depth of the deepest coefficient-group chain (root = depth 1).
 fn max_group_depth(groups: &[GroupSeed]) -> usize {
-    let parent: BTreeMap<&str, Option<&str>> =
-        groups.iter().map(|g| (g.label, g.parent)).collect();
+    let parent: BTreeMap<&str, Option<&str>> = groups.iter().map(|g| (g.label, g.parent)).collect();
     fn depth(label: &str, parent: &BTreeMap<&str, Option<&str>>) -> usize {
         match parent.get(label).and_then(|p| *p) {
             Some(p) => 1 + depth(p, parent),
             None => 1,
         }
     }
-    groups.iter().map(|g| depth(g.label, &parent)).max().unwrap_or(0)
+    groups
+        .iter()
+        .map(|g| depth(g.label, &parent))
+        .max()
+        .unwrap_or(0)
 }
 
 #[test]
 fn composed_two_of_everything_depth3_layout_stays_consistent_2315() {
     let zoo = composed_zoo();
-    assert!(zoo.len() >= 4, "the composed zoo must exercise several configurations");
+    assert!(
+        zoo.len() >= 4,
+        "the composed zoo must exercise several configurations"
+    );
 
     for case in &zoo {
         // Precondition: every entry really is a 2-of-everything, depth-3 config.
@@ -265,11 +390,8 @@ fn composed_two_of_everything_depth3_layout_stays_consistent_2315() {
             "[{}] composition requires >= 2 parameter blocks",
             case.name
         );
-        let blocks_with_two_penalties = case
-            .specs
-            .iter()
-            .filter(|s| s.penalties.len() >= 2)
-            .count();
+        let blocks_with_two_penalties =
+            case.specs.iter().filter(|s| s.penalties.len() >= 2).count();
         assert!(
             blocks_with_two_penalties >= 2,
             "[{}] composition requires >= 2 blocks carrying >= 2 base penalties, found {}",
@@ -322,7 +444,10 @@ fn composed_two_of_everything_depth3_layout_stays_consistent_2315() {
 
         // 3. One prior per optimizer coordinate, and outer labels are unique.
         let RhoPrior::Independent(priors) = &realized.rho_prior else {
-            panic!("[{}] realized coefficient-group prior must be coordinate-wise", case.name);
+            panic!(
+                "[{}] realized coefficient-group prior must be coordinate-wise",
+                case.name
+            );
         };
         assert_eq!(
             priors.len(),
@@ -381,7 +506,10 @@ fn composed_depth3_group_priors_land_on_their_own_outer_coordinate_2315() {
         // be the group's own NormalLogPrecision mapped to a Normal rho prior.
         assert_eq!(
             realized.independent_prior_factor_labels,
-            case.groups.iter().map(|g| g.label.to_string()).collect::<Vec<_>>(),
+            case.groups
+                .iter()
+                .map(|g| g.label.to_string())
+                .collect::<Vec<_>>(),
             "[{}] independent prior-factor labels must be the declared groups in order",
             case.name
         );
@@ -404,9 +532,13 @@ fn composed_depth3_group_priors_land_on_their_own_outer_coordinate_2315() {
                 .expect("group label present among outer coordinates");
             assert_eq!(
                 priors[idx],
-                RhoPrior::Normal { mean: seed.mean, sd: seed.sd },
+                RhoPrior::Normal {
+                    mean: seed.mean,
+                    sd: seed.sd
+                },
                 "[{}] group '{}' prior must land on its own optimizer coordinate",
-                case.name, seed.label
+                case.name,
+                seed.label
             );
 
             // The group's emitted physical pieces all carry its label, and its
@@ -419,7 +551,8 @@ fn composed_depth3_group_priors_land_on_their_own_outer_coordinate_2315() {
             assert!(
                 piece_count >= 1,
                 "[{}] group '{}' must emit at least one physical penalty piece",
-                case.name, seed.label
+                case.name,
+                seed.label
             );
             let first_lambda = realized
                 .specs

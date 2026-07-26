@@ -235,7 +235,9 @@ pub fn affine_design_unavailable_reason(model: &FittedModel) -> Result<Option<St
     // multiply, so the refusal is structural rather than a missing feature
     // (#1046). Checked before the model class because a scan fit is otherwise
     // an ordinary standard model.
-    if let Some((feature_column, _)) = model.saved_spline_scan().map_err(|error| error.to_string())?
+    if let Some((feature_column, _)) = model
+        .saved_spline_scan()
+        .map_err(|error| error.to_string())?
     {
         return Ok(Some(format!(
             "s({feature_column}) is fit by the exact O(n) state-space spline scan, which does not \
@@ -481,11 +483,7 @@ mod tests {
         let b = 2.4_f64;
         let width = b - a;
         let mut knot_values = vec![a; 4];
-        knot_values.extend([
-            a + 0.18 * width,
-            a + 0.41 * width,
-            a + 0.77 * width,
-        ]);
+        knot_values.extend([a + 0.18 * width, a + 0.41 * width, a + 0.77 * width]);
         knot_values.extend(vec![b; 4]);
         let knots = Array1::from_vec(knot_values);
         let probe = array![-0.5, 0.0, 0.5];
@@ -569,7 +567,9 @@ mod tests {
 
         // The wiggle block is shared verbatim between the two operators, so the
         // value identity and the derivative agree exactly on `β_w`.
-        let value_wiggle = runtime.design(&warp_index).expect("frozen-index warp basis");
+        let value_wiggle = runtime
+            .design(&warp_index)
+            .expect("frozen-index warp basis");
         for row in 0..x.nrows() {
             for column in 0..runtime.beta.len() {
                 assert_eq!(

@@ -17,11 +17,9 @@
 
 #[test]
 fn gpu_required_tests_did_not_skip() {
-    let runtime_present = gam::gpu::device_runtime::GpuRuntime::resolve(
-        gam::gpu::GpuPolicy::Auto,
-    )
-    .unwrap_or_else(|error| panic!("GPU probe fault in ship-gate test: {error}"))
-    .is_some();
+    let runtime_present = gam::gpu::device_runtime::GpuRuntime::resolve(gam::gpu::GpuPolicy::Auto)
+        .unwrap_or_else(|error| panic!("GPU probe fault in ship-gate test: {error}"))
+        .is_some();
     if runtime_present {
         assert!(
             gam::gpu::cuda_selected()

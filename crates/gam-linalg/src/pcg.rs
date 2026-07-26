@@ -557,16 +557,13 @@ impl SymmetricLowRankPreconditioner {
         F: FnOnce(&ndarray::Array2<f64>, &mut ndarray::Array2<f64>),
     {
         use crate::faer_ndarray::{
-            FaerCholesky, FaerQr, default_rrqr_rank_alpha, fast_ab_into,
-            fast_atb_with_parallelism, matmul_parallelism, rrqr_with_permutation,
+            FaerCholesky, FaerQr, default_rrqr_rank_alpha, fast_ab_into, fast_atb_with_parallelism,
+            matmul_parallelism, rrqr_with_permutation,
         };
         use faer::Side;
 
         let rows = inverse_diagonal.len();
-        if !inverse_diagonal
-            .iter()
-            .all(|d| d.is_finite() && *d > 0.0)
-        {
+        if !inverse_diagonal.iter().all(|d| d.is_finite() && *d > 0.0) {
             return Err("PCG inverse diagonal must be finite and positive".to_string());
         }
         if scaled_candidates.nrows() != rows {
@@ -582,9 +579,8 @@ impl SymmetricLowRankPreconditioner {
             return Err("PCG scaled-subspace candidates must be finite".to_string());
         }
 
-        let rrqr =
-            rrqr_with_permutation(&scaled_candidates, default_rrqr_rank_alpha())
-                .map_err(|err| format!("PCG scaled-subspace RRQR failed: {err}"))?;
+        let rrqr = rrqr_with_permutation(&scaled_candidates, default_rrqr_rank_alpha())
+            .map_err(|err| format!("PCG scaled-subspace RRQR failed: {err}"))?;
         let rank = rrqr.rank;
         if rank == 0 {
             return Err("PCG scaled subspace has numerical rank zero".to_string());
@@ -592,8 +588,7 @@ impl SymmetricLowRankPreconditioner {
         let mut independent = ndarray::Array2::<f64>::zeros((rows, rank));
         for q in 0..rank {
             for i in 0..rows {
-                independent[[i, q]] =
-                    scaled_candidates[[i, rrqr.column_permutation[q]]];
+                independent[[i, q]] = scaled_candidates[[i, rrqr.column_permutation[q]]];
             }
         }
         drop(scaled_candidates);
@@ -602,12 +597,9 @@ impl SymmetricLowRankPreconditioner {
             .map_err(|err| format!("PCG scaled-subspace QR failed: {err}"))?;
         drop(independent);
         drop(triangular);
-        if scaled_basis.dim() != (rows, rank)
-            || !scaled_basis.iter().all(|value| value.is_finite())
+        if scaled_basis.dim() != (rows, rank) || !scaled_basis.iter().all(|value| value.is_finite())
         {
-            return Err(
-                "PCG scaled-subspace QR did not produce a finite thin basis".to_string(),
-            );
+            return Err("PCG scaled-subspace QR did not produce a finite thin basis".to_string());
         }
 
         let mut image = ndarray::Array2::<f64>::zeros((rows, rank));
@@ -616,25 +608,18 @@ impl SymmetricLowRankPreconditioner {
             return Err("PCG scaled operator produced a non-finite coarse image".to_string());
         }
 
-        let mut galerkin = fast_atb_with_parallelism(
-            &scaled_basis,
-            &image,
-            matmul_parallelism(rank, rank, rows),
-        );
+        let mut galerkin =
+            fast_atb_with_parallelism(&scaled_basis, &image, matmul_parallelism(rank, rank, rows));
         drop(image);
         if !galerkin.iter().all(|value| value.is_finite()) {
             return Err("PCG Galerkin operator is non-finite".to_string());
         }
-        let symmetry_factor = default_rrqr_rank_alpha()
-            * f64::EPSILON
-            * rows.max(rank).max(1) as f64;
+        let symmetry_factor =
+            default_rrqr_rank_alpha() * f64::EPSILON * rows.max(rank).max(1) as f64;
         for a in 0..rank {
             for b in 0..a {
                 let skew = (galerkin[[a, b]] - galerkin[[b, a]]).abs();
-                let scale = galerkin[[a, b]]
-                    .abs()
-                    .max(galerkin[[b, a]].abs())
-                    .max(1.0);
+                let scale = galerkin[[a, b]].abs().max(galerkin[[b, a]].abs()).max(1.0);
                 if skew > symmetry_factor * scale {
                     return Err(format!(
                         "PCG Galerkin operator is not symmetric at ({a},{b}): \
@@ -647,18 +632,16 @@ impl SymmetricLowRankPreconditioner {
                 galerkin[[b, a]] = value;
             }
         }
-        let factor = galerkin.cholesky(Side::Lower).map_err(|err| {
-            format!("PCG Galerkin operator is not SPD at rank {rank}: {err}")
-        })?;
-        let mut inverse_correction =
-            factor.solve_mat(&ndarray::Array2::<f64>::eye(rank));
+        let factor = galerkin
+            .cholesky(Side::Lower)
+            .map_err(|err| format!("PCG Galerkin operator is not SPD at rank {rank}: {err}"))?;
+        let mut inverse_correction = factor.solve_mat(&ndarray::Array2::<f64>::eye(rank));
         if !inverse_correction.iter().all(|value| value.is_finite()) {
             return Err("PCG Galerkin inverse is non-finite".to_string());
         }
         for a in 0..rank {
             for b in 0..a {
-                let value =
-                    0.5 * (inverse_correction[[a, b]] + inverse_correction[[b, a]]);
+                let value = 0.5 * (inverse_correction[[a, b]] + inverse_correction[[b, a]]);
                 inverse_correction[[a, b]] = value;
                 inverse_correction[[b, a]] = value;
             }
@@ -1069,8 +1052,12 @@ where
 
     fn column_dots(a: &ndarray::Array2<f64>, b: &ndarray::Array2<f64>, out: &mut [f64]) {
         let (m, t) = a.dim();
-        let av = a.as_slice().expect("block backend state is standard layout");
-        let bv = b.as_slice().expect("block backend state is standard layout");
+        let av = a
+            .as_slice()
+            .expect("block backend state is standard layout");
+        let bv = b
+            .as_slice()
+            .expect("block backend state is standard layout");
         out.par_chunks_mut(BLOCK_DOT_COLUMN_TILE)
             .enumerate()
             .for_each(|(tile, chunk)| {
@@ -1130,7 +1117,10 @@ where
             .r
             .as_slice_mut()
             .expect("block backend state is standard layout");
-        let ps = self.p.as_slice().expect("block backend state is standard layout");
+        let ps = self
+            .p
+            .as_slice()
+            .expect("block backend state is standard layout");
         let aps = self
             .ap
             .as_slice()
@@ -1158,7 +1148,10 @@ where
             .p
             .as_slice_mut()
             .expect("block backend state is standard layout");
-        let zs = self.z.as_slice().expect("block backend state is standard layout");
+        let zs = self
+            .z
+            .as_slice()
+            .expect("block backend state is standard layout");
         ps.par_chunks_mut(t)
             .zip(zs.par_chunks(t))
             .for_each(|(prow, zrow)| {
@@ -1416,15 +1409,18 @@ mod tests {
     /// Run `pcg_core` per column (ones preconditioner, refresh 0, Serial) and
     /// `pcg_multi_core` on the same block; every column must agree BIT-FOR-BIT
     /// in stop reason, iteration count, norms, iterate, and diagnostics trace.
-    fn assert_multi_matches_core(op: &SparseSpd, rhs: &Array2<f64>, rel_tol: f64, max_iters: usize) {
+    fn assert_multi_matches_core(
+        op: &SparseSpd,
+        rhs: &Array2<f64>,
+        rel_tol: f64,
+        max_iters: usize,
+    ) {
         let (m, t) = rhs.dim();
         let mut backend = CpuPcgBlockBackend::new(
             rhs.clone(),
             Array2::zeros((m, t)),
             vec![1.0; m],
-            |p: &Array2<f64>, ap: &mut Array2<f64>| {
-                op.apply_block(p, ap)
-            },
+            |p: &Array2<f64>, ap: &mut Array2<f64>| op.apply_block(p, ap),
         );
         let multi = pcg_multi_core(&mut backend, rel_tol, max_iters, true);
         assert_eq!(multi.len(), t);
@@ -1450,7 +1446,10 @@ mod tests {
             );
             let blocked = &multi[c];
             assert_eq!(single.stop, blocked.stop, "column {c} stop");
-            assert_eq!(single.iterations, blocked.iterations, "column {c} iterations");
+            assert_eq!(
+                single.iterations, blocked.iterations,
+                "column {c} iterations"
+            );
             assert_eq!(
                 single.rhs_norm.to_bits(),
                 blocked.rhs_norm.to_bits(),
@@ -1596,21 +1595,13 @@ mod tests {
                 ap[[i, 0]] = diagonal[i] * p[[i, 0]];
             }
         };
-        let mut identity = CpuPcgBlockBackend::new(
-            rhs.clone(),
-            Array2::zeros((m, 1)),
-            vec![1.0; m],
-            apply,
-        );
+        let mut identity =
+            CpuPcgBlockBackend::new(rhs.clone(), Array2::zeros((m, 1)), vec![1.0; m], apply);
         let identity_result = pcg_multi_core(&mut identity, 1.0e-10, m, false);
 
         let inverse_diagonal = diagonal.iter().map(|d| d.recip()).collect();
-        let mut jacobi = CpuPcgBlockBackend::new(
-            rhs,
-            Array2::zeros((m, 1)),
-            inverse_diagonal,
-            apply,
-        );
+        let mut jacobi =
+            CpuPcgBlockBackend::new(rhs, Array2::zeros((m, 1)), inverse_diagonal, apply);
         let jacobi_result = pcg_multi_core(&mut jacobi, 1.0e-10, m, false);
 
         assert_eq!(jacobi_result[0].stop, PcgStop::Converged);
@@ -1651,8 +1642,7 @@ mod tests {
                         qt_x += q[i] * basis[[i, c]];
                     }
                     for i in 0..m {
-                        image[[i, c]] =
-                            basis[[i, c]] + (eigenvalue - 1.0) * q[i] * qt_x;
+                        image[[i, c]] = basis[[i, c]] + (eigenvalue - 1.0) * q[i] * qt_x;
                     }
                 }
             },
@@ -1661,8 +1651,7 @@ mod tests {
         let mut rhs = Array2::<f64>::zeros((m, t));
         for i in 0..m {
             for c in 0..t {
-                rhs[[i, c]] =
-                    ((i * 17 + c * 29 + 3) as f64).sin() + (c + 1) as f64 * q[i];
+                rhs[[i, c]] = ((i * 17 + c * 29 + 3) as f64).sin() + (c + 1) as f64 * q[i];
             }
         }
         let apply = |x: &Array2<f64>, out: &mut Array2<f64>| {
