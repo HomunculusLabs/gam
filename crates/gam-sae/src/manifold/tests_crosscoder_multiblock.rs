@@ -204,6 +204,81 @@ fn bit_identical(a: &Array2<f64>, b: &Array2<f64>) -> bool {
             .all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
+/// #2512 — a joint fit is a function of its inputs, including above the
+/// reported 61→62-row transition. Four independently constructed terms receive
+/// the same finite target, rho, and one-iteration grant; every fitted decoder
+/// coefficient must therefore recur bit-for-bit. This deliberately exercises
+/// the cold-start chart placement and entry block sweep before Arrow–Schur
+/// assembly as well as the Newton step itself.
+#[test]
+fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
+    let n = 62usize;
+    let p_x = 4usize;
+    let vocab = 5usize;
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(5).unwrap());
+    let coords = Array2::<f64>::from_shape_fn((n, 1), |(i, _)| i as f64 / n as f64);
+
+    let mut z = Array2::<f64>::zeros((n, p_x));
+    let mut probs = Array2::<f64>::zeros((n, vocab));
+    let mut nx = noise_stream(0x5eed_1001);
+    for i in 0..n {
+        let theta = std::f64::consts::TAU * (i as f64 / n as f64);
+        z[[i, 0]] = theta.cos() + 0.05 * nx();
+        z[[i, 1]] = theta.sin() + 0.05 * nx();
+        z[[i, 2]] = 0.5 * (2.0 * theta).cos();
+        z[[i, 3]] = 0.05 * nx();
+        let law = softmax(&[
+            1.2 * theta.cos(),
+            1.2 * theta.sin(),
+            0.4 * (2.0 * theta).sin(),
+            0.2,
+            0.0,
+        ]);
+        for j in 0..vocab {
+            probs[[i, j]] = law[j];
+        }
+    }
+
+    let behavior = BehaviorBlock::fit(probs.view(), p_x, 0.0).unwrap();
+    let blocks = vec![OutputBlock::new("behavior", behavior.target, 0.0).unwrap()];
+    let target = stack_augmented_target(z.view(), &blocks).unwrap();
+    let p_tot = target.ncols();
+    let mut decoders = Vec::with_capacity(4);
+    for _ in 0..4 {
+        let (mut term, mut rho) = build_k1(&evaluator, &coords, p_tot);
+        term.set_guards_enabled(false);
+        term.run_joint_fit_arrow_schur(
+            target.view(),
+            &mut rho,
+            None,
+            1,
+            1.0,
+            1.0e-6,
+            1.0e-6,
+        )
+        .unwrap();
+        decoders.push(term.atoms[0].decoder_coefficients.clone());
+    }
+
+    let reference_norm = decoders[0].iter().map(|value| value * value).sum::<f64>().sqrt();
+    assert!(
+        reference_norm > 1.0,
+        "#2512 fixture must exercise a real fitted decoder, got norm {reference_norm:.6e}"
+    );
+    for (rep, decoder) in decoders.iter().enumerate().skip(1) {
+        let differing = decoders[0]
+            .iter()
+            .zip(decoder.iter())
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        assert_eq!(
+            differing, 0,
+            "#2512: fresh one-step fit {rep} differs from fit 0 in {differing}/{} decoder coefficients",
+            decoder.len()
+        );
+    }
+}
+
 /// The `K = 2` special case: the general multi-block driver reproduces the
 /// two-block driver to the last bit — same fitted decoders, same log λ.
 #[test]
