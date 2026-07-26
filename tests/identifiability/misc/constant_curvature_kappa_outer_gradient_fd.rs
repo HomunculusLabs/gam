@@ -138,28 +138,33 @@ fn constant_curvature_kappa_outer_gradient_matches_fd() {
             "non-finite kappa gradient component {j}: analytic={analytic} fd={fd}"
         );
         let scale = analytic.abs().max(fd.abs()).max(1e-6);
-        // 5e-3, not 5e-2. The old number was the fixed-step oracle's error
-        // budget rather than the gradient's; the audit now Ridders-extrapolates
-        // and reports `psi_fd_uncertainty`, so the tolerance can describe the
-        // gradient again. #2461.
+        // Still 5e-2, deliberately, unlike the two Matern siblings.
+        //
+        // The audit now Ridders-extrapolates and reports `psi_fd_uncertainty`
+        // (#2461), which is what let `matern_2d_iso_kappa_outer_gradient_
+        // matches_fd` and its anisotropic sibling come down to 5e-3 and add an
+        // oracle-resolution assertion. This gate cannot follow them yet,
+        // because it does not RUN: measured at this commit it dies upstream of
+        // every tolerance with
+        //
+        //     outer-gradient FD capture received 0 psi component rows, expected 1
+        //
+        // `record_outer_gradient_component` fires from the ext-coordinate
+        // gradient loop in `reml_outer_engine::objective`, and the
+        // ConstantCurvature psi coordinate (#944 stage 3, whose psi is the raw
+        // curvature rather than log-kappa) never reaches it. That is a third
+        // missing audit emitter, distinct from the selected-mode one this run
+        // supplied, and it belongs to #2460. Tightening a number in a test that
+        // cannot reach it would be a claim with no measurement behind it, so
+        // the number stays and the uncertainty is merely reported.
         assert!(
-            gap / scale < 5e-3,
+            gap / scale < 5e-2,
             "kappa outer-gradient analytic!=FD on coordinate {j}: \
              analytic={analytic:.6e} fd={fd:.6e} gap={gap:.3e} rel={:.3e} step={:.3e} \
              oracle_unc={:.3e} order={}",
             gap / scale,
             audit.psi_steps[j],
             audit.psi_fd_uncertainty[j],
-            audit.psi_fd_orders[j],
-        );
-        // An unresolved finite difference agrees with everything, so the gap
-        // check alone can pass on a measurement that measured nothing.
-        assert!(
-            audit.psi_fd_uncertainty[j] <= 5e-3 * fd.abs().max(1e-6),
-            "outer-gradient FD oracle did not resolve kappa coordinate {j}: \
-             fd={fd:.6e} uncertainty={:.3e} at step {:.3e} (order {})",
-            audit.psi_fd_uncertainty[j],
-            audit.psi_steps[j],
             audit.psi_fd_orders[j],
         );
     }

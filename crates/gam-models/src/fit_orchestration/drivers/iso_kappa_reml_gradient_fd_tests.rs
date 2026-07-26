@@ -40,7 +40,7 @@ mod iso_kappa_reml_gradient_fd_tests {
 
 #[test]
 fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "duchon_probit_n80",
         80,
         LikelihoodSpec::binomial_probit(),
@@ -83,6 +83,21 @@ fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
 /// may be minted reads the gradient AT the rail — so the analytic gradient in
 /// the only region the certificate consults had never been FD-checked by any
 /// gate. Pass `&[]` for the historical probe set. `#2425`.
+/// What one run of the iso-κ FD probe grid concluded.
+///
+/// A struct rather than a tuple because the fourth thing a caller needs is
+/// `unresolved` — the components the oracle declined to judge — and a gate that
+/// asserts only `violations.is_empty()` cannot tell "everything agreed" from
+/// "nothing could be measured". Both are named here so neither can be read as
+/// the other.
+struct IsoKappaFdReport {
+    pass: bool,
+    worst_psi_rel: f64,
+    violations: Vec<String>,
+    unresolved: Vec<String>,
+    analytic_by_probe: Vec<(String, Array1<f64>)>,
+}
+
 fn iso_kappa_fd_variant_driver(
     label: &str,
     n: usize,
@@ -90,7 +105,7 @@ fn iso_kappa_fd_variant_driver(
     skip_psi: bool,
     well_conditioned: bool,
     extra_rho_probes: &[f64],
-) -> (bool, f64, Vec<String>, Vec<(String, Array1<f64>)>) {
+) -> IsoKappaFdReport {
     let fixture = build_iso_kappa_fixture(label, n, family, well_conditioned);
     iso_kappa_fd_variant_driver_on(&fixture, label, skip_psi, extra_rho_probes)
 }
@@ -309,7 +324,7 @@ fn iso_kappa_fd_variant_driver_on(
     label: &str,
     skip_psi: bool,
     extra_rho_probes: &[f64],
-) -> (bool, f64, Vec<String>, Vec<(String, Array1<f64>)>) {
+) -> IsoKappaFdReport {
     let IsoKappaFixture {
         data,
         rho_dim,
@@ -451,7 +466,7 @@ fn iso_kappa_fd_variant_driver_on(
     let mut violations: Vec<String> = Vec::new();
     let mut analytic_by_probe: Vec<(String, Array1<f64>)> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
-    let mut unresolved = 0usize;
+    let mut unresolved: Vec<String> = Vec::new();
     let base_probes: [(&str, &Array1<f64>); 4] = [
         ("zero", &theta_zero),
         ("psi_only", &theta_psi_only),
@@ -515,7 +530,11 @@ fn iso_kappa_fd_variant_driver_on(
             }
             match verdict {
                 gam_linalg::test_support::fd_checker::FdVerdict::Unresolved => {
-                    unresolved += 1;
+                    unresolved.push(format!(
+                        "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
+                         unc={:.3e} at h={:.1e} (order {})",
+                        measured.uncertainty, measured.step, measured.order
+                    ));
                     continue;
                 }
                 gam_linalg::test_support::fd_checker::FdVerdict::Disagree => {
@@ -535,15 +554,22 @@ fn iso_kappa_fd_variant_driver_on(
     let pass = violations.is_empty();
     eprintln!(
         "[{label} SUMMARY] pass={pass} worst_psi_rel={worst_psi_rel:.3e} \
-             violations={} unresolved={unresolved}",
-        violations.len()
+             violations={} unresolved={}",
+        violations.len(),
+        unresolved.len()
     );
-    (pass, worst_psi_rel, violations, analytic_by_probe)
+    IsoKappaFdReport {
+        pass,
+        worst_psi_rel,
+        violations,
+        unresolved,
+        analytic_by_probe,
+    }
 }
 
 #[test]
 fn iso_kappa_duchon_gaussian_identity_fd() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "duchon_gaussian",
         80,
         LikelihoodSpec::gaussian_identity(),
@@ -570,7 +596,7 @@ fn iso_kappa_duchon_gaussian_identity_fd() {
 /// wrong, the optimizer's stall is explained and this fails loudly.
 #[test]
 fn iso_kappa_matern_gaussian_identity_fd() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "matern_gaussian",
         80,
         LikelihoodSpec::gaussian_identity(),
@@ -595,7 +621,7 @@ fn iso_kappa_matern_gaussian_identity_fd() {
 /// off-diagonal structure when d ≥ 2.
 #[test]
 fn iso_kappa_matern_2d_gaussian_identity_fd() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "matern_gaussian_2d",
         120,
         LikelihoodSpec::gaussian_identity(),
@@ -994,7 +1020,7 @@ fn iso_kappa_matern_2d_psi_fd_step_sweep_diagnostic() {
 /// #1122 stall is driven by the double-penalty value-path / re-key topology.
 #[test]
 fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "matern_gaussian_2d_dp",
         120,
         LikelihoodSpec::gaussian_identity(),
@@ -1012,7 +1038,7 @@ fn iso_kappa_matern_2d_dp_gaussian_identity_fd() {
 
 #[test]
 fn iso_kappa_duchon_binomial_logit_fd() {
-    let (pass, worst, violations, _) =
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
         iso_kappa_fd_variant_driver("duchon_logit", 80, LikelihoodSpec::binomial_logit(), false, false, &[]);
     assert!(
         pass,
@@ -1029,7 +1055,7 @@ fn iso_kappa_duchon_binomial_logit_fd() {
 
 #[test]
 fn iso_kappa_duchon_n_smaller_fd() {
-    let (pass, worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
         "duchon_probit_n20",
         20,
         LikelihoodSpec::binomial_probit(),
@@ -1051,7 +1077,7 @@ fn iso_kappa_duchon_n_smaller_fd() {
 
 #[test]
 fn iso_kappa_duchon_no_psi_fd() {
-    let (pass, _worst, violations, _) = iso_kappa_fd_variant_driver(
+    let IsoKappaFdReport { pass, violations, .. } = iso_kappa_fd_variant_driver(
         "duchon_probit_rho_only",
         80,
         LikelihoodSpec::binomial_probit(),
@@ -1139,7 +1165,7 @@ fn iso_kappa_rail_gradient_matches_fd_at_both_faces_2444() {
         ("matern_gaussian", 80, LikelihoodSpec::gaussian_identity()),
         ("duchon_logit", 80, LikelihoodSpec::binomial_logit()),
     ] {
-        let (pass, worst, violations, _) =
+        let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &[11.5, -11.5]);
         summary.push(format!(
             "{label}: pass={pass} worst_psi_rel={worst:.3e} violations={}",
@@ -1199,7 +1225,7 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
         ("matern_gaussian_2d", 120, LikelihoodSpec::gaussian_identity()),
         ("matern_gaussian_2d_dp", 120, LikelihoodSpec::gaussian_identity()),
     ] {
-        let (pass, worst, violations, _) =
+        let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } =
             iso_kappa_fd_variant_driver(label, n, family, false, false, &LADDER);
         eprintln!(
             "[zz-ladder-2425] {label}: fd_pass={pass} worst_psi_rel={worst:.3e} \
@@ -1210,6 +1236,67 @@ fn zz_measure_iso_kappa_face_saturation_ladder_2425() {
             eprintln!("[zz-ladder-2425] {label}: {v}");
         }
     }
+}
+
+/// #2461 — the analytic iso-κ outer gradient is CERTIFIED six e-folds past the
+/// box, on every fixture, in both blocks.
+///
+/// This region was unreachable before. `JOINT_RHO_BOUND = 12` is the widest ρ
+/// any gate had ever probed (`..._at_both_faces_2444`, at ±11.5), and the #2425
+/// ladder that walks out to 30 was reporting-only precisely because the
+/// fixed-step oracle behind it manufactured verdicts out there: on the run that
+/// opened #2461 it reported 31 violations on `duchon_gaussian` alone, of which
+/// the headline one — a 0.54% ψ gap stable over twelve e-folds — was its own
+/// `(h/s)²/6` truncation.
+///
+/// With a self-certifying oracle the same ladder is unambiguous. Measured at
+/// this commit across all four fixtures and BOTH ρ and ψ components, every
+/// probe at `ρ ≤ 18` returns `Agree`; the first non-`Agree` row anywhere is
+/// `duchon_gaussian rho1@21 rho j=1`, and it is `Unresolved` (λ = e²¹ ≈ 1.3e9,
+/// where the criterion's own evaluation noise, not its gradient, is the limit).
+/// So `{15, 18}` is exactly the region the fix makes gateable, and this pins
+/// it.
+///
+/// `unresolved` is asserted empty too. A gate that checks only `violations`
+/// cannot distinguish "every component agreed" from "no component could be
+/// measured" — an oracle that resolves nothing produces no violations at all.
+#[test]
+fn iso_kappa_gradient_is_certified_six_e_folds_past_the_box_2461() {
+    // Six and nine e-folds outside `JOINT_RHO_BOUND = 12`. Not further: at 21
+    // the criterion's evaluation noise starts to swallow ρ components that have
+    // decayed to their λ=∞ face, and the honest verdict there is `Unresolved`,
+    // which is not a property worth pinning as a pass.
+    const CERTIFIABLE: [f64; 2] = [15.0, 18.0];
+    let mut failures: Vec<String> = Vec::new();
+    let mut summary: Vec<String> = Vec::new();
+    for (label, n, family) in [
+        ("matern_gaussian", 80usize, LikelihoodSpec::gaussian_identity()),
+        ("duchon_gaussian", 80, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian_2d", 120, LikelihoodSpec::gaussian_identity()),
+        ("matern_gaussian_2d_dp", 120, LikelihoodSpec::gaussian_identity()),
+    ] {
+        let report = iso_kappa_fd_variant_driver(label, n, family, false, false, &CERTIFIABLE);
+        summary.push(format!(
+            "{label}: worst_psi_rel={:.3e} violations={} unresolved={}",
+            report.worst_psi_rel,
+            report.violations.len(),
+            report.unresolved.len()
+        ));
+        for violation in &report.violations {
+            failures.push(format!("{label} DISAGREE {violation}"));
+        }
+        for row in &report.unresolved {
+            failures.push(format!("{label} UNRESOLVED {row}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "every iso-κ gradient component must be CERTIFIED out to ρ=18; \
+         {} row(s) were not\n  {}\n  {}",
+        failures.len(),
+        summary.join("\n  "),
+        failures.join("\n  ")
+    );
 }
 
 /// #2450 — the λ=∞ face EXISTS: at large ρ the outer gradient has decayed to
@@ -1277,7 +1364,7 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
     const SATURATED: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
 
     for (label, family) in [("matern_gaussian", LikelihoodSpec::gaussian_identity())] {
-        let (_pass, _worst, _violations, grads) =
+        let IsoKappaFdReport { analytic_by_probe: grads, .. } =
             iso_kappa_fd_variant_driver(label, 80, family, false, false, &SATURATED);
         let mut checked = 0usize;
         let mut worst_fraction = 0.0f64;
