@@ -14,6 +14,14 @@ on:
       package:
         description: "Cargo package containing the focused tests."
         required: true
+      runner:
+        description: "Host/ISA lane for the focused proof."
+        type: choice
+        options:
+          - ubuntu-latest
+          - macos-15
+        default: ubuntu-latest
+        required: true
       target:
         description: "Compile library tests or one integration-test binary."
         type: choice
@@ -46,7 +54,9 @@ env:
   CARGO_TERM_COLOR: always
   # Match the full Rust archive builder so compiler objects are reusable across
   # the focused and complete lanes.
-  RUSTFLAGS: "-C link-arg=-Wl,--threads=1"
+  # GNU ld's threaded linker flag is Linux-only. An empty value on macOS
+  # matches native release builds and therefore their compiler-cache keys.
+  RUSTFLAGS: ${{ startsWith(github.event.inputs.runner, 'macos-') && '' || '-C link-arg=-Wl,--threads=1' }}
   SCCACHE_GHA_ENABLED: "true"
   # The two budgets below replace ONE bound that covered codegen, link AND
   # execution together (#2429).
@@ -67,7 +77,7 @@ env:
 jobs:
   prove:
     name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner }}
     # Must exceed BUILD_BUDGET_SECONDS + RUN_BUDGET_SECONDS plus checkout and
     # toolchain setup, so the LEGIBLE inner bounds always fire before the job
     # cap does. A job cancelled at the cap is the opaque outcome #2429 exists to
@@ -76,6 +86,21 @@ jobs:
     # that is fixed at BUILD_BUDGET_SECONDS.
     timeout-minutes: 35
     steps:
+      - name: Provide bounded execution on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gtimeout >/dev/null 2>&1; then
+            brew install coreutils
+          fi
+          echo "FOCUSED_TIMEOUT=gtimeout" >> "$GITHUB_ENV"
+
+      - name: Select native timeout command on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: echo "FOCUSED_TIMEOUT=timeout" >> "$GITHUB_ENV"
+
       - name: Checkout exact requested SHA
         uses: actions/checkout@v5
         with:
@@ -182,7 +207,7 @@ jobs:
           echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} --no-run"
           started=$(date +%s)
           set +e
-          timeout --signal=TERM --kill-after=15s "$BUILD_BUDGET_SECONDS" \
+          "$FOCUSED_TIMEOUT" --signal=TERM --kill-after=15s "$BUILD_BUDGET_SECONDS" \
             cargo test -p "$PACKAGE" --all-features "${target_args[@]}" --no-run \
             2>&1 | tee "$log_file"
           status=${PIPESTATUS[0]}
@@ -240,7 +265,7 @@ jobs:
             log_file="focused-rust-logs/${filter//[:.]/_}.log"
             echo "cargo test -p ${PACKAGE} --all-features ${target_args[*]} ${filter}"
             set +e
-            timeout --signal=TERM --kill-after=15s "$RUN_BUDGET_SECONDS" \
+            "$FOCUSED_TIMEOUT" --signal=TERM --kill-after=15s "$RUN_BUDGET_SECONDS" \
               cargo test -p "$PACKAGE" --all-features \
                 "${target_args[@]}" "$filter" \
                 -- --nocapture --test-threads=1 2>&1 | tee "$log_file"
