@@ -1,9 +1,9 @@
 name: Rolling wheel (warm-start artifact)
 
-# Permanent warm-start: main's tip is rebuilt into the x86_64 manylinux wheel
-# plus CLI on a fixed cadence, and both are pinned to the rolling `wheel-latest`
-# prerelease. Compute boxes and validation workflows download one verified
-# runtime in seconds instead of paying a cold cargo build:
+# Permanent warm-start: every push to main rebuilds the x86_64 manylinux wheel
+# plus CLI and pins both to the rolling `wheel-latest` prerelease. Compute boxes
+# and validation workflows download one verified runtime in seconds instead of
+# paying a cold cargo build:
 #
 #   gh release download wheel-latest --repo SauersML/gam -p 'gamfit-*.whl' -D dist/
 #   pip install --force-reinstall dist/gamfit-*.whl
@@ -11,23 +11,8 @@ name: Rolling wheel (warm-start artifact)
 # The wheel is built in a manylinux_2_28 container so it runs on MSI's Rocky 8
 # (glibc 2.28) as well as modern cloud images — a plain ubuntu-runner build
 # would tag manylinux_2_35 and refuse to install on the cluster. sccache keeps
-# rebuilds warm across runs.
-#
-# WHY A CADENCE AND NOT `on: push` (#2468). This workflow used to build every
-# push to main and cancel the superseded build, which is correct only while
-# pushes are further apart than a build. Measured 2026-07-26 over 100
-# consecutive push-triggered runs (8.8 h): median inter-push gap 4.0 min, p90
-# 12.7 min; build median 8.9 min, max 14.3 min. A build therefore survived only
-# when it happened to land in a gap longer than itself — 88 of 100 runs were
-# cancelled, 7 succeeded, and the artifact this workflow exists to publish was
-# essentially never published. That is not the external canceller of #2468: in
-# the same window cross-check's cancellation rate fell to 0% while this stayed
-# above 85%, because this half is self-inflicted supersession.
-#
-# The rate is the defect, not the supersession policy. A rolling warm-start
-# artifact needs a bounded staleness, not one build per commit, so the trigger
-# is a 30-minute cadence: at ~2x the worst measured build it cannot supersede
-# itself, and the published wheel is at most one period behind main's tip.
+# rebuilds warm across runs. `concurrency` cancels superseded builds so only
+# the newest SHA spends minutes.
 #
 # This channel NEVER publishes to PyPI — pypi-wheels.yml stays the version-gated
 # release path; this is the fleet's iteration artifact. It builds under the
@@ -36,19 +21,15 @@ name: Rolling wheel (warm-start artifact)
 # measurements, which need a real release-profile build.
 
 on:
-  schedule:
-    # Every 30 minutes, offset off :00/:30 because GitHub drops scheduled events
-    # at the top of the hour under load.
-    - cron: "9,39 * * * *"
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# Scheduled builds share one newest-writer lane. At a 30-minute cadence against
-# a <=15-minute build they do not overlap, so this cancellation is a safety net
-# for a delayed scheduler rather than the routine outcome it used to be.
-# An explicitly dispatched validation ref still gets its own lane: main churn
-# cannot starve a proof build, and that branch never writes the rolling release.
+# Main has one newest-writer lane, so superseded automatic builds are canceled.
+# An explicitly dispatched validation ref gets its own lane: main churn cannot
+# starve a proof build, and that branch never writes the rolling release.
 concurrency:
-  group: runtime-${{ github.event_name == 'schedule' && 'main' || github.ref }}
+  group: runtime-${{ github.event_name == 'push' && 'main' || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -101,14 +82,8 @@ jobs:
             (cd dist && sha256sum "$(basename "$WHEEL")" gam)
           } > dist/RUNTIME_PROVENANCE.txt
 
-      # Publishing is a property of WHICH REF was built, not of which trigger
-      # delivered it: main's tip belongs in the rolling release whether the
-      # cadence or a human asked for it, and a dispatched validation branch
-      # never does. Naming the trigger here instead would have silently
-      # disabled the only step this workflow exists for when the trigger
-      # changed, leaving a green run that published nothing.
       - name: Pin newest main runtime to rolling release
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
