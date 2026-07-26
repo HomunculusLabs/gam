@@ -20,6 +20,7 @@
 
 use crate::manifold::{AtlasOrientability, SphereChartTransition};
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
+use gam_math::probability::normal_two_sided_probability;
 use ndarray::{Array1, Array2, ArrayView2, s};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -4583,17 +4584,11 @@ fn gauss_bonnet_confidence(
             },
         )
     } else {
-        let normal = Normal::new(0.0, 1.0)
-            .map_err(|error| format!("standard-normal construction failed: {error}"))?;
-        let probability = (2.0
-            * (1.0
-                - normal.cdf(
-                    stochastic_rounding_margin
-                        / standard_error.ok_or_else(|| {
-                            "nondegenerate Gauss-Bonnet law lost its standard error".to_string()
-                        })?,
-                )))
-        .clamp(0.0, 1.0);
+        let standardized_margin = stochastic_rounding_margin
+            / standard_error.ok_or_else(|| {
+                "nondegenerate Gauss-Bonnet law lost its standard error".to_string()
+            })?;
+        let probability = normal_two_sided_probability(standardized_margin);
         if probability <= allocated_alpha {
             (
                 Some(probability),

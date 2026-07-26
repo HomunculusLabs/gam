@@ -8682,13 +8682,10 @@ pub fn smooth_term_lr_inference_forspec(
             _ => (f64::NAN, None),
         };
 
-        let chi2 = statrs::distribution::ChiSquared::new(ref_df).ok();
-        let p_uncorrected = match (chi2.as_ref(), statistic_lr.is_finite()) {
-            (Some(dist), true) => {
-                use statrs::distribution::ContinuousCDF;
-                (1.0 - dist.cdf(statistic_lr)).clamp(0.0, 1.0)
-            }
-            _ => f64::NAN,
+        let p_uncorrected = if statistic_lr.is_finite() {
+            gam_math::probability::chi_square_sf(statistic_lr, ref_df)
+        } else {
+            f64::NAN
         };
 
         // Magic Bartlett correction: only when the LR statistic is finite, the
@@ -8715,7 +8712,7 @@ pub fn smooth_term_lr_inference_forspec(
                     .and_then(|jets| jets.kappas().ok())
                 })
                 .collect();
-            if let (Some(kappas), Some(dist)) = (kappas, chi2.as_ref()) {
+            if let Some(kappas) = kappas {
                 let fixed_factor = lawley_lr_bartlett_factor(
                     full_design_dense.view(),
                     &kappas,
@@ -8754,10 +8751,10 @@ pub fn smooth_term_lr_inference_forspec(
                             correction = SmoothLrCorrection::LawleyLrEstimatedLambda;
                         }
                     }
-                    use statrs::distribution::ContinuousCDF;
                     bartlett_factor = c_applied;
                     statistic_corrected = statistic_lr / c_applied;
-                    p_corrected = (1.0 - dist.cdf(statistic_corrected)).clamp(0.0, 1.0);
+                    p_corrected =
+                        gam_math::probability::chi_square_sf(statistic_corrected, ref_df);
                 }
             }
         }

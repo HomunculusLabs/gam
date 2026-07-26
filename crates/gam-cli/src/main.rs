@@ -85,7 +85,10 @@ pub(crate) use gam_predict::{
 
 pub(crate) use gam::report;
 
-pub(crate) use gam::probability::{normal_cdf, normal_sf, standard_normal_quantile, students_t_sf};
+pub(crate) use gam::probability::{
+    normal_cdf, normal_two_sided_probability, standard_normal_quantile,
+    student_t_two_sided_probability,
+};
 
 pub(crate) use gam::families::fit_orchestration::drivers::freeze_term_collection_from_design;
 pub(crate) use gam::smooth::{

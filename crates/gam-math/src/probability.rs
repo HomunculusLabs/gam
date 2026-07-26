@@ -1,5 +1,8 @@
 use libm::{erf, erfc};
-use statrs::function::beta::{beta_reg, inv_beta_reg, ln_beta};
+use statrs::function::{
+    beta::{beta_reg, inv_beta_reg, ln_beta},
+    gamma::gamma_ur,
+};
 
 const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3;
 const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4;
@@ -144,6 +147,62 @@ fn beta_ascending_series(x: f64, a: f64, b: f64) -> Option<(f64, f64)> {
     None
 }
 
+/// `I_x(a,b)` from `ln(x)`, retaining a representable result when `x` itself
+/// underflows.
+///
+/// The ordinary `beta_reg(a,b,x)` interface necessarily loses every result
+/// whose beta argument is below the smallest subnormal, even when the
+/// regularized integral is much larger because `a < 1`. On the derived
+/// ascending-series branch, `x` appears only in the well-scaled correction
+/// `S(x)` while its leading power stays in log space:
+///
+/// `ln I_x(a,b) = a·ln(x) − ln B(a,b) + ln S(x)`.
+///
+/// The same term-ratio proof used by [`lower_tail_beta_quantile`] supplies the
+/// branch boundary. Outside that boundary, the ordinary regularized-beta
+/// implementation receives a representable argument and remains the canonical
+/// general evaluator.
+fn regularized_beta_lower_from_log_x(log_x: f64, a: f64, b: f64) -> f64 {
+    if !(a.is_finite() && a > 0.0 && b.is_finite() && b > 0.0)
+        || log_x.is_nan()
+        || log_x > 0.0
+    {
+        return f64::NAN;
+    }
+    if log_x == 0.0 {
+        return 1.0;
+    }
+    if log_x == f64::NEG_INFINITY {
+        return 0.0;
+    }
+
+    let series_limit = (0.5_f64).ln() - b.max(1.0).ln();
+    if log_x <= series_limit {
+        let x = log_x.exp();
+        let Some((sum, _)) = beta_ascending_series(x, a, b) else {
+            return f64::NAN;
+        };
+        let log_beta = ln_beta(a, b);
+        if !(sum.is_finite() && sum > 0.0 && log_beta.is_finite()) {
+            return f64::NAN;
+        }
+        return (a * log_x - log_beta + sum.ln()).exp();
+    }
+
+    beta_reg(a, b, log_x.exp())
+}
+
+/// `ln(1 / (1 + exp(log_ratio)))` without overflowing or rounding a
+/// representable small unit fraction to zero.
+#[inline]
+fn log_reciprocal_one_plus_exp(log_ratio: f64) -> f64 {
+    if log_ratio <= 0.0 {
+        -log_ratio.exp().ln_1p()
+    } else {
+        -log_ratio - (-log_ratio).exp().ln_1p()
+    }
+}
+
 /// Guard term count for [`beta_ascending_series`]. The caller's `x·max(1,b) ≤ ½`
 /// branch bounds every term ratio by `½`, so the series reaches one ulp of an
 /// `O(1/a)` partial sum in at most `53` terms; this is the non-convergence
@@ -216,60 +275,136 @@ pub fn normal_pdf(x: f64) -> f64 {
 /// returned function is the standard normal CDF itself rather than a separate
 /// polynomial surrogate surface.
 #[inline]
-/// Upper tail of the standard normal, `1 - Φ(x)`, with full *relative*
-/// accuracy everywhere it is representable.
+pub fn normal_cdf(x: f64) -> f64 {
+    0.5 * erfc(-x / std::f64::consts::SQRT_2)
+}
+
+/// Standard normal survival probability `P(Z > x)`.
 ///
-/// This is not `1.0 - normal_cdf(x)`. `Φ(x)` rounds to exactly `1.0` once its
-/// upper tail falls below half an ulp of one (5.55e-17, reached at `x ≈ 8.3`),
-/// so the subtraction returns exactly zero for every larger `x` — and is already
-/// wrong in its leading digits before that: at `x = 8` the true tail is
-/// 6.22e-16 and `1 - Φ(8)` gives 6.66e-16, seven percent high. The
-/// complementary error function carries the small tail directly and never forms
-/// the difference, so the relative error stays at a few ulp down to `x ≈ 37`,
-/// below which the true value is smaller than the smallest subnormal and zero
-/// is the correctly rounded answer.
-///
-/// Symmetry makes this the whole story for two-sided tests: the two-sided
-/// p-value of a z statistic is `2 * normal_sf(|z|)`, which is `erfc(|z|/√2)`.
+/// This is evaluated as `½·erfc(x/√2)`, not as `1 − Φ(x)`. The latter loses
+/// relative accuracy as soon as `Φ(x)` approaches one and becomes identically
+/// zero for every representable `x` above roughly `8.3`, while the direct
+/// complementary form retains the full representable tail.
+#[inline]
 pub fn normal_sf(x: f64) -> f64 {
     0.5 * erfc(x / std::f64::consts::SQRT_2)
 }
 
-/// Upper tail of Student's t on `nu` degrees of freedom, `P(T > t)`, with full
-/// *relative* accuracy in the tail.
+/// Two-sided standard-normal probability `P(|Z| ≥ |z|)`.
 ///
-/// This is not `1 - cdf(t)`. Like every CDF, `F_ν` saturates to exactly 1.0 once
-/// its upper tail falls below half an ulp of one, and the larger `ν` is the
-/// sooner that happens: at `ν = 500`, `1 - F(10)` is already exactly zero while
-/// the true tail is 6.9e-22. Here the tail comes from the identity
-///
-/// ```text
-/// P(T > t) = I_{ν/(ν+t²)}(ν/2, 1/2) / 2      for t >= 0
-/// ```
-///
-/// which is a single regularized incomplete beta and forms no difference. The
-/// argument `ν/(ν+t²)` stays in `(0, 1]` and moves *away* from the endpoints as
-/// `t` grows, so the deep tail is evaluated where the incomplete beta is at its
-/// best conditioned rather than its worst.
-///
-/// For `t < 0` the tail exceeds 1/2 and the reflection `1 - P(T > -t)` is
-/// harmless: the result is O(1), so one ulp of absolute error is one ulp of
-/// relative error.
-///
-/// The two-sided p-value of a t statistic is `2 * students_t_sf(|t|, ν)`, which
-/// is `beta_reg(ν/2, 1/2, ν/(ν+t²))` outright.
-///
-/// Returns NaN unless `nu` is finite and positive.
-pub fn students_t_sf(t: f64, nu: f64) -> f64 {
-    if !(nu.is_finite() && nu > 0.0) || t.is_nan() {
-        return f64::NAN;
-    }
-    let half_tail = 0.5 * beta_reg(0.5 * nu, 0.5, nu / (nu + t * t));
-    if t >= 0.0 { half_tail } else { 1.0 - half_tail }
+/// The exact symmetric identity is `erfc(|z|/√2)`. Evaluating that identity
+/// directly avoids both the cancellation in `2·(1 − Φ(|z|))` and an
+/// unnecessary rounding from multiplying a one-sided tail by two.
+#[inline]
+pub fn normal_two_sided_probability(z: f64) -> f64 {
+    erfc(z.abs() / std::f64::consts::SQRT_2)
 }
 
-pub fn normal_cdf(x: f64) -> f64 {
-    0.5 * erfc(-x / std::f64::consts::SQRT_2)
+/// Two-sided Student-t probability `P(|T_ν| ≥ |t|)`.
+///
+/// For finite `ν > 0`,
+///
+/// `P(|T_ν| ≥ |t|) = I_x(ν/2, 1/2)`, `x = ν / (ν + t²)`.
+///
+/// Neither `t²` nor `x` is formed directly. Their ratio is carried as
+/// `ln(t²/ν)`, and the regularized beta receives `ln(x)`. This matters beyond
+/// avoiding overflow: for `ν = 1` and `t = f64::MAX`, `x` underflows to zero
+/// although the Cauchy tail is still a representable subnormal. The log-beta
+/// series preserves that probability. Invalid degrees of freedom produce
+/// `NaN`; infinite statistics map to the exact limiting probability zero.
+pub fn student_t_two_sided_probability(t: f64, degrees_of_freedom: f64) -> f64 {
+    let half_df = 0.5 * degrees_of_freedom;
+    if t.is_nan()
+        || !(degrees_of_freedom.is_finite()
+            && degrees_of_freedom > 0.0
+            && half_df > 0.0)
+    {
+        return f64::NAN;
+    }
+    if t.is_infinite() {
+        return 0.0;
+    }
+
+    let log_t_squared_over_df = 2.0 * t.abs().ln() - degrees_of_freedom.ln();
+    let log_x = log_reciprocal_one_plus_exp(log_t_squared_over_df);
+    regularized_beta_lower_from_log_x(log_x, half_df, 0.5)
+}
+
+/// Student-t survival probability `P(T_ν > t)`.
+///
+/// The small tail is always obtained from
+/// [`student_t_two_sided_probability`]. For negative `t`, subtracting its
+/// half-tail from one constructs the large probability, where subtraction is
+/// well conditioned.
+pub fn student_t_sf(t: f64, degrees_of_freedom: f64) -> f64 {
+    let two_sided = student_t_two_sided_probability(t, degrees_of_freedom);
+    if t < 0.0 {
+        1.0 - 0.5 * two_sided
+    } else {
+        0.5 * two_sided
+    }
+}
+
+/// Chi-squared survival probability `P(X_ν > statistic)`.
+///
+/// Uses the regularized upper incomplete gamma directly instead of
+/// reconstructing a small tail as `1 − P(ν/2, statistic/2)`.
+pub fn chi_square_sf(statistic: f64, degrees_of_freedom: f64) -> f64 {
+    let half_df = 0.5 * degrees_of_freedom;
+    if statistic.is_nan()
+        || statistic < 0.0
+        || !(degrees_of_freedom.is_finite()
+            && degrees_of_freedom > 0.0
+            && half_df > 0.0)
+    {
+        return f64::NAN;
+    }
+    if statistic == 0.0 {
+        return 1.0;
+    }
+    if statistic == f64::INFINITY {
+        return 0.0;
+    }
+    gamma_ur(half_df, 0.5 * statistic)
+}
+
+/// Fisher-Snedecor survival probability `P(F_{d1,d2} > statistic)`.
+///
+/// The complementary regularized-beta identity is evaluated directly:
+///
+/// `I_x(d2/2, d1/2)`, `x = d2 / (d2 + d1·statistic)`.
+///
+/// The beta argument is derived in log space, so neither `d1·statistic` nor
+/// the denominator can overflow before a representable tail is recovered.
+pub fn fisher_snedecor_sf(
+    statistic: f64,
+    numerator_degrees_of_freedom: f64,
+    denominator_degrees_of_freedom: f64,
+) -> f64 {
+    let beta_a = 0.5 * denominator_degrees_of_freedom;
+    let beta_b = 0.5 * numerator_degrees_of_freedom;
+    if statistic.is_nan()
+        || statistic < 0.0
+        || !(numerator_degrees_of_freedom.is_finite()
+            && numerator_degrees_of_freedom > 0.0
+            && denominator_degrees_of_freedom.is_finite()
+            && denominator_degrees_of_freedom > 0.0
+            && beta_a > 0.0
+            && beta_b > 0.0)
+    {
+        return f64::NAN;
+    }
+    if statistic == 0.0 {
+        return 1.0;
+    }
+    if statistic == f64::INFINITY {
+        return 0.0;
+    }
+
+    let log_ratio = numerator_degrees_of_freedom.ln() + statistic.ln()
+        - denominator_degrees_of_freedom.ln();
+    let log_x = log_reciprocal_one_plus_exp(log_ratio);
+    regularized_beta_lower_from_log_x(log_x, beta_a, beta_b)
 }
 
 /// Scaled complementary error function `erfcx(x) = exp(x²) · erfc(x)`,
@@ -1255,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn students_t_sf_keeps_the_upper_tail_that_one_minus_the_cdf_destroys() {
+    fn student_t_primitives_keep_the_tail_that_one_minus_the_cdf_destroys() {
         // References are correctly rounded doubles from a 60-dps regularized
         // incomplete beta. The `nu = 10000, t = 10` row is here because a
         // plausible-looking hand-extrapolated literal for it (1.60e-23) is 20%
@@ -1292,19 +1427,27 @@ mod tests {
         // cancellation. Bar is 5x the worst measured.
         let bar = 1.0e-11;
         for (nu, t, want) in ROWS {
-            let got = students_t_sf(t, nu);
+            let got = student_t_sf(t, nu);
             let rel = ((got - want) / want).abs();
             assert!(
                 rel <= bar,
-                "students_t_sf({t}, {nu}) = {got:e}, want {want:e}, relative {rel:e} > {bar:e}"
+                "student_t_sf({t}, {nu}) = {got:e}, want {want:e}, relative {rel:e} > {bar:e}"
+            );
+            let got_two_sided = student_t_two_sided_probability(t, nu);
+            let two_sided_rel = ((got_two_sided - 2.0 * want) / (2.0 * want)).abs();
+            assert!(
+                two_sided_rel <= bar,
+                "student_t_two_sided_probability({t}, {nu}) = {got_two_sided:e}, \
+                 want {:e}, relative {two_sided_rel:e} > {bar:e}",
+                2.0 * want
             );
             // The reflection. `1 - want` is O(1), so its own absolute error of
             // one ulp is a relative error of one ulp -- which is exactly why
             // reflecting is safe here and reconstructing the small tail is not.
-            let lower = students_t_sf(-t, nu);
+            let lower = student_t_sf(-t, nu);
             assert!(
                 (lower - (1.0 - want)).abs() <= 2.0 * f64::EPSILON,
-                "students_t_sf({}, {nu}) = {lower}, want {}",
+                "student_t_sf({}, {nu}) = {lower}, want {}",
                 -t,
                 1.0 - want
             );
@@ -1312,18 +1455,18 @@ mod tests {
         // Symmetry at the median, and the degenerate arguments.
         for nu in [1.0_f64, 5.0, 1e4] {
             assert!(
-                (students_t_sf(0.0, nu) - 0.5).abs() <= f64::EPSILON,
+                (student_t_sf(0.0, nu) - 0.5).abs() <= f64::EPSILON,
                 "median at nu = {nu}"
             );
         }
-        assert!(students_t_sf(1.0, 0.0).is_nan(), "nu = 0 is not a t");
+        assert!(student_t_sf(1.0, 0.0).is_nan(), "nu = 0 is not a t");
         assert!(
-            students_t_sf(1.0, f64::INFINITY).is_nan(),
+            student_t_sf(1.0, f64::INFINITY).is_nan(),
             "nu = inf is not a t"
         );
-        assert_eq!(students_t_sf(f64::INFINITY, 5.0), 0.0, "tail beyond +inf");
+        assert_eq!(student_t_sf(f64::INFINITY, 5.0), 0.0, "tail beyond +inf");
         assert_eq!(
-            students_t_sf(f64::NEG_INFINITY, 5.0),
+            student_t_sf(f64::NEG_INFINITY, 5.0),
             1.0,
             "tail beyond -inf"
         );
@@ -1347,11 +1490,13 @@ mod tests {
         // z score as the input: the tail is exponentially steep in `x`, so the
         // last bit of `x` is worth `x^2` bits of the tail. It is also
         // irrelevant next to what it replaces, which is a relative error of 1.
-        const ROWS: [(f64, f64); 11] = [
+        const ROWS: [(f64, f64); 13] = [
             (0.5, 0.3085375387259869),
             (2.0, 0.02275013194817921),
             (4.0, 3.1671241833119924e-5),
+            (5.0, 2.866515718791933e-7),
             (6.0, 9.86587645037698e-10),
+            (7.0, 1.279812543885835e-12),
             (8.0, 6.220960574271784e-16),
             (8.3, 5.205569744890254e-17),
             (9.0, 1.1285884059538405e-19),
@@ -1367,6 +1512,14 @@ mod tests {
             assert!(
                 rel <= bar,
                 "normal_sf({x}) = {got:e}, want {want:e}, relative {rel:e} > {bar:e}"
+            );
+            let got_two_sided = normal_two_sided_probability(x);
+            let two_sided_rel = ((got_two_sided - 2.0 * want) / (2.0 * want)).abs();
+            assert!(
+                two_sided_rel <= bar,
+                "normal_two_sided_probability({x}) = {got_two_sided:e}, \
+                 want {:e}, relative {two_sided_rel:e} > {bar:e}",
+                2.0 * want
             );
             // The value this replaces. Above the saturation point it is not a
             // less accurate answer, it is no answer.
@@ -1385,6 +1538,79 @@ mod tests {
             assert!((sum - 1.0).abs() <= 2.0 * f64::EPSILON, "sf + cdf = {sum}");
             assert_eq!(normal_sf(-x), normal_cdf(x), "sf(-x) != cdf(x) at {x}");
         }
+    }
+
+    /// The final representable normal two-sided tail is subnormal. This is a
+    /// separate absolute/ULP assertion because a conventional relative-error
+    /// helper with a normal-number floor would make the edge vacuous.
+    #[test]
+    fn normal_two_sided_tail_retains_subnormal_edge() {
+        const EXPECTED_AT_38: f64 = 5.770_856_702_007_929e-316;
+        let got = normal_two_sided_probability(38.0);
+        let ulps = got.to_bits().abs_diff(EXPECTED_AT_38.to_bits());
+        assert!(
+            got.is_subnormal() && ulps <= 128,
+            "two-sided normal tail at z=38: got {got:.17e}, \
+             expected {EXPECTED_AT_38:.17e}, ulps {ulps}"
+        );
+        assert_eq!(normal_two_sided_probability(40.0), 0.0);
+        assert_eq!(normal_two_sided_probability(f64::INFINITY), 0.0);
+        assert!(normal_two_sided_probability(f64::NAN).is_nan());
+    }
+
+    /// `t²` and then `ν/(ν+t²)` both underflow at this edge, but the Cauchy
+    /// tail itself is still representable. The analytic Cauchy survival law is
+    /// an independent oracle for the log-beta implementation.
+    #[test]
+    fn student_t_two_sided_tail_retains_subnormal_cauchy_edge() {
+        const EXPECTED: f64 = 3.541_315_033_259_774_5e-309;
+        let got = student_t_two_sided_probability(f64::MAX, 1.0);
+        let analytic = 2.0 * (1.0 / f64::MAX).atan() / std::f64::consts::PI;
+        let pinned_ulps = got.to_bits().abs_diff(EXPECTED.to_bits());
+        let analytic_ulps = got.to_bits().abs_diff(analytic.to_bits());
+        assert!(
+            got.is_subnormal() && pinned_ulps <= 512 && analytic_ulps <= 512,
+            "Cauchy tail at f64::MAX: got {got:.17e}, pinned {EXPECTED:.17e}, \
+             analytic {analytic:.17e}, pinned ulps {pinned_ulps}, \
+             analytic ulps {analytic_ulps}"
+        );
+    }
+
+    #[test]
+    fn distribution_survival_primitives_define_boundaries_and_identities() {
+        assert_eq!(normal_sf(f64::INFINITY), 0.0);
+        assert_eq!(normal_sf(f64::NEG_INFINITY), 1.0);
+        assert!(normal_sf(f64::NAN).is_nan());
+
+        assert_eq!(student_t_two_sided_probability(0.0, 7.0), 1.0);
+        assert_eq!(student_t_sf(0.0, 7.0), 0.5);
+        assert!(student_t_sf(f64::NAN, 7.0).is_nan());
+
+        assert_eq!(chi_square_sf(0.0, 3.0), 1.0);
+        assert_eq!(chi_square_sf(f64::INFINITY, 3.0), 0.0);
+        assert!(chi_square_sf(-1.0, 3.0).is_nan());
+        assert!(chi_square_sf(1.0, 0.0).is_nan());
+
+        assert_eq!(fisher_snedecor_sf(0.0, 3.0, 20.0), 1.0);
+        assert_eq!(
+            fisher_snedecor_sf(f64::INFINITY, 3.0, 20.0),
+            0.0
+        );
+        assert!(fisher_snedecor_sf(-1.0, 3.0, 20.0).is_nan());
+        assert!(fisher_snedecor_sf(1.0, 0.0, 20.0).is_nan());
+        assert!(fisher_snedecor_sf(1.0, 3.0, 0.0).is_nan());
+
+        // χ²₁ is the square of a standard normal; F₁,₁ is the square of a
+        // Cauchy. These identities independently anchor both direct survival
+        // implementations in a small-tail regime.
+        let statistic = 160.0_f64;
+        let chi_expected = normal_two_sided_probability(statistic.sqrt());
+        let chi_got = chi_square_sf(statistic, 1.0);
+        assert!(rel_err(chi_got, chi_expected) <= 2.0e-13);
+
+        let f_expected = student_t_two_sided_probability(statistic.sqrt(), 1.0);
+        let f_got = fisher_snedecor_sf(statistic, 1.0, 1.0);
+        assert!(rel_err(f_got, f_expected) <= 2.0e-13);
     }
 
     #[test]

@@ -64,15 +64,15 @@ pub(crate) fn build_model_summary(
         // drops below half an ulp of one, so the subtraction reports p = 0 for
         // every |z| above 8.3 and is 7% high already at |z| = 8 -- and the
         // `.clamp(0.0, 1.0)` that used to wrap it made the zero look legal.
-        if scale_is_estimated {
+        let p_value = if scale_is_estimated {
             // For t > 0, P(T > t) = I_{nu/(nu+t^2)}(nu/2, 1/2) / 2, so the
             // two-sided p-value is that regularized incomplete beta outright.
-            let p = 2.0 * students_t_sf(z.abs(), residual_df?);
-            p.is_finite().then(|| p.clamp(0.0, 1.0))
+            student_t_two_sided_probability(z, residual_df?)
         } else {
             // 2 * (1 - Phi(|z|)) is erfc(|z|/sqrt2), one call and no subtraction.
-            Some((2.0 * normal_sf(z.abs())).clamp(0.0, 1.0))
-        }
+            normal_two_sided_probability(z)
+        };
+        p_value.is_finite().then_some(p_value)
     };
 
     let null_likelihood = gam::types::GlmLikelihoodSpec {

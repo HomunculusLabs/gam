@@ -57,6 +57,7 @@
 //! string DSL.
 
 use crate::chart_canonicalization::CanonicalChartTopology;
+use gam_math::probability::normal_two_sided_probability;
 use gam_solve::gaussian_reml::{
     gaussian_reml_closed_form_with_nullspace_dim, gaussian_reml_stationary_set,
 };
@@ -66,7 +67,6 @@ use gam_terms::basis::{
     periodic_bspline_first_derivative_nd,
 };
 use ndarray::{Array1, Array2, ArrayView1, Axis};
-use statrs::distribution::{ContinuousCDF, Normal};
 use std::f64::consts::{PI, TAU};
 
 /// Cubic splines for every transport smooth.
@@ -1399,9 +1399,7 @@ pub fn composition_defect(
     // empirical score variation there is no sampling law, so no p-value is
     // emitted from deterministic fitted-grid values.
     let max_studentized_p_value = if max_var > 0.0 {
-        let normal = Normal::new(0.0, 1.0)
-            .map_err(|e| format!("standard normal construction failed: {e}"))?;
-        let pointwise: f64 = (2.0 * (1.0 - normal.cdf(max_z))).clamp(0.0, 1.0);
+        let pointwise = normal_two_sided_probability(max_z);
         (n_grid as f64 * pointwise).min(1.0)
     } else {
         f64::NAN

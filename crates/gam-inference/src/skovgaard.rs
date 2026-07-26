@@ -120,6 +120,8 @@
 //! (`non_canonical_link_expected_info_enters_u`) pins `î ≠ ĵ` and asserts the
 //! `î/ĵ` factor changes `u` — the regression guard for this module.
 
+use gam_math::probability::normal_two_sided_probability;
+
 /// The ingredients of the scalar Skovgaard `r*`, all evaluated for a single
 /// scalar interest parameter `θ` (the functional `ψ = cᵀβ` after profiling out
 /// the nuisance coefficients).
@@ -182,16 +184,6 @@ pub struct ScalarSkovgaardResult {
     pub material: bool,
 }
 
-/// Standard normal CDF `Φ`.
-fn normal_cdf(z: f64) -> f64 {
-    gam_math::probability::normal_cdf(z)
-}
-
-/// Two-sided normal-tail p-value `2·Φ(−|z|)`.
-fn two_sided_p(z: f64) -> f64 {
-    (2.0 * normal_cdf(-z.abs())).clamp(0.0, 1.0)
-}
-
 /// The materiality threshold (#939 deliverable 4): a correction is material when
 /// it moves the result by more than 10%.
 pub const SKOVGAARD_MATERIAL_THRESHOLD: f64 = 0.10;
@@ -250,7 +242,7 @@ pub fn scalar_skovgaard_r_star(input: &ScalarSkovgaardInput) -> Option<ScalarSko
     // First-order directed root: sign from the estimate's side of the null, mag
     // from the LR statistic. `θ̂ ≠ θ₀` here, so `sign ∈ {−1, +1}`.
     let sign = (theta_hat - theta_null).signum();
-    let p_first = two_sided_p(sign * lr_statistic.sqrt());
+    let p_first = normal_two_sided_probability(sign * lr_statistic.sqrt());
     let r = sign * lr_statistic.sqrt();
 
     // Barndorff-Nielsen's `u = ĵ^{-1/2}·{SSD}` with Skovgaard's covariance
@@ -285,8 +277,8 @@ pub fn scalar_skovgaard_r_star(input: &ScalarSkovgaardInput) -> Option<ScalarSko
     let r_star = modified_root(u);
     let r_star_empirical = modified_root(u_empirical);
 
-    let p_corr = two_sided_p(r_star);
-    let p_corr_empirical = two_sided_p(r_star_empirical);
+    let p_corr = normal_two_sided_probability(r_star);
+    let p_corr_empirical = normal_two_sided_probability(r_star_empirical);
     let p_denom = p_first.max(p_corr).max(f64::MIN_POSITIVE);
     let p_move = (p_corr - p_first).abs() / p_denom;
     let r_move = (r_star - r).abs() / r.abs().max(f64::MIN_POSITIVE);
@@ -832,11 +824,12 @@ mod tests {
         .expect("poisson r*");
         let r = res.r;
         let u = res.u; // canonical ⇒ u = (θ̂−θ₀)√ĵ, the Wald root
-        // Our r* right-tail P(X ≥ x) = Φ(−r*) = 1 − Φ(r*).
-        let p_rstar = 1.0 - normal_cdf(res.r_star);
+        // Our r* right-tail P(X ≥ x) = Φ(−r*).
+        let p_rstar = gam_math::probability::normal_sf(res.r_star);
         // Lugannani–Rice tail from the same (r, u).
-        let p_lr = (1.0 - normal_cdf(r)) - normal_pdf(r) * (1.0 / r - 1.0 / u);
-        let p_first = 1.0 - normal_cdf(r);
+        let p_lr =
+            gam_math::probability::normal_sf(r) - normal_pdf(r) * (1.0 / r - 1.0 / u);
+        let p_first = gam_math::probability::normal_sf(r);
         (p_rstar, p_lr, p_first)
     }
 

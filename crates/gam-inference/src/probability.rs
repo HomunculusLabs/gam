@@ -20,10 +20,25 @@ pub use gam_math::probability::normal_cdf;
 /// (#2562). Implementation lives in `gam-math`.
 pub use gam_math::probability::normal_sf;
 
-/// Upper tail of Student's t, `P(T > t)`, computed rather than reconstructed.
-/// `1 - cdf` saturates to exactly zero the sooner the larger `nu` is -- already
-/// at `nu = 500, t = 10` (#2562). Implementation lives in `gam-math`.
-pub use gam_math::probability::students_t_sf;
+/// Two-sided standard-normal probability `P(|Z| ≥ |z|)`, evaluated directly
+/// without subtracting a CDF from one.
+pub use gam_math::probability::normal_two_sided_probability;
+
+/// Student-t survival probability `P(T_ν > t)`, evaluated through the direct
+/// regularized-beta tail in `gam-math`.
+pub use gam_math::probability::student_t_sf;
+
+/// Two-sided Student-t probability `P(|T_ν| ≥ |t|)`, evaluated through the
+/// direct regularized-beta tail in `gam-math`.
+pub use gam_math::probability::student_t_two_sided_probability;
+
+/// Chi-squared survival probability, evaluated through the regularized upper
+/// incomplete gamma in `gam-math`.
+pub use gam_math::probability::chi_square_sf;
+
+/// Fisher-Snedecor survival probability, evaluated through the complementary
+/// regularized-beta identity in `gam-math`.
+pub use gam_math::probability::fisher_snedecor_sf;
 
 /// Scaled complementary error function `erfcx(x) = exp(x²) · erfc(x)`,
 /// specialized to `x ≥ 0`.  The implementation now lives in the lowest crate

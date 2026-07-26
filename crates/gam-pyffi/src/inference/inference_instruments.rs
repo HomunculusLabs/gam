@@ -27,7 +27,6 @@
 use ndarray::{Array1, Array2, ArrayView2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use gam::inference::full_conformal::{CanonicalGlmFamily, GlmHomotopyFullConformal};
 use gam::inference::lawley::{
@@ -42,6 +41,7 @@ use gam::inference::structure_evidence::{
     select_probe_by_expected_evidence as core_select_probe_by_expected_evidence,
     split_likelihood_log_e_value,
 };
+use gam::probability::chi_square_sf;
 use gam::solver::CircularGaussianFit2d;
 
 use crate::py_value_error;
@@ -545,17 +545,9 @@ pub(crate) fn lawley_bartlett_factor<'py>(
             )));
         }
         let corrected = stat / factor;
-        let dist = ChiSquared::new(ref_df)
-            .map_err(|e| py_value_error(format!("lawley_bartlett: χ²_{ref_df} invalid: {e}")))?;
         out.set_item("corrected_statistic", corrected)?;
-        out.set_item(
-            "p_value_corrected",
-            (1.0 - dist.cdf(corrected)).clamp(0.0, 1.0),
-        )?;
-        out.set_item(
-            "p_value_uncorrected",
-            (1.0 - dist.cdf(stat)).clamp(0.0, 1.0),
-        )?;
+        out.set_item("p_value_corrected", chi_square_sf(corrected, ref_df))?;
+        out.set_item("p_value_uncorrected", chi_square_sf(stat, ref_df))?;
     }
     Ok(out)
 }
@@ -708,20 +700,9 @@ pub(crate) fn lawley_bartlett_factor_estimated_lambda<'py>(
             )));
         }
         let corrected = stat / factor;
-        let dist = ChiSquared::new(ref_df).map_err(|e| {
-            py_value_error(format!(
-                "lawley_bartlett_estimated: χ²_{ref_df} invalid: {e}"
-            ))
-        })?;
         out.set_item("corrected_statistic", corrected)?;
-        out.set_item(
-            "p_value_corrected",
-            (1.0 - dist.cdf(corrected)).clamp(0.0, 1.0),
-        )?;
-        out.set_item(
-            "p_value_uncorrected",
-            (1.0 - dist.cdf(stat)).clamp(0.0, 1.0),
-        )?;
+        out.set_item("p_value_corrected", chi_square_sf(corrected, ref_df))?;
+        out.set_item("p_value_uncorrected", chi_square_sf(stat, ref_df))?;
     }
     Ok(out)
 }

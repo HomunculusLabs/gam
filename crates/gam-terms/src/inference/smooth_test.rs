@@ -18,8 +18,8 @@
 //! than a central χ²/F reference target.
 
 use gam_linalg::faer_ndarray::FaerEigh;
+use gam_math::probability::{chi_square_sf, fisher_snedecor_sf};
 use ndarray::{Array1, Array2, ArrayView1, s};
-use statrs::distribution::{ChiSquared, ContinuousCDF, FisherSnedecor};
 use std::ops::Range;
 
 /// Whether the residual dispersion `φ` is known or estimated from the
@@ -75,7 +75,7 @@ pub struct SmoothTestInput<'a> {
 /// Output of `wood_smooth_test`: the Wald statistic
 /// `T = f̂ᵀ·Vf⁻ᵣ·f̂` (rank-`r` truncated pseudo-inverse of the design-whitened
 /// covariance `Vf = R·V·Rᵀ`), the reference d.f. used to compute the tail
-/// probability, and the resulting `p_value` (clamped to `[0,1]`).
+/// probability, and the resulting direct-tail `p_value`.
 #[derive(Debug, Clone)]
 pub struct SmoothTestResult {
     pub statistic: f64,
@@ -185,10 +185,7 @@ pub fn wood_smooth_test(input: SmoothTestInput<'_>) -> Option<SmoothTestResult> 
         return None;
     }
     let p_value = match input.scale {
-        SmoothTestScale::Known => {
-            let dist = ChiSquared::new(ref_df).ok()?;
-            1.0 - dist.cdf(statistic)
-        }
+        SmoothTestScale::Known => chi_square_sf(statistic, ref_df),
         SmoothTestScale::Estimated => {
             let residual_df = input
                 .residual_df
@@ -198,8 +195,7 @@ pub fn wood_smooth_test(input: SmoothTestInput<'_>) -> Option<SmoothTestResult> 
             // χ² divided by its reference d.f. only — mgcv's `Tr/rank`. Dividing
             // by `φ̂` again would re-introduce a response-unit dependence (#675).
             let f_stat = statistic / ref_df;
-            let dist = FisherSnedecor::new(ref_df, residual_df).ok()?;
-            1.0 - dist.cdf(f_stat)
+            fisher_snedecor_sf(f_stat, ref_df, residual_df)
         }
     };
     if !p_value.is_finite() {
@@ -208,7 +204,7 @@ pub fn wood_smooth_test(input: SmoothTestInput<'_>) -> Option<SmoothTestResult> 
     Some(SmoothTestResult {
         statistic,
         ref_df,
-        p_value: p_value.clamp(0.0, 1.0),
+        p_value,
     })
 }
 
@@ -364,7 +360,7 @@ fn reference_df(influence: Option<&Array2<f64>>, start: usize, end: usize) -> Op
 mod tests {
     use super::*;
     use ndarray::array;
-    use statrs::distribution::{ChiSquared, ContinuousCDF};
+    use statrs::function::gamma::gamma_ur;
 
     #[test]
     fn reference_df_uses_trace_correction() {
@@ -406,8 +402,7 @@ mod tests {
         })
         .expect("smooth test");
 
-        let dist = ChiSquared::new(out.ref_df).expect("chi-square");
-        let expected = 1.0 - dist.cdf(out.statistic);
+        let expected = gamma_ur(0.5 * out.ref_df, 0.5 * out.statistic);
         assert!((out.p_value - expected).abs() < 1e-15);
     }
 
