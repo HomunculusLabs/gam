@@ -2011,6 +2011,14 @@ impl<'a> RemlState<'a> {
         // crossed its activation threshold, so identical rho points alternated
         // between two costs and no stationary optimum existed (#1867).
         self.store_ift_mode_response_cache_from_result(rho, bundle, &result);
+        // Pair this rho with the criterion just computed AT it, so the
+        // persistent warm-start layer can record an objective alongside the
+        // iterate it stores. The store selects "lowest objective first" but
+        // degrades to "latest write" when every candidate has none -- and every
+        // entry had none, which is what let repeat fits ratchet away from the
+        // cold answer (#2486). The pair is kept whole so a criterion can never
+        // be attributed to an iterate it does not describe.
+        self.record_warm_start_criterion(rho, result.cost);
         if let Some(polish_step) = result.inner_polish_step.as_ref() {
             self.apply_inner_polish_step_to_warm_start(bundle, &solution_beta, polish_step);
         }

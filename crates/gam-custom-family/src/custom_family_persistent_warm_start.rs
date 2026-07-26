@@ -569,7 +569,9 @@ pub(crate) fn store_persistent_custom_family_warm_start(
         .collect();
     record.active_sets = warm_start.active_sets.clone();
     record.inner = persistent_block_inner_summary(warm_start);
-    if let Err(err) = store_block_record(&record) {
+    // No outer REML/LAML criterion is in hand on this path, so the entry is
+    // written without an objective and selection behaves as before (#2486).
+    if let Err(err) = store_block_record(&record, None) {
         log::warn!("[warm-start-cache] failed to persist custom-family warm start: {err}");
     }
 }
