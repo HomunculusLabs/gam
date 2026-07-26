@@ -371,33 +371,51 @@ fn marginal_jacobian_at_zero_beta_matches_rigid() {
     }
 }
 
+/// The wiggle tail at β = 0, which the two `..._at_zero_beta_matches_rigid`
+/// gates above skip: they assert only the `j < P_BASE` base columns, so
+/// `∂q/∂β_tw[k] = B_k(h0)` — the whole reason the wiggle block exists — was
+/// never checked against anything.
+///
+/// β = 0 does NOT mean "no wiggle derivative". `dq_dq0 = 1 + B'(h0)·β_tw` is 1
+/// there, but the basis VALUES `B_k(h0)` are not, so every wiggle column of the
+/// time Jacobian is nonzero and this is a real derivative to verify. The gate
+/// asserts that at least one of them is, so it cannot pass by comparing zeros.
+///
+/// gam#2473: the nonzero-β half of this file's FD coverage now lives in
+/// `gam-models`' `survival::marginal_slope::tests` as
+/// `timewiggle_primary_rows_match_finite_differences_of_q_2473`. Off β = 0 the
+/// callbacks no longer derive `∂q/∂β` — `981c3174d` moved that into the
+/// family's canonical `row_dynamic_q_gradient` and left them scaling the rows
+/// the family publishes on `family_scalars`. This file constructs the callbacks
+/// without a family, so the only rows it could hand them are ones it derived
+/// itself, and checking those against its own `q` would verify nothing about
+/// the derivation production runs. The FD gate had to follow the derivation.
 #[test]
-fn time_jacobian_matches_finite_difference_at_nonzero_beta() {
-    let beta = beta_nonzero();
+fn time_jacobian_matches_finite_difference_at_zero_beta() {
+    let zeros = vec![0.0f64; P_JOINT];
     let jac_cb = make_time_jac();
     let state = FamilyLinearizationState {
-        beta: beta.as_slice().unwrap(),
+        beta: &zeros,
         family_scalars: None,
         channel_hessian: None,
         probit_frailty_scale: 1.0,
     };
     let analytic = jac_cb
         .effective_jacobian_at(&state)
-        .expect("time jacobian at nonzero beta");
+        .expect("time jacobian at zero beta");
+    assert_eq!(analytic.dim(), (3 * N, P_TIME), "time Jacobian shape at β=0");
 
-    assert_eq!(
-        analytic.dim(),
-        (3 * N, P_TIME),
-        "time Jacobian shape at non-zero β"
-    );
+    let numeric = numerical_jacobian(&zeros, 0, P_TIME);
 
-    let numeric = numerical_jacobian(beta.as_slice().unwrap(), 0, P_TIME);
-
+    let mut max_wiggle = 0.0f64;
     for channel in 0..3 {
         for i in 0..N {
             for j in 0..P_TIME {
                 let a = analytic[[channel * N + i, j]];
                 let n = numeric[[channel * N + i, j]];
+                if j >= P_BASE {
+                    max_wiggle = max_wiggle.max(n.abs());
+                }
                 let tol = 1e-5 * n.abs().max(1e-6);
                 assert!(
                     (a - n).abs() <= tol,
@@ -408,29 +426,29 @@ fn time_jacobian_matches_finite_difference_at_nonzero_beta() {
             }
         }
     }
+    assert!(
+        max_wiggle > 1e-3,
+        "the wiggle columns must carry real derivative content at β=0, otherwise \
+         this gate is comparing zeros to zeros; max |∂/∂β_tw| = {max_wiggle:.3e}",
+    );
 }
 
 #[test]
-fn marginal_jacobian_matches_finite_difference_at_nonzero_beta() {
-    let beta = beta_nonzero();
+fn marginal_jacobian_matches_finite_difference_at_zero_beta() {
+    let zeros = vec![0.0f64; P_JOINT];
     let jac_cb = make_marginal_jac();
     let state = FamilyLinearizationState {
-        beta: beta.as_slice().unwrap(),
+        beta: &zeros,
         family_scalars: None,
         channel_hessian: None,
         probit_frailty_scale: 1.0,
     };
     let analytic = jac_cb
         .effective_jacobian_at(&state)
-        .expect("marginal jacobian at nonzero beta");
+        .expect("marginal jacobian at zero beta");
+    assert_eq!(analytic.dim(), (3 * N, P_M), "marginal Jacobian shape at β=0");
 
-    assert_eq!(
-        analytic.dim(),
-        (3 * N, P_M),
-        "marginal Jacobian shape at non-zero β"
-    );
-
-    let numeric = numerical_jacobian(beta.as_slice().unwrap(), P_TIME, P_M);
+    let numeric = numerical_jacobian(&zeros, P_TIME, P_M);
 
     for channel in 0..3 {
         for i in 0..N {
@@ -447,6 +465,47 @@ fn marginal_jacobian_matches_finite_difference_at_nonzero_beta() {
             }
         }
     }
+}
+
+/// The contract that replaced the derivation, pinned by name (gam#2473).
+///
+/// Off β = 0 these callbacks require the family's canonical q-gradient rows.
+/// Production always supplies them — `current_identifiability_family_scalars`
+/// builds them whenever `flex_timewiggle_active()`, and `fit.rs` threads them
+/// through `canonicalize_for_identifiability_with_operating_scalars` and the
+/// converged audit into `FamilyLinearizationState`. A caller that reaches
+/// nonzero β without them has skipped that wiring, and the right answer is a
+/// named refusal, not a second block-local derivation of `∂q/∂β` that could
+/// drift from the family's.
+#[test]
+fn timewiggle_jacobians_refuse_at_nonzero_beta_without_family_scalars() {
+    let beta = beta_nonzero();
+    assert!(
+        beta.iter().any(|value| *value != 0.0),
+        "the fixture β must be nonzero or this gate cannot reach the refusal",
+    );
+    let state = FamilyLinearizationState {
+        beta: beta.as_slice().unwrap(),
+        family_scalars: None,
+        channel_hessian: None,
+        probit_frailty_scale: 1.0,
+    };
+
+    let time_error = make_time_jac()
+        .effective_jacobian_at(&state)
+        .expect_err("nonzero β without family scalars must refuse, not guess");
+    assert!(
+        time_error.contains("family scalars"),
+        "the time refusal must name the missing input, got: {time_error}",
+    );
+
+    let marginal_error = make_marginal_jac()
+        .effective_jacobian_at(&state)
+        .expect_err("nonzero β without family scalars must refuse, not guess");
+    assert!(
+        marginal_error.contains("family scalars"),
+        "the marginal refusal must name the missing input, got: {marginal_error}",
+    );
 }
 
 #[test]
