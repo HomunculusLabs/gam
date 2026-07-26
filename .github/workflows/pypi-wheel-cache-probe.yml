@@ -79,7 +79,10 @@ jobs:
               # Resolve with the pinned toolchain before compilation. A package-local
               # selection can expose a stale lock edge that the full wheel graph hides;
               # that is source-integrity evidence, not a compiler-cache miss.
-              cargo metadata --format-version 1 --no-deps >/dev/null
+              cargo metadata \
+                --format-version 1 \
+                --filter-platform "${TARGET_TRIPLE}" \
+                --no-deps >/dev/null
               if ! git diff --exit-code -- Cargo.lock; then
                 echo "::error::The release commit has a non-canonical Cargo.lock for this target; no compiler probe was run."
                 return 1
