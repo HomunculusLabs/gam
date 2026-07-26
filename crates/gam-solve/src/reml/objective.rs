@@ -1,5 +1,86 @@
 use super::*;
 
+
+/// The coefficient frame a set of penalty coordinates is expressed in.
+///
+/// The reparameterization's declared-null basis is stored in the TRANSFORMED
+/// (post-`Qs`) frame, so projecting an ORIGINAL-frame coordinate against it
+/// requires rotating the basis by `Qs` first. Naming the frame at the call site
+/// is what keeps that rotation from being a coin flip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PenaltyFrame {
+    Original,
+    Transformed,
+}
+
+/// The λ-invariant declared-null subspace of the penalty reparameterization,
+/// materialized in both coefficient frames (#2454).
+///
+/// `gam.reparam` keeps only balanced-penalty eigendirections above a relative
+/// rank tolerance and rebuilds the penalty the criterion applies as
+/// `S̃(λ) = E(λ)ᵀE(λ)` on that subspace alone. Everything downstream of the
+/// inner solve — `H`, `log|S|₊`, the criterion value — is a function of `S̃`.
+/// This carries the discarded complement so the outer derivative channel can
+/// be built from the SAME penalty rather than from the unprojected blocks.
+///
+/// `None` bases mean "nothing declared null" and every `project` is the
+/// identity, which is the case for any penalty whose numerical rank agrees
+/// with the split's.
+pub(crate) struct PenaltyNullSplit {
+    transformed: Option<Array2<f64>>,
+    original: Option<Array2<f64>>,
+}
+
+impl PenaltyNullSplit {
+    /// Read the split out of an inner-solve reparameterization.
+    ///
+    /// `u_truncated` is `p × m` in the transformed frame; the original-frame
+    /// basis is `Qs · u_truncated` (`Qs` orthogonal, and `u_truncated` is
+    /// itself defined as `Qsᵀ Q_null`). A degenerate or absent basis disables
+    /// the projection rather than guessing at a rotation.
+    fn from_reparam(reparam: &gam_terms::construction::ReparamResult) -> Self {
+        let u = &reparam.u_truncated;
+        if u.ncols() == 0 || u.nrows() == 0 {
+            return Self {
+                transformed: None,
+                original: None,
+            };
+        }
+        let qs = &reparam.qs;
+        let original = if qs.nrows() == u.nrows() && qs.ncols() == u.nrows() {
+            Some(qs.dot(u))
+        } else {
+            // No usable `Qs`: the frames coincide (sparse-native / identity
+            // reparameterization) or the shapes are inconsistent, in which case
+            // `project` declines on the dimension check below anyway.
+            Some(u.clone())
+        };
+        Self {
+            transformed: Some(u.clone()),
+            original,
+        }
+    }
+
+    /// `Π S_k Π` for a coordinate expressed in `frame`, or the coordinate
+    /// unchanged when this split declares nothing null (or the basis does not
+    /// match the coordinate's dimension, which is a shape disagreement the
+    /// projection must not paper over).
+    fn project(
+        &self,
+        coord: &super::reml_outer_engine::PenaltyCoordinate,
+        frame: PenaltyFrame,
+    ) -> super::reml_outer_engine::PenaltyCoordinate {
+        let basis = match frame {
+            PenaltyFrame::Original => self.original.as_ref(),
+            PenaltyFrame::Transformed => self.transformed.as_ref(),
+        };
+        match basis {
+            Some(n) if n.nrows() == coord.dim() => coord.project_out_null_directions(n.view()),
+            _ => coord.clone(),
+        }
+    }
+}
+
 impl<'a> RemlState<'a> {
     /// Compute the scalar outer objective value used by the planner-selected
     /// outer optimizer.
@@ -1046,24 +1127,55 @@ impl<'a> RemlState<'a> {
         // (the same per-component roots the projected `log|S|₊` derivatives now
         // read). When `Qs = I` (no reparameterization) the two frames coincide,
         // so this is a no-op for the ordinary active-set paths.
+        //
+        // Null-split consistency (#2454). The reparameterization splits the
+        // coefficient space into a LAMBDA-INVARIANT penalized subspace and its
+        // complement `U_⊥` (`reparam_result.u_truncated`, transformed frame),
+        // and rebuilds the penalty the criterion applies as
+        // `S̃(λ) = E(λ)ᵀE(λ)` on the penalized subspace ALONE. The inner solve,
+        // `H`, `log|S|₊` and the criterion VALUE all use `S̃`. The per-block
+        // canonical `S_k`, whose own root rank can EXCEED the split's penalized
+        // rank, therefore describes a different penalty — and every outer
+        // derivative channel reads these coordinates. Project them onto the
+        // same subspace so `Σ_k λ_k S̃_k = S̃` holds exactly and, `Π` being
+        // λ-invariant, `∂S̃/∂ρ_k = λ_k S̃_k` with no approximation. Without
+        // this the penalty quadratic charges `β̂`'s energy in the discarded
+        // directions — energy the criterion never paid — and `∂/∂ρ_k`
+        // multiplies it by `λ_k`, contaminating the outer gradient with an
+        // additive `c·λ` that is invisible at `‖ρ‖ ≤ 1` and sign-flips it a
+        // dozen e-folds up. A no-op when the split declares nothing null.
+        let null_split = PenaltyNullSplit::from_reparam(&pirls_result.reparam_result);
         let penalty_coords = match free_basis {
             Some(z) => {
                 let original_coords = self.build_penalty_coords();
                 let transformed = &pirls_result.reparam_result.canonical_transformed;
-                let base_coords: Vec<_> = if transformed.len() == original_coords.len() {
-                    transformed
-                        .iter()
-                        .map(|cp| cp.to_penalty_coordinate())
-                        .collect()
+                let (base_coords, frame): (Vec<_>, _) = if transformed.len()
+                    == original_coords.len()
+                {
+                    (
+                        transformed
+                            .iter()
+                            .map(|cp| cp.to_penalty_coordinate())
+                            .collect(),
+                        PenaltyFrame::Transformed,
+                    )
                 } else {
-                    original_coords
+                    (original_coords, PenaltyFrame::Original)
                 };
                 base_coords
                     .iter()
-                    .map(|coord| coord.project_into_subspace(z))
+                    .map(|coord| {
+                        null_split
+                            .project(coord, frame)
+                            .project_into_subspace(z)
+                    })
                     .collect()
             }
-            None => self.build_penalty_coords(),
+            None => self
+                .build_penalty_coords()
+                .iter()
+                .map(|coord| null_split.project(coord, PenaltyFrame::Original))
+                .collect(),
         };
         if crate::estimate::outer_eval_capture::rho_outer_audit_enabled() {
             let transformed = &pirls_result.reparam_result.canonical_transformed;

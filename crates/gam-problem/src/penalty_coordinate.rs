@@ -4,7 +4,7 @@
 //! one definition without an upward edge into the engine.
 use crate::reml_contract_panic;
 use gam_linalg::dense;
-use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 
 /// A rho-coordinate always contributes
 ///
@@ -186,6 +186,124 @@ impl PenaltyCoordinate {
                 root, start, end, ..
             } => Some((root, *start, *end)),
             Self::KroneckerMarginal { .. } => None,
+        }
+    }
+
+    /// Remove this coordinate's support along the declared-null directions
+    /// `N` (orthonormal, shape `p × m`), returning the coordinate for
+    /// `Π S_k Π` with `Π = I − N Nᵀ`.
+    ///
+    /// # Why a penalty coordinate must know about the null split (#2454)
+    ///
+    /// The penalty reparameterization splits the coefficient space into a
+    /// **λ-invariant penalized subspace** and its complement, and rebuilds the
+    /// penalty the criterion actually applies as `S̃(λ) = E(λ)ᵀE(λ)` on the
+    /// penalized subspace ALONE — so that `H`, `log|S|₊`, the inner solve and
+    /// the criterion value all share one rank structure. A per-block `S_k`
+    /// whose own root rank exceeds the split's penalized rank therefore
+    /// describes a penalty that is NOT the one being optimized: it charges
+    /// energy in directions `S̃` does not penalize. Because `β̂` is free in
+    /// exactly those directions it accumulates `O(1)` coefficient energy there,
+    /// and `∂/∂ρ_k` multiplies that phantom energy by `λ_k` — an additive
+    /// `c·λ` contamination of the outer gradient that is invisible at `‖ρ‖ ≤ 1`
+    /// and flips the gradient's sign a dozen e-folds up.
+    ///
+    /// Projecting restores the identity the outer derivatives are built on:
+    /// `Σ_k λ_k (Π S_k Π) = Π (Σ_k λ_k S_k) Π = S̃(λ)` and, because `Π` is
+    /// λ-invariant by construction, `∂S̃/∂ρ_k = λ_k · Π S_k Π` exactly. One
+    /// penalty object then serves the value, the quadratic, the per-block
+    /// scores, the `tr(H⁻¹ Ḣ_k)` drift and the outer Hessian.
+    ///
+    /// # Structure
+    ///
+    /// `Π` is applied on both sides, i.e. the root becomes `R_k Π`. Block
+    /// locality is preserved whenever the null basis is block-local (the
+    /// non-overlapping reparameterization path, where the balanced penalty sum
+    /// is block-diagonal and its eigenvectors therefore are too); when a null
+    /// direction straddles blocks the projected root genuinely is not
+    /// block-local and a dense coordinate is returned. A centered coordinate
+    /// keeps its prior mean: the quadratic stays `‖R_kΠ(β − μ_k)‖²`.
+    ///
+    /// Returns `self` unchanged when `N` has no columns.
+    pub fn project_out_null_directions(&self, null_basis: ArrayView2<'_, f64>) -> Self {
+        if null_basis.ncols() == 0 {
+            return self.clone();
+        }
+        assert_eq!(
+            null_basis.nrows(),
+            self.dim(),
+            "PenaltyCoordinate::project_out_null_directions: null-basis row count {} does not \
+             match coordinate dimension {}",
+            null_basis.nrows(),
+            self.dim()
+        );
+        let total_dim = self.dim();
+        let (root, start, end) = match self.block_local_root() {
+            Some(parts) => parts,
+            // A Kronecker-factored coordinate has no single root; the Kronecker
+            // path builds its own marginal eigen-grid and never routes through
+            // the dense reparameterization's null split, so there is nothing to
+            // project against.
+            None => return self.clone(),
+        };
+        // Full-width root, then `R Π = R − (R N) Nᵀ`.
+        let mut projected = Array2::<f64>::zeros((root.nrows(), total_dim));
+        projected
+            .slice_mut(ndarray::s![.., start..end])
+            .assign(root);
+        let coefficients = projected.dot(&null_basis);
+        projected -= &coefficients.dot(&null_basis.t());
+
+        // Keep the block chart when the projection did not move support out of
+        // it. `column_support_tolerance` is scaled to the root's own magnitude:
+        // an out-of-block entry at that level is the reparameterization's own
+        // rounding, and forcing a dense p-wide root for it would cost every
+        // block-local trace fast path for nothing.
+        let root_scale = projected
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let column_support_tolerance = root_scale * f64::EPSILON * (total_dim as f64);
+        let stays_block_local = (start > 0 || end < total_dim)
+            && (0..total_dim)
+                .filter(|column| *column < start || *column >= end)
+                .all(|column| {
+                    projected
+                        .column(column)
+                        .iter()
+                        .all(|value| value.abs() <= column_support_tolerance)
+                });
+
+        let prior_mean = self.prior_mean_block();
+        if stays_block_local {
+            let block = projected.slice(ndarray::s![.., start..end]).to_owned();
+            match prior_mean {
+                Some(mean) => Self::from_block_root_with_mean(
+                    block,
+                    start,
+                    end,
+                    total_dim,
+                    mean.to_owned(),
+                ),
+                None => Self::from_block_root(block, start, end, total_dim),
+            }
+        } else {
+            match prior_mean {
+                Some(mean) => {
+                    let mut full_mean = Array1::<f64>::zeros(total_dim);
+                    full_mean.slice_mut(ndarray::s![start..end]).assign(&mean);
+                    Self::from_dense_root_with_mean(projected, full_mean)
+                }
+                None => Self::from_dense_root(projected),
+            }
+        }
+    }
+
+    /// The block-local prior mean, when this coordinate is centered.
+    fn prior_mean_block(&self) -> Option<ArrayView1<'_, f64>> {
+        match self {
+            Self::DenseRootCentered { prior_mean, .. }
+            | Self::BlockRootCentered { prior_mean, .. } => Some(prior_mean.view()),
+            Self::DenseRoot(_) | Self::BlockRoot { .. } | Self::KroneckerMarginal { .. } => None,
         }
     }
 
