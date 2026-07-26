@@ -36,7 +36,8 @@ pub use gam_runtime::test_support::install_diagnostic_logger;
 // no model-layer type, so it lives in `gam-linalg`.
 pub use gam_linalg::test_support::fd_checker;
 pub use gam_linalg::test_support::fd_checker::{
-    assert_matrix_derivativefd, assert_matrix_derivativefd_rel,
+    FdDerivative, RiddersConfig, assert_matrix_derivativefd, assert_matrix_derivativefd_rel,
+    ridders_derivative, ridders_partial_derivative,
 };
 
 // `ParameterBlockSpec` fixtures live in `gam-problem`, the crate that owns the
