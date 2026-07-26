@@ -8495,7 +8495,27 @@ mod glm_eta_observation_fd_tests {
     fn tiny_positive_and_zero_weights_are_not_projected() {
         let tiny = 1e-200;
         let logit = one_obs_weight(&LikelihoodSpec::binomial_logit(), 0.4, tiny, 0.0);
-        assert!((logit.fisherweight[0] / tiny - 0.25).abs() <= 2.0 * f64::EPSILON);
+        // The Fisher weight is assembled in LOG space — `weighted_positive_from_log`
+        // evaluates `exp(ln(w) + log_fisher)` — and that route is the subject of this
+        // test: going through logs is what lets a weight this small survive instead of
+        // underflowing. A log/exp round trip cannot be bit-exact. `exp` turns the
+        // ABSOLUTE error of its argument into a RELATIVE error of its result, and here
+        // the argument is `ln(1e-200) + ln(1/4) = -461.90`, so the route costs about
+        // `|x|·eps ≈ 1.03e-13` relative — five orders coarser than the 2-ULP bound this
+        // assertion used to demand, which no weight this extreme could ever have met.
+        // Measured: the ratio comes back 0.24999999999999353, off by 6.47e-15, i.e.
+        // 14.6x the old bound and 0.25x the derived one.
+        //
+        // So bound it by the route's own error, computed from the inputs rather than
+        // tuned: a wrong Fisher weight is orders away from this and still caught.
+        let log_argument = tiny.ln() + 0.25_f64.ln();
+        let roundtrip_tolerance = 0.25 * log_argument.abs() * f64::EPSILON;
+        let ratio = logit.fisherweight[0] / tiny;
+        assert!(
+            (ratio - 0.25).abs() <= roundtrip_tolerance,
+            "logit Fisher weight at eta=0 must be w/4 up to the log/exp round trip: \
+             fisherweight/w = {ratio:.17e}, want 0.25 within {roundtrip_tolerance:.3e}"
+        );
         assert!(logit.fisherweight[0] < 1e-190);
 
         let zero = one_obs_weight(&LikelihoodSpec::gaussian_identity(), 3.0, 0.0, -2.0);
