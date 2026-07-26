@@ -46,6 +46,12 @@ const EVIDENCE_REL_TOL: f64 = 1.0e-10;
 /// only guarantees termination (it is never a wall-clock budget — `SPEC.md`).
 const EVIDENCE_MAX_ITERS: usize = 500;
 
+/// How many trailing `(log λ, |Δ log λ|)` iterates the exhaustion refusal
+/// reports. Enough to read the residual's trend — a shrinking `|Δ|` is a budget
+/// shortfall, a flat one is a limit cycle — and to see a period-2 alternation
+/// for what it is.
+const EVIDENCE_REFUSAL_TAIL: usize = 8;
+
 /// The distilled per-row solution the amortized encoder predicts in one matmul:
 /// gate logits, per-atom latent coordinates, and per-atom amplitudes, laid out
 /// exactly like the exact solver's converged state.
@@ -366,6 +372,15 @@ fn fit_evidence_ridge(
     // iterate is a NON-converged evidence state and must not be minted as an
     // `EvidenceRidge` indistinguishable from a converged one.
     let mut evidence_converged = false;
+    // Refusal evidence. `|Δ log λ|` against the threshold it was tested at, the
+    // fitted state that produced it, and a short tail of iterates — the two
+    // exhaustion modes (a residual still contracting toward the tolerance, and
+    // one parked on a limit cycle) are indistinguishable without them.
+    let mut last_delta = f64::NAN;
+    let mut last_gamma = f64::NAN;
+    let mut last_w_sq_sum = f64::NAN;
+    let mut last_rss_sum = f64::NAN;
+    let mut tail: Vec<(f64, f64)> = Vec::new();
     for _ in 0..EVIDENCE_MAX_ITERS {
         let lambda = (alpha / beta).max(f64::MIN_POSITIVE);
         // γ = Σ_i s_i²/(s_i²+λ); pooled ‖w‖² and RSS across targets.
@@ -393,6 +408,30 @@ fn fit_evidence_ridge(
             rss_sum += rss_in + tail;
         }
         effective_dof = gamma;
+        last_gamma = gamma;
+        last_w_sq_sum = w_sq_sum;
+        last_rss_sum = rss_sum;
+        // NULL TERMINATION. Once the fitted weight energy has fallen to the
+        // data's own resolution floor, every λ from here upward yields the same
+        // estimator to f64 precision: α is unidentifiable, and the `α = γT/‖w‖²`
+        // update below is no longer the MacKay map — with `‖w‖²` clamped to the
+        // floor its denominator stops responding to λ, so the iterate crosses
+        // the clamp instead of contracting through it and settles into a limit
+        // cycle the log-λ tolerance can never close (measured on the pure-noise
+        // fixture: |Δ log λ| pinned at 2.55e-1, 1.3e8× the threshold, for all
+        // 500 iterations, with ‖w‖² = 1.6e-14 against a 6.7e-14 floor).
+        //
+        // That state is not a failure to converge — it IS the null solution, and
+        // it is certified by a STRONGER condition than the residual test: the
+        // residual test asks whether λ has stopped moving, this establishes that
+        // λ cannot matter. `effective_dof` (γ ≈ 0 here) carries the null verdict
+        // to the caller. The exhaustion refusal below still governs every case
+        // where the floor is NOT engaged, i.e. where λ is identifiable and the
+        // fixed point is genuinely unreached.
+        if w_sq_sum <= energy_floor {
+            evidence_converged = true;
+            break;
+        }
         // MacKay updates with strictly-positive floors (a perfectly-fit or
         // perfectly-shrunk direction must not divide by zero).
         alpha = (gamma * t_dim as f64) / w_sq_sum.max(energy_floor);
@@ -402,6 +441,13 @@ fn fit_evidence_ridge(
             return Err("fit_evidence_ridge: variance components diverged".to_string());
         }
         let log_lambda = (alpha / beta).ln();
+        if last_log_lambda.is_finite() {
+            last_delta = (log_lambda - last_log_lambda).abs();
+        }
+        tail.push((log_lambda, last_delta));
+        if tail.len() > EVIDENCE_REFUSAL_TAIL {
+            tail.remove(0);
+        }
         if last_log_lambda.is_finite()
             && (log_lambda - last_log_lambda).abs() <= EVIDENCE_REL_TOL * (1.0 + log_lambda.abs())
         {
@@ -412,12 +458,25 @@ fn fit_evidence_ridge(
     }
     if !evidence_converged {
         let log_lambda = (alpha / beta).ln();
+        let threshold = EVIDENCE_REL_TOL * (1.0 + log_lambda.abs());
+        let tail_text = tail
+            .iter()
+            .map(|(value, delta)| format!("({value:.17e}, {delta:.3e})"))
+            .collect::<Vec<_>>()
+            .join(" ");
         return Err(format!(
             "fit_evidence_ridge: MacKay evidence iteration exhausted its \
              {EVIDENCE_MAX_ITERS}-iteration safety cap without meeting the relative \
              log-λ fixed-point tolerance {EVIDENCE_REL_TOL:.1e} (last log λ = \
-             {log_lambda:.6e}, previous = {last_log_lambda:.6e}); refusing to mint a \
-             non-converged evidence ridge — the cap never selects the estimator"
+             {log_lambda:.17e}, previous = {last_log_lambda:.17e}, |Δ| = {last_delta:.6e} \
+             against threshold {threshold:.6e}, i.e. {:.3e}× too large; fitted state \
+             γ = {last_gamma:.6e}, ‖w‖² = {last_w_sq_sum:.6e}, RSS = {last_rss_sum:.6e}, \
+             energy floor = {energy_floor:.6e}); last {} iterates (log λ, |Δ|) = \
+             [{tail_text}] — a |Δ| still shrinking across them is a budget shortfall, \
+             a |Δ| pinned flat is a limit cycle; refusing to mint a non-converged \
+             evidence ridge — the cap never selects the estimator",
+            last_delta / threshold,
+            tail.len()
         ));
     }
 
