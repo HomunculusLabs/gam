@@ -4,6 +4,7 @@ use crate::estimate::evaluation::{
     sas_log_delta_edge_barriercostgrad, sas_log_delta_edge_barriercostgradhess,
     sas_log_deltaridgeweight,
 };
+use crate::estimate::edf_accounting::penalized_edf_bundle;
 use crate::estimate::penalty::{REML_SEED_SCREENING_RHO_CAP, scaled_covariance};
 use crate::estimate::prefit::{
     reject_prefit_binomial_separation, reject_prefit_unpenalized_rank_deficiency,
@@ -1976,25 +1977,22 @@ where
             // penalty_block_trace finiteness validator. Map any non-finite
             // product to the saturated `rank` bound, exactly as the inf case
             // already resolves (gam#1379).
-            let trace_val = lambdas[kk] * frob;
-            traces[kk] = if trace_val.is_finite() {
-                trace_val.clamp(0.0, rank as f64)
-            } else {
-                rank as f64
-            };
+            // Raw product: the `[0, rank]` admission, the non-finite
+            // resolution and the `[mp, p]` floor are all owned by
+            // `penalized_edf_bundle`, which every fitting route shares (#2470).
+            traces[kk] = lambdas[kk] * frob;
         }
-        edf_total = (p_dim as f64 - kahan_sum(traces.iter().copied())).clamp(mp, p_dim as f64);
-        penalty_block_trace.clone_from(&traces);
-        for (kk, cp) in pirls_res
+        let block_ranks: Vec<usize> = pirls_res
             .reparam_result
             .canonical_transformed
             .iter()
-            .enumerate()
-        {
-            let p_k = cp.rank() as f64;
-            let edf_k = (p_k - traces[kk]).clamp(0.0, p_k);
-            edf_by_block[kk] = edf_k;
-        }
+            .map(|cp| cp.rank())
+            .collect();
+        let bundle = penalized_edf_bundle(&traces, &block_ranks, p_dim, mp);
+        edf_total = bundle.edf_total;
+        penalty_block_trace.clone_from(&bundle.penalty_block_trace);
+        edf_by_block.clone_from(&bundle.edf_by_block);
+        traces.clone_from(&bundle.penalty_block_trace);
 
         // Reconcile the EDF accounting with the influence matrix F = H⁻¹X'WX.
         //
@@ -2068,25 +2066,21 @@ where
                         // consistent. Finite in-range traces are untouched.
                         // NaN-safe (gam#1379): f64::clamp leaves NaN as NaN, so
                         // map any non-finite product to the saturated `rank`.
-                        let trace_val = lambdas[kk] * frob;
-                        traces_f[kk] = if trace_val.is_finite() {
-                            trace_val.clamp(0.0, rank as f64)
-                        } else {
-                            rank as f64
-                        };
+                        // Raw product; admitted by the shared accounting below,
+                        // exactly as the trace-channel path above (#2470).
+                        traces_f[kk] = lambdas[kk] * frob;
                     }
-                    edf_total = (p_orig as f64 - kahan_sum(traces_f.iter().copied()))
-                        .clamp(mp, p_orig as f64);
-                    penalty_block_trace.clone_from(&traces_f);
-                    for (kk, cp) in pirls_res
+                    let block_ranks_f: Vec<usize> = pirls_res
                         .reparam_result
                         .canonical_transformed
                         .iter()
-                        .enumerate()
-                    {
-                        let p_k = cp.rank() as f64;
-                        edf_by_block[kk] = (p_k - traces_f[kk]).clamp(0.0, p_k);
-                    }
+                        .map(|cp| cp.rank())
+                        .collect();
+                    let bundle_f =
+                        penalized_edf_bundle(&traces_f, &block_ranks_f, p_orig, mp);
+                    edf_total = bundle_f.edf_total;
+                    penalty_block_trace.clone_from(&bundle_f.penalty_block_trace);
+                    edf_by_block.clone_from(&bundle_f.edf_by_block);
                 }
             }
         }
