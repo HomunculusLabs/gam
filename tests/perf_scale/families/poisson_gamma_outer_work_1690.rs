@@ -109,7 +109,8 @@ fn poisson_gamma_single_smooth_outer_work_1690() {
         let grad_norm = fit.outer_gradient_norm.unwrap_or_else(|| {
             panic!("{family}: converged fit must report an outer gradient norm")
         });
-        let score_relative_bound = (1.0e-3 * (1.0 + fit.reml_score.abs())).min(1.0);
+        let score_relative_bound =
+            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
         assert!(
             grad_norm.is_finite() && grad_norm <= score_relative_bound,
             "{family}: converged fit reports |g|={grad_norm:.6e} that does NOT clear the \

@@ -243,7 +243,7 @@ pub(crate) const FLAT_VALLEY_STALL_GRAD_CEILING: f64 = 5.0;
 /// degeneracy-prior null-space valleys (correct fits, EDF well below the basis)
 /// certify, while the #1426 stuck overfit (`|g| ≈ 11`, also above
 /// `FLAT_VALLEY_STALL_GRAD_CEILING`) does not.
-pub(crate) const FLAT_VALLEY_CONVERGED_REL_GRAD: f64 = 1.0e-3;
+pub const FLAT_VALLEY_CONVERGED_REL_GRAD: f64 = 1.0e-3;
 
 /// Multiplicative margin above the certified-stationary band
 /// (`score_relative_grad_bound`) below which a cost stall is treated as a genuine
@@ -268,7 +268,7 @@ pub(crate) const FLAT_VALLEY_STALL_ESCAPE_MARGIN: f64 = 1.5;
 /// small absolute gradient regardless of score, and stays well below the
 /// `FLAT_VALLEY_STALL_GRAD_CEILING = 5.0` stuck-stall band so a stuck overfit on a
 /// large-score fit is never certified.
-pub(crate) const FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP: f64 = 1.0;
+pub const FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP: f64 = 1.0;
 
 /// Score-relative flat-valley stationarity bound used by both the in-loop ARC
 /// cost-stall guard and the post-fit authoritative-gradient reconciliation.
@@ -276,8 +276,13 @@ pub(crate) const FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP: f64 = 1.0;
 /// Keeping the formula centralized prevents the shipped-fit certificate from
 /// drifting away from the guard that originally decides whether a stalled ARC
 /// trajectory is a genuine weakly-identified valley.
+///
+/// PUBLIC so that tests asserting outer stationarity consume THIS value rather
+/// than restating it. Three integration tests previously hand-copied
+/// `1e-3 * (1 + |score|)` as a literal, which meant no gate could ever report
+/// the constant itself wrong (#2519).
 #[inline]
-pub(crate) fn flat_valley_converged_grad_bound(score: f64) -> f64 {
+pub fn flat_valley_converged_grad_bound(score: f64) -> f64 {
     (FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs())).min(FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP)
 }
 

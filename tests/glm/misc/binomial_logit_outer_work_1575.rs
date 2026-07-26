@@ -180,14 +180,15 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
     // monomial bases): the REML surface flattens and the residual outer gradient
     // floors at O(0.1) on a score of ~390, exactly as mgcv's score-relative
     // convergence certifies. An ABSOLUTE 1e-3 bound is therefore the WRONG
-    // correctness check here — 1e-3 is the absolute floor the solver documents
-    // weakly-identified coordinates cannot reach. We keep a REAL correctness
-    // check by asserting the same score-relative stationarity bound the solver
-    // certifies against: this still REJECTS a genuinely non-stationary stuck
+    // correctness check here — weakly-identified coordinates cannot reach the
+    // solver's own score-relative floor. We keep a REAL correctness check by
+    // asserting against `flat_valley_converged_grad_bound`, the very function
+    // the solver certifies with, rather than restating its constant (#2519): this still REJECTS a genuinely non-stationary stuck
     // mode (e.g. the #1426-class overfit at |g|≈11, far above this bound),
     // while certifying the true flat-valley optimum.
     if let Some(g) = fit.outer_gradient_norm {
-        let score_relative_stationarity_bound = (1.0e-3 * (1.0 + fit.reml_score.abs())).min(1.0);
+        let score_relative_stationarity_bound =
+            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
         assert!(
             g <= score_relative_stationarity_bound,
             "final outer gradient norm {g} exceeds the score-relative stationarity \
@@ -300,7 +301,7 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
     );
     // Fit existence is the sealed convergence proof (SPEC 20).
     if let Some(g) = fit.outer_gradient_norm {
-        let bound = (1.0e-3 * (1.0 + fit.reml_score.abs())).min(1.0);
+        let bound = gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
         assert!(
             g <= bound,
             "Firth-ON final outer gradient norm {g} exceeds score-relative \

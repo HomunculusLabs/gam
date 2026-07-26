@@ -67,6 +67,12 @@ pub use crate::model_types::{
     CertifiedRung, RailCoordinate, RailTailEvidence, RailedCoordinateFact,
 };
 pub(crate) use bridges::*;
+// The score-relative flat-valley stationarity band, public so integration
+// tests assert against the shipped constant instead of restating it (#2519).
+pub use bridges::{
+    FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP, FLAT_VALLEY_CONVERGED_REL_GRAD,
+    flat_valley_converged_grad_bound,
+};
 pub use capability::*;
 pub use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
 pub(crate) use hessian_operator::*;
