@@ -780,6 +780,7 @@ pub(super) fn run(
              routing_resid={:.3e} births={} revived={} live={}/{} no_growth={} \
              support_saturated={} refresh_s={:.2} route_s={:.2} elapsed_s={:.1} \
              mean_degree={:.1} giant_fraction={:.4} max_component={} \
+             max_component_nnz={} operator_build_s={:.3} \
              cg_columns={} cg_iterations={} recycled_rank={} device_cols={} \
              cg_nonconverged={} cg_kappa_bound={:?} cg_relative_residual={:.3e}",
             epochs_run,
@@ -801,6 +802,8 @@ pub(super) fn run(
             decoder_solve_stats.mean_cofiring_degree,
             decoder_solve_stats.giant_component_fraction,
             decoder_solve_stats.max_component_size,
+            decoder_solve_stats.cg_max_component_nnz,
+            decoder_solve_stats.cg_operator_build_seconds,
             decoder_solve_stats.cg_columns,
             decoder_solve_stats.cg_iterations,
             decoder_solve_stats.cg_recycled_rank,
@@ -2145,6 +2148,19 @@ pub struct DecoderSolveStats {
     pub cg_columns: usize,
     /// Total CG iterations across solved columns.
     pub cg_iterations: usize,
+    /// Stored off-diagonal entries in the largest CG component's restricted
+    /// operator. `max_component_size` reports how many atoms the giant
+    /// component holds; this reports how much operator there is to apply, and
+    /// the two move independently — a birth that rewires the co-firing graph
+    /// can leave the atom count flat while densifying the coupling. Every
+    /// block-CG iteration walks this structure once, so it is the work per
+    /// iteration (#2441).
+    pub cg_max_component_nnz: usize,
+    /// Seconds spent assembling the restricted CSR operators, summed over the
+    /// CG-solved components of one refresh. Separated from the solve so a
+    /// refresh that inflates can be attributed to building the operator versus
+    /// iterating on it, rather than inferred from the correlation with births.
+    pub cg_operator_build_seconds: f64,
     /// Largest recycled Galerkin coarse-space rank used by a CG component.
     /// Zero is the first-refresh / no-independent-history case.
     pub cg_recycled_rank: usize,
@@ -2189,6 +2205,8 @@ impl Default for DecoderSolveStats {
             max_component_size: 0,
             cg_columns: 0,
             cg_iterations: 0,
+            cg_max_component_nnz: 0,
+            cg_operator_build_seconds: 0.0,
             cg_recycled_rank: 0,
             cg_kappa_hat: None,
             cg_relative_residual: 0.0,
@@ -2568,13 +2586,16 @@ fn solve_decoder_recycled(
     // at scale, so the exact-solve threshold `⌈K^{2/3}⌉` is expected to bind.
     log::debug!(
         "[SAE percolation] K={k} mean_degree={:.4} giant_fraction={:.4} \
-         components={} max_component={} direct_threshold={direct_threshold} \
+         components={} max_component={} max_component_nnz={} operator_build_s={:.3} \
+         direct_threshold={direct_threshold} \
          cg_columns={} cg_iterations={} recycled_rank={} cg_kappa_hat={:?} cg_kappa_bound={:?} \
          cg_nonconverged_columns={} cg_relative_residual={:.3e} cg_residual_stop={:.3e}",
         stats.mean_cofiring_degree,
         stats.giant_component_fraction,
         stats.component_count,
         stats.max_component_size,
+        stats.cg_max_component_nnz,
+        stats.cg_operator_build_seconds,
         stats.cg_columns,
         stats.cg_iterations,
         stats.cg_recycled_rank,
@@ -2796,6 +2817,7 @@ fn solve_component(
     // (both `comp` and each adjacency list are ascending) — so the block
     // operator's per-column summation order (diagonal first, then ascending
     // neighbors) is EXACTLY the legacy per-column matvec's order.
+    let operator_build_start = Instant::now();
     let nnz: usize = comp.iter().map(|&a| neigh[a].len()).sum();
     let mut row_ptr: Vec<u32> = Vec::with_capacity(m + 1);
     let mut csr_cols: Vec<u32> = Vec::with_capacity(nnz);
@@ -2812,6 +2834,8 @@ fn solve_component(
         row_ptr.push(csr_cols.len() as u32);
     }
     let diag_ridge: Vec<f64> = comp.iter().map(|&a| eq.diag[a] + ridge).collect();
+    stats.cg_max_component_nnz = stats.cg_max_component_nnz.max(nnz);
+    stats.cg_operator_build_seconds += operator_build_start.elapsed().as_secs_f64();
     let residual_tolerance = decoder_solve_relative_tolerance();
 
     // A-priori spectral bounds of the symmetrically Jacobi-scaled operator
