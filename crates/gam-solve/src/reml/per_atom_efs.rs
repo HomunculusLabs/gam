@@ -460,9 +460,9 @@ pub(crate) fn backtrack_cost(
     cfg: &PerAtomEfsConfig,
 ) -> Result<Option<(Array1<f64>, f64, f64)>, EstimationError> {
     let descent_slack = PER_ATOM_COST_DESCENT_TOL * current_cost.abs().max(1.0);
-    // A trial whose cost evaluation errors is an INVALID trial (`Ok(None)`):
-    // the search halves and retries without consulting the acceptance test,
-    // exactly as the pre-migration loop swallowed `Err(_)`.
+    // Recoverable domain refusals arrive as `Ok(+∞)` and keep halving. A typed
+    // error means the objective artifact could not be built and must escape this
+    // line search without being reinterpreted as another numerical point.
     let accepted = backtracking_line_search::<_, EstimationError>(
         BacktrackConfig {
             max_steps: PER_ATOM_MAX_BACKTRACK + 1,
@@ -474,7 +474,8 @@ pub(crate) fn backtrack_cost(
                 trial[i] += alpha * full_step[i];
             }
             let trial = project_to_bounds(&trial, cfg);
-            Ok(obj.eval_cost(&trial).ok().map(|cost| (cost, trial)))
+            let cost = obj.eval_cost(&trial)?;
+            Ok(Some((cost, trial)))
         },
         |_alpha, cost| cost.is_finite() && cost <= current_cost + descent_slack,
     )?;
