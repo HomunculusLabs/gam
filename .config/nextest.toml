@@ -197,3 +197,57 @@ diagnostic-probes = { max-threads = 2 }
 [[profile.default.overrides]]
 filter = 'test(/(^|::)zz/)'
 test-group = 'diagnostic-probes'
+
+# ── #2267: THE CONSUMER-CHOSEN REGRESSION SET FOR THE SAE INNER SOLVE ──────────
+#
+# `cargo nextest run -P sae-inner-consumers -p gam-sae --lib`
+#
+# WHY A PROFILE AND NOT A HABIT. A change to an accept/reject rule inside the SAE
+# inner solve does not alter what any function returns for fixed inputs — it
+# alters WHICH STATES FITS REACH. So the tests that notice it do not live near
+# the edit; they live wherever those states are consumed: value lanes, ranking
+# lanes, outer probes, rank charges, certificate gates. Selecting by proximity to
+# the diff measures "it still compiles and does not obviously explode".
+#
+# This is not a hypothetical. #2267's one-operator polish-merit fix was landed on
+# a set of ten tests chosen around the polish, 10/10 green in BOTH arms, and it
+# had broken `value_lane_prices_at_shared_fixed_point_2228` — a fixture the same
+# author had personally measured an hour earlier on the sibling issue. The land
+# was reverted (`81a97db3b` → `6597c5ae7`). The set below is what that check
+# should have been.
+#
+# THE SELECTOR IS MECHANICAL, so it can be re-derived rather than trusted: every
+# test module that drives a fit through `penalized_quasi_laplace_criterion*` or
+# `run_joint_fit_arrow_schur*`. Regenerate the module list with
+#
+#   grep -rl 'penalized_quasi_laplace_criterion\|run_joint_fit_arrow_schur_for_quasi_laplace' \
+#     crates/gam-sae/src --include='*.rs' | grep test
+#
+# and widen the alternation below if it grows. `zz` diagnostics are excluded on
+# the same path-segment anchor the diagnostic-probes group uses: they print, they
+# do not assert, and a probe cannot regress.
+#
+# ⚠ THE BASELINE IS NOT GREEN. At `bbbef6ad4` on an A10 (`--test-threads=4`,
+# `RAYON_NUM_THREADS=3`) the set is 58 tests, 44 pass, 12 fail. DIFF A CHANGE
+# AGAINST THIS LIST, NOT AGAINST GREEN:
+#
+#   tests_certify_external_2266::tests::converged_native_replay_passes_zero_optimization_audit_and_perturbation_fails
+#   tests_indefinite_a_refusal_2336::genuine_saddle_is_infeasible_probe_not_fatal_2336
+#   tests_inner_budget_trajectory_2015::inner_gnorm_vs_budget_trajectory_2015
+#   tests_outer_quasi_laplace_probe_budget_2080::ceiling_vs_pathology_outer_reml_instrument_2156
+#   tests_outer_quasi_laplace_probe_budget_2080::k1_generated_seed_circle_outer_reml_does_not_livelock_2153
+#   tests_outer_quasi_laplace_probe_budget_2080::profile_wide_p_criterion_cost_2080
+#   tests_outer_quasi_laplace_probe_budget_2080::reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080
+#   tests_outer_quasi_laplace_probe_budget_2080::small_fold_high_rank_circle_inner_solve_converges_2138
+#   tests_outer_quasi_laplace_probe_budget_2080::wide_p_outer_reml_terminates_within_probe_budget_2080
+#   tests_rank_charge_2101::rank_charge_dense_streaming_parity
+#   tests_streaming_efs_cache_1026::streaming_cache_is_efs_dropin_for_dense_cache_1026
+#   tests_tier0_primary_path_2023::tests::e1_arc_outer_search_mints_or_reports_blocker_2266
+#
+# Seven of those twelve are inner-solve or outer-REML CONVERGENCE tests, which is
+# the finding this set exists to keep visible: the #2267/#2253/#2080 wall is the
+# dominant failure mode of everything that consumes an SAE fit, not one fixture's
+# problem. Note also that `genuine_saddle_is_infeasible_probe_not_fatal_2336` is
+# already red — read it before building anything that relies on saddle handling.
+[profile.sae-inner-consumers]
+default-filter = 'package(gam-sae) and not test(/(^|::)zz/) and test(/^manifold::(sae_contract_probe_tests|tests_outer_quasi_laplace_probe_budget_2080|tests_inner_convergence_rate_2267|tests_certify_external_2266|tests_two_tier_2023|tests_tier0_primary_path_2023|tests_stall_diagnostic_2234|tests_indefinite_a_refusal_2336|tests_inner_budget_trajectory_2015|tests_rank_charge_2101|tests_streaming_efs_cache_1026)::/)'
