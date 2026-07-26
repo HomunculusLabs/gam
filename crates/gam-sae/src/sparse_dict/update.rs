@@ -816,8 +816,16 @@ pub(super) fn run(
         // the independent objective window below must plateau too. Raw
         // normal-equation convergence alone cannot certify a model because unit
         // projection and rerouting happen afterward.
+        // Soundness is a property of the ANSWER, not of which code path produced
+        // it. `dense_factorization_failures` counts how often the small-block
+        // Cholesky shortcut declined and the matrix-free block CG solved the
+        // system instead; that CG solve certifies itself through the two
+        // conditions that remain here, so a nonzero count is a routing
+        // diagnostic and nothing more. It is deliberately NOT a soundness term:
+        // gating on it refused fits whose residuals were exactly zero and whose
+        // explained variance was exactly 1.0, because a faster path had declined
+        // on the way to the same exact answer.
         let numerically_sound = decoder_solve_stats.cg_nonconverged_columns == 0
-            && decoder_solve_stats.dense_factorization_failures == 0
             && decoder_solve_stats.cg_relative_residual
                 <= decoder_solve_stats.cg_residual_stop.max(f64::MIN_POSITIVE);
         let structure_settled = accepted_births == 0;
@@ -2464,16 +2472,31 @@ fn solve_component(
                 rhs[[i, c]] = eq.b[[a, c]];
             }
         }
-        let Some(sol) = cholesky_solve_block(&mat, &rhs) else {
-            stats.dense_factorization_failures += 1;
-            return Ok(());
-        };
-        for (i, &a) in comp.iter().enumerate() {
-            for c in 0..p {
-                decoder[[a, c]] = sol[[i, c]] as f32;
+        if let Some(sol) = cholesky_solve_block(&mat, &rhs) {
+            for (i, &a) in comp.iter().enumerate() {
+                for c in 0..p {
+                    decoder[[a, c]] = sol[[i, c]] as f32;
+                }
             }
+            return Ok(());
         }
-        return Ok(());
+        // The dense Cholesky is an OPTIMIZATION for small blocks, not the only
+        // way to solve one: `A_sub + ρI` is SPD by construction, so when the
+        // factorization is refused (a marginally-indefinite assembly at this
+        // block's conditioning) the matrix-free block CG below solves the SAME
+        // system to its own certified residual. Fall through to it.
+        //
+        // This used to `return Ok(())` here WITHOUT WRITING A SOLUTION —
+        // reporting success to the caller while leaving the decoder block at its
+        // previous value, with the failure recorded only in a counter. That is a
+        // fabricated success: the one caller-visible signal was a statistic that
+        // downstream code had to remember to consult, and the certification gate
+        // consulted it by refusing outright — so a fit whose residuals were
+        // EXACTLY zero and whose explained variance was EXACTLY 1.0 was reported
+        // as non-convergent purely because a faster path had declined earlier.
+        // Solving it here makes the counter a diagnostic (which path ran) rather
+        // than a veto (whether the answer exists).
+        stats.dense_factorization_failures += 1;
     }
 
     // Default coupled path: one matrix-free BLOCK CG over all live columns.
