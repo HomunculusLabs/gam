@@ -1330,15 +1330,28 @@ fn summary_smooth_terms(
         family.response,
         ResponseFamily::Gaussian | ResponseFamily::Gamma
     );
-    // Sample size belongs to the rebuilt training design, not optional IRLS
-    // row evidence. Exact-Newton and multi-parameter fits retain coefficient
-    // geometry without a single working vector and still have a valid Wald/F
-    // denominator.
-    let n_obs = Some(design.design.nrows() as f64);
-    let residual_df = n_obs.zip(fit.edf_total()).and_then(|(n, edf)| {
-        let value = n - edf;
-        (edf.is_finite() && value.is_finite() && value > 0.0).then_some(value)
-    });
+    // The Wald/F denominator is `n - edf` at the TRAINING sample size. `design`
+    // here is rebuilt from `representative_data_from_ranges`, a 16-row synthetic
+    // grid over the saved feature ranges — it exists to replay the basis, and
+    // its row count is a property of that grid, not of the data the model was
+    // fitted to. Using it put `n = 16` into every p-value this table reports,
+    // and silently dropped the smooth test entirely for any model with
+    // `edf >= 16`, because `n - edf` then fails the positivity check.
+    //
+    // The in-process summary (`gam-cli/src/main/model_summary.rs`) has always
+    // used `y.len()`. This path is the persisted-model twin and must agree with
+    // it or the same fit reports different significance through the two
+    // surfaces. Where the row count is genuinely unavailable the test is not
+    // reported — a missing p-value is recoverable, a p-value computed against
+    // the wrong reference distribution is not.
+    let residual_df = fit
+        .working_response()
+        .map(|response| response.len() as f64)
+        .zip(fit.edf_total())
+        .and_then(|(n, edf)| {
+            let value = n - edf;
+            (edf.is_finite() && value.is_finite() && value > 0.0).then_some(value)
+        });
     let scale = if scale_is_estimated {
         SmoothTestScale::Estimated
     } else {
