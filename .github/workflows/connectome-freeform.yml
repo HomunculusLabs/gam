@@ -272,6 +272,24 @@ jobs:
             echo "no lessons.json produced this run"
           fi
 
+          # 2b. Prune old per-run refs. At a 30-minute cadence these accrue two
+          #     refs per run — ~35k/year — and every run's restore does an
+          #     ls-remote across them. Safe because a lessons shard's content is
+          #     folded into the store's own lessons.json by every subsequent
+          #     run's restore, so a shard older than the retention window has
+          #     long since been absorbed by the surviving lineage. Keeps the
+          #     newest KEEP of each kind; deletion failures are ignored.
+          KEEP=200
+          for kind in runs lessons; do
+            # newest-first by numeric run id, then skip the KEEP newest;
+            # `tail -n +N` is portable where GNU `head -n -N` is not.
+            stale=$(git ls-remote origin "refs/agent-memory/$kind/*" 2>/dev/null \
+                    | awk '{print $2}' | sort -t/ -k4 -rn | tail -n +"$((KEEP + 1))")
+            [ -z "$stale" ] && continue
+            echo "pruning $(printf '%s\n' "$stale" | wc -l | tr -d ' ') old $kind ref(s)"
+            printf '%s\n' "$stale" | xargs -r -n 50 git push --quiet origin --delete 2>/dev/null || true
+          done
+
           # 3. Advance the shared pointer that the next run restores from.
           #    Contended by design: with parallel runs the last finisher wins,
           #    and a loss here costs nothing because step 1 already persisted
