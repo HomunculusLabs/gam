@@ -107,11 +107,6 @@ pub fn init_parallelism() {
                 gam_inference::hmc_io::HmcIoLaplaceMarginalSampler,
             )),
         );
-        drop(
-            gam_problem::laplace_sampler_contract::set_gaussian_mode_posterior_sampler(Box::new(
-                gam_inference::hmc_io::HmcIoGaussianModePosteriorSampler,
-            )),
-        );
         drop(gam_problem::rho_posterior::set_rho_posterior_escalator(
             Box::new(gam_inference::rho_posterior::HmcIoRhoPosteriorEscalator),
         ));

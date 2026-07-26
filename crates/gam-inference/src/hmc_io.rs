@@ -5064,117 +5064,6 @@ pub(crate) fn run_nuts_sampling(
     Ok(result)
 }
 
-/// Terminal never-fail Gaussian-posterior sampling target.
-///
-/// This is the bottom rung of the solver's geometry-driven escalation ladder.
-/// When the outer smoothing optimizer cannot certify convergence on a custom
-/// (BMS / general) family — typically because Strong-Wolfe stalls on an
-/// indefinite or non-smooth LAML objective — the driver no longer dead-ends
-/// with an `Err`. Instead it lands here: the *same* penalized objective's
-/// curvature (its penalized joint Hessian `H = −∇²log L + Σ_k λ_k S_k`,
-/// augmented with the proper (unconditional) Jeffreys/PC term)
-/// is used as the precision of a proper Gaussian posterior `N(β̂, H⁻¹)` about
-/// the best mode `β̂` the inner solve reached. Sampling a multivariate normal
-/// cannot fail: in the worst case (a poorly conditioned `H`) the intervals come
-/// out honestly wider, which is the intended "magic for all users" behavior —
-/// a finite point with calibrated SEs instead of a hard error.
-///
-/// The target is expressed in the whitened space `z` (`β = β̂ + L z`,
-/// `L Lᵀ = H⁻¹`), where the posterior is the standard normal `N(0, I)`. Its
-/// log-density and gradient are then exactly `logp(z) = −½ zᵀz`,
-/// `∇ = −z` — a smooth, globally coercive target with no failure mode. The
-/// `chol` factor un-whitens draws back to coefficient space, identically to
-/// the `NutsPosterior` whitening contract above.
-struct GaussianModeTarget;
-
-impl HamiltonianTarget<Array1<f64>> for GaussianModeTarget {
-    #[inline]
-    fn logp_and_grad(&self, position: &Array1<f64>, grad: &mut Array1<f64>) -> f64 {
-        // Standard-normal target in whitened coordinates: logp = -0.5 zᵀz,
-        // ∇ = -z. The whitening `L` (built from the penalized Hessian) carries
-        // all of the posterior geometry, so the sampler itself only ever sees a
-        // unit-covariance Gaussian — which is why this rung cannot stall.
-        let mut quad = 0.0;
-        for (g, &zi) in grad.iter_mut().zip(position.iter()) {
-            *g = -zi;
-            quad += zi * zi;
-        }
-        -0.5 * quad
-    }
-}
-
-/// Sample the proper Gaussian posterior `N(mode, H⁻¹)` defined by a mode and a
-/// (penalized, Jeffreys-augmented) SPD precision `hessian`.
-///
-/// This is the terminal, never-fail rung of the outer-optimizer escalation:
-/// it consumes the same penalized-objective curvature the inner machinery
-/// already computed and returns an honest posterior summary. It returns `Err`
-/// only for a *structurally* impossible request (dimension mismatch, a Hessian
-/// that is not even positive-definite after symmetrization, a degenerate
-/// config) — never for "did not converge", which is precisely the dead-end this
-/// path exists to remove.
-///
-/// `hessian` must be the finite symmetric positive-definite penalized joint
-/// Hessian at `mode` (e.g. from `compute_joint_geometry`). It is factored
-/// exactly as supplied; asymmetry, singularity, or indefiniteness is an error.
-pub fn sample_gaussian_mode_posterior(
-    mode: ArrayView1<f64>,
-    hessian: ArrayView2<f64>,
-    config: &NutsConfig,
-) -> Result<GaussianModePosterior, String> {
-    validate_nuts_config(config).map_err(String::from)?;
-    let dim = mode.len();
-    if hessian.nrows() != dim || hessian.ncols() != dim {
-        return Err(format!(
-            "Gaussian-posterior fallback: hessian shape {:?} does not match mode dim {dim}",
-            hessian.dim()
-        ));
-    }
-    if dim == 0 {
-        return Err("Gaussian-posterior fallback: zero-dimensional posterior".to_string());
-    }
-
-    let mode_owned = mode.to_owned();
-    let whitening = hessian_whitening_transform(
-        hessian,
-        dim,
-        1.0,
-        "Gaussian-posterior fallback Cholesky failed",
-    )?;
-    let chol = whitening.chol;
-    let target = GaussianModeTarget;
-    let initial_positions = jittered_initial_positions(config, dim, 0.1, 0x51A6_2C73_90E4_1DBF);
-    let mass_cfg = robust_mass_matrix_config(dim, config.nwarmup);
-    let (result, run_stats) = run_whitened_nuts_result(
-        target,
-        &mode_owned,
-        &chol,
-        initial_positions,
-        config,
-        dim,
-        mass_cfg,
-        0x7C19_5A3E_82D6_44B1,
-        "Gaussian-posterior fallback NUTS sampling failed",
-        mode_owned.clone(),
-        NutsConvergenceThresholds {
-            max_rhat: 1.1,
-            min_ess: None,
-        },
-    )?;
-    log::info!(
-        "never-fail Gaussian-posterior fallback: sampling complete dim={dim} {}",
-        run_stats
-    );
-
-    Ok(GaussianModePosterior {
-        samples: result.samples,
-        posterior_mean: result.posterior_mean,
-        posterior_std: result.posterior_std,
-        rhat: result.rhat,
-        ess: result.ess,
-    })
-}
-
 /// Penalty subtracted from the log-density when the `ρ`-criterion closure
 /// reports an infeasible / non-finite point during Tier-2 `ρ`-posterior NUTS
 /// (#938). The fallback density is the whitened standard normal shifted down by
@@ -6933,8 +6822,8 @@ fn cubic_power_iteration_refinement(
 // the directional-cubic eigen diagnostic) stays UP in this module and
 // constructs these types under their original names via this re-export.
 pub use gam_problem::laplace_sampler_contract::{
-    BlockExcessTarget, BlockSampledMarginal, BlockSampledMoments, GaussianModePosterior,
-    LaplaceTrustworthiness, laplace_skewness_threshold, laplace_trustworthiness_from_skewness,
+    BlockExcessTarget, BlockSampledMarginal, BlockSampledMoments, LaplaceTrustworthiness,
+    laplace_skewness_threshold, laplace_trustworthiness_from_skewness,
 };
 
 /// Monolith (gam-inference-tier) implementor of the contract-downed
@@ -6960,27 +6849,6 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalSampler for HmcIoLapl
         target: &dyn BlockExcessTarget,
     ) -> Result<BlockSampledMarginal, String> {
         block_sampled_marginal_correction(target)
-    }
-}
-
-/// Monolith (gam-inference-tier) implementor of the contract-downed
-/// [`GaussianModePosteriorSampler`](gam_problem::laplace_sampler_contract::GaussianModePosteriorSampler):
-/// the never-fail Gaussian mode-posterior rung. Builds the NUTS config from the
-/// problem dimension internally (so `NutsConfig` never crosses the contract)
-/// and wraps `hmc_io::sample_gaussian_mode_posterior`. Registered at process
-/// init via `gam_problem::laplace_sampler_contract::set_gaussian_mode_posterior_sampler`.
-pub struct HmcIoGaussianModePosteriorSampler;
-
-impl gam_problem::laplace_sampler_contract::GaussianModePosteriorSampler
-    for HmcIoGaussianModePosteriorSampler
-{
-    fn sample_gaussian_mode_posterior(
-        &self,
-        mode: ArrayView1<f64>,
-        precision: ArrayView2<f64>,
-    ) -> Result<GaussianModePosterior, String> {
-        let config = NutsConfig::for_dimension(mode.len());
-        sample_gaussian_mode_posterior(mode, precision, &config)
     }
 }
 

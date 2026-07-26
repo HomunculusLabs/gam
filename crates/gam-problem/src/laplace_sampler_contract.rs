@@ -11,14 +11,13 @@
 //! data-down (#1521):
 //!
 //! * the plain-DATA result carriers gam-solve reads
-//!   ([`BlockSampledMarginal`], [`BlockSampledMoments`], [`GaussianModePosterior`],
+//!   ([`BlockSampledMarginal`], [`BlockSampledMoments`],
 //!   [`LaplaceTrustworthiness`]);
 //! * the caller-supplied [`BlockExcessTarget`] evaluator gam-solve IMPLEMENTS
 //!   (its `Gam784BlockTarget`), so the trait must live below both;
-//! * the two SAMPLER TRAITS ([`LaplaceMarginalSampler`],
-//!   [`GaussianModePosteriorSampler`]) gam-solve calls THROUGH; the monolith /
-//!   gam-inference implements them over `hmc_io` and injects the impl via the
-//!   process-level registry below.
+//! * the SAMPLER TRAIT [`LaplaceMarginalSampler`] gam-solve calls THROUGH; the
+//!   monolith / gam-inference implements it over `hmc_io` and injects the impl
+//!   via the process-level registry below.
 //!
 //! The pure threshold math ([`laplace_skewness_threshold`],
 //! [`laplace_trustworthiness_from_skewness`]) has no sampler dependency, so it is
@@ -34,7 +33,7 @@
 use std::sync::OnceLock;
 
 use gam_linalg::matrix::DesignMatrix;
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2};
 
 // ───────────────────────── data carriers (contract-down) ─────────────────────
 
@@ -100,23 +99,6 @@ pub struct BlockSampledMarginal {
     /// Gradient-channel moments for the exact (b)–(d) assembly; `None` only when
     /// the block is empty (`m == 0`, where the correction is zero).
     pub moments: Option<BlockSampledMoments>,
-}
-
-/// Honest posterior summary from sampling the proper Gaussian posterior
-/// `N(mode, H⁻¹)` — the terminal never-fail rung of the custom-family
-/// covariance escalation. Field-for-field the monolith `hmc_io` type.
-#[derive(Clone, Debug)]
-pub struct GaussianModePosterior {
-    /// Coefficient draws in original (un-whitened) space: `(n_draws, dim)`.
-    pub samples: Array2<f64>,
-    /// Posterior mean (≈ the seeded mode for a Gaussian target).
-    pub posterior_mean: Array1<f64>,
-    /// Per-coordinate posterior standard deviation (honest SEs).
-    pub posterior_std: Array1<f64>,
-    /// Split-chain R̂ mixing diagnostic.
-    pub rhat: f64,
-    /// Effective sample size.
-    pub ess: f64,
 }
 
 // ───────────────────────── pure threshold math (moved down) ──────────────────
@@ -253,28 +235,9 @@ pub trait LaplaceMarginalSampler: Send + Sync {
     ) -> Result<BlockSampledMarginal, String>;
 }
 
-/// The gam-inference-tier sampler for the never-fail Gaussian mode posterior
-/// (custom-family covariance escalation). Implemented UP over
-/// `hmc_io::sample_gaussian_mode_posterior` (which auto-derives its
-/// `NutsConfig::for_dimension(mode.len())` internally — that NUTS config never
-/// crosses the contract) and injected DOWN via
-/// [`set_gaussian_mode_posterior_sampler`].
-pub trait GaussianModePosteriorSampler: Send + Sync {
-    /// Sample `N(mode, precision⁻¹)`. `Err` only for a structurally impossible
-    /// request (dimension mismatch, non-PSD precision after symmetrization) —
-    /// never for "did not converge".
-    fn sample_gaussian_mode_posterior(
-        &self,
-        mode: ArrayView1<f64>,
-        precision: ArrayView2<f64>,
-    ) -> Result<GaussianModePosterior, String>;
-}
-
 // ───────────────────────── process-level injection registry ──────────────────
 
 static LAPLACE_MARGINAL_SAMPLER: OnceLock<Box<dyn LaplaceMarginalSampler>> = OnceLock::new();
-static GAUSSIAN_MODE_POSTERIOR_SAMPLER: OnceLock<Box<dyn GaussianModePosteriorSampler>> =
-    OnceLock::new();
 
 /// Register the monolith's `hmc_io`-backed #784 Laplace-correction sampler.
 /// Called once at process init by the gam-inference tier. First writer wins;
@@ -291,21 +254,6 @@ pub fn set_laplace_marginal_sampler(
 /// correction, returning the zero contribution — a safe no-op).
 pub fn laplace_marginal_sampler() -> Option<&'static dyn LaplaceMarginalSampler> {
     LAPLACE_MARGINAL_SAMPLER.get().map(|b| b.as_ref())
-}
-
-/// Register the monolith's `hmc_io`-backed never-fail Gaussian-mode-posterior
-/// sampler. First writer wins (see [`set_laplace_marginal_sampler`]).
-pub fn set_gaussian_mode_posterior_sampler(
-    sampler: Box<dyn GaussianModePosteriorSampler>,
-) -> Result<(), Box<dyn GaussianModePosteriorSampler>> {
-    GAUSSIAN_MODE_POSTERIOR_SAMPLER.set(sampler)
-}
-
-/// The registered never-fail Gaussian-mode-posterior sampler, or `None` when the
-/// sampler tier is not linked (the custom-family path then retains the
-/// optimizer-conditional covariance — its existing fallback).
-pub fn gaussian_mode_posterior_sampler() -> Option<&'static dyn GaussianModePosteriorSampler> {
-    GAUSSIAN_MODE_POSTERIOR_SAMPLER.get().map(|b| b.as_ref())
 }
 
 #[cfg(test)]
