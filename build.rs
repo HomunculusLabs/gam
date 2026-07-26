@@ -3945,8 +3945,25 @@ fn decode_index_varint(buf: &[u8]) -> Result<(usize, usize), String> {
     Ok((value, consumed))
 }
 
+/// Dependency lockfiles are generated: the resolver owns their length, so it
+/// tracks the size of the dependency graph rather than anything an author wrote.
+/// Both size audits prescribe splitting the file along a cohesive seam, which
+/// does not exist for a lockfile — and a lockfile that tripped the hard limit
+/// could never be redeemed either, since it cannot be cut to the probation
+/// floor. Both audits therefore skip them; every hand-written file, including
+/// line-oriented data assets, stays in scope.
+fn is_generated_lockfile(rel: &Path) -> bool {
+    matches!(
+        rel.file_name().and_then(|name| name.to_str()),
+        Some("Cargo.lock" | "uv.lock")
+    )
+}
+
 fn scan_for_oversized_tracked_files(root: &Path, offenders: &mut Vec<(PathBuf, usize, String)>) {
     for rel in collect_repo_files(root) {
+        if is_generated_lockfile(&rel) {
+            continue;
+        }
         let path = root.join(rel);
         let line_count = match count_file_lines(&path) {
             Ok(line_count) => line_count,
@@ -4007,6 +4024,9 @@ fn scan_for_probation_oversized_files(root: &Path, offenders: &mut Vec<(PathBuf,
     // Current line count for every tracked file, keyed by repo-relative path.
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for rel in collect_repo_files(root) {
+        if is_generated_lockfile(&rel) {
+            continue;
+        }
         let path = root.join(rel);
         let line_count = match count_file_lines(&path) {
             Ok(line_count) => line_count,

@@ -32,7 +32,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 
 [dependencies.general-mcmc]
 package = "general-mcmc"
-version = "0.9"
+version = "0.10"
 default-features = false
 
 # The `gpu_polya_gamma` Linux CUDA path drives cudarc directly (gated by

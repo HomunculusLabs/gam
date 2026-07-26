@@ -127,7 +127,7 @@ cudarc.workspace = true
 
 [dependencies.general-mcmc]
 package = "general-mcmc"
-version = "0.9"
+version = "0.10"
 default-features = false
 
 [dev-dependencies]
