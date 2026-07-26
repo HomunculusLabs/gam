@@ -1975,20 +1975,34 @@ pub(crate) fn newton_predicted_decrease(hessian: &Array2<f64>, grad: &Array1<f64
     Some(0.5 * quad)
 }
 
-/// Is outer coordinate `k` pinned within [`CERTIFICATE_RAIL_MARGIN`] of either
+/// Is outer coordinate `k` pinned within [`coordinate_rail_margin`] of either
 /// of its own box bounds?
 ///
 /// Factored out so the λ-block REPORT and the θ-wide certificate FACE below
 /// cannot drift apart about what "railed" means for the same coordinate: they
 /// differ only in which coordinates they scan, never in the test.
+///
+/// The margin is the shared width-capped one, so this is the exact-bound test on
+/// [`rail_relaxed_bounds`]' relaxed endpoints. It used to be a flat
+/// [`CERTIFICATE_RAIL_MARGIN`] while the residual projector capped the same
+/// constant at a quarter-width, and a box narrower than `2 ×
+/// CERTIFICATE_RAIL_MARGIN` — the raw-κ chart window on any standardised
+/// feature set — was then covered end to end by its own two margin bands: every
+/// κ read railed, flat κ = 0 included, and the certificate's reduced Hessian
+/// lost every row it was supposed to judge (#2462).
+///
+/// Comparing against the relaxed endpoints rather than `|θ_k − bound|` also
+/// keeps an infeasible coordinate railed. Under the absolute-value form a point
+/// *outside* the box by more than the margin reported interior, which is the one
+/// reading that can never be right.
 fn outer_coordinate_is_railed(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> bool {
     let (lo, hi) = match config.model_domain_bounds.as_ref() {
         Some((lo, hi)) if k < lo.len() && k < hi.len() => (lo[k], hi[k]),
         Some(_) => return false,
         None => (-config.rho_bound, config.rho_bound),
     };
-    (theta[k] - lo).abs() <= CERTIFICATE_RAIL_MARGIN
-        || (hi - theta[k]).abs() <= CERTIFICATE_RAIL_MARGIN
+    let margin = coordinate_rail_margin(lo, hi);
+    theta[k] <= lo + margin || theta[k] >= hi - margin
 }
 
 /// Smoothing coordinates (leading ρ block) railed against the outer box.

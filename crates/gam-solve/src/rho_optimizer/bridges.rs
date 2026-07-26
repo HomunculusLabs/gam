@@ -2477,13 +2477,10 @@ pub(crate) fn projected_gradient_norm(
 /// only the OUTWARD half (`.max(0.0)` / `.min(0.0)`), so a near-bound
 /// coordinate that still has feasible-descent gradient keeps it and still
 /// registers as a stationarity residual.
-/// The margin is capped at a quarter of each coordinate's own width, so the
-/// relaxed interval always retains at least half the original and the two
-/// endpoints can never cross. Without that cap a box narrower than twice the
-/// margin would invert, making *every* point read as railed at both ends and
-/// zeroing the coordinate's residual outright — a silent false certification on
-/// exactly the tightly-boxed coordinates that most need a real one. A fixed
-/// coordinate (`lower == upper`) gets no relaxation and stays on the exact test.
+///
+/// The per-coordinate margin is [`coordinate_rail_margin`], which is also what
+/// the certificate's rail flag tests against, so the relaxed endpoints and the
+/// flag are the same statement about the same coordinate.
 pub(crate) fn rail_relaxed_bounds(
     bounds: &(Array1<f64>, Array1<f64>),
 ) -> (Array1<f64>, Array1<f64>) {
@@ -2491,19 +2488,50 @@ pub(crate) fn rail_relaxed_bounds(
     let margins: Vec<f64> = lower
         .iter()
         .zip(upper.iter())
-        .map(|(lo, hi)| {
-            let quarter_width = (hi - lo) * 0.25;
-            if quarter_width.is_finite() && quarter_width > 0.0 {
-                CERTIFICATE_RAIL_MARGIN.min(quarter_width)
-            } else {
-                0.0
-            }
-        })
+        .map(|(lo, hi)| coordinate_rail_margin(*lo, *hi))
         .collect();
     (
         Array1::from_iter(lower.iter().zip(&margins).map(|(v, m)| v + m)),
         Array1::from_iter(upper.iter().zip(&margins).map(|(v, m)| v - m)),
     )
+}
+
+/// The inward rail margin for ONE coordinate — the single definition of "close
+/// enough to a bound to count as railed", shared by [`rail_relaxed_bounds`] and
+/// by the certificate's rail flag (`outer_coordinate_is_railed`). "Railed" is
+/// therefore exactly `x <= lower + margin || x >= upper - margin`, and the two
+/// layers cannot disagree about a coordinate.
+///
+/// The margin is capped at a quarter of the coordinate's own width. Without the
+/// cap a box narrower than twice [`CERTIFICATE_RAIL_MARGIN`] has its two margin
+/// bands cover the WHOLE interval, so every feasible point reads railed at both
+/// ends — including the exact centre. That is not a conservative reading in
+/// either consumer. The residual projector would zero the coordinate's pull
+/// outright, and the certificate deletes railed rows and columns from its
+/// reduced Hessian, so a fully-covered box leaves an empty interior sub-block
+/// whose second-order condition passes vacuously: a silent false certification
+/// on exactly the tightly-boxed coordinates that most need a real one.
+///
+/// Narrow boxes are the normal case for the non-ρ blocks a joint search carries
+/// in the same θ vector. A constant-curvature term's raw-κ window is
+/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²` (width `1/R²`), so any data
+/// whose farthest point sits at squared chart radius `R² ≥ 1` — every
+/// standardised feature set — has a κ window at most `2 ×
+/// CERTIFICATE_RAIL_MARGIN` wide, and an absolute margin would flag flat κ = 0
+/// railed. κ = 0 is the *centre* of that window and the interior point the raw-κ
+/// coordinate exists to keep reachable (#2462).
+///
+/// The cap keeps at least the middle half of every box interior, so the centre
+/// is never railed and a relaxed interval can never invert. A fixed or
+/// degenerate coordinate (`upper <= lower`, or a NaN width) gets no relaxation
+/// and stays on the exact bound test.
+pub(crate) fn coordinate_rail_margin(lower: f64, upper: f64) -> f64 {
+    let quarter_width = (upper - lower) * 0.25;
+    if quarter_width > 0.0 {
+        CERTIFICATE_RAIL_MARGIN.min(quarter_width)
+    } else {
+        0.0
+    }
 }
 
 /// Projected stationarity-residual norm measured against [`rail_relaxed_bounds`].

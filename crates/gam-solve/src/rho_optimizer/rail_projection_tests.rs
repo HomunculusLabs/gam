@@ -15,7 +15,11 @@ use super::bridges::{
     projected_gradient_norm, rail_projected_gradient_norm, rail_relaxed_bounds,
     reduced_hessian_psd_at_point,
 };
+use super::{
+    OuterConfig, certificate_hessian_is_psd_off_railed, certificate_railed_coordinates,
+};
 use crate::model_types::CERTIFICATE_RAIL_MARGIN;
+use gam_terms::smooth::CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
 use ndarray::{Array1, array};
 
 /// The default outer search box, wide enough that the margin is not width-capped.
@@ -131,6 +135,18 @@ fn a_narrow_box_is_relaxed_without_inverting() {
     let x = Array1::from_vec(vec![0.0]);
     let gradient = Array1::from_vec(vec![2.0]);
     assert!((rail_projected_gradient_norm(&x, &gradient, Some(&bounds)) - 2.0).abs() < 1e-12);
+
+    // Ask the OTHER consumer the same question. This assertion is the one this
+    // test was missing: the claim above was only ever put to the projector,
+    // and the certificate's rail flag answered it the opposite way on this
+    // very box (`|0.0 − (−0.4)| = 0.4 ≤ CERTIFICATE_RAIL_MARGIN`) for as long
+    // as it carried its own margin law (#2462).
+    let config = boxed_config(bounds.0.clone(), bounds.1.clone());
+    assert!(
+        certificate_railed_coordinates(&x, &config).is_empty(),
+        "the centre of a narrow box must read interior to the certificate too, \
+         not only to the residual projector",
+    );
 }
 
 #[test]
@@ -215,4 +231,146 @@ fn a_fixed_coordinate_gets_no_relaxation() {
     let (lower, upper) = rail_relaxed_bounds(&bounds);
     assert_eq!(lower[0], 2.0);
     assert_eq!(upper[0], 2.0);
+}
+
+// ─── #2462: the certificate's rail FLAG obeys the same margin law ────────
+//
+// The projector above caps the margin at a quarter of each coordinate's width.
+// The flag did not: it applied a flat `CERTIFICATE_RAIL_MARGIN` to whatever box
+// it was handed, so on any box narrower than twice that constant the two margin
+// bands covered the whole interval and every feasible point read railed at both
+// ends. The non-ρ blocks a joint search carries in the same θ vector are exactly
+// that narrow.
+
+/// The raw-κ window a constant-curvature term installs on the outer box:
+/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²`, as built by
+/// `gam_terms::smooth::term_specs::constant_curvature_kappa_bounds`. Its
+/// documented contract is that flat κ = 0 is the window's INTERIOR centre — the
+/// reachability the raw-κ (not log-κ) coordinate exists to preserve.
+fn constant_curvature_kappa_window(max_chart_radius2: f64) -> (Array1<f64>, Array1<f64>) {
+    let half = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_chart_radius2;
+    (array![-half], array![half])
+}
+
+fn boxed_config(lower: Array1<f64>, upper: Array1<f64>) -> OuterConfig {
+    OuterConfig {
+        model_domain_bounds: Some((lower, upper)),
+        ..OuterConfig::default()
+    }
+}
+
+#[test]
+fn flat_curvature_at_the_centre_of_its_own_window_is_not_railed() {
+    // R² = 18 is what standardised 2-D features (|z| ≲ 3) produce, so the κ
+    // window is ±0.028 — two orders narrower than the rail margin.
+    let (lower, upper) = constant_curvature_kappa_window(18.0);
+    let width = upper[0] - lower[0];
+    assert!(
+        width < 2.0 * CERTIFICATE_RAIL_MARGIN,
+        "this fixture only reaches the defect in the narrow-box regime, and its \
+         width {width} is not below 2 x {CERTIFICATE_RAIL_MARGIN}",
+    );
+    // The reading the flat margin produced, stated directly: both bands reach
+    // the centre, so "railed" carried no information about this coordinate.
+    assert!(
+        (0.0 - lower[0]).abs() <= CERTIFICATE_RAIL_MARGIN
+            && (upper[0] - 0.0).abs() <= CERTIFICATE_RAIL_MARGIN,
+    );
+
+    let config = boxed_config(lower.clone(), upper.clone());
+    assert_eq!(
+        certificate_railed_coordinates(&array![0.0], &config),
+        Vec::<usize>::new(),
+        "flat kappa is the centre of its own window and must read interior",
+    );
+    // Both walls still register, so the cap did not simply switch rails off.
+    assert_eq!(certificate_railed_coordinates(&lower, &config), vec![0]);
+    assert_eq!(certificate_railed_coordinates(&upper, &config), vec![0]);
+}
+
+#[test]
+fn a_narrow_window_still_gets_a_real_second_order_verdict() {
+    // Why the margin law is load-bearing rather than cosmetic: railed rows and
+    // columns are DELETED from the certificate's reduced Hessian, so a window
+    // covered end to end by its own margin bands leaves an empty interior
+    // sub-block and an indefinite curvature passes vacuously.
+    let (lower, upper) = constant_curvature_kappa_window(18.0);
+    let config = boxed_config(lower, upper);
+    let railed = certificate_railed_coordinates(&array![0.0], &config);
+    let indefinite = array![[-1.0]];
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed(&indefinite, &railed),
+        Some(false),
+        "an indefinite curvature at an interior kappa must refuse",
+    );
+    assert_eq!(
+        certificate_hessian_is_psd_off_railed(&indefinite, &[0]),
+        Some(true),
+        "control: with the coordinate railed there is nothing left to judge",
+    );
+}
+
+#[test]
+fn the_rail_flag_is_the_exact_test_on_the_relaxed_box() {
+    // One law, two layers: `railed` must be precisely `x <= relaxed_lower ||
+    // x >= relaxed_upper`, on wide, narrow, tied and degenerate boxes alike.
+    let boxes = [
+        (-30.0, 30.0),                              // the default rho box
+        (-0.5 / 18.0, 0.5 / 18.0),                  // a raw-kappa chart window
+        (-0.39196610102242435, 0.6226807260860918), // the psi box measured on #2462
+        (-1.0, 3.0),                                // width 4: cap and constant tie
+        (2.0, 2.0),                                 // a fixed coordinate
+    ];
+    for (lo, hi) in boxes {
+        let bounds = (array![lo], array![hi]);
+        let config = boxed_config(bounds.0.clone(), bounds.1.clone());
+        let (relaxed_lower, relaxed_upper) = rail_relaxed_bounds(&bounds);
+        let width = hi - lo;
+        let outside = width.max(1.0);
+        for x in [
+            lo - outside,
+            lo,
+            lo + 0.25 * width,
+            0.5 * (lo + hi),
+            hi - 0.25 * width,
+            hi,
+            hi + outside,
+        ] {
+            let flagged = !certificate_railed_coordinates(&array![x], &config).is_empty();
+            let projected = x <= relaxed_lower[0] || x >= relaxed_upper[0];
+            assert_eq!(
+                flagged, projected,
+                "flag and relaxed box disagree at x={x} on [{lo}, {hi}]",
+            );
+        }
+    }
+}
+
+#[test]
+fn the_centre_of_a_box_is_never_railed() {
+    // The invariant the quarter-width cap buys: the two bands together cover at
+    // most half the interval, so a coordinate sitting at the middle of its own
+    // domain is interior at every width.
+    for width in [1e-6, 1e-3, 0.05, 0.5, 1.0, 1.9, 2.0, 2.1, 4.0, 60.0] {
+        let config = boxed_config(array![-0.5 * width], array![0.5 * width]);
+        assert!(
+            certificate_railed_coordinates(&array![0.0], &config).is_empty(),
+            "the centre of a width-{width} box must read interior",
+        );
+    }
+}
+
+#[test]
+fn a_coordinate_outside_its_box_is_railed() {
+    // The absolute-value form reported a point far OUTSIDE the box as interior,
+    // because `|theta - lower|` exceeded the margin on the infeasible side.
+    let config = boxed_config(array![-5.0], array![5.0]);
+    assert_eq!(
+        certificate_railed_coordinates(&array![-12.0], &config),
+        vec![0]
+    );
+    assert_eq!(
+        certificate_railed_coordinates(&array![12.0], &config),
+        vec![0]
+    );
 }
