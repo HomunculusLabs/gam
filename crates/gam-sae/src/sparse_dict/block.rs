@@ -2252,6 +2252,9 @@ fn fit_block_sparse_dictionary_with_seed_inner(
     // total-improvement denominator of the captured-fraction plateau test (arm 2).
     let entry_ev = seed_ev;
     let mut plateau_rounds = 0usize;
+    // Hoisted so the terminal decision below can report the value that
+    // decided arm (2), not just the arm it fell through to.
+    let mut captured_fraction = f64::NAN;
 
     for epoch in 0..config.max_epochs {
         epochs_run = epoch + 1;
@@ -2277,7 +2280,7 @@ fn fit_block_sparse_dictionary_with_seed_inner(
         // from exiting a still-climbing fit.
         let round_improvement = (next_ev - prev_ev).max(0.0);
         let total_improvement = (next_ev - entry_ev).max(0.0);
-        let captured_fraction = if total_improvement > f64::MIN_POSITIVE {
+        captured_fraction = if total_improvement > f64::MIN_POSITIVE {
             round_improvement / total_improvement
         } else {
             0.0
@@ -2350,6 +2353,33 @@ fn fit_block_sparse_dictionary_with_seed_inner(
             certified = false;
         }
     }
+
+    // The per-epoch trace above is `debug!`, one level below the floor the workspace's
+    // diagnostic backend pins (`install_diagnostic_logger` sets `Info`, deliberately and
+    // not env-configurable). So the numbers that decide this fit's fate were computed
+    // every epoch and discarded every epoch. Report the TERMINAL decision — which arm,
+    // and the value that kept the other arms from firing — at a level that is read.
+    // Once per fit, not once per epoch: a 200-iteration trace at `Info` floods the
+    // channel until readers filter it out, which is how a useful channel dies.
+    let arm = if certified {
+        "1-certified"
+    } else if converged {
+        "2-best-effort"
+    } else {
+        "3-non-converged"
+    };
+    log::info!(
+        "[block-sparse terminal] arm={arm} epochs={epochs_run}/{max_epochs} ev={ev:.9} \
+         ev_residual={ev_residual:.3e} gamma_residual={gamma_residual:.3e} \
+         frame_residual={frame_residual:.3e} routing_residual={routing_residual:.3e} \
+         reconstruction_residual={reconstruction_residual:.3e} tolerance={tolerance:.3e} \
+         captured_fraction={captured_fraction:.3e} plateau_rounds={plateau_rounds}/{min_rounds} \
+         births={accepted_births} polar={polar_failures}",
+        ev = state.explained_variance,
+        max_epochs = config.max_epochs,
+        tolerance = config.tolerance,
+        min_rounds = BLOCK_EV_PLATEAU_MIN_ROUNDS,
+    );
 
     // #2275/#2023 arm (3) — NON-CONVERGED: neither the absolute criterion (arm 1) nor
     // the objective plateau (arm 2) was reached within `max_epochs`, or the replay
