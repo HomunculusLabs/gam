@@ -5544,16 +5544,15 @@ mod tests {
         // therefore contribute neither a log|lambda * S| term to the
         // objective nor an entry to the rho-gradient vector.
         //
-        // We verify the objective formula and the gradient dimensionality at
-        // a fixed beta rather than a fitted one: the bug this test guards
-        // against was purely algebraic enumeration over penalty blocks and
-        // has no dependence on PIRLS convergence quality. A gradient-vs-FD
-        // comparison would require beta to sit at the joint MLE of a tiny
-        // synthetic survival fixture, which the analytic Newton/PIRLS path
-        // cannot reach to 1e-10 KKT tolerance without a much richer design.
+        // Evaluate the enumeration identity at the fitted inner mode. LAML is
+        // defined only there; an arbitrary fixed beta would test an algebraic
+        // surrogate that production now deliberately refuses (#2491).
         let rho0 = -0.35_f64;
-        let beta = array![-2.5_f64, 1.0];
+        let beta0 = array![-2.5_f64, 1.0];
         let model = laml_fd_test_model(rho0.exp());
+        let (model, beta) = model
+            .reconverge_survival_inner_mode(&[rho0], &beta0)
+            .expect("converge inner mode for LAML prefix-skip test");
         let state = model
             .update_state(&beta)
             .expect("state for LAML prefix-skip test");
@@ -5723,8 +5722,7 @@ mod tests {
             range: 1..2,
             nullspace_dim: 0,
         }]);
-        let beta = array![0.2, 0.2, 0.1];
-        let state = model.update_state(&beta).expect("state at structural beta");
+        let beta0 = array![0.2, 0.2, 0.1];
         let rho = Array1::from_iter(
             model
                 .penalties
@@ -5733,6 +5731,13 @@ mod tests {
                 .filter(|b| b.lambda > 0.0)
                 .map(|b| b.lambda.ln()),
         );
+        let (model, beta) = model
+            .reconverge_survival_inner_mode(
+                rho.as_slice().expect("contiguous structural rho"),
+                &beta0,
+            )
+            .expect("converge structural survival mode");
+        let state = model.update_state(&beta).expect("state at structural mode");
         let (obj, grad) = model
             .unified_lamlobjective_and_rhogradient(&beta, &state, &rho)
             .expect("laml gradient should work in structural mode");
@@ -6144,7 +6149,7 @@ mod tests {
         ];
         let penalties = PenaltyBlocks::new(Vec::new());
         let mono = SurvivalMonotonicityPenalty { tolerance: 1e-8 };
-        let beta = array![-2.0, 0.7, 0.2];
+        let beta0 = array![-2.0, 0.7, 0.2];
 
         let model = survival_model(
             survival_inputs(
@@ -6163,7 +6168,10 @@ mod tests {
         )
         .expect("construct survival model");
 
-        let state = model.update_state(&beta).expect("state at beta");
+        let (model, beta) = model
+            .reconverge_survival_inner_mode(&[], &beta0)
+            .expect("converge no-penalty survival mode");
+        let state = model.update_state(&beta).expect("state at fitted mode");
         let rho = Array1::from_iter(
             model
                 .penalties
