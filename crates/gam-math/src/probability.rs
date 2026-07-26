@@ -1,5 +1,5 @@
 use libm::{erf, erfc};
-use statrs::function::beta::inv_beta_reg;
+use statrs::function::beta::{inv_beta_reg, ln_beta};
 
 const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3;
 const SQRT_2_OVER_PI: f64 = 0.797_884_560_802_865_4;
@@ -20,8 +20,140 @@ pub fn beta_quantile(p: f64, a: f64, b: f64) -> f64 {
     if p >= 1.0 {
         return 1.0;
     }
-    inv_beta_reg(a, b, p)
+    match lower_tail_beta_quantile(p, a, b) {
+        Some(x) => x,
+        None => inv_beta_reg(a, b, p),
+    }
 }
+
+/// `Beta⁻¹(p; a, b)` on the branch where the answer is small enough for the
+/// ascending series to be exact, or `None` when it is not.
+///
+/// `inv_beta_reg` converges on an ABSOLUTE tolerance in `x`, so it cannot
+/// resolve a quantile below about `1e-16`: it stalls and returns a number in
+/// the `1e-17..1e-19` band unrelated to the answer. That band is not exotic —
+/// it is the ordinary lower tail of a beta-regression predictive interval
+/// whenever the mean is small. For `Beta(0.04, 3.96)` at `p = 0.025`, the
+/// shapes a mean of `0.01` with a fifth of the Bernoulli variance produces, it
+/// returned `6.7e-18` where the truth is `1.5e-41` (#2528).
+///
+/// The lower tail has a convergent ascending series,
+///
+/// ```text
+/// I_x(a,b) = x^a / B(a,b) · S(x),   S(x) = Σ_{k≥0} c_k x^k,
+/// c_k = (1−b)_k / (k!·(a+k)),       c_0 = 1/a
+/// ```
+///
+/// whose leading term inverts in closed form to
+/// `x₀ = exp([ln p + ln a + ln B(a,b)] / a)`. Refining it in `y = ln x` rather
+/// than in `x` is what removes the floor: the answer's own variable becomes the
+/// iteration variable, so an absolute step tolerance in `y` is a RELATIVE
+/// tolerance in `x` and there is nothing to stall against. The iteration is
+/// also better conditioned than the one it replaces —
+/// `G(y) = ln I_{e^y}(a,b) − ln p` has `G′(y) = a + x·S′(x)/S(x) → a`, a
+/// constant, where the `x`-space derivative `∂I/∂x` spans hundreds of orders
+/// over the same range.
+///
+/// Underflow then becomes something the function can state rather than paper
+/// over: a true quantile below `f64::MIN_POSITIVE` reaches `exp(y) = 0`, which
+/// is the correctly rounded answer, instead of a spurious positive floor a
+/// caller cannot distinguish from a resolved bound.
+///
+/// The branch condition is `x·max(1, b) ≤ ½`, which is derived rather than
+/// tuned. The term ratio is `|x·(k+1−b)/(k+1)|·(a+k)/(a+k+1)`, and
+/// `|k+1−b| ≤ (k+1)·max(1, b)` for every `k ≥ 0`, so the condition bounds every
+/// ratio by `½` and the series reaches `f64` resolution in at most
+/// [`BETA_SERIES_MAX_TERMS`] terms. It is the same boundary, for the same
+/// reason, that `crates/gam-terms/src/basis/polylog.rs` uses for its own
+/// ascending series.
+fn lower_tail_beta_quantile(p: f64, a: f64, b: f64) -> Option<f64> {
+    let ln_b = ln_beta(a, b);
+    if !ln_b.is_finite() {
+        return None;
+    }
+    // Leading-order inverse: `I_x ≈ x^a / (a·B(a,b))` as `x → 0`.
+    let mut y = (p.ln() + a.ln() + ln_b) / a;
+    if !y.is_finite() {
+        return None;
+    }
+    // Reject before iterating if the seed is outside the series branch. The
+    // seed underestimates `x` for `b < 1` and overestimates it for `b > 1`, by
+    // a factor that is itself `1 + O(x)`, so a seed comfortably inside the
+    // branch keeps every iterate inside it.
+    let ratio_bound = (0.5_f64).ln() - b.max(1.0).ln();
+    if !(y <= ratio_bound) {
+        return None;
+    }
+    let ln_p = p.ln();
+    for _ in 0..BETA_NEWTON_MAX_STEPS {
+        let x = y.exp();
+        if x * b.max(1.0) > 0.5 {
+            return None;
+        }
+        let (sum, derivative_sum) = beta_ascending_series(x, a, b)?;
+        if !(sum.is_finite() && sum > 0.0 && derivative_sum.is_finite()) {
+            return None;
+        }
+        // `G(y) = a·y − ln B(a,b) + ln S(e^y) − ln p`.
+        let g = a * y - ln_b + sum.ln() - ln_p;
+        let g_prime = a + x * derivative_sum / sum;
+        if !(g.is_finite() && g_prime.is_finite() && g_prime > 0.0) {
+            return None;
+        }
+        let step = g / g_prime;
+        if !step.is_finite() {
+            return None;
+        }
+        y -= step;
+        // Absolute in `y` is relative in `x`, which is the whole point.
+        if step.abs() <= f64::EPSILON * y.abs().max(1.0) {
+            break;
+        }
+    }
+    let x = y.exp();
+    if x.is_finite() && (0.0..=1.0).contains(&x) {
+        Some(x)
+    } else {
+        None
+    }
+}
+
+/// `(S(x), S′(x))` for `S(x) = Σ_{k≥0} (1−b)_k · x^k / (k!·(a+k))`.
+///
+/// Accumulated by the ratio `t_{k+1} = t_k·(k+1−b)/(k+1)` on the Pochhammer
+/// factor, so no factorial or gamma is formed. `None` if the guard term count
+/// is exhausted, which the caller's branch condition makes unreachable.
+fn beta_ascending_series(x: f64, a: f64, b: f64) -> Option<(f64, f64)> {
+    let mut pochhammer_over_factorial = 1.0_f64;
+    let mut power = 1.0_f64;
+    let mut sum = 1.0 / a;
+    let mut derivative_sum = 0.0_f64;
+    for k in 1..=BETA_SERIES_MAX_TERMS {
+        let kf = k as f64;
+        pochhammer_over_factorial *= (kf - b) / kf;
+        let coefficient = pochhammer_over_factorial / (a + kf);
+        // `power` holds `x^{k-1}` here, which is what `S′` wants.
+        derivative_sum += kf * coefficient * power;
+        power *= x;
+        let term = coefficient * power;
+        sum += term;
+        if term.abs() <= f64::EPSILON * sum.abs() {
+            return Some((sum, derivative_sum));
+        }
+    }
+    None
+}
+
+/// Guard term count for [`beta_ascending_series`]. The caller's `x·max(1,b) ≤ ½`
+/// branch bounds every term ratio by `½`, so the series reaches one ulp of an
+/// `O(1/a)` partial sum in at most `53` terms; this is the non-convergence
+/// guard, not the expected count.
+const BETA_SERIES_MAX_TERMS: usize = 128;
+
+/// Guard step count for the log-space Newton. From a seed whose relative error
+/// is `O(x)` the iteration is quadratic, so it converges in two or three steps
+/// over the whole branch; this is the non-convergence guard.
+const BETA_NEWTON_MAX_STEPS: usize = 32;
 
 /// The part of `x·x` that `f64` cannot hold: `x² = x*x + square_residual(x)`,
 /// exactly, for every `x` whose square neither overflows nor goes subnormal.
@@ -1068,6 +1200,72 @@ mod tests {
 
     fn rel_err(got: f64, expected: f64) -> f64 {
         (got - expected).abs() / expected.abs().max(1e-300)
+    }
+
+    #[test]
+    /// The lower tail of a beta quantile, where `inv_beta_reg`'s absolute
+    /// convergence tolerance in `x` used to stall (#2528).
+    ///
+    /// Shapes are the ones `gam_inference::probability` derives from a mean and
+    /// a variance (`precision = mu(1-mu)/total_var - 1`), so every row is the
+    /// lower endpoint of a 95% predictive interval a caller can actually ask
+    /// for. References are an 80-digit bisection in `ln x` on
+    /// `I_x(a,b) = p`; the `Beta(0.1, 0.1)` row is additionally checkable in
+    /// closed form, since `I_x -> x^a/(a B(a,b))` gives
+    /// `x = (p a B(a,b))^(1/a)` there.
+    ///
+    /// What shipped before, against the same references: `6.7e-18` for the
+    /// first row (true `1.5e-41`, relative error 4.6e+23), `5.8e-18` for the
+    /// second (true `6.3e-161`), and `9.6e-19` for the underflow row, whose
+    /// true quantile is `7.7e-688` and whose only correct `f64` answer is `0`.
+    /// The failure was not a loss of digits but a floor: every one of those
+    /// returns is the solver's own resolution limit rather than a quantile.
+    fn beta_quantile_resolves_the_lower_tail_below_the_solver_floor() {
+        const CASES: [(f64, f64, f64, f64); 8] = [
+            (0.04, 3.96, 0.025, 1.4749755854885786e-41),
+            (0.01, 0.99, 0.025, 6.326229749489128e-161),
+            (
+                0.046666666666666666,
+                2.2866666666666666,
+                0.025,
+                1.488779171021457e-35,
+            ),
+            (0.05, 0.95, 0.025, 9.875267916846768e-33),
+            (0.1, 0.9, 0.025, 1.12479965068234e-16),
+            (0.3, 0.7, 0.025, 7.6005358168401896e-6),
+            (0.5, 0.5, 0.025, 1.5413331334360133e-3),
+            (0.1, 0.1, 1.0e-4, 8.869280655550463e-38),
+        ];
+        let mut worst = 0.0_f64;
+        for (a, b, p, want) in CASES {
+            let got = beta_quantile(p, a, b);
+            let relative = ((got - want) / want).abs();
+            assert!(
+                relative <= 16.0 * f64::EPSILON,
+                "beta_quantile({p}, {a}, {b}) = {got:e}, want {want:e}, relative {relative:e}"
+            );
+            worst = worst.max(relative);
+        }
+        println!("worst relative error over the lower-tail table: {worst:e}");
+
+        // The true quantile here is 7.7e-688. It is not representable, so the
+        // correctly rounded answer is zero, and a caller reading a positive
+        // lower bound could not tell that it had underflowed.
+        let underflowed = beta_quantile(0.025, 0.0023333333333333335, 2.3310000000000004);
+        assert!(
+            underflowed == 0.0,
+            "a quantile below MIN_POSITIVE must round to zero, got {underflowed:e}"
+        );
+
+        // The upper tail of the same shape is not on the series branch and is
+        // still `inv_beta_reg`'s answer, at `inv_beta_reg`'s own accuracy. It is
+        // asserted here so that widening the branch cannot silently move it.
+        const UPPER: f64 = 0.12274676682071068;
+        let upper = beta_quantile(0.975, 0.04, 3.96);
+        assert!(
+            ((upper - UPPER) / UPPER).abs() <= 1.0e-11,
+            "upper tail moved: {upper:e}, want {UPPER:e}"
+        );
     }
 
     #[test]
