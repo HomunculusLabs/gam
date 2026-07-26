@@ -8,6 +8,7 @@ pub(crate) use super::tests_recovery_split_780::{
     rho_ladder_family_with_tolerance, smoothing_and_decisive_family, sparse_lift_ladder,
     warmstart_test_objective, warmstart_test_objective_with_evaluator,
 };
+use super::construction::coordinate_block_log_det;
 use super::*;
 use approx::assert_abs_diff_eq;
 use gam_terms::analytic_penalties::ARDPenalty;
