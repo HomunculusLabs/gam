@@ -2796,6 +2796,12 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn device_path_declines_on_unsupported_host_2422() {
+        assert_row_jet_device_path_declines_without_cuda();
+    }
+
     fn complete_fixture(n: usize) -> Vec<SaeSoftmaxRowJetInput> {
         let k = 3;
         let p = 2;
