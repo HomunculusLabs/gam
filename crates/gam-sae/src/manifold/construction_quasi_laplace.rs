@@ -2001,17 +2001,22 @@ impl SaeManifoldTerm {
             // contraction below is the PRIMARY merit; this budget only stops
             // objective blow-ups, not model-consistent saddle approaches.
             let model_predicted_change = 0.5 * sae_inner(&rhs, &newton).abs();
-            // λ²_pre = gᵀH⁻¹g at the pre-step state (the exact Newton decrement,
-            // = 2·model_predicted_change). The affine SECONDARY merit below accepts
-            // a step that contracts THIS even when raw ‖g‖ does not — the
-            // indefinite/stiff class (#2132/#2228/#2267) where ‖g‖ is non-monotone
-            // under the exact-Newton step, so a valid move toward stationarity would
-            // be rejected by the raw-‖g‖-only merit and the fit refused off-optimum
+            // The affine SECONDARY merit below accepts a step that contracts the
+            // Newton decrement even when raw ‖g‖ does not — the indefinite/stiff
+            // class (#2132/#2228/#2267) where ‖g‖ is non-monotone under the
+            // exact-Newton step, so a valid move toward stationarity would be
+            // rejected by the raw-‖g‖-only merit and the fit refused off-optimum
             // (measured: "step committed ‖g‖ 3.04e-1→2.73e-1" then "all backtracks
             // rejected" cycling per tol-round — the merit-rejects-valid-step grind).
-            let pre_decrement_sq = 2.0 * model_predicted_change;
+            // Its baseline is `decrement_sq` above, measured on the same operator;
+            // see the comparison site below for why it cannot be the exact-pencil
+            // 2·model_predicted_change.
             let obj_rise_budget = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * objective_scale
                 + model_predicted_change;
+            let newton_norm = (newton.t.iter().map(|v| v * v).sum::<f64>()
+                + newton.beta.iter().map(|v| v * v).sum::<f64>())
+            .sqrt();
+            let iterate_scale = self.inner_iterate_scale();
             let snapshot = self.snapshot_mutable_state();
             let mut accepted = false;
             let mut alpha = 1.0_f64;
@@ -2064,8 +2069,39 @@ impl SaeManifoldTerm {
                 // model's predicted rise for the indefinite saddle approach).
                 let obj_ok = trial_obj.is_finite() && trial_obj <= pre_obj + obj_rise_budget;
                 let grad_ok = trial_grad.is_some_and(|g| g.is_finite() && g < grad_norm);
+                // ONE OPERATOR PER COMPARISON. `trial_decrement_sq` is gᵀB⁻¹g on the
+                // deflated Gauss–Newton majorizer `B` — the same operator, and so the
+                // same currency, as the ½λ² certificate every acceptance gate in this
+                // file consults and that this merit exists to feed. Its baseline was
+                // gᵀA⁻¹g on the EXACT Hessian `A` (`2·model_predicted_change`, from
+                // `solve_exact_stationarity`): a different operator, so the test
+                // compared two quantities that are not on one scale. `A` is indefinite
+                // in this regime and `model_predicted_change` takes `.abs()`, so the
+                // more indefinite `A` is, the LARGER the baseline and the looser the
+                // merit — the bound relaxes exactly where the step is least
+                // trustworthy. Measured on the #2267 p=16 circle rung the two are
+                // ≥ 7.0× apart at one iterate (λ²_B = 2.381338e-4 while the A-side
+                // baseline exceeded 1.669962e-3), and the gap admitted a step that
+                // raised ‖g‖ from 1.556026e-2 to 6.409815e-1 and λ²_B sevenfold; the
+                // polish spent its entire run on that one step and then bailed on
+                // `no contraction in either currency`. `A` keeps its correct job
+                // above: the rise budget is the A-model's own prediction for the
+                // A-step actually being applied.
                 let decrement_ok =
-                    trial_decrement_sq.is_some_and(|d| d.is_finite() && d < pre_decrement_sq);
+                    trial_decrement_sq.is_some_and(|d| d.is_finite() && d < decrement_sq);
+                // Per-trial merit trace. This phase converts a budget death near
+                // the root into convergence, and its only record was a single
+                // committed/bail line — which is why a step that worsened BOTH
+                // merits at once could not be read off a trace at all (#2267).
+                log::debug!(
+                    "[SAE/polish] alpha={alpha:.4e} ‖Δ‖={newton_norm:.6e} \
+                     scale={iterate_scale:.6e} ‖g‖ {grad_norm:.6e}→{:.6e} \
+                     λ²_B {decrement_sq:.6e}→{:.6e} obj {pre_obj:.9e}→{trial_obj:.9e} \
+                     rise_budget={obj_rise_budget:.6e} obj_ok={obj_ok} grad_ok={grad_ok} \
+                     dec_ok={decrement_ok}",
+                    trial_grad.unwrap_or(f64::NAN),
+                    trial_decrement_sq.unwrap_or(f64::NAN),
+                );
                 if obj_ok && (grad_ok || decrement_ok) {
                     accepted = true;
                     made_progress = true;
