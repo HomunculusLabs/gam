@@ -783,8 +783,6 @@ impl SaeSupportSparseTerm {
                 row_value
             })
             .sum::<f64>();
-            }
-        }
         if value.is_finite() {
             Ok(value)
         } else {
