@@ -152,6 +152,28 @@ pub fn reml_laml_evaluate(
                 + (denom / 2.0) * (2.0 * std::f64::consts::PI * phi).ln()
                 - solution.gaussian_weight_log_sum_half;
 
+            // #2454: the `fixed_beta` gradient channel is
+            // `dp_cgrad · (½ λ_k q_k) / φ`, so the audit needs the two
+            // penalty-energy spellings and the three scalars that connect
+            // them to it.
+            if crate::estimate::outer_eval_capture::rho_outer_audit_enabled() {
+                let block_sum: f64 = lambdas
+                    .iter()
+                    .zip(solution.penalty_coords.iter())
+                    .map(|(&lambda, coord)| lambda * coord.shifted_quadratic(&solution.beta, 1.0))
+                    .sum();
+                crate::estimate::outer_eval_capture::record_rho_penalty_energy(
+                    crate::estimate::outer_eval_capture::PenaltyEnergyAudit {
+                        stable: solution.penalty_quadratic,
+                        block_sum,
+                        dp_raw,
+                        dp_floored: dp_c,
+                        dp_cgrad,
+                        phi,
+                    },
+                );
+            }
+
             (cost, phi, dp_cgrad, dp_cgrad2)
         }
         DispersionHandling::Fixed {
@@ -1389,6 +1411,8 @@ pub fn reml_laml_evaluate(
                 index: idx,
                 lambda,
                 block_quadratic,
+                rank: solution.penalty_coords[idx].rank(),
+                dim: solution.penalty_coords[idx].dim(),
                 fixed_beta,
                 logdet_h: ld_h,
                 logdet_s: ld_s,

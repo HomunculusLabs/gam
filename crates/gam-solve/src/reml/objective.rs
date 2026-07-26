@@ -1065,6 +1065,94 @@ impl<'a> RemlState<'a> {
             }
             None => self.build_penalty_coords(),
         };
+        if crate::estimate::outer_eval_capture::rho_outer_audit_enabled() {
+            let transformed = &pirls_result.reparam_result.canonical_transformed;
+            let original = self.build_penalty_coords();
+            let quad = |coord: &super::reml_outer_engine::PenaltyCoordinate| {
+                if coord.dim() == beta.len() {
+                    coord.shifted_quadratic(&beta, 1.0)
+                } else {
+                    f64::NAN
+                }
+            };
+            let qs = &pirls_result.reparam_result.qs;
+            let qs_deviation = if qs.nrows() == qs.ncols() {
+                (0..qs.nrows())
+                    .flat_map(|i| (0..qs.ncols()).map(move |j| (i, j)))
+                    .map(|(i, j)| {
+                        (qs[[i, j]] - if i == j { 1.0 } else { 0.0 }).abs()
+                    })
+                    .fold(0.0_f64, f64::max)
+            } else {
+                f64::NAN
+            };
+            let st = &pirls_result.reparam_result.s_transformed;
+            let et = &pirls_result.reparam_result.e_transformed;
+            let rotated = if qs.ncols() == beta.len() && qs.nrows() == beta.len() {
+                qs.t().dot(&beta)
+            } else {
+                beta.clone()
+            };
+            let sq = |m: &ndarray::Array2<f64>, v: &Array1<f64>| -> f64 {
+                if m.ncols() == v.len() { v.dot(&m.dot(v)) } else { f64::NAN }
+            };
+            let esq = |m: &ndarray::Array2<f64>, v: &Array1<f64>| -> f64 {
+                if m.ncols() == v.len() {
+                    let mv = m.dot(v);
+                    mv.dot(&mv)
+                } else {
+                    f64::NAN
+                }
+            };
+            let u_perp = &pirls_result.reparam_result.u_truncated;
+            let (beta_null_energy, projected_beta) = if u_perp.nrows() == rotated.len() {
+                let coeffs = u_perp.t().dot(&rotated);
+                (coeffs.dot(&coeffs), &rotated - &u_perp.dot(&coeffs))
+            } else {
+                (f64::NAN, rotated.clone())
+            };
+            crate::estimate::outer_eval_capture::record_rho_penalty_frame(
+                crate::estimate::outer_eval_capture::PenaltyFrameAudit {
+                    p: beta.len(),
+                    e_rows: et.nrows(),
+                    null_dim: u_perp.ncols(),
+                    beta_null_energy,
+                    coordinate_frame: match pirls_result.coordinate_frame {
+                        pirls::PirlsCoordinateFrame::OriginalSparseNative => "OriginalSparseNative",
+                        pirls::PirlsCoordinateFrame::TransformedQs => "TransformedQs",
+                    },
+                    s_transformed_quadratic: sq(st, &beta),
+                    s_transformed_quadratic_rotated: sq(st, &rotated),
+                    e_transformed_quadratic: esq(et, &beta),
+                    e_transformed_quadratic_rotated: esq(et, &rotated),
+                    stable_penalty_term: pirls_result.stable_penalty_term,
+                    original_frame_blocks: original.iter().map(quad).collect(),
+                    transformed_frame_blocks: transformed
+                        .iter()
+                        .map(|cp| {
+                            let coord = cp.to_penalty_coordinate();
+                            if coord.dim() == rotated.len() {
+                                coord.shifted_quadratic(&rotated, 1.0)
+                            } else {
+                                f64::NAN
+                            }
+                        })
+                        .collect(),
+                    projected_frame_blocks: transformed
+                        .iter()
+                        .map(|cp| {
+                            let coord = cp.to_penalty_coordinate();
+                            if coord.dim() == projected_beta.len() {
+                                coord.shifted_quadratic(&projected_beta, 1.0)
+                            } else {
+                                f64::NAN
+                            }
+                        })
+                        .collect(),
+                    qs_deviation_from_identity: qs_deviation,
+                },
+            );
+        }
         super::assembly::InnerAssembly {
             log_likelihood: ctx.log_likelihood,
             penalty_quadratic: pirls_result.stable_penalty_term,

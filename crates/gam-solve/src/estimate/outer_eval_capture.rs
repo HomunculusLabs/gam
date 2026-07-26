@@ -275,10 +275,68 @@ pub struct RhoGradientParts {
     pub index: usize,
     pub lambda: f64,
     pub block_quadratic: f64,
+    /// `rank(S_k)` as the outer penalty coordinate represents it (rows of its
+    /// root), and the ambient dimension it acts on.
+    pub rank: usize,
+    pub dim: usize,
     pub fixed_beta: f64,
     pub logdet_h: f64,
     pub logdet_s: f64,
     pub total: f64,
+}
+
+/// The two floating-point spellings of the penalty energy `β̂ᵀS(λ)β̂` that the
+/// criterion and its ρ-gradient respectively read, plus the profiled-Gaussian
+/// scalars that connect them to `fixed_beta`.
+///
+/// `stable` is the inner solve's stable-basis emission (what the criterion
+/// VALUE uses); `block_sum` is `Σ_k λ_k q_k` rebuilt from the outer penalty
+/// coordinates (what `½λ_k q_k` — the gradient's `fixed_beta` channel — is a
+/// per-block projection of). They are the same mathematical quantity, so any
+/// disagreement is a floating-point one; the ρ-derivative multiplies it by
+/// `λ_k`, which is why it must be measured rather than assumed small.
+#[derive(Clone, Copy, Debug)]
+pub struct PenaltyEnergyAudit {
+    pub stable: f64,
+    pub block_sum: f64,
+    pub dp_raw: f64,
+    pub dp_floored: f64,
+    pub dp_cgrad: f64,
+    pub phi: f64,
+}
+
+/// The same penalty energy spelled from the ORIGINAL-frame canonical penalty
+/// roots and from the TRANSFORMED-frame (post-`Qs`) ones, both evaluated at the
+/// coefficient vector the outer evaluator will actually use.
+///
+/// Recorded at the assembly site, where both root sets and the inner solve's
+/// own `stable_penalty_term` are simultaneously in scope.
+#[derive(Clone, Debug)]
+pub struct PenaltyFrameAudit {
+    pub stable_penalty_term: f64,
+    pub original_frame_blocks: Vec<f64>,
+    pub transformed_frame_blocks: Vec<f64>,
+    /// `‖Qs − I‖_max`; zero exactly when the reparameterization is the identity.
+    pub qs_deviation_from_identity: f64,
+    /// Which coefficient frame the inner solve reports `beta` in.
+    pub coordinate_frame: &'static str,
+    /// `βᵀ S_transformed β` from the reparameterization's rebuilt (rank-truncated)
+    /// penalty, at `β` as handed to the outer evaluator and at `Qsᵀβ`.
+    pub s_transformed_quadratic: f64,
+    pub s_transformed_quadratic_rotated: f64,
+    /// `‖E_transformed β‖²` and `‖E_transformed Qsᵀβ‖²`.
+    pub e_transformed_quadratic: f64,
+    pub e_transformed_quadratic_rotated: f64,
+    /// `p`, the reconstruction's row count (`structural_rank`), and the
+    /// dimension of the λ-invariant DECLARED-NULL subspace the split excludes.
+    pub p: usize,
+    pub e_rows: usize,
+    pub null_dim: usize,
+    /// `‖U_⊥ᵀ β_t‖²` — how much of β̂ lives in the declared-null subspace.
+    pub beta_null_energy: f64,
+    /// Per-block `(Πβ_t)ᵀ S_k^t (Πβ_t)` with `Π = I − U_⊥U_⊥ᵀ`: the block
+    /// quadratic restricted to the subspace the criterion actually penalizes.
+    pub projected_frame_blocks: Vec<f64>,
 }
 
 /// One outer evaluation's ρ-block audit: the criterion value decomposition and
@@ -289,6 +347,11 @@ pub struct RhoOuterAudit {
     pub criterion: Option<(f64, [f64; 4])>,
     /// Per-ρ-coordinate analytic gradient parts, in coordinate order.
     pub parts: Vec<RhoGradientParts>,
+    /// The penalty-energy spellings behind the `fixed_beta` channel.
+    pub penalty_energy: Option<PenaltyEnergyAudit>,
+    /// The original-frame vs transformed-frame penalty roots at the assembly
+    /// site.
+    pub penalty_frame: Option<PenaltyFrameAudit>,
 }
 
 thread_local! {
@@ -314,10 +377,17 @@ pub(crate) fn rho_outer_audit_enabled() -> bool {
 }
 
 /// Start a fresh window for one outer evaluation (no-op when disarmed).
+///
+/// Clears the criterion and per-coordinate gradient slots, which the evaluator
+/// refills on this evaluation. The penalty-frame slot is deliberately NOT
+/// cleared: it is written at the assembly site, which runs BEFORE the evaluator
+/// for the same evaluation, so clearing it here would discard the record the
+/// caller asked for.
 pub(crate) fn begin_rho_outer_audit_eval() {
     RHO_AUDIT.with(|audit| {
         if let Some(state) = audit.borrow_mut().as_mut() {
-            *state = RhoOuterAudit::default();
+            state.criterion = None;
+            state.parts = Vec::new();
         }
     });
 }
@@ -326,6 +396,22 @@ pub(crate) fn record_rho_outer_criterion(cost: f64, components: [f64; 4]) {
     RHO_AUDIT.with(|audit| {
         if let Some(state) = audit.borrow_mut().as_mut() {
             state.criterion = Some((cost, components));
+        }
+    });
+}
+
+pub(crate) fn record_rho_penalty_frame(frame: PenaltyFrameAudit) {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            state.penalty_frame = Some(frame);
+        }
+    });
+}
+
+pub(crate) fn record_rho_penalty_energy(energy: PenaltyEnergyAudit) {
+    RHO_AUDIT.with(|audit| {
+        if let Some(state) = audit.borrow_mut().as_mut() {
+            state.penalty_energy = Some(energy);
         }
     });
 }

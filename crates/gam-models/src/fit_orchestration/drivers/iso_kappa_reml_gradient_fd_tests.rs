@@ -2220,7 +2220,7 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
     let cost_parts_at = |theta: &Array1<f64>,
                          cache: &mut SingleBlockExactJointDesignCache<'_>,
                          evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
-     -> (f64, [f64; 4]) {
+     -> (f64, [f64; 4], gam_solve::estimate::outer_eval_capture::PenaltyEnergyAudit) {
         cache.ensure_theta(theta).unwrap_or_else(|e| panic!("ensure_theta: {e:?}"));
         enable_rho_outer_audit();
         let design = cache.design();
@@ -2245,7 +2245,7 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
             (audit_cost - cost).abs() <= 1e-9 * cost.abs().max(1.0),
             "audit cost {audit_cost:+.12e} disagrees with returned cost {cost:+.12e}"
         );
-        (cost, components)
+        (cost, components, audit.penalty_energy.expect("penalty energy recorded"))
     };
 
     let analytic_at = |theta: &Array1<f64>,
@@ -2282,19 +2282,66 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
 
     eprintln!("[zz-parts-2454] rho_dim={rho_dim} psi_dim={psi_dim} p={}", frozen_design.design.ncols());
     let h = 3e-4_f64;
-    for value in [6.0_f64, 9.0, 12.0, 15.0] {
+    for value in [6.0_f64, 15.0] {
         let mut theta = Array1::<f64>::zeros(rho_dim + psi_dim);
         for j in 0..rho_dim {
             theta[j] = value;
         }
         let (cost, _components, _grad, audit) = analytic_at(&theta, &mut cache, &mut evaluator);
-        for j in 0..rho_dim.min(1) {
+        let pe = audit.penalty_energy.expect("penalty energy recorded");
+        if let Some(frame) = audit.penalty_frame.as_ref() {
+            let sum = |v: &[f64]| -> f64 { v.iter().sum() };
+            eprintln!(
+                "[zz-parts-2454]  FRAME stable={:+.12e} qs_dev={:+.6e} frame={} \
+                 s_t_quad={:+.10e} s_t_quad_rot={:+.10e} e_t_quad={:+.10e} e_t_quad_rot={:+.10e}",
+                frame.stable_penalty_term, frame.qs_deviation_from_identity,
+                frame.coordinate_frame,
+                frame.s_transformed_quadratic, frame.s_transformed_quadratic_rotated,
+                frame.e_transformed_quadratic, frame.e_transformed_quadratic_rotated
+            );
+            let lambda = value.exp();
+            eprintln!(
+                "[zz-parts-2454]  FRAME p={} e_rows={} null_dim={} beta_null_energy={:+.6e}",
+                frame.p, frame.e_rows, frame.null_dim, frame.beta_null_energy
+            );
+            eprintln!(
+                "[zz-parts-2454]  FRAME original_sum={:+.12e} transformed_sum={:+.12e} \
+                 PROJECTED_sum={:+.12e}",
+                lambda * sum(&frame.original_frame_blocks),
+                lambda * sum(&frame.transformed_frame_blocks),
+                lambda * sum(&frame.projected_frame_blocks)
+            );
+            for (j, pq) in frame.projected_frame_blocks.iter().enumerate() {
+                eprintln!(
+                    "[zz-parts-2454]  FRAME j={j} lambda_q_projected={:+.10e}",
+                    lambda * pq
+                );
+            }
+            for (j, (o, t)) in frame
+                .original_frame_blocks
+                .iter()
+                .zip(frame.transformed_frame_blocks.iter())
+                .enumerate()
+            {
+                eprintln!(
+                    "[zz-parts-2454]  FRAME j={j} q_original={o:+.10e} q_transformed={t:+.10e} \
+                     lambda_q_transformed={:+.10e}",
+                    lambda * t
+                );
+            }
+        }
+        eprintln!(
+            "[zz-parts-2454] rho={value:5.1} COST={cost:+.12e} stable={:+.12e} block_sum={:+.12e} \
+             ratio={:+.9e} phi={:+.6e} dp_raw={:+.10e}",
+            pe.stable, pe.block_sum, pe.stable / pe.block_sum, pe.phi, pe.dp_raw
+        );
+        for j in 0..rho_dim {
             let mut plus = theta.clone();
             plus[j] += h;
             let mut minus = theta.clone();
             minus[j] -= h;
-            let (cp, comp_p) = cost_parts_at(&plus, &mut cache, &mut evaluator);
-            let (cm, comp_m) = cost_parts_at(&minus, &mut cache, &mut evaluator);
+            let (cp, comp_p, pe_p) = cost_parts_at(&plus, &mut cache, &mut evaluator);
+            let (cm, comp_m, pe_m) = cost_parts_at(&minus, &mut cache, &mut evaluator);
             let fd_total = (cp - cm) / (2.0 * h);
             let part = audit
                 .parts
@@ -2302,30 +2349,31 @@ fn zz_measure_rho_gradient_part_decomposition_2454() {
                 .find(|p| p.index == j)
                 .copied()
                 .expect("rho gradient part recorded");
-            let an_kkt = part.total - (part.fixed_beta + part.logdet_h + part.logdet_s);
             let fd_named = |idx: usize| (comp_p[idx] - comp_m[idx]) / (2.0 * h);
-            let lambda = value.exp();
+            let fd_stable = (pe_p.stable - pe_m.stable) / (2.0 * h);
+            let fd_block_sum = (pe_p.block_sum - pe_m.block_sum) / (2.0 * h);
+            let lambda = part.lambda;
             eprintln!(
-                "[zz-parts-2454] rho={value:5.1} j={j} lambda={lambda:.6e} COST={cost:+.12e} \
-                 q_k={:+.12e}",
-                part.block_quadratic
+                "[zz-parts-2454]  j={j} rank={} dim={} lambda={lambda:.6e} q_k={:+.10e} \
+                 lambda_q={:+.10e}",
+                part.rank, part.dim, part.block_quadratic, lambda * part.block_quadratic
             );
-            for (name, an, fd) in [
-                ("total     ", part.total, fd_total),
-                ("fixed_beta", part.fixed_beta, fd_named(0)),
-                ("logdet_h  ", part.logdet_h, fd_named(1)),
-                ("logdet_s  ", part.logdet_s, fd_named(2)),
-                ("kkt       ", an_kkt, fd_named(3)),
-            ] {
-                let gap = an - fd;
-                eprintln!(
-                    "[zz-parts-2454]   {name} an={an:+.10e} fd={fd:+.10e} gap={gap:+.6e} \
-                     gap_over_lambda={:+.6e}",
-                    gap / lambda
-                );
-            }
+            eprintln!(
+                "[zz-parts-2454]    d(stable)/drho_j={fd_stable:+.10e} \
+                 d(block_sum)/drho_j={fd_block_sum:+.10e} ratio={:+.6e}",
+                fd_stable / (lambda * part.block_quadratic)
+            );
+            eprintln!(
+                "[zz-parts-2454]    total an={:+.10e} fd={fd_total:+.10e} gap={:+.6e} \
+                 fixed_beta an={:+.10e} fd={:+.10e}",
+                part.total,
+                part.total - fd_total,
+                part.fixed_beta,
+                fd_named(0)
+            );
         }
     }
+
 }
 
 }
