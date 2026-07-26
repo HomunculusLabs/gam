@@ -1,4 +1,5 @@
 use crate::estimate::EstimationError;
+use gam_problem::StationarityRung;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, fast_ab, fast_atb, fast_xt_diag_x, fast_xt_diag_y,
@@ -4176,7 +4177,15 @@ fn profile_search_refusal(
         stationarity_bound: GRAD_TOL * (1.0 + e.cost.abs()),
         // The closed-form profiled search uses its own relative gradient
         // tolerance, which is not one of the outer ladder's rungs (#2458).
-        stationarity_bound_rung: None,
+        // That makes it a rung of ITS OWN, not an absent one: a refusal from
+        // this route reports `1e-12·(1 + |V|)`, five to ten orders tighter
+        // than anything the iterative outer ladder produces, and a reader
+        // comparing the two numbers needs to know they are not the same
+        // standard. `unrecorded` is reserved for a bound nobody recorded.
+        stationarity_bound_rung: Some(StationarityRung {
+            label: "closed-form-profile-relative",
+            derived_standard: false,
+        }),
         rho_checkpoint: vec![checkpoint],
     }
 }

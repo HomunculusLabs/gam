@@ -482,6 +482,17 @@ pub enum EstimationError {
         /// `None` means the refusing route does not record its rung — which is
         /// itself the finding, not a gap in the message: it marks exactly the
         /// routes whose stationarity standard is still unobservable.
+        ///
+        /// Every route inside the outer ladder now records one, and so does the
+        /// closed-form Gaussian profiled search, which has its own standard
+        /// rather than one of the ladder's. The residue is narrower and more
+        /// specific than "routes without a standard": the two remaining `None`
+        /// producers both REBUILD a refusal out of an
+        /// `OuterCriterionCertificate`, and the certificate carries
+        /// `stationarity.bound()` without the rung that produced it. So
+        /// `rung=unrecorded` now means "reconstructed from a certificate that
+        /// does not carry its rung" — a carrier gap with one fix, not a set of
+        /// unclassified routes.
         stationarity_bound_rung: Option<StationarityRung>,
         /// Best (lowest-objective feasible) outer iterate at exhaustion. This
         /// is work-preservation evidence for resume — it is NOT a fit and no
@@ -737,6 +748,11 @@ mod tests {
     /// A route that does not record its rung says so, rather than defaulting to
     /// a rung it never used. `rung=unrecorded` is the finding — it names a route
     /// whose stationarity standard is still unstated.
+    ///
+    /// Scope, so this test is not read as covering more than it does: no route
+    /// in the outer ladder reaches `None` any more. What it pins is the
+    /// RENDERING of `None`, which is still reachable from the refusals rebuilt
+    /// out of a certificate that carries a bound without its rung.
     #[test]
     fn unrecorded_rung_is_stated_not_defaulted() {
         let message = reml_refusal(None).to_string();

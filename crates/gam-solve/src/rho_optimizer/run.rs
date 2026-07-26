@@ -2076,6 +2076,14 @@ pub(crate) fn certificate_railed_coordinates(
 pub(crate) enum StationarityBoundSource {
     /// `outer_gradient_tolerance(config).threshold(cost, |g|)` -- the raw band.
     SolverBand,
+    /// `outer_gradient_tolerance(config).abs` -- the band's ABSOLUTE floor
+    /// alone, reported by a refusal reached before the point's own cost and
+    /// gradient existed to complete the relative term. Distinguishing it from
+    /// [`Self::SolverBand`] matters because the two are different numbers on
+    /// any objective declaring a scale (`abs = max(tolerance, scale*sqrt(eps))`),
+    /// and because a refusal carrying this rung states, by carrying it, that
+    /// NO stationarity comparison was performed at the reported point.
+    SolverBandAbsoluteFloor,
     /// `flat_valley_converged_grad_bound(cost)`, gated on a `CostStallFlatValley`
     /// exit. Saturates at its `1.0` cap (#2456).
     FlatValleyScore,
@@ -2088,16 +2096,27 @@ pub(crate) enum StationarityBoundSource {
     /// Twice the same-ρ spread between the run-recorded and certificate-time
     /// gradients (#2299): the measuring instrument's demonstrated noise.
     GradientReproducibility,
+    /// `config.tolerance` judged against the EFS/fixed-point route's
+    /// normalized residual `‖(θ⁺−θ)/scale‖_∞` -- not against a gradient norm
+    /// at all. The route has no ladder: it exposes no analytic gradient, so
+    /// none of the gradient-magnitude rungs above is even computable on it,
+    /// and the certificate it mints (`OuterStationarityCertificate::FixedPoint`)
+    /// already declares `bound: config.tolerance`. Recording it names the one
+    /// thing the shared `bound=` field could not previously say -- that the
+    /// number is a residual tolerance and the quantity beside it is a residual.
+    FixedPointResidual,
 }
 
 impl StationarityBoundSource {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::SolverBand => "solver-band",
+            Self::SolverBandAbsoluteFloor => "solver-band-absolute-floor",
             Self::FlatValleyScore => "flat-valley-score",
             Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
+            Self::FixedPointResidual => "fixed-point-residual",
         }
     }
 
@@ -2124,42 +2143,64 @@ impl StationarityBoundSource {
 /// so every refusal outside that block reported a number with no way to say
 /// which standard it came from. Bundling them makes it impossible to pass one
 /// without deciding the other.
+///
+/// The source is NOT optional. An earlier revision carried an `unrecorded`
+/// constructor for routes that "do not select a ladder rung", and 22 of the 30
+/// refusal paths took it — which read as 22 unclassifiable routes but was
+/// really three classifiable ones plus one oversight. Every bound this
+/// subsystem can report is now built by a named constructor below, so "which
+/// standard was this point held to" is answered by construction rather than
+/// left for a reader to infer from the magnitude.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StationarityBound {
     value: f64,
-    source: Option<StationarityBoundSource>,
+    source: StationarityBoundSource,
 }
 
 impl StationarityBound {
     /// A bound the rung ladder produced, carrying the rung it came from.
     pub(crate) fn from_ladder(value: f64, source: StationarityBoundSource) -> Self {
-        Self {
-            value,
-            source: Some(source),
-        }
+        Self { value, source }
     }
 
-    /// A bound from a route that does not select a ladder rung — a raw config
-    /// tolerance, or a refusal reached before the ladder is evaluated.
+    /// The solver band's absolute floor, for a refusal reached before the
+    /// point's own cost and gradient existed to complete the band's relative
+    /// term ([`StationarityBoundSource::SolverBandAbsoluteFloor`]).
     ///
-    /// This is deliberately not defaulted to [`StationarityBoundSource::SolverBand`]:
-    /// labelling an unclassified bound with a rung it did not come from would
-    /// make the ladder look more uniformly applied than it is, which is the
-    /// exact inference #2458 exists to stop. `rung=unrecorded` in a refusal is a
-    /// finding — it names a route whose stationarity standard is still unstated.
-    pub(crate) fn unrecorded(value: f64) -> Self {
-        Self {
-            value,
-            source: None,
-        }
+    /// Every such refusal is an evaluation, layout or inner-state failure at
+    /// the terminal point: there is no `|Pg|` to compare, and this number is
+    /// the standard the route WOULD have applied, reported for scale. Naming
+    /// that is the point — it separates "the gradient missed the band" from
+    /// "the band was never formed", which the bare number cannot.
+    pub(crate) fn solver_band_floor(config: &OuterConfig) -> Self {
+        Self::from_ladder(
+            outer_gradient_tolerance(config).abs,
+            StationarityBoundSource::SolverBandAbsoluteFloor,
+        )
+    }
+
+    /// The EFS/fixed-point route's standard: `config.tolerance` against a
+    /// normalized fixed-point residual
+    /// ([`StationarityBoundSource::FixedPointResidual`]).
+    ///
+    /// This is the bound `certify_fixed_point_optimality` mints its
+    /// `OuterStationarityCertificate::FixedPoint` against, so every refusal on
+    /// that route — including the ones that exit before the residual is formed
+    /// — reports the route's own declared standard rather than a gradient
+    /// tolerance it never used.
+    pub(crate) fn fixed_point_residual(config: &OuterConfig) -> Self {
+        Self::from_ladder(
+            config.tolerance,
+            StationarityBoundSource::FixedPointResidual,
+        )
     }
 
     pub(crate) fn value(self) -> f64 {
         self.value
     }
 
-    pub(crate) fn rung(self) -> Option<StationarityRung> {
-        self.source.map(StationarityBoundSource::provenance)
+    pub(crate) fn rung(self) -> StationarityRung {
+        self.source.provenance()
     }
 }
 
@@ -2202,7 +2243,7 @@ fn outer_nonconvergence_error(
         final_value: result.final_value,
         projected_grad_norm,
         stationarity_bound: stationarity_bound.value(),
-        stationarity_bound_rung: stationarity_bound.rung(),
+        stationarity_bound_rung: Some(stationarity_bound.rung()),
         rho_checkpoint: result.rho.to_vec(),
     }
 }
@@ -2278,7 +2319,7 @@ fn certify_fixed_point_optimality(
                         &format!("terminal value-only certificate evaluation failed: {err}"),
                         result,
                         None,
-                        StationarityBound::unrecorded(config.tolerance),
+                        StationarityBound::fixed_point_residual(config),
                     )
                 })?
                 .cost;
@@ -2288,7 +2329,7 @@ fn certify_fixed_point_optimality(
                     "terminal value-only certificate evaluation returned a non-finite objective value",
                     result,
                     None,
-                    StationarityBound::unrecorded(config.tolerance),
+                    StationarityBound::fixed_point_residual(config),
                 ));
             }
             Some(sample)
@@ -2302,7 +2343,7 @@ fn certify_fixed_point_optimality(
                 &format!("analytic fixed-point certificate evaluation failed: {err}"),
                 result,
                 None,
-                StationarityBound::unrecorded(config.tolerance),
+                StationarityBound::fixed_point_residual(config),
             )
         })?;
     if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
@@ -2311,7 +2352,7 @@ fn certify_fixed_point_optimality(
             "terminal fixed-point evidence was evaluated at a non-converged inner state",
             result,
             None,
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         ));
     }
     if evaluation.coordinates.len() != layout.n_params {
@@ -2324,7 +2365,7 @@ fn certify_fixed_point_optimality(
             ),
             result,
             None,
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         ));
     }
     if !evaluation.cost.is_finite() {
@@ -2333,7 +2374,7 @@ fn certify_fixed_point_optimality(
             "fixed-point certificate returned a non-finite objective value",
             result,
             None,
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         ));
     }
     if let Some(value_only) = value_only {
@@ -2343,7 +2384,7 @@ fn certify_fixed_point_optimality(
             evaluation.cost,
             result,
             None,
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         )?;
     }
 
@@ -2377,7 +2418,7 @@ fn certify_fixed_point_optimality(
             ),
             result,
             None,
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         ));
     }
 
@@ -2428,7 +2469,7 @@ fn certify_fixed_point_optimality(
             &certificate.summary(),
             result,
             Some(projected_inf),
-            StationarityBound::unrecorded(config.tolerance),
+            StationarityBound::fixed_point_residual(config),
         ));
     }
 
@@ -2552,7 +2593,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the selected checkpoint contains non-finite coordinates",
             result,
             None,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
     if layout.n_params == 0 {
@@ -2562,7 +2603,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("zero-dimensional final objective evaluation failed: {err}"),
                 result,
                 Some(0.0),
-                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+                StationarityBound::solver_band_floor(config),
             )
         })?;
         if !value.is_finite() {
@@ -2571,7 +2612,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 "the zero-dimensional final objective is non-finite",
                 result,
                 Some(0.0),
-                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+                StationarityBound::solver_band_floor(config),
             ));
         }
         let certificate = OuterCriterionCertificate {
@@ -2605,7 +2646,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the objective exposes no analytic gradient for final certification",
             result,
             None,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
 
@@ -2638,7 +2679,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("terminal value-only certificate evaluation failed: {err}"),
                 result,
                 result.final_grad_norm,
-                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+                StationarityBound::solver_band_floor(config),
             )
         })?
         .cost;
@@ -2648,7 +2689,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "terminal value-only certificate evaluation returned a non-finite objective value",
             result,
             result.final_grad_norm,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
 
@@ -2675,7 +2716,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             &format!("analytic final-point evaluation failed: {err}"),
             result,
             result.final_grad_norm,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         )
     })?;
     if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
@@ -2684,7 +2725,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "terminal analytic evidence was evaluated at a non-converged inner state",
             result,
             None,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
     layout
@@ -2695,7 +2736,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("malformed analytic final gradient: {err}"),
                 result,
                 None,
-                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+                StationarityBound::solver_band_floor(config),
             )
         })?;
     if !evaluation.cost.is_finite() || evaluation.gradient.iter().any(|value| !value.is_finite()) {
@@ -2704,7 +2745,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the analytic final-point value or gradient is non-finite",
             result,
             None,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
 
@@ -3077,7 +3118,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     hessian,
                     bounds: &bounds,
                     terminal_beta: terminal_beta.as_ref(),
-                    stationarity_bound,
+                    stationarity_bound: StationarityBound::from_ladder(stationarity_bound, bound_source),
                     objective_tol: asymptote_objective_tol,
                     context,
                 },
@@ -3134,7 +3175,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         // bound, or the curvature-scaled flat-valley widening when the
                         // interior sub-block's Newton decrement is below the loop's
                         // cost resolution (shared judgment with the Inc 2c mint).
-                        bound: effective_interior_bound,
+                        bound: effective_interior_bound.value(),
                         rails,
                     },
                     hessian_psd: Some(true),
@@ -3318,7 +3359,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 hessian,
                 bounds: &bounds,
                 terminal_beta: terminal_beta.as_ref(),
-                stationarity_bound,
+                stationarity_bound: StationarityBound::from_ladder(stationarity_bound, bound_source),
                 objective_tol: asymptote_objective_tol,
                 context,
             },
@@ -3371,7 +3412,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 let certificate = OuterCriterionCertificate {
                     stationarity: OuterStationarityCertificate::AsymptoteRail {
                         interior_projected_grad_norm,
-                        bound: effective_interior_bound,
+                        bound: effective_interior_bound.value(),
                         rails,
                     },
                     hessian_psd: Some(true),
@@ -3386,7 +3427,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &certificate.summary(),
                         result,
                         Some(interior_projected_grad_norm),
-                        StationarityBound::unrecorded(effective_interior_bound),
+                        effective_interior_bound,
                     ));
                 }
                 result
@@ -3541,7 +3582,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &projected_gradient,
                         &hessian,
                         &interior_indices,
-                        stationarity_bound,
+                        StationarityBound::from_ladder(stationarity_bound, bound_source),
                         asymptote_objective_tol,
                     )
                     .is_err();
@@ -3701,7 +3742,11 @@ struct AsymptoteRailInputs<'a> {
     hessian: &'a Array2<f64>,
     bounds: &'a (Array1<f64>, Array1<f64>),
     terminal_beta: Option<&'a Array1<f64>>,
-    stationarity_bound: f64,
+    /// The ladder bound the full problem was judged against, carrying the rung
+    /// that set it. The interior judgment may REPLACE it with its own
+    /// sub-block curvature bound, and the replacement's rung is what the
+    /// resulting certificate — or refusal — must report (#2458).
+    stationarity_bound: StationarityBound,
     /// The run's relative objective tolerance resolved at the certified cost —
     /// the same flat-valley floor the cost-stall guard and the curvature-scaled
     /// widening use. The tail-snap interior judgment applies the identical
@@ -3726,7 +3771,7 @@ struct AsymptoteRailInputs<'a> {
 fn try_certify_asymptote_rail(
     obj: &mut dyn OuterObjective,
     inputs: &AsymptoteRailInputs<'_>,
-) -> Result<Result<(f64, f64, Vec<RailCoordinate>), String>, EstimationError> {
+) -> Result<Result<(f64, StationarityBound, Vec<RailCoordinate>), String>, EstimationError> {
     let rho = inputs.rho;
     let projected_gradient = inputs.projected_gradient;
     let railed = inputs.railed;
@@ -4076,15 +4121,15 @@ pub(crate) fn certify_interior_stationarity(
     gradient: &Array1<f64>,
     hessian: &Array2<f64>,
     interior_indices: &[usize],
-    stationarity_bound: f64,
+    stationarity_bound: StationarityBound,
     objective_tol: f64,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, StationarityBound), String> {
     let interior_grad_norm = interior_indices
         .iter()
         .map(|&k| gradient[k] * gradient[k])
         .sum::<f64>()
         .sqrt();
-    if interior_grad_norm <= stationarity_bound {
+    if interior_grad_norm <= stationarity_bound.value() {
         return Ok((interior_grad_norm, stationarity_bound));
     }
     let m = interior_indices.len();
@@ -4102,15 +4147,27 @@ pub(crate) fn certify_interior_stationarity(
                 let curvature_grad_bound =
                     interior_grad_norm * (objective_tol / predicted_decrease).sqrt();
                 if curvature_grad_bound.is_finite() && curvature_grad_bound >= interior_grad_norm {
-                    return Ok((interior_grad_norm, curvature_grad_bound));
+                    // The returned bound is no longer the caller's: it is the
+                    // interior sub-block's own `|Pg_int|·√(τ/Δpred)`. Carrying
+                    // the caller's rung with it would report a widened bound
+                    // under the standard that did NOT set it (#2458).
+                    return Ok((
+                        interior_grad_norm,
+                        StationarityBound::from_ladder(
+                            curvature_grad_bound,
+                            StationarityBoundSource::CurvatureResolvability,
+                        ),
+                    ));
                 }
             }
             Err(format!(
-                "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound                  {stationarity_bound:.3e}, sub-block Newton decrement                  {predicted_decrease:.3e} > cost resolution {objective_tol:.3e}"
+                "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound                  {:.3e}, sub-block Newton decrement                  {predicted_decrease:.3e} > cost resolution {objective_tol:.3e}",
+                stationarity_bound.value()
             ))
         }
         _ => Err(format!(
-            "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound              {stationarity_bound:.3e} and the interior sub-block yields no PD Newton              decrement"
+            "interior not stationary: |Pg_int|={interior_grad_norm:.3e} > bound              {:.3e} and the interior sub-block yields no PD Newton              decrement",
+            stationarity_bound.value()
         )),
     }
 }
@@ -4165,7 +4222,7 @@ enum TailSnapOutcome {
     TailStationaryAtPoint {
         rails: Vec<RailCoordinate>,
         interior_projected_grad_norm: f64,
-        effective_interior_bound: f64,
+        effective_interior_bound: StationarityBound,
     },
     /// Tails confirmed, but the current point is not already
     /// tail-stationary. The snapped rail point is only a waypoint: the plan
@@ -4211,7 +4268,7 @@ fn try_tail_snap_to_rail(
             continue;
         }
         let g_k = gradient[k];
-        let side = match AsymptoteSide::from_gradient(g_k, inputs.stationarity_bound) {
+        let side = match AsymptoteSide::from_gradient(g_k, inputs.stationarity_bound.value()) {
             Some(side) => side,
             None => continue,
         };
@@ -4309,7 +4366,8 @@ fn try_tail_snap_to_rail(
                         AsymptoteSide::Upper => tail_constant * (-rho[*k]).exp(),
                         AsymptoteSide::Lower => tail_constant * rho[*k].exp(),
                     };
-                    if extrapolated_gap.is_finite() && extrapolated_gap <= inputs.stationarity_bound
+                    if extrapolated_gap.is_finite()
+                        && extrapolated_gap <= inputs.stationarity_bound.value()
                     {
                         at_point_rails.push(RailCoordinate {
                             index: *k,
@@ -4376,7 +4434,7 @@ fn try_tail_snap_to_rail(
                     .sum::<f64>()
                     / candidates.len() as f64;
                 let joint_gap = tail_constant * (-r0).exp();
-                if joint_gap.is_finite() && joint_gap <= inputs.stationarity_bound {
+                if joint_gap.is_finite() && joint_gap <= inputs.stationarity_bound.value() {
                     at_point_rails = candidates
                         .iter()
                         .map(|(k, side)| RailCoordinate {
@@ -5376,7 +5434,7 @@ pub(crate) fn run_outer(
                 "final outer state installation did not converge at full inner fidelity",
                 result,
                 result.final_grad_norm,
-                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+                StationarityBound::solver_band_floor(config),
             ));
         }
         certify_outer_optimality(obj, config, context, result)
@@ -5773,7 +5831,7 @@ pub(crate) fn run_outer_uncertified(
             "per-atom EFS exhausted its iteration budget before the fixed-point step converged",
             &result,
             None,
-            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
+            StationarityBound::solver_band_floor(config),
         ));
     }
 
@@ -6627,7 +6685,7 @@ mod asymptote_rail_certify_tests {
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
-                stationarity_bound: 1.0e-3,
+                stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
                 objective_tol: 1.0e-8,
                 context: "coupled pre-snap stationarity guard",
             },
@@ -6900,7 +6958,7 @@ mod asymptote_rail_certify_tests {
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
-                stationarity_bound: 1.0e-3,
+                stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
                 objective_tol: 1.0e-8,
                 context: "joint-face guard test",
             },
@@ -6963,7 +7021,7 @@ mod asymptote_rail_certify_tests {
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
-                stationarity_bound: 1.0e-3,
+                stationarity_bound: StationarityBound::from_ladder(1.0e-3, StationarityBoundSource::SolverBand),
                 objective_tol: 1.0e-8,
                 context: "joint-face unsettled-estimand guard test",
             },
@@ -7029,7 +7087,7 @@ mod asymptote_rail_certify_tests {
                 hessian: &hessian,
                 bounds: &bounds,
                 terminal_beta: None,
-                stationarity_bound: 1.0e-9,
+                stationarity_bound: StationarityBound::from_ladder(1.0e-9, StationarityBoundSource::SolverBand),
                 objective_tol: 1.0e-8,
                 context: "non-face guard test",
             },
@@ -7151,7 +7209,7 @@ mod asymptote_rail_certify_tests {
             hessian: &hessian_psd,
             bounds: &bounds,
             terminal_beta: None,
-            stationarity_bound: 1.0e-6,
+            stationarity_bound: StationarityBound::from_ladder(1.0e-6, StationarityBoundSource::SolverBand),
             objective_tol: 1.0e-5,
             context: "asymptote-rail psd test",
         };
@@ -7161,7 +7219,7 @@ mod asymptote_rail_certify_tests {
             minted.expect("PSD interior + confirmed tail must mint");
         assert!(interior_norm <= 1.0e-6);
         assert!(
-            effective_bound >= interior_norm,
+            effective_bound.value() >= interior_norm,
             "the admitting bound must cover the interior norm"
         );
         assert_eq!(rails.len(), 1);
