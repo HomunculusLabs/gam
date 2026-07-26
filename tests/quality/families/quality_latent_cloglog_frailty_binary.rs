@@ -40,6 +40,7 @@
 
 use gam::estimate::FittedLinkState;
 use gam::families::inverse_link::apply_inverse_link_spec_vec;
+use gam::families::survival::lognormal_kernel::{FrailtyScale, FrailtySpec, HazardLoading};
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::rmse;
@@ -57,8 +58,17 @@ const N: usize = 500;
 const LATENT_SD: f64 = 1.0; // the fixed latent SD the formula path uses.
 
 /// True conditional linear predictor (cloglog scale).
+///
+/// The amplitude is set on the MARGINAL curve, not the conditional one. The
+/// frailty attenuates the link, so a conditional sweep wide enough to look like
+/// a real signal collapses once `u` is integrated out: amplitude 0.8 spans
+/// 0.277 of conditional probability but only 0.207 of the marginal probability
+/// this test actually targets. Amplitude 1.5 puts the marginal span at 0.373
+/// over `p ∈ [0.41, 0.79]` — a genuine two-sided signal, away from both
+/// saturation ends, so the recovery RMSE is measured against a range that is
+/// really there.
 fn eta_true(x: f64) -> f64 {
-    0.8 * (PI * x).sin() - 0.7
+    1.5 * (PI * x).sin() - 0.8
 }
 
 #[test]
@@ -142,8 +152,18 @@ fn gam_latent_cloglog_recovers_frailty_marginal_probability() {
         };
 
     // ---- fit gam with the latent-cloglog binomial family --------------------
+    // The family carries the frailty explicitly: it integrates `u ~ N(0, σ)` out
+    // of the cloglog by Gauss-Hermite quadrature, and it refuses to guess σ. The
+    // σ wired here is the SAME `LATENT_SD` the DGP drew `u_i` from and the same
+    // one the ground-truth marginal curve was evaluated at, so the fit targets
+    // exactly the generating marginal — `Fixed`, not `Learned`, because σ is
+    // known here and the claim under test is mean recovery, not σ estimation.
     let cfg_latent = FitConfig {
         family: Some("latent-cloglog-binomial".to_string()),
+        frailty: FrailtySpec::HazardMultiplier {
+            scale: FrailtyScale::Fixed { sigma: LATENT_SD },
+            loading: HazardLoading::Full,
+        },
         ..FitConfig::default()
     };
     let result_latent = fit_from_formula("y ~ s(x)", &ds, &cfg_latent)

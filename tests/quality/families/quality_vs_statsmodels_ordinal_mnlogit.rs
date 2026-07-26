@@ -185,7 +185,7 @@ fn gam_multinomial_recovers_true_class_simplex() {
     }
 
     // ---- fit gam's penalized multinomial-logit at near-zero ridge -----------
-    let lambdas = Array1::from_elem(J - 1, 1e-3);
+    let lambdas = Array1::from_elem(J, 1e-3);
     let out = fit_penalized_multinomial(MultinomialFitInputs {
         design: design.view(),
         y_one_hot: y_one_hot.view(),
@@ -536,7 +536,7 @@ fn gam_multinomial_recovers_true_class_simplex_on_real_data() {
     // the SAME λ is implied for the baseline by statsmodels' default Newton MLE
     // (we do not penalize statsmodels — gam carries the heavier prior and must
     // STILL match-or-beat on held-out log-loss).
-    let lambdas = Array1::from_elem(RJ - 1, 0.1);
+    let lambdas = Array1::from_elem(RJ, 0.1);
     let out = fit_penalized_multinomial(MultinomialFitInputs {
         design: design.view(),
         y_one_hot: y_one_hot.view(),

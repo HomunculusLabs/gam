@@ -608,7 +608,7 @@ pub fn fit_penalized_multinomial(
     // The shared engine re-validates the geometry common to every vector-GLM
     // (nonempty design, penalty shape, λ finiteness/non-negativity, override
     // `(N, M, M)` shape, finite design). The multinomial family owns the
-    // class-count contract (`K ≥ 2`, λ length `K − 1`), the per-row simplex
+    // class-count contract (`K ≥ 2`, λ length `K`), the per-row simplex
     // precondition under which the softmax residual/Fisher are the exact
     // derivatives of `Σ_c y_c log p_c`, and the row-weight check the likelihood
     // adapter consumes.
