@@ -2764,18 +2764,20 @@ impl WorkingModelSurvival {
         // (β′ᵀS′β′ = βᵀSβ), so it carries over unchanged.
         let penalty_quadratic = state.penalty_term;
 
-        // #931 survival-LAML IFT envelope: attach the one-step Newton correction
-        // only when this state is actually a near-stationary inner solution. The
-        // residual MUST be the active-set-projected stationarity vector (a binding
-        // monotonicity constraint contributes r = Aᵀλ, λ≥0, which is not a
-        // stationarity residual). Project in the RAW frame (the constraint rows A
-        // live there), THEN rotate the projected residual into the Q_s frame:
-        // r_t = Q_sᵀ r_o — the penalized score rotates like β (β_t = Q_sᵀ β_o),
-        // exactly the standard lane's inner_kkt_residual_original_basis relation
-        // r_o = Q_s r_t, inverted here (raw→transformed) so the residual matches
-        // the transformed β̂′/H′ the assembly now carries.
-        const SURVIVAL_LAML_IFT_RELATIVE_KKT_GATE: f64 = 1.0e-8;
-        let kkt_residual = {
+        // The Laplace/LAML envelope is defined at a stationary inner mode. A
+        // one-step Newton residual surrogate is not an interchangeable
+        // criterion when the likelihood Hessian moves with beta: its scalar
+        // moving-Hessian response requires higher-order rho derivatives that
+        // the survival provider does not emit. Attaching that partial surrogate
+        // made the value and gradient different functions at rho=4 (#2491).
+        //
+        // Certify the active-set-projected KKT condition in the RAW frame. A
+        // binding monotonicity constraint contributes r = A^T lambda and must
+        // be projected out before the stationarity decision. Once certified,
+        // the exact envelope has no residual term; the transformed assembly
+        // therefore carries kkt_residual=None deliberately.
+        const SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL: f64 = 1.0e-8;
+        let relative_projected_norm = {
             let raw = state.gradient.clone();
             let projected = match self.monotonicity_linear_constraints() {
                 Some(constraints) => {
@@ -2790,17 +2792,18 @@ impl WorkingModelSurvival {
                 }
                 None => raw,
             };
-            let projected_norm = array1_l2_norm(&projected);
-            let relative_projected_norm = state.relative_gradient_norm(projected_norm);
-            if relative_projected_norm <= SURVIVAL_LAML_IFT_RELATIVE_KKT_GATE {
-                let projected_transformed = reparam.qs.t().dot(&projected);
-                Some(crate::model_types::ProjectedKktResidual::from_active_projected(
-                    projected_transformed,
-                ))
-            } else {
-                None
-            }
+            state.relative_gradient_norm(array1_l2_norm(&projected))
         };
+        if !relative_projected_norm.is_finite()
+            || relative_projected_norm > SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "survival LAML requires a stationary inner mode: projected relative KKT \
+                 residual {relative_projected_norm:.3e} exceeds \
+                 {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
+                 surrogate is not a differentiable substitute for the Laplace mode"
+            )));
+        }
 
         let result = InnerAssembly {
             log_likelihood: state.log_likelihood,
@@ -2828,7 +2831,7 @@ impl WorkingModelSurvival {
             rho_ext_pair_fn: None,
             fixed_drift_deriv: None,
             contracted_psi_second_order: None,
-            kkt_residual,
+            kkt_residual: None,
             active_constraints: None,
         }
         .evaluate(
