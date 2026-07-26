@@ -900,21 +900,31 @@ impl CascadeResidualSpectrum {
     /// strictly positive; the caller still rejects a nonpositive `R`, which is a
     /// statement about the DATA rather than about this arithmetic.
     fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
-        let mut s1 = 0.0;
-        let mut s2 = 0.0;
-        let mut s3 = 0.0;
-        let mut s4 = 0.0;
+        let [s1, s2, s3, s4] = self.moment_sums(lambda);
+        (self.anchor_energy[0] - s1, s2, s3, s4)
+    }
+
+    /// `[S_1, S_2, S_3, S_4]` at `lambda`, before the anchor subtraction that
+    /// turns `S_1` into the profiled residual.
+    ///
+    /// Exposed separately because `S_1` must NOT be recovered from `R` by
+    /// undoing that subtraction. At the top of the search domain
+    /// `lambda ~ theta_max/sqrt(eps)`, so `S_1 ~ ||beta||^2 sqrt(eps)/theta_max`
+    /// and `anchor - S_1` loses about eight digits of `S_1`; recovering it would
+    /// leave a `sqrt(eps)` relative error, which is exactly the resolution the
+    /// nested-rule certificate is charged at. Every `S_k` is a sum of strictly
+    /// positive terms, so read directly it carries no cancellation at all.
+    fn moment_sums(&self, lambda: f64) -> [f64; 4] {
+        let mut sums = [0.0_f64; 4];
         for (&theta, &projected_square) in self.eigenvalue.iter().zip(&self.projected_square) {
             let h = theta + lambda;
-            let first = projected_square / h;
-            let second = first / h;
-            let third = second / h;
-            s1 += first;
-            s2 += second;
-            s3 += third;
-            s4 += third / h;
+            let mut term = projected_square;
+            for sum in &mut sums {
+                term /= h;
+                *sum += term;
+            }
         }
-        (self.anchor_energy[0] - s1, s2, s3, s4)
+        sums
     }
 }
 
@@ -1030,18 +1040,9 @@ fn nested_moment_disagreement(
         if !(lambda.is_finite() && lambda > 0.0) {
             continue;
         }
-        let f = fine.moments(lambda);
-        let c = coarse.moments(lambda);
-        // `moments` returns `R = anchor - S_1` first; recover `S_1` from the same
-        // anchor both rules carry, so the comparison is on the moment itself.
-        let anchor = fine.anchor_energy[0];
-        let pairs = [
-            (anchor - f.0, anchor - c.0),
-            (f.1, c.1),
-            (f.2, c.2),
-            (f.3, c.3),
-        ];
-        for (fine_value, coarse_value) in pairs {
+        let fine_moments = fine.moment_sums(lambda);
+        let coarse_moments = coarse.moment_sums(lambda);
+        for (fine_value, coarse_value) in fine_moments.into_iter().zip(coarse_moments) {
             if !(fine_value.is_finite() && coarse_value.is_finite()) {
                 return Err(format!(
                     "residual cascade: non-finite nested-rule moment at log lambda {log_lambda} \
@@ -1706,8 +1707,11 @@ impl Core {
     /// The returned `T_m` is the Jacobi matrix of the Gauss quadrature rule for
     /// the measure `mu` that `start` induces on the spectrum of `B`, so
     /// `start' g(B) start ≈ ||start||^2 · e_1' g(T_m) e_1` for every analytic
-    /// `g` — the Golub–Meurant rule. [`Self::tail`] is the `(m+1, m)` entry the
-    /// truncation dropped, which is what decides whether that `≈` is an `=`.
+    /// `g` — the Golub–Meurant rule. Two things decide whether that `≈` is an
+    /// `=`, and both ride on the returned [`SchurLanczos`]: `tail`, the `(m+1, m)`
+    /// entry the truncation dropped, and `dimension_ceiling`, the caller's bound
+    /// on how many dimensions `K(B, start)` can have at all — reaching it leaves
+    /// the space nothing to grow into, whatever roundoff has left in `tail`.
     fn schur_lanczos(
         &self,
         null_chol: &[f64],
@@ -2242,18 +2246,6 @@ impl Core {
             ));
         }
         let measure_mass = beta.iter().map(|value| value * value).sum::<f64>();
-        let mut certificate = ResidualQuadratureCertificate {
-            steps: 0,
-            coarse_steps: 0,
-            rank,
-            budget,
-            relative_tail: 0.0,
-            agreement: 0.0,
-            target,
-            certified: true,
-            mass_defect: 0.0,
-            dropped_mass_fraction: 0.0,
-        };
         if !(measure_mass > 0.0) {
             // No response energy outside the polynomial null space: the profiled
             // residual is the anchor at every lambda. A zero measure is exactly
@@ -2265,7 +2257,18 @@ impl Core {
                     projected_square: Vec::new(),
                     anchor_energy: [anchor_energy],
                 }),
-                certificate,
+                ResidualQuadratureCertificate {
+                    steps: 0,
+                    coarse_steps: 0,
+                    rank,
+                    budget,
+                    relative_tail: 0.0,
+                    agreement: 0.0,
+                    target,
+                    certified: true,
+                    mass_defect: 0.0,
+                    dropped_mass_fraction: 0.0,
+                },
             ));
         }
         let mut steps = SLQ_LANCZOS_STEPS.min(budget);
@@ -2287,7 +2290,7 @@ impl Core {
                     self.residual_gauss_rule(&run, coarse_steps, anchor_energy, measure_mass)?;
                 nested_moment_disagreement(&fine.spectrum, &coarse.spectrum, domain)?
             };
-            certificate = ResidualQuadratureCertificate {
+            let certificate = ResidualQuadratureCertificate {
                 steps: taken,
                 coarse_steps: if run.invariant { 0 } else { coarse_steps },
                 rank,
@@ -3431,6 +3434,20 @@ impl ResidualCascadeDesign {
         let lambda = gam_problem::checked_exp_log_strength(log_lambda)
             .map_err(|error| format!("residual cascade: {error}"))?;
         self.core.logdet_slq(lambda)
+    }
+
+    /// The bounded `log λ` domain the certified REML search runs on — every
+    /// determinant transition `λ ≈ θ`, padded by `ln(1/√ε)` past the extreme Schur
+    /// modes.
+    ///
+    /// Exposed because the ENDPOINTS are where a criterion evaluation is hardest:
+    /// `maximize_score_1d` evaluates the lower boundary before anything else, and
+    /// on the iterative route that is the λ at which `X'WX + λD` is numerically
+    /// singular (#2503). A gate on "the criterion is evaluable everywhere the
+    /// search will look" needs to know where that is, rather than hard-coding a λ
+    /// read out of one failure's message.
+    pub fn log_lambda_domain(&self) -> Result<(f64, f64), String> {
+        self.core.reml_profile()?.log_lambda_domain()
     }
 
     /// Profiled-σ² REML criterion at `log λ` (differences across λ are exact

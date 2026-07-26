@@ -26,7 +26,7 @@
 
 use gam::solver::residual_cascade::{
     LogdetMethod, ResidualCascadeDesign, ResidualCascadeError, ResidualCascadeFit,
-    ResidualCascadeState, fit_residual_cascade,
+    ResidualCascadeState, ResidualMomentMethod, fit_residual_cascade,
 };
 
 /// SplitMix64 — deterministic test stream, no external RNG dependency.
@@ -1245,4 +1245,112 @@ fn cascade_state_rejects_corruption() {
         ResidualCascadeFit::from_state(&bad).is_err(),
         "zero Cholesky pivot must error"
     );
+}
+
+/// #2503 — past the dense cap, REML selection must reach its λ without solving
+/// `A = X'WX + λD` at ANY λ in the domain, and it must SAY so.
+///
+/// The defect: `maximize_score_1d` evaluates `log_lambda_domain`'s lower boundary
+/// before anything else, and past the cap the profiled residual and its three
+/// derivative moments were re-derived from two PCG solves at every λ. At the
+/// boundary — `λ = e^-30.14 = 8.1e-14` on this fixture — the multilevel Wendland
+/// frame is redundant across scales, `cond(X'WX + λD) ~ 1e10`, and PCG to `1e-9`
+/// needs ~`1e5` iterations against a 4000 budget. Eight tests in this file died
+/// there with that one error, and the search was paying an ill-conditioned solve
+/// for a number the domain padding already bounds to `√ε`.
+///
+/// Three claims, in the order they have to hold:
+///
+/// 1. the criterion is EVALUABLE at both domain endpoints, which is the repro;
+/// 2. `fit_reml` completes, which is the eight tests;
+/// 3. the route reports `ConvergedQuadrature`, which is why — and not, say,
+///    because a solver tolerance moved. Without (3) a future regression to the
+///    solve would only reappear as the same opaque CG message.
+#[test]
+fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
+    let n = 800;
+    let (axes, y, w) = sample(2, n, 0.1, 0x1032_0043);
+    let xs = axis_refs(&axes);
+    // Refinement level 6 is where this shape's `4^level` column growth crosses
+    // `DENSE_GRAM_MAX = 1536` — the level `fit_residual_cascade` reaches on this
+    // fixture, and the first one that has no dense Gram to fall back on.
+    let design = ResidualCascadeDesign::build(&xs, &y, &w, &[1.0, 1.0], 2.0, 6).expect("build");
+    assert!(
+        design.num_coeffs() > 1536,
+        "fixture must be past the dense sizing cap (m = {})",
+        design.num_coeffs()
+    );
+
+    let (lo, hi) = design.log_lambda_domain().expect("spectrum-derived domain");
+    assert!(
+        lo < -25.0,
+        "premise: the domain must reach the ill-conditioned end this issue is about (lo = {lo})"
+    );
+    for log_lambda in [lo, lo + 1e-9, 0.5 * (lo + hi), hi] {
+        let value = design
+            .criterion(log_lambda)
+            .unwrap_or_else(|error| panic!("criterion at log lambda {log_lambda}: {error}"));
+        assert!(
+            value.is_finite(),
+            "non-finite criterion at log lambda {log_lambda}"
+        );
+    }
+
+    let fit = design.fit_reml().expect("REML selection past the dense cap");
+    assert_eq!(fit.certificate.logdet_method, LogdetMethod::Slq);
+    let Some(ResidualMomentMethod::ConvergedQuadrature {
+        steps,
+        coarse_steps,
+        rank,
+        budget,
+        agreement,
+        target,
+        mass_defect,
+        dropped_mass_fraction,
+        ..
+    }) = fit.certificate.residual_moments
+    else {
+        panic!(
+            "the past-cap residual moments must come from a CONVERGED quadrature, not a solve: \
+             {:?}",
+            fit.certificate.residual_moments
+        );
+    };
+    assert!(
+        agreement <= target,
+        "admitted with the nested rules disagreeing by {agreement} against {target}"
+    );
+    assert!(
+        steps <= budget && coarse_steps <= steps,
+        "step accounting: {steps} steps, {coarse_steps} coarse, budget {budget}"
+    );
+    // The accepted rule must be far below the penalized rank. That is the whole
+    // point — a rule at `steps == rank` would be exact by dimension alone and
+    // would prove nothing about the quadrature, and it would cost an `O(rank^3)`
+    // reorthogonalization this route exists to avoid.
+    assert!(
+        rank > 4 * steps,
+        "the accepted rule must be TRUNCATED: {steps} nodes against penalized rank {rank}"
+    );
+    assert!(
+        mass_defect <= 1e-12 && dropped_mass_fraction <= f64::EPSILON,
+        "the rule's own self-checks must hold: mass defect {mass_defect}, dropped null mass \
+         {dropped_mass_fraction}"
+    );
+    eprintln!(
+        "[2503-SOLVEFREE] m={} rank={rank} steps={steps} coarse={coarse_steps} budget={budget} \
+         agreement={agreement:.3e} target={target:.3e} log_lambda={}",
+        design.num_coeffs(),
+        fit.log_lambda()
+    );
+
+    // ...and the selected fit is still a fit: a certified coefficient solve and a
+    // positive predictive variance.
+    assert!(
+        fit.certificate.solve_rel_residual <= 1e-9,
+        "uncertified coefficient solve at the selected lambda: {}",
+        fit.certificate.solve_rel_residual
+    );
+    let (_, var) = fit.predict(&[0.4, 0.6]).expect("predict");
+    assert!(var > 0.0, "non-positive predictive variance {var}");
 }
