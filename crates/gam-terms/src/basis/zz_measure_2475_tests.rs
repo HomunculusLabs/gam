@@ -9,13 +9,42 @@
 //! The remaining tests preserve the independent pseudo-limit and spherical-jet
 //! regressions discovered while tracing the original shared-floor defect.
 
+use super::sphere_half_angle::HalfAngleSeparation;
 use super::sphere_kernels::{
-    wahba_sphere_kernel_pseudo_coincident, wahba_sphere_kernel_pseudo_from_cos,
-    wahba_sphere_kernel_sobolev_closed_form, wahba_sphere_kernel_sobolev_derivative_dcos,
+    wahba_sphere_kernel_pseudo, wahba_sphere_kernel_pseudo_coincident, wahba_sphere_kernel_sobolev,
+    wahba_sphere_kernel_sobolev_derivative_dhav,
 };
 use super::sphere_spectral::{
     sobolev_s2_truncated_coefficients, sphere_truncated_spectral_derivative_eval,
 };
+
+/// This suite sweeps `cos γ` as its abscissa, because that is the coordinate
+/// the #2475 floors were expressed in. The kernels now take the half-angle pair
+/// `(u, v) = (sin²(γ/2), cos²(γ/2))` directly (#2489), so the sweep converts at
+/// the boundary. Both halves are taken from the side where Sterbenz's lemma
+/// makes them exact — `1 − cos γ` for `cos γ ∈ [0.5, 1]`, `1 + cos γ` for
+/// `cos γ ∈ [−1, −0.5]` — which is the best available reading of a cosine, and
+/// is bit-identical to what the shipped code did internally before the split.
+fn sep_from_cos(cos_gamma: f64) -> HalfAngleSeparation {
+    let cos_g = cos_gamma.clamp(-1.0, 1.0);
+    HalfAngleSeparation {
+        u: (1.0 - cos_g) * 0.5,
+        v: (1.0 + cos_g) * 0.5,
+    }
+}
+
+fn wahba_sphere_kernel_pseudo_from_cos(cos_gamma: f64, m: usize) -> f64 {
+    wahba_sphere_kernel_pseudo(sep_from_cos(cos_gamma), m)
+}
+
+fn wahba_sphere_kernel_sobolev_closed_form(cos_gamma: f64, m: usize) -> f64 {
+    wahba_sphere_kernel_sobolev(sep_from_cos(cos_gamma), m)
+}
+
+fn wahba_sphere_kernel_sobolev_derivative_dcos(cos_gamma: f64, m: usize) -> f64 {
+    // `du/d(cos γ) = −1/2`.
+    wahba_sphere_kernel_sobolev_derivative_dhav(sep_from_cos(cos_gamma), m) * (-0.5)
+}
 
 const FOUR_PI: f64 = 4.0 * std::f64::consts::PI;
 /// The floor that used to be shared by all four sites.

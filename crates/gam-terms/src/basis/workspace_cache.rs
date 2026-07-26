@@ -766,24 +766,22 @@ fn spherical_wahba_kernel_matrix_cpu_validated(
     } else {
         std::f64::consts::PI / 180.0
     };
-    // Precompute (sin_lat, cos_lat, sin_lon, cos_lon) for each center once.
-    // Using cos(lon - lon_c) = cos(lon)·cos(lon_c) + sin(lon)·sin(lon_c)
-    // collapses the inner-loop trig from one `.cos()` per (i, j) down to
-    // four multiplies and an add — a ~10x speedup on the inner body at
-    // large-scale N·K.
+    // Precompute (sin_lat, cos_lat, sin_lon, cos_lon) for each center once and
+    // reuse it across the whole N x K grid. The pair separation is then pure
+    // `+ - *` arithmetic on those eight numbers — see
+    // `super::sphere_half_angle` for why it is taken in chord form rather than
+    // as a dot product (#2489) and why it costs no transcendental call per
+    // (i, j) either way.
     let mut sin_lat_c = Vec::<f64>::with_capacity(k);
     let mut cos_lat_c = Vec::<f64>::with_capacity(k);
     let mut sin_lon_c = Vec::<f64>::with_capacity(k);
     let mut cos_lon_c = Vec::<f64>::with_capacity(k);
     for c in centers.outer_iter() {
-        let lat = c[0] * deg;
-        let lon = c[1] * deg;
-        let (s_lat, c_lat) = lat.sin_cos();
-        let (s_lon, c_lon) = lon.sin_cos();
-        sin_lat_c.push(s_lat);
-        cos_lat_c.push(c_lat);
-        sin_lon_c.push(s_lon);
-        cos_lon_c.push(c_lon);
+        let trig = SphereTrig::from_radians(c[0] * deg, c[1] * deg);
+        sin_lat_c.push(trig.sin_lat);
+        cos_lat_c.push(trig.cos_lat);
+        sin_lon_c.push(trig.sin_lon);
+        cos_lon_c.push(trig.cos_lon);
     }
     let mut out = Array2::<f64>::zeros((n, k));
     let err_flag = std::sync::atomic::AtomicBool::new(false);
@@ -797,45 +795,44 @@ fn spherical_wahba_kernel_matrix_cpu_validated(
             let tail = k % 4;
             for (local_i, mut out_row) in block.outer_iter_mut().enumerate() {
                 let i = row_offset + local_i;
-                let lat = data[(i, 0)] * deg;
-                let lon = data[(i, 1)] * deg;
-                let (sin_lat, cos_lat) = lat.sin_cos();
-                let (sin_lon, cos_lon) = lon.sin_cos();
-                let sin_lat_v = f64x4::from(sin_lat);
-                let cos_lat_v = f64x4::from(cos_lat);
-                let sin_lon_v = f64x4::from(sin_lon);
-                let cos_lon_v = f64x4::from(cos_lon);
+                let row = SphereTrig::from_radians(data[(i, 0)] * deg, data[(i, 1)] * deg);
+                let row_v = SphereTrig {
+                    sin_lat: f64x4::from(row.sin_lat),
+                    cos_lat: f64x4::from(row.cos_lat),
+                    sin_lon: f64x4::from(row.sin_lon),
+                    cos_lon: f64x4::from(row.cos_lon),
+                };
                 // SIMD over 4 centers at a time.
                 for cidx in 0..chunks {
                     let base = cidx * 4;
-                    let sl_c = f64x4::from([
-                        sin_lat_c[base],
-                        sin_lat_c[base + 1],
-                        sin_lat_c[base + 2],
-                        sin_lat_c[base + 3],
-                    ]);
-                    let cl_c = f64x4::from([
-                        cos_lat_c[base],
-                        cos_lat_c[base + 1],
-                        cos_lat_c[base + 2],
-                        cos_lat_c[base + 3],
-                    ]);
-                    let sn_c = f64x4::from([
-                        sin_lon_c[base],
-                        sin_lon_c[base + 1],
-                        sin_lon_c[base + 2],
-                        sin_lon_c[base + 3],
-                    ]);
-                    let cn_c = f64x4::from([
-                        cos_lon_c[base],
-                        cos_lon_c[base + 1],
-                        cos_lon_c[base + 2],
-                        cos_lon_c[base + 3],
-                    ]);
-                    let dlon_cos = cos_lon_v * cn_c + sin_lon_v * sn_c;
-                    let cos_gamma = sin_lat_v * sl_c + cos_lat_v * cl_c * dlon_cos;
-                    let vals =
-                        wahba_sphere_kernel_from_cos_simd_kind(cos_gamma, penalty_order, kernel);
+                    let center_v = SphereTrig {
+                        sin_lat: f64x4::from([
+                            sin_lat_c[base],
+                            sin_lat_c[base + 1],
+                            sin_lat_c[base + 2],
+                            sin_lat_c[base + 3],
+                        ]),
+                        cos_lat: f64x4::from([
+                            cos_lat_c[base],
+                            cos_lat_c[base + 1],
+                            cos_lat_c[base + 2],
+                            cos_lat_c[base + 3],
+                        ]),
+                        sin_lon: f64x4::from([
+                            sin_lon_c[base],
+                            sin_lon_c[base + 1],
+                            sin_lon_c[base + 2],
+                            sin_lon_c[base + 3],
+                        ]),
+                        cos_lon: f64x4::from([
+                            cos_lon_c[base],
+                            cos_lon_c[base + 1],
+                            cos_lon_c[base + 2],
+                            cos_lon_c[base + 3],
+                        ]),
+                    };
+                    let (u, v) = half_angle_separation(row_v, center_v);
+                    let vals = wahba_sphere_kernel_simd_kind(u, v, penalty_order, kernel);
                     let arr = vals.to_array();
                     for lane in 0..4 {
                         if !arr[lane].is_finite() {
@@ -849,9 +846,14 @@ fn spherical_wahba_kernel_matrix_cpu_validated(
                 let tail_start = chunks * 4;
                 for t in 0..tail {
                     let j = tail_start + t;
-                    let dlon_cos = cos_lon * cos_lon_c[j] + sin_lon * sin_lon_c[j];
-                    let cos_gamma = sin_lat * sin_lat_c[j] + cos_lat * cos_lat_c[j] * dlon_cos;
-                    match wahba_sphere_kernel_from_cos_kind(cos_gamma, penalty_order, kernel) {
+                    let center = SphereTrig {
+                        sin_lat: sin_lat_c[j],
+                        cos_lat: cos_lat_c[j],
+                        sin_lon: sin_lon_c[j],
+                        cos_lon: cos_lon_c[j],
+                    };
+                    let sep = half_angle_separation_scalar(row, center);
+                    match wahba_sphere_kernel_kind(sep, penalty_order, kernel) {
                         Ok(v) => out_row[j] = v,
                         Err(_) => {
                             err_flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -872,10 +874,7 @@ mod spherical_wahba_kernel_contract_2475_tests {
     use super::*;
     use ndarray::array;
 
-    fn assert_sobolev_m1_refusal(
-        entry_point: &str,
-        result: Result<Array2<f64>, BasisError>,
-    ) {
+    fn assert_sobolev_m1_refusal(entry_point: &str, result: Result<Array2<f64>, BasisError>) {
         let error = result.expect_err("untruncated Sobolev m=1 has no Gram diagonal");
         let message = error.to_string();
         assert!(
@@ -1100,17 +1099,12 @@ pub fn select_spherical_farthest_point_centers(
     num_centers: usize,
     radians: bool,
 ) -> Result<Array2<f64>, BasisError> {
-    select_spherical_farthest_point_center_rows_with_observer(
-        data,
-        num_centers,
-        radians,
-        |_| {},
-    )
-    .map(|chosen| {
-        // Return the selected rows VERBATIM (in the data's own lat/lon units), so
-        // the centers ARE data points and carry the rotation exactly.
-        Array2::from_shape_fn((chosen.len(), 2), |(r, c)| data[[chosen[r], c]])
-    })
+    select_spherical_farthest_point_center_rows_with_observer(data, num_centers, radians, |_| {})
+        .map(|chosen| {
+            // Return the selected rows VERBATIM (in the data's own lat/lon units), so
+            // the centers ARE data points and carry the rotation exactly.
+            Array2::from_shape_fn((chosen.len(), 2), |(r, c)| data[[chosen[r], c]])
+        })
 }
 
 fn select_spherical_farthest_point_center_rows_with_observer<F>(
@@ -1194,8 +1188,7 @@ where
         .collect();
 
     let target = num_centers;
-    let seed_class =
-        resolve_spherical_profile_tie(&units, &seed_tied, &mut on_profile_builds);
+    let seed_class = resolve_spherical_profile_tie(&units, &seed_tied, &mut on_profile_builds);
     let seed_orbit = distinct_spherical_orbit(&units, &seed_class, &[]);
     if seed_orbit.len() > target {
         crate::bail_invalid_basis!(
@@ -1271,8 +1264,7 @@ where
             break;
         }
 
-        let tied_class =
-            resolve_spherical_profile_tie(&units, &cheap_tied, &mut on_profile_builds);
+        let tied_class = resolve_spherical_profile_tie(&units, &cheap_tied, &mut on_profile_builds);
         let orbit = distinct_spherical_orbit(&units, &tied_class, &selected);
         let remaining = target - selected.len();
         if orbit.len() > remaining {

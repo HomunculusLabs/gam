@@ -4292,11 +4292,24 @@ fn test_periodic_bspline_with_sum_to_zero_keeps_wrapped_rows_equal() {
 #[test]
 fn wahba_sphere_kernel_simd_matches_scalar_within_documented_tolerance() {
     // SIMD-kind helper should match the scalar-kind helper across lanes.
-    // abs/rel diff < 1e-12 vs the scalar path across the full domain.
-    // Sweep cos_gamma across [-1, 1] (including degenerate endpoints
-    // and the floor near cos_gamma = 1) for every supported penalty
-    // order. Use a slightly looser 1e-11 assertion so genuine
-    // regressions trip while floating-point ULP wiggle doesn't.
+    // Sweep the separation across the full closed domain (including both
+    // degenerate endpoints) for every supported penalty order, and require
+    // agreement to 1e-11 abs and rel — loose enough that ULP wiggle between a
+    // lane and a scalar does not trip it, tight enough that a genuine routing
+    // divergence does.
+    //
+    // The sweep is expressed in `cos γ` because that is the readable
+    // coordinate; both kernels take the half-angle pair
+    // `(u, v) = (sin²(γ/2), cos²(γ/2))` (#2489), so the abscissa is converted
+    // once, identically for both paths.
+    //
+    // `cos γ = 1` at `m = 1` is the one point where the scalar path REFUSES:
+    // the untruncated Sobolev `m = 1` kernel is `(−ln u − 1)/4π`, genuinely
+    // `+∞` at coincidence, which is why `spherical_wahba_kernel_matrix` rejects
+    // that combination outright (#2475). The requirement there is that the two
+    // paths agree in refusing — a SIMD lane quietly producing a finite number
+    // where the scalar path errors would be exactly the kind of divergence this
+    // test exists to catch.
     let xs: [f64; 16] = [
         -1.0,
         -0.999_999_999,
@@ -4315,16 +4328,42 @@ fn wahba_sphere_kernel_simd_matches_scalar_within_documented_tolerance() {
         1.0 - 1.0e-12,
         1.0,
     ];
+    use super::sphere_half_angle::HalfAngleSeparation;
+    let sep_from_cos = |cos_gamma: f64| -> HalfAngleSeparation {
+        let cos_g = cos_gamma.clamp(-1.0, 1.0);
+        HalfAngleSeparation {
+            u: (1.0 - cos_g) * 0.5,
+            v: (1.0 + cos_g) * 0.5,
+        }
+    };
     let mut max_abs = 0.0f64;
     let mut max_rel = 0.0f64;
+    let mut refusals = 0usize;
     for &m in &[1_usize, 2, 3, 4] {
         for chunk in xs.chunks(4) {
-            let lane = wide::f64x4::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            let simd = wahba_sphere_kernel_from_cos_simd_kind(lane, m, SphereWahbaKernel::Sobolev);
+            let seps: Vec<HalfAngleSeparation> = chunk.iter().map(|&x| sep_from_cos(x)).collect();
+            let u_lane =
+                wide::f64x4::from([seps[0].u, seps[1].u, seps[2].u, seps[3].u]);
+            let v_lane =
+                wide::f64x4::from([seps[0].v, seps[1].v, seps[2].v, seps[3].v]);
+            let simd = wahba_sphere_kernel_simd_kind(u_lane, v_lane, m, SphereWahbaKernel::Sobolev);
             let simd_arr: [f64; 4] = simd.into();
             for (i, &x) in chunk.iter().enumerate() {
-                let scalar = wahba_sphere_kernel_from_cos_kind(x, m, SphereWahbaKernel::Sobolev)
-                    .expect("scalar kernel must produce finite value over closed [-1, 1]");
+                let scalar = match wahba_sphere_kernel_kind(seps[i], m, SphereWahbaKernel::Sobolev)
+                {
+                    Ok(value) => value,
+                    Err(_) => {
+                        refusals += 1;
+                        assert!(
+                            !simd_arr[i].is_finite(),
+                            "scalar kernel refused at cos_gamma={x:.6e} penalty_order={m} \
+                             but the SIMD lane returned the finite {s:.17e}; the two paths \
+                             must agree on which separations have no kernel value",
+                            s = simd_arr[i],
+                        );
+                        continue;
+                    }
+                };
                 let abs = (simd_arr[i] - scalar).abs();
                 let rel = abs / scalar.abs().max(1.0e-300);
                 if abs.is_finite() {
@@ -4352,6 +4391,12 @@ fn wahba_sphere_kernel_simd_matches_scalar_within_documented_tolerance() {
             }
         }
     }
+    // The log-singular m=1 coincident point is the only refusal in the sweep.
+    assert_eq!(
+        refusals, 1,
+        "expected exactly one refusal (Sobolev m=1 at cos γ = 1, where the \
+         kernel is log-singular); got {refusals}"
+    );
     // Surface the measured maxima in cargo-test output for visibility
     // when the test is run with --nocapture.
     eprintln!(

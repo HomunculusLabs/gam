@@ -6,6 +6,7 @@
 
 use super::BasisError;
 use super::polylog::{dilog_unit, trilog_unit};
+use super::sphere_half_angle::HalfAngleSeparation;
 use super::sphere_spec::SphereWahbaKernel;
 use super::sphere_spectral::{
     pseudo_s2_truncated_coefficients, sobolev_s2_truncated_coefficients,
@@ -46,30 +47,34 @@ pub(crate) fn wahba_sphere_kernel_pseudo_coincident(m: usize) -> f64 {
     1.0 / (2.0 * std::f64::consts::PI * (m_eff as f64) * factorial)
 }
 
-/// Pseudo-spline Wahba kernel on S² (mgcv `makeR`-style closed form).
+/// Pseudo-spline Wahba kernel on S² (mgcv `makeR`-style closed form), as a
+/// function of the half-angle separation `u = sin²(γ/2)`.
 #[inline]
-pub(crate) fn wahba_sphere_kernel_pseudo_from_cos(cos_gamma: f64, m: usize) -> f64 {
-    let cg = cos_gamma.clamp(-1.0, 1.0);
-    let z = 1.0 - cg;
+pub(crate) fn wahba_sphere_kernel_pseudo(sep: HalfAngleSeparation, m: usize) -> f64 {
+    // `w` IS the half-angle separation: the closed forms below are polynomials
+    // in `w = (1 − cos γ)/2 = sin²(γ/2)` with a `√w` and a `ln(1 + 1/√w)`, so
+    // the kernel takes `u` straight through.
+    //
     // Coincident points are the ONLY inputs the old `z.max(f64::EPSILON*1e-4)`
     // floor could ever bind on, and there the kernel has an exact finite limit.
-    // By Sterbenz's lemma `1.0 - cg` is computed exactly for `cg ∈ [0.5, 1]`,
-    // and the representable spacing below `1.0` is `2⁻⁵³`, so a positive `z` is
-    // at least `2⁻⁵³ ≈ 1.11e-16` — nine orders above that floor, which sat at
-    // `2.22e-20`. Taking the analytic limit here is therefore bit-identical to
-    // the floored form at every input except exact coincidence, where it
-    // replaces a 4.2e-10 relative error (the floor's `-2√w` term, `O(√floor)`)
-    // with the exact value.
+    // Taking the analytic limit here is bit-identical to the floored form at
+    // every input the old `cos γ` route could produce, where a positive `u` was
+    // quantized to at least `2⁻⁵⁴ ≈ 5.6e-17` — three and a half orders above
+    // that floor, which sat at `1.11e-20` in `w` — and it replaces a 4.2e-10
+    // relative error at coincidence (the floor's `-2√w` term, `O(√floor)`) with
+    // the exact value. Now that `u` arrives in haversine form (#2489) it can be
+    // genuinely tiny rather than quantized, which is what makes the floor's
+    // absence load-bearing rather than merely tidy.
     //
     // Shrinking the floor rather than removing it would also have recovered
     // the limits (down to `f64::MIN_POSITIVE`), but not unconditionally: half
-    // a step further, at the smallest subnormal, `w = 0.5 * z` underflows to
-    // zero, `1.0/c0` is `+∞`, and the `2·a·w` term becomes `∞ · 0 = NaN`. The
+    // a step further, at the smallest subnormal, `√w` underflows to zero,
+    // `1.0/c0` is `+∞`, and the `2·a·w` term becomes `∞ · 0 = NaN`. The
     // analytic limit has no such cliff, and needs no constant to state.
-    if z <= 0.0 {
+    let w = sep.u;
+    if w <= 0.0 {
         return wahba_sphere_kernel_pseudo_coincident(m);
     }
-    let w = 0.5 * z;
     let c0 = w.sqrt();
     let a = (1.0 + 1.0 / c0).ln();
     let c = 2.0 * c0;
@@ -108,18 +113,77 @@ pub(crate) fn wahba_sphere_kernel_pseudo_from_cos(cos_gamma: f64, m: usize) -> f
     }
 }
 
-/// Exact derivative `dK_m^{pseudo}/d(cos gamma)` of the pseudo-spline Wahba
-/// kernel [`wahba_sphere_kernel_pseudo_from_cos`].
+/// Coincident-point limit of `dK_m^{pseudo}/du` at `u = sin²(γ/2) = 0`, in
+/// closed form — where it exists.
 ///
-/// The forward kernel is a polynomial in `w = (1 - cos gamma)/2` with the
-/// auxiliary terms `c0 = sqrt(w)`, `c = 2 c0`, and
-/// `a = ln(1 + 1/c0)`. Differentiating in `w` and applying
-/// `dw/d(cos gamma) = -1/2` gives the analytic `dK/d(cos gamma)` below.
+/// From the spectral representation `K = Σ_{ℓ≥1} c_ℓ P_ℓ(cos γ)` with
+/// `c_ℓ = 2 / (4π · Π_{k=1..m+1}(ℓ + k))` (see
+/// [`wahba_sphere_kernel_pseudo_coincident`]) and `P'_ℓ(1) = ℓ(ℓ+1)/2`,
+///
+/// ```text
+/// dK/du|₀ = −2 · dK/d(cos γ)|₀ = −Σ_{ℓ≥1} ℓ(ℓ+1) c_ℓ
+///         = −(1/2π) · Σ_{ℓ≥1} ℓ / ((ℓ+2)(ℓ+3)···(ℓ+m+1)).
+/// ```
+///
+/// Splitting `ℓ = (ℓ+2) − 2` and telescoping each half with
+/// `Σ_{ℓ≥1} 1/((ℓ+a)···(ℓ+a+p−1)) = 1/((p−1)·(1+a)···(a+p−1))` gives
+///
+/// ```text
+/// Σ_{ℓ≥1} ℓ / ((ℓ+2)···(ℓ+m+1)) = 6/((m−2)(m+1)!) − 4/((m−1)(m+1)!)
+///                                = 2(m+1) / ((m−2)(m−1)(m+1)!)
+/// ```
+///
+/// so
+///
+/// ```text
+/// dK_m^{pseudo}/du|₀ = −(m+1) / (π (m−2)(m−1)(m+1)!)
+/// ```
+///
+/// giving `−1/(12π)` for `m = 3` and `−1/(144π)` for `m = 4`. The `m − 2`
+/// factor is the statement that the sum DIVERGES for `m ∈ {1, 2}`: those
+/// kernels have a genuine cusp at coincidence (`m = 1` diverges like
+/// `−1/(2π√u)` from the `−2√u` term, `m = 2` logarithmically), so `None` is
+/// returned and the caller must resolve the cusp rather than being handed a
+/// finite lie. Both limits were checked against the `w → 0` limit of the
+/// polynomial in [`wahba_sphere_kernel_pseudo_derivative_dhav`] and against the
+/// truncated spectral sum.
 #[inline]
-pub(crate) fn wahba_sphere_kernel_pseudo_derivative_dcos(cos_gamma: f64, m: usize) -> f64 {
-    let cg = cos_gamma.clamp(-1.0, 1.0);
-    let z = (1.0 - cg).max(f64::EPSILON * 1.0e-4);
-    let w = 0.5 * z;
+fn wahba_sphere_kernel_pseudo_derivative_coincident(m: usize) -> Option<f64> {
+    let m_eff = m.clamp(1, 4);
+    if m_eff < 3 {
+        return None;
+    }
+    let m_f = m_eff as f64;
+    let factorial = (1..=(m_eff + 1)).map(|k| k as f64).product::<f64>();
+    Some(-(m_f + 1.0) / (std::f64::consts::PI * (m_f - 2.0) * (m_f - 1.0) * factorial))
+}
+
+/// Exact derivative `dK_m^{pseudo}/du` of the pseudo-spline Wahba kernel
+/// [`wahba_sphere_kernel_pseudo`] with respect to `u = sin²(γ/2)`.
+///
+/// The forward kernel is a polynomial in `w = u` with the auxiliary terms
+/// `c0 = sqrt(w)`, `c = 2 c0`, and `a = ln(1 + 1/c0)`; this differentiates it
+/// in `w` directly. The `u` form is the one the jet wants — see
+/// [`super::sphere_half_angle::half_angle_partials`] for why the `cos γ` chain
+/// cannot compute the cusp gradient.
+///
+/// At exact coincidence `m ∈ {3, 4}` have finite limits (returned by
+/// [`wahba_sphere_kernel_pseudo_derivative_coincident`]) and `m ∈ {1, 2}` are
+/// genuinely `−∞`. Returning the infinity is deliberate: it used to be masked
+/// by a `w.max(f64::EPSILON * 1e-4)` floor that reported
+/// `-1/(2π·1.05e-10) = −1.5e9` for a cusp of infinite slope, which is neither
+/// the limit nor a diagnosable value. Callers that need the JET at coincidence
+/// resolve it there, where `∂u/∂φ` is exactly `0` and the cusp's one-sided
+/// gradients differ only in sign.
+#[inline]
+pub(crate) fn wahba_sphere_kernel_pseudo_derivative_dhav(
+    sep: HalfAngleSeparation,
+    m: usize,
+) -> f64 {
+    let w = sep.u;
+    if w <= 0.0 {
+        return wahba_sphere_kernel_pseudo_derivative_coincident(m).unwrap_or(f64::NEG_INFINITY);
+    }
     let c0 = w.sqrt();
     let a = (1.0 + 1.0 / c0).ln();
     let c = 2.0 * c0;
@@ -161,7 +225,7 @@ pub(crate) fn wahba_sphere_kernel_pseudo_derivative_dcos(cos_gamma: f64, m: usiz
             (dq4_dw / 24.0) / two_pi
         }
     };
-    dk_dw * (-0.5)
+    dk_dw
 }
 
 // ============================================================================
@@ -176,25 +240,53 @@ pub(crate) fn wahba_sphere_kernel_pseudo_derivative_dcos(cos_gamma: f64, m: usiz
 // 083 (Section 6.2). For `m = 4`, we fall back to a truncated Legendre series.
 
 /// Sobolev `K_m^{Sobolev}` reproducing kernel on S², closed-form for
-/// `m in {1, 2, 3}` plus spectral series for `m = 4`.
+/// `m in {1, 2, 3}` plus spectral series for `m = 4`, as a function of the
+/// half-angle separation.
+///
+/// Every closed form here is a function of `u = sin²(γ/2)` and
+/// `v = cos²(γ/2) = 1 − u`, which is why the separation is carried as the pair:
+/// `m = 1` needs `−ln u` (singular at coincidence) and `m = 2` needs `Li₂(v)`
+/// (whose argument vanishes at the antipode). Taking `v` as `1.0 - u` instead
+/// destroys the antipodal end — at `cos γ = −1 + 1e-16`, `u` rounds to `1.0`
+/// and `1.0 - u` is `0`, reporting an exact antipode for a pair that is not one.
 #[inline]
-pub(crate) fn wahba_sphere_kernel_sobolev_closed_form(cos_gamma: f64, m: usize) -> f64 {
-    let cos_g = cos_gamma.clamp(-1.0, 1.0);
+pub(crate) fn wahba_sphere_kernel_sobolev(sep: HalfAngleSeparation, m: usize) -> f64 {
     let four_pi = 4.0 * std::f64::consts::PI;
     let pi2_6 = std::f64::consts::PI * std::f64::consts::PI / 6.0;
-    let u = ((1.0 - cos_g) * 0.5).max(f64::EPSILON * 1.0e-4);
-    let one_minus_u = (1.0 - u).max(f64::EPSILON * 1.0e-4);
+    // No `f64::EPSILON * 1.0e-4` floor on either half. Both polylogarithms
+    // already carry their endpoints exactly (`Li₂(0) = Li₃(0) = 0`,
+    // `Li₂(1) = π²/6`, `Li₃(1) = ζ₃`), so the only thing the floor did was to
+    // keep `u.ln()` off `-∞` — and it did that by evaluating the kernel at a
+    // separation of `1.5e-10` rad instead of at `0`, which is a choice of
+    // resolution, not a limit (#2469, #2475). The two places `ln u` appears are
+    // handled on their own terms below.
+    let u = sep.u;
+    let one_minus_u = sep.v;
     match m {
+        // `K_1 = (−ln u − 1)/4π` is genuinely `+∞` at coincidence: the m = 1
+        // Sobolev Gram diagonal does not exist, which is exactly why
+        // `validate_spherical_wahba_gram_request` refuses to build one. Letting
+        // the infinity through is the honest report — every public entry point
+        // checks `is_finite` — where the floor returned `45.0/4π` and looked
+        // like an answer.
         1 => (-u.ln() - 1.0) / four_pi,
         2 => (dilog_unit(one_minus_u) + 1.0 - pi2_6) / four_pi,
         3 => {
             const ZETA3: f64 = 1.2020569031595942853997381615114499907649862923404988817922;
             let li3_u = trilog_unit(u);
             let li2_one_minus_u = dilog_unit(one_minus_u);
-            let li2_u = dilog_unit(u);
-            (-2.0 * li3_u - li2_one_minus_u + u.ln() * li2_u + 2.0 * ZETA3 + pi2_6 - 2.0) / four_pi
+            // `ln(u)·Li₂(u)` is `−∞ · 0` at coincidence with the REMOVABLE
+            // limit `0`, since `Li₂(u) = u + u²/4 + … = O(u)` and `u ln u → 0`.
+            // Resolving it analytically is what makes `K_3(0) = (2ζ₃ − 2)/4π`
+            // exact rather than floor-dependent.
+            let cross = if u <= 0.0 {
+                0.0
+            } else {
+                u.ln() * dilog_unit(u)
+            };
+            (-2.0 * li3_u - li2_one_minus_u + cross + 2.0 * ZETA3 + pi2_6 - 2.0) / four_pi
         }
-        _ => wahba_sphere_kernel_sobolev_spectral(cos_g, m),
+        _ => wahba_sphere_kernel_sobolev_spectral(sep.cos_gamma(), m),
     }
 }
 
@@ -228,10 +320,11 @@ pub(crate) fn wahba_sphere_kernel_sobolev_spectral(cos_gamma: f64, m: usize) -> 
     sum
 }
 
-/// Evaluate the Wahba sphere reproducing kernel at a single `cos gamma`.
+/// Evaluate the Wahba sphere reproducing kernel at a single half-angle
+/// separation.
 #[inline]
-pub(crate) fn wahba_sphere_kernel_from_cos_kind(
-    cos_gamma: f64,
+pub(crate) fn wahba_sphere_kernel_kind(
+    sep: HalfAngleSeparation,
     penalty_order: usize,
     kernel: SphereWahbaKernel,
 ) -> Result<f64, BasisError> {
@@ -240,32 +333,48 @@ pub(crate) fn wahba_sphere_kernel_from_cos_kind(
             "spherical spline penalty_order must be one of 1, 2, 3, 4; got {penalty_order}"
         );
     }
-    let value = match kernel {
-        SphereWahbaKernel::Sobolev => {
-            wahba_sphere_kernel_sobolev_closed_form(cos_gamma, penalty_order)
-        }
-        SphereWahbaKernel::Pseudo => wahba_sphere_kernel_pseudo_from_cos(cos_gamma, penalty_order),
-        SphereWahbaKernel::SobolevTruncated { lmax } => {
-            let coeffs = sobolev_s2_truncated_coefficients(lmax as usize, penalty_order);
-            sphere_truncated_spectral_eval(cos_gamma, &coeffs)
-        }
-        SphereWahbaKernel::PseudoTruncated { lmax } => {
-            let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
-            sphere_truncated_spectral_eval(cos_gamma, &coeffs)
-        }
-    };
+    let value = wahba_sphere_kernel_kind_unchecked(sep, penalty_order, kernel);
     if !value.is_finite() {
         crate::bail_invalid_basis!("spherical spline kernel produced a non-finite value");
     }
     Ok(value)
 }
 
-/// SIMD lane-wise evaluation. Both Sobolev and pseudo-spline branches are
-/// scalar-per-lane because the closed forms contain non-vector elementary and
-/// polylogarithm calls.
+/// The kernel dispatch itself, with `penalty_order` and finiteness already
+/// established (or, on the SIMD path, established once for the whole vector).
+///
+/// This is the single place the four [`SphereWahbaKernel`] variants are mapped
+/// to their evaluators; the scalar and SIMD entry points differ only in how they
+/// loop over it.
 #[inline]
-pub(crate) fn wahba_sphere_kernel_from_cos_simd_kind(
-    cos_gamma: wide::f64x4,
+fn wahba_sphere_kernel_kind_unchecked(
+    sep: HalfAngleSeparation,
+    penalty_order: usize,
+    kernel: SphereWahbaKernel,
+) -> f64 {
+    match kernel {
+        SphereWahbaKernel::Sobolev => wahba_sphere_kernel_sobolev(sep, penalty_order),
+        SphereWahbaKernel::Pseudo => wahba_sphere_kernel_pseudo(sep, penalty_order),
+        SphereWahbaKernel::SobolevTruncated { lmax } => {
+            let coeffs = sobolev_s2_truncated_coefficients(lmax as usize, penalty_order);
+            sphere_truncated_spectral_eval(sep.cos_gamma(), &coeffs)
+        }
+        SphereWahbaKernel::PseudoTruncated { lmax } => {
+            let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
+            sphere_truncated_spectral_eval(sep.cos_gamma(), &coeffs)
+        }
+    }
+}
+
+/// SIMD lane-wise evaluation over four half-angle separations. Both Sobolev and
+/// pseudo-spline branches are scalar-per-lane because the closed forms contain
+/// non-vector elementary and polylogarithm calls; what the vector form buys is
+/// the *separation* arithmetic (see
+/// [`super::sphere_half_angle::half_angle_separation`]), which is pure `+ − ×`.
+#[inline]
+pub(crate) fn wahba_sphere_kernel_simd_kind(
+    u: wide::f64x4,
+    v: wide::f64x4,
     penalty_order: usize,
     kernel: SphereWahbaKernel,
 ) -> wide::f64x4 {
@@ -273,23 +382,18 @@ pub(crate) fn wahba_sphere_kernel_from_cos_simd_kind(
     if !(1..=4).contains(&penalty_order) {
         return f64x4::from(f64::NAN);
     }
-    let cg = cos_gamma.fast_max(f64x4::from(-1.0)).fast_min(f64x4::ONE);
-    let lanes = cg.to_array();
-    let f = |x: f64| -> f64 {
-        match kernel {
-            SphereWahbaKernel::Sobolev => wahba_sphere_kernel_sobolev_closed_form(x, penalty_order),
-            SphereWahbaKernel::Pseudo => wahba_sphere_kernel_pseudo_from_cos(x, penalty_order),
-            SphereWahbaKernel::SobolevTruncated { lmax } => {
-                let coeffs = sobolev_s2_truncated_coefficients(lmax as usize, penalty_order);
-                sphere_truncated_spectral_eval(x, &coeffs)
-            }
-            SphereWahbaKernel::PseudoTruncated { lmax } => {
-                let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
-                sphere_truncated_spectral_eval(x, &coeffs)
-            }
-        }
-    };
-    f64x4::from(lanes.map(f))
+    let zero = f64x4::ZERO;
+    let u_lanes = u.fast_max(zero).fast_min(f64x4::ONE).to_array();
+    let v_lanes = v.fast_max(zero).fast_min(f64x4::ONE).to_array();
+    let mut out = [0.0_f64; 4];
+    for lane in 0..4 {
+        let sep = HalfAngleSeparation {
+            u: u_lanes[lane],
+            v: v_lanes[lane],
+        };
+        out[lane] = wahba_sphere_kernel_kind_unchecked(sep, penalty_order, kernel);
+    }
+    f64x4::from(out)
 }
 
 /// Spectral derivative of the Sobolev sphere kernel w.r.t. `cos gamma`.
@@ -307,26 +411,27 @@ pub(crate) fn wahba_sphere_kernel_from_cos_simd_kind(
 ///        ⇒ dK/du = [-Li₂(u)/u - ln(u)/(1-u) - ln(u)·ln(1-u)/u]/(4π)
 /// using d Li₂(z)/dz = -ln(1-z)/z and d Li₃(z)/dz = Li₂(z)/z.
 #[inline]
-fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: usize) -> f64 {
-    let cos_g = cos_gamma.clamp(-1.0, 1.0);
+fn wahba_sphere_kernel_sobolev_closed_form_derivative_dhav(
+    sep: HalfAngleSeparation,
+    m: usize,
+) -> f64 {
     let four_pi = 4.0 * std::f64::consts::PI;
-    // No floor on `u` or `1 - u`. The sole caller only reaches this closed form
-    // below the COINCIDENT pole, which bounds `u = (1 - cos γ)/2` away from `0`
+    // No floor on `u` or `v`. The sole caller only reaches this closed form
+    // below the COINCIDENT pole, which bounds `u = sin²(γ/2)` away from `0`
     // by `5e-11` — nine orders above the `f64::EPSILON * 1.0e-4` floor these
     // lines used to carry (a factor of 2.3e9), so it could never bind.
     // Flooring here was dead arithmetic that read as if the singularities were
     // being handled (#2469, #2475 site 4).
     //
-    // `1 - u` is carried as `v = (1 + cos γ)/2` rather than as `1.0 - u`,
-    // because `v` is the quantity that vanishes at the ANTIPODE and only this
-    // form resolves it. Both halves are exact by Sterbenz's lemma on the side
-    // where they are small: `1 - cos γ` for `cos γ ∈ [0.5, 1]` and `1 + cos γ`
-    // for `cos γ ∈ [-1, -0.5]`. Going through `u` instead destroys the
+    // `1 - u` is carried as the separation's own `v = cos²(γ/2)` rather than as
+    // `1.0 - u`, because `v` is the quantity that vanishes at the ANTIPODE and
+    // only this form resolves it. Going through `u` instead destroys the
     // antipodal end outright — at `cos γ = -1 + 1e-16`, `1 - cos γ` rounds to
     // `2.0`, so `u` rounds to `1.0` and `1.0 - u` is `0`, reporting an exact
-    // antipode for a pair that is not one.
-    let u = (1.0 - cos_g) * 0.5;
-    let v = (1.0 + cos_g) * 0.5;
+    // antipode for a pair that is not one. Both halves reach here already taken
+    // from the side where they are small and exact (#2489).
+    let u = sep.u;
+    let v = sep.v;
     // assert!, not debug_assert!: the ban-scanner forbids debug_assert (silent
     // in release → debug/release divergence). An O(1) comparison in front of a
     // dilogarithm is free.
@@ -338,8 +443,8 @@ fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: us
     assert!(
         u > 0.0,
         "closed-form Sobolev derivative called at the coincident pole \
-         (cos γ = {cos_g}); the caller's POLE_LIMIT_THRESHOLD guard is supposed \
-         to make this unreachable"
+         (u = sin²(γ/2) = {u}); the caller's POLE_LIMIT_THRESHOLD guard is \
+         supposed to make this unreachable"
     );
     // `ln u`, taken from whichever of the two exact halves is the small one.
     // `ln_1p(-v)` keeps full relative accuracy as `v → 0` (where `ln u → 0` and
@@ -368,8 +473,9 @@ fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: us
             let cross = if v == 0.0 { 0.0 } else { ln_u * ln_v / u };
             (-li2_u / u - ln_u_over_v - cross) / four_pi
         }
-        // SAFETY: the sole caller `wahba_sphere_kernel_sobolev_derivative_dcos`
-        // dispatches to this closed form only inside `(1..=3).contains(&m)`, so
+        // SAFETY: the sole caller
+        // `wahba_sphere_kernel_sobolev_derivative_dhav` dispatches to this
+        // closed form only inside `(1..=3).contains(&m)`, so
         // any other `m` is a caller-contract violation (a programming error,
         // not runtime data), and panicking surfaces it instead of returning a
         // silently-wrong derivative.
@@ -377,12 +483,21 @@ fn wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(cos_gamma: f64, m: us
             panic!("closed-form Sobolev derivative only defined for m in {{1,2,3}}; got m={other}")
         }
     };
-    // du/d(cos gamma) = -1/2.
-    dk_du * (-0.5)
+    dk_du
 }
 
-pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dcos(x: f64, m: usize) -> f64 {
+/// `dK_m^{Sobolev}/du` with respect to the half-angle separation
+/// `u = sin²(γ/2)`.
+pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dhav(
+    sep: HalfAngleSeparation,
+    m: usize,
+) -> f64 {
     const POLE_LIMIT_THRESHOLD: f64 = 1.0e-10;
+    // `u = (1 − cos γ)/2`, so the historical `cos γ ≤ 1 − POLE_LIMIT_THRESHOLD`
+    // guard is exactly `u ≥ POLE_LIMIT_THRESHOLD/2`. Stating it in `u` keeps the
+    // boundary where it was while letting the caller hand in a `u` that is
+    // accurate below it (#2489) instead of one quantized to multiples of `ε/4`.
+    const POLE_LIMIT_U: f64 = 0.5 * POLE_LIMIT_THRESHOLD;
 
     // m in {1,2,3} use the exact polylog closed-form derivative so the jet
     // matches the closed-form forward kernel; m=4 falls back to the spectral
@@ -417,8 +532,8 @@ pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dcos(x: f64, m: usize) -> f
     //
     // m=4 keeps both poles: its differentiated terms decay like `ℓ^-4`, so the
     // spectral limit converges there and is the only form available.
-    if (1..=3).contains(&m) && x.clamp(-1.0, 1.0) <= 1.0 - POLE_LIMIT_THRESHOLD {
-        return wahba_sphere_kernel_sobolev_closed_form_derivative_dcos(x, m);
+    if (1..=3).contains(&m) && sep.u >= POLE_LIMIT_U {
+        return wahba_sphere_kernel_sobolev_closed_form_derivative_dhav(sep, m);
     }
 
     let l_max = match m {
@@ -427,7 +542,7 @@ pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dcos(x: f64, m: usize) -> f
         3 => 128,
         _ => 96,
     };
-    let x = x.clamp(-1.0, 1.0);
+    let x = sep.cos_gamma();
     let m_i = m as i32;
     let four_pi = 4.0 * std::f64::consts::PI;
     // ONE sweep, valid on the closed interval including both poles. There is no
@@ -475,30 +590,35 @@ pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dcos(x: f64, m: usize) -> f
         d_prev = d_curr;
         d_curr = d_next;
     }
-    sum
+    // The spectral sweep produces `dK/d(cos γ)`; `d(cos γ)/du = −2`.
+    -2.0 * sum
 }
 
-/// Unified `dK/d(cos gamma)` for any [`SphereWahbaKernel`] kind.
+/// Unified `dK/du` for any [`SphereWahbaKernel`] kind, against the half-angle
+/// separation `u = sin²(γ/2)`.
+///
+/// This is the form the design jet wants: paired with
+/// [`super::sphere_half_angle::half_angle_partials`] it computes the `|γ|` cusp
+/// gradient as a product of two finite factors, where the `cos γ` chain has to
+/// recover it from `∞ · 0` (#2489).
 #[inline]
-pub(crate) fn wahba_sphere_kernel_derivative_dcos_kind(
-    cos_gamma: f64,
+pub(crate) fn wahba_sphere_kernel_derivative_dhav_kind(
+    sep: HalfAngleSeparation,
     penalty_order: usize,
     kernel: SphereWahbaKernel,
 ) -> f64 {
     match kernel {
         SphereWahbaKernel::Sobolev => {
-            wahba_sphere_kernel_sobolev_derivative_dcos(cos_gamma, penalty_order)
+            wahba_sphere_kernel_sobolev_derivative_dhav(sep, penalty_order)
         }
-        SphereWahbaKernel::Pseudo => {
-            wahba_sphere_kernel_pseudo_derivative_dcos(cos_gamma, penalty_order)
-        }
+        SphereWahbaKernel::Pseudo => wahba_sphere_kernel_pseudo_derivative_dhav(sep, penalty_order),
         SphereWahbaKernel::SobolevTruncated { lmax } => {
             let coeffs = sobolev_s2_truncated_coefficients(lmax as usize, penalty_order);
-            sphere_truncated_spectral_derivative_eval(cos_gamma, &coeffs)
+            -2.0 * sphere_truncated_spectral_derivative_eval(sep.cos_gamma(), &coeffs)
         }
         SphereWahbaKernel::PseudoTruncated { lmax } => {
             let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
-            sphere_truncated_spectral_derivative_eval(cos_gamma, &coeffs)
+            -2.0 * sphere_truncated_spectral_derivative_eval(sep.cos_gamma(), &coeffs)
         }
     }
 }

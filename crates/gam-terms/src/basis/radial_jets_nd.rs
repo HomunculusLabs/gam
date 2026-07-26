@@ -1826,15 +1826,18 @@ pub fn matern_input_location_hessian_nd(
 /// sphere `S^{dim−1}`.
 ///
 /// `points` is `(n_rows, dim)` ambient unit vectors `t_n ∈ ℝ^dim`,
-/// `centers` is `(n_centers, dim)` ambient unit vectors `c_k`. The kernel
-/// is `K(cos γ)` with `cos γ = t · c`, and the chain rule gives
+/// `centers` is `(n_centers, dim)` ambient unit vectors `c_k`. The kernel is a
+/// function of `u = sin²(γ/2) = |t − c|²/4`, and the chain rule gives
 ///
 /// ```text
-///     ∂Φ_{n,k} / ∂t_n = K'(cos γ_{n,k}) · c_k,
+///     ∂Φ_{n,k} / ∂t_n = dK/du · ∂u/∂t_n = −½ · dK/du · c_k,
 /// ```
 ///
-/// where `K'` is `dK/d(cos γ)` from
-/// [`wahba_sphere_kernel_sobolev_derivative_dcos`].
+/// since `u = (1 − t·c)/2`. Taking the separation as `|t − c|²/4` rather than
+/// as `1 − t·c` is the ambient twin of the lat/lon fix in #2489: it is a sum of
+/// squares, so it resolves nearby points to full relative precision and is
+/// exactly `0` for a row that coincides with a center — which is the ordinary
+/// case, since centers are selected from the data.
 ///
 /// When `project_to_tangent` is `true`, each per-row gradient is projected
 /// through [`crate::latent::LatentManifold::Sphere`] onto
@@ -1875,11 +1878,10 @@ pub fn sphere_first_derivative_nd(
     let mut ambient = Array1::<f64>::zeros(dim);
     for n in 0..n_rows {
         for k in 0..n_centers {
-            let mut cos_g = 0.0_f64;
-            for a in 0..dim {
-                cos_g += points[[n, a]] * centers[[k, a]];
-            }
-            let dk = wahba_sphere_kernel_sobolev_derivative_dcos(cos_g, penalty_order);
+            let sep = ambient_half_angle_separation(points.row(n), centers.row(k));
+            let dk_du = wahba_sphere_kernel_sobolev_derivative_dhav(sep, penalty_order);
+            // ∂u/∂t_a = −c_a/2, from u = (1 − t·c)/2.
+            let dk = -0.5 * dk_du;
             for a in 0..dim {
                 ambient[a] = dk * centers[[k, a]];
             }
@@ -1906,11 +1908,14 @@ pub fn sphere_first_derivative_nd(
 /// input — i.e. the radian-space derivative scaled by `deg = radians ? 1 :
 /// π/180`.
 ///
-/// With `cos γ = sinφ sinφc + cosφ cosφc cos(ψ − ψc)` (φ, ψ in radians):
-///   ∂cosγ/∂φ = cosφ sinφc − sinφ cosφc cos(ψ − ψc),
-///   ∂cosγ/∂ψ = −cosφ cosφc sin(ψ − ψc),
-/// and ∂Φ/∂φ = K'(cosγ)·∂cosγ/∂φ, ∂Φ/∂ψ = K'(cosγ)·∂cosγ/∂ψ. The raw-radian
-/// derivatives are multiplied by `deg` to express them per raw input unit.
+/// The chain is taken against `u = sin²(γ/2)`, not against `cos γ`:
+/// `∂Φ/∂φ = dK/du · ∂u/∂φ`, with both factors from
+/// [`super::sphere_half_angle`]. The `cos γ` form of the same product is
+/// `dK/d(cos γ) · ∂(cos γ)/∂φ`, which is analytically identical but numerically
+/// an `∞ · 0` at a cusp — the pseudo-spline `m = 1` jet came out `−99 %` low at
+/// `1e-10°` from a center and exactly zero *at* one (#2489). Centers are chosen
+/// from the data rows by farthest-point selection, so "at a center" is a state
+/// every fit reaches.
 pub(crate) fn spherical_wahba_kernel_jet_with_kind(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
@@ -1937,12 +1942,11 @@ pub(crate) fn spherical_wahba_kernel_jet_with_kind(
     let mut sin_lon_c = Vec::<f64>::with_capacity(k);
     let mut cos_lon_c = Vec::<f64>::with_capacity(k);
     for c in centers.outer_iter() {
-        let (s_lat, c_lat) = (c[0] * deg).sin_cos();
-        let (s_lon, c_lon) = (c[1] * deg).sin_cos();
-        sin_lat_c.push(s_lat);
-        cos_lat_c.push(c_lat);
-        sin_lon_c.push(s_lon);
-        cos_lon_c.push(c_lon);
+        let trig = SphereTrig::from_radians(c[0] * deg, c[1] * deg);
+        sin_lat_c.push(trig.sin_lat);
+        cos_lat_c.push(trig.cos_lat);
+        sin_lon_c.push(trig.sin_lon);
+        cos_lon_c.push(trig.cos_lon);
     }
     let mut out = Array3::<f64>::zeros((n, k, 2));
     let err_flag = std::sync::atomic::AtomicBool::new(false);
@@ -1953,20 +1957,35 @@ pub(crate) fn spherical_wahba_kernel_jet_with_kind(
             let row_offset = chunk_idx * 256;
             for (local_i, mut out_row) in block.outer_iter_mut().enumerate() {
                 let i = row_offset + local_i;
-                let (sin_lat, cos_lat) = (data[(i, 0)] * deg).sin_cos();
-                let (sin_lon, cos_lon) = (data[(i, 1)] * deg).sin_cos();
+                let row = SphereTrig::from_radians(data[(i, 0)] * deg, data[(i, 1)] * deg);
                 for j in 0..k {
-                    // cos(ψ − ψc) and sin(ψ − ψc) via angle-subtraction.
-                    let dlon_cos = cos_lon * cos_lon_c[j] + sin_lon * sin_lon_c[j];
-                    let dlon_sin = sin_lon * cos_lon_c[j] - cos_lon * sin_lon_c[j];
-                    let cos_gamma = sin_lat * sin_lat_c[j] + cos_lat * cos_lat_c[j] * dlon_cos;
-                    let dk =
-                        wahba_sphere_kernel_derivative_dcos_kind(cos_gamma, penalty_order, kernel);
-                    // ∂cosγ/∂φ and ∂cosγ/∂ψ (radian space).
-                    let dcos_dphi = cos_lat * sin_lat_c[j] - sin_lat * cos_lat_c[j] * dlon_cos;
-                    let dcos_dpsi = -cos_lat * cos_lat_c[j] * dlon_sin;
-                    let dphi = dk * dcos_dphi * deg;
-                    let dpsi = dk * dcos_dpsi * deg;
+                    let center = SphereTrig {
+                        sin_lat: sin_lat_c[j],
+                        cos_lat: cos_lat_c[j],
+                        sin_lon: sin_lon_c[j],
+                        cos_lon: cos_lon_c[j],
+                    };
+                    let sep = half_angle_separation_scalar(row, center);
+                    // Exact coincidence. `∂u/∂φ` and `∂u/∂ψ` are both exactly
+                    // zero here (the chord form makes that a theorem, not a
+                    // rounding accident), while `dK/du` is `−∞` for the kernels
+                    // with a `|γ|` cusp — so the product is the indeterminate
+                    // `∞ · 0`, and the true one-sided derivatives differ only in
+                    // SIGN. No single value is the derivative. Zero is the
+                    // midpoint of the Clarke subdifferential and the only
+                    // rotation-invariant choice, since every direction of
+                    // approach is equivalent by symmetry; it is also the exact
+                    // derivative for the kernels that are smooth at `γ = 0`.
+                    if sep.u <= 0.0 {
+                        out_row[[j, 0]] = 0.0;
+                        out_row[[j, 1]] = 0.0;
+                        continue;
+                    }
+                    let dk_du =
+                        wahba_sphere_kernel_derivative_dhav_kind(sep, penalty_order, kernel);
+                    let (du_dphi, du_dpsi) = half_angle_partials(row, center);
+                    let dphi = dk_du * du_dphi * deg;
+                    let dpsi = dk_du * du_dpsi * deg;
                     if !dphi.is_finite() || !dpsi.is_finite() {
                         err_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                         return;

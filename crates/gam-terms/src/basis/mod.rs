@@ -15,6 +15,7 @@ include!("prelude.rs");
 // ---- Manifold / geometric smooth specifications and kernels ----
 mod constant_curvature_smooth;
 mod cyclic;
+mod sphere_half_angle;
 mod sphere_kernels;
 mod sphere_spec;
 mod sphere_spectral;

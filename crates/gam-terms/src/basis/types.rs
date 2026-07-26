@@ -868,9 +868,14 @@ pub enum SpatialIdentifiability {
     FrozenTransform { transform: Array2<f64> },
 }
 
+pub(crate) use sphere_half_angle::{
+    SphereTrig, ambient_half_angle_separation, half_angle_partials, half_angle_separation,
+    half_angle_separation_scalar,
+};
+
 pub(crate) use sphere_kernels::{
-    wahba_sphere_kernel_derivative_dcos_kind, wahba_sphere_kernel_from_cos_kind,
-    wahba_sphere_kernel_from_cos_simd_kind, wahba_sphere_kernel_sobolev_derivative_dcos,
+    wahba_sphere_kernel_derivative_dhav_kind, wahba_sphere_kernel_kind,
+    wahba_sphere_kernel_simd_kind, wahba_sphere_kernel_sobolev_derivative_dhav,
 };
 
 pub use sphere_spectral::{
@@ -2029,8 +2034,7 @@ impl ConstructiveQuadratic {
         if let Some(frame) = self.structural_null_frame.as_ref() {
             if gauge.n_blocks() == 1 {
                 let transform = gauge.block_transform(0);
-                out.structural_null_frame =
-                    transport_structural_null_frame(frame, &transform);
+                out.structural_null_frame = transport_structural_null_frame(frame, &transform);
             }
             // Multi-block gauges do not arise on the paths that declare
             // frames; dropping the declaration is always safe (consumers
