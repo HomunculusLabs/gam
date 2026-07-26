@@ -110,7 +110,8 @@ impl DenseSpectralOperator {
             for (index, &sigma) in eigenvalues.iter().enumerate() {
                 if !sigma.is_finite() || sigma <= 0.0 {
                     return Err(format!(
-                        "positive-definite Hessian required for Laplace evaluation:                          eigenvalue {index} is {sigma:.6e}"
+                        "positive-definite Hessian required for Laplace evaluation: \
+                         eigenvalue {index} is {sigma:.6e}"
                     ));
                 }
             }
@@ -155,7 +156,9 @@ impl DenseSpectralOperator {
         // few orders of `σ_max` (≫ the relative floor), so every eigenpair stays
         // active and the mask is byte-identical to the pre-#2358 absolute-ε mask.
         let active: Vec<bool> = match mode {
-            PseudoLogdetMode::Smooth | PseudoLogdetMode::PositiveDefinite => vec![true; n],
+            PseudoLogdetMode::Smooth | PseudoLogdetMode::PositiveDefinite => {
+                vec![true; n]
+            }
             PseudoLogdetMode::HardPseudo => {
                 let sigma_max = eigenvalues
                     .iter()
