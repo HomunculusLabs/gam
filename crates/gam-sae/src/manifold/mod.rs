@@ -307,6 +307,8 @@ mod tests_indefinite_a_refusal_2336;
 #[cfg(test)]
 mod tests_schur_seed_refusal_1782;
 #[cfg(test)]
+mod tests_sparse_curvature_operator_2500;
+#[cfg(test)]
 mod tests_smooth_clamp_2339;
 
 #[cfg(test)]
