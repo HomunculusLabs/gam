@@ -812,7 +812,7 @@ where
     let result = problem
         .run(&mut obj, context)
         .map_err(|e| format!("{context} failed: {e}"))?;
-    if !result.converged {
+    if !result.converged() {
         return Err(SurvivalConstructionError::InvalidConfig {
             reason: format!(
                 "{context} did not converge after {} iterations (final_objective={:.6e}, final_grad_norm={})",

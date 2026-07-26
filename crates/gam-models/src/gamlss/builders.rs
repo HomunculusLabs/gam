@@ -3645,7 +3645,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     let outer = problem
         .run(&mut obj, "binomial mean wiggle exact spatial hyper")
         .map_err(|e| e.to_string())?;
-    if !outer.converged {
+    if !outer.converged() {
         return Err(GamlssError::NumericalFailure { reason: format!(
             "binomial mean wiggle exact spatial hyper did not converge after {} iterations (final_objective={:.6e}, final_grad_norm={})",
             outer.iterations,

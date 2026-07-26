@@ -2401,7 +2401,7 @@ fn constant_curvature_kappa_fair_optimum(
         &mut objective,
         &format!("constant-curvature fair profile term {term_idx}"),
     )?;
-    if !result.converged {
+    if !result.converged() {
         crate::bail_invalid_estim!(
             "constant-curvature fair-profile κ optimization did not converge for term {} after {} iterations (negative_log_evidence={:.6e}, final_grad_norm={})",
             term_idx,
@@ -4213,7 +4213,7 @@ fn run_exact_joint_spatial_optimization(
         SpatialHyperKind::Isotropic => "iso-kappa joint REML",
     };
     let result = problem.run(&mut obj, run_label)?;
-    if !result.converged {
+    if !result.converged() {
         crate::bail_invalid_estim!(
             "{} did not converge after {} iterations (final_objective={:.6e}, final_grad_norm={})",
             run_label,
@@ -7558,7 +7558,7 @@ fn try_exact_joint_latent_coord_optimization(
                 ))
             })?
     };
-    if !result.converged {
+    if !result.converged() {
         crate::bail_invalid_estim!(
             "latent-coordinate joint optimization did not converge after {} iterations (final_objective={:.6e}, final_grad_norm={})",
             result.iterations,
