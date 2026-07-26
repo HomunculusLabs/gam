@@ -1,3 +1,35 @@
+## v0.3.151 — gam 0.3.151 / gamfit 0.1.260 (2026-07-26)
+
+This release carries the post-0.3.150 correctness, inference, and performance
+campaign into one coordinated Rust/Python release. Notable root repairs:
+
+- **Survival LAML uses one exact mode geometry (#2491).** LAML now requires
+  a projected-KKT-stationary inner mode and a finite strictly positive-definite
+  observed penalized Hessian. Value, log-determinant/trace contractions, and
+  the implicit mode-response solve all use that same full coefficient space;
+  the former relative pseudo-spectrum mask can no longer delete an identifiable
+  low-curvature response direction and flip the outer gradient.
+- **Exact Tweedie series remain exact at extreme scale (#2505).** Poisson- and
+  Gamma-shaped log factors are centered algebraically with deviance identities
+  and Stirling corrections before floating-point evaluation, eliminating peak
+  cancellation without a saddlepoint fallback or a relaxed truncation certificate.
+- **Posterior and prediction semantics follow the fitted distribution (#2440).**
+  Constrained credible intervals project the persisted truncated posterior rather
+  than reporting a symmetric Gaussian summary; covariance provenance and the
+  smoothing correction remain attached across prediction and reload.
+- **Configured mathematics is no longer discarded (#1376, #2254, #2463).**
+  Realized anisotropic metrics retain their derivatives, deterministic Gaussian
+  boundary fits derive smoothing state from the optimized coordinate, and every
+  configured smoothing prior reaches the criterion that is actually optimized.
+- **Finite constrained solves and calibrated dispatch replace open-ended work
+  (#2432, #2420, #2504).** Dense constrained QPs use a certified finite dual
+  projection, sphere basis construction avoids a trivial-section copy at scale,
+  and Polya–Gamma GPU dispatch obeys the measured problem-size threshold.
+- **Release builds are measured, pinned, and warm.** PyPI wheel production pins
+  maturin-action and maturin, fixes the manylinux contract, zeros compiler-cache
+  counters immediately before each target, and refuses any unmeasured or zero-hit
+  publication build. Commit-addressed binary releases enforce the same rule.
+
 ## v0.3.150 — gam 0.3.150 / gamfit 0.1.259 (2026-07-23)
 
 This release ships the post-0.3.149 correctness and convergence campaign,

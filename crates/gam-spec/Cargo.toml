@@ -1,6 +1,6 @@
 [package]
 name = "gam-spec"
-version = "0.3.150"
+version = "0.3.151"
 edition = "2024"
 rust-version = "1.97"
 description = "Serializable model-spec types for the gam penalized-likelihood engine"

@@ -1,6 +1,6 @@
 [package]
 name = "gam-cli"
-version = "0.3.150"
+version = "0.3.151"
 edition = "2024"
 rust-version = "1.97"
 publish = false
