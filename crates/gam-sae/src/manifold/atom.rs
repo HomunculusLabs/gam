@@ -280,7 +280,7 @@ impl SaeAtomBasisKind {
 /// `α·softplus_{τ₀}(cos κt)` of the hard clamp `α·max(cos κt, 0)`, not the hard
 /// clamp itself (#2339): it removes the kink at `cos κt = 0` so the streaming
 /// `½log|B̃|` criterion is a composite-analytic estimand, while the tiny
-/// dimensionless temperature `τ₀` (see [`Self::clamp_temperature`]) keeps the
+/// dimensionless temperature `τ₀` (see [`gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE`]) keeps the
 /// value change below the criterion's own spectral-deflation floor. Euclidean
 /// axes have constant `V'' = α > 0`, so the clamp is a no-op there and
 /// `hess_majorized == hess` bit-for-bit.
@@ -359,29 +359,19 @@ impl ArdAxisPrior {
         }
     }
 
-    /// The periodic ARD curvature `V'' = α·cos(κt)` is signed, so the operator the
-    /// Newton/Schur majorizer installs is the homogeneity-preserving smooth PSD
-    /// clamp `α·s_{τ₀}(cos κt)` (#2339). Both the clamp and its derived
-    /// temperature live in `gam_linalg::utils` — the layer that owns
-    /// `SPECTRAL_DEFLATION_REL_FLOOR`, which is what fixes `τ₀` — so every family
-    /// that has to majorize a signed curvature reads ONE seam. Aliased here
-    /// because the homogeneity is load-bearing for THIS family in a specific way:
-    /// the `½log|B|` θ-adjoint's explicit-`ρ` channel uses
-    /// `∂/∂ρ_ard[α·s_{τ₀}(c)] = α·s_{τ₀}(c) = psd_majorizer_hess`, so the
-    /// log-precision log-det traces (`ard_log_precision_hessian_trace`,
-    /// `coordinate_block_ard_log_precision_hessian_trace`) are the exact
-    /// `∂B/∂ρ_ard` with no code change. A non-homogeneous `s_{τ}(α·c)` would
-    /// silently desync them.
-    /// Read through a function rather than exposed as a bare associated constant:
-    /// the only in-crate CODE consumer is `tests_smooth_clamp_2339`'s pin, so a
-    /// constant is dead in a non-test build and `-D warnings` stops the build on
-    /// it. The alias itself is worth keeping — it is what the two doc comments
-    /// above and below point at when they say `τ₀` — so it becomes the accessor
-    /// that carries the reasoning.
-    #[inline]
-    pub(crate) fn clamp_temperature() -> f64 {
-        gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE
-    }
+    // The periodic ARD curvature `V'' = α·cos(κt)` is signed, so the operator the
+    // Newton/Schur majorizer installs is the homogeneity-preserving smooth PSD
+    // clamp `α·s_{τ₀}(cos κt)` (#2339). Both the clamp and its derived temperature
+    // `τ₀` live in `gam_linalg::utils` — the layer that owns
+    // `SPECTRAL_DEFLATION_REL_FLOOR`, which is what fixes `τ₀` — so every family
+    // that has to majorize a signed curvature reads ONE seam, and this family does
+    // not re-export it. The homogeneity is load-bearing HERE in a specific way: the
+    // `½log|B|` θ-adjoint's explicit-`ρ` channel uses
+    // `∂/∂ρ_ard[α·s_{τ₀}(c)] = α·s_{τ₀}(c) = psd_majorizer_hess`, so the
+    // log-precision log-det traces (`ard_log_precision_hessian_trace`,
+    // `coordinate_block_ard_log_precision_hessian_trace`) are the exact `∂B/∂ρ_ard`
+    // with no code change. A non-homogeneous `s_{τ}(α·c)` would silently desync
+    // them.
 
     /// Homogeneity-preserving smooth replacement for `α·max(cos, 0)` acting on the
     /// dimensionless cosine `cos = cos κt ∈ [−1,1]` (`alpha ≥ 0`). See
@@ -407,7 +397,7 @@ impl ArdAxisPrior {
     /// its Laplace log determinant declare this positive-part operator, so every
     /// derivative of that operator must call this seam. On a periodic axis it is
     /// the smooth envelope `α·softplus_{τ₀}(cos κt)` (see
-    /// [`Self::clamp_temperature`]); on a Euclidean axis it is `hess = α`.
+    /// [`gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE`]); on a Euclidean axis it is `hess = α`.
     #[inline]
     pub(crate) fn psd_majorizer_hess(self) -> f64 {
         self.hess_majorized

@@ -22,7 +22,7 @@ use std::f64::consts::{LN_2, TAU};
 /// τ₀, the dimensionless softplus temperature. Mirrors the derived constant so
 /// the test fails loudly if the derivation constant is ever silently retuned.
 fn tau0() -> f64 {
-    ArdAxisPrior::clamp_temperature()
+    gam_linalg::utils::SMOOTH_PSD_CLAMP_TEMPERATURE
 }
 
 /// The maximum admissible deviation of the smooth clamp from the hard clamp, in
