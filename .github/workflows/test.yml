@@ -551,7 +551,7 @@ jobs:
   # ---------------------------------------------------------------------------
   aggregate:
     name: Aggregate failures (MASTER_FAILURES.md)
-    needs: [build, rust-test, pyffi-test, python-tests]
+    needs: [setup, build, rust-test, pyffi-test, python-tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
@@ -594,6 +594,10 @@ jobs:
           # skipped job could never emit.
           BUILD_RESULT: ${{ needs.build.result }}
           RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          # How many shards were PLANNED. A complete red inventory has one log
+          # per planned shard; a cancelled or mid-flight matrix has fewer, and
+          # that count is what separates the two -- not the matrix conclusion.
+          EXPECTED_SHARDS: ${{ needs.setup.outputs.total }}
           # The gam-pyffi unit job writes its own ARCHIVE_MISSING marker, but a
           # job that never ran cannot write one — same hole, same fix.
           PYFFI_TEST_RESULT: ${{ needs.pyffi-test.result }}
@@ -725,8 +729,29 @@ jobs:
           # failed matrix may have died mid-flight with partial logs, and a
           # partial inventory read as complete is exactly the false green this
           # ledger exists to kill.
-          shards_never_ran = (rust_test_result not in ('', 'success')
-                              or not workspace_shard_logs)
+          # A matrix conclusion of `failure` means TESTS failed. That is the
+          # normal, expected state of a red ledger -- it is not evidence that
+          # the shards did not run, and treating it as such made the MEASURED
+          # verdict unreachable for any run containing a single failing test,
+          # i.e. always (#2437). Run 30209439994 is the exhibit: build
+          # `success`, all ten shard logs uploaded, a 10.3 GB nx-archive, 490
+          # real failures parsed out of them -- and `workspace shards: NOT
+          # MEASURED`, because nine shards concluded `failure`.
+          #
+          # What actually distinguishes a partial inventory from a complete red
+          # one is whether every PLANNED shard uploaded its log. A cancelled or
+          # mid-flight matrix leaves fewer than `total` (run 30195751223: seven
+          # of ten killed), and that shortfall is the false green this ledger
+          # exists to kill. `cancelled` stays a hard signal in its own right,
+          # because a matrix cancelled after all uploads is still not a run
+          # anyone should read as a verdict.
+          expected_shards = int(os.environ.get('EXPECTED_SHARDS') or 0)
+          shards_incomplete = (
+              expected_shards > 0 and len(workspace_shard_logs) < expected_shards
+          )
+          shards_never_ran = (rust_test_result == 'cancelled'
+                              or not workspace_shard_logs
+                              or shards_incomplete)
           pyffi_never_ran = pyffi_test_result == 'skipped'
           archive_missing = (
               shard_marker_missing or build_did_not_succeed
@@ -736,7 +761,8 @@ jobs:
               label
               for label, fired in (
                   (f'the archive build reported `{build_result}`', build_did_not_succeed),
-                  (f'the shard matrix reported `{rust_test_result}`', rust_test_result not in ('', 'success')),
+                  (f'the shard matrix reported `{rust_test_result}`', rust_test_result == 'cancelled'),
+                  (f'only {len(workspace_shard_logs)} of {expected_shards} planned shard logs were collected', shards_incomplete),
                   ('no workspace shard log was collected at all', not workspace_shard_logs),
                   ('a shard reported ARCHIVE_MISSING', shard_marker_missing),
                   (f'the gam-pyffi unit job reported `{pyffi_test_result}`', pyffi_never_ran),
