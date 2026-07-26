@@ -184,22 +184,74 @@ jobs:
           # OAuth subscription token, not an API key.
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_CODE_ALT_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
+          # Every wait in this step is bounded, and every bound is far enough
+          # inside `timeout-minutes` that "Save memory", the host-log tail and
+          # the diagnostics upload all still run. Run 30189939720 reached its
+          # terminal event at 06:46:00Z and then sat perfectly idle until the
+          # 11:47:09Z Actions ceiling cancelled it: five of its six hours spent
+          # doing nothing, and because a cancelled step never reaches its own
+          # `tail`, its host log was never emitted at all.
+          RUN_DEADLINE_MS: "18000000"
+          STALL_TIMEOUT_MS: "1200000"
+          HEARTBEAT_MS: "60000"
         run: |
           set -uo pipefail
           cd "$HOST_DIR"
+          host_log="$RUNNER_TEMP/host.log"
+          : > "$host_log"
           bun src/index.ts "$AGENT_REPO_DIR/.github/connectome/recipe.json" \
-            --headless > "$RUNNER_TEMP/host.log" 2>&1 &
+            --headless > "$host_log" 2>&1 &
           HOST_PID=$!
           echo "host pid $HOST_PID"
 
+          # Stream the host's own output into the job log AS IT HAPPENS. Reading
+          # it only after the driver returns is worthless for precisely the runs
+          # worth debugging -- the ones that do not return.
+          tail -n +1 -F "$host_log" 2>/dev/null | sed -u 's/^/[host] /' &
+          TAIL_PID=$!
+
           driver_status=0
           CONNECTOME_HOST_PID="$HOST_PID" \
-            node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || driver_status=$?
+            node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" 2>&1 \
+            | tee "$RUNNER_TEMP/drive.log" || driver_status=$?
 
-          host_status=0
-          wait "$HOST_PID" || host_status=$?
+          # The driver bounds itself now, but a bare `wait` does not: a host
+          # that ignores graceful shutdown would simply move the six-hour hang
+          # from the driver into this line.
+          forced=0
+          grace=120
+          deadline=$((SECONDS + grace))
+          while kill -0 "$HOST_PID" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+            sleep 2
+          done
+          if kill -0 "$HOST_PID" 2>/dev/null; then
+            forced=1
+            echo "::warning::host still running ${grace}s after the driver exited; terminating"
+            kill -TERM "$HOST_PID" 2>/dev/null || true
+            for _ in $(seq 10); do
+              kill -0 "$HOST_PID" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL "$HOST_PID" 2>/dev/null || true
+          fi
+          wait "$HOST_PID"
+          waited=$?
+
+          # Let the streamer flush, then stop it before the log is tailed again.
+          # `$!` names the pipeline's last process (sed), so the `tail` feeding
+          # it has to be closed by name or it outlives the kill.
+          sleep 2
+          kill "$TAIL_PID" 2>/dev/null || true
+          pkill -f "F $host_log" 2>/dev/null || true
           echo "=== tail of host log ==="
-          tail -120 "$RUNNER_TEMP/host.log" || true
+          tail -120 "$host_log" || true
+
+          host_status="$waited"
+          if [ "$forced" -eq 1 ]; then
+            echo "::error::host ignored graceful shutdown and was force-terminated (wait status $waited)"
+            host_status=1
+          fi
+          echo "driver status $driver_status, host status $host_status"
 
           if [ "$driver_status" -ne 0 ]; then
             echo "::error::Connectome driver failed with status $driver_status"
@@ -209,6 +261,24 @@ jobs:
             echo "::error::Connectome host failed with status $host_status"
             exit "$host_status"
           fi
+
+      # Before "Save memory", which deliberately prunes headless.log and the
+      # llm-calls*.jsonl transcripts out of the persisted store -- exactly the
+      # files needed to diagnose a bad run. Keep them as an artifact instead of
+      # only in a store nobody can read.
+      - name: Upload run diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: connectome-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/host.log
+            ${{ runner.temp }}/drive.log
+            ${{ runner.temp }}/connectome-data/headless.log
+            ${{ runner.temp }}/connectome-data/llm-calls*.jsonl
 
       # Save the agent's past even if the run failed or timed out — a crashed
       # run still lived through something.

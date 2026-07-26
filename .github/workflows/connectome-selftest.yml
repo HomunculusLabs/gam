@@ -1,0 +1,84 @@
+name: Connectome self-test
+
+# The wrapper around Connectome has now produced three separate false-green or
+# hung runs (#2511), every one of them in wrapper logic that nothing tested:
+# a terminal framework event the driver discarded, a `wait` with no bound, a
+# tool advertising a timeout the transport does not allow, and a context budget
+# whose pinned window left no room to fold. These gates run in seconds and each
+# one fails against the code as it was before the fix.
+
+on:
+  push:
+    paths:
+      - '.github/connectome/**'
+      - '.github/workflows/connectome-selftest.yml'
+  pull_request:
+    paths:
+      - '.github/connectome/**'
+      - '.github/workflows/connectome-selftest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Cheap and first: a malformed recipe fails the agent run at startup, and
+      # a well-formed but over-pinned one wedges it an hour in.
+      - name: Recipe parses and leaves room to fold
+        run: node .github/connectome/recipe.check.mjs
+
+      # Socket-level. The primary case replays run 30189939720: four
+      # attempt-level inference:failed events then the framework's terminal
+      # inference:exhausted, with the stall timeout and deadline set to ten
+      # minutes so only correct event handling can pass it.
+      - name: Driver terminates on every terminal route
+        run: node .github/connectome/drive.test.mjs
+
+      # Protocol-level. Asserts no tools/call can approach the 60 s MCPL cap
+      # while long builds still run to completion behind a job handle.
+      - name: Shell server answers inside the transport window
+        run: node .github/connectome/shell-mcp.test.mjs
+
+      # The workflow's own shell must at least parse; a syntax error here is a
+      # broken agent run for every scheduled trigger until someone notices.
+      - name: Agent workflow shell scripts parse
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF' > /tmp/steps.txt
+          import json, re, sys
+          # Deliberately not a YAML parse: no PyYAML on a bare runner. Pull the
+          # `run: |` blocks out by indentation, which is all bash -n needs.
+          text = open('.github/workflows/connectome-freeform.yml').read().split('\n')
+          out, i = [], 0
+          while i < len(text):
+              m = re.match(r'^(\s*)run: \|\s*$', text[i])
+              if not m:
+                  i += 1
+                  continue
+              indent = len(m.group(1)) + 2
+              i += 1
+              body = []
+              while i < len(text) and (not text[i].strip() or text[i][:indent].strip() == ''):
+                  body.append(text[i][indent:])
+                  i += 1
+              out.append('\n'.join(body))
+          print(json.dumps(out))
+          EOF
+          count=$(python3 -c "import json,sys;d=json.load(open('/tmp/steps.txt'));print(len(d))")
+          echo "found $count run blocks"
+          test "$count" -ge 6
+          for n in $(seq 0 $((count - 1))); do
+            python3 -c "import json;print(json.load(open('/tmp/steps.txt'))[$n])" > "/tmp/step_$n.sh"
+            bash -n "/tmp/step_$n.sh" || { echo "::error::run block $n has a bash syntax error"; exit 1; }
+            echo "  block $n OK"
+          done

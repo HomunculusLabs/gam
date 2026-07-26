@@ -5,10 +5,37 @@
 // observes agent states, not the framework event queue, so treating that signal
 // as an instruction to stop can close the queue while a late tool result is
 // still scheduling the next inference. Lifecycle idleness is therefore
-// diagnostic only. We arm shutdown solely from a terminal framework event:
-// either a completed, user-visible turn or an explicit inference failure.
-// Any subsequent work cancels that decision; only a quiet terminal interval
-// permits an explicit graceful shutdown.
+// diagnostic only.
+//
+// TERMINATION HAS FIVE INDEPENDENT ROUTES, in descending preference. Every one
+// of them ends the run; none of them can be starved by the others:
+//
+//   1. A completed, user-visible turn (`inference:completed` then
+//      `inference:speech`) or an explicit `inference:turn_ended`, followed by a
+//      quiet interval. This is the success certificate.
+//   2. A terminal failure event — `inference:exhausted` or `inference:aborted`.
+//      These are the framework's real terminal failure states
+//      (agent-tree-reducer.ts: both flip the node to `cancelled`).
+//   3. The retry budget being spent: MAX_INFERENCE_ATTEMPTS consecutive
+//      `inference:failed` with no intervening progress. `inference:failed` is
+//      ATTEMPT-level telemetry — startAgentStream emits it before consulting
+//      DefaultErrorPolicy and then retries — so a single one is not terminal,
+//      but a full run of them is, whether or not a terminal event follows.
+//   4. The recovery window (RECOVERY_TIMEOUT_MS): a failure has been seen and
+//      no completion followed it. Armed by failure, cleared by completion, and
+//      immune to the cancellation that erased the verdict in the first place.
+//   5. Backstops that cannot be reasoned away: a stall watchdog (no
+//      substantive event for STALL_TIMEOUT_MS) and an absolute deadline
+//      (RUN_DEADLINE_MS). Both sit well inside the Actions job cap so the run
+//      still saves its memory and prints its logs.
+//
+// Route 5 exists because routes 1-4 all depend on recognising event NAMES, and
+// this driver has already been wedged once by a name it did not know: an
+// unhandled event cancelled the terminal candidate and then matched nothing, so
+// run 30189939720 sat silent from 06:46:09Z to the 11:47:09Z Actions ceiling —
+// five hours of a six-hour job spent doing nothing at all. A protocol-level
+// gate that only ever ARMS on names it knows must have a route that needs no
+// name whatsoever.
 
 import { connect } from 'node:net';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -18,18 +45,30 @@ const DATA_DIR = process.env.DATA_DIR || './data';
 const SOCKET = process.env.IPC_SOCKET || join(DATA_DIR, 'ipc.sock');
 const READY_TIMEOUT_MS = Number(process.env.READY_TIMEOUT_MS || 180_000);
 const IDLE_SETTLE_MS = Number(process.env.IDLE_SETTLE_MS || 5_000);
-// Once inference has failed, the host gets a bounded window to produce a real
-// completion before the run is declared unable to proceed. Unbounded, a host
-// that answers a failure with a retry that never terminates leaves no armed
-// timer at all: the retry's `inference:started` cancels the terminal
-// settlement and nothing re-arms it, because `inference:started` is not itself
-// a terminal candidate. Runs 30188621552 and 30189939720 each sat in exactly
-// that state for ~5 h until the 360-minute job timeout, and a timed-out job
-// reports `cancelled` — indistinguishable from "still running".
-const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS || 600_000);
+// No substantive (non-lifecycle) event for this long means the run is dead.
+// Must exceed the longest legitimate silence, which is one tool call: the MCPL
+// transport abandons a tools/call at 60 s, so any real gap is minutes, not
+// tens of minutes.
+const STALL_TIMEOUT_MS = Number(process.env.STALL_TIMEOUT_MS || 20 * 60_000);
+// Absolute cap on the agent stage. Deliberately far below the job's
+// timeout-minutes so "Save memory", the host-log tail and the artifact upload
+// all still run.
+const RUN_DEADLINE_MS = Number(process.env.RUN_DEADLINE_MS || 300 * 60_000);
 // A graceful shutdown asks the host to close the socket. A host that is already
 // wedged cannot honour it, so the request itself needs a deadline.
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS || 30_000);
+// Once inference has failed, the host gets a bounded window to produce a real
+// completion before the run is declared unable to proceed. This bound is armed
+// by a failure and cleared only by a completion, and — unlike the terminal
+// candidate — it is deliberately immune to cancellation, because the defect
+// being guarded is precisely that a silent non-terminal event can erase the
+// terminal verdict. Runs 30188621552 and 30189939720 each sat in exactly that
+// state for ~5 h until the 360-minute job timeout, and a timed-out job reports
+// `cancelled` — indistinguishable from "still running".
+const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS || 600_000);
+const HEARTBEAT_MS = Number(process.env.HEARTBEAT_MS || 60_000);
+// agent-framework 0.6.8: initial attempt + three DefaultErrorPolicy retries.
+const MAX_INFERENCE_ATTEMPTS = Number(process.env.MAX_INFERENCE_ATTEMPTS || 4);
 const RUN_ID = process.env.GITHUB_RUN_ID || 'unknown';
 const RUN_MARKER = process.env.RUN_MARKER;
 const HOST_PID = Number(process.env.CONNECTOME_HOST_PID);
@@ -52,6 +91,23 @@ const KICKOFF =
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// ---------------------------------------------------------------------------
+// Logging. Every line carries elapsed time: the previous driver printed bare
+// lines, so a live run was indistinguishable from a hung one and a wedged run
+// was indistinguishable from a slow build.
+// ---------------------------------------------------------------------------
+const START = Date.now();
+const elapsedMs = () => Date.now() - START;
+const clock = (ms = elapsedMs()) => {
+  const total = Math.floor(ms / 1000);
+  const h = String(Math.floor(total / 3600)).padStart(2, '0');
+  const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+  const s = String(total % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+};
+const say = (line) => console.log(`[${clock()}] ${line}`);
+const cry = (line) => console.error(`[${clock()}] ${line}`);
+
 async function waitForSocket() {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -70,7 +126,7 @@ async function waitForSocket() {
 try {
   await waitForSocket();
 } catch (error) {
-  console.error(`[drive] ${error.message}`);
+  cry(`[drive] ${error.message}`);
   process.exit(1);
 }
 
@@ -83,10 +139,18 @@ let sawFinalSpeech = false;
 let sawExiting = false;
 let shutdownRequested = false;
 let terminalFailure = null;
-let lastInferenceFailure = null;
 let terminalSettleTimer = null;
-let recoveryTimer = null;
 let shutdownGraceTimer = null;
+let recoveryTimer = null;
+let lastSubstantiveAt = Date.now();
+let consecutiveFailures = 0;
+let lastInferenceFailure = null;
+const counts = { inferences: 0, completions: 0, failures: 0, tools: 0, toolFailures: 0, events: 0 };
+const unknownEventTypes = new Set();
+
+// Terminal FAILURE states in agent-framework 0.6.8. Both flip the agent node
+// to `cancelled` in the host's reducer; neither is followed by more work.
+const TERMINAL_FAILURE_EVENTS = new Set(['inference:exhausted', 'inference:aborted']);
 
 const send = (message) => {
   if (!sock.writable) {
@@ -110,25 +174,15 @@ const clearRecovery = () => {
   }
 };
 
-// Report what the run reached and leave. Used both when the host closes the
-// socket and when it stops answering, so neither path can outlive the job.
-const finish = () => {
-  clearTimeout(readyFallback);
-  cancelTerminalSettlement();
-  clearRecovery();
-  if (shutdownGraceTimer !== null) {
-    clearTimeout(shutdownGraceTimer);
-    shutdownGraceTimer = null;
-  }
-  console.log(
-    `[drive] socket closed; inference=${sawInference} completed=${sawCompletion} ` +
-      `finalSpeech=${sawFinalSpeech} exiting=${sawExiting}`,
-  );
-  if (terminalFailure) {
-    console.error(`[drive] failed: ${terminalFailure}`);
-    process.exit(1);
-  }
-  process.exit(0);
+// Armed by the first inference failure, cleared only by a real completion, and
+// never cleared by cancelTerminalSettlement — see RECOVERY_TIMEOUT_MS.
+const armRecovery = (failure) => {
+  if (recoveryTimer !== null) return;
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = null;
+    requestShutdown(`no inference completed within ${RECOVERY_TIMEOUT_MS} ms of ${failure}`);
+  }, RECOVERY_TIMEOUT_MS);
+  recoveryTimer.unref?.();
 };
 
 const requestShutdown = (failure = null) => {
@@ -136,30 +190,26 @@ const requestShutdown = (failure = null) => {
   shutdownRequested = true;
   terminalFailure ??= failure;
   clearRecovery();
-  console.log(
+  say(
     failure
       ? `[drive] refusing a false-green run: ${failure}`
       : `[drive] completed turn stayed quiescent for ${IDLE_SETTLE_MS} ms; requesting shutdown`,
   );
   send({ type: 'shutdown', graceful: true });
+
+  // A host that ignores graceful shutdown must not reproduce the very hang
+  // this driver exists to prevent.
   shutdownGraceTimer = setTimeout(() => {
     shutdownGraceTimer = null;
     terminalFailure ??= `host ignored a graceful shutdown for ${SHUTDOWN_GRACE_MS} ms`;
-    console.error(`[drive] ${terminalFailure}`);
-    finish();
+    cry(
+      `[drive] host did not close the socket within ${SHUTDOWN_GRACE_MS} ms of a ` +
+        'graceful shutdown request; abandoning it',
+    );
+    summarise('shutdown not honoured');
+    process.exit(1);
   }, SHUTDOWN_GRACE_MS);
-};
-
-// Armed by the first inference failure and cleared only by a real completion.
-// Deliberately NOT cleared by cancelTerminalSettlement: the whole defect is
-// that a silent non-terminal event can erase the terminal verdict, so the
-// bound on "the host stopped making progress" must survive that erasure.
-const armRecovery = (failure) => {
-  if (recoveryTimer !== null) return;
-  recoveryTimer = setTimeout(() => {
-    recoveryTimer = null;
-    requestShutdown(`no inference completed within ${RECOVERY_TIMEOUT_MS} ms of ${failure}`);
-  }, RECOVERY_TIMEOUT_MS);
+  shutdownGraceTimer.unref?.();
 };
 
 const settleTerminal = (failure = null) => {
@@ -170,19 +220,89 @@ const settleTerminal = (failure = null) => {
   }, IDLE_SETTLE_MS);
 };
 
+// --- backstops --------------------------------------------------------------
+// These two need no knowledge of any event name, which is the whole point.
+const STALL_POLL_MS = Math.min(30_000, Math.max(250, Math.floor(STALL_TIMEOUT_MS / 4)));
+const stallWatchdog = setInterval(() => {
+  if (shutdownRequested) return;
+  const quietMs = Date.now() - lastSubstantiveAt;
+  if (quietMs >= STALL_TIMEOUT_MS) {
+    requestShutdown(
+      `no substantive framework event for ${Math.round(quietMs / 1000)} s ` +
+        `(stall timeout ${Math.round(STALL_TIMEOUT_MS / 1000)} s)`,
+    );
+  }
+}, STALL_POLL_MS);
+stallWatchdog.unref?.();
+
+const runDeadline = setTimeout(() => {
+  requestShutdown(
+    `absolute run deadline of ${Math.round(RUN_DEADLINE_MS / 60_000)} min reached`,
+  );
+}, RUN_DEADLINE_MS);
+runDeadline.unref?.();
+
+const heartbeat = setInterval(() => {
+  if (shutdownRequested) return;
+  const quiet = Math.round((Date.now() - lastSubstantiveAt) / 1000);
+  say(
+    `[heartbeat] events=${counts.events} inferences=${counts.inferences} ` +
+      `completed=${counts.completions} failed=${counts.failures} ` +
+      `tools=${counts.tools} (${counts.toolFailures} failed) ` +
+      `quiet=${quiet}s deadline_in=${clock(Math.max(0, RUN_DEADLINE_MS - elapsedMs()))}`,
+  );
+}, HEARTBEAT_MS);
+heartbeat.unref?.();
+
+function summarise(why) {
+  clearInterval(stallWatchdog);
+  clearInterval(heartbeat);
+  clearTimeout(runDeadline);
+  clearRecovery();
+  if (shutdownGraceTimer !== null) {
+    clearTimeout(shutdownGraceTimer);
+    shutdownGraceTimer = null;
+  }
+  say(
+    `[drive] finished after ${clock()} (${why}); inference=${sawInference} ` +
+      `completed=${sawCompletion} finalSpeech=${sawFinalSpeech} exiting=${sawExiting}`,
+  );
+  say(
+    `[drive] totals: events=${counts.events} inferences=${counts.inferences} ` +
+      `completions=${counts.completions} inference_failures=${counts.failures} ` +
+      `tool_calls=${counts.tools} tool_failures=${counts.toolFailures}`,
+  );
+  if (unknownEventTypes.size > 0) {
+    say(`[drive] unhandled event types seen: ${[...unknownEventTypes].sort().join(', ')}`);
+  }
+  if (lastInferenceFailure) say(`[drive] last inference error: ${lastInferenceFailure}`);
+}
+
 const readyFallback = setTimeout(() => kickOnce('ready-timeout fallback'), 20_000);
 
 function kickOnce(reason) {
   if (kicked) return;
   kicked = true;
   clearTimeout(readyFallback);
-  console.log(`[drive] sending unique kickoff for run ${RUN_ID} (${reason})`);
+  say(`[drive] sending unique kickoff for run ${RUN_ID} (${reason})`);
   send({ type: 'text', content: KICKOFF });
 }
 
 sock.on('connect', () => {
-  console.log(`[drive] connected to ${SOCKET}`);
-  writeFileSync(RUN_MARKER, `${RUN_ID}\n`, { flag: 'wx' });
+  say(`[drive] connected to ${SOCKET}`);
+  say(
+    `[drive] budgets: stall=${Math.round(STALL_TIMEOUT_MS / 60_000)}min ` +
+      `deadline=${Math.round(RUN_DEADLINE_MS / 60_000)}min ` +
+      `recovery=${Math.round(RECOVERY_TIMEOUT_MS / 60_000)}min ` +
+      `settle=${IDLE_SETTLE_MS}ms max_attempts=${MAX_INFERENCE_ATTEMPTS}`,
+  );
+  // A pre-existing marker would throw here, inside an event handler, killing
+  // the driver with a bare stack trace instead of a diagnosis.
+  try {
+    writeFileSync(RUN_MARKER, `${RUN_ID}\n`, { flag: 'wx' });
+  } catch (error) {
+    cry(`[drive] could not create run marker ${RUN_MARKER}: ${error.message}`);
+  }
   send({
     type: 'subscribe',
     events: ['lifecycle', 'inference:*', 'tool:*', 'command-output'],
@@ -201,71 +321,153 @@ sock.on('data', (chunk) => {
     try {
       event = JSON.parse(line);
     } catch {
-      console.error(`[drive] discarded malformed JSONL: ${line.slice(0, 200)}`);
+      cry(`[drive] discarded malformed JSONL: ${line.slice(0, 200)}`);
       continue;
     }
+
+    counts.events += 1;
 
     if (event.type === 'lifecycle') {
-      console.log(`[lifecycle] ${event.phase}${event.reason ? ` (${event.reason})` : ''}`);
+      say(`[lifecycle] ${event.phase}${event.reason ? ` (${event.reason})` : ''}`);
       if (event.phase === 'ready') kickOnce('lifecycle:ready');
       if (event.phase === 'idle' && !sawCompletion && !lastInferenceFailure) {
-        console.log('[drive] premature lifecycle idle ignored; no terminal inference event yet');
+        say('[drive] lifecycle idle is diagnostic only; no terminal inference event yet');
       }
       if (event.phase === 'exiting') sawExiting = true;
+      // Deliberately NOT counted as substantive: lifecycle is a 500 ms poll of
+      // agent state, so letting it feed the stall watchdog would let a dead
+      // agent look alive forever.
       continue;
     }
 
-    // A framework event after a terminal candidate means work continued.
-    // Cancel the candidate before interpreting this event; a new terminal
-    // event below may arm a fresh quiet interval.
-    cancelTerminalSettlement();
+    lastSubstantiveAt = Date.now();
 
-    if (event.type === 'inference:started') {
-      sawInference = true;
+    // --- terminal failure: the framework has settled the agent -------------
+    if (TERMINAL_FAILURE_EVENTS.has(event.type)) {
+      const why = String(event.error ?? event.reason ?? 'no reason given');
+      cry(`[${event.type}] ${why}`);
+      cancelTerminalSettlement();
+      settleTerminal(`${event.type}: ${why}`);
+      continue;
+    }
+
+    // --- terminal success --------------------------------------------------
+    if (event.type === 'inference:turn_ended') {
+      say('[inference] turn ended by the agent');
+      sawCompletion = true;
+      counts.completions += 1;
+      consecutiveFailures = 0;
+      lastInferenceFailure = null;
+      clearRecovery();
+      cancelTerminalSettlement();
+      settleTerminal();
       continue;
     }
     if (event.type === 'inference:completed') {
       sawCompletion = true;
+      counts.completions += 1;
+      consecutiveFailures = 0;
       lastInferenceFailure = null;
       clearRecovery();
-      continue;
-    }
-    if (event.type === 'inference:failed') {
-      lastInferenceFailure = String(event.error ?? 'unknown inference failure');
-      console.error(`[inference failed] ${lastInferenceFailure}`);
-      settleTerminal(`inference failed: ${lastInferenceFailure}`);
-      armRecovery(lastInferenceFailure);
+      cancelTerminalSettlement();
       continue;
     }
     if (event.type === 'inference:speech' && event.content) {
       sawFinalSpeech = true;
+      // Real output is real progress, so it breaks a run of failed attempts.
+      // "Consecutive" has to mean "with nothing in between", or a run that
+      // survives one transient error per turn would accumulate a phantom
+      // exhaustion over hours of healthy work.
+      consecutiveFailures = 0;
       console.log(`\n${String(event.content).trimEnd()}`);
+      cancelTerminalSettlement();
       if (sawCompletion) settleTerminal();
       continue;
     }
+
+    // --- attempt telemetry, NOT a terminal state ---------------------------
+    // Arming shutdown on a single one of these is what made an early
+    // transient error look like a finished run. Arming on nothing at all is
+    // what let four of them wedge the driver for five hours. The retry budget
+    // is the honest line: spend it, and the run is over.
+    if (event.type === 'inference:failed') {
+      counts.failures += 1;
+      consecutiveFailures += 1;
+      lastInferenceFailure = String(event.error ?? 'unknown inference failure');
+      cry(
+        `[inference failed] attempt ${consecutiveFailures}/${MAX_INFERENCE_ATTEMPTS}: ` +
+          lastInferenceFailure,
+      );
+      cancelTerminalSettlement();
+      if (consecutiveFailures >= MAX_INFERENCE_ATTEMPTS) {
+        settleTerminal(
+          `inference failed on all ${consecutiveFailures} attempts: ${lastInferenceFailure}`,
+        );
+      }
+      // Independent of the retry count, and immune to cancellation: if no
+      // completion arrives within the recovery window, the run is over.
+      armRecovery(lastInferenceFailure);
+      continue;
+    }
+
+    if (event.type === 'inference:started') {
+      sawInference = true;
+      counts.inferences += 1;
+      cancelTerminalSettlement();
+      continue;
+    }
     if (event.type === 'tool:started') {
+      counts.tools += 1;
+      consecutiveFailures = 0;
       const input = event.input ? JSON.stringify(event.input) : '';
-      console.log(`  · ${event.tool}${input ? ` ${input.slice(0, 160)}` : ''}`);
+      say(`  · ${event.tool}${input ? ` ${input.slice(0, 160)}` : ''}`);
+      cancelTerminalSettlement();
       continue;
     }
     if (event.type === 'tool:failed') {
-      console.error(`[tool failed] ${event.tool ?? 'unknown'}: ${event.error ?? ''}`);
+      counts.toolFailures += 1;
+      cry(`[tool failed] ${event.tool ?? 'unknown'}: ${event.error ?? ''}`);
+      cancelTerminalSettlement();
       continue;
     }
-    if (event.type === 'command-output' && event.text) console.log(event.text);
+    if (event.type === 'command-output' && event.text) {
+      console.log(event.text);
+      cancelTerminalSettlement();
+      continue;
+    }
+
+    // An event this driver does not know. Cancelling the terminal candidate is
+    // the conservative choice — it cannot cause a premature shutdown — and is
+    // only safe because the stall watchdog, the deadline and the recovery
+    // window do not depend on recognising anything. Report each new name once
+    // so the next protocol drift is visible in the log instead of silent.
+    if (!unknownEventTypes.has(event.type)) {
+      unknownEventTypes.add(event.type);
+      say(`[drive] unhandled event type "${event.type}" (treated as progress)`);
+    }
+    cancelTerminalSettlement();
   }
 });
 
 sock.on('error', (error) => {
   terminalFailure ??= `socket error: ${error.message}`;
-  console.error(`[drive] ${terminalFailure}`);
+  cry(`[drive] ${terminalFailure}`);
 });
 
 sock.on('close', () => {
+  clearTimeout(readyFallback);
+  cancelTerminalSettlement();
+
   if (!shutdownRequested) {
     terminalFailure ??= 'host closed the socket before the driver requested shutdown';
   } else if (!sawExiting) {
     terminalFailure ??= 'host closed without acknowledging graceful shutdown';
   }
-  finish();
+
+  summarise(terminalFailure ? 'failed' : 'clean');
+  if (terminalFailure) {
+    cry(`[drive] failed: ${terminalFailure}`);
+    process.exit(1);
+  }
+  process.exit(0);
 });
