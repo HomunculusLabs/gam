@@ -7744,6 +7744,24 @@ mod spatial_trial_recovery_tests {
             "the spatial κ recovery gate must not mask unrelated invalid inputs"
         );
     }
+
+    #[test]
+    fn spatial_value_probe_classifier_matches_derivative_lane() {
+        let recoverable = EstimationError::InvalidInput(
+            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
+        );
+        let value = classify_spatial_value_probe_failure(recoverable)
+            .expect("a recoverable trial point must remain a domain refusal");
+        assert!(value.is_infinite() && value.is_sign_positive());
+
+        let fatal_message = "outer rho bounds are invalid";
+        let fatal = classify_spatial_value_probe_failure(EstimationError::InvalidInput(
+            fatal_message.to_string(),
+        ))
+        .expect_err("an evaluation-artifact failure must remain typed");
+        assert!(matches!(fatal, EstimationError::InvalidInput(_)));
+        assert!(fatal.to_string().contains(fatal_message));
+    }
 }
 
 fn require_successful_spatial_optimization_result<T>(
