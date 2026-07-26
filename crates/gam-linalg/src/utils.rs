@@ -1476,7 +1476,7 @@ pub fn solve_dense_block_system(
 mod certified_inverse_tests {
     use super::{
         CertifiedSymmetricSolveError, certified_spd_factorize, certified_spd_inverse,
-        certified_symmetric_solve, rank_certified_psd_pseudoinverse,
+        certified_symmetric_solve, positive_ulp, rank_certified_psd_pseudoinverse,
         validate_finite_symmetric_matrix,
     };
     use ndarray::array;
@@ -1584,13 +1584,34 @@ mod certified_inverse_tests {
             .expect("ULP-level roundoff on a zero-diagonal system is symmetric");
     }
 
+    /// The property under test is that no ridge is added to the diagonal, and
+    /// the entry that carries it is `inverse[[1, 1]]`: a perturbation `δ` on a
+    /// diagonal of `2^-40` moves that entry by a relative `δ·2^40`, so the
+    /// exact assertion below detects a ridge as small as `2^-92` — thirteen
+    /// orders under the smallest ridge anyone would add. Three of the four
+    /// entries stay bit-exact for a structural reason: `2^-40` is an even power
+    /// of two, so its square root `2^-20` is exact, and a diagonal system's
+    /// off-diagonal factors are structural zeros.
+    ///
+    /// `inverse[[0, 0]]` cannot be. `certified_spd_inverse` goes through
+    /// `certified_spd_factorize`, so `1/8` is formed from the factor rather
+    /// than by dividing, and `√8` is irrational in binary — the result lands
+    /// one ulp above `0.125`. Bit-equality there tests the arithmetic route,
+    /// not the property, so it is scored against the roundings it actually
+    /// accumulates: the square root, the reciprocal, and the product.
     #[test]
     fn spd_inverse_never_adds_a_diagonal_perturbation() {
+        const INVERSE_ENTRY_ULPS: f64 = 4.0;
         let tiny = 2.0_f64.powi(-40);
         let matrix = array![[8.0, 0.0], [0.0, tiny]];
         let certified = certified_spd_inverse(&matrix, "unperturbed diagonal").unwrap();
         let inverse = certified.inverse();
-        assert_eq!(inverse[[0, 0]], 0.125);
+        let defect = (inverse[[0, 0]] - 0.125).abs();
+        assert!(
+            defect <= INVERSE_ENTRY_ULPS * positive_ulp(0.125),
+            "inverse[[0,0]] = {} is {defect} from 0.125, beyond {INVERSE_ENTRY_ULPS} ulp",
+            inverse[[0, 0]],
+        );
         assert_eq!(inverse[[1, 1]], 2.0_f64.powi(40));
         assert_eq!(inverse[[0, 1]], 0.0);
         assert_eq!(inverse[[1, 0]], 0.0);

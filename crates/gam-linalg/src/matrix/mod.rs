@@ -6207,6 +6207,15 @@ mod tests {
             "dropping the governed owner must release its charge"
         );
 
+        // Snapshot the dense image while the ledger still has room. Below this
+        // point the test holds the entire budget, and `to_dense_arc` is the
+        // infallible accessor whose contract is that the caller has already
+        // established densification is permitted — calling it under a full
+        // ledger is the caller breaking that contract, which it answers with
+        // an abort. The reference has to be taken before the pressure, not
+        // under it.
+        let dense = design.to_dense_arc();
+
         // Exhaust the remaining budget: a fresh (uncached) design must refuse
         // the governed dense route, while the strategy consumer falls back to
         // the streaming CSC path and still produces the exact weighted Gram.
@@ -6223,7 +6232,6 @@ mod tests {
         let weights = array![1.0, -2.0, 0.5];
         let gram = xt_diag_x_symmetric(&DesignMatrix::from(sparse.clone()), &weights)
             .expect("streaming fallback under a full ledger");
-        let dense = pressured.to_dense_arc();
         let mut expected = Array2::<f64>::zeros((2, 2));
         for row in 0..3 {
             for a in 0..2 {

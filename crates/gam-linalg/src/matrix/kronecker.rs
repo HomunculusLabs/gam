@@ -920,7 +920,14 @@ mod tests {
             right,
         )
         .unwrap();
-        let rowwise_dense = rowwise.to_dense();
+        // `RowwiseKroneckerOperator::to_dense` is an unconditional refusal by
+        // design — the type is operator-only, and reaching that method means a
+        // caller bypassed the operator-aware dispatch, which is the bug it
+        // exists to catch rather than something a test should step around.
+        // The supported way to obtain the dense image is the row-chunked path
+        // every legitimate consumer takes, so the reference is built with it.
+        let rowwise_dense = crate::matrix::dense_operator_to_dense_by_chunks(&rowwise)
+            .expect("row-chunked materialization of the rowwise Kronecker operator");
         let expected = rowwise_dense
             .t()
             .dot(&(&rowwise_dense * &weights.view().insert_axis(Axis(1))));
