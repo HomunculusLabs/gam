@@ -320,17 +320,24 @@ pub(crate) fn custom_family_blockwise_edf(
         format!("custom-family edf: exact penalized-Hessian factorization failed: {error}")
     })?;
 
-    let mut edf_by_penalty = vec![0.0_f64; expected_rho];
-    // Raw per-penalty trace tr_kk = λ_kk·tr(H⁻¹S_kk), aligned with edf_by_penalty
-    // (issue #1219), so per-term EDF assembles as |coeff_range| − Σ tr_kk.
-    let mut penalty_trace = vec![0.0_f64; expected_rho];
-    let mut block_edf = Vec::with_capacity(specs.len());
-    let mut total_trace = 0.0_f64;
+    // Raw per-penalty traces and their block ranks, handed to the shared
+    // accounting below. Admission, the non-finite resolution and the
+    // `[mp, p]` floor are stated once in `penalized_edf_bundle` (#2470);
+    // this route previously floored `edf_total` at 0, which permits an
+    // effective dimension below the joint penalty null space.
+    let mut raw_traces = vec![0.0_f64; expected_rho];
+    let mut penalty_ranks = vec![0_usize; expected_rho];
+    // `Σ_k S_k` in the joint layout, whose rank gives the null-space floor.
+    // Unscaled on purpose: the floor is a structural property of the penalty
+    // geometry, exactly as the canonical path reads it off the stacked
+    // penalty root rather than off `λ`.
+    let mut joint_penalty = Array2::<f64>::zeros((p, p));
+    let mut block_spans: Vec<(usize, usize, usize)> = Vec::with_capacity(specs.len());
     let mut penalty_offset = 0usize;
     let mut block_col_start = 0usize;
     for spec in specs.iter() {
         let block_cols = spec.design.ncols();
-        let mut block_edf_acc = block_cols as f64;
+        block_spans.push((penalty_offset, spec.penalties.len(), block_cols));
         for (local_k, penalty) in spec.penalties.iter().enumerate() {
             let global_k = penalty_offset + local_k;
             let lambda = lambdas[global_k];
@@ -377,23 +384,37 @@ pub(crate) fn custom_family_blockwise_edf(
             for d in 0..p {
                 trace += z[[d, d]];
             }
-            let lam_trace = if lambda > 0.0 { lambda * trace } else { 0.0 };
-            total_trace += lam_trace;
-            penalty_trace[global_k] = lam_trace;
-            let penalty_rank = penalty_rank as f64;
-            let edf_k = (penalty_rank - lam_trace).clamp(0.0, penalty_rank);
-            edf_by_penalty[global_k] = edf_k;
-            // The block's edf is the column count minus the total trace this
-            // block's penalties spend (so multiple penalties on one block
-            // compose), clamped to the block's column count.
-            block_edf_acc -= lam_trace;
+            joint_penalty += &s_full;
+            raw_traces[global_k] = if lambda > 0.0 { lambda * trace } else { 0.0 };
+            penalty_ranks[global_k] = penalty_rank;
         }
-        block_edf.push(block_edf_acc.clamp(0.0, block_cols as f64));
         penalty_offset += spec.penalties.len();
         block_col_start += block_cols;
     }
 
-    let edf_total = (p as f64 - total_trace).clamp(0.0, p as f64);
+    let joint_penalty_rank = penalty_matrix_root(&joint_penalty)
+        .map_err(|error| format!("custom-family edf: joint penalty rank failed: {error}"))?
+        .nrows();
+    let bundle = gam_solve::estimate::penalized_edf_bundle(
+        &raw_traces,
+        &penalty_ranks,
+        p,
+        (p - joint_penalty_rank.min(p)) as f64,
+    );
+    let edf_by_penalty = bundle.edf_by_block;
+    let penalty_trace = bundle.penalty_block_trace;
+    // A block's edf is its column count minus the trace its penalties spend, so
+    // multiple penalties on one block compose. It is built from the ADMITTED
+    // traces above, not the raw products, so the block figure and the per-penalty
+    // figures cannot disagree about how much each penalty absorbed.
+    let block_edf: Vec<f64> = block_spans
+        .iter()
+        .map(|&(start, count, block_cols)| {
+            let spent: f64 = penalty_trace[start..start + count].iter().sum();
+            (block_cols as f64 - spent).clamp(0.0, block_cols as f64)
+        })
+        .collect();
+    let edf_total = bundle.edf_total;
     if !edf_total.is_finite()
         || edf_by_penalty.iter().any(|v| !v.is_finite())
         || block_edf.iter().any(|v| !v.is_finite())
