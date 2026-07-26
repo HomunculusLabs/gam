@@ -182,12 +182,94 @@ pub struct AtomTopologyPersistence {
     /// surface H₂ claim (sphere, torus, projective plane, or Klein bottle; the
     /// non-orientable cases use the same F2 coefficient field as the reducer).
     pub h2: Vec<PersistenceBar>,
+    /// Whether the Betti readout is admissible as a manifold measurement. When
+    /// this is not [`TopologyResolution::Resolved`] the Betti fields are
+    /// telemetry only and `contested` is forced false — a coarse cover is not
+    /// evidence against the raced type.
+    pub resolution: TopologyResolution,
     /// The certificate flag: the measured topology disagrees with the raced
     /// type's expected Betti signature. Fed to the probe planner.
+    ///
+    /// Only ever set under [`TopologyResolution::Resolved`]. The two carry
+    /// OPPOSITE remedies — a contested resolved verdict means the atom's raced
+    /// type is wrong, an unresolved one means the SAMPLE is too coarse and says
+    /// nothing about the type — so they must not share a field (#2465).
     pub contested: bool,
     /// Human-readable summary.
     pub note: String,
 }
+
+/// Whether a measured Betti signature is a statement about the MANIFOLD or only
+/// about the complex built from one particular cover.
+///
+/// Vietoris–Rips homology agrees with the underlying manifold's only when the
+/// sample is dense enough relative to the manifold's REACH. The reach is not
+/// observable from a point cloud, so this does not estimate it and introduces no
+/// threshold: it tests the property that the density condition exists to
+/// guarantee — that the answer does not depend on the sampling. `b₁` is read a
+/// second time on a strictly coarser farthest-point cover of the *same*
+/// construction, and the readout is admissible only when the two agree.
+///
+/// Measured (#2552): a flat Clifford torus reads `b₁ = 2` at 10×8, 12×10 and
+/// 16×14 — stable, and correct. The same code reads `13` and `17` on an
+/// *embedded* torus at 12×10 and 16×14, and `0` on a 4×4 Clifford torus. Those
+/// are not counting errors: at 16×14 fifteen bars are alive across the same
+/// scale range as the two genuine generators, so the complex really does have
+/// `b₁ = 17` there. Comparing that against a manifold's predicted `2` is
+/// comparing two different objects.
+///
+/// ⚠ The tempting cheaper test — "the reported classes are exactly coincident,
+/// therefore they are congruent grid cells rather than generators" — is FALSE,
+/// and #2159 already fell into its mirror image. A SQUARE Clifford torus is
+/// born-degenerate: its two genuinely independent generators appear at identical
+/// filtration values by symmetry. Coincidence cannot separate congruent noise
+/// from symmetric signal. Stability can, because a symmetry survives coarsening
+/// while a cell count does not. Do not replace this with a coincidence check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologyResolution {
+    /// `b₁` is unchanged on the coarser cover, so the readout is a property of
+    /// the sampled manifold and may be compared against the raced prediction.
+    Resolved,
+    /// `b₁` moved when the cover was coarsened. The number describes THIS
+    /// complex and carries no information about the manifold.
+    UnstableUnderCoarsening {
+        coarse_landmarks: usize,
+        coarse_b1: usize,
+    },
+    /// The cover cannot be coarsened and still resolve H₁ at all (the halved
+    /// cover holds fewer than the four points a loop needs), so stability is not
+    /// establishable either way.
+    NotCoarsenable { coarse_landmarks: usize },
+    /// The diagram HAD H₁ bars but not one of them outlived the cover's own
+    /// sampling resolution, so `spacing_floor_bar_count` returned its essential
+    /// fallback. That is a default, not a reading.
+    ///
+    /// Distinct from a legitimate zero: a sphere or an arc produces **no H₁ bars
+    /// at all**, which genuinely measures "no loop". A 4×4 Clifford torus
+    /// produces seventeen bars of identical persistence and no verdict about any
+    /// of them (#2552) — and being stably wrong under coarsening, it would
+    /// otherwise pass the stability test.
+    UnderSampled { finite_bars: usize },
+}
+
+impl TopologyResolution {
+    /// True only when the Betti readout is licensed to be compared against a
+    /// raced type's prediction.
+    pub fn is_resolved(self) -> bool {
+        matches!(self, Self::Resolved)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::UnstableUnderCoarsening { .. } => "unstable_under_coarsening",
+            Self::NotCoarsenable { .. } => "not_coarsenable",
+            Self::UnderSampled { .. } => "under_sampled",
+        }
+    }
+}
+
+
 
 /// Aggregate certificate adapter for the unified certificate ledger.
 ///
@@ -844,7 +926,10 @@ fn dominant_persistence(bars: &[PersistenceBar]) -> f64 {
 /// spacing scale to the hole scale and own the widest plateau, so both survive the
 /// symmetry degeneracy and are counted (→ 2). The sphere's transient loops die
 /// within the spacing (→ 0) and a circle keeps its single generator (→ 1).
-fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> usize {
+/// Returns `(count, fell_back)`. `fell_back` is true when the diagram had bars
+/// but none survived the covering-scale floor, so the returned count is the
+/// essential-bar default rather than a reading of the filtration (#2552).
+fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> (usize, bool) {
     let essential = bars.iter().filter(|b| b.is_essential()).count();
     // Covering-scale floor: the median nearest-neighbour distance of the landmark
     // cover. A cycle that persists past this outlives the sampling resolution and
@@ -866,7 +951,7 @@ fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> 
         }
     }
     if nn.is_empty() {
-        return essential;
+        return (essential, !bars.is_empty());
     }
     nn.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let spacing = nn[nn.len() / 2];
@@ -881,7 +966,7 @@ fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> 
         })
         .collect();
     if finite.is_empty() {
-        return essential;
+        return (essential, !bars.is_empty());
     }
 
     // Read β₁ on the widest log-scale plateau. The count of bars alive at a scale
@@ -918,7 +1003,7 @@ fn spacing_floor_bar_count(bars: &[PersistenceBar], distances: &Array2<f64>) -> 
             best = count;
         }
     }
-    essential + best
+    (essential + best, false)
 }
 
 fn shell_plateau_bar_count(bars: &[PersistenceBar]) -> usize {
@@ -1043,6 +1128,9 @@ fn topology_persistence_verdict_impl(
 
     let (support_mass, effective_n, support_ess) = support_summary(weights, full);
 
+    let (full_b1, full_b1_fell_back) =
+        spacing_floor_bar_count(&h1_diagram.h1, &h1_distances);
+
     let finite_h0: Vec<PersistenceBar> = h1_diagram
         .h0
         .iter()
@@ -1053,7 +1141,7 @@ fn topology_persistence_verdict_impl(
 
     let measured_betti = BettiSignature {
         b0: n_components,
-        b1: spacing_floor_bar_count(&h1_diagram.h1, &h1_distances),
+        b1: full_b1,
         b2: expected_betti.b2.map(|expected_h2| {
             let counted = shell_plateau_bar_count(&h2);
             if expected_h2 == 0 && counted == 0 {
@@ -1065,7 +1153,58 @@ fn topology_persistence_verdict_impl(
     };
     let dominant_h1_persistence = dominant_persistence(&h1_diagram.h1);
     let dominant_h2_persistence = dominant_persistence(&h2);
-    let contested = !measured_betti.matches_expected(expected_betti);
+
+    // ── Admissibility: is `b₁` a fact about the manifold or about this cover? ──
+    //
+    // Re-read `b₁` on a strictly coarser farthest-point cover of the SAME
+    // construction and require the two to agree. Halving the landmark budget is
+    // the coarsening choice: it is the largest step that still leaves a cover of
+    // the same family (so nothing about the estimator changes but its
+    // resolution), and it introduces no tunable — any strict coarsening tests the
+    // same property, and a smaller step only makes the test weaker. The FPS
+    // subsample is recomputed rather than truncated: greedy farthest-point
+    // *happens* to make a prefix a valid coarser cover, but relying on that would
+    // silently break if the subsample routine ever reorders its output.
+    //
+    // The four-point floor is the same one the early return uses: a triangle plus
+    // one point is the minimum that can kill a loop, so a halved cover below it
+    // cannot resolve H₁ at all and stability is not establishable either way.
+    let coarse_budget = h1_landmarks.len() / 2;
+    let resolution = if full_b1_fell_back {
+        // The count is `spacing_floor_bar_count`'s default, not a reading, so
+        // stability under coarsening would only confirm that two equally
+        // uninformative covers agree.
+        TopologyResolution::UnderSampled {
+            finite_bars: h1_diagram.h1.len(),
+        }
+    } else if coarse_budget < 4 {
+        TopologyResolution::NotCoarsenable {
+            coarse_landmarks: coarse_budget,
+        }
+    } else {
+        let coarse_landmarks =
+            farthest_point_subsample_weighted(points, weights, coarse_budget);
+        let coarse_sub = points.select(ndarray::Axis(0), &coarse_landmarks);
+        let coarse_weights = fold_mass_to_landmarks(points, weights, &coarse_landmarks);
+        let coarse_diagram =
+            dtm_vietoris_rips_persistence(coarse_sub.view(), Some(coarse_weights.view()), 1);
+        let coarse_distances =
+            dtm_weighted_distances(coarse_sub.view(), Some(coarse_weights.view()));
+        let (coarse_b1, _) = spacing_floor_bar_count(&coarse_diagram.h1, &coarse_distances);
+        if coarse_b1 == measured_betti.b1 {
+            TopologyResolution::Resolved
+        } else {
+            TopologyResolution::UnstableUnderCoarsening {
+                coarse_landmarks: coarse_landmarks.len(),
+                coarse_b1,
+            }
+        }
+    };
+
+    // A verdict against the raced type is only meaningful on an admissible
+    // readout; on an inadmissible one the Betti numbers describe the complex.
+    let contested =
+        resolution.is_resolved() && !measured_betti.matches_expected(expected_betti);
 
     let note = if contested {
         let mut reasons = Vec::new();
@@ -1090,10 +1229,20 @@ fn topology_persistence_verdict_impl(
             }
         }
         format!("CONTESTED topology: {}", reasons.join("; "))
-    } else {
+    } else if let TopologyResolution::Resolved = resolution {
         format!(
             "topology agrees: measured Betti {:?} matches raced Betti {:?}",
             measured_betti, expected_betti
+        )
+    } else {
+        format!(
+            "topology UNRESOLVED at this cover ({}): measured Betti {:?} describes the \
+             Vietoris-Rips complex of {} landmarks, not the manifold, so it is not \
+             evidence for or against the raced Betti {:?}",
+            resolution.as_str(),
+            measured_betti,
+            h1_landmarks.len(),
+            expected_betti
         )
     };
     let stability_band = if full > PERSISTENCE_MAX_POINTS {
@@ -1124,6 +1273,7 @@ fn topology_persistence_verdict_impl(
         h0: h1_diagram.h0,
         h1: h1_diagram.h1,
         h2,
+        resolution,
         contested,
         note,
     })
@@ -1457,8 +1607,9 @@ mod tests {
         let distances = dtm_weighted_distances(sub.view(), Some(weights.view()));
         assert_eq!(
             spacing_floor_bar_count(&diagram.h1, &distances),
-            2,
-            "an asymmetric torus still has two independent loops"
+            (2, false),
+            "an asymmetric torus still has two independent loops, read from the \
+             filtration rather than from the essential fallback"
         );
     }
 
