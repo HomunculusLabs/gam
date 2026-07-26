@@ -152,12 +152,15 @@ jobs:
           # stranded in a parallel lineage nobody inherits. connectome-host
           # reads the global file at $DATA_DIR/lessons.json
           # (index.ts:186 -> storePath/../.. with storePath={dataDir}/sessions/{id}).
-          shards=$(git ls-remote origin 'refs/agent-memory/lessons/*' 2>/dev/null | awk '{print $2}' | sort | tail -300)
+          # One wildcard refspec fetches the whole namespace. (A per-ref list
+          # built with `printf '+%s:%s\n' $a $a` is WRONG -- printf cycles its
+          # format across every argument, so it pairs ref1 with ref2 and emits
+          # a malformed refspec whose failure the redirect would hide, leaving
+          # the union silently empty.)
+          git fetch --quiet origin '+refs/agent-memory/lessons/*:refs/agent-memory/lessons/*' 2>/dev/null || true
+          shards=$(git for-each-ref --format='%(refname)' 'refs/agent-memory/lessons/*' 2>/dev/null | sort -t/ -k4 -rn | head -300)
           if [ -n "$shards" ]; then
-            n=$(printf '%s\n' "$shards" | wc -l | tr -d ' ')
-            echo "fetching $n lesson shard(s)"
-            # shellcheck disable=SC2086
-            git fetch --quiet origin $(printf '+%s:%s\n' $shards $shards | paste -sd' ' -) 2>/dev/null || true
+            echo "unioning $(printf '%s\n' "$shards" | wc -l | tr -d ' ') lesson shard(s)"
             tmp=$(mktemp -d)
             i=0
             for r in $shards; do
