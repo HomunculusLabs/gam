@@ -306,6 +306,7 @@ pub fn build_term_collection_design_inner_with_policy(
                 effective_rank: 1,
                 normalization_scale: 1.0,
                 kronecker_factors: None,
+                structural_null_frame: None,
             },
         });
     }
@@ -327,6 +328,7 @@ pub fn build_term_collection_design_inner_with_policy(
                 effective_rank: block_size,
                 normalization_scale: 1.0,
                 kronecker_factors: None,
+                structural_null_frame: None,
             },
         });
     }
@@ -1239,6 +1241,20 @@ fn apply_global_smooth_identifiability(
                     penalty.matrix.clone(),
                     "global smooth source penalty",
                 )?;
+                // Re-attach the structural null frame the basis factory
+                // declared (#2445): `try_from_dense_psd` sees only the dense
+                // matrix, and the declaration must survive this chokepoint so
+                // the double-penalty rebuild below decides topology from the
+                // carried theorem, not from a rank test on a matrix carrying
+                // the Duchon conditioning ridge. `.restricted` transports it
+                // through the global gauge.
+                let raw = match penalty.info.structural_null_frame.as_ref() {
+                    Some(frame) => raw.with_structural_null_frame(
+                        frame.clone(),
+                        "global smooth source penalty structural frame",
+                    )?,
+                    None => raw,
+                };
                 let restricted = if let Some(gauge) = coefficient_gauge.as_ref() {
                     raw.restricted(gauge, "global smooth identifiability restriction")?
                 } else {
@@ -1344,6 +1360,18 @@ fn apply_global_smooth_identifiability(
                     s_full.factor().slice(s![.., *plo..*phi]).to_owned(),
                     "owned global smooth primary block",
                 )?;
+                // The support-block extraction rebuilds the quadratic from a
+                // sliced factor, so re-attach the declared structural frame
+                // restricted to the same block (it is `None` when the frame
+                // has support outside the block, and the rebuild then falls
+                // back to measuring — never guesses).
+                let block = match s_full.structural_null_frame_block(*plo, *phi) {
+                    Some(frame) => block.with_structural_null_frame(
+                        frame,
+                        "owned global smooth primary block structural frame",
+                    )?,
+                    None => block,
+                };
                 let ridge_full = candidate.matrix.scaled(
                     candidate.normalization_scale,
                     "physical global smooth null ridge",

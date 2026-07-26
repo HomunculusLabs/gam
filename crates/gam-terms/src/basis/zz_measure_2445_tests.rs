@@ -1,20 +1,23 @@
-//! Measurement probe for #2445 / #2444 — is the `DoublePenaltyNullspace` FD
-//! residue exactly the motion of the rebuild's rank-test frame?
+//! Measurement probe for #2445 / #2444 — the `DoublePenaltyNullspace` rebuild
+//! frame, before and after the structural-frame fix.
 //!
-//! Not a gate. It prints, and it asserts only the ONE quantitative prediction
-//! the root-cause model makes, so a wrong model fails here instead of surviving
-//! into the fix.
+//! PRE-FIX MODEL (confirmed to every printed digit before the fix landed):
+//! `rebuild_metric_consistent_ridge` built `R = N (NᵀR_cN) Nᵀ` with
+//! `N = null(S_c)` from a numerical rank test; `dim N = 1` here, so the
+//! shipped block was exactly `u uᵀ` and its whole FD residue
+//! (`fd_norm = 2.3142e-6`) was the frame motion `√2‖u′‖` — the `√ε` affine
+//! conditioning ridge tilting `null(S_c)` as ψ moves (measured principal
+//! angle `3.2728e-10` at `ε = 1e-4`, agreeing with the prediction from
+//! `fd_norm` to every digit).
 //!
-//! The model: `rebuild_metric_consistent_ridge` builds `R = N (NᵀR_cN) Nᵀ` with
-//! `N = null(S_c)` from a numerical rank test. In this fixture `dim N = 1`, so
-//! after Frobenius normalization the shipped block is exactly `u uᵀ` — the
-//! scalar metric `NᵀR_cN` cancels. Hence
-//!
-//!   `‖d/dψ (u uᵀ)‖_F = √2 ‖u′‖`   (u′ ⊥ u since ‖u‖ = 1)
-//!
-//! and the observed `fd_norm = 2.3142e-6` predicts `‖u′‖ = 1.6364e-6`, i.e. the
-//! angle between `u(+ε)` and `u(−ε)` at `ε = 1e-4` must be `2ε‖u′‖ = 3.27e-10`.
-//! That number is not tunable: it is fixed by the failing test's own output.
+//! POST-FIX PINS (what this probe now gates):
+//!  1. the rank-test frame STILL moves with ψ — that motion is why a rank
+//!     test may not decide topology, and it is printed, not asserted;
+//!  2. the SHIPPED trend ridge no longer moves: its central FD across ±ε is
+//!     rebuild roundoff, orders below the pre-fix 2.3e-6;
+//!  3. the shipped ridge's range is the STRUCTURAL frame
+//!     `{γ : Tγ ∈ span(poly block)} = null(T[..kernel_cols, :])`, which is
+//!     ψ-invariant under the frozen chart by construction.
 
 use ndarray::{Array2, ArrayView2, s};
 
@@ -158,32 +161,25 @@ fn zz_measure_2445_rank_test_frame_moves_with_psi() {
     let fd_norm = fd.iter().map(|v| v * v).sum::<f64>().sqrt();
     eprintln!(
         "[2445] principal angle between null(S_c)(-eps) and null(S_c)(+eps) = {angle:.6e}\n\
-         [2445] fd_norm(rebuilt trend ridge) = {fd_norm:.6e}\n\
-         [2445] predicted angle from fd_norm (dim-1 frame) = {:.6e}",
-        2.0 * eps * fd_norm / std::f64::consts::SQRT_2
+         [2445] fd_norm(shipped trend ridge) = {fd_norm:.6e}\n\
+         [2445] pre-fix fd_norm was 2.3142e-6 (= the frame motion, #2444)",
     );
 
-    assert_eq!(
-        frames[1].ncols(),
-        1,
-        "fixture is expected to have a 1-D rank-test null space"
-    );
-    // With `dim N = 1` the normalization makes the shipped block exactly `uuᵀ`.
-    // Confirm that before reading anything into the frame motion.
-    for (index, (frame, ridge)) in frames.iter().zip(ridges.iter()).enumerate() {
-        let outer = frame.dot(&frame.t());
-        let gap = (&outer - ridge).iter().map(|v| v * v).sum::<f64>().sqrt();
-        eprintln!("[2445] ‖ridge - u uᵀ‖_F at sample {index} = {gap:.6e}");
-    }
-    let predicted = 2.0 * eps * fd_norm / std::f64::consts::SQRT_2;
+    // Pin 2 — the SHIPPED block is ψ-invariant under the frozen chart: its
+    // central FD is rebuild roundoff (≈1e-14/entry eigendecomposition noise
+    // divided by 2ε), not the 2.3e-6 frame motion. Same floor derivation as
+    // the `_frozen`/`_linear` gates.
+    let entries = ridges[1].len() as f64;
+    let fd_roundoff_floor = 1e2 * 1e-14 * entries.sqrt() / (2.0 * eps);
     assert!(
-        (angle - predicted).abs() <= 0.05 * predicted.max(1e-14),
-        "the FD residue must BE the frame motion: angle={angle:.6e} predicted={predicted:.6e}"
+        fd_norm <= fd_roundoff_floor,
+        "shipped trend ridge must not move with ψ under a frozen chart: \
+         fd_norm={fd_norm:.6e} floor={fd_roundoff_floor:.6e}"
     );
 
-    // The structural transport: `N_c = {γ : Tγ ∈ span(polynomial block)}`,
-    // i.e. the null space of the kernel-block rows of the chart. Frozen chart
-    // and a κ-free polynomial block, so this cannot move with ψ.
+    // Pin 3 — the shipped ridge's range is the STRUCTURAL frame. With a 1-D
+    // frame the normalized block is exactly `u uᵀ`, so compare `u` (leading
+    // eigenvector of the shipped block) against the structural transport.
     if let Some(t) = transform.as_ref() {
         let kernel_rows_t = t.slice(s![..kernel_cols, ..]).t().to_owned();
         let (structural, rank) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(&kernel_rows_t, 1.0)
@@ -195,7 +191,78 @@ fn zz_measure_2445_rank_test_frame_moves_with_psi() {
         );
         let overlap = frame_sin_angle(&structural, &frames[1]);
         eprintln!(
-            "[2445] angle(structural frame, rank-test frame at psi=0) = {overlap:.6e}"
+            "[2445] angle(structural frame, rank-test frame at psi=0) = {overlap:.6e} \
+             (pre-fix: 4.32e-6 — the conditioning-ridge tilt)"
         );
+        if structural.ncols() == 1 {
+            let u = structural.column(0);
+            let ru = ridges[1].dot(&u);
+            let ru_norm = ru.iter().map(|v| v * v).sum::<f64>().sqrt();
+            // `R = u uᵀ` on the structural direction ⇒ `‖R u‖ = 1` after unit
+            // Frobenius normalization; a residual off `span(u)` means the
+            // shipped range is NOT the structural frame.
+            let residual = &ru - &(u.to_owned() * ru.dot(&u));
+            let off = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+            eprintln!(
+                "[2445] shipped-ridge action on structural u: ‖Ru‖={ru_norm:.6e} \
+                 off-span residual={off:.6e}"
+            );
+            assert!(
+                off <= 1e-8 * ru_norm.max(1e-12),
+                "shipped trend ridge range must be the structural frame: \
+                 off-span residual {off:.3e} vs ‖Ru‖ {ru_norm:.3e}"
+            );
+        }
     }
+}
+
+/// #2445 symptom 2 — the double-penalty TOPOLOGY must not depend on the
+/// kernel Gram's conditioning. Under one frozen chart, sweep κ across five
+/// octaves: the trend ridge must be emitted, nonzero, and retained by the
+/// candidate filter in EVERY arm, and the emitted penalty count must be
+/// κ-invariant (this is also what #2433's per-κ-trial guard needs: a topology
+/// that can flip with κ is a latent hard refusal on every trial move).
+#[test]
+fn duchon_trend_ridge_topology_is_kappa_invariant_2445() {
+    let (_, spec) = frozen_fixture();
+    let centers = match &spec.center_strategy {
+        CenterStrategy::UserProvided(c) => c.clone(),
+        _ => unreachable!("fixture freezes the centers"),
+    };
+    let (z, transform, _, _) = frozen_chart_transforms(centers.view(), &spec);
+    let mut counts = Vec::new();
+    for octave in 0..6 {
+        let length_scale = f64::from(1u32 << octave);
+        let candidates = duchon_native_penalty_candidates(
+            centers.view(),
+            Some(length_scale),
+            spec.power,
+            duchon_effective_nullspace_order(centers.view(), spec.nullspace_order),
+            None,
+            &z,
+            transform.as_ref(),
+        )
+        .expect("native penalty candidates");
+        let filtered =
+            filter_penalty_candidates(candidates).expect("filter penalty candidates");
+        let trend_retained = filtered
+            .active
+            .iter()
+            .any(|penalty| matches!(penalty.info.source, PenaltySource::DoublePenaltyNullspace));
+        eprintln!(
+            "[2445-topology] length_scale={length_scale}: active={} trend_retained={trend_retained}",
+            filtered.active.len(),
+        );
+        assert!(
+            trend_retained,
+            "trend ridge must be emitted at length_scale={length_scale}: \
+             the null space of a curvature seminorm is a theorem, not a \
+             property of the Gram's conditioning"
+        );
+        counts.push(filtered.active.len());
+    }
+    assert!(
+        counts.windows(2).all(|pair| pair[0] == pair[1]),
+        "emitted penalty topology must be κ-invariant under a frozen chart, got {counts:?}"
+    );
 }

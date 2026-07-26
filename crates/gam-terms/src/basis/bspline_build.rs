@@ -1880,6 +1880,7 @@ pub fn filter_penalty_candidates(
             kronecker_factors,
             op,
         } = candidate;
+        let structural_null_frame = matrix.structural_null_frame().cloned();
         let analysis = analyze_penalty_block_with_op(&matrix, op)?;
         let dropped_reason = if analysis.rank == 0 {
             Some(if analysis.iszero {
@@ -1927,6 +1928,7 @@ pub fn filter_penalty_candidates(
                     effective_rank: analysis.rank,
                     normalization_scale,
                     kronecker_factors,
+                    structural_null_frame,
                 },
             });
         }
@@ -3040,8 +3042,28 @@ pub(crate) fn rebuild_metric_consistent_ridge(
     if primary_constrained.nrows() == 0 {
         return Ok(None);
     }
-    let Some(n) = constructive_nullspace_basis(primary_constrained)? else {
-        return Ok(None);
+    // A DECLARED structural null frame overrides the rank test (#2445): the
+    // null space of a curvature seminorm is a theorem (Duchon's polynomial
+    // block), and the shipped primary deliberately contains a `√ε`-relative
+    // conditioning ridge on exactly those directions (gam#880/#1816), so a
+    // rank test on the shipped matrix decides the double-penalty TOPOLOGY by
+    // the Gram's conditioning — and its frame rotates with ψ, which is the
+    // whole of the #2444 FD residue. The declaration is transported through
+    // every chart by `ConstructiveQuadratic::restricted`, so consuming it
+    // here keeps `P` ψ-invariant and the emitted topology structural.
+    let n = match primary_constrained.structural_null_frame() {
+        Some(frame) => {
+            if frame.ncols() == 0 {
+                return Ok(None);
+            }
+            frame.to_owned()
+        }
+        None => {
+            let Some(n) = constructive_nullspace_basis(primary_constrained)? else {
+                return Ok(None);
+            };
+            n
+        }
     };
     let w = ridge_constrained.dense().dot(&n);
     Ok(Some(constructive_ridge_from_null_metric_action(

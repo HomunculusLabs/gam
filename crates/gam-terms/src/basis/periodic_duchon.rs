@@ -1723,6 +1723,54 @@ fn reject_nonpsd_then_clamp_noise(matrix: &Array2<f64>) -> Result<Array2<f64>, B
     Ok(project_penalty_to_psd_cone(&sym))
 }
 
+/// The STRUCTURAL null frame of the Duchon curvature seminorm, in the chart
+/// the emitted penalties live in (#2445).
+///
+/// The seminorm annihilates every polynomial-block direction — a theorem of
+/// the RKHS construction, not a property of the shipped matrix, which
+/// deliberately carries a `√ε`-relative conditioning ridge on the affine
+/// slope columns (gam#880/#1816). In the raw `(kernel | poly)` frame the null
+/// space is therefore exactly the `poly_cols` trailing coordinate axes. Under
+/// an outer identifiability transform `T` it becomes
+/// `{γ : Tγ ∈ span(poly axes)} = null(T[..kernel_cols, :])` — the null space
+/// of the KERNEL-block rows of the chart, a rank decision on an orthonormal
+/// matrix whose gaps are principal-angle-sized, never the Gram's conditioning.
+///
+/// The full polynomial block (constant AND slopes) is what must be carried:
+/// intersecting the chart with the trend (slope-only) subspace is generically
+/// `{0}`, while the chart itself is what removes the constant when an
+/// intercept constraint is present.
+pub(crate) fn duchon_structural_trend_null_frame(
+    kernel_cols: usize,
+    total_cols: usize,
+    outer_identifiability: Option<&Array2<f64>>,
+) -> Result<Array2<f64>, BasisError> {
+    let poly_cols = total_cols.saturating_sub(kernel_cols);
+    match outer_identifiability {
+        None => {
+            let mut frame = Array2::<f64>::zeros((total_cols, poly_cols));
+            for column in 0..poly_cols {
+                frame[[kernel_cols + column, column]] = 1.0;
+            }
+            Ok(frame)
+        }
+        Some(transform) => {
+            if transform.nrows() != total_cols {
+                crate::bail_dim_basis!(
+                    "Duchon structural null frame: identifiability transform has {} rows \
+                     but the pre-identifiability frame has {total_cols} columns",
+                    transform.nrows()
+                );
+            }
+            let kernel_rows_t = transform.slice(s![..kernel_cols, ..]).t().to_owned();
+            let (frame, _rank) =
+                gam_linalg::faer_ndarray::rrqr_nullspace_basis(&kernel_rows_t, 1.0)
+                    .map_err(BasisError::LinalgError)?;
+            Ok(frame)
+        }
+    }
+}
+
 pub(crate) fn duchon_native_penalty_candidates(
     centers: ArrayView2<'_, f64>,
     length_scale: Option<f64>,
@@ -1842,10 +1890,20 @@ pub(crate) fn duchon_native_penalty_candidates(
         None
     };
     let mut out = Vec::new();
-    out.push(normalize_penalty_candidate(
-        primary,
-        PenaltySource::Primary,
-    )?);
+    let mut primary_candidate = normalize_penalty_candidate(primary, PenaltySource::Primary)?;
+    // Declare the seminorm's structural null frame on the shipped Primary
+    // (#2445): the polynomial block is null by theorem, and the `√ε` affine
+    // conditioning ridge deliberately present in the matrix must not be able
+    // to move that decision. The frame is what the metric-consistent
+    // double-penalty rebuild consumes instead of a rank test, both in the
+    // frozen-chart replay below and at the term-collection chokepoint.
+    let structural_frame =
+        duchon_structural_trend_null_frame(n_kernel, n_pre, outer_identifiability)?;
+    primary_candidate.matrix = primary_candidate.matrix.with_structural_null_frame(
+        structural_frame,
+        "Duchon primary structural null declaration",
+    )?;
+    out.push(primary_candidate);
     if let Some(shrink) = shrink {
         out.push(normalize_penalty_candidate(
             shrink,

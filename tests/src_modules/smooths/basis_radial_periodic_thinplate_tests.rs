@@ -7225,11 +7225,22 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_frozen() {
         let a_norm = analytic.iter().map(|v| v * v).sum::<f64>().sqrt();
         let fd_norm = fd.iter().map(|v| v * v).sum::<f64>().sqrt();
         let scale = a_norm.max(fd_norm).max(1e-12);
+        // Absolute floor beside the relative gate (#2444/#2445): a
+        // structurally ψ-invariant block (the trend ridge on the carried
+        // structural frame) has analytic derivative EXACTLY zero, and its FD
+        // is the rebuild's eigendecomposition roundoff (≈1e-14 per entry,
+        // measured in the #2444 step sweep) divided by 2ε. A relative-only
+        // gate divides that roundoff by itself and reports rel=1 for any
+        // legitimately-zero derivative. The floor is 100× the roundoff FD
+        // and sits four orders under the 2.3e-6 frame-motion defect this
+        // gate exists to catch.
+        let entries = plus.active_penalties[idx].matrix.len() as f64;
+        let fd_roundoff_floor = 1e2 * 1e-14 * entries.sqrt() / (2.0 * eps);
         assert!(
-            err / scale < 1e-3,
+            err <= fd_roundoff_floor || err / scale < 1e-3,
             "[duchon_d1_p1_frozen] penalty {idx} mismatch: \
                  analytic_norm={a_norm:.4e} fd_norm={fd_norm:.4e} err={err:.4e} \
-                 rel_err={:.4e}",
+                 rel_err={:.4e} floor={fd_roundoff_floor:.4e}",
             err / scale,
         );
     }
@@ -7356,10 +7367,16 @@ fn test_duchon_log_kappa_derivative_matchesfd_dim1_power1_linear() {
         let a_norm = analytic.iter().map(|v| v * v).sum::<f64>().sqrt();
         let fd_norm = fd.iter().map(|v| v * v).sum::<f64>().sqrt();
         let rel = err / a_norm.max(fd_norm).max(1e-12);
+        // Absolute floor beside the relative gate — same derivation as the
+        // `_frozen` variant above (#2444/#2445): exactly-zero derivatives of
+        // the structurally rebuilt trend ridge must be expressible.
+        let entries = plus.active_penalties[idx].matrix.len() as f64;
+        let fd_roundoff_floor = 1e2 * 1e-14 * entries.sqrt() / (2.0 * eps);
         assert!(
-            rel < 1e-3,
+            err <= fd_roundoff_floor || rel < 1e-3,
             "[duchon_d1_p1_linear] penalty {} ({:?}) log-κ derivative mismatch: \
-             analytic_norm={a_norm:.4e} fd_norm={fd_norm:.4e} err={err:.4e} rel={rel:.4e}",
+             analytic_norm={a_norm:.4e} fd_norm={fd_norm:.4e} err={err:.4e} rel={rel:.4e} \
+             floor={fd_roundoff_floor:.4e}",
             idx,
             plus.active_penalties[idx].info.source,
         );

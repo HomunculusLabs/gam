@@ -2329,6 +2329,7 @@ mod joint_unpenalized_dim_tests {
                 effective_rank,
                 normalization_scale: 1.0,
                 kronecker_factors: None,
+                structural_null_frame: None,
             },
         }
     }

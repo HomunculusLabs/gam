@@ -2344,9 +2344,38 @@ pub fn build_duchon_native_penalty_psi_derivatives(
         &gram_psi,
         &gram_psi_psi,
     )?;
-    let mut trend_value = project_penalty_matrix(&trend_jet.value, identifiability_transform);
-    let mut trend_first = project_penalty_matrix(&trend_jet.first_a, identifiability_transform);
-    let mut trend_second = project_penalty_matrix(&trend_jet.mixed, identifiability_transform);
+    // Mirror the value path's STRUCTURAL metric-consistent rebuild (#2445):
+    // the shipped trend block is `F (Fᵀ R_c F) Fᵀ` with `F` the structural
+    // null frame carried by the Primary — a ψ-INVARIANT frame, so the jet of
+    // the shipped block is the same sandwich applied to the jet of `R_c`,
+    // with no frame-motion terms. (Before #2445 the value path rebuilt onto
+    // `null(S_c)` from a rank test; that frame rotates with ψ at the scale of
+    // the affine conditioning ridge, and the un-mirrored rotation was the
+    // whole 2.3e-6 FD residue of #2444.) With no outer chart the projected
+    // jet already lives in `span(F)`, so the sandwich is exactly the
+    // identity there and only the charted path moves.
+    let structural_frame = duchon_structural_trend_null_frame(
+        kernel_cols,
+        total_cols,
+        identifiability_transform,
+    )?;
+    let structural_sandwich = |x: &Array2<f64>| -> Array2<f64> {
+        if structural_frame.ncols() == 0 {
+            return Array2::<f64>::zeros(x.raw_dim());
+        }
+        let middle = structural_frame.t().dot(x).dot(&structural_frame);
+        symmetrize(&structural_frame.dot(&middle).dot(&structural_frame.t()))
+    };
+    let mut trend_value =
+        structural_sandwich(&project_penalty_matrix(&trend_jet.value, identifiability_transform));
+    let mut trend_first = structural_sandwich(&project_penalty_matrix(
+        &trend_jet.first_a,
+        identifiability_transform,
+    ));
+    let mut trend_second = structural_sandwich(&project_penalty_matrix(
+        &trend_jet.mixed,
+        identifiability_transform,
+    ));
     // Put the jet on a unit working scale before normalizing it.
     //
     // The value path decides "is there a penalty here?" from the block's RANK
