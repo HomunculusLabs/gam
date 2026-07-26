@@ -18,6 +18,18 @@ const DATA_DIR = process.env.DATA_DIR || './data';
 const SOCKET = process.env.IPC_SOCKET || join(DATA_DIR, 'ipc.sock');
 const READY_TIMEOUT_MS = Number(process.env.READY_TIMEOUT_MS || 180_000);
 const IDLE_SETTLE_MS = Number(process.env.IDLE_SETTLE_MS || 5_000);
+// Once inference has failed, the host gets a bounded window to produce a real
+// completion before the run is declared unable to proceed. Unbounded, a host
+// that answers a failure with a retry that never terminates leaves no armed
+// timer at all: the retry's `inference:started` cancels the terminal
+// settlement and nothing re-arms it, because `inference:started` is not itself
+// a terminal candidate. Runs 30188621552 and 30189939720 each sat in exactly
+// that state for ~5 h until the 360-minute job timeout, and a timed-out job
+// reports `cancelled` — indistinguishable from "still running".
+const RECOVERY_TIMEOUT_MS = Number(process.env.RECOVERY_TIMEOUT_MS || 600_000);
+// A graceful shutdown asks the host to close the socket. A host that is already
+// wedged cannot honour it, so the request itself needs a deadline.
+const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS || 30_000);
 const RUN_ID = process.env.GITHUB_RUN_ID || 'unknown';
 const RUN_MARKER = process.env.RUN_MARKER;
 const HOST_PID = Number(process.env.CONNECTOME_HOST_PID);
@@ -73,6 +85,8 @@ let shutdownRequested = false;
 let terminalFailure = null;
 let lastInferenceFailure = null;
 let terminalSettleTimer = null;
+let recoveryTimer = null;
+let shutdownGraceTimer = null;
 
 const send = (message) => {
   if (!sock.writable) {
@@ -89,16 +103,63 @@ const cancelTerminalSettlement = () => {
   }
 };
 
+const clearRecovery = () => {
+  if (recoveryTimer !== null) {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+  }
+};
+
+// Report what the run reached and leave. Used both when the host closes the
+// socket and when it stops answering, so neither path can outlive the job.
+const finish = () => {
+  clearTimeout(readyFallback);
+  cancelTerminalSettlement();
+  clearRecovery();
+  if (shutdownGraceTimer !== null) {
+    clearTimeout(shutdownGraceTimer);
+    shutdownGraceTimer = null;
+  }
+  console.log(
+    `[drive] socket closed; inference=${sawInference} completed=${sawCompletion} ` +
+      `finalSpeech=${sawFinalSpeech} exiting=${sawExiting}`,
+  );
+  if (terminalFailure) {
+    console.error(`[drive] failed: ${terminalFailure}`);
+    process.exit(1);
+  }
+  process.exit(0);
+};
+
 const requestShutdown = (failure = null) => {
   if (shutdownRequested) return;
   shutdownRequested = true;
   terminalFailure ??= failure;
+  clearRecovery();
   console.log(
     failure
       ? `[drive] refusing a false-green run: ${failure}`
       : `[drive] completed turn stayed quiescent for ${IDLE_SETTLE_MS} ms; requesting shutdown`,
   );
   send({ type: 'shutdown', graceful: true });
+  shutdownGraceTimer = setTimeout(() => {
+    shutdownGraceTimer = null;
+    terminalFailure ??= `host ignored a graceful shutdown for ${SHUTDOWN_GRACE_MS} ms`;
+    console.error(`[drive] ${terminalFailure}`);
+    finish();
+  }, SHUTDOWN_GRACE_MS);
+};
+
+// Armed by the first inference failure and cleared only by a real completion.
+// Deliberately NOT cleared by cancelTerminalSettlement: the whole defect is
+// that a silent non-terminal event can erase the terminal verdict, so the
+// bound on "the host stopped making progress" must survive that erasure.
+const armRecovery = (failure) => {
+  if (recoveryTimer !== null) return;
+  recoveryTimer = setTimeout(() => {
+    recoveryTimer = null;
+    requestShutdown(`no inference completed within ${RECOVERY_TIMEOUT_MS} ms of ${failure}`);
+  }, RECOVERY_TIMEOUT_MS);
 };
 
 const settleTerminal = (failure = null) => {
@@ -165,12 +226,15 @@ sock.on('data', (chunk) => {
     }
     if (event.type === 'inference:completed') {
       sawCompletion = true;
+      lastInferenceFailure = null;
+      clearRecovery();
       continue;
     }
     if (event.type === 'inference:failed') {
       lastInferenceFailure = String(event.error ?? 'unknown inference failure');
       console.error(`[inference failed] ${lastInferenceFailure}`);
       settleTerminal(`inference failed: ${lastInferenceFailure}`);
+      armRecovery(lastInferenceFailure);
       continue;
     }
     if (event.type === 'inference:speech' && event.content) {
@@ -198,22 +262,10 @@ sock.on('error', (error) => {
 });
 
 sock.on('close', () => {
-  clearTimeout(readyFallback);
-  cancelTerminalSettlement();
-
   if (!shutdownRequested) {
     terminalFailure ??= 'host closed the socket before the driver requested shutdown';
   } else if (!sawExiting) {
     terminalFailure ??= 'host closed without acknowledging graceful shutdown';
   }
-
-  console.log(
-    `[drive] socket closed; inference=${sawInference} completed=${sawCompletion} ` +
-      `finalSpeech=${sawFinalSpeech} exiting=${sawExiting}`,
-  );
-  if (terminalFailure) {
-    console.error(`[drive] failed: ${terminalFailure}`);
-    process.exit(1);
-  }
-  process.exit(0);
+  finish();
 });

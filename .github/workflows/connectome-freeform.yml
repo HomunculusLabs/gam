@@ -179,6 +179,7 @@ jobs:
           fi
 
       - name: Run the agent
+        id: agent
         env:
           # OAuth subscription token, not an API key.
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_CODE_ALT_OAUTH_TOKEN }}
@@ -218,6 +219,8 @@ jobs:
         # nothing), but it should not retroactively redden a run whose agent
         # worked fine.
         continue-on-error: true
+        env:
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
         run: |
           set -uo pipefail
           [ -d "$DATA_DIR" ] || { echo "no data dir; nothing to save"; exit 0; }
@@ -326,6 +329,19 @@ jobs:
           #    Contended by design: with parallel runs the last finisher wins,
           #    and a loss here costs nothing because step 1 already persisted
           #    everything. Never retried into a spin — a losing run just yields.
+          #
+          #    Only a run whose agent actually finished may become the pointer.
+          #    Memory is inherited whole, so a lineage the producing run could
+          #    not itself use is one every later run also cannot use: on 07-26
+          #    a run that died on an over-budget context advanced the pointer to
+          #    an 89.9 MB store, and every run after it restored that same dead
+          #    state. Persisting the lineage at $own above already loses
+          #    nothing — this only declines to make a dead state the default.
+          if [ "${AGENT_OUTCOME:-}" != "success" ]; then
+            echo "::warning::agent outcome '${AGENT_OUTCOME:-unset}' — memory kept at $own but $MEMORY_REF left where it was"
+            exit 0
+          fi
+
           for attempt in 1 2 3; do
             if git push origin "$commit:$MEMORY_REF" 2>&1 | tail -1; then
               echo "advanced $MEMORY_REF to ${commit:0:9}"
