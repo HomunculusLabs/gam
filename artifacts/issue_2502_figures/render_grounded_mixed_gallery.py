@@ -248,9 +248,14 @@ for surface_index, (ax, item, cmap_name) in enumerate(
         *uu.shape, 3
     )
     bead3 = (item["fitted"] - display_mean) @ display_basis.T
-    facecolors = plt.get_cmap(cmap_name)(
-        (np.arctan2(vv, uu) + np.pi) / (2 * np.pi)
-    )
+    # These fitted d=2 neighborhoods are Euclidean disk-like charts, not
+    # periodic surfaces.  Color therefore follows the first intrinsic chart
+    # coordinate continuously; using atan2 here would introduce a false
+    # circular branch cut and visually imply the wrong topology.
+    color_min = float(min(uu.min(), item["u"][:, 0].min()))
+    color_max = float(max(uu.max(), item["u"][:, 0].max()))
+    color_span = max(color_max - color_min, 1e-12)
+    facecolors = plt.get_cmap(cmap_name)((uu - color_min) / color_span)
     facecolors[..., 3] = 0.82
     ax.plot_surface(
         mesh3[:, :, 0],
@@ -286,13 +291,15 @@ for surface_index, (ax, item, cmap_name) in enumerate(
         min(105, len(supported_vertices)),
         replace=False,
     )
-    phase = np.arctan2(item["u"][:, 1], item["u"][:, 0])
+    bead_coordinate = item["u"][:, 0]
     ax.scatter(
         bead3[keep, 0],
         bead3[keep, 1],
         bead3[keep, 2],
-        c=phase[keep],
+        c=bead_coordinate[keep],
         cmap=cmap_name,
+        vmin=color_min,
+        vmax=color_max,
         s=34,
         edgecolors="#f2f6ff",
         linewidths=0.75,
@@ -314,6 +321,7 @@ for surface_index, (ax, item, cmap_name) in enumerate(
             "sheet_ratio": item["sheet_ratio"],
             "bend_ratio": item["bend_ratio"],
             "display_domain": "smooth 90th-percentile radial envelope of observed intrinsic coordinates with an 8% margin",
+            "color_coordinate": "first non-periodic intrinsic chart coordinate",
         }
     )
 
