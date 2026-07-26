@@ -1,0 +1,213 @@
+name: Connectome Freeform (continuous agent, memory across runs)
+
+# The freeform agent, moved off claude-code-action and onto the Connectome
+# stack so that it is ONE agent that persists rather than a fresh stranger
+# every 30 minutes.
+#
+# What actually changes: the agent's Chronicle store (event-sourced history +
+# autobiographical compression) is restored before the run and saved after it,
+# so its memory is its own recollection of its own past instead of a briefing.
+# Measured motivation: across 203 runs of the old workflow, every single one
+# opened `MEMORY.md`, found it empty, and re-derived the same four facts; 41
+# wrote notes "for future sessions" onto a disk destroyed minutes later.
+#
+# Auth is the Claude Code OAuth subscription token, NOT an API key —
+# connectome-host passes ANTHROPIC_AUTH_TOKEN through Membrane with the
+# `oauth-2025-04-20` beta (see connectome-host src/index.ts:77,852).
+#
+# Memory lives at refs/agent-memory/store — deliberately NOT a branch. GitHub
+# only raises push events for refs/heads/* and refs/tags/*, so this ref can
+# never trigger a workflow, and Chronicle's content-addressed append-only
+# layout means git dedupes it perfectly across runs.
+
+on:
+  workflow_dispatch:
+  # The schedule moves here from claude-freeform.yml once a dispatch run is
+  # verified green end-to-end.
+
+# One continuous agent means one writer. Overlapping runs would fork its
+# memory, so scheduled runs queue rather than race.
+concurrency:
+  group: connectome-freeform
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+  actions: read
+
+jobs:
+  freeform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      # Both kept OUTSIDE the checkout so neither can be swept into the
+      # agent's own commits.
+      DATA_DIR: ${{ runner.temp }}/connectome-data
+      HOST_DIR: ${{ runner.temp }}/connectome-host
+      AGENT_REPO_DIR: ${{ github.workspace }}
+      MEMORY_REF: refs/agent-memory/store
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Same non-expiring push route as the other agent workflows: the App
+      # token dies at 60 minutes, this job may run for 360.
+      - name: Install a push credential that outlives the run
+        env:
+          PUSH_KEY: ${{ secrets.AGENT_PUSH_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSH_KEY:-}" ]; then
+            echo "::error::AGENT_PUSH_SSH_KEY unset — the agent could not push or save memory"
+            exit 1
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$PUSH_KEY" > "$HOME/.ssh/agent_push"
+          chmod 600 "$HOME/.ssh/agent_push"
+          ssh-keyscan -t ed25519 github.com > "$HOME/.ssh/known_hosts" 2>/dev/null
+          git config --global core.sshCommand \
+            "ssh -i $HOME/.ssh/agent_push -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          git config --global user.name 'claude[bot]'
+          git config --global user.email '41898282+claude[bot]@users.noreply.github.com'
+          git remote set-url --push origin "git@github.com:${GITHUB_REPOSITORY}.git"
+          git remote add ssh "git@github.com:${GITHUB_REPOSITORY}.git" 2>/dev/null \
+            || git remote set-url ssh "git@github.com:${GITHUB_REPOSITORY}.git"
+          git ls-remote --exit-code ssh HEAD >/dev/null
+          echo "push route: $(git remote get-url --push origin) — no expiry"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install gam CLI
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Try to build gamfit from source (non-fatal)
+        continue-on-error: true
+        run: |
+          set -uxo pipefail
+          python -m pip install --upgrade pip maturin
+          python -m pip install numpy pandas scipy scikit-learn pyarrow requests
+          python -m pip install . && \
+            (cd /tmp && python -c "import gamfit; print('gamfit ok')") || \
+            echo "::warning::gamfit source build failed — the gam CLI still works"
+
+      - name: Install connectome-host
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/anima-research/connectome-host.git "$HOST_DIR"
+          cd "$HOST_DIR"
+          bun install
+          echo "connectome-host at $(git -C "$HOST_DIR" rev-parse --short HEAD)"
+
+      # Restore the agent's past. Absent on the very first run, which is the
+      # only run that is allowed to start as a stranger.
+      - name: Restore memory
+        run: |
+          set -euo pipefail
+          mkdir -p "$DATA_DIR"
+          if git fetch --quiet origin "+$MEMORY_REF:$MEMORY_REF" 2>/dev/null \
+             && git rev-parse --verify -q "$MEMORY_REF" >/dev/null; then
+            git archive "$MEMORY_REF" | tar -x -C "$DATA_DIR"
+            echo "restored memory from $(git log -1 --format='%h %ad %s' --date=iso "$MEMORY_REF")"
+            echo "store size: $(du -sh "$DATA_DIR" | cut -f1), $(find "$DATA_DIR" -type f | wc -l) files"
+          else
+            echo "::notice::no memory ref yet — this is the agent's first run"
+          fi
+
+      - name: Run the agent
+        env:
+          # OAuth subscription token, not an API key.
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.CLAUDE_CODE_ALT_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          cd "$HOST_DIR"
+          bun src/index.ts "$AGENT_REPO_DIR/.github/connectome/recipe.json" \
+            --headless --exit-when-idle > "$RUNNER_TEMP/host.log" 2>&1 &
+          HOST_PID=$!
+          echo "host pid $HOST_PID"
+
+          node "$AGENT_REPO_DIR/.github/connectome/drive.mjs" || true
+
+          # The host exits on its own once the agent is quiescent.
+          wait "$HOST_PID" || echo "::warning::host exited non-zero"
+          echo "=== tail of host log ==="
+          tail -60 "$RUNNER_TEMP/host.log" || true
+
+      # Save the agent's past even if the run failed or timed out — a crashed
+      # run still lived through something.
+      - name: Save memory
+        if: always()
+        run: |
+          set -uo pipefail
+          [ -d "$DATA_DIR" ] || { echo "no data dir; nothing to save"; exit 0; }
+          # Never persist the live IPC socket or transient logs.
+          rm -f "$DATA_DIR/ipc.sock"
+          size=$(du -sm "$DATA_DIR" | cut -f1)
+          echo "store size: ${size} MB, $(find "$DATA_DIR" -type f | wc -l) files"
+          if [ "$size" -gt 1024 ]; then
+            echo "::warning::memory store is ${size} MB — consider pruning old Chronicle branches"
+          fi
+
+          idx=$(mktemp)
+          export GIT_INDEX_FILE="$idx"
+          export GIT_DIR="$AGENT_REPO_DIR/.git"
+          export GIT_WORK_TREE="$DATA_DIR"
+          git add -A . || { echo "::error::failed to stage memory"; exit 0; }
+          tree=$(git write-tree) || exit 0
+          parent=$(git rev-parse --verify -q "$MEMORY_REF" || true)
+          msg="memory after run ${GITHUB_RUN_ID} (${GITHUB_RUN_NUMBER})"
+          if [ -n "$parent" ]; then
+            commit=$(git commit-tree "$tree" -p "$parent" -m "$msg")
+          else
+            commit=$(git commit-tree "$tree" -m "$msg")
+          fi
+          unset GIT_WORK_TREE GIT_INDEX_FILE
+          for attempt in 1 2 3; do
+            if git push origin "$commit:$MEMORY_REF" 2>&1 | tail -2; then
+              echo "saved memory as ${commit:0:9}"
+              exit 0
+            fi
+            echo "push attempt $attempt failed; refetching"
+            git fetch --quiet origin "+$MEMORY_REF:$MEMORY_REF" || true
+            sleep 5
+          done
+          echo "::error::could not save memory after 3 attempts"
+
+      - name: Rescue any unpushed commits
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE" || exit 0
+          git rev-parse --git-dir >/dev/null 2>&1 || exit 0
+          git fetch ssh main --quiet 2>/dev/null || git fetch origin main --quiet 2>/dev/null || exit 0
+          base=$(git rev-parse FETCH_HEAD)
+          ahead=$(git rev-list --count "$base"..HEAD 2>/dev/null || echo 0)
+          if [ "$ahead" -eq 0 ]; then echo "nothing to rescue"; exit 0; fi
+          echo "::warning::${ahead} commit(s) were never pushed by the agent — rescuing"
+          git rebase "$base" \
+            || { git rebase --abort 2>/dev/null || true
+                 echo "::error::rebase onto main conflicted; ${ahead} commit(s) left unpushed"; exit 0; }
+          git push origin HEAD:main 2>&1 | tail -3 \
+            || git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main 2>&1 | tail -3
