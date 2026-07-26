@@ -2105,6 +2105,11 @@ pub(crate) fn sys_htbeta_accumulate_transpose(
     if let Some(op_t) = sys.htbeta_transpose_matvec.as_ref() {
         op_t(row_idx, v, out);
     } else if sys.htbeta_matvec.is_some() {
+        // SAFETY: reaching this arm means a forward matrix-free H_tbeta was
+        // installed without its declared transpose — an installation-contract
+        // violation upstream, not a data condition. Skipping the transpose term
+        // instead would silently price a DIFFERENT operator (#2509's defect
+        // class), so this must halt.
         panic!(
             "matrix-free H_tbeta requires its declared sparse transpose; \
              install both through ArrowSchurSystem::set_row_htbeta_operator"

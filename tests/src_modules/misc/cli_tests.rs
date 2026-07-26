@@ -197,6 +197,7 @@ fn bounded_cli_termspec() -> TermCollectionSpec {
 
 fn saved_fit_summary_fixture() -> SavedFitSummary {
     SavedFitSummary {
+        training_sample_size: 1,
         likelihood_family: Some(LikelihoodSpec::new(
             ResponseFamily::Gaussian,
             InverseLink::Standard(StandardLink::Identity),
@@ -2955,6 +2956,7 @@ fn core_saved_fit_result_json_roundtripswith_finite_summary() {
         None,
         None,
         SavedFitSummary {
+            training_sample_size: 1,
             likelihood_family: Some(LikelihoodSpec::new(
                 ResponseFamily::Gaussian,
                 InverseLink::Standard(StandardLink::Identity),

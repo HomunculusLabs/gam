@@ -1336,17 +1336,6 @@ const LATENT_SURVIVAL_PRIMARY_MU: usize = 4;
 const LATENT_SURVIVAL_PRIMARY_LOG_SIGMA: usize = 5;
 const LATENT_SURVIVAL_PRIMARY_DIM: usize = 6;
 
-/// Derivatives of `log(x)` through fourth order at the only point needed by
-/// normalized kernel sums: the literal `x = 1`.
-///
-/// Keeping the point in the function name and removing the free argument makes
-/// the representability contract structural. No caller can accidentally feed a
-/// small positive linear-domain mass into the reciprocal powers.
-#[inline]
-fn latent_unary_derivatives_log_at_one() -> [f64; 5] {
-    [0.0, 1.0, -1.0, 2.0, -6.0]
-}
-
 /// Certified derivative tower of `f(x) = log(1 - exp(x))` for `x < 0`.
 ///
 /// The value uses `log1mexp`; derivative magnitudes are assembled in log space:
@@ -1830,6 +1819,18 @@ fn latent_kernel_term_sequence_inline(
 
 #[cfg(test)]
 mod tests_multidir_kernel {
+    /// Derivatives of `log(x)` through fourth order at the only point needed by
+    /// normalized kernel sums: the literal `x = 1`.
+    ///
+    /// Keeping the point in the function name and removing the free argument
+    /// makes the representability contract structural. No caller can
+    /// accidentally feed a small positive linear-domain mass into the
+    /// reciprocal powers.
+    #[inline]
+    fn latent_unary_derivatives_log_at_one() -> [f64; 5] {
+        [0.0, 1.0, -1.0, 2.0, -6.0]
+    }
+
     use super::tests_kernel_recurrence::latent_kernel_differentiate_terms;
     use super::*;
     use gam_math::jet_partitions::MultiDirJet as LatentMultiDirJet;
@@ -2048,8 +2049,6 @@ fn latent_signed_log_cumulants(
             }
             block = (block - 1) & mask;
         }
-        debug_assert!(len <= log_mags.len());
-
         let (log_abs, sign) = signed_log_sum_exp(&log_mags[..len], &signs[..len]);
         let cumulant =
             latent_signed_log_checked(log_abs, sign, context, "log-sum cumulant")?;
@@ -2263,13 +2262,20 @@ fn latent_kernel_signed_log_parts<const K: usize>(
         out[3].0.v = latent_signed_log_materialize(composed[0b1100], context)?;
     }
 
+    let (gradient_mask, hessian_mask) = match part_count {
+        1 => (0b0001, 0b0011),
+        2 => (0b0101, 0b0111),
+        4 => (0b1101, 0b1111),
+        other => {
+            return Err(LatentSurvivalError::NumericalFailure {
+                reason: format!(
+                    "{context} composed a latent moment jet over {other} parts; \
+                     only 1, 2, or 4 are constructible"
+                ),
+            })
+        }
+    };
     for a in 0..K {
-        let gradient_mask = match part_count {
-            1 => 0b0001,
-            2 => 0b0101,
-            4 => 0b1101,
-            _ => unreachable!(),
-        };
         let composed = compose_log(moments_for(a, a), gradient_mask)?;
         out[0].0.g[a] = latent_signed_log_materialize(composed[0b0001], context)?;
         if part_count >= 2 {
@@ -2280,12 +2286,6 @@ fn latent_kernel_signed_log_parts<const K: usize>(
             out[3].0.g[a] = latent_signed_log_materialize(composed[0b1101], context)?;
         }
         for b in a..K {
-            let hessian_mask = match part_count {
-                1 => 0b0011,
-                2 => 0b0111,
-                4 => 0b1111,
-                _ => unreachable!(),
-            };
             let composed = compose_log(moments_for(a, b), hessian_mask)?;
             out[0].0.h[a][b] =
                 latent_signed_log_materialize(composed[0b0011], context)?;

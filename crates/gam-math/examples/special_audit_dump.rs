@@ -205,12 +205,12 @@ fn main() {
         ] {
             println!(
                 "students_t_sf\t{nu:e}\t{t:e}\t{:e}",
-                prob::students_t_sf(t, nu)
+                prob::student_t_sf(t, nu)
             );
             println!(
                 "students_t_sf\t{nu:e}\t{:e}\t{:e}",
                 -t,
-                prob::students_t_sf(-t, nu)
+                prob::student_t_sf(-t, nu)
             );
         }
     }
