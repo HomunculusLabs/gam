@@ -741,22 +741,61 @@ where
     F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
     P: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
 {
+    let initial = SaeArrowVector {
+        t: Array1::zeros(rhs.t.len()),
+        beta: Array1::zeros(rhs.beta.len()),
+    };
+    solve_b_preconditioned_gmres_from(rhs, &initial, apply_a, precondition)
+        .map(|(solution, _iterations)| solution)
+}
+
+/// Warm-started sibling of solve_b_preconditioned_gmres_with.
+///
+/// The physical initial vector is checked against the original residual before
+/// any Arnoldi step. An exact warm start therefore returns with zero iterations;
+/// every inexact start follows the same flexible right-preconditioned recurrence
+/// and the same original-residual certificate as the zero-start entry. Returning
+/// the actual iteration count makes descending shifted systems auditable and
+/// allows their neighboring solutions to be reused without changing the solve.
+pub(crate) fn solve_b_preconditioned_gmres_from<F, P>(
+    rhs: &SaeArrowVector,
+    initial: &SaeArrowVector,
+    apply_a: F,
+    precondition: P,
+) -> Result<(SaeArrowVector, usize), String>
+where
+    F: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+    P: Fn(&SaeArrowVector) -> Result<SaeArrowVector, String>,
+{
     let t_len = rhs.t.len();
     let beta_len = rhs.beta.len();
+    if initial.t.len() != t_len || initial.beta.len() != beta_len {
+        return Err(format!(
+            "solve_b_preconditioned_gmres: initial dimensions ({}, {}) do not match rhs ({t_len}, {beta_len})",
+            initial.t.len(),
+            initial.beta.len(),
+        ));
+    }
     let dim = t_len + beta_len;
     if dim == 0 {
-        return Ok(SaeArrowVector {
-            t: Array1::zeros(0),
-            beta: Array1::zeros(0),
-        });
+        return Ok((
+            SaeArrowVector {
+                t: Array1::zeros(0),
+                beta: Array1::zeros(0),
+            },
+            0,
+        ));
     }
     let rhs_flat = flatten_arrow_parts(rhs.t.view(), rhs.beta.view());
     let rhs_norm = rhs_flat.dot(&rhs_flat).sqrt();
     if rhs_norm == 0.0 {
-        return Ok(SaeArrowVector {
-            t: Array1::zeros(t_len),
-            beta: Array1::zeros(beta_len),
-        });
+        return Ok((
+            SaeArrowVector {
+                t: Array1::zeros(t_len),
+                beta: Array1::zeros(beta_len),
+            },
+            0,
+        ));
     }
     if !rhs_norm.is_finite() {
         return Err("solve_b_preconditioned_gmres: non-finite right-hand side".to_string());
@@ -770,7 +809,10 @@ where
     // is the typed numerical-stagnation certificate.
     let restart = admitted_gmres_restart(dim)?;
     let mut iterations = 0usize;
-    let mut solution = Array1::<f64>::zeros(dim);
+    let mut solution = flatten_arrow_parts(initial.t.view(), initial.beta.view());
+    if solution.iter().any(|value| !value.is_finite()) {
+        return Err("solve_b_preconditioned_gmres: non-finite initial solution".to_string());
+    }
 
     let as_arrow = |flat: &Array1<f64>| SaeArrowVector {
         t: flat.slice(s![..t_len]).to_owned(),
@@ -804,7 +846,7 @@ where
             };
             let original_norm = sae_norm(&original);
             if original_norm <= relative_floor * rhs_norm {
-                return Ok(candidate);
+                return Ok((candidate, iterations));
             }
         }
         if !(residual_norm.is_finite() && residual_norm > 0.0) {
@@ -918,7 +960,7 @@ where
         // floor rather than a last-iterate fallback.
         let roundoff_floor = relative_floor * rhs_norm;
         if original_norm <= roundoff_floor {
-            return Ok(candidate);
+            return Ok((candidate, iterations));
         }
         let next_ax = apply_operator(&solution)?;
         let next_residual = &b - &next_ax;
@@ -940,6 +982,37 @@ where
 mod right_preconditioned_gmres_tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn exact_physical_warm_start_returns_without_an_arnoldi_step_2515() {
+        let rhs = SaeArrowVector {
+            t: array![5.0_f64, 5.0],
+            beta: Array1::zeros(0),
+        };
+        let exact = SaeArrowVector {
+            t: array![1.0_f64, 1.0],
+            beta: Array1::zeros(0),
+        };
+        let apply_a = |value: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            Ok(SaeArrowVector {
+                t: array![
+                    3.0 * value.t[0] + 2.0 * value.t[1],
+                    value.t[0] + 4.0 * value.t[1],
+                ],
+                beta: Array1::zeros(0),
+            })
+        };
+        let identity = |value: &SaeArrowVector| -> Result<SaeArrowVector, String> {
+            Ok(value.clone())
+        };
+
+        let (solved, iterations) =
+            solve_b_preconditioned_gmres_from(&rhs, &exact, apply_a, identity)
+                .expect("exact warm start");
+        assert_eq!(iterations, 0, "an exact warm start must do no Arnoldi work");
+        assert_eq!(solved.t, exact.t);
+        assert_eq!(solved.beta, exact.beta);
+    }
 
     #[test]
     fn certifies_original_residual_under_ill_scaled_preconditioner_2258() {
