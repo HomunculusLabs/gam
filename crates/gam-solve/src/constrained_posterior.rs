@@ -1193,6 +1193,7 @@ fn box_truncated_moments(
             &mut accumulator,
             mean,
             upper,
+            None,
             factor,
             &generator,
             evaluated,
@@ -1296,12 +1297,107 @@ impl OrthantNodeSink for OrthantAccumulator {
     }
 }
 
+/// One affine wall, already expressed in the cubature's own standardized
+/// coordinates.
+///
+/// The box ceiling the cubature already carries is a wall whose normal is a
+/// single coordinate, so it constrains that coordinate directly. A general wall
+/// `aᵀu ≤ c` does not: after `u = mean + L z` it reads `(Lᵀa)ᵀz ≤ c − aᵀmean`,
+/// which constrains the LAST coordinate its transformed normal touches, given
+/// the ones drawn before it. That is the whole difference between the two, and
+/// it is why the limit has to be computed per node rather than once per
+/// coordinate.
+///
+/// `pivot` is that last touched coordinate. The wall says nothing about any
+/// coordinate before it and must not be consulted there.
+#[derive(Clone, Debug)]
+pub struct StandardizedCeiling {
+    /// `Lᵀa`, in the cubature's standardized coordinates.
+    coefficients: Array1<f64>,
+    /// `c − aᵀmean`.
+    bound: f64,
+    pivot: usize,
+}
+
+impl StandardizedCeiling {
+    /// Build the standardized form of `normal · u ≤ bound` for the law
+    /// `u ~ N(mean, L Lᵀ)`.
+    ///
+    /// Refuses a wall whose transformed normal vanishes: such a wall constrains
+    /// no coordinate of the cubature and is either redundant or infeasible, and
+    /// the two cannot be told apart from the normal alone.
+    pub fn new(
+        normal: &Array1<f64>,
+        bound: f64,
+        mean: &Array1<f64>,
+        factor: ArrayView2<'_, f64>,
+    ) -> Result<Self, String> {
+        let q = mean.len();
+        if normal.len() != q {
+            return Err(format!(
+                "affine ceiling: the normal has length {} but the law has {q} coordinates",
+                normal.len()
+            ));
+        }
+        let mut coefficients = Array1::<f64>::zeros(q);
+        for j in 0..q {
+            let mut total = 0.0;
+            for k in j..q {
+                total += factor[[k, j]] * normal[k];
+            }
+            coefficients[j] = total;
+        }
+        let scale = coefficients
+            .iter()
+            .fold(0.0f64, |worst, value| worst.max(value.abs()));
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err(format!(
+                "affine ceiling: the standardized normal vanished (scale {scale:?}); the wall                  constrains no cubature coordinate"
+            ));
+        }
+        let floor = 8.0 * f64::EPSILON * scale;
+        let pivot = (0..q)
+            .rev()
+            .find(|j| coefficients[*j].abs() > floor)
+            .ok_or_else(|| "affine ceiling: no coordinate clears the pivot floor".to_string())?;
+        let offset = normal.dot(mean);
+        if !(bound - offset).is_finite() {
+            return Err(format!(
+                "affine ceiling: the standardized bound is not finite (bound {bound:?},                  offset {offset:?})"
+            ));
+        }
+        Ok(Self {
+            coefficients,
+            bound: bound - offset,
+            pivot,
+        })
+    }
+
+    /// The wall's limit on coordinate `pivot` given the coordinates before it,
+    /// as `(lower, upper)` additions — a positive pivot coefficient caps the
+    /// coordinate from above, a negative one raises its floor.
+    fn limit(&self, z: &Array1<f64>) -> (f64, f64) {
+        let mut remaining = self.bound;
+        for j in 0..self.pivot {
+            remaining -= self.coefficients[j] * z[j];
+        }
+        let coefficient = self.coefficients[self.pivot];
+        let limit = remaining / coefficient;
+        if coefficient > 0.0 {
+            (f64::NEG_INFINITY, limit)
+        } else {
+            (limit, f64::INFINITY)
+        }
+    }
+}
+
 /// Evaluate Genz nodes `first..last` of the Kronecker sequence and fold them
 /// into `accumulator`.
 fn accumulate_orthant_nodes<S: OrthantNodeSink>(
     accumulator: &mut S,
     mean: &Array1<f64>,
     upper: &[f64],
+    ceiling: Option<&StandardizedCeiling>,
     factor: ArrayView2<'_, f64>,
     generator: &[f64],
     first: usize,
@@ -1318,7 +1414,22 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
             for j in 0..i {
                 bound -= factor[[i, j]] * z[j];
             }
-            let wall = bound / factor[[i, i]];
+            let mut wall = bound / factor[[i, i]];
+            // The affine wall, if it pivots here, is a second candidate limit on
+            // the SAME interval. Merging it before the interval is resolved is
+            // what keeps one path through the reflection and the mass: from here
+            // down, an affine-bounded coordinate and a box-bounded one are the
+            // same arithmetic on the same `[wall, ceiling]`.
+            let mut affine_ceiling = f64::INFINITY;
+            if let Some(wall_rule) = ceiling
+                && wall_rule.pivot == i
+            {
+                let (raised, capped) = wall_rule.limit(&z);
+                if raised > wall {
+                    wall = raised;
+                }
+                affine_ceiling = capped;
+            }
             // Tent-periodized Kronecker lattice. The raw sequence leaves the
             // integrand non-periodic across the cube face, which costs the
             // lattice rule most of its rate; folding `x ↦ 1 − |2x − 1|`
@@ -1328,7 +1439,7 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
                 let fractional = raw - raw.floor();
                 1.0 - (2.0 * fractional - 1.0).abs()
             };
-            if !upper[i].is_finite() {
+            if !upper[i].is_finite() && !affine_ceiling.is_finite() {
                 let log_tail = normal_logsf(wall);
                 if !log_tail.is_finite() {
                     // The remaining feasible mass along this coordinate
@@ -1361,7 +1472,20 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
             // Bounded coordinate. The conditional interval is `[wall, ceiling]`
             // and `ceiling − wall = upper_i / L_ii` exactly, so the width never
             // goes through a subtraction of two conditional means.
-            let ceiling = wall + upper[i] / factor[[i, i]];
+            // The box width stays subtraction-free exactly as before; the
+            // affine limit is an independent candidate and the tighter one wins.
+            let boxed = if upper[i].is_finite() {
+                wall + upper[i] / factor[[i, i]]
+            } else {
+                f64::INFINITY
+            };
+            let ceiling = boxed.min(affine_ceiling);
+            if !(ceiling > wall) {
+                // The two walls have crossed: this node's feasible interval is
+                // empty, which is a property of the region and not a failure.
+                log_weight = f64::NEG_INFINITY;
+                break;
+            }
             // Reflect an interval that sits in the LOWER tail. Both `Φ̄` values
             // are then within rounding of one and their difference — the
             // interval's entire mass — would be computed as a cancellation
@@ -1540,6 +1664,7 @@ fn converged_projection_nodes(
             &mut accumulator,
             mean,
             upper,
+            None,
             factor.view(),
             &generator,
             evaluated,
@@ -3385,4 +3510,212 @@ mod coverage_gate_tests {
         );
     }
 
+}
+
+
+#[cfg(test)]
+mod affine_ceiling_tests {
+    use super::*;
+    use ndarray::array;
+
+    /// Run the cubature over `{u >= 0}` intersected with an optional affine
+    /// wall, and return the log mass.
+    fn log_mass(
+        mean: &Array1<f64>,
+        sd: &Array1<f64>,
+        ceiling: Option<&StandardizedCeiling>,
+        upper: &[f64],
+        nodes: usize,
+    ) -> Option<f64> {
+        let q = mean.len();
+        let mut factor = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            factor[[i, i]] = sd[i];
+        }
+        let generator = kronecker_generator(q);
+        let mut accumulator = OrthantAccumulator::new(q);
+        accumulate_orthant_nodes(
+            &mut accumulator,
+            mean,
+            upper,
+            ceiling,
+            factor.view(),
+            &generator,
+            0,
+            nodes,
+        )
+        .expect("cubature");
+        // The accumulator carries its scale separately so a face spanning
+        // hundreds of decades never underflows; the mass is that scale times the
+        // accumulated sum, averaged over the nodes evaluated.
+        if !(accumulator.weight_sum.is_finite() && accumulator.weight_sum > 0.0) {
+            return None;
+        }
+        Some(accumulator.log_scale + accumulator.weight_sum.ln() - (nodes as f64).ln())
+    }
+
+    fn diagonal_factor(sd: &Array1<f64>) -> Array2<f64> {
+        let q = sd.len();
+        let mut factor = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            factor[[i, i]] = sd[i];
+        }
+        factor
+    }
+
+    #[test]
+    fn a_coordinate_normal_reproduces_the_box_it_is_the_degenerate_case_of() {
+        // The box ceiling and an affine wall whose normal is a single
+        // coordinate describe the SAME region. They are computed differently on
+        // purpose — the box keeps its subtraction-free width — so this asserts
+        // they agree, which is the property that lets one arithmetic path serve
+        // both.
+        let mean = array![0.35, -0.20];
+        let sd = array![1.0, 0.8];
+        let factor = diagonal_factor(&sd);
+        let width = 1.4;
+
+        let boxed = log_mass(&mean, &sd, None, &[width, f64::INFINITY], 1 << 14)
+            .expect("box mass");
+        let wall = StandardizedCeiling::new(&array![1.0, 0.0], width, &mean, factor.view())
+            .expect("coordinate wall");
+        let affine = log_mass(
+            &mean,
+            &sd,
+            Some(&wall),
+            &[f64::INFINITY, f64::INFINITY],
+            1 << 14,
+        )
+        .expect("affine mass");
+        assert_eq!(wall.pivot, 0, "a normal touching only coordinate 0 pivots there");
+        assert!(
+            (boxed - affine).abs() < 1e-12,
+            "box {boxed:.15} and affine {affine:.15} describe the same region"
+        );
+    }
+
+    #[test]
+    fn an_affine_ceiling_removes_the_mass_it_should() {
+        // Region: {u >= 0} ∩ {u0 + u1 <= c}, a triangle. With independent
+        // coordinates the answer is a one-dimensional integral, which Simpson
+        // resolves to far better than the cubature's own tolerance — an
+        // independent reference rather than a second run of the same rule.
+        let mean = array![0.4, -0.3];
+        let sd = array![0.9, 1.1];
+        let factor = diagonal_factor(&sd);
+        let bound = 1.6;
+        let wall = StandardizedCeiling::new(&array![1.0, 1.0], bound, &mean, factor.view())
+            .expect("sum wall");
+        assert_eq!(wall.pivot, 1, "a wall touching both coordinates pivots on the last");
+
+        let got = log_mass(
+            &mean,
+            &sd,
+            Some(&wall),
+            &[f64::INFINITY, f64::INFINITY],
+            1 << 16,
+        )
+        .expect("triangle mass");
+
+        // Simpson over u0 in [0, bound] of  φ((u0−m0)/s0)/s0 · P(0 ≤ u1 ≤ bound−u0)
+        let panels = 4000usize;
+        let step = bound / panels as f64;
+        let density = |x: f64| {
+            let z = (x - mean[0]) / sd[0];
+            (-0.5 * z * z).exp() / (sd[0] * (2.0 * std::f64::consts::PI).sqrt())
+        };
+        let inner = |x: f64| {
+            let hi = (bound - x - mean[1]) / sd[1];
+            let lo = -mean[1] / sd[1];
+            if hi <= lo {
+                0.0
+            } else {
+                normal_cdf(hi) - normal_cdf(lo)
+            }
+        };
+        let integrand = |x: f64| density(x) * inner(x);
+        let mut total = integrand(0.0) + integrand(bound);
+        for k in 1..panels {
+            let x = k as f64 * step;
+            total += integrand(x) * if k % 2 == 0 { 2.0 } else { 4.0 };
+        }
+        let reference = (total * step / 3.0).ln();
+        assert!(
+            (got - reference).abs() < 5e-4,
+            "cubature {got:.12} against the Simpson reference {reference:.12}"
+        );
+
+        // ... and the wall must actually bite: the same region without it is
+        // strictly larger. A ceiling that changed nothing would pass the check
+        // above just as well.
+        let unbounded = log_mass(
+            &mean,
+            &sd,
+            None,
+            &[f64::INFINITY, f64::INFINITY],
+            1 << 16,
+        )
+        .expect("unbounded mass");
+        assert!(
+            unbounded > got + 0.05,
+            "the wall removed {:.4} nats, which is not enough to call it active",
+            unbounded - got
+        );
+    }
+
+    #[test]
+    fn a_wall_that_crosses_the_orthant_leaves_no_mass() {
+        // `u0 + u1 <= -1` is disjoint from the closed orthant, so every node's
+        // interval is empty and the cubature reports no feasible mass rather
+        // than a small wrong one.
+        let mean = array![0.2, 0.1];
+        let sd = array![1.0, 1.0];
+        let factor = diagonal_factor(&sd);
+        let wall = StandardizedCeiling::new(&array![1.0, 1.0], -1.0, &mean, factor.view())
+            .expect("infeasible wall");
+        assert!(
+            log_mass(&mean, &sd, Some(&wall), &[f64::INFINITY, f64::INFINITY], 1 << 10).is_none(),
+            "an empty region reports no mass"
+        );
+    }
+
+    #[test]
+    fn a_vanishing_normal_is_refused_rather_than_pivoted_arbitrarily() {
+        let mean = array![0.0, 0.0];
+        let factor = diagonal_factor(&array![1.0, 1.0]);
+        let message = StandardizedCeiling::new(&array![0.0, 0.0], 1.0, &mean, factor.view())
+            .expect_err("a zero normal constrains nothing");
+        assert!(
+            message.contains("vanished"),
+            "the refusal must say the normal vanished, got: {message}"
+        );
+        let mismatched = StandardizedCeiling::new(&array![1.0], 1.0, &mean, factor.view())
+            .expect_err("a normal of the wrong length is refused");
+        assert!(mismatched.contains("length"), "got: {mismatched}");
+    }
+
+    #[test]
+    fn the_pivot_follows_the_factor_not_just_the_normal() {
+        // `Lᵀa` is what decides the pivot, so a normal touching only coordinate
+        // 0 can still reach earlier coordinates through a dense factor — but
+        // never a LATER one, because L is lower triangular. This pins the
+        // direction of the transform, which a transpose slip would invert.
+        let mean = array![0.0, 0.0, 0.0];
+        let mut factor = Array2::<f64>::zeros((3, 3));
+        factor[[0, 0]] = 1.0;
+        factor[[1, 0]] = 0.7;
+        factor[[1, 1]] = 1.0;
+        factor[[2, 0]] = 0.3;
+        factor[[2, 1]] = 0.4;
+        factor[[2, 2]] = 1.0;
+        let wall = StandardizedCeiling::new(&array![0.0, 0.0, 1.0], 2.0, &mean, factor.view())
+            .expect("last-coordinate normal");
+        assert_eq!(wall.pivot, 2);
+        let early = StandardizedCeiling::new(&array![1.0, 0.0, 0.0], 2.0, &mean, factor.view())
+            .expect("first-coordinate normal");
+        assert_eq!(
+            early.pivot, 0,
+            "a normal on coordinate 0 cannot reach a later coordinate through a lower-triangular factor"
+        );
+    }
 }
