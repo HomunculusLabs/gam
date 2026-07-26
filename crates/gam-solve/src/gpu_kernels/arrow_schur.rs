@@ -1134,13 +1134,19 @@ pub struct FrameHostOperands {
     pub g_off_j: Vec<i32>,
     pub g_ri: Vec<i32>,
     pub g_rj: Vec<i32>,
-    pub g_mi: Vec<i32>,
     pub g_mj: Vec<i32>,
     pub g_ptr: Vec<i32>,
     pub g_data: Vec<f64>,
     pub w_ptr: Vec<i32>,
     pub w_data: Vec<f64>,
-    pub g_blocks: usize,
+    /// CSR over disjoint output spans. `g_group_blocks[g_group_ptr[g]..]`
+    /// lists, in original block order, every G block contributing to the scalar
+    /// output range `[g_group_off[g], g_group_off[g] + g_group_width[g])`.
+    pub g_group_ptr: Vec<i32>,
+    pub g_group_blocks: Vec<i32>,
+    pub g_group_off: Vec<i32>,
+    pub g_group_width: Vec<i32>,
+    pub g_groups: usize,
     pub g_max_work: usize,
     pub htb_ptr: Vec<i32>,
     pub htb: Vec<f64>,
@@ -1153,6 +1159,104 @@ pub struct FrameHostOperands {
 #[cfg(target_os = "linux")]
 fn frame_checked_i32(value: usize) -> Result<i32, ArrowSchurGpuFailure> {
     i32::try_from(value).map_err(|_| ArrowSchurGpuFailure::Unavailable)
+}
+
+/// Fixed-order ownership plan for additive device blocks.
+///
+/// Each input span describes the complete scalar output range written by one
+/// block. Equal spans are one ownership group; their block indices are retained
+/// in input order. Distinct spans must be disjoint, because partially
+/// overlapping ranges cannot be assigned to one owning thread per output
+/// without expanding to a per-coordinate incidence matrix. SAE atom blocks
+/// satisfy the stronger equal-or-disjoint invariant by construction, so a
+/// partial overlap is malformed geometry and fails loudly.
+#[cfg(target_os = "linux")]
+fn deterministic_output_groups(
+    spans: &[(usize, usize)],
+    output_len: usize,
+    label: &str,
+) -> Result<DeterministicOutputGroups, ArrowSchurGpuFailure> {
+    use std::collections::HashMap;
+
+    let malformed = |reason: String| ArrowSchurGpuFailure::SchurFactorFailed {
+        reason: format!("{label} deterministic output ownership: {reason}"),
+    };
+    let mut lookup = HashMap::<(usize, usize), usize>::new();
+    let mut group_spans = Vec::<(usize, usize)>::new();
+    let mut group_blocks = Vec::<Vec<usize>>::new();
+    for (block, &(offset, width)) in spans.iter().enumerate() {
+        let end = offset.checked_add(width).ok_or_else(|| {
+            malformed(format!(
+                "block {block} output span overflows ({offset} + {width})"
+            ))
+        })?;
+        if width == 0 || end > output_len {
+            return Err(malformed(format!(
+                "block {block} has output span [{offset}, {end}) outside [0, {output_len})"
+            )));
+        }
+        let group = if let Some(&group) = lookup.get(&(offset, width)) {
+            group
+        } else {
+            let group = group_spans.len();
+            lookup.insert((offset, width), group);
+            group_spans.push((offset, width));
+            group_blocks.push(Vec::new());
+            group
+        };
+        group_blocks[group].push(block);
+    }
+
+    let mut by_offset: Vec<usize> = (0..group_spans.len()).collect();
+    by_offset.sort_unstable_by_key(|&group| group_spans[group].0);
+    for adjacent in by_offset.windows(2) {
+        let left = group_spans[adjacent[0]];
+        let right = group_spans[adjacent[1]];
+        let left_end = left.0 + left.1;
+        if left_end > right.0 {
+            return Err(malformed(format!(
+                "distinct output spans [{}, {}) and [{}, {}) overlap",
+                left.0,
+                left_end,
+                right.0,
+                right.0 + right.1
+            )));
+        }
+    }
+
+    let mut ptr = Vec::with_capacity(group_spans.len() + 1);
+    let mut blocks = Vec::with_capacity(spans.len());
+    ptr.push(0_i32);
+    for members in &group_blocks {
+        for &block in members {
+            blocks.push(frame_checked_i32(block)?);
+        }
+        ptr.push(frame_checked_i32(blocks.len())?);
+    }
+    let mut off = Vec::with_capacity(group_spans.len());
+    let mut width = Vec::with_capacity(group_spans.len());
+    let mut max_width = 0usize;
+    for &(group_off, group_width) in &group_spans {
+        off.push(frame_checked_i32(group_off)?);
+        width.push(frame_checked_i32(group_width)?);
+        max_width = max_width.max(group_width);
+    }
+    Ok(DeterministicOutputGroups {
+        ptr,
+        blocks,
+        off,
+        width,
+        max_width,
+    })
+}
+
+#[cfg(target_os = "linux")]
+struct DeterministicOutputGroups {
+    ptr: Vec<i32>,
+    blocks: Vec<i32>,
+    off: Vec<i32>,
+    width: Vec<i32>,
+    max_width: usize,
 }
 
 /// Marshal the ridge-INDEPENDENT framed operands into contiguous host buffers.
@@ -1202,13 +1306,12 @@ pub fn flatten_frame_host_operands(
     let mut g_off_j = Vec::new();
     let mut g_ri = Vec::new();
     let mut g_rj = Vec::new();
-    let mut g_mi = Vec::new();
     let mut g_mj = Vec::new();
     let mut g_ptr = vec![0_i32];
     let mut g_data = Vec::<f64>::new();
     let mut w_ptr = vec![0_i32];
     let mut w_data = Vec::<f64>::new();
-    let mut g_max_work = 0usize;
+    let mut g_output_spans = Vec::with_capacity(frame.frame_blocks.len());
     for blk in &frame.frame_blocks {
         let ri = frame.ranks[blk.atom_i];
         let rj = frame.ranks[blk.atom_j];
@@ -1220,7 +1323,6 @@ pub fn flatten_frame_host_operands(
         g_off_j.push(frame_checked_i32(frame.border_offsets[blk.atom_j])?);
         g_ri.push(frame_checked_i32(ri)?);
         g_rj.push(frame_checked_i32(rj)?);
-        g_mi.push(frame_checked_i32(mi)?);
         g_mj.push(frame_checked_i32(mj)?);
         for r in 0..mi {
             for c in 0..mj {
@@ -1234,8 +1336,14 @@ pub fn flatten_frame_host_operands(
             }
         }
         w_ptr.push(frame_checked_i32(w_data.len())?);
-        g_max_work = g_max_work.max(mi * ri);
+        let width = mi
+            .checked_mul(ri)
+            .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+        g_output_spans.push((frame.border_offsets[blk.atom_i], width));
     }
+    let g_groups =
+        deterministic_output_groups(&g_output_spans, k, "framed G matvec")?;
+    let g_group_count = g_groups.off.len();
 
     // Per-row dense cross-block + q (the factored ainv is ridge-dependent and
     // lives in `compute_ainv_host`, not here).
@@ -1274,14 +1382,17 @@ pub fn flatten_frame_host_operands(
         g_off_j,
         g_ri,
         g_rj,
-        g_mi,
         g_mj,
         g_ptr,
         g_data,
         w_ptr,
         w_data,
-        g_blocks: frame.frame_blocks.len(),
-        g_max_work,
+        g_group_ptr: g_groups.ptr,
+        g_group_blocks: g_groups.blocks,
+        g_group_off: g_groups.off,
+        g_group_width: g_groups.width,
+        g_groups: g_group_count,
+        g_max_work: g_groups.max_width,
         htb_ptr,
         htb,
         q_of,
@@ -2787,41 +2898,40 @@ extern "C" __global__ void arrow_sae_smooth_matvec(
 extern "C" __global__ void arrow_sae_sparse_g_matvec(
     const double* __restrict__ x,
     double* __restrict__ out,
-    const int* __restrict__ row_off,
     const int* __restrict__ col_off,
-    const int* __restrict__ rows,
     const int* __restrict__ cols,
     const int* __restrict__ data_ptr,
     const double* __restrict__ data,
+    const int* __restrict__ group_ptr,
+    const int* __restrict__ group_blocks,
+    const int* __restrict__ group_off,
+    const int* __restrict__ group_width,
     int p,
-    int n_blocks
+    int n_groups
 ) {
-    int block_id = blockIdx.y;
+    int group = blockIdx.y;
     int linear = blockIdx.x * blockDim.x + threadIdx.x;
-    if (block_id >= n_blocks) {
+    if (group >= n_groups || linear >= group_width[group]) {
         return;
     }
-    int m_i = rows[block_id];
-    int m_j = cols[block_id];
-    int total = m_i * p;
-    if (linear >= total) {
-        return;
-    }
+    int out_index = group_off[group] + linear;
     int li = linear / p;
     int oc = linear - li * p;
-    int rbase = row_off[block_id];
-    int cbase = col_off[block_id];
-    int dbase = data_ptr[block_id];
-    double acc = 0.0;
-    for (int lj = 0; lj < m_j; ++lj) {
-        acc += data[dbase + li * m_j + lj] * x[(cbase + lj) * p + oc];
+    double acc = out[out_index];
+    // #2535 — one thread OWNS this scalar output and walks every contributing
+    // G block in original host order. Equal output spans were grouped into the
+    // CSR above; distinct spans are disjoint. The scheduler therefore chooses
+    // only when an independent output runs, never the order of its additions.
+    for (int position = group_ptr[group]; position < group_ptr[group + 1]; ++position) {
+        int block_id = group_blocks[position];
+        int m_j = cols[block_id];
+        int cbase = col_off[block_id];
+        int dbase = data_ptr[block_id];
+        for (int lj = 0; lj < m_j; ++lj) {
+            acc += data[dbase + li * m_j + lj] * x[(cbase + lj) * p + oc];
+        }
     }
-    // #1017 — a row atom co-occurs with multiple column atoms, so several
-    // concurrent (atom_i, atom_j) blocks (blockIdx.y) write the SAME output
-    // element `out[(rbase+li)*p+oc]`. A plain `+=` races and loses updates
-    // (silently-wrong Schur matvec); accumulate atomically. `double` atomicAdd
-    // needs sm_60+, guaranteed by the NVRTC arch pin (#1551).
-    atomicAdd(&out[(rbase + li) * p + oc], acc);
+    out[out_index] = acc;
 }
 
 extern "C" __global__ void arrow_sae_gather_u(
@@ -3066,49 +3176,50 @@ extern "C" __global__ void arrow_sae_frame_g_matvec(
     const int* __restrict__ off_j,
     const int* __restrict__ r_i,
     const int* __restrict__ r_j,
-    const int* __restrict__ m_i,
     const int* __restrict__ m_j,
     const int* __restrict__ g_ptr,
     const double* __restrict__ g_data,
     const int* __restrict__ w_ptr,
     const double* __restrict__ w_data,
-    int n_blocks
+    const int* __restrict__ group_ptr,
+    const int* __restrict__ group_blocks,
+    const int* __restrict__ group_off,
+    const int* __restrict__ group_width,
+    int n_groups
 ) {
-    int block_id = blockIdx.y;
+    int group = blockIdx.y;
     int linear = blockIdx.x * blockDim.x + threadIdx.x;
-    if (block_id >= n_blocks) {
+    if (group >= n_groups || linear >= group_width[group]) {
         return;
     }
-    int ri = r_i[block_id];
-    int rj = r_j[block_id];
-    int mi = m_i[block_id];
-    int mj = m_j[block_id];
-    int total = mi * ri;
-    if (linear >= total) {
-        return;
-    }
-    int li = linear / ri;       // basis row in atom i
-    int a = linear - li * ri;   // frame coord in atom i
-    int oi = off_i[block_id];
-    int oj = off_j[block_id];
-    int gbase = g_ptr[block_id];
-    int wbase = w_ptr[block_id];
-    double acc = 0.0;
-    for (int lj = 0; lj < mj; ++lj) {
-        double g = g_data[gbase + li * mj + lj];
-        if (g == 0.0) { continue; }
-        int xj_base = oj + lj * rj;
-        double inner = 0.0;
-        for (int b = 0; b < rj; ++b) {
-            inner += w_data[wbase + a * rj + b] * x[xj_base + b];
+    int out_index = group_off[group] + linear;
+    double acc = out[out_index];
+    // #2535 — fixed-order G⊗W accumulation. The owning output thread walks the
+    // original block subsequence and, within each block, the original lj/b
+    // order used by the CPU oracle. No partial buffer and no host reduction.
+    for (int position = group_ptr[group]; position < group_ptr[group + 1]; ++position) {
+        int block_id = group_blocks[position];
+        int ri = r_i[block_id];
+        int rj = r_j[block_id];
+        int mj = m_j[block_id];
+        int local = out_index - off_i[block_id];
+        int li = local / ri;
+        int a = local - li * ri;
+        int oj = off_j[block_id];
+        int gbase = g_ptr[block_id];
+        int wbase = w_ptr[block_id];
+        for (int lj = 0; lj < mj; ++lj) {
+            double g = g_data[gbase + li * mj + lj];
+            if (g == 0.0) { continue; }
+            int xj_base = oj + lj * rj;
+            double inner = 0.0;
+            for (int b = 0; b < rj; ++b) {
+                inner += w_data[wbase + a * rj + b] * x[xj_base + b];
+            }
+            acc += g * inner;
         }
-        acc += g * inner;
     }
-    // #1017 — same race as `arrow_sae_sparse_g_matvec`: atom i is the row atom of
-    // multiple co-occurring (i,j) frame blocks running concurrently on
-    // blockIdx.y, all targeting `out[oi+li*ri+a]`. Accumulate atomically so the
-    // framed G⊗W matvec is correct (the CPU oracle sums these sequentially).
-    atomicAdd(&out[oi + li * ri + a], acc);
+    out[out_index] = acc;
 }
 
 /* Per-row reduced-Schur subtraction with a DENSE cross-block H_tβ^(i).
@@ -3306,7 +3417,13 @@ extern "C" __global__ void arrow_sae_frame_apply_h_warp(
     }
 }
 
-/* Frame Jacobi diagonal subtraction: diag[a] -= Σ_c Σ_d H_tβ[c,a]·ainv[c,d]·H_tβ[d,a]. */
+/* Frame Jacobi diagonal subtraction:
+ *   diag[a] -= Σ_row Σ_c Σ_d H_tβ[row,c,a]·ainv[row,c,d]·H_tβ[row,d,a].
+ *
+ * #2535 — one thread owns each diagonal scalar and walks rows in host order.
+ * The former (row,a) grid raced through atomicAdd(&diag[a], -quad), making the
+ * preconditioner depend on CTA scheduling even after the two G writers were
+ * made deterministic. */
 extern "C" __global__ void arrow_sae_frame_diag_sub(
     double* __restrict__ diag,
     const double* __restrict__ ainv,
@@ -3317,20 +3434,23 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
     int max_q,
     int n_rows
 ) {
-    int row = blockIdx.y;
     int a = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= n_rows || a >= k) { return; }
-    int q = q_of[row];
-    int hbase = htb_ptr[row];
-    int abase = row * max_q * max_q;
-    double quad = 0.0;
-    for (int c = 0; c < q; ++c) {
-        double hc = htb[hbase + c * k + a];
-        for (int d = 0; d < q; ++d) {
-            quad += hc * ainv[abase + c * max_q + d] * htb[hbase + d * k + a];
+    if (a >= k) { return; }
+    double acc = diag[a];
+    for (int row = 0; row < n_rows; ++row) {
+        int q = q_of[row];
+        int hbase = htb_ptr[row];
+        int abase = row * max_q * max_q;
+        double quad = 0.0;
+        for (int c = 0; c < q; ++c) {
+            double hc = htb[hbase + c * k + a];
+            for (int d = 0; d < q; ++d) {
+                quad += hc * ainv[abase + c * max_q + d] * htb[hbase + d * k + a];
+            }
         }
+        acc -= quad;
     }
-    atomicAdd(&diag[a], -quad);
+    diag[a] = acc;
 }
 "#;
 
@@ -3414,12 +3534,14 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         smooth_m: CudaSlice<i32>,
         smooth_ptr: CudaSlice<i32>,
         smooth_data: CudaSlice<f64>,
-        g_row_off: CudaSlice<i32>,
         g_col_off: CudaSlice<i32>,
-        g_rows: CudaSlice<i32>,
         g_cols: CudaSlice<i32>,
         g_ptr: CudaSlice<i32>,
         g_data: CudaSlice<f64>,
+        g_group_ptr: CudaSlice<i32>,
+        g_group_blocks: CudaSlice<i32>,
+        g_group_off: CudaSlice<i32>,
+        g_group_width: CudaSlice<i32>,
         ainv: CudaSlice<f64>,
         u: CudaSlice<f64>,
         w: CudaSlice<f64>,
@@ -3433,7 +3555,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         k: usize,
         max_q: usize,
         smooth_blocks: usize,
-        g_blocks: usize,
+        g_groups: usize,
+        g_max_work: usize,
     }
 
     fn checked_i32(value: usize) -> Result<i32, ArrowSchurGpuFailure> {
@@ -3560,18 +3683,15 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             smooth_ptr_host.push(checked_i32(smooth_data_host.len())?);
         }
 
-        let mut g_row_off_host = Vec::with_capacity(data.sparse_g_blocks.len());
         let mut g_col_off_host = Vec::with_capacity(data.sparse_g_blocks.len());
-        let mut g_rows_host = Vec::with_capacity(data.sparse_g_blocks.len());
         let mut g_cols_host = Vec::with_capacity(data.sparse_g_blocks.len());
         let mut g_ptr_host = Vec::with_capacity(data.sparse_g_blocks.len() + 1);
         let mut g_data_host = Vec::<f64>::new();
+        let mut g_output_spans = Vec::with_capacity(data.sparse_g_blocks.len());
         g_ptr_host.push(0_i32);
         for block in &data.sparse_g_blocks {
             let (rows, cols) = block.data.dim();
-            g_row_off_host.push(checked_i32(block.row_off)?);
             g_col_off_host.push(checked_i32(block.col_off)?);
-            g_rows_host.push(checked_i32(rows)?);
             g_cols_host.push(checked_i32(cols)?);
             for r in 0..rows {
                 for c in 0..cols {
@@ -3579,7 +3699,18 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 }
             }
             g_ptr_host.push(checked_i32(g_data_host.len())?);
+            let offset = block
+                .row_off
+                .checked_mul(p)
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let width = rows
+                .checked_mul(p)
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            g_output_spans.push((offset, width));
         }
+        let g_groups =
+            super::deterministic_output_groups(&g_output_spans, k, "sparse G matvec")?;
+        let g_group_count = g_groups.off.len();
 
         let mut ainv_host = vec![0.0_f64; n_rows * max_q * max_q];
         for (row_idx, row) in sys.rows.iter().enumerate() {
@@ -3646,14 +3777,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             smooth_data: stream
                 .clone_htod(&smooth_data_host)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
-            g_row_off: stream
-                .clone_htod(&g_row_off_host)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
             g_col_off: stream
                 .clone_htod(&g_col_off_host)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
-            g_rows: stream
-                .clone_htod(&g_rows_host)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
             g_cols: stream
                 .clone_htod(&g_cols_host)
@@ -3663,6 +3788,18 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
             g_data: stream
                 .clone_htod(&g_data_host)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            g_group_ptr: stream
+                .clone_htod(&g_groups.ptr)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            g_group_blocks: stream
+                .clone_htod(&g_groups.blocks)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            g_group_off: stream
+                .clone_htod(&g_groups.off)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+            g_group_width: stream
+                .clone_htod(&g_groups.width)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
             ainv: stream
                 .clone_htod(&ainv_host)
@@ -3686,7 +3823,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             k,
             max_q,
             smooth_blocks: data.smooth_blocks.len(),
-            g_blocks: data.sparse_g_blocks.len(),
+            g_groups: g_group_count,
+            g_max_work: g_groups.max_width,
         })
     }
 
@@ -3753,21 +3891,16 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             // against each block's stored size.
             unsafe { builder.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
-        if buffers.g_blocks > 0 {
+        if buffers.g_groups > 0 {
             let kernel = module
                 .load_function("arrow_sae_sparse_g_matvec")
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let max_work = buffers
-                .k
-                .checked_div(buffers.p)
-                .unwrap_or(0)
-                .saturating_mul(buffers.p);
             let p_i32 = checked_i32(buffers.p)?;
-            let blocks_i32 = checked_i32(buffers.g_blocks)?;
+            let groups_i32 = checked_i32(buffers.g_groups)?;
             let cfg = LaunchConfig {
                 grid_dim: (
-                    ((max_work as u32).saturating_add(255) / 256).max(1),
-                    checked_i32(buffers.g_blocks)? as u32,
+                    ((buffers.g_max_work as u32).saturating_add(255) / 256).max(1),
+                    groups_i32 as u32,
                     1,
                 ),
                 block_dim: (256, 1, 1),
@@ -3777,18 +3910,20 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             builder
                 .arg(x)
                 .arg(&mut *out)
-                .arg(&buffers.g_row_off)
                 .arg(&buffers.g_col_off)
-                .arg(&buffers.g_rows)
                 .arg(&buffers.g_cols)
                 .arg(&buffers.g_ptr)
                 .arg(&buffers.g_data)
+                .arg(&buffers.g_group_ptr)
+                .arg(&buffers.g_group_blocks)
+                .arg(&buffers.g_group_off)
+                .arg(&buffers.g_group_width)
                 .arg(&p_i32)
-                .arg(&blocks_i32);
-            // SAFETY: sparse G block metadata/data are live device buffers built
-            // from host CSR-like block descriptors; the launch dimensions cover
-            // declared block work only and the kernel checks row/column bounds
-            // before reading or accumulating.
+                .arg(&groups_i32);
+            // SAFETY: each CSR ownership group covers one in-bounds scalar output
+            // span, distinct group spans are disjoint, and every listed block's
+            // column/data metadata is live. One thread writes each output after
+            // walking its contributor list in fixed order.
             unsafe { builder.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         Ok(())
@@ -5042,13 +5177,16 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         g_off_j: CudaSlice<i32>,
         g_ri: CudaSlice<i32>,
         g_rj: CudaSlice<i32>,
-        g_mi: CudaSlice<i32>,
         g_mj: CudaSlice<i32>,
         g_ptr: CudaSlice<i32>,
         g_data: CudaSlice<f64>,
         w_ptr: CudaSlice<i32>,
         w_data: CudaSlice<f64>,
-        g_blocks: usize,
+        g_group_ptr: CudaSlice<i32>,
+        g_group_blocks: CudaSlice<i32>,
+        g_group_off: CudaSlice<i32>,
+        g_group_width: CudaSlice<i32>,
+        g_groups: usize,
         g_max_work: usize,
         // Per-row dense cross-block H_tβ^(i) + row q + factored ainv.
         htb_ptr: CudaSlice<i32>,
@@ -5131,13 +5269,16 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             g_off_j: htod_i(&host.g_off_j)?,
             g_ri: htod_i(&host.g_ri)?,
             g_rj: htod_i(&host.g_rj)?,
-            g_mi: htod_i(&host.g_mi)?,
             g_mj: htod_i(&host.g_mj)?,
             g_ptr: htod_i(&host.g_ptr)?,
             g_data: htod_f(&host.g_data)?,
             w_ptr: htod_i(&host.w_ptr)?,
             w_data: htod_f(&host.w_data)?,
-            g_blocks: host.g_blocks,
+            g_group_ptr: htod_i(&host.g_group_ptr)?,
+            g_group_blocks: htod_i(&host.g_group_blocks)?,
+            g_group_off: htod_i(&host.g_group_off)?,
+            g_group_width: htod_i(&host.g_group_width)?,
+            g_groups: host.g_groups,
             g_max_work: host.g_max_work,
             htb_ptr: htod_i(&host.htb_ptr)?,
             htb: htod_f(&host.htb)?,
@@ -5180,7 +5321,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             }};
         }
         if host.s_blocks != buffers.s_blocks
-            || host.g_blocks != buffers.g_blocks
+            || host.g_groups != buffers.g_groups
             || host.g_max_work != buffers.g_max_work
             || host.n_rows != buffers.n_rows
             || host.k != buffers.k
@@ -5197,12 +5338,15 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         refresh!(&host.g_off_j, buffers.g_off_j);
         refresh!(&host.g_ri, buffers.g_ri);
         refresh!(&host.g_rj, buffers.g_rj);
-        refresh!(&host.g_mi, buffers.g_mi);
         refresh!(&host.g_mj, buffers.g_mj);
         refresh!(&host.g_ptr, buffers.g_ptr);
         refresh!(&host.g_data, buffers.g_data);
         refresh!(&host.w_ptr, buffers.w_ptr);
         refresh!(&host.w_data, buffers.w_data);
+        refresh!(&host.g_group_ptr, buffers.g_group_ptr);
+        refresh!(&host.g_group_blocks, buffers.g_group_blocks);
+        refresh!(&host.g_group_off, buffers.g_group_off);
+        refresh!(&host.g_group_width, buffers.g_group_width);
         refresh!(&host.htb_ptr, buffers.htb_ptr);
         refresh!(&host.htb, buffers.htb);
         refresh!(&host.q_of, buffers.q_of);
@@ -5293,12 +5437,12 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             unsafe { b.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         // Data penalty.
-        if buffers.g_blocks > 0 {
+        if buffers.g_groups > 0 {
             let kernel = module
                 .load_function("arrow_sae_frame_g_matvec")
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
-            let blocks_i32 = checked_i32(buffers.g_blocks)?;
-            let cfg = frame_grid(buffers.g_max_work.max(1), buffers.g_blocks)?;
+            let groups_i32 = checked_i32(buffers.g_groups)?;
+            let cfg = frame_grid(buffers.g_max_work.max(1), buffers.g_groups)?;
             let mut b = stream.launch_builder(&kernel);
             b.arg(x)
                 .arg(&mut *out)
@@ -5306,15 +5450,19 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
                 .arg(&buffers.g_off_j)
                 .arg(&buffers.g_ri)
                 .arg(&buffers.g_rj)
-                .arg(&buffers.g_mi)
                 .arg(&buffers.g_mj)
                 .arg(&buffers.g_ptr)
                 .arg(&buffers.g_data)
                 .arg(&buffers.w_ptr)
                 .arg(&buffers.w_data)
-                .arg(&blocks_i32);
-            // SAFETY: g/w block metadata/data are live device buffers; the grid
-            // covers (max m_i·r_i × n_blocks) and the kernel bounds-checks.
+                .arg(&buffers.g_group_ptr)
+                .arg(&buffers.g_group_blocks)
+                .arg(&buffers.g_group_off)
+                .arg(&buffers.g_group_width)
+                .arg(&groups_i32);
+            // SAFETY: each CSR ownership group covers one in-bounds scalar output
+            // span, distinct spans are disjoint, and its block list indexes live
+            // G/W metadata. Exactly one thread writes each scalar output.
             unsafe { b.launch(cfg) }.map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
         }
         // Reduced-Schur subtraction via dense per-row cross-blocks.
@@ -5543,7 +5691,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         let k_i32 = checked_i32(buffers.k)?;
         let max_q_i32 = checked_i32(buffers.max_q)?;
         let n_rows_i32 = checked_i32(buffers.n_rows)?;
-        let cfg = frame_grid(buffers.k, buffers.n_rows)?;
+        let cfg = frame_grid(buffers.k, 1)?;
         let mut b = stream.launch_builder(&kernel);
         b.arg(diag)
             .arg(&buffers.ainv)
@@ -5553,7 +5701,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             .arg(&k_i32)
             .arg(&max_q_i32)
             .arg(&n_rows_i32);
-        // SAFETY: diag + cross-block + ainv live buffers; kernel guards a<k, c/d<q.
+        // SAFETY: diag + cross-block + ainv are live buffers; one thread owns
+        // each a<k and walks every row, with c/d bounded by q<=max_q.
         unsafe { b.launch(cfg) }
             .map(drop)
             .map_err(|_| ArrowSchurGpuFailure::Unavailable)
@@ -6646,8 +6795,9 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         //! is the one form the scanner permits.
         use super::*;
         use crate::arrow_schur::{
-            ArrowSchurSystem, DeviceSaeFrameData, DeviceSaePcgData, DeviceSaeSmoothBlock,
-            FactoredFrameGBlock,
+            ArrowSchurSystem, BetaPenaltyOp, DeviceSaeFrameData, DeviceSaePcgData,
+            DeviceSaeSmoothBlock, FactoredFrameGBlock, SparseBlockKroneckerPenaltyOp,
+            SparseGBlock,
         };
         use ndarray::Array2;
 
@@ -6887,6 +7037,409 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             stream
                 .clone_dtoh(&out_dev)
                 .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+        }
+
+        /// Run only the legacy full-B penalty-side matvec repeatedly on one
+        /// warmed device frame. This isolates `arrow_sae_sparse_g_matvec` from
+        /// PCG and the reduced-Schur scatter while still using the production
+        /// marshalling and launch.
+        fn sparse_penalty_matvec_repeated(
+            sys: &ArrowSchurSystem,
+            data: &DeviceSaePcgData,
+            x_host: &[f64],
+            repetitions: usize,
+        ) -> Result<Vec<Vec<f64>>, ArrowSchurGpuFailure> {
+            assert!(repetitions > 0);
+            let runtime = super::super::resolve_runtime_for_device_path()?
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let ctx = gam_gpu::device_runtime::cuda_context_for(runtime.selected_device().ordinal)
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let stream = ctx
+                .new_stream()
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let vector_module = pcg_vector_module(&ctx)?;
+            let mut buffers = flatten_device_sae_data(sys, data, 0.0, &stream)?;
+            let x_dev = stream
+                .clone_htod(x_host)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut out_dev = stream
+                .alloc_zeros::<f64>(x_host.len())
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut observed = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                launch_sae_penalty_matvec(
+                    &stream,
+                    vector_module,
+                    &mut buffers,
+                    &x_dev,
+                    &mut out_dev,
+                    0.0,
+                )?;
+                observed.push(
+                    stream
+                        .clone_dtoh(&out_dev)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+                );
+            }
+            Ok(observed)
+        }
+
+        /// Run the framed matvec repeatedly against one warmed device frame.
+        fn frame_matvec_repeated(
+            sys: &ArrowSchurSystem,
+            data: &DeviceSaePcgData,
+            ridge_t: f64,
+            ridge_beta: f64,
+            x_host: &[f64],
+            repetitions: usize,
+        ) -> Result<Vec<Vec<f64>>, ArrowSchurGpuFailure> {
+            assert!(repetitions > 0);
+            let frame = data
+                .frame
+                .as_ref()
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let runtime = super::super::resolve_runtime_for_device_path()?
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let ctx = gam_gpu::device_runtime::cuda_context_for(runtime.selected_device().ordinal)
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let stream = ctx
+                .new_stream()
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let vector_module = pcg_vector_module(&ctx)?;
+            let mut buffers = flatten_device_sae_frame_data(sys, data, frame, ridge_t, &stream)?;
+            let x_dev = stream
+                .clone_htod(x_host)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut out_dev = stream
+                .alloc_zeros::<f64>(x_host.len())
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut observed = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                launch_sae_frame_matvec(
+                    &stream,
+                    vector_module,
+                    &mut buffers,
+                    &x_dev,
+                    &mut out_dev,
+                    ridge_beta,
+                )?;
+                observed.push(
+                    stream
+                        .clone_dtoh(&out_dev)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+                );
+            }
+            Ok(observed)
+        }
+
+        /// Build and subtract the framed reduced-Schur Jacobi diagonal
+        /// repeatedly on one warmed device frame, using the same production
+        /// marshalling and kernel launch as the framed PCG solver.
+        fn frame_diag_repeated(
+            sys: &ArrowSchurSystem,
+            data: &DeviceSaePcgData,
+            ridge_t: f64,
+            ridge_beta: f64,
+            repetitions: usize,
+        ) -> Result<Vec<Vec<f64>>, ArrowSchurGpuFailure> {
+            assert!(repetitions > 0);
+            let frame = data
+                .frame
+                .as_ref()
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let runtime = super::super::resolve_runtime_for_device_path()?
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let ctx = gam_gpu::device_runtime::cuda_context_for(runtime.selected_device().ordinal)
+                .ok_or(ArrowSchurGpuFailure::Unavailable)?;
+            let stream = ctx
+                .new_stream()
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let vector_module = pcg_vector_module(&ctx)?;
+            let buffers = flatten_device_sae_frame_data(sys, data, frame, ridge_t, &stream)?;
+            let diag_host = sae_frame_penalty_diag_host(data, frame, ridge_beta)?;
+            let mut diag_dev = stream
+                .clone_htod(&diag_host)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            let mut observed = Vec::with_capacity(repetitions);
+            for _ in 0..repetitions {
+                stream
+                    .memcpy_htod(&diag_host, &mut diag_dev)
+                    .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+                launch_sae_frame_diag_sub(&stream, vector_module, &buffers, &mut diag_dev)?;
+                observed.push(
+                    stream
+                        .clone_dtoh(&diag_dev)
+                        .map_err(|_| ArrowSchurGpuFailure::Unavailable)?,
+                );
+            }
+            Ok(observed)
+        }
+
+        /// #2535 race witness and receipt.
+        ///
+        /// Three co-occurring atoms contribute, in fixed source order, the
+        /// exactly representable sequence `2^53, 1, -2^53` to every channel of
+        /// every output atom. Sequential IEEE addition returns zero; the former
+        /// one-CTA-per-(i,j) `atomicAdd(double)` kernels could schedule the
+        /// cancelling pair first and return one. Repeating the complete
+        /// three-atom Gram 32 times gives each output 96 racing contributors,
+        /// making the witness sensitive without a large scratch buffer.
+        ///
+        /// The legacy full-B sparse-G writer, framed G⊗W writer, and framed
+        /// Jacobi-diagonal writer all run on the real CUDA device, match their
+        /// independent fixed-order CPU oracles, and reproduce every output bit
+        /// across hundreds of warmed device launches.
+        #[test]
+        fn g_matvec_output_owners_are_bit_reproducible_on_device_2535() {
+            let Some(runtime) =
+                gam_gpu::device_runtime::GpuRuntime::resolve(gam_gpu::GpuPolicy::Auto)
+                    .unwrap_or_else(|error| panic!("GPU probe fault in #2535 witness: {error}"))
+            else {
+                return;
+            };
+            let ordinal = runtime.selected_device().ordinal;
+            let atoms = 3usize;
+            let basis = 64usize;
+            let channels = 8usize;
+            let rounds = 32usize;
+            let g_repetitions = 512usize;
+            let diag_repetitions = 512usize;
+            let huge = (1_u64 << 53) as f64;
+            let tiny = 1.0 / huge;
+            let dim_a = atoms * basis;
+            let k = dim_a * channels;
+            let mut x = vec![0.0_f64; k];
+            for channel in 0..channels {
+                x[channel] = 1.0;
+                x[basis * channels + channel] = tiny;
+                x[2 * basis * channels + channel] = -1.0;
+            }
+
+            let mut sparse_blocks = Vec::with_capacity(rounds * atoms * atoms);
+            for _ in 0..rounds {
+                for atom_i in 0..atoms {
+                    for atom_j in 0..atoms {
+                        sparse_blocks.push(SparseGBlock {
+                            row_off: atom_i * basis,
+                            col_off: atom_j * basis,
+                            data: Array2::from_elem((basis, basis), huge),
+                        });
+                    }
+                }
+            }
+            let sparse_oracle = SparseBlockKroneckerPenaltyOp {
+                p: channels,
+                dim_a,
+                k,
+                blocks: sparse_blocks.clone(),
+            };
+            let mut sparse_cpu = vec![0.0_f64; k];
+            sparse_oracle.matvec(&x, &mut sparse_cpu);
+            let mut sparse_sys =
+                ArrowSchurSystem::new_with_empty_hbb_and_htbeta_cols(1, 1, k, 0);
+            sparse_sys.rows[0].htt[[0, 0]] = 1.0;
+            let sparse_data = DeviceSaePcgData {
+                p: channels,
+                beta_dim: k,
+                a_phi: std::sync::Arc::from(vec![Vec::new()].into_boxed_slice()),
+                local_jac: std::sync::Arc::from(
+                    vec![vec![0.0_f64; channels]].into_boxed_slice(),
+                ),
+                smooth_blocks: Vec::new(),
+                sparse_g_blocks: sparse_blocks,
+                frame: None,
+            };
+            let sparse_runs = sparse_penalty_matvec_repeated(
+                &sparse_sys,
+                &sparse_data,
+                &x,
+                g_repetitions,
+            )
+            .unwrap_or_else(|failure| {
+                panic!("#2535 sparse G matvec declined on CUDA device {ordinal}: {failure:?}")
+            });
+            let sparse_reference = &sparse_runs[0];
+            assert_eq!(
+                sparse_reference, &sparse_cpu,
+                "#2535 sparse device G matvec differs from its fixed-order CPU operator"
+            );
+            for (repetition, observed) in sparse_runs.iter().enumerate().skip(1) {
+                let differing = sparse_reference
+                    .iter()
+                    .zip(observed)
+                    .filter(|(left, right)| left.to_bits() != right.to_bits())
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "#2535 sparse G repetition {repetition} changed {differing}/{k} output bits"
+                );
+            }
+            drop(sparse_runs);
+
+            let identity = Array2::<f64>::eye(channels);
+            let mut frame_blocks = Vec::with_capacity(rounds * atoms * atoms);
+            for _ in 0..rounds {
+                for atom_i in 0..atoms {
+                    for atom_j in 0..atoms {
+                        frame_blocks.push(FactoredFrameGBlock {
+                            atom_i,
+                            atom_j,
+                            g: Array2::from_elem((basis, basis), huge),
+                            w: identity.clone(),
+                        });
+                    }
+                }
+            }
+            let frame_data = DeviceSaePcgData {
+                p: channels,
+                beta_dim: k,
+                a_phi: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                local_jac: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                smooth_blocks: Vec::new(),
+                sparse_g_blocks: Vec::new(),
+                frame: Some(DeviceSaeFrameData {
+                    ranks: vec![channels; atoms],
+                    basis_sizes: vec![basis; atoms],
+                    border_offsets: (0..atoms)
+                        .map(|atom| atom * basis * channels)
+                        .collect(),
+                    frame_blocks,
+                    smooth_ranks: Vec::new(),
+                    row_htbeta: vec![Vec::new()],
+                }),
+            };
+            let frame_sys = ArrowSchurSystem::new_with_empty_hbb_and_htbeta_cols(1, 1, k, 0);
+            let mut frame_cpu = vec![0.0_f64; k];
+            super::super::sae_framed_schur_matvec_cpu(
+                &frame_sys,
+                &frame_data,
+                0.0,
+                0.0,
+                &x,
+                &mut frame_cpu,
+            )
+            .expect("#2535 framed CPU oracle");
+            let frame_runs = frame_matvec_repeated(
+                &frame_sys,
+                &frame_data,
+                0.0,
+                0.0,
+                &x,
+                g_repetitions,
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "#2535 framed G matvec declined on CUDA device {ordinal}: {failure:?}"
+                )
+            });
+            let frame_reference = &frame_runs[0];
+            assert_eq!(
+                frame_reference, &frame_cpu,
+                "#2535 framed device G⊗W matvec differs from its fixed-order CPU operator"
+            );
+            for (repetition, observed) in frame_runs.iter().enumerate().skip(1) {
+                let differing = frame_reference
+                    .iter()
+                    .zip(observed)
+                    .filter(|(left, right)| left.to_bits() != right.to_bits())
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "#2535 framed G repetition {repetition} changed {differing}/{k} output bits"
+                );
+            }
+            drop(frame_runs);
+
+            // The third writer was not named in the issue body: framed Jacobi
+            // construction launched one CTA per row and atomically subtracted
+            // every row's quadratic form into diag[a]. This fixture makes the
+            // order observable. Starting at 32·2^52 and subtracting alternating
+            // `2^52, 1` row contributions yields -3 in row order. Three unit
+            // subtractions survive: at the exact 2H=2^53 binade boundary
+            // (`2H - 1` is representable because spacing below 2H is one), below
+            // H, and after crossing zero. Scheduling all unit contributions
+            // early can round them away and yield zero.
+            let diag_k = 2_048usize;
+            let diag_rounds = 32usize;
+            let diag_rows = 2 * diag_rounds;
+            let diag_huge = (1_u64 << 52) as f64;
+            let diag_ridge = diag_rounds as f64 * diag_huge;
+            let mut diag_sys = ArrowSchurSystem::new_with_empty_hbb_and_htbeta_cols(
+                diag_rows, 1, diag_k, 0,
+            );
+            let mut diag_slabs = Vec::with_capacity(diag_rows);
+            for row in 0..diag_rows {
+                diag_sys.rows[row].htt[[0, 0]] = 1.0;
+                let h = if row % 2 == 0 {
+                    (1_u64 << 26) as f64
+                } else {
+                    1.0
+                };
+                diag_slabs.push(vec![h; diag_k]);
+            }
+            let diag_data = DeviceSaePcgData {
+                p: 1,
+                beta_dim: diag_k,
+                a_phi: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                local_jac: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                smooth_blocks: Vec::new(),
+                sparse_g_blocks: Vec::new(),
+                frame: Some(DeviceSaeFrameData {
+                    ranks: vec![1],
+                    basis_sizes: vec![diag_k],
+                    border_offsets: vec![0],
+                    frame_blocks: Vec::new(),
+                    smooth_ranks: Vec::new(),
+                    row_htbeta: diag_slabs.clone(),
+                }),
+            };
+            let mut diag_cpu = vec![diag_ridge; diag_k];
+            for slab in &diag_slabs {
+                for a in 0..diag_k {
+                    diag_cpu[a] -= slab[a] * slab[a];
+                }
+            }
+            assert!(
+                diag_cpu.iter().all(|&value| value == -3.0),
+                "#2535 diagonal witness must retain three fixed-order unit subtractions"
+            );
+            let diag_runs = frame_diag_repeated(
+                &diag_sys,
+                &diag_data,
+                0.0,
+                diag_ridge,
+                diag_repetitions,
+            )
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "#2535 framed diagonal declined on CUDA device {ordinal}: {failure:?}"
+                )
+            });
+            let diag_reference = &diag_runs[0];
+            assert_eq!(
+                diag_reference, &diag_cpu,
+                "#2535 framed device Jacobi diagonal differs from its fixed-row-order oracle"
+            );
+            for (repetition, observed) in diag_runs.iter().enumerate().skip(1) {
+                let differing = diag_reference
+                    .iter()
+                    .zip(observed)
+                    .filter(|(left, right)| left.to_bits() != right.to_bits())
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "#2535 framed diagonal repetition {repetition} changed \
+                     {differing}/{diag_k} output bits"
+                );
+            }
+            eprintln!(
+                "ISSUE2535_DEVICE_OUTPUT_OWNER_PASS ordinal={ordinal} atoms={atoms} basis={basis} \
+                 channels={channels} k={k} contributors_per_g_output={} \
+                 sparse_warm_runs={g_repetitions} framed_warm_runs={g_repetitions} \
+                 diag_k={diag_k} diag_rows={diag_rows} \
+                 diag_warm_runs={diag_repetitions}",
+                rounds * atoms
+            );
         }
 
         /// #1551 stage-isolating matvec triage on a TINY hand-verifiable fixture:
