@@ -35,7 +35,7 @@
 /// flex jets are `Clone`, not `Copy`) and carries no constructor (a Vec-backed
 /// constant needs a primary count) — the `Copy`, `from_f64`-carrying nested-dual
 /// oracle path adds those through [`JetFieldConst`].
-pub trait JetField {
+pub trait JetField: Clone {
     /// The real value channel (recurses through any nesting to the `f64` leaf).
     fn value(&self) -> f64;
     fn add(&self, o: &Self) -> Self;
@@ -49,6 +49,35 @@ pub trait JetField {
     /// `u = self.value()` — the identical `[f64; 5]` stack shape
     /// [`crate::jet_tower::Tower4::compose_unary`] consumes.
     fn compose_unary(&self, d: [f64; 5]) -> Self;
+
+    /// A constant carrying THIS element's shape: real value `v`, every
+    /// derivative channel zero.
+    ///
+    /// [`JetField`] deliberately has no dimensionless constructor (a Vec-backed
+    /// runtime-width constant needs a primary count), so a shape has to come
+    /// from an existing element. The default routes through [`Self::compose_unary`]
+    /// with a zero-derivative stack, which is correct for every implementor but
+    /// walks the whole Faa di Bruno partition sum to write a constant — at
+    /// `Dual2<Order2<K>>` that is three inner compositions plus four products,
+    /// all of whose channels are known zero ahead of time. Implementors on a hot
+    /// path override it with the direct construction. (#932)
+    fn constant_like(&self, v: f64) -> Self {
+        self.compose_unary([v, 0.0, 0.0, 0.0, 0.0])
+    }
+
+    /// `self` with its real value channel replaced by `v`, every derivative
+    /// channel untouched.
+    ///
+    /// This is the explicit form of the "anchor the value, keep the
+    /// derivatives" idiom that a row program uses to hold a previously computed
+    /// f64 result bitwise while lifting it into a jet. Expressing it as a
+    /// primitive (rather than as subtract-a-constant-then-add-a-constant) makes
+    /// the bitwise contract exact by construction instead of emergent from
+    /// floating-point cancellation. (#932)
+    fn with_value(&self, v: f64) -> Self {
+        self.sub(&self.constant_like(self.value()))
+            .add(&self.constant_like(v))
+    }
 }
 
 /// A [`JetField`] that is `Copy` and can be built from a real constant with
@@ -90,6 +119,14 @@ impl JetField for f64 {
     fn compose_unary(&self, d: [f64; 5]) -> Self {
         // The stack is already evaluated at `u = *self`; `f(u)` is `d[0]`.
         d[0]
+    }
+    #[inline]
+    fn constant_like(&self, v: f64) -> Self {
+        v
+    }
+    #[inline]
+    fn with_value(&self, v: f64) -> Self {
+        v
     }
 }
 
@@ -203,6 +240,26 @@ impl<S: JetField> JetField for Dual2<S> {
             v: f0,
             g: f1.mul(&self.g),
             h: f1.mul(&self.h).add(&f2.mul(&self.g).mul(&self.g)),
+        }
+    }
+    #[inline]
+    fn constant_like(&self, v: f64) -> Self {
+        // The default's `g`/`h` are `compose_unary([0;5]).mul(..)` products of a
+        // zero jet, i.e. structurally zero: build them directly.
+        Self {
+            v: self.v.constant_like(v),
+            g: self.v.constant_like(0.0),
+            h: self.v.constant_like(0.0),
+        }
+    }
+    #[inline]
+    fn with_value(&self, v: f64) -> Self {
+        // Only the real value channel lives in `self.v`; this dual's own
+        // derivative channels are untouched.
+        Self {
+            v: self.v.with_value(v),
+            g: self.g.clone(),
+            h: self.h.clone(),
         }
     }
 }

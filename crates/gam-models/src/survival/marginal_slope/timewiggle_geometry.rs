@@ -110,28 +110,24 @@ pub(crate) struct TimewiggleScalarQ<J> {
     pub(crate) qd1: J,
 }
 
-#[inline]
-fn constant_like<J: JetField>(anchor: &J, value: f64) -> J {
-    anchor.compose_unary([value, 0.0, 0.0, 0.0, 0.0])
-}
-
-#[inline]
-fn centered<J: JetField>(value: &J) -> J {
-    value.sub(&constant_like(value, value.value()))
-}
-
 fn timewiggle_q_at_endpoint<J: JetField>(
     h: &J,
     beta_w: &[J],
     basis: &TimewiggleBasisDerivativeRows<'_>,
     base_value: f64,
 ) -> J {
-    let mut q = constant_like(h, base_value).add(&centered(h));
+    let mut q = h.clone();
     for (coefficient, beta) in beta_w.iter().enumerate() {
         let basis_value = h.compose_unary(basis.basis_stack(coefficient));
-        q = q.add(&centered(&beta.mul(&basis_value)));
+        q = q.add(&beta.mul(&basis_value));
     }
-    q
+    // Anchor the value channel on the f64 path's own already-computed result.
+    // Accumulation above is `add`, which is channel-wise, so every derivative
+    // channel already equals the previously per-term-centered sum's; only the
+    // value channel ever needed pinning. Centering each term instead cost one
+    // full zero-derivative `compose_unary` plus one `sub` per term — the whole
+    // Faa di Bruno walk, to write a constant. (#932)
+    q.with_value(base_value)
 }
 
 /// Evaluate `q0 = h0 + B(h0) beta_w`, `q1 = h1 + B(h1) beta_w`, and
@@ -156,11 +152,12 @@ pub(crate) fn timewiggle_q_from_basis_derivative_rows<J: JetField>(
 
     let q0 = timewiggle_q_at_endpoint(h0, beta_w, entry_basis, base_values.q0);
     let q1 = timewiggle_q_at_endpoint(h1, beta_w, exit_basis, base_values.q1);
-    let mut dq1_dh1 = constant_like(h1, base_values.dq1_dh1);
+    let mut dq1_dh1 = h1.constant_like(base_values.dq1_dh1);
     for (coefficient, beta) in beta_w.iter().enumerate() {
         let basis_derivative = h1.compose_unary(exit_basis.derivative_stack(coefficient));
-        dq1_dh1 = dq1_dh1.add(&centered(&beta.mul(&basis_derivative)));
+        dq1_dh1 = dq1_dh1.add(&beta.mul(&basis_derivative));
     }
+    let dq1_dh1 = dq1_dh1.with_value(base_values.dq1_dh1);
 
     Ok(TimewiggleScalarQ {
         q0,

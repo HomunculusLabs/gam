@@ -756,6 +756,25 @@ impl JetField for Jet2 {
         }
         Jet2 { v: f, g, h }
     }
+    fn constant_like(&self, v: f64) -> Self {
+        // The default routes through `compose_unary([v, 0, 0, 0, 0])`, which
+        // allocates the p*p Hessian and then fills every entry with
+        // `0*g[i]*g[j] + 0*h[i][j]`. Allocate the zeros once and skip the
+        // arithmetic. (#932)
+        let p = self.p();
+        Jet2 {
+            v,
+            g: vec![0.0; p],
+            h: vec![0.0; p * p],
+        }
+    }
+    fn with_value(&self, v: f64) -> Self {
+        Jet2 {
+            v,
+            g: self.g.clone(),
+            h: self.h.clone(),
+        }
+    }
 }
 
 impl FlexJet for Jet2 {
@@ -935,6 +954,21 @@ impl JetField for Jet3 {
         let fprime = self.base.compose_unary([d[1], d[2], d[3], d[4], d[4]]);
         let eps = fprime.mul(&self.eps);
         Jet3 { base, eps }
+    }
+    fn constant_like(&self, v: f64) -> Self {
+        // The default also builds the all-zero `fprime` and runs a full
+        // `Jet2::mul` against it; both products are structurally zero. (#932)
+        Jet3 {
+            base: self.base.constant_like(v),
+            eps: self.eps.constant_like(0.0),
+        }
+    }
+    fn with_value(&self, v: f64) -> Self {
+        // The real value channel lives in the base part.
+        Jet3 {
+            base: self.base.with_value(v),
+            eps: self.eps.clone(),
+        }
     }
 }
 
