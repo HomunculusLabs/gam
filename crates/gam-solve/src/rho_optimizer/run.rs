@@ -1,4 +1,5 @@
 use super::*;
+use gam_problem::StationarityRung;
 
 use super::asymptote_certificate::{
     AsymptoteSample, AsymptoteSide, AsymptoteTolerances, AsymptoteVerdict, AsymptoteWindow,
@@ -2005,6 +2006,61 @@ impl StationarityBoundSource {
     pub(crate) fn is_derived_standard(self) -> bool {
         matches!(self, Self::CurvatureResolvability)
     }
+
+    /// The neutral projection carried on the refusal, so a red states its own
+    /// rung instead of leaving it to be inferred from the numbers.
+    pub(crate) fn provenance(self) -> StationarityRung {
+        StationarityRung {
+            label: self.label(),
+            derived_standard: self.is_derived_standard(),
+        }
+    }
+}
+
+/// A stationarity bound bundled with the rung that produced it (#2458).
+///
+/// The bound and its provenance travelled separately before this: the bound was
+/// a bare `f64` argument and the rung stayed a local in the certificate block,
+/// so every refusal outside that block reported a number with no way to say
+/// which standard it came from. Bundling them makes it impossible to pass one
+/// without deciding the other.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StationarityBound {
+    value: f64,
+    source: Option<StationarityBoundSource>,
+}
+
+impl StationarityBound {
+    /// A bound the rung ladder produced, carrying the rung it came from.
+    pub(crate) fn from_ladder(value: f64, source: StationarityBoundSource) -> Self {
+        Self {
+            value,
+            source: Some(source),
+        }
+    }
+
+    /// A bound from a route that does not select a ladder rung — a raw config
+    /// tolerance, or a refusal reached before the ladder is evaluated.
+    ///
+    /// This is deliberately not defaulted to [`StationarityBoundSource::SolverBand`]:
+    /// labelling an unclassified bound with a rung it did not come from would
+    /// make the ladder look more uniformly applied than it is, which is the
+    /// exact inference #2458 exists to stop. `rung=unrecorded` in a refusal is a
+    /// finding — it names a route whose stationarity standard is still unstated.
+    pub(crate) fn unrecorded(value: f64) -> Self {
+        Self {
+            value,
+            source: None,
+        }
+    }
+
+    pub(crate) fn value(self) -> f64 {
+        self.value
+    }
+
+    pub(crate) fn rung(self) -> Option<StationarityRung> {
+        self.source.map(StationarityBoundSource::provenance)
+    }
 }
 
 fn outer_nonconvergence_error(
@@ -2012,7 +2068,7 @@ fn outer_nonconvergence_error(
     reason: &str,
     result: &OuterResult,
     projected_grad_norm: Option<f64>,
-    stationarity_bound: f64,
+    stationarity_bound: StationarityBound,
 ) -> EstimationError {
     // Solver provenance, appended to every outer non-convergence.
     //
@@ -2045,7 +2101,8 @@ fn outer_nonconvergence_error(
         iterations: result.iterations,
         final_value: result.final_value,
         projected_grad_norm,
-        stationarity_bound,
+        stationarity_bound: stationarity_bound.value(),
+        stationarity_bound_rung: stationarity_bound.rung(),
         rho_checkpoint: result.rho.to_vec(),
     }
 }
@@ -2068,7 +2125,7 @@ fn audit_outer_value_agreement(
     derivative_sample: f64,
     result: &mut OuterResult,
     projected_grad_norm: Option<f64>,
-    stationarity_bound: f64,
+    stationarity_bound: StationarityBound,
 ) -> Result<(), EstimationError> {
     let bound = outer_value_agreement_bound(value_only, derivative_sample);
     let disagreement = (value_only - derivative_sample).abs();
@@ -2122,7 +2179,7 @@ fn certify_fixed_point_optimality(
                         &format!("terminal value-only certificate evaluation failed: {err}"),
                         result,
                         None,
-                        config.tolerance,
+                        StationarityBound::unrecorded(config.tolerance),
                     )
                 })?
                 .cost;
@@ -2132,7 +2189,7 @@ fn certify_fixed_point_optimality(
                     "terminal value-only certificate evaluation returned a non-finite objective value",
                     result,
                     None,
-                    config.tolerance,
+                    StationarityBound::unrecorded(config.tolerance),
                 ));
             }
             Some(sample)
@@ -2146,7 +2203,7 @@ fn certify_fixed_point_optimality(
                 &format!("analytic fixed-point certificate evaluation failed: {err}"),
                 result,
                 None,
-                config.tolerance,
+                StationarityBound::unrecorded(config.tolerance),
             )
         })?;
     if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
@@ -2155,7 +2212,7 @@ fn certify_fixed_point_optimality(
             "terminal fixed-point evidence was evaluated at a non-converged inner state",
             result,
             None,
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         ));
     }
     if evaluation.coordinates.len() != layout.n_params {
@@ -2168,7 +2225,7 @@ fn certify_fixed_point_optimality(
             ),
             result,
             None,
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         ));
     }
     if !evaluation.cost.is_finite() {
@@ -2177,7 +2234,7 @@ fn certify_fixed_point_optimality(
             "fixed-point certificate returned a non-finite objective value",
             result,
             None,
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         ));
     }
     if let Some(value_only) = value_only {
@@ -2187,7 +2244,7 @@ fn certify_fixed_point_optimality(
             evaluation.cost,
             result,
             None,
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         )?;
     }
 
@@ -2221,7 +2278,7 @@ fn certify_fixed_point_optimality(
             ),
             result,
             None,
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         ));
     }
 
@@ -2273,7 +2330,7 @@ fn certify_fixed_point_optimality(
             &certificate.summary(),
             result,
             Some(projected_inf),
-            config.tolerance,
+            StationarityBound::unrecorded(config.tolerance),
         ));
     }
 
@@ -2381,7 +2438,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the selected checkpoint contains non-finite coordinates",
             result,
             None,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
     if layout.n_params == 0 {
@@ -2391,7 +2448,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("zero-dimensional final objective evaluation failed: {err}"),
                 result,
                 Some(0.0),
-                outer_gradient_tolerance(config).abs,
+                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
             )
         })?;
         if !value.is_finite() {
@@ -2400,7 +2457,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 "the zero-dimensional final objective is non-finite",
                 result,
                 Some(0.0),
-                outer_gradient_tolerance(config).abs,
+                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
             ));
         }
         let certificate = OuterCriterionCertificate {
@@ -2433,7 +2490,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the objective exposes no analytic gradient for final certification",
             result,
             None,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
 
@@ -2466,7 +2523,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("terminal value-only certificate evaluation failed: {err}"),
                 result,
                 result.final_grad_norm,
-                outer_gradient_tolerance(config).abs,
+                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
             )
         })?
         .cost;
@@ -2476,7 +2533,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "terminal value-only certificate evaluation returned a non-finite objective value",
             result,
             result.final_grad_norm,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
 
@@ -2503,7 +2560,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             &format!("analytic final-point evaluation failed: {err}"),
             result,
             result.final_grad_norm,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         )
     })?;
     if !inner_solve_converged(config.outer_inner_cap.as_ref()) {
@@ -2512,7 +2569,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "terminal analytic evidence was evaluated at a non-converged inner state",
             result,
             None,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
     layout
@@ -2523,7 +2580,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 &format!("malformed analytic final gradient: {err}"),
                 result,
                 None,
-                outer_gradient_tolerance(config).abs,
+                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
             )
         })?;
     if !evaluation.cost.is_finite() || evaluation.gradient.iter().any(|value| !value.is_finite()) {
@@ -2532,7 +2589,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             "the analytic final-point value or gradient is non-finite",
             result,
             None,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
 
@@ -2600,7 +2657,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         evaluation.cost,
         result,
         Some(projected_grad_norm),
-        stationarity_bound,
+        StationarityBound::from_ladder(stationarity_bound, bound_source),
     )?;
 
     // The optimizer's own recorded best-iterate evidence, captured before the
@@ -2630,7 +2687,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                             &format!("malformed analytic final Hessian: {err}"),
                             result,
                             Some(projected_grad_norm),
-                            stationarity_bound,
+                            StationarityBound::from_ladder(stationarity_bound, bound_source),
                         )
                     })?;
                 if hessian.iter().any(|value| !value.is_finite()) {
@@ -2639,7 +2696,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         "the analytic final Hessian contains non-finite entries",
                         result,
                         Some(projected_grad_norm),
-                        stationarity_bound,
+                        StationarityBound::from_ladder(stationarity_bound, bound_source),
                     ));
                 }
                 Some(hessian)
@@ -2650,7 +2707,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     "the objective declared analytic curvature but returned none at the final point",
                     result,
                     Some(projected_grad_norm),
-                    stationarity_bound,
+                    StationarityBound::from_ladder(stationarity_bound, bound_source),
                 ));
             }
             Err(err) => {
@@ -2659,7 +2716,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     &format!("analytic final Hessian could not be certified: {err}"),
                     result,
                     Some(projected_grad_norm),
-                    stationarity_bound,
+                    StationarityBound::from_ladder(stationarity_bound, bound_source),
                 ));
             }
         }
@@ -2935,7 +2992,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &certificate.summary(),
                         result,
                         Some(interior_projected_grad_norm),
-                        stationarity_bound,
+                        StationarityBound::from_ladder(stationarity_bound, bound_source),
                     ));
                 }
                 result.converged = true;
@@ -3053,7 +3110,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                     ),
                     result,
                     Some(certified_projected_grad_norm),
-                    stationarity_bound,
+                    StationarityBound::from_ladder(stationarity_bound, bound_source),
                 )
             })?;
         }
@@ -3170,7 +3227,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
                         &certificate.summary(),
                         result,
                         Some(interior_projected_grad_norm),
-                        effective_interior_bound,
+                        StationarityBound::unrecorded(effective_interior_bound),
                     ));
                 }
                 result.converged = true;
@@ -3385,7 +3442,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
             &summary,
             result,
             Some(certified_projected_grad_norm),
-            stationarity_bound,
+            StationarityBound::from_ladder(stationarity_bound, bound_source),
         ));
     }
 
@@ -5160,7 +5217,7 @@ pub(crate) fn run_outer(
                 "final outer state installation did not converge at full inner fidelity",
                 result,
                 result.final_grad_norm,
-                outer_gradient_tolerance(config).abs,
+                StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
             ));
         }
         certify_outer_optimality(obj, config, context, result)
@@ -5524,7 +5581,7 @@ pub(crate) fn run_outer_uncertified(
             "per-atom EFS exhausted its iteration budget before the fixed-point step converged",
             &result,
             None,
-            outer_gradient_tolerance(config).abs,
+            StationarityBound::unrecorded(outer_gradient_tolerance(config).abs),
         ));
     }
 

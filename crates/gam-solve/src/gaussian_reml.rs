@@ -4174,6 +4174,9 @@ fn profile_search_refusal(
         final_value: e.cost,
         projected_grad_norm: e.grad.is_finite().then_some(e.grad.abs()),
         stationarity_bound: GRAD_TOL * (1.0 + e.cost.abs()),
+        // The closed-form profiled search uses its own relative gradient
+        // tolerance, which is not one of the outer ladder's rungs (#2458).
+        stationarity_bound_rung: None,
         rho_checkpoint: vec![checkpoint],
     }
 }

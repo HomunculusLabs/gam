@@ -86,7 +86,7 @@ pub use dispersion_cov::{
 };
 pub use estimation_error::{
     EstimationError, FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage,
-    FixedLambdaStallReason, FixedLambdaStationarityEvidence,
+    FixedLambdaStallReason, FixedLambdaStationarityEvidence, StationarityRung,
 };
 pub use execution_path::ExecutionPath;
 pub use family_options::{ExactNewtonOuterObjective, ExactOuterDerivativeOrder};

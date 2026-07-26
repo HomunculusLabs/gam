@@ -524,6 +524,9 @@ pub fn fit_shared_tangent_reml(
                     .criterion_certificate
                     .as_ref()
                     .map_or(0.0, |value| value.stationarity.bound()),
+                // The certificate carries the bound but not the rung that
+                // produced it, so this route cannot state its standard (#2458).
+                stationarity_bound_rung: None,
                 rho_checkpoint: outer.rho.to_vec(),
             })?;
         (outer.rho, outer.iterations, certificate)
