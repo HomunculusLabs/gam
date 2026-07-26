@@ -2527,6 +2527,19 @@ impl SaeManifoldTerm {
         let rank_charge = self
             .production_rank_charge_derivative(target, rho, loss, cache)
             .map_err(OuterGradientError::internal)?;
+        // #2330 Phase-2 / #2333 — which majorizer the logdet channels belong to
+        // is a property of the ROUTE, and it is known here, before any of them is
+        // produced. On the dense direct-logdet route the ranked term is ½log|A|,
+        // so `logdet_trace` and `Γ` come from `dense_exact_a_logdet_channels`
+        // and every B-majorizer producer below would be discarded unread: a
+        // selected-inverse pass for the smoothness EDF, two solver-bound
+        // assignment log-strength traces, the ARD Hessian traces, and two
+        // θ-adjoint towers. Deciding once, up front, is what lets them be
+        // skipped rather than computed and overwritten. The `explicit`, `occam`
+        // and rank-charge-direct channels are majorizer-independent and are
+        // produced on every route.
+        let exact_a_logdet_route =
+            logdet_derivative_bundle.is_none() && matrix_free_system.is_none();
 
         if let Some(sparse_index) = rho.sparse_flat_index() {
             explicit[sparse_index] =
@@ -2541,18 +2554,20 @@ impl SaeManifoldTerm {
             // likelihood and its Gauss--Newton blocks have no direct alpha
             // derivative. Structurally fixed assignments have no sparse index
             // and skip this channel entirely.
-            let joint_trace = match logdet_derivative_bundle {
-                Some((probes, sinv)) => self
-                    .assignment_log_strength_hessian_trace_from_probes(rho, cache, probes, sinv)
-                    .map_err(OuterGradientError::internal)?,
-                None => self
-                    .assignment_log_strength_hessian_trace(rho, cache, solver)
-                    .map_err(OuterGradientError::internal)?,
-            };
-            let coordinate_trace = self
-                .coordinate_block_assignment_log_strength_hessian_trace(rho, cache)
-                .map_err(OuterGradientError::internal)?;
-            logdet_trace[sparse_index] = joint_trace - coordinate_trace;
+            if !exact_a_logdet_route {
+                let joint_trace = match logdet_derivative_bundle {
+                    Some((probes, sinv)) => self
+                        .assignment_log_strength_hessian_trace_from_probes(rho, cache, probes, sinv)
+                        .map_err(OuterGradientError::internal)?,
+                    None => self
+                        .assignment_log_strength_hessian_trace(rho, cache, solver)
+                        .map_err(OuterGradientError::internal)?,
+                };
+                let coordinate_trace = self
+                    .coordinate_block_assignment_log_strength_hessian_trace(rho, cache)
+                    .map_err(OuterGradientError::internal)?;
+                logdet_trace[sparse_index] = joint_trace - coordinate_trace;
+            }
         }
 
         // #1556: λ_smooth is per-atom, so the smoothness gradient block occupies
@@ -2580,27 +2595,31 @@ impl SaeManifoldTerm {
         // #2080: the per-atom smoothness logdet derivative off the shared
         // low-rank derivative representation when the rational lane supplied it;
         // the dense `DeflatedArrowSolver` selected inverse otherwise.
-        let smooth_logdet = match logdet_derivative_bundle {
-            Some((probes, sinv)) => self
-                .decoder_smoothness_effective_dof_per_atom_from_probes(
-                    probes,
-                    sinv,
-                    &lambda_smooth_vec,
-                )
-                .map_err(|err| OuterGradientError::InternalInvariant {
-                    reason: format!(
-                        "analytic_outer_rho_gradient_components: smooth dof (matrix-free): {err}"
-                    ),
-                })?,
-            None => self
-                .decoder_smoothness_effective_dof_with_solver_per_atom(
-                    cache,
-                    solver,
-                    &lambda_smooth_vec,
-                )
-                .map_err(|err| OuterGradientError::InternalInvariant {
-                    reason: format!("analytic_outer_rho_gradient_components: {err}"),
-                })?,
+        let smooth_logdet = if exact_a_logdet_route {
+            None
+        } else {
+            Some(match logdet_derivative_bundle {
+                Some((probes, sinv)) => self
+                    .decoder_smoothness_effective_dof_per_atom_from_probes(
+                        probes,
+                        sinv,
+                        &lambda_smooth_vec,
+                    )
+                    .map_err(|err| OuterGradientError::InternalInvariant {
+                        reason: format!(
+                            "analytic_outer_rho_gradient_components: smooth dof (matrix-free): {err}"
+                        ),
+                    })?,
+                None => self
+                    .decoder_smoothness_effective_dof_with_solver_per_atom(
+                        cache,
+                        solver,
+                        &lambda_smooth_vec,
+                    )
+                    .map_err(|err| OuterGradientError::InternalInvariant {
+                        reason: format!("analytic_outer_rho_gradient_components: {err}"),
+                    })?,
+            })
         };
         let smooth_occam = self
             .reml_occam_log_lambda_smooth_derivative(rho)
@@ -2608,7 +2627,9 @@ impl SaeManifoldTerm {
         for atom_idx in 0..k_smooth {
             let index = rho.smooth_flat_index(atom_idx);
             explicit[index] = smooth_explicit[atom_idx];
-            logdet_trace[index] = 0.5 * smooth_logdet[atom_idx];
+            if let Some(smooth_logdet) = smooth_logdet.as_ref() {
+                logdet_trace[index] = 0.5 * smooth_logdet[atom_idx];
+            }
             occam[index] = -smooth_occam[atom_idx];
         }
 
@@ -2622,28 +2643,33 @@ impl SaeManifoldTerm {
         // any row carrying gauge/rotation deflation (the plain-S⁻¹ bundle cannot
         // reconstruct the Daleckii–Krein correction), routing that fit to the dense
         // channel rather than silently dropping the correction.
-        let ard_joint_trace = match logdet_derivative_bundle {
-            Some((probes, sinv)) => self
-                .ard_log_precision_hessian_trace_from_probes(rho, cache, probes, sinv)
+        let ard_logdet_traces = if exact_a_logdet_route {
+            None
+        } else {
+            let joint = match logdet_derivative_bundle {
+                Some((probes, sinv)) => self
+                    .ard_log_precision_hessian_trace_from_probes(rho, cache, probes, sinv)
+                    .map_err(|err| OuterGradientError::InternalInvariant {
+                        reason: format!(
+                            "analytic_outer_rho_gradient_components: ARD logdet trace \
+                             (matrix-free): {err}"
+                        ),
+                    })?,
+                None => self
+                    .ard_log_precision_hessian_trace(rho, cache, solver)
+                    .map_err(|err| OuterGradientError::InternalInvariant {
+                        reason: format!("analytic_outer_rho_gradient_components: {err}"),
+                    })?,
+            };
+            let coordinate = self
+                .coordinate_block_ard_log_precision_hessian_trace(rho, cache)
                 .map_err(|err| OuterGradientError::InternalInvariant {
                     reason: format!(
-                        "analytic_outer_rho_gradient_components: ARD logdet trace \
-                         (matrix-free): {err}"
+                        "analytic_outer_rho_gradient_components: coordinate-block ARD trace: {err}"
                     ),
-                })?,
-            None => self
-                .ard_log_precision_hessian_trace(rho, cache, solver)
-                .map_err(|err| OuterGradientError::InternalInvariant {
-                    reason: format!("analytic_outer_rho_gradient_components: {err}"),
-                })?,
+                })?;
+            Some((joint, coordinate))
         };
-        let ard_coordinate_trace = self
-            .coordinate_block_ard_log_precision_hessian_trace(rho, cache)
-            .map_err(|err| OuterGradientError::InternalInvariant {
-                reason: format!(
-                    "analytic_outer_rho_gradient_components: coordinate-block ARD trace: {err}"
-                ),
-            })?;
         // #1026 shared-ARD: `ard_flat_index` maps `(k, axis)` onto the flat outer
         // coordinate for BOTH parameterizations. In `Shared` mode several atoms
         // alias one axis coordinate `1+K+axis`, and the outer derivative there is
@@ -2656,7 +2682,9 @@ impl SaeManifoldTerm {
             for axis in 0..rho.log_ard[k].len() {
                 let idx = rho.ard_flat_index(k, axis);
                 explicit[idx] += ard_explicit[k][axis];
-                logdet_trace[idx] += ard_joint_trace[k][axis] - ard_coordinate_trace[k][axis];
+                if let Some((joint, coordinate)) = ard_logdet_traces.as_ref() {
+                    logdet_trace[idx] += joint[k][axis] - coordinate[k][axis];
+                }
             }
         }
 
@@ -2678,25 +2706,33 @@ impl SaeManifoldTerm {
         // Hessian trace + θ-adjoint); assignment log-strength traces remain
         // solver-bound
         // — the last gaps before the routing flip (see the docstring).
-        let mut gamma = match logdet_derivative_bundle {
-            Some((probes, sinv)) => self
-                .logdet_theta_adjoint_from_probes(rho, cache, probes, sinv)
-                .map_err(OuterGradientError::internal)?,
-            None => self
-                .logdet_theta_adjoint(rho, cache, solver)
-                .map_err(OuterGradientError::internal)?,
+        let majorizer_gamma = if exact_a_logdet_route {
+            None
+        } else {
+            let mut gamma = match logdet_derivative_bundle {
+                Some((probes, sinv)) => self
+                    .logdet_theta_adjoint_from_probes(rho, cache, probes, sinv)
+                    .map_err(OuterGradientError::internal)?,
+                None => self
+                    .logdet_theta_adjoint(rho, cache, solver)
+                    .map_err(OuterGradientError::internal)?,
+            };
+            let coordinate_gamma = self
+                .coordinate_block_logdet_theta_adjoint(rho, cache, solver)
+                .map_err(OuterGradientError::internal)?;
+            gamma.t -= &coordinate_gamma.t;
+            gamma.beta -= &coordinate_gamma.beta;
+            Some(gamma)
         };
-        let coordinate_gamma = self
-            .coordinate_block_logdet_theta_adjoint(rho, cache, solver)
-            .map_err(OuterGradientError::internal)?;
-        gamma.t -= &coordinate_gamma.t;
-        gamma.beta -= &coordinate_gamma.beta;
         // `½ Γ_joint·theta_hat - ½ Γ_tt·theta_hat + ∇R·theta_hat`
         // is represented by one effective logdet adjoint
         // `Γ_eff = Γ_joint - Γ_tt + 2∇R`, preserving the existing
         // `-½ <Γ_eff, A^-1 g_rho>` contraction convention below.
-        gamma.t.scaled_add(2.0, &rank_charge.theta.t);
-        gamma.beta.scaled_add(2.0, &rank_charge.theta.beta);
+        let majorizer_gamma = majorizer_gamma.map(|mut gamma| {
+            gamma.t.scaled_add(2.0, &rank_charge.theta.t);
+            gamma.beta.scaled_add(2.0, &rank_charge.theta.beta);
+            gamma
+        });
         // #1418: the implicit-function correction is `−½·Γᵀ·θ̂_ρ` with
         // `θ̂_ρ = −A⁻¹ g_ρ` (the code contracts `−½·⟨Γ, A⁻¹ g_ρ⟩` with rhs `= +∂g/∂ρ`, i.e. `+½·Γᵀθ̂_ρ` of the response — the sign lives in the −0.5 factor), where `A = ∇²_θθ L` is the EXACT stationarity
         // Jacobian of the inner fit — data residual curvature, exact softmax
@@ -2739,17 +2775,23 @@ impl SaeManifoldTerm {
         // The single adjoint solve `a = A⁺Γ` — the only solver-bound step. At
         // #2330 Phase-2: on the dense direct-logdet route (no probe bundle, no
         // matrix-free system) the ranked value is ½log|A|, so the logdet channels
-        // must be A-based. Overwrite the B-majorizer logdet_trace + Γ assembled
-        // above with the exact-A ones; explicit / occam / rank-charge-direct
-        // channels are majorizer-independent and stay. The matrix-free / bundle
+        // must be A-based; `exact_a_logdet_route` suppressed the B-majorizer
+        // producers above precisely so this is the only assembly that ran.
+        // Explicit / occam / rank-charge-direct channels are majorizer-
+        // independent and were produced on both routes. The matrix-free / bundle
         // route keeps ½log|B| until Phase-2b (streaming signed-LDLᵀ A-factor).
-        if logdet_derivative_bundle.is_none() && matrix_free_system.is_none() {
-            let (exact_logdet_trace, exact_gamma) = self
-                .dense_exact_a_logdet_channels(target, rho, loss, cache)
-                .map_err(OuterGradientError::internal)?;
-            logdet_trace = exact_logdet_trace;
-            gamma = exact_gamma;
-        }
+        // Exactly one arm produces Γ, so the two majorizers cannot both be paid
+        // for on one gradient.
+        let gamma = match majorizer_gamma {
+            Some(gamma) => gamma,
+            None => {
+                let (exact_logdet_trace, exact_gamma) = self
+                    .dense_exact_a_logdet_channels(target, rho, loss, cache)
+                    .map_err(OuterGradientError::internal)?;
+                logdet_trace = exact_logdet_trace;
+                exact_gamma
+            }
+        };
 
         // massive K (`matrix_free_system = Some`) it rides the reduced-Schur CG on
         // the reassembled undamped operator; otherwise the dense deflated arrow
