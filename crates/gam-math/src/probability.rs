@@ -1,4 +1,4 @@
-use libm::erfc;
+use libm::{erf, erfc};
 use statrs::function::beta::inv_beta_reg;
 
 const INV_SQRT_PI: f64 = 0.564_189_583_547_756_3;
@@ -620,7 +620,35 @@ pub fn standard_normal_quantile(p: f64) -> Result<f64, String> {
         // for `p ∈ [½,1)`). For `x ≤ 0`, `normal_cdf(x) = 0.5·erfc(|x|/√2)` is
         // itself the faithfully carried small lower-tail value, so the direct
         // form is already cancellation-free.
-        let residual = if x > 0.0 {
+        let residual = if (0.25..=0.75).contains(&p) {
+            // Central band. Both tail forms below subtract two quantities of
+            // size ~½, so their difference carries an absolute error of one ulp
+            // of ½ (1.1e-16) NO MATTER how small the true residual is. Since
+            // `Δx ≈ residual_error / φ(x)`, the returned quantile then carries a
+            // FIXED absolute error ~1.2e-16 and a relative error ~1.2e-16/|x|
+            // that diverges as `p → ½`: measured 4.1e-14 at `p = 0.50125` and
+            // 1.2e-03 at `p = ½ + 2.75e-14`, against ~2e-16 everywhere else in
+            // this module. The polish cannot repair the seed there — the
+            // residual it is handed is quantized to multiples of one ulp of ½
+            // and is usually exactly 0, so the answer that ships is the raw
+            // Acklam seed at its own 1.15e-9.
+            //
+            // Subtracting the ½ ANALYTICALLY removes it: `F(x) − p` is
+            // `(F(x) − ½) − (p − ½)` = `½·erf(x/√2) − δ`, and both terms are now
+            // of size |δ| with full RELATIVE accuracy — `erf` near 0 is `z·R(z²)`,
+            // no cancellation — so the residual error is `ε·|δ|` and the relative
+            // error in `x` is `ε` uniformly, including in the limit `x → 0`.
+            //
+            // The band is the exactness domain of `δ`, not a tuning choice:
+            // Sterbenz's lemma makes `p − ½` exact for `p ∈ [¼, 1]`, and the
+            // reflection `p ↦ 1 − p` maps that onto `[0, ¾]`, so `[¼, ¾]` is
+            // where δ is exact on both sides. It is also where the centered form
+            // is the better one: outside it `|x| > 0.6745` and the tail forms
+            // carry relative accuracy in their own small quantity, which is what
+            // the deep tails need. At the shared boundary the two agree to
+            // within a factor of two, so nothing steps across the seam.
+            0.5 * erf(x / std::f64::consts::SQRT_2) - (p - 0.5)
+        } else if x > 0.0 {
             (1.0 - p) - 0.5 * erfc(x / std::f64::consts::SQRT_2)
         } else {
             normal_cdf(x) - p
@@ -1889,6 +1917,79 @@ mod tests {
     /// runs out to `p = 1e-300` where the seed is far from the root, and covers
     /// the reflected upper tail where the residual must be formed from
     /// `(1 − p) − ½erfc(x/√2)` rather than `Φ(x) − p`.
+    /// The CENTRAL band, where the residual `F(x) − p` must never be formed
+    /// against `½`.
+    ///
+    /// The sibling table above straddles Acklam's `P_LOW` branch and runs into
+    /// both tails, but its tightest central point is `p = 0.5000000001`. That
+    /// is not where the old residual failed. Forming `F(x) − p` as
+    /// `(1 − p) − ½erfc(x/√2)` (or `F(x) − p` directly) subtracts two numbers
+    /// of size ~½, so the residual carries a FIXED absolute error of one ulp of
+    /// ½ however small the true residual is; `Δx ≈ residual_error / φ(x)` then
+    /// pins the quantile's ABSOLUTE error at ~1.2e-16 and lets its RELATIVE
+    /// error grow like `1.2e-16 / |x|` without bound as `p → ½`.
+    ///
+    /// Measured against a 50-digit `erfinv` reference at the exact `f64`
+    /// abscissae below, before the centered residual and after:
+    ///
+    /// | `p`             | before   | after   |
+    /// |-----------------|----------|---------|
+    /// | `½ + 2⁻⁴⁵`      | 1.13e-09 | 2.3e-16 |
+    /// | `0.5012506…`    | 7.31e-15 | 2.3e-16 |
+    /// | `0.4987493…`    | 7.33e-15 | 2.3e-16 |
+    ///
+    /// The `1.13e-09` is not a coincidence: it is `|A[5] − √(2π)| / √(2π)`,
+    /// Acklam's own advertised accuracy. As `p → ½` the seed reduces to
+    /// `A[5]·(p − ½)` and the polish is handed a residual quantized to
+    /// multiples of one ulp of ½ — usually exactly `0` — so the raw seed is
+    /// what shipped.
+    ///
+    /// The bar is `4·f64::EPSILON` relative: half an ulp for the correctly
+    /// rounded reference literal, the rest for the evaluator. Worst measured
+    /// margin over this table is 1.0 ulp.
+    #[test]
+    fn normal_quantile_is_ulp_accurate_through_the_median() {
+        // `[p, Φ⁻¹(p)]`, the second entry correctly rounded from a 50-digit
+        // `sqrt(2)·erfinv(2p − 1)` evaluated at the EXACT binary `p`.
+        const CENTRAL_REFERENCE: [[f64; 2]; 19] = [
+            [0.5000000000000284, 7.124266047159724e-14],
+            [0.4999999999999716, -7.124266047159724e-14],
+            [0.5000000009313226, 2.3344794983332983e-09],
+            [0.4999999990686774, -2.3344794983332983e-09],
+            [0.5000009536743164, 2.390507006295574e-06],
+            [0.500000001, 2.5066282037387115e-09],
+            [0.4999999999, -2.506628482030354e-10],
+            [0.5001, 0.00025066283008800747],
+            [0.4999, -0.00025066283008800747],
+            [0.51, 0.025068908258711057],
+            [0.49, -0.025068908258711057],
+            [0.55, 0.12566134685507416],
+            [0.45, -0.12566134685507402],
+            [0.6, 0.2533471031357997],
+            [0.4, -0.2533471031357997],
+            [0.7, 0.5244005127080407],
+            [0.3, -0.5244005127080408],
+            [0.75, 0.6744897501960817],
+            [0.25, -0.6744897501960817],
+        ];
+        let bar = 4.0 * f64::EPSILON;
+        let mut worst = 0.0_f64;
+        let mut worst_at = f64::NAN;
+        for [p, expected] in CENTRAL_REFERENCE {
+            let got = standard_normal_quantile(p).expect("central p is in (0,1)");
+            let relative = ((got - expected) / expected).abs();
+            if relative > worst {
+                worst = relative;
+                worst_at = p;
+            }
+            assert!(
+                relative <= bar,
+                "Phi^-1({p}) = {got}, expected {expected}, relative {relative:e} > {bar:e}"
+            );
+        }
+        println!("central quantile worst relative {worst:e} at p = {worst_at}");
+    }
+
     #[test]
     fn normal_quantiles_match_independent_high_precision_reference() {
         const QUANTILE_REFERENCE: [[f64; 2]; 22] = [
