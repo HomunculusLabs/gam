@@ -407,40 +407,51 @@ fn iso_kappa_fd_variant_driver_on(
         rail_probes.push((format!("rhoALL@{value}"), theta_all_rail));
     }
 
-    // Central-difference step, DERIVED rather than picked (#2425).
+    // The oracle is SELF-CERTIFYING; there is no step to pick (#2461).
     //
-    // The historical `1e-5` assumed an exact evaluator, for which the optimal
-    // central step is `h ≈ eps^(1/3) ≈ 6e-6`. This evaluator is not exact: each
-    // cost runs an inner PIRLS solve, so its value carries an absolute noise
-    // floor `ν`, and the total central-difference error is
+    // Every earlier revision of this driver differentiated the criterion at one
+    // hard-wired step and reported the answer as fact. Both attempts to derive
+    // that step (`1e-5`, then `3e-4`) fixed it from a noise measurement taken at
+    // ONE probe — `psi_only`, `‖ρ‖ ≤ 1` — under the explicit assumption
+    // `S''' = O(1)`. A central difference's error is
     //
-    //     ν/h  +  h²·S'''/6            (round-off/noise)  +  (truncation)
+    //     ν/h  +  h²·S'''/6            (evaluator noise)  +  (truncation)
     //
-    // minimized at `h* = (3ν/S''')^(1/3)`. `zz_measure_psi_only_rho1_fd_step_law_2425`
-    // measures `ν` on the production objective by sweeping `h` over 1e-3…1e-7 and
-    // reading which law the analytic-vs-FD gap follows. It is unambiguously the
-    // NOISE law, not truncation — `gap·h` is flat at ~1.5e-11 across four decades
-    // while `gap/h²` sweeps from 1e-2 to 1e10:
+    // and BOTH coefficients move by many orders across the probe grid this
+    // driver now walks. At `duchon_gaussian rho1@15` the ψ-direction third
+    // derivative is `≈ −9.0e7`, not `O(1)`: the criterion's ψ-profile there has
+    // characteristic scale `s = √(S'/S''') = 1.66e-3`, so a step of `3e-4` costs
+    // the sinc defect `(h/s)²/6 = 5.4e-3` — larger than `rel_tol`, constant in
+    // ρ (because the criterion saturates, so `S'` and `S'''` saturate together),
+    // and therefore indistinguishable from a formula error. That artifact was
+    // filed as #2461. At the other end, ρ ≈ 30, the evaluator's noise floor is
+    // nowhere near the `ν ≈ 1.5e-11` measured near the origin, and the same
+    // fixed step reports a confident `-1.9e-1` against a true gradient of
+    // `+1.3e-7`.
     //
-    //     h        1e-3     1e-4     1e-5     1e-6     1e-7
-    //     gap·h    9.6e-12  2.2e-12  1.0e-11  2.1e-11  1.7e-11
-    //     gap/h²   9.6e-3   2.2e0    1.0e4    2.1e7    1.7e10
+    // A gate cannot pick one step for a grid like that, so it must not try.
+    // `ridders_derivative` runs a shrinking geometric ladder of central
+    // differences, Neville-extrapolates across it, and returns the extrapolant
+    // together with an estimate of ITS OWN error. Three consequences, all of
+    // which this driver relies on:
     //
-    // So `ν ≈ 1.5e-11` and, with `S''' = O(1)`, `h* = (3·1.5e-11)^(1/3) ≈ 3.6e-4`.
-    // At the old `1e-5` the oracle's OWN error is `ν/h ≈ 1.5e-6`, which is ~10%
-    // of a near-zero component like the `psi_only` ρ₁ row (~1.5e-5) — that is
-    // what made `iso_kappa_duchon_n_smaller_fd` fail at `rel=5.077e-3` against a
-    // `5e-3` gate, with the analytic gradient correct all along. The measurement
-    // confirms the tail of the argument too: at `h=1e-3`, where noise is
-    // negligible, FD agrees with the analytic value to 0.6%.
-    //
-    // Raising `h` costs truncation on the WELL-scaled components, and that is
-    // affordable: `h²·S'''/6 ≈ 9e-8·S'''/6`, four orders inside `rel_tol`.
-    let h = 3e-4_f64;
+    //   * agreement is judged against `rel_tol·denom + oracle uncertainty`, so
+    //     the oracle's error is never charged to the analytic gradient;
+    //   * a component the ladder cannot resolve is reported UNRESOLVED and is
+    //     not a violation — an unresolvable component is a fact about the
+    //     objective at that θ, not about the gradient formula;
+    //   * `worst_psi_rel` is measured against the extrapolant, so it is a
+    //     property of the gradient rather than of the step.
+    let ridders = gam_linalg::test_support::fd_checker::RiddersConfig::default();
     let rel_tol = 5e-3_f64;
+    // Below this the `rel_tol` band would be tighter than the criterion's own
+    // evaluation noise, which no oracle can see through; it is the historical
+    // `denom` floor, kept because it plays the same role.
+    let abs_floor = 1e-3_f64;
     let mut violations: Vec<String> = Vec::new();
     let mut analytic_by_probe: Vec<(String, Array1<f64>)> = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
+    let mut unresolved = 0usize;
     let base_probes: [(&str, &Array1<f64>); 4] = [
         ("zero", &theta_zero),
         ("psi_only", &theta_psi_only),
@@ -473,27 +484,43 @@ fn iso_kappa_fd_variant_driver_on(
             if skip_psi && is_psi {
                 continue;
             }
-            let mut plus = theta.clone();
-            plus[j] += h;
-            let mut minus = theta.clone();
-            minus[j] -= h;
-            let cp = cost_at(&plus, &mut cache, &mut evaluator);
-            let cm = cost_at(&minus, &mut cache, &mut evaluator);
-            let fd = (cp - cm) / (2.0 * h);
-            let denom = fd.abs().max(grad_an[j].abs()).max(1e-3);
-            let rel = (grad_an[j] - fd).abs() / denom;
+            let measured = gam_linalg::test_support::fd_checker::ridders_derivative(
+                |t| {
+                    let mut probe_theta = theta.clone();
+                    probe_theta[j] += t;
+                    cost_at(&probe_theta, &mut cache, &mut evaluator)
+                },
+                ridders,
+            );
+            let fd = measured.value;
+            let denom = fd.abs().max(grad_an[j].abs()).max(abs_floor);
+            let gap = (grad_an[j] - fd).abs();
+            let rel = gap / denom;
+            let resolved = measured.resolved(rel_tol, abs_floor);
             let kind = if is_psi { "psi" } else { "rho" };
             eprintln!(
-                "[{label} {probe}] {kind} j={j} an={:+.4e} fd={:+.4e} rel={:.3e}",
-                grad_an[j], fd, rel
+                "[{label} {probe}] {kind} j={j} an={:+.4e} fd={:+.4e} rel={:.3e} \
+                 unc={:.3e} step={:.1e} order={} {}",
+                grad_an[j],
+                fd,
+                rel,
+                measured.uncertainty,
+                measured.step,
+                measured.order,
+                if resolved { "resolved" } else { "UNRESOLVED" }
             );
+            if !resolved {
+                unresolved += 1;
+                continue;
+            }
             if is_psi && rel > worst_psi_rel {
                 worst_psi_rel = rel;
             }
-            if rel >= rel_tol {
+            if gap >= measured.agreement_bound(grad_an[j], rel_tol, abs_floor) {
                 violations.push(format!(
-                    "{probe} {kind} j={j}: analytic={:+.6e} fd={:+.6e} rel={:.3e}",
-                    grad_an[j], fd, rel
+                    "{probe} {kind} j={j}: analytic={:+.6e} fd={:+.6e} rel={:.3e} \
+                     (oracle unc={:.3e} at h={:.1e}, order {})",
+                    grad_an[j], fd, rel, measured.uncertainty, measured.step, measured.order
                 ));
             }
         }
@@ -501,7 +528,7 @@ fn iso_kappa_fd_variant_driver_on(
     let pass = violations.is_empty();
     eprintln!(
         "[{label} SUMMARY] pass={pass} worst_psi_rel={worst_psi_rel:.3e} \
-             violations={}",
+             violations={} unresolved={unresolved}",
         violations.len()
     );
     (pass, worst_psi_rel, violations, analytic_by_probe)
