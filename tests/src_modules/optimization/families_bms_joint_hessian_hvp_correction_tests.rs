@@ -3515,12 +3515,16 @@ fn bernoulli_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
 /// The deterministic labels are separated by a smooth latent surface, keeping
 /// the Jeffreys term active at the finite Firth mode.
 ///
-/// The MSI harness runs this ignored probe with info logging and requires the
-/// production `[979-TRUE-HESSIAN]` line (component, M_DD, and M_true spectra plus
+/// The MSI harness runs this probe with info logging and requires the production
+/// `[979-TRUE-HESSIAN]` line (component, M_DD, and M_true spectra plus
 /// current-vs-true contraction), the returned-mode tangent spectrum, and the
 /// terminal completion-call/cycle ledger.
+///
+/// It carries no `#[ignore]`. `build.rs`'s ignored-test ban is a build-stopping
+/// rule whose stated remedy is "either deleted or restored to the running suite",
+/// and a probe the MSI harness depends on is not a candidate for deletion — so it
+/// runs with everything else and is bounded by the ordinary per-test cap.
 #[test]
-#[ignore = "focused MSI causal probe; not part of routine unit-test latency"]
 fn bms_true_hessian_fixed_theta_c12_probe() {
     const N: usize = 2_500;
     const CENTERS: usize = 12;
