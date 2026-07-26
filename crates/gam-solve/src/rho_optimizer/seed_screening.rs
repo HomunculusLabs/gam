@@ -627,7 +627,7 @@ pub(crate) fn seed_is_oversmoothing_boundary(
 /// certified, not asserted). This is that principle at the ADOPTION stage.
 ///
 /// THIS IS A RESTORATION, NOT A NEW POLICY. The rule below is the line
-/// `Some(best) if candidate.converged != best.converged => candidate.converged`
+/// `Some(best) if candidate.converged() != best.converged() => candidate.converged()`
 /// that `dd7f3580a` ("Checkpoint Codex-fleet WIP interrupted by usage limit")
 /// deleted along with its companion `nonconverged_cost_is_trustworthy` guard
 /// (#1426/#1477); a later edit dropped even the asymmetric remnant, leaving a
@@ -641,7 +641,7 @@ pub(crate) fn seed_is_oversmoothing_boundary(
 pub(crate) fn candidate_improves_best(candidate: &OuterResult, best: Option<&OuterResult>) -> bool {
     match best {
         None => true,
-        Some(best) if candidate.converged != best.converged => candidate.converged,
+        Some(best) if candidate.converged() != best.converged() => candidate.converged(),
         Some(best) => candidate.final_value < best.final_value,
     }
 }

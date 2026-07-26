@@ -1657,7 +1657,7 @@ where
                 .unwrap_or(reml_tol)
                 .max(f64::EPSILON);
             let rho_certificate_ok = final_rho.is_empty()
-                || (outer_result.converged
+                || (outer_result.converged()
                     && outer_result
                         .criterion_certificate
                         .as_ref()
@@ -2362,7 +2362,7 @@ where
             .zip(outer_result.rho.iter())
             .all(|(shipped, certified)| shipped.to_bits() == certified.to_bits());
     let certificate_valid = final_rho.is_empty()
-        || (outer_result.converged
+        || (outer_result.converged()
             && outer_result
                 .criterion_certificate
                 .as_ref()
@@ -2377,7 +2377,7 @@ where
                  certified rho {:?} (converged={}, certifies={}, |Pg| at shipped point {:.3e})",
                 final_rho.to_vec(),
                 outer_result.rho.to_vec(),
-                outer_result.converged,
+                outer_result.converged(),
                 outer_result
                     .criterion_certificate
                     .as_ref()
