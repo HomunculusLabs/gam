@@ -59,6 +59,7 @@ pub mod reml;
 
 pub use reml::reml_outer_engine::PenaltyCoordinate;
 
+mod edf_accounting;
 mod evaluation;
 mod external_options;
 mod fit;
@@ -78,6 +79,7 @@ pub use crate::model_types::{
     saved_latent_cloglog_state_from_fit, saved_mixture_state_from_fit, saved_sas_state_from_fit,
     validate_dense_hessian_export, validate_explicit_dense_hessian_for_whitening,
 };
+pub use edf_accounting::{EdfBundle, penalized_edf_bundle};
 pub use evaluation::{
     evaluate_external_ift_residual_at_perturbed_rho, evaluate_externalcost_andridge,
     evaluate_externalgradient,
