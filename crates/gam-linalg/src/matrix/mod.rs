@@ -1042,10 +1042,30 @@ impl SparseDesignMatrix {
             .clone())
     }
 
+    /// An owner for a dense copy the cache already holds the ledger charge
+    /// for. Both arms of [`Self::try_to_dense_governed`] end here, so nothing
+    /// downstream can tell from its `Governed` whether it materialized the
+    /// copy or found one.
+    fn cached_dense_owner(context: &str) -> MemoryReservation {
+        MemoryGovernor::global()
+            .try_reserve(0, context)
+            .expect("zero-byte reservation cannot exceed any budget")
+    }
+
     /// Densify under the process-wide byte governor, coupling the returned
     /// dense copy to its RAII reservation. A refusal is typed evidence that
     /// the dense footprint does not fit the joint ledger right now — callers
     /// route to a streaming / sparse strategy instead of allocating.
+    ///
+    /// An admitted copy is memoized on `dense_cache` and the ledger charge
+    /// lives exactly as long as that memo — the contract the operator-backed
+    /// sibling already states on [`LazyDense`]. `matrix` is immutable after
+    /// construction, so a memoized image can never go stale, and every clone
+    /// of the design shares one dense copy. Materializing a fresh copy per
+    /// call instead made the two dense-regime `XᵀWX` routes pay an O(n·p)
+    /// allocate-and-scatter over an unchanging design on every IRLS/Newton
+    /// reassembly, which is an n-proportional term in work the outer loop is
+    /// contracted to keep n-free (gh#2449).
     pub fn try_to_dense_governed(
         &self,
         context: &str,
@@ -1053,11 +1073,6 @@ impl SparseDesignMatrix {
         let governor = MemoryGovernor::global();
         let (nrows, ncols) = (self.matrix.nrows(), self.matrix.ncols());
         if let Some((cached, _)) = self.dense_cache.get() {
-            // Cache hit: the bytes are already accounted for by the cache's
-            // own reservation, so this owner charges nothing extra.
-            let reservation = governor
-                .try_reserve(0, context)
-                .expect("zero-byte reservation cannot exceed any budget");
             crate::governed_capture::record_governed_decision(
                 context,
                 nrows,
@@ -1065,7 +1080,7 @@ impl SparseDesignMatrix {
                 Some(0),
                 crate::governed_capture::GovernedArm::CacheHit,
             );
-            return Ok(reservation.bind(cached.clone()));
+            return Ok(Self::cached_dense_owner(context).bind(cached.clone()));
         }
         let dense_bytes = match self.dense_nbytes() {
             Ok(bytes) => bytes,
@@ -1107,7 +1122,16 @@ impl SparseDesignMatrix {
             Some(dense_bytes),
             crate::governed_capture::GovernedArm::Admitted,
         );
-        Ok(reservation.bind(self.materialize_dense_arc()))
+        // The admitted bytes are handed to the memo, which holds them for the
+        // design's lifetime; a racing initializer's copy wins and this
+        // reservation drops with the losing closure. Either way the owner
+        // returned below charges nothing further, exactly as on a hit.
+        let cached = self
+            .dense_cache
+            .get_or_init(|| (self.materialize_dense_arc(), reservation))
+            .0
+            .clone();
+        Ok(Self::cached_dense_owner(context).bind(cached))
     }
 
     pub fn to_dense_arc(&self) -> Arc<Array2<f64>> {
@@ -6262,20 +6286,68 @@ mod tests {
 
         let design = SparseDesignMatrix::new(sparse.clone());
         let before = governor.reserved_bytes();
+        let footprint = 3 * 2 * std::mem::size_of::<f64>();
         let governed = design
             .try_to_dense_governed("governed sparse test")
             .expect("small governed densification succeeds");
         assert_eq!(
             governor.reserved_bytes(),
-            before + 3 * 2 * std::mem::size_of::<f64>(),
+            before + footprint,
             "governed densification must charge its dense footprint"
         );
         assert_eq!(governed.dim(), (3, 2));
+
+        // The admitted copy is memoized on the design, so a second governed
+        // request must reuse that image rather than scatter a fresh one — the
+        // property that keeps a repeatedly-reassembled XᵀWX off an O(n·p)
+        // materialization per iteration (gh#2449). Assert the decision, not
+        // only the pointer: the arm is what routes the caller.
+        crate::governed_capture::begin_governed_decision_capture();
+        let second = design
+            .try_to_dense_governed("governed sparse test, second owner")
+            .expect("a memoized design admits again");
+        let arms: Vec<_> = crate::governed_capture::take_governed_decision_capture()
+            .expect("capture was started")
+            .into_iter()
+            .map(|decision| decision.arm)
+            .collect();
+        assert_eq!(
+            arms,
+            vec![crate::governed_capture::GovernedArm::CacheHit],
+            "a design that has already been densified must report a cache hit, \
+             not a second admission"
+        );
+        assert!(
+            std::ptr::eq(&**governed, &**second),
+            "both governed owners must share the design's one dense image"
+        );
         drop(governed);
+        drop(second);
         assert_eq!(
             governor.reserved_bytes(),
-            before,
-            "dropping the governed owner must release its charge"
+            before + footprint,
+            "the memo holds the charge, not the owner: dropping owners must not \
+             release bytes that still back a live cached buffer"
+        );
+
+        // The charge is released when the design and every clone sharing its
+        // memo drop, which is the buffer's real lifetime.
+        {
+            let scoped = SparseDesignMatrix::new(sparse.clone());
+            let owner = scoped
+                .try_to_dense_governed("governed sparse scoped owner")
+                .expect("small governed densification succeeds");
+            assert_eq!(
+                governor.reserved_bytes(),
+                before + 2 * footprint,
+                "a second design must charge its own dense footprint"
+            );
+            drop(owner);
+        }
+        assert_eq!(
+            governor.reserved_bytes(),
+            before + footprint,
+            "dropping the design must release the memo's charge"
         );
 
         // Snapshot the dense image while the ledger still has room. Below this
