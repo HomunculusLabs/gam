@@ -563,6 +563,27 @@ pub struct SaeManifoldAtom {
     pub ard_precisions: Option<Array1<f64>>,
 }
 
+/// Fully validated, detached mutable atom state prepared by
+/// [`SaeManifoldAtom::prepare_mutable_state_restore`].
+///
+/// Preparation performs every fallible evaluator call and topology check before
+/// the live term is touched. Committing this value is therefore infallible, which
+/// makes a term-level multi-atom restore atomic rather than an atom-by-atom
+/// partial write.
+#[derive(Debug)]
+pub(crate) struct SaeManifoldAtomPreparedMutableState {
+    basis_values: Array2<f64>,
+    basis_jacobian: Array3<f64>,
+    decoder_coefficients: Array2<f64>,
+    smooth_penalty: Array2<f64>,
+    basis_evaluator: Option<Arc<dyn SaeBasisEvaluator>>,
+    basis_second_jet: Option<Arc<dyn SaeBasisSecondJet>>,
+    decoder_frame: Option<GrassmannFrame>,
+    homotopy_eta: f64,
+    chart_canonicalized: bool,
+    reduced_column_map: Option<Array2<f64>>,
+}
+
 impl SaeManifoldAtom {
     pub fn basis_kind(&self) -> &SaeAtomBasisKind {
         &self.basis_kind
@@ -598,23 +619,150 @@ impl SaeManifoldAtom {
         Ok(())
     }
 
-    /// Restore an exact Gram captured from this same atom by the line-search
-    /// snapshot. The shape check prevents a stale snapshot from crossing a
-    /// structural basis change; no eigendecomposition is repeated on this hot
-    /// rollback path because the snapshot was copied from validated state.
-    pub(crate) fn restore_smooth_penalty_snapshot(
-        &mut self,
-        penalty: &Array2<f64>,
-    ) -> Result<(), String> {
-        if penalty.dim() != self.smooth_penalty.dim() {
+    /// Prepare the complete mutable topology represented by `snapshot` without
+    /// changing this atom.
+    ///
+    /// Evaluator-owned basis caches are rebuilt at the evaluator's restored
+    /// width. Caller-managed atoms have no rebuild authority, so their snapshot
+    /// carries the exact caches instead. This is deliberately a structural
+    /// replacement: a full-width snapshot may restore over a rank-reduced live
+    /// atom and vice versa.
+    pub(crate) fn prepare_mutable_state_restore(
+        &self,
+        snapshot: &SaeManifoldAtomSnapshot,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<SaeManifoldAtomPreparedMutableState, String> {
+        let n = coords.nrows();
+        let d = self.latent_dim;
+        let m = snapshot.decoder_coefficients.nrows();
+        let p = snapshot.decoder_coefficients.ncols();
+        if coords.ncols() != d {
             return Err(format!(
-                "SaeManifoldAtom::restore_smooth_penalty_snapshot: snapshot shape {:?} != live shape {:?}",
-                penalty.dim(),
-                self.smooth_penalty.dim()
+                "coordinate width {} != atom latent dimension {d}",
+                coords.ncols()
             ));
         }
-        self.smooth_penalty.assign(penalty);
-        Ok(())
+        if n != self.n_obs() {
+            return Err(format!(
+                "coordinate row count {n} != atom row count {}",
+                self.n_obs()
+            ));
+        }
+        if m == 0 {
+            return Err("restored basis width must be positive".to_string());
+        }
+        if p != self.output_dim() {
+            return Err(format!(
+                "restored decoder output width {p} != atom output width {}",
+                self.output_dim()
+            ));
+        }
+        if snapshot.smooth_penalty.dim() != (m, m) {
+            return Err(format!(
+                "restored smooth-penalty shape {:?} != decoder basis shape ({m}, {m})",
+                snapshot.smooth_penalty.dim()
+            ));
+        }
+        if snapshot.smooth_penalty.iter().any(|value| !value.is_finite()) {
+            return Err("restored smooth penalty must be finite".to_string());
+        }
+        if snapshot.basis_second_jet.is_some() && snapshot.basis_evaluator.is_none() {
+            return Err(
+                "restored second-jet evaluator has no matching basis evaluator".to_string(),
+            );
+        }
+        if let Some(frame) = snapshot.decoder_frame.as_ref()
+            && frame.output_dim() != p
+        {
+            return Err(format!(
+                "restored decoder-frame output width {} != decoder output width {p}",
+                frame.output_dim()
+            ));
+        }
+        if let Some(column_map) = snapshot.reduced_column_map.as_ref() {
+            if column_map.ncols() != m || column_map.nrows() <= m {
+                return Err(format!(
+                    "restored reduced-column map shape {:?} must be (M, {m}) with M > {m}",
+                    column_map.dim()
+                ));
+            }
+            if column_map.iter().any(|value| !value.is_finite()) {
+                return Err("restored reduced-column map must be finite".to_string());
+            }
+        }
+
+        let (basis_values, basis_jacobian) =
+            match (&snapshot.basis_evaluator, &snapshot.caller_managed_basis) {
+                (Some(evaluator), None) => {
+                    if snapshot.homotopy_eta == 1.0 {
+                        evaluator.evaluate(coords)?
+                    } else {
+                        let evaluated =
+                            evaluator.evaluate_phi_eta(coords, snapshot.homotopy_eta)?;
+                        (evaluated.phi, evaluated.jet)
+                    }
+                }
+                (None, Some((basis_values, basis_jacobian))) => {
+                    (basis_values.clone(), basis_jacobian.clone())
+                }
+                (Some(_), Some(_)) => {
+                    return Err(
+                        "evaluator-owned snapshot also carried caller-managed basis caches"
+                            .to_string(),
+                    );
+                }
+                (None, None) => {
+                    return Err(
+                        "caller-managed snapshot omitted its authoritative basis caches"
+                            .to_string(),
+                    );
+                }
+            };
+        if basis_values.dim() != (n, m) {
+            return Err(format!(
+                "restored evaluator produced basis shape {:?}, expected ({n}, {m})",
+                basis_values.dim()
+            ));
+        }
+        if basis_jacobian.dim() != (n, m, d) {
+            return Err(format!(
+                "restored evaluator produced basis-jet shape {:?}, expected ({n}, {m}, {d})",
+                basis_jacobian.dim()
+            ));
+        }
+
+        Ok(SaeManifoldAtomPreparedMutableState {
+            basis_values,
+            basis_jacobian,
+            decoder_coefficients: snapshot.decoder_coefficients.clone(),
+            smooth_penalty: snapshot.smooth_penalty.clone(),
+            basis_evaluator: snapshot.basis_evaluator.clone(),
+            basis_second_jet: snapshot.basis_second_jet.clone(),
+            decoder_frame: snapshot.decoder_frame.clone(),
+            homotopy_eta: snapshot.homotopy_eta,
+            chart_canonicalized: snapshot.chart_canonicalized,
+            reduced_column_map: snapshot.reduced_column_map.clone(),
+        })
+    }
+
+    /// Commit a state returned by [`Self::prepare_mutable_state_restore`].
+    ///
+    /// All validation and evaluation already succeeded, so this operation has no
+    /// failure edge and cannot leave a multi-atom term partially restored.
+    pub(crate) fn commit_prepared_mutable_state(
+        &mut self,
+        restored: SaeManifoldAtomPreparedMutableState,
+    ) {
+        self.basis_values = restored.basis_values;
+        self.basis_jacobian = restored.basis_jacobian;
+        self.decoder_coefficients = restored.decoder_coefficients;
+        self.smooth_penalty = restored.smooth_penalty;
+        self.basis_evaluator = restored.basis_evaluator;
+        self.basis_second_jet = restored.basis_second_jet;
+        self.decoder_frame = restored.decoder_frame;
+        self.homotopy_eta = restored.homotopy_eta;
+        self.chart_canonicalized = restored.chart_canonicalized;
+        self.reduced_column_map = restored.reduced_column_map;
     }
 
     #[must_use = "build error must be handled"]

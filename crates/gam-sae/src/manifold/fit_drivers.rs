@@ -481,6 +481,14 @@ impl SaeManifoldTerm {
                 basis_evaluator: atom.basis_evaluator.clone(),
                 basis_second_jet: atom.basis_second_jet.clone(),
                 homotopy_eta: atom.homotopy_eta,
+                chart_canonicalized: atom.chart_canonicalized,
+                reduced_column_map: atom.reduced_column_map.clone(),
+                caller_managed_basis: atom.basis_evaluator.is_none().then(|| {
+                    (
+                        atom.basis_values.clone(),
+                        atom.basis_jacobian.clone(),
+                    )
+                }),
             })
             .collect();
         SaeManifoldMutableState {
@@ -493,10 +501,10 @@ impl SaeManifoldTerm {
 
     /// Whether the term is exactly at a saved fitted-model state.
     ///
-    /// The snapshot omits basis caches because they are deterministic functions
-    /// of the coordinate blocks, evaluator handles, and homotopy dial. Comparing
-    /// those driving fields plus the decoder/logits is therefore an exact model-
-    /// state identity test without copying the large `(N × M)` basis arrays.
+    /// Evaluator-backed snapshots omit basis caches because they are deterministic
+    /// functions of the coordinates, evaluator, and homotopy dial. Caller-managed
+    /// snapshots carry their authoritative caches. Comparing those fields plus the
+    /// decoder/logits is therefore an exact model-state identity test.
     pub(crate) fn matches_mutable_state(&self, snapshot: &SaeManifoldMutableState) -> bool {
         let atoms_match = self.atoms.len() == snapshot.atoms.len()
             && self
@@ -525,6 +533,16 @@ impl SaeManifoldTerm {
                         _ => false,
                     };
                     atom.decoder_coefficients == saved.decoder_coefficients
+                        && atom.chart_canonicalized == saved.chart_canonicalized
+                        && atom.reduced_column_map == saved.reduced_column_map
+                        && match &saved.caller_managed_basis {
+                            Some((basis, jet)) => {
+                                atom.basis_evaluator.is_none()
+                                    && atom.basis_values == *basis
+                                    && atom.basis_jacobian == *jet
+                            }
+                            None => atom.basis_evaluator.is_some(),
+                        }
                         && decoder_frame_matches
                         && atom.smooth_penalty() == &saved.smooth_penalty
                         && atom.homotopy_eta.to_bits() == saved.homotopy_eta.to_bits()
@@ -559,35 +577,166 @@ impl SaeManifoldTerm {
 
     /// Restore the mutable state captured by [`Self::snapshot_mutable_state`].
     ///
-    /// Reassigns the cheap driving state in place (reusing the already-allocated
-    /// buffers), restores each atom's basis-determining handles
-    /// (`basis_evaluator`, `basis_second_jet`, `homotopy_eta`), then rebuilds
-    /// `basis_values`/`basis_jacobian` from the restored coordinates via
-    /// `refresh_basis_from_current_coords` — which fills the atoms' existing
-    /// basis buffers in place through `SaeBasisEvaluator::evaluate_into`. Because
-    /// the basis is a deterministic function of `(coords, evaluator, η)`, the
-    /// rebuilt basis is bit-identical to the snapshotted values. Fallible only
-    /// because the basis re-evaluation is: on valid restored state it cannot
-    /// fail, but the error is propagated rather than swallowed.
+    /// This is a total structural inverse. Cardinalities and row topology are
+    /// validated first, then every atom is evaluated into detached prepared
+    /// state at the snapshot evaluator's own width. Only after every fallible
+    /// operation succeeds are atoms, logits, coordinates, and row layout
+    /// replaced. A stale or incompatible snapshot therefore returns a typed
+    /// invariant error without a broadcast, panic, fallback, or partial restore.
     pub(crate) fn restore_mutable_state(
         &mut self,
         snapshot: &SaeManifoldMutableState,
-    ) -> Result<(), String> {
-        for (atom, snap) in self.atoms.iter_mut().zip(snapshot.atoms.iter()) {
-            atom.decoder_coefficients.assign(&snap.decoder_coefficients);
-            atom.decoder_frame.clone_from(&snap.decoder_frame);
-            atom.restore_smooth_penalty_snapshot(&snap.smooth_penalty)?;
-            atom.basis_evaluator.clone_from(&snap.basis_evaluator);
-            atom.basis_second_jet.clone_from(&snap.basis_second_jet);
-            atom.homotopy_eta = snap.homotopy_eta;
+    ) -> Result<(), SaeMutableStateRestoreError> {
+        let incompatible = |
+            component: &'static str,
+            expected: Vec<usize>,
+            observed: Vec<usize>,
+        | SaeMutableStateRestoreError::IncompatibleCardinality {
+            component,
+            expected,
+            observed,
+        };
+        let k = self.atoms.len();
+        if snapshot.atoms.len() != k {
+            return Err(incompatible(
+                "atom",
+                vec![k],
+                vec![snapshot.atoms.len()],
+            ));
         }
-        self.assignment.logits.assign(&snapshot.logits);
-        self.assignment.coords.clone_from(&snapshot.coords);
-        self.last_row_layout.clone_from(&snapshot.last_row_layout);
-        // Rebuild the per-atom basis caches from the restored coordinates. This
-        // reuses the in-place `evaluate_into` workspaces (no fresh (N,M)+(N,M,d)
-        // allocation) and reproduces the snapshotted basis exactly.
-        self.refresh_basis_from_current_coords()
+        if self.assignment.coords.len() != k {
+            return Err(incompatible(
+                "live coordinate-block",
+                vec![k],
+                vec![self.assignment.coords.len()],
+            ));
+        }
+        if snapshot.coords.len() != k {
+            return Err(incompatible(
+                "snapshot coordinate-block",
+                vec![k],
+                vec![snapshot.coords.len()],
+            ));
+        }
+        if snapshot.logits.dim() != self.assignment.logits.dim() {
+            return Err(incompatible(
+                "logit shape",
+                self.assignment.logits.shape().to_vec(),
+                snapshot.logits.shape().to_vec(),
+            ));
+        }
+        let n = snapshot.logits.nrows();
+        for atom_idx in 0..k {
+            let atom = &self.atoms[atom_idx];
+            let coord = &snapshot.coords[atom_idx];
+            if atom.n_obs() != n {
+                return Err(incompatible(
+                    "atom row",
+                    vec![n],
+                    vec![atom.n_obs()],
+                ));
+            }
+            if coord.n_obs() != n || coord.latent_dim() != atom.latent_dim() {
+                return Err(incompatible(
+                    "coordinate shape",
+                    vec![n, atom.latent_dim()],
+                    vec![coord.n_obs(), coord.latent_dim()],
+                ));
+            }
+        }
+
+        if let Some(layout) = snapshot.last_row_layout.as_ref() {
+            if layout.active_atoms.len() != n || layout.coord_starts.len() != n {
+                return Err(incompatible(
+                    "row-layout row",
+                    vec![n, n],
+                    vec![layout.active_atoms.len(), layout.coord_starts.len()],
+                ));
+            }
+            if layout.coord_dims.len() != k || layout.coord_offsets_full.len() != k {
+                return Err(incompatible(
+                    "row-layout atom",
+                    vec![k, k],
+                    vec![layout.coord_dims.len(), layout.coord_offsets_full.len()],
+                ));
+            }
+            let mut full_offset = 0usize;
+            for atom_idx in 0..k {
+                let expected_dim = snapshot.coords[atom_idx].latent_dim();
+                if layout.coord_dims[atom_idx] != expected_dim
+                    || layout.coord_offsets_full[atom_idx] != full_offset
+                {
+                    return Err(SaeMutableStateRestoreError::InvalidTopology {
+                        component: "row layout".to_string(),
+                        detail: format!(
+                            "atom {atom_idx} has dim/offset ({}, {}), expected ({expected_dim}, {full_offset})",
+                            layout.coord_dims[atom_idx],
+                            layout.coord_offsets_full[atom_idx]
+                        ),
+                    });
+                }
+                full_offset += expected_dim;
+            }
+            for row in 0..n {
+                let active = &layout.active_atoms[row];
+                let starts = &layout.coord_starts[row];
+                if starts.len() != active.len() {
+                    return Err(incompatible(
+                        "row-layout active block",
+                        vec![active.len()],
+                        vec![starts.len()],
+                    ));
+                }
+                let mut compact_offset = 0usize;
+                let mut previous = None;
+                for (&atom_idx, &start) in active.iter().zip(starts.iter()) {
+                    if atom_idx >= k || previous.is_some_and(|prior| prior >= atom_idx) {
+                        return Err(SaeMutableStateRestoreError::InvalidTopology {
+                            component: "row layout".to_string(),
+                            detail: format!(
+                                "row {row} active atoms are not strict sorted indices below {k}: {active:?}"
+                            ),
+                        });
+                    }
+                    if start != compact_offset {
+                        return Err(SaeMutableStateRestoreError::InvalidTopology {
+                            component: "row layout".to_string(),
+                            detail: format!(
+                                "row {row}, atom {atom_idx} starts at {start}, expected {compact_offset}"
+                            ),
+                        });
+                    }
+                    compact_offset += layout.coord_dims[atom_idx];
+                    previous = Some(atom_idx);
+                }
+            }
+        }
+
+        let restored_logits = snapshot.logits.clone();
+        let restored_coords = snapshot.coords.clone();
+        let restored_row_layout = snapshot.last_row_layout.clone();
+        let mut prepared = Vec::with_capacity(k);
+        for atom_idx in 0..k {
+            let coords = snapshot.coords[atom_idx].as_matrix();
+            prepared.push(
+                self.atoms[atom_idx]
+                    .prepare_mutable_state_restore(&snapshot.atoms[atom_idx], coords.view())
+                    .map_err(|detail| SaeMutableStateRestoreError::InvalidTopology {
+                        component: format!("atom {atom_idx}"),
+                        detail,
+                    })?,
+            );
+        }
+
+        // Commit is deliberately infallible. Every allocation, evaluator call,
+        // shape check, and topology check completed above against detached state.
+        for (atom_idx, restored) in prepared.into_iter().enumerate() {
+            self.atoms[atom_idx].commit_prepared_mutable_state(restored);
+        }
+        self.assignment.logits = restored_logits;
+        self.assignment.coords = restored_coords;
+        self.last_row_layout = restored_row_layout;
+        Ok(())
     }
 
     pub(crate) fn refresh_basis_from_current_coords(&mut self) -> Result<(), String> {
@@ -1073,11 +1222,6 @@ impl SaeManifoldTerm {
         // chart-dependent quantity is expressed in the canonical coordinate.
         if !eligible.is_empty() {
             let snapshot = self.snapshot_mutable_state();
-            let prior_flags: Vec<bool> = self
-                .atoms
-                .iter()
-                .map(|atom| atom.chart_canonicalized)
-                .collect();
             let pre_total = self.penalized_objective_total(target, rho, analytic_penalties, 1.0)?;
 
             let mut any_changed = false;
@@ -1096,9 +1240,6 @@ impl SaeManifoldTerm {
                     Ok(changed) => any_changed |= changed,
                     Err(err) => {
                         self.restore_mutable_state(&snapshot)?;
-                        for (atom, flag) in self.atoms.iter_mut().zip(prior_flags.iter()) {
-                            atom.chart_canonicalized = *flag;
-                        }
                         return Err(err);
                     }
                 }
@@ -1121,9 +1262,6 @@ impl SaeManifoldTerm {
                 };
                 if !keep {
                     self.restore_mutable_state(&snapshot)?;
-                    for (atom, flag) in self.atoms.iter_mut().zip(prior_flags.iter()) {
-                        atom.chart_canonicalized = *flag;
-                    }
                 }
             }
         }

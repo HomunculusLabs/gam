@@ -829,7 +829,10 @@ impl Clone for SaeManifoldTerm {
 /// state — decoder coefficients, the frozen reference-function Gram, and the
 /// per-atom basis-determining handles (`basis_evaluator`, `basis_second_jet`,
 /// `homotopy_eta`) — plus the assignment logits, latent coordinates, and row
-/// layout.
+/// layout. Structural atom state (`decoder_frame`, `chart_canonicalized`, and
+/// `reduced_column_map`) is included as well: rank reduction and chart
+/// canonicalization are valid mutations inside snapshot scopes, so a restore is
+/// a topology replacement rather than a same-shape buffer assignment.
 ///
 /// The expensive `basis_values` (`N×M`) and `basis_jacobian` (`N×M×d`) arrays are
 /// NOT stored: they are pure deterministic functions of `(coords, basis_evaluator,
@@ -837,10 +840,13 @@ impl Clone for SaeManifoldTerm {
 /// tier (K=512, N=96k, M=7, d=1) copying them was ~5.5 GB of `memcpy` per snapshot
 /// — taken once per Newton line search, per incumbent-banking improvement, per
 /// basin-bundle member, per polish round — the dominant memory-bandwidth wall.
-/// [`SaeManifoldTerm::restore_mutable_state`] reassigns the cheap state, restores
+/// Caller-managed atoms are the explicit exception: without an evaluator there
+/// is no authority from which to rebuild their arrays, so only those uncommon
+/// atoms snapshot their caches. Native production atoms retain the differential,
+/// pointer-cheap path. [`SaeManifoldTerm::restore_mutable_state`] restores
 /// the basis-determining handles, and rebuilds `basis_values`/`basis_jacobian`
-/// in place via `refresh_basis_from_current_coords` (reusing the atoms' existing
-/// buffers through `SaeBasisEvaluator::evaluate_into`). Restores happen only on
+/// into detached arrays before atomically committing the restored term.
+/// Restores happen only on
 /// REJECTED trials / incumbent rollbacks, which are rare relative to snapshots, so
 /// trading a snapshot-time `O(K·N·M·(1+d))` copy for a restore-time single basis
 /// evaluation is a large net win — and the previous restore ALSO deep-copied the
@@ -866,14 +872,62 @@ impl Clone for SaeManifoldTerm {
 /// declared quadratic together with its decoder coordinates.
 #[derive(Debug)]
 pub(crate) struct SaeManifoldMutableState {
-    /// Per-atom differential state
+    /// Per-atom mutable structural state
     /// `(decoder_coefficients, decoder_frame, smooth_penalty, basis_evaluator,
-    /// basis_second_jet, homotopy_eta)`. `basis_values`/`basis_jacobian` are
+    /// basis_second_jet, homotopy_eta, chart, reduced-column map)`. `basis_values`/`basis_jacobian` are
     /// rebuilt on restore.
     pub(crate) atoms: Vec<SaeManifoldAtomSnapshot>,
     pub(crate) logits: Array2<f64>,
     pub(crate) coords: Vec<LatentCoordValues>,
     pub(crate) last_row_layout: Option<SaeRowLayout>,
+}
+
+/// Typed refusal from an attempted mutable-state restore.
+///
+/// A snapshot mismatch is an invariant failure, not an ndarray broadcast
+/// condition and not a reason to salvage a prefix of the state. The restore
+/// validates and prepares every atom before committing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SaeMutableStateRestoreError {
+    IncompatibleCardinality {
+        component: &'static str,
+        expected: Vec<usize>,
+        observed: Vec<usize>,
+    },
+    InvalidTopology {
+        component: String,
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for SaeMutableStateRestoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleCardinality {
+                component,
+                expected,
+                observed,
+            } => write!(
+                formatter,
+                "SaeManifoldTerm::restore_mutable_state: incompatible {component} cardinality: \
+                 expected {expected:?}, observed {observed:?}"
+            ),
+            Self::InvalidTopology { component, detail } => write!(
+                formatter,
+                "SaeManifoldTerm::restore_mutable_state: invalid {component} topology: {detail}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SaeMutableStateRestoreError {}
+
+// The manifold fitting surface currently carries internal failures as strings.
+// Keep that outer contract while retaining a typed error at the restore seam.
+impl From<SaeMutableStateRestoreError> for String {
+    fn from(error: SaeMutableStateRestoreError) -> Self {
+        error.to_string()
+    }
 }
 
 /// Recurrent objective-incumbent identity and its outer-stationarity evidence.
@@ -903,4 +957,10 @@ pub(crate) struct SaeManifoldAtomSnapshot {
     pub(crate) basis_evaluator: Option<Arc<dyn SaeBasisEvaluator>>,
     pub(crate) basis_second_jet: Option<Arc<dyn SaeBasisSecondJet>>,
     pub(crate) homotopy_eta: f64,
+    pub(crate) chart_canonicalized: bool,
+    pub(crate) reduced_column_map: Option<Array2<f64>>,
+    /// Exact caches for an atom whose caller, rather than an evaluator, owns its
+    /// basis. `None` on every evaluator-backed production atom, preserving the
+    /// differential snapshot's O(1) cache cost there.
+    pub(crate) caller_managed_basis: Option<(Array2<f64>, Array3<f64>)>,
 }

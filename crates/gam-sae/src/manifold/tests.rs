@@ -12,7 +12,7 @@ pub(crate) use super::tests_recovery_split_780::{
 use super::*;
 use approx::assert_abs_diff_eq;
 use gam_terms::analytic_penalties::ARDPenalty;
-use ndarray::{Array5, array};
+use ndarray::{Array4, Array5, array};
 
 pub(crate) fn assert_matrix_same_bits(left: &Array2<f64>, right: &Array2<f64>) {
     assert_eq!(left.dim(), right.dim());
@@ -1455,6 +1455,237 @@ pub(crate) fn dense_assignment_budget_refuses_without_truncation() {
     euclidean
         .require_exact_dense_assignment_budget(euclidean_required)
         .expect("the exact required-byte boundary is admitted");
+}
+
+/// Exact width-two affine evaluator used to exercise the same analytic
+/// second-jet contract as the #1117 production rank reducer.
+#[derive(Debug)]
+struct SnapshotLinearSecondJet2521;
+
+impl SaeBasisEvaluator for SnapshotLinearSecondJet2521 {
+    fn second_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Option<Result<Array4<f64>, String>> {
+        Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
+    }
+
+    fn third_jet_dyn(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Option<Result<Array5<f64>, String>> {
+        if coords.ncols() != 1 {
+            return Some(Err(format!(
+                "SnapshotLinearSecondJet2521: coordinate width {} != 1",
+                coords.ncols()
+            )));
+        }
+        None
+    }
+
+    fn evaluate(
+        &self,
+        coords: ArrayView2<'_, f64>,
+    ) -> Result<(Array2<f64>, Array3<f64>), String> {
+        if coords.ncols() != 1 {
+            return Err(format!(
+                "SnapshotLinearSecondJet2521: coordinate width {} != 1",
+                coords.ncols()
+            ));
+        }
+        let n = coords.nrows();
+        let mut basis = Array2::<f64>::zeros((n, 2));
+        let mut jet = Array3::<f64>::zeros((n, 2, 1));
+        for row in 0..n {
+            basis[[row, 0]] = 1.0;
+            basis[[row, 1]] = coords[[row, 0]];
+            jet[[row, 1, 0]] = 1.0;
+        }
+        Ok((basis, jet))
+    }
+}
+
+impl SaeBasisSecondJet for SnapshotLinearSecondJet2521 {
+    fn second_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array4<f64>, String> {
+        if coords.ncols() != 1 {
+            return Err(format!(
+                "SnapshotLinearSecondJet2521: coordinate width {} != 1",
+                coords.ncols()
+            ));
+        }
+        Ok(Array4::<f64>::zeros((coords.nrows(), 2, 1, 1)))
+    }
+}
+
+fn structural_restore_fixture_2521() -> SaeManifoldTerm {
+    // The second column vanishes on these rows, making the exact data-supported
+    // rank one while the snapshotted decoder is genuinely 2×6.
+    let coords = Array2::<f64>::zeros((4, 1));
+    let evaluator = Arc::new(SnapshotLinearSecondJet2521);
+    let (basis, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let atom = SaeManifoldAtom::new_with_provided_function_gram(
+        "rank-reduced-restore",
+        SaeAtomBasisKind::Linear,
+        1,
+        basis,
+        jet,
+        array![
+            [0.20, -0.10, 0.30, -0.40, 0.50, -0.60],
+            [0.70, 0.80, -0.90, 1.00, -1.10, 1.20]
+        ],
+        Array2::<f64>::eye(2),
+    )
+    .unwrap()
+    .with_basis_second_jet(evaluator);
+    let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+        Array2::<f64>::zeros((4, 1)),
+        vec![coords],
+        vec![LatentManifold::Euclidean],
+        AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, true),
+    )
+    .unwrap();
+    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+}
+
+/// #2521 — a mutable-state snapshot is a structural inverse across the #1117
+/// rank-reduction boundary in both directions, not a same-shape ndarray assign.
+#[test]
+pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521() {
+    let mut term = structural_restore_fixture_2521();
+    term.atoms[0].decoder_frame = Some(
+        GrassmannFrame::from_orthonormal(
+            array![
+                [1.0_f64],
+                [0.0],
+                [0.0],
+                [0.0],
+                [0.0],
+                [0.0]
+            ],
+            array![1.0],
+        )
+        .unwrap(),
+    );
+    let target = Array2::<f64>::zeros((4, 6));
+    let rho = SaeManifoldRho::new(0.0, -6.0, vec![Array1::<f64>::zeros(1)]);
+
+    let full_snapshot = term.snapshot_mutable_state();
+    let full_basis = term.atoms[0].basis_values.clone();
+    let full_jet = term.atoms[0].basis_jacobian.clone();
+    let full_decoder = term.atoms[0].decoder_coefficients.clone();
+    let full_model = full_basis.dot(&full_decoder);
+    let full_loss_bits = term.loss(target.view(), &rho).unwrap().total().to_bits();
+
+    // Exercise the production reducer, not a hand-resized stand-in. The exact
+    // rank-one design maps M=2 to r=1 and replaces every width-bearing field.
+    term.reduce_atoms_to_data_supported_rank().unwrap();
+    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (1, 6));
+    assert_eq!(term.atoms[0].basis_values.dim(), (4, 1));
+    assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 1, 1));
+    assert_eq!(term.atoms[0].smooth_penalty().dim(), (1, 1));
+    assert!(term.atoms[0].decoder_frame.is_none());
+    assert_eq!(
+        term.atoms[0]
+            .reduced_column_map
+            .as_ref()
+            .map(|column_map| column_map.dim()),
+        Some((2, 1))
+    );
+    term.atoms[0].chart_canonicalized = true;
+    let reduced_snapshot = term.snapshot_mutable_state();
+    let reduced_basis = term.atoms[0].basis_values.clone();
+    let reduced_jet = term.atoms[0].basis_jacobian.clone();
+    let reduced_decoder = term.atoms[0].decoder_coefficients.clone();
+    let reduced_model = reduced_basis.dot(&reduced_decoder);
+    let reduced_loss_bits = term.loss(target.view(), &rho).unwrap().total().to_bits();
+
+    // Full snapshot over reduced live storage: the original [2,6] → [1,6]
+    // broadcast panic is impossible because every owned field is replaced.
+    term.restore_mutable_state(&full_snapshot)
+        .expect("full topology restores over reduced topology");
+    assert!(term.matches_mutable_state(&full_snapshot));
+    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (2, 6));
+    assert_eq!(term.atoms[0].basis_values.dim(), (4, 2));
+    assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 2, 1));
+    assert_eq!(term.atoms[0].smooth_penalty().dim(), (2, 2));
+    assert!(term.atoms[0].reduced_column_map.is_none());
+    let restored_frame = term.atoms[0]
+        .decoder_frame
+        .as_ref()
+        .expect("full snapshot restores its profiled decoder frame");
+    assert_eq!((restored_frame.output_dim(), restored_frame.rank()), (6, 1));
+    assert!(!term.atoms[0].chart_canonicalized);
+    assert_matrix_same_bits(&term.atoms[0].basis_values, &full_basis);
+    assert_tensor3_same_bits(&term.atoms[0].basis_jacobian, &full_jet);
+    assert_matrix_same_bits(&term.atoms[0].decoder_coefficients, &full_decoder);
+    assert_matrix_same_bits(
+        &term.atoms[0]
+            .basis_values
+            .dot(&term.atoms[0].decoder_coefficients),
+        &full_model,
+    );
+    assert_eq!(
+        term.loss(target.view(), &rho).unwrap().total().to_bits(),
+        full_loss_bits
+    );
+
+    // The inverse direction is equally structural: a reduced snapshot replaces
+    // full-width storage and reinstalls the wrapped evaluator plus true M×r map.
+    term.restore_mutable_state(&reduced_snapshot)
+        .expect("reduced topology restores over full topology");
+    assert!(term.matches_mutable_state(&reduced_snapshot));
+    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (1, 6));
+    assert_eq!(term.atoms[0].basis_values.dim(), (4, 1));
+    assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 1, 1));
+    assert_eq!(term.atoms[0].smooth_penalty().dim(), (1, 1));
+    assert_eq!(
+        term.atoms[0]
+            .reduced_column_map
+            .as_ref()
+            .map(|column_map| column_map.dim()),
+        Some((2, 1))
+    );
+    assert!(term.atoms[0].chart_canonicalized);
+    assert_matrix_same_bits(&term.atoms[0].basis_values, &reduced_basis);
+    assert_tensor3_same_bits(&term.atoms[0].basis_jacobian, &reduced_jet);
+    assert_matrix_same_bits(&term.atoms[0].decoder_coefficients, &reduced_decoder);
+    assert_matrix_same_bits(
+        &term.atoms[0]
+            .basis_values
+            .dot(&term.atoms[0].decoder_coefficients),
+        &reduced_model,
+    );
+    assert_eq!(
+        term.loss(target.view(), &rho).unwrap().total().to_bits(),
+        reduced_loss_bits
+    );
+}
+
+/// #2521 — an incompatible snapshot is a typed refusal and the live state is
+/// unchanged. The old silent `zip` accepted a missing atom and restored a
+/// prefix; this pins all-or-nothing cardinality.
+#[test]
+pub(crate) fn snapshot_restore_refuses_incompatible_cardinality_atomically_2521() {
+    let mut term = structural_restore_fixture_2521();
+    let live = term.snapshot_mutable_state();
+    let mut incompatible = term.snapshot_mutable_state();
+    incompatible.atoms.clear();
+
+    let error = term
+        .restore_mutable_state(&incompatible)
+        .expect_err("missing atom must be a typed invariant refusal");
+    assert!(matches!(
+        error,
+        SaeMutableStateRestoreError::IncompatibleCardinality {
+            component: "atom",
+            expected,
+            observed,
+        } if expected == vec![1] && observed == vec![0]
+    ));
+    assert!(
+        term.matches_mutable_state(&live),
+        "failed restore must not commit any prefix of the snapshot"
+    );
 }
 
 /// `snapshot_mutable_state` / `restore_mutable_state` (the in-place
