@@ -401,7 +401,6 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
     let mut sum_ln = 0.0_f64;
     let mut sum_ln1m = 0.0_f64;
     let mut mean = 0.0_f64;
-    let mut mean_sq = 0.0_f64;
     for &x in r {
         if !(x > 0.0 && x < 1.0) {
             return None;
@@ -409,11 +408,26 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
         sum_ln += x.ln();
         sum_ln1m += (1.0 - x).ln();
         mean += x;
-        mean_sq += x * x;
     }
     let nf = n as f64;
     mean /= nf;
-    let var = (mean_sq / nf - mean * mean).max(f64::EPSILON);
+    // Second pass for the variance, which is what the caller already does. The
+    // one-pass form `E[x²] − E[x]²` subtracts two quantities of size `mean²`
+    // to produce one of size `var`, so its result is quantized to multiples of
+    // `ulp(mean²)`: with samples clustered near a common amplitude — the
+    // collapsed state this gauge exists to detect — the difference is a count
+    // of ulps rather than a measurement of the spread, and it goes negative.
+    let var = r.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / nf;
+    // A sample with no spread has no identifiable Beta shape: the
+    // method-of-moments `common = m(1−m)/var − 1` is a division by zero and the
+    // likelihood is flat in the direction that scales `α` and `β` together.
+    // That is the degenerate-moment case this function documents, so it is
+    // reported rather than floored — flooring `var` returns the same seed for
+    // every sample below the floor, which makes the answer a property of the
+    // floor and not of the data.
+    if !(var > 0.0) {
+        return None;
+    }
     // Method-of-moments seed: `common = m(1−m)/v − 1`, `α = m·common`,
     // `β = (1−m)·common`. Guard positivity so Newton starts in the interior.
     let common = (mean * (1.0 - mean) / var - 1.0).max(1.0e-3);
@@ -572,6 +586,73 @@ mod tests {
         let (a, b, _ll) = fit_beta_mle(&samples).expect("beta fit");
         assert!((a - 2.0).abs() < 0.3, "alpha {a}");
         assert!((b - 1.0).abs() < 0.3, "beta {b}");
+    }
+
+    /// A sample with no spread has no Beta shape, and now says so.
+    ///
+    /// `fit_beta_mle` documents `None` for "the moments are degenerate". It
+    /// reached that verdict through `E[x²] − E[x]²`, which for identical
+    /// samples returns a small NEGATIVE number (measured `-5.0e-15` at
+    /// `x = 0.9`, `n = 256`) rather than zero, because the two accumulators
+    /// round apart. `.max(f64::EPSILON)` then turned that into a positive
+    /// variance and the function returned a shape, seeded at
+    /// `α = m(m(1−m)/ε − 1)`, which is a property of the floor and not of the
+    /// data. The second-pass form returns exactly zero here, so the documented
+    /// verdict is reachable.
+    #[test]
+    fn beta_mle_reports_a_spreadless_sample_as_degenerate() {
+        // 0.75 and n = 256 are binary-exact, so the mean is exactly 0.75 and
+        // every deviation is exactly zero on any conforming platform.
+        let samples = vec![0.75_f64; 256];
+        assert!(
+            fit_beta_mle(&samples).is_none(),
+            "a sample with zero spread has no identifiable Beta shape"
+        );
+    }
+
+    /// The retired variance was quantized to `ulp(mean²)`, not to the spread.
+    ///
+    /// This measures the expression `fit_beta_mle` no longer evaluates, because
+    /// it is the reason it stopped. Half the mass sits at `c + s` and half at
+    /// `c − s` with `c = 0.75` and `s` a power of two, so the mean is exactly
+    /// `c` and the variance is exactly `s²` with no reference implementation
+    /// required. The one-pass form must difference two quantities of size `c²`,
+    /// so it can only resolve the variance in steps of `ulp(c²) = 2⁻⁵³`.
+    #[test]
+    fn beta_mle_variance_had_been_quantized_to_ulps_of_the_mean_square() {
+        let c = 0.75_f64;
+        let ulp_c2 = (c * c) * f64::EPSILON;
+        let mut collapsed = 0usize;
+        for k in 20..30u32 {
+            let s = (2.0_f64).powi(-(k as i32));
+            let mut samples = vec![c + s; 128];
+            samples.extend(std::iter::repeat_n(c - s, 128));
+            let exact = s * s;
+
+            let nf = samples.len() as f64;
+            let mean: f64 = samples.iter().sum::<f64>() / nf;
+            let mean_sq: f64 = samples.iter().map(|x| x * x).sum::<f64>() / nf;
+            let one_pass = mean_sq - mean * mean;
+            let two_pass: f64 = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / nf;
+
+            assert_eq!(mean, c, "the construction must give the mean exactly");
+            assert_eq!(
+                two_pass, exact,
+                "the second-pass form must be exact on an exact construction"
+            );
+            if one_pass <= 0.0 {
+                collapsed += 1;
+            }
+            println!(
+                "s = 2^-{k:<2}  exact var {exact:.6e}  one-pass {one_pass:.6e}  \
+                 ulp(c^2) {ulp_c2:.6e}"
+            );
+        }
+        assert!(
+            collapsed > 0,
+            "the one-pass form must be seen to lose the variance entirely, \
+             or this measurement is not exercising the regime it describes"
+        );
     }
 
     #[test]
