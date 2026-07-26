@@ -2345,25 +2345,6 @@ pub(super) fn solve_decoder_with_routability_gate_recycled(
     Ok((stats, gate))
 }
 
-#[cfg(test)]
-fn solve_decoder_with_routability_gate(
-    decoder: &mut Array2<f32>,
-    eq: &DecoderNormalEq,
-    ridge: f64,
-    residual_scale: f64,
-    gpu: gam_gpu::GpuPolicy,
-) -> Result<(DecoderSolveStats, Vec<RoutabilityGateDecision>), String> {
-    let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
-    solve_decoder_with_routability_gate_recycled(
-        decoder,
-        eq,
-        ridge,
-        residual_scale,
-        gpu,
-        &mut recycle,
-    )
-}
-
 /// Re-seed atoms that fired for no row this epoch (dead atoms) onto the current
 /// worst-reconstructed rows' residual directions — the "dead-feature resampling"
 /// that lets a large dictionary actually use all `K` atoms (#1026).
@@ -2597,20 +2578,6 @@ fn solve_decoder_recycled(
     );
     recycle.finish_refresh();
     Ok(stats)
-}
-
-/// Test-only one-refresh entry point. Production owns a
-/// [`DecoderRecycleSpace`] across epochs and enters through
-/// [`solve_decoder_with_routability_gate_recycled`].
-#[cfg(test)]
-fn solve_decoder(
-    decoder: &mut Array2<f32>,
-    eq: &DecoderNormalEq,
-    ridge: f64,
-    gpu: gam_gpu::GpuPolicy,
-) -> Result<DecoderSolveStats, String> {
-    let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
-    solve_decoder_recycled(decoder, eq, ridge, gpu, &mut recycle)
 }
 
 /// Largest recycled rank whose apply work and resident storage are both
@@ -3473,14 +3440,51 @@ mod exact_solve_tests {
         LINEAR_EV_PLATEAU_FRACTION, LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth,
         SparseDictionaryError, cg_solve, explained_variance, kappa_from_cg_tridiagonal,
         open_round_is_stationary, pcg_multi_core, recycled_component_preconditioner,
-        route_and_code_all, run, solve_decoder, solve_decoder_recycled,
-        solve_decoder_with_routability_gate,
+        route_and_code_all, run, solve_decoder_recycled,
+        solve_decoder_with_routability_gate_recycled,
     };
     use crate::sparse_dict::codes::SparseCode;
     use crate::sparse_dict::scoring::TileScorer;
     use crate::sparse_dict::{SparseDictConfig, fit_sparse_dictionary};
     use ndarray::{Array2, ArrayView2};
     use std::collections::HashMap;
+
+    /// Test-local one-refresh adapter. Production deliberately owns one recycle
+    /// space across epochs; tests that isolate a single solve make that lifetime
+    /// explicit here instead of adding a test-only item to the production module.
+    fn solve_decoder(
+        decoder: &mut Array2<f32>,
+        eq: &DecoderNormalEq,
+        ridge: f64,
+        gpu: gam_gpu::GpuPolicy,
+    ) -> Result<super::DecoderSolveStats, String> {
+        let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
+        solve_decoder_recycled(decoder, eq, ridge, gpu, &mut recycle)
+    }
+
+    fn solve_decoder_with_routability_gate(
+        decoder: &mut Array2<f32>,
+        eq: &DecoderNormalEq,
+        ridge: f64,
+        residual_scale: f64,
+        gpu: gam_gpu::GpuPolicy,
+    ) -> Result<
+        (
+            super::DecoderSolveStats,
+            Vec<super::RoutabilityGateDecision>,
+        ),
+        String,
+    > {
+        let mut recycle = DecoderRecycleSpace::new(eq.diag.len());
+        solve_decoder_with_routability_gate_recycled(
+            decoder,
+            eq,
+            ridge,
+            residual_scale,
+            gpu,
+            &mut recycle,
+        )
+    }
 
     /// The plateau detector decides whether a still-open fit may be returned at
     /// all, so its failure mode is a model minted from a non-converged iterate.

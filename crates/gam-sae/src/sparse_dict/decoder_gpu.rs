@@ -555,7 +555,10 @@ impl DeviceBlockCgBackend {
     /// and folds rows in ascending order; the expansion kernel assigns one
     /// thread to each `(row, column)` and folds modes in ascending order.
     fn apply_preconditioner(&mut self, initialize_p: bool) {
-        debug_assert!(self.rank > 0);
+        assert!(
+            self.rank > 0,
+            "coarse preconditioner launch requires positive rank"
+        );
         let project = complete(
             "project_coarse load_function",
             self.module
