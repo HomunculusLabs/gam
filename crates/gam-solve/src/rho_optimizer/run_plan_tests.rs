@@ -3754,6 +3754,64 @@ fn cost_stall_certifies_converged_below_probe_noise_floor_2241() {
     );
 }
 
+/// #2456 — when the probe-noise measurement exceeds the resolution ceiling the
+/// rung must DECLINE, not clamp to the ceiling and certify against the clamp.
+///
+/// Deliberately the same fixture as
+/// `cost_stall_certifies_converged_below_probe_noise_floor_2241` with ONE
+/// change: the probed radius collapses from `1e-3` to `1e-4`. Nothing about the
+/// point improved — the search got worse — and yet under the old
+/// `(σ̂/Δ).min(CAP)` the certified band ROSE, from `0.6` to the `1.0` ceiling,
+/// which covers `|g| = 0.5` and accepted. That is the whole defect in one step:
+/// the acceptance threshold reaches its maximum exactly as the search stops
+/// making progress, because a saturating `min` is scale-invariant and the
+/// regime it saturates in is the stalled one.
+///
+/// `σ̂/Δ = 6.0` is a statement that the criterion resolves NO gradient below
+/// `6.0` at this step scale. That is evidence about the instrument, not about
+/// the point, so it licenses nothing and the stall falls back to the
+/// score-relative band (`1e-3·(1+10) = 0.011`), which `|g| = 0.5` does not
+/// clear.
+#[test]
+fn collapsed_probe_radius_declines_the_noise_rung_instead_of_certifying_at_the_cap_2456() {
+    let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));
+    let mut guard = CostStallGuard::new(1.0e-6, 3, 1.0e-9, exit.clone());
+    let residual_grad = 0.5;
+    let score = 10.0;
+    guard.observe_seed(&array![0.0, 0.0], score, residual_grad);
+    // σ̂ = median{8e-4, 4e-4, 6e-4} = 6e-4 over a probed radius Δ = 1e-4.
+    guard.observe(&array![1.0e-4, 0.0], score + 8.0e-4, residual_grad, true);
+    guard.observe(&array![2.0e-4, 0.0], score + 4.0e-4, residual_grad, true);
+    let verdict = guard.observe(&array![3.0e-4, 0.0], score + 1.0e-3, residual_grad, true);
+
+    // The fixture is only an exhibit of the clamp if the CEILING would have
+    // covered the residual. Assert that, rather than trusting the arithmetic.
+    assert!(
+        residual_grad <= FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP,
+        "fixture proves nothing about the clamp unless the ceiling covers |g|"
+    );
+    // ...and if no surviving rung does.
+    assert!(
+        flat_valley_converged_grad_bound(score) < residual_grad,
+        "fixture must not be certifiable by the score-relative band"
+    );
+
+    assert!(
+        !matches!(verdict, CostStallVerdict::Converged),
+        "a stall whose own probe-noise measurement exceeds the resolution ceiling \
+         has measured that the criterion resolves nothing here; it must not then \
+         certify against the ceiling (#2456). Got {:?}",
+        std::mem::discriminant(&verdict)
+    );
+    assert!(
+        exit.lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|published| !published.converged && published.noise_grad_bound.is_none()),
+        "an unresolvable probe-noise measurement must not publish a certified bound"
+    );
+}
+
 /// #1689 — a criterion-flat ARC halt that the guard certified through the
 /// score-relative band must retain that halt provenance through the mandatory
 /// analytic final-point certificate. The old runner marked only NON-converged
@@ -3824,10 +3882,17 @@ fn criterion_flat_provenance_preserves_score_relative_certificate_1689() {
 }
 
 /// #2241 companion — the noise certificate must be un-gameable by collapsed
-/// step sizes: Δ → 0 inflates the raw σ̂/Δ arbitrarily, but the bound is capped
-/// at `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`, so a genuinely steep point
-/// (|g| = 2 > cap) can never be certified through the noise route; it keeps
+/// step sizes: Δ → 0 inflates the raw σ̂/Δ arbitrarily, so a genuinely steep
+/// point (|g| = 2) can never be certified through the noise route; it keeps
 /// descending exactly as the score-relative escape gate (#509) demands.
+///
+/// SCOPE, so this is not read as covering more than it does: `|g| = 2` sits
+/// ABOVE `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`, and above the ceiling clamping
+/// the ratio and declining it give the SAME answer. This fixture therefore
+/// could not have caught #2456, whose entire defect lives at `|g| <= cap` —
+/// where the clamp returned the ceiling and the ceiling was then certified
+/// against. The `..._declines_the_noise_rung_instead_of_certifying_at_the_cap`
+/// fixture below is the missing half.
 #[test]
 fn probe_noise_floor_capped_never_certifies_steep_point_2241() {
     let exit: Arc<Mutex<Option<CostStallExit>>> = Arc::new(Mutex::new(None));

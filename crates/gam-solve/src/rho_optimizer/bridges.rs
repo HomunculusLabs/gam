@@ -281,6 +281,201 @@ pub(crate) fn flat_valley_converged_grad_bound(score: f64) -> f64 {
     (FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs())).min(FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP)
 }
 
+/// What the stall window's own value scatter licenses about the gradient
+/// (#2241, corrected by #2456).
+///
+/// The measurement is `σ̂/Δ`: the criterion's evaluation noise over the radius
+/// the search actually probed. Below [`FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`]
+/// that ratio is a genuine resolution certificate — no probe of the size the
+/// line search takes can move the criterion by more than its own noise, so a
+/// gradient under it is indistinguishable from zero *at the resolution the
+/// criterion can be evaluated*.
+///
+/// ABOVE the ceiling it is not a weaker certificate; it is a different
+/// statement. `σ̂/Δ = 5e1` says the criterion cannot resolve a gradient
+/// anywhere below `5e1` — the instrument is blind in this regime, which is
+/// evidence about the measurement, not about the point. The previous code
+/// clamped the ratio with `.min(CAP)` and certified against the clamp, so a
+/// failed measurement was replaced by a constant and the constant was then
+/// accepted as a bound: `bound=1.000e0` on two fits whose objectives differ by
+/// 4000x, because saturation is scale-invariant by construction. Worse, the
+/// in-loop `converged` test read `|g| <= 1.0` as convergence, so the most
+/// permissive threshold the code can produce was applied exactly in the regime
+/// (`Δ → 0`) where the search is least converged.
+///
+/// A blind instrument certifies nothing, so [`Self::Unresolvable`] licenses no
+/// bound at all and the stall falls back to the score-relative band — which is
+/// never larger than the clamp, so this only ever tightens acceptance.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProbeNoiseVerdict {
+    /// Fewer than three consecutive differences, or a degenerate probe radius:
+    /// the window carried too little evidence to form the ratio.
+    Unmeasured,
+    /// `σ̂/Δ` measured within the admissible ceiling.
+    Resolved {
+        bound: f64,
+        noise_floor: f64,
+        probe_radius: f64,
+    },
+    /// `σ̂/Δ` measured above the ceiling: the criterion has no resolving power
+    /// at this step scale, so no gradient bound follows from it.
+    Unresolvable {
+        ratio: f64,
+        noise_floor: f64,
+        probe_radius: f64,
+    },
+}
+
+impl ProbeNoiseVerdict {
+    /// The gradient bound this measurement licenses, if any.
+    pub(crate) fn certified_bound(self) -> Option<f64> {
+        match self {
+            Self::Resolved { bound, .. } => Some(bound),
+            Self::Unmeasured | Self::Unresolvable { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ProbeNoiseVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unmeasured => write!(f, "unmeasured (stall window carried too little evidence)"),
+            Self::Resolved {
+                bound,
+                noise_floor,
+                probe_radius,
+            } => write!(
+                f,
+                "{bound:.3e} (sigma={noise_floor:.3e} / delta={probe_radius:.3e})"
+            ),
+            Self::Unresolvable {
+                ratio,
+                noise_floor,
+                probe_radius,
+            } => write!(
+                f,
+                "declined: sigma/delta={ratio:.3e} exceeds the {FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP:.3e} \
+                 resolution ceiling (sigma={noise_floor:.3e}, delta={probe_radius:.3e}), so the \
+                 criterion resolves no gradient at this step scale"
+            ),
+        }
+    }
+}
+
+/// Which term of the flat-valley acceptance `max` set the bound, alongside
+/// every candidate term's value (#2456/#2465).
+///
+/// The refusal and the acceptance both used to report only the winning number,
+/// and the terms saturate at the same `1.0` ceiling, so identical bounds came
+/// out of unrelated derivations and the message invited the reader to reconcile
+/// a bound with an objective it has no relation to. Carrying the whole `max`
+/// makes the acceptance re-derivable from the run record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlatValleyBoundTerm {
+    /// The absolute outer gradient tolerance the ordinary BFGS path checks.
+    SolverBand,
+    /// `FLAT_VALLEY_CONVERGED_REL_GRAD·(1 + |score|)`, capped.
+    ScoreRelative,
+    /// The measured probe-noise resolution floor.
+    ProbeNoise,
+}
+
+impl FlatValleyBoundTerm {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::SolverBand => "solver-band",
+            Self::ScoreRelative => "score-relative",
+            Self::ProbeNoise => "probe-noise-floor",
+        }
+    }
+}
+
+/// The stationarity bound a cost-stall exit is judged against, carrying the
+/// term that set it and the evidence behind each candidate (#2456).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FlatValleyGradBound {
+    pub(crate) value: f64,
+    pub(crate) term: FlatValleyBoundTerm,
+    pub(crate) solver_band: f64,
+    /// The score-relative band BEFORE the absolute ceiling is applied. When it
+    /// exceeds [`FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`] the reported `value` is
+    /// the ceiling, which is a deliberate acceptance policy (it only tightens)
+    /// — but it is then not the score-relative band, and saying so is the
+    /// difference between a readable message and an unreconcilable one.
+    pub(crate) score_relative_raw: f64,
+    pub(crate) probe_noise: ProbeNoiseVerdict,
+}
+
+/// Whether the score-relative flat-valley band is REPORTED AT ITS CEILING
+/// rather than at the band its formula gives (#2456/#2465).
+///
+/// `flat_valley_converged_grad_bound` returns `min(rel·(1+|score|), CAP)`, so on
+/// any objective with `|score| > 999` the answer is the constant `CAP` and two
+/// fits three orders apart report an identical bound. The certificate needs to
+/// say which of the two a reported number is; the value alone cannot.
+#[inline]
+pub(crate) fn flat_valley_score_saturates(score: f64) -> bool {
+    FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs()) > FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP
+}
+
+impl FlatValleyGradBound {
+    fn new(solver_band: f64, score: f64, probe_noise: ProbeNoiseVerdict) -> Self {
+        let score_relative_raw = FLAT_VALLEY_CONVERGED_REL_GRAD * (1.0 + score.abs());
+        let score_relative = flat_valley_converged_grad_bound(score);
+        let mut value = solver_band;
+        let mut term = FlatValleyBoundTerm::SolverBand;
+        if score_relative > value {
+            value = score_relative;
+            term = FlatValleyBoundTerm::ScoreRelative;
+        }
+        if let Some(noise) = probe_noise.certified_bound()
+            && noise > value
+        {
+            value = noise;
+            term = FlatValleyBoundTerm::ProbeNoise;
+        }
+        Self {
+            value,
+            term,
+            solver_band,
+            score_relative_raw,
+            probe_noise,
+        }
+    }
+
+    /// Whether the score-relative term was reported at the absolute ceiling
+    /// rather than at the band its label names.
+    pub(crate) fn score_relative_saturated(&self) -> bool {
+        self.score_relative_raw > FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP
+    }
+}
+
+impl std::fmt::Display for FlatValleyGradBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.3e} set by {}{}; terms: solver-band {:.3e}, score-relative {:.3e}{}, probe-noise {}",
+            self.value,
+            self.term.label(),
+            if matches!(self.term, FlatValleyBoundTerm::ScoreRelative)
+                && self.score_relative_saturated()
+            {
+                " (at the absolute ceiling, not the score-relative band)"
+            } else {
+                ""
+            },
+            self.solver_band,
+            self.score_relative_raw,
+            if self.score_relative_saturated() {
+                format!(" capped to {FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP:.3e}")
+            } else {
+                String::new()
+            },
+            self.probe_noise,
+        )
+    }
+}
+
 /// Maximum number of consecutive [`CostStallVerdict::StuckKeepDescending`]
 /// escapes the guard grants before it falls back to a [`CostStallVerdict::
 /// FlatValleyStall`] halt (#1426). Each escape resets the no-improvement window
@@ -309,11 +504,15 @@ pub(crate) struct CostStallExit {
     /// rebuilt outer result as non-converged in that case.
     pub(crate) converged: bool,
     /// #2241 — the probe-noise-floor gradient bound σ̂/Δ measured at the stall
-    /// (see [`CostStallGuard::probe_noise_grad_bound`]); `None` when the stall
-    /// window carried too little evidence to measure it. Carried onto
-    /// `OuterResult.flat_noise_grad_bound` so the final analytic certificate
-    /// judges the re-measured gradient against the same flat band the guard
-    /// certified in the loop.
+    /// (see [`CostStallGuard::probe_noise_verdict`]); `None` when the stall
+    /// window carried too little evidence to measure it OR when the measured
+    /// ratio exceeded the resolution ceiling, in which case the criterion
+    /// resolves no gradient at this step scale and the rung licenses nothing
+    /// (#2456). Carried onto `OuterResult.flat_noise_grad_bound` so the final
+    /// analytic certificate judges the re-measured gradient against the same
+    /// flat band the guard certified in the loop — and, just as importantly, so
+    /// the certificate never adopts a `ProbeNoiseFloor` rung the guard did not
+    /// actually measure.
     pub(crate) noise_grad_bound: Option<f64>,
 }
 
@@ -427,16 +626,21 @@ impl CostStallGuard {
     ///
     /// Guards: σ̂ is floored at the roundoff scale `ε·(1+|f_best|)` (a
     /// byte-identical window cannot license an infinite bound of 0/Δ — it
-    /// licenses exactly the roundoff resolution), and the returned bound is
-    /// capped at [`FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`] so collapsed step
-    /// sizes (Δ → 0 inflating σ̂/Δ) can never certify a genuinely steep point:
-    /// the #1426 stuck stall (|g| ≈ 11) and the #509 seed-park (|g| ≈ 2) both
-    /// sit above the cap and remain uncertifiable by this route. Returns
-    /// `None` when fewer than three consecutive differences exist or the probe
-    /// radius is degenerate (zero / non-finite).
-    fn probe_noise_grad_bound(&self) -> Option<f64> {
+    /// licenses exactly the roundoff resolution), and a ratio above
+    /// [`FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP`] is DECLINED rather than clamped
+    /// (#2456): collapsed step sizes (Δ → 0 inflating σ̂/Δ) mean the criterion
+    /// resolves nothing at this scale, and a blind instrument certifies
+    /// nothing. Clamping instead returned the ceiling and then certified
+    /// against it, which is how the most permissive threshold the code can
+    /// produce came to be applied exactly where the search is least converged.
+    /// The #1426 stuck stall (|g| ≈ 11) and the #509 seed-park (|g| ≈ 2) remain
+    /// uncertifiable by this route under either treatment; declining is never
+    /// the more permissive of the two, since it removes a term from a `max`.
+    /// Returns [`ProbeNoiseVerdict::Unmeasured`] when fewer than three
+    /// consecutive differences exist or the probe radius is degenerate.
+    fn probe_noise_verdict(&self) -> ProbeNoiseVerdict {
         if self.recent.len() < 4 {
-            return None;
+            return ProbeNoiseVerdict::Unmeasured;
         }
         let mut value_diffs: Vec<f64> = Vec::with_capacity(self.recent.len() - 1);
         let mut probe_radius = 0.0_f64;
@@ -452,7 +656,7 @@ impl CostStallGuard {
             probe_radius = probe_radius.max(step);
         }
         if !probe_radius.is_finite() || probe_radius <= 0.0 {
-            return None;
+            return ProbeNoiseVerdict::Unmeasured;
         }
         value_diffs.sort_by(|a, b| a.total_cmp(b));
         let mid = value_diffs.len() / 2;
@@ -462,7 +666,7 @@ impl CostStallGuard {
             0.5 * (value_diffs[mid - 1] + value_diffs[mid])
         };
         if !median.is_finite() {
-            return None;
+            return ProbeNoiseVerdict::Unmeasured;
         }
         let best_scale = if self.best_value.is_finite() {
             self.best_value.abs()
@@ -470,13 +674,30 @@ impl CostStallGuard {
             0.0
         };
         let noise_floor = median.max(f64::EPSILON * (1.0 + best_scale));
-        Some((noise_floor / probe_radius).min(FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP))
+        let ratio = noise_floor / probe_radius;
+        if !ratio.is_finite() {
+            return ProbeNoiseVerdict::Unmeasured;
+        }
+        if ratio > FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP {
+            return ProbeNoiseVerdict::Unresolvable {
+                ratio,
+                noise_floor,
+                probe_radius,
+            };
+        }
+        ProbeNoiseVerdict::Resolved {
+            bound: ratio,
+            noise_floor,
+            probe_radius,
+        }
     }
 
-    fn certified_grad_bound(&self) -> f64 {
-        let score_bound = flat_valley_converged_grad_bound(self.best_value);
-        let noise_bound = self.probe_noise_grad_bound().unwrap_or(0.0);
-        self.grad_threshold.max(score_bound).max(noise_bound)
+    fn certified_grad_bound(&self) -> FlatValleyGradBound {
+        FlatValleyGradBound::new(
+            self.grad_threshold,
+            self.best_value,
+            self.probe_noise_verdict(),
+        )
     }
 
     /// Register a precomputed feasible seed that the optimizer consumes from
@@ -849,14 +1070,25 @@ impl CostStallGuard {
         // #2241 — probe-noise-floor certificate: the stall window's own value
         // scatter and probed radius bound the gradient at which further probes
         // become indistinguishable from evaluation noise (derivation on
-        // `probe_noise_grad_bound`). It composes with the score-relative band
-        // as a second sufficient condition; both are capped well below the
-        // stuck-stall regimes so neither can certify a genuinely steep point.
-        let noise_grad_bound = self.probe_noise_grad_bound();
-        let converged = best_grad_norm.is_finite()
-            && (best_grad_norm <= self.grad_threshold
-                || best_grad_norm <= score_relative_grad_bound
-                || noise_grad_bound.is_some_and(|bound| best_grad_norm <= bound));
+        // `probe_noise_verdict`). It composes with the score-relative band as a
+        // second sufficient condition — but only when it RESOLVED (#2456);
+        // above the resolution ceiling it is a statement that the criterion
+        // measures nothing here, and it contributes no term.
+        let certified = FlatValleyGradBound::new(
+            self.grad_threshold,
+            best_value,
+            self.probe_noise_verdict(),
+        );
+        let noise_grad_bound = certified.probe_noise.certified_bound();
+        let converged = best_grad_norm.is_finite() && best_grad_norm <= certified.value;
+        if !converged
+            && let ProbeNoiseVerdict::Unresolvable { .. } = certified.probe_noise
+        {
+            log::info!(
+                "[OUTER] cost-stall probe-noise rung declined (#2456): |g|={best_grad_norm:.3e}, \
+                 bound {certified}"
+            );
+        }
         if converged {
             if let Ok(mut slot) = self.exit.lock() {
                 *slot = Some(CostStallExit {
@@ -1483,20 +1715,15 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
                     // #2241 probe-noise floor — printing only the raw
                     // tolerance made a flat-band acceptance read as an
                     // arithmetic impossibility in the log.
-                    let flat_band = flat_valley_converged_grad_bound(guard.best_value);
-                    let noise_band = guard.probe_noise_grad_bound().unwrap_or(f64::NAN);
                     log::info!(
                         "[OUTER] cost-stall convergence: REML objective improved < {:.3e} \
                          (relative) over {} consecutive accepted outer steps AND the projected \
-                         gradient cleared a stationarity band (|g|={:.3e}; absolute tol {:.3e}, \
-                         score-relative flat band {:.3e}, probe-noise band {:.3e}); accepting \
+                         gradient cleared a stationarity band (|g|={:.3e}; bound {}); accepting \
                          best-so-far as a stationary optimum (value={:.6e}).",
                         guard.rel_tol,
                         guard.window,
                         guard.best_grad_norm,
-                        guard.grad_threshold,
-                        flat_band,
-                        noise_band,
+                        guard.certified_grad_bound(),
                         guard.best_value,
                     );
                     return Err(ObjectiveEvalError::Fatal {
@@ -1980,8 +2207,8 @@ impl OuterSecondOrderBridge<'_> {
                 log::info!(
                     "[OUTER] ARC finite cost stall deferred to exact second-order convergence: \
                      REML objective improved < {:.3e} (relative) over {} consecutive outer \
-                     steps and the stored best projected gradient is small (|g|={:.3e} <= \
-                     {:.3e}), but only ARC owns the synchronized reduced-Hessian certificate \
+                     steps and the stored best projected gradient is small (|g|={:.3e}; bound \
+                     {}), but only ARC owns the synchronized reduced-Hessian certificate \
                      (value={:.6e}).",
                     guard.rel_tol,
                     guard.window,
@@ -2042,7 +2269,7 @@ impl OuterSecondOrderBridge<'_> {
                 log::warn!(
                     "[OUTER] ARC infeasible-probe stall: {} consecutive infeasible λ→0 trials \
                      after the best feasible iterate. Its stored projected gradient is small \
-                     (|g|={:.3e} <= {:.3e}) and its synchronized reduced Hessian does not \
+                     (|g|={:.3e}; bound {}) and its synchronized reduced Hessian does not \
                      certify negative curvature; halting only as a NON-CONVERGED checkpoint \
                      (value={:.6e}).",
                     guard.window,
