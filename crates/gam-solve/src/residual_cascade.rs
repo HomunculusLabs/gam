@@ -96,7 +96,8 @@ use std::sync::Arc;
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_math::score_opt::{
-    ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample, maximize_score_1d,
+    AffineRemlProfile, ClosedInterval, DerivativeEnclosure, ScoreJet, ScoreSample,
+    maximize_score_1d,
 };
 use gam_terms::grid_spline_2d::{chol_solve, cholesky_logdet};
 use ndarray::Array2;
@@ -756,16 +757,108 @@ struct CascadeSpectralMode {
 /// determinant mode is an analytic logistic function of `log(lambda)`. The
 /// representation is built once, rather than re-running a basin-selecting
 /// lattice of lambda-dependent factorizations.
+///
+/// The same elimination puts the PROFILED RESIDUAL in the same form wherever
+/// the eigenbasis survives the construction — see [`CascadeResidualForm`].
 struct CascadeRemlProfile<'a> {
     core: &'a Core,
     null_logdet: f64,
     modes: Vec<CascadeSpectralMode>,
+    residual: CascadeResidualForm,
+}
+
+/// The lambda-independent spectral form of the PROFILED RESIDUAL
+/// `R(lambda) = y'Wy - b'A(lambda)^(-1) b`.
+///
+/// The same null-space elimination and penalty whitening that turns the
+/// determinant into a mode sum does the same thing to the residual. In the
+/// Schur eigenbasis `B = V Theta V'`, `A(lambda)` acts as `Theta + lambda I`,
+/// so with
+///
+/// `p = V' D^(-1/2) (b1 - G10 G00^(-1) b0)`   and
+/// `S_k(lambda) = sum_i p_i^2 / (theta_i + lambda)^k`,
+///
+/// `R = anchor_energy - S1`, and the three quadratic forms the score jet needs
+/// are the next three moments of that same sum:
+///
+/// `c'Dc = S2`, `(Dc)'A^(-1)(Dc) = S3`, `u'Du = S4` for `u = A^(-1) D c`.
+///
+/// `anchor_energy = y'Wy - b0' G00^(-1) b0` is the part of the residual no
+/// lambda can move.
+struct CascadeResidualSpectrum {
+    /// `theta_i`, the Schur eigenvalue of mode `i` — the SAME numbers the
+    /// determinant modes carry.
+    eigenvalue: Vec<f64>,
+    /// Every mode's penalty scale, which is exactly `1` because the Schur
+    /// complement was whitened by `D^(-1/2)` before it was decomposed. It is
+    /// materialized because [`AffineRemlProfile`] takes the pencil
+    /// `h_i = g_i + lambda s_i` as two parallel slices.
+    penalty: Vec<f64>,
+    /// `p_i^2`, the squared projection of the null-eliminated, penalty-whitened
+    /// right-hand side onto mode `i`.
+    projected_square: Vec<f64>,
+    /// `y'Wy - b0' G00^(-1) b0`, as the single-response slice
+    /// [`AffineRemlProfile`] expects.
+    anchor_energy: [f64; 1],
+}
+
+impl CascadeResidualSpectrum {
+    /// `(R, S2, S3, S4)` at `lambda`. Every `theta_i` is nonnegative by
+    /// construction and `lambda` is strictly positive, so every denominator is
+    /// strictly positive; the caller still rejects a nonpositive `R`, which is a
+    /// statement about the DATA rather than about this arithmetic.
+    fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
+        let mut s1 = 0.0;
+        let mut s2 = 0.0;
+        let mut s3 = 0.0;
+        let mut s4 = 0.0;
+        for (&theta, &projected_square) in self.eigenvalue.iter().zip(&self.projected_square) {
+            let h = theta + lambda;
+            let first = projected_square / h;
+            let second = first / h;
+            let third = second / h;
+            s1 += first;
+            s2 += second;
+            s3 += third;
+            s4 += third / h;
+        }
+        (self.anchor_energy[0] - s1, s2, s3, s4)
+    }
+}
+
+/// Where the profiled residual and its three log-lambda derivatives come from.
+///
+/// Both arms describe the SAME function of lambda; they differ only in what the
+/// design's Schur decomposition left behind. Under the dense sizing cap the
+/// determinant spectrum comes from a full eigendecomposition, so the eigen-BASIS
+/// exists and the residual is a closed-form sum over exactly the modes the
+/// determinant already uses — no linear solve at any lambda, and the whole score
+/// is O(rank) per trial after the one decomposition.
+///
+/// Past the cap only a fixed-probe QUADRATURE of that spectrum exists (Ritz
+/// values and weights, with no basis to project the right-hand side onto), so
+/// there the residual is still obtained by solving, with both right-hand sides
+/// sharing one factorization or one preconditioner at that lambda.
+enum CascadeResidualForm {
+    Spectral(CascadeResidualSpectrum),
+    Solved,
 }
 
 struct CascadeScoreEvaluation {
     jet: ScoreJet,
     /// `log|G + lambda D| - rank(D) log(lambda) - log|D|_+`.
     normalized_logdet: f64,
+}
+
+/// The determinant half of the score at one `log lambda`.
+struct DeterminantParts {
+    /// `log|G + lambda D| - rank(D) log(lambda) - log|D|_+`.
+    normalized_logdet: f64,
+    /// `d/d log lambda`: `-sum_i w_i t_i` with `t_i = theta_i/(theta_i+lambda)`.
+    /// Nonpositive, and INCREASING in `log lambda` because every `t_i` falls.
+    first: f64,
+    /// `d^2/d log lambda^2`: `sum_i w_i t_i (1-t_i)`. Nonnegative.
+    second: f64,
 }
 
 impl CascadeRemlProfile<'_> {
@@ -800,54 +893,50 @@ impl CascadeRemlProfile<'_> {
         Ok((lo, hi))
     }
 
-    fn evaluate(&self, log_lambda: f64) -> Result<CascadeScoreEvaluation, String> {
-        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("residual cascade: {error}"))?;
-
+    /// This profile as the affine spectral REML score it is, when the residual
+    /// is spectral.
+    ///
+    /// With `h_i(lambda) = theta_i + lambda` the cascade's dense-route score is
+    /// term for term an [`AffineRemlProfile`]: `sum log h_i - rank log lambda`
+    /// is the normalized log-determinant, `R = anchor - sum p_i^2/h_i` is the
+    /// profiled residual, and there is one response. The point of saying so is
+    /// the ENCLOSURE. `AffineRemlProfile::enclose` evaluates the mode kernels on
+    /// an interval lambda, so it is a genuine interval extension whose width
+    /// collapses with the cell; [`CascadeRemlProfile::enclose`] can only pad the
+    /// endpoint jets with global Lipschitz constants, and that pad does not
+    /// collapse — see its own note on why the search could not terminate.
+    fn affine_view(&self) -> Result<Option<AffineRemlProfile<'_>>, String> {
+        let CascadeResidualForm::Spectral(spectrum) = &self.residual else {
+            return Ok(None);
+        };
         let core = self.core;
-        // ONE factorization of `A = X'WX + λD` for BOTH right-hand sides below;
-        // the matrix is the same at this λ and only the right-hand side differs.
-        let solver = core.coeff_solver(lambda)?;
-        let coeff = solver.solve(core, lambda, &core.rhs)?;
-        let rss = core.rss_pen(&coeff);
-        if !(rss.is_finite() && rss > 0.0) {
-            return Err(format!(
-                "residual cascade: degenerate penalized residual {rss}"
-            ));
-        }
+        AffineRemlProfile::new(
+            &spectrum.eigenvalue,
+            &spectrum.penalty,
+            &spectrum.projected_square,
+            &spectrum.anchor_energy,
+            (core.y.len() - core.nullity()) as f64,
+            // Every whitened mode carries penalty scale 1, so the penalized
+            // determinant rank is the full Schur rank.
+            spectrum.penalty.len(),
+            self.null_logdet,
+        )
+        .map(Some)
+        .map_err(|error| format!("residual cascade: affine spectral profile rejected: {error}"))
+    }
 
-        // R = y'Wy - b'A^-1b. With A' = lambda D,
-        // R' = lambda c'Dc and
-        // R'' = lambda c'Dc - 2 lambda^2 (Dc)'A^-1(Dc).
-        // The third derivative is retained to justify the analytic enclosure
-        // used below; it needs no third solve because the last quadratic is
-        // u'Du for u=A^-1Dc.
-        let dc: Vec<f64> = coeff
-            .iter()
-            .zip(core.pen_diag.iter())
-            .map(|(&c, &d)| d * c)
-            .collect();
-        let penalty_energy = coeff
-            .iter()
-            .zip(dc.iter())
-            .map(|(&c, &v)| c * v)
-            .sum::<f64>();
-        let u = solver.solve(core, lambda, &dc)?;
-        let inverse_penalty_energy = dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum::<f64>();
-        let third_energy = u
-            .iter()
-            .zip(core.pen_diag.iter())
-            .map(|(&v, &d)| d * v * v)
-            .sum::<f64>();
-        let rss_d1 = lambda * penalty_energy;
-        let lambda2 = lambda * lambda;
-        let rss_d2 = rss_d1 - 2.0 * lambda2 * inverse_penalty_energy;
-        let rss_d3 =
-            rss_d1 - 6.0 * lambda2 * inverse_penalty_energy + 6.0 * lambda2 * lambda * third_energy;
-
-        let mut normalized_logdet = self.null_logdet;
-        let mut determinant_d1 = 0.0;
-        let mut determinant_d2 = 0.0;
+    /// The normalized log-determinant and its first two `log lambda`
+    /// derivatives.
+    ///
+    /// `O(modes)` and free of linear algebra on every route, which is what lets
+    /// [`Self::enclose`] have the determinant half of the jet at both cell
+    /// endpoints without an evaluation of its own.
+    fn determinant_parts(&self, log_lambda: f64, lambda: f64) -> DeterminantParts {
+        let mut parts = DeterminantParts {
+            normalized_logdet: self.null_logdet,
+            first: 0.0,
+            second: 0.0,
+        };
         for mode in &self.modes {
             let theta = mode.eigenvalue;
             let weight = mode.weight;
@@ -857,7 +946,7 @@ impl CascadeRemlProfile<'_> {
             // Stable forms for log(1 + theta/lambda) and
             // t=theta/(lambda+theta), including widely separated scales.
             let log_theta = theta.ln();
-            normalized_logdet += weight
+            parts.normalized_logdet += weight
                 * if log_theta > log_lambda {
                     (log_theta - log_lambda) + (log_lambda - log_theta).exp().ln_1p()
                 } else {
@@ -868,9 +957,77 @@ impl CascadeRemlProfile<'_> {
             } else {
                 theta / (lambda + theta)
             };
-            determinant_d1 -= weight * t;
-            determinant_d2 += weight * t * (1.0 - t);
+            parts.first -= weight * t;
+            parts.second += weight * t * (1.0 - t);
         }
+        parts
+    }
+
+    fn evaluate(&self, log_lambda: f64) -> Result<CascadeScoreEvaluation, String> {
+        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
+            .map_err(|error| format!("residual cascade: {error}"))?;
+
+        let core = self.core;
+        // R = y'Wy - b'A^-1b. With A' = lambda D,
+        // R' = lambda c'Dc and
+        // R'' = lambda c'Dc - 2 lambda^2 (Dc)'A^-1(Dc).
+        // The third derivative is retained to justify the analytic enclosure
+        // used below; it needs no third solve because the last quadratic is
+        // u'Du for u=A^-1Dc.
+        let (rss, penalty_energy, inverse_penalty_energy, third_energy) = match &self.residual {
+            // The decomposition that produced the determinant modes produced
+            // these three quadratic forms too. Reading them off it costs
+            // O(rank); re-deriving them cost a fresh O(m^3) factorization of
+            // `A = X'WX + λD` at EVERY λ the certified search visits.
+            CascadeResidualForm::Spectral(spectrum) => spectrum.moments(lambda),
+            CascadeResidualForm::Solved => {
+                // ONE factorization of `A` for BOTH right-hand sides below; the
+                // matrix is the same at this λ and only the right-hand side
+                // differs.
+                let solver = core.coeff_solver(lambda)?;
+                let coeff = solver.solve(core, lambda, &core.rhs)?;
+                let dc: Vec<f64> = coeff
+                    .iter()
+                    .zip(core.pen_diag.iter())
+                    .map(|(&c, &d)| d * c)
+                    .collect();
+                let penalty_energy = coeff
+                    .iter()
+                    .zip(dc.iter())
+                    .map(|(&c, &v)| c * v)
+                    .sum::<f64>();
+                let u = solver.solve(core, lambda, &dc)?;
+                let inverse_penalty_energy =
+                    dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum::<f64>();
+                let third_energy = u
+                    .iter()
+                    .zip(core.pen_diag.iter())
+                    .map(|(&v, &d)| d * v * v)
+                    .sum::<f64>();
+                (
+                    core.rss_pen(&coeff),
+                    penalty_energy,
+                    inverse_penalty_energy,
+                    third_energy,
+                )
+            }
+        };
+        if !(rss.is_finite() && rss > 0.0) {
+            return Err(format!(
+                "residual cascade: degenerate penalized residual {rss}"
+            ));
+        }
+        let rss_d1 = lambda * penalty_energy;
+        let lambda2 = lambda * lambda;
+        let rss_d2 = rss_d1 - 2.0 * lambda2 * inverse_penalty_energy;
+        let rss_d3 =
+            rss_d1 - 6.0 * lambda2 * inverse_penalty_energy + 6.0 * lambda2 * lambda * third_energy;
+
+        let DeterminantParts {
+            normalized_logdet,
+            first: determinant_d1,
+            second: determinant_d2,
+        } = self.determinant_parts(log_lambda, lambda);
 
         let dof = (core.y.len() - core.nullity()) as f64;
         let rss_log_d1 = rss_d1 / rss;
@@ -904,21 +1061,52 @@ impl CascadeRemlProfile<'_> {
         })
     }
 
-    /// Outer derivative ranges from analytic global Lipschitz bounds.
+    /// Outer derivative ranges for the route with no eigenbasis: the INTERSECTION
+    /// of an additive Lipschitz pad and a multiplicative spectral bracket.
     ///
-    /// Each determinant mode has `|f''| <= 1/4` and `|f'''| <= 1/4`.
+    /// Both are outer enclosures of the same two derivatives, so intersecting
+    /// them is again one — and they fail in opposite places, which is the whole
+    /// reason both are here.
+    ///
+    /// THE PAD. Each determinant mode has `|f''| <= 1/4` and `|f'''| <= 1/4`.
     /// After the null-space elimination the profiled residual is a positive
     /// mixture of `lambda/(theta+lambda)` kernels plus a lambda-independent
-    /// residual. Its log therefore has `|g''| <= 2`, `|g'''| <= 6` (the loose
-    /// moment bounds for variables in `[0,1]`). Endpoint jets plus these bounds
-    /// enclose the complete interval without sampling it.
+    /// residual, so its log has `|g''| <= 2`, `|g'''| <= 6` (the loose moment
+    /// bounds for variables in `[0,1]`). Endpoint jets plus these bounds enclose
+    /// the interval without sampling it, and the jets arrive as the search's own
+    /// `left`/`right` SAMPLES, so this function evaluates the profile zero
+    /// times. The pad is tight where the score has real curvature — around the
+    /// optimum, where certifying a unique root actually happens.
     ///
-    /// Those endpoint jets arrive as the search's own `left`/`right` SAMPLES —
-    /// `maximize_score_1d` already evaluated them to build the cell — so this
-    /// function evaluates the profile zero times. It used to re-run
-    /// `self.evaluate` at both endpoints, and since each `evaluate` performs
-    /// TWO penalized linear solves, every branch-and-bound cell paid six solves
-    /// where two suffice, at every refinement level of `fit_residual_cascade`.
+    /// WHERE THE PAD FAILS. Its radius is `C·width` with `C` of order the
+    /// residual degrees of freedom, and it shrinks only as fast as the cell.
+    /// [`Self::log_lambda_domain`] deliberately runs `ln(1/sqrt(eps))` past the
+    /// extreme Schur eigenvalues, and out there `f'` has decayed to order
+    /// `rank·sqrt(eps)` — while the search's resolution floor is also
+    /// `sqrt(eps)`, so `C·width` AT THE FLOOR is larger than the derivative it
+    /// is meant to bracket. The tail is then neither dismissible (the pad
+    /// straddles zero) nor refinable (the floor is reached), and the search
+    /// grinds toward a `ScoreSearchError::Unresolved` it cannot avoid. That is
+    /// a search that does not terminate on its own domain, not a slow one.
+    ///
+    /// THE BRACKET, which has no floor because it is RELATIVE. Write
+    /// `f' = -(D1 + dof·rho)/2` with `D1 = -sum_i w_i t_i`,
+    /// `t_i = theta_i/(theta_i+lambda)` and `rho = R'/R > 0`.
+    ///
+    /// * every `t_i` falls with `log lambda`, so `D1` RISES: `D1` on the cell is
+    ///   bracketed by its two endpoint values exactly, with no bound at all;
+    /// * `d log t_i/dx = -(1-t_i)` and `d log[t_i(1-t_i)]/dx = 2t_i - 1`, both
+    ///   in `[-1, 1]`, and a positive mixture's log-derivative is a convex
+    ///   combination of its parts', so `D2` and `R'` each satisfy
+    ///   `|d log(.)/dx| <= 1`;
+    /// * `R` rises, so `d log rho/dx = d log R'/dx - rho <= 1`, giving
+    ///   `rho(x) <= rho(a)e^w` and `rho(x) >= rho(b)e^{-w}`;
+    /// * `|R''| <= R'` mode by mode, so `sigma = R''/R - rho^2` lies in
+    ///   `[-rho(1+rho), rho]`.
+    ///
+    /// Every one of those bounds is proportional to the quantity it bounds, so
+    /// in a tail where `f'` merely has a constant sign the bracket excludes zero
+    /// at a width that does not depend on how far the tail runs.
     fn enclose(&self, left: ScoreSample, right: ScoreSample) -> Result<DerivativeEnclosure, String> {
         let (lo, hi) = (left.x, right.x);
         if !(lo.is_finite() && hi.is_finite() && lo <= hi) {
@@ -927,13 +1115,33 @@ impl CascadeRemlProfile<'_> {
             ));
         }
         let width = hi - lo;
+        let dof = (self.core.y.len() - self.core.nullity()) as f64;
+        let pad = self.lipschitz_pad(left, right, width);
+        let Some(bracket) = self.multiplicative_bracket(left, right, width, dof)? else {
+            return Ok(pad);
+        };
+        Ok(DerivativeEnclosure {
+            derivative: intersect(pad.derivative, bracket.derivative),
+            curvature: intersect(pad.curvature, bracket.curvature),
+        })
+    }
+
+    /// The additive half of [`Self::enclose`], on its own — the enclosure this
+    /// module used to return, kept separable so its tail stall can be asserted
+    /// against the bracket that repairs it rather than described.
+    fn lipschitz_pad(
+        &self,
+        left: ScoreSample,
+        right: ScoreSample,
+        width: f64,
+    ) -> DerivativeEnclosure {
         let rank = (self.core.m - self.core.nullity()) as f64;
         let dof = (self.core.y.len() - self.core.nullity()) as f64;
         let curvature_abs_bound = 0.5 * (0.25 * rank + 2.0 * dof);
         let third_abs_bound = 0.5 * (0.25 * rank + 6.0 * dof);
         let derivative_radius = curvature_abs_bound * width;
         let curvature_radius = third_abs_bound * width;
-        Ok(DerivativeEnclosure {
+        DerivativeEnclosure {
             derivative: ClosedInterval::outward(
                 (left.derivative - derivative_radius).min(right.derivative - derivative_radius),
                 (left.derivative + derivative_radius).max(right.derivative + derivative_radius),
@@ -942,18 +1150,99 @@ impl CascadeRemlProfile<'_> {
                 (left.curvature - curvature_radius).min(right.curvature - curvature_radius),
                 (left.curvature + curvature_radius).max(right.curvature + curvature_radius),
             ),
-        })
+        }
+    }
+
+    /// The relative bracket described on [`Self::enclose`], or `None` when the
+    /// endpoint residual log-slopes cannot be recovered to a definite sign (see
+    /// below), in which case the pad stands alone and nothing is claimed.
+    fn multiplicative_bracket(
+        &self,
+        left: ScoreSample,
+        right: ScoreSample,
+        width: f64,
+        dof: f64,
+    ) -> Result<Option<DerivativeEnclosure>, String> {
+        // Per endpoint: (D1, D2, rho lower estimate, rho upper estimate).
+        let mut parts = [(0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64); 2];
+        for (slot, sample) in parts.iter_mut().zip([left, right]) {
+            let lambda = gam_problem::checked_exp_log_strength(sample.x)
+                .map_err(|error| format!("residual cascade: {error}"))?;
+            let determinant = self.determinant_parts(sample.x, lambda);
+            // `evaluate` formed `derivative = -(D1 + dof*rho)/2` from THIS
+            // determinant value — recomputed here bitwise, same inputs, same
+            // code — so `-2*derivative` returns that sum exactly (halving and
+            // doubling are exact) and one subtraction recovers `dof*rho`. The
+            // recovery's error is the roundoff of the sum it undoes plus its
+            // own and the division: at most four roundings of magnitude
+            // `|D1| + |2*derivative|`. That is a rounding COUNT, not a slack to
+            // tune, and it is carried in both directions.
+            let total = -2.0 * sample.derivative;
+            let recovered = (total - determinant.first) / dof;
+            let slack = 4.0 * f64::EPSILON * (determinant.first.abs() + total.abs()) / dof;
+            *slot = (
+                determinant.first,
+                determinant.second,
+                recovered - slack,
+                recovered + slack,
+            );
+        }
+        let (first_lo, second_lo, _, rho_left_upper) = parts[0];
+        let (first_hi, second_hi, rho_right_lower, rho_right_upper) = parts[1];
+
+        // `rho > 0` is a theorem (`R' = lambda c'Dc > 0`), but a recovery that
+        // cannot place it strictly above zero has lost it to cancellation and
+        // can no longer carry a RELATIVE bound. Decline rather than guess.
+        let growth = width.exp();
+        if !(rho_left_upper > 0.0 && rho_right_upper > 0.0 && growth.is_finite()) {
+            return Ok(None);
+        }
+        // `rho(x) <= rho(a)e^w` integrating the `<= 1` side forward from the
+        // left endpoint; `rho(x) >= rho(b)e^-w` integrating it back from the
+        // right. Only those two directions are free of `rho` itself.
+        let rho_hi = rho_left_upper.max(rho_right_upper) * growth;
+        let rho_lo = (rho_right_lower / growth).max(0.0);
+
+        // D1 rises across the cell, so its endpoint values bracket it exactly.
+        let derivative = ClosedInterval::outward(
+            -0.5 * (first_hi + dof * rho_hi),
+            -0.5 * (first_lo + dof * rho_lo),
+        );
+
+        // D2 > 0 at both ends forces D2 > 0 throughout (a zero inside would make
+        // `|d log D2/dx| <= 1` impossible on a finite cell), which is what lets
+        // the relative bound apply; otherwise only `D2 >= 0` is available.
+        let (d2_lo, d2_hi) = if second_lo > 0.0 && second_hi > 0.0 {
+            (second_lo.max(second_hi) / growth, second_lo.min(second_hi) * growth)
+        } else {
+            (0.0, 0.25 * self.modes.iter().map(|mode| mode.weight).sum::<f64>())
+        };
+        let curvature = ClosedInterval::outward(
+            -0.5 * (d2_hi + dof * rho_hi),
+            -0.5 * (d2_lo - dof * rho_hi * (1.0 + rho_hi)),
+        );
+        Ok(Some(DerivativeEnclosure {
+            derivative,
+            curvature,
+        }))
     }
 }
 
-/// A coefficient solver pinned to one λ (see [`Core::coeff_solver`]). The
-/// dense arms hold the Cholesky factor so repeated right-hand sides at that λ
-/// cost only triangular solves; the iterative arm has no factor to share and
-/// simply defers to the certified PCG per right-hand side.
+/// The tighter of two outer enclosures of the same quantity.
+fn intersect(a: ClosedInterval, b: ClosedInterval) -> ClosedInterval {
+    ClosedInterval::new(a.lo.max(b.lo), a.hi.min(b.hi))
+}
+
+/// A coefficient solver pinned to one λ (see [`Core::coeff_solver`]). The dense
+/// arms hold the Cholesky factor so repeated right-hand sides at that λ cost
+/// only triangular solves; the iterative arm holds the coarse-space
+/// preconditioner, which is likewise a function of λ alone and whose coarse
+/// block is an `O(n·q_C²) + O(q_C³)` assembly and factorization — paid once per
+/// λ, not once per right-hand side.
 enum CoeffSolver<'a> {
     Cached(&'a [f64]),
     Factored(Vec<f64>),
-    Iterative,
+    Iterative(Preconditioner),
 }
 
 impl CoeffSolver<'_> {
@@ -961,7 +1250,9 @@ impl CoeffSolver<'_> {
         match self {
             Self::Cached(l) => Ok(chol_solve(l, core.m, b)),
             Self::Factored(l) => Ok(chol_solve(l, core.m, b)),
-            Self::Iterative => core.pcg(lambda, b, None).map(|(coeff, _, _)| coeff),
+            Self::Iterative(preconditioner) => core
+                .pcg_with(lambda, preconditioner, b, None)
+                .map(|(coeff, _, _)| coeff),
         }
     }
 }
@@ -1045,10 +1336,19 @@ impl Core {
         }
     }
 
+    /// Exact Schur spectrum under the dense sizing cap, WITH the eigenbasis it
+    /// is computed from.
+    ///
+    /// `eigh` returns the eigenvectors whether or not the caller keeps them.
+    /// Dropping them here used to leave the residual half of the same score with
+    /// no way to reach the decomposition, so `evaluate` re-derived it as a fresh
+    /// Cholesky of `A = X'WX + λD` at every λ the certified search visited —
+    /// an O(m^3) factorization per trial, standing in for a projection this
+    /// factorization had already made available.
     fn dense_cascade_spectrum(
         &self,
         null_chol: &[f64],
-    ) -> Result<Vec<CascadeSpectralMode>, String> {
+    ) -> Result<(Vec<CascadeSpectralMode>, CascadeResidualSpectrum), String> {
         let q = self.nullity();
         let rank = self.m - q;
         let mut schur = Array2::<f64>::zeros((rank, rank));
@@ -1071,7 +1371,7 @@ impl Core {
                 schur[(j, i)] = value;
             }
         }
-        let (eigenvalues, _) = schur.eigh(Side::Lower).map_err(|error| {
+        let (eigenvalues, eigenvectors) = schur.eigh(Side::Lower).map_err(|error| {
             format!("residual cascade: Schur-complement eigendecomposition failed: {error}")
         })?;
         let scale = eigenvalues
@@ -1080,7 +1380,21 @@ impl Core {
             .map(f64::abs)
             .fold(0.0, f64::max);
         let roundoff = f64::EPSILON * rank.max(1) as f64 * scale.max(f64::MIN_POSITIVE);
-        eigenvalues
+        // A mode inside the decomposition's OWN roundoff floor is a null
+        // direction of the whitened design, not a small positive one. The floor
+        // is the same quantity the semidefiniteness check below is stated in;
+        // reading it in one direction only ("this is not really negative") and
+        // not the other ("so it is not really positive either") is what lets a
+        // noise-level eigenvalue set the small-lambda end of the search domain
+        // and divide into the residual there.
+        let certified = |eigenvalue: f64| {
+            if eigenvalue > roundoff {
+                eigenvalue
+            } else {
+                0.0
+            }
+        };
+        let modes = eigenvalues
             .iter()
             .copied()
             .enumerate()
@@ -1091,12 +1405,66 @@ impl Core {
                     ))
                 } else {
                     Ok(CascadeSpectralMode {
-                        eigenvalue: eigenvalue.max(0.0),
+                        eigenvalue: certified(eigenvalue),
                         weight: 1.0,
                     })
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?;
+
+        // The same null elimination and penalty whitening, applied to the
+        // right-hand side instead of to the Gram: `beta = D^(-1/2)(b1 - G10
+        // G00^(-1) b0)`, then projected onto the eigenbasis above.
+        let null_solved = chol_solve(null_chol, q, &self.rhs[..q]);
+        let mut whitened = vec![0.0_f64; rank];
+        for (i, value) in whitened.iter_mut().enumerate() {
+            let mut entry = self.rhs[q + i];
+            for (k, &coefficient) in null_solved.iter().enumerate() {
+                entry -= self.dense_gram_entry(q + i, k).expect("dense Gram exists") * coefficient;
+            }
+            *value = entry / self.pen_diag[q + i].sqrt();
+        }
+        // A null mode carries NO response energy, exactly. The Schur complement
+        // and the whitened right-hand side are built from the same design `Z`:
+        // `B = Z'WZ` and `beta = Z'Wy`, so `Bv = 0` gives `Zv = 0` and hence
+        // `v'beta = (Zv)'Wy = 0`. What the arithmetic returns for such a mode is
+        // roundoff — and the residual sum divides it by `theta + lambda`, which
+        // at the bottom of the search domain is SMALLER than that roundoff. On a
+        // 558-column cascade the three null modes carried `p^2 ~ 3e-16` against
+        // `lambda ~ 4e-19` and drove the profiled residual to -764 where the
+        // mathematics bounds it below by the unpenalized residual sum of
+        // squares. Restoring the exact identity is not a tolerance.
+        let mut projected_square = vec![0.0_f64; rank];
+        for (j, square) in projected_square.iter_mut().enumerate() {
+            if certified(eigenvalues[j]) == 0.0 {
+                continue;
+            }
+            let mut projection = 0.0;
+            for (i, &value) in whitened.iter().enumerate() {
+                projection += eigenvectors[(i, j)] * value;
+            }
+            *square = projection * projection;
+        }
+        let anchor_energy = self.ytwy
+            - self.rhs[..q]
+                .iter()
+                .zip(null_solved.iter())
+                .map(|(&b, &c)| b * c)
+                .sum::<f64>();
+        if !(anchor_energy.is_finite() && projected_square.iter().all(|v| v.is_finite())) {
+            return Err(format!(
+                "residual cascade: non-finite spectral residual representation (anchor {anchor_energy})"
+            ));
+        }
+        Ok((
+            modes,
+            CascadeResidualSpectrum {
+                eigenvalue: eigenvalues.iter().copied().map(certified).collect(),
+                penalty: vec![1.0; rank],
+                projected_square,
+                anchor_energy: [anchor_energy],
+            },
+        ))
     }
 
     /// Fixed-probe Lanczos quadrature of the lambda-independent Schur
@@ -1212,7 +1580,18 @@ impl Core {
                     ));
                 }
                 modes.push(CascadeSpectralMode {
-                    eigenvalue: eigenvalue.max(0.0),
+                    // Same reading of the same floor as the dense route: a Ritz
+                    // value inside the quadrature's own roundoff is a null
+                    // direction, not a small positive mode. Admitting it as
+                    // positive lets it set the small-lambda end of
+                    // `log_lambda_domain`, which is how the search comes to
+                    // demand a solve of `X'WX + λD` at a λ that leaves the
+                    // matrix numerically singular.
+                    eigenvalue: if eigenvalue > roundoff {
+                        eigenvalue
+                    } else {
+                        0.0
+                    },
                     weight,
                 });
             }
@@ -1222,15 +1601,20 @@ impl Core {
 
     fn reml_profile(&self) -> Result<CascadeRemlProfile<'_>, String> {
         let (null_chol, null_logdet) = self.null_gram_factor()?;
-        let modes = if self.dense_gram.is_some() {
-            self.dense_cascade_spectrum(&null_chol)?
+        let (modes, residual) = if self.dense_gram.is_some() {
+            let (modes, spectrum) = self.dense_cascade_spectrum(&null_chol)?;
+            (modes, CascadeResidualForm::Spectral(spectrum))
         } else {
-            self.iterative_cascade_spectrum(&null_chol)?
+            (
+                self.iterative_cascade_spectrum(&null_chol)?,
+                CascadeResidualForm::Solved,
+            )
         };
         Ok(CascadeRemlProfile {
             core: self,
             null_logdet,
             modes,
+            residual,
         })
     }
 
@@ -1427,8 +1811,21 @@ impl Core {
         b: &[f64],
         warm: Option<&[f64]>,
     ) -> Result<(Vec<f64>, f64, usize), String> {
-        let m = self.m;
         let prec = self.build_preconditioner(lambda)?;
+        self.pcg_with(lambda, &prec, b, warm)
+    }
+
+    /// [`Core::pcg`] against a preconditioner the caller already built at this
+    /// λ. The preconditioner depends on λ and nothing else, so a caller with
+    /// several right-hand sides at one λ builds it once.
+    fn pcg_with(
+        &self,
+        lambda: f64,
+        prec: &Preconditioner,
+        b: &[f64],
+        warm: Option<&[f64]>,
+    ) -> Result<(Vec<f64>, f64, usize), String> {
+        let m = self.m;
         let b_norm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
         if b_norm == 0.0 {
             return Ok((vec![0.0; m], 0.0, 0));
@@ -1623,15 +2020,14 @@ impl Core {
     }
 
     /// The coefficient solver at a FIXED λ, obtained once so that several
-    /// right-hand sides can share one factorization.
+    /// right-hand sides can share one factorization or one preconditioner.
     ///
-    /// `A = X'WX + λD` does not depend on the right-hand side, so a caller that
-    /// needs two solves at the same λ must not pay two O(m³) Cholesky
-    /// factorizations for it. `CascadeScoreProfile::evaluate` needs exactly
-    /// that pair (`A⁻¹b` and then `A⁻¹Dc`), and going through `solve_coeff`
-    /// twice rebuilt and refactorized the identical matrix — the dominant cost
-    /// of the whole REML search, since `cholesky_logdet` is where the profile
-    /// spends its time.
+    /// Neither `A = X'WX + λD` nor its preconditioner depends on the right-hand
+    /// side, so a caller that needs two solves at the same λ must not pay two
+    /// O(m³) Cholesky factorizations — or two coarse-block assemblies — for it.
+    /// [`CascadeResidualForm::Solved`] needs exactly that pair (`A⁻¹b` and then
+    /// `A⁻¹Dc`), and going through `solve_coeff`/`pcg` twice rebuilt the
+    /// identical operator both times.
     fn coeff_solver(&self, lambda: f64) -> Result<CoeffSolver<'_>, String> {
         if let Some(l) = &self.predict_chol {
             return Ok(CoeffSolver::Cached(l));
@@ -1640,7 +2036,7 @@ impl Core {
             cholesky_logdet(&mut a, self.m)?;
             return Ok(CoeffSolver::Factored(a));
         }
-        Ok(CoeffSolver::Iterative)
+        Ok(CoeffSolver::Iterative(self.build_preconditioner(lambda)?))
     }
 
     /// Coefficient solve at λ: dense Cholesky when cached, else certified PCG.
@@ -2369,21 +2765,40 @@ impl ResidualCascadeDesign {
     pub fn fit_reml(&self) -> Result<ResidualCascadeFit, String> {
         let profile = self.core.reml_profile()?;
         let (log_lambda_lo, log_lambda_hi) = profile.log_lambda_domain()?;
-        let search = maximize_score_1d(
-            log_lambda_lo,
-            log_lambda_hi,
-            f64::EPSILON.sqrt(),
-            |log_lambda| {
-                profile
-                    .evaluate(log_lambda)
-                    .map(|evaluation| evaluation.jet)
-            },
-            |left, right| profile.enclose(left, right),
-        )
-        .map_err(|error| format!("residual cascade: REML stationary isolation failed: {error}"))?;
-        let selected = profile.evaluate(search.optimum.x)?;
+        let resolution = f64::EPSILON.sqrt();
+        let failed = |error: &dyn std::fmt::Display| {
+            format!("residual cascade: REML stationary isolation failed: {error}")
+        };
+        // Both arms run the SAME certified isolation on the SAME domain; they
+        // differ only in the enclosure oracle the design can honestly supply.
+        let selected_log_lambda = match profile.affine_view()? {
+            Some(affine) => {
+                affine
+                    .maximize(log_lambda_lo, log_lambda_hi, resolution)
+                    .map_err(|error| failed(&error))?
+                    .optimum
+                    .x
+            }
+            None => {
+                maximize_score_1d(
+                    log_lambda_lo,
+                    log_lambda_hi,
+                    resolution,
+                    |log_lambda| {
+                        profile
+                            .evaluate(log_lambda)
+                            .map(|evaluation| evaluation.jet)
+                    },
+                    |left, right| profile.enclose(left, right),
+                )
+                .map_err(|error| failed(&error))?
+                .optimum
+                .x
+            }
+        };
+        let selected = profile.evaluate(selected_log_lambda)?;
         self.fit_at_with_warm(
-            search.optimum.x,
+            selected_log_lambda,
             None,
             None,
             Some(selected.normalized_logdet),
@@ -3032,9 +3447,10 @@ mod refinement_decision_tests {
         );
     }
 
-    #[test]
-    fn dense_spectral_profile_matches_factorization_and_analytic_slope() {
-        let side = 6usize;
+    /// A 2-D fixture small enough to stay under the dense sizing cap, with a
+    /// response that is smooth plus a deterministic wobble so the profiled
+    /// residual is not degenerate at any λ.
+    fn dense_fixture(side: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let mut x1 = Vec::with_capacity(side * side);
         let mut x2 = Vec::with_capacity(side * side);
         let mut y = Vec::with_capacity(side * side);
@@ -3047,6 +3463,269 @@ mod refinement_decision_tests {
                 y.push((2.3 * a).sin() + (1.7 * b).cos() + 0.07 * ((3 * i + 5 * j) % 7) as f64);
             }
         }
+        (x1, x2, y)
+    }
+
+    /// The two [`CascadeResidualForm`] arms are the same function of λ.
+    ///
+    /// The spectral arm reads the profiled residual and its three quadratic
+    /// forms off the Schur decomposition; the solved arm re-derives them from a
+    /// factorization of `A = X'WX + λD`. If they ever disagree the criterion is
+    /// route-dependent, which is the defect the spectral arm exists to remove —
+    /// so the agreement is asserted directly rather than inferred from the
+    /// scores that consume it.
+    ///
+    /// The bound is the textbook forward-error of the comparator, not a tuned
+    /// number: the solved arm's Cholesky solve carries `O(m)·eps·cond(A)`, and
+    /// `cond(A) = (θ_max + λ)/(θ_min + λ)` is available exactly from the same
+    /// spectrum. Nothing here is free to be widened without changing that claim.
+    #[test]
+    fn spectral_and_solved_residual_forms_agree() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("cascade design");
+        let core = &design.core;
+        assert!(core.dense_gram.is_some(), "fixture must take the dense route");
+        let profile = core.reml_profile().expect("spectral profile");
+        let CascadeResidualForm::Spectral(spectrum) = &profile.residual else {
+            panic!("the dense route must carry the spectral residual form");
+        };
+
+        let smallest = spectrum
+            .eigenvalue
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let largest = spectrum
+            .eigenvalue
+            .iter()
+            .copied()
+            .fold(0.0_f64, f64::max);
+
+        for log_lambda in [-6.0_f64, -2.0, 0.0, 2.0, 6.0] {
+            let lambda = log_lambda.exp();
+            let (rss, penalty_energy, inverse_penalty_energy, third_energy) =
+                spectrum.moments(lambda);
+
+            let solver = core.coeff_solver(lambda).expect("factored solver");
+            let coeff = solver.solve(core, lambda, &core.rhs).expect("first solve");
+            let dc: Vec<f64> = coeff
+                .iter()
+                .zip(core.pen_diag.iter())
+                .map(|(&c, &d)| d * c)
+                .collect();
+            let u = solver.solve(core, lambda, &dc).expect("second solve");
+            let solved = [
+                core.rss_pen(&coeff),
+                coeff.iter().zip(dc.iter()).map(|(&c, &v)| c * v).sum(),
+                dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum(),
+                u.iter()
+                    .zip(core.pen_diag.iter())
+                    .map(|(&v, &d)| d * v * v)
+                    .sum(),
+            ];
+            let spectral = [rss, penalty_energy, inverse_penalty_energy, third_energy];
+            let names = ["R", "c'Dc", "(Dc)'A^-1(Dc)", "u'Du"];
+
+            let condition = (largest + lambda) / (smallest + lambda);
+            // The three quadratic forms are sums of positive terms, so their
+            // relative error is the solve's own `O(m)·eps·cond(A)`. `R` is not:
+            // BOTH routes form it by subtracting a fitted energy from an anchor
+            // energy, so its relative error carries that cancellation's own
+            // condition number, `anchor/|R|`. Charging the sum of the two is the
+            // honest comparator bound.
+            let cancellation = spectrum.anchor_energy[0] / rss.abs().max(f64::MIN_POSITIVE);
+            let bounds = [
+                core.m as f64 * f64::EPSILON * (condition + cancellation),
+                core.m as f64 * f64::EPSILON * condition,
+                core.m as f64 * f64::EPSILON * condition,
+                core.m as f64 * f64::EPSILON * condition,
+            ];
+            for (((&a, &b), name), bound) in
+                spectral.iter().zip(solved.iter()).zip(names).zip(bounds)
+            {
+                let gap = (a - b).abs() / b.abs().max(f64::MIN_POSITIVE);
+                assert!(
+                    gap <= bound,
+                    "{name} disagrees at log lambda {log_lambda}: spectral {a}, solved {b} \
+                     (relative {gap:e} exceeds the comparator's own forward error {bound:e} \
+                      at cond(A) = {condition:e}, cancellation = {cancellation:e})"
+                );
+            }
+        }
+    }
+
+    /// The cascade's own closed form and the [`AffineRemlProfile`] the search
+    /// actually runs on are one score.
+    ///
+    /// `fit_reml` isolates the optimum with the affine profile (for its interval
+    /// extension) while `criterion` and the selected `normalized_logdet` come
+    /// from [`CascadeRemlProfile::evaluate`]. Two implementations of one
+    /// quantity is exactly the arrangement that lets a criterion drift, so the
+    /// two are held to agreement in value, slope and curvature here. The bound
+    /// is the summation roundoff of the mode sums both perform — `rank·eps`
+    /// relative — and nothing about the fixture is free to widen it.
+    #[test]
+    fn affine_view_is_the_same_score_as_the_cascade_jet() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("cascade design");
+        let profile = design.core.reml_profile().expect("spectral profile");
+        let affine = profile
+            .affine_view()
+            .expect("affine view")
+            .expect("the dense route must expose an affine view");
+        let (lo, hi) = profile.log_lambda_domain().expect("domain");
+        let rank = (design.core.m - design.core.nullity()) as f64;
+        let bound = rank * f64::EPSILON;
+
+        for step in 0..=8 {
+            let log_lambda = lo + (hi - lo) * step as f64 / 8.0;
+            let cascade = profile.evaluate(log_lambda).expect("cascade jet").jet;
+            let spectral = affine.evaluate(log_lambda).expect("affine jet");
+            for (name, a, b) in [
+                ("value", cascade.value, spectral.value),
+                ("derivative", cascade.derivative, spectral.derivative),
+                ("curvature", cascade.curvature, spectral.curvature),
+            ] {
+                let gap = (a - b).abs() / (1.0 + b.abs());
+                assert!(
+                    gap <= bound,
+                    "{name} disagrees at log lambda {log_lambda}: cascade {a}, affine {b} \
+                     (relative {gap:e} exceeds the shared mode-sum roundoff {bound:e})"
+                );
+            }
+        }
+    }
+
+    /// Both replacement enclosures dismiss a tail cell the Lipschitz pad cannot.
+    ///
+    /// At the top of `log_lambda_domain` the score's derivative has decayed to
+    /// order `rank·sqrt(eps)`, while the pad's radius at the search's own
+    /// resolution floor is `C·sqrt(eps)` with `C` of order the residual degrees
+    /// of freedom. The pad therefore straddles zero at a width the search cannot
+    /// go below — a search that cannot terminate, not a slow one. Both cures
+    /// have widths that collapse with the cell instead: the affine interval
+    /// extension on the dense route, and the multiplicative bracket that
+    /// [`CascadeRemlProfile::enclose`] intersects into the pad everywhere else.
+    /// This asserts the difference at the resolution floor rather than
+    /// describing it.
+    #[test]
+    fn tail_cell_the_lipschitz_pad_cannot_dismiss_is_dismissed_by_both_cures() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("cascade design");
+        let profile = design.core.reml_profile().expect("spectral profile");
+        let affine = profile
+            .affine_view()
+            .expect("affine view")
+            .expect("the dense route must expose an affine view");
+        let (_, hi) = profile.log_lambda_domain().expect("domain");
+
+        let lo = hi - f64::EPSILON.sqrt();
+        let left = sample_at(&profile, lo);
+        let right = sample_at(&profile, hi);
+
+        let pad = profile.lipschitz_pad(left, right, hi - lo);
+        assert!(
+            pad.derivative.contains_zero(),
+            "the fixture no longer reproduces the pad's tail stall: {pad:?}"
+        );
+        assert!(
+            pad.derivative.hi - pad.derivative.lo > 10.0 * left.derivative.abs(),
+            "the stall is that the pad is WIDER than the derivative it brackets; \
+             derivative {}, pad {:?}",
+            left.derivative,
+            pad.derivative
+        );
+
+        for (name, enclosure) in [
+            (
+                "affine interval extension",
+                affine.enclose(lo, hi).expect("interval extension").derivative,
+            ),
+            (
+                "multiplicative bracket (intersected)",
+                profile.enclose(left, right).expect("enclosure").derivative,
+            ),
+        ] {
+            assert!(
+                !enclosure.contains_zero(),
+                "{name} must exclude zero on a floor-width tail cell where the \
+                 derivative is {} and the pad reports {:?}; got {enclosure:?}",
+                left.derivative,
+                pad.derivative
+            );
+        }
+    }
+
+    /// The multiplicative bracket is an OUTER bound, checked against the score
+    /// it claims to bracket.
+    ///
+    /// A too-tight enclosure does not fail loudly — it makes the search discard
+    /// a cell that contained a stationary point and return a certified wrong
+    /// answer. So the bracket is charged against densely sampled truth on cells
+    /// spanning the whole domain and every width from the resolution floor up.
+    #[test]
+    fn enclosure_contains_the_derivatives_it_brackets() {
+        let (x1, x2, y) = dense_fixture(6);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("cascade design");
+        let profile = design.core.reml_profile().expect("spectral profile");
+        let (domain_lo, domain_hi) = profile.log_lambda_domain().expect("domain");
+        let span = domain_hi - domain_lo;
+
+        for cell in 0..24 {
+            let width = span * 0.5_f64.powi(cell as i32 % 12);
+            let start = domain_lo + (span - width) * (cell / 12) as f64;
+            let (lo, hi) = (start, (start + width).min(domain_hi));
+            if !(hi > lo) {
+                continue;
+            }
+            let left = sample_at(&profile, lo);
+            let right = sample_at(&profile, hi);
+            let enclosure = profile.enclose(left, right).expect("enclosure");
+            for step in 0..=32 {
+                let x = lo + (hi - lo) * step as f64 / 32.0;
+                let jet = profile.evaluate(x).expect("jet").jet;
+                assert!(
+                    enclosure.derivative.contains(jet.derivative),
+                    "derivative {} at {x} escapes {:?} on cell [{lo}, {hi}]",
+                    jet.derivative,
+                    enclosure.derivative
+                );
+                assert!(
+                    enclosure.curvature.contains(jet.curvature),
+                    "curvature {} at {x} escapes {:?} on cell [{lo}, {hi}]",
+                    jet.curvature,
+                    enclosure.curvature
+                );
+            }
+        }
+    }
+
+    fn sample_at(profile: &CascadeRemlProfile<'_>, x: f64) -> ScoreSample {
+        let jet = profile.evaluate(x).expect("cascade jet").jet;
+        ScoreSample {
+            x,
+            value: jet.value,
+            derivative: jet.derivative,
+            curvature: jet.curvature,
+            third: jet.third,
+        }
+    }
+
+    #[test]
+    fn dense_spectral_profile_matches_factorization_and_analytic_slope() {
+        let (x1, x2, y) = dense_fixture(6);
         let weights = vec![1.0; y.len()];
         let axes: [&[f64]; 2] = [&x1, &x2];
         let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
