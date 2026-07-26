@@ -2871,12 +2871,6 @@ where
         }
         _ => {}
     }
-    if zero_covariance_boundary {
-        return Err(EstimationError::InvalidInput(
-            "the general REML reporting path reached the degenerate profiled-Gaussian boundary sigma^2 = 0, where no finite normalized Gaussian density exists; exact constant-response fits must use the dedicated deterministic-Gaussian shortcut"
-                .to_string(),
-        ));
-    }
     // The fully-normalized reporting kernel (#2096) reads a CONCRETE dispersion
     // `φ = σ̂²` for Gaussian off `likelihood.scale`. A profiled Gaussian carries
     // only the `ProfiledGaussian` marker (`fixed_phi() == None`), which the
@@ -2904,13 +2898,40 @@ where
         spec: reported_family.clone(),
         scale: reporting_scale,
     };
-    let log_likelihood = crate::pirls::evaluate_full_log_likelihood_from_eta(
-        y_o.view(),
-        pirls_res.final_eta.view(),
-        &reported_likelihood,
-        w_o.view(),
-    )?
-    .total();
+    // At the validated boundary `σ̂² = 0` the fit reproduces the adjusted
+    // response exactly, and no ordinary normalized Lebesgue density exists
+    // there — so there is no finite FULL log-likelihood to evaluate, and the
+    // kernel below must not be asked for one.
+    //
+    // Report it the way the deterministic-Gaussian route already reports this
+    // same boundary: the value `0` under `UserProvided`, which DECLINES to
+    // claim a normalized density rather than fabricating one. That is the
+    // established convention for this state, not a new one.
+    //
+    // This replaces a hard refusal that told the caller to "use the dedicated
+    // deterministic-Gaussian shortcut". That shortcut is dispatched by a
+    // predicate living at ONE entry point (the formula path), so every other
+    // entry — the term-collection entries reach this solver directly — had no
+    // way to take the advice and died here instead. The condition is DETECTED
+    // here, where the dispersion has actually been estimated, so no entry can
+    // miss it; an entry-level predicate can only ever PREDICT this state, and
+    // the widening history of `exact_unpenalized_gaussian_beta` (which had to
+    // grow from the intercept subspace to any exact affine fit) shows how that
+    // prediction keeps coming up short.
+    let (log_likelihood, log_likelihood_normalization) = if zero_covariance_boundary {
+        (0.0, LogLikelihoodNormalization::UserProvided)
+    } else {
+        (
+            crate::pirls::evaluate_full_log_likelihood_from_eta(
+                y_o.view(),
+                pirls_res.final_eta.view(),
+                &reported_likelihood,
+                w_o.view(),
+            )?
+            .total(),
+            LogLikelihoodNormalization::Full,
+        )
+    };
 
     let result = ExternalOptimResult {
         beta: reported_beta_orig_internal,
@@ -2918,7 +2939,7 @@ where
         lambdas: lambdas.to_owned(),
         likelihood_family: reported_family,
         likelihood_scale: likelihood_scale_field,
-        log_likelihood_normalization: LogLikelihoodNormalization::Full,
+        log_likelihood_normalization,
         log_likelihood,
         standard_deviation,
         iterations: iters,
