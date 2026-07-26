@@ -21,9 +21,12 @@ name: Connectome Freeform (continuous agent, memory across runs)
 # layout means git dedupes it perfectly across runs.
 
 on:
+  schedule:
+    # Every 30 minutes, 24/7. Offset off :00/:30 because GitHub drops scheduled
+    # events during the high-load start-of-hour window. Inherited from
+    # claude-freeform.yml, which is now dispatch-only.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
-  # The schedule moves here from claude-freeform.yml once a dispatch run is
-  # verified green end-to-end.
 
 # NO concurrency group, deliberately. Parallel runs of this workflow are wanted
 # and must never queue or cancel each other — the fleet's throughput comes from

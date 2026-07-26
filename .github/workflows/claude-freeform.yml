@@ -1,10 +1,10 @@
 name: Claude Freeform (do whatever you want)
 
 on:
-  schedule:
-    # Every 30 minutes, 24/7. Offset from :00/:30 because GitHub may delay or
-    # drop scheduled events during the high-load start-of-hour window.
-    - cron: "7,37 * * * *"
+  # The 30-minute schedule moved to connectome-freeform.yml on 2026-07-26, where
+  # the agent keeps its memory across runs instead of starting as a stranger
+  # every time. Kept dispatch-only rather than deleted: it is the rollback, and
+  # one `gh workflow run` restores the old behaviour immediately.
   workflow_dispatch:
 
 permissions:
