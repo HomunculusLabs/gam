@@ -472,11 +472,11 @@ mod tests {
             stationarity: gam::estimate::OuterStationarityCertificate::AnalyticGradient {
                 grad_norm: 1e-8,
                 projected_grad_norm: 1e-8,
-                bound:
-rung: 1e-4, {
-    label: "solver-band".to_string(),
-    derived_standard: false,
-}, 1e-4,
+                bound: 1e-4,
+                rung: gam::model_types::CertifiedRung {
+                    label: "solver-band".to_string(),
+                    derived_standard: false,
+                },
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
@@ -570,11 +570,11 @@ rung: 1e-4, {
             stationarity: gam::estimate::OuterStationarityCertificate::AnalyticGradient {
                 grad_norm: 1e-8,
                 projected_grad_norm: 1e-8,
-                bound:
-rung: 1e-4, {
-    label: "solver-band".to_string(),
-    derived_standard: false,
-}, 1e-4,
+                bound: 1e-4,
+                rung: gam::model_types::CertifiedRung {
+                    label: "solver-band".to_string(),
+                    derived_standard: false,
+                },
             },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),

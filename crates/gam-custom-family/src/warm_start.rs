@@ -645,11 +645,11 @@ mod assembly_convergence_tests {
                 gam_solve::rho_optimizer::OuterStationarityCertificate::AnalyticGradient {
                     grad_norm: 1.0,
                     projected_grad_norm: 1.0,
-                    bound:
-rung: 0.1, {
-    label: "solver-band".to_string(),
-    derived_standard: false,
-}, 0.1,
+                    bound: 0.1,
+                    rung: gam_solve::rho_optimizer::CertifiedRung {
+                        label: "solver-band".to_string(),
+                        derived_standard: false,
+                    },
                 },
             hessian_psd: Some(true),
             lambdas_railed: Vec::new(),
