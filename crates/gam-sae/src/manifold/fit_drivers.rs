@@ -28,6 +28,9 @@ struct JointFitOutcome {
     loss: SaeManifoldLoss,
     termination: JointFitTermination,
     state_moved: bool,
+    /// The FIRST site that moved state, for the evidence lane's refusal
+    /// to name (see [`StateMoveSite`]).
+    moved_at: Option<StateMoveSite>,
 }
 
 pub(crate) struct EvidenceJointFitOutcome {
@@ -51,6 +54,83 @@ pub(crate) struct EvidenceJointFitOutcome {
 /// them; and `gam-sae` test binaries install no logger backend, so a `log::`
 /// line would not surface it either. Carrying the clause makes the refusal
 /// actionable at the point it is raised.
+/// WHERE a pass moved model state.
+///
+/// `state_moved` is an OR over the whole call, but `termination` is assigned only
+/// inside the Newton loop — four of the eight move sites are OUTSIDE it (one
+/// before, three after). So "settled-root termination AND state_moved" is not a
+/// contradiction and neither signal is lying: they quantify over different spans
+/// of the pass, and without the site the pair cannot be read at all.
+///
+/// Two of the out-of-loop sites are RESTORES, which put the model back to a
+/// banked state — they set `state_moved` while potentially leaving the state
+/// bit-identical to entry, which `entry_state_recurred` already tests exactly.
+/// Distinguishing a restore from the exit block sweep is therefore the whole
+/// diagnosis: a restore means the certificate is refusing an idempotent pass,
+/// the exit sweep means the state genuinely was not a fixed point of the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateMoveSite {
+    /// The block sweep that runs BEFORE the Newton loop.
+    EntryBlockSweep,
+    /// The annealing schedule emitted a new temperature.
+    TemperatureSchedule,
+    /// The line search accepted a Newton step.
+    AcceptedNewtonStep,
+    /// The proximal-correction fallback accepted a step, inside the loop. This
+    /// path runs when the ordinary Armijo line search could not find a
+    /// sufficient directional decrease, and it commits only a decrease that
+    /// clears the evidence lane's MATERIAL floor
+    /// (`SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1 + |objective|)`).
+    ProximalCorrectionStep,
+    /// Active frames were refreshed from data inside the loop.
+    FrameRefresh,
+    /// AFTER the loop: the banked inner incumbent was restored (#1026).
+    InnerIncumbentRestore,
+    /// AFTER the loop: the exit block sweep committed a material decrease.
+    ExitBlockSweep,
+    /// AFTER the loop: the exit objective warranty restored a banked state (#2228).
+    ExitWarrantyRestore,
+}
+
+impl StateMoveSite {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::EntryBlockSweep => {
+                "the pass moved state at the ENTRY block sweep, which runs BEFORE the Newton \
+                 loop (so the loop's own termination says nothing about it)"
+            }
+            Self::TemperatureSchedule => {
+                "the pass moved state at the annealing schedule, inside the loop"
+            }
+            Self::AcceptedNewtonStep => {
+                "the pass moved state at an accepted Newton step, inside the loop"
+            }
+            Self::ProximalCorrectionStep => {
+                "the pass moved state at the PROXIMAL-CORRECTION fallback, inside the loop - it \
+                 committed a decrease clearing the evidence MATERIAL floor, so a real objective \
+                 improvement was still available at the state being certified"
+            }
+            Self::FrameRefresh => {
+                "the pass moved state at an active-frame refresh, inside the loop"
+            }
+            Self::InnerIncumbentRestore => {
+                "the pass moved state at the inner-incumbent RESTORE, AFTER the loop - a \
+                 restore, so the state may be bit-identical to entry and the refusal may be \
+                 rejecting an idempotent pass"
+            }
+            Self::ExitBlockSweep => {
+                "the pass moved state at the EXIT block sweep, AFTER the loop - a committed \
+                 material decrease, so the state genuinely was not a fixed point of the map"
+            }
+            Self::ExitWarrantyRestore => {
+                "the pass moved state at the exit-warranty RESTORE, AFTER the loop - a \
+                 restore, so the state may be bit-identical to entry and the refusal may be \
+                 rejecting an idempotent pass"
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvidenceFixedPointGap {
     /// No clause failed: the pass recurred its entry state exactly.
@@ -58,8 +138,8 @@ pub(crate) enum EvidenceFixedPointGap {
     /// The pass left through a route that is not a settled root (it exhausted
     /// its iteration budget, or took a descent step it accepted).
     NotASettledRoot,
-    /// The pass reported that it moved model state.
-    StateMoved,
+    /// The pass reported that it moved model state, at the named site.
+    StateMoved(StateMoveSite),
     /// The pass reported no move, yet the model state is not bit-identical to
     /// the entry snapshot — the re-entry wrote back a perturbed state.
     StateNotRecurred,
@@ -77,7 +157,7 @@ impl EvidenceFixedPointGap {
                 "the pass did not terminate on a settled root (budget exhausted, or a step \
                  was accepted)"
             }
-            Self::StateMoved => "the Newton walk reported it moved model state",
+            Self::StateMoved(site) => site.as_str(),
             Self::StateNotRecurred => {
                 "the pass reported no move but the model state is not bit-identical to entry"
             }
@@ -5851,7 +5931,13 @@ impl SaeManifoldTerm {
         let gap = if !settled_root {
             EvidenceFixedPointGap::NotASettledRoot
         } else if outcome.state_moved {
-            EvidenceFixedPointGap::StateMoved
+            // Name the site: `termination` is a fact about the Newton loop while
+            // `state_moved` is an OR over the whole call, so a settled-root
+            // termination paired with a move is only readable once you know
+            // WHICH of the four out-of-loop sites fired.
+            EvidenceFixedPointGap::StateMoved(
+                outcome.moved_at.unwrap_or(StateMoveSite::AcceptedNewtonStep),
+            )
         } else if !entry_state_recurred {
             EvidenceFixedPointGap::StateNotRecurred
         } else if !temperature_stable_on_reentry {
@@ -5940,6 +6026,7 @@ impl SaeManifoldTerm {
                 loss,
                 termination: JointFitTermination::Frozen,
                 state_moved: false,
+                moved_at: None,
             });
         }
         // #1117 root-cause fix — rank-revealing adaptive basis depth, applied
@@ -6218,6 +6305,9 @@ impl SaeManifoldTerm {
         let mut lm_ridge_b = ridge_beta;
         let mut termination = JointFitTermination::IterationGrantExhausted;
         let mut state_moved = false;
+        // FIRST site to move state — `termination` is set only inside the Newton
+        // loop, so without this the out-of-loop sites are unattributable.
+        let mut moved_at: Option<StateMoveSite> = None;
         // FIRST-PRINCIPLES ENGINE ORDER (#2228 stage 4, increment 1) — run the
         // deterministic alternating block sweeps BEFORE the joint Newton walk,
         // not only as a post-loop rescue. At fixed gates the problem is
@@ -6250,6 +6340,7 @@ impl SaeManifoldTerm {
             allow_heuristic_termination,
         )? {
             state_moved = true;
+            moved_at.get_or_insert(StateMoveSite::EntryBlockSweep);
         }
         for outer_iteration in 0..max_iter {
             let temperature_before = self.assignment.mode.temperature();
@@ -6258,6 +6349,7 @@ impl SaeManifoldTerm {
                 .is_some_and(|temperature| temperature.to_bits() != temperature_before.to_bits())
             {
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::TemperatureSchedule);
             }
             // ρ (including the ARD precisions) is owned by the outer engine
             // (`SaeManifoldOuterObjective`) and held FIXED across this inner
@@ -6764,6 +6856,7 @@ impl SaeManifoldTerm {
             );
             if let Some(step) = accepted_step {
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::AcceptedNewtonStep);
                 // #2267 — A NEWTON STEP'S NATURAL LENGTH IS ONE.
                 //
                 // `backtracking_line_search` only ever CONTRACTS from its initial
@@ -6928,6 +7021,7 @@ impl SaeManifoldTerm {
                     break;
                 }
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::ProximalCorrectionStep);
             }
             // Affine gauge canonicalization is a representation change, but the
             // decoder smoothness term is part of the optimized objective — a
@@ -7121,6 +7215,7 @@ impl SaeManifoldTerm {
                 Ok(())
             })? {
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::FrameRefresh);
             }
             // Unconditional warranty-bank update (see the bank's declaration):
             // strictly-better penalized objective ⇒ this accepted boundary is
@@ -7198,6 +7293,7 @@ impl SaeManifoldTerm {
                 self.restore_mutable_state(best_state)?;
                 inner_incumbent_restored = true;
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::InnerIncumbentRestore);
                 if self.frames_active() {
                     // #2230 — the post-restore frame re-polar is a class-(c)
                     // transaction like the in-loop triple; unguarded it
@@ -7291,6 +7387,7 @@ impl SaeManifoldTerm {
             )?
         {
             state_moved = true;
+            moved_at.get_or_insert(StateMoveSite::ExitBlockSweep);
         }
         // EXIT-BOUNDARY OBJECTIVE WARRANTY enforcement (#2228): the LAST gate
         // before the loss is priced. Whatever combination of non-monotone
@@ -7316,6 +7413,7 @@ impl SaeManifoldTerm {
                 );
                 self.restore_mutable_state(bank)?;
                 state_moved = true;
+                moved_at.get_or_insert(StateMoveSite::ExitWarrantyRestore);
                 // A warranty restore means the walk was NOT settled; any
                 // cross-call incumbent streak is void.
                 self.best_fit_incumbent = None;
@@ -7355,6 +7453,7 @@ impl SaeManifoldTerm {
             loss,
             termination,
             state_moved,
+            moved_at,
         })
     }
 
