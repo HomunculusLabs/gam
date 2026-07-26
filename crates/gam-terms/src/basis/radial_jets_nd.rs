@@ -2034,7 +2034,8 @@ pub(crate) fn apply_identifiability_to_jet(raw_jet: &Array3<f64>, z: &Array2<f64
 ///   ∂col/∂φ = N_{lm}·T_m(ψ)·P'_{lm}(x)·cosφ   (dx/dφ = cosφ),
 ///   ∂col/∂ψ = N_{lm}·T'_m(ψ)·P_{lm}(x)         (T' = m cos(mψ), 0, −m sin(mψ)).
 /// `P'_{lm}(x)` from `(1 − x²) P'_{lm}(x) = −l x P_{lm}(x) + (l+m) P_{l−1,m}(x)`,
-/// with the forward's latitude clamp and `somx2` floor reused for the poles.
+/// with the forward's latitude clamp reused, and no pole floor: the
+/// latitude derivative is taken in the colatitude form, which has none.
 /// The radian-space derivatives are scaled by `deg` to per-raw-unit values.
 pub(crate) fn spherical_harmonic_jet(
     data: ArrayView2<'_, f64>,
@@ -2078,10 +2079,11 @@ pub(crate) fn spherical_harmonic_jet(
                     let lat =
                         lat_raw.clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
                     let lon = data[(i, 1)] * deg;
-                    let cos_lat = lat.cos();
-                    let x = lat.sin();
-                    let somx2 = (1.0 - x * x).max(0.0).sqrt();
-                    let one_minus_x2 = (1.0 - x * x).max(f64::EPSILON);
+                    // `√(1 - sin² lat)` IS `cos(lat)` on `[-π/2, π/2]`; taking it
+                    // as a radicand costs `ε/cos²(lat)` relative accuracy near the
+                    // poles for nothing. One `sin_cos` serves the Legendre
+                    // recurrence and the chain rule both.
+                    let (x, cos_lat) = lat.sin_cos();
                     // Associated Legendre P_{l,m}(x) — identical recurrence to
                     // `fill_real_spherical_harmonics_row`.
                     for slot in p_buf.iter_mut() {
@@ -2089,7 +2091,8 @@ pub(crate) fn spherical_harmonic_jet(
                     }
                     p_buf[idx(0, 0)] = 1.0;
                     for m in 1..=max_degree {
-                        p_buf[idx(m, m)] = -((2 * m - 1) as f64) * somx2 * p_buf[idx(m - 1, m - 1)];
+                        p_buf[idx(m, m)] =
+                            -((2 * m - 1) as f64) * cos_lat * p_buf[idx(m - 1, m - 1)];
                     }
                     for m in 0..max_degree {
                         p_buf[idx(m + 1, m)] = ((2 * m + 1) as f64) * x * p_buf[idx(m, m)];
@@ -2101,11 +2104,49 @@ pub(crate) fn spherical_harmonic_jet(
                                 / ((l - m) as f64);
                         }
                     }
-                    // P'_{l,m}(x) via (1 − x²) P'_{l,m} = −l x P_{l,m} + (l+m) P_{l−1,m}.
-                    let dp = |l: usize, m: usize| -> f64 {
-                        let p_lm1 = if l >= 1 { p_buf[idx(l - 1, m)] } else { 0.0 };
-                        (-(l as f64) * x * p_buf[idx(l, m)] + ((l + m) as f64) * p_lm1)
-                            / one_minus_x2
+                    // `∂P_{l,m}(sin lat)/∂lat` DIRECTLY, with no `1/(1 - x²)`
+                    // anywhere. The route this replaces went through
+                    // `P'_{l,m}(x) = [−l x P_{l,m} + (l+m) P_{l−1,m}] / (1 - x²)`
+                    // and then multiplied by `dx/dlat = cos(lat)`. That identity
+                    // is correct, but both of its sides vanish at a pole: the
+                    // numerator is `O(cos² lat)` assembled by subtracting two
+                    // `O(1)` terms, so its relative error grows like
+                    // `ε/cos²(lat)` — `1.4e-8` at `lat = 89.99°`, about 1.1 km out,
+                    // against the `1e-11`-class finite-difference agreement this
+                    // crate asserts elsewhere — and closer in it collapses
+                    // entirely. The removable `0/0` was papered over with a
+                    // `.max(f64::EPSILON)` floor on the denominator, which does
+                    // not restore the limit: at the pole the numerator is
+                    // exactly zero, so every entry came out `0.0` regardless of
+                    // the true value. For `(l, m) = (3, 1)` that true value is
+                    // `6.0`.
+                    //
+                    // The colatitude form has no pole at all. With `x = cos θ`,
+                    //
+                    //     dP_{l,m}/dθ = ½ [ P_{l,m+1} − (l+m)(l−m+1) P_{l,m−1} ]
+                    //
+                    // and here `x = sin(lat) = cos(π/2 - lat)`, so `θ` is the
+                    // colatitude and `d/dlat = -d/dθ`, flipping the bracket. At
+                    // `m = 0` the identity needs `P_{l,-1}`, which under the
+                    // Condon-Shortley convention this recurrence carries is
+                    // `-P_{l,1}/(l(l+1))`; substituting collapses the bracket to
+                    // `dP_{l,0}/dlat = -P_{l,1}`, so that arm is written out
+                    // rather than reached through a negative index. `P_{l,m} = 0`
+                    // for `m > l` supplies the upper term at `m = l`.
+                    //
+                    // Every term is a Legendre value the loop above already has:
+                    // one multiply-add instead of a division, and exact at the
+                    // poles rather than merely finite there.
+                    let dp_dlat = |l: usize, m: usize| -> f64 {
+                        if m == 0 {
+                            return -p_buf[idx(l, 1)];
+                        }
+                        let p_up = if m + 1 <= l {
+                            p_buf[idx(l, m + 1)]
+                        } else {
+                            0.0
+                        };
+                        0.5 * (((l + m) * (l - m + 1)) as f64 * p_buf[idx(l, m - 1)] - p_up)
                     };
                     // sin(mψ), cos(mψ) via Chebyshev recurrence (mirror forward).
                     let (sin1, cos1) = lon.sin_cos();
@@ -2129,14 +2170,14 @@ pub(crate) fn spherical_harmonic_jet(
                             let nlm = norms[idx(l, m_pos)];
                             let mf = m_pos as f64;
                             // ∂/∂φ = N·sin(mψ)·P'·cosφ ; ∂/∂ψ = N·m cos(mψ)·P.
-                            out_row[[col, 0]] = nlm * sin_buf[m_pos] * dp(l, m_pos) * cos_lat * deg;
+                            out_row[[col, 0]] = nlm * sin_buf[m_pos] * dp_dlat(l, m_pos) * deg;
                             out_row[[col, 1]] =
                                 nlm * mf * cos_buf[m_pos] * p_buf[idx(l, m_pos)] * deg;
                             col += 1;
                         }
                         // m = 0: no trig factor → ∂/∂ψ = 0.
                         let nl0 = norms[idx(l, 0)];
-                        out_row[[col, 0]] = nl0 * dp(l, 0) * cos_lat * deg;
+                        out_row[[col, 0]] = nl0 * dp_dlat(l, 0) * deg;
                         out_row[[col, 1]] = 0.0;
                         col += 1;
                         // cos(mψ) columns for m = 1, ..., l.
@@ -2144,7 +2185,7 @@ pub(crate) fn spherical_harmonic_jet(
                             let nlm = norms[idx(l, m)];
                             let mf = m as f64;
                             // ∂/∂φ = N·cos(mψ)·P'·cosφ ; ∂/∂ψ = −N·m sin(mψ)·P.
-                            out_row[[col, 0]] = nlm * cos_buf[m] * dp(l, m) * cos_lat * deg;
+                            out_row[[col, 0]] = nlm * cos_buf[m] * dp_dlat(l, m) * deg;
                             out_row[[col, 1]] = -nlm * mf * sin_buf[m] * p_buf[idx(l, m)] * deg;
                             col += 1;
                         }

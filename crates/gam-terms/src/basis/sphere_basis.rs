@@ -495,8 +495,17 @@ pub(crate) fn fill_real_spherical_harmonics_row(
     // Recurrence for associated Legendre P_{l,m}(sin(lat)) — standard
     // formulation (no Condon-Shortley phase, since we apply the (-1)^m
     // factor implicitly through cos(m·φ)/sin(m·φ) sign cancellation).
-    let x = lat.sin();
-    let somx2 = (1.0 - x * x).max(0.0).sqrt();
+    // `x = sin(lat)` and the sectoral recurrence's factor is `√(1 - x²)`, which
+    // IS `cos(lat)` — latitude is confined to `[-π/2, π/2]`, where the cosine is
+    // non-negative, so no branch is being chosen. Taking it as `√(1 - sin²)`
+    // instead subtracts two `O(1)` quantities to make one of size `cos²(lat)`,
+    // which costs a factor `ε/cos²(lat)` in relative accuracy near the poles and
+    // then halves the exponent through the square root: `1.7e-4` of cosine at
+    // `lat = 89.99°` (about 1.1 km out) already leaves the sectoral harmonics
+    // short by `~7e-9` relative. `sin_cos` returns both to full precision for
+    // the price of the one call, and the `.max(0.0)` guard against a negative
+    // radicand has nothing left to guard.
+    let (x, somx2) = lat.sin_cos();
     for slot in p_buf.iter_mut() {
         *slot = 0.0;
     }
