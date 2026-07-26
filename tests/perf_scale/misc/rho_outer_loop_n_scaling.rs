@@ -263,39 +263,62 @@ fn rho_outer_loop_is_n_independent() {
         );
     }
 
-    // VALIDITY PRECONDITION, checked before any ratio is formed (#2449).
+    // VALIDITY PRECONDITION: a WITHIN-RUN REPLICATE, not a monotonicity
+    // assumption (#2544).
     //
-    // Per-trial cost cannot DECREASE as n grows -- the work is monotone in the
-    // row count -- so a non-monotone reading is not a noisy measurement of this
-    // quantity, it is a measurement of the machine. Under contention the whole
-    // sweep collapses toward the load rather than the code: a replicate at load
-    // 25 returned [111.427, 72.745, 86.596] ms, and the ratio built from it was
-    // NEGATIVE. Reporting that as a verdict about the Gram cache would be a
-    // number with no relationship to the code under test.
+    // The former guard refused any sweep whose per-trial cost fell as n grew,
+    // reasoning that "this quantity cannot do that". That premise holds only
+    // while the defect does. Once the per-trial cost is genuinely n-free --
+    // which is exactly what this test asserts -- the readings are flat, and
+    // flat readings invert on measurement noise as a matter of course. So the
+    // guard assumed the very growth the gate exists to detect, and rejected
+    // the fixed program while admitting the broken one. A validity guard must
+    // not assume the defect.
     //
-    // This is the automatic form of "declining to measure is a result". A
-    // pre-run load gate cannot do it, because load rising DURING the sweep
-    // produces exactly this signature; only the readings themselves can.
-    for pair in per_trial.windows(2) {
-        assert!(
-            pair[1] >= pair[0],
-            "INVALID MEASUREMENT (contention), not a verdict about the code: per-trial \
-             cost fell from {:.3} ms to {:.3} ms as n grew, which this quantity cannot \
-             do. The sweep measured the machine; re-run on an idle box before reading \
-             any ratio from it. per_trial_ms={:?}",
-            1e3 * pair[0],
-            1e3 * pair[1],
-            per_trial
-                .iter()
-                .map(|v| (v * 1e6).round() / 1e3)
-                .collect::<Vec<_>>()
-        );
-    }
+    // Re-measuring the SMALLEST cell at the end tests what the old guard was
+    // reaching for -- did the machine stay still while we swept? -- without
+    // any assumption about how cost varies with n. A cell that disagrees with
+    // ITSELF is contention; that is a direct observation, not an inference.
+    let replicate = run_rho_trials(ns[0])
+        .unwrap_or_else(|reason| {
+            panic!("[rho-n-scaling] replicate n={}: instrumentation failed — {reason}", ns[0])
+        });
+    let replicate_per_trial = replicate.trial_s / replicate.calls as f64;
+    eprintln!(
+        "[rho-n-scaling] replicate {:>9}  {:>11.4}  {:>11.4}  {:>12.3}  {:>14.6e}",
+        ns[0], replicate.prime_s, replicate.trial_s, 1e3 * replicate_per_trial, replicate.checksum,
+    );
 
     let first = per_trial.first().copied().unwrap_or(0.0).max(1e-6);
     let last = per_trial.last().copied().unwrap_or(0.0).max(1e-6);
     let n_ratio = (*ns.last().unwrap() as f64) / (*ns.first().unwrap() as f64);
     let trial_ratio = last / first;
+
+    // How far the box moved under us, read off one cell measured twice.
+    let replicate_spread = (first / replicate_per_trial.max(1e-6))
+        .max(replicate_per_trial.max(1e-6) / first);
+    // `trial_ratio` divides one noisy reading by another, so each end of it can
+    // be wrong by up to `replicate_spread` and the quotient by its square. The
+    // refusal threshold is the gate's own, so no new tolerance is introduced:
+    // the run is INDETERMINATE exactly when that band straddles the verdict.
+    let threshold = 0.25 * n_ratio;
+    let band_low = trial_ratio / (replicate_spread * replicate_spread);
+    let band_high = trial_ratio * replicate_spread * replicate_spread;
+    assert!(
+        !(band_low < threshold && band_high >= threshold),
+        "INDETERMINATE MEASUREMENT (contention), not a verdict about the code: the \
+         smallest cell disagreed with itself by {replicate_spread:.2}× ({:.3} ms then \
+         {:.3} ms), so the growth ratio {trial_ratio:.2}× is only known to lie in \
+         [{band_low:.2}, {band_high:.2}] — which straddles the {threshold:.2}× \
+         threshold. The sweep measured the machine; re-run on an idle box. \
+         per_trial_ms={:?}",
+        1e3 * first,
+        1e3 * replicate_per_trial,
+        per_trial
+            .iter()
+            .map(|v| (v * 1e6).round() / 1e3)
+            .collect::<Vec<_>>()
+    );
     eprintln!(
         "[rho-n-scaling] n grew {n_ratio:.0}× ; post-prime rho trial grew {trial_ratio:.2}× \
          (n-independent ⇒ ~1×, not ~{n_ratio:.0}×)"
@@ -306,7 +329,7 @@ fn rho_outer_loop_is_n_independent() {
     // Generous slack absorbs shared-node wall-clock noise; the invariant and
     // threshold are unchanged from the former subtraction-based harness.
     assert!(
-        trial_ratio < 0.25 * n_ratio,
+        trial_ratio < threshold,
         "post-prime rho trial grew {trial_ratio:.2}× across a {n_ratio:.0}× n-sweep \
          — expected n-INDEPENDENT (θ-invariant Gram cache); a near-linear growth \
          means the per-trial n-row Gram rebuild was re-introduced (#1033 mechanism a)"
