@@ -2828,15 +2828,11 @@ struct SpatialJointContext<'d> {
     /// O(outer steps), not O(trials). `None` until the first compute / when no
     /// frozen-W inputs are installed.
     frozen_glm_weight_memo: Option<(Array1<f64>, Array1<f64>)>,
-    /// #2481: value probes that returned `+∞` because the EVALUATOR failed at
-    /// that θ, not because the point is infeasible. `eval_cost` hands the line
-    /// search a bare `f64`, so a realizer or evaluation error is indistinguishable
-    /// from genuine infeasibility once it crosses that boundary — and the gradient
-    /// lane treats the same condition as fatal (`is_recoverable_trial_point_error`
-    /// keeps layout/topology invariants non-recoverable). Counting the two error
-    /// kinds separately is what lets a run's narrative say "the objective is a
-    /// wall here" apart from "N trials never evaluated". Split by kind because
-    /// they fail at different stages and a fix for one does not touch the other.
+    /// #2481: failed value-probe attempts, split by the stage that refused.
+    /// Recoverable trial-point failures remain ordinary `Ok(+∞)` domain refusals;
+    /// every other failure is propagated through the typed outer-objective seam.
+    /// The counters retain stage attribution for successful runs that encountered
+    /// recoverable walls before converging.
     value_realization_failures: usize,
     value_evaluation_failures: usize,
 }
@@ -2886,6 +2882,20 @@ fn nfree_skip_gate_status_from_parts(
         penalty,
         revision,
         second_order: allow_second_order,
+    }
+}
+
+/// Apply the same trial-point classification to the value and derivative lanes.
+/// `Ok(+∞)` means the point is outside the evaluable numerical domain; `Err`
+/// means the evaluation artifact itself could not be constructed and must abort
+/// every outer solver route.
+fn classify_spatial_value_probe_failure(
+    error: EstimationError,
+) -> Result<f64, EstimationError> {
+    if is_recoverable_trial_point_error(&error) {
+        Ok(f64::INFINITY)
+    } else {
+        Err(error)
     }
 }
 
@@ -3336,9 +3346,9 @@ impl<'d> SpatialJointContext<'d> {
     /// `try_build_spatial_log_kappa_hyper_dirs` nor assemble a gradient that
     /// the line search will discard. Split-borrow on `self.cache` +
     /// `self.evaluator` matches the pattern already used by `eval_full`.
-    fn eval_cost(&mut self, theta: &Array1<f64>) -> f64 {
+    fn eval_cost(&mut self, theta: &Array1<f64>) -> Result<f64, EstimationError> {
         if let Some(cost) = self.cache.memoized_cost(theta) {
-            return cost;
+            return Ok(cost);
         }
         // #1029: a BFGS line-search VALUE probe. It converges the inner PIRLS to
         // the SAME tolerance the accepted-point full eval uses (NOT a capped
@@ -3427,40 +3437,27 @@ impl<'d> SpatialJointContext<'d> {
             && !self.evaluator.psi_gram_tensor_covers(theta[self.rho_dim])
         {
             self.cache.store_cost_at(theta, f64::INFINITY);
-            return f64::INFINITY;
+            return Ok(f64::INFINITY);
         }
-        // #2481: `ensure_theta` failing is a statement about the EVALUATOR at this
-        // θ, not about the point. Both are reported to the line search as `+∞`
-        // because that is the only value this signature can carry, but the reason
-        // is no longer destroyed: the first one warns with the θ that produced it,
-        // the rest are counted and reported in `[KAPPA-PHASE-SUMMARY]`. Note the
-        // asymmetry with the coverage refusal above, which memoizes its `∞` — a
-        // point outside the ψ window has that cost, whereas a failed realization
-        // may succeed on a later attempt and must not be cached as a value.
-        if !skip_value_realization && let Err(err) = self.cache.ensure_theta(theta) {
+        // #2481: preserve the derivative-lane contract. A basis or inner-solve
+        // refusal at this trial is a recoverable domain wall; layout, topology,
+        // and arbitrary invalid-input failures are fatal evaluation failures.
+        if !skip_value_realization && let Err(message) = self.cache.ensure_theta(theta) {
             self.value_realization_failures += 1;
+            let error = EstimationError::InvalidInput(message);
             let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
-            if self.value_realization_failures == 1 {
-                log::warn!(
-                    "[STAGE] {} value-probe: design realization FAILED at theta_norm={:.4e} \
-                     log_kappa_norm={:.4e} ({err}); reporting +inf to the line search, which \
-                     cannot distinguish this from genuine infeasibility (#2481). Further \
-                     occurrences are counted, not logged.",
-                    self.kind.label(),
-                    theta_norm,
-                    log_kappa_norm,
+            if is_recoverable_trial_point_error(&error) {
+                log::debug!(
+                    "[STAGE] {} value-probe: design realization makes this trial infeasible at theta_norm={:.4e} log_kappa_norm={:.4e} ({error}); retreating",
+                    self.kind.label(), theta_norm, log_kappa_norm,
                 );
             } else {
-                log::debug!(
-                    "[STAGE] {} value-probe: design realization FAILED (occurrence {}) at \
-                     theta_norm={:.4e} log_kappa_norm={:.4e} ({err})",
-                    self.kind.label(),
-                    self.value_realization_failures,
-                    theta_norm,
-                    log_kappa_norm,
+                log::warn!(
+                    "[STAGE] {} value-probe: design realization FAILED fatally at theta_norm={:.4e} log_kappa_norm={:.4e} ({error}); propagating",
+                    self.kind.label(), theta_norm, log_kappa_norm,
                 );
             }
-            return f64::INFINITY;
+            return classify_spatial_value_probe_failure(error);
         }
         // #1033 penalty lane: stage the EXACT n-free `S(ψ)` for this probe's ψ so
         // the cost-only fast path re-keys the kept surface without `reset_surface`
@@ -3531,32 +3528,23 @@ impl<'d> SpatialJointContext<'d> {
                     probe_start.elapsed().as_secs_f64(),
                 );
                 self.cache.store_cost_at(theta, cost);
-                cost
+                Ok(cost)
             }
-            // #2481: same reasoning as the realization failure above — the
-            // evaluator refused, the line search can only be told `+∞`, so the
-            // reason is logged once and counted rather than discarded. Not
-            // memoized: this is a failure to produce the value, not the value.
-            Err(err) => {
+            // #2481: cost-evaluator failures use the same classifier as
+            // design realization and the derivative-bearing lane.
+            Err(error) => {
                 self.value_evaluation_failures += 1;
                 let (theta_norm, log_kappa_norm) = kphase_log_norms(theta, self.rho_dim);
-                if self.value_evaluation_failures == 1 {
-                    log::warn!(
-                        "[STAGE] {cost_label} value-probe: cost evaluation FAILED at \
-                         theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} \
-                         ({err}); reporting +inf to the line search, which cannot distinguish \
-                         this from genuine infeasibility (#2481). Further occurrences are \
-                         counted, not logged.",
+                if is_recoverable_trial_point_error(&error) {
+                    log::debug!(
+                        "[STAGE] {cost_label} value-probe: cost evaluator makes this trial infeasible at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} ({error}); retreating",
                     );
                 } else {
-                    log::debug!(
-                        "[STAGE] {cost_label} value-probe: cost evaluation FAILED (occurrence \
-                         {}) at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} \
-                         ({err})",
-                        self.value_evaluation_failures,
+                    log::warn!(
+                        "[STAGE] {cost_label} value-probe: cost evaluation FAILED fatally at theta_norm={theta_norm:.4e} log_kappa_norm={log_kappa_norm:.4e} ({error}); propagating",
                     );
                 }
-                f64::INFINITY
+                classify_spatial_value_probe_failure(error)
             }
         }
     }
@@ -4219,7 +4207,7 @@ fn run_exact_joint_spatial_optimization(
                 log_kappa_norm,
                 elapsed_s,
             );
-            Ok(cost)
+            cost
         },
         |ctx: &mut &mut SpatialJointContext<'_>, theta: &Array1<f64>| {
             eval_outer(
