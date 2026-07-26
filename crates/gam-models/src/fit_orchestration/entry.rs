@@ -605,6 +605,34 @@ fn deterministic_gaussian_standard_fit(
         }
         lambda
     };
+    // Canonicalize λ through its log-strength coordinate BEFORE anything reads
+    // it. `UnifiedFitResult` requires `lambdas[i]` to be BITWISE equal to
+    // `checked_exp_log_strength(log_lambdas[i])`, and ρ is the canonical
+    // coordinate everywhere else in the engine (`gam_problem::log_strength`,
+    // `joint_penalty.rs:317`) — λ is DERIVED from ρ, never the reverse. This
+    // shortcut computes λ straight from the penalty spectrum, so deriving
+    // `ρ = ln(λ)` afterwards cannot satisfy that invariant: `exp(ln(x))` differs
+    // from `x` by an ulp for most `x` and the check is exact, which is why a
+    // constant-response fit reported "log_lambdas must equal ln(lambdas)
+    // elementwise" (#2254) despite converging.
+    //
+    // Deriving BOTH stored values from this one `ρ` — rather than round-tripping
+    // and hoping it is idempotent — makes the pair consistent by construction,
+    // and doing it here rather than at the reporting site keeps the λ that
+    // enters the penalized Hessian identical to the λ the result reports.
+    let log_lambda_full = lambda_full.max(f64::MIN_POSITIVE).ln();
+    let lambda_full = if n_penalties == 0 {
+        lambda_full
+    } else {
+        gam_problem::checked_exp_log_strength(log_lambda_full).map_err(|error| {
+            WorkflowError::IntegrationFailed {
+                reason: format!(
+                    "deterministic Gaussian shortcut produced a boundary precision outside the \
+                     log-strength domain: {error}"
+                ),
+            }
+        })?
+    };
     let mut penalized_hessian = xtwx.clone();
     penalized_hessian.scaled_add(lambda_full, &unit_penalty);
     // Symmetrize defensively against accumulated round-off before the Cholesky.
@@ -675,8 +703,11 @@ fn deterministic_gaussian_standard_fit(
     // IRLS working response for the identity link is the raw response y (η
     // absorbs the offset); the working weights are the prior weights.
     let working_response = request.y.as_ref().clone();
+    // Both from the SAME `ρ`: `lambda_full` is the value `checked_exp_log_strength`
+    // returned for `log_lambda_full`, so `lambdas == exp(log_lambdas)` holds to
+    // the bit without assuming `ln`/`exp` round-trip.
     let lambdas = Array1::<f64>::from_elem(n_penalties, lambda_full);
-    let log_lambdas = lambdas.mapv(|v| v.max(f64::MIN_POSITIVE).ln());
+    let log_lambdas = Array1::<f64>::from_elem(n_penalties, log_lambda_full);
     let penalized_hessian_precision =
         gam_problem::dispersion_cov::UnscaledPrecision::wrap(penalized_hessian.clone());
     let inference = gam_solve::estimate::FitInference {
