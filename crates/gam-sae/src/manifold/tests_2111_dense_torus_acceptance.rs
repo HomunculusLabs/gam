@@ -280,9 +280,24 @@ fn dense_torus_integrated_birth_recovery_2111() {
     );
     eprintln!("[#2111] birth ledger:");
     for (r, br) in result.report.birth_records.iter().enumerate() {
+        // #2556: `dEV` is now the candidate's REAL delta on both branches, and the
+        // outcome carries the clause that decided the round. This line used to
+        // print `dEV=0.00000` on every rejection because the record fabricated it,
+        // which is what made "an exact zero improvement from a candidate carrying
+        // energy" a readable — and wrong — inference.
         eprintln!(
-            "   round {r}: accepted={} kind={:?} dEV={:.5} factor_energy={:.5}",
-            br.accepted, br.kind, br.delta_ev, br.factor_energy
+            "   round {r}: outcome={:?} kind={:?} dEV={} criterion_after={} factor_energy={:.5}",
+            br.outcome,
+            br.kind,
+            br
+                .delta_ev
+                .map(|d| format!("{d:.5}"))
+                .unwrap_or_else(|| "none".to_string()),
+            br
+                .joint_penalized_quasi_laplace_after
+                .map(|c| format!("{c:.5}"))
+                .unwrap_or_else(|| "none".to_string()),
+            br.factor_energy
         );
     }
 

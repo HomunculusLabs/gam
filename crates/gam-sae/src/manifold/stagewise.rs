@@ -163,21 +163,137 @@ pub enum StagewiseStop {
 /// One birth round's outcome, recorded for the honesty surface (never silent).
 #[derive(Clone, Copy, Debug)]
 pub struct BirthRecord {
-    /// The winning candidate kind (only meaningful when `accepted`).
+    /// The winning candidate kind (only meaningful when accepted).
     pub kind: BirthKind,
-    /// ΔEV the winning candidate achieved over the pre-round state.
-    pub delta_ev: f64,
+    /// ΔEV of the candidate this round was DECIDED ON — the accepted one, or on a
+    /// rejection the best candidate the gate actually examined.
+    ///
+    /// `None` in exactly one case: no candidate could be constructed, so no ΔEV
+    /// exists to report. It used to be a hardcoded `0.0` on both rejection
+    /// branches (#2556), which is indistinguishable from a measured zero and is
+    /// therefore worse than an absence — a reader who took `dEV = 0.00000` at
+    /// face value concluded something false about the candidate.
+    pub delta_ev: Option<f64>,
     /// Explained residual energy `‖Λ_:,0‖²` of the top factor the seed came from
     /// — the birth's dose, reported so a trivial-but-real wiggle is visible.
     pub factor_energy: f64,
     /// Frozen joint penalized quasi-Laplace criterion before the round (lower is better).
     pub joint_penalized_quasi_laplace_before: f64,
-    /// Frozen joint penalized quasi-Laplace criterion of the winning candidate (or the unchanged
-    /// pre-round value when the round was rejected).
-    pub joint_penalized_quasi_laplace_after: f64,
-    /// Whether a candidate cleared BOTH the evidence gate and the minimum-effect
-    /// floor and was adopted.
-    pub accepted: bool,
+    /// Frozen joint penalized quasi-Laplace criterion of the candidate this round
+    /// was decided on. `None` under the same single condition as
+    /// [`Self::delta_ev`]: no candidate existed. It used to be set to the
+    /// pre-round value on rejection, so `before == after` looked like a measured
+    /// no-op rather than an absent measurement.
+    pub joint_penalized_quasi_laplace_after: Option<f64>,
+    /// What happened, as ONE field.
+    ///
+    /// Not an `accepted: bool` beside an `Option<reason>`: two fields for one
+    /// fact is the state #2479's genus is about, and it would let a record claim
+    /// acceptance while carrying a rejection reason. Read the boolean through
+    /// [`Self::accepted`].
+    pub outcome: BirthOutcome,
+}
+
+impl BirthRecord {
+    /// Whether a candidate cleared BOTH the evidence clause and the
+    /// minimum-effect floor and was adopted.
+    pub fn accepted(&self) -> bool {
+        matches!(self.outcome, BirthOutcome::Accepted)
+    }
+}
+
+/// The outcome of one birth round.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BirthOutcome {
+    /// A candidate cleared the gate and was adopted.
+    Accepted,
+    /// No candidate was adopted, and this is why.
+    Rejected(BirthRejection),
+}
+
+/// Why a birth round adopted nothing — the clause that decided it, carrying the
+/// quantity it was decided against.
+///
+/// #2556: a rejection record that fabricates its decision quantity is the same
+/// failure this repository already fixed in `ScoreSearchError::Unresolved`
+/// (which carries `value_excess` / `value_floor`) and in #2456's
+/// `FlatValleyGradBound` (which reports which of its terms set it). #2427 states
+/// the general rule: a refusal carries the quantity it was decided against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BirthRejection {
+    /// No candidate could be constructed this round. The ONLY state in which
+    /// there is no ΔEV or criterion to report.
+    NoCandidate,
+    /// The candidate's joint criterion was not finite.
+    NonFiniteCriterion,
+    /// The candidate's explained variance was not finite.
+    NonFiniteEv,
+    /// Evidence clause: the joint criterion did not strictly improve on the
+    /// pre-round value.
+    EvidenceNotImproved {
+        /// The candidate's joint criterion.
+        criterion: f64,
+        /// The pre-round value it had to come in strictly below.
+        must_be_below: f64,
+    },
+    /// Minimum-effect clause: ΔEV fell below the configured floor.
+    EffectBelowFloor {
+        /// The realised `ev - cur_ev`.
+        delta_ev: f64,
+        /// `config.min_effect_ev`.
+        floor: f64,
+    },
+    /// The candidate CLEARED the gate but the disjoint batch selection did not
+    /// take it — the birth budget was exhausted, or every remaining candidate
+    /// overlapped an accepted one on rows or output dims. Distinguished from the
+    /// gate clauses because it says nothing about the candidate's quality, and
+    /// collapsing it into one of them would be exactly the mislabelling #2556 is
+    /// about.
+    NotSelectedInBatch {
+        /// The candidate's joint criterion.
+        criterion: f64,
+        /// The realised `ev - cur_ev`.
+        delta_ev: f64,
+    },
+}
+
+/// Classify one candidate against the birth gate.
+///
+/// `None` means it passes. This is the SINGLE definition of the gate: the
+/// `passes` predicate below is written in terms of it, so the accept/reject
+/// decision and the reason reported for a rejection cannot drift apart.
+fn classify_birth_candidate(
+    criterion: f64,
+    ev: f64,
+    cur_ev: f64,
+    current_criterion: f64,
+    min_effect_ev: f64,
+) -> Option<BirthRejection> {
+    if !criterion.is_finite() {
+        return Some(BirthRejection::NonFiniteCriterion);
+    }
+    if !(criterion < current_criterion) {
+        return Some(BirthRejection::EvidenceNotImproved {
+            criterion,
+            must_be_below: current_criterion,
+        });
+    }
+    if !ev.is_finite() {
+        return Some(BirthRejection::NonFiniteEv);
+    }
+    let delta_ev = ev - cur_ev;
+    // Written as the NEGATION of the original `>=` clause, not as `<`. They differ
+    // on NaN: `NaN >= floor` is false (the original rejects), while `NaN < floor`
+    // is also false (a `<` form would ACCEPT). Keeping the negated form makes the
+    // classifier exactly equivalent to the predicate it replaced instead of
+    // equivalent-except-on-an-edge-case.
+    if !(delta_ev >= min_effect_ev) {
+        return Some(BirthRejection::EffectBelowFloor {
+            delta_ev,
+            floor: min_effect_ev,
+        });
+    }
+    None
 }
 
 /// The full SAC report: the birth ledger, the by-construction-monotone EV traces,
@@ -1493,11 +1609,18 @@ pub fn fit_stagewise(
 
         // Gate: strictly-improved joint evidence AND ΔEV ≥ the minimum-effect
         // floor. Among the candidates that clear both gates, the lower penalized quasi-Laplace wins.
+        // ONE definition of the gate (#2556): the predicate is the classifier's
+        // "no complaint" case, so a rejection's reported reason is by construction
+        // the reason the gate actually used.
         let passes = |penalized_quasi_laplace: f64, ev: f64| -> bool {
-            penalized_quasi_laplace.is_finite()
-                && penalized_quasi_laplace < current_penalized_quasi_laplace
-                && ev.is_finite()
-                && (ev - cur_ev) >= config.min_effect_ev
+            classify_birth_candidate(
+                penalized_quasi_laplace,
+                ev,
+                cur_ev,
+                current_penalized_quasi_laplace,
+                config.min_effect_ev,
+            )
+            .is_none()
         };
         let a_ok = cand_a
             .as_ref()
@@ -1519,13 +1642,37 @@ pub fn fit_stagewise(
             (false, false) => {
                 births_rejected += 1;
                 consecutive_rejections += 1;
+                // Report the candidate the gate would have CHOSEN had one passed —
+                // the lower-criterion of the constructible pair — together with the
+                // clause that actually rejected it. Before #2556 this wrote a
+                // literal `delta_ev: 0.0` and `after == before`, so a rejection
+                // reported numbers that looked measured and were not.
+                let best = [cand_a.as_ref(), cand_b.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .min_by(|l, r| l.2.total_cmp(&r.2));
+                let (delta_ev, criterion_after, rejection) = match best {
+                    Some(&(_, _, criterion, ev)) => (
+                        Some(ev - cur_ev),
+                        Some(criterion),
+                        classify_birth_candidate(
+                            criterion,
+                            ev,
+                            cur_ev,
+                            current_penalized_quasi_laplace,
+                            config.min_effect_ev,
+                        )
+                        .unwrap_or(BirthRejection::NoCandidate),
+                    ),
+                    None => (None, None, BirthRejection::NoCandidate),
+                };
                 birth_records.push(BirthRecord {
                     kind: BirthKind::NewAtom,
-                    delta_ev: 0.0,
+                    delta_ev,
                     factor_energy,
                     joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                    joint_penalized_quasi_laplace_after: current_penalized_quasi_laplace,
-                    accepted: false,
+                    joint_penalized_quasi_laplace_after: criterion_after,
+                    outcome: BirthOutcome::Rejected(rejection),
                 });
                 emit_stagewise_progress(
                     &mut progress,
@@ -1563,11 +1710,11 @@ pub fn fit_stagewise(
         consecutive_rejections = 0;
         birth_records.push(BirthRecord {
             kind,
-            delta_ev: ev_after - cur_ev,
+            delta_ev: Some(ev_after - cur_ev),
             factor_energy,
             joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-            joint_penalized_quasi_laplace_after: penalized_quasi_laplace_after,
-            accepted: true,
+            joint_penalized_quasi_laplace_after: Some(penalized_quasi_laplace_after),
+            outcome: BirthOutcome::Accepted,
         });
         ev_trace.push(ev_after);
         emit_stagewise_progress(
@@ -2234,12 +2381,20 @@ pub fn fit_stagewise_batched(
             .collect();
 
         // Birth gate: strictly-improved joint evidence AND ΔEV ≥ the minimum-effect
-        // floor — identical to the serial `passes` predicate.
+        // floor. This was a hand-copied duplicate of the serial `passes` predicate
+        // with a comment asserting they were "identical" — #2556 routes both
+        // through `classify_birth_candidate`, so the claim is now structural
+        // rather than a promise, and a rejection reason cannot disagree with the
+        // gate that produced it.
         let passes = |c: &RacedCandidate| -> bool {
-            c.penalized_quasi_laplace.is_finite()
-                && c.penalized_quasi_laplace < current_penalized_quasi_laplace
-                && c.ev.is_finite()
-                && (c.ev - cur_ev) >= base.min_effect_ev
+            classify_birth_candidate(
+                c.penalized_quasi_laplace,
+                c.ev,
+                cur_ev,
+                current_penalized_quasi_laplace,
+                base.min_effect_ev,
+            )
+            .is_none()
         };
         let mut order: Vec<usize> = (0..raced.len()).filter(|&i| passes(&raced[i])).collect();
         let candidates_passing_gate = order.len();
@@ -2282,11 +2437,11 @@ pub fn fit_stagewise_batched(
                 // Charge this birth exactly what the serial loop would: its own
                 // K+1 joint-evidence delta over the round's reference (additive
                 // across the disjoint batch).
-                delta_ev: c.ev - cur_ev,
+                delta_ev: Some(c.ev - cur_ev),
                 factor_energy: c.energy,
                 joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                joint_penalized_quasi_laplace_after: c.penalized_quasi_laplace,
-                accepted: true,
+                joint_penalized_quasi_laplace_after: Some(c.penalized_quasi_laplace),
+                outcome: BirthOutcome::Accepted,
             });
             ev_trace.push(running_ev);
         }
@@ -2301,13 +2456,37 @@ pub fn fit_stagewise_batched(
         if co_accepted == 0 {
             births_rejected += 1;
             consecutive_reject_rounds += 1;
+            // `co_accepted == 0` has TWO causes and they mean opposite things:
+            // the best candidate failed the gate, or it PASSED and the disjoint
+            // selection could not take it (budget exhausted / every remaining
+            // candidate overlapped an accepted one). Reporting the second as a
+            // gate rejection would be the same mislabelling #2556 is about, so
+            // the classifier decides and `NotSelectedInBatch` names the other.
+            let (delta_ev, criterion_after, rejection) = match raced.first() {
+                Some(c) => (
+                    Some(c.ev - cur_ev),
+                    Some(c.penalized_quasi_laplace),
+                    classify_birth_candidate(
+                        c.penalized_quasi_laplace,
+                        c.ev,
+                        cur_ev,
+                        current_penalized_quasi_laplace,
+                        base.min_effect_ev,
+                    )
+                    .unwrap_or(BirthRejection::NotSelectedInBatch {
+                        criterion: c.penalized_quasi_laplace,
+                        delta_ev: c.ev - cur_ev,
+                    }),
+                ),
+                None => (None, None, BirthRejection::NoCandidate),
+            };
             birth_records.push(BirthRecord {
                 kind: BirthKind::NewAtom,
-                delta_ev: 0.0,
+                delta_ev,
                 factor_energy: raced.first().map(|c| c.energy).unwrap_or(0.0),
                 joint_penalized_quasi_laplace_before: current_penalized_quasi_laplace,
-                joint_penalized_quasi_laplace_after: current_penalized_quasi_laplace,
-                accepted: false,
+                joint_penalized_quasi_laplace_after: criterion_after,
+                outcome: BirthOutcome::Rejected(rejection),
             });
         } else {
             consecutive_reject_rounds = 0;
@@ -3865,4 +4044,75 @@ mod tests {
     // co-accepts ≥2 block-orthogonal births in one round (not a serial loop in
     // disguise) — is enforced non-ignored by `batched_round_co_accepts_via_both_routes`;
     // the standalone births/sec timing lives in the `stagewise_batched_births` bench.
+}
+
+#[cfg(test)]
+mod birth_rejection_reason_tests {
+    use super::*;
+
+    /// #2556 — every gate clause is REACHABLE and names itself, and passing is the
+    /// classifier's only silent case.
+    ///
+    /// Non-vacuous by construction: each arm below is a different clause, so the
+    /// test fails both if a clause stops being reachable and if two clauses
+    /// collapse onto one reason. The old record could not distinguish any of
+    /// these — it wrote `delta_ev: 0.0` for all of them.
+    #[test]
+    fn every_birth_gate_clause_names_itself() {
+        // Passing: strictly better criterion, ΔEV at the floor.
+        assert_eq!(
+            classify_birth_candidate(1.0, 0.5, 0.4, 2.0, 0.05),
+            None,
+            "a candidate that beats the criterion and clears the floor must pass"
+        );
+        // Clause (A): the criterion did not improve. Reported with BOTH the
+        // candidate's value and the value it had to beat, so the margin is
+        // readable without re-running anything.
+        assert_eq!(
+            classify_birth_candidate(2.0, 0.5, 0.4, 2.0, 0.0),
+            Some(BirthRejection::EvidenceNotImproved {
+                criterion: 2.0,
+                must_be_below: 2.0
+            }),
+            "equality is NOT improvement — the gate is strict"
+        );
+        // Clause (B): ΔEV below the floor, reported against the floor.
+        assert_eq!(
+            classify_birth_candidate(1.0, 0.41, 0.4, 2.0, 0.05),
+            Some(BirthRejection::EffectBelowFloor {
+                delta_ev: 0.41_f64 - 0.4_f64,
+                floor: 0.05
+            })
+        );
+        // A NEGATIVE ΔEV is reported as its real value, not as zero. This is the
+        // exact confusion #2556 was filed on: the fixture sets `min_effect_ev = 0`,
+        // so a rejection there means the criterion clause failed OR ΔEV was
+        // strictly negative, and the old record made those indistinguishable.
+        let negative = classify_birth_candidate(1.0, 0.3, 0.4, 2.0, 0.0);
+        match negative {
+            Some(BirthRejection::EffectBelowFloor { delta_ev, floor }) => {
+                assert!(delta_ev < 0.0, "a real negative ΔEV must survive as negative");
+                assert_eq!(floor, 0.0);
+            }
+            other => panic!("expected the effect floor to reject a negative ΔEV; got {other:?}"),
+        }
+        // Non-finite inputs are their own reasons, not silently folded into a
+        // comparison that would be false anyway.
+        assert_eq!(
+            classify_birth_candidate(f64::NAN, 0.5, 0.4, 2.0, 0.0),
+            Some(BirthRejection::NonFiniteCriterion)
+        );
+        assert_eq!(
+            classify_birth_candidate(1.0, f64::NAN, 0.4, 2.0, 0.0),
+            Some(BirthRejection::NonFiniteEv)
+        );
+        // A NaN ΔEV from a finite `ev` and a NaN reference must REJECT. The
+        // clauses are written as negations of the original `<` / `>=` predicate
+        // precisely so this holds: a `delta_ev < floor` form would have returned
+        // `None` here and silently widened the gate.
+        assert!(
+            classify_birth_candidate(1.0, 0.5, f64::NAN, 2.0, 0.0).is_some(),
+            "a NaN ΔEV must be rejected, not passed"
+        );
+    }
 }
