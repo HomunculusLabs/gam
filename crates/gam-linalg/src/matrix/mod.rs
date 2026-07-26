@@ -103,6 +103,13 @@ fn governed_dense_operator_to_dense_by_chunks<O: DenseDesignOperator + ?Sized>(
         merge_operator_materialization_policies(Some(policy.clone()), op.materialization_policy())
             .expect("caller policy is always present");
     if !effective_policy.allow_operator_materialization {
+        crate::governed_capture::record_governed_decision(
+            context,
+            op.nrows(),
+            op.ncols(),
+            None,
+            crate::governed_capture::GovernedArm::Ineligible,
+        );
         return Err(MatrixMaterializationError::Forbidden {
             context,
             mode: gam_runtime::resource::DerivativeStorageMode::AnalyticOperatorRequired,
@@ -110,6 +117,13 @@ fn governed_dense_operator_to_dense_by_chunks<O: DenseDesignOperator + ?Sized>(
     }
     let bytes = dense_f64_bytes(op.nrows(), op.ncols()).unwrap_or(usize::MAX);
     if bytes > effective_policy.max_single_dense_bytes {
+        crate::governed_capture::record_governed_decision(
+            context,
+            op.nrows(),
+            op.ncols(),
+            Some(bytes),
+            crate::governed_capture::GovernedArm::Ineligible,
+        );
         return Err(MatrixMaterializationError::TooLarge {
             context,
             nrows: op.nrows(),
@@ -118,8 +132,30 @@ fn governed_dense_operator_to_dense_by_chunks<O: DenseDesignOperator + ?Sized>(
             limit_bytes: effective_policy.max_single_dense_bytes,
         });
     }
-    let reservation =
-        MemoryGovernor::global().try_reserve_dense_f64(op.nrows(), op.ncols(), context)?;
+    let reservation = match MemoryGovernor::global().try_reserve_dense_f64(
+        op.nrows(),
+        op.ncols(),
+        context,
+    ) {
+        Ok(reservation) => reservation,
+        Err(err) => {
+            crate::governed_capture::record_governed_decision(
+                context,
+                op.nrows(),
+                op.ncols(),
+                Some(bytes),
+                crate::governed_capture::GovernedArm::Refused,
+            );
+            return Err(err.into());
+        }
+    };
+    crate::governed_capture::record_governed_decision(
+        context,
+        op.nrows(),
+        op.ncols(),
+        Some(bytes),
+        crate::governed_capture::GovernedArm::Admitted,
+    );
     dense_operator_to_dense_by_chunks(op).map(|matrix| reservation.bind(matrix))
 }
 
@@ -1018,24 +1054,62 @@ impl SparseDesignMatrix {
         context: &str,
     ) -> Result<Governed<Arc<Array2<f64>>>, String> {
         let governor = MemoryGovernor::global();
+        let (nrows, ncols) = (self.matrix.nrows(), self.matrix.ncols());
         if let Some((cached, _)) = self.dense_cache.get() {
             // Cache hit: the bytes are already accounted for by the cache's
             // own reservation, so this owner charges nothing extra.
             let reservation = governor
                 .try_reserve(0, context)
                 .expect("zero-byte reservation cannot exceed any budget");
+            crate::governed_capture::record_governed_decision(
+                context,
+                nrows,
+                ncols,
+                Some(0),
+                crate::governed_capture::GovernedArm::CacheHit,
+            );
             return Ok(reservation.bind(cached.clone()));
         }
-        let dense_bytes = self.dense_nbytes()?;
-        let reservation = governor.try_reserve(dense_bytes, context).map_err(|err| {
-            String::from(MatrixError::DensificationRefused {
-                reason: format!(
-                    "{context}: refusing to densify sparse design {}x{}: {err}",
-                    self.matrix.nrows(),
-                    self.matrix.ncols(),
-                ),
-            })
-        })?;
+        let dense_bytes = match self.dense_nbytes() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                crate::governed_capture::record_governed_decision(
+                    context,
+                    nrows,
+                    ncols,
+                    None,
+                    crate::governed_capture::GovernedArm::Ineligible,
+                );
+                return Err(err);
+            }
+        };
+        let reservation = match governor.try_reserve(dense_bytes, context) {
+            Ok(reservation) => reservation,
+            Err(err) => {
+                // gh#2486: this refusal sends the caller down a numerically
+                // different route, so it is the decision an investigator needs
+                // recorded — not merely the fact that the call happened.
+                crate::governed_capture::record_governed_decision(
+                    context,
+                    nrows,
+                    ncols,
+                    Some(dense_bytes),
+                    crate::governed_capture::GovernedArm::Refused,
+                );
+                return Err(String::from(MatrixError::DensificationRefused {
+                    reason: format!(
+                        "{context}: refusing to densify sparse design {nrows}x{ncols}: {err}"
+                    ),
+                }));
+            }
+        };
+        crate::governed_capture::record_governed_decision(
+            context,
+            nrows,
+            ncols,
+            Some(dense_bytes),
+            crate::governed_capture::GovernedArm::Admitted,
+        );
         Ok(reservation.bind(self.materialize_dense_arc()))
     }
 
