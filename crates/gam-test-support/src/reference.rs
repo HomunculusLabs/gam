@@ -216,15 +216,37 @@ pub const REFERENCE_ENV_MISSING: &str = "REFERENCE_ENV_MISSING";
 /// class of problem as one absent altogether — the box cannot run the
 /// comparison — and lumping it in with genuine reference errors is what let a
 /// version skew masquerade as a gam defect.
+///
+/// `package or namespace load failed` is the same argument for R's native
+/// packages, and it is the one case this file already knew about before the
+/// marker existed: [`r_package_available`] is documented as the escape hatch for
+/// references "not reliably installable on a bare runner (notably R-INLA, whose
+/// bundled native binaries `dyn.load` per-OS)". An INSTALLED-but-unloadable
+/// package never says "there is no package called" — R reports it as a load
+/// failure — so before this row a body that reached `library(INLA)` without
+/// consulting the probe was filed as a genuine reference error. That is the
+/// same box-cannot-measure-it verdict as an absent package, arrived at one step
+/// later.
 fn missing_reference_dependency(stderr: &str) -> Option<String> {
     // Python: "ModuleNotFoundError: No module named 'statsmodels'"
     //         "ImportError: cannot import name 'SplineTransformer' from 'sklearn…'"
     // R:      "Error in library(gamlss) : there is no package called 'gamlss'"
+    //         "Error: package or namespace load failed for ‘INLA’: … unable to
+    //          load shared object … libgfortran.so.5: cannot open shared object"
+    //
+    // Both R rows carry the typographic and the straight quote: `sQuote()` picks
+    // between them on `useFancyQuotes`, which follows the runner's locale.
     for (marker, open, close) in [
         ("No module named ", '\'', '\''),
         ("cannot import name ", '\'', '\''),
         ("there is no package called ", '\u{2018}', '\u{2019}'),
         ("there is no package called ", '\'', '\''),
+        (
+            "package or namespace load failed for ",
+            '\u{2018}',
+            '\u{2019}',
+        ),
+        ("package or namespace load failed for ", '\'', '\''),
     ] {
         if let Some(rest) = stderr.split(marker).nth(1)
             && let Some(name) = rest
@@ -456,12 +478,10 @@ pub fn r_package_available(pkg: &str) -> bool {
     // only the external-reference arm.
     let script =
         format!("cat(if (requireNamespace(\"{pkg}\", quietly = TRUE)) \"1\\n\" else \"0\\n\")");
-    let output = match Command::new("Rscript")
-        .arg("--vanilla")
-        .arg("-e")
-        .arg(script)
-        .output()
-    {
+    // Through `ReferenceKind::r().command()`, like the `--version` probe above:
+    // spelling `Rscript --vanilla` a second time here is how the probe and the
+    // runner would drift about which interpreter "available" was measured on.
+    let output = match ReferenceKind::r().command().arg("-e").arg(script).output() {
         Ok(output) => output,
         Err(_) => return false,
     };
@@ -1118,6 +1138,22 @@ mod reference_env_marker_tests {
                 "Error in library(flexsurv) : there is no package called \u{2018}flexsurv\u{2019}\n",
                 "flexsurv",
             ),
+            // INSTALLED but unloadable — the R-INLA class `r_package_available`
+            // exists for. R never says "there is no package called" here, so
+            // this shape reached the genuine-failure bucket until it was named.
+            (
+                "Error: package or namespace load failed for \u{2018}INLA\u{2019}:\n \
+                 .onLoad failed in loadNamespace() for 'INLA', details:\n  \
+                 call: dyn.load(file, DLLpath = DLLpath, ...)\n  \
+                 error: unable to load shared object '/usr/lib/R/site-library/INLA/libs/INLA.so':\n  \
+                 libgfortran.so.5: cannot open shared object file: No such file or directory\n",
+                "INLA",
+            ),
+            (
+                "Error: package or namespace load failed for 'rstan':\n \
+                 .onLoad failed in loadNamespace() for 'rstan'\n",
+                "rstan",
+            ),
         ];
         for (stderr, expected) in cases {
             assert_eq!(
@@ -1140,6 +1176,10 @@ mod reference_env_marker_tests {
              m = MNLogit(Ytr, Xtr)\nnumpy.exceptions.AxisError: axis 1 is out of bounds for \
              array of dimension 1\n",
             "Error in gam(y ~ s(x), data = df) : Model has more coefficients than data\n",
+            // Adjacent to the R load-failure row without being it: a body that
+            // cannot read a fixture off disk is a real failure, and "load" in
+            // the message must not be enough to excuse it.
+            "Error in load(\"model.rda\") : cannot open the connection\n",
             "ValueError: Input contains NaN, infinity or a value too large for dtype('float64').\n",
             "LinAlgError: Singular matrix\n",
             "",
