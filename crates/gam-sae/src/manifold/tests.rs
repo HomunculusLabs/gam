@@ -3585,21 +3585,16 @@ fn matrix_free_ard_logdet_hessian_trace_from_probes_matches_dense() {
     }
 }
 
-/// #2080 analytic-gradient cluster routing seam: the whole analytic outer ρ-gradient
-/// assembled through `analytic_outer_rho_gradient_components_with_bundle(Some(bundle))`
-/// — routing BOTH selected-inverse channels (per-atom smoothness EDF `tr(H⁻¹ M_k)`
-/// and the per-(atom,axis) ARD log-precision Hessian trace `½tr(H⁻¹ ∂H/∂logα)`) off
-/// the shared (probes, S⁻¹·probes) bundle as one all-or-nothing cluster — must
-/// reproduce the dense (`None`) assembly bit-for-bit on the PLAIN (undeflated)
-/// fixture. Every other channel (explicit, Occam, the #1006 envelope third-order
-/// correction) is fed the IDENTICAL cache + plain solver in both calls, so this
-/// isolates the bundle routing: feeding full-basis probes `√k·e_j` with the EXACT
-/// dense `S⁻¹` (`cache.schur_inverse_apply`) collapses each channel's selected-inverse
-/// diagonal to its exact value, so the two assemblies must agree to solve precision.
-/// The gate that keeps the (dormant, `None`-only in production) forward plumbing from
-/// silently desyncing the value and gradient lanes if a routing flip ever engages it.
+/// #2515 route-invariance contract: storage and host capability must not choose the
+/// statistical criterion. The dense direct route currently prices the exact observed
+/// information `A = B + ΔC`, while the probe/bundle route prices the Gauss--Newton
+/// majorizer `B`. This fixture holds `theta`, `rho`, the assembled system and every
+/// non-logdet channel fixed, then requires BOTH the Laplace logdet value component and
+/// the complete analytic outer gradient to agree across routes. Full-basis probes
+/// `√k·e_j` with exact `S⁻¹ e_j` remove stochastic approximation from the comparison,
+/// so any delta is an operator-authority defect rather than probe noise.
 #[test]
-fn analytic_outer_gradient_with_bundle_matches_dense_assembly() {
+fn laplace_value_and_gradient_are_route_invariant_2515() {
     let n = 24usize;
     let p = 2usize;
     let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
@@ -3641,6 +3636,25 @@ fn analytic_outer_gradient_with_bundle_matches_dense_assembly() {
     let (_delta_t, _delta_beta, cache) =
         solve_arrow_newton_step_with_options(&sys, 0.0, 0.0, &options).unwrap();
     let loss = term.loss(target.view(), &rho).unwrap();
+
+    // Value-side witness. All non-logdet criterion terms are identical at this fixed
+    // state, so half the joint-minus-coordinate logdet difference is the complete
+    // route-dependent value delta.
+    let (log_a, log_a_tt) = term
+        .exact_observed_information_log_dets(&rho, target.view(), &cache)
+        .unwrap();
+    let log_b = cache
+        .arrow_log_det()
+        .expect("majorizer joint logdet must be available");
+    let log_b_tt = coordinate_block_log_det(&cache).unwrap();
+    let exact_a_laplace_logdet = 0.5 * (log_a - log_a_tt);
+    let majorizer_laplace_logdet = 0.5 * (log_b - log_b_tt);
+    eprintln!(
+        "[#2515 ROUTE-PARITY] exact_A_laplace_logdet={exact_a_laplace_logdet:.17e} \
+         majorizer_B_laplace_logdet={majorizer_laplace_logdet:.17e} \
+         delta={:.17e}",
+        exact_a_laplace_logdet - majorizer_laplace_logdet
+    );
 
     // Same plain (undeflated) solver in BOTH assemblies — the only variable is the
     // bundle routing of the two selected-inverse channels.
@@ -3744,6 +3758,11 @@ fn analytic_outer_gradient_with_bundle_matches_dense_assembly() {
     assert!(
         trace_sq > 0.0 && trace_sq.is_finite(),
         "the routed log|H|-trace channel must be non-trivial; ‖logdet_trace‖²={trace_sq}"
+    );
+    assert_abs_diff_eq!(
+        exact_a_laplace_logdet,
+        majorizer_laplace_logdet,
+        epsilon = 1.0e-9
     );
 }
 
