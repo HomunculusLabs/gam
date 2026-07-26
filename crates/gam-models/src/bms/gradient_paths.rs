@@ -883,14 +883,35 @@ impl MarginalSlopeCovariance {
             format!("marginal-slope covariance eigendecomposition failed: {error}")
         })?;
         let dimension = covariance.nrows();
+        // A rank-deficient score geometry (collinear scores — a real, expected
+        // input) is PSD with EXACT ZEROS in its spectrum, and a symmetric
+        // eigensolver returns those zeros with either sign: its computed
+        // eigenvalues are exact for `C + E` with `‖E‖₂ ≤ p(k)·ε·‖C‖₂`, so a true
+        // zero lands anywhere in `±p(k)·ε·max|λ̂|`. Deciding definiteness against
+        // an EXACT zero therefore refuses honest collinear scores whenever
+        // roundoff happens to fall on the negative side — a host- and
+        // BLAS-dependent refusal of a valid covariance, not a geometry defect.
+        // Decide against the eigensolver's own band instead, in the established
+        // dimension-scaled form `128·k·ε·max|λ̂|` that
+        // `gam_linalg::utils::rank_certified_psd_pseudoinverse` already uses for
+        // exactly this question. Material indefiniteness outside the band is
+        // still an error.
+        let spectral_magnitude = eigenvalues
+            .iter()
+            .fold(0.0_f64, |magnitude, &value| magnitude.max(value.abs()));
+        let psd_roundoff = 128.0 * dimension as f64 * f64::EPSILON * spectral_magnitude;
         let mut square_root_factor = Array2::<f64>::zeros((dimension, dimension));
         for (eigen_axis, &eigenvalue) in eigenvalues.iter().enumerate() {
-            if !(eigenvalue.is_finite() && eigenvalue >= 0.0) {
+            if !eigenvalue.is_finite() || eigenvalue < -psd_roundoff {
                 return Err(format!(
-                    "marginal-slope full covariance must be positive semidefinite; eigenvalue {eigen_axis} is {eigenvalue}"
+                    "marginal-slope full covariance must be positive semidefinite; eigenvalue {eigen_axis} is {eigenvalue} (admissible eigensolver band -{psd_roundoff:.3e})"
                 ));
             }
-            let scale = eigenvalue.sqrt();
+            // Clamp inside the band: a direction whose true eigenvalue is
+            // indistinguishable from zero contributes no spread, and this keeps
+            // the square-root factor real (`sqrt` of a tiny negative is NaN,
+            // which would silently poison every downstream quadratic form).
+            let scale = eigenvalue.max(0.0).sqrt();
             for axis in 0..dimension {
                 square_root_factor[[eigen_axis, axis]] = scale * eigenvectors[[axis, eigen_axis]];
             }
@@ -2281,6 +2302,26 @@ mod covariance_admission_tests {
     fn full_covariance_admission_accepts_exact_singular_psd_932() {
         MarginalSlopeCovariance::full(array![[1.0, 0.0], [0.0, 0.0]])
             .expect("an exact singular PSD covariance is admissible");
+    }
+
+    /// A singular covariance's zero eigenvalues come back from the symmetric
+    /// eigensolver with either sign, anywhere inside its backward-error band
+    /// `128·k·ε·max|λ̂|`. Admission must be decided against that band, not
+    /// against an exact zero, or a collinear score geometry is refused on some
+    /// hosts and admitted on others. Both sides are pinned here: `-1e-17` sits
+    /// inside the band for `k = 2, max|λ̂| = 1` (≈5.68e-14) and must be admitted
+    /// and clamped, while `-1e-12` sits outside it and must still be refused.
+    #[test]
+    fn full_covariance_admission_decides_psd_against_the_eigensolver_band() {
+        let admitted = MarginalSlopeCovariance::full(array![[1.0, 0.0], [0.0, -1.0e-17]])
+            .expect("a negative eigenvalue inside the eigensolver band is a zero one");
+        assert!(
+            admitted.ones_quadratic_form().is_finite(),
+            "clamping inside the band must keep the square-root factor real"
+        );
+        let error = MarginalSlopeCovariance::full(array![[1.0, 0.0], [0.0, -1.0e-12]])
+            .expect_err("a negative eigenvalue outside the band is material indefiniteness");
+        assert!(error.contains("must be positive semidefinite"), "{error}");
     }
 
     #[test]

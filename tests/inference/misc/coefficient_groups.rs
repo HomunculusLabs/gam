@@ -345,12 +345,20 @@ fn custom_family_parent_group_ties_concatenated_child_penalties() {
         realized.outer_labels,
         vec!["endpoint_supergroup", "risk_a_leaf", "risk_b_leaf"]
     );
+    // `penalty_labels` mirrors the BLOCK-FLATTENED physical emission walk — the
+    // same walk `penalty_label_layout_with_joint` consumes — so label `i` names
+    // physical penalty `i`. The supergroup spans both blocks, so it emits one
+    // piece inside each block and its two labels are SEPARATED by that block's
+    // own leaf; grouping them adjacently would list labels in an order the
+    // physical penalty list does not have, silently misaligning the two.
+    // The tie itself is visible in `outer_labels` above: two physical pieces,
+    // one outer coordinate.
     assert_eq!(
         realized.penalty_labels,
         vec![
             "endpoint_supergroup",
-            "endpoint_supergroup",
             "risk_a_leaf",
+            "endpoint_supergroup",
             "risk_b_leaf",
         ]
     );
