@@ -15,8 +15,6 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.tri as mtri
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 
 ROOT = Path("/private/tmp/claude-scratch-2502")
@@ -193,68 +191,96 @@ surface_meta = []
 for surface_index, (ax, item, cmap_name) in enumerate(
     zip(surface_axes, surfaces, ["viridis", "magma"])
 ):
-    # Display only the data-supported patch.  Delaunay triangles are built in
-    # the learned intrinsic coordinates and decoded through the fitted chart;
-    # there is no rectangular grid extending beyond observed token support.
-    _, display_mean, display_basis = pca(item["fitted"], 3)
-    bead3 = (item["fitted"] - display_mean) @ display_basis.T
-    triangulation = mtri.Triangulation(item["u"][:, 0], item["u"][:, 1])
-    triangles = triangulation.triangles
-    intrinsic_vertices = item["u"][triangles]
-    edge_lengths = np.stack(
-        [
-            np.linalg.norm(intrinsic_vertices[:, 0] - intrinsic_vertices[:, 1], axis=1),
-            np.linalg.norm(intrinsic_vertices[:, 1] - intrinsic_vertices[:, 2], axis=1),
-            np.linalg.norm(intrinsic_vertices[:, 2] - intrinsic_vertices[:, 0], axis=1),
-        ],
-        axis=1,
+    # A smooth, hole-free domain in the atom's actual intrinsic coordinates.
+    # Its radial envelope is the smoothed 90th-percentile data extent in each
+    # direction, enlarged by 8%: enough context around the observations,
+    # without the old far-field extrapolation.
+    intrinsic = item["u"]
+    token_angle = np.arctan2(intrinsic[:, 1], intrinsic[:, 0])
+    token_radius = np.linalg.norm(intrinsic, axis=1)
+    n_bins = 72
+    bin_width = 2 * np.pi / n_bins
+    bin_id = np.floor((token_angle + np.pi) / bin_width).astype(int) % n_bins
+    radial_profile = np.full(n_bins, np.nan)
+    for bin_index in range(n_bins):
+        values = token_radius[bin_id == bin_index]
+        if len(values):
+            radial_profile[bin_index] = np.quantile(values, 0.90)
+    valid = np.flatnonzero(np.isfinite(radial_profile))
+    extended_index = np.concatenate([valid - n_bins, valid, valid + n_bins])
+    extended_values = np.tile(radial_profile[valid], 3)
+    radial_profile = np.interp(np.arange(n_bins), extended_index, extended_values)
+    offsets = np.arange(-6, 7)
+    weights = np.exp(-0.5 * (offsets / 2.7) ** 2)
+    weights /= weights.sum()
+    radial_profile = sum(
+        weight * np.roll(radial_profile, int(offset))
+        for weight, offset in zip(weights, offsets)
     )
-    max_edge = edge_lengths.max(axis=1)
-    triangles = triangles[max_edge <= np.quantile(max_edge, 0.82)]
-    # Keep the largest locally connected patch.  Sparse peripheral points stay
-    # out of the rendered surface rather than being joined by visually
-    # misleading bridge triangles.
-    adjacency: dict[int, set[int]] = {}
-    for triangle in triangles:
-        for vertex in triangle:
-            adjacency.setdefault(int(vertex), set()).update(
-                int(other) for other in triangle if other != vertex
-            )
-    components: list[set[int]] = []
-    unseen = set(adjacency)
-    while unseen:
-        component: set[int] = set()
-        frontier = [unseen.pop()]
-        while frontier:
-            vertex = frontier.pop()
-            component.add(vertex)
-            for neighbor in adjacency.get(vertex, ()):
-                if neighbor in unseen:
-                    unseen.remove(neighbor)
-                    frontier.append(neighbor)
-        components.append(component)
-    largest_component = max(components, key=len)
-    triangles = np.asarray(
+    radial_profile *= 1.08
+
+    bin_centers = -np.pi + (np.arange(n_bins) + 0.5) * bin_width
+    extended_centers = np.concatenate(
+        [bin_centers - 2 * np.pi, bin_centers, bin_centers + 2 * np.pi]
+    )
+    extended_profile = np.tile(radial_profile, 3)
+    theta = np.linspace(-np.pi, np.pi, 97)
+    boundary = np.interp(theta, extended_centers, extended_profile)
+    radial_fraction = np.linspace(0.0, 1.0, 30)
+    uu = radial_fraction[:, None] * boundary[None, :] * np.cos(theta)[None, :]
+    vv = radial_fraction[:, None] * boundary[None, :] * np.sin(theta)[None, :]
+    design = np.column_stack(
         [
-            triangle
-            for triangle in triangles
-            if all(int(vertex) in largest_component for vertex in triangle)
+            np.ones(uu.size),
+            uu.ravel(),
+            vv.ravel(),
+            uu.ravel() ** 2,
+            (uu * vv).ravel(),
+            vv.ravel() ** 2,
         ]
     )
-    triangle_uv = item["u"][triangles].mean(axis=1)
-    phase = np.arctan2(triangle_uv[:, 1], triangle_uv[:, 0])
-    facecolors = plt.get_cmap(cmap_name)((phase + np.pi) / (2 * np.pi))
-    facecolors[:, 3] = 0.80
-    surface = Poly3DCollection(
-        bead3[triangles],
+    mesh = (design @ item["beta"]).reshape(*uu.shape, -1)
+    _, display_mean, display_basis = pca(
+        np.vstack([mesh.reshape(-1, 128), item["fitted"]]),
+        3,
+    )
+    mesh3 = ((mesh.reshape(-1, 128) - display_mean) @ display_basis.T).reshape(
+        *uu.shape, 3
+    )
+    bead3 = (item["fitted"] - display_mean) @ display_basis.T
+    facecolors = plt.get_cmap(cmap_name)(
+        (np.arctan2(vv, uu) + np.pi) / (2 * np.pi)
+    )
+    facecolors[..., 3] = 0.82
+    ax.plot_surface(
+        mesh3[:, :, 0],
+        mesh3[:, :, 1],
+        mesh3[:, :, 2],
         facecolors=facecolors,
-        edgecolors=(0.75, 0.84, 1.0, 0.10),
-        linewidths=0.24,
+        rstride=1,
+        cstride=1,
+        linewidth=0,
         antialiased=True,
+        shade=True,
+        alpha=0.86,
         zorder=2,
     )
-    ax.add_collection3d(surface)
-    supported_vertices = np.unique(triangles)
+
+    # Sparse coordinate lines show the actual regular (u, v) chart rather than
+    # an arbitrary triangulation of display-space points.
+    ax.plot_wireframe(
+        mesh3[:, :, 0],
+        mesh3[:, :, 1],
+        mesh3[:, :, 2],
+        rstride=5,
+        cstride=8,
+        color="#d9e7ff",
+        linewidth=0.34,
+        alpha=0.14,
+        zorder=4,
+    )
+    token_boundary = np.interp(token_angle, extended_centers, extended_profile)
+    supported_vertices = np.flatnonzero(token_radius <= token_boundary * 1.01)
     keep = RNG.choice(
         supported_vertices,
         min(105, len(supported_vertices)),
@@ -287,7 +313,7 @@ for surface_index, (ax, item, cmap_name) in enumerate(
             "curvature_score": item["curvature"],
             "sheet_ratio": item["sheet_ratio"],
             "bend_ratio": item["bend_ratio"],
-            "display_domain": "largest connected Delaunay patch of observed token coordinates; longest 18% boundary bridges removed",
+            "display_domain": "smooth 90th-percentile radial envelope of observed intrinsic coordinates with an 8% margin",
         }
     )
 

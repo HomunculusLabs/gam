@@ -209,7 +209,7 @@
       "curvature_score": 0.7089976221424581,
       "sheet_ratio": 0.9028904145386774,
       "bend_ratio": 0.6461689330357232,
-      "display_domain": "largest connected Delaunay patch of observed token coordinates; longest 18% boundary bridges removed"
+      "display_domain": "smooth 90th-percentile radial envelope of observed intrinsic coordinates with an 8% margin"
     },
     {
       "anchor_row": 1247,
@@ -400,7 +400,7 @@
       "curvature_score": 0.6110706471888276,
       "sheet_ratio": 0.7855106280092308,
       "bend_ratio": 0.6401960760796241,
-      "display_domain": "largest connected Delaunay patch of observed token coordinates; longest 18% boundary bridges removed"
+      "display_domain": "smooth 90th-percentile radial envelope of observed intrinsic coordinates with an 8% margin"
     }
   ],
   "synthetic_geometry": false

@@ -119,6 +119,51 @@ origin = np.array([0.0, 0.0])
 w_wed = wed - origin
 sum_state = tue + w_wed
 
+# The learned Wednesday direction (center -> Wednesday), then its translation
+# to the current Tuesday activation.  The dashed parallelogram makes the
+# vector construction visible without adding prose or equations.
+left.scatter(
+    *origin,
+    s=42,
+    color=TEXT,
+    edgecolors=INK,
+    linewidths=1.0,
+    alpha=0.92,
+    zorder=9,
+)
+left.add_patch(
+    FancyArrowPatch(
+        tuple(origin),
+        tuple(wed),
+        arrowstyle="-|>",
+        mutation_scale=19,
+        linewidth=2.2,
+        color=RED,
+        linestyle=(0, (4, 3)),
+        alpha=0.82,
+        shrinkA=5,
+        shrinkB=8,
+        zorder=7,
+    )
+)
+left.plot(
+    [origin[0], tue[0]],
+    [origin[1], tue[1]],
+    color=TEXT,
+    lw=1.25,
+    ls=(0, (3, 4)),
+    alpha=0.30,
+    zorder=5,
+)
+left.plot(
+    [wed[0], sum_state[0]],
+    [wed[1], sum_state[1]],
+    color=RED,
+    lw=1.55,
+    ls=(0, (4, 3)),
+    alpha=0.68,
+    zorder=6,
+)
 arrow(left, tue, sum_state, RED, width=4.0, mutation=26)
 left.scatter(*sum_state, s=440, color=RED, alpha=0.94, edgecolors="#ffdfe2", lw=2.0, zorder=10)
 
@@ -156,39 +201,6 @@ right.plot(
     zorder=7,
 )
 arrow(right, arc[42], arc[50], GREEN, width=1.8, mutation=15, z=8)
-right.text(
-    2.72,
-    0.16,
-    "learned coordinate path",
-    color="#baffdf",
-    fontsize=10.5,
-    ha="left",
-    va="center",
-)
-right.annotate(
-    "encode current activation",
-    xy=tue,
-    xytext=(-1.45, 0.72),
-    color=TEXT,
-    fontsize=10.5,
-    ha="center",
-    va="center",
-    bbox={"boxstyle": "round,pad=0.30", "fc": "#111a2f", "ec": "#7085b8", "alpha": 0.94},
-    arrowprops={"arrowstyle": "->", "color": "#9eb0d8", "lw": 1.4},
-    zorder=12,
-)
-right.annotate(
-    "Wednesday examples\nlocate target coordinate",
-    xy=wed,
-    xytext=(-1.38, -0.62),
-    color=TEXT,
-    fontsize=10.5,
-    ha="center",
-    va="center",
-    bbox={"boxstyle": "round,pad=0.32", "fc": "#10261f", "ec": GREEN, "alpha": 0.94},
-    arrowprops={"arrowstyle": "->", "color": GREEN, "lw": 1.4},
-    zorder=12,
-)
 
 fig.savefig(OUT, facecolor=INK, dpi=200)
 print(OUT)
