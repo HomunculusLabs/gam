@@ -49,9 +49,28 @@
 //! reparameterized image through exactly REFUSES the slice rather than taking
 //! it lossily — canonicalization is a retraction or it does not happen. The
 //! diffeomorphism guards (`SAE_FLOW_DIFFEO_MIN_DET`,
-//! `min_jacobian_det_on_grid`) are the complementary safety rail: they keep the
-//! candidate slice INSIDE `Diff(M)` (`det Dφ > 0` everywhere), because a folded
-//! map leaves the gauge orbit entirely rather than moving along it.
+//! `certified_min_jacobian_det`) are the complementary safety rail: they keep
+//! the candidate slice INSIDE `Diff(M)`, because a folded map leaves the gauge
+//! orbit entirely rather than moving along it.
+//!
+//! ⚠ `det Dφ > 0` everywhere does NOT by itself imply the map is injective — a
+//! polynomial map can have a positive Jacobian determinant everywhere and still
+//! be many-to-one (Pinchuk 1994). Each arm supplies the extra hypothesis that
+//! actually closes the inference, and it is the STRUCTURE of the flow family,
+//! never the guard, that closes it:
+//!
+//!  * torus — the flow is a degree-`(1,1)` self-map of `T²` (the displacement is
+//!    periodic), and a degree-`(1,1)` self-map with `det Dφ > 0` is a global
+//!    diffeomorphism;
+//!  * free patch — `PATCH_FLOW_MAX_DEGREE = 1`, so the flow is AFFINE and
+//!    nonzero determinant gives global invertibility by linear algebra;
+//!  * sphere — the conformal Möbius boosts are diffeomorphisms by construction;
+//!  * `d = 1` arc length — monotone by construction, hence degree 1.
+//!
+//! So the guard's job is narrow and should be read narrowly: it refuses folds
+//! (`det Dφ ≤ δ`) within a family whose injectivity is already established by
+//! degree. Widening any family's degree invalidates the injectivity argument and
+//! requires a new one — no amount of determinant checking substitutes for it.
 //! ═══════════════════════════════════════════════════════════════════════════
 //!
 //! #1019 stage 1 / #2022 — arc-length (unit-speed) chart canonicalization for `d = 1`.
@@ -531,10 +550,17 @@ pub const SAE_FLOW_DIFFEO_MIN_DET: f64 = 0.1;
 pub const TORUS_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 
 /// Per-axis node count of the diffeomorphism-guard check grid. The flow basis
-/// is band-limited to `TORUS_FLOW_MAX_HARMONIC` (≤ 2 oscillations per axis),
-/// so 64 nodes per axis oversample `det Dφ_θ` (itself band-limited to ≤ 4 per
-/// axis) by 16×: the grid minimum is a faithful surrogate for the continuum
-/// minimum at the `δ = 0.1` margin.
+/// is band-limited to `TORUS_FLOW_MAX_HARMONIC` (≤ 2 oscillations per axis), so
+/// `det Dφ_θ` is band-limited to ≤ 4 per axis and 64 nodes oversample it by 16×.
+///
+/// Oversampling is not a proof. "Band-limited and sampled densely" bounds
+/// nothing about the value BETWEEN nodes without a derivative bound, and the
+/// guard's contract is `det Dφ_θ > δ` *everywhere*. The node count therefore
+/// no longer carries the argument on its own:
+/// [`TorusFlowBasis::certified_min_jacobian_det`] subtracts a closed-form
+/// inter-node correction from this grid's minimum and is what the gate consumes.
+/// `N` now sets only how TIGHT that certificate is — the correction scales as
+/// `1/N` — never whether it is valid.
 pub const TORUS_FLOW_GUARD_NODES_PER_AXIS: usize = 64;
 
 /// Outer iteration cap for the damped Gauss–Newton flow optimization. The
@@ -720,8 +746,11 @@ impl TorusFlowBasis {
     }
 
     /// Minimum of `det Dφ_θ` over the
-    /// [`TORUS_FLOW_GUARD_NODES_PER_AXIS`]² check grid — the diffeomorphism
-    /// guard's decision quantity.
+    /// [`TORUS_FLOW_GUARD_NODES_PER_AXIS`]² check grid — a SAMPLE, not the
+    /// continuum minimum. The diffeomorphism guard consumes
+    /// [`Self::certified_min_jacobian_det`], which corrects this to a rigorous
+    /// everywhere-bound; this stays public because the pair (sample, certified
+    /// bound) is what makes the correction's size observable.
     pub fn min_jacobian_det_on_grid(&self, theta: &[f64]) -> f64 {
         let nodes = TORUS_FLOW_GUARD_NODES_PER_AXIS;
         let mut min_det = f64::INFINITY;
@@ -737,6 +766,99 @@ impl TorusFlowBasis {
             }
         }
         min_det
+    }
+
+    /// Half the guard grid's per-axis spacing — the largest distance from an
+    /// arbitrary torus point to the nearest node along one axis. The grid wraps
+    /// with the torus, so this is exact, not an edge-effect approximation.
+    fn guard_grid_half_spacing(&self) -> f64 {
+        0.5 * self.period / TORUS_FLOW_GUARD_NODES_PER_AXIS as f64
+    }
+
+    /// The inter-node correction `(h/2)·(L₀ + L₁)` with `L_m = ‖∂_m det Dφ_θ‖_∞`
+    /// — the amount by which `det Dφ_θ` can dip below the grid minimum between
+    /// nodes. Exactly `0` at `θ = 0`, where `det Dφ ≡ 1`.
+    ///
+    /// Every `L_m` is closed form in `θ` and the mode frequencies, with no
+    /// sampling. Mode `k` is `e_{c(k)}·trig(w₀t₀ + w₁t₁)` with
+    /// `w_j = 2π·freq_j/period`, so for EITHER phase
+    /// `|∂_j v| ≤ |w_j|` and `|∂_m ∂_j v| ≤ |w_j w_m|`. Writing
+    ///
+    /// ```text
+    /// A[c][j]    = Σ_{k: c(k)=c} |θ_k|·|w_{k,j}|
+    /// D[c][j][m] = Σ_{k: c(k)=c} |θ_k|·|w_{k,j}|·|w_{k,m}|
+    /// ```
+    ///
+    /// gives `‖J[c][j]‖_∞ ≤ δ_{cj} + A[c][j]` and `‖∂_m J[c][j]‖_∞ ≤ D[c][j][m]`
+    /// for `J = Dφ_θ = I + Σ_k θ_k Dv_k`, and the product rule on
+    /// `det = J₀₀J₁₁ − J₀₁J₁₀` gives `L_m`.
+    pub fn jacobian_det_grid_correction(&self, theta: &[f64]) -> f64 {
+        assert_eq!(theta.len(), self.dim(), "TorusFlowBasis: theta length");
+        let tau = std::f64::consts::TAU;
+        let mut a = [[0.0_f64; 2]; 2];
+        let mut d = [[[0.0_f64; 2]; 2]; 2];
+        let mut idx = 0usize;
+        for component in 0..2 {
+            for &(fa, fb) in &self.freqs {
+                let w = [
+                    (tau * fa as f64 / self.period).abs(),
+                    (tau * fb as f64 / self.period).abs(),
+                ];
+                // The sin and cos phases of one frequency share `|w|`, so they
+                // contribute through the same bounds; walk both in θ order.
+                for _phase in 0..2 {
+                    let coef = theta[idx].abs();
+                    idx += 1;
+                    for j in 0..2 {
+                        a[component][j] += coef * w[j];
+                        for m in 0..2 {
+                            d[component][j][m] += coef * w[j] * w[m];
+                        }
+                    }
+                }
+            }
+        }
+        let jmax = |c: usize, j: usize| -> f64 { (if c == j { 1.0 } else { 0.0 }) + a[c][j] };
+        let half = self.guard_grid_half_spacing();
+        let mut correction = 0.0_f64;
+        for m in 0..2 {
+            let l_m = d[0][0][m] * jmax(1, 1)
+                + jmax(0, 0) * d[1][1][m]
+                + d[0][1][m] * jmax(1, 0)
+                + jmax(0, 1) * d[1][0][m];
+            correction += l_m * half;
+        }
+        correction
+    }
+
+    /// Rigorous LOWER BOUND on `det Dφ_θ` over the WHOLE torus — the quantity
+    /// the diffeomorphism guard's contract actually needs, and the one the gate
+    /// consumes.
+    ///
+    /// [`Self::min_jacobian_det_on_grid`] is a sample. `det Dφ_θ` is a trig
+    /// polynomial of degree ≤ `2·TORUS_FLOW_MAX_HARMONIC` per axis (each entry
+    /// of `Dφ_θ` has degree ≤ `H`, and `det` is a sum of pairwise products), so
+    /// between two nodes it can dip below every value the grid saw. The grid is
+    /// uniform with spacing `h = period/N` and wraps with the torus, so every
+    /// point lies within `h/2` of a node along each axis and
+    ///
+    /// ```text
+    /// min_{T²} det  ≥  min_grid det  −  (h/2)·(L₀ + L₁),   L_m = ‖∂_m det‖_∞,
+    /// ```
+    ///
+    /// with `L_m` closed form in `θ` ([`Self::jacobian_det_grid_correction`]).
+    ///
+    /// # Why the coefficient bound rather than Bernstein
+    ///
+    /// Bernstein's inequality gives `L_m ≤ (2π·2H/period)·‖det‖_∞`, which is
+    /// correct but loose exactly where this guard operates. Accepted flows are
+    /// near-identity: `‖det‖_∞ ≈ 1` while the true `L_m` is `O(|θ|)`. Charging
+    /// the correction against `‖det‖_∞` would make it `O(1)` and reject
+    /// near-identity flows the guard has no reason to touch. Bernstein is the
+    /// right tool when only `‖det‖_∞` is known; here the coefficients ARE the
+    /// input, so the product-rule bound is both rigorous and `O(|θ|)`.
+    pub fn certified_min_jacobian_det(&self, theta: &[f64]) -> f64 {
+        self.min_jacobian_det_on_grid(theta) - self.jacobian_det_grid_correction(theta)
     }
 }
 
@@ -766,8 +888,11 @@ pub struct TorusIsometryFlowReparameterization {
     /// The profiled global metric scale `c` at the optimum (the canonical
     /// chart's pullback metric is `≈ c·ḡ·I`).
     pub profiled_metric_scale: f64,
-    /// `min det Dφ_θ` on the guard grid. Always `> TORUS_FLOW_DIFFEO_MIN_DET`
-    /// when `Some(..)` is returned — a folded chart is refused upstream.
+    /// Certified lower bound on `det Dφ_θ` over the whole torus
+    /// ([`TorusFlowBasis::certified_min_jacobian_det`]) — NOT the raw grid
+    /// minimum. Always `> TORUS_FLOW_DIFFEO_MIN_DET` when `Some(..)` is
+    /// returned, so a folded chart is refused upstream on a bound that holds
+    /// everywhere rather than on the nodes it happened to sample.
     pub min_flow_jacobian_det: f64,
     /// Max-abs recomposition error on the audit grid, relative to the image
     /// scale. Always `≤ CHART_RECOMPOSITION_REL_TOL` when `Some(..)`.
@@ -1613,13 +1738,13 @@ pub fn torus_isometry_flow_reparameterization(
         ghat_norm_sq,
         q,
         TORUS_FLOW_DIFFEO_MIN_DET,
-        &|candidate: &[f64]| basis.min_jacobian_det_on_grid(candidate),
+        &|candidate: &[f64]| basis.certified_min_jacobian_det(candidate),
     ) else {
         return Ok(None);
     };
     let theta = minimization.theta;
     let defect_initial = minimization.defect_initial;
-    let min_flow_jacobian_det = basis.min_jacobian_det_on_grid(&theta);
+    let min_flow_jacobian_det = basis.certified_min_jacobian_det(&theta);
     if !(min_flow_jacobian_det > TORUS_FLOW_DIFFEO_MIN_DET) {
         // Unreachable through the guarded accept path; refuse defensively
         // rather than ever committing a folded chart.
@@ -1729,8 +1854,31 @@ pub const PATCH_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 
 /// Per-axis node count of the free-patch diffeomorphism-guard check grid. With
 /// the affine flow basis (`PATCH_FLOW_MAX_DEGREE = 1`) the Jacobian `Dφ_θ` is
-/// CONSTANT over the patch, so `det Dφ_θ` is a single value and any grid is
-/// exact; 48 nodes per axis keep the guard robust if the degree ever rises.
+/// CONSTANT over the patch, so `det Dφ_θ` is a single value and any grid — this
+/// one, or a single node — is exact.
+///
+/// ⚠ The node count is therefore NOT a safety margin against a future degree
+/// rise, and must not be read as one. TWO separate things rest on
+/// `PATCH_FLOW_MAX_DEGREE = 1`, and a finer grid rescues only the first:
+///
+///  1. Grid exactness. At degree `> 1` the Jacobian varies over the patch and a
+///     sampled minimum stops being the minimum. That is repairable, but not by
+///     nodes alone — it needs a closed-form inter-node correction, exactly as
+///     [`TorusFlowBasis::certified_min_jacobian_det`] does for the torus.
+///  2. Injectivity, which NO grid can rescue. The guard exists to keep the
+///     candidate inside `Diff(patch)`, and the step `det Dφ > 0` ⇒ injective is
+///     a DEGREE-1 fact: an affine map with nonzero determinant is globally
+///     invertible by linear algebra. At degree `> 1` it is simply false — a real
+///     polynomial map can have `det Dφ > 0` everywhere and still be
+///     non-injective (Pinchuk 1994). A degree-`> 1` patch flow needs a NEW
+///     injectivity argument; more nodes are not one.
+///
+/// Raising `PATCH_FLOW_MAX_DEGREE` therefore invalidates this constant's
+/// justification outright and must force a re-derivation of both points above.
+/// (`PATCH_FLOW_MAX_DEGREE`'s own doc records a second, independent reason the
+/// degree is pinned at 1: exact image-freezing needs the composed image to stay
+/// inside the decoder's polynomial basis.)
+///
 /// The guard grid spans the normalized patch box `[-1, 1]²` slightly widened to
 /// `[-1.1, 1.1]²` so a fold just outside the data hull is still refused.
 pub const PATCH_FLOW_GUARD_NODES_PER_AXIS: usize = 48;
@@ -3679,6 +3827,152 @@ mod turning_tests {
             result.is_none(),
             "a curve stationary at some nodes but moving at others (a cusp) must \
              refuse with None; got {result:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod certified_diffeo_guard_tests_2518 {
+    use super::*;
+
+    /// #2518 item 3 — the guard's contract is `det Dφ_θ > δ` EVERYWHERE, so its
+    /// decision quantity must be a lower bound on the continuum minimum, not a
+    /// sample. Resample `det Dφ_θ` on a much finer grid deliberately OFFSET from
+    /// the guard nodes — so it sees exactly the inter-node values the guard
+    /// cannot — and require the certificate to sit below everything it finds.
+    #[test]
+    fn certified_torus_jacobian_det_lower_bounds_the_offgrid_minimum_2518() {
+        let period = 1.0_f64;
+        let basis = TorusFlowBasis::new(period).expect("torus flow basis");
+        let dim = basis.dim();
+
+        // Identity flow: `det Dφ ≡ 1`, the grid is already exact, and the
+        // correction must be EXACTLY zero — a certificate that charged a
+        // near-identity flow would be unusable.
+        let zero = vec![0.0_f64; dim];
+        assert_eq!(
+            basis.jacobian_det_grid_correction(&zero),
+            0.0,
+            "the identity flow has a constant determinant; its correction is exactly 0"
+        );
+        assert!(
+            (basis.certified_min_jacobian_det(&zero) - 1.0).abs() < 1.0e-12,
+            "identity flow must certify det = 1"
+        );
+
+        // Off-grid dense resample helper: 4x the guard resolution, shifted by
+        // half the dense spacing so no dense node coincides with a guard node.
+        let offgrid_min = |theta: &[f64]| -> f64 {
+            let dense = 256usize;
+            let shift = 0.5 * period / dense as f64;
+            let mut worst = f64::INFINITY;
+            for i in 0..dense {
+                for j in 0..dense {
+                    let t = [
+                        period * i as f64 / dense as f64 + shift,
+                        period * j as f64 / dense as f64 + shift,
+                    ];
+                    let jac = basis.flow_jacobian(theta, t);
+                    worst = worst.min(jac[0][0] * jac[1][1] - jac[0][1] * jac[1][0]);
+                }
+            }
+            worst
+        };
+        let mixed_signs = |scale: f64| -> Vec<f64> {
+            (0..dim)
+                .map(|k| {
+                    let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                    scale * ((k % 7) as f64 - 3.0) * sign
+                })
+                .collect::<Vec<f64>>()
+        };
+
+        // SOUNDNESS, at two amplitudes an order of magnitude apart. The bound is
+        // the guard's whole contract, so it must hold everywhere the guard could
+        // be asked, not at one tuned point.
+        for scale in [2.0e-5_f64, 4.0e-4] {
+            let theta = mixed_signs(scale);
+            let grid_min = basis.min_jacobian_det_on_grid(&theta);
+            let correction = basis.jacobian_det_grid_correction(&theta);
+            let certified = basis.certified_min_jacobian_det(&theta);
+            let dense_min = offgrid_min(&theta);
+            println!(
+                "[#2518 torus det certificate] scale={scale:.1e} grid_min={grid_min:.9} \
+                 correction={correction:.9} certified={certified:.9} offgrid_min={dense_min:.9}"
+            );
+            assert!(
+                correction > 0.0,
+                "a flow with a varying Jacobian must pay a positive inter-node correction"
+            );
+            assert!(
+                certified < grid_min,
+                "the certificate must sit strictly below the sample it corrects: \
+                 {certified} vs {grid_min}"
+            );
+            assert!(
+                certified <= dense_min,
+                "certified bound {certified} must not exceed the off-grid minimum \
+                 {dense_min} (correction {correction}, grid minimum {grid_min})"
+            );
+        }
+
+        // NON-VACUITY. The correction is `O(|θ|)` precisely so a near-identity
+        // flow still clears the fold floor — a certificate that refused every
+        // flow would satisfy the soundness arm above and be worthless.
+        let near_identity = mixed_signs(2.0e-5);
+        let certified_near = basis.certified_min_jacobian_det(&near_identity);
+        assert!(
+            certified_near > TORUS_FLOW_DIFFEO_MIN_DET,
+            "a near-identity flow must still certify above the fold floor δ={}; got \
+             {certified_near}",
+            TORUS_FLOW_DIFFEO_MIN_DET
+        );
+    }
+
+    /// The correction is a bound on how far `det` can move between nodes, so it
+    /// must vanish with the flow amplitude and grow with it — otherwise it is a
+    /// constant tax rather than a derived quantity.
+    #[test]
+    fn certified_torus_correction_tracks_the_flow_amplitude_2518() {
+        let basis = TorusFlowBasis::new(1.0).expect("torus flow basis");
+        let dim = basis.dim();
+        let base: Vec<f64> = (0..dim)
+            .map(|k| 0.001 * ((k % 5) as f64 - 2.0))
+            .collect();
+        let small: Vec<f64> = base.iter().map(|v| v * 0.5).collect();
+        let large: Vec<f64> = base.iter().map(|v| v * 2.0).collect();
+        let c_small = basis.jacobian_det_grid_correction(&small);
+        let c_base = basis.jacobian_det_grid_correction(&base);
+        let c_large = basis.jacobian_det_grid_correction(&large);
+        assert!(
+            c_small < c_base && c_base < c_large,
+            "correction must be strictly increasing in the flow amplitude: \
+             {c_small} < {c_base} < {c_large}"
+        );
+        assert!(
+            basis.jacobian_det_grid_correction(&vec![0.0_f64; dim]) == 0.0,
+            "zero amplitude pays nothing"
+        );
+    }
+
+    /// #2518 item 0 — the free-patch guard's injectivity argument is DEGREE-1
+    /// ONLY: `det Dφ > 0` ⇒ injective holds for an affine map by linear algebra
+    /// and is FALSE for higher-degree polynomial maps (Pinchuk 1994 constructs a
+    /// real polynomial counterexample). `PATCH_FLOW_GUARD_NODES_PER_AXIS` is
+    /// documented against that proof, not against grid resolution, so pin the
+    /// degree here: raising it must break a test rather than silently invalidate
+    /// the guard's justification.
+    #[test]
+    fn patch_flow_degree_is_pinned_to_its_injectivity_proof_2518() {
+        assert_eq!(
+            PATCH_FLOW_MAX_DEGREE, 1,
+            "PATCH_FLOW_GUARD_NODES_PER_AXIS = {} is justified by the flow being AFFINE: \
+             Dφ_θ is then CONSTANT (so any grid is exact) and det ≠ 0 gives global \
+             injectivity by linear algebra. At degree > 1 BOTH facts fail and no node count \
+             restores either — the guard needs a new injectivity argument first, and the \
+             inter-node correction of TorusFlowBasis::certified_min_jacobian_det for the \
+             sampling half",
+            PATCH_FLOW_GUARD_NODES_PER_AXIS
         );
     }
 }
