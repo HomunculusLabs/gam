@@ -60,18 +60,18 @@ on:
         default: "10"
         required: false
       ledger_date:
-        description: "UTC date reserved for nightly-ledger-guardian; empty means interactive."
+        description: "UTC date for a scheduled ledger dispatch; empty means interactive."
         default: ""
         required: false
 
 # GitHub may drop scheduled events under load (#2437), so this expensive workflow
-# is dispatch-only. nightly-ledger-guardian.yml owns several cheap, idempotent
-# schedule opportunities and supplies `ledger_date` exactly once when the current
-# UTC ledger is overdue.
+# is dispatch-only. A scheduled dispatcher (retired; any future one inherits the
+# contract) supplies `ledger_date` exactly once when the current UTC ledger is
+# overdue; until one exists, ledger dispatches are manual.
 #
-# Interactive dispatches keep their ref-keyed supersession policy. A guardian
+# Interactive dispatches keep their ref-keyed supersession policy. A ledger
 # dispatch gets a UTC-date group with cancellation disabled, so interactive work
-# cannot destroy the ledger and duplicate guardian events cannot supersede it.
+# cannot destroy the ledger and duplicate ledger events cannot supersede it.
 concurrency:
   group: rust-ci-${{ inputs.ledger_date != '' && format('ledger-{0}', inputs.ledger_date) || github.ref }}
   cancel-in-progress: ${{ inputs.ledger_date == '' }}
