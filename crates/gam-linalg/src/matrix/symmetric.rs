@@ -705,6 +705,93 @@ mod tests {
         assert!(err.contains("row 1"), "unexpected diagnostic: {err}");
     }
 
+    /// The two `XᵀWX` routes inside `xt_diag_x_symmetric` must agree, because
+    /// which one runs is decided by a MEMORY RESERVATION, not by the problem.
+    ///
+    /// `xt_diag_x_symmetric`'s dense-regime arm picks between a densify-then-
+    /// BLAS crossprod and a streaming CSC accumulation on `try_to_dense_governed`
+    /// succeeding. That governor's budget derives from *available host memory*,
+    /// so on a busy machine the same fit can take either branch. Nothing about
+    /// the problem changed — only what else the machine was doing.
+    ///
+    /// That is only safe because the two branches agree, and nothing was
+    /// asserting it. They do agree today (measured bit-identical when this was
+    /// written), so this locks the property in rather than reporting a defect:
+    /// a future blocking change to either kernel that broke it would make
+    /// fitted answers depend on machine load, which is close to impossible to
+    /// diagnose from the outside.
+    #[test]
+    fn both_xtwx_routes_agree_so_the_memory_governor_cannot_change_the_answer() {
+        use crate::faer_ndarray::{CrossprodAccum, CrossprodStructure, stream_weighted_crossprod_into};
+        use faer::sparse::{SparseColMat, Triplet};
+
+        // Dense-regime shape (`4·avg_nnz_row ≥ p`), and wide enough that the
+        // two accumulation orders have room to disagree in the low bits.
+        let (n, p, per_row) = (900_usize, 24_usize, 9_usize);
+        let mut triplets = Vec::new();
+        let mut dense = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for k in 0..per_row {
+                let col = (i * 7 + k * 5) % p;
+                // Mixed magnitudes: a summation-order difference is invisible
+                // when every term is the same size.
+                let value = ((i % 13) as f64 - 6.0) * 0.5 + (k as f64) * 1.7 + 0.25;
+                triplets.push(Triplet::new(i, col, value));
+                dense[[i, col]] += value;
+            }
+        }
+        let sparse = SparseColMat::try_new_from_triplets(n, p, &triplets).expect("design");
+        // Signed weights, as the signed-weight route allows.
+        let w = Array1::from_shape_fn(n, |i| ((i % 11) as f64 - 5.0) * 0.37 + 0.05);
+
+        let mut via_dense = Array2::<f64>::zeros((p, p));
+        stream_weighted_crossprod_into(
+            &dense,
+            &w,
+            &mut via_dense,
+            CrossprodStructure::Full,
+            CrossprodAccum::Replace,
+            effective_global_parallelism(),
+        );
+
+        let (symbolic, values) = sparse.parts();
+        let mut via_sparse = Array2::<f64>::zeros((p, p));
+        streaming_sparse_csc_xt_diag_x(
+            symbolic.col_ptr(),
+            symbolic.row_idx(),
+            values,
+            n,
+            p,
+            w.view(),
+            &mut via_sparse,
+        );
+
+        let mut worst = 0.0_f64;
+        let mut worst_at = (0, 0);
+        for a in 0..p {
+            for b in 0..p {
+                let scale = via_dense[[a, b]].abs().max(via_sparse[[a, b]].abs()).max(1.0);
+                let rel = (via_dense[[a, b]] - via_sparse[[a, b]]).abs() / scale;
+                if rel > worst {
+                    worst = rel;
+                    worst_at = (a, b);
+                }
+            }
+        }
+        // Measured bit-identical (worst == 0.0) on this fixture when written;
+        // the bound is a tolerance rather than bit-equality so a legitimate
+        // blocking change in either kernel does not fail the build. What must
+        // never happen is a difference large enough to move a fit.
+        assert!(
+            worst <= 1e-13,
+            "the two XtWX routes disagree by {worst:.3e} (relative) at [{}, {}]; \
+             the memory governor picks between them, so the fitted answer would \
+             depend on host memory pressure (#2486)",
+            worst_at.0,
+            worst_at.1
+        );
+    }
+
     /// Reusing one design's memoized Hessian pattern must not leak state
     /// between assemblies.
     ///
@@ -774,3 +861,4 @@ mod tests {
         }
     }
 }
+
