@@ -1,57 +1,19 @@
-// #2450 — WHICH criterion does a `gam-models` fit actually minimize?
+// #2450/#2463 — which criterion does a `gam-models` fit minimize?
 //
-// SPEC says one thing ("REML (or LAML) always used for fitting", "posterior
-// mean must always be the default (never MAP)"). `FitOptions::default()` ships
-// `RhoPrior::Normal { mean: 0, sd: 3 }`, which would make the criterion
-// `REML + Σρ²/18` — MAP in ρ. And `relax_smoothing_rho_prior` REWRITES the
-// caller's prior per coordinate before the fit ever runs. Three descriptions,
-// so the only honest way to know is to measure at the seam a user controls.
+// SPEC makes `Flat` the REML/LAML default. A non-Flat `FitOptions::rho_prior`
+// is therefore an explicit caller request, and the fit must either minimize that
+// configured criterion or refuse it — never rewrite it silently.
 //
-// The instrument is a PAIRED A/B/C over `FitOptions::rho_prior`: same data,
-// same seed, same spec, same options, only the prior varies, so any difference
-// is the criterion's own and nothing else (common random numbers — the quantity
-// under test IS a difference).
+// This paired A/B/C gate holds data, seed, spec, and every other option fixed:
 //
-//   arm REML  — `RhoPrior::Flat`, the SPEC criterion
-//   arm MAP   — `RhoPrior::Normal { 0, 3 }`, the shipped default
-//   arm ABSURD— `RhoPrior::Normal { -6, 0.25 }`, a prior no data could shrug
-//               off. This is the DISCRIMINATOR, and it is the reason the probe
-//               can distinguish "the prior is honored and happens not to
-//               matter" from "the prior never reached the criterion". A
-//               criterion that honors its caller cannot return a bitwise
-//               identical ρ̂ under a prior pinning λ at e^{-6}.
+//   * REML: `Flat`;
+//   * configured: `Normal { mean: 0, sd: 3 }`;
+//   * discriminator: `Normal { mean: -6, sd: 0.25 }`, which pins λ near e^-6.
 //
-// Two basis families, because they took opposite branches of the rewrite:
+// It exercises both the relaxable P-spline route and the moving-κ Matérn control.
+// Every measured cell must move under the discriminator. Bitwise-identical rho
+// means the caller's prior was discarded before reaching the criterion (#2463).
 //
-//   * `ps` (BSpline1D) is *relaxable*: `relax_smoothing_rho_prior` replaced the
-//     caller's prior with `Flat` on every coordinate the term owns whenever the
-//     fit is well-determined (`n ≥ 2p`), no link-aux, no moving κ.
-//   * `matern` carries a moving log-κ coordinate, so the same function BAILS
-//     (`length_safe == false`) and returns the caller's prior untouched.
-//
-// WHAT THIS PROBE FOUND, and what changed because of it. At the #2450 landing
-// the four `ps` rows came back `d_rho_ABSURD == +0.0000` — bitwise identical ρ̂,
-// edf and MISE under a prior pinning λ six e-folds away — while `matern` moved.
-// That asymmetry is not a property of the two families' likelihoods; it is the
-// rewrite discarding a configured prior on the branch that takes it, filed as
-// #2463 and fixed by gating the rewrite on `RhoPrior::is_unset`. The four `ps`
-// rows now read `d_rho_ABSURD` ≈ −6 to −13 and every arm reports REACHES. The
-// `ps` column is therefore this instrument's live regression detector: a
-// `+0.0000` there again means a configured prior has stopped reaching the
-// criterion. Nothing about the ARM DEFINITIONS or the DGP changed, so the two
-// tables are directly comparable.
-//
-// The bail is a LENGTH-ALIGNMENT decision, not a modelling one: the per-
-// coordinate `Independent` prior it would need must match the full outer ρ
-// vector, and a moving κ appends trailing coordinates the rewrite cannot count.
-// So the families that still carry the `Normal{0,3}` cap are exactly the ones
-// where nobody decided they should — and exactly the ones where the λ=∞ rail
-// certificate is needed and provably cannot work (#2450, #2348, #2392). That
-// half is unaffected by the #2463 gate: with the base prior UNSET, which is what
-// every shipped path now passes, the bail returns `Flat` and carries no cap at
-// all. It bites only when a caller configures one, which is now their choice.
-//
-// Measurement only: it prints and asserts only that the measurement was taken.
 #[cfg(test)]
 mod zz_measure_2450_rho_prior_criterion_tests {
     use super::*;
@@ -249,7 +211,7 @@ mod zz_measure_2450_rho_prior_criterion_tests {
     }
 
     const FLAT: fn() -> gam_problem::RhoPrior = || gam_problem::RhoPrior::Flat;
-    const SHIPPED: fn() -> gam_problem::RhoPrior = || gam_problem::RhoPrior::Normal {
+    const CONFIGURED: fn() -> gam_problem::RhoPrior = || gam_problem::RhoPrior::Normal {
         mean: 0.0,
         sd: 3.0,
     };
@@ -291,7 +253,7 @@ mod zz_measure_2450_rho_prior_criterion_tests {
 
         println!(
             "[2450] paired A/B/C over FitOptions::rho_prior at one SHA. \
-             REML = Flat; MAP = Normal{{0,3}} (shipped default); \
+             REML = Flat; CONFIGURED = Normal{{0,3}}; \
              ABSURD = Normal{{-6,0.25}} (the discriminator)."
         );
         println!(
@@ -331,7 +293,7 @@ mod zz_measure_2450_rho_prior_criterion_tests {
                     y[i] = truth_values[i] + NOISE_SD * stream.next_normal();
                 }
                 let flat = run_arm(&data, &y, &truth_values, &cell.spec, FLAT());
-                let map = run_arm(&data, &y, &truth_values, &cell.spec, SHIPPED());
+                let map = run_arm(&data, &y, &truth_values, &cell.spec, CONFIGURED());
                 let absurd = run_arm(&data, &y, &truth_values, &cell.spec, ABSURD());
                 // A replicate counts only when every arm produced a fit;
                 // dropping one arm alone would break the pairing.
@@ -392,6 +354,14 @@ mod zz_measure_2450_rho_prior_criterion_tests {
                 } else {
                     "IS OVERRIDDEN before the fit (bitwise identical under an absurd prior)"
                 }
+            );
+            assert!(
+                honored,
+                "#2463: {family} n={n} frequency={frequency} accepted an explicit rho prior \
+                 but returned bitwise-identical rho under Normal{{-6,0.25}} and Flat",
+                family = cell.family,
+                n = cell.n,
+                frequency = cell.frequency,
             );
         }
         assert!(

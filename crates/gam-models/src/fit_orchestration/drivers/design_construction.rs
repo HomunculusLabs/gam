@@ -2758,34 +2758,18 @@ fn relax_smoothing_rho_prior(
 ) -> gam_spec::RhoPrior {
     use gam_terms::basis::BasisMetadata;
     let base = &options.rho_prior;
-    // A caller-built `Independent` prior is per-coordinate already: honored as
-    // written, never rewritten.
+    // Caller authority is the first invariant at this seam (#2463). `Flat`
+    // is the SPEC default and authorizes the library to synthesize only the
+    // coordinate-specific identifiability policies below. Every other variant
+    // is an explicit modelling choice; replacing it with `Flat`, a widened
+    // Normal, or a null-space PC prior silently changes the criterion.
     //
-    // `Flat` deliberately does NOT short-circuit here, and that is the #2450
-    // polarity inversion. This function was written when the base prior was a
-    // `Normal { 0, 3 }` cap on every coordinate, so its job was to REMOVE the
-    // cap wherever it had been measured harmful — #1266, #1271, #1867, one
-    // family at a time. With `RhoPrior::default()` now `Flat` (SPEC: the
-    // deterministic criterion is REML/LAML, never MAP), the base carries no cap
-    // and the job inverts: what remains is to ADD the per-coordinate
-    // stabilisers this function already derives — the #1089/#1392
-    // under-determined widening and the #1476 null-space degeneracy breaker —
-    // to a criterion that is otherwise pure REML. Short-circuiting on `Flat`
-    // would skip that policy entirely and silently drop both.
-    //
-    // The change of polarity is also what retires the length-safety bail below
-    // as a *criterion* decision. That bail exists because a per-coordinate
-    // `Independent` prior must align 1:1 with the outer ρ vector, and a moving
-    // log-κ or a SAS/mixture link appends trailing coordinates this function
-    // cannot count. Under the old base that bail did not merely decline to
-    // relax — it left the FULL `Normal { 0, 3 }` cap in place, on exactly the
-    // spatial families where the λ→∞ rail certificate is needed and where a
-    // prior gradient surviving into the tail makes `ĉ = −e^ρ ∂V/∂ρ` divergent,
-    // so no rail can ever be certified (#2450, #2348, #2392). Nobody decided
-    // those families should keep a cap; they kept it because the removal
-    // machinery could not address them. A `Flat` base is length-agnostic, so
-    // the bail now returns the right criterion instead of the wrong one.
-    if matches!(base, gam_spec::RhoPrior::Independent(_)) {
+    // This also covers `Independent`: it is already coordinate-specific and
+    // must pass through byte-for-byte. A configured scalar Normal / Gamma / PC
+    // prior is equally authoritative even though it broadcasts to every outer
+    // coordinate. The relaxations remain active only for the unset/default
+    // `Flat` case that originally needed library policy.
+    if !matches!(base, gam_spec::RhoPrior::Flat) {
         return base.clone();
     }
     // AN EXPLICITLY CONFIGURED PRIOR IS HONOURED AS WRITTEN (#2463).
