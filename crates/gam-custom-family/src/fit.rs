@@ -2154,7 +2154,21 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     let certified_outer = match outer_result {
         Ok(outer) => outer,
         Err(e) => {
-            let rho_checkpoint = obj
+            // `rho_checkpoint` has ONE owner: `EstimationError::RemlDidNotConverge`
+            // carries the best iterate and tells the caller to resume the outer
+            // search there, and every other emission of the name in this file is
+            // the ρ its fit is actually at (`rho_star`, or the caller's fixed ρ).
+            // The warm cache is not that quantity — it is overwritten at EVERY
+            // objective evaluation, including seed-screening probes and rejected
+            // trial steps, so on a failed run it holds wherever the search died.
+            // Emitting it under the same name minted a second definition, and the
+            // two do diverge: on the #2501 by-group seed-3 refusal both appear in
+            // ONE message, agreeing on seven of eight coordinates and differing by
+            // a full 18.0 on the eighth, because the last evaluation was a
+            // near-floor screening probe while the best iterate sat interior.
+            // `{e}` already carries the optimizer-owned checkpoint; this reports
+            // the cache as what it is.
+            let last_evaluated_rho = obj
                 .state
                 .warm_cache
                 .as_ref()
@@ -2171,7 +2185,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 context: "fit_custom_family outer smoothing",
                 reason: format!(
                     "outer smoothing optimization failed certified-fit validation after exhausting strategy fallbacks: \
-                     {e}; rho_checkpoint={rho_checkpoint:?}; no fit was assembled.\
+                     {e}; last_evaluated_rho={last_evaluated_rho:?}; no fit was assembled.\
                      {last_error_detail}"
                 ),
             });
