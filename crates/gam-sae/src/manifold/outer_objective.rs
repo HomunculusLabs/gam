@@ -599,7 +599,13 @@ pub struct SaeManifoldOuterObjective {
 /// cgroup-aware host budget as the SAE streaming plan. Reaching it is an
 /// explicit feasibility error from `BasinBundle::admit`, not an inexact envelope.
 fn basin_bundle_member_capacity(term: &SaeManifoldTerm) -> usize {
-    let (host_budget, host_available) = super::sae_host_in_core_budget_bytes();
+    // #2560 — derive from the reading the term captured once at construction,
+    // not from a fresh probe. Available memory moves with every other process
+    // on the box, and this function previously probed twice: the plan below was
+    // sized against one reading and the capacity against another, so a
+    // neighbouring allocation between them changed the answer.
+    let host_available = term.host_available_bytes;
+    let host_budget = super::sae_host_in_core_budget_from_available(host_available);
     let total_basis: usize = term.atoms.iter().map(SaeManifoldAtom::basis_size).sum();
     let d_max = term
         .atoms
@@ -625,7 +631,6 @@ fn basin_bundle_member_capacity(term: &SaeManifoldTerm) -> usize {
     if !plan.direct_logdet_admitted() {
         return 0;
     }
-    let (host_budget, _) = super::sae_host_in_core_budget_bytes();
     let bytes_per_saved_state = plan
         .estimated_direct_peak_bytes
         .max(plan.estimated_full_batch_bytes)

@@ -423,7 +423,11 @@ impl SaeManifoldTerm {
         // structure avoids an additional p² factor). TopK has an exact sparse
         // representation and never enters this check.
         if row_layout.is_none() {
-            let budget_bytes = sae_host_in_core_budget_bytes().0;
+            // #2560 — the term's own captured host reading, so this refusal
+            // boundary is a property of the fit rather than of the box's
+            // momentary free memory.
+            let budget_bytes =
+                sae_host_in_core_budget_from_available(self.host_available_bytes);
             self.require_exact_dense_assignment_budget(budget_bytes)?;
         }
         // #974 likelihood-whitening seam. The single per-row decision: when the
