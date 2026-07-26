@@ -104,11 +104,21 @@ fn parse_cycles(err: &str) -> Option<usize> {
     rest[..end].trim().parse::<usize>().ok()
 }
 
-/// The `rho_checkpoint=[...]` vector carried in the refusal certificate (the
+/// The `rho_checkpoint = [...]` vector carried in the refusal certificate (the
 /// best iterate the outer search reached), returned verbatim including brackets.
+///
+/// `EstimationError::RemlDidNotConverge` — the certificate this doc names — renders
+/// the field with spaces around the `=`. The no-space spelling this used to anchor
+/// on belonged to a caller-side field that carried the LAST EVALUATED ρ, a
+/// screening probe or rejected trial step rather than the best iterate, so the
+/// probe was reading a different quantity from the one it reports (#2501; the
+/// caller-side field is now `last_evaluated_rho`). Accept either spelling.
 fn parse_rho_checkpoint(err: &str) -> Option<String> {
-    let anchor = err.find("rho_checkpoint=[")? + "rho_checkpoint=".len();
-    let rest = &err[anchor..];
+    let anchor = err.find("rho_checkpoint")? + "rho_checkpoint".len();
+    let rest = err[anchor..].trim_start().strip_prefix('=')?.trim_start();
+    if !rest.starts_with('[') {
+        return None;
+    }
     let end = rest.find(']')?;
     Some(rest[..=end].to_string())
 }
