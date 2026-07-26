@@ -441,10 +441,6 @@ pub struct OuterProbeTelemetry {
     /// infeasible objective value: collapse remains a structural ledger verdict
     /// while penalized quasi-Laplace remains the sole optimized criterion.
     pub infeasible_criterion_evals: usize,
-    /// #2234 — cost-only probes whose capped/forced inner solve exhausted its
-    /// budget and were RESCUED by a one-shot retry at the accepted-point drive
-    /// (full budget) instead of being misclassified as the infeasibility wall.
-    pub budget_rescued_value_probes: usize,
     /// Basin-bundle lower-envelope telemetry (see [`BasinBundle`]). The outer
     /// value lanes evaluate `V*(ρ) = min_b V_b(ρ)` over a memory-admitted bundle of saved
     /// inner basins instead of the single hysteretic warm-start trajectory
@@ -495,14 +491,15 @@ impl OuterProbeTelemetry {
 ///
 /// The generic outer line search evaluates its cost probes through the
 /// value-only lane (`eval_with_order(Value)` / `eval_cost` →
-/// `evaluate_envelope_value_probe` → `evaluate_value_probe_with_drive`), each of which drives the FULL
-/// inner `(t, β)` Newton solve to KKT convergence at the probed ρ — starting
-/// from the accepted basin — and then RESTORES the accepted term, discarding
-/// that converged state. The accepted point of a successful line search is
-/// always the ρ of its last successful value probe, and the engine then
-/// re-evaluates it through the gradient lane (`eval`), which historically
-/// re-ran the identical deterministic inner convergence from the identical
-/// accepted basin — a full redundant inner solve per outer iteration.
+/// `authoritative_envelope_value_probe` →
+/// `evaluate_authoritative_value_probe`), each of which drives the FULL inner
+/// `(t, β)` Newton solve to KKT convergence at the probed ρ — starting from the
+/// accepted basin — and then RESTORES the accepted term, discarding that
+/// converged state. The accepted point of a successful line search is always
+/// the ρ of its last successful value probe, and the engine then re-evaluates
+/// it through the gradient lane (`eval`), which historically re-ran the
+/// identical deterministic inner convergence from the identical accepted
+/// basin — a full redundant inner solve per outer iteration.
 ///
 /// This handoff retains the probe's converged term (a move, not a clone: it is
 /// swapped out against the restored saved term) keyed by the BITWISE probed ρ.
@@ -528,15 +525,6 @@ struct ProbeConvergedHandoff {
     /// evaluation still treats it as a warm start and independently checks the
     /// same KKT stationarity condition before pricing value or gradient.
     term: SaeManifoldTerm,
-}
-
-/// How a criterion evaluation drives the inner `(t, β)` solve.
-#[derive(Clone, Copy)]
-enum ProbeInnerDrive {
-    /// Historical path: hand the whole inner drive to
-    /// `penalized_quasi_laplace_criterion_with_refine_policy` (accepted-basin evaluations, the
-    /// cross-seed ranking / EFS value lane, streaming fits).
-    Criterion { refine_progress_extension: bool },
 }
 
 /// #2231 Inc-B (stage 1) — crosscoder block-relevance PRICING state.
@@ -674,7 +662,7 @@ pub struct SaeManifoldOuterObjective {
     /// can only LOWER the envelope, so discovery strictly improves the criterion
     /// surface. Cleared with `probe_converged_handoff` at every accepted-basin /
     /// row-support seam; bypassed in the streaming and `inner_max_iter == 0`
-    /// freeze regimes (see `evaluate_envelope_value_probe`).
+    /// freeze regimes (see `authoritative_envelope_value_probe`).
     basin_bundle: BasinBundle<SaeManifoldTerm>,
     /// #2235 — outer termination ledger (verdicts: engine-stopped / incumbent-
     /// stationary / budget-exhausted). Freezes the criterion once a verdict
@@ -2450,36 +2438,25 @@ impl SaeManifoldOuterObjective {
         if matches { Some(handoff.term) } else { None }
     }
 
-    /// Shared cost path: evaluate the penalized quasi-Laplace criterion at `rho_flat`, updating
-    /// the cached ρ / loss and (optionally) priming the inner solve from a
-    /// seeded β. Returns `(cost, β̂)`.
-    ///
-    /// `refine_progress_extension = false` is a bounded provisional policy:
-    /// it may stop before the idempotent inner fixed point and therefore must
-    /// never supply a finite value that selects an estimator. Every production
-    /// outer lane that ranks, accepts, or certifies a finite value passes `true`.
-    pub(crate) fn evaluate_with_refine_policy(
+    /// Evaluate the authoritative penalized quasi-Laplace criterion at
+    /// `rho_flat`, updating the cached ρ / loss and optionally priming the inner
+    /// solve from a seeded β. Every finite production value is driven to the
+    /// same idempotent fixed point differentiated by the analytic gradient; the
+    /// raw reduced-budget term policy is intentionally not exposed through the
+    /// outer objective. Returns `(cost, β̂)`.
+    pub(crate) fn evaluate_authoritative_criterion(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
-        refine_progress_extension: bool,
     ) -> Result<(f64, Array1<f64>), String> {
-        self.evaluate_with_inner_drive(
-            rho_flat,
-            ProbeInnerDrive::Criterion {
-                refine_progress_extension,
-            },
-            false,
-        )
+        self.evaluate_authoritative_inner(rho_flat, false)
     }
 
-    /// As [`Self::evaluate_with_refine_policy`], but with the inner `(t, β)`
-    /// drive selected by [`ProbeInnerDrive`]. Everything around the inner drive —
-    /// the probe handoff install, seeded-β warm start, amortized latent warm
-    /// start, and collapse ledger — is shared.
-    fn evaluate_with_inner_drive(
+    /// Shared authoritative inner drive. Everything around the full-refine
+    /// criterion — probe handoff installation, seeded-β and amortized latent
+    /// warm starts, and the collapse ledger — is shared across outer lanes.
+    fn evaluate_authoritative_inner(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
-        drive: ProbeInnerDrive,
         basin_installed: bool,
     ) -> Result<(f64, Array1<f64>), String> {
         // Any new criterion drive may change the installed inner state. A fit
@@ -2543,23 +2520,19 @@ impl SaeManifoldOuterObjective {
                 .warm_start_latents_from_amortized_encoder(self.target.view(), &rho);
             self.record_warm_start(warm_start_outcome)?;
         }
-        let criterion = match drive {
-            ProbeInnerDrive::Criterion {
-                refine_progress_extension,
-            } => self
-                .term
-                .penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
-                    self.target.view(),
-                    &rho,
-                    self.registry.as_ref(),
-                    self.inner_max_iter,
-                    self.learning_rate,
-                    self.ridge_ext_coord,
-                    self.ridge_beta,
-                    refine_progress_extension,
-                    self.surrogate_lane.as_mut(),
-                ),
-        };
+        let criterion = self
+            .term
+            .penalized_quasi_laplace_criterion_with_refine_policy_and_lane(
+                self.target.view(),
+                &rho,
+                self.registry.as_ref(),
+                self.inner_max_iter,
+                self.learning_rate,
+                self.ridge_ext_coord,
+                self.ridge_beta,
+                true,
+                self.surrogate_lane.as_mut(),
+            );
         let (penalized_quasi_laplace_cost, loss) = match criterion {
             Ok(evaluated) => evaluated,
             Err(SaeCriterionError::VanishedAtoms(atoms)) => {
@@ -2643,7 +2616,7 @@ impl SaeManifoldOuterObjective {
         self.fit_verdict = None;
         self.terminal_penalized_quasi_laplace_criterion = None;
         let rho_state = self.baseline_rho.from_flat(rho_flat.clone())?;
-        let (criterion, _) = self.evaluate_with_refine_policy(rho_flat, true)?;
+        let (criterion, _) = self.evaluate_authoritative_criterion(rho_flat)?;
         let jacobian = self.block_jacobian(&rho_state);
         let cost = criterion + jacobian;
         if !cost.is_finite() {
@@ -2665,20 +2638,18 @@ impl SaeManifoldOuterObjective {
     /// Evaluate a value-only rho probe without committing the inner basin it
     /// reaches. The generic line search may reject this point, so its solved
     /// coordinates/decoder must not become the warm-start state for later
-    /// probes or for the accepted iterate. The inner `(t, β)` drive is selected
-    /// by the caller. Estimator-selecting outer lanes pass the full fixed-point
-    /// criterion drive; bounded provisional drives may only support diagnostics
-    /// whose values cannot rank, accept, or certify an estimator.
-    fn evaluate_value_probe_with_drive(
+    /// probes or for the accepted iterate. This path exposes no work-policy
+    /// switch: a finite value is always the authoritative fixed-point
+    /// criterion, never a reduced-budget iterate.
+    fn evaluate_authoritative_value_probe(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
-        drive: ProbeInnerDrive,
     ) -> Result<(f64, Array1<f64>), String> {
         let saved_term = self.term.clone();
         let saved_rho = self.current_rho.clone();
         let saved_loss = self.last_loss.clone();
         let saved_seeded_beta = self.seeded_beta.clone();
-        let result = self.evaluate_with_inner_drive(rho_flat, drive, false);
+        let result = self.evaluate_authoritative_inner(rho_flat, false);
         // #2080 (a) — instead of discarding the probe's converged inner state,
         // hand it off (a move: swapped against the restored `saved_term`, no
         // extra clone) to the next evaluation at this exact ρ — the line-search
@@ -2718,69 +2689,34 @@ impl SaeManifoldOuterObjective {
     /// 2. **Seed.** On the first envelope evaluation the bundle admits the current
     ///    accepted basin (`self.term`).
     /// 3. **Discovery.** Run the ONE historical warm-start probe from the accepted
-    ///    basin (`evaluate_value_probe_with_drive`). It consumes the seeded-β /
+    ///    basin (`evaluate_authoritative_value_probe`). It consumes the seeded-β /
     ///    amortized-encoder warm start, parks its converged term in the probe
     ///    handoff, and — crucially — is the mechanism by which a basin JUMP is
     ///    discovered (its warm start can cross a boundary at a far ρ).
     /// 4. **Members.** Re-converge every saved basin from its OWN state through
-    ///    the caller-selected criterion drive (`basin_installed = true`: no
-    ///    warm-start and no seed). Estimator-selecting callers use the full
-    ///    idempotent fixed-point drive for every candidate basin.
+    ///    the authoritative value-probe drive (`basin_installed = true`: no
+    ///    warm-start, no seed) — members near their optimum re-converge in a
+    ///    round or two.
     /// 5. **Admit + envelope.** Admit the discovery basin (new basin ⇒ grow;
     ///    duplicate ⇒ keep the better value). The envelope value is the bundle
-    ///    argmin over {members ∪ discovery}; the converged argmin basin state
-    ///    is installed as the probe handoff so the subsequent gradient eval
-    ///    prices THAT basin (envelope theorem). Admission can only LOWER the
-    ///    envelope. Retention is bounded only by memory admission; a work-count
-    ///    cap would make the envelope inexact.
-    /// #2234 stall fix — a cost-only probe whose inner solve exhausts its CAPPED
-    /// budget is an UNFINISHED COMPUTATION, not undefined quasi-Laplace score.
-    /// The same is true when a criterion drive sees a non-PD
-    /// per-row factor BEFORE inner KKT stationarity: that factor describes the
-    /// current warm-start iterate, not the probed ρ. The full accepted-point
-    /// drive can cross that transient indefinite state and reach a finite
-    /// stationary factor (the linear-block seed that produced an infeasible
-    /// value probe versus a finite analytic evaluation at the identical ρ).
+    ///    argmin over {members ∪ discovery}; the argmin basin's converged state is
+    ///    installed as the probe handoff so the subsequent gradient eval prices
+    ///    THAT basin (envelope theorem). Admission can only LOWER the envelope.
     ///
-    /// Complete either provisional result once at the accepted-point drive.
-    /// Only a full-drive refusal reaches the caller's infeasible/hard-error
-    /// classification, so genuinely non-PD stationary factors retain their
-    /// infeasibility semantics while transient pre-KKT indefiniteness never
-    /// masquerades as a property of the probed ρ.
-    fn value_probe_with_budget_rescue(
+    /// Every discovery/member evaluation uses the same authoritative full-refine
+    /// policy as the analytic gradient lane. Warm member states remain cheap in
+    /// realised iterations, but no finite reduced-budget iterate is an admissible
+    /// envelope value. Retention is bounded only by memory admission; a
+    /// work-count cap would make the envelope inexact.
+    fn authoritative_envelope_value_probe(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
-        drive: ProbeInnerDrive,
-    ) -> Result<(f64, Array1<f64>), String> {
-        match self.evaluate_envelope_value_probe(rho_flat, drive) {
-            Err(err)
-                if err.contains("inner solve did not converge at fixed ρ")
-                    || err.contains(
-                        "undamped criterion factorization hit a non-PD per-row H_tt block before KKT stationarity",
-                    ) =>
-            {
-                self.probe_telemetry.budget_rescued_value_probes += 1;
-                self.evaluate_envelope_value_probe(
-                    rho_flat,
-                    ProbeInnerDrive::Criterion {
-                        refine_progress_extension: true,
-                    },
-                )
-            }
-            outcome => outcome,
-        }
-    }
-
-    fn evaluate_envelope_value_probe(
-        &mut self,
-        rho_flat: ArrayView1<'_, f64>,
-        drive: ProbeInnerDrive,
     ) -> Result<(f64, Array1<f64>), String> {
         // (1) Bypass: streaming/matrix-free (no dense per-basin factor to
         // re-converge) or the freeze contract (verbatim reuse). Byte-for-byte
         // historical single trajectory.
         if self.inner_max_iter == 0 || !self.term.streaming_plan()?.direct_logdet_admitted() {
-            return self.evaluate_value_probe_with_drive(rho_flat, drive);
+            return self.evaluate_authoritative_value_probe(rho_flat);
         }
 
         // (2) Seed the bundle with the accepted entry basin on first use. The
@@ -2794,7 +2730,7 @@ impl SaeManifoldOuterObjective {
 
         // (3) Discovery trajectory — the historical single warm-start probe. Sets
         // the probe handoff (when finite) to its converged term at this exact ρ.
-        let discovery = self.evaluate_value_probe_with_drive(rho_flat, drive);
+        let discovery = self.evaluate_authoritative_value_probe(rho_flat);
         let discovery_cost = match &discovery {
             Ok((cost, _)) if !Self::probe_value_is_infeasible(*cost) => Some(*cost),
             _ => None,
@@ -2809,7 +2745,7 @@ impl SaeManifoldOuterObjective {
         // the per-member inner drive; restored immediately after.
         let mut bundle = std::mem::replace(&mut self.basin_bundle, BasinBundle::new(0));
         let member_eval = bundle.evaluate(|state: &SaeManifoldTerm| {
-            let (res, converged) = self.converge_member_criterion(rho_flat, state, drive);
+            let (res, converged) = self.converge_member_criterion(rho_flat, state);
             res.map(|value| (converged, value))
         });
 
@@ -2881,17 +2817,17 @@ impl SaeManifoldOuterObjective {
         }
     }
 
-    /// Re-converge one saved basin `member` at `rho_flat` through the cheap
-    /// value-probe `drive`, returning `(criterion, converged_term)`. PURE w.r.t.
-    /// `self`: `term`, `current_rho`, `last_loss`, and `seeded_beta` are all saved
-    /// and restored. `basin_installed = true` so the installed converged state is
-    /// NOT re-warm-started (no amortized encoder entry heuristic) and does NOT
+    /// Re-converge one saved basin `member` at `rho_flat` through the
+    /// authoritative full-refine drive, returning `(criterion,
+    /// converged_term)`. PURE w.r.t. `self`: `term`, `current_rho`,
+    /// `last_loss`, and `seeded_beta` are all saved and restored.
+    /// `basin_installed = true` so the installed converged state is NOT
+    /// re-warm-started (no amortized encoder entry heuristic) and does NOT
     /// consume the pending β seed (the seed belongs to the discovery trajectory).
     fn converge_member_criterion(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
         member: &SaeManifoldTerm,
-        drive: ProbeInnerDrive,
     ) -> (Result<f64, String>, SaeManifoldTerm) {
         let saved_term = std::mem::replace(&mut self.term, member.clone());
         let saved_rho = self.current_rho.clone();
@@ -2899,7 +2835,7 @@ impl SaeManifoldOuterObjective {
         // Members must not touch the pending seed — take it out for the duration.
         let saved_seeded_beta = self.seeded_beta.take();
         let res = self
-            .evaluate_with_inner_drive(rho_flat, drive, true)
+            .evaluate_authoritative_inner(rho_flat, true)
             .map(|(cost, _beta)| cost);
         let converged = std::mem::replace(&mut self.term, saved_term);
         self.current_rho = saved_rho;
@@ -3864,22 +3800,18 @@ impl OuterObjective for SaeManifoldOuterObjective {
 
     fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
         self.check_cancelled()?;
-        // Value-only cross-seed/EFS comparisons still SELECT the estimator.
-        // They therefore price the same fully converged penalized quasi-Laplace
-        // basin envelope as accepted gradient and line-search evaluations. A
-        // bounded provisional value is not a cheaper representation of this
-        // function: if it participates in ranking, its unfinished inner state
-        // changes the estimator. Work policy may change when a probe refuses,
-        // never the finite value used for selection (#2510).
+        // Value-only cross-seed ranking / EFS path (seed screening, final
+        // selection, and backtracking). Although no derivative is consumed at
+        // this iterate, its finite value selects a seed/state and therefore
+        // prices the same fully converged `f(ρ)` as the analytic gradient lane.
+        // A reduced-budget finite iterate would define a second objective; only
+        // an explicit refusal may represent unfinished computation.
         self.probe_telemetry.criterion_calls += 1;
-        // #2230/#2087/#2510 — descend V*(rho)=min_b V_b(rho) through the full
-        // fixed-point drive. The envelope owns the streaming/freeze bypass.
-        match self.value_probe_with_budget_rescue(
-            rho.view(),
-            ProbeInnerDrive::Criterion {
-                refine_progress_extension: true,
-            },
-        ) {
+        // #2230/#2087 — descend the basin lower envelope V*(ρ)=min_b V_b(ρ) here
+        // instead of the single hysteretic warm-start trajectory. The shared
+        // authoritative drive is also used by line-search and gradient handoff
+        // repair; the envelope owns streaming / freeze bypass semantics.
+        match self.authoritative_envelope_value_probe(rho.view()) {
             Ok((cost, _beta)) => {
                 // #2231 Inc-B — price the block-relevance Jacobian into the SAME
                 // cost that flows to `termination.record` (0 for a plain SAE).
@@ -3942,9 +3874,10 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 .map_err(EstimationError::RemlOptimizationFailed)?
                 .direct_logdet_admitted()
         {
-            // Seed validation and streaming EFS selection return a finite value
-            // only at the same idempotent fixed point as every dense outer lane.
-            let (cost, _beta_hat) = match self.evaluate_with_refine_policy(rho.view(), true) {
+            // Seed validation still selects whether this fit exists, so its
+            // streaming value must be the same fully converged fixed point used
+            // by every dense ranking/value lane.
+            let (cost, _beta_hat) = match self.evaluate_authoritative_criterion(rho.view()) {
                 Ok(evaluated) => evaluated,
                 // A recoverable refusal means the streaming quasi-Laplace score is
                 // undefined at this ρ. Return the objective contract's typed
@@ -3996,12 +3929,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 // at this rho. The selector owns dense discovery/member
                 // reconvergence and the streaming/freeze bypass, and every
                 // finite outcome must park its exact-rho argmin handoff.
-                let probe_cost = match self.value_probe_with_budget_rescue(
-                    rho.view(),
-                    ProbeInnerDrive::Criterion {
-                        refine_progress_extension: true,
-                    },
-                ) {
+                let probe_cost = match self.authoritative_envelope_value_probe(rho.view()) {
                     Ok((cost, _beta)) => cost,
                     Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
                         self.probe_telemetry.record_refusal_kind(&err);
@@ -4040,7 +3968,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         }
         // #1154 — warm-start the inner latent coords from the amortized encoder
         // built on the running dictionary at this ρ (Design A), exactly as the
-        // value-probe lane (`evaluate_with_refine_policy`) does. The accepted
+        // value-probe lane (`evaluate_authoritative_criterion`) does. The accepted
         // iterate's inner solve then refines from the cheap one-mat-vec seed to
         // the SAME stationary point, so the exact penalized quasi-Laplace λ-gradient computed below
         // is untouched — the warm-start changes only the basin entry, never the
@@ -4154,7 +4082,7 @@ impl OuterObjective for SaeManifoldOuterObjective {
         // by the outer BFGS Armijo line search) MUST return a cost whose gradient
         // is the gradient we return: the consistent pair `(f, ∇f)` for the pure
         // penalized quasi-Laplace criterion — the SAME criterion every value/ranking/EFS lane prices
-        // (one coherent objective; see `evaluate_with_inner_drive`). Collapse was
+        // (one coherent objective; see `evaluate_authoritative_inner`). Collapse was
         // recorded above as a structural verdict and leaves this value unchanged.
         // #2231 Inc-B — price the block Jacobian into the gradient lane's cost so
         // the value it records matches the value/ranking/EFS lanes (0 for a plain
@@ -4219,18 +4147,16 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 // analytic-sample value"). Price through the SAME `Criterion`
                 // drive the GRADIENT lane (`eval` →
                 // `penalized_quasi_laplace_criterion_with_cache`) and the outer
-                // certification use — the FULL-refine budget
-                // (`refine_progress_extension = true`). `eval_cost` uses the
-                // same contract because cross-seed/EFS ranking also selects the
-                // estimator. The objective cannot depend on which caller asked
-                // for its value. `value_lane_prices_at_shared_fixed_point` and
-                // `outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_criterion`
-                // pin both value lanes against the accepted gradient sample.
-                let drive = ProbeInnerDrive::Criterion {
-                    refine_progress_extension: true,
-                };
-                let (cost, beta_hat) = match self.value_probe_with_budget_rescue(rho.view(), drive)
-                {
+                // certification use — the authoritative FULL-refine budget.
+                // Every value/ranking lane shares this authority: a coarse
+                // iterate ~1% off it (real scale, #2228) makes every step fail
+                // Armijo (StepSizeTooSmall), and using that iterate to rank seeds
+                // selects against a different function. At small n both budgets
+                // reach the fixed point so this is a no-op (tier0 unchanged); the
+                // regression test
+                // `value_lane_prices_at_shared_fixed_point` pins the invariant so a
+                // future rewrite reintroducing `false` here goes red.
+                let (cost, beta_hat) = match self.authoritative_envelope_value_probe(rho.view()) {
                     Ok(evaluated) => evaluated,
                     // A recoverable non-PD/non-converged probe has undefined
                     // quasi-Laplace score. `OuterEval::infeasible` is the

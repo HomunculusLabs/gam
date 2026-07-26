@@ -37,7 +37,7 @@ fn successful_evaluation_alone_cannot_mint_a_fit() {
         crate::assignment::AssignmentMode::softmax(1.0),
     );
     objective
-        .evaluate_with_refine_policy(seed.view(), true)
+        .evaluate_authoritative_criterion(seed.view())
         .expect("fixed-rho inner evaluation succeeds");
     let error = match objective.into_fitted() {
         Ok(_) => panic!("an evaluated but uncertified objective must not mint a fit"),

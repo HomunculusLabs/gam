@@ -1435,8 +1435,8 @@ fn zz_measure_2228_value_lane_budget_sweep() {
         let full =
             t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb);
         let full_secs = started.elapsed().as_secs_f64();
-        // COARSE budget (refine_progress_extension = false): the cheap ranking
-        // probe, which the fixture requires to be INADEQUATE at the same budget.
+        // COARSE budget (refine_progress_extension = false): the raw diagnostic
+        // policy, which the fixture requires to be inadequate at the same budget.
         // If raising `imi` ever made this one adequate too, the test's
         // coarse-vs-full premise would go vacuous, so sweep both together.
         let mut t_coarse = term.clone();
@@ -1472,8 +1472,9 @@ fn zz_measure_2228_value_lane_budget_sweep() {
 /// (`penalized_quasi_laplace_criterion_with_cache`, `refine_progress_extension =
 /// true`); the outer certification samples that same root. In the
 /// ill-conditioned wide-`p` / over-smoothed regime a COARSE probe
-/// (`refine_progress_extension = false`, the cheap ranking budget) sits ~1% off
-/// that root, so (a) no step reduces the coarsely-ranked value while pointing
+/// (`refine_progress_extension = false`, a raw reduced-budget policy that no
+/// outer ranking lane may consume) sits ~1% off that root, so (a) no step
+/// reduces the coarsely-ranked value while pointing
 /// down the analytic gradient — BFGS backtracks to `StepSizeTooSmall` at
 /// iteration 1 — and (b) the shipped coarse terminal value fails the outer cert
 /// value-agreement gate ("cost-only value disagrees with analytic-sample value",
@@ -1518,14 +1519,12 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     //       STRONGER form of the same statement, since no value at all is further
     //       from the root than any finite disagreement.
     //
-    // (b) is the DESIGNED coarse-probe behaviour, not a defect: per #2080 a cheap
-    // ranking probe returns a typed verdict instead of grinding its refine budget
-    // (that grind was the wide-`p` outer hang). Production never consumes the
-    // coarse criterion unguarded — `eval_cost`'s coarse drive is wrapped in
-    // `value_probe_with_budget_rescue`, which retries on exactly this refusal with
-    // `refine_progress_extension = true` — so a refusal here never reaches a
-    // ranked comparison in the fitted path. This assertion is the only caller that
-    // sees the raw internal.
+    // (b) is the DESIGNED raw coarse-policy behaviour, not a defect: per #2080 a
+    // reduced-budget probe may return a typed verdict instead of grinding. No
+    // production outer value/ranking entry point consumes that policy: they all
+    // route through `authoritative_envelope_value_probe`, whose full-refine drive
+    // either reaches the shared fixed point or refuses. This assertion is the
+    // only caller that observes the raw coarse policy.
     //
     // Landing in (b) makes the Value-lane invariant below STRICTLY harder to
     // satisfy, not easier: a Value lane wrongly rebuilt on the coarse budget would

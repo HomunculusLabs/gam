@@ -1011,20 +1011,16 @@ impl SaeManifoldTerm {
                     Ok(()) => {}
                     Err(err) if Self::is_undamped_evidence_row_non_pd(&err) => {
                         // #2080 — a non-PD per-row H_tt block means the undamped
-                        // Laplace log-det is UNDEFINED at this ρ: the ρ is
-                        // infeasible. For a PROBE (line-search value / FD /
-                        // seed-validation lane, `refine_progress_extension == false`)
-                        // the caller only needs a typed infeasible verdict so the
-                        // outer search steers back into the PD region — refining the
-                        // inner solve to try to CROSS the indefinite basin is the
-                        // accepted-iterate's job, not a probe's. Grinding the probe
-                        // refine budget (up to `4×inner_max_iter`, and historically
-                        // the accepted `16×/64×` via `penalized_quasi_laplace_criterion_with_cache`) on
-                        // every overshooting line-search / FD probe is exactly the
-                        // wide-`p` outer penalized quasi-Laplace hang (#2080). Return the typed refusal
-                        // after this single diagnostic factor pass;
-                        // `is_recoverable_value_probe_refusal` maps it to the finite
-                        // infeasibility wall.
+                        // Laplace log-det is undefined at this provisional inner
+                        // state. The raw reduced-budget policy
+                        // (`refine_progress_extension == false`) is retained only
+                        // for focused diagnostics: it returns a typed refusal
+                        // after this factor pass rather than grinding. Production
+                        // ranking, line-search, seed-validation, and accepted
+                        // lanes all use the full drive because any finite value
+                        // they return selects the estimator; that drive may cross
+                        // the transient indefinite state and only classifies the
+                        // converged fixed point.
                         if !refine_progress_extension {
                             return Err(format!(
                                 "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped evidence \

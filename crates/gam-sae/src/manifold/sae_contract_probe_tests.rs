@@ -987,85 +987,52 @@ fn ranking_and_gradient_lanes_match_bare_reml() {
         "both lanes must be finite: value={value_lane}, gradient={gradient_lane}"
     );
 
-    // The amortized warm-start fires on this fixture (the basin-warmup fix lets the
-    // Kantorovich gate certify unit-amplitude rows), so it shifts the inner-coord
-    // seed of the value/gradient lanes. To keep the lane-vs-bare comparisons an
-    // isolation of objective plumbing (not warm-start drift), each bare reference
-    // below is warm-started identically — the SAME `warm_start_latents_from_amortized_encoder`
-    // call the objective's `eval`/`eval_cost` apply — so the only remaining
-    // difference between a lane and its matched bare is the objective plumbing.
-
-    // Bare REML for the VALUE lane, computed on the SAME probe refine policy
-    // (`refine_progress_extension = false`) the value lane uses.
-    let bare_value = {
-        let mut probe = warmstart_test_objective_with_evaluator();
-        let target = probe.target.clone();
-        let rho_state = probe.baseline_rho.from_flat(rho_flat.view()).unwrap();
-        // Warm-start identically to the value lane.
-        probe
-            .term
-            .warm_start_latents_from_amortized_encoder(target.view(), &rho_state)
-            .ok();
-        let (reml, _loss) = probe
-            .term
-            .penalized_quasi_laplace_criterion_with_refine_policy(
-                target.view(),
-                &rho_state,
-                None,
-                probe.inner_max_iter,
-                probe.learning_rate,
-                probe.ridge_ext_coord,
-                probe.ridge_beta,
-                false,
-            )
-            .expect("bare value-lane penalized quasi-Laplace criterion evaluates");
-        reml
-    };
-    let value_vs_bare = (value_lane - bare_value).abs();
-    assert!(
-        value_vs_bare < 1.0e-9,
-        "the ranking lane must report bare REML so selection and descent share \
-         one criterion: value_lane={value_lane}, bare={bare_value}, \
-         diff={value_vs_bare}"
-    );
-
-    // Bare REML for the GRADIENT lane, computed on the SAME full-refine path
-    // (`penalized_quasi_laplace_criterion_with_cache`, i.e. `refine_progress_extension = true`)
-    // the gradient lane uses. The gradient lane must EQUAL this (it carries NO
-    // consistency or collapse fold), so its (cost, ∇f) pair
-    // describes one function — the #1206 contract for BFGS Armijo. (The
-    // gradient-lane and value-lane bares may differ by the refine policy, so
-    // each lane is checked against its OWN matched bare.)
-    let bare_grad = {
-        let mut probe = warmstart_test_objective_with_evaluator();
-        let target = probe.target.clone();
-        let rho_state = probe.baseline_rho.from_flat(rho_flat.view()).unwrap();
-        // Warm-start identically to the gradient lane.
-        probe
-            .term
-            .warm_start_latents_from_amortized_encoder(target.view(), &rho_state)
-            .ok();
-        let (reml, _loss, _cache) = probe
-            .term
+    // `eval` leaves the basin-envelope argmin installed in `objective_grad.term`.
+    // Price that exact selected state once more through the bare term criterion:
+    // this isolates objective plumbing (block Jacobian / diagnostic folds) from
+    // basin selection. Constructing a fresh bare term would instead price the
+    // historical single warm-start trajectory and recreate the route split this
+    // contract exists to forbid.
+    let bare_shared = {
+        let mut selected_term = objective_grad.term.clone();
+        let target = objective_grad.target.clone();
+        let rho_state = objective_grad
+            .baseline_rho
+            .from_flat(rho_flat.view())
+            .unwrap();
+        let (reml, _loss, _cache) = selected_term
             .penalized_quasi_laplace_criterion_with_cache(
                 target.view(),
                 &rho_state,
-                None,
-                probe.inner_max_iter,
-                probe.learning_rate,
-                probe.ridge_ext_coord,
-                probe.ridge_beta,
+                objective_grad.registry.as_ref(),
+                objective_grad.inner_max_iter,
+                objective_grad.learning_rate,
+                objective_grad.ridge_ext_coord,
+                objective_grad.ridge_beta,
             )
-            .expect("bare gradient-lane penalized quasi-Laplace criterion evaluates");
+            .expect("selected envelope state re-prices through the bare criterion");
         reml
     };
-    let gradient_vs_bare = (gradient_lane - bare_grad).abs();
+    let value_vs_bare = (value_lane - bare_shared).abs();
+    assert!(
+        value_vs_bare < 1.0e-9,
+        "the ranking lane must report bare REML so selection and descent share \
+         one criterion: value_lane={value_lane}, bare={bare_shared}, \
+         diff={value_vs_bare}"
+    );
+
+    let gradient_vs_bare = (gradient_lane - bare_shared).abs();
     assert!(
         gradient_vs_bare < 1.0e-9,
         "the gradient lane must report bare REML (no consistency fold), so its \
          (cost, ∇f) pair is self-consistent for BFGS Armijo: \
-         gradient_lane={gradient_lane}, bare_grad={bare_grad}, \
+         gradient_lane={gradient_lane}, bare={bare_shared}, \
          diff={gradient_vs_bare}"
+    );
+    assert!(
+        (value_lane - gradient_lane).abs() < 1.0e-9,
+        "ranking and gradient lanes must price one fixed point: \
+         value={value_lane}, gradient={gradient_lane}"
     );
 }
 

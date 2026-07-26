@@ -2920,8 +2920,9 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
     // A fixed ρ at which all three lanes converge from the same fixture state.
     let rho_flat = warmstart_test_objective().baseline_rho.to_flat();
 
-    // Gradient lane (ValueAndGradient): the consistent `(f, ∇f)` pair. Its cost
-    // is the penalized quasi-Laplace basin-envelope criterion.
+    // Gradient lane (ValueAndGradient): the consistent `(f, ∇f)` pair. This
+    // objective is intentionally fresh, so its empty envelope bundle exercises
+    // first-use selection rather than inheriting a value-probe handoff.
     let mut grad_obj = warmstart_test_objective();
     let grad_cost = grad_obj
         .eval(&rho_flat)
@@ -2929,7 +2930,7 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
         .cost;
     assert!(
         grad_obj.probe_telemetry.basin_envelope_evals > 0,
-        "a fresh dense gradient objective must evaluate the authoritative basin envelope",
+        "a fresh dense gradient objective must seed and evaluate the authoritative envelope",
     );
 
     // Line-search lane (Value order): the BFGS/ARC probe. Post-fix this reports
@@ -2938,6 +2939,21 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
     let ls_cost = ls_obj
         .eval_with_order(&rho_flat, OuterEvalOrder::Value)
         .expect("line-search probe must converge on the warm-start fixture")
+        .cost;
+
+    // Re-evaluate through the now-pre-seeded envelope with a deliberately
+    // mismatched single-shot handoff. A one-bit-adjacent probe leaves a handoff
+    // that cannot match `rho_flat`; the following gradient evaluation must
+    // reconstruct the exact-rho handoff through the envelope selector. Fresh
+    // and pre-seeded bundle history must select the same mathematical objective.
+    let mut adjacent_rho = rho_flat.clone();
+    adjacent_rho[0] = f64::from_bits(adjacent_rho[0].to_bits() ^ 1);
+    ls_obj
+        .eval_with_order(&adjacent_rho, OuterEvalOrder::Value)
+        .expect("adjacent line-search probe must seed a mismatched-rho handoff");
+    let preseeded_grad_cost = ls_obj
+        .eval(&rho_flat)
+        .expect("pre-seeded gradient lane must reconstruct the exact-rho handoff")
         .cost;
 
     // Ranking lane (`eval_cost`): the cross-seed screen prices the same `f`.
@@ -2949,6 +2965,7 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
     // Armijo and cross-seed selection both price the criterion whose gradient
     // the accepted-point lane returns.
     assert_abs_diff_eq!(ls_cost, grad_cost, epsilon = 1.0e-10);
+    assert_abs_diff_eq!(preseeded_grad_cost, grad_cost, epsilon = 1.0e-10);
     assert_abs_diff_eq!(rank_cost, grad_cost, epsilon = 1.0e-10);
 }
 
