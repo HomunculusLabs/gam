@@ -277,7 +277,23 @@ fn conditioned_helpercost_matches_fittedobjective() {
         x[[i, 2]] = (1.7 * x1).sin();
     }
     let beta = array![0.8, -1.1, 0.55];
-    let y = x.dot(&beta);
+    // A NOISELESS response (`y = Xβ` exactly) makes this fixture degenerate for
+    // any path that reports standard errors: the residual is identically zero,
+    // so the dispersion φ = RSS/(n − edf) is zero and the coefficient covariance
+    // φ·H⁻¹ is the ZERO matrix up to roundoff. `se_from_covariance`'s negativity
+    // tolerance is purely RELATIVE (`max|entry| · 16n · ε`), so on a zero matrix
+    // it collapses to ~1e-30 and a −2.2e-16 diagonal — one ulp of 1.0, pure
+    // roundoff — is rejected as "materially negative". The fit then fails before
+    // this test reaches its own claim. That claim (the conditioned helper cost
+    // matches the fitted objective) has nothing to do with the noise level, so a
+    // small deterministic wobble keeps the fixture exactly reproducible while
+    // putting φ strictly above zero.
+    let y = Array1::from_iter(
+        x.dot(&beta)
+            .iter()
+            .enumerate()
+            .map(|(index, mean)| mean + 0.05 * (0.7 * index as f64).sin()),
+    );
     let w = Array1::<f64>::ones(n);
     let offset = Array1::<f64>::zeros(n);
 

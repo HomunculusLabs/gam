@@ -390,8 +390,14 @@ fn binomial_single_block(seed: u64) -> GlmFixture {
     }
 }
 
-/// Poisson / Gamma design with a strictly-positive response so the log
-/// link is well defined.
+/// CONTINUOUS strictly-positive design (Gamma, Tweedie) so the log link is
+/// well defined.
+///
+/// NOT for integer-only families: the response here is `μ·(1 ± 0.2)`, a real
+/// number. This previously read "Poisson / Gamma design", and the Poisson arm
+/// was wired to it on that description — which the Poisson density validly
+/// rejects ("response must be a finite non-negative integer … got 1.9668…").
+/// Integer-support families take [`count_response_single_block`].
 fn positive_response_single_block(seed: u64, intercept: f64) -> GlmFixture {
     let n = 180usize;
     let p = 7usize;
@@ -425,10 +431,10 @@ fn positive_response_single_block(seed: u64, intercept: f64) -> GlmFixture {
     }
 }
 
-/// Count-valued design for integer-only families (negative-binomial). Identical
-/// mean structure to positive_response_single_block, but the response is rounded
-/// to a non-negative integer so the negative-binomial log density (which validly
-/// rejects non-integer responses) is well defined.
+/// Count-valued design for integer-only families (negative-binomial, Poisson).
+/// Identical mean structure to positive_response_single_block, but the response
+/// is rounded to a non-negative integer so log densities that validly reject
+/// non-integer responses are well defined.
 fn count_response_single_block(seed: u64, intercept: f64) -> GlmFixture {
     let mut fix = positive_response_single_block(seed, intercept);
     fix.y = fix.y.mapv(|v| v.round().max(0.0));
@@ -512,7 +518,7 @@ fn glm_objective_gradient_consistent_interior_multifamily() {
     }
 
     // Poisson-log.
-    let pois = positive_response_single_block(303, 0.6);
+    let pois = count_response_single_block(303, 0.6);
     let pois_opts = glm_opts(
         standard_spec(ResponseFamily::Poisson, StandardLink::Log),
         vec![1],
