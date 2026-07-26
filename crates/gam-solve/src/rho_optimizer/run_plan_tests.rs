@@ -6675,8 +6675,14 @@ fn note_persists_inner_beta_hint_from_eval() {
         .expect("eval with finite β must persist a (ρ,β) checkpoint");
     let payload = decode_iterate(&on_disk.payload, 1).expect("payload decodes");
     assert_eq!(payload.beta, vec![1.5, 2.5, 3.5]);
-    let captured = wrapped.last_inner_beta().expect("β was captured");
+    let captured = wrapped
+        .inner_beta_for(&array![0.5])
+        .expect("β was captured at its producing rho");
     assert_eq!(captured.to_vec(), vec![1.5, 2.5, 3.5]);
+    assert!(
+        wrapped.inner_beta_for(&array![0.25]).is_none(),
+        "β from rho=0.5 must not be exposed as state for another outer coordinate",
+    );
 }
 
 #[test]
@@ -6709,8 +6715,8 @@ fn note_rejects_nonfinite_inner_beta() {
         "non-finite β must abort the checkpoint write, not poison the cache",
     );
     assert!(
-        wrapped.last_inner_beta().is_none(),
-        "non-finite β must not be exposed via last_inner_beta()",
+        wrapped.inner_beta_for(&array![0.5]).is_none(),
+        "non-finite β must not be exposed as exact outer/inner state",
     );
 }
 
