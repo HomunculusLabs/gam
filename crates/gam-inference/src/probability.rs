@@ -343,8 +343,14 @@ pub fn negative_binomial_moment_matched_interval(
 /// Poisson↔gamma identity). Increasing in `k`; `P(Y ≤ 0) = e^{−μ}` is the zero mass.
 #[inline]
 fn poisson_cdf_at(k: f64, mu: f64) -> f64 {
-    // P(Y ≤ k) = Q(k+1, μ) = 1 − P(k+1, μ); `regularized_lower_gamma` is `P`.
-    (1.0 - regularized_lower_gamma(k + 1.0, mu)).clamp(0.0, 1.0)
+    // P(Y ≤ k) = Q(k+1, μ) is the *upper* incomplete gamma, so take it from the
+    // pair evaluator, which computes it directly by continued fraction. Forming
+    // it as `1 − P` instead destroys it whenever the count sits far below the
+    // mean and the answer is small: at μ = 50, k = 0 the true mass is 1.93e-22 and
+    // `1 − P` returns exactly 0, because `P` has already rounded to 1.
+    regularized_incomplete_gamma_pair(k + 1.0, mu)
+        .1
+        .clamp(0.0, 1.0)
 }
 
 /// Quantile (inverse CDF) of a Poisson with mean `mu ≥ 0` at probability
@@ -635,9 +641,18 @@ pub fn tweedie_moment_matched_interval(
     }
 }
 
-/// Regularized lower incomplete gamma `P(a, x) = γ(a, x) / Γ(a)` — the CDF of a
-/// unit-scale `Gamma(shape = a)` variate — accurate down to the smallest
-/// representable `x`.
+/// Both regularized incomplete gamma tails at once, `(P(a, x), Q(a, x))`, each
+/// accurate to a relative ulp across the whole domain. `P(a, x) = γ(a, x) / Γ(a)`
+/// is the CDF of a unit-scale `Gamma(shape = a)` variate and `Q = 1 − P` is its
+/// survival function.
+///
+/// The pair is returned rather than `P` alone because the two are not
+/// interchangeable in `f64`: whichever of them is small carries information the
+/// other has already rounded away. Reconstructing the small one by subtracting
+/// the large one from 1 loses every digit it had — that is not a sharpening, it
+/// is the difference between an answer and none. Each branch below returns the
+/// tail it evaluates directly, and the complement is only ever formed where the
+/// subtraction is between unequal magnitudes.
 ///
 /// This is the exact function [`inverse_regularized_lower_gamma`] inverts, so we
 /// own it rather than borrowing `statrs::gamma_lr`. That routine hard-clamps to
@@ -651,12 +666,12 @@ pub fn tweedie_moment_matched_interval(
 /// `exp(a·ln x − x − ln Γ(a))` factor in logs, so the value stays finite and
 /// nonzero for arguments far below that clamp, and always evaluates the *smaller*
 /// tail directly (no catastrophic cancellation near either edge).
-fn regularized_lower_gamma(a: f64, x: f64) -> f64 {
+fn regularized_incomplete_gamma_pair(a: f64, x: f64) -> (f64, f64) {
     use statrs::function::gamma::ln_gamma;
     // Callers (`inverse_regularized_lower_gamma`) validate `a > 0` upstream; a
     // non-positive `a` would only mis-feed `ln_gamma`, never UB.
     if x <= 0.0 {
-        return 0.0;
+        return (0.0, 1.0);
     }
     let gln = ln_gamma(a);
     if x < a + 1.0 {
@@ -673,7 +688,11 @@ fn regularized_lower_gamma(a: f64, x: f64) -> f64 {
                 break;
             }
         }
-        (sum.ln() + a * x.ln() - x - gln).exp()
+        // The series branch is entered only for `x < a + 1`, where `P` is bounded
+        // by `P(a, a+1) < 3/4`, so the complement is a subtraction of unequal
+        // magnitudes and keeps every digit `P` has.
+        let p = (sum.ln() + a * x.ln() - x - gln).exp();
+        (p, 1.0 - p)
     } else {
         // Modified-Lentz continued fraction for Q(a,x) = 1 − P(a,x); P = 1 − Q.
         // Evaluating the *upper* tail here keeps the directly-computed quantity
@@ -702,8 +721,15 @@ fn regularized_lower_gamma(a: f64, x: f64) -> f64 {
             }
         }
         let q = (a * x.ln() - x - gln + h.ln()).exp();
-        1.0 - q
+        (1.0 - q, q)
     }
+}
+
+/// Regularized lower incomplete gamma `P(a, x)` alone — see
+/// [`regularized_incomplete_gamma_pair`], which computes whichever tail is small
+/// directly and is what callers wanting `Q` must use.
+fn regularized_lower_gamma(a: f64, x: f64) -> f64 {
+    regularized_incomplete_gamma_pair(a, x).0
 }
 
 /// Inverse of the regularized lower incomplete gamma function: the `x ≥ 0` with
@@ -714,9 +740,12 @@ fn regularized_lower_gamma(a: f64, x: f64) -> f64 {
 /// extreme lower tail where the exact small-`x` seed
 /// `exp((ln p + ln Γ(a + 1)) / a)` follows from `P(a, x) ~ x^a / Γ(a + 1)`.
 /// For `a ≤ 1` it keeps the Numerical Recipes series/log initial estimate. The
-/// seed is refined by Halley's method on `P(a, x) − p` — third order, a Newton
-/// step scaled by the local curvature of `P`. The ratio `P(a, x)` is the crate's
-/// own [`regularized_lower_gamma`] (NOT `statrs::gamma_lr`, which clamps the
+/// seed is refined by Halley's method on the CDF residual — third order, a Newton
+/// step scaled by the local curvature of `P`. That residual is taken against
+/// whichever tail is small — `P(a,x) − p` below the median, `(1 − p) − Q(a,x)`
+/// above it — so it never subtracts two quantities of size 1; see the note at the
+/// iteration itself. Both tails come from the crate's own
+/// [`regularized_incomplete_gamma_pair`] (NOT `statrs::gamma_lr`, which clamps the
 /// residual to `−p` for tiny `x`; see that fn's note); the density
 /// `f(x) = x^{a−1} e^{−x} / Γ(a)` is evaluated through the same overflow-safe
 /// log factorization Numerical Recipes uses (`invgammp`), so the iteration stays
@@ -790,7 +819,21 @@ fn inverse_regularized_lower_gamma(p: f64, a: f64) -> f64 {
         if x <= 0.0 {
             return 0.0;
         }
-        let err = regularized_lower_gamma(a, x) - p;
+        // Residual in whichever tail is small. `P(a,x) − p` subtracts two
+        // quantities of size 1 once `p > 1/2`, pinning the residual's absolute
+        // error at one ulp of 1 however close the iterate is; since the step is
+        // `err / dens` and `dens ≈ 1 − p` out there, the returned quantile carries
+        // a relative error of `ε / ((1 − p)·x)`, which diverges as `p → 1`
+        // (7.8e-4 at `1 − p = 1e-15`). Against the complement the same Newton step
+        // is `(1 − p) − Q(a,x)`: `1 − p` is exact for `p ≥ 1/2` by Sterbenz and `Q`
+        // is computed directly, so the residual carries *relative* accuracy. The
+        // branch point is the Sterbenz domain itself, not a tuned constant.
+        let (p_at_x, q_at_x) = regularized_incomplete_gamma_pair(a, x);
+        let err = if p > 0.5 {
+            (1.0 - p) - q_at_x
+        } else {
+            p_at_x - p
+        };
         let dens = if a > 1.0 {
             afac * (-(x - a1) + a1 * (x.ln() - lna1)).exp()
         } else {
@@ -1005,6 +1048,128 @@ mod tests {
                     "CDF round-trip failed a={a} p={p}: P(a, {x}) = {recovered}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn incomplete_gamma_quantile_keeps_its_digits_in_the_upper_tail() {
+        // The Halley residual used to be `P(a, x) - p`. For `p > 1/2` that is a
+        // subtraction of two quantities of size 1, so its absolute error is one
+        // ulp of 1 no matter how close the iterate is; the step is `err / dens`
+        // and `dens ~ 1 - p` out there, giving a relative error in the returned
+        // quantile of `eps / ((1 - p) * x)` -- a defect that grows by a decade for
+        // every decade of tail mass. Measured against these same references, the
+        // old residual returned (worst over shapes) 1.3e-12 at `1 - p = 1e-6`,
+        // 2.1e-9 at 1e-9, 1.3e-6 at 1e-12 and 7.8e-4 at 1e-15.
+        //
+        // Bar: the references below are correctly rounded doubles (half an ulp).
+        // The residual `(1 - p) - Q(a, x)` is exact in its first term (Sterbenz,
+        // `p >= 1/2`) and carries a few ulp in `Q`. A relative error `d` in the
+        // residual moves the root by `d * q / (x * f(x))`, and that amplification
+        // is at most 0.053 over this table -- the inversion *contracts* error in
+        // the upper tail -- so a handful of ulp is the honest ceiling. Worst
+        // measured over the table is 0.8 ulp, leaving 5x headroom.
+        const ROWS: [(f64, f64, f64); 15] = [
+            (0.5, 0.999999999, 18.66244655325936),
+            (0.5, 0.999999999999, 25.422085666224586),
+            (0.5, 0.999999999999999, 32.21601948468177),
+            (1.0, 0.999999999, 20.723265865228342),
+            (1.0, 0.999999999999, 27.63104323789336),
+            (1.0, 0.999999999999999, 34.53957599234088),
+            (2.0, 0.999999999, 23.939727895037286),
+            (2.0, 0.999999999999, 31.099896029053795),
+            (2.0, 0.999999999999999, 38.20846875548482),
+            (5.0, 0.999999999, 31.47272874252078),
+            (5.0, 0.999999999999, 39.2358478401201),
+            (5.0, 0.999999999999999, 46.835268260827775),
+            (30.0, 0.999999999, 75.24037981905084),
+            (30.0, 0.999999999999, 85.92954232248108),
+            (30.0, 0.999999999999999, 96.00299916243361),
+        ];
+        let bar = 4.0 * f64::EPSILON;
+        let mut worst = 0.0_f64;
+        for (a, p, want) in ROWS {
+            let got = inverse_regularized_lower_gamma(p, a);
+            let rel = ((got - want) / want).abs();
+            worst = worst.max(rel);
+            assert!(
+                rel <= bar,
+                "shape {a}, p {p:.17}: got {got:.17e}, want {want:.17e}, relative {rel:e} > {bar:e}"
+            );
+        }
+        // Below the median the residual is untouched -- `P(a,x) - p` as before --
+        // and these rows check it still lands on the reference.
+        //
+        // Bar: both tails are formed as `exp(S)`, so a rounding in any term of `S`
+        // becomes a *relative* error in the value of the same size; hence the
+        // value carries about `eps * T` where `T` is the largest term magnitude in
+        // `S`. The inversion then scales that by `A = p / (x * f(x))`. Over this
+        // table `T * A` peaks at 55 (shape 0.5 at `p = 1e-12`: `T = |a*ln x| = 28`,
+        // `A = 2`), and doubling for the roundings in the seed and the Halley steps
+        // themselves gives 128 ulp. Worst measured is 29 ulp.
+        for (a, p, want) in [
+            (0.5_f64, 1.0e-12_f64, 7.853981633974483e-25_f64),
+            (0.5, 1.0e-3, 7.85398574631245e-7),
+            (2.0, 1.0e-12, 1.4142142290401938e-6),
+            (2.0, 0.4, 1.3764213420628868),
+            (30.0, 1.0e-3, 15.869170797140358),
+            (30.0, 0.4, 28.309997390436227),
+        ] {
+            let got = inverse_regularized_lower_gamma(p, a);
+            let rel = ((got - want) / want).abs();
+            assert!(
+                rel <= 128.0 * f64::EPSILON,
+                "lower tail at shape {a}, p {p:e}: got {got:e}, want {want:e}, relative {rel:e}"
+            );
+        }
+        println!(
+            "upper-tail quantile: worst relative {worst:e} over {} rows",
+            ROWS.len()
+        );
+    }
+
+    #[test]
+    fn poisson_cdf_below_the_mean_is_a_number_rather_than_zero() {
+        // `P(Y <= k)` is `Q(k+1, mu)`, the *upper* incomplete gamma. Reconstructing
+        // it as `1 - P` returns exactly 0.0 for every count far enough below the
+        // mean, because `P` has already rounded to 1 -- not a loss of digits but a
+        // loss of the answer. `poisson_quantile` searches on this CDF, so the
+        // lower endpoint of a count predictive interval was being chosen against a
+        // flat zero.
+        //
+        // At `k = 0` the identity is closed form and needs no external reference:
+        // `P(Y <= 0) = e^{-mu}` exactly, which is what this fn's own doc claims.
+        //
+        // Bar: the survival value is `exp(S)` with `S = a*ln x - x - ln Gamma(a) +
+        // ln h`, whose terms are of magnitude `mu`. Each is rounded, so `S` carries
+        // absolute error of order `eps * mu`, and `exp` turns absolute argument
+        // error into relative result error one for one -- so the floor grows
+        // linearly in the mean, and `8 * eps * mu` is the ceiling. Measured at
+        // `mu = 5`: 4.1 ulp against a 40-ulp bar. The old `1 - P` form returns
+        // exactly 0 from `mu = 37` up, a relative error of 1 that no bar admits.
+        for mu in [5.0_f64, 20.0, 50.0, 100.0, 300.0, 700.0] {
+            let got = poisson_cdf_at(0.0, mu);
+            let want = (-mu).exp();
+            let rel = ((got - want) / want).abs();
+            assert!(
+                rel <= 8.0 * f64::EPSILON * mu,
+                "P(Y<=0 | mu={mu}) = {got:e}, want e^-mu = {want:e}, relative {rel:e}"
+            );
+        }
+        // For `k > 0` the same `eps * mu` accounting applies, with the Lentz
+        // recurrence contributing about one rounding per iteration on top; the
+        // largest mean here is 200, so `8 * eps * mu` again bounds it.
+        for (k, mu, want) in [
+            (2.0_f64, 60.0_f64, 1.6295866529378224e-23_f64),
+            (5.0, 120.0, 1.6584764014207315e-44),
+            (10.0, 200.0, 4.109584943447632e-71),
+        ] {
+            let got = poisson_cdf_at(k, mu);
+            let rel = ((got - want) / want).abs();
+            assert!(
+                rel <= 8.0 * f64::EPSILON * mu,
+                "P(Y<={k} | mu={mu}) = {got:e}, want {want:e}, relative {rel:e}"
+            );
         }
     }
 
