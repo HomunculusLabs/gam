@@ -3656,6 +3656,60 @@ impl<'a> RemlState<'a> {
         eval
     }
 
+    /// The amount by which a consumer needing a ρ *distribution* must correct
+    /// the criterion's ρ-prior contribution (#2450).
+    ///
+    /// [`evaluate_configured_rho_prior`](Self::evaluate_configured_rho_prior)
+    /// deliberately replaces every firth-default coordinate's plain PC term with
+    /// the SELF-GATED barrier, which is byte-identically flat on the identified
+    /// side. That is right for the criterion — it is what keeps a clean fit
+    /// byte-identical to plain REML, and what lets the λ=∞ rail certificates
+    /// hold — and wrong for anything that has to be a density: a prior that
+    /// contributes exactly nothing over the identified region leaves the
+    /// ρ-posterior with no prior at all there.
+    ///
+    /// `resolve_effective_rho_prior` already fills unset coordinates with the
+    /// weak PC default for exactly this purpose. This returns
+    /// `(proper − as-applied)`, i.e. `Σ_k (pc − barrier)` over the defaulted
+    /// coordinates and zero elsewhere, so a sampler can add it to the criterion
+    /// it is handed and recover the distribution WITHOUT any criterion site
+    /// changing. Nothing on the certification path calls this.
+    ///
+    /// Returned as `(cost, gradient)` only: the ρ-posterior samplers consume a
+    /// log-density and its gradient, and no consumer of this correction needs
+    /// its curvature.
+    pub(crate) fn rho_prior_distribution_correction(
+        &self,
+        rho: &Array1<f64>,
+    ) -> (f64, Array1<f64>) {
+        let mask = firth_default_coord_mask(&self.rho_prior, rho.len());
+        let mut cost = 0.0;
+        let mut gradient = Array1::<f64>::zeros(rho.len());
+        if !mask.iter().any(|&d| d) {
+            return (cost, gradient);
+        }
+        // The SAME weight anchoring the criterion's own prior evaluation uses
+        // (#877), so the correction is taken at the coordinate the terms it
+        // corrects were evaluated at.
+        let anchor = self.rho_weight_anchor();
+        let theta =
+            crate::rho_prior_eval::pc_prior_rate(FIRTH_DEFAULT_PC_UPPER, FIRTH_DEFAULT_PC_TAIL_PROB);
+        for (idx, &is_default) in mask.iter().enumerate() {
+            if !is_default {
+                continue;
+            }
+            let (coord_cost, coord_grad) =
+                crate::rho_prior_eval::firth_default_distribution_correction(
+                    theta,
+                    FIRTH_DEFAULT_PC_UPPER,
+                    rho[idx] - anchor,
+                );
+            cost += coord_cost;
+            gradient[idx] += coord_grad;
+        }
+        (cost, gradient)
+    }
+
     /// Emit the configured ρ-prior as a criterion atom after every REML/LAML
     /// prior policy has been applied. Callers project cost, gradient, and
     /// Hessian from this one object instead of making separate evaluator calls.

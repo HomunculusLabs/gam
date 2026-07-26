@@ -105,6 +105,33 @@ pub(crate) fn firth_default_barrier_terms(theta: f64, upper: f64, r: f64) -> (f6
     (cost, grad, hess)
 }
 
+/// How much a consumer that needs a ρ *distribution* must add to the criterion's
+/// prior contribution on ONE firth-default coordinate (#2450): `pc − barrier`.
+///
+/// [`firth_default_barrier_terms`] is byte-identically flat on the identified
+/// side, which is exactly right for the criterion — it is what keeps a clean fit
+/// identical to plain REML, and what leaves the `λ = ∞` face gradient vanishing
+/// so the rail certificates can hold. It is exactly wrong for anything that has
+/// to be a density: a prior contributing nothing over the identified region
+/// leaves the ρ-posterior with no prior there at all, and the ρ-posterior
+/// samplers target `exp(−criterion(ρ))` directly.
+///
+/// `resolve_effective_rho_prior` already fills unset coordinates with the weak PC
+/// default for precisely this purpose, so the correction is the difference
+/// between that PC term and the barrier the criterion applied instead. Above the
+/// gate the barrier is zero and this is the whole PC term — which is the point:
+/// it restores the `+1/2` upper-tail gradient, so the sampled density decays like
+/// `e^{−ρ/2}` instead of running flat to the box edge.
+///
+/// Curvature is not returned. Consumers of this correction sample a log-density
+/// and its gradient; none of them needs its second derivative, and the criterion
+/// — which does — must never receive it.
+pub(crate) fn firth_default_distribution_correction(theta: f64, upper: f64, r: f64) -> (f64, f64) {
+    let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
+    let (barrier_cost, barrier_grad, _) = firth_default_barrier_terms(theta, upper, r);
+    (pc_cost - barrier_cost, pc_grad - barrier_grad)
+}
+
 /// What a caller wants done when the configured prior is malformed (e.g. a
 /// `Normal` with non-positive `sd`, a `GammaPrecision` with non-positive
 /// `shape`, an `Independent` whose length disagrees with `ρ`, or a nested

@@ -3278,6 +3278,76 @@ mod tk_math_tests {
         assert!((fd_h - h).abs() < 1e-5, "hess FD {fd_h} vs {h}");
     }
 
+    /// Issue #2450. The ρ-posterior samplers target `exp(−criterion(ρ))`, so they
+    /// need a criterion that is a log-DENSITY. The one the optimizer minimizes is
+    /// deliberately not: on the identified side the firth default contributes
+    /// byte-zero, which is what keeps a clean fit identical to plain REML and what
+    /// leaves the `λ = ∞` face gradient vanishing so the rail certificates hold.
+    ///
+    /// Both halves have to stay true at once, and this pins them together: the
+    /// criterion's contribution is unchanged (still byte-zero, still an exactly
+    /// vanishing upper-tail gradient), while the correction a sampler adds is the
+    /// whole PC prior there — including the `+1/2` upper-tail gradient that makes
+    /// the sampled density decay like `e^{−ρ/2}` instead of running flat.
+    #[test]
+    pub(crate) fn sampler_prior_correction_restores_the_density_the_criterion_must_not_have_2450() {
+        use crate::rho_prior_eval::{
+            firth_default_barrier_terms, firth_default_distribution_correction, pc_prior_rate,
+            pc_prior_terms,
+        };
+        let upper = FIRTH_DEFAULT_PC_UPPER;
+        let theta = pc_prior_rate(upper, FIRTH_DEFAULT_PC_TAIL_PROB);
+        let rho_gate = -2.0 * upper.ln();
+
+        for &r in &[rho_gate, rho_gate + 1e-9, 0.0, 5.0, 30.0] {
+            // THE CRITERION HALF, unchanged: byte-zero on the identified side, so
+            // `upper_tail_gradient_vanishes` and every rail path see exactly what
+            // they saw before a sampler correction existed.
+            assert_eq!(
+                firth_default_barrier_terms(theta, upper, r),
+                (0.0, 0.0, 0.0),
+                "the criterion's firth default must stay byte-zero at ρ={r}"
+            );
+            // THE SAMPLER HALF: where the criterion has nothing, the correction is
+            // the entire PC prior — bitwise, since it is `pc − 0`.
+            let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
+            assert_eq!(
+                firth_default_distribution_correction(theta, upper, r),
+                (pc_cost, pc_grad),
+                "above the gate the sampler correction IS the PC prior at ρ={r}"
+            );
+        }
+
+        // The mechanism, made executable: the restored upper-tail gradient tends to
+        // `+1/2`, so the sampled density decays like `e^{−ρ/2}`. The shortfall is
+        // exactly `(θ/2)·e^{−ρ/2}`, which is below 1e-7 by ρ = 30 — the ρ box bound,
+        // i.e. the far edge of the region a sampler can reach.
+        let (_, tail_grad) = firth_default_distribution_correction(theta, upper, 30.0);
+        let shortfall = 0.5 * theta * (-0.5 * 30.0f64).exp();
+        assert!(
+            (0.5 - tail_grad - shortfall).abs() < 1e-15,
+            "the tail shortfall must be exactly (θ/2)e^{{-ρ/2}}: {} vs {shortfall}",
+            0.5 - tail_grad
+        );
+        assert!(
+            shortfall < 1e-7,
+            "the restored upper-tail gradient must have reached +1/2 by the box bound, \
+             shortfall {shortfall}"
+        );
+
+        // Below the gate the criterion DOES carry a wall, so the correction is the
+        // difference and nothing more.
+        for &r in &[rho_gate - 1e-3, rho_gate - 1.0, rho_gate - 5.0, -20.0] {
+            let (pc_cost, pc_grad, _) = pc_prior_terms(theta, r);
+            let (barrier_cost, barrier_grad, _) = firth_default_barrier_terms(theta, upper, r);
+            assert_eq!(
+                firth_default_distribution_correction(theta, upper, r),
+                (pc_cost - barrier_cost, pc_grad - barrier_grad),
+                "below the gate the correction is exactly pc − barrier at ρ={r}"
+            );
+        }
+    }
+
     #[test]
     pub(crate) fn penalty_rank_uses_actual_positive_eigenspace_not_root_rows() {
         let e = array![[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0],];

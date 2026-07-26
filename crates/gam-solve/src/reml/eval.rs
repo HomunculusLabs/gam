@@ -709,11 +709,42 @@ impl<'a> RemlState<'a> {
             // pass `allow_escalation = false`, so they surface the cheap Tier-0
             // certificate while never launching the sampler.
             Some(RhoCertificate::Escalate) if allow_escalation => {
+                // #2450 — THE SAMPLER TARGETS A DISTRIBUTION; THE CRITERION DOES NOT.
+                //
+                // The tiers below sample `π(ρ|y) ∝ exp(−criterion(ρ))`, so the
+                // criterion they are handed has to BE a log-density. The one the
+                // optimizer minimizes is not: `evaluate_configured_rho_prior`
+                // replaces every firth-default coordinate's PC term with the
+                // self-gated barrier, which is byte-identically flat on the
+                // identified side — deliberately, because that is what keeps a
+                // clean fit identical to plain REML and what lets the λ=∞ rail
+                // certificates hold. Handing that to a sampler leaves it with no
+                // prior at all over the identified region: measured on the
+                // n=600 anisotropic-Duchon fit in
+                // `margslope_duchon_slowdown`, the NUTS tier doubles to maximum
+                // depth and the fit does not return in 2136 s, against 1.28 s
+                // once ρ carries a proper prior.
+                //
+                // `resolve_effective_rho_prior` already produces the PC-filled
+                // proper prior for exactly this reason, and
+                // `rho_prior_distribution_correction` is the difference between
+                // it and what the criterion applied. Adding it HERE, at the
+                // sampler's own call site, is what keeps the two apart: no
+                // criterion site is touched, so certification, the rail
+                // certificates and every fit's λ̂ are byte-unchanged by
+                // construction rather than by review.
+                //
+                // The Tier-0 certificate above is left on the criterion as the
+                // optimizer sees it: it asks whether the PLUG-IN Gaussian is
+                // adequate, which is a question about the object the fit
+                // reports, and moving it is a separate decision recorded on
+                // #2450.
                 Some(escalator.escalate_rho_posterior(
                     final_rho,
                     &outer_hessian,
                     &mut |rho| {
                         self.without_persistent_warm_start_store(|| self.compute_cost(rho).ok())
+                            .map(|cost| cost + self.rho_prior_distribution_correction(rho).0)
                     },
                     &mut |rho| {
                         self.without_persistent_warm_start_store(|| {
@@ -722,6 +753,11 @@ impl<'a> RemlState<'a> {
                             // value+gradient outer evaluation so the inner PIRLS
                             // solve and IFT state are shared by construction.
                             self.compute_cost_and_gradient(rho).ok()
+                        })
+                        .map(|(cost, gradient)| {
+                            let (prior_cost, prior_gradient) =
+                                self.rho_prior_distribution_correction(rho);
+                            (cost + prior_cost, gradient + prior_gradient)
                         })
                     },
                 ))
