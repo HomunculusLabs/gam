@@ -708,12 +708,11 @@ pub(crate) struct CheckpointingObjective<'a> {
     session: Arc<CacheSession>,
     mirror_sessions: Vec<Arc<CacheSession>>,
     eval_counter: AtomicU64,
-    /// Most-recent inner β surfaced via [`OuterEval::inner_beta_hint`]. The
-    /// finalize path reads this so the `kind: Final` write encodes the
-    /// (ρ, β) pair that the BFGS optimum was actually fitted at — without
-    /// this the finalize would clobber per-eval checkpoint β state with a
-    /// ρ-only payload, reintroducing the cold-β resume failure.
-    last_inner_beta: std::sync::Mutex<Option<Array1<f64>>>,
+    /// Most-recent exact outer/inner state surfaced by one beta-bearing
+    /// evaluation. Keeping ρ beside β is load-bearing: scalar certification
+    /// probes carry no β, so a bare "last β" can otherwise be paired with a
+    /// later certified ρ that never produced it (#2486).
+    last_inner_state: std::sync::Mutex<Option<(Array1<f64>, Array1<f64>)>>,
     /// True only while the typed reactive-domain path evaluates an
     /// initialization waypoint. Those waypoints are transactional means of
     /// reaching the literal requested model, not candidate outer iterates, so
@@ -732,13 +731,14 @@ impl<'a> CheckpointingObjective<'a> {
             session,
             mirror_sessions,
             eval_counter: AtomicU64::new(0),
-            last_inner_beta: std::sync::Mutex::new(None),
+            last_inner_state: std::sync::Mutex::new(None),
             reactive_waypoint_active: AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn last_inner_beta(&self) -> Option<Array1<f64>> {
-        self.last_inner_beta.lock().ok().and_then(|g| g.clone())
+    pub(crate) fn inner_beta_for(&self, rho: &Array1<f64>) -> Option<Array1<f64>> {
+        let guard = self.last_inner_state.lock().ok()?;
+        beta_for_exact_rho(guard.as_ref(), rho)
     }
 
     fn note(&self, rho: &Array1<f64>, beta: Option<&Array1<f64>>, cost: f64) {
@@ -754,8 +754,8 @@ impl<'a> CheckpointingObjective<'a> {
             if !b.iter().all(|v| v.is_finite()) {
                 return;
             }
-            if let Ok(mut guard) = self.last_inner_beta.lock() {
-                *guard = Some(b.clone());
+            if let Ok(mut guard) = self.last_inner_state.lock() {
+                *guard = Some((rho.clone(), b.clone()));
             }
         }
         let i = self.eval_counter.fetch_add(1, Ordering::Relaxed);
@@ -768,6 +768,45 @@ impl<'a> CheckpointingObjective<'a> {
                 mirror.checkpoint(&bytes, Some(cost), Some(i));
             }
         }
+    }
+}
+
+fn beta_for_exact_rho(
+    state: Option<&(Array1<f64>, Array1<f64>)>,
+    rho: &Array1<f64>,
+) -> Option<Array1<f64>> {
+    let (producing_rho, beta) = state?;
+    (producing_rho.len() == rho.len()
+        && producing_rho
+            .iter()
+            .zip(rho.iter())
+            .all(|(left, right)| left.to_bits() == right.to_bits()))
+    .then(|| beta.clone())
+}
+
+#[cfg(test)]
+mod checkpoint_state_pair_tests {
+    use super::*;
+
+    #[test]
+    fn finalized_beta_requires_its_exact_producing_rho_2486() {
+        let state = (
+            Array1::from_vec(vec![1.0, -0.0]),
+            Array1::from_vec(vec![3.0, 4.0]),
+        );
+
+        assert_eq!(
+            beta_for_exact_rho(Some(&state), &Array1::from_vec(vec![1.0, -0.0])),
+            Some(Array1::from_vec(vec![3.0, 4.0])),
+        );
+        assert!(
+            beta_for_exact_rho(Some(&state), &Array1::from_vec(vec![1.0, 0.0])).is_none(),
+            "even numerically equal but bit-distinct rho cannot borrow another evaluation's beta",
+        );
+        assert!(
+            beta_for_exact_rho(Some(&state), &Array1::from_vec(vec![1.0])).is_none(),
+            "a shape-mismatched rho cannot borrow beta",
+        );
     }
 }
 
@@ -835,14 +874,10 @@ impl<'a> OuterObjective for CheckpointingObjective<'a> {
         // eval surfaces a fresher β first. Only prime on actual install —
         // `NoSlot` means the inner solver will not see β, so the cache
         // entry would be a lie.
-        let result = self.inner.seed_inner_state(beta);
-        if matches!(result, Ok(SeedOutcome::Installed))
-            && beta.iter().all(|v| v.is_finite())
-            && let Ok(mut guard) = self.last_inner_beta.lock()
-        {
-            *guard = Some(beta.clone());
-        }
-        result
+        // A donated β has no producing ρ at this API boundary. It may seed the
+        // next evaluation, but it cannot become final-state evidence until an
+        // evaluation returns it together with the coordinate it was solved at.
+        self.inner.seed_inner_state(beta)
     }
 
     fn terminal_eval_order(&self) -> Option<OuterEvalOrder> {

@@ -901,10 +901,15 @@ impl OuterProblem {
             config.cache_mirror_sessions.clone(),
         );
         let result = run_outer(&mut checkpointing, &config, context);
-        // Pull the most-recent inner β surfaced by the inner solver so the
-        // finalize write encodes the (ρ, β) pair the BFGS optimum was
-        // actually fitted at, not a ρ-only seed that resumes at cold β.
-        let final_beta = checkpointing.last_inner_beta();
+        // Attach β only when a beta-bearing evaluation surfaced it at this
+        // exact final ρ. Scalar terminal audits carry no β and may follow an
+        // evaluation elsewhere; a bare "last β" would manufacture a false
+        // (ρ, β) pair and let machine history select the next fit's basin
+        // (#2486). A rho-only payload is slower to resume but remains honest.
+        let final_beta = result
+            .as_ref()
+            .ok()
+            .and_then(|result| checkpointing.inner_beta_for(&result.rho));
         if let Ok(result) = result.as_ref()
             && result.final_value.is_finite()
             && result.converged
