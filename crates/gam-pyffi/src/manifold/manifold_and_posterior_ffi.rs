@@ -1330,28 +1330,11 @@ fn summary_smooth_terms(
         family.response,
         ResponseFamily::Gaussian | ResponseFamily::Gamma
     );
-    // The Wald/F denominator is `n - edf` at the TRAINING sample size. `design`
-    // here is rebuilt from `representative_data_from_ranges`, a 16-row synthetic
-    // grid over the saved feature ranges — it exists to replay the basis, and
-    // its row count is a property of that grid, not of the data the model was
-    // fitted to. Using it put `n = 16` into every p-value this table reports,
-    // and silently dropped the smooth test entirely for any model with
-    // `edf >= 16`, because `n - edf` then fails the positivity check.
-    //
-    // The in-process summary (`gam-cli/src/main/model_summary.rs`) has always
-    // used `y.len()`. This path is the persisted-model twin and must agree with
-    // it or the same fit reports different significance through the two
-    // surfaces. Where the row count is genuinely unavailable the test is not
-    // reported — a missing p-value is recoverable, a p-value computed against
-    // the wrong reference distribution is not.
-    let residual_df = fit
-        .working_response()
-        .map(|response| response.len() as f64)
-        .zip(fit.edf_total())
-        .and_then(|(n, edf)| {
-            let value = n - edf;
-            (edf.is_finite() && value.is_finite() && value > 0.0).then_some(value)
-        });
+    // The fit owns both the training row count and this calculation. The
+    // representative design above exists only to replay frozen basis geometry;
+    // optional working evidence exists only for row-wise diagnostics. Neither
+    // is a sample-size source.
+    let residual_df = fit.wald_residual_degrees_of_freedom();
     let scale = if scale_is_estimated {
         SmoothTestScale::Estimated
     } else {
@@ -1542,6 +1525,8 @@ fn summary_curvature_estimands(model: &FittedModel) -> Vec<SummaryCurvatureRow> 
 /// — rather than dumping ~`n` basis coefficients.
 struct ScanIntrospection {
     feature_column: String,
+    /// Original row count before tied abscissae were pooled into knots.
+    training_sample_size: usize,
     /// Effective degrees of freedom (tr S), strictly between the polynomial
     /// null-space dimension `order` and `n`.
     edf: f64,
@@ -1571,6 +1556,7 @@ fn scan_introspection(model: &FittedModel) -> Result<Option<ScanIntrospection>, 
     };
     Ok(Some(ScanIntrospection {
         feature_column: feature_column.to_string(),
+        training_sample_size: fit.training_sample_size(),
         edf: fit.edf(),
         lambda: fit.lambda(),
         reml_cost: -fit.restricted_loglik,
@@ -1610,10 +1596,7 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         // Scan-routed models do not retain the λ-comparable log-likelihood, so
         // leave `log_likelihood` unset.
         log_likelihood: None,
-        // The O(n) smoother does not retain the IRLS working set, and its
-        // `reml_cost` is explicitly within-fit (not cross-model comparable), so
-        // leave `n_obs` unset — `compare_models` treats it as unconstrained.
-        n_obs: None,
+        n_obs: Some(scan.training_sample_size),
         // null_dim is left unset: the scan does not compute the penalized-Hessian
         // null-space logdet the TK normalizer needs, so `comparable_reml_score`
         // returns the raw cost unchanged (and `evidence()` stays well-defined).
@@ -1727,10 +1710,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         deployment_extensions: model.payload().deployment_extensions.clone(),
         deviance: fit.deviance,
         log_likelihood: Some(fit.log_likelihood),
-        // Report an observation count only when the fitted result retained the
-        // exact working response. A summary must not manufacture N from an
-        // unrelated representative design.
-        n_obs: fit.working_response().map(|response| response.len()),
+        n_obs: Some(fit.training_sample_size()),
         reml_score,
         raw_reml_score,
         null_space_logdet: fit.artifacts.null_space_logdet,
@@ -2031,7 +2011,7 @@ fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<Str
         family_name: model.likelihood().pretty_name().to_string(),
         model_class: prediction_model_class_label(model),
         formula: model.payload().formula.clone(),
-        n_obs: None,
+        n_obs: Some(scan.training_sample_size),
         deviance: scan.deviance,
         reml_score: scan.reml_cost,
         iterations: 0,
@@ -2105,7 +2085,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         family_name: model.likelihood().pretty_name().to_string(),
         model_class: prediction_model_class_label(&model),
         formula: model.payload().formula.clone(),
-        n_obs: None,
+        n_obs: Some(fit.training_sample_size()),
         deviance: fit.deviance,
         reml_score: fit.reml_score,
         iterations: fit.outer_iterations,

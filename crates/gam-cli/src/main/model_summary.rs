@@ -17,6 +17,13 @@ pub(crate) fn build_model_summary(
     weights: ArrayView1<'_, f64>,
 ) -> Result<ModelSummary, String> {
     const CONTINUOUS_ORDER_EPS: f64 = 1e-12;
+    if y.len() != fit.training_sample_size() {
+        return Err(format!(
+            "summary response has {} rows but the fitted model records {} training rows",
+            y.len(),
+            fit.training_sample_size()
+        ));
+    }
     // Definition-consistent SE pair (#2296): corrected-preferred, with the
     // exact definition recorded on the summary so the displayed SEs are never
     // an unlabeled mix of covariance definitions.
@@ -51,10 +58,10 @@ pub(crate) fn build_model_summary(
         LikelihoodScaleMetadata::ProfiledGaussian
             | LikelihoodScaleMetadata::EstimatedGammaShape { .. }
     );
-    let residual_df = fit.edf_total().and_then(|edf| {
-        let value = y.len() as f64 - edf;
-        (edf.is_finite() && value.is_finite() && value > 0.0).then_some(value)
-    });
+    // One fit-owned definition serves this live-data summary and the loaded
+    // model summary. The response view is retained for null deviance only; its
+    // length is checked above, never used as a second Wald authority.
+    let residual_df = fit.wald_residual_degrees_of_freedom();
     let two_sided_parametric_p = |z: f64| -> Option<f64> {
         if !z.is_finite() {
             return None;

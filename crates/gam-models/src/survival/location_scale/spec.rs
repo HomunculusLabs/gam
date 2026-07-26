@@ -277,6 +277,8 @@ pub struct SurvivalLocationScaleTermFitResult {
 /// Helper struct so callers can build a `UnifiedFitResult` from
 /// survival-specific fields without knowing about the unified layout.
 pub struct SurvivalLocationScaleFitResultParts {
+    /// Number of original survival records used by every parameter block.
+    pub training_sample_size: usize,
     pub beta_time: Array1<f64>,
     pub beta_threshold: Array1<f64>,
     pub beta_log_sigma: Array1<f64>,
@@ -410,6 +412,7 @@ pub fn survival_fit_from_parts(
     parts: SurvivalLocationScaleFitResultParts,
 ) -> Result<UnifiedFitResult, String> {
     let SurvivalLocationScaleFitResultParts {
+        training_sample_size,
         beta_time,
         beta_threshold,
         beta_log_sigma,
@@ -749,6 +752,7 @@ pub fn survival_fit_from_parts(
     let deviance = -2.0 * log_likelihood;
     crate::model_types::UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
         blocks,
+        training_sample_size,
         log_lambdas,
         lambdas: Array1::from_vec(all_lambdas),
         likelihood_family: None,

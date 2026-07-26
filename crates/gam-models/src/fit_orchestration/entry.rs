@@ -775,6 +775,7 @@ fn deterministic_gaussian_standard_fit(
                 edf: edf_total,
                 lambdas: lambdas.clone(),
             }],
+            training_sample_size: request.y.len(),
             log_lambdas,
             lambdas,
             likelihood_family: Some(request.family.clone()),

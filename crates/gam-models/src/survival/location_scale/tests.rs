@@ -407,6 +407,7 @@ fn test_survival_fit(
         })
         .unwrap_or((None, None));
     survival_fit_from_parts(SurvivalLocationScaleFitResultParts {
+        training_sample_size: 32,
         beta_time,
         beta_threshold,
         beta_log_sigma,
@@ -439,6 +440,7 @@ fn survival_fit_parts_with_outer_evidence(
     criterion_certificate: Option<gam_solve::rho_optimizer::OuterCriterionCertificate>,
 ) -> SurvivalLocationScaleFitResultParts {
     SurvivalLocationScaleFitResultParts {
+        training_sample_size: 32,
         beta_time: array![0.1],
         beta_threshold: array![0.2],
         beta_log_sigma: array![0.0],

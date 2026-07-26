@@ -926,6 +926,7 @@ pub(crate) fn finalize_survival_location_scale_fit(
         })
         .transpose()?;
     survival_fit_from_parts(SurvivalLocationScaleFitResultParts {
+        training_sample_size: fit.training_sample_size(),
         beta_time,
         beta_threshold,
         beta_log_sigma,

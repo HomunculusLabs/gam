@@ -26,6 +26,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "formula",
     "family_name",
     "model_class",
+    "n_obs",
     "deviance",
     "reml_score",
     "raw_reml_score",
@@ -153,6 +154,10 @@ class Summary:
         Human-readable family + link label, e.g. ``"Gaussian Identity"``.
     model_class : str
         Internal model class, e.g. ``"standard"`` / ``"marginal-slope"``.
+    n_obs : int or None
+        Number of original training rows. Fitted-model summaries always carry
+        this persisted value; non-model summaries such as posterior-draw
+        summaries leave it unset.
     deviance : float or None
         Model deviance at the converged fit. ``None`` for models that do not
         report a deviance.
@@ -235,6 +240,7 @@ class Summary:
     formula: str = ""
     family_name: str = ""
     model_class: str = ""
+    n_obs: int | None = None
     deviance: float | None = None
     reml_score: float | None = None
     raw_reml_score: float | None = None
@@ -372,6 +378,8 @@ class Summary:
             lines.append(f"  Family:  {self.family_name}")
         if self.model_class:
             lines.append(f"  Class:   {self.model_class}")
+        if self.n_obs is not None:
+            lines.append(f"  Training rows: {self.n_obs}")
         if self.deviance is not None:
             lines.append(f"  Deviance: {self.deviance:g}")
         if self.reml_score is not None:

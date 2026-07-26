@@ -495,6 +495,7 @@ fn truncate_marginal_slope_influence_absorber(
     // `FitConvergenceEvidence`); carry the certified inner status into the
     // narrowed reassembly, which revalidates the preserved artifacts.
     let pirls_status = fit_result.convergence_evidence().inner_status();
+    let training_sample_size = fit_result.training_sample_size();
     let UnifiedFitResult {
         mut blocks,
         log_lambdas,
@@ -556,6 +557,7 @@ fn truncate_marginal_slope_influence_absorber(
 
     UnifiedFitResult::try_from_parts(gam_solve::estimate::UnifiedFitResultParts {
         blocks,
+        training_sample_size,
         log_lambdas,
         lambdas,
         likelihood_family,

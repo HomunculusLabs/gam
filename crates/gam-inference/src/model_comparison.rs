@@ -941,6 +941,7 @@ mod tests {
                 edf: 1.5,
                 lambdas: array![2.0],
             }],
+            training_sample_size: 3,
             log_lambdas: array![2.0_f64.ln()],
             lambdas: array![2.0],
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),

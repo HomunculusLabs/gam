@@ -2177,6 +2177,7 @@ fn survival_unified_fit_result(
     lambdas: Array1<f64>,
     summary: &gam_solve::pirls::WorkingModelPirlsResult,
     state: &gam_solve::pirls::WorkingState,
+    training_sample_size: usize,
     penalty_blocks: &[PenaltyBlock],
     // OUTER convergence evidence from the smoothing selection (#2301 defect D):
     // the real outer-iteration count (0 when no smoothing coordinate was
@@ -2186,6 +2187,12 @@ fn survival_unified_fit_result(
     outer_iterations: usize,
     criterion_certificate: Option<gam_solve::estimate::OuterCriterionCertificate>,
 ) -> Result<UnifiedFitResult, String> {
+    if state.eta.len() != training_sample_size {
+        return Err(format!(
+            "survival transformation state has {} rows but the training data has {training_sample_size}",
+            state.eta.len()
+        ));
+    }
     let log_lambdas = Array1::from_vec(
         lambdas
             .iter()
@@ -2307,6 +2314,7 @@ fn survival_unified_fit_result(
             edf: edf_total,
             lambdas: lambdas.clone(),
         }],
+        training_sample_size,
         log_lambdas,
         lambdas,
         likelihood_family: Some(LikelihoodSpec::royston_parmar()),
@@ -3387,6 +3395,7 @@ pub(crate) fn fit_survival_transformation_model(
         lambdas,
         &summary,
         &state,
+        spec.age_exit.len(),
         &penalty_blocks,
         survival_outer_iterations,
         survival_outer_certificate,

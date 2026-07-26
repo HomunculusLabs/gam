@@ -132,6 +132,7 @@ mod per_term_edf_tests {
                 edf: 28.0,
                 lambdas: Array1::from_vec(vec![1.0, 1.0]),
             }],
+            training_sample_size: 64,
             log_lambdas: Array1::zeros(2),
             lambdas: Array1::from_vec(vec![1.0, 1.0]),
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),
@@ -218,6 +219,7 @@ mod per_term_edf_tests {
                 edf: edf_total,
                 lambdas: Array1::from_vec(vec![1.0]),
             }],
+            training_sample_size: 64,
             log_lambdas: Array1::zeros(1),
             lambdas: Array1::from_vec(vec![1.0]),
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),
@@ -292,6 +294,7 @@ mod per_term_edf_tests {
                 edf: edf_total,
                 lambdas: lambdas.clone(),
             }],
+            training_sample_size: 256,
             log_lambdas: Array1::zeros(n_levels),
             lambdas,
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),
@@ -487,6 +490,7 @@ mod per_term_edf_tests {
                 edf: p as f64,
                 lambdas: lambdas.clone(),
             }],
+            training_sample_size: 256,
             log_lambdas: Array1::zeros(n_blocks),
             lambdas,
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),
@@ -2441,6 +2445,10 @@ pub struct FitGeometry {
 #[derive(Clone)]
 pub struct UnifiedFitResultParts {
     pub blocks: Vec<FittedBlock>,
+    /// Number of original training rows / experimental units. This is row
+    /// count, not positive-weight count and not row count multiplied by the
+    /// number of response coordinates.
+    pub training_sample_size: usize,
     pub log_lambdas: Array1<f64>,
     pub lambdas: Array1<f64>,
     pub likelihood_family: Option<LikelihoodSpec>,
@@ -2586,6 +2594,7 @@ mod assembly_inner_status_gate_tests {
                 edf: 1.0,
                 lambdas: Array1::from_vec(vec![1.0]),
             }],
+            training_sample_size: 64,
             log_lambdas: Array1::zeros(1),
             lambdas: Array1::from_vec(vec![1.0]),
             likelihood_family: Some(LikelihoodSpec::gaussian_identity()),
@@ -2725,6 +2734,50 @@ mod assembly_inner_status_gate_tests {
             )
         );
     }
+
+    #[test]
+    fn training_sample_size_is_required_and_owns_the_wald_denominator() {
+        let mut parts = parts_with_inner_status(PirlsStatus::Converged);
+        parts.geometry = None;
+        parts.training_sample_size = 73;
+        let fit = UnifiedFitResult::try_from_parts(parts)
+            .expect("a fit does not need working-row evidence to retain its training row count");
+        assert_eq!(fit.training_sample_size(), 73);
+        assert_eq!(fit.wald_residual_degrees_of_freedom(), Some(72.0));
+
+        let mut encoded = serde_json::to_value(&fit).expect("serialize fit");
+        encoded
+            .as_object_mut()
+            .expect("fit serializes as an object")
+            .remove("training_sample_size");
+        let error = serde_json::from_value::<UnifiedFitResult>(encoded)
+            .expect_err("pre-training-size wire data must not deserialize");
+        assert!(
+            error.to_string().contains("training_sample_size"),
+            "missing required wire field reported an unrelated error: {error}"
+        );
+
+        let mut zero_encoded = serde_json::to_value(&fit).expect("serialize fit");
+        zero_encoded
+            .as_object_mut()
+            .expect("fit serializes as an object")
+            .insert("training_sample_size".to_string(), serde_json::json!(0));
+        let error = serde_json::from_value::<UnifiedFitResult>(zero_encoded)
+            .expect_err("zero training rows must not deserialize");
+        assert!(
+            error.to_string().contains("nonzero"),
+            "zero-row wire rejection reported an unrelated error: {error}"
+        );
+
+        let mut zero = parts_with_inner_status(PirlsStatus::Converged);
+        zero.training_sample_size = 0;
+        let error = UnifiedFitResult::try_from_parts(zero)
+            .expect_err("zero training rows cannot mint a fitted result");
+        assert!(
+            error.to_string().contains("training_sample_size"),
+            "zero-row rejection reported an unrelated error: {error}"
+        );
+    }
 }
 
 /// Exact coefficient-covariance definition (#2296).
@@ -2782,6 +2835,13 @@ pub struct UnifiedFitResult {
     // ── canonical fields ──────────────────────────────────────────────────
     /// Coefficient blocks (1 for standard GAM, N for GAMLSS/survival).
     pub blocks: Vec<FittedBlock>,
+    /// Number of original training rows / experimental units.
+    ///
+    /// This required wire field is the sole authority for sample-size-based
+    /// post-fit inference. It deliberately cannot be reconstructed from
+    /// optional IRLS evidence, a synthetic prediction grid, nonzero weights,
+    /// or the number of response coordinates.
+    training_sample_size: std::num::NonZeroUsize,
     /// Log-smoothing parameters (all blocks concatenated in block order).
     pub log_lambdas: Array1<f64>,
     /// Smoothing parameters (exp of log_lambdas).
@@ -3171,10 +3231,28 @@ impl UnifiedFitResult {
         &self.convergence
     }
 
+    /// Number of original training rows / experimental units.
+    pub fn training_sample_size(&self) -> usize {
+        self.training_sample_size.get()
+    }
+
+    /// Denominator degrees of freedom for estimated-scale Wald/F references.
+    ///
+    /// Both in-process and persisted-model summaries call this method so the
+    /// definition cannot drift between presentation surfaces.
+    pub fn wald_residual_degrees_of_freedom(&self) -> Option<f64> {
+        self.edf_total().and_then(|edf| {
+            let residual_df = self.training_sample_size.get() as f64 - edf;
+            (edf.is_finite() && residual_df.is_finite() && residual_df > 0.0)
+                .then_some(residual_df)
+        })
+    }
+
     pub fn try_from_parts(parts: UnifiedFitResultParts) -> Result<Self, EstimationError> {
         let convergence = FitConvergenceEvidence::try_from_parts(&parts)?;
         let UnifiedFitResultParts {
             blocks,
+            training_sample_size,
             log_lambdas,
             lambdas,
             likelihood_family,
@@ -3218,6 +3296,12 @@ impl UnifiedFitResult {
             outer_gradient_norm
         };
 
+        let training_sample_size = std::num::NonZeroUsize::new(training_sample_size)
+            .ok_or_else(|| {
+                EstimationError::InvalidInput(
+                    "UnifiedFitResult training_sample_size must be positive".to_string(),
+                )
+            })?;
         if blocks.is_empty() {
             crate::bail_invalid_estim!("UnifiedFitResult requires at least one coefficient block");
         }
@@ -3284,6 +3368,15 @@ impl UnifiedFitResult {
         }
         if let Some(geom) = geometry.as_ref() {
             geom.validate_numeric_finiteness()?;
+            if let Some(working) = geom.working.as_ref()
+                && working.response.len() != training_sample_size.get()
+            {
+                crate::bail_invalid_estim!(
+                    "UnifiedFitResult working row count {} must match training_sample_size {}",
+                    working.response.len(),
+                    training_sample_size.get()
+                );
+            }
         }
         for (idx, state) in block_states.iter().enumerate() {
             validate_all_finite_estimation(
@@ -3498,6 +3591,7 @@ impl UnifiedFitResult {
 
         Ok(Self {
             blocks,
+            training_sample_size,
             log_lambdas,
             lambdas,
             likelihood_family,
@@ -3546,6 +3640,7 @@ impl UnifiedFitResult {
         }
         let reconstructed = Self::try_from_parts(UnifiedFitResultParts {
             blocks: self.blocks.clone(),
+            training_sample_size: self.training_sample_size.get(),
             log_lambdas: self.log_lambdas.clone(),
             lambdas: self.lambdas.clone(),
             likelihood_family: self.likelihood_family.clone(),

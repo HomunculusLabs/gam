@@ -241,13 +241,13 @@ struct SummaryPayload {
     /// it ranks on (issue #1362). Optional for forward/backward compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     log_likelihood: Option<f64>,
-    /// Number of observations the fit was trained on. Carried so `compare_models`
+    /// Number of original rows the fit was trained on. Carried so `compare_models`
     /// can REFUSE to rank fits made on different-sized (hence different) data:
     /// `−2·loglik` / REML evidence grow with `n`, so a score gap between two fits
     /// with different `n` is not a Bayes factor (#1384 sibling — the same
-    /// fail-loud contract as the family guard). Sourced from the IRLS working-set
-    /// length; `None` for fit paths that do not retain the working geometry (e.g.
-    /// O(n) spline-scan models), which the guard then treats as unconstrained.
+    /// fail-loud contract as the family guard). Model summaries source it only
+    /// from their required persisted training-sample-size authority; `None` is
+    /// reserved for non-model summary kinds.
     #[serde(skip_serializing_if = "Option::is_none")]
     n_obs: Option<usize>,
     reml_score: f64,

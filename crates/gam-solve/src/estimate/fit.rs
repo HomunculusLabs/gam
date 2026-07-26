@@ -304,6 +304,7 @@ where
             edf,
             lambdas: result_lambdas.clone(),
         }],
+        training_sample_size: y.len(),
         log_lambdas,
         lambdas: result_lambdas,
         likelihood_family: Some(result.likelihood_family),

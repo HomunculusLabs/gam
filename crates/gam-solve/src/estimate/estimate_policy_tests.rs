@@ -664,6 +664,7 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
             edf: 1.5,
             lambdas: lambdas.clone(),
         }],
+        training_sample_size: 16,
         log_lambdas,
         lambdas,
         likelihood_family: Some(LikelihoodSpec::new(

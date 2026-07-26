@@ -754,7 +754,27 @@ pub fn blockwise_fit_from_parts(
         }
         .into());
     }
+    // `design`, unlike `solver_design()`, has one row per original
+    // experimental unit. Survival and multi-output blocks may expand their
+    // solver design, but that expansion is not a larger training sample.
     let n = specs[0].design.nrows();
+    if n == 0 {
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: "blockwise_fit requires at least one original training row".to_string(),
+        }
+        .into());
+    }
+    for (idx, spec) in specs.iter().enumerate().skip(1) {
+        if spec.design.nrows() != n {
+            return Err(CustomFamilyError::DimensionMismatch {
+                reason: format!(
+                    "blockwise_fit spec {idx} has {} original training rows, expected {n}",
+                    spec.design.nrows()
+                ),
+            }
+            .into());
+        }
+    }
     let total_p = block_states
         .iter()
         .map(|state| state.beta.len())
@@ -956,6 +976,7 @@ pub fn blockwise_fit_from_parts(
 
     gam_solve::model_types::UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
         blocks,
+        training_sample_size: n,
         log_lambdas: log_lambdas.clone(),
         lambdas: lambdas.clone(),
         likelihood_family: None,

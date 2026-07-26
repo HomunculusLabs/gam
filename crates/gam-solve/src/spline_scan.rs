@@ -1579,9 +1579,9 @@ pub struct SplineScanFit {
     /// λ- and data-independent additive constant. Differences across λ are
     /// exact REML criterion differences.
     pub restricted_loglik: f64,
-    /// Raw observation count `n` (pre-pooling; ties collapse to fewer knots),
-    /// retained for the residual d.o.f. `n − order` (#1046).
-    pub n_obs: usize,
+    /// Original training row count (pre-pooling; ties collapse to fewer
+    /// knots), retained for every sample-size-based post-fit calculation.
+    training_sample_size: std::num::NonZeroUsize,
     /// Weighted DATA residual sum of squares `Σ wᵢ (yᵢ − f̂(xᵢ))²` at the
     /// smoothed posterior mean. Stored explicitly because the profiled
     /// innovations quadratic `σ̂²·(n − order)` is the REML objective's
@@ -2227,7 +2227,8 @@ pub fn fit_spline_scan_at(
         log_lambda,
         sigma2,
         restricted_loglik,
-        n_obs,
+        training_sample_size: std::num::NonZeroUsize::new(n_obs)
+            .expect("pool_nodes requires at least one training row"),
         data_sse,
         smoothed_state: sm_state,
         smoothed_cov: sm_cov,
@@ -2507,8 +2508,8 @@ pub struct SplineScanState {
     pub log_lambda: f64,
     pub sigma2: f64,
     pub restricted_loglik: f64,
-    /// Raw observation count `n` (#1046).
-    pub n_obs: u64,
+    /// Original training row count. Required on the wire.
+    pub training_sample_size: std::num::NonZeroU64,
     /// Weighted data residual sum of squares `Σ wᵢ (yᵢ − f̂(xᵢ))²` at the
     /// smoothed mean — the Gaussian deviance. Stored because it cannot be
     /// recovered from the profiled σ² (whose quadratic also carries
@@ -2558,7 +2559,11 @@ impl SplineScanFit {
             log_lambda: self.log_lambda,
             sigma2: self.sigma2,
             restricted_loglik: self.restricted_loglik,
-            n_obs: self.n_obs as u64,
+            training_sample_size: std::num::NonZeroU64::new(
+                u64::try_from(self.training_sample_size.get())
+                    .expect("SplineScanFit row count exceeds the persistence format"),
+            )
+            .expect("SplineScanFit construction requires training rows"),
             data_sse: self.data_sse,
         }
     }
@@ -2670,10 +2675,13 @@ impl SplineScanFit {
             })
             .collect();
         let sigma2 = state.sigma2;
-        if state.n_obs == 0 {
-            return Err("spline scan state: n_obs must be positive".to_string());
-        }
-        let n_obs = state.n_obs as usize;
+        let training_sample_size =
+            usize::try_from(state.training_sample_size.get()).map_err(|_| {
+                format!(
+                    "spline scan state: training_sample_size {} exceeds this platform's usize",
+                    state.training_sample_size
+                )
+            })?;
         Ok(Self {
             order,
             knots: state.knots.clone(),
@@ -2683,7 +2691,8 @@ impl SplineScanFit {
             log_lambda: state.log_lambda,
             sigma2,
             restricted_loglik: state.restricted_loglik,
-            n_obs,
+            training_sample_size: std::num::NonZeroUsize::new(training_sample_size)
+                .expect("nonzero wire count remains nonzero after conversion"),
             data_sse: state.data_sse,
             smoothed_state,
             smoothed_cov,
@@ -2847,9 +2856,9 @@ impl SplineScanFit {
         self.log_lambda
     }
 
-    /// Raw observation count `n` used to profile σ² (#1046).
-    pub fn n_obs(&self) -> usize {
-        self.n_obs
+    /// Number of original training rows / experimental units.
+    pub fn training_sample_size(&self) -> usize {
+        self.training_sample_size.get()
     }
 
     /// Gaussian deviance — the weighted DATA residual sum of squares
@@ -3255,15 +3264,37 @@ mod tests {
         let w: Vec<f64> = (0..n).map(|i| 1.0 + 0.5 * ((i % 3) as f64)).collect();
         let fit = fit_spline_scan(&x, &y, &w, order).expect("scan fit");
         assert_eq!(fit.order, order);
-        // The raw count is retained verbatim (n rows, one tie pair collapses a
-        // knot but not the count) and drives the recovered deviance (#1046).
-        assert_eq!(fit.n_obs, n);
+        // The original row count is retained verbatim: one tie pair collapses a
+        // knot, but never changes the fit's sample-size authority.
+        assert_eq!(fit.training_sample_size(), n);
 
         let json = serde_json::to_string(&fit.to_state()).expect("serialize state");
         let state: SplineScanState = serde_json::from_str(&json).expect("deserialize state");
         let restored = SplineScanFit::from_state(&state).expect("restore fit");
 
-        assert_eq!(fit.n_obs, restored.n_obs);
+        assert_eq!(
+            fit.training_sample_size(),
+            restored.training_sample_size()
+        );
+        if order == 2 {
+            let mut pre_change = serde_json::to_value(fit.to_state()).expect("serialize state");
+            pre_change
+                .as_object_mut()
+                .expect("spline state serializes as an object")
+                .remove("training_sample_size");
+            assert!(
+                serde_json::from_value::<SplineScanState>(pre_change).is_err(),
+                "pre-training-size spline state must not deserialize"
+            );
+            let mut zero = serde_json::to_value(fit.to_state()).expect("serialize state");
+            zero.as_object_mut()
+                .expect("spline state serializes as an object")
+                .insert("training_sample_size".to_string(), serde_json::json!(0));
+            assert!(
+                serde_json::from_value::<SplineScanState>(zero).is_err(),
+                "zero training rows must not deserialize"
+            );
+        }
         assert_eq!(fit.deviance().to_bits(), restored.deviance().to_bits());
         assert_eq!(fit.knots, restored.knots);
         assert_eq!(fit.mean, restored.mean);
@@ -3312,7 +3343,7 @@ mod tests {
     }
 
     #[test]
-    fn state_snapshot_round_trips_predict_bit_for_bit() {
+    fn state_snapshot_round_trips_predict_and_training_sample_size_bit_for_bit() {
         round_trip_predict_bit_for_bit(2);
     }
 
@@ -3464,7 +3495,8 @@ mod tests {
             fit.deviance()
         );
         // The old proxy is strictly larger: it includes penalty energy.
-        let reml_quadratic = fit.sigma2 * (fit.n_obs as f64 - fit.order as f64);
+        let reml_quadratic =
+            fit.sigma2 * (fit.training_sample_size() as f64 - fit.order as f64);
         assert!(fit.deviance() < reml_quadratic);
     }
 }

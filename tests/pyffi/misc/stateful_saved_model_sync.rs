@@ -21,9 +21,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use tempfile::tempdir;
 
-const EXPECTED_MODEL_PAYLOAD_VERSION: u64 = 14;
+const EXPECTED_MODEL_PAYLOAD_VERSION: u64 = 15;
 const EXPECTED_SAVED_MODEL_ROOT_FIELD_COUNT: usize = 2;
-// FittedModelPayload has 96 serialized fields in schema version 14. These pin
+// FittedModelPayload has 96 serialized fields in schema version 15. These pin
 // fixtures leave `group_metadata=None` and `deployment_extensions=[]`; those are
 // the only two fields guarded by `skip_serializing_if`, so their JSON payloads
 // contain exactly 94 keys. Version 12 adds the required fitted-estimator tag so
@@ -61,6 +61,26 @@ fn assert_saved_model_schema_is_pinned(saved: &Value) {
         Some(EXPECTED_MODEL_PAYLOAD_VERSION),
         "saved model schema version changed; audit stateful payload fields before updating this test"
     );
+    if let Some(fit) = payload.get("fit_result").and_then(Value::as_object) {
+        for (label, materialization) in [
+            ("fit_result", fit),
+            (
+                "unified",
+                payload
+                    .get("unified")
+                    .and_then(Value::as_object)
+                    .expect("dense saved fit carries its synchronized unified materialization"),
+            ),
+        ] {
+            assert_eq!(
+                materialization
+                    .get("training_sample_size")
+                    .and_then(Value::as_u64),
+                Some(8),
+                "{label} must persist the same authoritative training row count"
+            );
+        }
+    }
     assert_eq!(
         serde_json::from_value::<FittedEstimator>(
             payload
@@ -107,6 +127,7 @@ fn minimal_fit_result(fitted_link: FittedLinkState) -> UnifiedFitResult {
             edf: 0.0,
             lambdas: Array1::zeros(0),
         }],
+        training_sample_size: 8,
         log_lambdas: Array1::zeros(0),
         lambdas: Array1::zeros(0),
         likelihood_family: Some(LikelihoodSpec::new(
@@ -161,6 +182,7 @@ fn minimal_survival_fit_result() -> UnifiedFitResult {
                 lambdas: Array1::zeros(0),
             },
         ],
+        training_sample_size: 8,
         log_lambdas: Array1::zeros(0),
         lambdas: Array1::zeros(0),
         likelihood_family: Some(LikelihoodSpec::new(

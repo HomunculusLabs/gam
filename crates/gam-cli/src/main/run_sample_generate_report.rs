@@ -428,7 +428,7 @@ pub(crate) fn run_report_spline_scan(
         family_name: model.likelihood().pretty_name().to_string(),
         model_class: format!("{:?}", model.predict_model_class()),
         formula: model.formula.clone(),
-        n_obs: Some(scan.n_obs()),
+        n_obs: Some(scan.training_sample_size()),
         deviance: scan.deviance(),
         reml_score: -scan.restricted_loglik,
         iterations: 0,
@@ -515,7 +515,7 @@ pub(crate) fn run_report_residual_cascade(
         family_name: model.likelihood().pretty_name().to_string(),
         model_class: format!("{:?}", model.predict_model_class()),
         formula: model.formula.clone(),
-        n_obs: None,
+        n_obs: Some(fit.training_sample_size()),
         // Gaussian-identity deviance ≡ the penalized residual quadratic
         // `y'Wy − ĉ'X'Wy` the fit profiles σ² from.
         deviance: fit.rss_pen,

@@ -236,6 +236,7 @@ pub(crate) fn core_saved_fit_result(
                 edf: 0.0,
                 lambdas: lambdas.clone(),
             }],
+            training_sample_size: summary.training_sample_size,
             log_lambdas,
             lambdas,
             likelihood_family: summary.likelihood_family,
@@ -290,6 +291,9 @@ pub(crate) fn core_saved_fit_result(
 
 #[derive(Clone)]
 pub(crate) struct SavedFitSummary {
+    /// Original training rows, carried through compact saved-fit
+    /// materialization without consulting optional working geometry.
+    pub(crate) training_sample_size: usize,
     pub(crate) likelihood_family: Option<LikelihoodSpec>,
     pub(crate) likelihood_scale: LikelihoodScaleMetadata,
     pub(crate) log_likelihood_normalization: LogLikelihoodNormalization,
@@ -311,6 +315,9 @@ pub(crate) struct SavedFitSummary {
 
 impl SavedFitSummary {
     fn validated(self) -> Result<Self, String> {
+        if self.training_sample_size == 0 {
+            return Err("fit_result.training_sample_size must be positive".to_string());
+        }
         ensure_finite_scalar("fit_result.log_likelihood", self.log_likelihood)?;
         ensure_finite_scalar("fit_result.finalgrad_norm", self.finalgrad_norm)?;
         ensure_finite_scalar("fit_result.deviance", self.deviance)?;
@@ -330,6 +337,7 @@ impl SavedFitSummary {
             .flat_map(|b| b.eta.iter())
             .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
         Self {
+            training_sample_size: fit.training_sample_size(),
             likelihood_family: fit.likelihood_family.clone(),
             likelihood_scale: fit.likelihood_scale,
             log_likelihood_normalization: fit.log_likelihood_normalization,
@@ -399,6 +407,9 @@ pub(crate) fn compact_saved_multiblock_fit_result(
         }
         fit_result.geometry = Some(geom);
     }
+    fit_result
+        .validate_numeric_finiteness()
+        .expect("compact saved fit materialization violated fitted-result invariants");
     fit_result
 }
 
@@ -490,6 +501,7 @@ mod tests {
                 edf: 2.0,
                 lambdas: Array1::from_vec(vec![1.0]),
             }],
+            training_sample_size: 32,
             log_lambdas: Array1::zeros(1),
             lambdas: Array1::from_vec(vec![1.0]),
             likelihood_family: None,
@@ -524,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_saved_fit_retains_outer_certificate() {
+    fn compact_saved_fit_retains_outer_certificate_and_training_sample_size() {
         let fit = location_scale_fit_with_outer_certificate();
         // Precondition: the live fit optimized ρ and holds an analytic proof.
         assert_eq!(fit.outer_iterations, 1);
@@ -537,6 +549,11 @@ mod tests {
         assert!(
             summary.criterion_certificate.is_some(),
             "SavedFitSummary dropped the live outer certificate"
+        );
+        assert_eq!(
+            summary.training_sample_size,
+            fit.training_sample_size(),
+            "SavedFitSummary must carry the authoritative training-row count"
         );
 
         // Reconstructing the compact saved fit must not panic and must preserve
@@ -553,6 +570,11 @@ mod tests {
             summary,
         );
         assert_eq!(reconstructed.outer_iterations, 1);
+        assert_eq!(
+            reconstructed.training_sample_size(),
+            fit.training_sample_size(),
+            "compact materialization changed the authoritative training-row count"
+        );
         assert!(
             reconstructed
                 .convergence_evidence()
@@ -588,6 +610,7 @@ mod tests {
                 edf: 2.0,
                 lambdas: Array1::from_vec(vec![1.0]),
             }],
+            training_sample_size: 32,
             log_lambdas: Array1::zeros(1),
             lambdas: Array1::from_vec(vec![1.0]),
             likelihood_family: None,

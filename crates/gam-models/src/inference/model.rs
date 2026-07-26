@@ -58,7 +58,11 @@ use std::path::Path;
 /// Do NOT bump for purely additive `Option<T>` fields that the save-time
 /// invariant (`validate_for_persistence`) does not yet require. Those are
 /// forward-compatible.
-pub const MODEL_PAYLOAD_VERSION: u32 = 14;
+// v15 makes the original training row count required on every mutually
+// exclusive fit representation (`UnifiedFitResult`, spline scan, residual
+// cascade). Readers must never guess it from optional working evidence or
+// prediction-time reconstruction grids.
+pub const MODEL_PAYLOAD_VERSION: u32 = 15;
 
 /// Coefficient parameterization of a saved transformation-normal (CTN) fit.
 ///
@@ -4540,6 +4544,19 @@ impl FittedModel {
         // MODEL_PAYLOAD_VERSION constant — every payload must round-trip
         // identically between writers and readers running the same schema.
         self.validate_payload_version()?;
+        if let (Some(fit_result), Some(unified)) =
+            (self.fit_result.as_ref(), self.unified.as_ref())
+            && fit_result.training_sample_size() != unified.training_sample_size()
+        {
+            return Err(FittedModelError::SchemaMismatch {
+                reason: format!(
+                    "saved model fit_result training_sample_size {} disagrees with its unified \
+                     materialization {}; regenerate the model",
+                    fit_result.training_sample_size(),
+                    unified.training_sample_size()
+                ),
+            });
+        }
         let expectile_family_tag = {
             let family = self.family.trim().to_ascii_lowercase();
             family == "expectile" || family.starts_with("expectile(")
@@ -5815,6 +5832,7 @@ mod tests {
         let p: usize = blocks.iter().map(|block| block.beta.len()).sum();
         UnifiedFitResult::try_from_parts(gam_solve::estimate::UnifiedFitResultParts {
             blocks,
+            training_sample_size: 16,
             log_lambdas: Array1::zeros(0),
             lambdas: Array1::zeros(0),
             likelihood_family: Some(LikelihoodSpec::binomial_probit()),
@@ -5876,6 +5894,34 @@ mod tests {
         payload.fit_result = Some(fit.clone());
         payload.unified = Some(fit);
         FittedModel::from_payload(payload)
+    }
+
+    #[test]
+    fn dense_materializations_must_share_training_sample_size() {
+        let canonical = saved_fit(vec![FittedBlock {
+            beta: array![0.25],
+            role: BlockRole::Mean,
+            edf: 1.0,
+            lambdas: Array1::zeros(0),
+        }]);
+        let mut encoded = serde_json::to_value(&canonical).expect("serialize canonical fit");
+        encoded
+            .as_object_mut()
+            .expect("fit serializes as an object")
+            .insert("training_sample_size".to_string(), serde_json::json!(17));
+        let divergent =
+            serde_json::from_value::<UnifiedFitResult>(encoded).expect("decode divergent alias");
+
+        let model = standard_binomial_model(canonical);
+        let mut payload = model.payload().clone();
+        payload.unified = Some(divergent);
+        let error = FittedModel::from_payload(payload)
+            .validate_for_persistence()
+            .expect_err("dense aliases cannot disagree about training rows");
+        assert!(
+            error.to_string().contains("training_sample_size"),
+            "alias disagreement reported an unrelated error: {error}"
+        );
     }
 
     #[test]

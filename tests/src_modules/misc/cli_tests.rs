@@ -1950,6 +1950,7 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
             edf: 0.0,
             lambdas: Array1::zeros(0),
         }],
+        training_sample_size: 12,
         log_lambdas: Array1::zeros(0),
         lambdas: Array1::zeros(0),
         likelihood_family: Some(LikelihoodSpec::new(
@@ -2853,6 +2854,7 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
             edf: 1.5,
             lambdas: lambdas.clone(),
         }],
+        training_sample_size: 3,
         log_lambdas: lambdas.mapv(f64::ln),
         lambdas,
         likelihood_family: Some(LikelihoodSpec::new(

@@ -525,6 +525,9 @@ pub struct ResidualCascadeDesign {
 /// Fitted cascade with factored-by-solve posterior access.
 pub struct ResidualCascadeFit {
     core: Arc<Core>,
+    /// Number of original training rows. Restored fits retain this scalar even
+    /// though their prediction-only core intentionally drops the row arrays.
+    training_sample_size: std::num::NonZeroUsize,
     /// Dense-route prediction factor at the fit's λ. When present, pointwise
     /// variance uses this one Cholesky factor instead of refactoring the same
     /// precision matrix for every prediction point.
@@ -711,8 +714,8 @@ pub struct LevelState {
 }
 
 /// Serializable snapshot of a [`ResidualCascadeFit`] (#1032 persistence
-/// prerequisite). Holds everything `predict` needs and NOTHING about the
-/// training rows:
+/// prerequisite). Holds everything `predict` and sample-size-based reporting
+/// need and no training row values:
 /// - MEAN: the nested geometry (`dim`/`metric`/box/`sobolev_s` + per-level
 ///   centers/δ/weights/col-offsets) and the root polynomial layer are all that
 ///   `basis_row_scaled`·`coeff` reads;
@@ -728,6 +731,8 @@ pub struct LevelState {
 /// contract.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResidualCascadeState {
+    /// Original training row count. Required on the wire.
+    pub training_sample_size: std::num::NonZeroU64,
     pub dim: u64,
     /// Per-axis metric scaling (length 3; trailing entries are 1 for `dim < 3`).
     pub metric: [f64; 3],
@@ -3354,6 +3359,8 @@ impl ResidualCascadeDesign {
         };
         Ok(ResidualCascadeFit {
             core: Arc::clone(&self.core),
+            training_sample_size: std::num::NonZeroUsize::new(core.y.len())
+                .expect("ResidualCascadeDesign requires training rows"),
             predict_chol,
             coeff,
             log_lambda,
@@ -3593,6 +3600,11 @@ impl ResidualCascadeFit {
             .expect("ResidualCascadeFit construction validates its private log strength")
     }
 
+    /// Number of original training rows / experimental units.
+    pub fn training_sample_size(&self) -> usize {
+        self.training_sample_size.get()
+    }
+
     /// Posterior `(mean, variance)` at a raw point: the sparse basis row
     /// dotted with the coefficients, and `σ̂²·x'(X'WX+λD)^{−1}x` through one
     /// certified solve.
@@ -3681,6 +3693,17 @@ impl ResidualCascadeFit {
     /// replays the posterior mean+variance bit-for-bit.
     pub fn to_state(&self) -> Result<ResidualCascadeState, String> {
         let core = &self.core;
+        let training_sample_size =
+            u64::try_from(self.training_sample_size.get()).map_err(|_| {
+                format!(
+                    "residual cascade fit: training_sample_size {} exceeds the persistence format",
+                    self.training_sample_size
+                )
+            })?;
+        let training_sample_size =
+            std::num::NonZeroU64::new(training_sample_size).ok_or_else(|| {
+                "residual cascade fit: training_sample_size must be positive".to_string()
+            })?;
         let lambda = gam_problem::checked_exp_log_strength(self.log_lambda)
             .map_err(|error| format!("residual cascade fit: {error}"))?;
         let predict_chol = if let Some(l) = &self.predict_chol {
@@ -3709,6 +3732,7 @@ impl ResidualCascadeFit {
             })
             .collect();
         Ok(ResidualCascadeState {
+            training_sample_size,
             dim: dim as u64,
             metric: core.metric,
             z_lo: core.z_lo,
@@ -3735,6 +3759,13 @@ impl ResidualCascadeFit {
     /// `predict_chol = Some(L)`; its `predict` reads only geometry (mean) and
     /// the factor (variance), replaying both exactly.
     pub fn from_state(state: &ResidualCascadeState) -> Result<Self, String> {
+        let training_sample_size =
+            usize::try_from(state.training_sample_size.get()).map_err(|_| {
+                format!(
+                    "residual cascade state: training_sample_size {} exceeds this platform's usize",
+                    state.training_sample_size
+                )
+            })?;
         let dim = state.dim as usize;
         if !(dim == 2 || dim == 3) {
             return Err(format!(
@@ -3913,6 +3944,8 @@ impl ResidualCascadeFit {
         };
         Ok(ResidualCascadeFit {
             core: Arc::new(core),
+            training_sample_size: std::num::NonZeroUsize::new(training_sample_size)
+                .expect("nonzero wire count remains nonzero after conversion"),
             predict_chol: None,
             coeff: state.coeff.clone(),
             log_lambda: state.log_lambda,
@@ -4670,6 +4703,47 @@ mod refinement_decision_tests {
             y.push(truth + 0.1 * rng.next_normal());
         }
         (x1, x2, y)
+    }
+
+    #[test]
+    fn state_round_trip_requires_and_preserves_training_sample_size() {
+        let (x1, x2, y) = dense_fixture(4);
+        let weights = vec![1.0; y.len()];
+        let axes: [&[f64]; 2] = [&x1, &x2];
+        let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, 2)
+            .expect("cascade design");
+        let fit = design.fit_at(0.0, None).expect("fixed-lambda fit");
+        assert_eq!(fit.training_sample_size(), y.len());
+
+        let state = fit.to_state().expect("persist cascade fit");
+        assert_eq!(state.training_sample_size.get(), y.len() as u64);
+        let restored = ResidualCascadeFit::from_state(&state).expect("restore cascade fit");
+        assert_eq!(
+            restored.training_sample_size(),
+            y.len(),
+            "prediction-only materialization must retain the original row count"
+        );
+
+        let mut encoded = serde_json::to_value(&state).expect("serialize cascade state");
+        encoded
+            .as_object_mut()
+            .expect("cascade state serializes as an object")
+            .remove("training_sample_size");
+        assert!(
+            serde_json::from_value::<ResidualCascadeState>(encoded).is_err(),
+            "pre-training-size cascade state must not deserialize"
+        );
+
+        let mut zero = serde_json::to_value(&state).expect("serialize cascade state");
+        zero.as_object_mut()
+            .expect("cascade state serializes as an object")
+            .insert("training_sample_size".to_string(), serde_json::json!(0));
+        let error = serde_json::from_value::<ResidualCascadeState>(zero)
+            .expect_err("zero training rows must not deserialize");
+        assert!(
+            error.to_string().contains("nonzero"),
+            "zero-row rejection reported an unrelated error: {error}"
+        );
     }
 
     /// Past the dense cap, a scattered design must EXHAUST its Krylov space inside
