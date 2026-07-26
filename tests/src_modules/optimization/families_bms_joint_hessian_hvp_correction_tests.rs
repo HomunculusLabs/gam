@@ -750,60 +750,155 @@ fn bernoulli_flex_tiled_hvp_cache_matches_host_cache_small_case() {
     }
 }
 
+/// The per-row primary-Hessian cache is taken exactly when the planner's own
+/// work ledger says building it amortizes, and at a large-scale flex shape it
+/// does.
+///
+/// #2425/#2487: this test used to run two `Instant::elapsed()` loops and assert
+/// `cached_elapsed < uncached_elapsed` with no margin at all. That is a
+/// wall-clock gate (SPEC rule 19) and a coin flip under fleet co-tenancy — the
+/// same defect that retired four GPU ratio gates in `4fa4012b4`. The claim
+/// worth keeping never needed a clock, because the planner already *counts* the
+/// work each route does:
+///
+///   * materialize → each row's primary Hessian is lowered once, `n` in total;
+///   * stream → `exact_newton_joint_hessian_matvec_from_cache` finds
+///     `row_primary_hessians` `Empty` and re-runs
+///     `lower_bms_flex_row_order2_with_moments` for every row on every reuse
+///     pass, `n · expected_reuse_passes` in total.
+///
+/// So the saving is `(passes − 1) · n` row lowerings — an integer, identical on
+/// every box, and the quantity `decide_row_primary_hessian_cache` actually
+/// branches on. This test owns that decision and the crossover on both of its
+/// gates; that the two routes compute the *same* numbers is
+/// `bernoulli_flex_hvp_cache_matches_uncached_path_small_case`.
 #[test]
-fn bernoulli_flex_hvp_cache_timing_large_scale_shape_pattern() {
-    // Wall-clock micro-benchmark for the per-row primary-Hessian cache
-    // (`row_primary_hessians`).  The matrix-free CG / inner-Newton loops
-    // contract the same per-row primary Hessian against many trial
-    // directions at the same β, so caching the `r×r` blocks once should
-    // beat rebuilding cell moments + flex jets on every Hv.
+fn bernoulli_flex_hvp_cache_materializes_when_reuse_amortizes_the_row_lowering() {
     let (family, states) = make_flex_hvp_cache_test_family(96);
-    let mut cached = family
+    let cache = family
         .build_exact_eval_cache(&states)
-        .expect("cached exact eval cache");
-    cached.row_primary_hessians = family
-        .build_row_primary_hessian_cache(&states, &cached)
-        .expect("row Hessian cache");
-    let uncached = BernoulliMarginalSlopeExactEvalCache {
-        slices: cached.slices.clone(),
-        primary: cached.primary.clone(),
-        row_contexts: cached.row_contexts.clone(),
-        row_cell_moments: None,
-        cell_family_forest: None,
-        row_cell_moments_d15: gam_runtime::resource::RayonSafeOnce::new(),
-        row_cell_moments_d21: gam_runtime::resource::RayonSafeOnce::new(),
-        row_primary_hessians: RowPrimaryEvalCache::Empty,
-        rigid_third_full: gam_runtime::resource::RayonSafeOnce::new(),
-        rigid_fourth_full: gam_runtime::resource::RayonSafeOnce::new(),
-        flex_row_program_derivatives: gam_runtime::resource::RayonSafeOnce::new(),
-        full_data_outer_rows: std::sync::OnceLock::new(),
-    };
-    let directions: Vec<_> = (0..4)
-        .map(|rep| {
-            Array1::from_iter(
-                (0..cached.slices.total)
-                    .map(|idx| 0.01 * (((idx * 13 + rep * 7) % 11) as f64 - 5.0)),
-            )
-        })
-        .collect();
-    let start_uncached = std::time::Instant::now();
-    for direction in &directions {
-        family
-            .exact_newton_joint_hessian_matvec_from_cache(direction, &states, &uncached)
-            .expect("uncached Hv");
-    }
-    let uncached_elapsed = start_uncached.elapsed();
-    let start_cached = std::time::Instant::now();
-    for direction in &directions {
-        family
-            .exact_newton_joint_hessian_matvec_from_cache(direction, &states, &cached)
-            .expect("cached Hv");
-    }
-    let cached_elapsed = start_cached.elapsed();
-    eprintln!("flex Hv cache timing: uncached={uncached_elapsed:?} cached={cached_elapsed:?}");
+        .expect("exact eval cache");
+    let n = family.y.len();
+    let r = cache.primary.total;
     assert!(
-        cached_elapsed < uncached_elapsed,
-        "expected cached Hv loop to beat uncached: cached={cached_elapsed:?} uncached={uncached_elapsed:?}"
+        r > 0,
+        "the flex fixture must carry a non-empty primary block, got r={r}"
+    );
+
+    // Budgets are supplied explicitly rather than read from the host so the
+    // decision under test is a function of the shape alone. `capacity` is far
+    // above the `n · (r² + r + 1) · 8 B` this shape needs, so the two memory
+    // gates are slack here and the reuse gate is the only thing deciding.
+    let capacity: u64 = 64 << 30;
+    let passes = BMS_ROW_PRIMARY_HESSIAN_EXPECTED_REUSE_PASSES;
+    let min_passes = BMS_ROW_PRIMARY_HESSIAN_MIN_REUSE_PASSES;
+    let plan = decide_row_primary_hessian_cache(n, r, passes, capacity, capacity, 0);
+    assert!(
+        plan.materialize,
+        "at n={n} r={r} with the production reuse count {passes} and a slack memory budget, the \
+         row-primary Hessian cache declined to materialize — reason={}",
+        plan.reason.as_str()
+    );
+    assert_eq!(
+        plan.reason,
+        RowPrimaryHessianCacheReason::ReuseAmortizesBuild,
+        "materializing here must be justified by reuse, not by a memory gate falling through"
+    );
+
+    // The work ledger itself: the whole point of the cache, stated as counts.
+    assert_eq!(
+        plan.materialized_row_hessian_evals, n,
+        "materializing must lower each of the {n} rows exactly once"
+    );
+    assert_eq!(
+        plan.streamed_row_hessian_evals,
+        n * passes,
+        "streaming must re-lower all {n} rows on each of the {passes} reuse passes"
+    );
+    assert!(
+        plan.streamed_row_hessian_evals > plan.materialized_row_hessian_evals,
+        "the ledger the decision is made on says streaming costs no more than materializing: \
+         streamed={} materialized={}",
+        plan.streamed_row_hessian_evals,
+        plan.materialized_row_hessian_evals
+    );
+
+    // Crossover on the reuse gate, pinned by the adjacent pair. Without the
+    // negative arm the positive one proves nothing — a planner that
+    // materialized unconditionally would pass it.
+    let at_min = decide_row_primary_hessian_cache(n, r, min_passes, capacity, capacity, 0);
+    assert!(
+        at_min.materialize,
+        "{min_passes} reuse passes is the documented minimum that amortizes the build, yet the \
+         plan declined — reason={}",
+        at_min.reason.as_str()
+    );
+    let below_min = decide_row_primary_hessian_cache(n, r, min_passes - 1, capacity, capacity, 0);
+    assert!(
+        !below_min.materialize,
+        "one pass below the minimum the build cannot be amortized — a single pass lowers every row \
+         once either way — yet the plan materialized: reason={}",
+        below_min.reason.as_str()
+    );
+    assert_eq!(
+        below_min.reason,
+        RowPrimaryHessianCacheReason::ReuseTooLow,
+        "below the reuse minimum the refusal must name the reuse gate"
+    );
+
+    // Crossover on the single-cache memory gate, at the same shape: the budget
+    // is derived from `plan.bytes` so the pair straddles `bytes >= budget`
+    // exactly, whatever `r` the fixture produces.
+    let exact_fit_capacity = plan
+        .bytes
+        .saturating_mul(BMS_ROW_PRIMARY_HESSIAN_SINGLE_FRACTION_DEN)
+        / BMS_ROW_PRIMARY_HESSIAN_SINGLE_FRACTION_NUM;
+    let too_small =
+        decide_row_primary_hessian_cache(n, r, passes, exact_fit_capacity, capacity, 0);
+    assert!(
+        !too_small.materialize,
+        "a cache needing {} B against a single-cache budget of exactly {} B must decline, \
+         yet the plan materialized: reason={}",
+        plan.bytes,
+        too_small.single_cache_budget_bytes,
+        too_small.reason.as_str()
+    );
+    assert_eq!(
+        too_small.reason,
+        RowPrimaryHessianCacheReason::SingleCacheExceedsRamFraction,
+        "at the memory crossover the refusal must name the single-cache gate"
+    );
+    // One budget-unit above that crossover the same shape must be admitted, so
+    // the refusal above is attributable to the gate and not to the shape.
+    let just_fits = decide_row_primary_hessian_cache(
+        n,
+        r,
+        passes,
+        exact_fit_capacity + BMS_ROW_PRIMARY_HESSIAN_SINGLE_FRACTION_DEN,
+        capacity,
+        0,
+    );
+    assert!(
+        just_fits.materialize,
+        "one budget unit above the crossover the single-cache gate must admit {} B against {} B, \
+         yet the plan declined: reason={}",
+        plan.bytes,
+        just_fits.single_cache_budget_bytes,
+        just_fits.reason.as_str()
+    );
+
+    // Reachability: the production builder must actually take the materialized
+    // route at this shape, or the counts above describe a path this test never
+    // reaches. `n · (r² + r + 1) · 8 B` is well under a megabyte here, so a
+    // refusal means the host could not spare that — which is worth failing on.
+    let built = family
+        .build_row_primary_hessian_cache(&states, &cache)
+        .expect("row Hessian cache");
+    assert!(
+        built.is_some(),
+        "the production builder streamed at n={n} r={r} ({} B), so the Hv path re-lowers every row \
+         on every pass; the plan for this shape says materialize",
+        plan.bytes
     );
 }
 
