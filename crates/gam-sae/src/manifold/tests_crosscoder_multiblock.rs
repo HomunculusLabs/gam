@@ -279,7 +279,7 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
             )
             .unwrap();
         }
-    
+
         let reference = &fits[0].0.atoms[0].decoder_coefficients;
         assert_eq!(
             reference.len(),
@@ -308,6 +308,9 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
 }
 
 
+/// The `K = 2` special case: the general multi-block driver reproduces the
+/// two-block driver to the last bit — same fitted decoders, same log λ.
+#[test]
 fn multiblock_reduces_to_two_block_bit_identically_at_k2() {
     let n = 72usize;
     let p_x = 4usize;
