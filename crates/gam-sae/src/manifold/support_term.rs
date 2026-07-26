@@ -926,52 +926,75 @@ impl SaeSupportSparseTerm {
         out
     }
 
-    /// [`Self::evaluate_active`] against a caller-held coordinate slice.
-    fn evaluate_active_at(
+    /// Fill one active slot's basis row, jet, decoded image, and coordinate
+    /// Jacobian into caller-owned buffers — the allocation-free counterpart of
+    /// [`Self::evaluate_active`] for the parallel row solve. The profiled
+    /// inner-cycle cost (98.6% of every core in `__memset`) was these buffers
+    /// being freshly zero-allocated for every slot of every line-search trial
+    /// of every row; the basis itself goes through the trait's
+    /// [`SaeBasisEvaluator::evaluate_into`].
+    fn fill_active_eval(
         &self,
         row: usize,
         slot: usize,
         slot_coords: &[f64],
-    ) -> Result<ActiveAtomEval, String> {
+        phi: &mut Array2<f64>,
+        jet: &mut ndarray::Array3<f64>,
+        decoded: &mut Array1<f64>,
+        jacobian: &mut Array2<f64>,
+    ) -> Result<(), String> {
         let atom_idx = self.assignment.support_indices(row)[slot] as usize;
         let atom = &self.atoms[atom_idx];
         let d = atom.latent_dim();
-        let coords = Array2::from_shape_vec((1, d), slot_coords.to_vec())
-            .map_err(|error| format!("SaeSupportSparseTerm::evaluate_active_at: {error}"))?;
-        let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
-            format!("SaeSupportSparseTerm::evaluate_active_at: atom {atom_idx} has no evaluator")
-        })?;
-        let (phi, jet) = evaluator.evaluate(coords.view())?;
         let m = atom.basis_size();
-        if phi.dim() != (1, m) || jet.dim() != (1, m, d) {
+        if slot_coords.len() != d
+            || phi.dim() != (1, m)
+            || jet.dim() != (1, m, d)
+            || decoded.len() != self.output_dim
+            || jacobian.dim() != (d, self.output_dim)
+        {
             return Err(format!(
-                "SaeSupportSparseTerm::evaluate_active_at: atom {atom_idx} evaluator shapes Phi={:?}, jet={:?}, expected (1,{m}) and (1,{m},{d})",
+                "SaeSupportSparseTerm::fill_active_eval: atom {atom_idx} buffer shapes \
+                 coords={}, phi={:?}, jet={:?}, decoded={}, jacobian={:?} do not match \
+                 (m={m}, d={d}, p={})",
+                slot_coords.len(),
                 phi.dim(),
-                jet.dim()
+                jet.dim(),
+                decoded.len(),
+                jacobian.dim(),
+                self.output_dim
             ));
         }
-        let phi = phi.row(0).to_owned();
-        let decoded = phi.dot(&atom.decoder_coefficients);
-        let mut jacobian = Array2::<f64>::zeros((d, self.output_dim));
+        let coords = ndarray::ArrayView2::from_shape((1, d), slot_coords)
+            .map_err(|error| format!("SaeSupportSparseTerm::fill_active_eval: {error}"))?;
+        let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
+            format!("SaeSupportSparseTerm::fill_active_eval: atom {atom_idx} has no evaluator")
+        })?;
+        evaluator.evaluate_into(phi, jet, coords)?;
+        decoded.fill(0.0);
+        for basis in 0..m {
+            let weight = phi[[0, basis]];
+            for output in 0..self.output_dim {
+                decoded[output] += weight * atom.decoder_coefficients[[basis, output]];
+            }
+        }
+        jacobian.fill(0.0);
         for axis in 0..d {
             for basis in 0..m {
                 let weight = jet[[0, basis, axis]];
                 for output in 0..self.output_dim {
-                    jacobian[[axis, output]] += weight * atom.decoder_coefficients[[basis, output]];
+                    jacobian[[axis, output]] +=
+                        weight * atom.decoder_coefficients[[basis, output]];
                 }
             }
         }
-        Ok(ActiveAtomEval {
-            phi,
-            decoded,
-            jacobian,
-        })
+        Ok(())
     }
 
     /// One row's exact Gauss-Newton coordinate step with manifold-aware
-    /// backtracking, on the row's caller-held coordinate block. The body is
-    /// the serial sweep's row iteration, transformed to read and write ONLY
-    /// `coords_row`; rows share no mutable state.
+    /// backtracking, on the row's caller-held coordinate block. Semantically
+    /// the serial sweep's row iteration; storage-wise a single per-row scratch
+    /// filled in place, so the line-search halvings allocate nothing.
     fn row_coordinate_solve(
         &self,
         row: usize,
@@ -983,22 +1006,55 @@ impl SaeSupportSparseTerm {
     ) -> Result<f64, String> {
         let mut max_change = 0.0_f64;
         let offsets = self.slot_offsets(row);
+        let n_slots = offsets.len();
         let q = coords_row.len();
-        let mut fitted = Array1::<f64>::zeros(self.output_dim);
-        let mut jacobian = Array2::<f64>::zeros((q, self.output_dim));
-        let mut active_evals = Vec::with_capacity(self.assignment.support_indices(row).len());
-        let mut cursor = 0;
-        for slot in 0..self.assignment.support_indices(row).len() {
-            let active = self.evaluate_active_at(row, slot, &coords_row[offsets[slot].clone()])?;
-            fitted += &active.decoded;
-            let d = active.jacobian.nrows();
-            for axis in 0..d {
+        let p = self.output_dim;
+
+        // ---- per-row scratch, allocated once ----
+        let support = self.assignment.support_indices(row).to_vec();
+        let dims: Vec<(usize, usize)> = support
+            .iter()
+            .map(|&atom| {
+                let atom = atom as usize;
+                (self.atoms[atom].basis_size(), self.atoms[atom].latent_dim())
+            })
+            .collect();
+        let mut phi_cur: Vec<Array2<f64>> =
+            dims.iter().map(|&(m, _)| Array2::zeros((1, m))).collect();
+        let mut jet_cur: Vec<ndarray::Array3<f64>> = dims
+            .iter()
+            .map(|&(m, d)| ndarray::Array3::zeros((1, m, d)))
+            .collect();
+        let mut dec_cur: Vec<Array1<f64>> = dims.iter().map(|_| Array1::zeros(p)).collect();
+        let mut jac_cur: Vec<Array2<f64>> =
+            dims.iter().map(|&(_, d)| Array2::zeros((d, p))).collect();
+        let mut phi_trial = phi_cur.clone();
+        let mut jet_trial = jet_cur.clone();
+        let mut dec_trial = dec_cur.clone();
+        let mut jac_trial = jac_cur.clone();
+        let mut fitted = Array1::<f64>::zeros(p);
+        let mut jacobian = Array2::<f64>::zeros((q, p));
+        let mut trial_fitted = Array1::<f64>::zeros(p);
+        let mut trial_residual = Array1::<f64>::zeros(p);
+        let mut trial_delta = vec![0.0_f64; q];
+        let mut fitted_delta: Vec<KahanSum> = (0..p).map(|_| KahanSum::default()).collect();
+
+        for slot in 0..n_slots {
+            self.fill_active_eval(
+                row,
+                slot,
+                &coords_row[offsets[slot].clone()],
+                &mut phi_cur[slot],
+                &mut jet_cur[slot],
+                &mut dec_cur[slot],
+                &mut jac_cur[slot],
+            )?;
+            fitted += &dec_cur[slot];
+            for axis in 0..dims[slot].1 {
                 jacobian
-                    .row_mut(cursor + axis)
-                    .assign(&active.jacobian.row(axis));
+                    .row_mut(offsets[slot].start + axis)
+                    .assign(&jac_cur[slot].row(axis));
             }
-            cursor += d;
-            active_evals.push(active);
         }
         let residual = &target.row(row) - &fitted;
         let mut row_objective_scale =
@@ -1006,7 +1062,7 @@ impl SaeSupportSparseTerm {
         let mut rhs_vector = jacobian.dot(&residual);
         let mut gram = jacobian.dot(&jacobian.t());
         let mut prior_cursor = 0usize;
-        for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
+        for (slot, &atom) in support.iter().enumerate() {
             let atom = atom as usize;
             let periods = self.assignment.atom_axis_periods(atom);
             for axis in 0..self.assignment.atom_coord_dim(atom) {
@@ -1066,19 +1122,18 @@ impl SaeSupportSparseTerm {
         let mut best_objective_delta = f64::NAN;
         let mut best_armijo_bound = f64::NAN;
         let evaluation_ops = 1usize
-            + self.output_dim
+            + p
             + q
-            + active_evals
-                .iter()
-                .map(|active| active.phi.len() * self.output_dim)
-                .sum::<usize>();
+            + dims.iter().map(|&(m, _)| m * p).sum::<usize>();
         let gamma =
             evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
         let objective_resolution = gamma * row_objective_scale;
         for halving in 0..=24 {
             self.assignment.project_row_coords(row, &old_coords, coords_row)?;
             let step = 2.0_f64.powi(-(halving as i32));
-            let trial_delta = delta.iter().map(|value| step * value).collect::<Vec<_>>();
+            for (target_slot, value) in trial_delta.iter_mut().zip(delta.iter()) {
+                *target_slot = step * value;
+            }
             self.assignment.retract_row_coords(row, coords_row, &trial_delta)?;
             // Evaluate f(trial) - f(old) directly. Near stationarity the
             // decrease is O(||g||^2), so subtracting two O(1) objective
@@ -1088,33 +1143,41 @@ impl SaeSupportSparseTerm {
             // per-axis energy increments. Kahan accumulation preserves their
             // first-order cancellation in a wide output/coordinate block.
             let mut objective_delta = KahanSum::default();
-            let mut fitted_delta = vec![KahanSum::default(); self.output_dim];
-            let mut trial_evals = Vec::with_capacity(active_evals.len());
-            for (slot, old_active) in active_evals.iter().enumerate() {
-                let atom = self.assignment.support_indices(row)[slot] as usize;
-                let trial_active = self.evaluate_active_at(row, slot, &coords_row[offsets[slot].clone()])?;
-                for basis in 0..old_active.phi.len() {
+            for accumulator in fitted_delta.iter_mut() {
+                *accumulator = KahanSum::default();
+            }
+            for slot in 0..n_slots {
+                let atom = support[slot] as usize;
+                self.fill_active_eval(
+                    row,
+                    slot,
+                    &coords_row[offsets[slot].clone()],
+                    &mut phi_trial[slot],
+                    &mut jet_trial[slot],
+                    &mut dec_trial[slot],
+                    &mut jac_trial[slot],
+                )?;
+                for basis in 0..dims[slot].0 {
                     // Subtract basis values before multiplying by decoder
                     // coefficients. This cancels shared constant/intercept
                     // components before rounding, instead of subtracting two
                     // already-decoded O(1) predictions to recover an O(step)
                     // difference.
-                    let phi_delta = trial_active.phi[basis] - old_active.phi[basis];
-                    for output in 0..self.output_dim {
+                    let phi_delta = phi_trial[slot][[0, basis]] - phi_cur[slot][[0, basis]];
+                    for output in 0..p {
                         fitted_delta[output].add(
                             phi_delta * self.atoms[atom].decoder_coefficients[[basis, output]],
                         );
                     }
                 }
-                trial_evals.push(trial_active);
             }
-            for (output, delta_sum) in fitted_delta.into_iter().enumerate() {
+            for (output, delta_sum) in fitted_delta.iter().enumerate() {
                 let fitted_delta = delta_sum.sum();
                 objective_delta
                     .add(fitted_delta.mul_add(0.5 * fitted_delta - residual[output], 0.0));
             }
             let mut coord_cursor = 0usize;
-            for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
+            for (slot, &atom) in support.iter().enumerate() {
                 let atom = atom as usize;
                 let periods = self.assignment.atom_axis_periods(atom);
                 for axis in 0..self.assignment.atom_coord_dim(atom) {
@@ -1136,17 +1199,19 @@ impl SaeSupportSparseTerm {
                 best_objective_delta = objective_delta;
                 best_armijo_bound = armijo_bound;
             }
-            let mut trial_fitted = Array1::<f64>::zeros(self.output_dim);
-            for active in &trial_evals {
-                trial_fitted += &active.decoded;
+            trial_fitted.fill(0.0);
+            for decoded in &dec_trial {
+                trial_fitted += decoded;
             }
-            let trial_residual = &target.row(row) - &trial_fitted;
+            trial_residual.assign(&target.row(row));
+            trial_residual -= &trial_fitted;
             let mut trial_gradient_max = 0.0_f64;
-            for (slot, active) in trial_evals.iter().enumerate() {
-                let atom = self.assignment.support_indices(row)[slot] as usize;
+            for (slot, &atom) in support.iter().enumerate() {
+                let atom = atom as usize;
                 let periods = self.assignment.atom_axis_periods(atom);
-                for axis in 0..active.jacobian.nrows() {
-                    let likelihood_gradient = -active.jacobian.row(axis).dot(&trial_residual);
+                for axis in 0..dims[slot].1 {
+                    let likelihood_gradient =
+                        -jac_trial[slot].row(axis).dot(&trial_residual);
                     let gradient = likelihood_gradient
                         + ArdAxisPrior::eval(
                             ard_precisions[atom][axis],
