@@ -35,6 +35,7 @@ pub mod pairwise_reduce;
 pub mod parallel;
 pub mod pcg;
 pub mod psd_trust_region;
+pub mod roundoff;
 pub mod sparse_exact;
 pub mod test_support;
 pub mod triangular;

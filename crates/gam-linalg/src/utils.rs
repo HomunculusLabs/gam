@@ -932,7 +932,14 @@ pub fn boundary_hit_step_fraction(
         .max(directional_slack_change.abs())
         .max(current_step_limit.abs())
         .max(1.0);
-    let directional_tol = (64.0 * f64::EPSILON * scale).max(1e-14);
+    // `scale` is at least one by construction above, so `64 EPSILON * scale` is
+    // at least 1.42e-14 and an absolute floor below that can never bind; the
+    // comparison is purely relative. The multiplier is a stated policy value
+    // rather than a derived one: the Wilkinson band for
+    // `directional_slack_change` needs the length of the accumulation that
+    // produced it (see `crate::roundoff`), and this signature carries three
+    // scalars with no term count among them.
+    let directional_tol = 64.0 * f64::EPSILON * scale;
     if directional_slack_change >= -directional_tol {
         return None;
     }

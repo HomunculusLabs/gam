@@ -1,3 +1,4 @@
+use gam_linalg::roundoff::accumulation_band;
 use ndarray::{Array1, ArrayView1};
 use opt::{BacktrackConfig, ExpandConfig, bidirectional_line_search, constants};
 
@@ -102,7 +103,13 @@ fn metric_norm_from_product(
     // A Riemannian metric is positive definite. Permit only the backward-error
     // band of the final dot product; clamping a materially negative quadratic
     // to zero would falsely turn an indefinite metric into a stationary point.
-    let negative_roundoff = 64.0 * f64::EPSILON * absolute_sum;
+    // That band is Wilkinson's for this exact accumulation — both of its inputs,
+    // the term count and the absolute sum, are the loop's own state — so it is
+    // computed rather than guessed. A fixed multiple of EPSILON would be too
+    // tight on a high-dimensional tangent space, rejecting metrics whose
+    // squared norm is zero in exact arithmetic, and needlessly loose on a
+    // low-dimensional one.
+    let negative_roundoff = accumulation_band(a.len(), absolute_sum);
     if squared_norm < -negative_roundoff {
         return Err(crate::manifold::GeometryError::InvalidPoint(
             "Riemannian metric produced a negative squared norm",

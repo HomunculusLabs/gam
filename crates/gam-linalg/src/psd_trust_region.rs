@@ -14,6 +14,7 @@
 
 use crate::LinalgError;
 use crate::faer_ndarray::FaerEigh;
+use crate::roundoff::accumulation_growth;
 use faer::Side;
 use ndarray::{Array1, ArrayView1, ArrayView2};
 
@@ -145,52 +146,88 @@ pub fn solve_psd_trust_region(
         ));
     }
 
-    let relative_tolerance = 64.0 * dimension as f64 * f64::EPSILON;
+    // `norm` is a `dimension`-term accumulation, so it cannot resolve a
+    // deviation from one that is finer than its own backward-error band; below
+    // that band `norm == 1` and `norm != 1` are the same statement about the
+    // exact secular function. The norm is `O(1)` at the root, so the band is
+    // the growth factor itself. (`scaled_norm` finishes with a square root,
+    // which halves relative error rather than growing it, so the plain
+    // accumulation bound is conservative.)
+    let residual_band = accumulation_growth(dimension);
     let mut shift = 0.5 * upper;
     if shift == 0.0 {
         return Err(LinalgError::InvalidInput(
             "PSD trust-region secular shift underflowed".to_string(),
         ));
     }
-    for _ in 0..100 {
+
+    // `‖d/(ℓ+ν)‖₂` is strictly decreasing in `ν ≥ 0`, and `ν = ‖d‖₂` already
+    // gives a norm of at most one because `ℓ ≥ 0`, so `[lower, upper]` brackets
+    // the root on entry and every update preserves that. Newton is safeguarded
+    // by the bracket, but a Newton step may land arbitrarily close to an
+    // endpoint, so bracket progress is enforced separately: an iteration that
+    // fails to halve the bracket forces the next step to bisect. The bracket
+    // therefore contracts by at least 2x every two iterations, which bounds the
+    // loop by the number of times an f64 interval can be halved before its
+    // midpoint is bit-identical to an endpoint. Reaching that point is not a
+    // failure to converge — it means the root is pinned between adjacent
+    // representable values and no finer answer exists in this precision — so
+    // both exits are certified and neither is an iteration budget.
+    let mut previous_width = upper - lower;
+    let mut force_bisection = false;
+    loop {
         let norm = scaled_norm(
             scaled_rhs
                 .iter()
                 .zip(scaled_eigenvalues.iter())
                 .map(|(&coefficient, &eigenvalue)| coefficient / (eigenvalue + shift)),
         );
-        if !norm.is_finite() {
-            lower = shift;
-            shift = 0.5 * (lower + upper);
-            continue;
-        }
-        if norm > 1.0 {
-            lower = shift;
+        if norm.is_finite() {
+            if norm > 1.0 {
+                lower = shift;
+            } else {
+                upper = shift;
+            }
+            if (norm - 1.0).abs() <= residual_band {
+                break;
+            }
         } else {
-            upper = shift;
-        }
-        if (norm - 1.0).abs() <= relative_tolerance
-            || upper - lower <= relative_tolerance * upper
-        {
-            break;
+            // `shift` sits on a pole of the secular equation, hence below the
+            // root: the norm diverges to `+inf` as the pole is approached from
+            // above, and the root is where it falls to one.
+            lower = shift;
         }
 
-        // Safeguarded Newton on phi(nu)=1/||y(nu)||-1. Expressing the
-        // derivative through normalized y avoids squaring a huge near-pole step.
-        let inverse_norm = 1.0 / norm;
-        let mut weighted_inverse_denominator = 0.0_f64;
-        for (&coefficient, &eigenvalue) in scaled_rhs.iter().zip(scaled_eigenvalues.iter()) {
-            let denominator = eigenvalue + shift;
-            let normalized = (coefficient / denominator) * inverse_norm;
-            weighted_inverse_denominator += normalized * normalized / denominator;
+        let width = upper - lower;
+        let midpoint = 0.5 * (lower + upper);
+        if !(midpoint > lower && midpoint < upper) {
+            break;
         }
-        let phi = inverse_norm - 1.0;
-        let phi_derivative = inverse_norm * weighted_inverse_denominator;
-        let candidate = shift - phi / phi_derivative;
-        shift = if candidate.is_finite() && candidate > lower && candidate < upper {
-            candidate
+        let bisect = force_bisection || !norm.is_finite();
+        force_bisection = width > 0.5 * previous_width;
+        previous_width = width;
+
+        shift = if bisect {
+            midpoint
         } else {
-            0.5 * (lower + upper)
+            // Safeguarded Newton on phi(nu)=1/||y(nu)||-1. Expressing the
+            // derivative through normalized y avoids squaring a huge near-pole step.
+            let inverse_norm = 1.0 / norm;
+            let mut weighted_inverse_denominator = 0.0_f64;
+            for (&coefficient, &eigenvalue) in scaled_rhs.iter().zip(scaled_eigenvalues.iter())
+            {
+                let denominator = eigenvalue + shift;
+                let normalized = (coefficient / denominator) * inverse_norm;
+                weighted_inverse_denominator += normalized * normalized / denominator;
+            }
+            let phi = inverse_norm - 1.0;
+            let phi_derivative = inverse_norm * weighted_inverse_denominator;
+            let candidate = shift - phi / phi_derivative;
+            if candidate.is_finite() && candidate > lower && candidate < upper {
+                candidate
+            } else {
+                midpoint
+            }
         };
     }
 
