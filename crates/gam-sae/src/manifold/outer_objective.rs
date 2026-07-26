@@ -3996,27 +3996,22 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 self.term = converged;
                 self.seeded_beta = None;
                 true
-            } else if !self.basin_bundle.is_empty() {
-                // #2087/#2253 envelope-consistency — the value lanes price the
-                // basin lower envelope min_b V_b(ρ); the gradient lane used to
-                // inherit the argmin basin ONLY through the bitwise-ρ handoff.
-                // On a handoff miss (e.g. the bridge's value-probe cache served
-                // the repeated ρ without touching this objective) this lane
-                // silently re-converged the single accepted-trajectory basin —
-                // returning a (value, gradient) pair from a DIFFERENT function
-                // than the envelope the line search accepted at the same ρ.
-                // Run the envelope at this exact ρ (it installs the argmin
-                // basin's converged state as the handoff), then consume it, so
-                // value and gradient always price one basin. With an empty
-                // bundle no envelope has ever been evaluated and the historical
-                // single-trajectory path below is already consistent.
-                match self.value_probe_with_budget_rescue(
+            } else {
+                // #2087/#2253/#2510 envelope-consistency — every outer lane
+                // prices the basin lower envelope min_b V_b(rho). An empty
+                // bundle means the envelope has not been seeded yet; it must
+                // never select a different, single-trajectory objective. On
+                // any exact-rho handoff miss, run the authoritative selector
+                // at this rho. The selector owns dense discovery/member
+                // reconvergence and the streaming/freeze bypass, and every
+                // finite outcome must park its exact-rho argmin handoff.
+                let probe_cost = match self.value_probe_with_budget_rescue(
                     rho.view(),
                     ProbeInnerDrive::Criterion {
                         refine_progress_extension: true,
                     },
                 ) {
-                    Ok(_) => {}
+                    Ok((cost, _beta)) => cost,
                     Err(err) if Self::is_recoverable_value_probe_refusal(&err) => {
                         self.probe_telemetry.record_refusal_kind(&err);
                         log::debug!("SAE criterion eval mapped refusal to +inf: {err}");
@@ -4024,16 +4019,21 @@ impl OuterObjective for SaeManifoldOuterObjective {
                         return Ok(OuterEval::infeasible(rho.len()));
                     }
                     Err(err) => return Err(EstimationError::RemlOptimizationFailed(err)),
+                };
+                if Self::probe_value_is_infeasible(probe_cost) {
+                    return Ok(OuterEval::infeasible(rho.len()));
                 }
-                if let Some(converged) = self.take_probe_converged_handoff(rho.view()) {
-                    self.term = converged;
-                    self.seeded_beta = None;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
+                let converged = self
+                    .take_probe_converged_handoff(rho.view())
+                    .ok_or_else(|| {
+                        EstimationError::RemlOptimizationFailed(
+                            "SAE basin-envelope protocol violated: a finite probe at the requested rho did not install its exact-rho converged-state handoff"
+                                .to_string(),
+                        )
+                    })?;
+                self.term = converged;
+                self.seeded_beta = None;
+                true
             };
         if let Some(beta) = self.seeded_beta.take() {
             if beta.len() != self.term.beta_dim() {

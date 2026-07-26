@@ -2921,12 +2921,16 @@ pub(crate) fn outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_c
     let rho_flat = warmstart_test_objective().baseline_rho.to_flat();
 
     // Gradient lane (ValueAndGradient): the consistent `(f, ∇f)` pair. Its cost
-    // is penalized quasi-Laplace (+ the discrete collapse barrier, which stays on both lanes).
+    // is the penalized quasi-Laplace basin-envelope criterion.
     let mut grad_obj = warmstart_test_objective();
     let grad_cost = grad_obj
         .eval(&rho_flat)
         .expect("gradient lane must converge on the warm-start fixture")
         .cost;
+    assert!(
+        grad_obj.probe_telemetry.basin_envelope_evals > 0,
+        "a fresh dense gradient objective must evaluate the authoritative basin envelope",
+    );
 
     // Line-search lane (Value order): the BFGS/ARC probe. Post-fix this reports
     // the SAME penalized quasi-Laplace cost the gradient lane reports.
