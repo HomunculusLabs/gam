@@ -1996,13 +1996,104 @@ pub(crate) fn newton_predicted_decrease(hessian: &Array2<f64>, grad: &Array1<f64
 /// *outside* the box by more than the margin reported interior, which is the one
 /// reading that can never be right.
 fn outer_coordinate_is_railed(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> bool {
-    let (lo, hi) = match config.model_domain_bounds.as_ref() {
-        Some((lo, hi)) if k < lo.len() && k < hi.len() => (lo[k], hi[k]),
-        Some(_) => return false,
-        None => (-config.rho_bound, config.rho_bound),
-    };
-    let margin = coordinate_rail_margin(lo, hi);
-    theta[k] <= lo + margin || theta[k] >= hi - margin
+    RailTest::evaluate(theta, k, config).is_railed()
+}
+
+/// One coordinate's rail test: the verdict together with the interval and the
+/// margin it was decided against (#2465).
+///
+/// The predicate above computed `(lo, hi)`, derived a margin from them, compared
+/// against the relaxed endpoints, and returned a bare `bool` — so `railed=[3]`
+/// reached the reader with everything that produced it already destroyed, and
+/// recovering the interval on #2462 took a thirteen-point seeding sweep.
+///
+/// #2462 made carrying it necessary rather than merely useful: the margin is now
+/// [`coordinate_rail_margin`], **width-capped per coordinate**, so two
+/// coordinates in the same fit can be judged railed against different margins.
+/// `railed=[1, 3]` is no longer even one statement, and the flag alone cannot
+/// say which band either coordinate met.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RailTest {
+    /// Index into the θ vector.
+    pub(crate) index: usize,
+    /// The coordinate's value at the judged point.
+    pub(crate) theta: f64,
+    /// The interval it was tested against. `None` means the configured box does
+    /// not cover this coordinate at all — which is itself the reason the verdict
+    /// is `false`, a distinction the bare bool erased.
+    pub(crate) box_bounds: Option<(f64, f64)>,
+    /// The width-capped margin in force for THIS coordinate, from
+    /// [`coordinate_rail_margin`]. Zero when the box does not cover it.
+    pub(crate) margin: f64,
+}
+
+impl RailTest {
+    fn evaluate(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> Self {
+        let box_bounds = match config.model_domain_bounds.as_ref() {
+            Some((lo, hi)) if k < lo.len() && k < hi.len() => Some((lo[k], hi[k])),
+            Some(_) => None,
+            None => Some((-config.rho_bound, config.rho_bound)),
+        };
+        Self {
+            // Indexed, not `get`-ed: every caller scans an index range derived
+            // from `theta.len()`, so an out-of-range k is a caller bug and the
+            // predicate this replaced panicked on it. Softening that to a silent
+            // `false` would turn a bug into a coordinate quietly reported
+            // un-railed.
+            theta: theta[k],
+            index: k,
+            margin: box_bounds.map_or(0.0, |(lo, hi)| coordinate_rail_margin(lo, hi)),
+            box_bounds,
+        }
+    }
+
+    /// Pinned at or past either relaxed endpoint. This is the ONLY definition of
+    /// railed in this file; both the λ-block report and the θ-wide certificate
+    /// face route through it, and the relaxed-endpoint form (rather than
+    /// `|θ_k − bound|`) is what keeps an infeasible coordinate railed (#2462).
+    pub(crate) fn is_railed(self) -> bool {
+        match self.box_bounds {
+            Some((lo, hi)) => self.theta <= lo + self.margin || self.theta >= hi - self.margin,
+            None => false,
+        }
+    }
+}
+
+impl std::fmt::Display for RailTest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.box_bounds {
+            Some((lo, hi)) => write!(
+                f,
+                "#{} theta={:.6e} box=[{:.6e}, {:.6e}] margin={:.3e} railed_at=(<={:.6e} or >={:.6e})",
+                self.index,
+                self.theta,
+                lo,
+                hi,
+                self.margin,
+                lo + self.margin,
+                hi - self.margin,
+            ),
+            None => write!(
+                f,
+                "#{} theta={:.6e} box=NOT-COVERED-BY-CONFIGURED-BOUNDS",
+                self.index, self.theta,
+            ),
+        }
+    }
+}
+
+/// Render the rail tests for `indices`, so a refusal naming railed coordinates
+/// also states the interval and margin each was judged against (#2465).
+pub(crate) fn rail_test_summary(
+    theta: &Array1<f64>,
+    indices: &[usize],
+    config: &OuterConfig,
+) -> String {
+    indices
+        .iter()
+        .map(|&k| RailTest::evaluate(theta, k, config).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Smoothing coordinates (leading ρ block) railed against the outer box.
@@ -2099,8 +2190,19 @@ pub(crate) enum StationarityBoundSource {
     /// NO stationarity comparison was performed at the reported point.
     SolverBandAbsoluteFloor,
     /// `flat_valley_converged_grad_bound(cost)`, gated on a `CostStallFlatValley`
-    /// exit. Saturates at its `1.0` cap (#2456).
+    /// exit, reported at the band its formula gives.
     FlatValleyScore,
+    /// The SAME score-relative band reported at its absolute ceiling, because
+    /// `FLAT_VALLEY_CONVERGED_REL_GRAD*(1 + |score|)` exceeded
+    /// `FLAT_VALLEY_CONVERGED_ABS_GRAD_CAP` (#2456/#2465).
+    ///
+    /// Split from [`Self::FlatValleyScore`] because a saturated value is not
+    /// the band its label names -- it is a constant, identical on objectives
+    /// three orders apart, and that is exactly why a `bound=1.000e0` could not
+    /// be reconciled against the objective printed beside it. The bound is
+    /// unchanged; what changes is that the message now says which of the two
+    /// the number is.
+    FlatValleyScoreCeiling,
     /// The cost-stall guard's measured probe-noise floor `σ̂/Δ` (#2241). Diverges
     /// as the step collapses, which is the regime it fires in.
     ProbeNoiseFloor,
@@ -2127,6 +2229,7 @@ impl StationarityBoundSource {
             Self::SolverBand => "solver-band",
             Self::SolverBandAbsoluteFloor => "solver-band-absolute-floor",
             Self::FlatValleyScore => "flat-valley-score",
+            Self::FlatValleyScoreCeiling => "flat-valley-score-ceiling",
             Self::ProbeNoiseFloor => "probe-noise-floor",
             Self::CurvatureResolvability => "curvature-resolvability",
             Self::GradientReproducibility => "gradient-reproducibility",
@@ -2843,7 +2946,11 @@ fn certify_outer_optimality_at_terminal_fidelity(
     ) {
         let flat_valley = flat_valley_converged_grad_bound(evaluation.cost);
         if flat_valley > solver_bound {
-            bound_source = StationarityBoundSource::FlatValleyScore;
+            bound_source = if flat_valley_score_saturates(evaluation.cost) {
+                StationarityBoundSource::FlatValleyScoreCeiling
+            } else {
+                StationarityBoundSource::FlatValleyScore
+            };
             flat_valley
         } else {
             solver_bound
@@ -3642,6 +3749,14 @@ fn certify_outer_optimality_at_terminal_fidelity(
             summary = format!(
                 "{summary}; outer coordinates railed (theta-wide, incl. non-rho blocks): \
                  {certificate_railed:?}"
+            );
+        }
+        // #2465: `railed=[…]` without its box is unfalsifiable from the run
+        // record. Every value here is live at the emission site.
+        if !certificate_railed.is_empty() {
+            summary = format!(
+                "{summary}; rail tests: [{}]",
+                rail_test_summary(&result.rho, &certificate_railed, config)
             );
         }
         if let Some(note) = asymptote_rail_note {
