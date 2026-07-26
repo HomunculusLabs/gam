@@ -2550,8 +2550,11 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
     let stable_penalty_term = 2.0 * final_eval.adaptive_penalty_value
         + beta.dot(&fixed_total.as_dense().dot(&beta));
     let standard_deviation = if family.is_gaussian_identity() {
-        let denom = (y.len() as f64 - edf_total).max(1.0);
-        (deviance / denom).sqrt()
+        certified_profiled_gaussian_scale(
+            deviance,
+            y.len() as f64 - edf_total,
+            "exact spatial-adaptive Gaussian",
+        )?
     } else {
         1.0
     };
@@ -6822,6 +6825,49 @@ fn exact_bounded_edf(
 /// precision must be SPD. Singular and indefinite modes are refused; projecting
 /// them into a pseudo-covariance would silently report zero uncertainty in an
 /// unidentified direction.
+/// `σ̂ = sqrt(deviance / residual_dof)` for a profiled-Gaussian scale, with the
+/// residual degrees of freedom certified rather than floored.
+///
+/// `residual_dof = n − edf` is the information left over once the fit has spent
+/// its effective parameters. At `n − edf ≤ 0` the fit has at least as many
+/// effective parameters as observations and there is no residual information to
+/// estimate a scale from: the quantity does not exist, and saying so is the only
+/// honest answer.
+///
+/// Flooring the denominator returns a number anyway — and because a floor only
+/// ever *raises* the denominator, that number is biased **low**. Every standard
+/// error, Wald statistic and interval width computed from it is then too narrow,
+/// which is the direction nothing downstream can detect: a too-wide interval is
+/// visibly useless, a too-narrow one just looks confident.
+///
+/// The caller states `residual_dof` rather than passing `n` and `edf`, because
+/// the routes legitimately differ on what they subtract — a fit that computed no
+/// inference has spent no measured effective parameters and uses `n`.
+fn certified_profiled_gaussian_scale(
+    deviance: f64,
+    residual_dof: f64,
+    label: &str,
+) -> Result<f64, EstimationError> {
+    if !(residual_dof.is_finite() && residual_dof > 0.0) {
+        crate::bail_invalid_estim!(
+            "{label} residual degrees of freedom must be finite and positive, got {residual_dof}; \
+             a fit with no residual information cannot report a scale"
+        );
+    }
+    if !(deviance.is_finite() && deviance >= 0.0) {
+        crate::bail_invalid_estim!(
+            "{label} deviance must be finite and non-negative, got {deviance}"
+        );
+    }
+    let variance = deviance / residual_dof;
+    if !variance.is_finite() {
+        crate::bail_invalid_estim!(
+            "{label} residual variance is not representable: {deviance}/{residual_dof}"
+        );
+    }
+    Ok(variance.sqrt())
+}
+
 fn certified_bounded_posterior_covariance(
     precision: &Array2<f64>,
     label: &'static str,
@@ -7147,24 +7193,11 @@ fn fit_bounded_term_collection_with_design(
         } else {
             y.len() as f64
         };
-        if !(residual_dof.is_finite() && residual_dof > 0.0) {
-            return Err(EstimationError::InvalidInput(format!(
-                "bounded Gaussian residual degrees of freedom must be finite and positive, got n={} minus edf={edf_total} = {residual_dof}",
-                y.len()
-            )));
-        }
-        if !(deviance.is_finite() && deviance >= 0.0) {
-            return Err(EstimationError::InvalidInput(format!(
-                "bounded Gaussian deviance must be finite and non-negative, got {deviance}"
-            )));
-        }
-        let variance = deviance / residual_dof;
-        if !variance.is_finite() {
-            return Err(EstimationError::InvalidInput(format!(
-                "bounded Gaussian residual variance is not representable: {deviance}/{residual_dof}"
-            )));
-        }
-        Some(variance.sqrt())
+        Some(certified_profiled_gaussian_scale(
+            deviance,
+            residual_dof,
+            "bounded Gaussian",
+        )?)
     } else {
         None
     };
