@@ -2454,12 +2454,10 @@ impl SaeManifoldOuterObjective {
     /// the cached ρ / loss and (optionally) priming the inner solve from a
     /// seeded β. Returns `(cost, β̂)`.
     ///
-    /// `refine_progress_extension = false` selects the value-probe refine
-    /// budget (#1029). The budget cut keeps the SAME KKT/step tolerance as the
-    /// full path — a successfully returned value is converged to the identical
-    /// stationarity measure, so probe values and accepted-point values are
-    /// always comparable; only an expensive grind-then-refuse becomes a cheap
-    /// refusal (a recoverable line-search reject).
+    /// `refine_progress_extension = false` is a bounded provisional policy:
+    /// it may stop before the idempotent inner fixed point and therefore must
+    /// never supply a finite value that selects an estimator. Every production
+    /// outer lane that ranks, accepts, or certifies a finite value passes `true`.
     pub(crate) fn evaluate_with_refine_policy(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
@@ -2668,9 +2666,9 @@ impl SaeManifoldOuterObjective {
     /// reaches. The generic line search may reject this point, so its solved
     /// coordinates/decoder must not become the warm-start state for later
     /// probes or for the accepted iterate. The inner `(t, β)` drive is selected
-    /// by the caller: the line-search lane (`eval_with_order(Value)`) passes the
-    /// exact probe drive; every other value lane uses the historical criterion
-    /// drive (`Criterion { refine_progress_extension: false }`).
+    /// by the caller. Estimator-selecting outer lanes pass the full fixed-point
+    /// criterion drive; bounded provisional drives may only support diagnostics
+    /// whose values cannot rank, accept, or certify an estimator.
     fn evaluate_value_probe_with_drive(
         &mut self,
         rho_flat: ArrayView1<'_, f64>,
@@ -2725,21 +2723,19 @@ impl SaeManifoldOuterObjective {
     ///    handoff, and — crucially — is the mechanism by which a basin JUMP is
     ///    discovered (its warm start can cross a boundary at a far ρ).
     /// 4. **Members.** Re-converge every saved basin from its OWN state through
-    ///    the cheap value-probe drive (`basin_installed = true`: no warm-start, no
-    ///    seed) — members near their optimum re-converge in a round or two.
+    ///    the caller-selected criterion drive (`basin_installed = true`: no
+    ///    warm-start and no seed). Estimator-selecting callers use the full
+    ///    idempotent fixed-point drive for every candidate basin.
     /// 5. **Admit + envelope.** Admit the discovery basin (new basin ⇒ grow;
     ///    duplicate ⇒ keep the better value). The envelope value is the bundle
-    ///    argmin over {members ∪ discovery}; the argmin basin's converged state is
-    ///    installed as the probe handoff so the subsequent gradient eval prices
-    ///    THAT basin (envelope theorem). Admission can only LOWER the envelope.
-    ///
-    /// Only the argmin is later re-converged to full tolerance (in `eval`); every
-    /// member and the discovery probe run on the cheap value-probe budget, so the
-    /// per-eval cost is `len(bundle) + 1` cheap inner solves. Retention is bounded
-    /// only by memory admission; a work-count cap would make the envelope inexact.
+    ///    argmin over {members ∪ discovery}; the converged argmin basin state
+    ///    is installed as the probe handoff so the subsequent gradient eval
+    ///    prices THAT basin (envelope theorem). Admission can only LOWER the
+    ///    envelope. Retention is bounded only by memory admission; a work-count
+    ///    cap would make the envelope inexact.
     /// #2234 stall fix — a cost-only probe whose inner solve exhausts its CAPPED
     /// budget is an UNFINISHED COMPUTATION, not undefined quasi-Laplace score.
-    /// The same is true when the cheap CROSS-SEED/RANKING drive sees a non-PD
+    /// The same is true when a criterion drive sees a non-PD
     /// per-row factor BEFORE inner KKT stationarity: that factor describes the
     /// current warm-start iterate, not the probed ρ. The full accepted-point
     /// drive can cross that transient indefinite state and reach a finite
@@ -3868,27 +3864,20 @@ impl OuterObjective for SaeManifoldOuterObjective {
 
     fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
         self.check_cancelled()?;
-        // Value-only comparison path (EFS backtracking and seed validation): no
-        // gradient/Hessian is ever
-        // consumed at this iterate, so it takes the cheap probe refine budget
-        // (#1029). Accepted points are always re-polished through
-        // `eval`/`eval_with_order(ValueAndGradient|ValueGradientHessian)`
-        // before any derivative consumption, and a probe value — when one is
-        // returned at all — is converged to the same KKT/step tolerance as
-        // the full-budget path, so all ranked comparisons stay in one measure.
-        // `eval_cost` is the value-only CROSS-SEED RANKING / EFS lane (seed
-        // screening, cross-seed final selection, EFS backtracking). It prices
-        // the SAME penalized quasi-Laplace criterion `f(ρ)` the gradient lane descends, so
-        // the fit selection is stationary for the criterion that selected it.
+        // Value-only cross-seed/EFS comparisons still SELECT the estimator.
+        // They therefore price the same fully converged penalized quasi-Laplace
+        // basin envelope as accepted gradient and line-search evaluations. A
+        // bounded provisional value is not a cheaper representation of this
+        // function: if it participates in ranking, its unfinished inner state
+        // changes the estimator. Work policy may change when a probe refuses,
+        // never the finite value used for selection (#2510).
         self.probe_telemetry.criterion_calls += 1;
-        // #2230/#2087 — descend the basin lower envelope V*(ρ)=min_b V_b(ρ) here
-        // instead of the single hysteretic warm-start trajectory. Same value-probe
-        // drive (`refine_progress_extension = false`) as the historical lane; the
-        // envelope bypasses to it verbatim in the streaming / freeze regimes.
+        // #2230/#2087/#2510 — descend V*(rho)=min_b V_b(rho) through the full
+        // fixed-point drive. The envelope owns the streaming/freeze bypass.
         match self.value_probe_with_budget_rescue(
             rho.view(),
             ProbeInnerDrive::Criterion {
-                refine_progress_extension: false,
+                refine_progress_extension: true,
             },
         ) {
             Ok((cost, _beta)) => {
@@ -3953,7 +3942,9 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 .map_err(EstimationError::RemlOptimizationFailed)?
                 .direct_logdet_admitted()
         {
-            let (cost, _beta_hat) = match self.evaluate_with_refine_policy(rho.view(), false) {
+            // Seed validation and streaming EFS selection return a finite value
+            // only at the same idempotent fixed point as every dense outer lane.
+            let (cost, _beta_hat) = match self.evaluate_with_refine_policy(rho.view(), true) {
                 Ok(evaluated) => evaluated,
                 // A recoverable refusal means the streaming quasi-Laplace score is
                 // undefined at this ρ. Return the objective contract's typed
@@ -4229,17 +4220,12 @@ impl OuterObjective for SaeManifoldOuterObjective {
                 // drive the GRADIENT lane (`eval` →
                 // `penalized_quasi_laplace_criterion_with_cache`) and the outer
                 // certification use — the FULL-refine budget
-                // (`refine_progress_extension = true`), NOT eval_cost's coarse
-                // ranking budget: the line-search value must price the SAME
-                // idempotent fixed point the gradient differentiates and the cert
-                // samples, or a coarse iterate ~1% off it (real scale, #2228) makes
-                // every step fail Armijo (StepSizeTooSmall) and the shipped coarse
-                // value then fails the cert value-agreement gate. eval_cost keeps the
-                // coarse budget (#1029/#2138 ranking contract); this Value lane does
-                // NOT. At small n both budgets reach the fixed point so this is a
-                // no-op (tier0 unchanged); the regression test
-                // `value_lane_prices_at_shared_fixed_point` pins the invariant so a
-                // future rewrite reintroducing `false` here goes red.
+                // (`refine_progress_extension = true`). `eval_cost` uses the
+                // same contract because cross-seed/EFS ranking also selects the
+                // estimator. The objective cannot depend on which caller asked
+                // for its value. `value_lane_prices_at_shared_fixed_point` and
+                // `outer_value_and_ranking_lanes_share_pure_penalized_quasi_laplace_criterion`
+                // pin both value lanes against the accepted gradient sample.
                 let drive = ProbeInnerDrive::Criterion {
                     refine_progress_extension: true,
                 };
