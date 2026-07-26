@@ -1,3 +1,33 @@
+## gamfit 0.1.261 (2026-07-26)
+
+This explicit Python release carries the 60 commits after 0.1.260 without
+launching an unseeded cross-platform build.
+
+- **Final scientific state has exact smoothing-coordinate provenance (#2486).**
+  Outer finalization can attach an inner coefficient vector only when its
+  producing rho matches the finalized rho bit-for-bit. A seed or a cost-only
+  evaluation can no longer manufacture a mismatched `(rho, beta)` pair, so
+  posterior-mean prediction and persistence consume one coherent fitted state.
+- **Spherical separation remains accurate on every execution backend (#2489).**
+  CPU, SIMD, input jets, ambient geometry, raw CUDA kernels, and fused CUDA
+  Householder kernels carry cancellation-free chord energies instead of
+  reconstructing `1 - cos(gamma)` from a rounded dot product.
+- **Affine REML root finding is cancellation-free and value-certified (#2513).**
+  The implemented point jet is enclosed directly, refinement returns the
+  refined root rather than a new midpoint, and callers retain the value verdict
+  that makes the root usable.
+- **SAE criteria are single-valued and failure-honest (#2510, #2481).**
+  Ranking differentiates the authoritative converged basin envelope; spatial
+  and per-atom EFS failures preserve their typed payloads and escape
+  backtracking instead of being silently reclassified.
+- **Reproducibility is a cross-platform release contract (#2512).** Both reported
+  Arrow-Schur border shapes now have bit-exact repeated-fit regressions, including
+  simultaneous live allocations and a native Apple-silicon proof.
+- **Publication is explicit, atomic, and cache-measured.** PyPI dispatches record
+  their requested platform scope; full releases require every advertised
+  platform, cancelled work is never accepted as an artifact, and cache
+  read/write errors invalidate the publication receipt.
+
 ## v0.3.151 — gam 0.3.151 / gamfit 0.1.260 (2026-07-26)
 
 This release carries the post-0.3.150 correctness, inference, and performance
