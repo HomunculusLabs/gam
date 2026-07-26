@@ -1710,7 +1710,8 @@ mod sphere_gpu_tests {
         }
         assert!(
             max_abs < 1e-12,
-            "CPU truncated-spectral kernel matrix departs from the stable half-angle              elementwise definition: max |delta| = {max_abs:.3e}"
+            "CPU truncated-spectral kernel matrix departs from the stable half-angle \
+             elementwise definition: max |delta| = {max_abs:.3e}"
         );
     }
 
