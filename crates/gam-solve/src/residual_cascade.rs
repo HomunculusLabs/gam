@@ -224,11 +224,25 @@ const SLQ_LANCZOS_STEPS: usize = 48;
 /// may occupy past the dense cap (see [`Core::residual_quadrature_budget`]). The
 /// basis is `steps x rank` doubles, and it is the only quantity in that run that
 /// grows with both; the matvecs and the tridiagonal eigensolve are negligible
-/// beside it. 256 MiB keeps a full-rank run available for every design the
-/// iterative route sees just past `DENSE_GRAM_MAX` — where the rank is thousands,
-/// so exactness is reachable outright — while bounding the run on the
-/// hundred-thousand-column designs `MAX_CENTERS` permits.
-const RESIDUAL_QUADRATURE_BASIS_BYTES: usize = 256 << 20;
+/// beside it.
+///
+/// The number is chosen so the run can REACH its Krylov ceiling, because that is
+/// where the rule becomes exact and stopping short of it buys nothing at all: a
+/// budget of `0.9 * ceiling` pays 90% of the work and then falls back to the solve.
+/// The binding requirement is therefore `ceiling * rank * 8` bytes, measured on the
+/// designs the #2503 integration fixtures actually build:
+///
+/// ```text
+///   n =  800, level 6   ceiling  797   rank  7387    47 MB
+///   n = 1200, level 8   ceiling 1197   rank 30879   296 MB
+///   n = 2500, level 7   ceiling 2497   rank 16565   331 MB
+///   n = 6000, level 7   ceiling 5997   rank  8432   404 MB
+/// ```
+///
+/// 512 MiB covers all of them and still bounds the run on the
+/// hundred-thousand-column designs `MAX_CENTERS` permits, where the ceiling is
+/// unreachable at any budget worth paying and the route keeps the solve.
+const RESIDUAL_QUADRATURE_BASIS_BYTES: usize = 512 << 20;
 
 /// Deterministic seed for the SLQ probes and posterior samples.
 const RNG_SEED: u64 = 0x1032_CA5C_ADE0_5EED;
@@ -1018,9 +1032,16 @@ impl ResidualQuadratureCertificate {
     }
 }
 
-/// Conservative upper estimate of the profiled-residual quadrature's REMAINING
-/// relative error, from three NESTED Gauss rules for the same measure, over
-/// `S_1..S_4` and the whole `log lambda` domain.
+/// Extrapolated estimate of the profiled-residual quadrature's REMAINING relative
+/// error, from three NESTED Gauss rules for the same measure, over `S_1..S_4` and
+/// the whole `log lambda` domain.
+///
+/// An estimate, stated as one: it is a rate fitted to two observed gaps and
+/// summed, not an inequality. What makes it usable as an admission test rather
+/// than a hope is (a) the rate it fits is the one the Gauss error for a resolvent
+/// is KNOWN to decay at, (b) the fit errs high — see below — and (c) it is charged
+/// against the exact dense eigenbasis at every budget on the production ladder by
+/// `the_quadrature_tail_estimate_bounds_the_error_against_the_exact_spectrum_2503`.
 ///
 /// WHY NOT TWO RULES. `(theta + lambda)^-k` has positive even derivatives, so the
 /// standard Gauss error representation is one-signed and every rule
@@ -1044,11 +1065,18 @@ impl ResidualQuadratureCertificate {
 /// ```
 ///
 /// so `x = (sqrt(1 + 4 rho) - 1)/2` recovers the rate from the two observed gaps
-/// and the tail follows in closed form. `x >= 1` — no contraction — is refused
-/// outright rather than extrapolated, which is the stagnation case a two-rule test
-/// cannot see. The direction of the residual approximation is the safe one: the
-/// effective rate IMPROVES with `m` once the extreme Ritz values converge, so a
-/// rate fitted on `[m/4, m/2]` over-states the tail beyond `m`.
+/// and the tail follows in closed form. The direction of the residual
+/// approximation is the safe one: the effective rate IMPROVES with `m` once the
+/// extreme Ritz values converge, so a rate fitted on `[m/4, m/2]` over-states the
+/// tail beyond `m`.
+///
+/// `x >= 1` — no contraction — has no tail to extrapolate, and there the last
+/// OBSERVED movement is reported instead. That decides correctly at both ends
+/// without a special case: a rule that is genuinely stuck is still moving by more
+/// than the target and is refused, while a rule that has already converged, whose
+/// two gaps sit near the arithmetic floor and whose RATIO is therefore pure noise,
+/// is not refused for the noise in a ratio. This is the stagnation case a two-rule
+/// agreement test cannot see at all.
 ///
 /// A gap already at the arithmetic's own floor (`eps * m * |G_m|`, the rounding of
 /// the sum being compared) is converged, not stagnant, and contributes nothing.
@@ -1124,13 +1152,21 @@ fn residual_quadrature_tail_estimate(
             // `x` solves `x^2 + x = ratio`: the per-quarter-budget decay rate the
             // two observed gaps imply.
             let rate = 0.5 * ((1.0 + 4.0 * ratio).sqrt() - 1.0);
-            if !(rate < 1.0) {
-                // Not contracting. This is the case a two-rule agreement test
-                // cannot see, and it is refused rather than extrapolated.
-                return Ok(f64::INFINITY);
-            }
-            let square = rate * rate;
-            worst = worst.max(recent * square / ((1.0 - square) * magnitude));
+            worst = worst.max(if rate < 1.0 {
+                let square = rate * rate;
+                recent * square / ((1.0 - square) * magnitude)
+            } else {
+                // NOT CONTRACTING: the geometric model does not apply and there
+                // is nothing to extrapolate, so what is reported is the last
+                // OBSERVED movement and no more. That is the honest quantity, and
+                // it decides correctly at both ends without a special case. A rule
+                // that is genuinely stuck is still moving by more than the target,
+                // so this refuses it; a rule that has converged and whose two gaps
+                // are both near the arithmetic floor — where their RATIO is pure
+                // noise and routinely exceeds one — is not refused for the noise
+                // in a ratio when its movement is already inside the target.
+                recent / magnitude
+            });
         }
     }
     if sampled == 0 {
@@ -1829,11 +1865,16 @@ impl Core {
         let mut alpha: Vec<f64> = Vec::with_capacity(steps);
         let mut beta: Vec<f64> = Vec::with_capacity(steps.saturating_sub(1));
         // `max_i |alpha_i|` is a lower bound on `||B||` restricted to the Krylov
-        // space (every `alpha_i` is a Rayleigh quotient), and it only rises. The
-        // per-step break floor below is deliberately left on the CURRENT
-        // `alpha_i` — that is the arithmetic the determinant sweep shipped with —
-        // while the invariance certificate is stated against this running scale,
-        // which a single small Rayleigh quotient cannot deflate.
+        // space (every `alpha_i` is a Rayleigh quotient) and it only rises, which
+        // is exactly what the break floor below needs. Stating that floor against
+        // the CURRENT `alpha_i` instead — as this recurrence originally did — makes
+        // it COLLAPSE in the regime it exists to detect: once the Krylov space has
+        // consumed the operator's range, the remaining iterates are roundoff, the
+        // Rayleigh quotients go to zero with them, and the floor chases the
+        // residual down instead of catching it. Measured on the #2503 `n = 2500`
+        // fixture, where `rank = 16565` but `rank(B) <= n - nullity = 2497`, so
+        // 85% of the space is null: the run ground to 2023 steps without ever
+        // reporting invariance and produced a Ritz value at `-7.9e-11`.
         let mut spectral_scale = 0.0_f64;
         let mut tail = 0.0_f64;
         // A Krylov space that has consumed its whole DIMENSION is invariant: there
@@ -1894,7 +1935,7 @@ impl Core {
             }
             tail = norm;
             let rounding_floor =
-                f64::EPSILON * rank.max(1) as f64 * diagonal.abs().max(f64::MIN_POSITIVE);
+                f64::EPSILON * alpha.len() as f64 * spectral_scale.max(f64::MIN_POSITIVE);
             if norm <= rounding_floor {
                 invariant = true;
                 break;
@@ -2212,11 +2253,22 @@ impl Core {
         let mut projected_square = Vec::with_capacity(ritz.len());
         let mut total_mass = 0.0_f64;
         let mut dropped_mass = 0.0_f64;
+        // A Ritz value is not an eigenvalue: it comes out of a Lanczos recurrence
+        // and a QL sweep whose backward error grows with the step count, so the
+        // threshold at which negativity stops being arithmetic and starts being a
+        // statement about `B` is NOT the eigenvalue floor. Below `sqrt(eps)*theta_max`
+        // — the resolution this module works at throughout, the same one
+        // `log_lambda_domain_from_modes` pads with — a negative Ritz value is
+        // indistinguishable from the zero it is approximating, and is clamped to
+        // the null direction it represents. Above it, the penalty-whitened Schur
+        // complement is genuinely indefinite, which is a defect and not roundoff.
+        let indefinite = f64::EPSILON.sqrt() * scale.max(f64::MIN_POSITIVE);
         for (index, (&theta, &first)) in ritz.iter().zip(first_components.iter()).enumerate() {
-            if !theta.is_finite() || theta < -eigenvalue_floor {
+            if !theta.is_finite() || theta < -indefinite {
                 return Err(format!(
                     "residual cascade: profiled-residual Ritz value {index} of {steps} is not \
-                     positive semidefinite ({theta})"
+                     positive semidefinite ({theta}); the whitened Schur complement is \
+                     indefinite beyond the run's own resolution {indefinite}"
                 ));
             }
             let weight = run.start_norm_sq * first * first;
@@ -5009,6 +5061,104 @@ mod refinement_decision_tests {
                     k + 1
                 );
             }
+        }
+    }
+
+    /// A scattered cloud with a bounding-box-filled net, sized so the iterative
+    /// route is engaged and the penalized rank is far above the reachable Krylov
+    /// dimension — the regime the #2503 integration fixtures live in.
+    fn scattered_fixture(n: usize, seed: u64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mut rng = SplitMix64::new(seed);
+        let mut x1 = Vec::with_capacity(n);
+        let mut x2 = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        for _ in 0..n {
+            let a = rng.next_unit();
+            let b = rng.next_unit();
+            x1.push(a);
+            x2.push(b);
+            let truth = (2.0 * std::f64::consts::PI * a).sin()
+                * (2.0 * std::f64::consts::PI * b).cos();
+            y.push(truth + 0.1 * rng.next_normal());
+        }
+        (x1, x2, y)
+    }
+
+    /// Past the dense cap, a scattered design must EXHAUST its Krylov space inside
+    /// the budget — because on these designs that is the only route to admission,
+    /// and without admission the route falls back to the solve and #2503 returns.
+    ///
+    /// The measurement behind this gate is the reason the budget is stated the way
+    /// it is. On every past-cap fixture the nested-rule tail estimate stays at
+    /// `O(1)` at EVERY budget, and always for the same reason: the worst point is
+    /// the domain's lower endpoint, where `S_k` is dominated by the smallest
+    /// spectral modes and a truncated rule sees none of them. Contrast the dense
+    /// regime, where the estimate reaches `1e-10` by 96–192 nodes. So past the cap
+    /// the extrapolation never fires and the rule is admitted by exhaustion alone —
+    /// which is not a weaker outcome but a stronger one, since an exhausted Krylov
+    /// space makes the rule exact for every kernel and every λ.
+    ///
+    /// That makes the budget load-bearing in a way a step count is not: it must
+    /// reach `min(rank, n − nullity)`, and a budget at 90% of that pays 90% of the
+    /// work and then falls back to the solve anyway. The fixtures below are the
+    /// three shapes the #2503 integration reds build, at the first level past the
+    /// cap.
+    #[test]
+    fn past_cap_designs_exhaust_their_krylov_space_inside_the_budget_2503() {
+        for (n, levels) in [(1200usize, 6usize), (2500, 6), (6000, 6)] {
+            let (x1, x2, y) = scattered_fixture(n, 0x2503_0001);
+            let weights = vec![1.0; y.len()];
+            let axes: [&[f64]; 2] = [&x1, &x2];
+            let design = ResidualCascadeDesign::build(&axes, &y, &weights, &[1.0, 1.0], 2.0, levels)
+                .expect("cascade design");
+            let core = &design.core;
+            assert!(
+                core.dense_gram.is_none(),
+                "premise: n={n} levels={levels} must be PAST the dense cap (m = {})",
+                core.m
+            );
+            let (null_chol, _) = core.null_gram_factor().expect("null factor");
+            let modes = core
+                .iterative_cascade_spectrum(&null_chol)
+                .expect("determinant modes");
+            let domain = log_lambda_domain_from_modes(&modes).expect("domain");
+            let rank = core.m - core.nullity();
+            let ceiling = core.residual_krylov_ceiling();
+            let budget = core.residual_quadrature_budget();
+            assert_eq!(
+                budget, ceiling,
+                "n={n} levels={levels}: the budget must reach the Krylov ceiling (rank {rank}); \
+                 stopping short of it pays the work and still falls back to the solve"
+            );
+            let (spectrum, certificate) = core
+                .iterative_residual_spectrum(&null_chol, domain)
+                .expect("quadrature");
+            println!(
+                "#2503 n={n} levels={levels} m={} rank={rank} ceiling={ceiling} steps={} \
+                 tail={:.2e} tail_estimate={:.3e} certified={} dropped={:.2e}",
+                core.m,
+                certificate.steps,
+                certificate.relative_tail,
+                certificate.tail_estimate,
+                certificate.certified,
+                certificate.dropped_mass_fraction,
+            );
+            assert!(
+                certificate.certified && spectrum.is_some(),
+                "n={n} levels={levels}: the past-cap quadrature must be admitted, else the \
+                 criterion is evaluated by a solve at every λ and the domain endpoint refuses \
+                 (#2503): {certificate:?}"
+            );
+            assert!(
+                certificate.relative_tail <= f64::EPSILON * certificate.steps as f64,
+                "n={n} levels={levels}: admission here must come from EXHAUSTION — the Krylov \
+                 residual against the operator scale must be at the arithmetic floor: \
+                 {certificate:?}"
+            );
+            assert!(
+                certificate.steps <= ceiling,
+                "the run cannot exceed the reachable dimension: {certificate:?}"
+            );
         }
     }
 

@@ -479,6 +479,48 @@ pub(crate) fn run_report_residual_cascade(
         cg_resid = fit.certificate.solve_rel_residual,
         cg_iters = fit.certificate.solve_iters,
     )];
+    // Which machinery selected λ is a property of the fit a reader cannot infer
+    // from the numbers above: past the dense sizing cap the profiled residual and
+    // its λ derivatives come from a Golub–Meurant quadrature whose own convergence
+    // admitted it, or — when none did — from a solve at every λ. Those are
+    // different criteria and the report says which one this fit was selected on.
+    match fit.certificate.residual_moments {
+        None => {}
+        Some(gam::solver::residual_cascade::ResidualMomentMethod::DenseExact) => notes.push(
+            "λ was selected against the EXACT profiled criterion: the dense Schur \
+             eigenbasis supplies the residual and its three log-λ derivative \
+             moments in closed form, with no linear solve at any λ."
+                .to_string(),
+        ),
+        Some(gam::solver::residual_cascade::ResidualMomentMethod::ConvergedQuadrature {
+            steps,
+            rank,
+            tail_estimate,
+            target,
+            ..
+        }) => notes.push(format!(
+            "λ was selected against a certified Golub–Meurant quadrature of the \
+             penalty-whitened Schur spectrum: {steps} nodes against penalized rank \
+             {rank}, with the extrapolated remaining relative error {tail_estimate:.2e} \
+             below the search resolution {target:.2e}. No linear solve was performed \
+             at any λ."
+        )),
+        Some(gam::solver::residual_cascade::ResidualMomentMethod::Solved {
+            steps,
+            rank,
+            budget,
+            tail_estimate,
+            target,
+            ..
+        }) => notes.push(format!(
+            "λ was selected through a SOLVE at every trial: the profiled-residual \
+             quadrature did not converge inside its budget ({steps} nodes taken of \
+             {budget} allowed against penalized rank {rank}; extrapolated remaining \
+             relative error {tail_estimate:.2e} against the search resolution \
+             {target:.2e}). The criterion is still the same function of λ, but it is \
+             evaluated to the CG backward error above rather than in closed form."
+        )),
+    }
     if let Some(refinement) = fit.refinement.as_ref() {
         notes.push(format!(
             "Refinement loop ran past the initial levels; the level-(L+1) \

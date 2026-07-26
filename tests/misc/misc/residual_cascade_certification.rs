@@ -1331,7 +1331,7 @@ fn past_cap_reml_selection_needs_no_solve_at_any_lambda_2503() {
     // would prove nothing about the quadrature, and it would cost an `O(rank^3)`
     // reorthogonalization this route exists to avoid.
     assert!(
-        rank > 4 * steps,
+        2 * steps < rank,
         "the accepted rule must be TRUNCATED: {steps} nodes against penalized rank {rank}"
     );
     assert!(
