@@ -115,6 +115,25 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Resolve metadata once before the matrix fans out. Running without
+      # --locked is deliberate in this ephemeral checkout: Cargo can reveal the
+      # exact resolver-owned delta, then this gate refuses publication if the
+      # checked-in lockfile was not already canonical.
+      - name: Require resolver-clean Cargo.lock
+        if: steps.check.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          cargo +1.97.1 metadata \
+            --manifest-path crates/gam-pyffi/Cargo.toml \
+            --format-version 1 \
+            --no-deps >/dev/null
+          if ! git diff --exit-code -- Cargo.lock; then
+            echo "::error::Cargo.lock is not the canonical resolution of the release manifests; refusing to start the wheel matrix."
+            exit 1
+          fi
+
   linux:
     needs: gate
     if: needs.gate.outputs.should_run == 'true'
@@ -149,7 +168,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: >-
             --profile release-pypi
-            --locked
             --compatibility pypi
             --strip
             --out dist
@@ -223,7 +241,6 @@ jobs:
           target: ${{ matrix.target }}
           args: >-
             --profile release-pypi
-            --locked
             --compatibility pypi
             --strip
             --out dist
@@ -304,7 +321,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: >-
             --profile release-pypi
-            --locked
             --compatibility pypi
             --strip
             --out dist
@@ -367,7 +383,6 @@ jobs:
           target: ${{ matrix.target }}
           args: >-
             --profile release-pypi
-            --locked
             --compatibility pypi
             --strip
             --out dist
@@ -402,7 +417,9 @@ jobs:
         with:
           command: sdist
           maturin-version: v1.14.1
-          args: --locked --out dist --manifest-path crates/gam-pyffi/Cargo.toml
+          # `locked = true` lives in pyproject.toml so both `build` and
+          # `sdist` receive it in maturin's supported configuration layer.
+          args: --out dist --manifest-path crates/gam-pyffi/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

@@ -98,6 +98,9 @@ all = [
 [tool.maturin]
 manifest-path = "crates/gam-pyffi/Cargo.toml"
 module-name = "gamfit._rust"
+# One authoritative Cargo-resolution policy for wheels, sdists, PEP 517, and
+# direct maturin use. Subcommand-specific CLI placement cannot drift.
+locked = true
 
 [tool.pytest.ini_options]
 # Use importlib mode so pytest does not prepend each test file's parent
