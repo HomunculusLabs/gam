@@ -137,4 +137,57 @@ fn main() {
             );
         }
     }
+
+    // Beta quantiles. The shapes are the ones a beta-regression predictive
+    // interval produces from a mean and a variance, plus a direct sweep of
+    // small and large shape pairs. The lower tail here reaches quantiles far
+    // below `f64::EPSILON`, which is exactly where a solver with an absolute
+    // tolerance in `x` stalls rather than degrading (#2528), so the sweep is
+    // deliberately weighted toward small `a`.
+    for (mu, variance_fraction) in [
+        (0.001_f64, 0.3_f64),
+        (0.01, 0.2),
+        (0.01, 0.5),
+        (0.02, 0.3),
+        (0.05, 0.5),
+        (0.1, 0.5),
+        (0.3, 0.5),
+        (0.5, 0.5),
+        (0.7, 0.5),
+        (0.9, 0.2),
+    ] {
+        let bernoulli_variance = mu * (1.0 - mu);
+        let precision = 1.0 / variance_fraction - 1.0;
+        let (a, b) = (mu * precision, (1.0 - mu) * precision);
+        for p in [0.001_f64, 0.025, 0.1, 0.5, 0.9, 0.975, 0.999] {
+            println!(
+                "beta_quantile\t{a:e}\t{b:e}\t{p:e}\t{:e}",
+                prob::beta_quantile(p, a, b)
+            );
+        }
+        // Keep the moment-matched variance in the record so a reader can see
+        // which mean produced which shape pair.
+        println!("beta_shape\t{mu:e}\t{bernoulli_variance:e}\t{a:e}\t{b:e}");
+    }
+    for (a, b) in [
+        (0.1_f64, 0.1_f64),
+        (0.5, 0.5),
+        (0.5, 20.0),
+        (20.0, 0.5),
+        (1.0, 1.0),
+        (2.0, 3.0),
+        (2.5, 7.5),
+        (100.0, 100.0),
+        (1000.0, 5.0),
+        (5.0, 1000.0),
+    ] {
+        for p in [
+            1.0e-8_f64, 1.0e-4, 0.001, 0.01, 0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975, 0.999,
+        ] {
+            println!(
+                "beta_quantile\t{a:e}\t{b:e}\t{p:e}\t{:e}",
+                prob::beta_quantile(p, a, b)
+            );
+        }
+    }
 }

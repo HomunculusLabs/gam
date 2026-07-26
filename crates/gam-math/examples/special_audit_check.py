@@ -158,6 +158,35 @@ def errors(got, want):
     return relative, absolute
 
 
+def beta_quantile_reference(a, b, p):
+    """`Beta^-1(p; a, b)` by bisection in `ln x`.
+
+    Newton and secant solvers (including `mp.findroot`'s defaults) do not find
+    these roots. `I_x(a,b)` is flat to more than a hundred digits over most of
+    the bracket, and for `Beta(0.1, 0.1)` at `p = 1e-8` the root sits at
+    `8.9e-78`; no method that steps in `x` reaches it. Bisecting in `ln x`
+    turns a search over hundreds of orders of magnitude into a search over a
+    bounded interval, and `I` is monotone, so bisection cannot fail.
+
+    Returns `0` when the root is below `f64`'s smallest subnormal, which is a
+    real answer rather than a failure: it says the correctly rounded `f64`
+    quantile is zero.
+    """
+    A, B, P = mp.mpf(a), mp.mpf(b), mp.mpf(p)
+    # `exp(-1490)` is below `f64::MIN_POSITIVE`; `exp(0)` is the support ceiling.
+    low, high = mp.mpf(-1490), mp.mpf(0)
+    for _ in range(230):
+        middle = (low + high) / 2
+        value = mp.betainc(A, B, 0, mp.e ** middle, regularized=True)
+        value = mp.mpf(value.real) if not isinstance(value, mp.mpf) else value
+        if value < P:
+            low = middle
+        else:
+            high = middle
+    root = mp.e ** ((low + high) / 2)
+    return mp.mpf(0) if root < mp.mpf("5e-324") else root
+
+
 def main():
     path = sys.argv[1]
     only = set(sys.argv[2:]) or None
@@ -165,6 +194,7 @@ def main():
     worst_absolute = defaultdict(lambda: (mp.mpf(0), None))
     gl_rows = defaultdict(dict)
     binomial_rows = []
+    beta_rows = []
     skipped = defaultdict(int)
 
     with open(path) as handle:
@@ -181,6 +211,24 @@ def main():
                 continue
             if channel == "binomial":
                 binomial_rows.append((int(parts[1]), int(parts[2]), float(parts[3])))
+                continue
+            if channel == "beta_shape":
+                continue
+            if channel == "beta_quantile":
+                if only and channel not in only:
+                    continue
+                a, b, p, value = (float(t) for t in parts[1:5])
+                want = beta_quantile_reference(a, b, p)
+                if want == 0:
+                    # The true quantile is below MIN_POSITIVE. Zero is then the
+                    # only correct f64 answer, and anything positive is a floor.
+                    if value != 0.0:
+                        beta_rows.append((float("inf"), (a, b, p)))
+                    continue
+                if not (MIN_MAGNITUDE < abs(want) < MAX_MAGNITUDE):
+                    skipped[channel] += 1
+                    continue
+                beta_rows.append((float(abs((mp.mpf(value) - want) / want)), (a, b, p)))
                 continue
             reference = CHANNELS.get(channel)
             if reference is None:
@@ -215,6 +263,17 @@ def main():
             f"{channel:26s} rel={mp.nstr(relative, 3):>9s} @ {rel_arg!r:<24s}"
             f" abs={mp.nstr(absolute, 3):>9s} @ {abs_arg!r}{note}"
         )
+
+    if beta_rows:
+        beta_rows.sort(reverse=True)
+        worst, where = beta_rows[0]
+        median = sorted(row[0] for row in beta_rows)[len(beta_rows) // 2]
+        print(
+            f"{'beta_quantile':26s} rel={mp.nstr(worst, 3):>9s} @ "
+            f"(a,b,p)={where!r}  median={median:.3e}  n={len(beta_rows)}"
+        )
+        for relative, where in beta_rows[1:4]:
+            print(f"{'':26s}     {mp.nstr(relative, 3):>9s} @ (a,b,p)={where!r}")
 
     for n in sorted(gl_rows):
         nodes = gl_rows[n]["gl_node"]
