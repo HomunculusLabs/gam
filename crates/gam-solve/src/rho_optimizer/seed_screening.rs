@@ -447,12 +447,11 @@ pub(crate) fn rank_seeds_with_screening(
     // solve (genuine separation), the seed loop still falls through to it.
     // (#686/#687/#688: Gaussian location-scale was pinned at ρ=bound,
     // over-smoothing the log-σ envelope and wrecking held-out calibration.)
-    let rho_dim = obj.capability().theta_layout().rho_dim();
+    let layout = obj.capability().theta_layout();
+    let rho_dim = layout.rho_dim();
     if rho_dim > 0 && ordered.len() > 1 {
-        let upper: Vec<f64> = match config.bounds.as_ref() {
-            Some((_, hi)) => hi.to_vec(),
-            None => vec![config.rho_bound; rho_dim],
-        };
+        let (_, search_upper) = outer_search_bounds_template(config, layout.n_params);
+        let upper: Vec<f64> = search_upper.iter().take(rho_dim).copied().collect();
         let (interior, boundary): (Vec<Array1<f64>>, Vec<Array1<f64>>) = ordered
             .into_iter()
             .partition(|seed| !seed_is_oversmoothing_boundary(seed, rho_dim, &upper));

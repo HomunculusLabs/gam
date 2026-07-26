@@ -121,7 +121,13 @@ pub(crate) struct OuterConfig {
     /// (`rel_cost = tolerance`) for every existing path byte-for-byte.
     pub(crate) rel_cost_tolerance: Option<f64>,
     pub(crate) max_iter: usize,
-    pub(crate) bounds: Option<(Array1<f64>, Array1<f64>)>,
+    /// The model's canonical feasible outer domain. Every stationarity
+    /// certificate and rail report reasons against this box.
+    pub(crate) model_domain_bounds: Option<(Array1<f64>, Array1<f64>)>,
+    /// A temporary algorithmic subspace used only by an active-set polish.
+    /// It may narrow the model domain but never changes the feasible cone that
+    /// screening or mint is allowed to certify.
+    pub(crate) search_bounds_override: Option<(Array1<f64>, Array1<f64>)>,
     pub(crate) seed_config: gam_problem::SeedConfig,
     pub(crate) rho_bound: f64,
     pub(crate) heuristic_lambdas: Option<Vec<f64>>,
@@ -210,7 +216,8 @@ impl Default for OuterConfig {
             tolerance: 1e-5,
             rel_cost_tolerance: None,
             max_iter: 200,
-            bounds: None,
+            model_domain_bounds: None,
+            search_bounds_override: None,
             seed_config: gam_problem::SeedConfig::default(),
             rho_bound: 30.0,
             heuristic_lambdas: None,
@@ -604,7 +611,8 @@ impl OuterProblem {
             tolerance: self.tolerance,
             rel_cost_tolerance: self.rel_cost_tolerance,
             max_iter: self.max_iter,
-            bounds: self.bounds.clone(),
+            model_domain_bounds: self.bounds.clone(),
+            search_bounds_override: None,
             seed_config: self.seed_config,
             rho_bound: self.rho_bound,
             heuristic_lambdas: self.heuristic_lambdas.clone(),
@@ -1974,7 +1982,7 @@ pub(crate) fn newton_predicted_decrease(hessian: &Array2<f64>, grad: &Array1<f64
 /// cannot drift apart about what "railed" means for the same coordinate: they
 /// differ only in which coordinates they scan, never in the test.
 fn outer_coordinate_is_railed(theta: &Array1<f64>, k: usize, config: &OuterConfig) -> bool {
-    let (lo, hi) = match config.bounds.as_ref() {
+    let (lo, hi) = match config.model_domain_bounds.as_ref() {
         Some((lo, hi)) if k < lo.len() && k < hi.len() => (lo[k], hi[k]),
         Some(_) => return false,
         None => (-config.rho_bound, config.rho_bound),
@@ -2373,7 +2381,7 @@ fn certify_fixed_point_optimality(
         ));
     }
 
-    let (lower, upper) = outer_bounds_template(config, layout.n_params);
+    let (lower, upper) = outer_model_domain_bounds_template(config, layout.n_params);
     let mut raw_inf = 0.0_f64;
     let mut projected_inf = 0.0_f64;
     for index in 0..layout.n_params {
@@ -2688,7 +2696,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         ));
     }
 
-    let bounds = outer_bounds_template(config, layout.n_params);
+    let bounds = outer_model_domain_bounds_template(config, layout.n_params);
     // A penalty creeping toward the ±rho_bound infinite-smoothing ceiling never reaches
     // it EXACTLY — each outer step only shrinks the gap, so it lands strictly inside the
     // box (the #2299 checkpoint sits at ρ=29.9938, not 30). `certificate_railed_lambdas`
@@ -5521,7 +5529,7 @@ pub(crate) fn run_outer(
                 // the interior now stationary. `config.clone()` reset each
                 // iteration, so the frozen box never persists past this run.
                 if let Some(frozen_bounds) = active_set_bounds {
-                    retry_cfg.bounds = Some(frozen_bounds);
+                    retry_cfg.search_bounds_override = Some(frozen_bounds);
                 }
                 retry_cfg.heuristic_lambdas = None;
                 retry_cfg.seed_config.max_seeds = 1;
@@ -5622,8 +5630,11 @@ fn canonicalize_outer_config(config: &OuterConfig, perm: &[usize]) -> OuterConfi
     if let Some(h) = config.heuristic_lambdas.as_ref() {
         canonical.heuristic_lambdas = Some(permute_vec(h));
     }
-    if let Some((lower, upper)) = config.bounds.as_ref() {
-        canonical.bounds = Some((permute_arr(lower), permute_arr(upper)));
+    if let Some((lower, upper)) = config.model_domain_bounds.as_ref() {
+        canonical.model_domain_bounds = Some((permute_arr(lower), permute_arr(upper)));
+    }
+    if let Some((lower, upper)) = config.search_bounds_override.as_ref() {
+        canonical.search_bounds_override = Some((permute_arr(lower), permute_arr(upper)));
     }
     // A transferred dense outer Hessian is in native coordinate order; permute
     // it into canonical order so the BFGS warm metric stays aligned. (None on
@@ -5663,8 +5674,38 @@ pub(crate) fn run_outer_uncertified(
     // reads — turns any such inversion into `EstimationError::InvalidInput`
     // regardless of how the bounds were constructed.
     {
-        let (bound_lo, bound_hi) = outer_bounds_template(config, cap.n_params);
-        for i in 0..bound_lo.len() {
+        let (model_lo, model_hi) =
+            outer_model_domain_bounds_template(config, cap.n_params);
+        let (bound_lo, bound_hi) = outer_search_bounds_template(config, cap.n_params);
+        if model_lo.len() != cap.n_params
+            || model_hi.len() != cap.n_params
+            || bound_lo.len() != cap.n_params
+            || bound_hi.len() != cap.n_params
+        {
+            return Err(EstimationError::InvalidInput(format!(
+                "{context}: outer bound dimension mismatch: parameters={},                  model_lower={}, model_upper={}, search_lower={}, search_upper={}",
+                cap.n_params,
+                model_lo.len(),
+                model_hi.len(),
+                bound_lo.len(),
+                bound_hi.len(),
+            )));
+        }
+        for i in 0..cap.n_params {
+            if !(model_lo[i].is_finite() && model_hi[i].is_finite())
+                || model_lo[i] > model_hi[i]
+            {
+                return Err(EstimationError::InvalidInput(format!(
+                    "{context}: outer model-domain bounds are invalid at coordinate {i}:                      lower={}, upper={}",
+                    model_lo[i], model_hi[i]
+                )));
+            }
+            if bound_lo[i] < model_lo[i] || bound_hi[i] > model_hi[i] {
+                return Err(EstimationError::InvalidInput(format!(
+                    "{context}: outer search bounds escape the model domain at coordinate {i}:                      model=[{}, {}], search=[{}, {}]",
+                    model_lo[i], model_hi[i], bound_lo[i], bound_hi[i]
+                )));
+            }
             if !(bound_lo[i].is_finite() && bound_hi[i].is_finite()) {
                 return Err(EstimationError::InvalidInput(format!(
                     "{context}: outer rho bounds are non-finite at coordinate {i}: \
@@ -6017,7 +6058,7 @@ pub(crate) fn run_per_atom_efs_if_frontier(
     let the_plan = plan(&cap);
     let rho_dim = cap.theta_layout().rho_dim();
 
-    let (lower, upper) = outer_bounds_template(config, cap.n_params);
+    let (lower, upper) = outer_search_bounds_template(config, cap.n_params);
 
     // Seed: cache/explicit initial ρ if present, otherwise the first generated
     // candidate. The per-atom multiplicative fixed point is locally
@@ -6067,8 +6108,11 @@ pub(crate) fn outer_bounds(lo: &Array1<f64>, hi: &Array1<f64>) -> Result<Bounds,
     })
 }
 
-pub(crate) fn outer_bounds_template(config: &OuterConfig, n: usize) -> (Array1<f64>, Array1<f64>) {
-    config.bounds.clone().unwrap_or_else(|| {
+pub(crate) fn outer_model_domain_bounds_template(
+    config: &OuterConfig,
+    n: usize,
+) -> (Array1<f64>, Array1<f64>) {
+    config.model_domain_bounds.clone().unwrap_or_else(|| {
         (
             Array1::<f64>::from_elem(n, -config.rho_bound),
             Array1::<f64>::from_elem(n, config.rho_bound),
@@ -6076,17 +6120,27 @@ pub(crate) fn outer_bounds_template(config: &OuterConfig, n: usize) -> (Array1<f
     })
 }
 
-/// Intersect typed objective-domain faces with the caller's configured search
-/// box. The resulting box is stored back on `config`, making it the one source
-/// consumed by seed projection, continuation entry, every solver, and terminal
-/// projected-stationarity certification.
+pub(crate) fn outer_search_bounds_template(
+    config: &OuterConfig,
+    n: usize,
+) -> (Array1<f64>, Array1<f64>) {
+    config
+        .search_bounds_override
+        .clone()
+        .unwrap_or_else(|| outer_model_domain_bounds_template(config, n))
+}
+
+/// Intersect typed objective-domain faces with the caller's declared model
+/// domain. The resulting box is the immutable feasible set used by every
+/// stationarity certificate. Algorithmic active-set reduction is represented
+/// separately by `search_bounds_override` and cannot redefine this domain.
 pub(super) fn install_objective_domain(
     config: &mut OuterConfig,
     n_params: usize,
     objective_lower: Option<Array1<f64>>,
     objective_upper: Option<Array1<f64>>,
 ) -> Result<(), EstimationError> {
-    let (mut lower, mut upper) = outer_bounds_template(config, n_params);
+    let (mut lower, mut upper) = outer_model_domain_bounds_template(config, n_params);
     if lower.len() != n_params || upper.len() != n_params {
         return Err(EstimationError::InvalidInput(format!(
             "outer configured bounds dimension mismatch: parameters={n_params}, lower={}, upper={}",
@@ -6136,7 +6190,8 @@ pub(super) fn install_objective_domain(
             )));
         }
     }
-    config.bounds = Some((lower, upper));
+    config.model_domain_bounds = Some((lower, upper));
+    config.search_bounds_override = None;
     Ok(())
 }
 
@@ -6275,7 +6330,7 @@ pub(crate) fn run_fixed_point_outer_solver(
             ));
         }
     };
-    let (lo, hi) = outer_bounds_template(config, layout.n_params);
+    let (lo, hi) = outer_search_bounds_template(config, layout.n_params);
     let bounds = outer_bounds(&lo, &hi).map_err(FixedPointOuterRunError::Failed)?;
     let tol = outer_tolerance(config.tolerance).map_err(FixedPointOuterRunError::Failed)?;
     let max_iter =

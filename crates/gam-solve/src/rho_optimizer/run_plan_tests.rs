@@ -454,7 +454,7 @@ fn certificate_rail_detection_uses_outer_box() {
     // Only the leading rho_dim coordinates are λ axes.
     assert_eq!(certificate_railed_lambdas(&rho, 1, &config), vec![0]);
     let bounded = OuterConfig {
-        bounds: Some((array![-5.0, -5.0, -5.0], array![5.0, 5.0, 5.0])),
+        model_domain_bounds: Some((array![-5.0, -5.0, -5.0], array![5.0, 5.0, 5.0])),
         ..OuterConfig::default()
     };
     let pinned = array![4.9, -4.7, 0.0];
@@ -514,7 +514,7 @@ fn audit_at_railed_optimum(
 #[test]
 fn certificate_certifies_kkt_stationary_railed_optimum() {
     let bounded = OuterConfig {
-        bounds: Some((array![-5.0, -5.0], array![5.0, 5.0])),
+        model_domain_bounds: Some((array![-5.0, -5.0], array![5.0, 5.0])),
         ..OuterConfig::default()
     };
     // ρ₁ railed at the upper bound (5.0); ρ₀ interior at its quadratic min.
@@ -554,7 +554,7 @@ fn certificate_certifies_kkt_stationary_railed_optimum() {
 #[test]
 fn active_set_reduction_freezes_a_railed_coordinate_when_the_interior_is_unpolished_2392() {
     let bounded = OuterConfig {
-        bounds: Some((array![-30.0, -30.0], array![30.0, 30.0])),
+        model_domain_bounds: Some((array![-30.0, -30.0], array![30.0, 30.0])),
         ..OuterConfig::default()
     };
     // Coord 0: genuine upper-rail tail `a·e^{−ρ₀}` (∂V/∂ρ₀ = −a·e^{−ρ₀} < 0 ⇒
@@ -1156,7 +1156,7 @@ fn large_step_flatness_rejects_real_slope_coordinate_2299() {
 #[test]
 fn certificate_rejects_genuine_interior_nonstationarity() {
     let bounded = OuterConfig {
-        bounds: Some((array![-5.0, -5.0], array![5.0, 5.0])),
+        model_domain_bounds: Some((array![-5.0, -5.0], array![5.0, 5.0])),
         ..OuterConfig::default()
     };
     // ρ₁ railed at the upper bound (KKT-balanced slope −7), but ρ₀ = 2.5 is
@@ -1176,7 +1176,7 @@ fn certificate_rejects_genuine_interior_nonstationarity() {
 #[test]
 fn certificate_full_space_unchanged_when_nothing_railed() {
     let bounded = OuterConfig {
-        bounds: Some((array![-30.0, -30.0], array![30.0, 30.0])),
+        model_domain_bounds: Some((array![-30.0, -30.0], array![30.0, 30.0])),
         ..OuterConfig::default()
     };
     // Interior optimum far from both bounds; slope 0 on ρ₁ and ρ₀ at its
@@ -4864,7 +4864,7 @@ fn reactive_domain_arrival_accepts_exact_finite_literal_seed() {
 #[test]
 fn active_outer_domain_refuses_singleton_search_interval() {
     let mut config = OuterConfig::default();
-    config.bounds = Some((array![-1_000.0], array![1_000.0]));
+    config.model_domain_bounds = Some((array![-1_000.0], array![1_000.0]));
     let error = install_objective_domain(&mut config, 1, Some(array![700.0]), Some(array![700.0]))
         .expect_err("an active optimizer coordinate needs a nonzero-width interval");
     let message = error.to_string();
@@ -4874,6 +4874,36 @@ fn active_outer_domain_refuses_singleton_search_interval() {
             && message.contains("lower=700")
             && message.contains("upper=700"),
         "unexpected singleton-domain refusal: {message}"
+    );
+}
+
+#[test]
+fn active_set_search_box_never_redefines_the_model_kkt_face_2514() {
+    let config = OuterConfig {
+        model_domain_bounds: Some((array![-5.0], array![5.0])),
+        search_bounds_override: Some((array![1.0], array![1.0])),
+        ..OuterConfig::default()
+    };
+    let model_domain = outer_model_domain_bounds_template(&config, 1);
+    let search_domain = outer_search_bounds_template(&config, 1);
+    assert_eq!(model_domain, (array![-5.0], array![5.0]));
+    assert_eq!(search_domain, (array![1.0], array![1.0]));
+
+    let rho = array![1.0];
+    let inward_gradient = array![26.0];
+    assert_eq!(
+        rail_projected_gradient_norm(&rho, &inward_gradient, Some(&search_domain)),
+        0.0,
+        "the frozen algorithmic coordinate is absent from the reduced search subspace"
+    );
+    assert_eq!(
+        rail_projected_gradient_norm(&rho, &inward_gradient, Some(&model_domain)),
+        26.0,
+        "the same coordinate remains a feasible inward direction in the model domain"
+    );
+    assert!(
+        certificate_railed_coordinates(&rho, &config).is_empty(),
+        "certificate rail membership must ignore the active-set search override"
     );
 }
 

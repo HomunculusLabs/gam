@@ -438,7 +438,7 @@ pub(crate) fn run_outer_with_plan(
         )));
     }
 
-    let (lower, upper) = outer_bounds_template(config, cap.n_params);
+    let (lower, upper) = outer_search_bounds_template(config, cap.n_params);
     crate::estimate::reml::outer_eval::record_current_outer_rho_upper_bounds_for_ift(&upper);
     let bounds_template = (lower, upper);
     let mut projected_seeds = Vec::with_capacity(seeds.len());
