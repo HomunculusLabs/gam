@@ -26,8 +26,8 @@
 //!   (`3^K` pure FMAs, no heap, no `dyn`).
 //!
 //! * **`compose_unary` is the truncated Faà di Bruno composition**, computed
-//!   here by the exact **truncated-Taylor reassociation** rather than a direct
-//!   set-partition sum. Let `v` be the non-constant part of `self`
+//!   here from the *multilinear powers* of the non-constant part rather than a
+//!   direct set-partition sum. Let `v` be the non-constant part of `self`
 //!   (`v[0] = 0`, `v[mask] = self[mask]`) and let `v^{⊛k}` be the `k`-fold
 //!   *subset convolution* (the multilinear power). The ordered-tuple identity
 //!   `v^{⊛k}[mask] = k! · Σ_{π ⊢ mask, |π| = k} Π_{B ∈ π} v[B]` turns the
@@ -38,45 +38,74 @@
 //!   f(self)[0]    = f^{(0)}
 //!   ```
 //!
-//!   so a composition is just **three subset convolutions** (`v²`, `v³=v²⊛v`,
-//!   `v⁴=v²⊛v²` — the Motzkin floor for a quartic) plus a five-term combine.
-//!   Each convolution is a four-lane compensated dot product (Ogita–Rump–Oishi
-//!   Dot2, FMA-split products + TwoSum carry) so the result is computed in
-//!   ~double the working precision and the rounding of `v²` cannot compound
-//!   through `v³`/`v⁴`; the final per-mask combine is Neumaier-compensated and
-//!   `wide::f64x4`-vectorised; and the whole call runs on reused thread-local
-//!   scratch with no per-call heap traffic. The reassociation is algebraically
-//!   exact; accuracy-vs-truth (a double-double oracle) is the test gate and is
-//!   strictly ≤ the old partition sum's error (see `tests`).
+//!   The powers themselves are built by the **pointed (lowest-set-bit)
+//!   recurrence**, not by full subset convolutions. Write `ℓ` for the lowest
+//!   set bit of `mask`. In any partition of `mask` exactly one block owns `ℓ`,
+//!   and the `k` blocks of an ordered `k`-tuple are interchangeable, so pinning
+//!   the outer block to the one containing `ℓ` counts each partition once
+//!   instead of `k` times:
 //!
-//! ### What this schedule costs, and why it is still the right one
+//!   ```text
+//!   v^{⊛k}[mask] = k · Σ_{B ⊆ mask, ℓ ∈ B} v[B] · v^{⊛(k-1)}[mask \ B]
+//!   ```
 //!
-//! **Accuracy is the whole justification — it is not also cheaper at the `K`
-//! this crate runs at.** The two schedules grow at different rates and the
-//! convolution one starts far behind:
+//!   This is an exact identity (`k = 2, 3, 4` reproduce `v²`, `v³`, `v⁴` to
+//!   roundoff against a brute-force partition sum, gated in `tests`), and it is
+//!   what makes the schedule cheap at small `K`: the complements `mask \ B`
+//!   range over submasks of `mask ^ ℓ` rather than of `mask`, and the surviving
+//!   term set shrinks with `k` because `v^{⊛(k-1)}` vanishes below popcount
+//!   `k-1`. All three powers therefore share **one** descending submask walk
+//!   whose `k = 3` and `k = 4` chains are popcount-suffixes of the `k = 2`
+//!   chain — one walk, one `v[B]` load, and three independent Dot2 chains to
+//!   interleave.
 //!
-//! * three subset convolutions walk `Σ_{p ≥ min_pop} C(K,p)·2^p` submasks each,
-//!   i.e. `Θ(3^K)`, and every step is a compensated Dot2 (~10 flops);
+//!   Each accumulation is a compensated dot product (Ogita–Rump–Oishi Dot2,
+//!   FMA-split products + TwoSum carry) so the result is computed in ~double
+//!   the working precision and the rounding of `v²` cannot compound through
+//!   `v³`/`v⁴`; the integer multiplicity `k` is applied with its own FMA split
+//!   so it costs one rounding rather than discarding the compensated tail; the
+//!   final per-mask combine is Neumaier-compensated and `wide::f64x4`-vectorised;
+//!   and the whole call runs on reused thread-local scratch with no per-call
+//!   heap traffic.
+//!
+//! ### What this schedule costs
+//!
+//! Everything below is recomputed from the enumeration itself by
+//! `compose_unary_work_model_matches_the_closed_form`, which replays the walk and
+//! counts its steps. A counted model cannot drift the way a prose factor did:
+//! this header once claimed "~3× fewer FLOPs than the partition gather" for a
+//! schedule that in fact cost ~9× as much at the `K` production runs at.
+//!
+//! * the pointed recurrence walks `Σ_{p ≥ 2} C(K,p)·Σ_{k=2..4, k ≤ p} Σ_{j ≥ k-1}
+//!   C(p-1,j)` terms, i.e. `Θ(3^K)`, each a compensated Dot2 (10 flops), plus a
+//!   5-flop multiplicity epilogue per power per mask;
 //! * the partition gather walks `Σ_p C(K,p)·B_{≤4}(p)` terms, i.e. `Θ(5^K/4!)`,
-//!   and every term is `|π|` plain multiplies and an add (~4 flops).
-//!
-//! `3^K` beats `5^K` eventually, but "eventually" is past this crate's range.
-//! Closed-form flop counts (pinned in
-//! `compose_unary_flop_crossover_matches_the_closed_form`):
+//!   each `|π|` plain multiplies and an add. (That count is a *lower bound* on
+//!   the gather: it omits the `2^p` per-mask index remap the gather also needs,
+//!   so every comparison below is stated against the gather at its best.)
 //!
 //! ```text
-//!   K        4      6      8      9     10     12
-//!   new/old  9.01x  5.97x  2.51x  1.54x  0.92x  0.33x
+//!   K                        2     3     4     6      8      9     10     12
+//!   pointed terms            1     7    34   534   6514  21589  69886  696810
+//!   gather terms             5    15    52   855  18002  86472 422005 10306752
+//!   pointed/gather flops  2.5x  3.5x  3.3x  2.0x  0.91x  0.59x  0.37x   0.15x
 //! ```
 //!
-//! The flop crossover is `K = 10`; measured wall clock crosses at `K ≈ 8.5`,
-//! the new path recovering ~2× of its flop deficit from the four-lane unroll,
-//! the `f64x4` combine, and the absent heap/`dyn` traffic. **The production
-//! entry point [`compose_unary_four_slot_coefficients`] is `K = 4`**, where
-//! this schedule is ~9× the flops and a measured ~2.1× the wall clock of the
-//! partition sum it replaced. That cost is bought deliberately and knowingly,
-//! for the ~double-precision accumulation that the accuracy gate pins; it is
-//! not a free win, and a reader sizing a new call site should plan for it.
+//! Two facts worth carrying:
+//!
+//! * The three-full-subset-convolution schedule this replaced walked **exactly
+//!   4×** as many terms at every `K ≤ 4` (136 against 34 at `K = 4`) — one factor
+//!   of 2 from pinning the block that owns `ℓ`, one from walking submasks of
+//!   `mask ^ ℓ` instead of `mask`. Its flop crossover against the gather sat at
+//!   `K = 10`; the pointed recurrence moves it to `K = 8`.
+//! * **The production entry point [`compose_unary_four_slot_coefficients`] is
+//!   `K = 4`**, where the schedule walks 34 terms against the gather's 52. It
+//!   does strictly *less* combinatorial work than the partition sum it replaced —
+//!   at every `K`, not just past a crossover — and the residual 3.3× flop ratio
+//!   at `K = 4` is entirely the Dot2 compensation: 10 flops a term against ~3.
+//!   That is the accuracy the double-double gate pins, and the only reason to
+//!   prefer this schedule; it is not free, and a reader sizing a new call site
+//!   should plan for it.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wide::f64x4;
@@ -275,20 +304,17 @@ fn compose_unary_coefficients_into(
     let count = coefficients.len();
     assert!(count > 1 && count.is_power_of_two());
     assert!(scratch.len() == 4 * count && out.len() == count);
-    let (vbuf, rest) = scratch.split_at_mut(count);
-    let (p2, rest) = rest.split_at_mut(count);
-    let (p3, p4) = rest.split_at_mut(count);
+    let (vbuf, tail) = scratch.split_at_mut(count);
+    let (p2, tail) = tail.split_at_mut(count);
+    let (p3, p4) = tail.split_at_mut(count);
 
     // v is the non-constant part of the input. The k=0 Taylor term owns the
     // constant coefficient, so the zero mask must not enter any power.
     vbuf.copy_from_slice(coefficients);
     vbuf[0] = 0.0;
 
-    // These three compensated subset convolutions are the unique Motzkin-floor
-    // schedule for the degree-four truncated Taylor polynomial.
-    subset_conv_into(vbuf, vbuf, p2, 2);
-    subset_conv_into(p2, vbuf, p3, 3);
-    subset_conv_into(p2, p2, p4, 4);
+    // The three multilinear powers, by the pointed recurrence (module header).
+    multilinear_powers_into(vbuf, p2, p3, p4);
     // `1/k!` undoes the ordered-tuple overcount of each k-fold subset power
     // relative to the unordered set-partition sum.
     let coefficients_by_order = [
@@ -302,7 +328,7 @@ fn compose_unary_coefficients_into(
 }
 
 /// Branchless TwoSum: returns `(s, e)` with `s = fl(a+b)` and `a+b = s+e`
-/// exactly (Knuth/Møller). Used by the compensated convolution and combine.
+/// exactly (Knuth/Møller). Used by the compensated power recurrence and combine.
 #[inline(always)]
 fn two_sum(a: f64, b: f64) -> (f64, f64) {
     let s = a + b;
@@ -311,98 +337,113 @@ fn two_sum(a: f64, b: f64) -> (f64, f64) {
     (s, e)
 }
 
-/// Subset (zeta-style) convolution `out[mask] = Σ_{sub ⊆ mask} a[sub]·b[mask^sub]`,
-/// evaluated as a **compensated dot product** (Ogita–Rump–Oishi Dot2): each
-/// product is split into head + FMA error (`mul_add`) and the running sum
-/// carries a TwoSum error term, so the result is accurate as if computed in
-/// ~twice the working precision. This stops the rounding of `v²` from
-/// compounding through `v³`/`v⁴`, which a single-rounding accumulation does
-/// not. Output masks with `popcount < min_pop` are left at zero: the
-/// multilinear power `v^{⊛k}` vanishes below popcount `k`, so the prune is exact
-/// and skips the low-order masks entirely.
+/// One step of an Ogita–Rump–Oishi Dot2: accumulate `x·y` into `(s, c)` so that
+/// `s + c` carries the running sum in ~twice the working precision. The product
+/// is split into head plus exact FMA error, and the addition's rounding error is
+/// recovered by TwoSum, so neither the product nor the sum silently drops bits.
+#[inline(always)]
+fn dot2_step(s: &mut f64, c: &mut f64, x: f64, y: f64) {
+    let prod = x * y;
+    let prod_err = x.mul_add(y, -prod); // exact: prod + prod_err == x*y
+    let (t, sum_err) = two_sum(*s, prod);
+    *s = t;
+    *c += prod_err + sum_err;
+}
+
+/// `k·(s + c)` for a small integer multiplicity `k`, with `k·s` split into head
+/// plus exact FMA error so the multiplicity costs one final rounding rather than
+/// discarding the compensated tail. For `k ∈ {2, 4}` the split is identically
+/// zero (both are exact scalings); `k = 3` is the case that needs it.
+#[inline(always)]
+fn scaled_compensated(k: f64, s: f64, c: f64) -> f64 {
+    let hi = k * s;
+    let lo = k.mul_add(s, -hi); // exact: hi + lo == k*s
+    hi + (lo + k * c)
+}
+
+/// The multilinear powers `v^{⊛2}`, `v^{⊛3}`, `v^{⊛4}` of the non-constant part
+/// `v`, by the **pointed (lowest-set-bit) recurrence** derived in the module
+/// header:
+///
+/// ```text
+/// v^{⊛k}[mask] = k · Σ_{t ⊊ mask, ℓ ∉ t} v[mask \ t] · v^{⊛(k-1)}[t]
+/// ```
+///
+/// with `ℓ` the lowest set bit of `mask`. Pinning the block that owns `ℓ` counts
+/// each partition once instead of `k` times, and the surviving `t` range over
+/// submasks of `mask ^ ℓ` rather than of `mask` — together an exactly 4× shorter
+/// walk than the three full subset convolutions this replaced, at every
+/// `K ≤ 4` (see `compose_unary_work_model_matches_the_closed_form`).
+///
+/// All three powers share **one** descending walk over the submasks of
+/// `mask ^ ℓ`, because their term sets are nested: `v^{⊛(k-1)}[t]` vanishes
+/// below `popcount(t) = k - 1`, so the `k = 3` and `k = 4` chains are the
+/// `popcount ≥ 2` and `popcount ≥ 3` suffixes of the `k = 2` chain. Sharing the
+/// walk also shares the `v[mask \ t]` load and gives three independent Dot2
+/// dependency chains to interleave, which is what the old kernel's four-way
+/// unroll was buying separately.
+///
+/// Every accumulation is a compensated Dot2, so the rounding of `v²` cannot
+/// compound through `v³`/`v⁴`. Masks below popcount `k` are left at zero: the
+/// `k`-fold multilinear power vanishes there, so the prune is exact.
 #[inline]
-fn subset_conv_into(a: &[f64], b: &[f64], out: &mut [f64], min_pop: u32) {
-    // SAFETY invariant for the `get_unchecked` loads below: every index this
-    // kernel reads is `< out.len()`, and the caller passes `a`/`b` at least as
-    // long as `out` (in `compose_unary` all three are the same `count`-length
-    // slices carved from one scratch buffer). Concretely `mask < out.len()`
-    // (loop bound), and each submask satisfies `sub ⊆ mask` so `sub ≤ mask` and
-    // `mask ^ sub ⊆ mask` so `mask ^ sub ≤ mask` — both `< out.len() ≤ a.len(),
-    // b.len()`. The `assert!` below pins the length precondition (one check per
-    // call, negligible next to the walk) so the `get_unchecked` below is sound;
-    // the bounds checks LLVM cannot elide (the indices are data-dependent) are a
-    // real per-step cost across the `3^K` submask walk (×3 convolutions per
-    // compose), so eliding them via get_unchecked is a measured ~20% at the
-    // marginal-slope direction counts.
-    assert!(a.len() >= out.len() && b.len() >= out.len());
-    for (mask, slot) in out.iter_mut().enumerate() {
-        if (mask as u64).count_ones() < min_pop {
-            *slot = 0.0;
+fn multilinear_powers_into(v: &[f64], p2: &mut [f64], p3: &mut [f64], p4: &mut [f64]) {
+    let count = v.len();
+    // SAFETY precondition for the `get_unchecked` loads below, pinned once per
+    // call (negligible next to the walk): all four buffers are `count` long.
+    // Every index read is either `t` or `mask ^ t` for `t ⊆ mask < count`, and
+    // both are submasks of `mask`, hence `< count`. The per-load bounds checks
+    // LLVM cannot elide (the indices are data-dependent) are a real cost across
+    // the exponential walk, and eliding them measured ~20% on the kernel this
+    // replaced.
+    assert!(p2.len() == count && p3.len() == count && p4.len() == count);
+    if count > 0 {
+        p2[0] = 0.0;
+        p3[0] = 0.0;
+        p4[0] = 0.0;
+    }
+    for mask in 1..count {
+        // `v^{⊛k}` vanishes below popcount k, so a popcount-1 mask is all-zero
+        // in every power and never enters a walk.
+        let lowest = mask & mask.wrapping_neg();
+        let rest = mask ^ lowest;
+        if rest == 0 {
+            p2[mask] = 0.0;
+            p3[mask] = 0.0;
+            p4[mask] = 0.0;
             continue;
         }
-        // Descending submask enumeration `sub = (sub-1) & mask`, terminating
-        // after `sub == 0` (the classic Gosper-style submask walk). The Dot2 is
-        // spread across FOUR independent named accumulators (a 4-way unroll) so
-        // the FMA/TwoSum latency chains overlap — the loop becomes throughput-
-        // rather than latency-bound — then the lanes are merged with a final
-        // compensated reduction. Every non-pruned mask has popcount ≥ 2, so its
-        // `2^popcount` submask count is a multiple of 4 and the unroll is exact
-        // (the all-zero submask always lands in the fourth lane). Reassociation
-        // only; the value is the same real sum, in ~double the working precision.
-        #[inline(always)]
-        fn dot2_step(s: &mut f64, c: &mut f64, x: f64, y: f64) {
-            let prod = x * y;
-            let prod_err = x.mul_add(y, -prod); // exact: prod + prod_err == x*y
-            let (t, sum_err) = two_sum(*s, prod);
-            *s = t;
-            *c += prod_err + sum_err;
-        }
-        let (mut s0, mut s1, mut s2, mut s3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        let (mut c0, mut c1, mut c2, mut c3) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        let mut sub = mask;
-        // SAFETY: see the invariant comment at the top of the function — `sub`
-        // and `mask ^ sub` are both submasks of `mask < out.len()`, hence in
-        // bounds for `a`/`b` (each ≥ `out.len()` long).
-        unsafe {
-            loop {
-                dot2_step(
-                    &mut s0,
-                    &mut c0,
-                    *a.get_unchecked(sub),
-                    *b.get_unchecked(mask ^ sub),
-                );
-                sub = (sub - 1) & mask;
-                dot2_step(
-                    &mut s1,
-                    &mut c1,
-                    *a.get_unchecked(sub),
-                    *b.get_unchecked(mask ^ sub),
-                );
-                sub = (sub - 1) & mask;
-                dot2_step(
-                    &mut s2,
-                    &mut c2,
-                    *a.get_unchecked(sub),
-                    *b.get_unchecked(mask ^ sub),
-                );
-                sub = (sub - 1) & mask;
-                dot2_step(
-                    &mut s3,
-                    &mut c3,
-                    *a.get_unchecked(sub),
-                    *b.get_unchecked(mask ^ sub),
-                );
-                if sub == 0 {
-                    break;
+        let (mut s2, mut c2) = (0.0f64, 0.0f64);
+        let (mut s3, mut c3) = (0.0f64, 0.0f64);
+        let (mut s4, mut c4) = (0.0f64, 0.0f64);
+        // Descending submask walk `t = (t - 1) & rest` over the NONZERO submasks
+        // of `rest` (the classic Gosper-style enumeration). `t = 0` is skipped
+        // because it is the one term whose complement is the whole mask, and
+        // `v^{⊛(k-1)}[0] = 0` for every `k ≥ 2`.
+        let mut t = rest;
+        while t != 0 {
+            // SAFETY: `t ⊆ rest ⊂ mask < count` and `mask ^ t ⊆ mask < count`,
+            // and all four buffers are `count` long (asserted above).
+            unsafe {
+                let block = *v.get_unchecked(mask ^ t);
+                dot2_step(&mut s2, &mut c2, block, *v.get_unchecked(t));
+                let popcount = (t as u64).count_ones();
+                if popcount >= 2 {
+                    dot2_step(&mut s3, &mut c3, block, *p2.get_unchecked(t));
+                    if popcount >= 3 {
+                        dot2_step(&mut s4, &mut c4, block, *p3.get_unchecked(t));
+                    }
                 }
-                sub = (sub - 1) & mask;
             }
+            t = (t - 1) & rest;
         }
-        // Merge the four lanes, compensated.
-        let (s01, e01) = two_sum(s0, s1);
-        let (s23, e23) = two_sum(s2, s3);
-        let (total, etot) = two_sum(s01, s23);
-        *slot = total + (etot + e01 + e23 + c0 + c1 + c2 + c3);
+        // The pointed recurrence's multiplicity. `v^{⊛k}[mask]` must be written
+        // before the `k+1` chain of any LATER mask reads it, and `t < mask`
+        // strictly for every `t ⊆ mask ^ ℓ`, so writing all three here keeps the
+        // recurrence's read-before-write order across the ascending mask loop.
+        p2[mask] = scaled_compensated(2.0, s2, c2);
+        p3[mask] = scaled_compensated(3.0, s3, c3);
+        p4[mask] = scaled_compensated(4.0, s4, c4);
     }
 }
 
@@ -963,90 +1004,318 @@ mod tests {
         );
     }
 
-    /// The two schedules' operation counts in closed form, which is the
-    /// machine-independent statement of when the convolution path is cheaper.
-    /// This is the gate for the cost table in the module header; the wall-clock
-    /// test below can only corroborate it.
+    /// `v^{⊛k}[mask] = k! · Σ_{π ⊢ mask, |π| = k} Π_{B ∈ π} v[B]` by direct
+    /// enumeration of the set partitions of `mask` — the *definition* the pointed
+    /// recurrence claims to compute.
     ///
-    /// It exists because the header used to claim the convolution schedule was
-    /// "~3× fewer FLOPs than the per-mask partition gather" full stop, and the
-    /// wall-clock test asserted a speedup from `K = 6`. Both are false: at the
-    /// `K = 4` the production entry point actually uses, the convolution path
-    /// is ~9× the flops, and it does not come out ahead until `K = 10`. A
-    /// closed-form count cannot drift the way a prose factor did.
-    #[test]
-    fn compose_unary_flop_crossover_matches_the_closed_form() {
-        // Three subset convolutions, pruned at popcount < min_pop (min_pop =
-        // 2, 3, 4 for v², v³, v⁴); each surviving mask walks its 2^popcount
-        // submasks, and each step is a Dot2 (mul + FMA + TwoSum + 2 adds).
-        fn new_flops(k: u32) -> u64 {
-            const DOT2_FLOPS: u64 = 10;
-            let binom = |n: u32, r: u32| -> u64 {
-                (0..r).fold(1u64, |acc, i| acc * u64::from(n - i) / (u64::from(i) + 1))
-            };
-            (2u32..=4)
-                .map(|min_pop| {
-                    (min_pop..=k)
-                        .map(|p| binom(k, p) * (1u64 << p))
-                        .sum::<u64>()
-                })
-                .sum::<u64>()
-                * DOT2_FLOPS
+    /// Returns `[v², v³, v⁴]` and, per mask, the forward error the pair of
+    /// evaluations is jointly entitled to: this reference accumulates `n` terms
+    /// naively (Wilkinson: `n·u` times the sum of the term magnitudes) after up to
+    /// three roundings per product, and the compensated walk is good to ~`u`, so
+    /// `(n + 4)·EPSILON·Σ|term|` bounds their difference. It is derived from the
+    /// enumeration, not fitted to an observed failure.
+    fn brute_force_multilinear_powers(v: &[f64]) -> ([Vec<f64>; 3], [Vec<f64>; 3]) {
+        fn recurse(
+            elem: usize,
+            bits: &[usize],
+            blocks: &mut Vec<usize>,
+            v: &[f64],
+            acc: &mut [f64; 5],
+            acc_abs: &mut [f64; 5],
+            acc_count: &mut [u32; 5],
+        ) {
+            if blocks.len() > 4 {
+                return;
+            }
+            if elem == bits.len() {
+                let order = blocks.len();
+                if order >= 2 {
+                    let product: f64 = blocks.iter().map(|&b| v[b]).product();
+                    acc[order] += product;
+                    acc_abs[order] += product.abs();
+                    acc_count[order] += 1;
+                }
+                return;
+            }
+            let bit = 1usize << bits[elem];
+            for slot in 0..blocks.len() {
+                blocks[slot] |= bit;
+                recurse(elem + 1, bits, blocks, v, acc, acc_abs, acc_count);
+                blocks[slot] &= !bit;
+            }
+            blocks.push(bit);
+            recurse(elem + 1, bits, blocks, v, acc, acc_abs, acc_count);
+            blocks.pop();
         }
-        // Partition gather: per mask of popcount p, every set partition of a
-        // p-set into 1..=4 blocks contributes |π| multiplies and one add.
-        fn old_flops(k: u32) -> u64 {
-            fn stirling(n: u32, blocks: u32) -> u64 {
-                let (n, blocks) = (n as usize, blocks as usize);
-                let mut s = vec![vec![0u64; blocks + 1]; n + 1];
-                s[0][0] = 1;
-                for i in 1..=n {
-                    for j in 1..=blocks {
-                        s[i][j] = (j as u64) * s[i - 1][j] + s[i - 1][j - 1];
+        let count = v.len();
+        let mut powers = [vec![0.0; count], vec![0.0; count], vec![0.0; count]];
+        let mut entitled = [vec![0.0; count], vec![0.0; count], vec![0.0; count]];
+        let factorial = [1.0, 1.0, 2.0, 6.0, 24.0];
+        for mask in 1..count {
+            let mut bits = Vec::new();
+            let mut rest = mask;
+            while rest != 0 {
+                bits.push(rest.trailing_zeros() as usize);
+                rest &= rest - 1;
+            }
+            let mut acc = [0.0f64; 5];
+            let mut acc_abs = [0.0f64; 5];
+            let mut acc_count = [0u32; 5];
+            recurse(
+                0,
+                &bits,
+                &mut Vec::new(),
+                v,
+                &mut acc,
+                &mut acc_abs,
+                &mut acc_count,
+            );
+            for order in 2..=4usize {
+                powers[order - 2][mask] = factorial[order] * acc[order];
+                entitled[order - 2][mask] = (f64::from(acc_count[order]) + 4.0)
+                    * f64::EPSILON
+                    * factorial[order]
+                    * acc_abs[order];
+            }
+        }
+        (powers, entitled)
+    }
+
+    /// The pointed (lowest-set-bit) recurrence is an *identity*, not an
+    /// approximation: pinning the block that owns the lowest set bit and
+    /// multiplying by `k` reproduces the `k`-fold multilinear power of the
+    /// brute-force set-partition definition, to the forward error the two
+    /// evaluations are jointly entitled to.
+    ///
+    /// This is the gate on the recurrence the module header derives. The header's
+    /// cost claims are only worth anything if the cheaper walk computes the same
+    /// quantity, and that is what this pins.
+    #[test]
+    fn pointed_recurrence_reproduces_the_brute_force_multilinear_powers() {
+        let mut rng = Rng(0x0be1_1ab0_1a5e_c001);
+        for n_dirs in 1usize..=6 {
+            for _ in 0..24 {
+                let count = 1usize << n_dirs;
+                let mut v: Vec<f64> = (0..count).map(|_| rng.signed(1.0)).collect();
+                v[0] = 0.0;
+                let mut p2 = vec![f64::NAN; count];
+                let mut p3 = vec![f64::NAN; count];
+                let mut p4 = vec![f64::NAN; count];
+                multilinear_powers_into(&v, &mut p2, &mut p3, &mut p4);
+                let (want, entitled) = brute_force_multilinear_powers(&v);
+                for (order, got) in [&p2, &p3, &p4].iter().enumerate() {
+                    for mask in 0..count {
+                        // Graded against the forward error the two evaluations are
+                        // jointly entitled to (see the reference above), which is a
+                        // derived bound rather than a fitted tolerance. Where the
+                        // power vanishes identically the bound is zero and the
+                        // agreement must be exact.
+                        let tolerance = entitled[order][mask];
+                        assert!(
+                            (got[mask] - want[order][mask]).abs() <= tolerance,
+                            "K={n_dirs} k={} mask={mask}: pointed={:.17e} partitions={:.17e} \
+                             tol={tolerance:.3e}",
+                            order + 2,
+                            got[mask],
+                            want[order][mask]
+                        );
                     }
                 }
-                s[n][blocks]
             }
-            let binom = |n: u32, r: u32| -> u64 {
-                (0..r).fold(1u64, |acc, i| acc * u64::from(n - i) / (u64::from(i) + 1))
-            };
-            (0..=k)
-                .map(|p| {
-                    let per_mask: u64 = if p == 0 {
-                        1
-                    } else {
-                        (1..=4u32)
-                            .map(|b| stirling(p, b) * (u64::from(b) + 1))
-                            .sum()
-                    };
-                    binom(k, p) * per_mask
-                })
-                .sum()
+        }
+    }
+
+    /// The two schedules' operation counts, recomputed from the enumeration
+    /// itself. This is the machine-independent statement of what each schedule
+    /// costs and where the convolution path becomes the cheaper one; the
+    /// wall-clock test below can only corroborate it.
+    ///
+    /// It exists because the header once claimed the convolution schedule was
+    /// "~3× fewer FLOPs than the per-mask partition gather" full stop, and a
+    /// wall-clock test asserted a speedup from `K = 6`. Both were false of the
+    /// schedule then in the file: three full subset convolutions cost ~9× the
+    /// gather at the `K = 4` the production entry point uses, and did not come
+    /// out ahead until `K = 10`. A counted model cannot drift the way a prose
+    /// factor did.
+    #[test]
+    fn compose_unary_work_model_matches_the_closed_form() {
+        // Dot2: mul, FMA error, TwoSum (6), two carry adds.
+        const DOT2_FLOPS: u64 = 10;
+        // `scaled_compensated`: k·s, its FMA error, k·c, and two adds.
+        const MULTIPLICITY_FLOPS: u64 = 5;
+
+        let binom = |n: u32, r: u32| -> u64 {
+            (0..r).fold(1u64, |acc, i| acc * u64::from(n - i) / (u64::from(i) + 1))
+        };
+
+        // Replay of `multilinear_powers_into`'s enumeration — same mask loop,
+        // same lowest-bit pin, same descending walk over the submasks of
+        // `mask ^ lowest`, same popcount gates — counting Dot2 steps instead of
+        // performing them. This is what makes the closed form below a claim about
+        // the kernel rather than about itself.
+        fn walked_terms(n_dirs: u32) -> u64 {
+            let count = 1usize << n_dirs;
+            let mut steps = 0u64;
+            for mask in 1..count {
+                let lowest = mask & mask.wrapping_neg();
+                let rest = mask ^ lowest;
+                if rest == 0 {
+                    continue;
+                }
+                let mut t = rest;
+                while t != 0 {
+                    steps += 1;
+                    let popcount = (t as u64).count_ones();
+                    if popcount >= 2 {
+                        steps += 1;
+                        if popcount >= 3 {
+                            steps += 1;
+                        }
+                    }
+                    t = (t - 1) & rest;
+                }
+            }
+            steps
         }
 
-        // The production entry point is four-slot: K = 4.
-        let production_ratio = new_flops(4) as f64 / old_flops(4) as f64;
-        assert!(
-            (production_ratio - 9.01).abs() < 0.05,
-            "at the production K=4 the convolution schedule should cost ~9.01x \
-             the partition gather's flops, got {production_ratio:.2}x"
-        );
-        for k in 2..=9u32 {
-            assert!(
-                new_flops(k) > old_flops(k),
-                "K={k}: convolution schedule should still be the more expensive \
-                 one below the crossover (new {} vs old {})",
-                new_flops(k),
-                old_flops(k)
+        // Closed form: per mask of popcount p ≥ 2 and each power k ≤ p, the
+        // submasks t of `mask ^ ℓ` (a (p-1)-set) with popcount(t) ≥ k-1.
+        let pointed_terms = |n_dirs: u32| -> u64 {
+            (2..=n_dirs)
+                .map(|p| {
+                    let per_mask: u64 = (2..=4u32)
+                        .filter(|k| *k <= p)
+                        .map(|k| (k - 1..=p - 1).map(|j| binom(p - 1, j)).sum::<u64>())
+                        .sum();
+                    binom(n_dirs, p) * per_mask
+                })
+                .sum()
+        };
+        let pointed_flops = |n_dirs: u32| -> u64 {
+            (2..=n_dirs)
+                .map(|p| {
+                    let per_mask: u64 = (2..=4u32)
+                        .filter(|k| *k <= p)
+                        .map(|k| (k - 1..=p - 1).map(|j| binom(p - 1, j)).sum::<u64>())
+                        .sum();
+                    binom(n_dirs, p) * (per_mask * DOT2_FLOPS + 3 * MULTIPLICITY_FLOPS)
+                })
+                .sum()
+        };
+
+        // The schedule this replaced: three full subset convolutions v², v³=v²⊛v,
+        // v⁴=v²⊛v², each pruned at popcount < k, each surviving mask walking all
+        // 2^popcount of its submasks.
+        let full_convolution_terms = |n_dirs: u32| -> u64 {
+            (2..=4u32)
+                .map(|k| (k..=n_dirs).map(|p| binom(n_dirs, p) * (1u64 << p)).sum::<u64>())
+                .sum()
+        };
+
+        // Partition gather: per mask of popcount p, every set partition of a
+        // p-set into 1..=4 blocks contributes |π| multiplies and one add. This
+        // omits the gather's own `2^p` per-mask index remap, so it is a lower
+        // bound on the gather and every comparison below is against its best case.
+        fn stirling(n: u32, blocks: u32) -> u64 {
+            let (n, blocks) = (n as usize, blocks as usize);
+            let mut s = vec![vec![0u64; blocks + 1]; n + 1];
+            s[0][0] = 1;
+            for i in 1..=n {
+                for j in 1..=blocks {
+                    s[i][j] = (j as u64) * s[i - 1][j] + s[i - 1][j - 1];
+                }
+            }
+            s[n][blocks]
+        }
+        let gather_terms = |n_dirs: u32| -> u64 {
+            1 + (1..=n_dirs)
+                .map(|p| binom(n_dirs, p) * (1..=4u32).map(|b| stirling(p, b)).sum::<u64>())
+                .sum::<u64>()
+        };
+        let gather_flops = |n_dirs: u32| -> u64 {
+            1 + (1..=n_dirs)
+                .map(|p| {
+                    binom(n_dirs, p)
+                        * (1..=4u32)
+                            .map(|b| stirling(p, b) * (u64::from(b) + 1))
+                            .sum::<u64>()
+                })
+                .sum::<u64>()
+        };
+
+        // (a) The closed form describes the walk the kernel actually performs.
+        for n_dirs in 2..=12u32 {
+            assert_eq!(
+                walked_terms(n_dirs),
+                pointed_terms(n_dirs),
+                "K={n_dirs}: closed form disagrees with the replayed enumeration"
             );
         }
-        for k in 10..=14u32 {
+
+        // (b) Against the three full subset convolutions this replaced: exactly
+        // 4× fewer terms across the whole range production runs at — one factor
+        // of 2 from pinning the block that owns the lowest set bit, one from
+        // walking submasks of `mask ^ ℓ` rather than of `mask`.
+        for n_dirs in 2..=4u32 {
+            assert_eq!(
+                full_convolution_terms(n_dirs),
+                4 * pointed_terms(n_dirs),
+                "K={n_dirs}: the replaced schedule should be exactly 4x this one"
+            );
+        }
+        for n_dirs in 2..=14u32 {
             assert!(
-                new_flops(k) < old_flops(k),
-                "K={k}: convolution schedule should be cheaper at and above the \
-                 K=10 crossover (new {} vs old {})",
-                new_flops(k),
-                old_flops(k)
+                pointed_terms(n_dirs) < full_convolution_terms(n_dirs),
+                "K={n_dirs}: the pointed recurrence must never walk more terms \
+                 than the full convolutions it replaced ({} vs {})",
+                pointed_terms(n_dirs),
+                full_convolution_terms(n_dirs)
+            );
+        }
+
+        // (c) Against the partition gather: strictly fewer terms at every K,
+        // including the production K = 4 (34 against 52). The combinatorial
+        // deficit that made the old schedule indefensible at small K is gone.
+        for n_dirs in 2..=14u32 {
+            assert!(
+                pointed_terms(n_dirs) < gather_terms(n_dirs),
+                "K={n_dirs}: pointed schedule should walk fewer terms than the \
+                 partition gather ({} vs {})",
+                pointed_terms(n_dirs),
+                gather_terms(n_dirs)
+            );
+        }
+        assert_eq!((pointed_terms(4), gather_terms(4)), (34, 52));
+
+        // (d) What remains at the production K = 4 is the compensation premium
+        // and nothing else: 10 flops a term against the gather's ~3, over fewer
+        // terms, for a 3.3x flop ratio. That is the price of the ~double-precision
+        // accumulation the accuracy gate pins — it is bought, not free.
+        let production_ratio = pointed_flops(4) as f64 / gather_flops(4) as f64;
+        assert!(
+            (production_ratio - 3.34).abs() < 0.05,
+            "at the production K=4 the pointed schedule should cost ~3.34x the \
+             partition gather's flops, got {production_ratio:.2}x"
+        );
+
+        // (e) The flop crossover, which the pointed recurrence moves from K = 10
+        // (three full convolutions) to K = 8.
+        for n_dirs in 2..=7u32 {
+            assert!(
+                pointed_flops(n_dirs) > gather_flops(n_dirs),
+                "K={n_dirs}: below the crossover the compensated schedule is still \
+                 the more expensive one ({} vs {})",
+                pointed_flops(n_dirs),
+                gather_flops(n_dirs)
+            );
+        }
+        for n_dirs in 8..=14u32 {
+            assert!(
+                pointed_flops(n_dirs) < gather_flops(n_dirs),
+                "K={n_dirs}: at and above the K=8 crossover the compensated \
+                 schedule should also be the cheaper one ({} vs {})",
+                pointed_flops(n_dirs),
+                gather_flops(n_dirs)
             );
         }
     }
@@ -1055,17 +1324,16 @@ mod tests {
     fn compose_unary_speedup_over_partition_sum() {
         // Measure ns/call new vs. the previous partition-sum implementation.
         // Prints the multiple at every K; the assert is placed where the win
-        // actually exists.
+        // is large enough that no box can argue with it.
         //
-        // It used to be placed at `n_dirs >= 6`, where the convolution path is
-        // ~6x the flops of the partition gather and measured ~2x SLOWER — so
-        // this test was red at main and could not be greened by any threshold,
-        // because the inequality it asserted is false. The real wall-clock
-        // crossover is K ≈ 8.5 (below the K = 10 flop crossover pinned in
-        // `compose_unary_flop_crossover_matches_the_closed_form`, the
-        // difference being the four-lane unroll and the f64x4 combine). The
-        // assert therefore sits at K = 12, where the margin measured 6.1x and
-        // is not something CI noise reaches.
+        // This is corroboration, not the contract. The contract is
+        // `compose_unary_work_model_matches_the_closed_form`, which counts
+        // operations: a count is the same on every machine, and a wall clock is
+        // not. The assert used to sit at `n_dirs >= 6` and was red at main,
+        // because the schedule then in the file cost ~6x the gather's flops
+        // there and could not win however the threshold was moved. Keep any
+        // guard here far past the crossover the counted model reports (K = 8
+        // for the pointed recurrence) and let the printed line carry the rest.
         use std::time::Instant;
         let mut rng = Rng(0xfeed_face_dead_beef);
         for &n_dirs in &[2usize, 4, 6, 8, 12] {
@@ -1112,15 +1380,16 @@ mod tests {
                  speedup={:.2}x",
                 old_ns / new_ns
             );
-            // Guard only in an optimised build and only past the measured
-            // wall-clock crossover. Below it the convolution schedule is
-            // legitimately slower (see the module header's cost table) and
-            // asserting otherwise is asserting a falsehood; debug builds are
+            // Guard only in an optimised build, and only where the counted
+            // model says the compensated schedule does ~7x less arithmetic —
+            // a margin no shared box's load can invert. Debug builds are
             // dominated by fixed per-call overhead and are not a guard either.
             if !cfg!(debug_assertions) && n_dirs >= 12 {
                 assert!(
                     new_ns < old_ns,
-                    "K={n_dirs} is past the crossover, so the convolution path                      must win here: new={new_ns:.1}ns old={old_ns:.1}ns"
+                    "K={n_dirs} is far past the crossover the work model reports, \
+                     so the compensated schedule must win here: new={new_ns:.1}ns \
+                     old={old_ns:.1}ns"
                 );
             }
         }
