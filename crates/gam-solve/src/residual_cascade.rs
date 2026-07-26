@@ -1299,8 +1299,22 @@ impl CascadeRemlProfile<'_> {
                 // ONE factorization of `A` for BOTH right-hand sides below; the
                 // matrix is the same at this λ and only the right-hand side
                 // differs.
-                let solver = core.coeff_solver(lambda)?;
-                let coeff = solver.solve(core, lambda, &core.rhs)?;
+                //
+                // Every failure here is a failure to evaluate the criterion at a
+                // λ the search chose, and on this route the reason the criterion
+                // needs a solve at all is that no quadrature converged. So the
+                // refusal carries the certificate that refused: without it the
+                // message names the SOLVER ("CG failed to reach 1e-9") when the
+                // decision that put a solve in the path was made much earlier
+                // and elsewhere. That is the archaeology #2503 opens with.
+                let solved = |error: String| -> String {
+                    format!(
+                        "{error}; the profiled residual is on the SOLVE route at this λ because                          the Golub–Meurant quadrature did not converge: {:?}",
+                        self.residual.method()
+                    )
+                };
+                let solver = core.coeff_solver(lambda).map_err(solved)?;
+                let coeff = solver.solve(core, lambda, &core.rhs).map_err(solved)?;
                 let dc: Vec<f64> = coeff
                     .iter()
                     .zip(core.pen_diag.iter())
@@ -1311,7 +1325,7 @@ impl CascadeRemlProfile<'_> {
                     .zip(dc.iter())
                     .map(|(&c, &v)| c * v)
                     .sum::<f64>();
-                let u = solver.solve(core, lambda, &dc)?;
+                let u = solver.solve(core, lambda, &dc).map_err(solved)?;
                 let inverse_penalty_energy =
                     dc.iter().zip(u.iter()).map(|(&a, &b)| a * b).sum::<f64>();
                 let third_energy = u
@@ -1699,6 +1713,7 @@ impl Core {
         null_chol: &[f64],
         start: &[f64],
         max_steps: usize,
+        dimension_ceiling: usize,
     ) -> Result<SchurLanczos, String> {
         let nullity = self.nullity();
         let rank = self.m - nullity;
@@ -1736,9 +1751,15 @@ impl Core {
         // which a single small Rayleigh quotient cannot deflate.
         let mut spectral_scale = 0.0_f64;
         let mut tail = 0.0_f64;
-        // A Krylov space that has consumed the whole rank IS invariant: it is the
-        // entire range the operator acts on.
-        let mut invariant = steps == rank;
+        // A Krylov space that has consumed its whole DIMENSION is invariant: there
+        // is nothing left for it to grow into. `dimension_ceiling` is the caller's
+        // bound on that dimension — `rank` is the trivial one, but for a start
+        // vector inside `range(B)` the binding bound is `rank(B) <= n - nullity`
+        // (`B = Z'WZ` with `W^(1/2) Z = (I - P) W^(1/2) X_1` and `P` of rank
+        // `nullity`), which on a bounding-box-filled cascade is an order of
+        // magnitude below `rank`. Reaching it makes the Gauss rule exact whatever
+        // the accumulated roundoff has left in `tail`.
+        let mut invariant = steps >= dimension_ceiling;
         for step in 0..steps {
             self.schur_whitened_matvec(
                 null_chol,
@@ -1969,7 +1990,7 @@ impl Core {
                 beta,
                 start_norm_sq,
                 ..
-            } = self.schur_lanczos(null_chol, &probe_vector, steps)?;
+            } = self.schur_lanczos(null_chol, &probe_vector, steps, rank)?;
             let (eigenvalues, first_components) = symmetric_tridiagonal_eigen(&alpha, &beta)?;
             let scale = eigenvalues
                 .iter()
@@ -2210,6 +2231,7 @@ impl Core {
         domain: (f64, f64),
     ) -> Result<(Option<CascadeResidualSpectrum>, ResidualQuadratureCertificate), String> {
         let rank = self.m - self.nullity();
+        let ceiling = self.residual_krylov_ceiling();
         let budget = self.residual_quadrature_budget();
         let target = f64::EPSILON.sqrt();
         let (beta, anchor_energy) = self.whitened_residual_rhs(null_chol);
@@ -2248,12 +2270,18 @@ impl Core {
         }
         let mut steps = SLQ_LANCZOS_STEPS.min(budget);
         loop {
-            let run = self.schur_lanczos(null_chol, &beta, steps)?;
+            let run = self.schur_lanczos(null_chol, &beta, steps, ceiling)?;
             let taken = run.alpha.len();
             let fine = self.residual_gauss_rule(&run, taken, anchor_energy, measure_mass)?;
             let coarse_steps = taken / 2;
-            let agreement = if run.invariant || coarse_steps == 0 {
+            let agreement = if run.invariant {
+                // A closed Krylov space makes the rule exact for every kernel;
+                // there is nothing left for a nested comparison to add.
                 0.0
+            } else if coarse_steps == 0 {
+                // A one-node rule has no nested coarser rule to be charged
+                // against, and "no evidence" is not "agreement".
+                f64::INFINITY
             } else {
                 let coarse =
                     self.residual_gauss_rule(&run, coarse_steps, anchor_energy, measure_mass)?;
@@ -2299,12 +2327,29 @@ impl Core {
     /// to clean up come from.
     fn residual_quadrature_budget(&self) -> usize {
         let rank = self.m - self.nullity();
-        let krylov_ceiling = rank.min(self.y.len().saturating_sub(self.nullity()));
         let by_memory =
             RESIDUAL_QUADRATURE_BASIS_BYTES / (size_of::<f64>() * rank.max(1)).max(1);
         by_memory
             .max(SLQ_LANCZOS_STEPS)
-            .min(krylov_ceiling.max(1))
+            .min(self.residual_krylov_ceiling())
+    }
+
+    /// Largest dimension `K_m(B, beta)` can reach, so reaching it proves the space
+    /// is `B`-invariant and the Gauss rule EXACT.
+    ///
+    /// `B = D^(-1/2)(G11 - G10 G00^(-1) G01) D^(-1/2) = Z'WZ` with
+    /// `W^(1/2) Z = (I - P) W^(1/2) X_1` and `P` the `W`-projector onto the
+    /// polynomial block, so `rank(B) <= n - nullity`; and `beta = Z'Wy` lies in
+    /// `range(B)`, so the Krylov space cannot leave it. On a cascade whose net
+    /// fills the bounding BOX rather than the data cloud this is the binding bound
+    /// by an order of magnitude — measured on the `n = 800` 2-D fixture at
+    /// refinement level 6: `rank = 7387` against `n - nullity = 797`, because 89%
+    /// of the columns are void-filling centres the data cannot pin. Reading the
+    /// ceiling as `rank` there made the invariance test unreachable and sent the
+    /// route back to the solve at full budget.
+    fn residual_krylov_ceiling(&self) -> usize {
+        let rank = self.m - self.nullity();
+        rank.min(self.y.len().saturating_sub(self.nullity())).max(1)
     }
 
     fn reml_profile(&self) -> Result<CascadeRemlProfile<'_>, String> {
@@ -4768,6 +4813,83 @@ mod refinement_decision_tests {
         }
     }
 
+    /// A Krylov space that has reached `rank(B) <= n - nullity` is invariant even
+    /// when its numerical `tail` says otherwise, and the rule there IS the exact
+    /// spectrum.
+    ///
+    /// This is the ceiling that decides whether the iterative route can ever leave
+    /// the solve. A bounding-box-filled cascade has far more columns than the data
+    /// can pin — measured on #2503's own `n = 800` 2-D fixture at refinement level
+    /// 6, `rank = 7387` against `n - nullity = 797`, so 89% of the whitened Schur
+    /// spectrum is exactly zero. Reading the invariance ceiling as `rank` made the
+    /// test unreachable and the route fell back to the solve at full budget, which
+    /// is exactly the wall this issue is about.
+    ///
+    /// The claim being gated is that the ceiling is a THEOREM and not an
+    /// optimism: `B = Z'WZ` with `W^{1/2}Z = (I − P)W^{1/2}X₁` and `P` of rank
+    /// `nullity`, so `rank(B) ≤ n − nullity`; `β = Z'Wy ∈ range(B)`; and the
+    /// Krylov space cannot leave `range(B)`. The fixture puts the ceiling strictly
+    /// below `rank` and charges the rule at the ceiling against the exact dense
+    /// eigenbasis over the whole domain.
+    #[test]
+    fn a_krylov_space_at_the_rank_ceiling_reproduces_the_exact_spectrum_2503() {
+        let (x1, x2, y) = dense_fixture(20);
+        let design = cascade_core((&x1, &x2, &y), 5);
+        let core = &design.core;
+        assert!(core.dense_gram.is_some());
+        let rank = core.m - core.nullity();
+        let ceiling = core.residual_krylov_ceiling();
+        assert!(
+            ceiling < rank,
+            "premise: this fixture must have MORE penalized columns than the data can pin \
+             (rank {rank}, ceiling {ceiling}), or the ceiling is not being exercised"
+        );
+        assert_eq!(
+            ceiling,
+            y.len() - core.nullity(),
+            "the ceiling must be `n - nullity` when that is the binding bound"
+        );
+
+        let (null_chol, _) = core.null_gram_factor().expect("null factor");
+        let (modes, exact) = core
+            .dense_cascade_spectrum(&null_chol)
+            .expect("dense spectrum");
+        let (lo, hi) = log_lambda_domain_from_modes(&modes).expect("domain");
+        let (beta, anchor) = core.whitened_residual_rhs(&null_chol);
+        let mass = beta.iter().map(|value| value * value).sum::<f64>();
+        let run = core
+            .schur_lanczos(&null_chol, &beta, ceiling, ceiling)
+            .expect("lanczos");
+        assert_eq!(run.alpha.len(), ceiling, "the run must reach the ceiling");
+        assert!(
+            run.invariant,
+            "a run that consumed the whole reachable dimension must report invariance \
+             (tail/scale {})",
+            run.tail / run.spectral_scale
+        );
+        let rule = core
+            .residual_gauss_rule(&run, ceiling, anchor, mass)
+            .expect("gauss rule");
+
+        let resolution = f64::EPSILON.sqrt();
+        for step in 0..=192 {
+            let lambda = (lo + (hi - lo) * step as f64 / 192.0).exp();
+            let (r_exact, s2, s3, s4) = exact.moments(lambda);
+            let (r_gauss, g2, g3, g4) = rule.spectrum.moments(lambda);
+            assert!(
+                (r_gauss - r_exact).abs() <= resolution * anchor.abs(),
+                "profiled residual at the ceiling disagrees at lambda {lambda}: {r_gauss} \
+                 versus {r_exact}"
+            );
+            for (name, got, truth) in [("S2", g2, s2), ("S3", g3, s3), ("S4", g4, s4)] {
+                assert!(
+                    (got - truth).abs() <= resolution * truth.abs(),
+                    "{name} at the ceiling disagrees at lambda {lambda}: {got} versus {truth}"
+                );
+            }
+        }
+    }
+
     /// A Ritz node whose WEIGHT is roundoff must not reach the spectrum, because
     /// `(θ + λ)^{-k}` will amplify it by `λ^{-k}` at the bottom of the domain.
     ///
@@ -4796,7 +4918,7 @@ mod refinement_decision_tests {
         let mass = beta.iter().map(|value| value * value).sum::<f64>();
         let steps = 96;
         let run = core
-            .schur_lanczos(&null_chol, &beta, steps)
+            .schur_lanczos(&null_chol, &beta, steps, core.residual_krylov_ceiling())
             .expect("lanczos");
         assert_eq!(run.alpha.len(), steps, "premise: the run must not close early");
         let shipped = core
@@ -4916,7 +5038,7 @@ mod refinement_decision_tests {
             let mut steps = SLQ_LANCZOS_STEPS.min(budget);
             loop {
                 let run = core
-                    .schur_lanczos(&null_chol, &beta, steps)
+                    .schur_lanczos(&null_chol, &beta, steps, core.residual_krylov_ceiling())
                     .expect("lanczos");
                 let taken = run.alpha.len();
                 let fine = core
