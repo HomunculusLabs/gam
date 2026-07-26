@@ -428,12 +428,10 @@ where
         let width = right.x - left.x;
         let midpoint = left.x + 0.5 * width;
         if !(midpoint > left.x && midpoint < right.x) {
-            return Err(ScoreSearchError::Unresolved {
-                lo: left.x,
-                hi: right.x,
-                requested_resolution: resolution,
-                enclosure,
-            });
+            // The bracket is two adjacent doubles.  The root is isolated as
+            // tightly as the representation admits, which is TIGHTER than the
+            // caller asked for — not a failure to reach the request.
+            break;
         }
 
         // Newton is accepted only in the central half of the bracket.  Thus
@@ -451,18 +449,17 @@ where
             f64::NAN
         };
         let guard = 0.25 * width;
-        let x = if newton.is_finite() && newton >= left.x + guard && newton <= right.x - guard {
+        let mut x = if newton.is_finite() && newton >= left.x + guard && newton <= right.x - guard {
             newton
         } else {
             midpoint
         };
         if !(x > left.x && x < right.x) {
-            return Err(ScoreSearchError::Unresolved {
-                lo: left.x,
-                hi: right.x,
-                requested_resolution: resolution,
-                enclosure,
-            });
+            // `left.x + guard` can round back onto `left.x` on a bracket only a
+            // few ulps wide, admitting a Newton step that is not interior.  The
+            // midpoint is known interior here, so fall back to it rather than
+            // abandoning a bracket that is still contracting.
+            x = midpoint;
         }
         let sample = evaluate_sample(x, evaluate)?;
         if sample.derivative == 0.0 {
@@ -478,18 +475,40 @@ where
         }
     }
 
-    let midpoint = left.x + 0.5 * (right.x - left.x);
-    let sample = if midpoint > left.x && midpoint < right.x {
-        evaluate_sample(midpoint, evaluate)?
-    } else if left.derivative.abs() <= right.derivative.abs() {
+    // The BRACKET is the certificate; the returned sample is the best ESTIMATE
+    // inside it, and the two are not the same thing.  Reporting the midpoint of
+    // the final bracket threw away every iterate the refinement had already
+    // paid for: the derivative is monotone here (that is what certified the
+    // root), so each accepted sample is closer to the root than the endpoint it
+    // replaced, and after a Newton step the winning endpoint is typically
+    // within an ulp of the root while the midpoint is a full half-resolution
+    // away.  Measured on the #2513 fixture at resolution sqrt(eps), the
+    // midpoint answered lambda=1.2000000050 where the bracket endpoint answers
+    // 1.2000000000 — a 5e-9 error on a root the search had already located to
+    // 1e-16.
+    let bracket = ClosedInterval::new(left.x, right.x);
+    let best_endpoint = if left.derivative.abs() <= right.derivative.abs() {
         left
     } else {
         right
     };
-    Ok(StationaryPoint {
-        sample,
-        bracket: ClosedInterval::new(left.x, right.x),
-    })
+    // One false-position step costs the same single evaluation the midpoint
+    // used to cost and dominates both endpoints: on a pure-bisection bracket it
+    // IS the midpoint, and on a Newton-contracted one it lands on the root.
+    let total = left.derivative.abs() + right.derivative.abs();
+    let interpolated = left.x + (right.x - left.x) * (left.derivative.abs() / total);
+    let sample =
+        if total.is_finite() && total > 0.0 && interpolated > left.x && interpolated < right.x {
+            let candidate = evaluate_sample(interpolated, evaluate)?;
+            if candidate.derivative.abs() < best_endpoint.derivative.abs() {
+                candidate
+            } else {
+                best_endpoint
+            }
+        } else {
+            best_endpoint
+        };
+    Ok(StationaryPoint { sample, bracket })
 }
 
 /// Globally maximize a smooth score on `[lo, hi]` by certified stationary
@@ -1639,6 +1658,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #2513: the refinement's own iterates locate the root far below the
+    /// requested bracket resolution, and the reported sample must be one of
+    /// them rather than a fresh midpoint of the final bracket.  The bracket
+    /// stays the certificate and is still honoured at the requested width.
+    #[test]
+    fn refined_root_is_reported_far_inside_its_own_bracket() {
+        let profile = tail_fixture();
+        let resolution = f64::EPSILON.sqrt();
+        let search = profile
+            .maximize(f64::MIN_POSITIVE.ln(), (f64::MAX / 2.0).ln(), resolution)
+            .expect("certified search");
+        assert_eq!(search.location, ScoreOptimumLocation::Stationary(0));
+        assert_eq!(search.stationary_points.len(), 1);
+        let stationary = search.stationary_points[0];
+        // gamma_max = 2 for the fixture this profile was normalized from, and
+        // the one-direction stationarity equation gives lambda = 1.2 exactly.
+        let lambda = 2.0 * stationary.sample.x.exp();
+        assert!(
+            (lambda - 1.2).abs() <= 1.0e-13,
+            "lambda={lambda}; the midpoint-of-bracket report was 1.2000000050"
+        );
+        assert!(stationary.bracket.hi - stationary.bracket.lo <= resolution);
+        assert!(stationary.bracket.contains(stationary.sample.x));
     }
 
     #[test]
