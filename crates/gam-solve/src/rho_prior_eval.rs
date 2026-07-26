@@ -73,17 +73,37 @@ pub(crate) fn pc_prior_terms(theta: f64, r: f64) -> (f64, f64, f64) {
 ///
 /// SHAPE. Work on the distance scale `b(ρ) = e^{-ρ/2}` (the marginal-SD scale of
 /// the penalized component; `b → ∞` is the under-smoothing degeneracy). Gate at
-/// `ρ_gate` with `b_gate = e^{-ρ_gate/2}`:
+/// `ρ_gate` with `b_gate = e^{-ρ_gate/2}`, and write the depth below the gate on
+/// the distance scale's own exponent, `x = (ρ_gate − ρ)/2`, so that
+/// `b(ρ) = b_gate·eˣ`:
 ///   * `ρ ≥ ρ_gate` (identified side, distance `b ≤ b_gate`): cost = grad = hess
 ///     = 0, BYTE-IDENTICALLY (a clean fit pays nothing — strict zero-downside).
-///   * `ρ < ρ_gate` (degenerate side, distance `b > b_gate`): a convex barrier
-///     that is C¹ at the gate,
-///       cost = θ [ b(ρ) − b_gate − (1/2) b_gate (ρ_gate − ρ) ],
-///       grad = θ [ −(1/2) b(ρ) + (1/2) b_gate ]   (= 0 at the gate, < 0 below),
-///       hess = (θ/4) b(ρ)  (> 0, always usable curvature).
-///     The gradient is negative below the gate (pushing `ρ` UP, away from the
-///     `λ → 0` wall) and decays continuously to zero AT the gate, so there is no
-///     persistent pull on the identified side.
+///   * `ρ < ρ_gate` (degenerate side, `x > 0`): the exponential wall with its
+///     second-order Taylor polynomial at the gate removed, i.e. `θ·b_gate` times
+///     the order-3 exponential remainder `E₃(x) = eˣ − 1 − x − x²/2`,
+///       cost = θ b_gate E₃(x),
+///       grad = −(θ b_gate/2) E₂(x),   E₂(x) = eˣ − 1 − x,
+///       hess =  (θ b_gate/4) E₁(x),   E₁(x) = eˣ − 1.
+///     Every `Eₘ` is a positive, increasing function of `x > 0` vanishing at
+///     `x = 0`, so the barrier is convex, its gradient is negative below the gate
+///     (pushing `ρ` UP, away from the `λ → 0` wall), and cost, slope AND
+///     curvature all decay to the flat side's exact zero at the gate.
+///
+/// C² AT THE GATE (issue #2506). Removing only the first-order polynomial leaves
+/// a barrier that is C¹ but not C²: its curvature would jump from `θ·b_gate/4`
+/// (≈ 1.15 under the default calibration) to the identified side's exact zero.
+/// A coordinate resting at the gate is then a point where the objective has no
+/// single-valued Hessian, so the outer Newton model disagrees with the function
+/// across the step and the second-order stationarity certificate asks a question
+/// the objective does not answer — which value it gets depends on which side the
+/// last probe landed. That is not hypothetical: once `RhoPrior::default()` became
+/// `Flat` this evaluator became the default outer prior on every unset
+/// coordinate, and the measured moving-κ (Matérn / sphere / curvature /
+/// measure-jet / anisotropic Duchon) fits rest *within 0.13 of `ρ_gate`*.
+/// Subtracting the order-2 polynomial instead is the unique minimal choice that
+/// joins the flat side in value, slope and curvature while leaving the wall's
+/// calibrated leading term `θ·e^{-ρ/2}` — and its exactly-zero upper tail —
+/// untouched.
 ///
 /// GATE CHOICE. `ρ_gate = −2 ln(upper)`, i.e. the barrier engages only once the
 /// marginal-SD distance `b = e^{-ρ/2}` exceeds the SAME interpretable `upper`
@@ -97,12 +117,52 @@ pub(crate) fn firth_default_barrier_terms(theta: f64, upper: f64, r: f64) -> (f6
         // Identified side: byte-identically flat (strict zero-downside).
         return (0.0, 0.0, 0.0);
     }
-    let b = (-0.5 * r).exp();
     let b_gate = (-0.5 * rho_gate).exp(); // == upper, but kept symbolic for clarity.
-    let cost = theta * (b - b_gate - 0.5 * b_gate * (rho_gate - r));
-    let grad = theta * (-0.5 * b + 0.5 * b_gate);
-    let hess = 0.25 * theta * b;
-    (cost, grad, hess)
+    // `x` is the depth below the gate on the distance scale's exponent, so
+    // `b(ρ) = b_gate·eˣ` and `dx/dρ = −1/2` supplies every chain-rule factor.
+    let x = 0.5 * (rho_gate - r);
+    let (e1, e2, e3) = exp_remainders_at(x);
+    let scale = theta * b_gate;
+    (scale * e3, -0.5 * scale * e2, 0.25 * scale * e1)
+}
+
+/// The three leading remainders of the exponential series at `x`,
+/// `Eₘ(x) = eˣ − Σ_{k<m} xᵏ/k! = Σ_{k≥m} xᵏ/k!` for `m = 1, 2, 3`, returned
+/// together because [`firth_default_barrier_terms`] projects its cost, gradient
+/// and curvature out of this one evaluation and so cannot desync them.
+///
+/// The literal forms `expm1(x) − x` and `expm1(x) − x − x²/2` cancel
+/// catastrophically as `x → 0`: the values are `Θ(x²)` and `Θ(x³)` while the
+/// rounding error of the largest intermediate stays `Θ(ε·eˣ)`. For this barrier
+/// that is the hot path, not a corner — a coordinate sitting on the gate is at
+/// `x = 0` exactly, and the fits this exists for sit just below it.
+///
+/// The branch at `|x| = 1` is derived rather than tuned. Below it the ascending
+/// series reaches full `f64` precision in a bounded number of terms (summation
+/// stops when a term no longer moves the partial sum, which for `|x| ≤ 1` always
+/// happens because the terms decay at least geometrically with ratio `1/4` from
+/// `k = 3` on). Above it the literal form's cancellation amplification
+/// `eˣ/E₃(x)` is maximal at `x = 1`, where it is `e/(e − 5/2) ≈ 12.5` — under
+/// two ulps of loss — and decreases monotonically as `x` grows.
+fn exp_remainders_at(x: f64) -> (f64, f64, f64) {
+    if x.abs() > 1.0 {
+        let e1 = x.exp_m1();
+        return (e1, e1 - x, e1 - x - 0.5 * x * x);
+    }
+    let mut term = x * x * x / 6.0;
+    let mut e3 = term;
+    let mut k = 3.0_f64;
+    loop {
+        k += 1.0;
+        term *= x / k;
+        let next = e3 + term;
+        if next == e3 {
+            break;
+        }
+        e3 = next;
+    }
+    let e2 = e3 + 0.5 * x * x;
+    (e2 + x, e2, e3)
 }
 
 /// What a caller wants done when the configured prior is malformed (e.g. a
