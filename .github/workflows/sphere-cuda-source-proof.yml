@@ -35,7 +35,11 @@ jobs:
             echo "::error::source_ref must be an exact lowercase 40-character commit."
             exit 1
           fi
-          test "$(git rev-parse HEAD)" = "${REQUESTED_SOURCE_REF}"
+          resolved=$(tr -d '\r\n' < .git/HEAD)
+          if [[ "${resolved}" != "${REQUESTED_SOURCE_REF}" ]]; then
+            echo "::error::Checkout resolved to ${resolved}, not ${REQUESTED_SOURCE_REF}."
+            exit 1
+          fi
 
       - name: Extract embedded CUDA and emit PTX
         shell: bash
