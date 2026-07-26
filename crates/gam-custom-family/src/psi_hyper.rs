@@ -4,6 +4,71 @@
 
 use super::*;
 
+/// Materialize `D_beta(∂_psi H_info)[direction]` from the same ψ authority
+/// that supplied `∂_psi H_info`.
+///
+/// An exact-ψ workspace owns more than a representation cache: it also owns
+/// the evaluation options and row measure used by its first-order terms. In
+/// particular, survival marginal-slope's early outer pilot installs a
+/// Horvitz-Thompson row measure in that workspace. Replaying the direct family
+/// hook here would combine a workspace `∂_psi H_info` with a full-data
+/// `D_beta(∂_psi H_info)` inside one Jeffreys derivative. That pair is not the
+/// derivative of any information matrix.
+///
+/// This is the materializing counterpart of
+/// [`build_psi_drift_deriv_callback`]: a present workspace is the exclusive
+/// authority, while the direct family hook is used only when no workspace was
+/// constructed.
+fn materialize_authoritative_psi_hessian_directional_derivative<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    synced_states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    hyper_layout: &CustomFamilyHyperLayout,
+    psi_workspace: Option<&dyn ExactNewtonJointPsiWorkspace>,
+    psi_index: usize,
+    direction: &Array1<f64>,
+    total: usize,
+) -> Result<Option<Array2<f64>>, String> {
+    let drift = if let Some(workspace) = psi_workspace {
+        workspace.hessian_directional_derivative(psi_index, direction)?
+    } else {
+        family
+            .exact_newton_joint_psihessian_directional_derivative(
+                synced_states,
+                specs,
+                hyper_layout,
+                psi_index,
+                direction,
+            )?
+            .map(DriftDerivResult::Dense)
+    };
+    match drift {
+        Some(DriftDerivResult::Dense(matrix)) => {
+            if matrix.dim() != (total, total) {
+                return Err(format!(
+                    "authoritative psi Hessian directional derivative for axis {psi_index} \
+                     has dense shape {:?}, expected ({total}, {total})",
+                    matrix.dim(),
+                ));
+            }
+            Ok(Some(matrix))
+        }
+        Some(DriftDerivResult::Operator(operator)) => {
+            if operator.dim() != total {
+                return Err(format!(
+                    "authoritative psi Hessian directional derivative for axis {psi_index} \
+                     has operator dimension {}, expected {total}",
+                    operator.dim(),
+                ));
+            }
+            Ok(Some(operator.mul_mat(&Array2::<f64>::eye(total))))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Build `HyperCoord` objects for ψ (custom family) hyperparameters.
 ///
 /// Converts family-provided (a^ℓ, q, L) objects and penalty derivatives
@@ -217,13 +282,17 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                     specs,
                     &e_a,
                 )?;
-                let psi_hdot_a = family.exact_newton_joint_psihessian_directional_derivative(
-                    synced_states,
-                    specs,
-                    hyper_layout,
-                    psi_global,
-                    &e_a,
-                )?;
+                let psi_hdot_a =
+                    materialize_authoritative_psi_hessian_directional_derivative(
+                        family,
+                        synced_states,
+                        specs,
+                        hyper_layout,
+                        psi_workspace.as_deref(),
+                        psi_global,
+                        &e_a,
+                        total,
+                    )?;
                 if let (Some(hdot_a), Some(psi_hdot_a)) = (hdot_a, psi_hdot_a) {
                     let phi_psi_beta_a =
                             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_phi_explicit_param_second_derivative(
@@ -270,12 +339,15 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
                             )
                         },
                         |dir: &Array1<f64>| {
-                            family.exact_newton_joint_psihessian_directional_derivative(
+                            materialize_authoritative_psi_hessian_directional_derivative(
+                                family,
                                 synced_states,
                                 specs,
                                 hyper_layout,
+                                psi_workspace.as_deref(),
                                 psi_global,
                                 dir,
+                                total,
                             )
                         },
                     )?,

@@ -2413,6 +2413,150 @@ pub(crate) fn workspace_first_order_terms_are_single_authority_without_direct_re
 }
 
 #[test]
+pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
+    #[derive(Clone)]
+    struct WorkspaceJeffreysFamily {
+        direct_mixed_calls: Arc<AtomicUsize>,
+    }
+
+    impl CustomFamily for WorkspaceJeffreysFamily {
+        fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            Ok(FamilyEvaluation {
+                log_likelihood: 0.0,
+                blockworking_sets: Vec::new(),
+            })
+        }
+
+        fn joint_jeffreys_term_required(&self) -> bool {
+            true
+        }
+
+        fn joint_jeffreys_information_with_specs(
+            &self,
+            _: &[ParameterBlockState],
+            _: &[ParameterBlockSpec],
+        ) -> Result<Option<Array2<f64>>, String> {
+            // Inside the absolute conditioning-gate band, so both the mixed
+            // value derivative and the explicit H_phi derivative are active.
+            Ok(Some(array![[0.5]]))
+        }
+
+        fn joint_jeffreys_information_directional_derivative_with_specs(
+            &self,
+            _: &[ParameterBlockState],
+            _: &[ParameterBlockSpec],
+            direction: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_eq!(direction.len(), 1);
+            Ok(Some(array![[0.0]]))
+        }
+
+        fn exact_newton_joint_psihessian_directional_derivative(
+            &self,
+            _: &[ParameterBlockState],
+            _: &[ParameterBlockSpec],
+            _: &CustomFamilyHyperLayout,
+            _: usize,
+            _: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            self.direct_mixed_calls.fetch_add(1, Ordering::Relaxed);
+            Err(
+                "a present exact-psi workspace must not be crossed with the direct mixed hook"
+                    .to_string(),
+            )
+        }
+    }
+
+    struct WorkspaceJeffreysPsi {
+        mixed_calls: Arc<AtomicUsize>,
+    }
+
+    impl ExactNewtonJointPsiWorkspace for WorkspaceJeffreysPsi {
+        fn first_order_terms(
+            &self,
+            psi_index: usize,
+        ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+            assert_eq!(psi_index, 0);
+            let mut terms = ExactNewtonJointPsiTerms::zeros(1);
+            terms.hessian_psi = array![[0.25]];
+            Ok(Some(terms))
+        }
+
+        fn second_order_terms(
+            &self,
+            _: usize,
+            _: usize,
+        ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+            Ok(None)
+        }
+
+        fn hessian_directional_derivative(
+            &self,
+            psi_index: usize,
+            direction: &Array1<f64>,
+        ) -> Result<Option<DriftDerivResult>, String> {
+            assert_eq!(psi_index, 0);
+            assert_eq!(direction.len(), 1);
+            self.mixed_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(DriftDerivResult::Dense(array![[
+                0.125 * direction[0]
+            ]])))
+        }
+    }
+
+    let direct_mixed_calls = Arc::new(AtomicUsize::new(0));
+    let workspace_mixed_calls = Arc::new(AtomicUsize::new(0));
+    let family = WorkspaceJeffreysFamily {
+        direct_mixed_calls: Arc::clone(&direct_mixed_calls),
+    };
+    let workspace = WorkspaceJeffreysPsi {
+        mixed_calls: Arc::clone(&workspace_mixed_calls),
+    };
+    let spec = ParameterBlockSpec {
+        name: "workspace-jeffreys-authority".to_string(),
+        design: DesignMatrix::from(array![[1.0]]),
+        offset: array![0.0],
+        penalties: Vec::new(),
+        nullspace_dims: Vec::new(),
+        initial_log_lambdas: Array1::zeros(0),
+        initial_beta: None,
+        gauge_priority: 100,
+        jacobian_callback: None,
+        stacked_design: None,
+        stacked_offset: None,
+    };
+    let state = ParameterBlockState {
+        beta: array![0.0],
+        eta: array![0.0],
+    };
+    let layout = CustomFamilyHyperLayout::new(vec![Vec::new()], vec![0], array![0.0])
+        .expect("one explicit family axis");
+
+    let coords = build_psi_hyper_coords(
+        &family,
+        &[state],
+        &[spec],
+        &layout,
+        &array![0.0],
+        &[],
+        &[0],
+        None,
+        false,
+        Some(Arc::new(workspace)),
+    )
+    .expect("one coherent workspace-owned Jeffreys psi coordinate");
+
+    assert_eq!(coords.len(), 1);
+    assert!(coords[0].g[0].is_finite());
+    assert_eq!(direct_mixed_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        workspace_mixed_calls.load(Ordering::Relaxed),
+        2,
+        "both -d_beta(d_psi Phi) and d_psi H_Phi must use the workspace row measure",
+    );
+}
+
+#[test]
 pub(crate) fn psi_drift_deriv_workspace_preserves_block_local_operator() {
     #[derive(Clone)]
     struct ZeroFamily;
