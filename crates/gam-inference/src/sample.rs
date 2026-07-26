@@ -289,7 +289,7 @@ pub fn sample_saved_model(
                     | SurvivalLikelihoodMode::LatentBinary
                     | SurvivalLikelihoodMode::LocationScale
             ) {
-                laplace_gaussian_fallback(model, cfg, "survival posterior fallback")
+                constrained_laplace_fallback(model, cfg, "survival posterior fallback")
             } else {
                 sample_survival(model, data, col_map, training_headers, cfg)
             }
@@ -304,7 +304,7 @@ pub fn sample_saved_model(
             // Laplace-Gaussian fallback every other NUTS-unsupported model
             // class already uses, so callers still get a usable posterior.
             if matches!(likelihood.response, ResponseFamily::Beta { .. }) {
-                laplace_gaussian_fallback(model, cfg, "beta-regression posterior fallback")
+                constrained_laplace_fallback(model, cfg, "beta-regression posterior fallback")
             } else {
                 sample_standard(model, data, col_map, training_headers, likelihood, cfg)
             }
@@ -319,16 +319,16 @@ pub fn sample_saved_model(
         // posterior predictive, etc.) keep working uniformly across
         // model classes.
         PredictModelClass::GaussianLocationScale => {
-            laplace_gaussian_fallback(model, cfg, "gaussian location-scale posterior")
+            constrained_laplace_fallback(model, cfg, "gaussian location-scale posterior")
         }
         PredictModelClass::BinomialLocationScale => {
-            laplace_gaussian_fallback(model, cfg, "binomial location-scale posterior")
+            constrained_laplace_fallback(model, cfg, "binomial location-scale posterior")
         }
         PredictModelClass::DispersionLocationScale => {
-            laplace_gaussian_fallback(model, cfg, "dispersion location-scale posterior")
+            constrained_laplace_fallback(model, cfg, "dispersion location-scale posterior")
         }
         PredictModelClass::BernoulliMarginalSlope => {
-            laplace_gaussian_fallback(model, cfg, "bernoulli marginal-slope posterior")
+            constrained_laplace_fallback(model, cfg, "bernoulli marginal-slope posterior")
         }
         PredictModelClass::TransformationNormal => {
             // The CTN posterior is the Laplace Gaussian TRUNCATED to the
@@ -661,6 +661,125 @@ fn standard_posterior_route(
         return Ok(StandardPosteriorRoute::GaussianClosedForm);
     }
     Ok(StandardPosteriorRoute::UnconstrainedNuts)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LaplaceFallbackRoute {
+    InequalityTruncated,
+    UnconstrainedGaussian,
+}
+
+/// Whether a model class with no exact NUTS implementation may draw from the
+/// UNCONSTRAINED Laplace Gaussian, or must draw from the persisted
+/// inequality-truncated posterior instead (#2536).
+///
+/// This is [`standard_posterior_route`]'s shape (#2438) applied to the fallback
+/// arms of [`sample_saved_model`], and it deliberately does NOT decide on
+/// `constrained_posterior.is_some()` alone.
+///
+/// `gam-custom-family`'s covariance assembly returns `constrained_posterior:
+/// None` for a genuinely CONSTRAINED fit whose ambient posterior precision is
+/// not positive definite — the #2442 decline, whose own comment records that a
+/// consumer cannot tell that state apart from an unconstrained fit. A presence
+/// test would therefore send exactly the hardest constrained fits to the
+/// unconstrained Gaussian: this issue's defect, relocated onto a narrower path
+/// where it would be harder to find. What separates the two states is whether
+/// the model DECLARES a cone, so a declared cone with no persisted identity is
+/// an error rather than a quiet fallback.
+fn laplace_fallback_route(
+    declares_linear_inequality: bool,
+    has_link_wiggle: bool,
+    has_persisted_inequality: bool,
+) -> Result<LaplaceFallbackRoute, String> {
+    if has_persisted_inequality {
+        return Ok(LaplaceFallbackRoute::InequalityTruncated);
+    }
+    if has_link_wiggle || declares_linear_inequality {
+        return Err(
+            "the fitted model declares inequality constraints but carries no persisted \
+             inequality-truncated posterior identity, so a Laplace-Gaussian draw would put mass \
+             outside the cone the fit certified (a negative monotone-wiggle coefficient is a \
+             non-monotone warp the model cannot produce); refit with the current schema, or read \
+             the covariance decline this fit recorded"
+                .to_string(),
+        );
+    }
+    Ok(LaplaceFallbackRoute::UnconstrainedGaussian)
+}
+
+/// [`laplace_gaussian_fallback`] for the model classes that can carry a
+/// coefficient cone, routed through the persisted truncated posterior whenever
+/// the fit certified one.
+///
+/// The truncated draw itself is class-agnostic: [`sample_standard_truncated`]
+/// consumes the persisted mode, ambient centre and `Aβ ≥ b` and nothing that is
+/// specific to a `Standard` fit, so these arms reuse it rather than growing a
+/// second implementation of the same law.
+fn constrained_laplace_fallback(
+    model: &SavedModel,
+    cfg: &NutsConfig,
+    rationale: &'static str,
+) -> Result<NutsResult, String> {
+    validate_nuts_config(cfg).map_err(String::from)?;
+    let fit = fit_result_from_saved_model_for_prediction(model)?;
+    // A saved artifact with no resolved term specification cannot be asked what
+    // it declares. `has_link_wiggle` is read from the model itself and still
+    // applies, and it is the signal that matters for these classes, so a
+    // missing specification narrows the refusal check rather than disabling the
+    // route.
+    let declares_linear_inequality = model
+        .resolved_termspec
+        .as_ref()
+        .map(|saved_spec| {
+            saved_spec
+                .linear_terms
+                .iter()
+                .any(|term| term.coefficient_min.is_some() || term.coefficient_max.is_some())
+                || saved_spec
+                    .smooth_terms
+                    .iter()
+                    .any(|term| !matches!(term.shape, gam_terms::smooth::ShapeConstraint::None))
+        })
+        .unwrap_or(false);
+    let has_persisted_inequality = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .is_some();
+    let route = laplace_fallback_route(
+        declares_linear_inequality,
+        model.has_link_wiggle(),
+        has_persisted_inequality,
+    )
+    .map_err(|reason| format!("{rationale}: {reason}"))?;
+    match route {
+        LaplaceFallbackRoute::InequalityTruncated => {
+            // `sample_standard_truncated` reads the persisted mode, ambient
+            // centre and `Aβ ≥ b` from the geometry and whitens with the fit's
+            // penalised Hessian. Those agree only while the geometry and the
+            // reported coefficient vector share one coordinate frame. The
+            // survival location-scale finalizer composes a finalization gauge
+            // onto the geometry it forwards, so this is a real precondition on
+            // this path and not a formality — and a gauge that rotates without
+            // changing the dimension would produce draws in the wrong
+            // coordinates while every length check still passed. Assert it.
+            let geometry = fit.geometry.as_ref().ok_or_else(|| {
+                format!("{rationale}: a persisted inequality identity requires a coefficient geometry")
+            })?;
+            if !geometry.coefficient_gauge.is_identity() {
+                return Err(format!(
+                    "{rationale}: the fit carries an inequality-truncated posterior in a gauged \
+                     coefficient frame, and the truncated draw is only defined where that frame \
+                     is the one the reported coefficients live in; sampling here would return \
+                     draws in the wrong coordinates, so it is declined rather than approximated"
+                ));
+            }
+            sample_standard_truncated(&fit, cfg)
+        }
+        LaplaceFallbackRoute::UnconstrainedGaussian => {
+            laplace_gaussian_fallback(model, cfg, rationale)
+        }
+    }
 }
 
 fn sample_standard(
@@ -1043,7 +1162,7 @@ fn sample_survival(
             | SurvivalLikelihoodMode::LatentBinary
             | SurvivalLikelihoodMode::LocationScale
     ) {
-        return laplace_gaussian_fallback(model, cfg, "survival posterior fallback");
+        return constrained_laplace_fallback(model, cfg, "survival posterior fallback");
     }
     // `survival_entry == None` is the right-censored shorthand
     // `Surv(time, event)`: training synthesized a zero entry column,
@@ -1670,5 +1789,99 @@ mod tests {
             poisson.response, before,
             "Poisson response must be untouched by the NB theta refresh"
         );
+    }
+
+
+    // ---------------------------------------------------------------- #2536
+
+    /// The defect: a fit that certified a cone must not be sampled from the
+    /// unconstrained Laplace Gaussian. With the cone persisted, the fallback
+    /// arms take the truncated law.
+    #[test]
+    fn a_persisted_cone_routes_the_fallback_arms_to_the_truncated_law() {
+        for &declares in &[false, true] {
+            for &wiggle in &[false, true] {
+                assert_eq!(
+                    laplace_fallback_route(declares, wiggle, true),
+                    Ok(LaplaceFallbackRoute::InequalityTruncated),
+                    "a persisted inequality identity is the dispatch authority \
+                     (declares={declares}, wiggle={wiggle})"
+                );
+            }
+        }
+    }
+
+    /// ⭐ The case a presence test gets wrong, and the reason this route keys on
+    /// DECLARATION rather than on `constrained_posterior.is_some()`.
+    ///
+    /// `gam-custom-family`'s covariance assembly returns `None` for a genuinely
+    /// constrained fit whose ambient precision is not positive definite (#2442),
+    /// and records in its own comment that a consumer cannot distinguish that
+    /// state from an unconstrained fit. Those fits reach here as
+    /// `has_persisted_inequality = false` with the declaration still true — and
+    /// they must NOT fall through to the unconstrained Gaussian, which is
+    /// exactly the defect #2536 reports, relocated.
+    #[test]
+    fn a_declared_cone_with_no_persisted_identity_is_refused_not_approximated() {
+        for &(declares, wiggle) in &[(true, false), (false, true), (true, true)] {
+            let route = laplace_fallback_route(declares, wiggle, false);
+            let error = route.expect_err(
+                "a declared cone without its persisted identity has no admissible draw",
+            );
+            assert!(
+                error.contains("no persisted inequality-truncated posterior identity"),
+                "the refusal must name what is missing, got: {error}"
+            );
+            assert!(
+                error.contains("outside the cone"),
+                "the refusal must name the consequence, got: {error}"
+            );
+        }
+    }
+
+    /// The unconstrained path is unchanged: a model that declares nothing and
+    /// carries nothing still draws from the Laplace Gaussian. Without this the
+    /// guard would be indistinguishable from disabling the fallback entirely.
+    #[test]
+    fn a_model_declaring_no_cone_keeps_the_unconstrained_gaussian_fallback() {
+        assert_eq!(
+            laplace_fallback_route(false, false, false),
+            Ok(LaplaceFallbackRoute::UnconstrainedGaussian)
+        );
+    }
+
+    /// The fallback route and the `Standard` route (#2438) must agree wherever
+    /// both are defined, or one public entry point samples a different law from
+    /// the other for the same fit. `Standard` adds the bounded-latent and
+    /// Gaussian-closed-form arms this one has no analogue for; on the three
+    /// constraint states they share, they must not diverge.
+    #[test]
+    fn the_fallback_route_agrees_with_the_standard_route_on_every_shared_state() {
+        for &declares in &[false, true] {
+            for &wiggle in &[false, true] {
+                for &persisted in &[false, true] {
+                    let standard = standard_posterior_route(false, declares, wiggle, persisted, false);
+                    let fallback = laplace_fallback_route(declares, wiggle, persisted);
+                    match (standard, fallback) {
+                        (Ok(StandardPosteriorRoute::InequalityTruncated), Ok(other)) => assert_eq!(
+                            other,
+                            LaplaceFallbackRoute::InequalityTruncated,
+                            "declares={declares} wiggle={wiggle} persisted={persisted}"
+                        ),
+                        (Ok(StandardPosteriorRoute::UnconstrainedNuts), Ok(other)) => assert_eq!(
+                            other,
+                            LaplaceFallbackRoute::UnconstrainedGaussian,
+                            "the unconstrained state differs only in HOW it draws, not in \
+                             whether the cone applies (declares={declares} wiggle={wiggle})"
+                        ),
+                        (Err(_), Err(_)) => {}
+                        (standard, fallback) => panic!(
+                            "the two public routes disagree at declares={declares} \
+                             wiggle={wiggle} persisted={persisted}: {standard:?} vs {fallback:?}"
+                        ),
+                    }
+                }
+            }
+        }
     }
 }
