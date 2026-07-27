@@ -52,7 +52,7 @@ runs:
         # numbers you can read in a diff.
         is_result_file() {
           case "${1,,}" in
-            *.json|*.jsonl|*.ndjson|*.tsv|*.csv|*.txt|*.md|*.log|*.out|*.yaml|*.yml) return 0 ;;
+            *.json|*.jsonl|*.ndjson|*.tsv|*.csv|*.txt|*.md|*.log|*.out|*.yaml|*.yml|*.xml) return 0 ;;
             *) return 1 ;;
           esac
         }

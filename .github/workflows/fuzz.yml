@@ -115,5 +115,5 @@ jobs:
         with:
           name: fuzz
           files: |
-            fuzz/artifacts
-            fuzz-summary.txt
+            bench/fuzz_results.jsonl
+            fuzz_output.txt

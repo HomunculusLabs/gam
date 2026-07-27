@@ -1,0 +1,8 @@
+{
+  "workflow": "Rust tests",
+  "job_status": "failure",
+  "run_id": "30209439994",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30209439994",
+  "completed_utc": "2026-07-26T19:42:00Z",
+  "seeded_by": "manual backfill from the run's artifact; subsequent updates are written by .github/actions/publish-gha-results"
+}

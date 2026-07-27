@@ -1,0 +1,8 @@
+[1m[92m    Finished[0m `test` profile [optimized + debuginfo] target(s) in 0.24s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/deps/gam_sae-5dcb5c82674e2cc0)
+
+running 1 test
+test manifold::arrow_solver::right_preconditioned_gmres_tests::exact_physical_warm_start_returns_without_an_arnoldi_step_2515 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1480 filtered out; finished in 0.00s
+

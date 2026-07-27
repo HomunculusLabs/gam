@@ -1,0 +1,8 @@
+{
+  "workflow": "Fuzz vs mgcv",
+  "job_status": "cancelled",
+  "run_id": "30243238297",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30243238297",
+  "completed_utc": "2026-07-27T12:00:00Z",
+  "seeded_by": "manual backfill from the run's artifact; subsequent updates are written by .github/actions/publish-gha-results"
+}
