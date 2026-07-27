@@ -19,7 +19,13 @@ use gam_sae::manifold::{
 };
 use ndarray::{Array2, Axis};
 
-fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, max_outer: usize) -> String {
+struct Budget {
+    max_outer: usize,
+    max_inner: usize,
+    inner_tolerance: f64,
+}
+
+fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, budget: &Budget) -> String {
     let (rows, cols) = target.dim();
     // Exactly what the FFI front door does for `assignment="topk", K > P`.
     let mut atom_basis = vec!["auto".to_string(); k_atoms];
@@ -76,9 +82,9 @@ fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, max_outer: usize
         target: centered,
         initial_smoothness: 1.0,
         ard_precisions,
-        max_outer_iter: max_outer,
-        max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
-        inner_tolerance: 1.0e-4,
+        max_outer_iter: budget.max_outer,
+        max_inner_iter: budget.max_inner,
+        inner_tolerance: budget.inner_tolerance,
         trust_radius: 1.0,
         random_state: 0,
     }) {
@@ -96,14 +102,26 @@ fn one_cell(target: &Array2<f64>, k_atoms: usize, top_k: usize, max_outer: usize
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 6 {
+    if args.len() < 8 {
         return Err(
-            "usage: issue_2572_repro <f64-le.bin> <rows> <cols> <max_outer_iter> <k:s>...".into(),
+            "usage: issue_2572_repro <f64-le.bin> <rows> <cols> <max_outer_iter> <max_inner_iter|0> <inner_tol> <k:s>..."
+                .into(),
         );
     }
     let rows: usize = args[2].parse().map_err(|e| format!("rows: {e}"))?;
     let cols: usize = args[3].parse().map_err(|e| format!("cols: {e}"))?;
     let max_outer: usize = args[4].parse().map_err(|e| format!("max_outer: {e}"))?;
+    let max_inner: usize = args[5].parse().map_err(|e| format!("max_inner: {e}"))?;
+    let inner_tolerance: f64 = args[6].parse().map_err(|e| format!("inner_tol: {e}"))?;
+    let budget = Budget {
+        max_outer,
+        max_inner: if max_inner == 0 {
+            SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER
+        } else {
+            max_inner
+        },
+        inner_tolerance,
+    };
 
     let bytes = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
     if bytes.len() < rows * cols * 8 {
@@ -115,12 +133,12 @@ fn main() -> Result<(), String> {
         .collect();
     let target = Array2::from_shape_vec((rows, cols), data).map_err(|e| e.to_string())?;
 
-    for cell in &args[5..] {
+    for cell in &args[7..] {
         let (k_text, s_text) = cell.split_once(':').ok_or("cell must be <k>:<s>")?;
         let k_atoms: usize = k_text.parse().map_err(|e| format!("k: {e}"))?;
         let top_k: usize = s_text.parse().map_err(|e| format!("top_k: {e}"))?;
         let started = std::time::Instant::now();
-        let outcome = std::panic::catch_unwind(|| one_cell(&target, k_atoms, top_k, max_outer));
+        let outcome = std::panic::catch_unwind(|| one_cell(&target, k_atoms, top_k, &budget));
         let elapsed = started.elapsed().as_secs_f64();
         match outcome {
             Ok(text) => println!("N={rows} P={cols} K={k_atoms} s={top_k} [{elapsed:.1}s] {text}"),
