@@ -225,9 +225,49 @@ runs:
         # Neural/interpretable GAM family, alongside the existing EBM + pyGAM
         # predictive arms. Best-effort: these are research-grade and several
         # publish no stable package, so a miss here is an ungated REF_ERROR.
-        pip install nodegam || true
-        pip install igann || true
-        pip install nam || true
+        # These projects are not consistently named on PyPI; try each published
+        # spelling and stop at the first that takes.
+        for c in nodegam node-gam;              do pip install "$c" && break; done || true
+        for c in igann IGANN;                   do pip install "$c" && break; done || true
+        for c in nam neural-additive-models;    do pip install "$c" && break; done || true
+        # NAME EVERY COMPARATOR THAT DID NOT LAND, LOUDLY.
+        # A silently absent comparator becomes a REF_ERROR at test time - a lost
+        # gam-vs-reference measurement discovered hours later in the dashboard.
+        # Surface it here, at install time, where it is actionable.
+        echo "--- comparator availability ---"
+        python - <<'AVAIL'
+        import importlib
+        want = {
+            "mapie": "conformal prediction intervals",
+            "mssm": "Mixed-Sparse-Smooth-Models (Python GAMM)",
+            "nodegam": "NODE-GAM",
+            "igann": "IGANN",
+            "nam": "Neural Additive Models",
+        }
+        missing = []
+        for mod, why in want.items():
+            try:
+                importlib.import_module(mod)
+                print(f"  OK      {mod:9s} {why}")
+            except Exception as error:
+                missing.append(mod)
+                print(f"  MISSING {mod:9s} {why}  ({type(error).__name__})")
+        if missing:
+            print("::warning::python comparators unavailable, their arms will "
+                  "REF_ERROR: " + ", ".join(missing))
+        AVAIL
+        Rscript -e '
+          want <- c(KFAS="state-space/Kalman smoother", gamlss2="modern gamlss rewrite")
+          miss <- character(0)
+          for (p in names(want)) {
+            ok <- requireNamespace(p, quietly=TRUE)
+            cat(sprintf("  %-7s %-8s %s\n", if (ok) "OK" else "MISSING", p, want[[p]]))
+            if (!ok) miss <- c(miss, p)
+          }
+          if (length(miss)) cat(sprintf(
+            "::warning::R comparators unavailable, their arms will REF_ERROR: %s\n",
+            paste(miss, collapse=", ")))
+        ' || true
         pip install xgboostlss lightgbmlss || true
         python -c "import numpy,scipy,sklearn,statsmodels,pandas; print('core python refs ok')"
 
