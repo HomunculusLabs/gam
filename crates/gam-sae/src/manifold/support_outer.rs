@@ -19,6 +19,40 @@ use super::*;
 
 const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
 
+/// The one field of the shared SAE evidence-surrogate policy this lane may not
+/// inherit: the bar the frozen `log|S|` plan's Hutchinson error must clear
+/// before its deflation rank stops growing.
+///
+/// The shared value is `0.1 · SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL` = 1e-9
+/// of `|log|S|| + 1`. **That is unreachable at overcomplete border widths, and
+/// unreachable here means REFUSED**, not merely slow:
+/// `rational_reduced_schur_plan_derived` doubles the deflation rank until the
+/// bar clears and returns `None` when its ceiling is exhausted, which this lane
+/// turns into a typed evidence failure. Measured on a small overcomplete chart
+/// (N=2000, P=32, K=59, border 5056, `log|S| ≈ 1.4e4`): the bare estimator's
+/// relative error bar is 3.7e-3 at 8 probes and 1.9e-3 at 16, so the shared bar
+/// asks for roughly a hundredfold variance reduction that peeling 128 of 5056
+/// directions cannot deliver.
+///
+/// The reachable bar, derived from the probe count rather than borrowed from an
+/// inner-solve stall tolerance: `√(2/m)`, the relative standard error a
+/// `±1`-Rademacher Hutchinson estimator has in the WORST case
+/// (`Var(zᵀAz) = 2‖A_off‖_F²`, attained when the off-diagonal mass matches the
+/// trace). Asking for exactly that says "deflate only when this operator's
+/// spectrum is worse than the theory says an `m`-probe estimator can be" — the
+/// bar fires on a pathological spectrum and stays out of the way otherwise,
+/// which is the only thing a variance-reduction ladder should be doing.
+///
+/// This does not weaken the criterion's usable accuracy, because a FROZEN plan
+/// draws the SAME probes at every ρ: the estimator's error is a nearly constant
+/// offset across the smoothing search, not per-ρ jitter, and the search ranks
+/// differences. That common-random-numbers property is the whole reason the
+/// plan is frozen, and it is what makes a worst-case-bound bar the right one
+/// here rather than an accuracy compromise.
+fn support_laml_deflation_target_std_err_rel() -> f64 {
+    (2.0 / SCHUR_SLQ_LOGDET_PROBES as f64).sqrt()
+}
+
 fn outer_error(message: impl Into<String>) -> EstimationError {
     EstimationError::RemlOptimizationFailed(message.into())
 }
@@ -302,14 +336,16 @@ impl SaeSupportOuterObjective {
             ));
         }
         // One SAE evidence-surrogate policy, shared with the dense manifold
-        // lane — except the seed, which is the caller's: a support fit's
-        // `random_state` is what makes ITS criterion bit-reproducible, and two
-        // fits of the same data at different seeds must be able to disagree
-        // about their probes without disagreeing about their policy.
+        // lane, with exactly two fields DERIVED rather than inherited.
         let seed = self.random_state;
         let lane = self.logdet_surrogate.get_or_insert_with(|| {
             SurrogateLaneState::new(SurrogateLaneConfig {
+                // The seed is the caller's: a support fit's `random_state` is
+                // what makes ITS criterion bit-reproducible, and two fits of the
+                // same data at different seeds must be able to disagree about
+                // their probes without disagreeing about their policy.
                 seed,
+                deflation_target_std_err_rel: support_laml_deflation_target_std_err_rel(),
                 ..sae_surrogate_lane_config()
             })
         });
@@ -398,7 +434,7 @@ impl SaeSupportOuterObjective {
                 "support LAML requires positive finite penalized deviance; got {deviance}"
             )));
         }
-        let (_, beta_dim) = self.beta_layout()?;
+        let (beta_offsets, beta_dim) = self.beta_layout()?;
         let beta_nullity = beta_dim
             .checked_sub(self.spectrum.total_rank)
             .ok_or_else(|| outer_error("support smooth penalty rank exceeds beta dimension"))?;
@@ -430,7 +466,6 @@ impl SaeSupportOuterObjective {
         // Hutchinson family (its own 16 probes, its own unshifted `S⁻¹` solves,
         // one per group), which both cost the whole evaluation's wall-clock and
         // left the value and gradient free to describe different functions.
-        let (beta_offsets, beta_dim_for_derivative) = self.beta_layout()?;
         let energy = self.penalty_energy_by_group(&lambda_smooth);
         let mut gradient = Array1::<f64>::zeros(self.layout.group_keys.len());
         for group in 0..gradient.len() {
@@ -439,7 +474,7 @@ impl SaeSupportOuterObjective {
                     group,
                     &lambda_smooth,
                     &beta_offsets,
-                    beta_dim_for_derivative,
+                    beta_dim,
                     vector,
                 )
             };
