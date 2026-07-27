@@ -42,9 +42,9 @@
 //! by-carrier construction is the trigger" from "the two-block coupling is", and
 //! costs one fit each.
 //!
-//! zz_probe discipline: numbers and traces are printed, nothing is gated. The only
-//! assertions are that the dataset was built as intended, so this can never become
-//! a flaky bar.
+//! The census probes remain measurements: they print every result without gating.
+//! The deterministic #2524 seed-303 reproduction below is a regression bar now
+//! that its premature optimizer stop is resolved.
 
 use csv::StringRecord;
 use gam::progress_log::{init_logging, set_log_level};
@@ -345,14 +345,12 @@ fn zz_probe_2501_bygroup_seed3_refusal_traced() {
         ..FitConfig::default()
     };
     eprintln!("[zz2524] seed={} sigma=by-group, tracing", 300 + seed);
-    match fit_from_formula("y ~ s(x, bs='tp', by=group)", &ds, &cfg) {
-        Ok(_) => eprintln!("[zz2524] FIT (the #2524 refusal did not reproduce)"),
-        Err(e) => {
-            eprintln!("[zz2524] REFUSED");
-            eprintln!("[zz2524-MSG-BEGIN]");
-            eprintln!("{e}");
-            eprintln!("[zz2524-MSG-END]");
-        }
-    }
+    fit_from_formula("y ~ s(x, bs='tp', by=group)", &ds, &cfg).unwrap_or_else(|error| {
+        panic!(
+            "#2524 regression: generic relative-stall termination pre-empted the \
+             authoritative custom-family stationarity certificate:\n{error}"
+        )
+    });
+    eprintln!("[zz2524] FIT");
     eprintln!("[zz2524] done");
 }

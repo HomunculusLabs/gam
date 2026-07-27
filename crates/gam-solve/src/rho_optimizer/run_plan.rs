@@ -1943,7 +1943,16 @@ pub(crate) fn run_outer_with_plan(
                         .with_initial_sample(seed.clone(), initial_sample)
                         .with_bounds(bounds)
                         .with_gradient_tolerance(grad_tol)
-                        .with_max_iterations(max_iter);
+                        .with_max_iterations(max_iter)
+                        // GAM owns the authoritative six-iterate cost-stall
+                        // guard in `OuterFirstOrderBridge` and independently
+                        // certifies the terminal KKT residual. `opt`'s generic
+                        // three-iterate relative-stall gate multiplies the
+                        // gradient tolerance by `(1 + ||rho||_inf)`; a railed
+                        // smoothing parameter can therefore make that duplicate
+                        // gate claim convergence while a different interior
+                        // coordinate still has measurable descent (#2524).
+                        .without_relative_stall();
                     // First-step scaling. `opt::Bfgs` begins with an
                     // UNSCALED identity inverse-Hessian (`B_inv = I`) on iter 0:
                     // the search direction is the raw `d = -g`, so the unit
