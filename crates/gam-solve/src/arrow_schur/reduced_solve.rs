@@ -2736,6 +2736,14 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
         if !(denom.is_finite() && denom > 0.0) {
             return None;
         }
+        // `rs = rᵀM⁻¹r` is zero only when `r` is, and a zero residual exits
+        // through the loop condition above (`tol > 0` always). Reaching here
+        // with `rs == 0` therefore means round-off has destroyed the
+        // SPD-by-construction preconditioned inner product, and the direction
+        // update below would be a division by zero rather than a descent step.
+        if rs == 0.0 {
+            return None;
+        }
         let alpha = rs / denom;
         y.scaled_add(alpha, &p);
         r.scaled_add(-alpha, &ap);
@@ -2743,12 +2751,6 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
         z = precondition(&r);
         let rs_new = r.dot(&z);
         if !(rs_new.is_finite() && residual_norm_sq.is_finite()) {
-            return None;
-        }
-        // A preconditioned residual inner product that has lost positivity
-        // means the (SPD-by-construction) preconditioner has been destroyed by
-        // round-off; continuing would build a non-descent direction.
-        if rs == 0.0 {
             return None;
         }
         p = &z + &(&p * (rs_new / rs));

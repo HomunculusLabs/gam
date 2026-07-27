@@ -901,6 +901,10 @@ fn shifted_pcg(
         if rayleigh.is_finite() {
             observed_operator_norm = observed_operator_norm.max(rayleigh);
         }
+        // `rs = rᵀM⁻¹r` is zero only when `r` is, and a zero residual reaches
+        // the certified-exit branch above (`tol > 0` always). Reaching here with
+        // `rs == 0` means round-off destroyed the SPD-by-construction
+        // preconditioned inner product; the update would divide by zero.
         if rs == 0.0 {
             return None;
         }
