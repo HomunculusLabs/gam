@@ -4914,6 +4914,10 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(sae_manifold_payload_roundtrip, module)?)?;
     module.add_class::<ManifoldSaeCore>()?;
+    // The overcomplete K>P representation is a separate public type, not a
+    // variant of the dense one; leaving it unregistered is what let two classes
+    // share one `__name__` (#2567).
+    module.add_class::<crate::manifold::support_sparse_sae_ffi::SupportSparseManifoldSaeCore>()?;
     module.add_class::<AtomCore>()?;
     module.add_function(wrap_pyfunction!(bspline_basis, module)?)?;
     module.add_function(wrap_pyfunction!(bspline_basis_derivative, module)?)?;

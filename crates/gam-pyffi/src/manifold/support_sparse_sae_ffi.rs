@@ -9,8 +9,9 @@
 use gam::terms::sae::front_door::{SaeFitLane, admit_topk_manifold};
 use gam::terms::sae::manifold::{
     SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportOuterRequest,
-    SaeSupportSparseTerm, SaeSupportTermSeedRequest, build_sae_support_seed,
-    build_sae_support_term_seed, run_sae_support_outer, sae_support_effective_atom_dims,
+    SaeSupportRehydrateRequest, SaeSupportSparseTerm, SaeSupportTermSeedRequest,
+    build_sae_support_seed, build_sae_support_term_seed, rehydrate_sae_support_term,
+    run_sae_support_outer, sae_support_effective_atom_dims,
 };
 use gam::terms::sae::manifold::{SaeSupportSeedRequest, SaeSupportStationarity};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -32,7 +33,23 @@ pub(crate) struct SupportSparseFitRequest<'a> {
     pub random_state: u64,
 }
 
-#[pyclass(module = "gamfit._rust", name = "ManifoldSAE", frozen)]
+/// The on-disk tag for this representation. Checked exactly, never sniffed:
+/// the dense artifact's tag also begins `gamfit.ManifoldSAE`, so a substring
+/// test routes dense payloads here and support payloads there (#2567).
+pub(crate) const SUPPORT_SCHEMA_TAG: &str = "gamfit.ManifoldSAE/support-v2";
+
+fn required_field<'py>(
+    payload: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    payload.get_item(key)?.ok_or_else(|| {
+        py_value_error(format!(
+            "ManifoldSAESupport.from_dict: payload is missing required field {key:?}"
+        ))
+    })
+}
+
+#[pyclass(module = "gamfit._rust", name = "ManifoldSAESupport", frozen)]
 pub(crate) struct SupportSparseManifoldSaeCore {
     term: SaeSupportSparseTerm,
     requested_k: usize,
@@ -294,7 +311,7 @@ impl SupportSparseManifoldSaeCore {
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let out = PyDict::new(py);
-        out.set_item("schema", "gamfit.ManifoldSAE/support-v1")?;
+        out.set_item("schema", SUPPORT_SCHEMA_TAG)?;
         out.set_item("requested_k", self.requested_k)?;
         out.set_item("retained_atom_indices", self.retained_atom_indices.clone())?;
         out.set_item("atom_basis", self.atom_basis.clone())?;
@@ -329,12 +346,135 @@ impl SupportSparseManifoldSaeCore {
             "termination",
             json_value_to_py(py, self.termination.clone())?,
         )?;
+        // Without these the payload cannot rebuild the model it came from:
+        // `reconstruction_r2` is not recoverable from `fitted` alone (the
+        // training target is not stored), and the four fit knobs are model
+        // state that `from_dict` must restore rather than invent.
+        out.set_item("reconstruction_r2", self.reconstruction_r2)?;
+        out.set_item("max_iter", self.max_iter)?;
+        out.set_item("trust_radius", self.trust_radius)?;
+        out.set_item("tolerance", self.tolerance)?;
+        out.set_item("random_state", self.random_state)?;
         Ok(out.unbind().into_any())
+    }
+
+    /// Rebuild a fitted overcomplete model from [`Self::to_dict`] (#2567).
+    ///
+    /// `atom_topologies` is re-derived from `atom_basis` rather than stored,
+    /// because it is a function of the bases and a stored copy could disagree
+    /// with them.
+    #[staticmethod]
+    fn from_dict(payload: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let schema: String = required_field(payload, "schema")?.extract()?;
+        if schema != SUPPORT_SCHEMA_TAG {
+            return Err(py_value_error(format!(
+                "ManifoldSAESupport.from_dict: schema {schema:?} is not {SUPPORT_SCHEMA_TAG:?}; \
+                 dense payloads tagged gamfit.ManifoldSAE/v6 load with ManifoldSAE.from_dict"
+            )));
+        }
+        let requested_k: usize = required_field(payload, "requested_k")?.extract()?;
+        let retained_atom_indices: Vec<usize> =
+            required_field(payload, "retained_atom_indices")?.extract()?;
+        let atom_basis: Vec<String> = required_field(payload, "atom_basis")?.extract()?;
+        let atom_dim: Vec<usize> = required_field(payload, "atom_dim")?.extract()?;
+        let support_k: usize = required_field(payload, "top_k")?.extract()?;
+        let training_mean: Vec<f64> = required_field(payload, "training_mean")?.extract()?;
+        let fitted = required_field(payload, "fitted")?
+            .extract::<PyReadonlyArray2<'_, f64>>()?
+            .as_array()
+            .to_owned();
+        let support_indices = required_field(payload, "support_indices")?
+            .extract::<PyReadonlyArray2<'_, u32>>()?
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|row| row.to_vec())
+            .collect::<Vec<_>>();
+        let support_values = required_field(payload, "support_values")?
+            .extract::<PyReadonlyArray2<'_, f64>>()?
+            .as_array()
+            .rows()
+            .into_iter()
+            .map(|row| row.to_vec())
+            .collect::<Vec<_>>();
+        let coord_items: Vec<Bound<'_, PyAny>> =
+            required_field(payload, "coords")?.extract()?;
+        let mut coords = Vec::with_capacity(coord_items.len());
+        for item in &coord_items {
+            coords.push(
+                item.extract::<PyReadonlyArray1<'_, f64>>()?
+                    .as_array()
+                    .to_vec(),
+            );
+        }
+        let decoder_items: Vec<Bound<'_, PyAny>> =
+            required_field(payload, "decoder_blocks")?.extract()?;
+        let mut decoder_blocks = Vec::with_capacity(decoder_items.len());
+        for item in &decoder_items {
+            decoder_blocks.push(
+                item.extract::<PyReadonlyArray2<'_, f64>>()?
+                    .as_array()
+                    .to_owned(),
+            );
+        }
+        let log_lambda_smooth: Vec<f64> =
+            required_field(payload, "log_lambda_smooth")?.extract()?;
+        let ard_precisions: Vec<Vec<f64>> =
+            required_field(payload, "ard_precisions")?.extract()?;
+        let criterion: f64 = required_field(payload, "criterion")?.extract()?;
+        let reconstruction_r2: f64 = required_field(payload, "reconstruction_r2")?.extract()?;
+        let max_iter: usize = required_field(payload, "max_iter")?.extract()?;
+        let trust_radius: f64 = required_field(payload, "trust_radius")?.extract()?;
+        let tolerance: f64 = required_field(payload, "tolerance")?.extract()?;
+        let random_state: u64 = required_field(payload, "random_state")?.extract()?;
+        let certificates = crate::manifold::manifold_sae_coercion::py_any_to_json_value(
+            &required_field(payload, "certificates")?,
+        )?;
+        let termination = crate::manifold::manifold_sae_coercion::py_any_to_json_value(
+            &required_field(payload, "termination")?,
+        )?;
+
+        let output_dim = training_mean.len();
+        let atom_topologies = gam::terms::sae::atom_schema::topologies_for_bases(&atom_basis)
+            .map_err(py_value_error)?;
+        let term = rehydrate_sae_support_term(SaeSupportRehydrateRequest {
+            atom_basis: atom_basis.clone(),
+            atom_dim: atom_dim.clone(),
+            output_dim,
+            support_k,
+            random_state,
+            support_indices,
+            support_values,
+            coords,
+            decoder_blocks,
+        })
+        .map_err(py_value_error)?;
+        Ok(Self {
+            term,
+            requested_k,
+            retained_atom_indices,
+            atom_basis,
+            atom_dim,
+            atom_topologies,
+            support_k,
+            training_mean,
+            fitted,
+            reconstruction_r2,
+            log_lambda_smooth,
+            ard_precisions,
+            criterion,
+            certificates,
+            termination,
+            max_iter,
+            trust_radius,
+            tolerance,
+            random_state,
+        })
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "ManifoldSAE(K_requested={}, K_retained={}, n={}, p={}, assignment=\"topk\", support={})",
+            "ManifoldSAESupport(K_requested={}, K_retained={}, n={}, p={}, assignment=\"topk\", support={})",
             self.requested_k,
             self.term.k_atoms(),
             self.term.n_obs(),

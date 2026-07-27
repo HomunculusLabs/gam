@@ -1368,12 +1368,22 @@ def load(path: str | Path) -> Any:
     >>> model.predict(test_df)
     """
     raw = Path(path).read_bytes()
-    # Cheap sniff: only ManifoldSAE payloads are JSON with the schema tag.
+    # Only manifold-SAE payloads are JSON carrying a schema tag. Both the dense
+    # and the overcomplete tag begin "gamfit.ManifoldSAE", so the sniff selects
+    # JSON and the *exact* tag then selects the class -- a substring test sent
+    # overcomplete payloads to a parser pinned to /v6, which claimed the file
+    # and then rejected it (#2567).
     head = raw[:256].lstrip()
     if head.startswith(b"{") and b"gamfit.ManifoldSAE" in raw[:512]:
+        payload = json.loads(raw.decode("utf-8"))
+        schema = payload.get("schema") if isinstance(payload, dict) else None
+        if schema == "gamfit.ManifoldSAE/support-v2":
+            from ._binding import rust_module  # local import avoids cycle
+
+            return rust_module().ManifoldSAESupport.from_dict(payload)
         from ._sae_manifold import ManifoldSAE  # local import avoids cycle
 
-        return ManifoldSAE.from_dict(json.loads(raw.decode("utf-8")))
+        return ManifoldSAE.from_dict(payload)
     return loads(raw)
 
 

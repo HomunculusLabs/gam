@@ -663,3 +663,81 @@ mod tests {
         assert!(err.contains("admission does not describe"));
     }
 }
+
+/// Parts of a fitted support-sparse term, as recovered from a serialized model.
+pub struct SaeSupportRehydrateRequest {
+    pub atom_basis: Vec<String>,
+    pub atom_dim: Vec<usize>,
+    pub output_dim: usize,
+    pub support_k: usize,
+    pub random_state: u64,
+    pub support_indices: Vec<Vec<u32>>,
+    pub support_values: Vec<Vec<f64>>,
+    pub coords: Vec<Vec<f64>>,
+    pub decoder_blocks: Vec<Array2<f64>>,
+}
+
+/// Rebuild a fitted support-sparse term from its serialized parts (#2567).
+///
+/// The overcomplete lane could serialize a fit and never reopen it, so every
+/// downstream analysis had to run inside the fitting process and a lost process
+/// meant a lost fit. SPEC-20 requires work to survive walls via
+/// checkpoint/resume; this is the inverse that makes that possible.
+///
+/// Atom construction is deliberately routed back through
+/// [`build_sae_support_term_seed`] rather than reimplemented here: the basis
+/// evaluators, chart plans and effective dimensions are exactly the parts that
+/// must agree with the fitting path, so they are produced by the same code that
+/// produces them during a fit. Only the fitted decoder coefficients are then
+/// substituted, and the term is rebuilt through [`SaeSupportSparseTerm::new`]
+/// so the support inversion is recomputed rather than carried across.
+pub fn rehydrate_sae_support_term(
+    request: SaeSupportRehydrateRequest,
+) -> Result<super::SaeSupportSparseTerm, String> {
+    let k_atoms = request.atom_basis.len();
+    if k_atoms == 0 {
+        return Err("rehydrate_sae_support_term: K must be positive".into());
+    }
+    if request.decoder_blocks.len() != k_atoms {
+        return Err(format!(
+            "rehydrate_sae_support_term: decoder_blocks length {} must equal K={k_atoms}",
+            request.decoder_blocks.len()
+        ));
+    }
+    let n_obs = request.support_indices.len();
+    if n_obs == 0 {
+        return Err("rehydrate_sae_support_term: N must be positive".into());
+    }
+    let (_atom_kinds, _effective_atom_dim, atom_specs) =
+        resolve_support_atoms(&request.atom_basis, &request.atom_dim)?;
+    let assignment = SaeAssignmentState::from_topk_support_heterogeneous(
+        n_obs,
+        k_atoms,
+        request.support_k,
+        atom_specs,
+        request.support_indices,
+        request.support_values,
+        request.coords,
+    )?;
+    let seeded = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+        assignment,
+        atom_basis: request.atom_basis,
+        atom_dim: request.atom_dim,
+        output_dim: request.output_dim,
+        random_state: request.random_state,
+    })?;
+    let mut atoms = seeded.term.atoms.clone();
+    let assignment = seeded.term.assignment.clone();
+    for (atom, decoder) in request.decoder_blocks.into_iter().enumerate() {
+        let planned = atoms[atom].decoder_coefficients.dim();
+        if decoder.dim() != planned {
+            return Err(format!(
+                "rehydrate_sae_support_term: atom {atom} decoder shape {:?} != planned {:?}",
+                decoder.dim(),
+                planned
+            ));
+        }
+        atoms[atom].decoder_coefficients = decoder;
+    }
+    super::SaeSupportSparseTerm::new(atoms, assignment)
+}
