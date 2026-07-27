@@ -3,7 +3,7 @@ use crate::basis::analyze_penalty_block;
 use crate::smooth::PenaltyStructureHint;
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Mat, MatRef, Par, Side};
-use gam_linalg::faer_ndarray::{FaerLinalgError, FaerSvd};
+use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd};
 use gam_linalg::matrix::symmetrize_in_place;
 use gam_linalg::utils::KahanSum;
 use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut2, Axis, s};
@@ -2281,6 +2281,41 @@ fn structurally_penalized_columns(penalties: &[CanonicalPenalty], p: usize) -> V
 /// directions from causing pathological non-Gaussianity in the posterior (e.g.,
 /// extreme skewness under logit link with high-dimensional spatial smooths).
 /// A typical value is `1e-6`. Set to `None` or `Some(0.0)` to disable.
+/// Write the penalized-block spectrum and rotation from a right-singular
+/// factorization of the stacked scaled roots `E = [√λₖ Rₖ]ₖ`.
+///
+/// Both admissible routes to that factorization — the SVD of `E` and the SVD of
+/// its Householder QR factor `R` — produce the identical pair, because
+/// `EᵀE = RᵀR`. Absorbing them through one function is what makes "the same two
+/// outputs by a different computation" a fact of the code rather than a claim
+/// about it.
+fn absorb_right_singular_factorization(
+    singular_values: &Array1<f64>,
+    vt: &Array2<f64>,
+    penalized_rank: usize,
+    range_eigenvalues_sorted: &mut Vec<f64>,
+    range_rotation: &mut Mat<f64>,
+) {
+    // `singular_values` descending → eigenvalues `d_i = σ_i²` descending;
+    // `vt` is `penalized_rank × penalized_rank` with row i = vᵢᵀ.
+    let n_sv = singular_values.len().min(penalized_rank).min(vt.nrows());
+    *range_eigenvalues_sorted = (0..penalized_rank)
+        .map(|i| {
+            if i < n_sv {
+                let s = singular_values[i];
+                s * s
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    for col_idx in 0..n_sv {
+        for row in 0..penalized_rank {
+            range_rotation[(row, col_idx)] = vt[[col_idx, row]];
+        }
+    }
+}
+
 /// The facts a refusing stacked-root SVD was decided against (#2465): the shape
 /// it was handed, whether that input was even finite, its magnitude, and the λ
 /// dynamic range that set it. A refusal naming only "no convergence" cannot
@@ -2459,10 +2494,16 @@ pub fn stable_reparameterizationwith_invariant(
         // away from a trusted routine for the same quantity, aborting a whole
         // converging fit (measured: nottem `cc(month, k=12)`, one 75% partition,
         // λ ≈ 5, an 11×11 `E` — the outer BFGS had already certified a nearby ρ
-        // before the refinement pass hit it).  The Gram route's real cost is the
-        // squared condition number, so taking it is REPORTED, not silently
-        // substituted.
+        // before the refinement pass hit it).
+        //
+        // The ladder has three rungs, in accuracy order: the direct SVD of `E`;
+        // the R-SVD of its Householder QR factor, which is EXACTLY as accurate
+        // and merely a different computation; and only then the Gram route,
+        // whose real cost is the squared condition number.  Reaching either
+        // lower rung is REPORTED, so the route that produced the answer is never
+        // silently substituted.
         let mut have_rotation = false;
+        let mut rescued_by_r_svd = false;
         let mut svd_refusal: Option<String> = None;
         if total_root_rows >= penalized_rank {
             let mut e_stacked = Array2::<f64>::zeros((total_root_rows, penalized_rank));
@@ -2479,47 +2520,72 @@ pub fn stable_reparameterizationwith_invariant(
             }
             match e_stacked.svd(false, true) {
                 Ok((_, singular_values, Some(vt))) => {
-                    // `singular_values` descending → eigenvalues `d_i = σ_i²` descending;
-                    // `vt` is `penalized_rank × penalized_rank` with row i = vᵢᵀ.
-                    let n_sv = singular_values.len().min(penalized_rank).min(vt.nrows());
-                    range_eigenvalues_sorted = (0..penalized_rank)
-                        .map(|i| {
-                            if i < n_sv {
-                                let s = singular_values[i];
-                                s * s
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect();
-                    for col_idx in 0..n_sv {
-                        for row in 0..penalized_rank {
-                            range_rotation[(row, col_idx)] = vt[[col_idx, row]];
-                        }
-                    }
+                    absorb_right_singular_factorization(
+                        &singular_values,
+                        &vt,
+                        penalized_rank,
+                        &mut range_eigenvalues_sorted,
+                        &mut range_rotation,
+                    );
                     have_rotation = true;
                 }
-                Ok((_, _, None)) => {
+                direct => {
                     let facts = describe_stacked_roots(&e_stacked, lambdas);
-                    svd_refusal = Some(format!("returned no right singular vectors; {facts}"));
-                }
-                Err(err) => {
-                    let facts = describe_stacked_roots(&e_stacked, lambdas);
-                    svd_refusal = Some(format!("failed: {err:?}; {facts}"));
+                    svd_refusal = Some(match direct {
+                        Err(err) => format!("failed: {err:?}; {facts}"),
+                        _ => format!("returned no right singular vectors; {facts}"),
+                    });
+                    // RUNG 2, and the reason the Gram route is a LAST resort
+                    // rather than the only alternative.  `E = QR` by Householder
+                    // reflections is direct — it has no convergence criterion to
+                    // miss — and `EᵀE = RᵀR`, so `R`'s right singular vectors
+                    // and singular values ARE `E`'s.  It therefore delivers the
+                    // same two outputs at the same `O(ε²·d_max)` resolution the
+                    // direct SVD promises, on a `penalized_rank`-square problem
+                    // instead of a `total_root_rows`-tall one.
+                    //
+                    // Measured on the refusing input (nottem `cc(month, k=12)`,
+                    // split 1, an 11×11 `E`, one λ = 6.068, no non-finite
+                    // entries): a power-of-two rescale of `E` refuses
+                    // identically — so the failure is not a scaling artefact —
+                    // while this route and `svd(Eᵀ)` both converge and agree on
+                    // `σ₀ = 1.653863e0`.
+                    if let Ok((_, r_factor)) = e_stacked.qr()
+                        && let Ok((_, singular_values, Some(vt))) = r_factor.svd(false, true)
+                    {
+                        absorb_right_singular_factorization(
+                            &singular_values,
+                            &vt,
+                            penalized_rank,
+                            &mut range_eigenvalues_sorted,
+                            &mut range_rotation,
+                        );
+                        have_rotation = true;
+                        rescued_by_r_svd = true;
+                    }
                 }
             }
         }
-        if !have_rotation {
-            if let Some(reason) = svd_refusal.as_deref() {
+        if let Some(reason) = svd_refusal.as_deref() {
+            if rescued_by_r_svd {
+                log::warn!(
+                    "penalized-block rotation: stacked-root SVD {reason}. Recovered the SAME \
+                     right-singular basis from the Householder QR of `E` followed by the SVD \
+                     of its triangular factor `R`: `EᵀE = RᵀR`, so no accuracy is given up."
+                );
+            } else {
                 // The accuracy downgrade is observable rather than silent: the
                 // Gram route resolves a recessive penalized eigenvalue only down
                 // to `O(ε·d_max)`, where the SVD of `E` reaches `O(ε²·d_max)`.
                 log::warn!(
-                    "penalized-block rotation: stacked-root SVD {reason}. Recomputing it from \
-                     the Gram `Σₖ λₖ Sₖ`, which squares the condition number: recessive \
-                     eigenvalues are resolved to O(ε·d_max) rather than O(ε²·d_max)."
+                    "penalized-block rotation: stacked-root SVD {reason}, and so did the R-SVD \
+                     of its Householder QR factor. Recomputing it from the Gram `Σₖ λₖ Sₖ`, \
+                     which squares the condition number: recessive eigenvalues are resolved to \
+                     O(ε·d_max) rather than O(ε²·d_max)."
                 );
             }
+        }
+        if !have_rotation {
             // Assemble the Gram and eigendecompose it. This route serves a layout
             // whose penalty roots cannot span the penalized subspace
             // (`total_root_rows < penalized_rank`) AND a stacked-root SVD that
