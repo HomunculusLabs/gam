@@ -915,17 +915,56 @@ mod tests {
              stationary inner state"
         );
 
-        // The frozen surrogate is the criterion's identity: a second evaluation
-        // at the same ρ must reuse it and reproduce the value BITWISE. A plan
-        // rebuilt per evaluation would make the outer search descend a different
-        // function at every point and would show up here as a value that moves.
-        let again = objective.evaluate(&rho).expect("second evaluation");
+        // The frozen surrogate is the criterion's identity. Its invariant is
+        // stated against a FIXED operator: evaluating the plan twice on one
+        // assembled system must be bit-identical, because the probes, the
+        // quadrature nodes and the deflation basis are all fixed at the first
+        // build. A plan rebuilt per call would make the outer search descend a
+        // different function at every point, and the exact directional
+        // derivative would be the gradient of something nobody evaluated twice.
+        let lambda = objective.layout.expand(&rho).expect("expand");
+        let system = objective
+            .term
+            .assemble_arrow_schur(
+                objective.target.view(),
+                &lambda,
+                &objective.ard_precisions,
+            )
+            .expect("assemble arrow schur");
+        let first = objective
+            .evidence_log_det(&system)
+            .expect("frozen surrogate")
+            .0;
+        let second = objective
+            .evidence_log_det(&system)
+            .expect("frozen surrogate")
+            .0;
         assert_eq!(
-            evaluation.cost, again.cost,
-            "the frozen log|S| surrogate must make the criterion bit-reproducible at a \
-             fixed ρ"
+            first, second,
+            "the frozen log|S| surrogate must be bit-reproducible on one operator"
         );
-        assert_eq!(evaluation.gradient, again.gradient);
+
+        // A second full `evaluate` at the same ρ re-enters `solve_fixed_point`
+        // from the state the first one left, so β̂ moves by a few ulps and the
+        // criterion moves with it. That is the inner solve's reproducibility,
+        // not the surrogate's, so this limb is a tight relative bound rather
+        // than an equality — the equality above already pins the surrogate.
+        let again = objective.evaluate(&rho).expect("second evaluation");
+        assert!(
+            (again.cost - evaluation.cost).abs() <= 1.0e-12 * evaluation.cost.abs().max(1.0),
+            "criterion moved between two evaluations at one ρ: {} vs {}",
+            evaluation.cost,
+            again.cost
+        );
+        for group in 0..evaluation.gradient.len() {
+            let gap = (again.gradient[group] - evaluation.gradient[group]).abs();
+            assert!(
+                gap <= 1.0e-10 * evaluation.gradient[group].abs().max(1.0),
+                "group {group} gradient moved between two evaluations at one ρ: {} vs {}",
+                evaluation.gradient[group],
+                again.gradient[group]
+            );
+        }
     }
 
     /// #2576's decisive oracle for the channel that REPLACED the Hutchinson

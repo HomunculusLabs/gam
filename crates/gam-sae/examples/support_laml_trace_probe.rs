@@ -135,19 +135,29 @@ fn main() -> Result<(), String> {
         .factor_blocks(&system.rows, 0.0, system.d, false)
         .map_err(|e| format!("row factorization: {e}"))?;
 
-    // A/B on ONE operator. `hbb_diag` is read by nothing but
-    // `penalty_diagonal_add`, i.e. by the preconditioner build alone — the
-    // reduced-Schur matvec goes through `hbb_matvec`. So stripping it from a
-    // clone yields the byte-identical operator solved by the IDENTITY-
-    // preconditioned iteration: exactly what this lane ran before #2576.
+    // A/B on ONE operator.
+    //
+    // The preconditioner build reads the shared block's diagonal through
+    // `penalty_diagonal_add`, which prefers `penalty_op` and falls back to
+    // `hbb_diag`. `set_shared_beta_operator` installs BOTH (the penalty op is a
+    // `MatvecDiagPenaltyOp` wrapping the very same matvec `Arc` plus the same
+    // diagonal), so clearing only `hbb_diag` leaves the preconditioner fully
+    // supplied — the first version of this harness did exactly that and
+    // measured the preconditioned iteration twice.
+    //
+    // Clearing both leaves the operator itself unchanged: every hot path falls
+    // back to `hbb_matvec`, which is the identical closure. The `log|S|`
+    // equality printed by the two arms is the check that this is so — the value
+    // is a property of the operator, not of the preconditioner.
     let mut bare = system.clone();
     bare.hbb_diag = None;
+    bare.penalty_op = None;
 
     for (label, sys) in [
         ("identity (pre-#2576)", &bare),
         ("shared-block diagonal", &system),
     ] {
-        for probes in [8usize, 16] {
+        for probes in [8usize] {
             let start = Instant::now();
             match rational_reduced_schur_log_det(
                 sys, &htt, 0.0, &backend, None, None, probes, 0xC0FFEE, 1.0e-8, 40, 1.0e-8, 20_000,

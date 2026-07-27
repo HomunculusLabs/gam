@@ -138,11 +138,11 @@ pub(crate) fn beta_gauge_quotient_value_inverse_and_gradient_are_orbit_invariant
 
     let factors = ArrowFactorSlab::from_blocks(Vec::new());
     let backend = CpuBatchedBlockSolver;
-    let mf_a = reduced_schur_inverse_apply(
+    let (mf_a, _) = reduced_schur_inverse_apply(
         &sys_a, &factors, 0.0, &backend, None, None, &rhs, None, 1e-13, 32,
     )
     .expect("matrix-free inverse A");
-    let mf_b = reduced_schur_inverse_apply(
+    let (mf_b, _) = reduced_schur_inverse_apply(
         &sys_b, &factors, 0.0, &backend, None, None, &rhs, None, 1e-13, 32,
     )
     .expect("matrix-free inverse B");
@@ -5807,7 +5807,7 @@ fn hutchinson_reduced_schur_inverse_trace_matches_dense() {
 
     // Fixed probe set (reuse the surrogate plan's Rademacher probes).
     let plan = RationalLogdetPlan::build(k, 64, seed, 1e-3, 1e3, 1e-9).expect("plan");
-    let sinv = reduced_schur_inverse_probe_solves(
+    let (sinv, _) = reduced_schur_inverse_probe_solves(
         &sys,
         &htt_factors,
         ridge_beta,
@@ -5859,6 +5859,7 @@ fn hutchinson_reduced_schur_inverse_trace_matches_dense() {
         50_000,
     )
     .expect("S⁻¹ v_j bundle must re-solve");
+    let (sinv2, _) = sinv2;
     let tr2 = hutchinson_reduced_schur_inverse_trace(&plan.probes, &sinv2, &|v| v.to_owned())
         .expect("tr(S⁻¹) re-estimate");
     assert_eq!(tr_sinv_i, tr2, "tr(S⁻¹) estimator must be bit-reproducible");
@@ -5924,7 +5925,7 @@ fn reduced_schur_inverse_apply_matches_dense_solve() {
     });
     let dense_x = dense_spd_solve_from_lower(&l, &rhs);
 
-    let mf_x = reduced_schur_inverse_apply(
+    let (mf_x, _) = reduced_schur_inverse_apply(
         &sys,
         &htt_factors,
         ridge_beta,
@@ -5947,7 +5948,7 @@ fn reduced_schur_inverse_apply_matches_dense_solve() {
     );
 
     // Bit-reproducible for a fixed rhs (the REML gradient lane requires it).
-    let mf_x2 = reduced_schur_inverse_apply(
+    let (mf_x2, _) = reduced_schur_inverse_apply(
         &sys,
         &htt_factors,
         ridge_beta,
@@ -5965,7 +5966,7 @@ fn reduced_schur_inverse_apply_matches_dense_solve() {
     // Warm-start slot: seeding with the exact solution converges to it (the CRN
     // reuse the surrogate lane does across the ρ walk cannot move the answer, only
     // cut iterations).
-    let mf_warm = reduced_schur_inverse_apply(
+    let (mf_warm, _) = reduced_schur_inverse_apply(
         &sys,
         &htt_factors,
         ridge_beta,
@@ -6029,7 +6030,7 @@ fn matrix_free_full_arrow_apply_and_inverse_match_dense_cache() {
     let (dense_solved_t, dense_solved_beta) = cache
         .full_inverse_apply(rhs_t.view(), rhs_beta.view())
         .expect("dense full-arrow inverse");
-    let (matrix_free_solved_t, matrix_free_solved_beta) = matrix_free_arrow_inverse_apply(
+    let (matrix_free_solved_t, matrix_free_solved_beta, _) = matrix_free_arrow_inverse_apply(
         &sys,
         &cache,
         rhs_t.view(),
