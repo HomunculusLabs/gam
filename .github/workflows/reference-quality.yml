@@ -222,7 +222,10 @@ jobs:
             metric=$(grep -hoaE '(R2|r2|rmse|mae|rel_l2|l2|auc|deviance|nll|loglik|crps|acc|accuracy|logloss|concordance|c_index|seam|edf|pearson|spearman|coverage|width|bias|frechet|distance|geodesic|rho|ess|rhat|kl|wasserstein|calibration|brier|ci_|se_)[^ ,;)]*[=: ]+-?[0-9][0-9.eE+-]*' "$log" 2>/dev/null | tr '\n' ' ')
             # A reference tool failing/missing (R/Python package, system lib,
             # namespace, broken generated script) — this is NOT a gam result.
-            refmarker=$(grep -aE 'there is no package called|could not find function|Error in library\(|package or namespace load failed|unable to load shared object|cannot open shared object|No module named|ModuleNotFoundError|IndentationError|reference .* body failed' "$log" | head -1)
+            # REFERENCE_ENV_MISSING is the harness's own canonical marker for this
+            # (crates/gam-test-support/src/reference.rs); it already covers both
+            # interpreters' import-failure dialects, including `cannot import name`.
+            refmarker=$(grep -aE 'REFERENCE_ENV_MISSING|there is no package called|could not find function|Error in library\(|package or namespace load failed|unable to load shared object|cannot open shared object|No module named|ModuleNotFoundError|IndentationError|reference .* body failed' "$log" | head -1)
             # First panic: "<thread> panicked at <file:line>:" then the message.
             panicmsg=$(awk '/panicked at/{loc=$0; getline; print loc " :: " $0; exit}' "$log")
             # gam-side fit errors (the fit crashed/refused/failed to converge).
@@ -246,7 +249,7 @@ jobs:
               case "$t" in
                 *mgcv*|*gamlss*|*survival*) guaranteed_referr=$((guaranteed_referr+1)) ;;
               esac
-            elif printf '%s' "$panicmsg" | grep -qaE 'src/test_support/reference\.rs|No such file or directory'; then
+            elif printf '%s' "$panicmsg" | grep -qaE 'gam-test-support/src/reference\.rs|No such file or directory'; then
               # Test/harness setup defect (bad data, missing fixture, length
               # mismatch). Gated on the panic ORIGINATING in the harness
               # (src/test_support/reference.rs — where write_columns_csv asserts

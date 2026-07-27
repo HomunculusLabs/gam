@@ -186,6 +186,12 @@ runs:
         # scipy therefore hard-crashes `import statsmodels.api` and turned 15
         # quality tests into REF_ERRORs. The pin restores the known-good combo;
         # revisit when the statsmodels pin above moves to ≥0.14.5.
+        # Inline pins only bind the ONE command they are on: the best-effort
+        # installs below re-resolve and clobbered scipy 1.15.3 -> 1.12 -> 1.18 ->
+        # 1.16.3 on run 30277355276, breaking `import statsmodels.api` (17 tests).
+        # PIP_CONSTRAINT is read by every pip invocation in this step.
+        export PIP_CONSTRAINT="${RUNNER_TEMP:-/tmp}/ref-constraints.txt"
+        printf '%s\n' "scipy<1.16" "statsmodels<0.14.2" "arviz<1.0" > "$PIP_CONSTRAINT"
         pip install "numpy<2" pandas "scipy<1.16" scikit-learn "statsmodels<0.14.2"
         pip install pygam lifelines scikit-survival properscoring scoringrules || true
         pip install geomstats GPy gpytorch || true
