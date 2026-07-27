@@ -231,3 +231,5 @@ experiments/spectrometer/*.npy
 *artifacts
 *artifacts/**
 artifacts/*
+artifacts/**
+artifacts/**/*
