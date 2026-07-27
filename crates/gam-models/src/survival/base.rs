@@ -2642,7 +2642,7 @@ impl WorkingModelSurvival {
         // be projected out before the stationarity decision. Once certified,
         // the exact envelope has no residual term; the transformed assembly
         // therefore carries kkt_residual=None deliberately.
-        let relative_projected_norm = {
+        let projected_norm = {
             let raw = state.gradient.clone();
             let projected = match self.monotonicity_linear_constraints() {
                 Some(constraints) => {
@@ -2657,16 +2657,27 @@ impl WorkingModelSurvival {
                 }
                 None => raw,
             };
-            state.relative_gradient_norm(array1_l2_norm(&projected))
+            array1_l2_norm(&projected)
         };
-        if !relative_projected_norm.is_finite()
-            || relative_projected_norm > SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL
+        // Accept exactly what the inner solver certified. `certifies_kkt` is the
+        // producer's own convergence predicate: it accepts under EITHER the
+        // dimension bound `tol·√(n·p)` or the natural-scale bound
+        // `tol·(1+‖g‖_scale)`. Re-deriving only the natural-scale half here made
+        // this gate strictly stronger than the contract PIRLS was run under, so
+        // every mode that converged via the dimension branch — the binding one
+        // whenever √(n·p) > 1+scale, i.e. the normal case for these baselines —
+        // was certified by the solver and then refused here, fatally. Same
+        // tolerance, same rule, one owner.
+        if !projected_norm.is_finite()
+            || !state.certifies_kkt(projected_norm, SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL)
         {
             return Err(EstimationError::InvalidInput(format!(
-                "survival LAML requires a stationary inner mode: projected relative KKT \
-                 residual {relative_projected_norm:.3e} exceeds \
+                "survival LAML requires a stationary inner mode: projected KKT residual \
+                 {projected_norm:.3e} (relative {:.3e}) is not certified by the inner \
+                 solver's convergence test at tolerance \
                  {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
-                 surrogate is not a differentiable substitute for the Laplace mode"
+                 surrogate is not a differentiable substitute for the Laplace mode",
+                state.relative_gradient_norm(projected_norm)
             )));
         }
 

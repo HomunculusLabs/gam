@@ -73,21 +73,18 @@ pub(crate) fn fit_reduced_parametric_aft(
     // for the time block, exactly as `refresh_all_block_etas` produces and as
     // the family's `validate_joint_states` / `offset_channel_geometry` require.
     // `blockwise_fit_from_parts` validates each block's `η.len()` against
-    // `spec.design.nrows()`, so present it the row-matching `solver_design()`
-    // as `design` (same coefficients, penalties, name, role — only the row
-    // count differs). All other fields are unchanged, so the assembled result
-    // is identical to the coupled path's.
-    let assembly_specs: Vec<ParameterBlockSpec> = specs
-        .iter()
-        .map(|spec| {
-            let mut s = spec.clone();
-            s.design = spec.solver_design().clone();
-            s.offset = spec.solver_offset().clone();
-            s.stacked_design = None;
-            s.stacked_offset = None;
-            s
-        })
-        .collect();
+    // `spec.solver_design().nrows()`, which already resolves through
+    // `stacked_design`, so the specs are handed over untouched.
+    //
+    // This used to flatten `solver_design()` into `design` (clearing
+    // `stacked_design`) to satisfy that check back when it read `design`
+    // directly. The check moved; the workaround did not, and it broke the
+    // sibling invariant that every block's `design` carries one row per
+    // ORIGINAL experimental unit: the time block became 3n while log_sigma
+    // stayed n, so `blockwise_fit_from_parts` refused the fit and named the
+    // block that was still correct. It also fed `training_sample_size` the
+    // stacked channel count (3n) rather than the sample size.
+    let assembly_specs: Vec<ParameterBlockSpec> = specs.to_vec();
 
     crate::custom_family::blockwise_fit_from_parts(
         crate::custom_family::BlockwiseFitResultParts {
