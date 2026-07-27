@@ -29,9 +29,9 @@ use std::time::Instant;
 fn main() -> Result<(), String> {
     env_logger::try_init().ok();
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 8 {
+    if !matches!(args.len(), 8 | 9) {
         return Err(
-            "usage: tiered_dominance <chart.bin> <rows> <cols> <blocks> <block_size> <curved_K> <curved_s>"
+            "usage: tiered_dominance <chart.bin> <rows> <cols> <blocks> <block_size> <curved_K> <curved_s> [inner_tol]"
                 .into(),
         );
     }
@@ -41,6 +41,17 @@ fn main() -> Result<(), String> {
     let block_size: usize = args[5].parse().map_err(|e| format!("block_size: {e}"))?;
     let curved_k: usize = args[6].parse().map_err(|e| format!("curved_K: {e}"))?;
     let curved_s: usize = args[7].parse().map_err(|e| format!("curved_s: {e}"))?;
+    // Tier-2's inner stationarity tolerance. The default is 1e-8; this lane
+    // certifies routinely at 1e-4 and plateaus near 1e-5 relative KKT, so at the
+    // default the tiered path cannot certify and every run dies in the REML
+    // outer loop. Printed because the failure came from a threshold that was
+    // never reported.
+    let inner_tol: f64 = if args.len() == 9 {
+        args[8].parse().map_err(|e| format!("inner_tol: {e}"))?
+    } else {
+        1.0e-4
+    };
+    println!("tier2 inner_tolerance: {inner_tol:e}");
 
     let bytes = std::fs::read(&args[1]).map_err(|e| format!("{}: {e}", args[1]))?;
     if bytes.len() != rows * cols * 8 {
@@ -82,6 +93,7 @@ fn main() -> Result<(), String> {
     let mut hybrid_config = TieredFitConfig::tiered(blocks, block_size);
     hybrid_config.tier2.n_atoms = curved_k;
     hybrid_config.tier2.support_k = curved_s;
+    hybrid_config.tier2.inner_tolerance = inner_tol;
     let hybrid = fit_tiered(z.view(), &hybrid_config)?;
     println!(
         "HYBRID (mu+L+C) EV={:.6} (IN-SAMPLE)  {:.0}s",
