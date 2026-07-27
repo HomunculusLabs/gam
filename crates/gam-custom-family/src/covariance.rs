@@ -1242,12 +1242,20 @@ pub(crate) fn penalized_hessian_from_owned_mode(
 /// Materialize the unpenalized coefficient Hessian owned by a certified
 /// terminal mode without re-evaluating the likelihood.
 ///
-/// A coupled likelihood has exactly one admissible authority: its retained
-/// joint workspace.  For a likelihood that explicitly declares its blocks
+/// A coupled likelihood has exactly one admissible KIND of authority: an exact
+/// JOINT Hessian, with its cross-block curvature intact.  Two things can supply
+/// one — the retained joint workspace, and a deterministic re-evaluation of the
+/// exact joint likelihood Hessian at the frozen converged mode — and they are
+/// tried in that order.  For a likelihood that explicitly declares its blocks
 /// uncoupled, the terminal per-block working sets are an equally exact
-/// authority and assemble a block-diagonal joint Hessian.  Keeping those two
-/// cases explicit prevents final result assembly from either calling a
-/// stateful family a second time or silently dropping cross-block curvature.
+/// authority and assemble a block-diagonal joint Hessian.  Keeping those cases
+/// explicit prevents final result assembly from either calling a stateful
+/// family a second time or silently dropping cross-block curvature.
+///
+/// What is NOT admissible, and stays inadmissible here, is substituting the
+/// block-diagonal working-set assembly for a COUPLED family: that trades a loud
+/// refusal for a quietly understated precision in every covariance, EDF and
+/// `FitGeometry` consumer downstream.
 pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -1260,19 +1268,43 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
 ) -> Result<Array2<f64>, String> {
     let ranges = block_param_ranges(specs);
     let total = ranges.last().map(|(_, end)| *end).unwrap_or(0);
+    // #2580.  `Ok(None)` from the workspace means "this workspace exposes no
+    // curvature by ANY route" — its preferred one, `hessian_dense`, and the
+    // operator fallback all came back empty.  That is a statement about the
+    // WORKSPACE, not about whether an exact authority exists for this mode, and
+    // converting it straight into an error here vetoed the route two branches
+    // below: the exact joint likelihood Hessian recomputed at the FROZEN
+    // converged mode from the block states alone.
+    //
+    // That route is not the block-diagonal working-set substitute the
+    // single-authority contract forbids for a coupled likelihood — it is a full
+    // joint Hessian with its cross-block curvature intact, and its own comment
+    // names the location-scale survival AFT path as the shape it exists for.
+    // The forbidden substitution is still forbidden: a coupled family that
+    // cannot recompute still refuses rather than assembling block-diagonal
+    // working sets.
+    //
+    // What the workspace could not supply is carried forward instead of
+    // discarded, so a refusal further down names every route that was consulted
+    // rather than only the last one (#2465).
+    let mut workspace_refusal: Option<String> = None;
     if let Some(workspace) = workspace {
-        let source = exact_newton_joint_hessian_source_from_workspace(
+        match exact_newton_joint_hessian_source_from_workspace(
             workspace,
             total,
             MaterializationIntent::LogdetFactorization,
             context,
-        )?
-        .ok_or_else(|| {
-            format!(
-                "{context}: the certified terminal workspace did not expose its exact returned-beta Hessian"
-            )
-        })?;
-        return materialize_joint_hessian_source(&source, total, context);
+        )? {
+            Some(source) => return materialize_joint_hessian_source(&source, total, context),
+            None => {
+                workspace_refusal = Some(format!(
+                    "the certified terminal workspace exposed its exact returned-beta Hessian by                      no route (LogdetFactorization preference = {:?}; dense, diagonal and                      operator all absent)",
+                    workspace.hessian_source_preference_for_intent(
+                        MaterializationIntent::LogdetFactorization,
+                    )
+                ));
+            }
+        }
     }
 
     if states.len() != specs.len() {
@@ -1316,14 +1348,22 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
             return Ok(hessian);
         }
         return Err(format!(
-            "{context}: a coupled {}-block likelihood cannot derive its joint Hessian from block working sets, and the family exposes no exact joint Hessian to recompute at the certified mode",
+            "{context}: a coupled {}-block likelihood cannot derive its joint Hessian from block working sets, and the family exposes no exact joint Hessian to recompute at the certified mode{}",
             specs.len(),
+            workspace_refusal
+                .as_deref()
+                .map(|refusal| format!("; {refusal}"))
+                .unwrap_or_default(),
         ));
     }
 
     let working_sets = working_sets.ok_or_else(|| {
         format!(
-            "{context}: the certified terminal mode retained neither a joint Hessian workspace nor per-block working sets"
+            "{context}: the certified terminal mode retained neither a usable joint Hessian workspace nor per-block working sets{}",
+            workspace_refusal
+                .as_deref()
+                .map(|refusal| format!(" ({refusal})"))
+                .unwrap_or_default(),
         )
     })?;
     if working_sets.len() != specs.len() {
