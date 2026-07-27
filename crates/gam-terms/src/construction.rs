@@ -2281,6 +2281,40 @@ fn structurally_penalized_columns(penalties: &[CanonicalPenalty], p: usize) -> V
 /// directions from causing pathological non-Gaussianity in the posterior (e.g.,
 /// extreme skewness under logit link with high-dimensional spatial smooths).
 /// A typical value is `1e-6`. Set to `None` or `Some(0.0)` to disable.
+/// The facts a refusing stacked-root SVD was decided against (#2465): the shape
+/// it was handed, whether that input was even finite, its magnitude, and the λ
+/// dynamic range that set it. A refusal naming only "no convergence" cannot
+/// distinguish a genuinely unusable pencil from an iteration that gave up on a
+/// well-formed one, and those two want opposite responses.
+fn describe_stacked_roots(e_stacked: &Array2<f64>, lambdas: &[f64]) -> String {
+    let mut max_abs = 0.0_f64;
+    let mut nonfinite = 0usize;
+    for &value in e_stacked.iter() {
+        if value.is_finite() {
+            max_abs = max_abs.max(value.abs());
+        } else {
+            nonfinite += 1;
+        }
+    }
+    let finite_lambdas: Vec<f64> = lambdas.iter().copied().filter(|l| l.is_finite()).collect();
+    let lambda_min = finite_lambdas.iter().copied().fold(f64::INFINITY, f64::min);
+    let lambda_max = finite_lambdas
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    format!(
+        "rows={} cols={} nonfinite_entries={} max_abs={:.6e} n_lambda={} lambda_min={:.6e} \
+         lambda_max={:.6e}",
+        e_stacked.nrows(),
+        e_stacked.ncols(),
+        nonfinite,
+        max_abs,
+        lambdas.len(),
+        lambda_min,
+        lambda_max,
+    )
+}
+
 pub fn stable_reparameterizationwith_invariant(
     penalties: &[CanonicalPenalty],
     lambdas: &[f64],
@@ -2414,6 +2448,22 @@ pub fn stable_reparameterizationwith_invariant(
         // the union of the penalty root ranges spans the penalized subspace — but a
         // pathological degenerate layout is handled by falling back to the Gram
         // eigendecomposition so `range_rotation` is never left rank-deficient.
+        //
+        // ROUTE LADDER (#2581).  The shape test gates only the ATTEMPT, not the
+        // choice.  Both routes below compute the SAME two outputs
+        // (`range_eigenvalues_sorted`, `range_rotation`), so a stacked-root SVD
+        // that fails to CONVERGE is exactly the pathological case the Gram route
+        // was written for: non-convergence is a property of the bidiagonal
+        // iteration, not evidence that the pencil is unusable.  Selecting on the
+        // shape alone turned that into a fatal `LayoutError` raised one branch
+        // away from a trusted routine for the same quantity, aborting a whole
+        // converging fit (measured: nottem `cc(month, k=12)`, one 75% partition,
+        // λ ≈ 5, an 11×11 `E` — the outer BFGS had already certified a nearby ρ
+        // before the refinement pass hit it).  The Gram route's real cost is the
+        // squared condition number, so taking it is REPORTED, not silently
+        // substituted.
+        let mut have_rotation = false;
+        let mut svd_refusal: Option<String> = None;
         if total_root_rows >= penalized_rank {
             let mut e_stacked = Array2::<f64>::zeros((total_root_rows, penalized_rank));
             let mut row_off = 0usize;
@@ -2427,36 +2477,53 @@ pub fn stable_reparameterizationwith_invariant(
                 }
                 row_off += rk;
             }
-            let (_, singular_values, vt_opt) = e_stacked.svd(false, true).map_err(|e| {
-                EstimationError::LayoutError(format!("penalized-block root SVD failed: {e:?}"))
-            })?;
-            let vt = vt_opt.ok_or_else(|| {
-                EstimationError::LayoutError(
-                    "penalized-block root SVD did not return right singular vectors".to_string(),
-                )
-            })?;
-            // `singular_values` descending → eigenvalues `d_i = σ_i²` descending;
-            // `vt` is `penalized_rank × penalized_rank` with row i = vᵢᵀ.
-            let n_sv = singular_values.len().min(penalized_rank).min(vt.nrows());
-            range_eigenvalues_sorted = (0..penalized_rank)
-                .map(|i| {
-                    if i < n_sv {
-                        let s = singular_values[i];
-                        s * s
-                    } else {
-                        0.0
+            match e_stacked.svd(false, true) {
+                Ok((_, singular_values, Some(vt))) => {
+                    // `singular_values` descending → eigenvalues `d_i = σ_i²` descending;
+                    // `vt` is `penalized_rank × penalized_rank` with row i = vᵢᵀ.
+                    let n_sv = singular_values.len().min(penalized_rank).min(vt.nrows());
+                    range_eigenvalues_sorted = (0..penalized_rank)
+                        .map(|i| {
+                            if i < n_sv {
+                                let s = singular_values[i];
+                                s * s
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    for col_idx in 0..n_sv {
+                        for row in 0..penalized_rank {
+                            range_rotation[(row, col_idx)] = vt[[col_idx, row]];
+                        }
                     }
-                })
-                .collect();
-            for col_idx in 0..n_sv {
-                for row in 0..penalized_rank {
-                    range_rotation[(row, col_idx)] = vt[[col_idx, row]];
+                    have_rotation = true;
+                }
+                Ok((_, _, None)) => {
+                    let facts = describe_stacked_roots(&e_stacked, lambdas);
+                    svd_refusal = Some(format!("returned no right singular vectors; {facts}"));
+                }
+                Err(err) => {
+                    let facts = describe_stacked_roots(&e_stacked, lambdas);
+                    svd_refusal = Some(format!("failed: {err:?}; {facts}"));
                 }
             }
-        } else {
-            // Defensive fallback (structurally unreachable): assemble the Gram and
-            // eigendecompose it. Loses the SVD's small-eigenvalue accuracy, but only
-            // reached if the penalty roots cannot span the penalized subspace.
+        }
+        if !have_rotation {
+            if let Some(reason) = svd_refusal.as_deref() {
+                // The accuracy downgrade is observable rather than silent: the
+                // Gram route resolves a recessive penalized eigenvalue only down
+                // to `O(ε·d_max)`, where the SVD of `E` reaches `O(ε²·d_max)`.
+                log::warn!(
+                    "penalized-block rotation: stacked-root SVD {reason}. Recomputing it from \
+                     the Gram `Σₖ λₖ Sₖ`, which squares the condition number: recessive \
+                     eigenvalues are resolved to O(ε·d_max) rather than O(ε²·d_max)."
+                );
+            }
+            // Assemble the Gram and eigendecompose it. This route serves a layout
+            // whose penalty roots cannot span the penalized subspace
+            // (`total_root_rows < penalized_rank`) AND a stacked-root SVD that
+            // did not converge.
             let mut range_block = Mat::<f64>::zeros(penalized_rank, penalized_rank);
             for (lambda, s_k) in lambdas.iter().zip(s_k_penalized_cache.iter()) {
                 for i in 0..penalized_rank {
