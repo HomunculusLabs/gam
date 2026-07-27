@@ -91,7 +91,16 @@ impl Certificate for OuterCriterionCertificate {
         }
         e.insert("lambdas_railed_count", self.lambdas_railed.len().into());
         e.insert("stationary", self.is_stationary().into());
-        e.insert("curvature_admissible", self.curvature_admissible().into());
+        // Both, deliberately (#2578): the boolean is the published contract and
+        // stays byte-compatible, and the verdict beside it says WHICH of the
+        // three states produced it — so a reader can tell "measured and
+        // admissible" from "nothing was measured", which the boolean alone
+        // cannot express.
+        e.insert("curvature_admissible", self.curvature_not_refused().into());
+        e.insert(
+            "curvature_verdict",
+            self.curvature_verdict().to_string().into(),
+        );
         e.insert("summary", self.summary().into());
         e
     }

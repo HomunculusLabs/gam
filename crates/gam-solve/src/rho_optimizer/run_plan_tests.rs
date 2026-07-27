@@ -8504,9 +8504,10 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
         "certificate must accept the constrained minimum: {}",
         cert.summary()
     );
-    assert!(
-        cert.curvature_admissible(),
-        "curvature is admissible on the feasible tangent subspace: {}",
+    assert_eq!(
+        cert.curvature_verdict(),
+        crate::model_types::result_types::CurvatureAdmissibility::Admissible,
+        "curvature is MEASURED admissible on the feasible tangent subspace, not merely          unevaluated (#2578): {}",
         cert.summary()
     );
     assert_eq!(

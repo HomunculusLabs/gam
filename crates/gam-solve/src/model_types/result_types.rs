@@ -1086,6 +1086,48 @@ impl std::fmt::Display for CurvatureEvidence {
     }
 }
 
+/// What second-order admissibility a certificate can actually claim (#2578).
+///
+/// The three variants are the three states of the question, and they are NOT
+/// two passes and a failure: `Unevaluated` is the absence of evidence, and it
+/// is reported as such rather than folded into the pass branch. It does not
+/// refuse — refusing every route with no analytic Hessian (the EFS/fixed-point
+/// route, the support-sparse grouped-LAML lane) would be wrong — but a consumer
+/// that needs a real second-order guarantee can now distinguish it, which is
+/// precisely what a bare `bool` made impossible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurvatureAdmissibility {
+    /// A Hessian existed at the certified point and it is admissible: measured
+    /// PSD, or measured indefinite with its most negative direction below the
+    /// instrument's own resolution.
+    Admissible,
+    /// A Hessian existed and it is indefinite by more than the floor allows.
+    /// `floor_consulted` records whether a floor verdict was available at all,
+    /// so the refusal can say whether the negative direction was judged against
+    /// a resolution or simply taken at face value.
+    Inadmissible { floor_consulted: bool },
+    /// No curvature question was answered here, and this is why.
+    Unevaluated { evidence: CurvatureEvidence },
+}
+
+impl std::fmt::Display for CurvatureAdmissibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admissible => f.write_str("admissible"),
+            Self::Inadmissible { floor_consulted } => write!(
+                f,
+                "INADMISSIBLE (floor {})",
+                if *floor_consulted {
+                    "consulted, not cleared"
+                } else {
+                    "not available"
+                }
+            ),
+            Self::Unevaluated { evidence } => write!(f, "unevaluated ({evidence})"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OuterCriterionCertificate {
     pub stationarity: OuterStationarityCertificate,
@@ -1131,14 +1173,54 @@ impl OuterCriterionCertificate {
     /// diagnostic; it cannot waive negative curvature in unrelated free
     /// directions. If a future certificate projects onto the exact critical
     /// cone, that projected result can be recorded here instead.
-    pub fn curvature_admissible(&self) -> bool {
-        // The raw measurement decides it whenever it is not a refusal. Only a
-        // measured `false` consults the floor, and then only to ask whether
-        // that negative direction was distinguishable from zero at all.
-        self.curvature.psd() != Some(false)
-            || self
-                .curvature_floor
-                .is_some_and(|clearance| clearance.cleared)
+    ///
+    /// Three-valued, because the question has three answers (#2578). The
+    /// predicate this replaced returned `bool`, and its `true` was produced by
+    /// two structurally different facts: a Hessian that was measured and found
+    /// admissible, and a route that never measured one. A gate whose passing
+    /// condition is satisfied by the ABSENCE of an observation cannot fail on
+    /// the case it exists to catch — on the support-sparse grouped-LAML lane,
+    /// which reports `hessian=Unavailable`, every consultation answered `true`
+    /// without inspecting anything.
+    ///
+    /// Acceptance is unchanged. [`CurvatureAdmissibility::Unevaluated`] does
+    /// not refuse, exactly as `!= Some(false)` did not. The difference is that
+    /// a caller wanting a genuine second-order guarantee can now ask for
+    /// [`CurvatureAdmissibility::Admissible`] and get one, instead of being
+    /// handed a `true` that means "nobody looked".
+    pub fn curvature_verdict(&self) -> CurvatureAdmissibility {
+        match self.curvature {
+            CurvatureEvidence::Measured { psd: true } => CurvatureAdmissibility::Admissible,
+            CurvatureEvidence::Measured { psd: false } => {
+                // Only a measured `false` consults the floor, and then only to
+                // ask whether that negative direction was distinguishable from
+                // zero at all.
+                let cleared = self
+                    .curvature_floor
+                    .is_some_and(|clearance| clearance.cleared);
+                if cleared {
+                    CurvatureAdmissibility::Admissible
+                } else {
+                    CurvatureAdmissibility::Inadmissible {
+                        floor_consulted: self.curvature_floor.is_some(),
+                    }
+                }
+            }
+            evidence @ (CurvatureEvidence::NotSpent
+            | CurvatureEvidence::NotAvailable
+            | CurvatureEvidence::NoEstimand) => CurvatureAdmissibility::Unevaluated { evidence },
+        }
+    }
+
+    /// Whether the second-order conjunct REFUSES this certificate — the shape
+    /// [`Self::refusal`] needs. This is deliberately not named
+    /// `curvature_admissible`: "did not refuse" and "was found admissible" are
+    /// different claims, and conflating them is what #2578 was.
+    pub fn curvature_not_refused(&self) -> bool {
+        !matches!(
+            self.curvature_verdict(),
+            CurvatureAdmissibility::Inadmissible { .. }
+        )
     }
 
     /// Whether the certificate accepts the returned point as a constrained
@@ -1191,10 +1273,8 @@ impl OuterCriterionCertificate {
                 bound: self.stationarity.bound(),
             });
         }
-        if !self.curvature_admissible() {
-            return Some(CertificationRefusal::InadmissibleCurvature {
-                floor_consulted: self.curvature_floor.is_some(),
-            });
+        if let CurvatureAdmissibility::Inadmissible { floor_consulted } = self.curvature_verdict() {
+            return Some(CertificationRefusal::InadmissibleCurvature { floor_consulted });
         }
         None
     }
@@ -1627,8 +1707,9 @@ impl Default for FitOptions {
 #[cfg(test)]
 mod tests_certification_refusal_2550 {
     use super::{
-        CertificationRefusal, CurvatureEvidence, OuterCriterionCertificate,
-        OuterStationarityCertificate, RailCoordinate, RailFault, RailTailEvidence,
+        CertificationRefusal, CurvatureAdmissibility, CurvatureEvidence,
+        OuterCriterionCertificate, OuterStationarityCertificate, RailCoordinate, RailFault,
+        RailTailEvidence,
     };
     use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
 
@@ -1706,9 +1787,10 @@ mod tests_certification_refusal_2550 {
             certificate.is_stationary(),
             "the fixture must be stationary, or it exercises the wrong branch"
         );
-        assert!(
-            certificate.curvature_admissible(),
-            "the fixture's curvature must be admissible, or the blame would be earned"
+        assert_eq!(
+            certificate.curvature_verdict(),
+            CurvatureAdmissibility::Admissible,
+            "the fixture's curvature must be MEASURED admissible, or the blame would be              earned -- an unevaluated curvature would satisfy a mere not-refused test              without exercising this branch at all (#2578)"
         );
         assert!(!certificate.certifies());
 

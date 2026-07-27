@@ -3744,7 +3744,7 @@ fn certify_outer_optimality_at_terminal_fidelity(
         // runs with it `false` — can never recurse.
         if allow_tail_snap
             && certificate.is_stationary()
-            && !certificate.curvature_admissible()
+            && !certificate.curvature_not_refused()
             && let Some(hessian) = result.final_hessian.clone()
             && let Some(gradient) = result.final_gradient.clone()
         {
