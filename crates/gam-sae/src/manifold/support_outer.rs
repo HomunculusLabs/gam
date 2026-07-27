@@ -75,54 +75,114 @@ fn support_laml_deflation_target_std_err_rel() -> f64 {
     (2.0 / SCHUR_SLQ_LOGDET_PROBES as f64).sqrt()
 }
 
+/// The coarsest quadrature this lane will ever ask for, and the accuracy its
+/// one-off pilot runs at.
+///
+/// `√(2/m)/m`: the worst-case relative standard error a `±1`-Rademacher
+/// Hutchinson estimator can have (`√(2/m)`, attained when the off-diagonal
+/// Frobenius mass matches the trace) divided by the probe count. It is a
+/// CEILING, not the working value — see
+/// [`support_laml_measured_quadrature_tolerance`] for why an a-priori bound
+/// cannot produce a safe working value here.
+fn support_laml_coarsest_quadrature_tolerance() -> f64 {
+    support_laml_deflation_target_std_err_rel() / SCHUR_SLQ_LOGDET_PROBES as f64
+}
+
 /// Accuracy asked of the surrogate's QUADRATURE — and of the quadrature only —
-/// derived from the probe count instead of standing beside it.
+/// derived from this operator's MEASURED Hutchinson resolution.
 ///
 /// The two deterministic knobs in this surrogate look alike and are not. Both
-/// are `1.0e-8` in the shared policy, and only one of them should move:
+/// read `1.0e-8` in the shared policy, and only one of them should move:
 ///
 /// * The **quadrature** truncation and step are fixed once, in the frozen plan.
-///   Their error is therefore a smooth, ρ-independent BIAS in `log|S|` —
-///   the same displacement at every ρ the outer search visits. A bias the
-///   estimator's own variance swamps is a bias nobody can measure, and asking
-///   for one five orders under that variance is not free: the node count grows
-///   like `log(1/tol)`, and the surrogate's cost is `m × nodes` shifted solves.
+///   Their error is a smooth, ρ-independent BIAS in `log|S|` — the same
+///   displacement at every ρ the outer search visits. A bias the estimator's
+///   own variance swamps is a bias nobody can measure, and asking for one five
+///   orders under that variance is not free: the node count grows like
+///   `log(1/tol)` and the surrogate's cost is `m × nodes` shifted solves.
+///   Measured on a small overcomplete chart (border 5056, `λ_min/λ_max = 1e-8`
+///   by the deflation-floor convention, hence a twelve-decade padded window):
+///   `1e-8` sizes **81** nodes.
 /// * The **shifted-CG residual** is not bias. Each solve's iteration count
 ///   varies with ρ, so its error is JITTER — a non-smooth `O(δ)` wobble in a
-///   criterion the outer quasi-Newton differentiates and line-searches. That
-///   requirement has nothing to do with the probe count and everything to do
-///   with the step sizes the outer search takes, so `cg_rel_tol` stays at the
-///   shared lane's value. (`support_outer_logdet_gradient_matches_fd_of_its_
-///   own_surrogate` is the gate that would catch loosening it: a central
-///   difference at `h = 1e-5` amplifies value jitter by `1/2h = 5e4`.)
+///   criterion the outer quasi-Newton differentiates and line-searches. What
+///   that must beat is the outer search's step sizes, not the probe count, so
+///   `cg_rel_tol` stays at the shared lane's value.
+///   (`support_outer_logdet_gradient_matches_fd_of_its_own_surrogate` is the
+///   gate that catches loosening it: a central difference at `h = 1e-5`
+///   amplifies value jitter by `1/2h = 5e4`.)
 ///
-/// Measured on a small overcomplete chart (border 5056, `λ_min/λ_max = 1e-8` by
-/// the deflation-floor convention, so a twelve-decade padded window): `1e-8`
-/// sizes **80** quadrature nodes, while the estimator wrapped around them has a
-/// relative error bar of 3.7e-3 at 8 probes and 1.9e-3 at 16.
+/// **Why the bias budget has to be measured.** The requirement is
+/// `m·δ ≲ σ/√m`: the bias, which the average does not shrink because it is
+/// identical in every term, must stay under the stochastic error, which the
+/// average does shrink. Substituting the a-priori worst case for `σ` moves the
+/// bound the WRONG WAY — it is an upper bound on `σ`, so it yields an upper
+/// bound on the ALLOWED `δ`, and a safe working value needs a lower bound on
+/// `σ` instead. There is none: `σ` is zero for a diagonal operator. Measured
+/// here, `σ/√m` is 1.9e-3 at 16 probes, two orders under the `√(2/m)` bound —
+/// so the bound-derived `√(2/m)/m = 7.8e-3` sits ABOVE the noise it was meant
+/// to hide under, not below it.
 ///
-/// Derivation. The surrogate averages `m` per-probe terms. The average cuts the
-/// stochastic part of each to `σ/√m`; it does not cut a deterministic bias,
-/// which is identical in every term. So the requirement is `m·δ ≲ σ/√m` — the
-/// bias, even added `m` times, must stay under the stochastic error. Bounding
-/// `σ` by the worst case a `±1`-Rademacher Hutchinson estimator can have (`√2`,
-/// when the off-diagonal Frobenius mass matches the trace) gives
+/// So measure it. The surrogate reports `std_err` — its own realized error bar
+/// — and a rank-0 pilot is cheap at the ceiling tolerance (18 nodes rather than
+/// 81). Crucially the pilot's COARSE quadrature does not corrupt the number it
+/// is measuring: a quadrature bias is common to every probe and cancels out of
+/// the across-probe spread that `std_err` is. The pilot's shifted solves DO run
+/// at the working `cg_rel_tol`, because per-probe solve jitter would not cancel.
 ///
-/// ```text
-/// δ = √(2/m) / m
-/// ```
-///
-/// — 2.4e-4 at `m = 32`, sizing **31** nodes instead of 80.
-///
-/// Honest about where the bound is thin: it is loose for this operator (whose
-/// achieved `σ` beats `√(2/m)` by two orders), so 2.4e-4 sits a factor of ~6
-/// under the measured 1.4e-3 resolution rather than the factor of `m` the
-/// derivation asks for. The bias is still the smaller of the two, which is the
-/// property that matters. Closing the rest means deriving `δ` from the pilot's
-/// MEASURED bar rather than the a-priori bound — a real improvement, and one
-/// that belongs to the shared lane rather than to this one.
-fn support_laml_quadrature_tolerance() -> f64 {
-    support_laml_deflation_target_std_err_rel() / SCHUR_SLQ_LOGDET_PROBES as f64
+/// The working budget is then `σ̂/m`, clamped to `[shared rel_tol, ceiling]` so
+/// it is never tighter than the shared policy would have asked nor looser than
+/// the worst case admits. Measured: `σ̂ ≈ 1.4e-3` at 32 probes gives `4.4e-5`
+/// and 39 nodes, against 81.
+fn support_laml_measured_quadrature_tolerance(
+    system: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    seed: u64,
+) -> Result<f64, EstimationError> {
+    let shared = sae_surrogate_lane_config();
+    let ceiling = support_laml_coarsest_quadrature_tolerance();
+    let (_plan, pilot) = rational_reduced_schur_log_det(
+        system,
+        htt_factors,
+        0.0,
+        &CpuBatchedBlockSolver,
+        None,
+        None,
+        shared.num_probes,
+        seed,
+        ceiling,
+        shared.power_iters,
+        shared.cg_rel_tol,
+        shared.cg_max_iters,
+    )
+    .ok_or_else(|| {
+        outer_error(format!(
+            "support LAML could not measure its reduced-Schur log-determinant resolution: the \
+             rank-0 pilot surrogate did not evaluate on a border of width {}",
+            system.k
+        ))
+    })?;
+    let measured_relative_std_err = pilot.std_err / (pilot.estimate.abs() + 1.0);
+    if !(measured_relative_std_err.is_finite() && measured_relative_std_err >= 0.0) {
+        return Err(outer_error(format!(
+            "support LAML pilot surrogate reported a non-finite error bar {} against estimate {}",
+            pilot.std_err, pilot.estimate
+        )));
+    }
+    let budget = (measured_relative_std_err / shared.num_probes as f64)
+        .clamp(shared.rel_tol.min(ceiling), ceiling);
+    log::info!(
+        "support LAML quadrature budget: pilot log|S| = {:.6e}, measured relative error bar \
+         {:.3e} at {} probes -> quadrature tolerance {:.3e} (shared policy {:.3e}, ceiling \
+         {:.3e})",
+        pilot.estimate,
+        measured_relative_std_err,
+        shared.num_probes,
+        budget,
+        shared.rel_tol,
+        ceiling,
+    );
+    Ok(budget)
 }
 
 fn outer_error(message: impl Into<String>) -> EstimationError {
@@ -408,20 +468,35 @@ impl SaeSupportOuterObjective {
             ));
         }
         // One SAE evidence-surrogate policy, shared with the dense manifold
-        // lane, with exactly two fields DERIVED rather than inherited.
+        // lane, with exactly two fields DERIVED rather than inherited — and the
+        // derivation happens ONCE, here, at the first ρ, so the whole outer
+        // search descends a single functional.
         let seed = self.random_state;
-        let lane = self.logdet_surrogate.get_or_insert_with(|| {
-            SurrogateLaneState::new(SurrogateLaneConfig {
+        if self.logdet_surrogate.is_none() {
+            let htt_factors = CpuBatchedBlockSolver
+                .factor_blocks(&system.rows, 0.0, system.d, true)
+                .map_err(|error| {
+                    outer_error(format!(
+                        "support LAML undamped evidence row factorization: {error}"
+                    ))
+                })?;
+            let rel_tol =
+                support_laml_measured_quadrature_tolerance(system, &htt_factors, seed)?;
+            self.logdet_surrogate = Some(SurrogateLaneState::new(SurrogateLaneConfig {
                 // The seed is the caller's: a support fit's `random_state` is
                 // what makes ITS criterion bit-reproducible, and two fits of the
                 // same data at different seeds must be able to disagree about
                 // their probes without disagreeing about their policy.
                 seed,
                 deflation_target_std_err_rel: support_laml_deflation_target_std_err_rel(),
-                rel_tol: support_laml_quadrature_tolerance(),
+                rel_tol,
                 ..sae_surrogate_lane_config()
-            })
-        });
+            }));
+        }
+        let lane = self
+            .logdet_surrogate
+            .as_mut()
+            .expect("the surrogate lane was just installed");
         // Ask for the derivative representation BEFORE the value, so a failed
         // evaluation can never be paired with a previous operator's gradient.
         lane.request_logdet_derivative_bundle();
