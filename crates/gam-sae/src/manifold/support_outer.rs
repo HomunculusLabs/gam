@@ -19,7 +19,72 @@ use super::*;
 
 const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
 const SUPPORT_LAML_TRACE_PROBES: usize = 16;
-const SUPPORT_LAML_CG_REL_TOL: f64 = 1.0e-8;
+
+/// The Hutchinson trace estimator's OWN relative resolution at
+/// `SUPPORT_LAML_TRACE_PROBES` probes.
+///
+/// For `±1` Rademacher probes `z` and a symmetric `A`,
+/// `Var(zᵀAz) = 2·‖A − diag(A)‖_F²`, so the `m`-probe mean has standard error
+/// `√(2/m)·‖A_off‖_F`. Relative to the estimand `tr(A)` the achievable floor is
+/// `√(2/m)`: **this is the accuracy the estimate can express**, no matter how
+/// exactly each linear system inside it is solved. At `m = 16` it is 35%.
+///
+/// Every tolerance the estimator hands downward is derived from this number
+/// rather than picked beside it (SPEC-21): a target below it buys precision the
+/// estimator's own variance swamps, and a residual above it means the
+/// deterministic solve error has overtaken the stochastic noise and the number
+/// is no longer an estimate of the trace at all.
+fn support_laml_trace_relative_resolution() -> f64 {
+    (2.0 / SUPPORT_LAML_TRACE_PROBES as f64).sqrt()
+}
+
+/// Relative-residual target for one trace probe's border solve.
+///
+/// The `m` per-probe CG truncation errors are NOT independent — they are
+/// deterministic functions of the same operator and can accumulate coherently
+/// through the `1/m` average, contributing up to `δ` in relative terms while
+/// the stochastic error shrinks as `√(2/m)`. Requiring that coherent bias to
+/// sit a full probe's worth BELOW the noise floor gives
+///
+/// ```text
+/// δ = √(2/m) / m
+/// ```
+///
+/// — 2.2e-2 at `m = 16`. The lane previously asked for `1.0e-8`, seven orders
+/// tighter than the estimator's own 35% resolution and chosen independently of
+/// the probe count; that target was never met anyway, because the solve behind
+/// it was unpreconditioned (#2576).
+fn support_laml_trace_cg_rel_tol() -> f64 {
+    support_laml_trace_relative_resolution() / SUPPORT_LAML_TRACE_PROBES as f64
+}
+
+/// Iteration budget for one trace probe's border solve.
+///
+/// In exact arithmetic CG terminates within the reduced dimension, so
+/// `beta_dim` is the only mathematically non-arbitrary cap; the clamp keeps a
+/// tiny fixture from being cut off before Krylov even spans its own system and
+/// keeps a massive-`K` border from spending a whole evaluation inside one
+/// probe. Hitting the cap is no longer silent: the solve returns a
+/// [`ReducedSchurCgReport`] and [`SaeSupportOuterObjective::trace_by_group`]'s
+/// caller reads it (see [`support_laml_trace_refusal_residual`]).
+fn support_laml_trace_cg_max_iters(beta_dim: usize) -> usize {
+    beta_dim.saturating_mul(2).clamp(128, 4096)
+}
+
+/// Relative residual above which a trace probe's solve is REFUSED rather than
+/// averaged in.
+///
+/// This is the estimator's own resolution `√(2/m)`. Below it the deterministic
+/// truncation is dominated by the stochastic noise the estimate already
+/// carries, so a solve that merely missed its (much tighter) target still
+/// estimates the right quantity and is reported, not refused. Above it the
+/// truncation error EXCEEDS the noise floor: averaging such a solve produces a
+/// number whose dominant term is CG's failure to converge, and minting an
+/// outer gradient from it is how a stalled solve silently steers the smoothing
+/// search (#2576).
+fn support_laml_trace_refusal_residual() -> f64 {
+    support_laml_trace_relative_resolution()
+}
 
 fn outer_error(message: impl Into<String>) -> EstimationError {
     EstimationError::RemlOptimizationFailed(message.into())
@@ -245,17 +310,42 @@ impl SaeSupportOuterObjective {
         out
     }
 
+    /// Hutchinson estimate of `tr(H⁻¹ ∂H/∂ρ_g) = tr(H⁻¹ λ_g S_g)` for EVERY
+    /// smoothing group, from ONE border solve per probe.
+    ///
+    /// `∂H/∂ρ_g` touches only the β block (the row-latent blocks carry no
+    /// smoothing coordinate), so each group's channel operator is
+    /// `B_g = λ_g S_g`, symmetric and block-diagonal by atom. The estimator
+    /// used to solve `H⁻¹(B_g z)` once PER GROUP — `groups × probes` solves.
+    /// But both `H⁻¹` and `B_g` are symmetric, so
+    ///
+    /// ```text
+    /// zᵀ H⁻¹ B_g z = (zᵀ H⁻¹ B_g z)ᵀ = zᵀ B_g H⁻¹ z = (B_g z) · (H⁻¹ z)
+    /// ```
+    ///
+    /// — the SAME estimator, not an approximation of it, computed from the
+    /// single group-independent solve `w = H⁻¹ z`. Every group then costs one
+    /// cheap `B_g z` apply. That is an exact `groups`× reduction in the
+    /// dominant cost (#2576).
+    ///
+    /// The reduced-Schur solve inside `H⁻¹` is iterative, so each probe's
+    /// contribution is only as good as its CG residual. The weakest
+    /// certificate across the probe family is returned with the traces: a
+    /// truncated solve biases the trace by an unbounded amount, and the caller
+    /// must not mint a gradient from it as though it were exact.
     fn trace_by_group(
         &self,
         system: &ArrowSchurSystem,
         cache: &ArrowFactorCache,
         lambda_smooth: &[f64],
-    ) -> Result<Vec<f64>, EstimationError> {
+    ) -> Result<(Vec<f64>, ReducedSchurCgReport), EstimationError> {
         let (_, beta_dim) = self.beta_layout()?;
         let latent_dim = cache.delta_t_len();
         let rhs_t = Array1::<f64>::zeros(latent_dim);
         let mut traces = vec![0.0; self.layout.group_keys.len()];
-        let max_iters = beta_dim.saturating_mul(2).clamp(128, 4096);
+        let max_iters = support_laml_trace_cg_max_iters(beta_dim);
+        let cg_rel_tol = support_laml_trace_cg_rel_tol();
+        let mut weakest: Option<ReducedSchurCgReport> = None;
         for probe in 0..SUPPORT_LAML_TRACE_PROBES {
             let mut z = Array1::<f64>::zeros(beta_dim);
             for index in 0..beta_dim {
@@ -266,21 +356,28 @@ impl SaeSupportOuterObjective {
                 );
                 z[index] = if hash >> 63 == 0 { -1.0 } else { 1.0 };
             }
+            let (_, solved_beta, report) = matrix_free_arrow_inverse_apply(
+                system,
+                cache,
+                rhs_t.view(),
+                z.view(),
+                cg_rel_tol,
+                max_iters,
+            )
+            .map_err(|error| outer_error(format!("support LAML trace solve: {error}")))?;
+            weakest = Some(match weakest {
+                Some(previous) => previous.weaker(report),
+                None => report,
+            });
             for (group, trace) in traces.iter_mut().enumerate() {
-                let rhs_beta = self.penalty_apply_group(group, lambda_smooth, z.view())?;
-                let (_, solved_beta) = matrix_free_arrow_inverse_apply(
-                    system,
-                    cache,
-                    rhs_t.view(),
-                    rhs_beta.view(),
-                    SUPPORT_LAML_CG_REL_TOL,
-                    max_iters,
-                )
-                .map_err(|error| outer_error(format!("support LAML trace solve: {error}")))?;
-                *trace += z.dot(&solved_beta) / SUPPORT_LAML_TRACE_PROBES as f64;
+                let channel = self.penalty_apply_group(group, lambda_smooth, z.view())?;
+                *trace += channel.dot(&solved_beta) / SUPPORT_LAML_TRACE_PROBES as f64;
             }
         }
-        Ok(traces)
+        let report = weakest.ok_or_else(|| {
+            outer_error("support LAML trace estimator ran zero probes; no certificate exists")
+        })?;
+        Ok((traces, report))
     }
 
     fn evaluate(&mut self, rho: &Array1<f64>) -> Result<SupportOuterEvaluation, EstimationError> {
@@ -352,7 +449,40 @@ impl SaeSupportOuterObjective {
         let cost = 0.5
             * (joint_logdet - penalty_logdet
                 + residual_df * (1.0 + (std::f64::consts::TAU * deviance / residual_df).ln()));
-        let traces = self.trace_by_group(&system, &cache, &lambda_smooth)?;
+        let trace_timer = std::time::Instant::now();
+        let (traces, cg) = self.trace_by_group(&system, &cache, &lambda_smooth)?;
+        // The expensive part of one outer evaluation lives INSIDE this call, so
+        // it is the only place that can report what it cost and what it bought.
+        // Before #2576 it emitted nothing at all: six minutes of fourteen busy
+        // cores between two log lines is what kept the stagnation invisible.
+        log::info!(
+            "support LAML trace estimator: {} probes x 1 border solve, weakest CG {} of {} \
+             iterations at relative residual {:.3e} (target {:.3e}, refusal {:.3e}, \
+             preconditioner {:?}), {:.1}s",
+            SUPPORT_LAML_TRACE_PROBES,
+            cg.iterations,
+            cg.max_iterations,
+            cg.relative_residual,
+            cg.tolerance,
+            support_laml_trace_refusal_residual(),
+            cg.preconditioner,
+            trace_timer.elapsed().as_secs_f64(),
+        );
+        if cg.relative_residual > support_laml_trace_refusal_residual() {
+            return Err(outer_error(format!(
+                "support LAML trace estimator: the border solve reached relative residual \
+                 {:.3e} after {} of {} CG iterations (preconditioner {:?}), above the \
+                 {}-probe estimator's own resolution {:.3e}. The truncation error now exceeds \
+                 the stochastic noise, so the smoothing gradient this trace would mint is \
+                 dominated by CG's failure to converge rather than by the trace",
+                cg.relative_residual,
+                cg.iterations,
+                cg.max_iterations,
+                cg.preconditioner,
+                SUPPORT_LAML_TRACE_PROBES,
+                support_laml_trace_refusal_residual(),
+            )));
+        }
         let energy = self.penalty_energy_by_group(&lambda_smooth);
         let mut gradient = Array1::<f64>::zeros(self.layout.group_keys.len());
         for group in 0..gradient.len() {

@@ -1045,7 +1045,15 @@ impl SaeManifoldTerm {
             // reduced preconditioner to the same relative accuracy. In exact
             // arithmetic CG terminates in at most the reduced dimension, so the
             // dimension itself is the non-arbitrary iteration bound.
-            let (t, beta) = matrix_free_arrow_inverse_apply(
+            // The CG certificate is ADVISORY on this seam and only on this seam:
+            // the inverse-apply is used as a PRECONDITIONER for the outer GMRES,
+            // which certifies the ORIGINAL residual regardless of how well the
+            // preconditioner approximates `A⁻¹` (`certifies_original_residual_
+            // under_ill_scaled_preconditioner_2258`). A truncated inner solve
+            // costs iterations here, never correctness — unlike the trace/
+            // criterion consumers, where a truncation silently biases the
+            // estimate (#2576).
+            let (t, beta, _cg) = matrix_free_arrow_inverse_apply(
                 system,
                 cache,
                 vector.t.view(),

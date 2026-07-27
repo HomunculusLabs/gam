@@ -2090,7 +2090,7 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
                     None
                 };
                 let bundle = if want_bundle {
-                    let sinv = reduced_schur_inverse_probe_solves(
+                    let (sinv, cg_report) = reduced_schur_inverse_probe_solves(
                         sys,
                         &htt_factors,
                         ridge_beta,
@@ -2105,6 +2105,19 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
                     .ok_or_else(|| ArrowSchurError::SchurFactorFailed {
                         reason: "rational surrogate inverse-probe bundle solve failed".to_string(),
                     })?;
+                    if !cg_report.converged() {
+                        log::warn!(
+                            "rational surrogate inverse-probe bundle: weakest reduced-Schur CG \
+                             reached relative residual {:.3e} against tolerance {:.3e} after \
+                             {} of {} iterations (preconditioner {:?}); every trace contracted \
+                             against this bundle inherits that error",
+                            cg_report.relative_residual,
+                            cg_report.tolerance,
+                            cg_report.iterations,
+                            cg_report.max_iterations,
+                            cg_report.preconditioner,
+                        );
+                    }
                     Some((plan.probes.clone(), sinv))
                 } else {
                     None
@@ -2415,12 +2428,146 @@ pub fn rational_reduced_schur_directional(
     plan.directional_derivative(eval, dmatvec)
 }
 
-/// Plain CG solve `S y = b` on the SPD reduced Schur through the matrix-free
-/// [`schur_matvec`] apply (the `t = 0`, unshifted companion to the surrogate's
-/// shifted solves), warm-started from `y0`. Yields `y = S⁻¹ b` — the operator
-/// every `tr(S⁻¹·M)` gradient / adjoint channel contracts against at massive K.
+/// Convergence certificate for one matrix-free reduced-Schur CG solve.
+///
+/// The evidence lane's `S⁻¹`-apply used to return its iterate with no way to
+/// tell a converged solve from one truncated at `max_iters`: a stagnating CG
+/// handed back an arbitrarily-wrong `S⁻¹b`, and every downstream trace /
+/// log-determinant estimate inherited that error SILENTLY (#2576 — a 4096-cap
+/// truncation invisible behind six minutes of no log output). The solve now
+/// carries what it achieved so consumers can refuse, escalate, or report
+/// instead of re-deriving it from nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReducedSchurCgReport {
+    /// CG iterations actually taken.
+    pub iterations: usize,
+    /// Iteration cap the solve ran under.
+    pub max_iterations: usize,
+    /// `‖b − S y‖ / ‖b‖` at the returned iterate.
+    pub relative_residual: f64,
+    /// Relative-residual target the solve was asked for.
+    pub tolerance: f64,
+    /// Which preconditioner steered the iteration.
+    pub preconditioner: ReducedSchurCgPreconditioner,
+}
+
+impl ReducedSchurCgReport {
+    /// True iff the returned iterate met the requested relative-residual bound.
+    /// A `false` here means the iterate is a TRUNCATION, not a solve.
+    pub fn converged(&self) -> bool {
+        self.relative_residual <= self.tolerance
+    }
+
+    /// Merge two certificates into the weaker of the pair, so a bundle of
+    /// solves reports its LEAST converged member rather than its best.
+    pub fn weaker(self, other: Self) -> Self {
+        let self_slack = self.relative_residual / self.tolerance.max(f64::MIN_POSITIVE);
+        let other_slack = other.relative_residual / other.tolerance.max(f64::MIN_POSITIVE);
+        if other_slack > self_slack { other } else { self }
+    }
+}
+
+/// Which preconditioner a reduced-Schur CG solve ran with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReducedSchurCgPreconditioner {
+    /// No usable diagonal was available; the iteration ran on the raw operator.
+    Identity,
+    /// `diag(H_ββ + ridge)` — the shared block's own diagonal, read straight
+    /// off the assembled system at zero build cost.
+    SharedBlockDiagonal,
+}
+
+/// Diagonal preconditioner for the matrix-free reduced-Schur CG.
+///
+/// `S = (H_ββ + ρ_β I) − Σ_i H_βt^(i)(H_tt^(i))⁻¹H_tβ^(i)` is SPD, and its
+/// diagonal spans whatever range the shared block's diagonal spans. On the
+/// overcomplete SAE border that range is the atom FIRING-COUNT distribution:
+/// `H_ββ`'s per-atom diagonal accumulates `Σ_{i ∋ k} φ_i,b²` over the rows on
+/// atom `k`'s support, so a dictionary whose atoms fire in 3 rows and 3,000
+/// rows carries three orders of magnitude of diagonal spread. Unpreconditioned
+/// CG's convergence rate is governed by `√κ(S)`, so that spread alone stalls
+/// it — which is exactly the #2576 stagnation (16 probes × 3 groups × the full
+/// 4096-iteration cap, tolerance-insensitive because the tolerance was never
+/// the binding constraint).
+///
+/// The exact reduced-Schur diagonal would need the point-elimination quotient
+/// `Σ_i (H_tβ^(i)e_a)ᵀ(H_tt^(i))⁻¹(H_tβ^(i)e_a)` per column — the `O(n·K)`
+/// probe build the Newton-side scalar Jacobi pays, which at the massive-K
+/// border costs orders of magnitude more than the solve it would precondition.
+/// The SHARED-BLOCK diagonal is already assembled (`hbb_diag` / `penalty_op`),
+/// so it is free, and it carries the whole firing-count spread. It is an upper
+/// bound on the true diagonal (the eliminated term is PSD), hence strictly
+/// positive whenever the assembled diagonal is, and it needs no factorization.
+///
+/// This is a preconditioner, not a change of operator: PCG converges to the
+/// same `S⁻¹b` as CG, only faster, so every downstream criterion value is
+/// unchanged up to the residual tolerance both must meet.
+struct ReducedSchurDiagonalPreconditioner {
+    inverse_diagonal: Option<Array1<f64>>,
+}
+
+impl ReducedSchurDiagonalPreconditioner {
+    fn build(sys: &ArrowSchurSystem, ridge_beta: f64) -> Self {
+        if sys.k == 0 {
+            return Self {
+                inverse_diagonal: None,
+            };
+        }
+        let mut diag = Array1::<f64>::zeros(sys.k);
+        {
+            let Some(slice) = diag.as_slice_mut() else {
+                return Self {
+                    inverse_diagonal: None,
+                };
+            };
+            sys.penalty_diagonal_add(slice);
+        }
+        // A shared block that assembled no diagonal (or a non-positive /
+        // non-finite entry, which the eliminated PSD term can only make worse)
+        // has nothing to scale by: fall back to the identity rather than
+        // fabricating a scale. `S` is still SPD, so plain CG remains correct —
+        // just slower, exactly as before this preconditioner existed.
+        let mut inverse = Array1::<f64>::zeros(sys.k);
+        for index in 0..sys.k {
+            let value = diag[index] + ridge_beta;
+            if !(value.is_finite() && value > 0.0) {
+                return Self {
+                    inverse_diagonal: None,
+                };
+            }
+            inverse[index] = 1.0 / value;
+        }
+        Self {
+            inverse_diagonal: Some(inverse),
+        }
+    }
+
+    fn kind(&self) -> ReducedSchurCgPreconditioner {
+        match self.inverse_diagonal {
+            Some(_) => ReducedSchurCgPreconditioner::SharedBlockDiagonal,
+            None => ReducedSchurCgPreconditioner::Identity,
+        }
+    }
+
+    fn apply(&self, residual: &Array1<f64>) -> Array1<f64> {
+        match &self.inverse_diagonal {
+            Some(inverse) => residual * inverse,
+            None => residual.clone(),
+        }
+    }
+}
+
+/// Preconditioned CG solve `S y = b` on the SPD reduced Schur through the
+/// matrix-free [`schur_matvec`] apply (the `t = 0`, unshifted companion to the
+/// surrogate's shifted solves), warm-started from `y0`. Yields `y = S⁻¹ b` —
+/// the operator every `tr(S⁻¹·M)` gradient / adjoint channel contracts against
+/// at massive K — together with the [`ReducedSchurCgReport`] certifying what
+/// residual it actually reached.
+///
 /// `None` on a non-finite breakdown (SPD `S` ⇒ that signals a caller bug or a
 /// non-finite operator, both of which must surface rather than be swallowed).
+/// Running out of iterations is NOT a breakdown: the iterate is returned with
+/// `converged() == false` so the caller decides.
 fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
@@ -2432,13 +2579,24 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
     y0: &Array1<f64>,
     cg_rel_tol: f64,
     cg_max_iters: usize,
-) -> Option<Array1<f64>> {
+) -> Option<(Array1<f64>, ReducedSchurCgReport)> {
     // One resident operator reused across every CG apply of this solve — device
     // seam threaded so the inverse-subspace S⁻¹·probe solves ride the resident op.
     let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
         .with_gpu_matvec(gpu_matvec);
     let apply = |v: &Array1<f64>| -> Array1<f64> { op.apply_owned(v) };
+    let precond = ReducedSchurDiagonalPreconditioner::build(sys, ridge_beta);
     let quotient = sys.beta_gauge_quotient.as_ref();
+    // The preconditioned direction must stay in the quotient complement, or the
+    // iteration re-injects the pinned gauge orbit the projected operator has no
+    // curvature along. Project inside the preconditioner apply, not after it.
+    let precondition = |residual: &Array1<f64>| -> Array1<f64> {
+        let z = precond.apply(residual);
+        match quotient {
+            Some(quotient) => quotient.project_complement(z.view()),
+            None => z,
+        }
+    };
     let b = match quotient {
         Some(quotient) => quotient.project_complement(b.view()),
         None => b.clone(),
@@ -2449,14 +2607,16 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
     };
     let mut r = &b - &apply(&y);
     let b_norm = b.dot(&b).sqrt().max(f64::MIN_POSITIVE);
-    let mut p = r.clone();
-    let mut rs = r.dot(&r);
-    if !rs.is_finite() {
+    let mut z = precondition(&r);
+    let mut p = z.clone();
+    let mut rs = r.dot(&z);
+    let mut residual_norm_sq = r.dot(&r);
+    if !(rs.is_finite() && residual_norm_sq.is_finite()) {
         return None;
     }
     let tol = cg_rel_tol * b_norm;
     let mut iters = 0usize;
-    while rs.sqrt() > tol && iters < cg_max_iters {
+    while residual_norm_sq.sqrt() > tol && iters < cg_max_iters {
         let ap = apply(&p);
         let denom = p.dot(&ap);
         if !(denom.is_finite() && denom > 0.0) {
@@ -2465,18 +2625,34 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
         let alpha = rs / denom;
         y.scaled_add(alpha, &p);
         r.scaled_add(-alpha, &ap);
-        let rs_new = r.dot(&r);
-        if !rs_new.is_finite() {
+        residual_norm_sq = r.dot(&r);
+        z = precondition(&r);
+        let rs_new = r.dot(&z);
+        if !(rs_new.is_finite() && residual_norm_sq.is_finite()) {
             return None;
         }
-        p = &r + &(&p * (rs_new / rs));
+        // A preconditioned residual inner product that has lost positivity
+        // means the (SPD-by-construction) preconditioner has been destroyed by
+        // round-off; continuing would build a non-descent direction.
+        if rs == 0.0 {
+            return None;
+        }
+        p = &z + &(&p * (rs_new / rs));
         rs = rs_new;
         iters += 1;
     }
-    Some(match quotient {
+    let report = ReducedSchurCgReport {
+        iterations: iters,
+        max_iterations: cg_max_iters,
+        relative_residual: residual_norm_sq.sqrt() / b_norm,
+        tolerance: cg_rel_tol,
+        preconditioner: precond.kind(),
+    };
+    let solved = match quotient {
         Some(quotient) => quotient.project_complement(y.view()),
         None => y,
-    })
+    };
+    Some((solved, report))
 }
 
 /// Matrix-free single-rhs reduced-Schur solve `S⁻¹ rhs` (`t = 0`) via CG on
@@ -2499,7 +2675,7 @@ pub fn reduced_schur_inverse_apply<B: BatchedBlockSolver + Sync>(
     warm: Option<&Array1<f64>>,
     cg_rel_tol: f64,
     cg_max_iters: usize,
-) -> Option<Array1<f64>> {
+) -> Option<(Array1<f64>, ReducedSchurCgReport)> {
     let zero = Array1::<f64>::zeros(sys.k);
     let y0 = warm.unwrap_or(&zero);
     reduced_schur_cg_solve(
@@ -2691,6 +2867,13 @@ pub fn matrix_free_arrow_operator_apply(
 /// It never materializes `S` or `S^-1`; the beta solve uses the same
 /// quotient-aware `S` operator as the rational log-determinant, then the latent
 /// block is recovered by standard arrow back-substitution.
+///
+/// The returned [`ReducedSchurCgReport`] certifies the inner CG's achieved
+/// relative residual. It is NOT decoration: the border solve is iterative and
+/// may truncate, so an `H⁻¹b` whose report says `converged() == false` is an
+/// approximation of unbounded error, and any consumer forming a criterion,
+/// trace, or gradient from it must say so rather than pass it on silently
+/// (#2576).
 pub fn matrix_free_arrow_inverse_apply(
     sys: &ArrowSchurSystem,
     cache: &ArrowFactorCache,
@@ -2698,7 +2881,7 @@ pub fn matrix_free_arrow_inverse_apply(
     rhs_beta: ArrayView1<'_, f64>,
     cg_rel_tol: f64,
     cg_max_iters: usize,
-) -> Result<(Array1<f64>, Array1<f64>), ArrowSchurError> {
+) -> Result<(Array1<f64>, Array1<f64>, ReducedSchurCgReport), ArrowSchurError> {
     validate_matrix_free_arrow_pair(sys, cache, "matrix_free_arrow_inverse_apply")?;
     if rhs_t.len() != cache.delta_t_len() || rhs_beta.len() != cache.k {
         return Err(ArrowSchurError::SchurFactorFailed {
@@ -2746,8 +2929,17 @@ pub fn matrix_free_arrow_inverse_apply(
     let mut reduced_rhs = rhs_beta.to_owned();
     reduced_rhs -= &eliminated;
 
-    let solved_beta = if cache.k == 0 {
-        Array1::<f64>::zeros(0)
+    let (solved_beta, report) = if cache.k == 0 {
+        (
+            Array1::<f64>::zeros(0),
+            ReducedSchurCgReport {
+                iterations: 0,
+                max_iterations: cg_max_iters,
+                relative_residual: 0.0,
+                tolerance: cg_rel_tol,
+                preconditioner: ReducedSchurCgPreconditioner::Identity,
+            },
+        )
     } else {
         reduced_schur_inverse_apply(
             sys,
@@ -2788,7 +2980,7 @@ pub fn matrix_free_arrow_inverse_apply(
             solved_t[start + axis] -= correction[axis];
         }
     }
-    Ok((solved_t, solved_beta))
+    Ok((solved_t, solved_beta, report))
 }
 
 /// The `S⁻¹ v_j` bundle for a fixed probe set: solves `S y_j = v_j` (`t = 0`) on
@@ -2801,6 +2993,10 @@ pub fn matrix_free_arrow_inverse_apply(
 /// `probes` are the surrogate plan's Rademacher probes (`RationalLogdetPlan::
 /// probes`); pass the SAME set the value used so the trace estimates are
 /// consistent with it. `None` on any CG breakdown.
+///
+/// The returned [`ReducedSchurCgReport`] is the bundle's WEAKEST member — a
+/// bundle is only as certified as its least-converged solve, and every trace
+/// estimated from it averages over all of them.
 pub fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
@@ -2812,13 +3008,14 @@ pub fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
     warm: Option<&[Array1<f64>]>,
     cg_rel_tol: f64,
     cg_max_iters: usize,
-) -> Option<Vec<Array1<f64>>> {
+) -> Option<(Vec<Array1<f64>>, ReducedSchurCgReport)> {
     let k = sys.k;
     let zero = Array1::<f64>::zeros(k);
     let mut out = Vec::with_capacity(probes.len());
+    let mut weakest: Option<ReducedSchurCgReport> = None;
     for (j, v) in probes.iter().enumerate() {
         let y0 = warm.and_then(|w| w.get(j)).unwrap_or(&zero);
-        let y = reduced_schur_cg_solve(
+        let (y, report) = reduced_schur_cg_solve(
             sys,
             htt_factors,
             ridge_beta,
@@ -2830,9 +3027,13 @@ pub fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
             cg_rel_tol,
             cg_max_iters,
         )?;
+        weakest = Some(match weakest {
+            Some(previous) => previous.weaker(report),
+            None => report,
+        });
         out.push(y);
     }
-    Some(out)
+    weakest.map(|report| (out, report))
 }
 
 /// Hutchinson estimate `tr(S⁻¹ M) ≈ (1/m) Σ_j (S⁻¹ v_j)ᵀ (M v_j)` for the reduced
