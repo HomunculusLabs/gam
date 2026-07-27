@@ -473,6 +473,13 @@ impl SaeSupportOuterObjective {
         // search descends a single functional.
         let seed = self.random_state;
         if self.logdet_surrogate.is_none() {
+            // `evidence_factorization = true` must match what the lane itself
+            // will use, or the pilot would measure a different operator from
+            // the one the frozen plan is built on. It does: the lane runs
+            // `ArrowEvidencePolicy::PositiveDefinite`
+            // (`with_positive_definite_evidence` below), and
+            // `factors_undamped_evidence()` is `!matches!(self, Strict)` — true
+            // for every policy except `Strict`, which this lane never selects.
             let htt_factors = CpuBatchedBlockSolver
                 .factor_blocks(&system.rows, 0.0, system.d, true)
                 .map_err(|error| {
