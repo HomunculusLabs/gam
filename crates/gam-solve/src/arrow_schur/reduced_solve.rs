@@ -2616,6 +2616,13 @@ struct ReducedSchurDiagonalPreconditioner {
 /// This is where the log-determinant lane's iterations actually go: `m` probes
 /// times the quadrature's node count, every one an unshifted-to-tiny-shift CG
 /// on the same wide-diagonal border (#2576).
+///
+/// Device seam: this costs no transfers even when the `S·v` apply is running on
+/// a GPU. The shifted CG already materializes its residual host-side (the
+/// matvec seam hands back an owned `Array1`), so the preconditioner is one
+/// elementwise `O(k)` pass over a vector that was already there. It is also
+/// reduction-free, hence bit-identical run to run regardless of thread count —
+/// the property the criterion's reproducibility contract needs.
 pub(crate) fn reduced_schur_shifted_preconditioner(
     sys: &ArrowSchurSystem,
     ridge_beta: f64,
