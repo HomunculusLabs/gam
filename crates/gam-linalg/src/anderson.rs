@@ -39,6 +39,7 @@
 
 use crate::LinalgError;
 use crate::faer_ndarray::FaerEigh;
+use crate::roundoff::accumulation_growth;
 use faer::Side;
 use ndarray::{Array1, Array2};
 use std::collections::VecDeque;
@@ -47,7 +48,6 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub struct AndersonAccelerator {
     depth: usize,
-    regularization: f64,
     dimension: Option<usize>,
     /// `(g_{k-1}, f_{k-1})` — the previous image and residual, kept so the next
     /// call can form one new difference column.
@@ -58,30 +58,27 @@ pub struct AndersonAccelerator {
 }
 
 impl AndersonAccelerator {
-    /// `depth` is the number of stored difference columns `m`; `regularization`
-    /// is the Tikhonov weight on the least squares, RELATIVE to the mean
-    /// diagonal of `ΔFᵀΔF`, so it is dimensionless and scale-free.
+    /// `depth` is the number of stored difference columns `m` — the order of
+    /// the multisecant model, and the method's only knob.
     ///
-    /// The regularisation is not optional insurance. `ΔF` is rank-deficient by
-    /// construction whenever the fixed-point map has an exactly flat direction —
-    /// a gauge orbit, for instance — because consecutive residuals then differ
-    /// by nothing along it. An unregularised normal equation is singular there,
-    /// and the extrapolation it produces is unbounded along the very direction
-    /// that does not matter.
-    pub fn new(depth: usize, regularization: f64) -> Result<Self, LinalgError> {
+    /// There is deliberately no regularisation parameter. `ΔFᵀΔF` is
+    /// rank-deficient by construction whenever the map has an exactly flat
+    /// direction — a gauge orbit, for instance — because consecutive residuals
+    /// then differ by nothing along it, and it is near-deficient whenever two
+    /// stored differences are nearly parallel, which is what a long history on a
+    /// slowly-contracting map produces. Rather than pick a shift, the solve
+    /// DERIVES the floor below which an eigenvalue is indistinguishable from the
+    /// Gram's own accumulation roundoff (see [`Self::solve_multisecant`]) and
+    /// drops those modes. A flat direction then contributes nothing, instead of
+    /// contributing a large coefficient that a chosen shift merely bounds.
+    pub fn new(depth: usize) -> Result<Self, LinalgError> {
         if depth == 0 {
             return Err(LinalgError::InvalidInput(
                 "Anderson acceleration requires a positive history depth".to_string(),
             ));
         }
-        if !(regularization.is_finite() && regularization >= 0.0) {
-            return Err(LinalgError::InvalidInput(format!(
-                "Anderson regularization must be finite and non-negative, got {regularization}"
-            )));
-        }
         Ok(Self {
             depth,
-            regularization,
             dimension: None,
             previous: None,
             image_differences: VecDeque::with_capacity(depth),
@@ -191,15 +188,21 @@ impl AndersonAccelerator {
         Ok(Some(candidate))
     }
 
-    /// `γ = (ΔFᵀΔF + λ‖·‖ I)⁻¹ ΔFᵀ f_k`, solved through the symmetric
-    /// eigendecomposition of an `order × order` matrix (`order ≤ depth`, so this
-    /// is a handful of flops next to one evaluation of the map).
+    /// `γ = (ΔFᵀΔF)⁺ ΔFᵀ f_k` on the modes the Gram can actually resolve.
     ///
-    /// The eigendecomposition rather than a Cholesky because the whole point of
-    /// the regularisation is that the un-shifted matrix may be singular, and an
-    /// eigendecomposition reports HOW singular: modes at or below the shift are
-    /// dropped rather than inverted, so a flat direction contributes nothing
-    /// instead of contributing a huge coefficient that the shift merely bounds.
+    /// An eigendecomposition of the `order × order` normal matrix (`order ≤
+    /// depth`, so a handful of flops next to one evaluation of the map), with
+    /// every mode at or below a DERIVED floor set to zero rather than inverted.
+    ///
+    /// The floor is the Gram's own backward-error band. Each entry is an inner
+    /// product over the full state width, so its computed value carries an
+    /// absolute error up to `γ_dimension · Σ|terms|`; summed over the diagonal
+    /// that is `γ_dimension · trace`. An eigenvalue below that is not
+    /// distinguishable from the roundoff of forming the matrix, and inverting it
+    /// amplifies noise by its reciprocal. This is a bound, not a tuned shift:
+    /// a genuinely informative secant direction has an eigenvalue of order
+    /// `‖Δf‖²`, which is enormous next to `γ_n·trace`, so the floor never
+    /// touches one.
     fn solve_multisecant(
         &self,
         residual: &[f64],
@@ -221,9 +224,12 @@ impl AndersonAccelerator {
         if !(trace.is_finite() && trace > 0.0) {
             return Ok(None);
         }
-        let shift = self.regularization * trace / order as f64;
-        for index in 0..order {
-            normal[[index, index]] += shift;
+        let floor = accumulation_growth(self.dimension.unwrap_or(0).max(1)) * trace;
+        if !floor.is_finite() {
+            // A state so wide that its inner products carry no error bound at
+            // all: the multisecant model cannot be trusted, so take the plain
+            // step rather than extrapolate on unbounded noise.
+            return Ok(None);
         }
         let rhs = Array1::from_iter(self.residual_differences.iter().map(|column| {
             column
@@ -237,11 +243,6 @@ impl AndersonAccelerator {
                 "Anderson multisecant eigendecomposition failed: {error}"
             ))
         })?;
-        let scale = eigenvalues
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max);
-        let floor = shift.max(f64::EPSILON * scale * order as f64);
         let projected = eigenvectors.t().dot(&rhs);
         let mut spectral = Array1::<f64>::zeros(order);
         for mode in 0..order {
@@ -268,7 +269,9 @@ mod tests {
     /// convention (`propose` takes the residual, not the image).
     #[test]
     fn an_affine_contraction_is_solved_in_dimension_steps() {
-        let a = [[0.975_f64, 0.20, 0.0], [0.0, 0.90, 0.15], [0.10, 0.0, 0.80]];
+        // Row sums 0.995, 0.930, 0.810, so the map is a genuine contraction in
+        // the max norm; its spectral radius is ≈ 0.975, the rate #2575 measured.
+        let a = [[0.975_f64, 0.02, 0.0], [0.0, 0.90, 0.03], [0.01, 0.0, 0.80]];
         let b = [1.0_f64, -2.0, 0.5];
         let map = |x: &[f64]| -> Vec<f64> {
             (0..3)
@@ -280,8 +283,12 @@ mod tests {
         for _ in 0..20_000 {
             reference = map(&reference);
         }
+        assert!(
+            reference.iter().all(|value| value.is_finite()),
+            "the fixture must contract: {reference:?}"
+        );
 
-        let mut accelerator = AndersonAccelerator::new(3, 1.0e-12).expect("accelerator");
+        let mut accelerator = AndersonAccelerator::new(3).expect("accelerator");
         let mut x = vec![0.0_f64; 3];
         let mut accelerated_error = f64::INFINITY;
         for _ in 0..6 {
@@ -327,7 +334,7 @@ mod tests {
     fn a_flat_gauge_direction_does_not_blow_up_the_extrapolation() {
         // Coordinate 2 is invariant under the map and carries no residual.
         let map = |x: &[f64]| -> Vec<f64> { vec![0.98 * x[0] + 1.0, 0.95 * x[1] - 0.5, x[2]] };
-        let mut accelerator = AndersonAccelerator::new(4, 1.0e-8).expect("accelerator");
+        let mut accelerator = AndersonAccelerator::new(4).expect("accelerator");
         let mut x = vec![0.0_f64, 0.0, 7.0];
         for _ in 0..8 {
             let g = map(&x);
@@ -345,10 +352,8 @@ mod tests {
 
     #[test]
     fn the_configuration_and_the_state_width_are_validated() {
-        assert!(AndersonAccelerator::new(0, 0.0).is_err());
-        assert!(AndersonAccelerator::new(2, -1.0).is_err());
-        assert!(AndersonAccelerator::new(2, f64::NAN).is_err());
-        let mut accelerator = AndersonAccelerator::new(2, 1.0e-10).expect("accelerator");
+        assert!(AndersonAccelerator::new(0).is_err());
+                let mut accelerator = AndersonAccelerator::new(2).expect("accelerator");
         assert!(accelerator.propose(&[], &[]).is_err());
         assert!(accelerator.propose(&[1.0], &[1.0, 2.0]).is_err());
         assert!(accelerator.propose(&[1.0, 2.0], &[0.1, 0.2]).is_ok());
@@ -363,7 +368,7 @@ mod tests {
     /// extrapolate from; `reset` returns to that state.
     #[test]
     fn the_history_starts_and_resets_empty() {
-        let mut accelerator = AndersonAccelerator::new(2, 1.0e-10).expect("accelerator");
+        let mut accelerator = AndersonAccelerator::new(2).expect("accelerator");
         assert_eq!(accelerator.history_len(), 0);
         assert!(
             accelerator
