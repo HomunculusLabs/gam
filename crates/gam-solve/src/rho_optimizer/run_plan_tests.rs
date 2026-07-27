@@ -6713,6 +6713,65 @@ fn effective_seed_budget_caps_expensive_solver_retries() {
         effective_seed_budget(3, Solver::Bfgs, gam_problem::SeedRiskProfile::Survival,),
         3
     );
+
+    let bfgs_glm = gam_problem::SeedConfig {
+        seed_budget: 3,
+        risk_profile: gam_problem::SeedRiskProfile::GeneralizedLinear,
+        num_auxiliary_trailing: 0,
+        ..Default::default()
+    };
+    assert_eq!(
+        effective_seed_budget_for_config(&bfgs_glm, Solver::Bfgs),
+        1,
+        "gradient-only GLM BFGS owns one neutral start (#2519)",
+    );
+
+    let bfgs_glm_with_aux = gam_problem::SeedConfig {
+        num_auxiliary_trailing: 1,
+        ..bfgs_glm
+    };
+    assert_eq!(
+        effective_seed_budget_for_config(&bfgs_glm_with_aux, Solver::Bfgs),
+        3,
+        "a trailing auxiliary coordinate preserves the caller's multistart policy",
+    );
+}
+
+#[test]
+fn bfgs_glm_single_start_prioritizes_the_neutral_seed_2519() {
+    let config = gam_problem::SeedConfig {
+        seed_budget: 2,
+        risk_profile: gam_problem::SeedRiskProfile::GeneralizedLinear,
+        num_auxiliary_trailing: 0,
+        ..Default::default()
+    };
+    let mut seeds = vec![array![-2.0, -2.0, -2.0], array![0.0, 0.0, 0.0]];
+    prioritize_neutral_bfgs_glm_seed(&mut seeds, &config, Solver::Bfgs, 1);
+    assert_eq!(seeds[0], array![0.0, 0.0, 0.0]);
+
+    let unchanged = seeds.clone();
+    prioritize_neutral_bfgs_glm_seed(&mut seeds, &config, Solver::Arc, 1);
+    assert_eq!(
+        seeds, unchanged,
+        "ARC retains its flexible/heavy basin policy",
+    );
+}
+
+#[test]
+fn rejected_budgeted_starts_license_bounded_replacement_seeds_2519() {
+    assert!(should_start_next_seed(0, 1, false));
+    assert!(
+        should_start_next_seed(1, 1, false),
+        "a rejected nominal start must not end the search without a certified candidate",
+    );
+    assert!(
+        !should_start_next_seed(1, 1, true),
+        "the first certified candidate exhausts the single-start policy",
+    );
+    assert!(
+        should_start_next_seed(2, 1, false),
+        "the finite generated seed list, not a failed-start count, bounds replacements",
+    );
 }
 
 #[test]

@@ -82,7 +82,13 @@ impl SeedRiskProfile {
 pub struct SeedConfig {
     pub bounds: (f64, f64),
     pub max_seeds: usize,
-    /// Maximum number of seed starts to run in heuristic order.
+    /// Nominal number of seed starts to run in heuristic order.
+    ///
+    /// A rejected or nonstationary start does not consume the optimizer's
+    /// authority to return a fit: when no candidate has certified, the runner
+    /// may continue through the remaining finite `max_seeds` lattice until one
+    /// certifies or the lattice is exhausted. The generated lattice remains the
+    /// absolute work bound.
     pub seed_budget: usize,
     /// Initial inner-iteration cap used while ranking candidate seeds.
     pub screen_max_inner_iterations: usize,

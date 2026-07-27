@@ -148,21 +148,14 @@ pub(crate) struct InnerProgressSnapshot {
 /// the lower-REML result, guarding against the top-screened seed landing a worse
 /// local optimum than the second.
 ///
-/// #1689/#1757/#1575: that hedge is now redundant for the Arc **Gaussian** and
-/// **GeneralizedLinear** paths. The analytic mgcv-style `initial.sp` seed (which
-/// replaced the banned log-λ grid prepass) lands the correct basin — the high-λ
-/// over-smoothing basin of a double-penalty null-space smooth (#1266), a
-/// collapsing-kernel spatial smooth (#1464), and the heavily-penalized GLM basin
-/// (#1074/#1426, e.g. gamma-log flat-valley) — by construction, and screening +
-/// the #1371 release-and-rerank lower-bound guard already certify the adopted seed.
-/// So the second full ~60-eval Arc solve was a ~2× cost with no basin benefit, and
-/// both budgets drop to 1. The Gaussian cut landed first (gated green on
-/// #1266/#1464/#1074); the GLM cut follows, gated on the heavily-penalized-basin
-/// regressions — bug_hunt_1426_gamma_log_reml_flat_valley, perf_1074_gamma_shape,
-/// and glm/binomial_logit_outer_work_1575 (all fit through the full pipeline in the
-/// executed shards). Survival stays at 1 (already), EFS/HybridEFS at 1, and
-/// GaussianLocationScale (and any other risk profile) is left at `requested_budget`
-/// unchanged.
+/// ARC and BFGS own different seed policies. ARC keeps the flexible/heavy
+/// two-basin hedge for parsimonious likelihoods; its curvature model can compare
+/// those basins directly. Gradient-only BFGS instead takes one neutral
+/// generalized-linear start when every coordinate is a smoothing parameter.
+/// Its promoted flexible/heavy pair was actively harmful on #2519: the flexible
+/// start exhausted at a lower objective, the heavy start certified the
+/// null-space-collapse basin, and the budget ended before the neutral seed that
+/// reaches the nonlinear optimum in 60 inner solves.
 #[inline]
 pub(crate) fn effective_seed_budget(
     requested_budget: usize,
@@ -195,6 +188,60 @@ pub(crate) fn effective_seed_budget(
         // here — it falls through to the requested budget, as before.)
         (Solver::Arc, gam_problem::SeedRiskProfile::Gaussian) => 1,
         _ => requested_budget,
+    }
+}
+
+#[inline]
+pub(crate) fn effective_seed_budget_for_config(
+    config: &gam_problem::SeedConfig,
+    solver: Solver,
+) -> usize {
+    if matches!(solver, Solver::Bfgs)
+        && matches!(
+            config.risk_profile,
+            gam_problem::SeedRiskProfile::GeneralizedLinear
+        )
+        && config.num_auxiliary_trailing == 0
+    {
+        1
+    } else {
+        effective_seed_budget(config.seed_budget, solver, config.risk_profile)
+    }
+}
+
+/// Put the neutral `λ=1` point first for the single-start BFGS GLM policy.
+///
+/// Screening is deliberately shallow and the ARC-oriented extreme promotion
+/// can rank an over-smoothed null-space basin ahead of this balanced interior
+/// point. BFGS has no second-order basin comparison, so its bounded policy starts
+/// at the invariant neutral point instead. Models with trailing auxiliary
+/// coordinates retain their caller-requested multistart policy.
+#[inline]
+pub(crate) fn prioritize_neutral_bfgs_glm_seed(
+    seeds: &mut Vec<Array1<f64>>,
+    config: &gam_problem::SeedConfig,
+    solver: Solver,
+    seed_budget: usize,
+) {
+    if seed_budget != 1
+        || !matches!(solver, Solver::Bfgs)
+        || !matches!(
+            config.risk_profile,
+            gam_problem::SeedRiskProfile::GeneralizedLinear
+        )
+        || config.num_auxiliary_trailing != 0
+    {
+        return;
+    }
+    let Some(neutral_idx) = seeds
+        .iter()
+        .position(|seed| seed.iter().all(|value| *value == 0.0))
+    else {
+        return;
+    };
+    if neutral_idx > 0 {
+        let neutral = seeds.remove(neutral_idx);
+        seeds.insert(0, neutral);
     }
 }
 

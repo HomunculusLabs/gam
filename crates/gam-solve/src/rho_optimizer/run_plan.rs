@@ -1,5 +1,14 @@
 use super::*;
 
+#[inline]
+fn should_start_next_seed(
+    started_seeds: usize,
+    seed_budget: usize,
+    has_certified_candidate: bool,
+) -> bool {
+    started_seeds < seed_budget || !has_certified_candidate
+}
+
 /// Require a continuation arrival to certify the literal outer seed itself.
 ///
 /// Only a state whose rho is bit-identical to the bounded literal seed and
@@ -671,12 +680,8 @@ pub(crate) fn run_outer_with_plan(
         )));
     }
 
-    let seed_budget = effective_seed_budget(
-        config.seed_config.seed_budget,
-        the_plan.solver,
-        config.seed_config.risk_profile,
-    )
-    .min(seeds.len());
+    let seed_budget =
+        effective_seed_budget_for_config(&config.seed_config, the_plan.solver).min(seeds.len());
     let explicit_initial_rho_owns_single_seed_budget = config.initial_rho.is_some()
         && seed_budget == 1
         && seeds.len() > 1
@@ -688,6 +693,12 @@ pub(crate) fn run_outer_with_plan(
             EstimationError::fatal_outer_evaluation("outer seed screening", error)
         })?;
     }
+    prioritize_neutral_bfgs_glm_seed(
+        &mut seeds,
+        &config.seed_config,
+        the_plan.solver,
+        seed_budget,
+    );
     log::debug!(
         "[OUTER] {context}: trying generated seeds directly (generated={}, budget={})",
         seeds.len(),
@@ -781,7 +792,7 @@ pub(crate) fn run_outer_with_plan(
     )> = None;
 
     'seed_attempts: for (seed_idx, seed) in seeds.iter().enumerate() {
-        if started_seeds == seed_budget {
+        if !should_start_next_seed(started_seeds, seed_budget, best.is_some()) {
             break;
         }
         // Domain entry is a property of this literal seed. A loop-local path

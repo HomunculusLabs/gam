@@ -199,6 +199,20 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
         fit.convergence_evidence().outer_certificate().is_some(),
         "outer REML fit must carry its analytic convergence certificate"
     );
+    let edf = fit
+        .edf_total()
+        .expect("the fitted three-smooth model must report total EDF");
+    assert!(
+        edf > 15.0,
+        "the three smooths collapsed toward their affine penalty null spaces: \
+         edf={edf:.4}, expected the nonlinear signal-recovery basin near 18.5 (#2519)",
+    );
+    assert!(
+        fit.reml_score < 550.0,
+        "the optimizer certified the wrong high-penalty basin: REML={:.6}, \
+         expected the measured signal-recovery basin near 503.7 (#2519)",
+        fit.reml_score,
+    );
     // mgcv's REML Newton converges in well under ~15 outer iterations on this
     // family of problem. Pin a generous multiple so the test fails loudly if
     // the outer loop regresses back to the ~150-eval grind reported in #1575.
