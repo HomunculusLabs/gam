@@ -2071,8 +2071,14 @@ pub fn matrix_free_arrow_evidence_log_det_surrogate(
                 )
                 .with_gpu_matvec(gpu_matvec);
                 let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
+                let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
                 let eval = plan
-                    .evaluate(&matvec, state.cfg.cg_rel_tol, state.cfg.cg_max_iters)
+                    .evaluate_preconditioned(
+                        &matvec,
+                        &precond,
+                        state.cfg.cg_rel_tol,
+                        state.cfg.cg_max_iters,
+                    )
                     .ok_or_else(|| ArrowSchurError::SchurFactorFailed {
                         reason: "rational log-det surrogate evaluation returned non-finite"
                             .to_string(),
@@ -2284,7 +2290,8 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
         .with_gpu_matvec(gpu_matvec);
     let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
-    let eval = plan.evaluate(&matvec, cg_rel_tol, cg_max_iters)?;
+    let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
+    let eval = plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
     Some((plan, eval))
 }
 
@@ -2354,9 +2361,13 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
         .with_gpu_matvec(gpu_matvec);
     let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
+    // The SAME shared-block diagonal every evaluation of this plan will use, so
+    // the rank-derivation ladder is not measuring a differently-conditioned
+    // iteration from the one production runs.
+    let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
     // Rank-0 pilot: fixes the |log|S|| scale and is the answer outright when no
     // deflation is requested or the bare bar already clears the target.
-    let pilot = base_plan.evaluate(&matvec, cg_rel_tol, cg_max_iters)?;
+    let pilot = base_plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
     if deflation_max_rank == 0 {
         return Some(base_plan);
     }
@@ -2389,15 +2400,16 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
         // the variance reduction, never biases the value (the split is exact for
         // any orthonormal `Q`), while an evaluation-grade solve there would burn
         // √κ-scale iterations per basis column for no accuracy in return.
-        let plan = base_plan.clone().with_two_sided_deflation(
+        let plan = base_plan.clone().with_two_sided_deflation_preconditioned(
             &matvec,
+            &precond,
             r.div_ceil(2),
             r / 2,
             deflation_subspace_iters,
             seed,
             (basis_cg_rel_tol, cg_max_iters),
         )?;
-        let eval = plan.evaluate(&matvec, cg_rel_tol, cg_max_iters)?;
+        let eval = plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
         if eval.std_err <= target {
             return Some(plan);
         }
@@ -2506,39 +2518,53 @@ struct ReducedSchurDiagonalPreconditioner {
     inverse_diagonal: Option<Array1<f64>>,
 }
 
+/// The shared-block diagonal `diag(H_ββ) + ρ_β` of the reduced Schur, as the
+/// preconditioner the SHIFTED rational-surrogate solves take.
+///
+/// Same diagonal, same justification as
+/// [`ReducedSchurDiagonalPreconditioner`] — but the surrogate solves
+/// `(S + t_ℓ I)` rather than `S`, and `diag(S + t I) = diag(S) + t`, so one
+/// diagonal serves the entire shift ladder with the shift added per solve.
+/// This is where the log-determinant lane's iterations actually go: `m` probes
+/// times the quadrature's node count, every one an unshifted-to-tiny-shift CG
+/// on the same wide-diagonal border (#2576).
+pub(crate) fn reduced_schur_shifted_preconditioner(
+    sys: &ArrowSchurSystem,
+    ridge_beta: f64,
+) -> ShiftedDiagonalPreconditioner {
+    match ReducedSchurDiagonalPreconditioner::shared_block_diagonal(sys, ridge_beta) {
+        Some(diagonal) => ShiftedDiagonalPreconditioner::from_operator_diagonal(&diagonal),
+        None => ShiftedDiagonalPreconditioner::identity(),
+    }
+}
+
 impl ReducedSchurDiagonalPreconditioner {
-    fn build(sys: &ArrowSchurSystem, ridge_beta: f64) -> Self {
+    /// `diag(H_ββ) + ρ_β`, or `None` when the assembled system carries no
+    /// strictly positive finite diagonal to scale by.
+    fn shared_block_diagonal(sys: &ArrowSchurSystem, ridge_beta: f64) -> Option<Array1<f64>> {
         if sys.k == 0 {
-            return Self {
-                inverse_diagonal: None,
-            };
+            return None;
         }
         let mut diag = Array1::<f64>::zeros(sys.k);
-        {
-            let Some(slice) = diag.as_slice_mut() else {
-                return Self {
-                    inverse_diagonal: None,
-                };
-            };
-            sys.penalty_diagonal_add(slice);
-        }
-        // A shared block that assembled no diagonal (or a non-positive /
-        // non-finite entry, which the eliminated PSD term can only make worse)
-        // has nothing to scale by: fall back to the identity rather than
-        // fabricating a scale. `S` is still SPD, so plain CG remains correct —
-        // just slower, exactly as before this preconditioner existed.
-        let mut inverse = Array1::<f64>::zeros(sys.k);
-        for index in 0..sys.k {
-            let value = diag[index] + ridge_beta;
-            if !(value.is_finite() && value > 0.0) {
-                return Self {
-                    inverse_diagonal: None,
-                };
+        sys.penalty_diagonal_add(diag.as_slice_mut()?);
+        for value in diag.iter_mut() {
+            *value += ridge_beta;
+            if !(value.is_finite() && *value > 0.0) {
+                return None;
             }
-            inverse[index] = 1.0 / value;
         }
+        Some(diag)
+    }
+
+    /// A shared block that assembled no diagonal (or a non-positive /
+    /// non-finite entry, which the eliminated PSD term can only make worse) has
+    /// nothing to scale by: fall back to the identity rather than fabricating a
+    /// scale. `S` is still SPD, so plain CG remains correct — just slower,
+    /// exactly as before this preconditioner existed.
+    fn build(sys: &ArrowSchurSystem, ridge_beta: f64) -> Self {
         Self {
-            inverse_diagonal: Some(inverse),
+            inverse_diagonal: Self::shared_block_diagonal(sys, ridge_beta)
+                .map(|diagonal| diagonal.mapv(|value| 1.0 / value)),
         }
     }
 

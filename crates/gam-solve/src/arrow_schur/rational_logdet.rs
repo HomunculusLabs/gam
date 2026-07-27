@@ -331,8 +331,39 @@ impl RationalLogdetPlan {
     /// reduction, never biases the estimate). Build this once at the plan's ρ, from
     /// the same operator the evaluations use.
     pub fn with_two_sided_deflation(
+        self,
+        matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+        top_rank: usize,
+        bottom_rank: usize,
+        subspace_iters: usize,
+        seed: u64,
+        cg: (f64, usize),
+    ) -> Option<Self> {
+        self.with_two_sided_deflation_preconditioned(
+            matvec,
+            &IDENTITY_SHIFT_PRECONDITIONER,
+            top_rank,
+            bottom_rank,
+            subspace_iters,
+            seed,
+            cg,
+        )
+    }
+
+    /// [`Self::with_two_sided_deflation`] with the same diagonal preconditioner
+    /// the evaluations use.
+    ///
+    /// The bottom-tail basis comes from INVERSE iteration — plain CG on the
+    /// UNSHIFTED operator at full `κ` — which is the single worst-conditioned
+    /// solve family in the whole surrogate. Preconditioning it is not optional
+    /// bookkeeping: without it, a wide-diagonal border makes the deflation ladder
+    /// (which doubles the rank until the error bar clears) spend its entire
+    /// budget inside `build_inverse_deflation_basis` (#2576). The basis only
+    /// steers variance reduction, so this cannot bias the value either way.
+    pub fn with_two_sided_deflation_preconditioned(
         mut self,
         matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+        preconditioner: &ShiftedDiagonalPreconditioner,
         top_rank: usize,
         bottom_rank: usize,
         subspace_iters: usize,
@@ -343,6 +374,7 @@ impl RationalLogdetPlan {
         let mut cols = build_deflation_basis(matvec, self.dim, top_rank, subspace_iters, seed);
         cols.extend(build_inverse_deflation_basis(
             matvec,
+            preconditioner,
             self.dim,
             bottom_rank,
             subspace_iters,
@@ -372,8 +404,43 @@ impl RationalLogdetPlan {
         cg_rel_tol: f64,
         cg_max_iters: usize,
     ) -> Option<RationalLogdetEval> {
+        self.evaluate_preconditioned(
+            matvec,
+            &IDENTITY_SHIFT_PRECONDITIONER,
+            cg_rel_tol,
+            cg_max_iters,
+        )
+    }
+
+    /// Evaluate with a diagonal preconditioner on the shifted solves.
+    ///
+    /// The plan is the STATISTICAL functional — probes, quadrature nodes,
+    /// deflation basis — and the shifted inverse is the NUMERICAL means of
+    /// evaluating it. A preconditioner changes only the second, so the value
+    /// this returns is the same function of the operator that
+    /// [`Self::evaluate`] returns, converged to the same certified residual,
+    /// and its [`Self::directional_derivative`] is still that value's exact
+    /// gradient. What changes is how many iterations each shifted solve takes:
+    /// on an operator whose diagonal spans orders of magnitude — the
+    /// overcomplete arrow border's atom firing counts — that is the difference
+    /// between converging and running to the iteration cap (#2576).
+    pub fn evaluate_preconditioned(
+        &self,
+        matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+        preconditioner: &ShiftedDiagonalPreconditioner,
+        cg_rel_tol: f64,
+        cg_max_iters: usize,
+    ) -> Option<RationalLogdetEval> {
         let solve = |shift: f64, rhs: &Array1<f64>, warm: &Array1<f64>| {
-            shifted_cg(matvec, shift, rhs, warm, cg_rel_tol, cg_max_iters)
+            shifted_pcg(
+                matvec,
+                preconditioner,
+                shift,
+                rhs,
+                warm,
+                cg_rel_tol,
+                cg_max_iters,
+            )
         };
         self.evaluate_with_shifted_solver(&solve)
     }
@@ -656,8 +723,78 @@ impl RationalLogdetPlan {
 /// approximate inverse while the derivative formula differentiates an exact
 /// inverse, re-opening the #2080 objective/gradient desynchronisation this
 /// module exists to prevent.
-fn shifted_cg(
+/// The no-op preconditioner: `shifted_cg` is `shifted_pcg` under it, so there
+/// is one shifted-solve implementation and one convergence certificate, not
+/// two that could drift apart.
+pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
+    ShiftedDiagonalPreconditioner { inverse: None };
+
+/// Diagonal preconditioner for the SHIFTED systems `(A + tI)` a rational
+/// log-determinant plan solves.
+///
+/// The caller supplies the *unshifted* operator's diagonal; the shift is added
+/// per solve, exactly as it is added to the operator. That single fact is what
+/// makes one diagonal serve the whole shift ladder: `diag(A + tI) = diag(A) + t`.
+///
+/// `inverse: None` is the identity, i.e. the unpreconditioned iteration. On the
+/// overcomplete arrow border the supplied diagonal is the shared block's own —
+/// the atom FIRING-COUNT distribution, orders of magnitude wide — and it is
+/// exactly the spread that stalls an unpreconditioned CG (#2576).
+#[derive(Debug, Clone)]
+pub struct ShiftedDiagonalPreconditioner {
+    inverse: Option<Array1<f64>>,
+}
+
+impl ShiftedDiagonalPreconditioner {
+    /// Build from the unshifted operator's diagonal. A non-finite or
+    /// non-positive entry means there is no usable scale, and the identity is
+    /// returned rather than a fabricated one: the iteration is then exactly the
+    /// unpreconditioned one, which is still correct for SPD `A`.
+    pub fn from_operator_diagonal(diagonal: &Array1<f64>) -> Self {
+        if diagonal
+            .iter()
+            .any(|value| !(value.is_finite() && *value > 0.0))
+        {
+            return Self { inverse: None };
+        }
+        Self {
+            inverse: Some(diagonal.clone()),
+        }
+    }
+
+    pub fn identity() -> Self {
+        Self { inverse: None }
+    }
+
+    /// Whether this preconditioner does anything.
+    pub fn is_identity(&self) -> bool {
+        self.inverse.is_none()
+    }
+
+    fn apply(&self, residual: &Array1<f64>, shift: f64) -> Array1<f64> {
+        match &self.inverse {
+            Some(diagonal) => {
+                let mut out = residual.clone();
+                for (value, scale) in out.iter_mut().zip(diagonal.iter()) {
+                    let denominator = scale + shift;
+                    if denominator > 0.0 && denominator.is_finite() {
+                        *value /= denominator;
+                    }
+                }
+                out
+            }
+            None => residual.clone(),
+        }
+    }
+}
+
+/// Preconditioned shifted CG. Identical certificate, restart policy and
+/// refusal contract as [`shifted_cg`] — the preconditioner steers the search
+/// directions and nothing else, so the returned iterate still satisfies the
+/// SAME true-residual / backward-error test before it is accepted.
+fn shifted_pcg(
     matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+    preconditioner: &ShiftedDiagonalPreconditioner,
     t: f64,
     b: &Array1<f64>,
     y0: &Array1<f64>,
@@ -675,16 +812,22 @@ fn shifted_cg(
     let mut y = y0.clone();
     let mut r = b - &apply(y.view());
     let b_norm = b.dot(b).sqrt().max(f64::MIN_POSITIVE);
-    let mut p = r.clone();
-    let mut rs = r.dot(&r);
-    if !rs.is_finite() {
+    let mut z = preconditioner.apply(&r, t);
+    let mut p = z.clone();
+    // `rs` is the PRECONDITIONED inner product `rᵀz` that drives the recurrence;
+    // `residual_norm_sq` is the plain `rᵀr` every convergence test below reads.
+    // Under the identity preconditioner they coincide, so this is the same
+    // iteration `shifted_cg` always ran.
+    let mut rs = r.dot(&z);
+    let mut residual_norm_sq = r.dot(&r);
+    if !(rs.is_finite() && residual_norm_sq.is_finite()) {
         return None;
     }
     let tol = rel_tol * b_norm;
     let mut iters = 0usize;
     let mut observed_operator_norm = 0.0_f64;
     loop {
-        if rs.sqrt() <= tol {
+        if residual_norm_sq.sqrt() <= tol {
             // Recursive CG residuals lose their equality to `b - A y` through
             // roundoff, especially on the smallest shifts.  A recursive
             // convergence report is therefore only a prompt to inspect the
@@ -725,9 +868,16 @@ fn shifted_cg(
             if iters >= max_iters {
                 return None;
             }
+            // The restart's `true_rs` is not stored: control falls straight
+            // into the matvec below, which recomputes `residual_norm_sq` from
+            // the updated residual before the next convergence test reads it.
             r = true_residual;
-            rs = true_rs;
-            p = r.clone();
+            z = preconditioner.apply(&r, t);
+            rs = r.dot(&z);
+            if !rs.is_finite() {
+                return None;
+            }
+            p = z.clone();
         }
         if iters >= max_iters {
             return None;
@@ -745,14 +895,19 @@ fn shifted_cg(
         if rayleigh.is_finite() {
             observed_operator_norm = observed_operator_norm.max(rayleigh);
         }
+        if rs == 0.0 {
+            return None;
+        }
         let alpha = rs / denom;
         y.scaled_add(alpha, &p);
         r.scaled_add(-alpha, &ap);
-        let rs_new = r.dot(&r);
-        if !rs_new.is_finite() {
+        residual_norm_sq = r.dot(&r);
+        z = preconditioner.apply(&r, t);
+        let rs_new = r.dot(&z);
+        if !(rs_new.is_finite() && residual_norm_sq.is_finite()) {
             return None;
         }
-        p = &r + &(&p * (rs_new / rs));
+        p = &z + &(&p * (rs_new / rs));
         rs = rs_new;
         iters += 1;
     }
@@ -888,6 +1043,7 @@ fn build_deflation_basis(
 /// cost per outer solve, never per evaluation.
 fn build_inverse_deflation_basis(
     matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+    preconditioner: &ShiftedDiagonalPreconditioner,
     dim: usize,
     rank: usize,
     iters: usize,
@@ -913,7 +1069,18 @@ fn build_inverse_deflation_basis(
         // tolerance; an exhausted solve invalidates the requested bottom peel.
         let applied: Option<Vec<Array1<f64>>> = cols
             .iter()
-            .map(|c| shifted_cg(matvec, 0.0, c, &zero, cg_rel_tol, cg_max_iters).map(|(y, _)| y))
+            .map(|c| {
+                shifted_pcg(
+                    matvec,
+                    preconditioner,
+                    0.0,
+                    c,
+                    &zero,
+                    cg_rel_tol,
+                    cg_max_iters,
+                )
+                .map(|(y, _)| y)
+            })
             .collect();
         cols = orthonormalize(&applied?);
     }
@@ -1236,12 +1403,14 @@ mod tests {
         let matvec = |v: ArrayView1<f64>| a.dot(&v);
 
         assert!(
-            shifted_cg(&matvec, 0.0, &b, &zero, 1.0e-12, 1).is_none(),
+            shifted_pcg(&matvec, &IDENTITY_SHIFT_PRECONDITIONER, 0.0, &b, &zero, 1.0e-12, 1)
+                .is_none(),
             "one CG step cannot solve a two-eigenvalue system to 1e-12; the \
              iteration-capped last iterate must be refused"
         );
-        let (solved, iterations) = shifted_cg(&matvec, 0.0, &b, &zero, 1.0e-12, 2)
-            .expect("two-dimensional SPD CG must converge in at most two steps");
+        let (solved, iterations) =
+            shifted_pcg(&matvec, &IDENTITY_SHIFT_PRECONDITIONER, 0.0, &b, &zero, 1.0e-12, 2)
+                .expect("two-dimensional SPD CG must converge in at most two steps");
         let residual = &b - &matvec(solved.view());
         assert!(
             residual.dot(&residual).sqrt() <= 1.0e-12 * b.dot(&b).sqrt(),
