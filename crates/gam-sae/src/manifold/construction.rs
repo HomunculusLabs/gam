@@ -788,6 +788,15 @@ impl SaeManifoldTerm {
             ));
         }
         for (k, atom) in atoms.iter().enumerate() {
+            // Same door check as the support-sparse lane (#2572): this term's
+            // kernels subscript `decoder[[basis, output]]` with `basis` bounded
+            // by `basis_size()`, which is read off `basis_values` — a different
+            // array. The three cross-atom checks below cover `n_obs`,
+            // `output_dim` and `latent_dim`; the atom's own contract covers the
+            // basis/decoder/Gram coupling, which is what an unbounded subscript
+            // actually depends on.
+            atom.validate_shape_contract()
+                .map_err(|error| format!("SaeManifoldTerm::new: atom {k}: {error}"))?;
             if atom.n_obs() != n {
                 return Err(format!(
                     "SaeManifoldTerm::new: atom {k} has n_obs={} but atom 0 has {n}",
@@ -1293,7 +1302,7 @@ impl SaeManifoldTerm {
         for col in 0..p {
             let mut norm = 0.0_f64;
             for r in 0..m {
-                let v = atom.decoder_coefficients[[r, col]];
+                let v = atom.decoder_coefficients()[[r, col]];
                 norm += v * v;
             }
             if norm > best_norm {
@@ -1301,7 +1310,7 @@ impl SaeManifoldTerm {
                 j_lead = col;
             }
         }
-        let beta = atom.decoder_coefficients.column(j_lead).to_owned();
+        let beta = atom.decoder_coefficients().column(j_lead).to_owned();
 
         // Active rows: a_{ik} > 0.
         let active: Vec<usize> = (0..n)
@@ -1902,7 +1911,7 @@ impl SaeManifoldTerm {
         let mut signal_upper_bounds = Vec::with_capacity(self.k_atoms());
         for atom in 0..self.k_atoms() {
             let gram = &grams[atom];
-            let decoder = &self.atoms[atom].decoder_coefficients;
+            let decoder = self.atoms[atom].decoder_coefficients();
             let m = decoder.nrows();
             if gram.dim() != (m, m) {
                 return Err(format!(
@@ -2053,7 +2062,7 @@ impl SaeManifoldTerm {
             let lam_k = lam[k];
             let d = realised_rank_charge_dof(
                 &grams[k],
-                &self.atoms[k].decoder_coefficients,
+                self.atoms[k].decoder_coefficients(),
                 n_eff_k,
                 p_out,
                 r_floor,
@@ -2488,7 +2497,7 @@ impl SaeManifoldTerm {
                 Some(crate::identifiability::AtomParameterView {
                     basis_values: atom.basis_values.clone(),
                     basis_jacobian: atom.basis_jacobian.clone(),
-                    decoder: atom.decoder_coefficients.clone(),
+                    decoder: atom.decoder_coefficients().clone(),
                     coords,
                     activations,
                     basis_second_jet,
@@ -3292,7 +3301,7 @@ impl SaeManifoldTerm {
             let coords = match atom.factored_coordinates()? {
                 Some(c) => c,
                 // Full-`B` path: the decoder itself is the coordinate matrix.
-                None => atom.decoder_coefficients.clone(),
+                None => atom.decoder_coefficients().clone(),
             };
             for basis_col in 0..m {
                 for j in 0..r {
@@ -3338,7 +3347,7 @@ impl SaeManifoldTerm {
                 self.atoms[atom_idx].set_factored_coordinates(coords.view())?;
             } else {
                 // Full-`B` path: the coordinates ARE the decoder.
-                self.atoms[atom_idx].decoder_coefficients = coords;
+                self.atoms[atom_idx].set_decoder_coefficients(coords)?;
             }
         }
         Ok(())
@@ -3679,7 +3688,7 @@ impl SaeManifoldTerm {
             for basis_col in 0..m {
                 for out_col in 0..p {
                     out[off + basis_col * p + out_col] =
-                        atom.decoder_coefficients[[basis_col, out_col]];
+                        atom.decoder_coefficients()[[basis_col, out_col]];
                 }
             }
         }
@@ -3701,7 +3710,7 @@ impl SaeManifoldTerm {
             let off = offsets[atom_idx];
             for basis_col in 0..m {
                 for out_col in 0..p {
-                    atom.decoder_coefficients[[basis_col, out_col]] =
+                    atom.decoder_coefficients_mut()[[basis_col, out_col]] =
                         beta[off + basis_col * p + out_col];
                 }
             }
@@ -3753,7 +3762,7 @@ impl SaeManifoldTerm {
             let off = offsets[atom_idx] / p;
             for basis_col in 0..m {
                 for out_col in 0..p {
-                    self.atoms[atom_idx].decoder_coefficients[[basis_col, out_col]] =
+                    self.atoms[atom_idx].decoder_coefficients_mut()[[basis_col, out_col]] =
                         beta[[off + basis_col, out_col]];
                 }
             }
@@ -5016,7 +5025,7 @@ impl SaeManifoldTerm {
             // Decode `Φ_k(t̂) · B_k` (n×M · M×p) through the faer GEMM; small
             // shapes fall back to `ndarray::dot` inside `fast_ab` (reduction
             // order may differ, acceptable per the crate convention).
-            let decoded = fast_ab(&phi, &atom.decoder_coefficients); // (n × p)
+            let decoded = fast_ab(&phi, atom.decoder_coefficients()); // (n × p)
             for row in 0..n {
                 let z = amplitudes[[row, atom_idx]];
                 if z == 0.0 {
@@ -5853,14 +5862,14 @@ impl SaeManifoldTerm {
             .map(|atom| {
                 (
                     atom.smooth_penalty().view(),
-                    atom.decoder_coefficients.view(),
+                    atom.decoder_coefficients().view(),
                 )
             })
             .collect();
         let sb_all = batched_smooth_sb(&sb_inputs, false, self.gpu_policy)?;
         let mut acc = 0.0;
         for (atom_idx, (atom, sb)) in self.atoms.iter().zip(sb_all.iter()).enumerate() {
-            acc += 0.5 * lambda_smooth[atom_idx] * (&atom.decoder_coefficients * sb).sum();
+            acc += 0.5 * lambda_smooth[atom_idx] * (atom.decoder_coefficients() * sb).sum();
         }
         Ok(acc)
     }
@@ -5878,7 +5887,7 @@ impl SaeManifoldTerm {
             .map(|atom| {
                 (
                     atom.smooth_penalty().view(),
-                    atom.decoder_coefficients.view(),
+                    atom.decoder_coefficients().view(),
                 )
             })
             .collect();
@@ -5886,7 +5895,7 @@ impl SaeManifoldTerm {
         let mut per_atom = vec![0.0_f64; self.atoms.len()];
         for (atom_idx, (atom, sb)) in self.atoms.iter().zip(sb_all.iter()).enumerate() {
             per_atom[atom_idx] =
-                0.5 * lambda_smooth[atom_idx] * (&atom.decoder_coefficients * sb).sum();
+                0.5 * lambda_smooth[atom_idx] * (atom.decoder_coefficients() * sb).sum();
         }
         Ok(per_atom)
     }

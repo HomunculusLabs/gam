@@ -342,7 +342,7 @@ pub struct Tier05SinkAtom {
 impl Tier05SinkAtom {
     /// Dense training reconstruction of the sink atom (`N×P`).
     pub fn reconstruction(&self) -> Array2<f64> {
-        self.atom.basis_values.dot(&self.atom.decoder_coefficients)
+        self.atom.basis_values.dot(self.atom.decoder_coefficients())
     }
 
     /// Peel the sink from a same-row residual matrix before semantic charting.
@@ -498,7 +498,7 @@ pub fn fit_tier05_sink_atom(
     )?
     .with_basis_second_jet(evaluator);
 
-    let reconstruction = atom.basis_values.dot(&atom.decoder_coefficients);
+    let reconstruction = atom.basis_values.dot(atom.decoder_coefficients());
     let mut rss = 0.0f64;
     let mut tss = 0.0f64;
     for row in 0..n {

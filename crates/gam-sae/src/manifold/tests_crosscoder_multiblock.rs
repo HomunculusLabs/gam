@@ -297,8 +297,8 @@ fn multiblock_reduces_to_two_block_bit_identically_at_k2() {
     // Same fitted decoders, to the bit.
     assert!(
         bit_identical(
-            &term_a.atoms[0].decoder_coefficients,
-            &term_b.atoms[0].decoder_coefficients
+            term_a.atoms[0].decoder_coefficients(),
+            term_b.atoms[0].decoder_coefficients()
         ),
         "fitted decoders differ between the two-block and multi-block paths"
     );
@@ -402,7 +402,7 @@ fn crosscoder_two_layers_shares_one_latent_and_selects_lambda() {
     let via_accessor = term.layer_decoder(0, 0).unwrap();
     let manual = blocks[0].split_honest_decoder(
         term.atoms[0]
-            .decoder_coefficients
+            .decoder_coefficients()
             .slice(ndarray::s![.., p_x..p_tot]),
     );
     assert!(
@@ -598,8 +598,8 @@ fn empty_layout_is_a_pure_descriptor_byte_identical_to_plain_fit() {
 
     assert!(
         bit_identical(
-            &term_a.atoms[0].decoder_coefficients,
-            &term_b.atoms[0].decoder_coefficients
+            term_a.atoms[0].decoder_coefficients(),
+            term_b.atoms[0].decoder_coefficients()
         ),
         "an empty crosscoder layout must not perturb the fitted decoders"
     );

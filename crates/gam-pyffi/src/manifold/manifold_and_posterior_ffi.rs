@@ -6690,7 +6690,7 @@ fn manifold_sae_hybrid_linear_images(
 }
 
 /// A single fitted atom's object surface (#2091). Mirrors the attributes
-/// `SaeManifoldAtomFit` exposed (`atom.basis`, `atom.decoder_coefficients`,
+/// `SaeManifoldAtomFit` exposed (`atom.basis`, `atom.decoder_coefficients()`,
 /// `atom.decoder_covariance` reconstructed dense, the shape band, …) so
 /// `ManifoldSaeCore.atoms` stays a list of objects consumers read by attribute,
 /// not a list of dicts. Additive: the Python dataclass remains the live facade.
@@ -7626,7 +7626,7 @@ impl ManifoldSaeCore {
         }
     }
     /// The per-atom object surface — a list of [`AtomCore`] handles, each read by
-    /// attribute (`atom.basis`, `atom.decoder_coefficients`, …), NOT a list of
+    /// attribute (`atom.basis`, `atom.decoder_coefficients()`, …), NOT a list of
     /// dicts. This preserves the `SaeManifoldAtomFit` duck-type consumers use.
     #[getter]
     fn atoms<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {

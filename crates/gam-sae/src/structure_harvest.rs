@@ -951,7 +951,7 @@ fn run_within_atom_carve(
     let (m_a, m_b) = evaluator.factor_basis_sizes()?;
     let build = carve_input_from_fitted_atom(
         a.basis_values.view(),
-        a.decoder_coefficients.view(),
+        a.decoder_coefficients().view(),
         m_a,
         m_b,
     );
@@ -1153,7 +1153,7 @@ fn atom_active_rows(term: &SaeManifoldTerm, atom: usize) -> Vec<usize> {
 /// `(rows.len() × p)`.
 fn decoded_points_at(atom: &SaeManifoldAtom, rows: &[usize]) -> Array2<f64> {
     let phi_sub = atom.basis_values.select(Axis(0), rows);
-    phi_sub.dot(&atom.decoder_coefficients)
+    phi_sub.dot(atom.decoder_coefficients())
 }
 
 /// Decode a standard periodic-harmonic coefficient block at explicit
@@ -1303,8 +1303,8 @@ fn fit_seam_transition(term: &SaeManifoldTerm, a: usize, b: usize) -> Option<Sea
     {
         return None;
     }
-    let p = atom_a.decoder_coefficients.ncols();
-    if p == 0 || p != atom_b.decoder_coefficients.ncols() {
+    let p = atom_a.decoder_coefficients().ncols();
+    if p == 0 || p != atom_b.decoder_coefficients().ncols() {
         return None;
     }
     let rows_a = atom_active_rows(term, a);
@@ -1733,8 +1733,8 @@ fn fit_sphere_seam_transition(
     }
     let atom_a = &term.atoms[a];
     let atom_b = &term.atoms[b];
-    let p = atom_a.decoder_coefficients.ncols();
-    if p == 0 || p != atom_b.decoder_coefficients.ncols() {
+    let p = atom_a.decoder_coefficients().ncols();
+    if p == 0 || p != atom_b.decoder_coefficients().ncols() {
         return None;
     }
     let l_a = sphere_linear_block(atom_a)?;
@@ -1900,7 +1900,7 @@ fn harvest_glue_proposals(
         .map(|atom| {
             let at = &term.atoms[atom];
             if at.latent_dim() == 1 && matches!(at.basis_kind(), SaeAtomBasisKind::Periodic) {
-                GrassmannFrame::from_decoder_row_space(at.decoder_coefficients.view())
+                GrassmannFrame::from_decoder_row_space(at.decoder_coefficients().view())
             } else {
                 None
             }
@@ -2713,7 +2713,7 @@ fn duplicate_atom(
     // combined decoder `½·parent + ½·child = original` EXACTLY unchanged (the
     // ±ε·s_ij cancel), so the warm-start is preserved. `ε ≫ fp noise`.
     {
-        let (m, p) = atoms[parent].decoder_coefficients.dim();
+        let (m, p) = atoms[parent].decoder_coefficients().dim();
         let s = |i: usize, j: usize| -> f64 {
             // Deterministic, varying, NON-ZERO pattern in [-1,-0.2]∪[0.2,1]. It
             // must vary across (i,j) (so `parent − child = −2·f_ij·D_ij` points
@@ -2725,8 +2725,8 @@ fn duplicate_atom(
         for i in 0..m {
             for j in 0..p {
                 let f = FISSION_SYMMETRY_BREAK_EPS * s(i, j);
-                atoms[parent].decoder_coefficients[[i, j]] *= 1.0 - f;
-                child_atom.decoder_coefficients[[i, j]] *= 1.0 + f;
+                atoms[parent].decoder_coefficients_mut()[[i, j]] *= 1.0 - f;
+                child_atom.decoder_coefficients_mut()[[i, j]] *= 1.0 + f;
             }
         }
         // The Grassmann decoder frame is derived from the coefficients; drop both
@@ -5464,7 +5464,7 @@ fn born_atom(
             // dim, basis values + Jacobian + reference Gram); only its decoder carries
             // the residual-factor direction.
             let mut atom = template.clone();
-            atom.decoder_coefficients = factor_dir.to_owned();
+            atom.set_decoder_coefficients(factor_dir.to_owned())?;
             (atom, term.assignment.coords[0].clone())
         }
     };
@@ -6244,7 +6244,7 @@ fn is_linear_like(kind: &SaeAtomBasisKind) -> bool {
 /// A linear atom's ambient reconstruction image `G = Φ · B` (`n × p`, before
 /// routing weight) — the geometric locus it parses.
 fn atom_ambient_image(atom: &SaeManifoldAtom) -> Array2<f64> {
-    atom.basis_values.dot(&atom.decoder_coefficients)
+    atom.basis_values.dot(atom.decoder_coefficients())
 }
 
 /// Top principal direction of the rows of `img` about `center`, restricted to

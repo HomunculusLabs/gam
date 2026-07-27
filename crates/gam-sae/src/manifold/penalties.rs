@@ -219,7 +219,7 @@ impl SaeManifoldTerm {
         let norm_sq: Vec<f64> = self
             .atoms
             .iter()
-            .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+            .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
             .collect();
         // Candidate pair set: only co-active atom pairs. The repulsion is the
         // anti-collapse cure for two atoms that drift onto the SAME decoder
@@ -256,8 +256,8 @@ impl SaeManifoldTerm {
             // of any rank now engage the repulsion. (The `norm_sq > 0` guard above
             // and the Frobenius energy the repulsion OPERATOR then penalizes are
             // unchanged — only the on/off GATE quantity is corrected.)
-            if self.atoms[j].decoder_coefficients.ncols()
-                != self.atoms[k].decoder_coefficients.ncols()
+            if self.atoms[j].decoder_coefficients().ncols()
+                != self.atoms[k].decoder_coefficients().ncols()
             {
                 continue;
             }
@@ -517,7 +517,7 @@ impl SaeManifoldTerm {
         let norm_sq: Vec<f64> = self
             .atoms
             .iter()
-            .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+            .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
             .collect();
         let floor2 = Self::barrier_norm_floor_sq(&norm_sq);
         self.amplitude_barrier_gate = (floor2 > 0.0).then_some(floor2);
@@ -556,7 +556,7 @@ impl SaeManifoldTerm {
         let offsets = self.beta_offsets();
         let mut wrote = false;
         for (atom_idx, atom) in self.atoms.iter().enumerate() {
-            let b = &atom.decoder_coefficients;
+            let b = atom.decoder_coefficients();
             let m = b.nrows();
             if m == 0 || b.ncols() != p {
                 continue;
@@ -612,7 +612,7 @@ impl SaeManifoldTerm {
         let p = self.output_dim();
         let mut acc = 0.0_f64;
         for atom in &self.atoms {
-            let b = &atom.decoder_coefficients;
+            let b = atom.decoder_coefficients();
             if b.nrows() == 0 || b.ncols() != p {
                 continue;
             }
@@ -1159,7 +1159,7 @@ impl SaeManifoldTerm {
         let norm_sq: Vec<f64> = self
             .atoms
             .iter()
-            .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+            .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
             .collect();
         let floor2 = Self::barrier_norm_floor_sq(&norm_sq);
         let mut acc = 0.0_f64;
@@ -1210,8 +1210,8 @@ impl SaeManifoldTerm {
     /// Squared cross-Gram shape energy `‖B_j B_kᵀ‖²_F = Σ_{a,b}(Σ_o B_j[a,o]B_k[b,o])²`
     /// for atoms `j, k` (the un-normalized numerator of `c_jk²`).
     fn barrier_cross_shape_energy(&self, j: usize, k: usize) -> f64 {
-        let bj = &self.atoms[j].decoder_coefficients;
-        let bk = &self.atoms[k].decoder_coefficients;
+        let bj = self.atoms[j].decoder_coefficients();
+        let bk = self.atoms[k].decoder_coefficients();
         let (m_j, p) = (bj.nrows(), bj.ncols());
         let m_k = bk.nrows();
         if bk.ncols() != p {
@@ -1272,8 +1272,8 @@ impl SaeManifoldTerm {
     /// differentiated collinearity scalar of the separation barrier and repulsion
     /// gate (its analytic gradient is derived in `add_sae_separation_barrier`).
     pub(crate) fn decoder_gram_cosine_sq(&self, j: usize, k: usize) -> f64 {
-        let bj = &self.atoms[j].decoder_coefficients;
-        let bk = &self.atoms[k].decoder_coefficients;
+        let bj = self.atoms[j].decoder_coefficients();
+        let bk = self.atoms[k].decoder_coefficients();
         let p = bj.ncols();
         if bk.ncols() != p || p == 0 {
             return 0.0;
@@ -1352,7 +1352,7 @@ impl SaeManifoldTerm {
         let norm_sq: Vec<f64> = self
             .atoms
             .iter()
-            .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+            .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
             .collect();
         let floor2 = Self::barrier_norm_floor_sq(&norm_sq);
         let mut wrote = false;
@@ -1407,8 +1407,8 @@ impl SaeManifoldTerm {
             // gradient and the bounded Levenberg majorizer as we go.
             let mut edge_v: Vec<Vec<(usize, f64)>> = Vec::with_capacity(ne);
             for e in &comp.edges {
-                let bj = &self.atoms[e.j].decoder_coefficients;
-                let bk = &self.atoms[e.k].decoder_coefficients;
+                let bj = self.atoms[e.j].decoder_coefficients();
+                let bk = self.atoms[e.k].decoder_coefficients();
                 let (m_j, pj) = (bj.nrows(), bj.ncols());
                 let m_k = bk.nrows();
                 if pj != p || bk.ncols() != p {
@@ -2046,7 +2046,7 @@ impl SaeManifoldTerm {
         // Leaving d_max on the clone makes `value` reshape a d=1 atom as d=2
         // and then ask `pullback_metric` for p*2 Jacobian columns.
         let atom = &self.atoms[atom_idx];
-        let p = atom.decoder_coefficients.ncols();
+        let p = atom.decoder_coefficients().ncols();
         let mut corrected: IsometryPenalty = (**iso).clone();
         corrected.target = PsiSlice::full(coord.len(), Some(atom.latent_dim()));
         corrected.p_out = p;
@@ -2104,7 +2104,7 @@ impl SaeManifoldTerm {
                             ),
                         });
                     }
-                    let b = &atom.decoder_coefficients;
+                    let b = atom.decoder_coefficients();
                     let mut jac2 = Array2::<f64>::zeros((n_obs, p * d * d));
                     for n in 0..n_obs {
                         for i in 0..p {
@@ -2258,7 +2258,7 @@ impl SaeManifoldTerm {
         let n_obs = coord.n_obs();
         let d = coord.latent_dim();
         let atom = &self.atoms[atom_idx];
-        let p = atom.decoder_coefficients.ncols();
+        let p = atom.decoder_coefficients().ncols();
         let m = atom.basis_size();
         let Some(jac) = corrected.jacobian_cache() else {
             return;
@@ -2506,7 +2506,7 @@ impl SaeManifoldTerm {
     ) {
         let atom = &self.atoms[atom_idx];
         let d = coord.latent_dim();
-        let p = atom.decoder_coefficients.ncols();
+        let p = atom.decoder_coefficients().ncols();
         let m = atom.basis_size();
         let n_obs = coord.n_obs();
         let grad_jac = corrected.grad_jacobian(coord.as_flat().view(), rho_local);
@@ -2995,8 +2995,8 @@ mod tests_findings_234 {
             for col in 0..p {
                 let mut plus = two_atom_term_with_decoders(dec0.clone(), dec1.clone());
                 let mut minus = two_atom_term_with_decoders(dec0.clone(), dec1.clone());
-                plus.atoms[1].decoder_coefficients[[a, col]] += h;
-                minus.atoms[1].decoder_coefficients[[a, col]] -= h;
+                plus.atoms[1].decoder_coefficients_mut()[[a, col]] += h;
+                minus.atoms[1].decoder_coefficients_mut()[[a, col]] -= h;
                 let vp = plus.separation_barrier_value(1.0);
                 let vm = minus.separation_barrier_value(1.0);
                 let fd = (vp - vm) / (2.0 * h);

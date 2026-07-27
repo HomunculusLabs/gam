@@ -112,7 +112,7 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
                 "#2512 fixture requires M={basis_width} periodic basis columns"
             );
             assert_eq!(
-                term.atoms[0].decoder_coefficients.dim(),
+                term.atoms[0].decoder_coefficients().dim(),
                 (basis_width, output_dim),
                 "#2512 fixture requires an M={basis_width} by p={output_dim} Arrow border"
             );
@@ -123,7 +123,7 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
                 .unwrap();
         }
 
-        let reference = &fits[0].0.atoms[0].decoder_coefficients;
+        let reference = fits[0].0.atoms[0].decoder_coefficients();
         assert_eq!(
             reference.len(),
             basis_width * output_dim,
@@ -139,7 +139,7 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
             "#2512 M={basis_width} fixture must exercise a real fitted decoder, got norm {reference_norm:.6e}"
         );
         for (repetition, (term, _)) in fits.iter().enumerate().skip(1) {
-            let decoder = &term.atoms[0].decoder_coefficients;
+            let decoder = term.atoms[0].decoder_coefficients();
             let differing = reference
                 .iter()
                 .zip(decoder.iter())

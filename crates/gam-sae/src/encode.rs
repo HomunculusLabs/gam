@@ -606,7 +606,7 @@ pub(crate) fn reconstruction_jet_sups(
         .then(|| atom.full_width_decoder());
     let decoder = full_decoder
         .as_ref()
-        .map_or_else(|| atom.decoder_coefficients.view(), |b| b.view());
+        .map_or_else(|| atom.decoder_coefficients().view(), |b| b.view());
     if matches!(
         atom.basis_kind(),
         crate::manifold::SaeAtomBasisKind::Periodic
@@ -1347,7 +1347,7 @@ fn joint_encode_value_grad_hess(
         for basis_col in 0..m {
             let phi_v = phi[[0, basis_col]];
             for out in 0..p {
-                let b = atom.decoder_coefficients[[basis_col, out]];
+                let b = atom.decoder_coefficients()[[basis_col, out]];
                 recon[out] += z * phi_v * b;
                 for axis in 0..d {
                     jac[[start + axis, out]] += z * dphi[[0, basis_col, axis]] * b;
@@ -1571,7 +1571,7 @@ pub(crate) fn encode_grad_hess_core(
             phi.dim()
         ));
     }
-    let decoder = &atom.decoder_coefficients;
+    let decoder = atom.decoder_coefficients();
     // Reconstruction m(t) = z · Bᵀ Φ(t)  ∈ ℝᵖ.
     let mut recon = Array1::<f64>::zeros(p);
     for basis_col in 0..m {
@@ -3284,7 +3284,7 @@ impl EncodeAtlas {
         // Step 3: ONE GEMM recon = Φ·B (n × p), then per-row amplitude scale z.
         // m(t̂) = z·Φ(t̂)·B, matching the module header and `fill_decoded_row`'s
         // `Φ·decoder` accumulation (the amplitude is applied once here).
-        let decoded = phi.dot(&atom.decoder_coefficients); // (n × p), amplitude-1
+        let decoded = phi.dot(atom.decoder_coefficients()); // (n × p), amplitude-1
         for row in 0..n {
             if !valid[row] {
                 continue; // stays zeroed — uncertified, like warm_start `None`.
@@ -3726,7 +3726,7 @@ pub(crate) fn center_beta(atom: &SaeManifoldAtom, center: &Array1<f64>, ridge: f
     let m = atom.basis_size();
     let coords = center.view().to_shape((1, d)).ok()?.to_owned();
     let (_phi, jet) = evaluator.evaluate(coords.view()).ok()?;
-    let decoder = &atom.decoder_coefficients;
+    let decoder = atom.decoder_coefficients();
     // J_m[axis] = Bᵀ (∂Φ/∂t_axis) ∈ ℝᵖ (amplitude-1; curvature scales with z²
     // and is absorbed conservatively by the amplitude-bounded Lipschitz term).
     let mut jm = Array2::<f64>::zeros((d, p));
@@ -3870,7 +3870,7 @@ pub(crate) fn center_amortized_jacobian(
     let m = atom.basis_size();
     let coords = center.view().to_shape((1, d)).ok()?.to_owned();
     let (phi, jet) = evaluator.evaluate(coords.view()).ok()?;
-    let decoder = &atom.decoder_coefficients;
+    let decoder = atom.decoder_coefficients();
     // m₁(t_c) = BᵀΦ(t_c) ∈ ℝᵖ (amplitude-1 center reconstruction).
     let mut recon = Array1::<f64>::zeros(p);
     for basis_col in 0..m {
@@ -4113,7 +4113,7 @@ pub(crate) fn encode_reconstruction_error_core(
     for out in 0..p {
         let mut recon = 0.0;
         for basis_col in 0..m {
-            recon += phi[[0, basis_col]] * atom.decoder_coefficients[[basis_col, out]];
+            recon += phi[[0, basis_col]] * atom.decoder_coefficients()[[basis_col, out]];
         }
         residual[out] = x[out] - amplitude * recon;
     }
@@ -4497,7 +4497,7 @@ fn atom_row_tangents(
     let p = atom.output_dim();
     let (_phi, jet) = evaluator.evaluate(coords)?; // jet: (n, M, d)
     let m = jet.shape()[1];
-    let b = &atom.decoder_coefficients; // (M, p)
+    let b = atom.decoder_coefficients(); // (M, p)
     let mut out = Vec::with_capacity(n);
     for row in 0..n {
         let mut tan = Array2::<f64>::zeros((d, p));

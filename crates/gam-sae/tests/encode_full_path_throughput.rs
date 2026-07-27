@@ -164,7 +164,7 @@ fn reconstruct(
 ) -> Array2<f64> {
     let evaluator = atom.basis_evaluator.as_ref().expect("atom has evaluator");
     let (phi, _) = evaluator.evaluate(coords.view()).unwrap();
-    let mut recon = phi.dot(&atom.decoder_coefficients); // (n × p)
+    let mut recon = phi.dot(atom.decoder_coefficients()); // (n × p)
     for i in 0..coords.nrows() {
         let z = amplitudes[i];
         for c in 0..recon.ncols() {

@@ -88,7 +88,7 @@ fn checkpoint_banks_resumes_and_discards_across_objectives() {
         first.checkpoint_path.exists(),
         "an improving evaluation must leave a banked checkpoint on disk"
     );
-    let fitted_decoder = first.term.atoms[0].decoder_coefficients.clone();
+    let fitted_decoder = first.term.atoms[0].decoder_coefficients().clone();
 
     // A fresh job on the identical data: resume must verify + install.
     let (mut second, _) = tiny_objective(salt);
@@ -105,7 +105,7 @@ fn checkpoint_banks_resumes_and_discards_across_objectives() {
         flat.len(),
         "resumed rho must match the outer coordinate length"
     );
-    let resumed_decoder = second.term.atoms[0].decoder_coefficients.clone();
+    let resumed_decoder = second.term.atoms[0].decoder_coefficients().clone();
     assert_eq!(
         resumed_decoder, fitted_decoder,
         "resume must install the banked decoder exactly (value-for-value)"

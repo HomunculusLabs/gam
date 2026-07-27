@@ -3069,14 +3069,14 @@ impl SaeManifoldTerm {
             .map(|atom| {
                 (
                     atom.smooth_penalty().view(),
-                    atom.decoder_coefficients.view(),
+                    atom.decoder_coefficients().view(),
                 )
             })
             .collect();
         let sb_all = batched_smooth_sb(&sb_inputs, true, self.gpu_policy)?;
         let mut per_atom = vec![0.0_f64; self.atoms.len()];
         for (atom_idx, (atom, sb)) in self.atoms.iter().zip(sb_all.iter()).enumerate() {
-            per_atom[atom_idx] = (&atom.decoder_coefficients * sb).sum();
+            per_atom[atom_idx] = (atom.decoder_coefficients() * sb).sum();
         }
         Ok(per_atom)
     }
@@ -4435,11 +4435,11 @@ impl SaeManifoldTerm {
             let m = atom.basis_size();
             let coeffs = if frames_active {
                 match &atom.decoder_frame {
-                    Some(frame) => frame.project_decoder(atom.decoder_coefficients.view())?,
-                    None => atom.decoder_coefficients.clone(),
+                    Some(frame) => frame.project_decoder(atom.decoder_coefficients().view())?,
+                    None => atom.decoder_coefficients().clone(),
                 }
             } else {
-                atom.decoder_coefficients.clone()
+                atom.decoder_coefficients().clone()
             };
             let r = coeffs.ncols();
             let off = offsets[target_atom];

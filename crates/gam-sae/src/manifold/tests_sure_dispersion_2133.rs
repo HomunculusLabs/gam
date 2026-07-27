@@ -219,7 +219,7 @@ fn sure_correction_matches_fd_divergence_2133() {
         })
         .collect();
     let ev = PeriodicHarmonicEvaluator::new(3).unwrap();
-    let decoder = term.atoms[0].decoder_coefficients.clone();
+    let decoder = term.atoms[0].decoder_coefficients().clone();
     // f, f', f'' at arbitrary t (a·Φ·B and its coordinate derivatives).
     let jets_at = |t: f64, a: f64| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let coords = Array2::<f64>::from_elem((1, 1), t.rem_euclid(1.0));

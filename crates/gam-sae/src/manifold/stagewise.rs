@@ -2280,7 +2280,7 @@ fn race_birth_seed(
     // an orthogonal ambient plane occupies only its 2 (cos/sin) output dims, so a
     // dense torus's per-circle candidates are output-disjoint even though they share
     // every row — the second block-orthogonality route the acceptance test reads.
-    let decoder = &cand_term.atoms[k].decoder_coefficients;
+    let decoder = cand_term.atoms[k].decoder_coefficients();
     let p_out = decoder.ncols();
     let mut col_energy = vec![0.0_f64; p_out];
     for row in 0..decoder.nrows() {
@@ -3523,7 +3523,7 @@ mod tests {
         )
         .expect("K=1 born-circle sub-fit must complete");
         let born_norm = child.atoms[born]
-            .decoder_coefficients
+            .decoder_coefficients()
             .iter()
             .map(|v| v * v)
             .sum::<f64>()
@@ -3968,8 +3968,8 @@ mod tests {
         )
         .expect("race B against R1");
 
-        let d_batched = &b_batched.born_atom.decoder_coefficients;
-        let d_serial = &b_serial.born_atom.decoder_coefficients;
+        let d_batched = b_batched.born_atom.decoder_coefficients();
+        let d_serial = b_serial.born_atom.decoder_coefficients();
         let decoder_diff = (d_batched - d_serial).mapv(f64::abs).sum();
         assert!(
             decoder_diff < 1e-6,

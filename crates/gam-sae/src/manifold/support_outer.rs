@@ -369,9 +369,9 @@ impl SaeSupportOuterObjective {
         for atom in 0..self.term.k_atoms() {
             let sb = self.term.atoms[atom]
                 .smooth_penalty()
-                .dot(&self.term.atoms[atom].decoder_coefficients);
+                .dot(self.term.atoms[atom].decoder_coefficients());
             let energy = self.term.atoms[atom]
-                .decoder_coefficients
+                .decoder_coefficients()
                 .iter()
                 .zip(sb.iter())
                 .map(|(left, right)| left * right)

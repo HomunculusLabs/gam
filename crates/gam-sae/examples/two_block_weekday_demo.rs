@@ -212,7 +212,7 @@ fn main() -> Result<(), String> {
     // measure exact KL between neighbouring decoded distributions — the
     // CALIBRATED SCALE on the dial. The chord version ‖Δy‖² is the flat
     // prediction; exact KL certifies it.
-    let (_b_k, c_k) = block.split_decoder(term.atoms[0].decoder_coefficients.view())?;
+    let (_b_k, c_k) = block.split_decoder(term.atoms[0].decoder_coefficients().view())?;
     let grid = 64usize;
     let mut tg = Array2::<f64>::zeros((grid, 1));
     for g in 0..grid {

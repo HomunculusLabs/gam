@@ -729,7 +729,7 @@ pub fn rehydrate_sae_support_term(
     let mut atoms = seeded.term.atoms.clone();
     let assignment = seeded.term.assignment.clone();
     for (atom, decoder) in request.decoder_blocks.into_iter().enumerate() {
-        let planned = atoms[atom].decoder_coefficients.dim();
+        let planned = atoms[atom].decoder_coefficients().dim();
         if decoder.dim() != planned {
             return Err(format!(
                 "rehydrate_sae_support_term: atom {atom} decoder shape {:?} != planned {:?}",
@@ -737,7 +737,7 @@ pub fn rehydrate_sae_support_term(
                 planned
             ));
         }
-        atoms[atom].decoder_coefficients = decoder;
+        atoms[atom].set_decoder_coefficients(decoder)?;
     }
     super::SaeSupportSparseTerm::new(atoms, assignment)
 }

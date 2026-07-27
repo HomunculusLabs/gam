@@ -100,7 +100,7 @@
 //! * [`outer_objective`] — the generic-engine REML outer objective and the
 //!   curvature-homotopy entry walk.
 
-use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, s};
+use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, ArrayView3, ArrayView4, ArrayViewMut2, s};
 
 use std::sync::Arc;
 

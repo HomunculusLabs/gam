@@ -176,7 +176,7 @@ pub(crate) fn sequential_deflation_gives_both_atoms_material_norm_2027() {
     let mut norms = [0.0_f64; 2];
     for (atom_idx, atom) in term.atoms.iter().enumerate() {
         norms[atom_idx] = atom
-            .decoder_coefficients
+            .decoder_coefficients()
             .iter()
             .map(|v| v * v)
             .sum::<f64>()
@@ -245,7 +245,7 @@ pub(crate) fn two_circle_separates_at_narrow_and_wide_widths_2027() {
         // lives on even channels, circle B on odd.
         let mut even_frac = [0.0_f64; 2];
         for (atom_idx, atom) in term.atoms.iter().enumerate() {
-            let b = &atom.decoder_coefficients; // (m × p)
+            let b = atom.decoder_coefficients(); // (m × p)
             let mut e_even = 0.0_f64;
             let mut e_odd = 0.0_f64;
             for col in 0..b.nrows() {
@@ -318,7 +318,7 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
                 b[[col, out]] = 1.0;
             }
         }
-        term.atoms[atom].decoder_coefficients = b;
+        term.atoms[atom].set_decoder_coefficients(b).expect("decoder matches its atom basis");
     }
     assert!(
         term.structural_coherence_collapse_detected()
@@ -335,8 +335,8 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
     let mut dup = Array2::<f64>::zeros((m, p));
     dup[[1, 0]] = 1.0;
     dup[[2, 1]] = 1.0;
-    term.atoms[0].decoder_coefficients = dup.clone();
-    term.atoms[1].decoder_coefficients = dup.clone();
+    term.atoms[0].set_decoder_coefficients(dup.clone()).expect("decoder matches its atom basis");
+    term.atoms[1].set_decoder_coefficients(dup.clone()).expect("decoder matches its atom basis");
     let mut shifted = term.assignment.coords[0].as_matrix().to_owned();
     for t in shifted.iter_mut() {
         *t = (*t + 0.25).rem_euclid(1.0);
@@ -589,7 +589,7 @@ pub(crate) fn birth_reseed_sequential_deflation_separates_curved_atoms_2132() {
     // circle A lives on the even channels, circle B on the odd.
     let mut even_frac = [0.0_f64; 2];
     for (atom_idx, atom) in term.atoms.iter().enumerate() {
-        let b = &atom.decoder_coefficients; // (m × p)
+        let b = atom.decoder_coefficients(); // (m × p)
         let (mut e_even, mut e_odd) = (0.0_f64, 0.0_f64);
         for col in 0..b.nrows() {
             for out in 0..p {

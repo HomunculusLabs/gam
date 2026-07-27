@@ -916,7 +916,7 @@ mod fit_tests {
         assert_eq!(tier2.mean.len(), p, "the peeled residual mean spans P");
         assert!(
             tier2.term.atoms.iter().all(|atom| atom
-                .decoder_coefficients
+                .decoder_coefficients()
                 .iter()
                 .all(|value| value.is_finite())),
             "every retained curved atom must carry finite decoder coefficients"

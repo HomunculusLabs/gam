@@ -516,7 +516,7 @@ fn sae_manifold_joint_two_circle_recovery_ordered_beta_bernoulli() {
     // ---- Hungarian (2x2 brute force) match fitted -> planted ---------------
     let planted_planes = [u_a.clone(), u_b.clone()];
     let fitted_planes: Vec<Array2<f64>> = (0..K)
-        .map(|k| fitted_plane(term1.atoms[k].decoder_coefficients.view()))
+        .map(|k| fitted_plane(term1.atoms[k].decoder_coefficients().view()))
         .collect();
     // cost[f][t] = 1 - sigma_min(plane match); pick the permutation minimizing total.
     let mut cost = [[0.0_f64; K]; K];

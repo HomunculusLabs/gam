@@ -447,7 +447,7 @@ pub fn run_sae_manifold_oos(request: SaeOosRequest) -> Result<SaeOosReport, Stri
     {
         atom_reports.push(SaeOosAtomReport {
             basis_kind: atom_specs[atom_index].basis_kind().clone(),
-            decoder: term.atoms[atom_index].decoder_coefficients.clone(),
+            decoder: term.atoms[atom_index].decoder_coefficients().clone(),
             coords,
             assignments: assignments.column(atom_index).to_owned(),
             reconstruction,

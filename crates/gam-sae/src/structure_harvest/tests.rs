@@ -1504,7 +1504,7 @@ fn orientation_reversing_seam_registers_atlas_without_destructive_fusion() {
     let (mut term, rho) = tiled_circle_term(n, 2, &[1.0, 1.0]);
     // `sin` changes sign under t -> -t; `cos` does not.  B therefore traces
     // exactly A's image with the orientation-reversing transition t_A=-t_B.
-    term.atoms[1].decoder_coefficients[[1, 0]] = -1.0;
+    term.atoms[1].decoder_coefficients_mut()[[1, 0]] = -1.0;
     let residuals = Array2::<f64>::zeros((n, 4));
     let (transition, _) = unit_speed_glue_certificate(&term, residuals.view(), 0, 1)
         .expect("reflected charts have an exact certified seam");
@@ -1760,7 +1760,7 @@ fn physical_excision_transplants_coords_from_the_live_seam() {
     // the terminal state can no longer identify a decoder transition.  The
     // accepted structural object is nevertheless fully specified by the
     // live harvest certificate above and must not be inferred again here.
-    term.atoms[1].decoder_coefficients.fill(0.0);
+    term.atoms[1].decoder_coefficients_mut().fill(0.0);
     assert!(
         fit_seam_transition(&term, 0, 1).is_none(),
         "post-harvest fixture must make seam re-fitting impossible"
@@ -1977,7 +1977,7 @@ fn apply_move_restructures_warm() {
     // panic the next assemble on the per-atom `lambda_smooth[atom_idx]` index.
     assert_eq!(born_rho.log_lambda_smooth.len(), k0 + 1);
     let born_atom = &born.atoms[k0];
-    let born_image = born_atom.basis_values.dot(&born_atom.decoder_coefficients);
+    let born_image = born_atom.basis_values.dot(born_atom.decoder_coefficients());
     assert_eq!(born_image.dim(), birth_target.dim());
     let mut max_recon_err = 0.0_f64;
     for (a, b) in born_image.iter().zip(birth_target.iter()) {
@@ -2368,14 +2368,14 @@ fn production_gate_consumes_corrected_pg_normalizer() {
 fn fission_breaks_symmetry_so_children_can_separate() {
     let (term, rho) = planted_term(&vec![vec![true]; 8]);
     assert_eq!(term.k_atoms(), 1);
-    let orig = term.atoms[0].decoder_coefficients.clone();
+    let orig = term.atoms[0].decoder_coefficients().clone();
 
     let (child, _child_rho) =
         apply_structure_move(&term, &rho, &StructureMove::Fission { atom: 0 }, &[]).unwrap();
     assert_eq!(child.k_atoms(), 2, "fission must add one atom");
 
-    let d0 = &child.atoms[0].decoder_coefficients;
-    let d1 = &child.atoms[1].decoder_coefficients;
+    let d0 = child.atoms[0].decoder_coefficients();
+    let d1 = child.atoms[1].decoder_coefficients();
     // (1) Symmetry BROKEN: the children's decoders are not identical (without
     // this the refit is stuck at the symmetric saddle and fission is a no-op).
     let sep = (d0 - d1).iter().map(|x| x * x).sum::<f64>().sqrt();

@@ -620,8 +620,8 @@ fn activate_residual_frame_installs_factored_decoder_and_engages_frames() {
 
     // Decoder is now exactly factored: B == (B U) Uᵀ (projection is idempotent).
     let u = frame.frame().to_owned();
-    let mut reproj = atom.decoder_coefficients.dot(&u).dot(&u.t());
-    reproj -= &atom.decoder_coefficients;
+    let mut reproj = atom.decoder_coefficients().dot(&u).dot(&u.t());
+    reproj -= atom.decoder_coefficients();
     let mut fro = 0.0;
     for v in reproj.iter() {
         fro += v * v;

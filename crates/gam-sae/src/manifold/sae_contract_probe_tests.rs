@@ -123,17 +123,17 @@ fn assert_decoder_gradient_matches_fd(
     assert_eq!(sys.k, term.beta_dim());
     let beta_idx = basis_col * p + out_col;
     let analytic = sys.gb[beta_idx];
-    let base = term.atoms[0].decoder_coefficients[[basis_col, out_col]];
+    let base = term.atoms[0].decoder_coefficients()[[basis_col, out_col]];
 
-    term.atoms[0].decoder_coefficients[[basis_col, out_col]] = base + h;
+    term.atoms[0].decoder_coefficients_mut()[[basis_col, out_col]] = base + h;
     let f_plus = term
         .penalized_objective_total(z.view(), rho, None, 1.0)
         .expect("decoder f+");
-    term.atoms[0].decoder_coefficients[[basis_col, out_col]] = base - h;
+    term.atoms[0].decoder_coefficients_mut()[[basis_col, out_col]] = base - h;
     let f_minus = term
         .penalized_objective_total(z.view(), rho, None, 1.0)
         .expect("decoder f-");
-    term.atoms[0].decoder_coefficients[[basis_col, out_col]] = base;
+    term.atoms[0].decoder_coefficients_mut()[[basis_col, out_col]] = base;
 
     let fd = (f_plus - f_minus) / (2.0 * h);
     assert_contract_close_with_floor(
@@ -362,7 +362,7 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
     let atom0 = &term.atoms[0];
     let evaluator = atom0.basis_evaluator.as_ref().unwrap();
     let (phi_hat, _j) = evaluator.evaluate(encodes.coords[0].view()).unwrap();
-    let decoded_hat = phi_hat.dot(&atom0.decoder_coefficients); // (n × p)
+    let decoded_hat = phi_hat.dot(atom0.decoder_coefficients()); // (n × p)
 
     // The exact per-row encode the sequential path would use as its teacher:
     // a certified cold chart-center Newton solve for each row.
@@ -401,7 +401,7 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
             .evaluate(exact_t.view().insert_axis(ndarray::Axis(0)))
             .unwrap()
             .0;
-        let exact_decoded = exact_phi.dot(&atom0.decoder_coefficients); // (1 × p)
+        let exact_decoded = exact_phi.dot(atom0.decoder_coefficients()); // (1 × p)
         for col in 0..p {
             let amortized = z * decoded_hat[[row, col]];
             let exact = z * exact_decoded[[0, col]];
@@ -433,7 +433,7 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
         (row as f64 + 0.25) / n_holdout as f64
     });
     let (heldout_phi, _heldout_jet) = periodic_basis(&heldout_coords);
-    let heldout = heldout_phi.dot(&atom0.decoder_coefficients);
+    let heldout = heldout_phi.dot(atom0.decoder_coefficients());
     let heldout_amplitudes = Array1::<f64>::ones(n_holdout);
     let mut target_norm_bound = 0.0_f64;
     for row in 0..n_holdout {
@@ -1255,7 +1255,7 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
     // certificate reach is short at unit amplitude.
     let heldout_recovery_gap = |term: &SaeManifoldTerm| -> (f64, usize) {
         let atom0 = &term.atoms[0];
-        let heldout = heldout_phi.dot(&atom0.decoder_coefficients);
+        let heldout = heldout_phi.dot(atom0.decoder_coefficients());
         let amps = Array1::<f64>::ones(n_holdout);
         let mut norm_bound = 0.0_f64;
         for row in 0..n_holdout {

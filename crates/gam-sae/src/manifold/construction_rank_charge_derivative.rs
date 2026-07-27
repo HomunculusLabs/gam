@@ -78,7 +78,7 @@ impl SaeManifoldTerm {
             let n_atom = n_eff[atom_idx];
             let spectrum = super::wbic_audit::recon_spectrum(
                 gram,
-                &atom.decoder_coefficients,
+                atom.decoder_coefficients(),
                 n_atom,
                 p,
                 dispersion,
@@ -262,7 +262,7 @@ impl SaeManifoldTerm {
             let n_atom = n_eff[atom_idx];
             let spectrum = super::wbic_audit::recon_spectrum(
                 gram,
-                &atom.decoder_coefficients,
+                atom.decoder_coefficients(),
                 n_atom,
                 p,
                 dispersion,

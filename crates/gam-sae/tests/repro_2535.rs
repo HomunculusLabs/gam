@@ -123,14 +123,14 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_at_k2_2535() {
     }
 
     for atom_index in 0..2 {
-        let reference = &fits[0].0.atoms[atom_index].decoder_coefficients;
+        let reference = fits[0].0.atoms[atom_index].decoder_coefficients();
         let reference_norm = reference.iter().map(|v| v * v).sum::<f64>().sqrt();
         assert!(
             reference_norm > 0.0,
             "#2535 atom {atom_index} must carry a fitted decoder, got norm {reference_norm:.6e}"
         );
         for (repetition, (term, _)) in fits.iter().enumerate().skip(1) {
-            let decoder = &term.atoms[atom_index].decoder_coefficients;
+            let decoder = term.atoms[atom_index].decoder_coefficients();
             let differing = reference
                 .iter()
                 .zip(decoder.iter())

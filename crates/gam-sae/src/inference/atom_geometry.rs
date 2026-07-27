@@ -226,7 +226,7 @@ pub fn atom_geometry(
             atom.basis_kind(),
             atom.basis_values.view(),
             atom.basis_jacobian.view(),
-            atom.decoder_coefficients.view(),
+            atom.decoder_coefficients().view(),
             masses,
         ));
     }

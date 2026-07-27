@@ -218,6 +218,17 @@ impl SaeSupportSparseTerm {
             );
         }
         for (atom, template) in atoms.iter().enumerate() {
+            // The kernels below subscript FOUR quantities per atom: the
+            // decoder's basis rows, the decoder's output columns, the reference
+            // Gram's width, and the coordinate block's latent width. This door
+            // used to validate the last two only, so an atom whose decoder did
+            // not span its own basis was ADMITTED and aborted later, inside a
+            // rayon worker, as a bare `ndarray: index out of bounds` naming no
+            // row and no atom (#2572). The atom states its own contract; check
+            // it here, where the two shapes can still be named.
+            template.validate_shape_contract().map_err(|error| {
+                format!("SaeSupportSparseTerm::new: atom {atom}: {error}")
+            })?;
             if template.output_dim() != output_dim {
                 return Err(format!(
                     "SaeSupportSparseTerm::new: atom {atom} output dimension {} != {output_dim}",
@@ -344,7 +355,7 @@ impl SaeSupportSparseTerm {
                     )
                 })?;
                 let (phi, _) = evaluator.evaluate(coordinate.view())?;
-                let decoded = phi.row(0).dot(&atom.decoder_coefficients);
+                let decoded = phi.row(0).dot(atom.decoder_coefficients());
                 let score = row
                     .iter()
                     .zip(decoded.iter())
@@ -539,7 +550,7 @@ impl SaeSupportSparseTerm {
             let lambda = lambda_smooth[atom];
             let sb = self.atoms[atom]
                 .smooth_penalty()
-                .dot(&self.atoms[atom].decoder_coefficients);
+                .dot(self.atoms[atom].decoder_coefficients());
             for basis in 0..m {
                 let base = beta_offsets[atom] + basis * self.output_dim;
                 for channel in 0..self.output_dim {
@@ -604,13 +615,13 @@ impl SaeSupportSparseTerm {
             ));
         }
         let phi = phi.row(0).to_owned();
-        let decoded = phi.dot(&atom.decoder_coefficients);
+        let decoded = phi.dot(atom.decoder_coefficients());
         let mut jacobian = Array2::<f64>::zeros((d, self.output_dim));
         for axis in 0..d {
             for basis in 0..m {
                 let weight = jet[[0, basis, axis]];
                 for output in 0..self.output_dim {
-                    jacobian[[axis, output]] += weight * atom.decoder_coefficients[[basis, output]];
+                    jacobian[[axis, output]] += weight * atom.decoder_coefficients()[[basis, output]];
                 }
             }
         }
@@ -647,7 +658,7 @@ impl SaeSupportSparseTerm {
             format!("SaeSupportSparseTerm::decode_atom_at: atom {atom_idx} has no evaluator")
         })?;
         let (phi, _jet) = evaluator.evaluate(coords)?;
-        Ok(phi.dot(&atom.decoder_coefficients))
+        Ok(phi.dot(atom.decoder_coefficients()))
     }
 
     fn reconstruct_row(&self, row: usize) -> Result<Array1<f64>, String> {
@@ -754,11 +765,11 @@ impl SaeSupportSparseTerm {
         self.validate_ard(ard_precisions)?;
         let mut value = 0.5 * residual.iter().map(|entry| entry * entry).sum::<f64>();
         for (atom, &lambda) in self.atoms.iter().zip(lambda_smooth) {
-            let sb = atom.smooth_penalty().dot(&atom.decoder_coefficients);
+            let sb = atom.smooth_penalty().dot(atom.decoder_coefficients());
             value += 0.5
                 * lambda
                 * atom
-                    .decoder_coefficients
+                    .decoder_coefficients()
                     .iter()
                     .zip(sb.iter())
                     .map(|(left, right)| left * right)
@@ -904,7 +915,7 @@ impl SaeSupportSparseTerm {
                 .par_iter()
                 .map(|&atom_idx| -> Result<_, String> {
                     let m = self.atoms[atom_idx].basis_size();
-                    let old_decoder = &self.atoms[atom_idx].decoder_coefficients;
+                    let old_decoder = self.atoms[atom_idx].decoder_coefficients();
                     let mut gram =
                         self.atoms[atom_idx].smooth_penalty().clone() * lambda_smooth[atom_idx];
                     let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
@@ -945,7 +956,7 @@ impl SaeSupportSparseTerm {
                 .collect::<Result<Vec<_>, String>>()?;
             for (atom_idx, decoder, row_updates, atom_change) in solved {
                 max_change = max_change.max(atom_change);
-                self.atoms[atom_idx].decoder_coefficients = decoder;
+                self.atoms[atom_idx].set_decoder_coefficients(decoder)?;
                 for (row, delta) in row_updates {
                     for output in 0..self.output_dim {
                         fitted[[row, output]] += delta[output];
@@ -1064,7 +1075,7 @@ impl SaeSupportSparseTerm {
         for basis in 0..m {
             let weight = phi[[0, basis]];
             for output in 0..self.output_dim {
-                decoded[output] += weight * atom.decoder_coefficients[[basis, output]];
+                decoded[output] += weight * atom.decoder_coefficients()[[basis, output]];
             }
         }
         jacobian.fill(0.0);
@@ -1073,7 +1084,7 @@ impl SaeSupportSparseTerm {
                 let weight = jet[[0, basis, axis]];
                 for output in 0..self.output_dim {
                     jacobian[[axis, output]] +=
-                        weight * atom.decoder_coefficients[[basis, output]];
+                        weight * atom.decoder_coefficients()[[basis, output]];
                 }
             }
         }
@@ -1254,7 +1265,7 @@ impl SaeSupportSparseTerm {
                     let phi_delta = phi_trial[slot][[0, basis]] - phi_cur[slot][[0, basis]];
                     for output in 0..p {
                         fitted_delta[output].add(
-                            phi_delta * self.atoms[atom].decoder_coefficients[[basis, output]],
+                            phi_delta * self.atoms[atom].decoder_coefficients()[[basis, output]],
                         );
                     }
                 }
@@ -1375,7 +1386,7 @@ impl SaeSupportSparseTerm {
             .into_par_iter()
             .map(|atom_idx| -> Result<(f64, f64), String> {
                 let atom = &self.atoms[atom_idx];
-                let mut gradient = atom.smooth_penalty().dot(&atom.decoder_coefficients)
+                let mut gradient = atom.smooth_penalty().dot(atom.decoder_coefficients())
                     * lambda_smooth[atom_idx];
                 for &(row, slot) in &self.atom_rows[atom_idx] {
                     let active = self.evaluate_active(row, slot)?;
@@ -1724,6 +1735,96 @@ mod tests {
         assert!((fitted[[0, 0]] - 1.0).abs() < 1.0e-12);
         assert!((fitted[[1, 0]] - 5.0).abs() < 1.0e-12);
         assert_eq!(term.active_pair_count(), 2);
+    }
+
+    /// One-atom, one-row support term whose decoder can be tampered with.
+    fn single_linear_atom_term() -> (SaeSupportSparseTerm, Array2<f64>) {
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let atoms = vec![atom(
+            "line",
+            SaeAtomBasisKind::Linear,
+            1,
+            evaluator,
+            &[0.0],
+            Array2::zeros((2, 2)),
+        )];
+        let state = SaeAssignmentState::from_topk_support(
+            3,
+            1,
+            1,
+            1,
+            vec![vec![0]; 3],
+            vec![vec![1.0]; 3],
+            vec![vec![-1.0], vec![0.0], vec![1.0]],
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let target = array![[-1.0, 0.5], [0.0, 0.0], [1.0, -0.5]];
+        (term, target)
+    }
+
+    /// #2572 — a decoder that does not span its own basis is not indexable, and
+    /// the lane must say so instead of aborting a rayon worker.
+    ///
+    /// Measured before the fix, with `decoder_coefficients` a `pub` field: the
+    /// row-short atom was ACCEPTED by `SaeSupportSparseTerm::new` (which
+    /// validated `output_dim` and `latent_dim` but not the basis coupling) and
+    /// then aborted in `reconstruct`, `raw_stationarity`, `solve_fixed_point`
+    /// and `assemble_arrow_schur`; the column-short atom aborted the same four
+    /// with the reported `ndarray: index out of bounds`. Both are now typed
+    /// refusals AT THE MUTATION, so no kernel can be reached with either.
+    #[test]
+    fn a_decoder_that_cannot_be_indexed_is_refused_not_aborted() {
+        let (term, _) = single_linear_atom_term();
+        let full = term.atoms[0].decoder_coefficients().clone();
+        assert_eq!(full.dim(), (2, 2));
+
+        for (label, broken) in [
+            ("one row short", full.slice(s![..1, ..]).to_owned()),
+            ("one column short", full.slice(s![.., ..1]).to_owned()),
+            ("one row too many", Array2::<f64>::zeros((3, 2))),
+        ] {
+            let mut atom = term.atoms[0].clone();
+            let error = atom
+                .set_decoder_coefficients(broken.clone())
+                .expect_err(label);
+            assert!(
+                error.contains("set_decoder_coefficients") && error.contains("(2, 2)"),
+                "{label}: {error}"
+            );
+            // The refusal is total: the atom keeps the decoder it had, so a
+            // caller that ignores the error still cannot reach a kernel with an
+            // unindexable atom.
+            assert_eq!(atom.decoder_coefficients(), &full, "{label}");
+        }
+    }
+
+    /// #2572 — the lane's door states the WHOLE contract its kernels subscript
+    /// under, not the half it used to.
+    ///
+    /// `basis_values` stays a public field (its column count IS
+    /// [`SaeManifoldAtom::basis_size`], so it cannot disagree with itself), which
+    /// leaves exactly one way to break the coupling from outside: narrow the
+    /// basis and leave the decoder wide. Before the fix this term ACCEPTED such
+    /// an atom and every kernel that touched it aborted; now the door refuses it
+    /// with the atom index and both shapes.
+    #[test]
+    fn the_support_term_door_refuses_an_atom_whose_decoder_misses_its_basis() {
+        let (term, target) = single_linear_atom_term();
+        let mut atoms = term.atoms.clone();
+        atoms[0].basis_values = atoms[0].basis_values.slice(s![.., ..1]).to_owned();
+        atoms[0].basis_jacobian = atoms[0].basis_jacobian.slice(s![.., ..1, ..]).to_owned();
+
+        let error = SaeSupportSparseTerm::new(atoms, term.assignment.clone())
+            .expect_err("an atom whose decoder overruns its basis is not indexable");
+        assert!(error.contains("atom 0"), "{error}");
+        assert!(error.contains("basis width is 1"), "{error}");
+
+        // The untampered term is untouched by the new check.
+        let ard = vec![vec![1.0]];
+        term.raw_stationarity(target.view(), &[0.1], &ard)
+            .expect("a well-formed term still evaluates");
     }
 
     #[test]

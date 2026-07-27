@@ -286,9 +286,9 @@ fn main() -> Result<(), String> {
             .as_matrix()
             .column(0)
             .mapv(|v| v.rem_euclid(1.0));
-        let m = term.atoms[0].decoder_coefficients.nrows();
+        let m = term.atoms[0].decoder_coefficients().nrows();
         let b_anchor = term.atoms[0]
-            .decoder_coefficients
+            .decoder_coefficients()
             .slice(ndarray::s![.., ..p_x])
             .to_owned(); // (M × p_x)
 

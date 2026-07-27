@@ -97,7 +97,7 @@ impl crate::row_jet_program::SaeSoftmaxRowProgramSource for ProductionSoftmaxRow
                 continue;
             }
             for out_col in 0..atom_ref.output_dim() {
-                out[out_col] += d2phi * atom_ref.decoder_coefficients[[basis_col, out_col]];
+                out[out_col] += d2phi * atom_ref.decoder_coefficients()[[basis_col, out_col]];
             }
         }
     }
@@ -221,7 +221,7 @@ impl SaeManifoldTerm {
                             (0..p)
                                 .map(|out_col| {
                                     if atom_is_active(atom_idx) {
-                                        atom.decoder_coefficients[[basis_col, out_col]]
+                                        atom.decoder_coefficients()[[basis_col, out_col]]
                                     } else {
                                         0.0
                                     }
@@ -397,7 +397,7 @@ mod tests_softmax_hand_reference {
                     continue;
                 }
                 for out_col in 0..atom.output_dim() {
-                    out[out_col] += d2phi * atom.decoder_coefficients[[basis_col, out_col]];
+                    out[out_col] += d2phi * atom.decoder_coefficients()[[basis_col, out_col]];
                 }
             }
         }

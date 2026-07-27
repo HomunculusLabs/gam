@@ -533,7 +533,7 @@ pub(crate) fn fit_data_collapse_verdict_uses_one_self_consistent_state_s1() {
     );
 
     let mut vanished_term = live_term.clone();
-    vanished_term.atoms[0].decoder_coefficients.fill(0.0);
+    vanished_term.atoms[0].decoder_coefficients_mut().fill(0.0);
     let vanished_verdict = vanished_term
         .dictionary_collapse_verdict(target.view(), &rho, None)
         .expect("vanished verdict");
@@ -700,7 +700,7 @@ pub(crate) fn fast_reconstruct_matches_per_row_decode() {
         let (phi_row, _jet) = evaluator
             .evaluate(single.view())
             .expect("single basis eval");
-        let decoded_row = phi_row.dot(&atom.decoder_coefficients); // (1 × p)
+        let decoded_row = phi_row.dot(atom.decoder_coefficients()); // (1 × p)
         for col in 0..p {
             let expect = amps[row] * decoded_row[[0, col]];
             max_diff = max_diff.max((fast_recon[[row, col]] - expect).abs());
@@ -788,7 +788,7 @@ fn fast_forward_is_accuracy_parity_with_certified() {
             cert_valid_count += 1;
             let single = coords.insert_axis(ndarray::Axis(0));
             let (phi, _) = evaluator.evaluate(single.view()).unwrap();
-            let dec = phi.dot(&atom.decoder_coefficients);
+            let dec = phi.dot(atom.decoder_coefficients());
             let mut e = 0.0;
             for c in 0..p {
                 let d = amps[row] * dec[[0, c]] - xr[c];
@@ -944,7 +944,7 @@ pub(crate) fn oos_train_curved(
         }
         atom = build(&coords);
     }
-    let rt = atom.basis_values.dot(&atom.decoder_coefficients);
+    let rt = atom.basis_values.dot(atom.decoder_coefficients());
     let mut etr = 0.0;
     for r in 0..n_tr {
         for c in 0..p {

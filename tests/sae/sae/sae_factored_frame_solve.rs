@@ -511,7 +511,7 @@ fn factored_fit_recovers_planted_low_rank_atoms() {
     // Each fitted atom recovers its planted decoder plane.
     for a in 0..k {
         let truth_q = planted_plane(&truth, a, p);
-        let fit_q = decoder_plane(&fitted.atoms[a].decoder_coefficients, p, 3);
+        let fit_q = decoder_plane(fitted.atoms[a].decoder_coefficients(), p, 3);
         let ang = max_principal_angle(&fit_q, &truth_q);
         println!("test1: atom {a} max principal angle to plant = {ang:.4} rad");
         assert!(
@@ -578,8 +578,8 @@ fn factored_matches_full_b_recovery() {
     // Both arms recover both planted planes.
     for a in 0..k {
         let truth_q = planted_plane(&truth, a, p);
-        let full_q = decoder_plane(&full_fit.atoms[a].decoder_coefficients, p, 3);
-        let framed_q = decoder_plane(&framed_fit.atoms[a].decoder_coefficients, p, 3);
+        let full_q = decoder_plane(full_fit.atoms[a].decoder_coefficients(), p, 3);
+        let framed_q = decoder_plane(framed_fit.atoms[a].decoder_coefficients(), p, 3);
         let ang_full = max_principal_angle(&full_q, &truth_q);
         let ang_framed = max_principal_angle(&framed_q, &truth_q);
         println!(
@@ -692,7 +692,7 @@ fn mixed_framed_and_full_rank_atoms() {
     // Both atoms recover their planted planes through the mixed solve.
     for a in 0..k {
         let truth_q = planted_plane(&truth, a, p);
-        let fit_q = decoder_plane(&fitted.atoms[a].decoder_coefficients, p, 3);
+        let fit_q = decoder_plane(fitted.atoms[a].decoder_coefficients(), p, 3);
         let ang = max_principal_angle(&fit_q, &truth_q);
         println!("test3: atom {a} max principal angle to plant = {ang:.4} rad");
         assert!(

@@ -604,7 +604,7 @@ fn held_out_ev(
     let mut basis_values = Array3::<f64>::zeros((k_atoms, n_test, m_max));
     for (ai, slot) in slots.iter().enumerate() {
         let m_k = slot.kind.basis_size();
-        let b = fitted.atoms[ai].decoder_coefficients.clone();
+        let b = fitted.atoms[ai].decoder_coefficients().clone();
         for row in 0..n_test {
             for c in 0..m_k {
                 basis_values[[ai, row, c]] = phi_k[ai][[row, c]];

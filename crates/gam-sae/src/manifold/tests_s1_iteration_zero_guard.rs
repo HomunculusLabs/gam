@@ -88,7 +88,7 @@ pub(crate) fn co_collapse_signal_arm_is_disarmed_at_iteration_zero_s1() {
     let before: Vec<Array2<f64>> = term
         .atoms
         .iter()
-        .map(|a| a.decoder_coefficients.clone())
+        .map(|a| a.decoder_coefficients().clone())
         .collect();
 
     // ── iteration 0: the absolute arm is disarmed — no event, state frozen ──
@@ -102,7 +102,7 @@ pub(crate) fn co_collapse_signal_arm_is_disarmed_at_iteration_zero_s1() {
     );
     for (atom, b) in before.iter().enumerate() {
         assert_eq!(
-            &term.atoms[atom].decoder_coefficients, b,
+            term.atoms[atom].decoder_coefficients(), b,
             "iteration-0 guard must leave atom {atom}'s decoder untouched"
         );
     }

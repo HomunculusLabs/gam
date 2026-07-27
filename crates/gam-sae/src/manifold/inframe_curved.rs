@@ -672,8 +672,8 @@ pub fn activate_residual_frame(
     let u = frame.frame().to_owned(); // p × r
     // Project the decoder onto the frame so B = C·Uᵀ holds exactly (mirrors
     // maybe_activate_decoder_frame's B ← (B U) Uᵀ convergence guard).
-    let c_proj = fast_ab(&atom.decoder_coefficients, &u); // M × r
-    atom.decoder_coefficients = fast_abt(&c_proj, &u); // M × p
+    let c_proj = fast_ab(atom.decoder_coefficients(), &u); // M × r
+    atom.set_decoder_coefficients(fast_abt(&c_proj, &u))?; // M × p
     atom.decoder_frame = Some(frame);
     Ok(Some(r))
 }

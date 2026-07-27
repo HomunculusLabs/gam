@@ -475,7 +475,7 @@ pub(crate) fn certificate_output_frame(
     }
     let p = atom.output_dim();
     let (_u, s, vt_opt) = atom
-        .decoder_coefficients
+        .decoder_coefficients()
         .svd(false, true)
         .map_err(|e| format!("certificate_output_frame: SVD failed for atom {atom_idx}: {e}"))?;
     let max_sv = s.iter().copied().fold(0.0_f64, f64::max);
@@ -514,7 +514,7 @@ pub(crate) fn atom_curvature_bound(term: &SaeManifoldTerm, atom_idx: usize) -> R
         atom,
         atom_idx,
         second.view(),
-        atom.decoder_coefficients.view(),
+        atom.decoder_coefficients().view(),
     )
 }
 
@@ -522,7 +522,7 @@ pub(crate) fn atom_curvature_bound(term: &SaeManifoldTerm, atom_idx: usize) -> R
 /// function of the decoder coefficient matrix `decoder` (shape `(M_k, p)`) and
 /// the precomputed second jet, so the #1099 delta-method gradient `∂κ/∂β` can be
 /// formed by finite-differencing it in the captured channel's coefficients
-/// without mutating the term. With `decoder = atom.decoder_coefficients` this is
+/// without mutating the term. With `decoder = atom.decoder_coefficients()` this is
 /// exactly `atom_curvature_bound`.
 ///
 /// This is the actual measurement of `κ̂`: at each observation row it forms the

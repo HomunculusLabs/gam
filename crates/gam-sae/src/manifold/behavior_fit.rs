@@ -440,7 +440,7 @@ impl SaeManifoldTerm {
                                 let range = range_layout.block_range(idx);
                                 for atom in &mut self.atoms {
                                     let mut cols =
-                                        atom.decoder_coefficients.slice_mut(s![.., range.clone()]);
+                                        atom.decoder_coefficients_mut().slice_move(s![.., range.clone()]);
                                     cols.mapv_inplace(|v| v * scale);
                                 }
                             }

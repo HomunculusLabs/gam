@@ -335,7 +335,7 @@ impl SaeManifoldTerm {
             .map(|atom| {
                 (
                     atom.smooth_penalty().view(),
-                    atom.decoder_coefficients.view(),
+                    atom.decoder_coefficients().view(),
                 )
             })
             .collect();

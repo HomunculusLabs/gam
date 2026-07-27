@@ -269,12 +269,12 @@ fn sae_euclidean_line_row() -> Vec<GradientChannel> {
     let p = term.output_dim();
     for (basis_col, out_col) in decoder_probes {
         let beta_idx = basis_col * p + out_col;
-        let base = term.atoms[0].decoder_coefficients[[basis_col, out_col]];
+        let base = term.atoms[0].decoder_coefficients()[[basis_col, out_col]];
         decoder_an.push(sys.gb[beta_idx]);
         let mut plus = term.clone();
-        plus.atoms[0].decoder_coefficients[[basis_col, out_col]] = base + FD_STEP;
+        plus.atoms[0].decoder_coefficients_mut()[[basis_col, out_col]] = base + FD_STEP;
         let mut minus = term.clone();
-        minus.atoms[0].decoder_coefficients[[basis_col, out_col]] = base - FD_STEP;
+        minus.atoms[0].decoder_coefficients_mut()[[basis_col, out_col]] = base - FD_STEP;
         decoder_fd
             .push((sae_value(&plus, &z, &rho) - sae_value(&minus, &z, &rho)) / (2.0 * FD_STEP));
     }
@@ -407,15 +407,15 @@ fn sae_k2_periodic_overlap_row() -> Vec<GradientChannel> {
     let mut decoder_an = Vec::new();
     let mut decoder_fd = Vec::new();
     let p = term.output_dim();
-    let per_atom_beta = term.atoms[0].decoder_coefficients.len();
+    let per_atom_beta = term.atoms[0].decoder_coefficients().len();
     for (atom, basis_col, out_col) in [(0usize, 1usize, 1usize), (1, 2, 2), (1, 0, 0)] {
         let beta_idx = atom * per_atom_beta + basis_col * p + out_col;
-        let base = term.atoms[atom].decoder_coefficients[[basis_col, out_col]];
+        let base = term.atoms[atom].decoder_coefficients()[[basis_col, out_col]];
         decoder_an.push(sys.gb[beta_idx]);
         let mut plus = term.clone();
-        plus.atoms[atom].decoder_coefficients[[basis_col, out_col]] = base + FD_STEP;
+        plus.atoms[atom].decoder_coefficients_mut()[[basis_col, out_col]] = base + FD_STEP;
         let mut minus = term.clone();
-        minus.atoms[atom].decoder_coefficients[[basis_col, out_col]] = base - FD_STEP;
+        minus.atoms[atom].decoder_coefficients_mut()[[basis_col, out_col]] = base - FD_STEP;
         decoder_fd
             .push((sae_value(&plus, &z, &rho) - sae_value(&minus, &z, &rho)) / (2.0 * FD_STEP));
     }

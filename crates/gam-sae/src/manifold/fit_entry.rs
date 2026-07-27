@@ -792,7 +792,7 @@ pub fn run_sae_manifold_fit(mut request: SaeFitRequest) -> Result<SaeFitOutcome,
             // unit-free and untouched; a cold all-zero decoder is a no-op.
             for atom in &mut request.base_term.atoms {
                 for (col_idx, s) in sigma.iter().enumerate() {
-                    for coeff in atom.decoder_coefficients.column_mut(col_idx).iter_mut() {
+                    for coeff in atom.decoder_coefficients_mut().column_mut(col_idx).iter_mut() {
                         *coeff /= *s;
                     }
                 }

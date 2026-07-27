@@ -900,8 +900,8 @@ pub fn sae_refine_routing_seed(
         )?;
         for atom_idx in 0..k_atoms {
             let m_k = basis_sizes[atom_idx];
-            let p_out = term.atoms[atom_idx].decoder_coefficients.ncols();
-            let dst = &mut term.atoms[atom_idx].decoder_coefficients;
+            let p_out = term.atoms[atom_idx].decoder_coefficients().ncols();
+            let mut dst = term.atoms[atom_idx].decoder_coefficients_mut();
             for c in 0..m_k {
                 for out_col in 0..p_out {
                     dst[[c, out_col]] = decoder[[atom_idx, c, out_col]];

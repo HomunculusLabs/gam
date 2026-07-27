@@ -161,7 +161,7 @@ fn per_atom_contribution_rms(term: &SaeManifoldTerm) -> Vec<f64> {
 /// Even-column energy fraction of an atom's decoder — the subspace fingerprint
 /// used to match a fitted atom to circle A (even, ~1.0) vs circle B (odd, ~0.0).
 fn even_energy_fraction(atom: &SaeManifoldAtom, p: usize) -> f64 {
-    let b = &atom.decoder_coefficients;
+    let b = atom.decoder_coefficients();
     let mut e_even = 0.0_f64;
     let mut e_odd = 0.0_f64;
     for col in 0..b.nrows() {

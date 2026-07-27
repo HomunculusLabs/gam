@@ -457,7 +457,25 @@ pub struct SaeManifoldAtom {
     latent_dim: usize,
     pub basis_values: Array2<f64>,
     pub basis_jacobian: Array3<f64>,
-    pub decoder_coefficients: Array2<f64>,
+    /// Decoder block `B_k`, shaped `(basis_size(), output_dim())`.
+    ///
+    /// PRIVATE ON PURPOSE (#2572). Every per-row and per-atom kernel in the
+    /// support-sparse and dense manifold lanes subscripts this array as
+    /// `[[basis, output]]` with `basis` ranging over [`Self::basis_size`] — a
+    /// bound taken from `basis_values`, not from this array. Those subscripts
+    /// are in range exactly when [`Self::validate_shape_contract`] holds, and
+    /// nothing else in the loop can check it: the loop runs on a rayon worker,
+    /// so a violation is an `ndarray: index out of bounds` abort with no row,
+    /// no atom, and no attributable frame (measured on both halves of the
+    /// contract in `examples/issue_2572_contract_probe.rs`).
+    ///
+    /// While this was a `pub` field the contract was established once, in
+    /// [`Self::new`], and then maintained by convention across ~20 replacement
+    /// sites. Replacements now go through [`Self::set_decoder_coefficients`],
+    /// which re-establishes it or returns a typed error naming both shapes;
+    /// element updates go through [`Self::decoder_coefficients_mut`], whose
+    /// `ArrayViewMut2` cannot change a shape at all.
+    decoder_coefficients: Array2<f64>,
     /// Frozen reference-function Gram `S_ref` read by every smoothing consumer
     /// (value, gradient, Kronecker Hessian, rank, and log determinant).
     ///
@@ -603,20 +621,6 @@ impl SaeManifoldAtom {
 
     pub fn geometry_plan(&self) -> Option<&SaeAtomGeometryPlan> {
         self.geometry_plan.as_ref()
-    }
-
-    /// Install the congruence-transformed representation of the already
-    /// declared reference-function Gram after an exact basis change. This is
-    /// the only mutation seam for the Gram outside this type; it validates the
-    /// new matrix before making the atomic replacement and never changes the
-    /// reference metric provenance or geometry plan.
-    pub(crate) fn install_transported_smooth_penalty(
-        &mut self,
-        penalty: Array2<f64>,
-    ) -> Result<(), String> {
-        self.smooth_penalty =
-            Self::validate_reference_function_gram(penalty, self.basis_size(), false)?;
-        Ok(())
     }
 
     /// Prepare the complete mutable topology represented by `snapshot` without
@@ -775,34 +779,13 @@ impl SaeManifoldAtom {
         decoder_coefficients: Array2<f64>,
         reference_roughness: SaeReferenceRoughness,
     ) -> Result<Self, String> {
-        let n = basis_values.nrows();
-        let m = basis_values.ncols();
-        let p = decoder_coefficients.ncols();
-        if basis_jacobian.dim() != (n, m, latent_dim) {
-            return Err(format!(
-                "SaeManifoldAtom::new: basis_jacobian must be ({n}, {m}, {latent_dim}); got {:?}",
-                basis_jacobian.dim()
-            ));
-        }
-        if decoder_coefficients.nrows() != m {
-            return Err(format!(
-                "SaeManifoldAtom::new: decoder rows {} must equal basis size {m}",
-                decoder_coefficients.nrows()
-            ));
-        }
-        if m == 0 {
-            return Err("SaeManifoldAtom::new: basis width must be positive".into());
-        }
-        if p == 0 {
-            return Err("SaeManifoldAtom::new: decoder output dimension must be positive".into());
-        }
         let (smooth_penalty, reference_roughness_kind) = Self::materialize_reference_roughness(
             &basis_kind,
             latent_dim,
             basis_jacobian.view(),
             reference_roughness,
         )?;
-        Ok(Self {
+        let atom = Self {
             name: name.into(),
             basis_kind,
             latent_dim,
@@ -823,7 +806,12 @@ impl SaeManifoldAtom {
             // Stamped from the terminal `rho.log_ard` at fit finalization; a
             // freshly-built atom carries no fitted coordinate prior yet.
             ard_precisions: None,
-        })
+        };
+        // ONE statement of the contract, checked here rather than as four
+        // hand-rolled inequalities that a later mutator would not share.
+        atom.validate_shape_contract()
+            .map_err(|error| format!("SaeManifoldAtom::new: {error}"))?;
+        Ok(atom)
     }
 
     /// Construct an atom whose topology/caller already supplied the exact
@@ -1147,6 +1135,13 @@ impl SaeManifoldAtom {
             Some(prev) => prev.dot(q),
             None => q.clone(),
         });
+        // The four coupled arrays just moved together. Re-state the contract
+        // here rather than trusting the six assignments above to agree: this is
+        // the one seam that legitimately changes the basis width, so it is the
+        // one seam where a partial update would leave an atom that indexes out
+        // of bounds later (#2572).
+        self.validate_shape_contract()
+            .map_err(|error| format!("SaeManifoldAtom::reduce_basis_to_subspace: {error}"))?;
         Ok(())
     }
 
@@ -1303,6 +1298,138 @@ impl SaeManifoldAtom {
 
     pub fn output_dim(&self) -> usize {
         self.decoder_coefficients.ncols()
+    }
+
+    /// The decoder block `B_k`, shaped `(basis_size(), output_dim())`.
+    pub fn decoder_coefficients(&self) -> &Array2<f64> {
+        &self.decoder_coefficients
+    }
+
+    /// Element-wise mutable access to the decoder block.
+    ///
+    /// A view, not a `&mut Array2`, so a caller can write coefficients but
+    /// cannot replace the array with one of a different shape — the mutation
+    /// that breaks [`Self::validate_shape_contract`]. Whole-block replacement
+    /// goes through [`Self::set_decoder_coefficients`], which re-checks it.
+    pub fn decoder_coefficients_mut(&mut self) -> ArrayViewMut2<'_, f64> {
+        self.decoder_coefficients.view_mut()
+    }
+
+    /// Install a whole decoder block, re-establishing the shape contract.
+    ///
+    /// The block must be `(basis_size(), output_dim())`. A caller that means to
+    /// change the atom's basis width must change the basis first (that is what
+    /// [`Self::reduce_basis_to_subspace`] and the reparameterization seams do),
+    /// because a decoder whose row count disagrees with the basis is not a
+    /// decoder for this atom at all.
+    pub fn set_decoder_coefficients(&mut self, decoder: Array2<f64>) -> Result<(), String> {
+        let expected = (self.basis_size(), self.output_dim());
+        if decoder.dim() != expected {
+            return Err(format!(
+                "SaeManifoldAtom::set_decoder_coefficients: atom '{}' decoder {:?} != \
+                 (basis_size, output_dim) = {expected:?}",
+                self.name,
+                decoder.dim()
+            ));
+        }
+        self.decoder_coefficients = decoder;
+        Ok(())
+    }
+
+    /// Swap the whole coupled quadruple — basis, jet, decoder, reference Gram —
+    /// in ONE step, for the seams that legitimately move all four together (an
+    /// exact chart reparameterization: affine gauge, arc-length, torus flow).
+    ///
+    /// Those seams used to assign the four fields one at a time and then call
+    /// [`Self::install_transported_smooth_penalty`], so the atom passed through
+    /// three intermediate states in which the contract did not hold, and the
+    /// contract itself was re-derived at each site rather than checked once.
+    /// Here it is checked once, and a partial update is impossible: on refusal
+    /// the atom is restored exactly as it was and the error names both shapes.
+    pub(crate) fn install_reparameterized_basis(
+        &mut self,
+        basis_values: Array2<f64>,
+        basis_jacobian: Array3<f64>,
+        decoder: Array2<f64>,
+        smooth_penalty: Array2<f64>,
+    ) -> Result<(), String> {
+        let width = basis_values.ncols();
+        let smooth_penalty =
+            Self::validate_reference_function_gram(smooth_penalty, width, false).map_err(
+                |error| format!("SaeManifoldAtom::install_reparameterized_basis: {error}"),
+            )?;
+        let previous = (
+            std::mem::replace(&mut self.basis_values, basis_values),
+            std::mem::replace(&mut self.basis_jacobian, basis_jacobian),
+            std::mem::replace(&mut self.decoder_coefficients, decoder),
+            std::mem::replace(&mut self.smooth_penalty, smooth_penalty),
+        );
+        if let Err(error) = self.validate_shape_contract() {
+            self.basis_values = previous.0;
+            self.basis_jacobian = previous.1;
+            self.decoder_coefficients = previous.2;
+            self.smooth_penalty = previous.3;
+            return Err(format!(
+                "SaeManifoldAtom::install_reparameterized_basis: {error}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The atom's cross-field shape contract, stated once.
+    ///
+    /// ```text
+    /// basis_values           : (n, m)
+    /// basis_jacobian         : (n, m, latent_dim)
+    /// decoder_coefficients   : (m, p)      with m > 0 and p > 0
+    /// smooth_penalty         : (m, m)
+    /// ```
+    ///
+    /// This is the precondition of every `[[basis, output]]` subscript on the
+    /// atom's decoder and of every `[[i, j]]` subscript on its reference Gram.
+    /// [`Self::new`] establishes it; the mutating seams re-establish it; the
+    /// support-sparse term re-checks it at its door, because an atom that
+    /// arrives violating it cannot be indexed and must be refused with both
+    /// shapes named rather than aborting a worker (#2572).
+    pub fn validate_shape_contract(&self) -> Result<(), String> {
+        let n = self.basis_values.nrows();
+        let m = self.basis_values.ncols();
+        if m == 0 {
+            return Err(format!(
+                "SaeManifoldAtom '{}': basis width must be positive",
+                self.name
+            ));
+        }
+        if self.basis_jacobian.dim() != (n, m, self.latent_dim) {
+            return Err(format!(
+                "SaeManifoldAtom '{}': basis_jacobian {:?} != (n, m, latent_dim) = ({n}, {m}, {})",
+                self.name,
+                self.basis_jacobian.dim(),
+                self.latent_dim
+            ));
+        }
+        if self.decoder_coefficients.nrows() != m {
+            return Err(format!(
+                "SaeManifoldAtom '{}': decoder {:?} has {} rows, but its basis width is {m}",
+                self.name,
+                self.decoder_coefficients.dim(),
+                self.decoder_coefficients.nrows()
+            ));
+        }
+        if self.decoder_coefficients.ncols() == 0 {
+            return Err(format!(
+                "SaeManifoldAtom '{}': decoder output dimension must be positive",
+                self.name
+            ));
+        }
+        if self.smooth_penalty.dim() != (m, m) {
+            return Err(format!(
+                "SaeManifoldAtom '{}': reference Gram {:?} != (m, m) = ({m}, {m})",
+                self.name,
+                self.smooth_penalty.dim()
+            ));
+        }
+        Ok(())
     }
 
     /// Effective profiled frame rank `r` of this atom's decoder block in the
@@ -1827,6 +1954,88 @@ mod tests {
             reference_roughness,
         )
         .unwrap()
+    }
+
+    /// #2572 — the atom's cross-field contract is what every `[[basis, output]]`
+    /// subscript on its decoder depends on, so the type refuses a decoder that
+    /// would break it rather than letting the next kernel abort.
+    #[test]
+    fn the_decoder_seam_refuses_every_shape_that_cannot_be_indexed() {
+        let atom = monomial_atom(SaeAtomBasisKind::EuclideanPatch, &[-1.0, 0.0, 1.0]);
+        assert_eq!(atom.basis_size(), 3);
+        assert_eq!(atom.output_dim(), 1);
+        atom.validate_shape_contract().expect("seeded atom is sound");
+
+        for (label, broken) in [
+            ("too few basis rows", Array2::<f64>::zeros((2, 1))),
+            ("too many basis rows", Array2::<f64>::zeros((4, 1))),
+            ("too few output columns", Array2::<f64>::zeros((3, 0))),
+            ("too many output columns", Array2::<f64>::zeros((3, 2))),
+        ] {
+            let mut candidate = atom.clone();
+            let error = candidate
+                .set_decoder_coefficients(broken)
+                .expect_err(label);
+            assert!(error.contains("(3, 1)"), "{label}: {error}");
+            assert_eq!(
+                candidate.decoder_coefficients(),
+                atom.decoder_coefficients(),
+                "{label}: a refused install must not have taken effect"
+            );
+        }
+
+        // The element seam is shape-preserving by type: an `ArrayViewMut2`
+        // cannot be reassigned to a differently shaped array.
+        let mut writable = atom.clone();
+        writable.decoder_coefficients_mut()[[2, 0]] = 4.0;
+        assert_eq!(writable.decoder_coefficients()[[2, 0]], 4.0);
+        writable
+            .validate_shape_contract()
+            .expect("an element write cannot break the contract");
+    }
+
+    /// #2572 — the reparameterization seam moves basis, jet, decoder and
+    /// reference Gram together, and either installs all four or none.
+    #[test]
+    fn the_reparameterization_seam_is_all_or_nothing() {
+        let mut atom = monomial_atom(SaeAtomBasisKind::EuclideanPatch, &[-1.0, 0.0, 1.0]);
+        let before = (
+            atom.basis_values.clone(),
+            atom.basis_jacobian.clone(),
+            atom.decoder_coefficients().clone(),
+            atom.smooth_penalty().clone(),
+        );
+
+        // A narrower basis with the old (wider) decoder is refused, and the atom
+        // is left exactly as it was — the state a field-by-field assignment used
+        // to pass through.
+        let narrow_phi = before.0.slice(s![.., ..2]).to_owned();
+        let narrow_jet = before.1.slice(s![.., ..2, ..]).to_owned();
+        let error = atom
+            .install_reparameterized_basis(
+                narrow_phi.clone(),
+                narrow_jet.clone(),
+                before.2.clone(),
+                Array2::<f64>::eye(2),
+            )
+            .expect_err("a decoder that overruns its new basis is refused");
+        assert!(error.contains("install_reparameterized_basis"), "{error}");
+        assert_eq!(atom.basis_values, before.0);
+        assert_eq!(atom.basis_jacobian, before.1);
+        assert_eq!(atom.decoder_coefficients(), &before.2);
+        assert_eq!(atom.smooth_penalty(), &before.3);
+
+        // The coherent quadruple installs.
+        atom.install_reparameterized_basis(
+            narrow_phi,
+            narrow_jet,
+            Array2::<f64>::zeros((2, 1)),
+            Array2::<f64>::eye(2),
+        )
+        .expect("a coherent reparameterization installs");
+        assert_eq!(atom.basis_size(), 2);
+        atom.validate_shape_contract()
+            .expect("the installed state holds the contract");
     }
 
     // #2135 — a #1117 rank-reduced circle/periodic atom stores a REDUCED decoder

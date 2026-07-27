@@ -3505,13 +3505,13 @@ fn reactive_ard_curvature_scale(
     axis: usize,
 ) -> Result<Option<f64>, String> {
     let atom = &term.atoms[atom_idx];
-    let p = atom.decoder_coefficients.ncols();
-    let m = atom.decoder_coefficients.nrows();
+    let p = atom.decoder_coefficients().ncols();
+    let m = atom.decoder_coefficients().nrows();
     if atom.basis_jacobian.dim().1 != m || axis >= atom.basis_jacobian.dim().2 {
         return Err(format!(
             "reactive rho domain: atom {atom_idx} axis {axis} is incompatible with basis Jacobian {:?} and decoder {:?}",
             atom.basis_jacobian.dim(),
-            atom.decoder_coefficients.dim()
+            atom.decoder_coefficients().dim()
         ));
     }
     let periods = term.assignment.coords[atom_idx].effective_axis_periods();
@@ -3530,7 +3530,7 @@ fn reactive_ard_curvature_scale(
         for basis in 0..m {
             let coefficient = gate * atom.basis_jacobian[[row, basis, axis]];
             for out in 0..p {
-                tangent[out] += coefficient * atom.decoder_coefficients[[basis, out]];
+                tangent[out] += coefficient * atom.decoder_coefficients()[[basis, out]];
             }
         }
         let tangent_norm_sq = match term.row_metric.as_ref() {

@@ -124,15 +124,15 @@ fn rank_charge_deff_accepts_circle_and_classifies_exact_zero_spectrum() {
         0.5 * d_real[0] * (80f64).ln()
     );
 
-    let saved = term.atoms[0].decoder_coefficients.clone();
-    term.atoms[0].decoder_coefficients.fill(0.0);
+    let saved = term.atoms[0].decoder_coefficients().clone();
+    term.atoms[0].decoder_coefficients_mut().fill(0.0);
     let d_vanish = term.per_atom_realised_rank_dof(&rho, disp).unwrap();
     assert_eq!(
         d_vanish[0], 0.0,
         "an exactly zero reconstruction spectrum must give d_eff=0; got {:.4}",
         d_vanish[0],
     );
-    term.atoms[0].decoder_coefficients.assign(&saved);
+    term.atoms[0].decoder_coefficients_mut().assign(&saved);
 }
 
 /// (iii) HEALTHY K=3 DECISION-LEVEL CONTROL (hand-built — the pipeline has no
@@ -490,7 +490,7 @@ fn rank_charge_shared_primitive_parity() {
     let lam = rho.lambda_smooth_vec().unwrap();
     let d_free = super::construction::realised_rank_charge_dof(
         &grams[0],
-        &term.atoms[0].decoder_coefficients,
+        term.atoms[0].decoder_coefficients(),
         n_eff,
         term.output_dim() as f64,
         disp,
@@ -518,7 +518,7 @@ fn rank_charge_shared_primitive_parity() {
 fn rank_charge_vetoes_zero_realised_rank_atom() {
     let (mut term, rho) = fitted_circle_term(80, 16);
     let tgt = unit_target(&term);
-    let saved = term.atoms[0].decoder_coefficients.clone();
+    let saved = term.atoms[0].decoder_coefficients().clone();
 
     // A real circle (rank_eff=2, d_eff≈5.5) remains finite.
     let (v_real, _, _) = term
@@ -533,7 +533,7 @@ fn rank_charge_vetoes_zero_realised_rank_atom() {
     // An exactly vanished decoder is a typed structural boundary in both
     // storage routes, never an Ok(+inf) scalar. Positive sub-edge spectra are
     // unresolved-but-alive and belong to the rank-one branch instead.
-    term.atoms[0].decoder_coefficients.fill(0.0);
+    term.atoms[0].decoder_coefficients_mut().fill(0.0);
     let dense = term
         .penalized_quasi_laplace_criterion_with_cache(tgt.view(), &rho, None, 0, 1.0, 1e-6, 1e-6)
         .unwrap_err();
@@ -554,7 +554,7 @@ fn rank_charge_vetoes_zero_realised_rank_atom() {
         };
         assert_eq!(atoms.iter().collect::<Vec<_>>(), vec![0]);
     }
-    term.atoms[0].decoder_coefficients.assign(&saved);
+    term.atoms[0].decoder_coefficients_mut().assign(&saved);
 }
 
 #[test]
@@ -643,7 +643,7 @@ fn rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099()
         .sum();
     let lam = rho.lambda_smooth_vec().unwrap();
     let p_out = term.output_dim() as f64;
-    let base_decoder = term.atoms[0].decoder_coefficients.clone();
+    let base_decoder = term.atoms[0].decoder_coefficients().clone();
     let d_eff = |decoder: &Array2<f64>| -> f64 {
         super::construction::realised_rank_charge_dof(
             &grams[0],

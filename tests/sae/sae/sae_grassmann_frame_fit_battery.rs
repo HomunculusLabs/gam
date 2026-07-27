@@ -650,8 +650,8 @@ fn designed_weighted_subsample_fit_recovers_what_the_full_fit_recovers() {
     // ---- both arms recover the planted planes --------------------------------
     for a in 0..k {
         let truth_q = planted_plane(a);
-        let full_q = decoder_plane(&full_fit.atoms[a].decoder_coefficients, p, 3);
-        let designed_q = decoder_plane(&designed_fit.atoms[a].decoder_coefficients, p, 3);
+        let full_q = decoder_plane(full_fit.atoms[a].decoder_coefficients(), p, 3);
+        let designed_q = decoder_plane(designed_fit.atoms[a].decoder_coefficients(), p, 3);
         let ang_full = max_principal_angle(&full_q, &truth_q);
         let ang_designed = max_principal_angle(&designed_q, &truth_q);
         println!(

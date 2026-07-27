@@ -102,17 +102,23 @@ fn main() -> Result<(), String> {
     // Drive the inner fixed point toward its optimum: the evidence is only the
     // Laplace normalizer AT a stationary inner state, and a random seed's arrow
     // system is not the one production factors.
+    // Running out of cycles is the expected outcome here and not a probe
+    // failure — this harness measures the EVIDENCE stage, which is downstream —
+    // so the non-convergence is reported rather than discarded.
     let t_inner = Instant::now();
-    let _ = term.solve_fixed_point(
+    let inner = match term.solve_fixed_point(
         centered.view(),
         &lambda_smooth,
         &ard_precisions,
         cycles,
         1.0e-4,
         1.0,
-    );
+    ) {
+        Ok(report) => format!("recurred in {} cycles", report.iterations),
+        Err(error) => format!("did not recur: {error}"),
+    };
     println!(
-        "inner fixed point: {cycles} cycles, {:.1}s",
+        "inner fixed point: {cycles} cycles, {:.1}s — {inner}",
         t_inner.elapsed().as_secs_f64()
     );
 

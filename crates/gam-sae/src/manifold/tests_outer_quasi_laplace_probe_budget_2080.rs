@@ -303,7 +303,7 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
         .atoms
         .iter()
         .map(|atom| {
-            atom.decoder_coefficients
+            atom.decoder_coefficients()
                 .iter()
                 .map(|value| value * value)
                 .sum::<f64>()
@@ -342,7 +342,7 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
     for atom in &objective.term.atoms {
         let mut even_energy = 0.0_f64;
         let mut odd_energy = 0.0_f64;
-        for ((_, output), value) in atom.decoder_coefficients.indexed_iter() {
+        for ((_, output), value) in atom.decoder_coefficients().indexed_iter() {
             if output % 2 == 0 {
                 even_energy += value * value;
             } else {
@@ -403,7 +403,7 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
             .atoms
             .iter()
             .map(|atom| {
-                atom.decoder_coefficients
+                atom.decoder_coefficients()
                     .iter()
                     .map(|value| value * value)
                     .sum::<f64>()
@@ -1016,7 +1016,7 @@ fn entangled_two_circle_outer_reml_separates_2080() {
     let mut norms = vec![0.0_f64; k];
     for (i, atom) in fitted.term.atoms.iter().enumerate() {
         norms[i] = atom
-            .decoder_coefficients
+            .decoder_coefficients()
             .iter()
             .map(|v| v * v)
             .sum::<f64>()

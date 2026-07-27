@@ -242,7 +242,7 @@ pub(crate) fn sae_row_jet_program_matches_production_row_jets_on_converged_cache
                             })
                             .collect(),
                         decoder: (0..m)
-                            .map(|b| (0..p).map(|c| atom.decoder_coefficients[[b, c]]).collect())
+                            .map(|b| (0..p).map(|c| atom.decoder_coefficients()[[b, c]]).collect())
                             .collect(),
                         latent_dim: d,
                     }

@@ -173,7 +173,7 @@ impl SaeFitCheckpoint {
             .iter()
             .enumerate()
             .map(|(atom_idx, atom)| SaeCheckpointAtom {
-                decoder_coefficients: rows_of(&atom.decoder_coefficients),
+                decoder_coefficients: rows_of(atom.decoder_coefficients()),
                 coords: rows_of(&term.assignment.coords[atom_idx].as_matrix()),
                 homotopy_eta: atom.homotopy_eta,
             })
@@ -211,14 +211,11 @@ impl SaeFitCheckpoint {
         for (atom_idx, banked) in self.atoms.iter().enumerate() {
             let decoder = array2_from_rows(&banked.decoder_coefficients)?;
             let atom = &mut term.atoms[atom_idx];
-            if decoder.dim() != atom.decoder_coefficients.dim() {
-                return Err(format!(
-                    "checkpoint install: atom {atom_idx} decoder {:?} != term {:?}",
-                    decoder.dim(),
-                    atom.decoder_coefficients.dim()
-                ));
-            }
-            atom.decoder_coefficients.assign(&decoder);
+            // The shape check the banked decoder needs IS the atom's own
+            // contract, so install through the seam that states it once rather
+            // than re-deriving it here (#2572).
+            atom.set_decoder_coefficients(decoder)
+                .map_err(|error| format!("checkpoint install: atom {atom_idx}: {error}"))?;
             atom.homotopy_eta = banked.homotopy_eta;
             let coords = array2_from_rows(&banked.coords)?;
             let slot = &mut term.assignment.coords[atom_idx];

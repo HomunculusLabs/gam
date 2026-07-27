@@ -54,7 +54,7 @@ pub fn refresh_isometry_caches_from_atom(
     let n_obs = coords.nrows();
     let d = atom.latent_dim();
     let m = atom.basis_size();
-    let p = atom.decoder_coefficients.ncols();
+    let p = atom.decoder_coefficients().ncols();
     if penalty.p_out != p {
         return Err(format!(
             "refresh_isometry_caches_from_atom: penalty.p_out={} but atom.decoder.cols={p}",
@@ -72,7 +72,7 @@ pub fn refresh_isometry_caches_from_atom(
     // latent axis `a` (jet slice × decoder), scattered into the row-major
     // (n, p, d) layout: the m-contraction is a matmul, not a quadruple scalar
     // loop of bounds-checked element reads (the profiled BLOCKER-1 hot leaf).
-    let b = &atom.decoder_coefficients;
+    let b = atom.decoder_coefficients();
     let mut jac3d = ndarray::Array3::<f64>::zeros((n_obs, p, d));
     for a in 0..d {
         let basis_axis: ndarray::ArrayView2<'_, f64> = jet.slice(ndarray::s![.., .., a]);
@@ -224,7 +224,7 @@ pub fn refresh_isometry_caches_from_term(
         let mut paired: Option<usize> = None;
         for (atom_idx, atom) in term.atoms.iter().enumerate() {
             let matches = atom.latent_dim() == p_latent_dim
-                && atom.decoder_coefficients.ncols() == p.p_out
+                && atom.decoder_coefficients().ncols() == p.p_out
                 && atom.basis_evaluator.is_some();
             if !matches {
                 continue;

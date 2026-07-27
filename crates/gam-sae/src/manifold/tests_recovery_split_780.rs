@@ -1374,7 +1374,7 @@ pub(crate) fn reference_function_gram_is_fixed_and_has_exact_trace_form() {
     )
     .unwrap();
     let frozen = atom.smooth_penalty().clone();
-    atom.decoder_coefficients.mapv_inplace(|value| value * 7.0);
+    atom.decoder_coefficients_mut().mapv_inplace(|value| value * 7.0);
     atom.basis_jacobian.fill(13.0);
     assert_eq!(atom.smooth_penalty(), &frozen);
     assert_eq!(

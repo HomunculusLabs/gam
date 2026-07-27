@@ -133,7 +133,7 @@ fn planted_targets(atoms: &[SaeManifoldAtom], n: usize, p: usize) -> (Array2<f64
         amps[row] = z;
         let coord = Array2::from_shape_fn((1, 1), |_| t);
         let (phi, _) = evaluator.evaluate(coord.view()).unwrap();
-        let decoded = phi.dot(&atoms[atom_k].decoder_coefficients); // (1 × p), amp-1
+        let decoded = phi.dot(atoms[atom_k].decoder_coefficients()); // (1 × p), amp-1
         for c in 0..p {
             targets[[row, c]] = z * decoded[[0, c]];
         }

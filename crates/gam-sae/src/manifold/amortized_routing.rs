@@ -135,7 +135,7 @@ impl SaeManifoldTerm {
                 ));
             }
             let (phi, _jac) = evaluator.evaluate(block.view())?;
-            let decoded = phi.dot(&atom.decoder_coefficients); // (n × p)
+            let decoded = phi.dot(atom.decoder_coefficients()); // (n × p)
             for row in 0..n {
                 let z = code.amplitudes[[row, atom_idx]];
                 if z == 0.0 {
@@ -301,7 +301,7 @@ impl SaeManifoldTerm {
                         continue;
                     }
                     for out in 0..p {
-                        gamma[out] += phi_v * atom.decoder_coefficients[[basis_col, out]];
+                        gamma[out] += phi_v * atom.decoder_coefficients()[[basis_col, out]];
                     }
                 }
                 // Unit-normalize the reconstruction (routing is amplitude-free —

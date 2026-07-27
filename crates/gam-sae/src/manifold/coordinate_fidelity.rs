@@ -1071,7 +1071,7 @@ pub fn atom_coordinate_fidelity(
     })?;
     let defect = crate::chart_canonicalization::chart_unit_speed_defect(
         evaluator.as_ref(),
-        atom.decoder_coefficients.view(),
+        atom.decoder_coefficients().view(),
         row_coords,
         &topology,
     )?;
@@ -1080,7 +1080,7 @@ pub fn atom_coordinate_fidelity(
     // when the mutating canonicalization honestly refused.
     let reading = chart_arclength_coordinates(
         evaluator.as_ref(),
-        atom.decoder_coefficients.view(),
+        atom.decoder_coefficients().view(),
         row_coords,
         &topology,
     )?;
@@ -1468,7 +1468,7 @@ impl SaeManifoldTerm {
             let defect = atom.basis_evaluator.as_ref().and_then(|evaluator| {
                 crate::chart_canonicalization::chart_unit_speed_defect(
                     evaluator.as_ref(),
-                    atom.decoder_coefficients.view(),
+                    atom.decoder_coefficients().view(),
                     coords.column(0),
                     &topology,
                 )

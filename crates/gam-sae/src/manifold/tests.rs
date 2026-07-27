@@ -1572,14 +1572,14 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     let full_snapshot = term.snapshot_mutable_state();
     let full_basis = term.atoms[0].basis_values.clone();
     let full_jet = term.atoms[0].basis_jacobian.clone();
-    let full_decoder = term.atoms[0].decoder_coefficients.clone();
+    let full_decoder = term.atoms[0].decoder_coefficients().clone();
     let full_model = full_basis.dot(&full_decoder);
     let full_loss_bits = term.loss(target.view(), &rho).unwrap().total().to_bits();
 
     // Exercise the production reducer, not a hand-resized stand-in. The exact
     // rank-one design maps M=2 to r=1 and replaces every width-bearing field.
     term.reduce_atoms_to_data_supported_rank().unwrap();
-    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (1, 6));
+    assert_eq!(term.atoms[0].decoder_coefficients().dim(), (1, 6));
     assert_eq!(term.atoms[0].basis_values.dim(), (4, 1));
     assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 1, 1));
     assert_eq!(term.atoms[0].smooth_penalty().dim(), (1, 1));
@@ -1595,7 +1595,7 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     let reduced_snapshot = term.snapshot_mutable_state();
     let reduced_basis = term.atoms[0].basis_values.clone();
     let reduced_jet = term.atoms[0].basis_jacobian.clone();
-    let reduced_decoder = term.atoms[0].decoder_coefficients.clone();
+    let reduced_decoder = term.atoms[0].decoder_coefficients().clone();
     let reduced_model = reduced_basis.dot(&reduced_decoder);
     let reduced_loss_bits = term.loss(target.view(), &rho).unwrap().total().to_bits();
 
@@ -1604,7 +1604,7 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     term.restore_mutable_state(&full_snapshot)
         .expect("full topology restores over reduced topology");
     assert!(term.matches_mutable_state(&full_snapshot));
-    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (2, 6));
+    assert_eq!(term.atoms[0].decoder_coefficients().dim(), (2, 6));
     assert_eq!(term.atoms[0].basis_values.dim(), (4, 2));
     assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 2, 1));
     assert_eq!(term.atoms[0].smooth_penalty().dim(), (2, 2));
@@ -1617,11 +1617,11 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     assert!(!term.atoms[0].chart_canonicalized);
     assert_matrix_same_bits(&term.atoms[0].basis_values, &full_basis);
     assert_tensor3_same_bits(&term.atoms[0].basis_jacobian, &full_jet);
-    assert_matrix_same_bits(&term.atoms[0].decoder_coefficients, &full_decoder);
+    assert_matrix_same_bits(term.atoms[0].decoder_coefficients(), &full_decoder);
     assert_matrix_same_bits(
         &term.atoms[0]
             .basis_values
-            .dot(&term.atoms[0].decoder_coefficients),
+            .dot(term.atoms[0].decoder_coefficients()),
         &full_model,
     );
     assert_eq!(
@@ -1634,7 +1634,7 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     term.restore_mutable_state(&reduced_snapshot)
         .expect("reduced topology restores over full topology");
     assert!(term.matches_mutable_state(&reduced_snapshot));
-    assert_eq!(term.atoms[0].decoder_coefficients.dim(), (1, 6));
+    assert_eq!(term.atoms[0].decoder_coefficients().dim(), (1, 6));
     assert_eq!(term.atoms[0].basis_values.dim(), (4, 1));
     assert_eq!(term.atoms[0].basis_jacobian.dim(), (4, 1, 1));
     assert_eq!(term.atoms[0].smooth_penalty().dim(), (1, 1));
@@ -1648,11 +1648,11 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     assert!(term.atoms[0].chart_canonicalized);
     assert_matrix_same_bits(&term.atoms[0].basis_values, &reduced_basis);
     assert_tensor3_same_bits(&term.atoms[0].basis_jacobian, &reduced_jet);
-    assert_matrix_same_bits(&term.atoms[0].decoder_coefficients, &reduced_decoder);
+    assert_matrix_same_bits(term.atoms[0].decoder_coefficients(), &reduced_decoder);
     assert_matrix_same_bits(
         &term.atoms[0]
             .basis_values
-            .dot(&term.atoms[0].decoder_coefficients),
+            .dot(term.atoms[0].decoder_coefficients()),
         &reduced_model,
     );
     assert_eq!(
@@ -1724,7 +1724,7 @@ pub(crate) fn snapshot_restore_round_trips_mutated_state() {
     let snapshot = term.snapshot_mutable_state();
     let pre_basis = term.atoms[0].basis_values.clone();
     let pre_jet = term.atoms[0].basis_jacobian.clone();
-    let pre_decoder = term.atoms[0].decoder_coefficients.clone();
+    let pre_decoder = term.atoms[0].decoder_coefficients().clone();
     let pre_logits = term.assignment.logits.clone();
     let pre_coords = term.assignment.coords[0].as_matrix();
 
@@ -1741,7 +1741,7 @@ pub(crate) fn snapshot_restore_round_trips_mutated_state() {
             .mapv(f64::abs)
             .sum()
             > 1e-9
-            || (&term.atoms[0].decoder_coefficients - &pre_decoder)
+            || (term.atoms[0].decoder_coefficients() - &pre_decoder)
                 .mapv(f64::abs)
                 .sum()
                 > 1e-9,
@@ -1758,7 +1758,7 @@ pub(crate) fn snapshot_restore_round_trips_mutated_state() {
     // reproduces the pre-step basis bit-for-bit (basis is deterministic in coords).
     assert_eq!(term.atoms[0].basis_values, pre_basis);
     assert_eq!(term.atoms[0].basis_jacobian, pre_jet);
-    assert_eq!(term.atoms[0].decoder_coefficients, pre_decoder);
+    assert_eq!(term.atoms[0].decoder_coefficients(), pre_decoder);
     assert_eq!(term.assignment.logits, pre_logits);
     assert_eq!(term.assignment.coords[0].as_matrix(), pre_coords);
 }
@@ -1851,11 +1851,11 @@ pub(crate) fn accepted_iterations_reuse_arrow_and_device_frame_allocations_with_
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
     let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(1)]);
 
-    let decoder_before = term.atoms[0].decoder_coefficients.clone();
+    let decoder_before = term.atoms[0].decoder_coefficients().clone();
     term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 1, 0.05, 1.0e-3, 1.0e-3)
         .expect("first accepted nonlinear iteration");
     assert_ne!(
-        term.atoms[0].decoder_coefficients, decoder_before,
+        term.atoms[0].decoder_coefficients(), decoder_before,
         "first production call must accept a state-changing step"
     );
     let first_row = term
@@ -1915,12 +1915,12 @@ pub(crate) fn accepted_iterations_reuse_arrow_and_device_frame_allocations_with_
     // Keep the second call away from the first call's fixed point so the test
     // exercises a second accepted step instead of merely reassembling a
     // converged state. The perturbation stays inside the active output frame.
-    term.atoms[0].decoder_coefficients[[0, 0]] += 0.02;
-    let decoder_before_second = term.atoms[0].decoder_coefficients.clone();
+    term.atoms[0].decoder_coefficients_mut()[[0, 0]] += 0.02;
+    let decoder_before_second = term.atoms[0].decoder_coefficients().clone();
     term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 1, 0.05, 1.0e-3, 1.0e-3)
         .expect("second accepted nonlinear iteration");
     assert_ne!(
-        term.atoms[0].decoder_coefficients, decoder_before_second,
+        term.atoms[0].decoder_coefficients(), decoder_before_second,
         "second production call must accept a state-changing step"
     );
     let second_row = term
@@ -2194,7 +2194,7 @@ pub(crate) fn per_atom_loao_ev_attributes_each_load_bearing_atom() {
     // to ~0 — the same Θ→0 dominance floor logic on the EV axis (no signal,
     // no contribution), independent of the curved/linear question.
     let mut dead_term = term.clone();
-    dead_term.atoms[1].decoder_coefficients.fill(0.0);
+    dead_term.atoms[1].decoder_coefficients_mut().fill(0.0);
     let dead_target = term
         .try_fitted_for_rho(&rho)
         .expect("reconstruction with the live atom-1 decoder");
@@ -4779,7 +4779,7 @@ pub(crate) fn rank_revealing_reduction_collapses_unexcited_circle_harmonic_to_fu
         r, 3,
         "rank-revealing reduction must drop the unexcited harmonic (r = 3 < M = 5)",
     );
-    assert_eq!(term.atoms[0].decoder_coefficients.nrows(), 3);
+    assert_eq!(term.atoms[0].decoder_coefficients().nrows(), 3);
     assert_eq!(term.atoms[0].basis_jacobian.dim(), (6, 3, 1));
     assert_eq!(term.atoms[0].smooth_penalty().dim(), (3, 3));
 
@@ -4798,7 +4798,7 @@ pub(crate) fn rank_revealing_reduction_collapses_unexcited_circle_harmonic_to_fu
 
     // (b) Rank-`r` oracle: the reduced reconstruction `Φ̃ B̃` equals the
     // original data fit (the dropped direction carried no data signal).
-    let recon_after = reduced_design.dot(&term.atoms[0].decoder_coefficients);
+    let recon_after = reduced_design.dot(term.atoms[0].decoder_coefficients());
     for i in 0..recon_before.nrows() {
         assert!(
             (recon_before[[i, 0]] - recon_after[[i, 0]]).abs() < 1e-9,
@@ -5078,7 +5078,7 @@ pub(crate) fn rank_reduction_is_idempotent_on_already_reduced_atom() {
     term.reduce_atoms_to_data_supported_rank().unwrap();
     assert_eq!(term.atoms[0].basis_size(), 3);
     let design_after_first = term.atoms[0].basis_values.clone();
-    let decoder_after_first = term.atoms[0].decoder_coefficients.clone();
+    let decoder_after_first = term.atoms[0].decoder_coefficients().clone();
 
     // Second pass: the reduced Gram is full rank → SKIP. Width and contents
     // are unchanged (no double-reduction).
@@ -5098,7 +5098,7 @@ pub(crate) fn rank_reduction_is_idempotent_on_already_reduced_atom() {
             );
         }
     }
-    let decoder_after_second = &term.atoms[0].decoder_coefficients;
+    let decoder_after_second = term.atoms[0].decoder_coefficients();
     for i in 0..3 {
         assert_eq!(
             decoder_after_second[[i, 0]],
@@ -5159,7 +5159,7 @@ pub(crate) fn full_rank_circle_design_keeps_full_harmonic_depth_unchanged() {
             );
         }
     }
-    let after = &term.atoms[0].decoder_coefficients;
+    let after = term.atoms[0].decoder_coefficients();
     for i in 0..5 {
         assert_eq!(
             after[[i, 0]],

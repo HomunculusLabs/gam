@@ -82,12 +82,12 @@ pub(crate) fn factored_border_dim_invariant_and_reconstruction() {
     let mut term = term;
     let border = term.flatten_factored_border().unwrap();
     assert_eq!(border.len(), m * r);
-    let saved = term.atoms[0].decoder_coefficients.clone();
+    let saved = term.atoms[0].decoder_coefficients().clone();
     term.scatter_factored_border(border.view()).unwrap();
     for mu in 0..m {
         for j in 0..p {
             assert_abs_diff_eq!(
-                term.atoms[0].decoder_coefficients[[mu, j]],
+                term.atoms[0].decoder_coefficients()[[mu, j]],
                 saved[[mu, j]],
                 epsilon = 1.0e-9
             );

@@ -187,7 +187,7 @@ fn inner_gnorm_vs_budget_trajectory_2015() {
         let mut max_dec = 0.0_f64;
         for atom in &term.atoms {
             let nrm = atom
-                .decoder_coefficients
+                .decoder_coefficients()
                 .iter()
                 .map(|v| v * v)
                 .sum::<f64>()

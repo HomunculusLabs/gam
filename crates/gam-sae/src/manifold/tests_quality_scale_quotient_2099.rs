@@ -104,7 +104,7 @@ fn reconstruction_criterion_and_diagnostics_quotient_decoder_scale_2099() {
     let uniformity0 = term.coordinate_uniformity_aggregate();
     let occupancy0 = term.per_atom_effective_sample_size();
     let fitted0 = term.try_fitted_for_rho(&rho).unwrap();
-    let b0 = term.atoms[0].decoder_coefficients.clone();
+    let b0 = term.atoms[0].decoder_coefficients().clone();
     let norm0 = b0.iter().map(|v| v * v).sum::<f64>().sqrt();
     assert!(
         ev0 > 0.80 && norm0 > 1.0e-6,
@@ -115,7 +115,7 @@ fn reconstruction_criterion_and_diagnostics_quotient_decoder_scale_2099() {
     // Apply the scale gauge IN PLACE: decoder ↦ c·B and target ↦ c·T. On this tree
     // this is the honest stand-in for the physical `exp(s)·B` redundancy.
     let c = 1000.0_f64;
-    term.atoms[0].decoder_coefficients.mapv_inplace(|v| v * c);
+    term.atoms[0].decoder_coefficients_mut().mapv_inplace(|v| v * c);
     let scaled_target = &target * c;
 
     // Reconstruction scales by EXACTLY c.
@@ -165,7 +165,7 @@ fn reconstruction_criterion_and_diagnostics_quotient_decoder_scale_2099() {
 
     // The decoder DIRECTION (unit-Frobenius shape) is unchanged — scale is confined
     // to the magnitude, which is exactly what the quotient factors out.
-    let b1 = &term.atoms[0].decoder_coefficients;
+    let b1 = term.atoms[0].decoder_coefficients();
     let norm1 = b1.iter().map(|v| v * v).sum::<f64>().sqrt();
     let mut max_dir_defect = 0.0_f64;
     for (a, b) in b1.iter().zip(b0.iter()) {

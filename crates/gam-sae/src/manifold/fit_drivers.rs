@@ -471,7 +471,7 @@ impl SaeManifoldTerm {
             .atoms
             .iter()
             .map(|atom| SaeManifoldAtomSnapshot {
-                decoder_coefficients: atom.decoder_coefficients.clone(),
+                decoder_coefficients: atom.decoder_coefficients().clone(),
                 decoder_frame: atom.decoder_frame.clone(),
                 smooth_penalty: atom.smooth_penalty().clone(),
                 // Pointer-cheap handle clones; `basis_values`/`basis_jacobian`
@@ -532,7 +532,7 @@ impl SaeManifoldTerm {
                         (None, None) => true,
                         _ => false,
                     };
-                    atom.decoder_coefficients == saved.decoder_coefficients
+                    atom.decoder_coefficients() == &saved.decoder_coefficients
                         && atom.chart_canonicalized == saved.chart_canonicalized
                         && atom.reduced_column_map == saved.reduced_column_map
                         && match &saved.caller_managed_basis {
@@ -897,7 +897,7 @@ impl SaeManifoldTerm {
             for basis_col in 0..m {
                 for out_col in 0..p {
                     let flat_idx = offset + basis_col * p + out_col;
-                    atom.decoder_coefficients[[basis_col, out_col]] +=
+                    atom.decoder_coefficients_mut()[[basis_col, out_col]] +=
                         step_size * delta_beta[flat_idx];
                 }
             }
@@ -1017,7 +1017,7 @@ impl SaeManifoldTerm {
             ));
         }
         let transport = solve_basis_transport(new_phi.view(), old_phi.view())?;
-        let old_decoder = self.atoms[atom_idx].decoder_coefficients.clone();
+        let old_decoder = self.atoms[atom_idx].decoder_coefficients().clone();
         let old_smooth_penalty = self.atoms[atom_idx].smooth_penalty().clone();
         let new_decoder = fast_ab(&transport, &old_decoder);
         let old_fit = fast_ab(&old_phi, &old_decoder);
@@ -1037,15 +1037,17 @@ impl SaeManifoldTerm {
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
-        atom.basis_values = new_phi;
-        atom.basis_jacobian = new_jet;
-        atom.decoder_coefficients = new_decoder;
         let base: Arc<dyn SaeBasisEvaluator> = new_evaluator.clone();
         atom.basis_evaluator = Some(base);
         atom.basis_second_jet = Some(new_evaluator);
         let transported_penalty =
             transport_smooth_penalty_for_decoder(transport.view(), old_smooth_penalty.view())?;
-        atom.install_transported_smooth_penalty(transported_penalty)?;
+        atom.install_reparameterized_basis(
+            new_phi,
+            new_jet,
+            new_decoder,
+            transported_penalty,
+        )?;
         Ok(())
     }
 
@@ -1309,7 +1311,7 @@ impl SaeManifoldTerm {
                 .map_or_else(|| "unavailable".to_string(), |d| format!("{d:.6e}"));
             match crate::chart_canonicalization::d1_atom_fitted_turning(
                 evaluator.as_ref(),
-                atom.decoder_coefficients.view(),
+                atom.decoder_coefficients().view(),
                 row_coords,
             ) {
                 Ok(Some(theta)) => log::info!(
@@ -1427,7 +1429,7 @@ impl SaeManifoldTerm {
         let row_coords = coords.column(0).to_owned();
         let Some(repar) = unit_speed_retraction(
             evaluator.as_ref(),
-            self.atoms[atom_idx].decoder_coefficients.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
             row_coords.view(),
             topology,
         )?
@@ -1464,7 +1466,7 @@ impl SaeManifoldTerm {
         // actually sits on. Same honest-fallback contract.
         let old_fit = fast_ab(
             &self.atoms[atom_idx].basis_values,
-            &self.atoms[atom_idx].decoder_coefficients,
+            self.atoms[atom_idx].decoder_coefficients(),
         );
         let new_fit = fast_ab(&new_phi, &repar.new_decoder);
         let mut fit_scale = 0.0_f64;
@@ -1487,14 +1489,16 @@ impl SaeManifoldTerm {
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
-        atom.basis_values = new_phi;
-        atom.basis_jacobian = new_jet;
-        atom.decoder_coefficients = repar.new_decoder;
         let transported_penalty = transport_smooth_penalty_for_decoder(
             repar.decoder_transport.view(),
             old_smooth_penalty.view(),
         )?;
-        atom.install_transported_smooth_penalty(transported_penalty)?;
+        atom.install_reparameterized_basis(
+            new_phi,
+            new_jet,
+            repar.new_decoder,
+            transported_penalty,
+        )?;
         atom.chart_canonicalized = true;
         Ok(true)
     }
@@ -1577,7 +1581,7 @@ impl SaeManifoldTerm {
         let coords = self.assignment.coords[atom_idx].as_matrix();
         let Some(repar) = torus_isometry_flow_reparameterization(
             evaluator.as_ref(),
-            self.atoms[atom_idx].decoder_coefficients.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
             coords.view(),
             period,
         )?
@@ -1606,7 +1610,7 @@ impl SaeManifoldTerm {
         // fit actually sits on. Same honest-fallback contract as d = 1.
         let old_fit = fast_ab(
             &self.atoms[atom_idx].basis_values,
-            &self.atoms[atom_idx].decoder_coefficients,
+            self.atoms[atom_idx].decoder_coefficients(),
         );
         let new_fit = fast_ab(&new_phi, &repar.new_decoder);
         let mut fit_scale = 0.0_f64;
@@ -1629,14 +1633,16 @@ impl SaeManifoldTerm {
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
-        atom.basis_values = new_phi;
-        atom.basis_jacobian = new_jet;
-        atom.decoder_coefficients = repar.new_decoder;
         let transported_penalty = transport_smooth_penalty_for_decoder(
             repar.decoder_transport.view(),
             old_smooth_penalty.view(),
         )?;
-        atom.install_transported_smooth_penalty(transported_penalty)?;
+        atom.install_reparameterized_basis(
+            new_phi,
+            new_jet,
+            repar.new_decoder,
+            transported_penalty,
+        )?;
         atom.chart_canonicalized = true;
         Ok(true)
     }
@@ -1665,7 +1671,7 @@ impl SaeManifoldTerm {
         let coords = self.assignment.coords[atom_idx].as_matrix();
         let Some(repar) = patch_isometry_flow_reparameterization(
             evaluator.as_ref(),
-            self.atoms[atom_idx].decoder_coefficients.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
             coords.view(),
         )?
         else {
@@ -1693,7 +1699,7 @@ impl SaeManifoldTerm {
         // actually sits on. Same honest-fallback contract as the torus path.
         let old_fit = fast_ab(
             &self.atoms[atom_idx].basis_values,
-            &self.atoms[atom_idx].decoder_coefficients,
+            self.atoms[atom_idx].decoder_coefficients(),
         );
         let new_fit = fast_ab(&new_phi, &repar.new_decoder);
         let mut fit_scale = 0.0_f64;
@@ -1716,14 +1722,16 @@ impl SaeManifoldTerm {
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
-        atom.basis_values = new_phi;
-        atom.basis_jacobian = new_jet;
-        atom.decoder_coefficients = repar.new_decoder;
         let transported_penalty = transport_smooth_penalty_for_decoder(
             repar.decoder_transport.view(),
             old_smooth_penalty.view(),
         )?;
-        atom.install_transported_smooth_penalty(transported_penalty)?;
+        atom.install_reparameterized_basis(
+            new_phi,
+            new_jet,
+            repar.new_decoder,
+            transported_penalty,
+        )?;
         atom.chart_canonicalized = true;
         Ok(true)
     }
@@ -1752,7 +1760,7 @@ impl SaeManifoldTerm {
         let coords = self.assignment.coords[atom_idx].as_matrix();
         let Some(repar) = sphere_isometry_flow_reparameterization(
             evaluator.as_ref(),
-            self.atoms[atom_idx].decoder_coefficients.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
             coords.view(),
         )?
         else {
@@ -1780,7 +1788,7 @@ impl SaeManifoldTerm {
         // actually sits on. Same honest-fallback contract as the torus path.
         let old_fit = fast_ab(
             &self.atoms[atom_idx].basis_values,
-            &self.atoms[atom_idx].decoder_coefficients,
+            self.atoms[atom_idx].decoder_coefficients(),
         );
         let new_fit = fast_ab(&new_phi, &repar.new_decoder);
         let mut fit_scale = 0.0_f64;
@@ -1803,14 +1811,16 @@ impl SaeManifoldTerm {
         let flat = Array1::from_iter(new_coords.iter().copied());
         self.assignment.coords[atom_idx].set_flat(flat.view());
         let atom = &mut self.atoms[atom_idx];
-        atom.basis_values = new_phi;
-        atom.basis_jacobian = new_jet;
-        atom.decoder_coefficients = repar.new_decoder;
         let transported_penalty = transport_smooth_penalty_for_decoder(
             repar.decoder_transport.view(),
             old_smooth_penalty.view(),
         )?;
-        atom.install_transported_smooth_penalty(transported_penalty)?;
+        atom.install_reparameterized_basis(
+            new_phi,
+            new_jet,
+            repar.new_decoder,
+            transported_penalty,
+        )?;
         atom.chart_canonicalized = true;
         Ok(true)
     }
@@ -1833,7 +1843,7 @@ impl SaeManifoldTerm {
             }
         }
         for atom in &self.atoms {
-            for &v in atom.decoder_coefficients.iter() {
+            for &v in atom.decoder_coefficients().iter() {
                 iterate_norm_sq += v * v;
             }
         }
@@ -2198,7 +2208,7 @@ impl SaeManifoldTerm {
             // Right-singular vectors of `B_k` (M_k × p) span the ambient
             // channel space; those with a sub-floor singular value are the
             // unrealised output channels (the decoder's column-span deficiency).
-            let (_u, sv, vt_opt) = match atom.decoder_coefficients.svd(false, true) {
+            let (_u, sv, vt_opt) = match atom.decoder_coefficients().svd(false, true) {
                 Ok(parts) => parts,
                 Err(_) => continue,
             };
@@ -2872,7 +2882,7 @@ impl SaeManifoldTerm {
                         continue;
                     }
                     for out_col in 0..p {
-                        motion[[row, out_col]] += w * atom.decoder_coefficients[[col, out_col]];
+                        motion[[row, out_col]] += w * atom.decoder_coefficients()[[col, out_col]];
                     }
                 }
             }
@@ -3134,7 +3144,7 @@ impl SaeManifoldTerm {
                     }
                     let w = a_k * dphi;
                     for c in 0..p {
-                        dfitted[[row, c]] += w * atom.decoder_coefficients[[mu, c]];
+                        dfitted[[row, c]] += w * atom.decoder_coefficients()[[mu, c]];
                     }
                 }
             }
@@ -3222,7 +3232,7 @@ impl SaeManifoldTerm {
                     }
                     let w = a_k * dphi;
                     for c in 0..p {
-                        dfitted[[row, c]] += w * atom.decoder_coefficients[[mu, c]];
+                        dfitted[[row, c]] += w * atom.decoder_coefficients()[[mu, c]];
                     }
                 }
             }
@@ -3495,7 +3505,7 @@ impl SaeManifoldTerm {
                 continue;
             }
             self.atoms[atom]
-                .decoder_coefficients
+                .decoder_coefficients_mut()
                 .mapv_inplace(|v| v / s);
             let ln_s = s.ln();
             for row in 0..n {
@@ -4203,7 +4213,7 @@ impl SaeManifoldTerm {
             residual = &residual - &fit;
             for col in 0..m {
                 for out in 0..p {
-                    self.atoms[atom].decoder_coefficients[[col, out]] = beta[[col, out]];
+                    self.atoms[atom].decoder_coefficients_mut()[[col, out]] = beta[[col, out]];
                 }
             }
             reseeded.push(atom);
@@ -4327,7 +4337,7 @@ impl SaeManifoldTerm {
             residual = &residual - &fit;
             for col in 0..m {
                 for out in 0..p {
-                    self.atoms[best_atom].decoder_coefficients[[col, out]] = beta[[col, out]];
+                    self.atoms[best_atom].decoder_coefficients_mut()[[col, out]] = beta[[col, out]];
                 }
             }
             remaining.retain(|&a| a != best_atom);
@@ -4363,7 +4373,7 @@ impl SaeManifoldTerm {
             for atom in 0..k {
                 let m = self.atoms[atom].basis_size();
                 let phi = &self.atoms[atom].basis_values;
-                let b = &self.atoms[atom].decoder_coefficients;
+                let b = self.atoms[atom].decoder_coefficients();
                 let mut align = 0.0_f64;
                 for out in 0..p {
                     let mut recon = 0.0_f64;
@@ -4535,7 +4545,7 @@ impl SaeManifoldTerm {
             // matrix-matrix product through the faer GEMM (small shapes fall
             // back to `ndarray::dot` inside `fast_ab`; the reduction order may
             // differ, acceptable per the crate convention).
-            let mut y = fast_ab(phi, &self.atoms[atom].decoder_coefficients);
+            let mut y = fast_ab(phi, self.atoms[atom].decoder_coefficients());
             for row in 0..n {
                 let g = gates[[row, atom]];
                 for col in 0..y.ncols() {
@@ -4613,7 +4623,7 @@ impl SaeManifoldTerm {
             .atoms
             .iter()
             .map(|atom| {
-                atom.decoder_coefficients
+                atom.decoder_coefficients()
                     .iter()
                     .map(|value| value * value)
                     .sum::<f64>()
@@ -4840,7 +4850,7 @@ impl SaeManifoldTerm {
             residual = &residual - &fit;
             for col in 0..m {
                 for out in 0..p {
-                    self.atoms[atom].decoder_coefficients[[col, out]] = beta[[col, out]];
+                    self.atoms[atom].decoder_coefficients_mut()[[col, out]] = beta[[col, out]];
                 }
             }
         }
@@ -4971,7 +4981,7 @@ impl SaeManifoldTerm {
             }
             let fit = design.dot(&beta);
             residual = &residual - &fit;
-            self.atoms[atom].decoder_coefficients.assign(&beta);
+            self.atoms[atom].decoder_coefficients_mut().assign(&beta);
         }
         Ok(())
     }
@@ -6110,7 +6120,7 @@ impl SaeManifoldTerm {
         let max_decoder_norm = self
             .atoms
             .iter()
-            .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+            .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
             .fold(0.0_f64, f64::max)
             .sqrt();
         if !(max_decoder_norm > 0.0) {
@@ -7057,7 +7067,7 @@ impl SaeManifoldTerm {
                         .atoms
                         .iter()
                         .map(|atom| {
-                            atom.decoder_coefficients
+                            atom.decoder_coefficients()
                                 .iter()
                                 .map(|value| value * value)
                                 .sum::<f64>()
@@ -7979,7 +7989,7 @@ impl SaeManifoldTerm {
                 atom.latent_dim(),
                 phi,
                 jet,
-                atom.decoder_coefficients.clone(),
+                atom.decoder_coefficients().clone(),
                 atom.smooth_penalty().clone(),
             )?;
             // Carry the atom's own evaluator when it has one; otherwise seed the

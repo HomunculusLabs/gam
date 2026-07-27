@@ -18,6 +18,10 @@ use gam_sae::manifold::{
     SaeSupportSeedRequest, SaeSupportTermSeedRequest, build_sae_support_seed,
     build_sae_support_term_seed, sae_support_effective_atom_dims,
 };
+use gam_solve::arrow_schur::{
+    ArrowSolveOptions, BatchedBlockSolver, CpuBatchedBlockSolver, SurrogateLaneConfig,
+    SurrogateLaneState, matrix_free_arrow_evidence_log_det_surrogate,
+};
 use ndarray::{Array2, Axis};
 
 fn splitmix64(mut x: u64) -> u64 {
@@ -71,6 +75,61 @@ fn structured_chart(n_obs: usize, p_out: usize, seed: u64) -> Array2<f64> {
     target
 }
 
+/// Every unchecked `[[i, j]]` in the support lane's hot kernels reduces to ONE
+/// cross-field contract on [`gam_sae::manifold::SaeManifoldAtom`]:
+///
+/// ```text
+/// basis_values.ncols() == basis_jacobian.dim().1
+///                      == decoder_coefficients.nrows()
+///                      == smooth_penalty rows == smooth_penalty cols
+/// basis_jacobian.dim().2 == latent_dim == assignment.atom_coord_dim(atom)
+/// decoder_coefficients.ncols() == term.output_dim()
+/// ```
+///
+/// `SaeManifoldAtom::new` establishes it; the three arrays are then `pub`
+/// fields. If any stage of the lane leaves an atom violating it, the very next
+/// kernel that indexes the decoder at a basis column aborts. So audit it
+/// directly at every stage boundary rather than waiting for the abort.
+fn audit_atom_shape_contract(
+    term: &gam_sae::manifold::SaeSupportSparseTerm,
+    stage: &str,
+) -> Result<(), String> {
+    for (index, atom) in term.atoms.iter().enumerate() {
+        let m = atom.basis_values.ncols();
+        let d = atom.latent_dim();
+        let violations = [
+            (atom.basis_jacobian.dim().1 != m, "jet basis width"),
+            (atom.basis_jacobian.dim().2 != d, "jet latent width"),
+            (atom.decoder_coefficients().nrows() != m, "decoder rows"),
+            (
+                atom.decoder_coefficients().ncols() != term.output_dim(),
+                "decoder columns",
+            ),
+            (atom.smooth_penalty().dim() != (m, m), "penalty shape"),
+            (
+                term.assignment.atom_coord_dim(index) != d,
+                "assignment latent dim",
+            ),
+        ];
+        for (violated, what) in violations {
+            if violated {
+                return Err(format!(
+                    "{stage}: atom {index} violates the shape contract at {what} — \
+                     Phi={:?}, jet={:?}, decoder={:?}, penalty={:?}, d={d}, \
+                     assignment d={}, output_dim={}",
+                    atom.basis_values.dim(),
+                    atom.basis_jacobian.dim(),
+                    atom.decoder_coefficients().dim(),
+                    atom.smooth_penalty().dim(),
+                    term.assignment.atom_coord_dim(index),
+                    term.output_dim()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 struct Cell {
     n_obs: usize,
     p_out: usize,
@@ -116,6 +175,7 @@ fn run_cell(cell: &Cell) -> Result<String, String> {
     })?
     .term;
     let k_ret = term.k_atoms();
+    audit_atom_shape_contract(&term, "after term seed")?;
     let ard: Vec<Vec<f64>> = (0..k_ret)
         .map(|atom| vec![1.0; term.assignment.atom_coord_dim(atom)])
         .collect();
@@ -123,19 +183,68 @@ fn run_cell(cell: &Cell) -> Result<String, String> {
 
     // The fixed point is allowed to run out of cycles: this is a shape probe,
     // not a convergence probe. Only an ABORT is a defect here.
-    let inner = term
-        .solve_fixed_point(centered.view(), &lambda, &ard, 3, 1.0e-4, 1.0)
-        .map(|report| format!("inner recurred in {}", report.iterations))
-        .unwrap_or_else(|error| format!("inner Err({})", &error[..error.len().min(60)]));
+    let mut inner = String::new();
+    for cycle in 1..=3 {
+        inner = term
+            .solve_fixed_point(centered.view(), &lambda, &ard, 1, 1.0e-4, 1.0)
+            .map(|report| format!("inner recurred in {}", report.iterations))
+            .unwrap_or_else(|error| format!("inner Err({})", &error[..error.len().min(60)]));
+        audit_atom_shape_contract(&term, &format!("after cycle {cycle}"))?;
+    }
     term.reconstruct()?;
     term.raw_stationarity(centered.view(), &lambda, &ard)?;
     term.penalized_objective(centered.view(), &lambda, &ard)?;
     let system = term.assemble_arrow_schur(centered.view(), &lambda, &ard)?;
+    let border = system.k;
+    let first = system.rows.first().map(|row| row.htt.dim());
+    let last = system.rows.last().map(|row| row.htt.dim());
+    // The reported cell reached a stage its `top_k = 8` sibling did not: that
+    // sibling failed with the inner fixed point's own non-convergence message,
+    // so the aborting arm got PAST the inner solve and into the LAML criterion
+    // (arrow assembly, per-row evidence factorization, reduced-Schur surrogate).
+    // Reaching that stage needs a tolerance the inner solve can actually meet
+    // here, so it is loosened deliberately: the stage under test is downstream.
+    // The reduced-Schur surrogate is the criterion's whole cost, so it runs at
+    // the cheapest plan that still exercises the same code (few probes, a short
+    // CG ladder). The stage matters here, not the accuracy: what is under test
+    // is whether any subscript on it can leave its array.
+    let backend = CpuBatchedBlockSolver;
+    let options = ArrowSolveOptions::inexact_pcg().with_positive_definite_evidence();
+    let mut evidence_lane = SurrogateLaneState::new(SurrogateLaneConfig {
+        num_probes: 4,
+        seed: 0x2572,
+        rel_tol: 1.0e-4,
+        power_iters: 8,
+        cg_rel_tol: 1.0e-4,
+        cg_max_iters: 400,
+        deflation_max_rank: 8,
+        deflation_subspace_iters: 2,
+        deflation_target_std_err_rel: 1.0e-2,
+    });
+    evidence_lane.request_logdet_derivative_bundle();
+    let htt = backend
+        .factor_blocks(&system.rows, 0.0, system.d, true)
+        .map_err(|error| format!("row factorization: {error}"))?;
+    let evidence = match matrix_free_arrow_evidence_log_det_surrogate(
+        &system,
+        0.0,
+        0.0,
+        &options,
+        4,
+        16,
+        0x2572,
+        Some(&mut evidence_lane),
+    ) {
+        Ok((row, schur)) => format!("evidence log|H_tt|={row:+.4e} log|S|={schur:+.4e}"),
+        Err(error) => {
+            let text = error.to_string();
+            format!("evidence Err({})", &text[..text.len().min(70)])
+        }
+    };
     Ok(format!(
-        "retained {k_ret}, border {}, row dims {:?}..{:?}, {inner}",
-        system.k,
-        system.rows.first().map(|row| row.htt.dim()),
-        system.rows.last().map(|row| row.htt.dim())
+        "retained {k_ret}, border {border}, row dims {first:?}..{last:?}, factors {}, \
+         {inner}, {evidence}",
+        htt.len()
     ))
 }
 

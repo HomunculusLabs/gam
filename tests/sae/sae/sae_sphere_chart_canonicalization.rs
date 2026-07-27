@@ -441,7 +441,7 @@ fn sphere_defect(term: &SaeManifoldTerm) -> f64 {
     let coords = term.assignment.coords[0].as_matrix();
     sphere_chart_isometry_defect(
         evaluator.as_ref(),
-        atom.decoder_coefficients.view(),
+        atom.decoder_coefficients().view(),
         coords.view(),
     )
     .expect("defect must evaluate")

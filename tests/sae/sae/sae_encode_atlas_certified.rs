@@ -787,8 +787,8 @@ fn fast_routed_forward_groups_atoms_correctly() {
     .expect("atlas build");
 
     // Sketch/index over BOTH atoms' decoder frames (oriented p-rows: (p, m)).
-    let frame0 = atom0.decoder_coefficients.t().to_owned();
-    let frame1 = atom1.decoder_coefficients.t().to_owned();
+    let frame0 = atom0.decoder_coefficients().t().to_owned();
+    let frame1 = atom1.decoder_coefficients().t().to_owned();
     let sketch = RandomProjectionFrameSketch::from_decoder_blocks(&[frame0, frame1], 8, 7)
         .expect("sketch build");
     let index = SaeCandidateIndex::build(&sketch, IndexConfig::auto(8, 2, 7)).expect("index build");

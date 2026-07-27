@@ -605,7 +605,7 @@ fn run_rung(rung: &Rung) {
     // ---- match fitted -> planted by principal angles ----------------------
     let planted_planes: Vec<Array2<f64>> = frames.clone();
     let fitted_planes: Vec<Array2<f64>> = (0..k)
-        .map(|a| fitted_plane(term1.atoms[a].decoder_coefficients.view(), p))
+        .map(|a| fitted_plane(term1.atoms[a].decoder_coefficients().view(), p))
         .collect();
     let matched = match_atoms(&fitted_planes, &planted_planes);
 

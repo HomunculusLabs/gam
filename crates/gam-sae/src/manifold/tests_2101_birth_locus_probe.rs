@@ -145,7 +145,7 @@ fn probe_2101_birth_locus_disjoint_6circle_ordered_beta_bernoulli() {
             events.set(events.get() + 1);
             let k = pg.k_atoms;
             let (born_norm, rows, top2, pr) = if k >= 1 {
-                let d = &pg.term.atoms[k - 1].decoder_coefficients;
+                let d = &pg.term.atoms[k - 1].decoder_coefficients();
                 let bn = d.iter().map(|v| v * v).sum::<f64>().sqrt();
                 let rn: Vec<f64> = (0..d.nrows())
                     .map(|r| d.row(r).iter().map(|v| v * v).sum::<f64>().sqrt())
@@ -319,7 +319,7 @@ fn probe_2101_proper_circle_seed_survival() {
         term.set_guards_enabled(false);
         let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
         let rows_before: Vec<f64> = {
-            let d = &term.atoms[0].decoder_coefficients;
+            let d = term.atoms[0].decoder_coefficients();
             (0..d.nrows())
                 .map(|r| d.row(r).iter().map(|v| v * v).sum::<f64>().sqrt())
                 .collect()
@@ -327,7 +327,7 @@ fn probe_2101_proper_circle_seed_survival() {
         term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
             .expect("K=1 circle fit");
         let rows_after: Vec<f64> = {
-            let d = &term.atoms[0].decoder_coefficients;
+            let d = term.atoms[0].decoder_coefficients();
             (0..d.nrows())
                 .map(|r| d.row(r).iter().map(|v| v * v).sum::<f64>().sqrt())
                 .collect()

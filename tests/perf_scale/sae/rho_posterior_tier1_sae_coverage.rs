@@ -159,7 +159,7 @@ fn fixed_grid_mean(term: &SaeManifoldTerm) -> Array2<f64> {
     let coords = Array2::from_shape_fn((GRID, 1), |(i, _)| (i as f64 + 0.5) / GRID as f64);
     let evaluator = PeriodicHarmonicEvaluator::new(M).unwrap();
     let evaluated = evaluator.evaluate(coords.view()).unwrap();
-    evaluated.0.dot(&term.atoms[0].decoder_coefficients)
+    evaluated.0.dot(term.atoms[0].decoder_coefficients())
 }
 
 fn fit_band_at_rho(

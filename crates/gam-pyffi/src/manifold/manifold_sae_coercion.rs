@@ -444,7 +444,7 @@ pub(crate) fn build_manifold_sae_payload(
             None => None,
             Some(v) => {
                 let cov = nested_to_array2(&v_arr2(v)?)?;
-                // M_k = decoder rows = a.decoder_coefficients.shape[0].
+                // M_k = decoder rows = a.decoder_coefficients().shape[0].
                 let m = decoder_coefficients.len() as i64;
                 channel_cov_factors(cov.view(), m).map(|b| array3_to_nested(&b))
             }

@@ -332,7 +332,7 @@ impl SupportSparseManifoldSaeCore {
         out.set_item("coords", coords_rows(py, &self.term)?)?;
         let decoders = PyList::empty(py);
         for atom in &self.term.atoms {
-            decoders.append(atom.decoder_coefficients.clone().into_pyarray(py))?;
+            decoders.append(atom.decoder_coefficients().clone().into_pyarray(py))?;
         }
         out.set_item("decoder_blocks", decoders)?;
         out.set_item("log_lambda_smooth", self.log_lambda_smooth.clone())?;
@@ -545,7 +545,7 @@ impl SupportSparseManifoldSaeCore {
     fn decoder_blocks<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let blocks = PyList::empty(py);
         for atom in &self.term.atoms {
-            blocks.append(atom.decoder_coefficients.clone().into_pyarray(py))?;
+            blocks.append(atom.decoder_coefficients().clone().into_pyarray(py))?;
         }
         Ok(blocks)
     }

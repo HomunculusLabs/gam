@@ -1289,8 +1289,8 @@ where
         let decoded = decoded_for(atom_idx);
         let target_resid = target_resid_for(atom_idx);
         // Curved parameter price = the decoder's `M · p` coefficients.
-        let curved_num_params = atom.decoder_coefficients.len();
-        let basis_size = atom.decoder_coefficients.nrows();
+        let curved_num_params = atom.decoder_coefficients().len();
+        let basis_size = atom.decoder_coefficients().nrows();
         let envelope = curved_envelope_metrics(
             assign.view(),
             decoded.view(),
@@ -1300,7 +1300,7 @@ where
         let fitted_turning = atom.basis_evaluator.as_ref().and_then(|evaluator| {
             d1_atom_fitted_turning(
                 evaluator.as_ref(),
-                atom.decoder_coefficients.view(),
+                atom.decoder_coefficients().view(),
                 coords.view(),
             )
             .ok()

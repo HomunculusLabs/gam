@@ -305,7 +305,7 @@ pub(crate) fn newton_trial_state_is_rayon_thread_count_invariant_2242() {
         serial.atoms.iter().zip(&parallel.atoms).enumerate()
     {
         assert_eq!(
-            serial_atom.decoder_coefficients, parallel_atom.decoder_coefficients,
+            serial_atom.decoder_coefficients(), parallel_atom.decoder_coefficients(),
             "atom {atom_idx} decoder differs across Rayon policies"
         );
         assert_eq!(

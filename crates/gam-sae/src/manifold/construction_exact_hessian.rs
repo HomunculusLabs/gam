@@ -1594,7 +1594,7 @@ impl SaeManifoldTerm {
         }
         let atom = &self.atoms[atom_idx];
         let basis = atom.basis_size();
-        let decoder = &atom.decoder_coefficients; // (basis, out)
+        let decoder = atom.decoder_coefficients(); // (basis, out)
         let p = error_metric.len();
         // D_c[out] = Σ_m B[m,out] · ∂^c φ_m over the collected coord axes.
         let mut d_c = vec![0.0_f64; p];
@@ -2104,7 +2104,7 @@ impl SaeManifoldTerm {
             let lambda = lambda_vec[atom_idx];
             let spectrum = super::wbic_audit::recon_spectrum(
                 gram,
-                &atom.decoder_coefficients,
+                atom.decoder_coefficients(),
                 n_atom,
                 p,
                 dispersion,

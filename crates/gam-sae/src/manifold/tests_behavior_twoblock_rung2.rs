@@ -140,7 +140,7 @@ fn two_block_joint_fit_reconstructs_activation_and_behavior() {
     // split_decoder recovers a NON-trivial behavior decoder, and decoding the
     // fitted behavior reconstruction returns to the planted distributions.
     let (b_k, c_k) = block
-        .split_decoder(term.atoms[0].decoder_coefficients.view())
+        .split_decoder(term.atoms[0].decoder_coefficients().view())
         .unwrap();
     assert_eq!(b_k.dim().1, p_x);
     assert_eq!(c_k.dim().1, p_y);
@@ -206,7 +206,7 @@ fn constant_behavior_yields_zero_behavior_decoder() {
         .expect("fit must complete");
 
     let (b_k, c_k) = block
-        .split_decoder(term.atoms[0].decoder_coefficients.view())
+        .split_decoder(term.atoms[0].decoder_coefficients().view())
         .unwrap();
     let b_norm = b_k.iter().map(|v| v * v).sum::<f64>().sqrt();
     let c_norm = c_k.iter().map(|v| v * v).sum::<f64>().sqrt();

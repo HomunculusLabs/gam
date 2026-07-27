@@ -175,7 +175,7 @@ pub fn atom_behavior_isometry(
     // Tier-0 column standardization/equilibration (#2015) is a fit-internal
     // frame: undo it first so b_k/c_k are in raw activation / nats units,
     // matching the raw-frame quantities the isometry ratio is quoted against.
-    let mut augmented = atom.decoder_coefficients.to_owned();
+    let mut augmented = atom.decoder_coefficients().to_owned();
     if let Some(scale) = term.tier0_scale() {
         if scale.len() != augmented.ncols() {
             return Err(format!(

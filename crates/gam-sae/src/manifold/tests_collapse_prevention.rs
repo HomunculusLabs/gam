@@ -27,10 +27,10 @@ pub(crate) fn decoder_norm_guard_reseeds_collapsed_atom_to_distinct_nonzero() {
     let mut term = term0.clone();
     // Collapse atom 1's decoder to ≈0 while leaving its assignment gates
     // spread (the mass guard sees nothing wrong). Atom 0 keeps its signal.
-    term.atoms[1].decoder_coefficients.fill(0.0);
+    term.atoms[1].decoder_coefficients_mut().fill(0.0);
 
     let norm = |a: &SaeManifoldAtom| -> f64 {
-        a.decoder_coefficients
+        a.decoder_coefficients()
             .iter()
             .map(|v| v * v)
             .sum::<f64>()
@@ -77,8 +77,8 @@ pub(crate) fn decoder_norm_guard_reseeds_collapsed_atom_to_distinct_nonzero() {
     // The reseeded decoder is DISTINCT from atom 0's (not a duplicate): the
     // residual-seeded coordinates point atom 1 at unexplained signal, so the
     // two decoder column-spaces are not collinear.
-    let b0 = &term.atoms[0].decoder_coefficients;
-    let b1 = &term.atoms[1].decoder_coefficients;
+    let b0 = term.atoms[0].decoder_coefficients();
+    let b1 = term.atoms[1].decoder_coefficients();
     let dot: f64 = b0.iter().zip(b1.iter()).map(|(x, y)| x * y).sum();
     let cos = dot.abs() / (n0 * n1);
     assert!(
@@ -193,7 +193,7 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     // decoder again, and the three decoders are pairwise distinct (each landed
     // on its own residual PC, so no two column-spaces are collinear).
     let norm = |a: &SaeManifoldAtom| -> f64 {
-        a.decoder_coefficients
+        a.decoder_coefficients()
             .iter()
             .map(|v| v * v)
             .sum::<f64>()
@@ -208,8 +208,8 @@ pub(crate) fn decoder_norm_guard_reseeds_all_atoms_on_total_co_collapse_k3() {
     }
     for a in 0..3 {
         for b in (a + 1)..3 {
-            let ba = &term.atoms[a].decoder_coefficients;
-            let bb = &term.atoms[b].decoder_coefficients;
+            let ba = term.atoms[a].decoder_coefficients();
+            let bb = term.atoms[b].decoder_coefficients();
             let dot: f64 = ba.iter().zip(bb.iter()).map(|(x, y)| x * y).sum();
             let cos = dot.abs() / (norms[a] * norms[b]);
             assert!(
@@ -304,9 +304,9 @@ pub(crate) fn live_decoder_state_does_not_burn_cocollapse_multistart_budget() {
     // EV is irrelevant: all three atoms carry resolvable gated signal and the
     // union output span has rank K.
     for atom in 0..3 {
-        term.atoms[atom].decoder_coefficients.fill(0.0);
+        term.atoms[atom].decoder_coefficients_mut().fill(0.0);
         for basis in 0..3 {
-            term.atoms[atom].decoder_coefficients[[basis, atom]] = 0.3;
+            term.atoms[atom].decoder_coefficients_mut()[[basis, atom]] = 0.3;
         }
     }
     let live = term
@@ -721,9 +721,9 @@ fn separation_barrier_gated_gradient_matches_fd_1625() {
     let build = |d1: [f64; 3]| -> SaeManifoldTerm {
         let mut t = aligned_two_atom_term_with_c2(c2);
         // Overwrite atom1's decoder row 0 with the perturbed direction.
-        t.atoms[1].decoder_coefficients[[0, 0]] = d1[0];
-        t.atoms[1].decoder_coefficients[[0, 1]] = d1[1];
-        t.atoms[1].decoder_coefficients[[0, 2]] = d1[2];
+        t.atoms[1].decoder_coefficients_mut()[[0, 0]] = d1[0];
+        t.atoms[1].decoder_coefficients_mut()[[0, 1]] = d1[1];
+        t.atoms[1].decoder_coefficients_mut()[[0, 2]] = d1[2];
         t
     };
     let base = build([cos, sin, 0.0]);
@@ -1311,7 +1311,7 @@ pub(crate) fn decoder_norm_guard_is_noop_for_k1() {
     let p = term.output_dim();
     let target = Array2::<f64>::zeros((n, p));
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![array![0.0_f64]]);
-    let before = term.atoms[0].decoder_coefficients.clone();
+    let before = term.atoms[0].decoder_coefficients().clone();
     term.enforce_decoder_norm_guard(target.view(), 0, &rho, None)
         .expect("K=1 decoder-norm guard must be a no-op, never error");
     assert!(
@@ -1319,7 +1319,7 @@ pub(crate) fn decoder_norm_guard_is_noop_for_k1() {
         "K=1 must record no decoder-collapse events"
     );
     assert_eq!(
-        term.atoms[0].decoder_coefficients, before,
+        term.atoms[0].decoder_coefficients(), before,
         "K=1 decoder must be untouched by the guard"
     );
 }
@@ -1358,9 +1358,9 @@ pub(crate) fn hybrid_collapse_is_load_bearing_and_dominates() {
     // decodes γ(t) = φ₀(t)·b, and we additionally drive its decoded image to a
     // pure line by zeroing the higher harmonics — Θ → 0 ⇒ the dominance floor
     // must select linear for this slot.
-    for basis_row in 1..term.atoms[0].decoder_coefficients.nrows() {
-        for out_col in 0..term.atoms[0].decoder_coefficients.ncols() {
-            term.atoms[0].decoder_coefficients[[basis_row, out_col]] = 0.0;
+    for basis_row in 1..term.atoms[0].decoder_coefficients().nrows() {
+        for out_col in 0..term.atoms[0].decoder_coefficients().ncols() {
+            term.atoms[0].decoder_coefficients_mut()[[basis_row, out_col]] = 0.0;
         }
     }
 
@@ -1454,7 +1454,7 @@ pub(crate) fn hybrid_collapse_is_load_bearing_and_dominates() {
         .find(|v| v.linear_image.is_some())
         .expect("a collapsed slot exists");
     let collapsed_idx = verdict.linear_image.as_ref().unwrap().atom_idx;
-    let curved_params = term.atoms[collapsed_idx].decoder_coefficients.len();
+    let curved_params = term.atoms[collapsed_idx].decoder_coefficients().len();
     assert!(
         verdict.choice.num_parameters < curved_params,
         "the linear-collapsed slot must shed curved coefficients: linear \
@@ -1589,9 +1589,9 @@ pub(crate) fn topk_reconstruction_composes_with_hybrid_collapse() {
     let (mut term, _t, rho) = small_two_atom_periodic_term();
 
     // Straighten atom 0 so its verdict collapses to the linear tail.
-    for basis_row in 1..term.atoms[0].decoder_coefficients.nrows() {
-        for out_col in 0..term.atoms[0].decoder_coefficients.ncols() {
-            term.atoms[0].decoder_coefficients[[basis_row, out_col]] = 0.0;
+    for basis_row in 1..term.atoms[0].decoder_coefficients().nrows() {
+        for out_col in 0..term.atoms[0].decoder_coefficients().ncols() {
+            term.atoms[0].decoder_coefficients_mut()[[basis_row, out_col]] = 0.0;
         }
     }
     // A PHYSICAL target: the term's curved reconstruction plus a tiny smooth
@@ -1687,9 +1687,9 @@ pub(crate) fn topk_reconstruction_composes_with_hybrid_collapse() {
 #[test]
 pub(crate) fn oos_linear_images_drive_collapsed_reconstruction() {
     let (mut term, _t, rho) = small_two_atom_periodic_term();
-    for basis_row in 1..term.atoms[0].decoder_coefficients.nrows() {
-        for out_col in 0..term.atoms[0].decoder_coefficients.ncols() {
-            term.atoms[0].decoder_coefficients[[basis_row, out_col]] = 0.0;
+    for basis_row in 1..term.atoms[0].decoder_coefficients().nrows() {
+        for out_col in 0..term.atoms[0].decoder_coefficients().ncols() {
+            term.atoms[0].decoder_coefficients_mut()[[basis_row, out_col]] = 0.0;
         }
     }
     // A PHYSICAL target: the term's curved reconstruction plus a tiny smooth
@@ -2007,13 +2007,13 @@ fn unscaled_jeffreys_value_and_gradient_match_closed_form() {
     let h = 1.0e-6;
     let mut max_rel = 0.0_f64;
     for atom in 0..2 {
-        let m = term.atoms[atom].decoder_coefficients.nrows();
+        let m = term.atoms[atom].decoder_coefficients().nrows();
         for a in 0..m {
             for o in 0..p {
                 let mut plus = jeffreys_two_atom_term(n, dec0, dec1);
-                plus.atoms[atom].decoder_coefficients[[a, o]] += h;
+                plus.atoms[atom].decoder_coefficients_mut()[[a, o]] += h;
                 let mut minus = jeffreys_two_atom_term(n, dec0, dec1);
-                minus.atoms[atom].decoder_coefficients[[a, o]] -= h;
+                minus.atoms[atom].decoder_coefficients_mut()[[a, o]] -= h;
                 let fd = (plus.separation_barrier_value(1.0) - minus.separation_barrier_value(1.0))
                     / (2.0 * h);
                 let analytic = grad[offsets[atom] + a * p + o];
@@ -2202,9 +2202,8 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
     // cosine² = 1, the maximal-coherence worst case for a radial leak) and deep
     // inside the amplitude barrier's turn-on radius (‖B_1‖²_F ≪ f).
     let eps = 1.0e-7_f64;
-    let b0 = term.atoms[0].decoder_coefficients.clone();
-    term.atoms[1].decoder_coefficients = &b0 * eps;
-
+    let b0 = term.atoms[0].decoder_coefficients().clone();
+    term.atoms[1].set_decoder_coefficients(&b0 * eps).expect("decoder matches its atom basis");
     // Zero target so the data-fit gradient on the ≈0 decoder is itself O(ε): the
     // dominant radial force on atom 1's block is the collapse-prevention stack.
     let target = Array2::<f64>::zeros(target0.raw_dim());
@@ -2230,7 +2229,7 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
 
     let offsets = term.beta_offsets();
     let off1 = offsets[1];
-    let b1 = term.atoms[1].decoder_coefficients.clone();
+    let b1 = term.atoms[1].decoder_coefficients().clone();
     let u: f64 = b1.iter().map(|v| v * v).sum();
     let s = u.sqrt();
     assert!(s > 0.0, "collapsing atom must retain a radial direction");
@@ -2242,7 +2241,7 @@ fn repulsion_is_radially_inert_net_radial_is_analytic_barrier_2343() {
     let norm_sq: Vec<f64> = term
         .atoms
         .iter()
-        .map(|atom| atom.decoder_coefficients.iter().map(|v| v * v).sum::<f64>())
+        .map(|atom| atom.decoder_coefficients().iter().map(|v| v * v).sum::<f64>())
         .collect();
     let f = SaeManifoldTerm::barrier_norm_floor_sq(&norm_sq);
     let mu = SAE_AMPLITUDE_BARRIER_STRENGTH;
@@ -2332,9 +2331,9 @@ fn zz_measure_real_fixture_barrier_q_2253() {
     term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
     term.refresh_barrier_coactivation_gate();
     report("recompute_asbuilt", &term);
-    let b0 = term.atoms[0].decoder_coefficients.clone();
-    if term.atoms[1].decoder_coefficients.dim() == b0.dim() {
-        term.atoms[1].decoder_coefficients = b0.clone();
+    let b0 = term.atoms[0].decoder_coefficients().clone();
+    if term.atoms[1].decoder_coefficients().dim() == b0.dim() {
+        term.atoms[1].set_decoder_coefficients(b0.clone()).expect("decoder matches its atom basis");
     }
     term.refresh_barrier_coactivation_gate();
     report("recompute_aligned", &term);
@@ -2342,9 +2341,9 @@ fn zz_measure_real_fixture_barrier_q_2253() {
     let (mut h, _t2, _r2) = small_two_atom_periodic_term();
     h.refresh_barrier_coactivation_gate();
     report("hutchinson_asbuilt", &h);
-    let hb0 = h.atoms[0].decoder_coefficients.clone();
-    if h.atoms[1].decoder_coefficients.dim() == hb0.dim() {
-        h.atoms[1].decoder_coefficients = hb0.clone();
+    let hb0 = h.atoms[0].decoder_coefficients().clone();
+    if h.atoms[1].decoder_coefficients().dim() == hb0.dim() {
+        h.atoms[1].set_decoder_coefficients(hb0.clone()).expect("decoder matches its atom basis");
     }
     h.refresh_barrier_coactivation_gate();
     report("hutchinson_aligned", &h);
@@ -2471,7 +2470,7 @@ pub(crate) fn same_state_gated_signal_separates_live_and_vanished_decoders_2253(
 
     let mut vanished_term = live_term.clone();
     for atom in &mut vanished_term.atoms {
-        atom.decoder_coefficients.fill(0.0);
+        atom.decoder_coefficients_mut().fill(0.0);
     }
     let vanished = vanished_term
         .dictionary_collapse_verdict(target.view(), &rho, None)

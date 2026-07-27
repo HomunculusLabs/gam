@@ -435,7 +435,7 @@ fn build_device_encode_fixture() -> (
         for c in 0..p {
             x[c] = amp
                 * (0..m)
-                    .map(|b| phi_row[[0, b]] * atom.decoder_coefficients[[b, c]])
+                    .map(|b| phi_row[[0, b]] * atom.decoder_coefficients()[[b, c]])
                     .sum::<f64>();
         }
         rows.push(x);

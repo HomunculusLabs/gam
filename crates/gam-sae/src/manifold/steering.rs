@@ -77,7 +77,7 @@ impl SaeManifoldAtom {
                 phi.ncols()
             ));
         }
-        Ok(phi.dot(&self.decoder_coefficients))
+        Ok(phi.dot(self.decoder_coefficients()))
     }
 }
 

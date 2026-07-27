@@ -196,7 +196,7 @@ fn score_atoms(
     let (mut n_real, mut n_clean) = (0usize, 0usize);
     let mut rows = Vec::new();
     for k in 0..term.k_atoms() {
-        let decoder = &term.atoms[k].decoder_coefficients;
+        let decoder = term.atoms[k].decoder_coefficients();
         let plane = decoder_output_plane(decoder);
         let pr = decoder_sv_pr(decoder);
         let mut ov: Vec<(f64, usize)> = true_planes

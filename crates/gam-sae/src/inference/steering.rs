@@ -1204,7 +1204,7 @@ fn decode_tangents_at(
             .evaluate_phi_eta(coords.view(), atom.homotopy_eta)?
             .jet
     };
-    let decoder = &atom.decoder_coefficients;
+    let decoder = atom.decoder_coefficients();
     let m = decoder.nrows();
     if jet.dim() != (1, m, d) {
         return Err(format!(

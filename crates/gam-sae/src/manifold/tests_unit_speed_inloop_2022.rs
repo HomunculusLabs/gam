@@ -120,12 +120,12 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     for &(bm, bp) in &[(0usize, 0usize), (1usize, 1usize)] {
         let beta_idx = bm * p + bp; // single atom: β flattened row-major (m × p)
         let g_analytic = sys.gb[beta_idx];
-        let base = term.atoms[0].decoder_coefficients[[bm, bp]];
-        term.atoms[0].decoder_coefficients[[bm, bp]] = base + h;
+        let base = term.atoms[0].decoder_coefficients()[[bm, bp]];
+        term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base + h;
         let lpp = term.loss(target.view(), &rho).unwrap().total();
-        term.atoms[0].decoder_coefficients[[bm, bp]] = base - h;
+        term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base - h;
         let lmm = term.loss(target.view(), &rho).unwrap().total();
-        term.atoms[0].decoder_coefficients[[bm, bp]] = base; // restore
+        term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base; // restore
         let g_fd = (lpp - lmm) / (2.0 * h);
         assert!(
             (g_analytic - g_fd).abs() <= 1.0e-6 * (1.0 + g_fd.abs()),
@@ -136,7 +136,7 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     // ============================ (A) NO-OP SAFETY ============================
     let l0 = term.loss(target.view(), &rho).unwrap();
     let coords0 = term.assignment.coords[0].as_matrix().column(0).to_owned();
-    let decoder0 = term.atoms[0].decoder_coefficients.clone();
+    let decoder0 = term.atoms[0].decoder_coefficients().clone();
     let topo = CanonicalChartTopology::Circle { period };
     // A non-uniform harmonic chart cannot recompose to 1e-9 ⇒ honest-skip.
     let applied = term.canonicalize_atom_unit_speed_chart(0, &topo).unwrap();
@@ -173,7 +173,7 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     );
     let ddrift = decoder0
         .iter()
-        .zip(term.atoms[0].decoder_coefficients.iter())
+        .zip(term.atoms[0].decoder_coefficients().iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
     assert!(
