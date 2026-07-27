@@ -565,6 +565,30 @@ impl SaeSupportSparseTerm {
         support_k: usize,
         random_state: u64,
     ) -> Result<Self, String> {
+        let zero_prior: Vec<Vec<f64>> = self
+            .atoms
+            .iter()
+            .map(|atom| vec![0.0_f64; atom.latent_dim()])
+            .collect();
+        self.reroute_fixed_decoder_ard(target, support_k, random_state, &zero_prior)
+    }
+
+    /// [`Self::reroute_fixed_decoder`] scoring the coordinate prior too, so the
+    /// greedy step and the caller's acceptance test agree on the objective.
+    pub fn reroute_fixed_decoder_ard(
+        &self,
+        target: ArrayView2<'_, f64>,
+        support_k: usize,
+        random_state: u64,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<Self, String> {
+        if ard_precisions.len() != self.k_atoms() {
+            return Err(format!(
+                "reroute_fixed_decoder_ard: ard_precisions length {} must equal K={}",
+                ard_precisions.len(),
+                self.k_atoms()
+            ));
+        }
         if target.ncols() != self.output_dim || target.nrows() == 0 {
             return Err(format!(
                 "SaeSupportSparseTerm::reroute_fixed_decoder: target {:?} must have positive rows and P={}",
@@ -599,6 +623,154 @@ impl SaeSupportSparseTerm {
         // This is the dominant cost of an out-of-sample reconstruct -- it scores
         // every atom against every row -- and it was leaving a 30-core box at
         // load 10.
+        // ---- residual-greedy (OMP) routing --------------------------------
+        // Marginal top-s is not the right selection rule for a K > P dictionary:
+        // the atoms are necessarily coherent (Welch), so the s best-individually
+        // atoms are near-duplicates and span far less than the s best jointly.
+        // Greedy against the running residual fixes that; the chart argmax is
+        // taken on a grid so the score is a property of the atom's image rather
+        // than of its index.
+        // One trial coordinate per basis coefficient. A basis carrying `m`
+        // coefficients cannot resolve more than about `m` independent features
+        // along its chart, so `m` is the basis's own resolution rather than a
+        // tuning constant. Atoms may carry different widths, so slots are
+        // addressed through a prefix offset instead of a uniform stride.
+        //
+        // Multi-axis atoms fall through to the marginal path below: a product
+        // grid is exponential in the latent dimension, and the overcomplete
+        // lane this serves admits 1-D charts.
+        if self.atoms.iter().all(|atom| atom.latent_dim() == 1) {
+            let k_atoms = self.k_atoms();
+            let mut grid_offset = Vec::with_capacity(k_atoms + 1);
+            let mut slot_atom = Vec::new();
+            let mut slots = 0usize;
+            for (atom_index, atom) in self.atoms.iter().enumerate() {
+                grid_offset.push(slots);
+                let width = atom.basis_size().max(2);
+                slot_atom.extend(std::iter::repeat(atom_index).take(width));
+                slots += width;
+            }
+            grid_offset.push(slots);
+            let mut gamma = Array2::<f64>::zeros((slots, self.output_dim));
+            let mut theta = vec![0.0_f64; slots];
+            for (atom_index, atom) in self.atoms.iter().enumerate() {
+                let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
+                    format!("reroute omp: atom {atom_index} has no evaluator")
+                })?;
+                let width = grid_offset[atom_index + 1] - grid_offset[atom_index];
+                for g in 0..width {
+                    let raw = -1.0 + 2.0 * (g as f64 / width as f64);
+                    let t = super::support_seed::chart_coordinate(atom.basis_kind(), 0, raw);
+                    let coordinate = Array2::from_shape_vec((1, 1), vec![t])
+                        .map_err(|error| format!("reroute grid: {error}"))?;
+                    let (phi, _) = evaluator.evaluate(coordinate.view())?;
+                    let decoded = phi.row(0).dot(atom.decoder_coefficients());
+                    let slot = grid_offset[atom_index] + g;
+                    for channel in 0..self.output_dim {
+                        gamma[[slot, channel]] = decoded[channel];
+                    }
+                    theta[slot] = t;
+                }
+            }
+            let self_term: Vec<f64> = (0..slots)
+                .map(|slot| {
+                    (0..self.output_dim).map(|c| gamma[[slot, c]] * gamma[[slot, c]]).sum::<f64>()
+                })
+                .collect();
+            // `2 * V(alpha, t)` -- the prior the objective charges for placing a
+            // row at this chart coordinate, on the same scale as `gain`.
+            let prior_term: Vec<f64> = (0..slots)
+                .map(|slot| {
+                    let atom_index = slot_atom[slot];
+                    let period = self.atom_axis_periods(atom_index)[0];
+                    2.0 * ArdAxisPrior::eval(
+                        ard_precisions[atom_index][0],
+                        theta[slot],
+                        period,
+                    )
+                    .value
+                })
+                .collect();
+
+            let routed: Vec<(Vec<u32>, Vec<f64>, Vec<f64>)> = (0..target.nrows())
+                .into_par_iter()
+                .map(|row| {
+                    let mut residual: Vec<f64> =
+                        (0..self.output_dim).map(|c| target[[row, c]]).collect();
+                    let mut taken = vec![false; k_atoms];
+                    let mut picked: Vec<(usize, f64, f64)> = Vec::with_capacity(support_k);
+                    for _ in 0..support_k {
+                        let mut best_gain = f64::NEG_INFINITY;
+                        let mut best_atom = usize::MAX;
+                        let mut best_theta = 0.0;
+                        let mut best_slot = 0usize;
+                        for atom_index in 0..k_atoms {
+                            if taken[atom_index] {
+                                continue;
+                            }
+                            for slot in grid_offset[atom_index]..grid_offset[atom_index + 1] {
+                                let mut cross = 0.0;
+                                for c in 0..self.output_dim {
+                                    cross += residual[c] * gamma[[slot, c]];
+                                }
+                                let gain = 2.0 * cross - self_term[slot] - prior_term[slot];
+                                if gain > best_gain {
+                                    best_gain = gain;
+                                    best_atom = atom_index;
+                                    best_theta = theta[slot];
+                                    best_slot = slot;
+                                }
+                            }
+                        }
+                        if best_atom == usize::MAX {
+                            break;
+                        }
+                        taken[best_atom] = true;
+                        for c in 0..self.output_dim {
+                            residual[c] -= gamma[[best_slot, c]];
+                        }
+                        picked.push((best_atom, best_gain, best_theta));
+                    }
+                    picked.sort_by_key(|entry| entry.0);
+                    (
+                        picked.iter().map(|e| e.0 as u32).collect::<Vec<u32>>(),
+                        picked.iter().map(|e| e.1).collect::<Vec<f64>>(),
+                        picked.iter().map(|e| e.2).collect::<Vec<f64>>(),
+                    )
+                })
+                .collect();
+
+            let mut indices = Vec::with_capacity(target.nrows());
+            let mut gate_params = Vec::with_capacity(target.nrows());
+            let mut coords = Vec::with_capacity(target.nrows());
+            for (row_indices, row_gates, row_coords) in routed {
+                indices.push(row_indices);
+                gate_params.push(row_gates);
+                coords.push(row_coords);
+            }
+            let atom_specs = self
+                .atoms
+                .iter()
+                .enumerate()
+                .map(|(atom, template)| SaeAssignmentAtomSpec {
+                    latent_dim: template.latent_dim(),
+                    id_mode: gam_terms::latent::LatentIdMode::None,
+                    manifold: template.basis_kind().latent_manifold(template.latent_dim()),
+                    retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+                    latent_id: super::support_seed::splitmix64(atom as u64),
+                })
+                .collect();
+            let assignment = SaeAssignmentState::from_topk_support_heterogeneous(
+                target.nrows(),
+                k_atoms,
+                support_k,
+                atom_specs,
+                indices,
+                gate_params,
+                coords,
+            )?;
+            return Self::new(self.atoms.clone(), assignment);
+        }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
         let per_row: Vec<RowRoute> = target
             .axis_iter(ndarray::Axis(0))
@@ -610,17 +782,53 @@ impl SaeSupportSparseTerm {
             })?;
             let mut selected = Vec::<Candidate>::with_capacity(support_k);
             for (atom_index, atom) in self.atoms.iter().enumerate() {
-                let candidate_coords = (0..atom.latent_dim())
-                    .map(|axis| {
-                        let raw = super::support_seed::projection(
-                            row_values,
-                            atom_index,
-                            axis + 1,
-                            random_state,
-                        );
-                        super::support_seed::chart_coordinate(atom.basis_kind(), axis, raw)
-                    })
-                    .collect::<Vec<_>>();
+                // The hashed coordinate is only a stand-in for "where on this atom's
+                // curve does this row sit". Scoring an atom at an arbitrary point
+                // makes selection near-uncorrelated with which atoms can actually
+                // represent the row, so a 1-D atom searches its own curve at the
+                // basis's resolution before being scored. Only a multi-axis atom,
+                // whose product grid is exponential, still falls back to the hash.
+                let route_grid = atom.basis_size().max(2);
+                let candidate_coords = if atom.latent_dim() == 1 {
+                    let periodic = matches!(
+                        atom.basis_kind(),
+                        super::SaeAtomBasisKind::Periodic
+                    );
+                    let mut best_t = 0.0_f64;
+                    let mut best_s = f64::NEG_INFINITY;
+                    for g in 0..route_grid {
+                        let frac = g as f64 / route_grid as f64;
+                        let t_try = if periodic { frac } else { -1.0 + 2.0 * frac };
+                        let c_try = Array2::from_shape_vec((1, 1), vec![t_try])
+                            .map_err(|error| format!("reroute grid: {error}"))?;
+                        if let Some(ev) = atom.basis_evaluator.as_ref() {
+                            let (phi_try, _) = ev.evaluate(c_try.view())?;
+                            let dec = phi_try.row(0).dot(atom.decoder_coefficients());
+                            let s_try: f64 = row
+                                .iter()
+                                .zip(dec.iter())
+                                .map(|(truth, fit)| 2.0 * truth * fit - fit * fit)
+                                .sum();
+                            if s_try > best_s {
+                                best_s = s_try;
+                                best_t = t_try;
+                            }
+                        }
+                    }
+                    vec![best_t]
+                } else {
+                    (0..atom.latent_dim())
+                        .map(|axis| {
+                            let raw = super::support_seed::projection(
+                                row_values,
+                                atom_index,
+                                axis + 1,
+                                random_state,
+                            );
+                            super::support_seed::chart_coordinate(atom.basis_kind(), axis, raw)
+                        })
+                        .collect::<Vec<_>>()
+                };
                 let coordinate =
                     Array2::from_shape_vec((1, atom.latent_dim()), candidate_coords.clone())
                         .map_err(|error| {
@@ -1210,6 +1418,19 @@ impl SaeSupportSparseTerm {
         let mut fitted = self.reconstruct()?;
         let mut max_change = 0.0_f64;
         let classes = self.decoder_conflict_colors();
+        // Parallel width of this sweep is the SIZE of a colour class, not the atom
+        // count: atoms in one class are row-disjoint and solved together, but the
+        // classes run in sequence. With top_k = s every row forces its s atoms into
+        // s distinct classes, so a dense conflict graph collapses the width.
+        if !classes.is_empty() {
+            let widest = classes.iter().map(|c| c.len()).max().unwrap_or(0);
+            let narrowest = classes.iter().map(|c| c.len()).min().unwrap_or(0);
+            let mean = self.k_atoms() as f64 / classes.len() as f64;
+            log::info!(
+                "decoder sweep colouring: {} classes over {} atoms (widest {}, narrowest {}, mean {:.1} atoms/class)",
+                classes.len(), self.k_atoms(), widest, narrowest, mean
+            );
+        }
         for class in &classes {
             // Atoms in one class are row-disjoint: solve in parallel against
             // the shared `fitted` snapshot (each atom reads only its own rows),
@@ -1957,6 +2178,54 @@ impl SaeSupportSparseTerm {
             let candidate =
                 objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
             if candidate && previous_candidate {
+                // The alternating sweeps hold the SUPPORT fixed, so a point that
+                // is stationary in the coordinates and the decoders can still be
+                // improved by re-routing rows onto atoms that now explain them
+                // better -- a TopK SAE re-selects its latents on every forward
+                // pass, and this loop never did. Proposing the move HERE, at the
+                // inner fixed point, is the dictionary-learning alternation the
+                // scheme was missing, and it needs no cadence constant because
+                // convergence is itself the trigger.
+                //
+                // The move is guarded on the certificate's own objective. A
+                // re-route changes the objective discontinuously, so accepting
+                // it unconditionally would destroy the monotonicity the
+                // certificate rests on; accepting only a strict decrease keeps
+                // the scheme monotone and makes the returned point locally
+                // optimal against a support move as well as stationary within
+                // one, which is strictly stronger than certifying a frozen
+                // support.
+                let support_k = match self.assignment.mode() {
+                    AssignmentMode::TopK { k } => k,
+                    _ => 0,
+                };
+                if support_k > 0 {
+                    let moved =
+                        self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
+                    let after =
+                        moved.penalized_objective(target, lambda_smooth, ard_precisions)?;
+                    if after < objective {
+                        log::info!(
+                            "support move accepted at cycle {iteration}: objective \
+                             {objective:.6e} -> {after:.6e}"
+                        );
+                        *self = moved;
+                        // The map itself changed, so every difference the
+                        // accelerator holds describes a map that no longer
+                        // exists, and the two-cycle recurrence has to be
+                        // re-established against the new support.
+                        accelerator.reset();
+                        taken_step.clear();
+                        taken_step.resize(self.coordinate_state_len(), 0.0);
+                        last_objective = None;
+                        previous_candidate = false;
+                        continue;
+                    }
+                    log::info!(
+                        "support move rejected at cycle {iteration}: objective \
+                         {objective:.6e} -> {after:.6e}"
+                    );
+                }
                 log::info!(
                     "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
                      max_change={:.3e} objective={:.6e} anderson_accepted={accepted_extrapolations}",

@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 8 {
+    if !matches!(args.len(), 8 | 10 | 11) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir>".into());
     }
     let rows: usize = args[2].parse().map_err(|e| format!("rows: {e}"))?;
@@ -107,6 +107,29 @@ fn main() -> Result<(), String> {
         .sum();
     let tot: f64 = centered.iter().map(|v| v * v).sum();
     println!("centered train EV = {:.4}", 1.0 - res / tot);
+
+    if args.len() >= 10 {
+        let te_rows: usize = args[9].parse().map_err(|e| format!("test rows: {e}"))?;
+        let te_bytes = std::fs::read(&args[8]).map_err(|e| format!("{}: {e}", args[8]))?;
+        if te_bytes.len() != te_rows * cols * 8 {
+            println!("HELDOUT skipped: bad size");
+        } else {
+            let te: Vec<f64> = te_bytes.chunks_exact(8)
+                .map(|c| f64::from_le_bytes(c.try_into().expect("8"))).collect();
+            let x_test = Array2::from_shape_vec((te_rows, cols), te).map_err(|e| format!("{e}"))?;
+            let centered_test = &x_test - &mean;
+            let mut te_term = term_seed.term.reroute_fixed_decoder_ard(centered_test.view(), top_k, 0, &ard)?;
+            match te_term.solve_coordinates_fixed_decoder(centered_test.view(), &ard, 400, 1.0e-4, 1.0) {
+                Ok(rep) => {
+                    let recon = te_term.reconstruct()?;
+                    let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
+                    let ss: f64 = centered_test.iter().map(|x| x * x).sum();
+                    println!("HELDOUT rows={te_rows} recurred={} EV={:.4}", rep.recurred, 1.0 - sse / ss);
+                }
+                Err(e) => println!("HELDOUT refused: {e}"),
+            }
+        }
+    }
 
     // usage census + per-atom rows
     let mut usage = vec![0usize; k_ret];
