@@ -5,13 +5,13 @@
 //! ρ-derivatives. Before #2576 that number could not be produced at all on a
 //! CPU-only host, and the lane reported nothing about what it spent. This
 //! harness assembles the SAME arrow system the criterion assembles and then
-//! prints, for a ladder of probe counts and deflation-rank targets, the frozen
-//! rational surrogate's estimate, its Hutchinson error bar, and its wall-clock —
-//! next to the exact dense `log|S|` whenever the border is small enough to
-//! afford one.
+//! prints what the frozen rational surrogate costs and produces: the
+//! preconditioner study's per-tier iteration counts, and a ladder of
+//! deflation-rank targets showing which are reachable at this width and what
+//! each costs.
 //!
 //! ```text
-//! cargo run -p gam-sae --release --example support_laml_trace_probe -- \
+//! cargo run -p gam-sae --release --example support_laml_evidence_probe -- \
 //!     chart.bin <rows> <cols> <k_atoms> <top_k> <inner_cycles>
 //! ```
 
@@ -38,7 +38,7 @@ fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 7 {
-        return Err("usage: support_laml_trace_probe <f64-le.bin> <rows> <cols> <k_atoms> \
+        return Err("usage: support_laml_evidence_probe <f64-le.bin> <rows> <cols> <k_atoms> \
                     <top_k> <inner_cycles>"
             .to_string());
     }
