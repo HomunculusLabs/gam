@@ -268,8 +268,7 @@ struct RowSolveScratch {
 
 impl RowSolveScratch {
     fn fit(&mut self, term: &SaeSupportSparseTerm, row: usize, q: usize, p: usize) {
-        self.offsets.clear();
-        self.offsets.extend(term.slot_offsets(row));
+        term.slot_offsets_into(row, &mut self.offsets);
         self.support.clear();
         self.support
             .extend_from_slice(term.assignment.support_indices(row));
@@ -311,6 +310,15 @@ pub struct SaeSupportSparseTerm {
     output_dim: usize,
     /// Inverted support index. Total entries are exactly `N·support_k`.
     atom_rows: Vec<Vec<(usize, usize)>>,
+    /// Per-atom axis periodicity, resolved ONCE at construction (#2575).
+    ///
+    /// `SaeAssignmentState::atom_axis_periods` builds a fresh `Vec` on every
+    /// call, and the ARD prior needs it at every `(row, slot, axis)` — including
+    /// inside the coordinate line search, so up to 25 times per row per sweep.
+    /// It is a property of the atom's declared manifold and retraction, both of
+    /// which are fixed when the assignment state is built and are never
+    /// mutated after, so resolving it per call was re-deriving a constant.
+    atom_axis_periods: Vec<Vec<Option<f64>>>,
 }
 
 impl SaeSupportSparseTerm {
@@ -384,12 +392,22 @@ impl SaeSupportSparseTerm {
                 atom_rows[atom as usize].push((row, slot));
             }
         }
+        let atom_axis_periods = (0..k_atoms)
+            .map(|atom| assignment.atom_axis_periods(atom))
+            .collect();
         Ok(Self {
             atoms,
             assignment,
             output_dim,
             atom_rows,
+            atom_axis_periods,
         })
+    }
+
+    /// Axis periodicity of one atom's coordinate block: `None` on a Euclidean
+    /// axis, `Some(period)` on a circular one.
+    fn atom_axis_periods(&self, atom: usize) -> &[Option<f64>] {
+        &self.atom_axis_periods[atom]
     }
 
     pub fn n_obs(&self) -> usize {
@@ -645,7 +663,7 @@ impl SaeSupportSparseTerm {
                 .assignment
                 .support_indices(row)
                 .iter()
-                .flat_map(|&atom| self.assignment.atom_axis_periods(atom as usize))
+                .flat_map(|&atom| self.atom_axis_periods(atom as usize).iter().copied())
                 .collect::<Vec<_>>();
             let mut coord_cursor = 0usize;
             for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
@@ -925,7 +943,7 @@ impl SaeSupportSparseTerm {
                 let mut row_value = 0.0_f64;
                 for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
                     let atom = atom as usize;
-                    let periods = self.assignment.atom_axis_periods(atom);
+                    let periods = self.atom_axis_periods(atom);
                     for axis in 0..self.assignment.atom_coord_dim(atom) {
                         row_value += ArdAxisPrior::eval(
                             ard_precisions[atom][axis],
@@ -1171,15 +1189,14 @@ impl SaeSupportSparseTerm {
     }
 
     /// Per-slot offset ranges into a row's compact coordinate block.
-    fn slot_offsets(&self, row: usize) -> Vec<Range<usize>> {
-        let mut out = Vec::with_capacity(self.assignment.support_indices(row).len());
+    fn slot_offsets_into(&self, row: usize, out: &mut Vec<Range<usize>>) {
+        out.clear();
         let mut cursor = 0usize;
         for &atom in self.assignment.support_indices(row) {
             let d = self.assignment.atom_coord_dim(atom as usize);
             out.push(cursor..cursor + d);
             cursor += d;
         }
-        out
     }
 
     /// Fill one active slot's basis row, jet, decoded image, and coordinate
@@ -1316,7 +1333,7 @@ impl SaeSupportSparseTerm {
         let mut prior_cursor = 0usize;
         for (slot, &atom) in support.iter().enumerate() {
             let atom = atom as usize;
-            let periods = self.assignment.atom_axis_periods(atom);
+            let periods = self.atom_axis_periods(atom);
             for axis in 0..self.assignment.atom_coord_dim(atom) {
                 let prior = ArdAxisPrior::eval(
                     ard_precisions[atom][axis],
@@ -1432,7 +1449,7 @@ impl SaeSupportSparseTerm {
             let mut coord_cursor = 0usize;
             for (slot, &atom) in support.iter().enumerate() {
                 let atom = atom as usize;
-                let periods = self.assignment.atom_axis_periods(atom);
+                let periods = self.atom_axis_periods(atom);
                 for axis in 0..self.assignment.atom_coord_dim(atom) {
                     objective_delta.add(ArdAxisPrior::value_delta(
                         ard_precisions[atom][axis],
@@ -1461,7 +1478,7 @@ impl SaeSupportSparseTerm {
             let mut trial_gradient_max = 0.0_f64;
             for (slot, &atom) in support.iter().enumerate() {
                 let atom = atom as usize;
-                let periods = self.assignment.atom_axis_periods(atom);
+                let periods = self.atom_axis_periods(atom);
                 for axis in 0..dims[slot].1 {
                     let likelihood_gradient =
                         -trial[slot].jacobian.row(axis).dot(&*trial_residual);
@@ -1568,7 +1585,7 @@ impl SaeSupportSparseTerm {
                 for slot in 0..self.assignment.support_indices(row).len() {
                     let atom = self.assignment.support_indices(row)[slot] as usize;
                     self.fill_active(row, slot, scratch)?;
-                    let periods = self.assignment.atom_axis_periods(atom);
+                    let periods = self.atom_axis_periods(atom);
                     for axis in 0..scratch.jacobian.nrows() {
                         let mut gradient = 0.0;
                         for output in 0..self.output_dim {
@@ -1610,7 +1627,7 @@ impl SaeSupportSparseTerm {
             for slot in 0..self.assignment.support_indices(row).len() {
                 let atom = self.assignment.support_indices(row)[slot] as usize;
                 self.fill_active(row, slot, &mut scratch)?;
-                let periods = self.assignment.atom_axis_periods(atom);
+                let periods = self.atom_axis_periods(atom);
                 for axis in 0..scratch.jacobian.nrows() {
                     let likelihood_gradient = scratch
                         .jacobian
@@ -1644,7 +1661,7 @@ impl SaeSupportSparseTerm {
         for row in 0..self.n_obs() {
             for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
                 let atom = atom as usize;
-                let periods = self.assignment.atom_axis_periods(atom);
+                let periods = self.atom_axis_periods(atom);
                 for axis in 0..self.assignment.atom_coord_dim(atom) {
                     objective += ArdAxisPrior::eval(
                         ard_precisions[atom][axis],

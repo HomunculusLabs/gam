@@ -22,6 +22,7 @@ macro_rules! impl_reason_error_boilerplate {
     };
 }
 
+pub mod anderson;
 pub mod decision;
 pub mod dense;
 mod error;
