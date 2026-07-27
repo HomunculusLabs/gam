@@ -558,31 +558,48 @@ fn hifreq_tensor_k4() -> Result<(), String> {
 fn hifreq_tensor_k6() -> Result<(), String> {
     hifreq_tensor_probe(6)
 }
-// gam#1082: hifreq_tensor_k8/k10 run LONGER than the default per-test
-// slow-timeout (300s notice / 600s SIGKILL) on an IRREDUCIBLE cost. They are
-// NOT `#[ignore]`d — the high-frequency recovery they verify is real coverage we
-// keep — they are given a dedicated, generous `slow-timeout` override in
-// `.config/nextest.toml` (filter `test(/hifreq_tensor_k(8|10)/)`) so the nightly
-// CI runs them to completion and asserts the recovery instead of bulk-killing
-// them at 600s. This is a genuine compute-cost split, not hiding a perf bug:
+// gam#1082/#2585: hifreq_tensor_k8/k10 run LONGER than the default per-test
+// slow-timeout (300s notice / 600s SIGKILL). They are NOT `#[ignore]`d — the
+// high-frequency recovery they verify is real coverage we keep — they are given
+// a dedicated, generous `slow-timeout` override in `.config/nextest.toml`
+// (filter `test(/hifreq_tensor_k(8|10)/)`) so the nightly CI runs them to
+// completion and asserts the recovery instead of bulk-killing them at 600s.
 //
-// The 2D tensor `te(theta, h, bc=['periodic','natural'], k=2k+4)` has coefficient
-// dimension p = kb² ≈ 400 (k8) / 576 (k10). The dominant inner cost is the dense
-// O(p³) Cholesky of the penalized PIRLS Hessian `XᵀWX + S_λ`, run every
-// PIRLS/REML iteration. This is genuinely irreducible here:
-//   * The PENALTY side already exploits the tensor's Kronecker structure fully —
-//     the marginal penalties are simultaneously diagonalized
-//     (`kronecker_reparameterization_engine`), so `S_λ` is diagonal and its
-//     log-det + λ-derivatives are O(p), not O(p³).
-//   * The DATA Gram `XᵀWX` does NOT inherit Kronecker structure: with a general
-//     PIRLS weight matrix W (data-dependent, non-identity), `Σ_i w_i (x_{a,i} ⊗
-//     x_{b,i})(·)ᵀ` does not factor as `A ⊗ B`, so its Cholesky is a true dense
-//     p×p factorization. No separable/banded reformulation removes the cube.
-// And `kb` CANNOT be capped to shrink p: the ground-truth signal is `sin(k·θ)`,
-// whose periodic marginal needs ≥ k Fourier modes to represent, so k8/k10
-// require kb ≳ 18; capping kb would make even the unpenalized oracle unable to
-// recover the truth, defeating the high-frequency recovery the probe exists to
-// check. k4/k6 (p ≈ 144/196) stay well within the default budget.
+// THE COST IS A PERF BUG, AND THIS NOTE USED TO SAY OTHERWISE. It claimed the
+// dominant cost is the dense O(p³) Cholesky of `XᵀWX + S_λ` and that this is
+// "genuinely irreducible". The k8 sibling refutes it in two lines:
+//
+//   kb = 2k+4, p = kb²   ->   k8: p = 400,  k10: p = 576
+//   a p³ law predicts    ->   k10 = 2.99 x k8 = 218 s
+//   measured (CI)        ->   k10 = 6310 s = 86 x k8's 73 s
+//
+// 29x above the cube-law prediction; the implied exponent is ~12. Driving the
+// same fixture through the CLI at k = 4/6/8 shows why: per-EVALUATION cost does
+// scale as about p^2.3 (73 / 288 / 734 ms — the O(n p²) assembly plus the O(p³)
+// factorization, so that half of the old note was right), while the number of
+// outer evaluations is 404 / 441 / 180 and is not a function of p at all. To
+// reach 6310 s, k10 must be spending ~4300 outer evaluations on a problem with
+// two or three λ.
+//
+// The structural reason is in this file's own fixture: the grid is 24 x 24, so
+// `n = 576`, and at k10 `kb = 24` gives `p = kb² = 576`. **p = n exactly** — a
+// saturated design with zero residual degrees of freedom, where the REML profile
+// has a genuine λ→0 boundary singularity and (per the `zz_measure` note below)
+// the null-space λ rails at the ρ ceiling. k8 is p = 400 against n = 576, i.e. a
+// perfectly ordinary problem, and it costs 73 s. One step of `k` crosses from
+// penalized regression into saturated interpolation.
+//
+// What remains true from the old note: the PENALTY side already exploits the
+// tensor's Kronecker structure fully (marginal penalties are simultaneously
+// diagonalized by `kronecker_reparameterization_engine`, so `S_λ` is diagonal
+// and its log-det + λ-derivatives are O(p)); the DATA Gram `XᵀWX` does not
+// inherit that structure under a general PIRLS weight W, so its factorization is
+// a true dense p×p one. And `kb` cannot be capped to shrink p: the ground truth
+// is `sin(k·θ)`, whose periodic marginal needs ≥ k Fourier modes, so k8/k10
+// require kb ≳ 18. The conclusion that does NOT follow is that `n = p` is an
+// acceptable design — the grid should grow with `kb` — but that is a fixture
+// question and #2585 keeps it deliberately behind the engine fix, so the outer
+// loop is measured against the hard case rather than the case being deleted.
 #[test]
 fn hifreq_tensor_k8() -> Result<(), String> {
     hifreq_tensor_probe(8)
