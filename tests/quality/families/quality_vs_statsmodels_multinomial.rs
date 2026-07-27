@@ -184,7 +184,8 @@ fn multinomial_logit_recovers_true_softmax_and_beats_statsmodels() {
     }
     // Zero penalty ⇒ unpenalized multinomial MLE.
     let penalty = Array2::<f64>::zeros((P, P));
-    let lambdas = Array1::<f64>::zeros(K - 1);
+    // #2344: one λ per CLASS, reference class included (permutation-equivariant).
+    let lambdas = Array1::<f64>::zeros(K);
 
     let out = fit_penalized_multinomial(MultinomialFitInputs {
         design: design.view(),
@@ -522,7 +523,8 @@ fn multinomial_logit_recovers_true_softmax_and_beats_statsmodels_on_real_data() 
     }
     // Zero penalty ⇒ unpenalized multinomial MLE on the linear design.
     let penalty = Array2::<f64>::zeros((PENGUIN_P, PENGUIN_P));
-    let lambdas = Array1::<f64>::zeros(PENGUIN_K - 1);
+    // #2344: one λ per CLASS, reference class included (permutation-equivariant).
+    let lambdas = Array1::<f64>::zeros(PENGUIN_K);
 
     let out = fit_penalized_multinomial(MultinomialFitInputs {
         design: design.view(),

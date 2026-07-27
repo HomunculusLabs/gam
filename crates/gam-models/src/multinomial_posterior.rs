@@ -254,6 +254,13 @@ pub fn integrate_logistic_normal_softmax_moments(
 ) -> Result<MultinomialPosteriorMoments, EstimationError> {
     control.validate()?;
     validate_inputs(active_mean, active_covariance)?;
+    // Integrate the nearest symmetric matrix. (C + Cᵀ)/2 is exact in floating
+    // point for the off-diagonal average and is what every downstream
+    // eigenroutine assumes it was handed; propagating one arbitrary triangle
+    // instead would make the result depend on which triangle happened to be
+    // read.
+    let symmetric_covariance = symmetrized_covariance(active_covariance);
+    let active_covariance = symmetric_covariance.view();
 
     let mean = active_mean.to_vec();
     let m = mean.len();
@@ -322,7 +329,20 @@ fn validate_inputs(
     let scale = active_covariance
         .iter()
         .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
-    let symmetry_tolerance = covariance_roundoff_tolerance(scale, m);
+    // STRUCTURAL asymmetry only. This covariance is symmetric by construction,
+    // so whatever difference survives between the triangles is roundoff from
+    // the chain that assembled it — and a `c·ε·m·scale` envelope silently
+    // encodes an assumed chain length. It fired at 51·ε on a 2×2 penguins
+    // posterior (asymmetry 5.218e-15 against a 3.260e-15 bound), refusing a
+    // correct fit over noise carrying no information.
+    //
+    // A caller error that this check exists to catch — a transposed factor,
+    // the wrong triangle — shows up at O(1) RELATIVE asymmetry, so gate there,
+    // using the same √ε relative convention `outer_value_agreement_bound` uses
+    // for two lanes that should agree up to roundoff. The matrix actually
+    // integrated is the symmetrized one (see `symmetrized_covariance`), so
+    // sub-threshold asymmetry is removed rather than propagated.
+    let symmetry_tolerance = f64::EPSILON.sqrt() * scale.max(1.0);
     let mut maximum_asymmetry = 0.0_f64;
     for row in 0..m {
         for column in (row + 1)..m {
@@ -332,10 +352,28 @@ fn validate_inputs(
     }
     if maximum_asymmetry > symmetry_tolerance {
         return Err(EstimationError::InvalidInput(format!(
-            "multinomial posterior integration covariance is not symmetric: max asymmetry {maximum_asymmetry:.6e} exceeds backward-error tolerance {symmetry_tolerance:.6e}"
+            "multinomial posterior integration covariance is not symmetric: max asymmetry {maximum_asymmetry:.6e} exceeds structural tolerance {symmetry_tolerance:.6e} (scale {scale:.6e})"
         )));
     }
     Ok(())
+}
+
+/// Nearest symmetric matrix to `covariance` in the Frobenius norm.
+///
+/// The inputs to this module are symmetric by construction; this removes the
+/// roundoff-level asymmetry their assembly chain leaves behind, so the
+/// integration cannot depend on which triangle a downstream routine reads.
+fn symmetrized_covariance(covariance: ArrayView2<'_, f64>) -> Array2<f64> {
+    let m = covariance.nrows();
+    let mut out = covariance.to_owned();
+    for row in 0..m {
+        for column in (row + 1)..m {
+            let average = 0.5 * (covariance[[row, column]] + covariance[[column, row]]);
+            out[[row, column]] = average;
+            out[[column, row]] = average;
+        }
+    }
+    out
 }
 
 fn covariance_roundoff_tolerance(scale: f64, dimension: usize) -> f64 {
