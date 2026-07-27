@@ -1909,21 +1909,22 @@ impl SaeSupportSparseTerm {
             format!("SaeSupportSparseTerm::fill_active_eval: atom {atom_idx} has no evaluator")
         })?;
         evaluator.evaluate_into(phi, jet, coords)?;
+        // Hoist the decoder and accumulate BY ROW. This is the hottest
+        // function in the fit -- 40% of profiled samples -- and it runs once per
+        // (row, slot). Re-resolving `decoder_coefficients()` inside the inner
+        // loop cost `m * P` accessor calls and a bounds-checked 2-D index per
+        // element; `scaled_add` over a contiguous decoder row is the same
+        // arithmetic as an axpy, with one bounds check per row.
+        let decoder = atom.decoder_coefficients();
         decoded.fill(0.0);
         for basis in 0..m {
-            let weight = phi[[0, basis]];
-            for output in 0..self.output_dim {
-                decoded[output] += weight * atom.decoder_coefficients()[[basis, output]];
-            }
+            decoded.scaled_add(phi[[0, basis]], &decoder.row(basis));
         }
         jacobian.fill(0.0);
         for axis in 0..d {
+            let mut jacobian_axis = jacobian.row_mut(axis);
             for basis in 0..m {
-                let weight = jet[[0, basis, axis]];
-                for output in 0..self.output_dim {
-                    jacobian[[axis, output]] +=
-                        weight * atom.decoder_coefficients()[[basis, output]];
-                }
+                jacobian_axis.scaled_add(jet[[0, basis, axis]], &decoder.row(basis));
             }
         }
         Ok(())

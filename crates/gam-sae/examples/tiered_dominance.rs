@@ -51,7 +51,19 @@ fn main() -> Result<(), String> {
         .map(|c| f64::from_le_bytes(c.try_into().expect("8-byte chunk")))
         .collect();
     let z = Array2::from_shape_vec((rows, cols), data).map_err(|e| e.to_string())?;
+    // The active-scalar budget is the axis this comparison turns on. Tier-1
+    // spends `block_topk * block_size` per row and `block_topk` DEFAULTS TO 1;
+    // this lane's curved atoms carry no per-atom amplitude, so the curved tier
+    // spends exactly one coordinate per selected atom.
+    let flat_config_probe = TieredFitConfig::linear_bulk(blocks, block_size);
+    let flat_actives = flat_config_probe.tier1.block_topk * block_size;
     println!("corpus {rows}x{cols}  tier1 {blocks} blocks of {block_size}  tier2 K={curved_k} s={curved_s}");
+    println!(
+        "actives/row: flat {} (block_topk {} x block_size {}) + curved {} = {}",
+        flat_actives, flat_config_probe.tier1.block_topk, block_size, curved_s,
+        flat_actives + curved_s
+    );
+    println!("NOTE: fit_tiered scores on the corpus it fits, so both EVs below are IN-SAMPLE.");
 
     // Arm 1: mu + L. Tier-2 disabled — the linear bulk alone, which is the
     // baseline the curved tier has to beat from its own residual.
@@ -59,7 +71,7 @@ fn main() -> Result<(), String> {
     let flat_config = TieredFitConfig::linear_bulk(blocks, block_size);
     let flat = fit_tiered(z.view(), &flat_config)?;
     println!(
-        "FLAT   (mu+L)   EV={:.6}  {:.0}s",
+        "FLAT   (mu+L)   EV={:.6} (IN-SAMPLE)  {:.0}s",
         flat.explained_variance,
         t0.elapsed().as_secs_f64()
     );
@@ -72,7 +84,7 @@ fn main() -> Result<(), String> {
     hybrid_config.tier2.support_k = curved_s;
     let hybrid = fit_tiered(z.view(), &hybrid_config)?;
     println!(
-        "HYBRID (mu+L+C) EV={:.6}  {:.0}s",
+        "HYBRID (mu+L+C) EV={:.6} (IN-SAMPLE)  {:.0}s",
         hybrid.explained_variance,
         t1.elapsed().as_secs_f64()
     );
@@ -84,7 +96,7 @@ fn main() -> Result<(), String> {
         );
     }
     println!(
-        "TIER2_ADDS_EV = {:.6}",
+        "TIER2_ADDS_EV = {:.6} (in-sample delta at identical Tier-1 geometry)",
         hybrid.explained_variance - flat.explained_variance
     );
     Ok(())
