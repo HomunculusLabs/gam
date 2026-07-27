@@ -1827,6 +1827,78 @@ mod tests {
             .expect("a well-formed term still evaluates");
     }
 
+    /// #2572 — the assembled support-sparse system must be usable by the PCG
+    /// preconditioner ladder, whose escalated tiers all build the β-coupling
+    /// graph first.
+    ///
+    /// This lane assembles with `htbeta_cols = 0` and carries `H_tβ` in a matvec
+    /// pair, so every row's dense cross block is `(d_i, 0)`; it also registers
+    /// per-atom `block_offsets`. `BetaCouplingGraph::build` read that slab
+    /// directly and aborted with `ndarray: index out of bounds` on the first
+    /// subscript. Measured on the seeded `K = 24 > P = 8`, `top_k = 4` term in
+    /// `examples/issue_2572_precond_probe.rs`: `ClusterJacobi` and
+    /// `AdditiveSchwarz{overlap: 1}` both aborted; both now build.
+    #[test]
+    fn the_assembled_system_can_build_the_escalated_preconditioner_tiers() {
+        use gam_solve::arrow_schur::{
+            AdditiveSchwarzPreconditioner, BatchedBlockSolver, ClusterJacobiPreconditioner,
+            CpuBatchedBlockSolver,
+        };
+
+        // Two linear atoms on disjoint rows, so the coupling graph has real
+        // block structure to partition and both atoms carry a PD `H_tt`.
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let atoms = vec![
+            atom(
+                "left",
+                SaeAtomBasisKind::Linear,
+                1,
+                Arc::clone(&evaluator),
+                &[0.0],
+                array![[0.5, -0.25], [1.0, 0.75]],
+            ),
+            atom(
+                "right",
+                SaeAtomBasisKind::Linear,
+                1,
+                evaluator,
+                &[0.0],
+                array![[-0.5, 0.25], [0.75, -1.0]],
+            ),
+        ];
+        let state = SaeAssignmentState::from_topk_support(
+            4,
+            2,
+            1,
+            1,
+            vec![vec![0], vec![1], vec![0], vec![1]],
+            vec![vec![1.0]; 4],
+            vec![vec![-1.0], vec![0.5], vec![1.0], vec![-0.5]],
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let target = array![[-1.0, 0.5], [0.25, 0.0], [1.0, -0.5], [-0.25, 0.75]];
+        let ard = vec![vec![1.0], vec![1.0]];
+        let lambda = vec![0.1, 0.1];
+        let system = term
+            .assemble_arrow_schur(target.view(), &lambda, &ard)
+            .expect("arrow system");
+        // The shape that used to abort: a zero-column cross-block slab with
+        // registered block offsets.
+        assert_eq!(system.rows[0].htbeta.dim().1, 0);
+        assert!(!system.block_offsets.is_empty());
+
+        let backend = CpuBatchedBlockSolver;
+        let htt = backend
+            .factor_blocks(&system.rows, 0.0, system.d, true)
+            .expect("per-row blocks factor");
+        ClusterJacobiPreconditioner::from_arrow_schur(&system, &htt, 0.0, &backend)
+            .expect("cluster-Jacobi tier builds on a matrix-free system");
+        AdditiveSchwarzPreconditioner::from_arrow_schur(&system, &htt, 0.0, &backend, 1)
+            .expect("additive-Schwarz tier builds on a matrix-free system");
+    }
+
     #[test]
     fn decoder_sweep_decreases_final_function_objective() {
         let evaluator: Arc<dyn SaeBasisSecondJet> =
