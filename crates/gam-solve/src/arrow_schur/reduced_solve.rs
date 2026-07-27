@@ -2408,40 +2408,6 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     }
 }
 
-/// Evaluate an ALREADY-BUILT rational surrogate plan against this system's
-/// matrix-free reduced Schur — the per-ρ companion to
-/// [`rational_reduced_schur_plan_derived`]'s build-once.
-///
-/// A criterion that differentiates its own log-determinant must evaluate ONE
-/// frozen functional at every ρ: same probes, same quadrature nodes, same
-/// deflation basis. Rebuilding the plan per ρ would make the value a different
-/// function at every point, and
-/// [`RationalLogdetPlan::directional_derivative`] would then be the exact
-/// gradient of a function nobody evaluated twice. This entry is what keeps the
-/// plan frozen while the OPERATOR moves: `sys` and `htt_factors` are the
-/// current ρ's, the plan is the outer solve's.
-///
-/// `None` on a shifted-CG breakdown or a non-finite assembly.
-pub fn rational_reduced_schur_evaluate<B: BatchedBlockSolver + Sync>(
-    plan: &RationalLogdetPlan,
-    sys: &ArrowSchurSystem,
-    htt_factors: &ArrowFactorSlab,
-    ridge_beta: f64,
-    backend: &B,
-    resident: Option<&SaeResidentReducedSchur>,
-    gpu_matvec: Option<&GpuSchurMatvec>,
-    cg_rel_tol: f64,
-    cg_max_iters: usize,
-) -> Option<RationalLogdetEval> {
-    if sys.k == 0 {
-        return None;
-    }
-    let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, resident)
-        .with_gpu_matvec(gpu_matvec);
-    let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
-    plan.evaluate(&matvec, cg_rel_tol, cg_max_iters)
-}
-
 /// Contract the surrogate's shifted-solve bundle from
 /// [`rational_reduced_schur_log_det`] against a reduced-Schur derivative operator
 /// `∂S` (supplied through its matvec `dmatvec(v) = (∂S)·v`) to obtain the EXACT

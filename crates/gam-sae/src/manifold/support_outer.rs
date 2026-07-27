@@ -18,73 +18,6 @@ use ndarray::{Array1, Array2, ArrayView1};
 use super::*;
 
 const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
-const SUPPORT_LAML_TRACE_PROBES: usize = 16;
-
-/// The Hutchinson trace estimator's OWN relative resolution at
-/// `SUPPORT_LAML_TRACE_PROBES` probes.
-///
-/// For `±1` Rademacher probes `z` and a symmetric `A`,
-/// `Var(zᵀAz) = 2·‖A − diag(A)‖_F²`, so the `m`-probe mean has standard error
-/// `√(2/m)·‖A_off‖_F`. Relative to the estimand `tr(A)` the achievable floor is
-/// `√(2/m)`: **this is the accuracy the estimate can express**, no matter how
-/// exactly each linear system inside it is solved. At `m = 16` it is 35%.
-///
-/// Every tolerance the estimator hands downward is derived from this number
-/// rather than picked beside it (SPEC-21): a target below it buys precision the
-/// estimator's own variance swamps, and a residual above it means the
-/// deterministic solve error has overtaken the stochastic noise and the number
-/// is no longer an estimate of the trace at all.
-fn support_laml_trace_relative_resolution() -> f64 {
-    (2.0 / SUPPORT_LAML_TRACE_PROBES as f64).sqrt()
-}
-
-/// Relative-residual target for one trace probe's border solve.
-///
-/// The `m` per-probe CG truncation errors are NOT independent — they are
-/// deterministic functions of the same operator and can accumulate coherently
-/// through the `1/m` average, contributing up to `δ` in relative terms while
-/// the stochastic error shrinks as `√(2/m)`. Requiring that coherent bias to
-/// sit a full probe's worth BELOW the noise floor gives
-///
-/// ```text
-/// δ = √(2/m) / m
-/// ```
-///
-/// — 2.2e-2 at `m = 16`. The lane previously asked for `1.0e-8`, seven orders
-/// tighter than the estimator's own 35% resolution and chosen independently of
-/// the probe count; that target was never met anyway, because the solve behind
-/// it was unpreconditioned (#2576).
-fn support_laml_trace_cg_rel_tol() -> f64 {
-    support_laml_trace_relative_resolution() / SUPPORT_LAML_TRACE_PROBES as f64
-}
-
-/// Iteration budget for one trace probe's border solve.
-///
-/// In exact arithmetic CG terminates within the reduced dimension, so
-/// `beta_dim` is the only mathematically non-arbitrary cap; the clamp keeps a
-/// tiny fixture from being cut off before Krylov even spans its own system and
-/// keeps a massive-`K` border from spending a whole evaluation inside one
-/// probe. Hitting the cap is no longer silent: the solve returns a
-/// [`ReducedSchurCgReport`] and [`SaeSupportOuterObjective::trace_by_group`]'s
-/// caller reads it (see [`support_laml_trace_refusal_residual`]).
-fn support_laml_trace_cg_max_iters(beta_dim: usize) -> usize {
-    beta_dim.saturating_mul(2).clamp(128, 4096)
-}
-
-/// Relative residual above which a trace probe's solve is REFUSED rather than
-/// averaged in.
-///
-/// This is the estimator's own resolution `√(2/m)`. Below it the deterministic
-/// truncation is dominated by the stochastic noise the estimate already
-/// carries, so a solve that merely missed its (much tighter) target still
-/// estimates the right quantity and is reported, not refused. Above it the
-/// truncation error EXCEEDS the noise floor: averaging such a solve produces a
-/// number whose dominant term is CG's failure to converge, and minting an
-/// outer gradient from it is how a stalled solve silently steers the smoothing
-/// search (#2576).
-fn support_laml_trace_refusal_residual() -> f64 {
-    support_laml_trace_relative_resolution()
-}
 
 fn outer_error(message: impl Into<String>) -> EstimationError {
     EstimationError::RemlOptimizationFailed(message.into())
@@ -213,6 +146,16 @@ struct SaeSupportOuterObjective {
     trust_radius: f64,
     random_state: u64,
     last_evaluation: Option<SupportOuterEvaluation>,
+    /// The FROZEN reduced-Schur log-determinant surrogate for this outer solve
+    /// — the same #2080 lane the dense manifold criterion runs on.
+    ///
+    /// Built once, on the first evaluation, and reused at every subsequent ρ.
+    /// The plan is the criterion's identity: its probes, quadrature nodes, and
+    /// deflation basis fix WHICH function of ρ the outer search descends.
+    /// Rebuilding it per ρ would evaluate a different function at every point,
+    /// and the exact directional derivative the gradient contracts would then
+    /// be the exact gradient of something nobody evaluated twice.
+    logdet_surrogate: Option<SurrogateLaneState>,
 }
 
 fn penalty_spectrum(
@@ -250,47 +193,9 @@ fn penalty_spectrum(
     })
 }
 
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
-
 impl SaeSupportOuterObjective {
     fn beta_layout(&self) -> Result<(Vec<usize>, usize), EstimationError> {
         self.term.beta_layout().map_err(outer_error)
-    }
-
-    fn penalty_apply_group(
-        &self,
-        group: usize,
-        lambda_smooth: &[f64],
-        vector: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, EstimationError> {
-        let (offsets, beta_dim) = self.beta_layout()?;
-        if vector.len() != beta_dim {
-            return Err(outer_error("support penalty vector width mismatch"));
-        }
-        let mut out = Array1::<f64>::zeros(beta_dim);
-        for atom in 0..self.term.k_atoms() {
-            if self.layout.atom_group[atom] != group {
-                continue;
-            }
-            let m = self.term.atoms[atom].basis_size();
-            let offset = offsets[atom];
-            let lambda = lambda_smooth[atom];
-            for left in 0..m {
-                for right in 0..m {
-                    let weight = lambda * self.term.atoms[atom].smooth_penalty()[[left, right]];
-                    for channel in 0..self.term.output_dim() {
-                        out[offset + left * self.term.output_dim() + channel] +=
-                            weight * vector[offset + right * self.term.output_dim() + channel];
-                    }
-                }
-            }
-        }
-        Ok(out)
     }
 
     fn penalty_energy_by_group(&self, lambda_smooth: &[f64]) -> Vec<f64> {
@@ -310,74 +215,146 @@ impl SaeSupportOuterObjective {
         out
     }
 
-    /// Hutchinson estimate of `tr(H⁻¹ ∂H/∂ρ_g) = tr(H⁻¹ λ_g S_g)` for EVERY
-    /// smoothing group, from ONE border solve per probe.
+    /// `∂S/∂ρ_g` as a matvec: the EXACT reduced-Schur derivative along one
+    /// smoothing coordinate.
     ///
-    /// `∂H/∂ρ_g` touches only the β block (the row-latent blocks carry no
-    /// smoothing coordinate), so each group's channel operator is
-    /// `B_g = λ_g S_g`, symmetric and block-diagonal by atom. The estimator
-    /// used to solve `H⁻¹(B_g z)` once PER GROUP — `groups × probes` solves.
-    /// But both `H⁻¹` and `B_g` are symmetric, so
+    /// The chain is short and it is worth stating in full, because it is what
+    /// lets this lane drop its separate trace estimator entirely. The joint
+    /// Hessian's dependence on the smoothing coordinates is confined to the
+    /// β block: `H_tt^(i)` is the Gauss–Newton latent curvature plus the ARD
+    /// prior and `H_tβ^(i)` is the cross term, and neither carries a λ. So on
+    /// `S = H_ββ − Σ_i H_βt^(i)(H_tt^(i))⁻¹H_tβ^(i)` only the first term moves,
+    /// and since `λ_g = exp(ρ_g)`,
     ///
     /// ```text
-    /// zᵀ H⁻¹ B_g z = (zᵀ H⁻¹ B_g z)ᵀ = zᵀ B_g H⁻¹ z = (B_g z) · (H⁻¹ z)
+    /// ∂S/∂ρ_g = ∂H_ββ/∂ρ_g = Σ_{k ∈ g} λ_k (S_k ⊗ I_P) = the group-g penalty apply.
     /// ```
     ///
-    /// — the SAME estimator, not an approximation of it, computed from the
-    /// single group-independent solve `w = H⁻¹ z`. Every group then costs one
-    /// cheap `B_g z` apply. That is an exact `groups`× reduction in the
-    /// dominant cost (#2576).
-    ///
-    /// The reduced-Schur solve inside `H⁻¹` is iterative, so each probe's
-    /// contribution is only as good as its CG residual. The weakest
-    /// certificate across the probe family is returned with the traces: a
-    /// truncated solve biases the trace by an unbounded amount, and the caller
-    /// must not mint a gradient from it as though it were exact.
-    fn trace_by_group(
+    /// Two consequences. First, `log|H| = Σ_i log|H_tt^(i)| + log|S|` has a
+    /// ρ-independent row half, so the whole smoothing gradient of the Laplace
+    /// normalizer is `∂log|S|/∂ρ_g` — exactly what the Hutchinson trace
+    /// `tr(H⁻¹ ∂H/∂ρ_g)` was estimating with its own separate probe family and
+    /// its own 48 unshifted `S⁻¹` solves. Second, the derivative operator is
+    /// already implemented as the group-restricted penalty apply below.
+    fn schur_derivative_matvec(
         &self,
-        system: &ArrowSchurSystem,
-        cache: &ArrowFactorCache,
+        group: usize,
         lambda_smooth: &[f64],
-    ) -> Result<(Vec<f64>, ReducedSchurCgReport), EstimationError> {
-        let (_, beta_dim) = self.beta_layout()?;
-        let latent_dim = cache.delta_t_len();
-        let rhs_t = Array1::<f64>::zeros(latent_dim);
-        let mut traces = vec![0.0; self.layout.group_keys.len()];
-        let max_iters = support_laml_trace_cg_max_iters(beta_dim);
-        let cg_rel_tol = support_laml_trace_cg_rel_tol();
-        let mut weakest: Option<ReducedSchurCgReport> = None;
-        for probe in 0..SUPPORT_LAML_TRACE_PROBES {
-            let mut z = Array1::<f64>::zeros(beta_dim);
-            for index in 0..beta_dim {
-                let hash = splitmix64(
-                    self.random_state
-                        ^ (probe as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                        ^ index as u64,
-                );
-                z[index] = if hash >> 63 == 0 { -1.0 } else { 1.0 };
+        beta_offsets: &[usize],
+        beta_dim: usize,
+        vector: ArrayView1<'_, f64>,
+    ) -> Array1<f64> {
+        let output_dim = self.term.output_dim();
+        let mut out = Array1::<f64>::zeros(beta_dim);
+        for atom in 0..self.term.k_atoms() {
+            if self.layout.atom_group[atom] != group {
+                continue;
             }
-            let (_, solved_beta, report) = matrix_free_arrow_inverse_apply(
-                system,
-                cache,
-                rhs_t.view(),
-                z.view(),
-                cg_rel_tol,
-                max_iters,
-            )
-            .map_err(|error| outer_error(format!("support LAML trace solve: {error}")))?;
-            weakest = Some(match weakest {
-                Some(previous) => previous.weaker(report),
-                None => report,
-            });
-            for (group, trace) in traces.iter_mut().enumerate() {
-                let channel = self.penalty_apply_group(group, lambda_smooth, z.view())?;
-                *trace += channel.dot(&solved_beta) / SUPPORT_LAML_TRACE_PROBES as f64;
+            let m = self.term.atoms[atom].basis_size();
+            let offset = beta_offsets[atom];
+            let lambda = lambda_smooth[atom];
+            let penalty = self.term.atoms[atom].smooth_penalty();
+            for left in 0..m {
+                for right in 0..m {
+                    let weight = lambda * penalty[[left, right]];
+                    for channel in 0..output_dim {
+                        out[offset + left * output_dim + channel] +=
+                            weight * vector[offset + right * output_dim + channel];
+                    }
+                }
             }
         }
-        let report = weakest.ok_or_else(|| {
-            outer_error("support LAML trace estimator ran zero probes; no certificate exists")
+        out
+    }
+
+    /// The joint Hessian's Laplace normalizer `log|H|`, and the bundle whose
+    /// contraction against any `∂S` is that value's EXACT ρ-derivative.
+    ///
+    /// This lane used to obtain its factor cache from
+    /// `solve_arrow_newton_step_with_options`, which solves a Newton step it
+    /// then discarded. That was not merely wasteful: `InexactPCG` never forms a
+    /// dense `k × k` reduced-Schur factor, so the cache came back with
+    /// `schur_factor_is_undamped = false`, `arrow_log_det()` returned `None`,
+    /// and the criterion could not evaluate AT ALL on a host without a CUDA
+    /// device — the only place a matrix-free `log|S|` was reachable from that
+    /// entry. Meanwhile the discarded step still paid for a
+    /// `JacobiPreconditioner` build, `O(n·K)` at the overcomplete border, which
+    /// is where the reported minutes of silent burn actually went (#2576).
+    ///
+    /// What a criterion needs instead is the evidence factorization:
+    /// `Σ_i log|H_tt^(i)|` from the undamped per-row Cholesky, and `log|S|` by a
+    /// route it can also DIFFERENTIATE. That route already exists and is already
+    /// production on the dense manifold lane — the #2080 frozen rational
+    /// surrogate ([`matrix_free_arrow_evidence_log_det_surrogate`] driven by a
+    /// [`SurrogateLaneState`]). It never forms a dense border, it runs on CPU
+    /// and device alike, and its value and gradient are one functional by
+    /// construction. The support lane joins it rather than growing a second
+    /// evidence policy beside it; see [`Self::schur_derivative_matvec`] for why
+    /// that one derivative is the whole smoothing gradient of the normalizer.
+    fn evidence_log_det(
+        &mut self,
+        system: &ArrowSchurSystem,
+    ) -> Result<(f64, RationalLogdetDerivativeBundle), EstimationError> {
+        if system.k == 0 {
+            return Err(outer_error(
+                "support LAML requires a decoder border to select smoothing against; the \
+                 assembled arrow system has none",
+            ));
+        }
+        // One SAE evidence-surrogate policy, shared with the dense manifold
+        // lane — except the seed, which is the caller's: a support fit's
+        // `random_state` is what makes ITS criterion bit-reproducible, and two
+        // fits of the same data at different seeds must be able to disagree
+        // about their probes without disagreeing about their policy.
+        let seed = self.random_state;
+        let lane = self.logdet_surrogate.get_or_insert_with(|| {
+            SurrogateLaneState::new(SurrogateLaneConfig {
+                seed,
+                ..sae_surrogate_lane_config()
+            })
+        });
+        // Ask for the derivative representation BEFORE the value, so a failed
+        // evaluation can never be paired with a previous operator's gradient.
+        lane.request_logdet_derivative_bundle();
+        let timer = std::time::Instant::now();
+        let options = ArrowSolveOptions::inexact_pcg().with_positive_definite_evidence();
+        let evaluated = matrix_free_arrow_evidence_log_det_surrogate(
+            system,
+            0.0,
+            0.0,
+            &options,
+            SCHUR_SLQ_LOGDET_PROBES,
+            SCHUR_SLQ_LOGDET_LANCZOS_STEPS,
+            SCHUR_SLQ_LOGDET_SEED,
+            Some(lane),
+        );
+        let (row_log_det, schur_log_det) = match evaluated {
+            Ok(split) => split,
+            Err(error) => {
+                drop(lane.take_logdet_derivative_bundle());
+                return Err(outer_error(format!(
+                    "support LAML matrix-free evidence log-determinant: {error}"
+                )));
+            }
+        };
+        let bundle = lane.take_logdet_derivative_bundle().ok_or_else(|| {
+            outer_error(
+                "support LAML evidence evaluation did not emit the rational value's derivative \
+                 bundle, so no smoothing gradient can be minted from it",
+            )
         })?;
-        Ok((traces, report))
+        // The expensive half of one outer evaluation lives in this call, and
+        // before #2576 it emitted nothing at all — six minutes of fourteen busy
+        // cores between two log lines is what kept the cost invisible.
+        log::info!(
+            "support LAML evidence: border {}, row log|H_tt| = {:.6e}, surrogate log|S| = \
+             {:.6e}, {:.1}s",
+            system.k,
+            row_log_det,
+            schur_log_det,
+            timer.elapsed().as_secs_f64(),
+        );
+        Ok((row_log_det + schur_log_det, bundle))
     }
 
     fn evaluate(&mut self, rho: &Array1<f64>) -> Result<SupportOuterEvaluation, EstimationError> {
@@ -397,12 +374,7 @@ impl SaeSupportOuterObjective {
             .term
             .assemble_arrow_schur(self.target.view(), &lambda_smooth, &self.ard_precisions)
             .map_err(outer_error)?;
-        let options = ArrowSolveOptions::inexact_pcg().with_positive_definite_evidence();
-        let (_, _, cache) = solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
-            .map_err(|error| outer_error(format!("support LAML Arrow factorization: {error}")))?;
-        let joint_logdet = cache
-            .arrow_log_det()
-            .ok_or_else(|| outer_error("support LAML factor cache has no joint log determinant"))?;
+        let (joint_logdet, logdet_derivative) = self.evidence_log_det(&system)?;
         // Gaussian dispersion argument = the PENALIZED deviance
         //   D_p(ρ) = ‖y − ŷ‖² + β̂ᵀ S_ρ β̂ + (every other penalty the inner solve descends),
         // NOT the raw residual sum of squares. This mirrors the canonical dense
@@ -449,45 +421,39 @@ impl SaeSupportOuterObjective {
         let cost = 0.5
             * (joint_logdet - penalty_logdet
                 + residual_df * (1.0 + (std::f64::consts::TAU * deviance / residual_df).ln()));
-        let trace_timer = std::time::Instant::now();
-        let (traces, cg) = self.trace_by_group(&system, &cache, &lambda_smooth)?;
-        // The expensive part of one outer evaluation lives INSIDE this call, so
-        // it is the only place that can report what it cost and what it bought.
-        // Before #2576 it emitted nothing at all: six minutes of fourteen busy
-        // cores between two log lines is what kept the stagnation invisible.
-        log::info!(
-            "support LAML trace estimator: {} probes x 1 border solve, weakest CG {} of {} \
-             iterations at relative residual {:.3e} (target {:.3e}, refusal {:.3e}, \
-             preconditioner {:?}), {:.1}s",
-            SUPPORT_LAML_TRACE_PROBES,
-            cg.iterations,
-            cg.max_iterations,
-            cg.relative_residual,
-            cg.tolerance,
-            support_laml_trace_refusal_residual(),
-            cg.preconditioner,
-            trace_timer.elapsed().as_secs_f64(),
-        );
-        if cg.relative_residual > support_laml_trace_refusal_residual() {
-            return Err(outer_error(format!(
-                "support LAML trace estimator: the border solve reached relative residual \
-                 {:.3e} after {} of {} CG iterations (preconditioner {:?}), above the \
-                 {}-probe estimator's own resolution {:.3e}. The truncation error now exceeds \
-                 the stochastic noise, so the smoothing gradient this trace would mint is \
-                 dominated by CG's failure to converge rather than by the trace",
-                cg.relative_residual,
-                cg.iterations,
-                cg.max_iterations,
-                cg.preconditioner,
-                SUPPORT_LAML_TRACE_PROBES,
-                support_laml_trace_refusal_residual(),
-            )));
-        }
+        // `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g`, and the surrogate's directional
+        // derivative is the EXACT derivative of the very `log|S|` that entered
+        // `cost` above — same probes, same quadrature nodes, same frozen
+        // deflation basis, same shifted-solve bundle. Value and gradient are
+        // therefore one functional by construction, not by tolerance tuning.
+        // The lane used to estimate this trace with a SECOND, independent
+        // Hutchinson family (its own 16 probes, its own unshifted `S⁻¹` solves,
+        // one per group), which both cost the whole evaluation's wall-clock and
+        // left the value and gradient free to describe different functions.
+        let (beta_offsets, beta_dim_for_derivative) = self.beta_layout()?;
         let energy = self.penalty_energy_by_group(&lambda_smooth);
         let mut gradient = Array1::<f64>::zeros(self.layout.group_keys.len());
         for group in 0..gradient.len() {
+            let derivative_matvec = |vector: ArrayView1<f64>| -> Array1<f64> {
+                self.schur_derivative_matvec(
+                    group,
+                    &lambda_smooth,
+                    &beta_offsets,
+                    beta_dim_for_derivative,
+                    vector,
+                )
+            };
+            let logdet_group_derivative = logdet_derivative
+                .directional_derivative(&derivative_matvec)
+                .ok_or_else(|| {
+                    outer_error(format!(
+                        "support LAML reduced-Schur surrogate produced no derivative for \
+                         smoothing group {group} ({})",
+                        self.layout.group_keys[group]
+                    ))
+                })?;
             gradient[group] = 0.5
-                * (traces[group] - self.spectrum.rank_by_group[group] as f64
+                * (logdet_group_derivative - self.spectrum.rank_by_group[group] as f64
                     + residual_df * energy[group] / deviance);
         }
         if !cost.is_finite() || gradient.iter().any(|value| !value.is_finite()) {
@@ -581,6 +547,7 @@ pub fn run_sae_support_outer(
         trust_radius: request.trust_radius,
         random_state: request.random_state,
         last_evaluation: None,
+        logdet_surrogate: None,
     };
     let initial_rho = Array1::from_elem(layout.group_keys.len(), request.initial_smoothness.ln());
     let problem = OuterProblem::new(layout.group_keys.len())
@@ -729,6 +696,7 @@ mod tests {
             trust_radius: 1.0,
             random_state: 0xC0FF_EE00_D15E_A5E5,
             last_evaluation: None,
+            logdet_surrogate: None,
         }
     }
 

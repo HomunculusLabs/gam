@@ -661,6 +661,11 @@ pub(crate) fn assignment_strength_gradient_coordinate(rho: &SaeManifoldRho) -> O
 /// one order under the inner-objective stall tolerance — `log|S|` is the
 /// criterion's dominant term at wide `k`, so the Hutchinson error bar must sit
 /// well inside the tolerance that certifies the ρ-search stationary.
+///
+/// This is the SAE evidence surrogate's ONE policy. The support-sparse grouped
+/// LAML lane reads it too (`support_outer::evidence_log_det`): both criteria
+/// take a matrix-free `log|S|` and differentiate it, so a second policy beside
+/// this one would be two answers to the same question (#2576, #2470).
 const SAE_SURROGATE_LANE_QUADRATURE_REL_TOL: f64 = 1.0e-8;
 const SAE_SURROGATE_LANE_POWER_ITERS: usize = 40;
 const SAE_SURROGATE_LANE_CG_REL_TOL: f64 = 1.0e-8;
@@ -668,7 +673,7 @@ const SAE_SURROGATE_LANE_CG_MAX_ITERS: usize = 20_000;
 const SAE_SURROGATE_LANE_DEFLATION_MAX_RANK: usize = 128;
 const SAE_SURROGATE_LANE_DEFLATION_SUBSPACE_ITERS: usize = 4;
 
-fn sae_surrogate_lane_config() -> SurrogateLaneConfig {
+pub(crate) fn sae_surrogate_lane_config() -> SurrogateLaneConfig {
     SurrogateLaneConfig {
         num_probes: SCHUR_SLQ_LOGDET_PROBES,
         seed: SCHUR_SLQ_LOGDET_SEED,
