@@ -117,7 +117,7 @@ pub use log_strength::{
     checked_log_strength, validate_log_strength, validate_log_strengths,
 };
 pub use monotone_root_error::MonotoneRootError;
-pub use penalty_coordinate::PenaltyCoordinate;
+pub use penalty_coordinate::{PenaltyCoordinate, project_block_root_out_of_null_directions};
 pub use penalty_matrix::PenaltyMatrix;
 pub use pseudo_logdet::PseudoLogdetMode;
 pub use psi_design_contract::{

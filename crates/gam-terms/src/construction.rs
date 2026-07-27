@@ -742,6 +742,141 @@ pub struct ReparamResult {
     pub penalty_shrinkage_ridge: f64,
 }
 
+/// The coefficient frame a set of penalty roots is expressed in.
+///
+/// The reparameterization's declared-null basis is stored in the TRANSFORMED
+/// (post-`Qs`) frame, so projecting an ORIGINAL-frame penalty against it
+/// requires rotating the basis by `Qs` first. Naming the frame at the call site
+/// is what keeps that rotation from being a coin flip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenaltyFrame {
+    Original,
+    Transformed,
+}
+
+/// The λ-invariant declared-null subspace of a penalty reparameterization,
+/// materialized in both coefficient frames (#2454).
+///
+/// # The invariant this type exists to hold
+///
+/// `gam.reparam` keeps only balanced-penalty eigendirections above a relative
+/// rank tolerance and rebuilds the penalty the model applies as
+/// `S̃(λ) = E(λ)ᵀE(λ)` on that subspace alone. **Everything the criterion is
+/// made of is a function of `S̃`**: the inner solve minimizes `−ℓ + ½βᵀS̃β`,
+/// `H = −∇²ℓ + S̃`, and the reported penalty energy is `‖E β̂‖²`.
+///
+/// A per-block `S_k` whose own root rank exceeds the split's penalized rank
+/// therefore describes a DIFFERENT penalty. Two things go wrong if one is used
+/// anywhere the criterion is differentiated or normalized:
+///
+///  1. `½ λ_k β̂ᵀS_kβ̂` charges β̂'s energy in directions `S̃` never penalized —
+///     and `β̂` is free there, so that energy is `O(1)` and `∂/∂ρ_k` multiplies
+///     it by `λ_k`. That is an additive `c·λ` in the outer gradient, invisible
+///     at `‖ρ‖ ≤ 1` and sign-flipping it a dozen e-folds up.
+///  2. `−½log|Σ_k λ_k S_k|₊` charges MORE directions than `½log|H|` can ever
+///     inflate, because `H`'s penalty part is `S̃`. The two halves of the LAML
+///     ratio then saturate at different rates and the criterion acquires an
+///     asymptotic slope of `½(rank(S̃) − rank(S))` per unit ρ — unbounded
+///     below, with no interior optimum and no certifiable λ=∞ rail.
+///
+/// Projecting restores the identity every outer derivative is built on:
+/// `Σ_k λ_k (Π S_k Π) = Π (Σ_k λ_k S_k) Π = S̃(λ)`, and because `Π` is
+/// λ-invariant by construction, `∂S̃/∂ρ_k = λ_k · Π S_k Π` exactly. One penalty
+/// object then serves the value, the quadratic, the per-block scores, the
+/// `tr(H⁻¹Ḣ_k)` drift, the `log|S|₊` and its rank, and the outer Hessian.
+///
+/// A `None` basis means "nothing declared null" and every `project` is the
+/// identity, which is the case for any penalty whose numerical rank agrees
+/// with the split's.
+#[derive(Clone, Debug)]
+pub struct PenaltyNullSplit {
+    transformed: Option<Array2<f64>>,
+    original: Option<Array2<f64>>,
+}
+
+impl PenaltyNullSplit {
+    /// The identity split: nothing is declared null, every projection is a
+    /// no-op. This is what a penalty system with no dense reparameterization
+    /// (Kronecker marginal grids, sparse-native identity frames) carries.
+    pub fn identity() -> Self {
+        Self {
+            transformed: None,
+            original: None,
+        }
+    }
+
+    /// The number of declared-null directions, or 0 for the identity split.
+    pub fn declared_null_dim(&self) -> usize {
+        self.transformed.as_ref().map_or(0, |n| n.ncols())
+    }
+
+    /// The declared-null basis in `frame`, if this split declares anything.
+    pub fn basis(&self, frame: PenaltyFrame) -> Option<&Array2<f64>> {
+        match frame {
+            PenaltyFrame::Original => self.original.as_ref(),
+            PenaltyFrame::Transformed => self.transformed.as_ref(),
+        }
+    }
+
+    /// `Π S_k Π` for a canonical penalty expressed in `frame`.
+    ///
+    /// The penalty is returned unchanged when this split declares nothing null,
+    /// or when the basis does not match the penalty's dimension — a shape
+    /// disagreement the projection must not paper over by guessing.
+    pub fn project_canonical(
+        &self,
+        penalty: &CanonicalPenalty,
+        frame: PenaltyFrame,
+    ) -> Result<CanonicalPenalty, EstimationError> {
+        match self.basis(frame) {
+            Some(n) if n.nrows() == penalty.total_dim => {
+                penalty.project_out_null_directions(n.view())
+            }
+            _ => Ok(penalty.clone()),
+        }
+    }
+
+    /// `Π S_k Π` for a solver-side penalty coordinate expressed in `frame`.
+    pub fn project_coordinate(
+        &self,
+        coord: &gam_problem::PenaltyCoordinate,
+        frame: PenaltyFrame,
+    ) -> gam_problem::PenaltyCoordinate {
+        match self.basis(frame) {
+            Some(n) if n.nrows() == coord.dim() => coord.project_out_null_directions(n.view()),
+            _ => coord.clone(),
+        }
+    }
+}
+
+impl ReparamResult {
+    /// The λ-invariant subspace split this reparameterization declared.
+    ///
+    /// `u_truncated` is `p × m` in the transformed frame; the original-frame
+    /// basis is `Qs · u_truncated` (`Qs` orthogonal, and `u_truncated` is
+    /// itself defined as `Qsᵀ Q_null`). A degenerate or absent basis yields the
+    /// identity split rather than a guessed rotation.
+    pub fn null_split(&self) -> PenaltyNullSplit {
+        let u = &self.u_truncated;
+        if u.ncols() == 0 || u.nrows() == 0 {
+            return PenaltyNullSplit::identity();
+        }
+        let qs = &self.qs;
+        let original = if qs.nrows() == u.nrows() && qs.ncols() == u.nrows() {
+            qs.dot(u)
+        } else {
+            // No usable `Qs`: the frames coincide (sparse-native / identity
+            // reparameterization) or the shapes are inconsistent, in which case
+            // `project` declines on the dimension check anyway.
+            u.clone()
+        };
+        PenaltyNullSplit {
+            transformed: Some(u.clone()),
+            original: Some(original),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kronecker factor decomposition primitives
 // ---------------------------------------------------------------------------
@@ -1060,6 +1195,120 @@ impl CanonicalPenalty {
         out.slice_mut(s![self.col_range.start..self.col_range.end])
             .assign(&self.prior_mean);
         out
+    }
+
+    /// `Π S_k Π` for the declared-null basis `N` (orthonormal, `total_dim × m`)
+    /// in THIS penalty's coefficient frame, with `Π = I − N Nᵀ` (#2454).
+    ///
+    /// See [`PenaltyNullSplit`] for why every penalty the criterion touches has
+    /// to be projected onto the reparameterization's penalized subspace. This
+    /// is the `CanonicalPenalty` face of [`gam_problem::PenaltyCoordinate::
+    /// project_out_null_directions`]; both go through the same root primitive.
+    ///
+    /// Returns `self` unchanged — `op` handle, cached spectrum and all — when
+    /// the projection is below the root's own representation noise
+    /// (`‖R N‖_max ≤ ‖R‖_max · ε · p`). That is not a shortcut but a statement
+    /// of exactness: a null direction the root does not resolve carries no
+    /// energy the criterion's `log|S|₊` can see either, so the projected and
+    /// unprojected penalties agree to every digit either object represents.
+    /// It is also the ordinary case — for any penalty whose structural null
+    /// space is exact, `N` spans `∩_k null(S_k)` and `Π S_k Π = S_k` in exact
+    /// arithmetic.
+    ///
+    /// When the projection does bite, block locality is preserved if the null
+    /// basis is itself block-local, `local` is rebuilt as `RᵀR` from the
+    /// projected root, and `positive_eigenvalues` becomes the projected root's
+    /// squared singular values — so `Σ positive_eigenvalues = tr(Π S_k Π)`
+    /// stays exact for the consumers that read it as a trace. The `op` handle
+    /// is dropped: it is declared bit-equivalent to `local`, and the projected
+    /// `local` is a different operator.
+    pub fn project_out_null_directions(
+        &self,
+        null_basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Self, EstimationError> {
+        if null_basis.ncols() == 0 || self.rank() == 0 {
+            return Ok(self.clone());
+        }
+        if null_basis.nrows() != self.total_dim {
+            return Err(EstimationError::LayoutError(format!(
+                "CanonicalPenalty::project_out_null_directions: null-basis row count {} does \
+                 not match the penalty's total dimension {}",
+                null_basis.nrows(),
+                self.total_dim
+            )));
+        }
+        let root_scale = self.root.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        let (projected_full, stays_block_local) =
+            gam_problem::project_block_root_out_of_null_directions(
+                self.root.view(),
+                self.col_range.start,
+                self.col_range.end,
+                self.total_dim,
+                null_basis,
+            );
+        // How much the projection actually moved, against the root's own
+        // representation noise.
+        let mut moved = 0.0_f64;
+        {
+            let original_full = self.full_width_root();
+            for (a, b) in projected_full.iter().zip(original_full.iter()) {
+                moved = moved.max((a - b).abs());
+            }
+        }
+        if moved <= root_scale * f64::EPSILON * (self.total_dim as f64) {
+            return Ok(self.clone());
+        }
+
+        let (root, col_range) = if stays_block_local {
+            (
+                projected_full
+                    .slice(s![.., self.col_range.start..self.col_range.end])
+                    .to_owned(),
+                self.col_range.clone(),
+            )
+        } else {
+            (projected_full, 0..self.total_dim)
+        };
+        let prior_mean = if col_range == self.col_range {
+            self.prior_mean.clone()
+        } else {
+            let mut full = Array1::<f64>::zeros(self.total_dim);
+            full.slice_mut(s![self.col_range.start..self.col_range.end])
+                .assign(&self.prior_mean);
+            full
+        };
+        // `RᵀR` eigenvalues are the squared singular values of `R`; taking them
+        // from the root rather than from an eigendecomposition of the assembled
+        // `local` keeps the small ones (the whole point of a root-scale
+        // representation) and costs O(rank² · block_dim).
+        let positive_eigenvalues = match root.svd(false, false) {
+            Ok((_, singular_values, _)) => {
+                let mut eigs = vec![0.0_f64; root.nrows()];
+                for (slot, &sigma) in eigs.iter_mut().zip(singular_values.iter()) {
+                    *slot = sigma * sigma;
+                }
+                eigs
+            }
+            Err(error) => {
+                return Err(EstimationError::LayoutError(format!(
+                    "CanonicalPenalty::project_out_null_directions: SVD of the projected root \
+                     failed: {error:?}"
+                )));
+            }
+        };
+        let local = root.t().dot(&root);
+        Ok(Self {
+            root,
+            col_range,
+            total_dim: self.total_dim,
+            // The projection can only remove curvature, so the block's nullity
+            // can only grow; the honest floor is what it already declared.
+            nullity: self.nullity,
+            local,
+            prior_mean,
+            positive_eigenvalues,
+            op: None,
+        })
     }
 
     /// Convert to a PenaltyCoordinate for the unified REML evaluator.

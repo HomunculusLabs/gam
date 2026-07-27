@@ -6,6 +6,59 @@ use crate::reml_contract_panic;
 use gam_linalg::dense;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1};
 
+/// `R ↦ R Π` for a block-local root, with `Π = I − N Nᵀ` the projector that
+/// removes the declared-null directions `N` (orthonormal, `total_dim × m`).
+///
+/// This is the ONE implementation of the null-split projection on a penalty
+/// root (#2454). Both penalty carriers that can hold a root — the solver's
+/// [`PenaltyCoordinate`] and the term layer's `CanonicalPenalty` — project
+/// through it, so the criterion's penalty, its ρ-derivatives, and its
+/// `log|S|₊` cannot end up on three slightly different projections of the same
+/// subspace.
+///
+/// Returns the FULL-WIDTH projected root (`rank × total_dim`) together with
+/// whether its support stayed inside the original `[start, end)` block. Block
+/// locality survives whenever the null basis is itself block-local — which is
+/// the case for the non-overlapping reparameterization, whose balanced penalty
+/// sum is block-diagonal and whose eigenvectors therefore are too. The caller
+/// uses the flag to keep its block chart (and every block-local trace fast
+/// path) instead of widening to a dense `p`-column root for nothing.
+///
+/// "Stayed inside the block" is decided against the projected root's OWN
+/// magnitude: an out-of-block entry at `‖R Π‖_max · ε · total_dim` is the
+/// projection's rounding, not support.
+pub fn project_block_root_out_of_null_directions(
+    root: ArrayView2<'_, f64>,
+    start: usize,
+    end: usize,
+    total_dim: usize,
+    null_basis: ArrayView2<'_, f64>,
+) -> (Array2<f64>, bool) {
+    let mut projected = Array2::<f64>::zeros((root.nrows(), total_dim));
+    projected
+        .slice_mut(ndarray::s![.., start..end])
+        .assign(&root);
+    if null_basis.ncols() > 0 {
+        let coefficients = projected.dot(&null_basis);
+        projected -= &coefficients.dot(&null_basis.t());
+    }
+
+    let root_scale = projected
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let column_support_tolerance = root_scale * f64::EPSILON * (total_dim as f64);
+    let stays_block_local = (start > 0 || end < total_dim)
+        && (0..total_dim)
+            .filter(|column| *column < start || *column >= end)
+            .all(|column| {
+                projected
+                    .column(column)
+                    .iter()
+                    .all(|value| value.abs() <= column_support_tolerance)
+            });
+    (projected, stays_block_local)
+}
+
 /// A rho-coordinate always contributes
 ///
 ///   A_k = λ_k S_k,
@@ -246,32 +299,15 @@ impl PenaltyCoordinate {
             // project against.
             None => return self.clone(),
         };
-        // Full-width root, then `R Π = R − (R N) Nᵀ`.
-        let mut projected = Array2::<f64>::zeros((root.nrows(), total_dim));
-        projected
-            .slice_mut(ndarray::s![.., start..end])
-            .assign(root);
-        let coefficients = projected.dot(&null_basis);
-        projected -= &coefficients.dot(&null_basis.t());
-
-        // Keep the block chart when the projection did not move support out of
-        // it. `column_support_tolerance` is scaled to the root's own magnitude:
-        // an out-of-block entry at that level is the reparameterization's own
-        // rounding, and forcing a dense p-wide root for it would cost every
-        // block-local trace fast path for nothing.
-        let root_scale = projected
-            .iter()
-            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let column_support_tolerance = root_scale * f64::EPSILON * (total_dim as f64);
-        let stays_block_local = (start > 0 || end < total_dim)
-            && (0..total_dim)
-                .filter(|column| *column < start || *column >= end)
-                .all(|column| {
-                    projected
-                        .column(column)
-                        .iter()
-                        .all(|value| value.abs() <= column_support_tolerance)
-                });
+        // `R Π = R − (R N) Nᵀ`, through the shared primitive so this coordinate
+        // and the term layer's `CanonicalPenalty` project identically.
+        let (projected, stays_block_local) = project_block_root_out_of_null_directions(
+            root.view(),
+            start,
+            end,
+            total_dim,
+            null_basis,
+        );
 
         let prior_mean = self.prior_mean_block();
         if stays_block_local {
