@@ -723,9 +723,11 @@ impl RationalLogdetPlan {
 /// approximate inverse while the derivative formula differentiates an exact
 /// inverse, re-opening the #2080 objective/gradient desynchronisation this
 /// module exists to prevent.
-/// The no-op preconditioner: `shifted_cg` is `shifted_pcg` under it, so there
-/// is one shifted-solve implementation and one convergence certificate, not
-/// two that could drift apart.
+/// The no-op preconditioner. `shifted_pcg` under it is bit-for-bit the plain CG
+/// this module ran before #2576 — `z == r`, so `rᵀz` is `rᵀr` and the direction
+/// update is `p ← r + βp` exactly — which is why there is ONE shifted-solve
+/// implementation and one convergence certificate here rather than two that
+/// could drift apart.
 pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
     ShiftedDiagonalPreconditioner { diagonal: None };
 
@@ -736,7 +738,7 @@ pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
 /// per solve, exactly as it is added to the operator. That single fact is what
 /// makes one diagonal serve the whole shift ladder: `diag(A + tI) = diag(A) + t`.
 ///
-/// `inverse: None` is the identity, i.e. the unpreconditioned iteration. On the
+/// `diagonal: None` is the identity, i.e. the unpreconditioned iteration. On the
 /// overcomplete arrow border the supplied diagonal is the shared block's own —
 /// the atom FIRING-COUNT distribution, orders of magnitude wide — and it is
 /// exactly the spread that stalls an unpreconditioned CG (#2576).
