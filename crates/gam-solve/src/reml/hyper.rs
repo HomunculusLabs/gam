@@ -2505,8 +2505,12 @@ impl<'a> RemlState<'a> {
         let is_gaussian_identity = matches!(self.config.link_function(), LinkFunction::Identity);
 
         let s_tau_tau = std::sync::Arc::new(s_tau_tau);
-        let s_k_unscaled =
-            std::sync::Arc::new(Self::canonical_penalty_matrices(&self.canonical_penalties));
+        // `ld_s` contracts `S_k` against `pld`, so it must be the SAME penalty
+        // component the factorization was built from — the split-projected
+        // `S̃_k`, not the term layer's raw block (#2454).
+        let s_k_unscaled = std::sync::Arc::new(Self::canonical_penalty_matrices(
+            &bundle.applied_canonical_penalties(&self.canonical_penalties)?,
+        ));
         let beta_eval = std::sync::Arc::new(beta_eval);
         let x_tau_terms = std::sync::Arc::new(x_tau_terms);
         let x_tau_beta_list = std::sync::Arc::new(x_tau_beta_list);

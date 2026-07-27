@@ -590,10 +590,14 @@ impl<'a> RemlState<'a> {
             self.p,
         )?;
 
+        // The derivative contraction must read the SAME penalty components the
+        // factorization was built from (#2454): `∂log|S̃|₊/∂ρ_k = λ_k tr(S̃⁺S̃_k)`
+        // is only the derivative of `pld.value()` when `S̃_k` is the block
+        // whose weighted sum `pld` factorized.
+        let applied = bundle.applied_canonical_penalties(&self.canonical_penalties)?;
         let value = pld.value();
         let rank = pld.rank();
-        let (det1, det2) =
-            pld.rho_derivatives_from_penalties(&self.canonical_penalties, lambdas_slice);
+        let (det1, det2) = pld.rho_derivatives_from_penalties(&applied, lambdas_slice);
         Ok((value, rank, det1, det2))
     }
 

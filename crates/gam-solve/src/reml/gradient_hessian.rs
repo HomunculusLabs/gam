@@ -503,18 +503,42 @@ impl<'a> RemlState<'a> {
             // halves of the LAML pair live in `range(Z)` of one frame. The roots
             // are orthogonal-invariant when `Qs = I` (no reparameterization), so
             // this is a no-op for the unconstrained / non-reparameterized paths.
-            let transformed = &bundle.pirls_result.reparam_result.canonical_transformed;
-            let projected_roots: Vec<Array2<f64>> = if transformed.len() == rho.len() {
-                transformed
-                    .iter()
-                    .map(|penalty| penalty.full_width_root().dot(z))
-                    .collect()
-            } else {
-                self.canonical_penalties
-                    .iter()
-                    .map(|penalty| penalty.full_width_root().dot(z))
-                    .collect()
-            };
+            //
+            // The SAME argument applies to the reparameterization's own
+            // subspace split (#2454): `H` carries `S̃ = Π(Σλ_kS_k)Π`, so the
+            // roots projected onto `Z` must already be the split-projected
+            // ones or `log|S|₊` charges directions `log|H|` cannot inflate —
+            // the two projections compose, `Zᵀ Π S_k Π Z`, and both must be
+            // applied for the LAML pair to live on one subspace.
+            let reparam = &bundle.pirls_result.reparam_result;
+            let null_split = reparam.null_split();
+            let transformed = &reparam.canonical_transformed;
+            let (base, frame): (&[gam_terms::construction::CanonicalPenalty], _) =
+                if transformed.len() == rho.len() {
+                    (
+                        transformed.as_slice(),
+                        gam_terms::construction::PenaltyFrame::Transformed,
+                    )
+                } else {
+                    (
+                        self.canonical_penalties.as_slice(),
+                        gam_terms::construction::PenaltyFrame::Original,
+                    )
+                };
+            let projected_roots: Vec<Array2<f64>> = base
+                .iter()
+                .map(|penalty| {
+                    null_split
+                        .project_canonical(penalty, frame)
+                        .map(|applied| applied.full_width_root().dot(z))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    EstimationError::LayoutError(format!(
+                        "projecting the constraint-reduced penalty roots onto the \
+                         reparameterization's penalized subspace failed: {error}"
+                    ))
+                })?;
             let (value, penalty_rank, det1, det2_full) = self
                 .structural_penalty_logdet_value_and_derivatives(
                     &projected_roots,
@@ -6515,6 +6539,7 @@ impl<'a> RemlState<'a> {
             firth_dense_operator,
             firth_dense_operator_original: None,
             penalty_pseudologdet: std::sync::OnceLock::new(),
+            applied_canonical_penalties: std::sync::OnceLock::new(),
             penalty_scores_at_mode: std::sync::OnceLock::new(),
             block_local_correction: std::sync::OnceLock::new(),
         })
@@ -6665,6 +6690,7 @@ impl<'a> RemlState<'a> {
             firth_dense_operator: None,
             firth_dense_operator_original,
             penalty_pseudologdet: std::sync::OnceLock::new(),
+            applied_canonical_penalties: std::sync::OnceLock::new(),
             penalty_scores_at_mode: std::sync::OnceLock::new(),
             block_local_correction: std::sync::OnceLock::new(),
         })

@@ -5020,6 +5020,26 @@ pub(crate) struct EvalShared {
     /// factorizes the canonical-TRANSFORMED, possibly constraint-projected
     /// penalties, a genuinely different matrix, not a duplicate of this one.)
     pub(crate) penalty_pseudologdet: std::sync::OnceLock<Arc<penalty_logdet::PenaltyPseudologdet>>,
+    /// The penalty components the criterion APPLIES, `S̃_k = Π S_k Π`, in the
+    /// ORIGINAL coefficient frame (#2454).
+    ///
+    /// `RemlState::canonical_penalties` are the penalties as the term layer
+    /// built them. The penalty the model is actually fitted under is the
+    /// reparameterization's split-projected `S̃(λ) = Π(Σ_k λ_k S_k)Π`: that is
+    /// what the inner solve minimizes, what `H` contains, and what the reported
+    /// penalty energy `‖Eβ̂‖²` measures. `log|S|₊`, its rank, its ρ- and
+    /// ψ-derivatives, and the `M_p` that sets the REML denominator must all be
+    /// taken on THAT penalty, or the two halves of the LAML ratio saturate at
+    /// different rates and the criterion acquires an asymptotic ρ-slope of
+    /// `½(rank(S̃) − rank(S))` — unbounded below, no interior optimum.
+    ///
+    /// `Π` is λ-invariant (it comes from the balanced penalty, not the weighted
+    /// one), so this set is a function of the inner solve's reparameterization
+    /// alone and is computed once per bundle. It is the same `Arc` as the input
+    /// when the split declares nothing null or the projection falls below the
+    /// roots' own representation noise, which is the ordinary case.
+    pub(crate) applied_canonical_penalties:
+        std::sync::OnceLock<Arc<Vec<gam_terms::construction::CanonicalPenalty>>>,
     /// Per-evaluation-point cache of the canonical penalty score vectors
     /// `S_k β̂` evaluated at this bundle's inner mode `β̂ =
     /// pirls_result.beta_transformed` (unscaled by λ_k). These depend ONLY
@@ -5077,9 +5097,64 @@ impl EvalShared {
     /// `lambdas` must be the λ = exp(ρ) vector of this bundle's evaluation
     /// point and `p` the original-basis coefficient dimension; on a cache
     /// hit both are checked against the stored object where representable.
+    /// The penalty components the criterion APPLIES, `S̃_k = Π S_k Π`, in the
+    /// ORIGINAL frame — see [`EvalShared::applied_canonical_penalties`] the
+    /// field for why every criterion consumer must read these rather than the
+    /// term layer's raw blocks (#2454).
+    ///
+    /// Computed once per bundle and shared. Returns the SAME `Arc` as the input
+    /// whenever the split declares nothing null or the projection falls below
+    /// the roots' own representation noise, so the ordinary path allocates
+    /// nothing and keeps every penalty's `op` handle and block chart.
+    pub(crate) fn applied_canonical_penalties(
+        &self,
+        canonical_penalties: &Arc<Vec<gam_terms::construction::CanonicalPenalty>>,
+    ) -> Result<Arc<Vec<gam_terms::construction::CanonicalPenalty>>, EstimationError> {
+        if let Some(applied) = self.applied_canonical_penalties.get() {
+            return Ok(Arc::clone(applied));
+        }
+        let split = self.pirls_result.reparam_result.null_split();
+        let applied = if split.declared_null_dim() == 0 || canonical_penalties.is_empty() {
+            Arc::clone(canonical_penalties)
+        } else {
+            let projected = canonical_penalties
+                .iter()
+                .map(|penalty| {
+                    split.project_canonical(penalty, gam_terms::construction::PenaltyFrame::Original)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    EstimationError::LayoutError(format!(
+                        "projecting the canonical penalties onto the reparameterization's \
+                         penalized subspace failed: {error}"
+                    ))
+                })?;
+            // `project_canonical` clones when the projection is below the
+            // roots' own noise, so an all-unchanged result is the identity and
+            // is returned as the original `Arc` rather than a copy.
+            if projected
+                .iter()
+                .zip(canonical_penalties.iter())
+                .all(|(a, b)| a.root == b.root && a.col_range == b.col_range)
+            {
+                Arc::clone(canonical_penalties)
+            } else {
+                Arc::new(projected)
+            }
+        };
+        match self.applied_canonical_penalties.set(Arc::clone(&applied)) {
+            Ok(()) => Ok(applied),
+            Err(_) => Ok(Arc::clone(
+                self.applied_canonical_penalties
+                    .get()
+                    .expect("OnceLock set raced, so it is initialized"),
+            )),
+        }
+    }
+
     pub(crate) fn penalty_pseudologdet_original(
         &self,
-        canonical_penalties: &[gam_terms::construction::CanonicalPenalty],
+        canonical_penalties: &Arc<Vec<gam_terms::construction::CanonicalPenalty>>,
         lambdas: &[f64],
         p: usize,
     ) -> Result<Arc<penalty_logdet::PenaltyPseudologdet>, EstimationError> {
@@ -5093,9 +5168,12 @@ impl EvalShared {
             }
             return Ok(Arc::clone(pld));
         }
+        // `log|S|₊` is one half of the LAML ratio `½(log|H| − log|S|₊)`; the
+        // other half carries the split-projected penalty, so this one must too.
+        let applied = self.applied_canonical_penalties(canonical_penalties)?;
         let pld = Arc::new(
             penalty_logdet::PenaltyPseudologdet::from_penalties(
-                canonical_penalties,
+                &applied,
                 lambdas,
                 self.ridge_passport.penalty_logdet_ridge(),
                 p,
