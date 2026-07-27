@@ -538,6 +538,9 @@ jobs:
           if-no-files-found: error
 
   aggregate:
+    permissions:
+      contents: write
+      actions: read
     name: Aggregate benchmark results
     needs:
       - bench-shard
@@ -575,6 +578,18 @@ jobs:
           path: bench/results.nightly.json
           if-no-files-found: error
 
+
+      # Track this run's uncompressed numbers in-tree (bench/gha_results/benchmark).
+      # always() so a failed or timed-out run still publishes what it measured -
+      # those numbers are usually the interesting ones. Publishes nothing when the
+      # run produced no results, so a bad run never blanks the last good one.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: benchmark
+          files: |
+            bench/results.nightly.json
       - name: Generate merged figures
         shell: bash
         run: |

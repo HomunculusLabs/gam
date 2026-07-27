@@ -71,6 +71,9 @@ env:
 
 jobs:
   prove:
+    permissions:
+      contents: write
+      actions: read
     name: Focused Rust proof (issue ${{ github.event.inputs.issue }})
     runs-on: ${{ github.event.inputs.runner }}
     # Must exceed BUILD_BUDGET_SECONDS + RUN_BUDGET_SECONDS plus checkout and
@@ -348,3 +351,16 @@ jobs:
           name: focused-rust-${{ github.run_id }}
           path: focused-rust-logs
           if-no-files-found: ignore
+
+
+      # Track this run's uncompressed numbers in-tree (bench/gha_results/focused-rust-proof).
+      # always() so a failed or timed-out run still publishes what it measured -
+      # those numbers are usually the interesting ones. Publishes nothing when the
+      # run produced no results, so a bad run never blanks the last good one.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: focused-rust-proof
+          files: |
+            focused-rust-logs

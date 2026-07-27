@@ -23,6 +23,11 @@ on:
   push:
     branches:
       - main
+    # Results commits (bench/gha_results/**) are data, not code: they are
+    # pushed by the publish-gha-results action and must not re-trigger the
+    # compile gate, which is already starved for runners (#2582).
+    paths-ignore:
+      - 'bench/gha_results/**'
   workflow_dispatch:
 
 concurrency:

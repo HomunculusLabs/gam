@@ -46,6 +46,9 @@ env:
 
 jobs:
   python-contracts:
+    permissions:
+      contents: write
+      actions: read
     name: Python contracts
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -165,3 +168,17 @@ jobs:
           name: py1512-junit
           path: ${{ runner.temp }}/py1512_junit.xml
           if-no-files-found: warn
+
+
+      # Track this run's uncompressed numbers in-tree (bench/gha_results/python-contracts).
+      # always() so a failed or timed-out run still publishes what it measured -
+      # those numbers are usually the interesting ones. Publishes nothing when the
+      # run produced no results, so a bad run never blanks the last good one.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: python-contracts
+          files: |
+            ${{ runner.temp }}/py1512_junit.xml
+            ${{ runner.temp }}/py1512_summary.txt

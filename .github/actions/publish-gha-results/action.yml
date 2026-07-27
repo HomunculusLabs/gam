@@ -1,0 +1,157 @@
+name: publish-gha-results
+description: >
+  Publish this run's UNCOMPRESSED result files (accuracy/perf numbers, metric
+  tables, reference-tool outputs) into bench/gha_results/<name>/ on main, so the
+  newest results for every workflow are always tracked in-tree and their change
+  over time is visible in git history.
+
+  Call it with `if: always()` so results are captured on failure and timeout too
+  — a failed run's numbers are usually the interesting ones. If the run produced
+  no results, nothing is committed: an empty or missing set never overwrites the
+  previous good one.
+
+inputs:
+  name:
+    description: "Subdirectory under bench/gha_results/ (usually the workflow name)."
+    required: true
+  files:
+    description: >
+      Newline-separated paths to publish. Entries may be files, directories
+      (published recursively), or globs. Missing entries are skipped silently —
+      workflows legitimately produce different subsets on different paths.
+    required: true
+  max_bytes:
+    description: "Skip any single file larger than this (keeps the repo sane)."
+    required: false
+    default: "5242880"
+  token:
+    description: "Token used to push. Needs contents: write on the calling job."
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Publish results to bench/gha_results
+      shell: bash
+      env:
+        RESULTS_NAME: ${{ inputs.name }}
+        RESULTS_FILES: ${{ inputs.files }}
+        MAX_BYTES: ${{ inputs.max_bytes }}
+        GH_TOKEN_PUBLISH: ${{ inputs.token }}
+        JOB_STATUS: ${{ job.status }}
+      run: |
+        set -uo pipefail
+
+        DEST_REL="bench/gha_results/${RESULTS_NAME}"
+        STAGE="$(mktemp -d)/payload"
+        mkdir -p "$STAGE"
+
+        # Uncompressed, human/tool-readable result formats only. Archives and
+        # binaries are what the artifact store is for; this directory is for
+        # numbers you can read in a diff.
+        is_result_file() {
+          case "${1,,}" in
+            *.json|*.jsonl|*.ndjson|*.tsv|*.csv|*.txt|*.md|*.log|*.out|*.yaml|*.yml) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+
+        stage_one() { # $1 = source file, $2 = destination path relative to STAGE
+          local src="$1" rel="$2" size
+          is_result_file "$src" || return 0
+          size=$(wc -c < "$src" 2>/dev/null || echo 0)
+          # Zero bytes is not a result. Oversized files stay in the artifact.
+          [ "$size" -gt 0 ] || return 0
+          if [ "$size" -gt "$MAX_BYTES" ]; then
+            echo "  skip (too large, ${size}B): $src"
+            return 0
+          fi
+          mkdir -p "$STAGE/$(dirname "$rel")"
+          cp -f "$src" "$STAGE/$rel" && echo "  staged (${size}B): $rel"
+        }
+
+        echo "collecting results for '${RESULTS_NAME}'"
+        while IFS= read -r pattern; do
+          pattern="$(echo "$pattern" | xargs || true)"
+          [ -z "$pattern" ] && continue
+          for path in $pattern; do
+            [ -e "$path" ] || continue
+            if [ -d "$path" ]; then
+              base="$(basename "$path")"
+              while IFS= read -r f; do
+                stage_one "$f" "${base}/${f#"$path"/}"
+              done < <(find "$path" -type f 2>/dev/null)
+            else
+              stage_one "$path" "$(basename "$path")"
+            fi
+          done
+        done <<< "$RESULTS_FILES"
+
+        if [ -z "$(find "$STAGE" -type f 2>/dev/null | head -1)" ]; then
+          echo "no result files produced by this run — leaving the previous results in place"
+          exit 0
+        fi
+
+        # Provenance travels WITH the numbers, and only when there are numbers:
+        # this file alone can never be the reason a commit happens.
+        cat > "$STAGE/_run.json" <<PROVENANCE
+        {
+          "workflow": "${GITHUB_WORKFLOW:-}",
+          "job_status": "${JOB_STATUS:-}",
+          "run_id": "${GITHUB_RUN_ID:-}",
+          "run_number": "${GITHUB_RUN_NUMBER:-}",
+          "run_attempt": "${GITHUB_RUN_ATTEMPT:-}",
+          "event": "${GITHUB_EVENT_NAME:-}",
+          "ref": "${GITHUB_REF:-}",
+          "sha": "${GITHUB_SHA:-}",
+          "completed_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "run_url": "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
+        }
+        PROVENANCE
+
+        # Publish from a FRESH clone, never the job's workspace: that workspace
+        # may be dirty, on a detached head, or mid-build, and none of that
+        # should be able to ride along into main.
+        WORKDIR="$(mktemp -d)"
+        if ! git clone --quiet --depth 1 --branch main \
+              "https://x-access-token:${GH_TOKEN_PUBLISH}@github.com/${GITHUB_REPOSITORY}.git" \
+              "$WORKDIR/repo"; then
+          echo "::warning::could not clone main to publish results; skipping (the run's own verdict is unaffected)"
+          exit 0
+        fi
+        cd "$WORKDIR/repo"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+        # Replace wholesale so files a run stops producing disappear rather than
+        # lingering as stale numbers next to fresh ones.
+        rm -rf "${DEST_REL:?}"
+        mkdir -p "$DEST_REL"
+        cp -R "$STAGE/." "$DEST_REL/"
+
+        git add -A -- "$DEST_REL"
+        if git diff --cached --quiet; then
+          echo "results identical to what is already on main — nothing to commit"
+          exit 0
+        fi
+
+        # [skip ci] is load-bearing: this pushes to main, and without it every
+        # results commit would re-trigger the push-driven workflows, which would
+        # publish again, forever.
+        git commit --quiet -m "results(${RESULTS_NAME}): run ${GITHUB_RUN_ID:-} (${JOB_STATUS:-unknown}) [skip ci]"
+
+        for attempt in 1 2 3 4 5; do
+          if git push --quiet origin HEAD:main 2>/dev/null; then
+            echo "published ${DEST_REL} (attempt ${attempt})"
+            exit 0
+          fi
+          # Another workflow published concurrently; rebase onto its commit and
+          # retry. Our change touches only our own subdirectory, so this cannot
+          # conflict with a different workflow's results.
+          git fetch --quiet origin main || true
+          git rebase --quiet origin/main || { git rebase --abort || true; }
+          sleep $(( (RANDOM % 5) + 2 ))
+        done
+        echo "::warning::could not push results for ${RESULTS_NAME} after 5 attempts"
+        exit 0

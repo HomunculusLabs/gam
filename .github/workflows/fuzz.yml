@@ -22,6 +22,9 @@ env:
 
 jobs:
   fuzz:
+    permissions:
+      contents: write
+      actions: read
     name: Fuzz vs mgcv
     runs-on: ubuntu-latest
     # MUST exceed the trial budget below (`--max-total-seconds 3300` = 55 min)
@@ -100,3 +103,17 @@ jobs:
             bench/fuzz_results.jsonl
             fuzz_output.txt
           if-no-files-found: warn
+
+
+      # Track this run's uncompressed numbers in-tree (bench/gha_results/fuzz).
+      # always() so a failed or timed-out run still publishes what it measured -
+      # those numbers are usually the interesting ones. Publishes nothing when the
+      # run produced no results, so a bad run never blanks the last good one.
+      - name: Publish results to bench/gha_results
+        if: always()
+        uses: ./.github/actions/publish-gha-results
+        with:
+          name: fuzz
+          files: |
+            fuzz/artifacts
+            fuzz-summary.txt
