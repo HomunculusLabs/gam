@@ -1173,7 +1173,33 @@ pub struct OuterResult {
     /// previous attempt already learned.
     pub operator_trust_radius: Option<f64>,
     /// Why the internal operator trust-region solver stopped.
+    ///
+    /// Derived from [`Self::termination`] in
+    /// `bridges::solution_into_outer_result`; do not set it independently
+    /// or the two can disagree.
     pub operator_stop_reason: Option<OperatorTrustRegionStopReason>,
+    /// Which test the underlying `opt` solver stopped on, and the
+    /// quantity it was decided against.
+    ///
+    /// Distinct from [`OuterTermination`], which is gam's *certification*
+    /// state machine (did a terminal analytic certificate authorize this
+    /// point). This is the solver's own account of why it stopped
+    /// searching, and the two answer different questions: a run can stop
+    /// on a satisfied gradient test and still fail certification, or
+    /// exhaust its budget and be certified by a later re-measurement.
+    ///
+    /// Carried from the solver rather than reconstructed here. Before
+    /// `opt` reported this, `operator_stop_reason` was hand-populated on
+    /// the matrix-free branch alone by matching the coarse
+    /// `OptimizationStatus`, so every other route left it `None` — and
+    /// `None` rendered identically to "there was nothing to say", which
+    /// made #2547's "WHY it stopped is unrecorded" unanswerable without a
+    /// new probe.
+    ///
+    /// `None` here means no `opt` solver produced this result at all (a
+    /// cache short-circuit, a synthesized checkpoint, the per-atom
+    /// Fellner–Schall lane) — an honest absence, not a dropped verdict.
+    pub solver_termination: Option<TerminationReason>,
     /// First-order optimality self-audit at the returned point (#934).
     ///
     /// `None` when no analytic gradient was measured at termination
@@ -1275,6 +1301,7 @@ impl OuterResult {
             plan_used,
             operator_trust_radius: None,
             operator_stop_reason: None,
+            solver_termination: None,
             criterion_certificate: None,
             flat_noise_grad_bound: None,
             rho_uncertainty_diagnostic: None,
@@ -2365,8 +2392,28 @@ fn outer_nonconvergence_error(
     // flat-valley cost stall from an iteration budget. All three are already on
     // the result and cost nothing to print.
     let reason = format!(
-        "{reason}; solver provenance: claimed_converged={}{}{}",
+        "{reason}; solver provenance: claimed_converged={}{}{}{}",
         result.solver_claimed_convergence(),
+        // #2547: `stop_reason` is the coarse projection. `termination` is
+        // the test the solver actually applied plus the quantity it was
+        // judged against, so a reader gets "the L-infinity window fired at
+        // a threshold of 8.9e-1" rather than "it stopped". A stop that
+        // made no stationarity claim at all (an iteration budget, a
+        // collapsed trust region) says so, instead of leaving that to be
+        // inferred from a bare gradient norm nothing compared it to.
+        result
+            .solver_termination
+            .map(|t| {
+                let evidence = match t.stationarity_evidence() {
+                    Some(e) => format!(
+                        " [measured={:.6e} vs threshold={:.6e}, {:?}, {:?}]",
+                        e.measured, e.threshold, e.norm, e.scaling
+                    ),
+                    None => " [made no stationarity claim]".to_string(),
+                };
+                format!(", termination={t}{evidence}")
+            })
+            .unwrap_or_else(|| ", termination=<no opt solver produced this result>".to_string()),
         result
             .operator_stop_reason
             .map(|stop| format!(", stop_reason={stop:?}"))
@@ -6131,8 +6178,8 @@ pub(crate) fn run_outer_uncertified(
         cap.theta_layout()
             .validate_point_len(initial_rho, "initial outer seed")
             .map_err(|err| match err {
-                ObjectiveEvalError::Recoverable { message }
-                | ObjectiveEvalError::Fatal { message } => {
+                err => {
+                    let message = err.into_message();
                     EstimationError::RemlOptimizationFailed(format!("{context}: {message}"))
                 }
             })?;
@@ -6707,14 +6754,16 @@ pub(crate) fn run_fixed_point_outer_solver(
     };
     let seed_sample = match objective.eval_step(seed) {
         Ok(sample) => sample,
-        Err(ObjectiveEvalError::Recoverable { message }) => {
+        Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
             let err = EstimationError::RemlOptimizationFailed(message);
             if requests_immediate_first_order_fallback(&err.to_string()) {
                 return Err(FixedPointOuterRunError::ImmediateFallback(err));
             }
             return Err(FixedPointOuterRunError::SeedRejected(err));
         }
-        Err(ObjectiveEvalError::Fatal { message }) => {
+        Err(err) => {
+                        let message = err.into_message();
             return Err(FixedPointOuterRunError::Failed(
                 EstimationError::fatal_outer_evaluation(
                     "outer fixed-point seed evaluation",

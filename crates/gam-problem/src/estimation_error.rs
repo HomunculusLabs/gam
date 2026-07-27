@@ -742,6 +742,28 @@ impl core::fmt::Debug for EstimationError {
 }
 
 impl EstimationError {
+    /// Whether this failure invalidates the whole outer run or only the
+    /// trial point it was produced at.
+    ///
+    /// The outer optimizer can survive an infeasible trial: it maps the
+    /// point to `OuterEval::infeasible`, backs off, and continues. It
+    /// cannot survive a structural failure. Deciding which is which is
+    /// the producer's job, and the answer must travel with the error
+    /// rather than be reconstructed downstream from its rendered text
+    /// (#2553).
+    ///
+    /// Only failures that are genuinely a property of *this theta* answer
+    /// `true`. Everything else stays fatal, which is the conservative
+    /// direction: misclassifying a structural failure as recoverable
+    /// would let the search grind through a problem that can never work.
+    #[must_use]
+    pub fn is_trial_point_infeasible(&self) -> bool {
+        match self {
+            Self::CustomFamily(err) => err.is_trial_point_infeasible(),
+            _ => false,
+        }
+    }
+
     /// Preserve a thrown outer-objective failure across seed, solver, and
     /// fallback-plan orchestration. Trial-domain refusals must be represented
     /// as a finite API outcome (`+inf` / `OuterEval::infeasible`); an `Err`

@@ -133,13 +133,13 @@ pub(crate) const PROBE_REFUSAL_FATAL_THRESHOLD: usize = 150;
 /// 150 probes × ~3 s each would otherwise cause an observed ~97 min hang.
 pub(crate) const PROBE_REFUSAL_FATAL_THRESHOLD_NAN_SEED: usize = 25;
 
-/// Sentinel prefix embedded in the [`ObjectiveEvalError::Fatal`] message the
+/// Sentinel prefix embedded in the fatal [`ObjectiveEvalError`] message the
 /// bridge returns when [`PROBE_REFUSAL_FATAL_THRESHOLD`] fires. The seed-loop
 /// runner matches this prefix and routes the failed seed to
 /// `rejection_reasons` rather than propagating a fatal error.
 pub(crate) const PROBE_REFUSAL_FATAL_SENTINEL: &str = "OUTER_PROBE_REFUSAL_FATAL";
 
-/// Sentinel embedded in the [`ObjectiveEvalError::Fatal`] message the bridge
+/// Sentinel embedded in the fatal [`ObjectiveEvalError`] message the bridge
 /// returns when [`CostStallGuard`] halts BFGS on a cost stall. `opt::Bfgs`
 /// preserves the message verbatim in [`BfgsError::ObjectiveFailed`]; the
 /// seed-loop runner recognizes this sentinel and rebuilds an outer result from
@@ -1304,9 +1304,7 @@ pub(crate) fn cached_value_probe_result(
         CachedValueProbeOutcome::Recoverable(message) => {
             Err(ObjectiveEvalError::recoverable(message.clone()))
         }
-        CachedValueProbeOutcome::Fatal(message) => Err(ObjectiveEvalError::Fatal {
-            message: message.clone(),
-        }),
+        CachedValueProbeOutcome::Fatal(message) => Err(ObjectiveEvalError::fatal(message.clone())),
     }
 }
 
@@ -1315,12 +1313,10 @@ pub(crate) fn cache_value_probe_result(
 ) -> CachedValueProbeOutcome {
     match result {
         Ok(cost) => CachedValueProbeOutcome::Cost(*cost),
-        Err(ObjectiveEvalError::Recoverable { message }) => {
-            CachedValueProbeOutcome::Recoverable(message.clone())
+        Err(err) if err.is_recoverable() => {
+            CachedValueProbeOutcome::Recoverable(err.message().to_string())
         }
-        Err(ObjectiveEvalError::Fatal { message }) => {
-            CachedValueProbeOutcome::Fatal(message.clone())
-        }
+        Err(err) => CachedValueProbeOutcome::Fatal(err.message().to_string()),
     }
 }
 
@@ -1444,7 +1440,7 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                     self.iter_count
                 );
             }
-            Err(ObjectiveEvalError::Recoverable { .. }) => {
+            Err(err) if err.is_recoverable() => {
                 log::info!(
                     "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=recoverable trial_rho_distance={:.3e} (first-order bridge, iter={})",
                     stage_start.elapsed().as_secs_f64(),
@@ -1480,9 +1476,7 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                                 guard.infeasible_streak,
                                 guard.best_value,
                             );
-                            return Err(ObjectiveEvalError::Fatal {
-                                message: COST_STALL_CONVERGED_SENTINEL.to_string(),
-                            });
+                            return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                         }
                         CostStallVerdict::FlatValleyStall { residual_grad_norm } => {
                             log::warn!(
@@ -1494,9 +1488,7 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                                 residual_grad_norm,
                                 guard.best_value,
                             );
-                            return Err(ObjectiveEvalError::Fatal {
-                                message: COST_STALL_CONVERGED_SENTINEL.to_string(),
-                            });
+                            return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                         }
                     }
                 }
@@ -1535,16 +1527,14 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                         self.last_value_grad_rho.is_none(),
                         self.iter_count,
                     );
-                    return Err(ObjectiveEvalError::Fatal {
-                        message: format!(
+                    return Err(ObjectiveEvalError::fatal(format!(
                             "{PROBE_REFUSAL_FATAL_SENTINEL}: {consecutive} consecutive \
                              infeasible probes with no accepted outer step",
                             consecutive = self.consecutive_probe_refusals,
-                        ),
-                    });
+                        )));
                 }
             }
-            Err(ObjectiveEvalError::Fatal { .. }) => {
+            Err(_err) => {
                 log::info!(
                     "[STAGE] outer eval end order=Value elapsed={:.3}s outcome=fatal trial_rho_distance={:.3e} (first-order bridge, iter={})",
                     stage_start.elapsed().as_secs_f64(),
@@ -1731,9 +1721,7 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
                         guard.certified_grad_bound(),
                         guard.best_value,
                     );
-                    return Err(ObjectiveEvalError::Fatal {
-                        message: COST_STALL_CONVERGED_SENTINEL.to_string(),
-                    });
+                    return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                 }
                 CostStallVerdict::FlatValleyStall { residual_grad_norm } => {
                     log::warn!(
@@ -1748,9 +1736,7 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
                         guard.grad_threshold,
                         guard.best_value,
                     );
-                    return Err(ObjectiveEvalError::Fatal {
-                        message: COST_STALL_CONVERGED_SENTINEL.to_string(),
-                    });
+                    return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                 }
             }
         }
@@ -2283,9 +2269,7 @@ impl OuterSecondOrderBridge<'_> {
                     guard.best_value,
                 );
                 guard.revoke_published_convergence();
-                Some(ObjectiveEvalError::Fatal {
-                    message: ARC_INFEASIBLE_STALL_SENTINEL.to_string(),
-                })
+                Some(ObjectiveEvalError::fatal(ARC_INFEASIBLE_STALL_SENTINEL.to_string()))
             }
             CostStallVerdict::FlatValleyStall { residual_grad_norm } => {
                 log::warn!(
@@ -2299,9 +2283,7 @@ impl OuterSecondOrderBridge<'_> {
                     guard.best_value,
                 );
                 guard.revoke_published_convergence();
-                Some(ObjectiveEvalError::Fatal {
-                    message: ARC_INFEASIBLE_STALL_SENTINEL.to_string(),
-                })
+                Some(ObjectiveEvalError::fatal(ARC_INFEASIBLE_STALL_SENTINEL.to_string()))
             }
         }
     }
@@ -2924,25 +2906,19 @@ pub(crate) fn build_bridge_hessian_for_source(
             {
                 op.materialize_dense()
                     .map(Some)
-                    .map_err(|error| ObjectiveEvalError::Fatal {
-                        message: format!("outer Hessian operator materialization failed: {error}"),
-                    })
+                    .map_err(|error| ObjectiveEvalError::fatal(format!("outer Hessian operator materialization failed: {error}")))
             }
-            HessianValue::Operator(op) => Err(ObjectiveEvalError::Fatal {
-                message: format!(
+            HessianValue::Operator(op) => Err(ObjectiveEvalError::fatal(format!(
                     "outer plan declared HessianSource::Analytic but the runtime returned a \
                      non-materializable Hessian operator (dim={}, materialization={:?}); \
                      finite-difference Hessian estimation is not permitted on the analytic route",
                     op.dim(),
                     op.materialization(),
-                ),
-            }),
-            HessianValue::Unavailable => Err(ObjectiveEvalError::Fatal {
-                message: "outer plan declared HessianSource::Analytic but the runtime returned \
+                ))),
+            HessianValue::Unavailable => Err(ObjectiveEvalError::fatal("outer plan declared HessianSource::Analytic but the runtime returned \
                           HessianValue::Unavailable; finite-difference Hessian estimation is \
                           not permitted on the analytic route"
-                    .to_string(),
-            }),
+                    .to_string())),
         },
         HessianSource::BfgsApprox
         | HessianSource::EfsFixedPoint
@@ -3526,7 +3502,67 @@ pub(crate) fn solution_into_outer_result(
     result.final_grad_norm = solution.final_gradient_norm;
     result.final_gradient = solution.final_gradient;
     result.final_hessian = solution.final_hessian;
+    // #2547: carry the solver's own verdict instead of reconstructing one.
+    // Every route that produces an `opt::Solution` funnels through here,
+    // so populating the stop reason at this single site is what makes it
+    // present on the BFGS / ARC / Newton / fixed-point routes at all — it
+    // used to be hand-set on the matrix-free branch only, leaving `None`
+    // everywhere else and making "why did it stop" unanswerable.
+    result.operator_stop_reason = Some(stop_reason_from(solution.termination));
+    result.solver_termination = Some(solution.termination);
     result
+}
+
+/// Project `opt`'s [`TerminationReason`] onto gam's coarser
+/// [`OperatorTrustRegionStopReason`].
+///
+/// A lossy projection kept for the retry orchestrator, which dispatches
+/// on the coarse category. Consumers that need the test that actually
+/// fired — and the quantity it was judged against — read
+/// `OuterResult::termination`; that is the point of carrying it.
+pub(crate) fn stop_reason_from(reason: TerminationReason) -> OperatorTrustRegionStopReason {
+    match reason {
+        // A cost stall whose best-iterate projected gradient cleared the
+        // outer tolerance is a KKT-stationary success, and the retry
+        // orchestrator has always treated it as `Converged`. Preserved
+        // exactly rather than unified with the floor case, because
+        // changing it would change which fits certify.
+        //
+        // Worth flagging while touching this: `CostStallFlatValley`'s own
+        // doc says the final analytic certificate needs that provenance in
+        // BOTH cases — "the in-loop guard may already have certified the
+        // score-relative residual OR may have returned a non-stationary
+        // floor; either way the final analytic certificate needs this
+        // provenance". Mapping the certified half to `Converged` discards
+        // it. Real question, separate change; `OuterResult::termination`
+        // now carries the undiscarded fact either way.
+        TerminationReason::CostStallStationary { .. } => OperatorTrustRegionStopReason::Converged,
+        TerminationReason::CostStallFloor { .. } => {
+            OperatorTrustRegionStopReason::CostStallFlatValley
+        }
+        TerminationReason::TrustRegionRejectFloor { .. } => {
+            OperatorTrustRegionStopReason::RejectFloor
+        }
+        TerminationReason::IterationBudget { .. } => OperatorTrustRegionStopReason::IterationBudget,
+        // Every remaining variant is either a stop the solver stands
+        // behind or a hard failure the caller sees through the `Err` arm;
+        // neither is a trust-region event.
+        TerminationReason::GradientTolerance { .. }
+        | TerminationReason::SmallStepFlatObjective { .. }
+        | TerminationReason::RelativeStationarityWindow { .. }
+        | TerminationReason::ModelNoiseFloor { .. }
+        | TerminationReason::StepNormTolerance { .. }
+        | TerminationReason::FixedPointRequestedStop { .. }
+        | TerminationReason::LineSearchFailed { .. }
+        | TerminationReason::ObjectiveFailed
+        | TerminationReason::NumericalFailure => OperatorTrustRegionStopReason::Converged,
+        // `TerminationReason` is `#[non_exhaustive]`: a variant added
+        // upstream lands here rather than breaking the build. Treating an
+        // unknown stop as `Converged` would be the wrong default, so it
+        // maps to the budget category, which the orchestrator already
+        // handles as "did not certify".
+        _ => OperatorTrustRegionStopReason::IterationBudget,
+    }
 }
 
 pub(crate) fn outer_result_with_gradient_norm(
@@ -3597,4 +3633,91 @@ pub(crate) fn bfgs_line_search_failure_message(
         format_top_abs_components(&solution.final_point, "top_abs_rho", 6),
         gradient_detail,
     )
+}
+
+#[cfg(test)]
+mod termination_provenance_tests {
+    use super::*;
+
+    /// #2547: the stop reason must be present on EVERY route, not only
+    /// the matrix-free branch that used to hand-set it. Every route funnels
+    /// through `solution_into_outer_result`, so exercising that funnel is
+    /// what proves the coverage.
+    #[test]
+    fn every_solver_derived_result_carries_its_stop_reason() {
+        let solution = Solution {
+            final_point: Array1::from_vec(vec![0.5, -1.25]),
+            final_value: -3.0,
+            final_gradient: Some(Array1::from_vec(vec![1.0e-9, -2.0e-9])),
+            final_hessian: None,
+            final_gradient_norm: Some(2.236e-9),
+            final_step_norm: None,
+            stationarity_kind: opt::StationarityKind::ProjectedGradient,
+            iterations: 12,
+            func_evals: 30,
+            grad_evals: 30,
+            hess_evals: 0,
+            termination: TerminationReason::GradientTolerance {
+                grad_norm: 2.236e-9,
+                threshold: 1.0e-8,
+            },
+        };
+        let plan = OuterPlan {
+            solver: crate::rho_optimizer::capability::Solver::Bfgs,
+            hessian_source: crate::rho_optimizer::capability::HessianSource::BfgsApprox,
+        };
+        let result = solution_into_outer_result(solution, true, plan);
+        let carried = result
+            .solver_termination
+            .expect("a solver-derived result must carry the solver's verdict");
+        let evidence = carried
+            .stationarity_evidence()
+            .expect("a gradient-tolerance stop was decided against a threshold");
+        assert!(evidence.measured <= evidence.threshold);
+        assert_eq!(
+            result.operator_stop_reason,
+            Some(OperatorTrustRegionStopReason::Converged)
+        );
+    }
+
+    /// A stop that made no stationarity claim must not present one. An
+    /// iteration budget knows a gradient norm but never compared it to
+    /// anything, and reporting it as evidence is the defect #2465 names.
+    #[test]
+    fn a_budget_exhaustion_reports_no_stationarity_evidence() {
+        let reason = TerminationReason::IterationBudget {
+            iterations: 200,
+            grad_norm: 1.58e2,
+            threshold: 1.0e-3,
+        };
+        assert!(reason.stationarity_evidence().is_none());
+        assert!(reason.grad_norm().is_some());
+        assert!(!reason.is_stationary_claim());
+        assert_eq!(
+            stop_reason_from(reason),
+            OperatorTrustRegionStopReason::IterationBudget
+        );
+    }
+
+    /// The weak exit and the strong one both succeed, and the projection
+    /// to gam's coarse enum cannot tell them apart — which is exactly why
+    /// `termination` is carried alongside it rather than replaced by it.
+    #[test]
+    fn the_relative_window_exit_is_distinguishable_only_through_termination() {
+        let strong = TerminationReason::GradientTolerance {
+            grad_norm: 1.0e-9,
+            threshold: 1.0e-8,
+        };
+        let weak = TerminationReason::RelativeStationarityWindow {
+            grad_inf: 6.984e-2,
+            threshold: 1.0e-3 * (1.0 + 30.0),
+            window: 3,
+        };
+        assert_eq!(stop_reason_from(strong), stop_reason_from(weak));
+        let s = strong.stationarity_evidence().unwrap();
+        let w = weak.stationarity_evidence().unwrap();
+        assert_eq!(s.scaling, opt::StationarityScaling::Absolute);
+        assert_eq!(w.scaling, opt::StationarityScaling::RelativeToIterate);
+        assert!(w.threshold > s.threshold);
+    }
 }

@@ -24,6 +24,34 @@ pub enum CustomFamilyError {
     ConstraintViolation { reason: String },
     #[error("{reason}")]
     UnsupportedConfiguration { reason: String },
+    /// The inner solve did not reach its KKT condition at THIS trial
+    /// point, so the analytic outer gradient/Hessian cannot be exposed
+    /// (they require `F_beta(beta, theta) = 0`).
+    ///
+    /// This is a statement about one `theta`, not about the problem: the
+    /// outer search should treat the trial as infeasible, back off, and
+    /// continue. It previously travelled as
+    /// [`UnsupportedConfiguration`](Self::UnsupportedConfiguration) — a
+    /// variant that *means* the configuration is structurally
+    /// unsupported, i.e. fatal — with the real distinction encoded only
+    /// in the message text. Downstream then had to recover it by
+    /// substring-matching that text, and two call sites reached opposite
+    /// verdicts on the same error (#2553). Choosing the variant that says
+    /// what happened removes the need to guess.
+    #[error(
+        "custom-family inner solve did not converge after {cycles} cycle(s); \
+         refusing to expose profile objective derivatives for theta_dim={theta_dim} \
+         (rho_dim={rho_dim}, psi_dim={psi_dim}). The analytic outer gradient/Hessian \
+         require the inner KKT equation F_beta(beta, theta)=0; returning a value with \
+         zero or shape-only derivatives is mathematically inconsistent. This trial \
+         point is infeasible; the outer search may step away from it."
+    )]
+    InnerSolveNotConverged {
+        cycles: usize,
+        theta_dim: usize,
+        rho_dim: usize,
+        psi_dim: usize,
+    },
     #[error("{reason}")]
     BasisDecompositionFailed { reason: String },
     /// Pre-fit cross-block identifiability audit refused the fit. The
@@ -120,5 +148,39 @@ mod tests {
         };
         let s = String::from(err);
         assert_eq!(s, "singular");
+    }
+}
+
+impl CustomFamilyError {
+    /// Whether a failure of this kind invalidates the whole outer run or
+    /// only the trial point it was produced at.
+    ///
+    /// The producer's judgement, made once against the variant. It
+    /// replaces a downstream substring match on the rendered message that
+    /// classified one variant two different ways depending on which call
+    /// site it crossed (#2553).
+    ///
+    /// The match is deliberately exhaustive with no wildcard arm: a new
+    /// variant must be classified when it is added, rather than
+    /// defaulting to whichever answer happens to be listed last.
+    #[must_use]
+    pub fn is_trial_point_infeasible(&self) -> bool {
+        match self {
+            // The inner solve missed its KKT condition at THIS theta. The
+            // outer search can step away; the problem is fine.
+            Self::InnerSolveNotConverged { .. } => true,
+            // Everything else is a property of the configuration, the
+            // data, or the numerics, and does not become true or false by
+            // moving theta.
+            Self::InvalidInput { .. }
+            | Self::Optimization { .. }
+            | Self::DimensionMismatch { .. }
+            | Self::NumericalFailure { .. }
+            | Self::ConstraintViolation { .. }
+            | Self::UnsupportedConfiguration { .. }
+            | Self::BasisDecompositionFailed { .. }
+            | Self::IdentifiabilityFailure { .. }
+            | Self::MapUniquenessFailure { .. } => false,
+        }
     }
 }

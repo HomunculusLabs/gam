@@ -1,6 +1,8 @@
 use gam_linalg::roundoff::accumulation_band;
 use ndarray::{Array1, ArrayView1};
-use opt::{BacktrackConfig, ExpandConfig, bidirectional_line_search, constants};
+use opt::{
+    BacktrackConfig, ExpandConfig, TrustRegionPolicy, bidirectional_line_search, constants,
+};
 
 use crate::manifold::{GeometryResult, RiemannianManifold, check_len, quad_form};
 
@@ -211,12 +213,15 @@ impl RiemannianTrustRegion {
         objective: &mut dyn RiemannianObjective,
         initial: ArrayView1<'_, f64>,
     ) -> GeometryResult<Array1<f64>> {
-        // Trust-region acceptance / radius-update constants.
-        const ETA1: f64 = 0.1; // accept the step iff ρ > ETA1
-        const ETA_SHRINK: f64 = 0.25; // ρ below this ⇒ shrink the radius
-        const ETA_EXPAND: f64 = 0.75; // ρ above this (at the boundary) ⇒ expand
-        const SHRINK: f64 = 0.25;
-        const EXPAND: f64 = 2.0;
+        // Trust-region acceptance and radius control come from `opt`, not
+        // from constants re-declared here. SPEC-22 puts general outer
+        // optimizer work in `opt`, and a trust-region rho-controller is
+        // exactly that: this loop's five constants were bit-for-bit the
+        // ones `TrustRegionPolicy::classic` already ships (accept 0.1,
+        // shrink below 0.25, expand above 0.75 at the boundary, x0.25,
+        // x2.0), so keeping a private copy bought nothing and gave the
+        // radius rule two places to drift apart.
+        let policy = TrustRegionPolicy::classic(self.max_radius);
         let mut x = initial.to_owned();
         let d = manifold.ambient_dim();
         check_len("trust-region initial point", x.len(), d)?;
@@ -295,7 +300,7 @@ impl RiemannianTrustRegion {
             // descent (e.g. a vanishing step); shrink and retry from the same
             // point rather than dividing by ~0 in ρ.
             if !(predicted_reduction > 0.0) {
-                delta *= SHRINK;
+                delta *= policy.shrink_factor;
                 if delta <= self.grad_tol * self.grad_tol {
                     break;
                 }
@@ -305,22 +310,31 @@ impl RiemannianTrustRegion {
             let trial_x = manifold.retract(x.view(), step.view())?;
             let f_trial = objective.value_gradient(trial_x.view())?.0;
             let actual_reduction = f_curr - f_trial;
-            let rho = if f_trial.is_finite() {
-                actual_reduction / predicted_reduction
-            } else {
-                f64::NEG_INFINITY
-            };
-
-            // Radius update.
-            if rho < ETA_SHRINK {
-                delta *= SHRINK;
-            } else if rho > ETA_EXPAND && hit_boundary {
-                delta = (delta * EXPAND).min(self.max_radius);
-            }
+            // The step's length in the manifold metric — the same norm
+            // `hit_boundary` was decided in. `classic` sets no rejection
+            // step cap so the policy does not currently consult it, but
+            // handing it a placeholder would make the call a lie the day
+            // that changes.
+            let step_norm = g_inner(manifold, x.view(), step.view(), step.view())?
+                .max(0.0)
+                .sqrt();
+            // A non-finite trial value reaches the policy as a non-finite
+            // `actual_reduction`, which cannot clear `rho > eta_accept`, so
+            // the explicit `f_trial.is_finite()` conjunct the hand-rolled
+            // version carried is subsumed rather than dropped.
+            let tr = policy.update(
+                delta,
+                step_norm,
+                hit_boundary,
+                actual_reduction,
+                predicted_reduction,
+                f_curr,
+            );
+            delta = tr.new_radius;
 
             // Accept only sufficiently-good steps; otherwise keep x (the next
             // iteration recomputes f and the gradient at the retained point).
-            if rho > ETA1 && f_trial.is_finite() {
+            if tr.accepted {
                 x = trial_x;
             }
         }

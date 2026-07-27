@@ -1214,43 +1214,39 @@ where
         }
     }
 }
-
-/// Distinctive signature of a custom-family inner solve that did not reach its
-/// KKT fixed point, emitted by `psi_hyper` when it refuses to expose profile
-/// objective derivatives at a non-stationary β̂ (crates/gam-custom-family/src/
-/// psi_hyper.rs). The analytic outer gradient/Hessian require the inner KKT
-/// equation `F_β(β, θ) = 0`; when the inner solve stalls at a particular ρ that
-/// equation is unmet, so the trial is INFEASIBLE **at that ρ** — not a
-/// structural defect of the problem.
-pub(crate) const INNER_DERIVATIVE_KKT_REFUSAL_MARKER: &str =
-    "refusing to expose profile objective derivatives";
-
+/// Classify an [`EstimationError`] for the outer objective boundary and
+/// carry it across as a typed source.
+///
+/// # Why this is not a substring match
+///
+/// Recoverability is a property of what failed, and only the producer
+/// knows it. This function used to decide it by testing whether the
+/// *rendered message* contained a marker string, because the variant it
+/// received — `CustomFamilyError::UnsupportedConfiguration` — meant "the
+/// configuration is structurally unsupported" while the condition it
+/// actually carried was "the inner solve missed its KKT condition at this
+/// one theta". The marker existed to undo that mismatch after the fact.
+///
+/// The consequence was #2553: the same variant was classified RECOVERABLE
+/// at a call site that could still see its type and FATAL here, where
+/// only the text was left, so a trial the optimizer was equipped to
+/// survive aborted the whole fit. A verdict carried in prose is one
+/// `format!` away from silently changing meaning.
+///
+/// Both halves are fixed at their roots. The producer emits
+/// [`CustomFamilyError::InnerSolveNotConverged`], a variant that *means*
+/// the trial point is infeasible, and `is_trial_point_infeasible` is an
+/// exhaustive match over the variants rather than a guess. `opt`'s
+/// `ObjectiveEvalError` then carries the originating error as a typed
+/// source, so any later layer that needs the classification downcasts to
+/// it instead of re-deriving one.
 pub(crate) fn into_objective_error(context: &str, err: EstimationError) -> ObjectiveEvalError {
-    let message = format!("{context}: {err}");
-    // #2358: a non-stationary custom-family inner solve at THIS ρ is a
-    // RECOVERABLE infeasibility (cost = ∞), not a fatal failure of the whole
-    // outer evaluation. Routing it through `Recoverable` lets the outer
-    // optimizer treat the trial as `OuterEval::infeasible` and BACK OFF to a
-    // feasible optimum (interior line-search / gradient path) or reject an
-    // infeasible seed and try the next one (seed-screening path) — the same
-    // `OuterEval::infeasible` mechanism the value-probe path already relies on.
-    // Previously EVERY objective error (including this per-ρ inner
-    // non-convergence) was classified `Fatal`: a single non-convergent interior
-    // ρ then aborted the entire fit even though the optimizer already held a
-    // feasible optimum to fall back to (the location-scale gagurine `tp` fit).
-    // Any ρ where the inner solve does reach stationarity is unaffected — it
-    // never carries this marker.
-    //
-    // This is necessary but not always sufficient: a fit whose EVERY seed is
-    // inner-infeasible (e.g. the wiggle two-block reference-flow, whose joint
-    // Newton trust region collapses on the coupled mean/log-σ/wiggle blocks)
-    // still fails, now with an honest "no candidate seeds passed validation"
-    // instead of a fatal abort. Repairing that inner collapse is separate.
-    if message.contains(INNER_DERIVATIVE_KKT_REFUSAL_MARKER) {
-        ObjectiveEvalError::recoverable(message)
+    let kind = if err.is_trial_point_infeasible() {
+        ObjectiveEvalKind::Recoverable
     } else {
-        ObjectiveEvalError::fatal(message)
-    }
+        ObjectiveEvalKind::Fatal
+    };
+    ObjectiveEvalError::from_source(kind, err).with_context(context)
 }
 
 pub(crate) fn finite_cost_or_error(context: &str, cost: f64) -> Result<f64, ObjectiveEvalError> {
@@ -1699,5 +1695,84 @@ impl<'a> OuterObjective for CanonicalizedObjective<'a> {
         // problems route through the host BFGS/ARC path (where the permutation
         // is honored) rather than the device driver.
         None
+    }
+}
+
+#[cfg(test)]
+mod trial_infeasibility_classification_tests {
+    use super::*;
+    use gam_problem::CustomFamilyError;
+
+    /// #2553: one variant used to get both verdicts depending on which
+    /// boundary it crossed, because the boundary read the rendered text.
+    /// The classification is now a property of the type, so both call
+    /// sites necessarily agree.
+    #[test]
+    fn inner_solve_nonconvergence_is_recoverable_and_carries_its_type() {
+        let err = EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
+            cycles: 12,
+            theta_dim: 5,
+            rho_dim: 3,
+            psi_dim: 2,
+        });
+        assert!(err.is_trial_point_infeasible());
+
+        let objective_err = into_objective_error("outer fixed-point evaluation", err);
+        assert!(
+            objective_err.is_recoverable(),
+            "an infeasible trial must let the outer search back off, not abort the fit"
+        );
+        assert!(
+            objective_err
+                .message()
+                .starts_with("outer fixed-point evaluation: "),
+            "context must prefix the message: {}",
+            objective_err.message()
+        );
+        // The producer's error is still reachable, so nothing downstream
+        // has to re-derive the classification from prose.
+        let source = objective_err
+            .downcast_ref::<EstimationError>()
+            .expect("the typed source must survive the boundary");
+        assert!(matches!(
+            source,
+            EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
+                cycles: 12,
+                ..
+            })
+        ));
+    }
+
+    /// The conservative direction: a genuinely structural failure stays
+    /// fatal. Widening recoverability would let the search grind through a
+    /// problem that can never work.
+    #[test]
+    fn a_structural_configuration_failure_stays_fatal() {
+        let err = EstimationError::CustomFamily(CustomFamilyError::UnsupportedConfiguration {
+            reason: "this family does not support the requested link".to_string(),
+        });
+        assert!(!err.is_trial_point_infeasible());
+        assert!(into_objective_error("outer EFS eval", err).is_fatal());
+    }
+
+    /// The two failures render with overlapping text but classify
+    /// oppositely — precisely what a substring test could not do, and why
+    /// one existed to be deleted.
+    #[test]
+    fn classification_does_not_depend_on_the_rendered_message() {
+        let infeasible = EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
+            cycles: 1,
+            theta_dim: 1,
+            rho_dim: 1,
+            psi_dim: 0,
+        });
+        let structural =
+            EstimationError::CustomFamily(CustomFamilyError::UnsupportedConfiguration {
+                reason: infeasible.to_string(),
+            });
+        // Byte-identical tails, opposite verdicts.
+        assert!(structural.to_string().contains(&infeasible.to_string()));
+        assert!(into_objective_error("ctx", infeasible).is_recoverable());
+        assert!(into_objective_error("ctx", structural).is_fatal());
     }
 }

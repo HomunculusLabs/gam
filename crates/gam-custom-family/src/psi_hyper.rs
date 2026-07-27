@@ -1571,16 +1571,18 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
     };
     if !inner.converged {
         let theta_dim = rho_dim + psi_dim;
-        return Err(CustomFamilyError::UnsupportedConfiguration {
-            reason: format!(
-                "custom-family inner solve did not converge after {} cycle(s); \
-             refusing to expose profile objective derivatives for theta_dim={} \
-             (rho_dim={}, psi_dim={}). The analytic outer gradient/Hessian \
-             require the inner KKT equation F_beta(beta, theta)=0; returning \
-             a value with zero or shape-only derivatives is mathematically \
-             inconsistent.",
-                inner.cycles, theta_dim, rho_dim, psi_dim
-            ),
+        // #2553: the fact that matters is "this trial point is
+        // infeasible", and it belongs in the variant rather than the
+        // message. `UnsupportedConfiguration` MEANS the configuration is
+        // structurally unsupported — a fatal claim — so encoding a
+        // recoverable per-theta condition in it forced every downstream
+        // consumer to recover the distinction from prose, and two of them
+        // reached opposite verdicts.
+        return Err(CustomFamilyError::InnerSolveNotConverged {
+            cycles: inner.cycles,
+            theta_dim,
+            rho_dim,
+            psi_dim,
         });
     }
     let ridge = effective_solverridge(options.ridge_floor);

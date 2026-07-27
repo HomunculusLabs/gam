@@ -2341,12 +2341,12 @@ fn hybrid_efs_backtracking_propagates_fatal_cost_failure() {
     let error = bridge
         .eval_step(&array![0.0])
         .expect_err("a typed value-probe failure must leave EFS backtracking");
-    let message = match error {
-        ObjectiveEvalError::Fatal { message } => message,
-        ObjectiveEvalError::Recoverable { message } => {
-            panic!("typed value-probe failure was downgraded to recoverable: {message}")
-        }
-    };
+    assert!(
+        error.is_fatal(),
+        "typed value-probe failure was downgraded to recoverable: {}",
+        error.message()
+    );
+    let message = error.into_message();
     assert!(message.contains(SENTINEL));
 }
 
@@ -2804,18 +2804,17 @@ fn analytic_route_unavailable_hessian_is_fatal() {
     };
     let err = SecondOrderObjective::eval_hessian(&mut bridge, &array![1.0])
         .expect_err("Analytic route must reject Unavailable Hessian, not pass None to opt");
-    match err {
-        ObjectiveEvalError::Fatal { message } => {
-            assert!(
-                message.contains("HessianSource::Analytic") && message.contains("Unavailable"),
-                "fatal message should explain the analytic-route mismatch, saw: {message}"
-            );
-        }
-        ObjectiveEvalError::Recoverable { message } => panic!(
-            "Analytic-route Hessian violations must be Fatal (FD estimation is forbidden); \
-                 got Recoverable: {message}"
-        ),
-    }
+    assert!(
+        err.is_fatal(),
+        "Analytic-route Hessian violations must be Fatal (FD estimation is forbidden); \
+         got Recoverable: {}",
+        err.message()
+    );
+    assert!(
+        err.message().contains("HessianSource::Analytic") && err.message().contains("Unavailable"),
+        "fatal message should explain the analytic-route mismatch, saw: {}",
+        err.message()
+    );
 }
 
 /// #2357 — the finite cost-stall window must not certify a strict-saddle
@@ -3196,7 +3195,11 @@ fn arc_bridge_cost_stall_halts_on_infeasible_separation_run() {
     for _ in 0..(COST_STALL_WINDOW + 2) {
         match SecondOrderObjective::eval_hessian(&mut bridge, &separating) {
             Ok(_) => panic!("an infeasible (cost=∞) trial must not return a finite sample"),
-            Err(ObjectiveEvalError::Fatal { message }) => {
+            // Before the window fills, infeasible trials surface as the normal
+            // recoverable non-finite-cost error (the optimizer shrinks + retries).
+            Err(err) if err.is_recoverable() => {}
+            Err(err) => {
+                let message = err.into_message();
                 assert_eq!(
                     message, ARC_INFEASIBLE_STALL_SENTINEL,
                     "infeasible-run halt must use the non-converged ARC checkpoint sentinel"
@@ -3204,9 +3207,6 @@ fn arc_bridge_cost_stall_halts_on_infeasible_separation_run() {
                 sentinel_fired = true;
                 break;
             }
-            // Before the window fills, infeasible trials surface as the normal
-            // recoverable non-finite-cost error (the optimizer shrinks + retries).
-            Err(ObjectiveEvalError::Recoverable { .. }) => {}
         }
     }
     assert!(
@@ -3359,7 +3359,9 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
         let trial = array![1.0 + i as f64];
         match ZerothOrderObjective::eval_cost(&mut bridge, &trial) {
             Ok(cost) => panic!("infeasible probe unexpectedly returned finite cost {cost}"),
-            Err(ObjectiveEvalError::Fatal { message }) => {
+            Err(err) if err.is_recoverable() => {}
+            Err(err) => {
+                let message = err.into_message();
                 assert_eq!(
                     message, COST_STALL_CONVERGED_SENTINEL,
                     "BFGS infeasible-probe halt must use the shared cost-stall sentinel"
@@ -3367,7 +3369,6 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
                 sentinel_fired = true;
                 break;
             }
-            Err(ObjectiveEvalError::Recoverable { .. }) => {}
         }
     }
     assert!(
@@ -4649,11 +4650,7 @@ fn finite_outer_eval_reports_gradient_length_mismatch() {
         },
     )
     .expect_err("gradient mismatch should be rejected");
-    let message = match err {
-        ObjectiveEvalError::Recoverable { message } | ObjectiveEvalError::Fatal { message } => {
-            message
-        }
-    };
+    let message = err.into_message();
     assert!(
         message.contains("outer gradient length mismatch"),
         "unexpected error: {message}"

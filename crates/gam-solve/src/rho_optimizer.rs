@@ -32,7 +32,8 @@ use ::opt::{
     FirstOrderObjective, FirstOrderSample, FixedPoint, FixedPointError, FixedPointObjective,
     FixedPointSample, FixedPointStatus, GradientTolerance, HessianFallbackPolicy,
     HessianMaterialization, HessianOperator, InitialMetric, MatrixFreeTrustRegion, MaxIterations,
-    ObjectiveEvalError, OperatorObjective, OperatorSample, OptimizationStatus, OptimizerObserver,
+    ObjectiveEvalError, ObjectiveEvalKind, OperatorObjective, OperatorSample, OptimizationStatus,
+    OptimizerObserver, TerminationReason,
     SecondOrderObjective, SecondOrderSample, Solution, StepInfo, Tolerance, ZerothOrderObjective,
 };
 

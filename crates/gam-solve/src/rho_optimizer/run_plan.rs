@@ -1144,7 +1144,8 @@ pub(crate) fn run_outer_with_plan(
                     .map_err(|err| into_objective_error("outer eval failed", err));
                 let seed_eval = match seed_eval {
                     Ok(seed_eval) => seed_eval,
-                    Err(ObjectiveEvalError::Recoverable { message }) => {
+                    Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
                         let err = EstimationError::RemlOptimizationFailed(message);
                         if requests_immediate_first_order_fallback(&err.to_string()) {
                             return Err(err);
@@ -1155,7 +1156,8 @@ pub(crate) fn run_outer_with_plan(
                         rejection_reasons.push((seed_idx, "validation", err.to_string()));
                         continue 'seed_attempts;
                     }
-                    Err(ObjectiveEvalError::Fatal { message }) => {
+                    Err(err) => {
+                        let message = err.into_message();
                         return Err(EstimationError::fatal_outer_evaluation(
                             "outer ARC seed evaluation",
                             EstimationError::RemlOptimizationFailed(message),
@@ -1165,7 +1167,8 @@ pub(crate) fn run_outer_with_plan(
                 let seed_eval = finite_outer_eval_or_error("outer eval failed", layout, seed_eval);
                 let mut seed_eval = match seed_eval {
                     Ok(seed_eval) => seed_eval,
-                    Err(ObjectiveEvalError::Recoverable { message }) => {
+                    Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
                         let err = EstimationError::RemlOptimizationFailed(message);
                         log::warn!(
                             "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
@@ -1173,7 +1176,8 @@ pub(crate) fn run_outer_with_plan(
                         rejection_reasons.push((seed_idx, "validation", err.to_string()));
                         continue 'seed_attempts;
                     }
-                    Err(ObjectiveEvalError::Fatal { message }) => {
+                    Err(err) => {
+                        let message = err.into_message();
                         return Err(EstimationError::fatal_outer_evaluation(
                             "outer ARC seed validation",
                             EstimationError::RemlOptimizationFailed(message),
@@ -1182,8 +1186,8 @@ pub(crate) fn run_outer_with_plan(
                 };
                 validate_second_order_seed_hessian(context, layout, &seed_eval).map_err(|err| {
                     match err {
-                        ObjectiveEvalError::Recoverable { message }
-                        | ObjectiveEvalError::Fatal { message } => {
+                        err => {
+                            let message = err.into_message();
                             EstimationError::RemlOptimizationFailed(message)
                         }
                     }
@@ -1320,8 +1324,6 @@ pub(crate) fn run_outer_with_plan(
                         | OptimizationStatus::NumericallyConverged => {
                             let mut result =
                                 solution_into_outer_result(report.solution, true, *the_plan);
-                            result.operator_stop_reason =
-                                Some(OperatorTrustRegionStopReason::Converged);
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
@@ -1338,8 +1340,6 @@ pub(crate) fn run_outer_with_plan(
                             );
                             let mut result =
                                 solution_into_outer_result(report.solution, false, *the_plan);
-                            result.operator_stop_reason =
-                                Some(OperatorTrustRegionStopReason::IterationBudget);
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
@@ -1355,8 +1355,6 @@ pub(crate) fn run_outer_with_plan(
                             );
                             let mut result =
                                 solution_into_outer_result(report.solution, false, *the_plan);
-                            result.operator_stop_reason =
-                                Some(OperatorTrustRegionStopReason::RejectFloor);
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
@@ -1374,8 +1372,6 @@ pub(crate) fn run_outer_with_plan(
                         OptimizationStatus::CostStallConverged => {
                             let mut result =
                                 solution_into_outer_result(report.solution, true, *the_plan);
-                            result.operator_stop_reason =
-                                Some(OperatorTrustRegionStopReason::Converged);
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
@@ -1388,8 +1384,6 @@ pub(crate) fn run_outer_with_plan(
                             );
                             let mut result =
                                 solution_into_outer_result(report.solution, false, *the_plan);
-                            result.operator_stop_reason =
-                                Some(OperatorTrustRegionStopReason::CostStallFlatValley);
                             result.operator_trust_radius = final_radius;
                             Ok(result)
                         }
@@ -1447,8 +1441,8 @@ pub(crate) fn run_outer_with_plan(
                         OUTER_HVP_MATERIALIZE_MAX_DIM,
                     )
                     .map_err(|err| match err {
-                        ObjectiveEvalError::Recoverable { message }
-                        | ObjectiveEvalError::Fatal { message } => {
+                        err => {
+                            let message = err.into_message();
                             EstimationError::RemlOptimizationFailed(message)
                         }
                     })?;
@@ -1646,8 +1640,6 @@ pub(crate) fn run_outer_with_plan(
                                     // final analytic certificate can report the
                                     // checkpoint provenance without confusing it
                                     // with an optimizer convergence result.
-                                    result.operator_stop_reason =
-                                        Some(OperatorTrustRegionStopReason::CostStallFlatValley);
                                     Ok(result)
                                 }
                                 None => Err(EstimationError::RemlOptimizationFailed(format!(
@@ -1719,7 +1711,8 @@ pub(crate) fn run_outer_with_plan(
                         .map_err(|err| into_objective_error("outer eval failed", err))
                     {
                         Ok(e) => e,
-                        Err(ObjectiveEvalError::Recoverable { message }) => {
+                        Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
                             let err = EstimationError::RemlOptimizationFailed(message);
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before device-BFGS start: {err}"
@@ -1727,7 +1720,8 @@ pub(crate) fn run_outer_with_plan(
                             rejection_reasons.push((seed_idx, "validation", err.to_string()));
                             continue 'seed_attempts;
                         }
-                        Err(ObjectiveEvalError::Fatal { message }) => {
+                        Err(err) => {
+                        let message = err.into_message();
                             return Err(EstimationError::fatal_outer_evaluation(
                                 "outer device-BFGS seed evaluation",
                                 EstimationError::RemlOptimizationFailed(message),
@@ -1815,15 +1809,15 @@ pub(crate) fn run_outer_with_plan(
                                 "outer eval failed",
                                 layout,
                                 seed_eval.map_err(|err| match err {
-                                    ObjectiveEvalError::Recoverable { message }
-                                    | ObjectiveEvalError::Fatal { message } => {
+                                    err => {
+                                        let message = err.into_message();
                                         EstimationError::RemlOptimizationFailed(message)
                                     }
                                 })?,
                             )
                             .map_err(|err| match err {
-                                ObjectiveEvalError::Recoverable { message }
-                                | ObjectiveEvalError::Fatal { message } => {
+                                err => {
+                                    let message = err.into_message();
                                     EstimationError::RemlOptimizationFailed(message)
                                 }
                             }) {
@@ -1841,7 +1835,8 @@ pub(crate) fn run_outer_with_plan(
                         .map_err(|err| into_objective_error("outer eval failed", err));
                     let seed_eval = match seed_eval {
                         Ok(seed_eval) => seed_eval,
-                        Err(ObjectiveEvalError::Recoverable { message }) => {
+                        Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
                             let err = EstimationError::RemlOptimizationFailed(message);
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
@@ -1849,7 +1844,8 @@ pub(crate) fn run_outer_with_plan(
                             rejection_reasons.push((seed_idx, "validation", err.to_string()));
                             continue 'seed_attempts;
                         }
-                        Err(ObjectiveEvalError::Fatal { message }) => {
+                        Err(err) => {
+                        let message = err.into_message();
                             return Err(EstimationError::fatal_outer_evaluation(
                                 "outer BFGS seed evaluation",
                                 EstimationError::RemlOptimizationFailed(message),
@@ -1862,7 +1858,8 @@ pub(crate) fn run_outer_with_plan(
                         seed_eval,
                     ) {
                         Ok(eval) => eval,
-                        Err(ObjectiveEvalError::Recoverable { message }) => {
+                        Err(err) if err.is_recoverable() => {
+                        let message = err.into_message();
                             let err = EstimationError::RemlOptimizationFailed(message);
                             log::warn!(
                                 "[OUTER] {context}: rejecting seed {seed_idx} before solver start: {err}"
@@ -1870,7 +1867,8 @@ pub(crate) fn run_outer_with_plan(
                             rejection_reasons.push((seed_idx, "validation", err.to_string()));
                             continue 'seed_attempts;
                         }
-                        Err(ObjectiveEvalError::Fatal { message }) => {
+                        Err(err) => {
+                        let message = err.into_message();
                             return Err(EstimationError::fatal_outer_evaluation(
                                 "outer BFGS seed validation",
                                 EstimationError::RemlOptimizationFailed(message),
@@ -2185,8 +2183,6 @@ pub(crate) fn run_outer_with_plan(
                                     // score of 2.7e3, certificate refused at
                                     // its raw 4.4e-2 bound and the fit died
                                     // with RemlConvergenceError).
-                                    result.operator_stop_reason =
-                                        Some(OperatorTrustRegionStopReason::CostStallFlatValley);
                                     Ok(result)
                                 }
                                 None => Err(EstimationError::RemlOptimizationFailed(format!(
