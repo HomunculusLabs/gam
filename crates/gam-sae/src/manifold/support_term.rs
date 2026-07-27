@@ -16,6 +16,16 @@ use std::sync::Arc;
 
 use super::*;
 
+/// Rows per rayon task in the read-only active-set passes (#2575).
+///
+/// The unit of work is a row, but the unit of ALLOCATION should not be: each
+/// task builds its evaluation scratch once and reuses it across the rows it
+/// takes, so the chunk width sets how many rows amortise one scratch. Wide
+/// enough that the per-task setup is negligible against the `support_k · M · P`
+/// work per row, narrow enough that a 4-core host still gets even load at the
+/// smallest shapes the lane admits.
+const RECONSTRUCT_ROW_CHUNK: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SaeSupportStationarity {
     pub decoder_l2: f64,
@@ -53,11 +63,57 @@ pub struct SaeSupportCoordinateFixedPointReport {
     pub recurred: bool,
 }
 
-struct ActiveAtomEval {
-    phi: Array1<f64>,
+/// Reusable storage for ONE active `(row, slot)` evaluation (#2575).
+///
+/// Every read-only pass over the active set — reconstruct, the raw KKT
+/// reductions, the penalized objective, the decoder sweep's normal equations,
+/// the arrow assembly — needs the same four arrays for each `(row, slot)` pair:
+/// the basis row `Φ(t)`, its jet, the decoded image `Φ·B`, and the coordinate
+/// Jacobian `∂(Φ·B)/∂t`. The producer used to ALLOCATE all four (plus a coords
+/// array and a `dot` result) on every call, and it is called `n·support_k` times
+/// per sweep — 358,544 times per sweep at the #2502 flagship shape, which is
+/// where the profiled 12.4% of self time in `malloc`/`free`/`memmove` went.
+///
+/// Held by the caller and reused across rows (per rayon worker, via
+/// `map_init`), it is sized once for the first `(m, d, p)` it sees and only
+/// resized when a later atom needs a different shape — so a homogeneous atom
+/// portfolio allocates once per worker per sweep instead of once per pair.
+#[derive(Debug, Default, Clone)]
+struct ActiveAtomScratch {
+    /// `(1, m)` — the evaluator's own buffer shape.
+    phi: Array2<f64>,
+    /// `(1, m, d)`.
+    jet: ndarray::Array3<f64>,
+    /// `(P,)`.
     decoded: Array1<f64>,
-    /// Coordinate-major decoded jet, `(d_k, P)`.
+    /// Coordinate-major decoded jet, `(d, P)`.
     jacobian: Array2<f64>,
+}
+
+impl ActiveAtomScratch {
+    /// Resize to hold one `(m, d)` atom's evaluation against a `p`-wide
+    /// response. A no-op when the shapes already match, which is the common
+    /// case: the shapes are a property of the atom, not of the row.
+    fn fit(&mut self, m: usize, d: usize, p: usize) {
+        if self.phi.dim() != (1, m) {
+            self.phi = Array2::zeros((1, m));
+        }
+        if self.jet.dim() != (1, m, d) {
+            self.jet = ndarray::Array3::zeros((1, m, d));
+        }
+        if self.decoded.len() != p {
+            self.decoded = Array1::zeros(p);
+        }
+        if self.jacobian.dim() != (d, p) {
+            self.jacobian = Array2::zeros((d, p));
+        }
+    }
+
+    /// The basis row as a flat `m`-vector view — every consumer reads it as
+    /// `phi[basis]`, and the evaluator writes it as `(1, m)`.
+    fn phi_row(&self) -> ndarray::ArrayView1<'_, f64> {
+        self.phi.row(0)
+    }
 }
 
 #[derive(Clone)]
@@ -177,6 +233,73 @@ impl SupportBetaOperator {
                 }
             }
         }
+    }
+}
+
+/// Reusable storage for ONE row's coordinate solve (#2575).
+///
+/// Held per rayon worker and reused across every row that worker takes. The
+/// row solve's working set is a function of the row's SUPPORT SHAPE — the
+/// number of active slots, each slot's `(m, d)`, the compact coordinate width
+/// `q` — and on this lane those are the same for almost every row (one support
+/// width, one atom portfolio), so [`Self::fit`] resizes on the first row and is
+/// a no-op thereafter.
+#[derive(Debug, Default, Clone)]
+struct RowSolveScratch {
+    /// Per-slot offsets into the row's compact coordinate block.
+    offsets: Vec<Range<usize>>,
+    /// The row's support, in slot order.
+    support: Vec<u32>,
+    /// Per-slot `(basis width, latent dim)`.
+    dims: Vec<(usize, usize)>,
+    /// Per-slot evaluation at the CURRENT coordinates.
+    current: Vec<ActiveAtomScratch>,
+    /// Per-slot evaluation at the line search's trial coordinates.
+    trial: Vec<ActiveAtomScratch>,
+    fitted: Array1<f64>,
+    /// `(q, P)` coordinate-major row Jacobian.
+    jacobian: Array2<f64>,
+    trial_fitted: Array1<f64>,
+    trial_residual: Array1<f64>,
+    trial_delta: Vec<f64>,
+    fitted_delta: Vec<KahanSum>,
+    old_coords: Vec<f64>,
+}
+
+impl RowSolveScratch {
+    fn fit(&mut self, term: &SaeSupportSparseTerm, row: usize, q: usize, p: usize) {
+        self.offsets.clear();
+        self.offsets.extend(term.slot_offsets(row));
+        self.support.clear();
+        self.support
+            .extend_from_slice(term.assignment.support_indices(row));
+        self.dims.clear();
+        self.dims.extend(self.support.iter().map(|&atom| {
+            let atom = atom as usize;
+            (
+                term.atoms[atom].basis_size(),
+                term.atoms[atom].latent_dim(),
+            )
+        }));
+        let slots = self.dims.len();
+        self.current.resize_with(slots, ActiveAtomScratch::default);
+        self.trial.resize_with(slots, ActiveAtomScratch::default);
+        for (slot, &(m, d)) in self.dims.iter().enumerate() {
+            self.current[slot].fit(m, d, p);
+            self.trial[slot].fit(m, d, p);
+        }
+        if self.fitted.len() != p {
+            self.fitted = Array1::zeros(p);
+            self.trial_fitted = Array1::zeros(p);
+            self.trial_residual = Array1::zeros(p);
+            self.fitted_delta = vec![KahanSum::default(); p];
+        }
+        if self.jacobian.dim() != (q, p) {
+            self.jacobian = Array2::zeros((q, p));
+        }
+        self.trial_delta.clear();
+        self.trial_delta.resize(q, 0.0);
+        self.old_coords.clear();
     }
 }
 
@@ -484,6 +607,10 @@ impl SaeSupportSparseTerm {
         );
         let mut linearized_rows = Vec::with_capacity(self.n_obs());
         let mut hbb_diag = Array1::<f64>::zeros(beta_dim);
+        // One evaluation scratch for the whole assembly (#2575); `blocks` still
+        // owns a copy of each active basis row because the linearized operator
+        // outlives this loop.
+        let mut scratch = ActiveAtomScratch::default();
         for row in 0..self.n_obs() {
             let q = row_layout.row_q_active(row);
             let mut fitted = Array1::<f64>::zeros(self.output_dim);
@@ -491,23 +618,24 @@ impl SaeSupportSparseTerm {
             let mut blocks = Vec::with_capacity(self.assignment.support_indices(row).len());
             for slot in 0..self.assignment.support_indices(row).len() {
                 let atom_idx = self.assignment.support_indices(row)[slot] as usize;
-                let active = self.evaluate_active(row, slot)?;
-                fitted += &active.decoded;
+                self.fill_active(row, slot, &mut scratch)?;
+                fitted += &scratch.decoded;
                 let cursor = row_layout.coord_starts[row][slot];
-                for axis in 0..active.jacobian.nrows() {
+                for axis in 0..scratch.jacobian.nrows() {
                     jacobian
                         .row_mut(cursor + axis)
-                        .assign(&active.jacobian.row(axis));
+                        .assign(&scratch.jacobian.row(axis));
                 }
-                for basis in 0..active.phi.len() {
+                let phi = scratch.phi_row();
+                for basis in 0..phi.len() {
                     let base = beta_offsets[atom_idx] + basis * self.output_dim;
                     for channel in 0..self.output_dim {
-                        hbb_diag[base + channel] += active.phi[basis] * active.phi[basis];
+                        hbb_diag[base + channel] += phi[basis] * phi[basis];
                     }
                 }
                 blocks.push(SupportBasisBlock {
                     beta_offset: beta_offsets[atom_idx],
-                    phi: active.phi,
+                    phi: phi.to_owned(),
                 });
             }
             let residual = &target.row(row) - &fitted;
@@ -595,41 +723,38 @@ impl SaeSupportSparseTerm {
         Ok(system)
     }
 
-    fn evaluate_active(&self, row: usize, slot: usize) -> Result<ActiveAtomEval, String> {
+    /// Evaluate one active `(row, slot)` pair into caller-owned storage.
+    ///
+    /// The allocating counterpart this replaces (`evaluate_active`) built six
+    /// fresh arrays per call and was called once per active pair per pass —
+    /// `n·support_k` times per sweep (#2575). The evaluation itself is
+    /// unchanged: it delegates to [`Self::fill_active_eval`], which is the one
+    /// place that reads the evaluator and folds the decoder, so the row solve
+    /// and every read-only pass now share a single producer.
+    fn fill_active(
+        &self,
+        row: usize,
+        slot: usize,
+        scratch: &mut ActiveAtomScratch,
+    ) -> Result<(), String> {
         let atom_idx = self.assignment.support_indices(row)[slot] as usize;
         let atom = &self.atoms[atom_idx];
-        let d = atom.latent_dim();
-        let coords =
-            Array2::from_shape_vec((1, d), self.assignment.coords_for_slot(row, slot).to_vec())
-                .map_err(|error| format!("SaeSupportSparseTerm::evaluate_active: {error}"))?;
-        let evaluator = atom.basis_evaluator.as_ref().ok_or_else(|| {
-            format!("SaeSupportSparseTerm::evaluate_active: atom {atom_idx} has no evaluator")
-        })?;
-        let (phi, jet) = evaluator.evaluate(coords.view())?;
-        let m = atom.basis_size();
-        if phi.dim() != (1, m) || jet.dim() != (1, m, d) {
-            return Err(format!(
-                "SaeSupportSparseTerm::evaluate_active: atom {atom_idx} evaluator shapes Phi={:?}, jet={:?}, expected (1,{m}) and (1,{m},{d})",
-                phi.dim(),
-                jet.dim()
-            ));
-        }
-        let phi = phi.row(0).to_owned();
-        let decoded = phi.dot(atom.decoder_coefficients());
-        let mut jacobian = Array2::<f64>::zeros((d, self.output_dim));
-        for axis in 0..d {
-            for basis in 0..m {
-                let weight = jet[[0, basis, axis]];
-                for output in 0..self.output_dim {
-                    jacobian[[axis, output]] += weight * atom.decoder_coefficients()[[basis, output]];
-                }
-            }
-        }
-        Ok(ActiveAtomEval {
+        scratch.fit(atom.basis_size(), atom.latent_dim(), self.output_dim);
+        let ActiveAtomScratch {
             phi,
+            jet,
             decoded,
             jacobian,
-        })
+        } = scratch;
+        self.fill_active_eval(
+            row,
+            slot,
+            self.assignment.coords_for_slot(row, slot),
+            phi,
+            jet,
+            decoded,
+            jacobian,
+        )
     }
 
     /// Decode one atom's image at caller coordinates: `Φ(t)·B_k`, shape
@@ -661,26 +786,45 @@ impl SaeSupportSparseTerm {
         Ok(phi.dot(atom.decoder_coefficients()))
     }
 
-    fn reconstruct_row(&self, row: usize) -> Result<Array1<f64>, String> {
-        let mut fitted = Array1::<f64>::zeros(self.output_dim);
+    fn reconstruct_row_into(
+        &self,
+        row: usize,
+        scratch: &mut ActiveAtomScratch,
+        fitted: &mut Array1<f64>,
+    ) -> Result<(), String> {
+        fitted.fill(0.0);
         for slot in 0..self.assignment.support_indices(row).len() {
-            let active = self.evaluate_active(row, slot)?;
-            fitted += &active.decoded;
+            self.fill_active(row, slot, scratch)?;
+            *fitted += &scratch.decoded;
         }
-        Ok(fitted)
+        Ok(())
     }
 
     /// Direct active-row reconstruction. No K-wide gate or basis row exists.
     /// Rows are independent reads of shared state, so they decode in parallel.
+    ///
+    /// #2575: the per-row decode used to allocate a fresh `(P,)` row and six
+    /// arrays per active pair, and the whole `(N, P)` result was collected as a
+    /// `Vec` of owned rows before being copied into the output. Each rayon
+    /// worker now carries ONE scratch and ONE row accumulator across all the
+    /// rows it takes, and writes into its own disjoint slice of the output.
     pub fn reconstruct(&self) -> Result<Array2<f64>, String> {
-        let rows = (0..self.n_obs())
-            .into_par_iter()
-            .map(|row| self.reconstruct_row(row))
-            .collect::<Result<Vec<_>, String>>()?;
         let mut fitted = Array2::<f64>::zeros((self.n_obs(), self.output_dim));
-        for (row, decoded) in rows.into_iter().enumerate() {
-            fitted.row_mut(row).assign(&decoded);
-        }
+        let output_dim = self.output_dim;
+        fitted
+            .axis_chunks_iter_mut(ndarray::Axis(0), RECONSTRUCT_ROW_CHUNK)
+            .into_par_iter()
+            .enumerate()
+            .try_for_each(|(chunk, mut block)| -> Result<(), String> {
+                let mut scratch = ActiveAtomScratch::default();
+                let mut row_fitted = Array1::<f64>::zeros(output_dim);
+                let base = chunk * RECONSTRUCT_ROW_CHUNK;
+                for local in 0..block.nrows() {
+                    self.reconstruct_row_into(base + local, &mut scratch, &mut row_fitted)?;
+                    block.row_mut(local).assign(&row_fitted);
+                }
+                Ok(())
+            })?;
         Ok(fitted)
     }
 
@@ -911,7 +1055,7 @@ impl SaeSupportSparseTerm {
             // Atoms in one class are row-disjoint: solve in parallel against
             // the shared `fitted` snapshot (each atom reads only its own rows),
             // then apply the disjoint updates.
-            let solved: Vec<(usize, Array2<f64>, Vec<(usize, Array1<f64>)>, f64)> = class
+            let solved: Vec<(usize, Array2<f64>, Array2<f64>, f64)> = class
                 .par_iter()
                 .map(|&atom_idx| -> Result<_, String> {
                     let m = self.atoms[atom_idx].basis_size();
@@ -919,21 +1063,33 @@ impl SaeSupportSparseTerm {
                     let mut gram =
                         self.atoms[atom_idx].smooth_penalty().clone() * lambda_smooth[atom_idx];
                     let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
-                    let mut rows = Vec::with_capacity(self.atom_rows[atom_idx].len());
-                    for &(row, slot) in &self.atom_rows[atom_idx] {
-                        let active = self.evaluate_active(row, slot)?;
+                    // #2575: the atom's basis rows and decoded images used to be
+                    // two fresh `Array1`s PER ROW on the atom's support, plus
+                    // six more inside the allocating evaluator, and a third per
+                    // row for the delta. They are one `(rows, m)` and one
+                    // `(rows, P)` block now — which also turns the decoded
+                    // refresh below into a single GEMM instead of a GEMV per row.
+                    let atom_rows = &self.atom_rows[atom_idx];
+                    let row_count = atom_rows.len();
+                    let mut phi_rows = Array2::<f64>::zeros((row_count, m));
+                    let mut decoded_rows = Array2::<f64>::zeros((row_count, self.output_dim));
+                    let mut scratch = ActiveAtomScratch::default();
+                    for (index, &(row, slot)) in atom_rows.iter().enumerate() {
+                        self.fill_active(row, slot, &mut scratch)?;
+                        let phi = scratch.phi_row();
                         for left in 0..m {
                             for right in 0..m {
-                                gram[[left, right]] += active.phi[left] * active.phi[right];
+                                gram[[left, right]] += phi[left] * phi[right];
                             }
                             for output in 0..self.output_dim {
                                 let residual_without = target[[row, output]]
                                     - fitted[[row, output]]
-                                    + active.decoded[output];
-                                rhs[[left, output]] += active.phi[left] * residual_without;
+                                    + scratch.decoded[output];
+                                rhs[[left, output]] += phi[left] * residual_without;
                             }
                         }
-                        rows.push((row, active.phi, active.decoded));
+                        phi_rows.row_mut(index).assign(&phi);
+                        decoded_rows.row_mut(index).assign(&scratch.decoded);
                     }
                     let decoder = Self::solve_psd_minimum_norm(
                         &gram,
@@ -944,22 +1100,17 @@ impl SaeSupportSparseTerm {
                     for (new, old) in decoder.iter().zip(old_decoder.iter()) {
                         atom_change = atom_change.max((new - old).abs());
                     }
-                    let mut row_updates = Vec::with_capacity(rows.len());
-                    for (row, phi, old_decoded) in rows {
-                        let new_decoded = phi.dot(&decoder);
-                        let mut delta = new_decoded;
-                        delta -= &old_decoded;
-                        row_updates.push((row, delta));
-                    }
-                    Ok((atom_idx, decoder, row_updates, atom_change))
+                    let mut deltas = phi_rows.dot(&decoder);
+                    deltas -= &decoded_rows;
+                    Ok((atom_idx, decoder, deltas, atom_change))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            for (atom_idx, decoder, row_updates, atom_change) in solved {
+            for (atom_idx, decoder, deltas, atom_change) in solved {
                 max_change = max_change.max(atom_change);
                 self.atoms[atom_idx].set_decoder_coefficients(decoder)?;
-                for (row, delta) in row_updates {
+                for (index, &(row, _slot)) in self.atom_rows[atom_idx].iter().enumerate() {
                     for output in 0..self.output_dim {
-                        fitted[[row, output]] += delta[output];
+                        fitted[[row, output]] += deltas[[index, output]];
                     }
                 }
             }
@@ -992,13 +1143,18 @@ impl SaeSupportSparseTerm {
         // coordinate block. Take the storage so rows solve in parallel with
         // `self` shared-read, then put it back (also on a row error).
         let mut coords_rows = self.assignment.take_coords();
+        // #2575: one scratch per rayon worker, not one per row. The row solve's
+        // working set is ~18 allocations sized by the row's support shape, which
+        // is identical for almost every row on this lane, so a worker allocates
+        // once and reuses across every row it takes.
         let row_results: Vec<Result<f64, String>> = coords_rows
             .par_iter_mut()
             .enumerate()
-            .map(|(row, coords_row)| {
+            .map_init(RowSolveScratch::default, |scratch, (row, coords_row)| {
                 self.row_coordinate_solve(
                     row,
                     coords_row,
+                    scratch,
                     target,
                     ard_precisions,
                     trust_radius,
@@ -1093,70 +1249,66 @@ impl SaeSupportSparseTerm {
 
     /// One row's exact Gauss-Newton coordinate step with manifold-aware
     /// backtracking, on the row's caller-held coordinate block. Semantically
-    /// the serial sweep's row iteration; storage-wise a single per-row scratch
-    /// filled in place, so the line-search halvings allocate nothing.
+    /// the serial sweep's row iteration.
+    ///
+    /// Storage-wise: nothing here allocates. The scratch is the CALLER's, held
+    /// per rayon worker and reused across every row that worker takes (#2575).
+    /// It used to be per-row — eighteen allocations per row, `N` rows per
+    /// sweep, hundreds of sweeps per fit — and the doc comment's claim that
+    /// "the line-search halvings allocate nothing" was true within a row and
+    /// misleading across them; the profiled 12.4% of self time in
+    /// `malloc`/`free`/`memmove` is what that cost.
     fn row_coordinate_solve(
         &self,
         row: usize,
         coords_row: &mut Vec<f64>,
+        scratch: &mut RowSolveScratch,
         target: ArrayView2<'_, f64>,
         ard_precisions: &[Vec<f64>],
         trust_radius: f64,
         stationarity_tolerance: f64,
     ) -> Result<f64, String> {
         let mut max_change = 0.0_f64;
-        let offsets = self.slot_offsets(row);
-        let n_slots = offsets.len();
         let q = coords_row.len();
         let p = self.output_dim;
-
-        // ---- per-row scratch, allocated once ----
-        let support = self.assignment.support_indices(row).to_vec();
-        let dims: Vec<(usize, usize)> = support
-            .iter()
-            .map(|&atom| {
-                let atom = atom as usize;
-                (self.atoms[atom].basis_size(), self.atoms[atom].latent_dim())
-            })
-            .collect();
-        let mut phi_cur: Vec<Array2<f64>> =
-            dims.iter().map(|&(m, _)| Array2::zeros((1, m))).collect();
-        let mut jet_cur: Vec<ndarray::Array3<f64>> = dims
-            .iter()
-            .map(|&(m, d)| ndarray::Array3::zeros((1, m, d)))
-            .collect();
-        let mut dec_cur: Vec<Array1<f64>> = dims.iter().map(|_| Array1::zeros(p)).collect();
-        let mut jac_cur: Vec<Array2<f64>> =
-            dims.iter().map(|&(_, d)| Array2::zeros((d, p))).collect();
-        let mut phi_trial = phi_cur.clone();
-        let mut jet_trial = jet_cur.clone();
-        let mut dec_trial = dec_cur.clone();
-        let mut jac_trial = jac_cur.clone();
-        let mut fitted = Array1::<f64>::zeros(p);
-        let mut jacobian = Array2::<f64>::zeros((q, p));
-        let mut trial_fitted = Array1::<f64>::zeros(p);
-        let mut trial_residual = Array1::<f64>::zeros(p);
-        let mut trial_delta = vec![0.0_f64; q];
-        let mut fitted_delta: Vec<KahanSum> = (0..p).map(|_| KahanSum::default()).collect();
+        scratch.fit(self, row, q, p);
+        let RowSolveScratch {
+            offsets,
+            support,
+            dims,
+            current,
+            trial,
+            fitted,
+            jacobian,
+            trial_fitted,
+            trial_residual,
+            trial_delta,
+            fitted_delta,
+            old_coords,
+        } = scratch;
+        let n_slots = offsets.len();
+        fitted.fill(0.0);
+        jacobian.fill(0.0);
 
         for slot in 0..n_slots {
+            let slot_scratch = &mut current[slot];
             self.fill_active_eval(
                 row,
                 slot,
                 &coords_row[offsets[slot].clone()],
-                &mut phi_cur[slot],
-                &mut jet_cur[slot],
-                &mut dec_cur[slot],
-                &mut jac_cur[slot],
+                &mut slot_scratch.phi,
+                &mut slot_scratch.jet,
+                &mut slot_scratch.decoded,
+                &mut slot_scratch.jacobian,
             )?;
-            fitted += &dec_cur[slot];
+            *fitted += &slot_scratch.decoded;
             for axis in 0..dims[slot].1 {
                 jacobian
                     .row_mut(offsets[slot].start + axis)
-                    .assign(&jac_cur[slot].row(axis));
+                    .assign(&slot_scratch.jacobian.row(axis));
             }
         }
-        let residual = &target.row(row) - &fitted;
+        let residual = &target.row(row) - &*fitted;
         let mut row_objective_scale =
             1.0 + 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
         let mut rhs_vector = jacobian.dot(&residual);
@@ -1214,7 +1366,8 @@ impl SaeSupportSparseTerm {
         if directional == 0.0 {
             return Ok(0.0);
         }
-        let old_coords = coords_row.clone();
+        old_coords.clear();
+        old_coords.extend_from_slice(coords_row);
         let mut accepted = None;
         let mut best_gap = f64::INFINITY;
         let mut best_step = 0.0_f64;
@@ -1228,12 +1381,12 @@ impl SaeSupportSparseTerm {
             evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
         let objective_resolution = gamma * row_objective_scale;
         for halving in 0..=24 {
-            self.assignment.project_row_coords(row, &old_coords, coords_row)?;
+            self.assignment.project_row_coords(row, old_coords, coords_row)?;
             let step = 2.0_f64.powi(-(halving as i32));
             for (target_slot, value) in trial_delta.iter_mut().zip(delta.iter()) {
                 *target_slot = step * value;
             }
-            self.assignment.retract_row_coords(row, coords_row, &trial_delta)?;
+            self.assignment.retract_row_coords(row, coords_row, trial_delta)?;
             // Evaluate f(trial) - f(old) directly. Near stationarity the
             // decrease is O(||g||^2), so subtracting two O(1) objective
             // values loses the Armijo signal at exactly sqrt(EPSILON).
@@ -1247,14 +1400,15 @@ impl SaeSupportSparseTerm {
             }
             for slot in 0..n_slots {
                 let atom = support[slot] as usize;
+                let slot_trial = &mut trial[slot];
                 self.fill_active_eval(
                     row,
                     slot,
                     &coords_row[offsets[slot].clone()],
-                    &mut phi_trial[slot],
-                    &mut jet_trial[slot],
-                    &mut dec_trial[slot],
-                    &mut jac_trial[slot],
+                    &mut slot_trial.phi,
+                    &mut slot_trial.jet,
+                    &mut slot_trial.decoded,
+                    &mut slot_trial.jacobian,
                 )?;
                 for basis in 0..dims[slot].0 {
                     // Subtract basis values before multiplying by decoder
@@ -1262,7 +1416,7 @@ impl SaeSupportSparseTerm {
                     // components before rounding, instead of subtracting two
                     // already-decoded O(1) predictions to recover an O(step)
                     // difference.
-                    let phi_delta = phi_trial[slot][[0, basis]] - phi_cur[slot][[0, basis]];
+                    let phi_delta = trial[slot].phi[[0, basis]] - current[slot].phi[[0, basis]];
                     for output in 0..p {
                         fitted_delta[output].add(
                             phi_delta * self.atoms[atom].decoder_coefficients()[[basis, output]],
@@ -1299,18 +1453,18 @@ impl SaeSupportSparseTerm {
                 best_armijo_bound = armijo_bound;
             }
             trial_fitted.fill(0.0);
-            for decoded in &dec_trial {
-                trial_fitted += decoded;
+            for slot_trial in trial.iter() {
+                *trial_fitted += &slot_trial.decoded;
             }
             trial_residual.assign(&target.row(row));
-            trial_residual -= &trial_fitted;
+            *trial_residual -= &*trial_fitted;
             let mut trial_gradient_max = 0.0_f64;
             for (slot, &atom) in support.iter().enumerate() {
                 let atom = atom as usize;
                 let periods = self.assignment.atom_axis_periods(atom);
                 for axis in 0..dims[slot].1 {
                     let likelihood_gradient =
-                        -jac_trial[slot].row(axis).dot(&trial_residual);
+                        -trial[slot].jacobian.row(axis).dot(&*trial_residual);
                     let gradient = likelihood_gradient
                         + ArdAxisPrior::eval(
                             ard_precisions[atom][axis],
@@ -1337,7 +1491,7 @@ impl SaeSupportSparseTerm {
                 }
             }
             None => {
-                self.assignment.project_row_coords(row, &old_coords, coords_row)?;
+                self.assignment.project_row_coords(row, old_coords, coords_row)?;
                 return Err(format!(
                     "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
                      (raw KKT max={raw_gradient_max:.17e}, rhs_dot_delta={directional:.17e}, \
@@ -1384,16 +1538,16 @@ impl SaeSupportSparseTerm {
         }
         let (decoder_sq, decoder_max) = (0..self.k_atoms())
             .into_par_iter()
-            .map(|atom_idx| -> Result<(f64, f64), String> {
+            .map_init(ActiveAtomScratch::default, |scratch, atom_idx| -> Result<(f64, f64), String> {
                 let atom = &self.atoms[atom_idx];
                 let mut gradient = atom.smooth_penalty().dot(atom.decoder_coefficients())
                     * lambda_smooth[atom_idx];
                 for &(row, slot) in &self.atom_rows[atom_idx] {
-                    let active = self.evaluate_active(row, slot)?;
+                    self.fill_active(row, slot, scratch)?;
+                    let phi = scratch.phi_row();
                     for basis in 0..atom.basis_size() {
                         for output in 0..self.output_dim {
-                            gradient[[basis, output]] -=
-                                active.phi[basis] * residual[[row, output]];
+                            gradient[[basis, output]] -= phi[basis] * residual[[row, output]];
                         }
                     }
                 }
@@ -1408,17 +1562,17 @@ impl SaeSupportSparseTerm {
             .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
         let (coordinate_sq, coordinate_max) = (0..self.n_obs())
             .into_par_iter()
-            .map(|row| -> Result<(f64, f64), String> {
+            .map_init(ActiveAtomScratch::default, |scratch, row| -> Result<(f64, f64), String> {
                 let mut sq = 0.0_f64;
                 let mut max = 0.0_f64;
                 for slot in 0..self.assignment.support_indices(row).len() {
                     let atom = self.assignment.support_indices(row)[slot] as usize;
-                    let active = self.evaluate_active(row, slot)?;
+                    self.fill_active(row, slot, scratch)?;
                     let periods = self.assignment.atom_axis_periods(atom);
-                    for axis in 0..active.jacobian.nrows() {
+                    for axis in 0..scratch.jacobian.nrows() {
                         let mut gradient = 0.0;
                         for output in 0..self.output_dim {
-                            gradient -= active.jacobian[[axis, output]] * residual[[row, output]];
+                            gradient -= scratch.jacobian[[axis, output]] * residual[[row, output]];
                         }
                         gradient += ArdAxisPrior::eval(
                             ard_precisions[atom][axis],
@@ -1451,13 +1605,14 @@ impl SaeSupportSparseTerm {
         let residual = self.raw_residual(target)?;
         let mut coordinate_sq = 0.0;
         let mut coordinate_max = 0.0_f64;
+        let mut scratch = ActiveAtomScratch::default();
         for row in 0..self.n_obs() {
             for slot in 0..self.assignment.support_indices(row).len() {
                 let atom = self.assignment.support_indices(row)[slot] as usize;
-                let active = self.evaluate_active(row, slot)?;
+                self.fill_active(row, slot, &mut scratch)?;
                 let periods = self.assignment.atom_axis_periods(atom);
-                for axis in 0..active.jacobian.nrows() {
-                    let likelihood_gradient = active
+                for axis in 0..scratch.jacobian.nrows() {
+                    let likelihood_gradient = scratch
                         .jacobian
                         .row(axis)
                         .iter()

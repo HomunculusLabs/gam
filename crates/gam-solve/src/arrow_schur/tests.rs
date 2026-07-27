@@ -1693,17 +1693,21 @@ fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
         graph
             .edges
             .iter()
-            .zip(0..)
-            .map(|(edge, _)| {
+            .map(|edge| {
                 let weight = graph
                     .weighted_neighbours(edge.a)
                     .find(|(node, _)| *node == edge.b)
-                    .map(|(_, w)| w)
-                    .expect("edge carries its co-firing weight");
+                    .map(|(_, weight)| weight)
+                    .expect("every edge carries its co-firing weight");
                 (edge.a, edge.b, weight)
             })
             .collect()
     };
+    assert_eq!(
+        weights(&dense_graph),
+        vec![(0, 1, 2.0), (2, 3, 1.0)],
+        "rows 0 and 1 co-fire blocks (0, 1); row 2 co-fires (2, 3)"
+    );
     assert_eq!(weights(&free_graph), weights(&dense_graph));
 
     // A column that is nonzero in two latent rows but sums to zero across them
