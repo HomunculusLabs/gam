@@ -6712,7 +6712,11 @@ impl<'a> RemlState<'a> {
             // to land on a different set (#2454).
             applied_canonical_penalties: {
                 let cell = std::sync::OnceLock::new();
-                let _ = cell.set(applied_penalties);
+                // A freshly constructed cell cannot already be occupied, so
+                // seeding it is infallible. `get_or_init` says that directly
+                // instead of producing a `Result` that has to be discarded
+                // (`let _ =` is banned — the scanner aborted the root build).
+                cell.get_or_init(|| applied_penalties);
                 cell
             },
             penalty_scores_at_mode: std::sync::OnceLock::new(),
