@@ -114,43 +114,48 @@ runs:
         # may be dirty, on a detached head, or mid-build, and none of that
         # should be able to ride along into main.
         WORKDIR="$(mktemp -d)"
-        if ! git clone --quiet --depth 1 --branch main \
-              "https://x-access-token:${GH_TOKEN_PUBLISH}@github.com/${GITHUB_REPOSITORY}.git" \
-              "$WORKDIR/repo"; then
-          echo "::warning::could not clone main to publish results; skipping (the run's own verdict is unaffected)"
-          exit 0
-        fi
-        cd "$WORKDIR/repo"
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        REMOTE="https://x-access-token:${GH_TOKEN_PUBLISH}@github.com/${GITHUB_REPOSITORY}.git"
 
-        # Replace wholesale so files a run stops producing disappear rather than
-        # lingering as stale numbers next to fresh ones.
-        rm -rf "${DEST_REL:?}"
-        mkdir -p "$DEST_REL"
-        cp -R "$STAGE/." "$DEST_REL/"
+        # One attempt = clone main fresh, drop our subdirectory in, push. On a
+        # race we RE-CLONE rather than rebase: the clone is --depth 1 and a
+        # shallow history cannot be rebased. Re-cloning also means each attempt
+        # builds on whatever main is NOW, which is the semantics wanted here -
+        # latest results win, within this subdirectory only.
+        publish_attempt() {
+          local repo="$WORKDIR/repo"
+          rm -rf "$repo"
+          git clone --quiet --depth 1 --branch main "$REMOTE" "$repo" || return 2
+          cd "$repo" || return 2
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-        git add -A -- "$DEST_REL"
-        if git diff --cached --quiet; then
-          echo "results identical to what is already on main — nothing to commit"
-          exit 0
-        fi
+          # Replace wholesale so files a run stops producing disappear rather
+          # than lingering as stale numbers next to fresh ones.
+          rm -rf "${DEST_REL:?}"
+          mkdir -p "$DEST_REL"
+          cp -R "$STAGE/." "$DEST_REL/"
 
-        # [skip ci] is load-bearing: this pushes to main, and without it every
-        # results commit would re-trigger the push-driven workflows, which would
-        # publish again, forever.
-        git commit --quiet -m "results(${RESULTS_NAME}): run ${GITHUB_RUN_ID:-} (${JOB_STATUS:-unknown}) [skip ci]"
+          git add -A -- "$DEST_REL"
+          if git diff --cached --quiet; then
+            echo "results identical to what is already on main - nothing to commit"
+            return 0
+          fi
+
+          # [skip ci] is load-bearing: this pushes to main, and without it every
+          # results commit would re-trigger the push-driven workflows, which
+          # would publish again, forever.
+          git commit --quiet -m "results(${RESULTS_NAME}): run ${GITHUB_RUN_ID:-} (${JOB_STATUS:-unknown}) [skip ci]"
+          git push --quiet origin HEAD:main 2>/dev/null || return 1
+          return 0
+        }
 
         for attempt in 1 2 3 4 5; do
-          if git push --quiet origin HEAD:main 2>/dev/null; then
-            echo "published ${DEST_REL} (attempt ${attempt})"
-            exit 0
-          fi
-          # Another workflow published concurrently; rebase onto its commit and
-          # retry. Our change touches only our own subdirectory, so this cannot
-          # conflict with a different workflow's results.
-          git fetch --quiet origin main || true
-          git rebase --quiet origin/main || { git rebase --abort || true; }
+          publish_attempt
+          case "$?" in
+            0) echo "published ${DEST_REL} (attempt ${attempt})"; exit 0 ;;
+            2) echo "::warning::could not clone main to publish results; skipping (the run's own verdict is unaffected)"; exit 0 ;;
+          esac
+          echo "lost a push race on attempt ${attempt}; re-cloning current main and retrying"
           sleep $(( (RANDOM % 5) + 2 ))
         done
         echo "::warning::could not push results for ${RESULTS_NAME} after 5 attempts"
