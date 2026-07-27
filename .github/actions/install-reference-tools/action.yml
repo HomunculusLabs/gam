@@ -190,12 +190,20 @@ runs:
         # scipy therefore hard-crashes `import statsmodels.api` and turned 15
         # quality tests into REF_ERRORs. The pin restores the known-good combo;
         # revisit when the statsmodels pin above moves to ≥0.14.5.
-        # Inline pins only bind the ONE command they are on: the best-effort
-        # installs below re-resolve and clobbered scipy 1.15.3 -> 1.12 -> 1.18 ->
-        # 1.16.3 on run 30277355276, breaking `import statsmodels.api` (17 tests).
-        # PIP_CONSTRAINT is read by every pip invocation in this step.
+        # Inline pins only bind the ONE command they are on; PIP_CONSTRAINT is
+        # read by every pip invocation in this step. That distinction is why the
+        # file must carry the FOUNDATION and not only the leaves: numpy and
+        # pandas were pinned inline on the install line below while only
+        # scipy/statsmodels/arviz were in the file, so the best-effort installs
+        # that follow re-resolved them freely — run 30301844000 installed numpy
+        # three times (1.26.4 -> 2.3.5 -> 2.4.6) and pandas up to 3.0.5. The
+        # statsmodels pin above predates numpy-2 support, so `import
+        # statsmodels.api` then failed and 16 quality tests reported REF_ERROR.
+        # numpy<2 is not incidental: it is what `statsmodels<0.14.2` requires,
+        # so those two pins stand or fall together.
         export PIP_CONSTRAINT="${RUNNER_TEMP:-/tmp}/ref-constraints.txt"
-        printf '%s\n' "scipy<1.16" "statsmodels<0.14.2" "arviz<1.0" > "$PIP_CONSTRAINT"
+        printf '%s\n' "numpy<2" "pandas<3" "scipy<1.16" "statsmodels<0.14.2" \
+          "arviz<1.0" > "$PIP_CONSTRAINT"
         pip install "numpy<2" pandas "scipy<1.16" scikit-learn "statsmodels<0.14.2"
         pip install pygam lifelines scikit-survival properscoring scoringrules || true
         pip install geomstats GPy gpytorch || true
@@ -269,7 +277,24 @@ runs:
             paste(miss, collapse=", ")))
         ' || true
         pip install xgboostlss lightgbmlss || true
-        python -c "import numpy,scipy,sklearn,statsmodels,pandas; print('core python refs ok')"
+        # Assert the constraint actually held, and import the module that breaks
+        # when it does not. Without this the failure is invisible here and
+        # resurfaces as a wall of per-test REF_ERRORs whose reason field says
+        # only "reference Python body failed (status Some(1))".
+        python - <<'CORE'
+        import numpy, pandas, scipy, sklearn, statsmodels
+        print(
+            f"core python refs: numpy={numpy.__version__} scipy={scipy.__version__} "
+            f"pandas={pandas.__version__} sklearn={sklearn.__version__} "
+            f"statsmodels={statsmodels.__version__}"
+        )
+        assert int(numpy.__version__.split(".")[0]) < 2, (
+            f"numpy {numpy.__version__} was re-resolved past the PIP_CONSTRAINT "
+            f"ceiling; statsmodels {statsmodels.__version__} cannot import against numpy 2"
+        )
+        import statsmodels.api  # the exact import a clobbered stack breaks
+        print("core python refs ok")
+        CORE
 
     - name: Verify reference stacks load
       shell: bash
