@@ -53,6 +53,48 @@ fn support_laml_deflation_target_std_err_rel() -> f64 {
     (2.0 / SCHUR_SLQ_LOGDET_PROBES as f64).sqrt()
 }
 
+/// The accuracy this lane asks of the surrogate's DETERMINISTIC machinery — the
+/// rational quadrature's truncation and step, and every shifted solve's
+/// residual — derived from the probe count instead of standing beside it.
+///
+/// The shared policy asks both for `1.0e-8`. That is the constant #2576 is
+/// about, in its second home: the estimator wrapped around those solves has a
+/// MEASURED relative error bar of 1.9e-3 at 16 probes on a small overcomplete
+/// chart, so `1e-8` buys five orders of precision its own variance swamps —
+/// and it is not free, because the surrogate's cost is linear in the quadrature
+/// node count and the node count grows like `log(1/tol)` while each shifted
+/// solve's iteration count grows the same way. Measured on that chart
+/// (`λ_min/λ_max = 1e-8` by the deflation-floor convention, so a twelve-decade
+/// padded window): `1e-8` sizes 80 nodes, and the value is `m × 80` shifted CG
+/// solves.
+///
+/// Derivation. The surrogate averages `m` per-probe terms. The stochastic part
+/// of each is cut to `σ/√m` by that average; a DETERMINISTIC per-probe error
+/// `δ` is not cut at all, because it is the same function of the same operator
+/// every time and can accumulate coherently. So the requirement is
+/// `m·δ ≲ σ/√m` — the deterministic error, even added `m` times, must stay
+/// under the stochastic one. Bounding `σ` by the worst case a `±1`-Rademacher
+/// Hutchinson estimator can have (`√2`, when the off-diagonal Frobenius mass
+/// matches the trace) gives
+///
+/// ```text
+/// δ = √(2/m) / m
+/// ```
+///
+/// — 2.4e-4 at `m = 32`. On the measured chart that sits a factor of ~6 below
+/// the estimator's actual 1.4e-3 resolution, so the deterministic error stays
+/// the smaller of the two, while sizing 31 quadrature nodes instead of 80.
+///
+/// The bound is loose for this operator (its off-diagonal mass is far under its
+/// trace, which is why the achieved `σ` beats `√(2/m)` by two orders), so the
+/// factor-of-`m` margin the derivation asks for is not fully realized here.
+/// Closing that would mean deriving `δ` from the pilot's MEASURED bar rather
+/// than the a-priori bound — a real improvement, and a change to the shared
+/// lane rather than to this one, so it is not smuggled in here.
+fn support_laml_deterministic_tolerance() -> f64 {
+    support_laml_deflation_target_std_err_rel() / SCHUR_SLQ_LOGDET_PROBES as f64
+}
+
 fn outer_error(message: impl Into<String>) -> EstimationError {
     EstimationError::RemlOptimizationFailed(message.into())
 }
@@ -346,6 +388,8 @@ impl SaeSupportOuterObjective {
                 // their probes without disagreeing about their policy.
                 seed,
                 deflation_target_std_err_rel: support_laml_deflation_target_std_err_rel(),
+                rel_tol: support_laml_deterministic_tolerance(),
+                cg_rel_tol: support_laml_deterministic_tolerance(),
                 ..sae_surrogate_lane_config()
             })
         });
