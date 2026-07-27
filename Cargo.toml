@@ -67,7 +67,7 @@ resolver = "3"
 # sign-bracket refinement. The git revision locks repository builds to the
 # audited source; the exact version keeps published manifests on the matching
 # non-yanked crates.io release after Cargo strips the git reference.
-opt = { version = "=0.7.0", git = "https://github.com/SauersML/opt.git", rev = "93af1cba62f64494456f2fb3e3c9b00df239f77a" }
+opt = { version = "=0.8.0", git = "https://github.com/SauersML/opt.git", rev = "80fa7e2b9dde1c1901925af8763ac94d3d5ba28f" }
 cudarc = { version = "0.19.8", default-features = false, features = ["std", "driver", "runtime", "nvrtc", "cublas", "cublaslt", "cusparse", "cusolver", "cusolvermg", "curand", "nvtx", "cupti", "fallback-dynamic-loading", "cuda-12000"] }
 
 [lints.rust]
@@ -79,9 +79,9 @@ rayon = "1.12.0"
 rand = "0.10.1"
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
 serde = { version = "1.0.228", features = ["derive"] }
-log = "0.4.29"
+log = "0.4.33"
 csv = "1.4.0"
-faer = "0.24.0"
+faer = "0.24.4"
 # `float_roundtrip` makes the JSON parser bit-exact for f64: serialization
 # (ryu) is already shortest-round-trippable, but the DEFAULT parser can be off
 # by 1 ULP on some values, so a saved model could predict infinitesimally

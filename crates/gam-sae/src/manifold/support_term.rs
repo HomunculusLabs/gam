@@ -1179,11 +1179,10 @@ impl SaeSupportSparseTerm {
         if raw_gradient_max <= stationarity_tolerance * row_objective_scale {
             return Ok(0.0);
         }
-        let delta = gam_linalg::psd_trust_region::solve_psd_trust_region(
-            gram.view(),
-            rhs_vector.view(),
-            trust_radius,
-        )
+        // SPEC-22: the exact PSD trust-region subproblem is general outer
+        // optimizer machinery and lives in `opt`. gam kept a private copy
+        // until #2574.
+        let delta = opt::solve_psd_trust_region(gram.view(), rhs_vector.view(), trust_radius)
         .map_err(|error| format!("SaeSupportSparseTerm::coordinate_sweep: {error}"))?;
         let directional = rhs_vector.dot(&delta);
         let delta_max = delta
