@@ -511,32 +511,27 @@ fn sphere_strict_lat_bound_at_90() {
         ..FitConfig::default()
     };
     let r = fit_from_formula("y~sphere(lat,lon,k=10)", &d, &cfg);
-    // The data is a constant response (y ≡ 1) on a constant-longitude great-circle
-    // arc — degenerate but well-posed for a sphere smoother (the penalty handles
-    // the rank-deficient lon direction). The fit must therefore SUCCEED and recover
-    // the constant. The previous assertion `r.is_ok() || r.is_err()` was a
-    // tautology that passed for ANY outcome, including a silent solver failure on
-    // this strict-latitude-bound edge case.
-    let result = r.expect("constant-response sphere fit on a constant-lon arc must succeed");
-    let FitResult::Standard(fit) = result else {
-        panic!("sphere fit must return a Standard fit result");
-    };
-    // Predict on the training latitudes (lon ≡ 0) via the same design-apply path the
-    // sibling fit2d helper uses, then assert the constant response is recovered.
-    let lats: Vec<f64> = (0..30).map(|i| -80.0 + i as f64 * 5.0).collect();
-    let mut m = Array2::<f64>::zeros((lats.len(), 3));
-    for (i, &lat) in lats.iter().enumerate() {
-        m[[i, 0]] = lat;
-        m[[i, 1]] = 0.0;
-    }
-    let dsg = build_term_collection_design(m.view(), &fit.resolvedspec).expect("design");
-    let preds = dsg.design.apply(&fit.fit.beta);
-    for &p in preds.iter() {
-        assert!(
-            p.is_finite() && (p - 1.0).abs() < 1e-1,
-            "constant response y≡1 must be recovered to ~1 on the constant-lon arc (got {p})"
-        );
-    }
+    // Every row here has lon ≡ 0: the data lies on a single meridian, so the
+    // 2-sphere term has no longitude variation to identify and its longitudinal
+    // component is arbitrary. gam REFUSES this by design, naming the degeneracy
+    // and the three remedies, rather than silently returning a fit whose lon
+    // direction is whatever the penalty nullspace happened to pick.
+    //
+    // Assert that contract. The original assertion here was the tautology
+    // `r.is_ok() || r.is_err()`, which passed for any outcome; replacing it with
+    // `r.expect(...)` swapped one wrong assertion for another, since it demands
+    // success from a guard that is deliberately a refusal. What is actually
+    // worth pinning is that the refusal is diagnosable: it must identify the
+    // degenerate axis and stay a typed configuration error, not a solver crash.
+    let error = r.expect_err(
+        "a sphere smooth on a constant-longitude arc is unidentifiable along lon \
+         and must be refused, not silently fitted",
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("lon") && message.contains("constant"),
+        "the refusal must name the constant axis so the user can act on it (got: {message})"
+    );
 }
 #[test]
 fn smooth_x_squared_inflection_at_zero() {
