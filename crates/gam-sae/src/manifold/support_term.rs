@@ -547,6 +547,11 @@ impl SaeSupportSparseTerm {
         self.atoms.len()
     }
 
+    /// Decoder width of one atom: its block is `basis_size x output_dim`.
+    pub fn atom_basis_size(&self, atom: usize) -> usize {
+        self.atoms[atom].basis_size()
+    }
+
     pub fn output_dim(&self) -> usize {
         self.output_dim
     }
@@ -1409,6 +1414,195 @@ impl SaeSupportSparseTerm {
         classes
     }
 
+    /// Per-atom REML smoothing by the Fellner-Schall / MacKay fixed point.
+    ///
+    /// Returns the updated K-length `lambda_smooth`. See the module discussion:
+    /// conditional on routing and coordinates the decoder information is
+    /// `(G_k + lambda_k S_k) (x) I_P`, so the update is closed-form in the same
+    /// `m x m` object `decoder_sweep` factors, with `tau_k` the per-channel
+    /// effective degrees of freedom and `M0_k` the penalty null space:
+    ///
+    /// ```text
+    ///   lambda_k <- sigma^2 * P * (tau_k - M0_k) / sum_c beta_kc' S_k beta_kc
+    /// ```
+    ///
+    /// An atom carrying no rows, or whose fitted roughness is numerically zero,
+    /// has no evidence to select from and keeps its incoming lambda. That is a
+    /// refusal to update, not a clamp: there is no likelihood ridge to climb.
+    ///
+    /// This is an OUTER-loop quantity. `solve_fixed_point` certifies at fixed
+    /// smoothing, so lambda must not move inside it.
+    pub fn fellner_schall_smoothing(
+        &self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+    ) -> Result<Vec<f64>, String> {
+        self.validate_smoothing(lambda_smooth)?;
+        let residual = self.raw_residual(target)?;
+        let sse: f64 = residual.iter().map(|value| value * value).sum();
+
+        // Per-atom effective df, and the roughness the fit actually spent.
+        let mut tau = vec![0.0_f64; self.k_atoms()];
+        let mut null_dim = vec![0.0_f64; self.k_atoms()];
+        let mut roughness = vec![0.0_f64; self.k_atoms()];
+        for atom_idx in 0..self.k_atoms() {
+            let m = self.atoms[atom_idx].basis_size();
+            let penalty = self.atoms[atom_idx].smooth_penalty().clone();
+
+            // `G_k` is the same accumulation `decoder_sweep` performs.
+            let mut gram = Array2::<f64>::zeros((m, m));
+            let mut scratch = ActiveAtomScratch::default();
+            for &(row, slot) in &self.atom_rows[atom_idx] {
+                self.fill_active(row, slot, &mut scratch)?;
+                let phi = scratch.phi_row();
+                for left in 0..m {
+                    for right in 0..m {
+                        gram[[left, right]] += phi[left] * phi[right];
+                    }
+                }
+            }
+
+            // `M0` is the dimension of the penalty null space, taken at the SAME
+            // machine-precision relative floor `solve_psd_minimum_norm` uses to
+            // decide rank, so the two agree about what "zero" means.
+            let symmetric_penalty = (&penalty + &penalty.t()) * 0.5;
+            let (penalty_eigenvalues, _) = symmetric_penalty
+                .eigh(Side::Lower)
+                .map_err(|error| format!("fellner_schall_smoothing: penalty eigh: {error}"))?;
+            let penalty_scale = penalty_eigenvalues
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
+            null_dim[atom_idx] = penalty_eigenvalues
+                .iter()
+                .filter(|value| **value <= penalty_tolerance)
+                .count() as f64;
+
+            // `tau = tr((G + lambda S)^-1 G)`, evaluated through the same
+            // symmetric eigendecomposition rather than an explicit inverse.
+            let mut shifted = gram.clone();
+            shifted.scaled_add(lambda_smooth[atom_idx], &penalty);
+            let symmetric = (&shifted + &shifted.t()) * 0.5;
+            let (eigenvalues, eigenvectors) = symmetric
+                .eigh(Side::Lower)
+                .map_err(|error| format!("fellner_schall_smoothing: eigh: {error}"))?;
+            let scale = eigenvalues
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let tolerance = f64::EPSILON * scale * m.max(1) as f64;
+            let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
+            let mut trace = 0.0_f64;
+            for mode in 0..m {
+                if eigenvalues[mode] > tolerance {
+                    trace += projected[[mode, mode]] / eigenvalues[mode];
+                }
+            }
+            tau[atom_idx] = trace;
+
+            let decoder = self.atoms[atom_idx].decoder_coefficients();
+            let penalized = penalty.dot(decoder);
+            roughness[atom_idx] = decoder
+                .iter()
+                .zip(penalized.iter())
+                .map(|(left, right)| left * right)
+                .sum::<f64>();
+        }
+
+        // Profiled scale: residual sum of squares over the residual degrees of
+        // freedom, which is `n*P` less the df the decoders spent (`P` channels
+        // share each atom's `tau`).
+        let spent: f64 = tau.iter().sum::<f64>() * self.output_dim as f64;
+        let total = (self.n_obs() * self.output_dim) as f64;
+        let residual_df = total - spent;
+        if !(residual_df > 0.0) {
+            return Err(format!(
+                "fellner_schall_smoothing: decoders spend {spent} of {total} degrees of freedom, leaving none for scale"
+            ));
+        }
+        let sigma_sq = sse / residual_df;
+
+        let mut updated = lambda_smooth.to_vec();
+        for atom_idx in 0..self.k_atoms() {
+            let signal = tau[atom_idx] - null_dim[atom_idx];
+            // No rows, no roughness, or no df beyond the null space: nothing in
+            // the likelihood distinguishes one lambda from another here.
+            if self.atom_rows[atom_idx].is_empty()
+                || !(roughness[atom_idx] > 0.0)
+                || !(signal > 0.0)
+            {
+                continue;
+            }
+            let candidate =
+                sigma_sq * self.output_dim as f64 * signal / roughness[atom_idx];
+            if candidate.is_finite() && candidate > 0.0 {
+                updated[atom_idx] = candidate;
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Per-atom effective degrees of freedom `tau_k` beyond the penalty null
+    /// space, the statistically meaningful "is this atom's bend supported?"
+    /// census. Reported alongside usage so a dictionary can be judged by the
+    /// curvature the evidence pays for rather than by atom count.
+    pub fn effective_curvature_df(
+        &self,
+        lambda_smooth: &[f64],
+    ) -> Result<Vec<f64>, String> {
+        self.validate_smoothing(lambda_smooth)?;
+        let mut out = vec![0.0_f64; self.k_atoms()];
+        for atom_idx in 0..self.k_atoms() {
+            let m = self.atoms[atom_idx].basis_size();
+            let penalty = self.atoms[atom_idx].smooth_penalty().clone();
+            let mut gram = Array2::<f64>::zeros((m, m));
+            let mut scratch = ActiveAtomScratch::default();
+            for &(row, slot) in &self.atom_rows[atom_idx] {
+                self.fill_active(row, slot, &mut scratch)?;
+                let phi = scratch.phi_row();
+                for left in 0..m {
+                    for right in 0..m {
+                        gram[[left, right]] += phi[left] * phi[right];
+                    }
+                }
+            }
+            let symmetric_penalty = (&penalty + &penalty.t()) * 0.5;
+            let (penalty_eigenvalues, _) = symmetric_penalty
+                .eigh(Side::Lower)
+                .map_err(|error| format!("effective_curvature_df: penalty eigh: {error}"))?;
+            let penalty_scale = penalty_eigenvalues
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
+            let null_dim = penalty_eigenvalues
+                .iter()
+                .filter(|value| **value <= penalty_tolerance)
+                .count() as f64;
+            let mut shifted = gram.clone();
+            shifted.scaled_add(lambda_smooth[atom_idx], &penalty);
+            let symmetric = (&shifted + &shifted.t()) * 0.5;
+            let (eigenvalues, eigenvectors) = symmetric
+                .eigh(Side::Lower)
+                .map_err(|error| format!("effective_curvature_df: eigh: {error}"))?;
+            let scale = eigenvalues
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let tolerance = f64::EPSILON * scale * m.max(1) as f64;
+            let projected = eigenvectors.t().dot(&gram).dot(&eigenvectors);
+            let mut trace = 0.0_f64;
+            for mode in 0..m {
+                if eigenvalues[mode] > tolerance {
+                    trace += projected[[mode, mode]] / eigenvalues[mode];
+                }
+            }
+            out[atom_idx] = trace - null_dim;
+        }
+        Ok(out)
+    }
+
     fn decoder_sweep(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -2195,13 +2389,36 @@ impl SaeSupportSparseTerm {
                 // optimal against a support move as well as stationary within
                 // one, which is strictly stronger than certifying a frozen
                 // support.
+                //
+                // SCOPE: "locally optimal against a support move" means against
+                // the proposal THIS router generates at its own fixed point --
+                // residual-greedy selection at basis resolution, then polished.
+                // It is not optimality over the space of supports, which is
+                // combinatorial and is not claimed here.
                 let support_k = match self.assignment.mode() {
                     AssignmentMode::TopK { k } => k,
                     _ => 0,
                 };
                 if support_k > 0 {
-                    let moved =
+                    let mut moved =
                         self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
+                    // The proposal arrives on the routing grid -- one of
+                    // `basis_size` samples per atom -- while the incumbent sits
+                    // at a converged continuous fixed point. Comparing them
+                    // directly charges the proposal a quantization tax on every
+                    // one of `n * support_k` slots and rejects good support
+                    // moves for a reason that has nothing to do with the
+                    // support. Solving the proposal's coordinates at frozen
+                    // decoders is a strict decrease of its own objective, so
+                    // this test accepts everything the unpolished one accepted
+                    // and additionally the moves quantization was vetoing.
+                    moved.solve_coordinates_fixed_decoder(
+                        target,
+                        ard_precisions,
+                        max_iter,
+                        tolerance,
+                        trust_radius,
+                    )?;
                     let after =
                         moved.penalized_objective(target, lambda_smooth, ard_precisions)?;
                     if after < objective {
