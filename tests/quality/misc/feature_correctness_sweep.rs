@@ -126,7 +126,33 @@ fn periodic_bspline_evaluates_seam_exactly() {
 
 #[test]
 fn periodic_bspline_for_all_supported_degrees() {
-    for degree in 1_usize..=4 {
+    // Degree 1 is NOT a supported degree for this construction: the periodic
+    // penalty is a 2nd-derivative penalty, and a degree-1 (piecewise linear)
+    // spline has no second derivative to penalise. The builder says so, and
+    // sweeping `1..=4` walked straight into that refusal and reported the
+    // library's correct diagnostic as a quality failure. Pin the refusal, then
+    // sweep the degrees that actually exist.
+    let degree_one = periodic_basis_dense(
+        make_uniform_loop(50, TAU).view(),
+        (0.0, TAU),
+        1,
+        4,
+    );
+    match degree_one {
+        Ok(_) => panic!(
+            "degree 1 has no second derivative, so it cannot carry the 2nd-order \
+             periodic penalty and must be refused"
+        ),
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("degree") && message.contains("derivative order"),
+                "the refusal must name the degree and the derivative order it is \
+                 too low for (got: {message})"
+            );
+        }
+    }
+    for degree in 2_usize..=4 {
         let period = TAU;
         let k = (degree + 1).max(4);
         let xs = make_uniform_loop(50, period);
