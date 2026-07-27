@@ -2420,6 +2420,94 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     }
 }
 
+/// One tier of the evidence lane's preconditioner study: what the SAME frozen
+/// surrogate cost, and produced, under one preconditioner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReducedSchurLogdetPrecondRow {
+    pub preconditioner: ReducedSchurCgPreconditioner,
+    /// The surrogate value `L̃ ≈ log|S|`.
+    pub log_det: f64,
+    /// The surrogate's own Hutchinson error bar on that value.
+    pub std_err: f64,
+    /// Total shifted-CG iterations across the whole probe × node ladder.
+    pub cg_iterations: usize,
+}
+
+/// Evidence-lane preconditioner study: evaluate ONE frozen rational
+/// log-determinant plan on one reduced Schur, once per preconditioner tier, and
+/// report what each cost.
+///
+/// This is the evidence-side companion to
+/// [`arrow_precond_ladder_iteration_study`], which does the same for the Newton
+/// PCG ladder. It exists because the two questions are different: the Newton
+/// ladder asks which preconditioner solves a STEP fastest, while this asks what
+/// the log-determinant's shifted-solve ladder costs — and before #2576 that
+/// second question had no answer at all, because nothing measured it and the
+/// solves were unpreconditioned.
+///
+/// Both tiers evaluate the SAME plan (same probes, same quadrature nodes, same
+/// deflation basis) against the SAME operator, so their `log_det` values must
+/// agree to solve accuracy: the preconditioner steers the iteration and cannot
+/// move the functional. That agreement is the study's built-in self-check —
+/// a tier that changed the value would be a bug in the preconditioner, not a
+/// measurement.
+///
+/// `None` when the spectral bracket or the plan cannot be built, or a shifted
+/// solve breaks down.
+pub fn reduced_schur_logdet_preconditioner_study<B: BatchedBlockSolver + Sync>(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    backend: &B,
+    num_probes: usize,
+    seed: u64,
+    rel_tol: f64,
+    power_iters: usize,
+    cg_rel_tol: f64,
+    cg_max_iters: usize,
+) -> Option<Vec<ReducedSchurLogdetPrecondRow>> {
+    if sys.k == 0 {
+        return None;
+    }
+    let lambda_max = reduced_schur_lambda_max(
+        sys,
+        htt_factors,
+        ridge_beta,
+        backend,
+        None,
+        None,
+        power_iters,
+        seed,
+    )?;
+    let lambda_min = (SPECTRAL_DEFLATION_REL_FLOOR * lambda_max).max(f64::MIN_POSITIVE);
+    let plan =
+        RationalLogdetPlan::build(sys.k, num_probes, seed, lambda_min, lambda_max, rel_tol)?;
+    let op = ReducedSchurOperator::new(sys, htt_factors, ridge_beta, backend, None);
+    let matvec = |v: ArrayView1<f64>| -> Array1<f64> { op.apply(v) };
+    let shared_block = reduced_schur_shifted_preconditioner(sys, ridge_beta);
+    let tiers = [
+        (
+            ReducedSchurCgPreconditioner::Identity,
+            ShiftedDiagonalPreconditioner::identity(),
+        ),
+        (
+            ReducedSchurCgPreconditioner::SharedBlockDiagonal,
+            shared_block,
+        ),
+    ];
+    let mut out = Vec::with_capacity(tiers.len());
+    for (kind, preconditioner) in tiers {
+        let eval = plan.evaluate_preconditioned(&matvec, &preconditioner, cg_rel_tol, cg_max_iters)?;
+        out.push(ReducedSchurLogdetPrecondRow {
+            preconditioner: kind,
+            log_det: eval.estimate,
+            std_err: eval.std_err,
+            cg_iterations: eval.cg_iterations,
+        });
+    }
+    Some(out)
+}
+
 /// Contract the surrogate's shifted-solve bundle from
 /// [`rational_reduced_schur_log_det`] against a reduced-Schur derivative operator
 /// `∂S` (supplied through its matvec `dmatvec(v) = (∂S)·v`) to obtain the EXACT

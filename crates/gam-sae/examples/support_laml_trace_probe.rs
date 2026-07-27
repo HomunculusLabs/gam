@@ -23,7 +23,7 @@ use gam_sae::manifold::{
 use gam_solve::arrow_schur::{
     ArrowSolveOptions, BatchedBlockSolver, CpuBatchedBlockSolver, SurrogateLaneConfig,
     SurrogateLaneState,
-    matrix_free_arrow_evidence_log_det_surrogate, rational_reduced_schur_log_det,
+    matrix_free_arrow_evidence_log_det_surrogate, reduced_schur_logdet_preconditioner_study,
 };
 use ndarray::{Array2, Axis};
 use std::time::Instant;
@@ -135,48 +135,34 @@ fn main() -> Result<(), String> {
         .factor_blocks(&system.rows, 0.0, system.d, false)
         .map_err(|e| format!("row factorization: {e}"))?;
 
-    // A/B on ONE operator.
+    // A/B on ONE operator through the evidence lane's own study seam.
     //
-    // The preconditioner build reads the shared block's diagonal through
-    // `penalty_diagonal_add`, which prefers `penalty_op` and falls back to
-    // `hbb_diag`. `set_shared_beta_operator` installs BOTH (the penalty op is a
-    // `MatvecDiagPenaltyOp` wrapping the very same matvec `Arc` plus the same
-    // diagonal), so clearing only `hbb_diag` leaves the preconditioner fully
-    // supplied — the first version of this harness did exactly that and
-    // measured the preconditioned iteration twice.
-    //
-    // Clearing both leaves the operator itself unchanged: every hot path falls
-    // back to `hbb_matvec`, which is the identical closure. The `log|S|`
-    // equality printed by the two arms is the check that this is so — the value
-    // is a property of the operator, not of the preconditioner.
-    let mut bare = system.clone();
-    bare.hbb_diag = None;
-    bare.penalty_op = None;
-
-    for (label, sys) in [
-        ("identity (pre-#2576)", &bare),
-        ("shared-block diagonal", &system),
-    ] {
-        for probes in [8usize] {
-            let start = Instant::now();
-            match rational_reduced_schur_log_det(
-                sys, &htt, 0.0, &backend, None, None, probes, 0xC0FFEE, 1.0e-8, 40, 1.0e-8, 20_000,
-            ) {
-                Some((_plan, eval)) => println!(
-                    "{label:<22} probes={probes:3}: log|S| = {:+.6e}  std_err {:.3e} \
-                     (rel {:.2e})  cg_iters {}  {:.1}s",
-                    eval.estimate,
-                    eval.std_err,
-                    eval.std_err / (eval.estimate.abs() + 1.0),
-                    eval.cg_iterations,
-                    start.elapsed().as_secs_f64(),
-                ),
-                None => println!(
-                    "{label:<22} probes={probes:3}: REFUSED after {:.1}s",
-                    start.elapsed().as_secs_f64()
-                ),
+    // Mutating the system to get an unpreconditioned arm does not work, and it
+    // is worth recording why. Clearing `hbb_diag` alone leaves the
+    // preconditioner fully supplied: `set_shared_beta_operator` also installs a
+    // `MatvecDiagPenaltyOp` in `penalty_op` carrying the same diagonal, and
+    // `penalty_diagonal_add` reads THAT first. Clearing `penalty_op` as well
+    // destroys the operator instead: the shared-block apply then falls back to
+    // the dense `hbb`, which is empty on a matrix-free system, so `S` loses its
+    // `H_bb` term entirely and turns negative definite — the power iteration
+    // refuses in 0.1s. The only honest A/B holds the system fixed and varies
+    // ONLY the preconditioner, which is what the study seam does.
+    match reduced_schur_logdet_preconditioner_study(
+        &system, &htt, 0.0, &backend, 8, 0xC0FFEE, 1.0e-8, 40, 1.0e-8, 20_000,
+    ) {
+        Some(rows) => {
+            for row in rows {
+                println!(
+                    "{:<24?}: log|S| = {:+.6e}  std_err {:.3e} (rel {:.2e})  cg_iters {}",
+                    row.preconditioner,
+                    row.log_det,
+                    row.std_err,
+                    row.std_err / (row.log_det.abs() + 1.0),
+                    row.cg_iterations,
+                );
             }
         }
+        None => println!("preconditioner study: REFUSED"),
     }
 
     // Derived-rank lane at a ladder of relative error-bar targets: how much

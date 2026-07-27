@@ -5417,6 +5417,89 @@ fn dense_top_eigenvalue(a: &Array2<f64>) -> f64 {
     lambda
 }
 
+/// #2576 — the evidence lane's log-determinant must be PRECONDITIONED, and the
+/// preconditioner must not move the value.
+///
+/// The reduced Schur `S = H_ββ − Σ_i H_βt(H_tt)⁻¹H_tβ` inherits `H_ββ`'s
+/// diagonal spread. On the overcomplete SAE border that spread IS the atom
+/// firing-count distribution — atoms occurring in a handful of rows next to
+/// atoms occurring in thousands — and every shifted solve inside the rational
+/// surrogate paid for it, unpreconditioned, at `√κ` convergence. This fixture
+/// puts four decades of shared-block diagonal on an otherwise ordinary arrow
+/// system and asserts both halves of the fix at once:
+///
+///   * the shared-block-diagonal tier takes strictly fewer shifted-CG
+///     iterations than the identity tier (the preconditioner does something);
+///   * both tiers return the SAME `log|S|` to solve accuracy (it does ONLY
+///     that — the surrogate is a function of the operator, and PCG converges
+///     to the same certified solve as CG).
+///
+/// A regression that dropped the preconditioner fails the first limb; one that
+/// let it leak into the functional fails the second.
+#[test]
+fn evidence_logdet_preconditioner_cuts_iterations_without_moving_log_det() {
+    let (n, d, k) = (24usize, 2usize, 40usize);
+    let mut sys = dense_direct_system(n, d, k);
+    // Four decades of shared-block diagonal spread, in the firing-count shape:
+    // a few "hot" columns carrying orders of magnitude more mass than the rest.
+    // The cross-block is left as the fixture built it, so the eliminated term
+    // is unchanged and the spread genuinely comes from `H_ββ`.
+    for column in 0..k {
+        let scale = 10.0_f64.powi((column % 5) as i32);
+        sys.hbb[[column, column]] = 6.0 * scale;
+    }
+    sys.refresh_row_hessian_fingerprint();
+    let backend = CpuBatchedBlockSolver;
+    let htt_factors = backend
+        .factor_blocks(&sys.rows, 0.0, d, false)
+        .expect("SPD per-row blocks must factor");
+
+    let rows = reduced_schur_logdet_preconditioner_study(
+        &sys,
+        &htt_factors,
+        0.0,
+        &backend,
+        16,
+        0x2576_C0DE,
+        1.0e-8,
+        60,
+        1.0e-10,
+        50_000,
+    )
+    .expect("the study must run on a well-conditioned SPD arrow system");
+    assert_eq!(rows.len(), 2, "study must report both tiers");
+
+    let identity = rows
+        .iter()
+        .find(|row| row.preconditioner == ReducedSchurCgPreconditioner::Identity)
+        .expect("identity tier");
+    let scaled = rows
+        .iter()
+        .find(|row| row.preconditioner == ReducedSchurCgPreconditioner::SharedBlockDiagonal)
+        .expect("shared-block-diagonal tier");
+    eprintln!(
+        "evidence log|S| preconditioner study: identity {} iters (log|S| {:.9e}), \
+         shared-block diagonal {} iters (log|S| {:.9e})",
+        identity.cg_iterations, identity.log_det, scaled.cg_iterations, scaled.log_det
+    );
+
+    assert!(
+        scaled.cg_iterations < identity.cg_iterations,
+        "the shared-block diagonal must cut the surrogate's shifted-CG work on a \
+         wide-diagonal border (identity {}, scaled {})",
+        identity.cg_iterations,
+        scaled.cg_iterations
+    );
+    let gap = (scaled.log_det - identity.log_det).abs();
+    assert!(
+        gap <= 1.0e-6 * identity.log_det.abs().max(1.0),
+        "a preconditioner steers the iteration and may not move the functional: \
+         identity {:.12e} vs scaled {:.12e} (gap {gap:.3e})",
+        identity.log_det,
+        scaled.log_det
+    );
+}
+
 /// The #2080 fixed-rational log-det surrogate on the matrix-free `schur_matvec`
 /// apply (`rational_reduced_schur_log_det`, NO dense `k×k` Schur formed) must
 /// agree with the exact dense evidence `log|S|` it replaces, be bit-reproducible
