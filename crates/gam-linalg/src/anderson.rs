@@ -20,15 +20,27 @@
 //! it needs nothing from the map beyond its images — no Jacobian, no
 //! directional derivative, no extra evaluation.
 //!
-//! # What the caller owes, and why the residual is an argument
+//! # Why this speaks only in differences
 //!
-//! [`AndersonAccelerator::propose`] takes `(x_k, f_k)` rather than `(x_k, g_k)`
-//! and reconstructs `g_k = x_k + f_k`. That is deliberate: on a state with
-//! PERIODIC coordinates the map's image is projected back to a principal branch,
-//! so `g_k − x_k` read literally can be a whole period where the actual step was
-//! infinitesimal. A caller on such a state supplies the WRAPPED difference as
-//! the residual, and every quantity this module forms — `g_k`, `ΔG`, `ΔF` — is
-//! then built from lifted, consistent values.
+//! [`AndersonAccelerator::propose`] never sees an iterate. It takes the current
+//! residual `f_k` and the STEP the caller actually took to reach `x_k`, and it
+//! returns the step to take next. Everything it forms is a difference:
+//!
+//! ```text
+//! Δf_k = f_k − f_{k-1}
+//! Δg_k = (x_k − x_{k-1}) + Δf_k        // = g_k − g_{k-1}, by definition of g
+//! step⁺ = f_k − ΔG_k γ                 // so x⁺ = x_k + step⁺ = g_k − ΔG_k γ
+//! ```
+//!
+//! That is not a stylistic choice; it is what makes the method usable on a
+//! state with a MANIFOLD structure. On a periodic coordinate the iteration
+//! projects each image back to a principal branch, so absolute values live in
+//! whatever lift the last projection left them in and `g_k − g_{k-1}` computed
+//! from stored absolutes can be a whole period where the motion was
+//! infinitesimal. Differences taken by the caller — which knows each axis's
+//! topology — are unambiguous, and returning a step means the caller applies it
+//! through its own retraction rather than having an extrapolated absolute
+//! position forced back onto the manifold by projection.
 //!
 //! The caller also owns the safeguard. A proposal is a candidate, not a step:
 //! Anderson has no descent guarantee, and the honest contract is that the caller
@@ -49,9 +61,9 @@ use std::collections::VecDeque;
 pub struct AndersonAccelerator {
     depth: usize,
     dimension: Option<usize>,
-    /// `(g_{k-1}, f_{k-1})` — the previous image and residual, kept so the next
-    /// call can form one new difference column.
-    previous: Option<(Vec<f64>, Vec<f64>)>,
+    /// `f_{k-1}` — the previous residual, kept so the next call can form one new
+    /// difference column. No absolute iterate is ever stored.
+    previous_residual: Option<Vec<f64>>,
     /// Difference columns, oldest first, at most `depth` of each.
     image_differences: VecDeque<Vec<f64>>,
     residual_differences: VecDeque<Vec<f64>>,
@@ -80,7 +92,7 @@ impl AndersonAccelerator {
         Ok(Self {
             depth,
             dimension: None,
-            previous: None,
+            previous_residual: None,
             image_differences: VecDeque::with_capacity(depth),
             residual_differences: VecDeque::with_capacity(depth),
         })
@@ -99,66 +111,73 @@ impl AndersonAccelerator {
     /// differences taken across that break would fit a secant model to a
     /// trajectory that never happened.
     pub fn reset(&mut self) {
-        self.previous = None;
+        self.previous_residual = None;
         self.image_differences.clear();
         self.residual_differences.clear();
     }
 
-    /// Offer the current iterate and its residual; return the accelerated
-    /// candidate when one is available.
+    /// Offer the current residual and the step that reached the current
+    /// iterate; return the accelerated STEP to take from it.
+    ///
+    /// `taken_step` is `x_k − x_{k-1}`, expressed by the caller in whatever
+    /// geometry its state has — it is ignored on the first call, where there is
+    /// no previous iterate. Pass the plain step when the previous cycle took
+    /// one, or the accepted extrapolated step when it took that; passing
+    /// anything else fits the secant model to a trajectory that did not happen,
+    /// which is what [`Self::reset`] is for.
     ///
     /// `Ok(None)` on the first call (no difference column yet) and whenever the
     /// least squares carries no usable information — an all-zero `ΔF`, or a
-    /// candidate that is not finite. Those are ordinary states of a converging
-    /// iteration, not errors: the caller simply takes the plain step.
+    /// step that is not finite. Those are ordinary states of a converging
+    /// iteration, not errors: the caller simply takes the plain step `f_k`.
     pub fn propose(
         &mut self,
-        iterate: &[f64],
         residual: &[f64],
+        taken_step: &[f64],
     ) -> Result<Option<Vec<f64>>, LinalgError> {
-        if iterate.len() != residual.len() {
+        if residual.len() != taken_step.len() {
             return Err(LinalgError::InvalidInput(format!(
-                "Anderson iterate width {} != residual width {}",
-                iterate.len(),
-                residual.len()
+                "Anderson residual width {} != step width {}",
+                residual.len(),
+                taken_step.len()
             )));
         }
-        if iterate.is_empty() {
+        if residual.is_empty() {
             return Err(LinalgError::InvalidInput(
                 "Anderson acceleration requires a non-empty state".to_string(),
             ));
         }
         match self.dimension {
-            None => self.dimension = Some(iterate.len()),
-            Some(dimension) if dimension != iterate.len() => {
+            None => self.dimension = Some(residual.len()),
+            Some(dimension) if dimension != residual.len() => {
                 return Err(LinalgError::InvalidInput(format!(
                     "Anderson state width changed from {dimension} to {}",
-                    iterate.len()
+                    residual.len()
                 )));
             }
             Some(_) => {}
         }
-        if iterate.iter().chain(residual).any(|value| !value.is_finite()) {
+        if residual
+            .iter()
+            .chain(taken_step)
+            .any(|value| !value.is_finite())
+        {
             return Err(LinalgError::InvalidInput(
-                "Anderson acceleration requires a finite iterate and residual".to_string(),
+                "Anderson acceleration requires a finite residual and step".to_string(),
             ));
         }
 
-        let image: Vec<f64> = iterate
-            .iter()
-            .zip(residual)
-            .map(|(x, f)| x + f)
-            .collect();
-        if let Some((previous_image, previous_residual)) = self.previous.as_ref() {
-            let image_difference: Vec<f64> = image
-                .iter()
-                .zip(previous_image)
-                .map(|(new, old)| new - old)
-                .collect();
+        if let Some(previous_residual) = self.previous_residual.as_ref() {
             let residual_difference: Vec<f64> = residual
                 .iter()
                 .zip(previous_residual)
                 .map(|(new, old)| new - old)
+                .collect();
+            // g_k − g_{k-1} = (x_k − x_{k-1}) + (f_k − f_{k-1}).
+            let image_difference: Vec<f64> = taken_step
+                .iter()
+                .zip(&residual_difference)
+                .map(|(step, difference)| step + difference)
                 .collect();
             if self.residual_differences.len() == self.depth {
                 self.image_differences.pop_front();
@@ -167,7 +186,7 @@ impl AndersonAccelerator {
             self.image_differences.push_back(image_difference);
             self.residual_differences.push_back(residual_difference);
         }
-        self.previous = Some((image.clone(), residual.to_vec()));
+        self.previous_residual = Some(residual.to_vec());
 
         let order = self.residual_differences.len();
         if order == 0 {
@@ -176,16 +195,16 @@ impl AndersonAccelerator {
         let Some(coefficients) = self.solve_multisecant(residual, order)? else {
             return Ok(None);
         };
-        let mut candidate = image;
+        let mut step = residual.to_vec();
         for (column, weight) in self.image_differences.iter().zip(coefficients.iter()) {
-            for (value, difference) in candidate.iter_mut().zip(column) {
+            for (value, difference) in step.iter_mut().zip(column) {
                 *value -= weight * difference;
             }
         }
-        if candidate.iter().any(|value| !value.is_finite()) {
+        if step.iter().any(|value| !value.is_finite()) {
             return Ok(None);
         }
-        Ok(Some(candidate))
+        Ok(Some(step))
     }
 
     /// `γ = (ΔFᵀΔF)⁺ ΔFᵀ f_k` on the modes the Gram can actually resolve.
@@ -290,14 +309,19 @@ mod tests {
 
         let mut accelerator = AndersonAccelerator::new(3).expect("accelerator");
         let mut x = vec![0.0_f64; 3];
+        let mut taken_step = vec![0.0_f64; 3];
         let mut accelerated_error = f64::INFINITY;
         for _ in 0..6 {
             let g = map(&x);
             let residual: Vec<f64> = g.iter().zip(&x).map(|(g, x)| g - x).collect();
-            x = match accelerator.propose(&x, &residual).expect("propose") {
-                Some(candidate) => candidate,
-                None => g,
-            };
+            let step = accelerator
+                .propose(&residual, &taken_step)
+                .expect("propose")
+                .unwrap_or_else(|| residual.clone());
+            for (value, delta) in x.iter_mut().zip(&step) {
+                *value += delta;
+            }
+            taken_step = step;
             accelerated_error = x
                 .iter()
                 .zip(&reference)
@@ -336,13 +360,18 @@ mod tests {
         let map = |x: &[f64]| -> Vec<f64> { vec![0.98 * x[0] + 1.0, 0.95 * x[1] - 0.5, x[2]] };
         let mut accelerator = AndersonAccelerator::new(4).expect("accelerator");
         let mut x = vec![0.0_f64, 0.0, 7.0];
+        let mut taken_step = vec![0.0_f64; 3];
         for _ in 0..8 {
             let g = map(&x);
             let residual: Vec<f64> = g.iter().zip(&x).map(|(g, x)| g - x).collect();
-            x = match accelerator.propose(&x, &residual).expect("propose") {
-                Some(candidate) => candidate,
-                None => g,
-            };
+            let step = accelerator
+                .propose(&residual, &taken_step)
+                .expect("propose")
+                .unwrap_or_else(|| residual.clone());
+            for (value, delta) in x.iter_mut().zip(&step) {
+                *value += delta;
+            }
+            taken_step = step;
             assert!(x.iter().all(|value| value.is_finite()), "{x:?}");
             assert_eq!(x[2], 7.0, "the flat coordinate must not move");
         }
@@ -356,12 +385,12 @@ mod tests {
                 let mut accelerator = AndersonAccelerator::new(2).expect("accelerator");
         assert!(accelerator.propose(&[], &[]).is_err());
         assert!(accelerator.propose(&[1.0], &[1.0, 2.0]).is_err());
-        assert!(accelerator.propose(&[1.0, 2.0], &[0.1, 0.2]).is_ok());
+        assert!(accelerator.propose(&[0.1, 0.2], &[0.0, 0.0]).is_ok());
         assert!(
-            accelerator.propose(&[1.0], &[0.1]).is_err(),
+            accelerator.propose(&[0.1], &[0.0]).is_err(),
             "a state that changes width is a caller error, not a silent restart"
         );
-        assert!(accelerator.propose(&[1.0, f64::NAN], &[0.1, 0.2]).is_err());
+        assert!(accelerator.propose(&[0.1, f64::NAN], &[0.0, 0.0]).is_err());
     }
 
     /// The first call has no difference column, so there is nothing to
@@ -372,13 +401,13 @@ mod tests {
         assert_eq!(accelerator.history_len(), 0);
         assert!(
             accelerator
-                .propose(&[1.0, 2.0], &[0.1, 0.2])
+                .propose(&[0.1, 0.2], &[0.0, 0.0])
                 .expect("propose")
                 .is_none()
         );
         assert!(
             accelerator
-                .propose(&[1.1, 2.2], &[0.05, 0.1])
+                .propose(&[0.05, 0.1], &[0.1, 0.2])
                 .expect("propose")
                 .is_some()
         );
@@ -387,7 +416,7 @@ mod tests {
         assert_eq!(accelerator.history_len(), 0);
         assert!(
             accelerator
-                .propose(&[1.15, 2.3], &[0.02, 0.05])
+                .propose(&[0.02, 0.05], &[0.05, 0.1])
                 .expect("propose")
                 .is_none()
         );

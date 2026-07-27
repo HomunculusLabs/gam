@@ -446,7 +446,48 @@ impl SaeSupportSparseTerm {
         }
     }
 
+    /// Apply one compact step to `T`, retracting each row onto its atoms'
+    /// manifolds — the same retraction the coordinate sweep's line search uses,
+    /// so an extrapolated step lands on the manifold by construction rather
+    /// than by being projected back afterwards.
+    fn retract_coordinates(&mut self, step: &[f64]) -> Result<(), String> {
+        let mut coords_rows = self.assignment.take_coords();
+        let mut cursor = 0usize;
+        let mut outcome = Ok(());
+        for (row, coords_row) in coords_rows.iter_mut().enumerate() {
+            let end = cursor + coords_row.len();
+            if end > step.len() {
+                outcome = Err(format!(
+                    "SaeSupportSparseTerm::retract_coordinates: step width {} is short of \
+                     row {row}'s block end {end}",
+                    step.len()
+                ));
+                break;
+            }
+            if let Err(error) = self
+                .assignment
+                .retract_row_coords(row, coords_row, &step[cursor..end])
+            {
+                outcome = Err(error);
+                break;
+            }
+            cursor = end;
+        }
+        self.assignment.restore_coords(coords_rows)?;
+        outcome?;
+        if cursor != step.len() {
+            return Err(format!(
+                "SaeSupportSparseTerm::retract_coordinates: step width {} != compact \
+                 coordinate width {cursor}",
+                step.len()
+            ));
+        }
+        Ok(())
+    }
+
     /// Install a whole `T`, projecting each row onto its atoms' manifolds.
+    /// Used to restore a rejected extrapolation, where the target state is an
+    /// absolute snapshot rather than a step.
     fn install_coordinates(&mut self, values: &[f64]) -> Result<(), String> {
         let mut cursor = 0usize;
         for row in 0..self.n_obs() {
@@ -1865,6 +1906,9 @@ impl SaeSupportSparseTerm {
         let mut cycle_start = Vec::with_capacity(self.coordinate_state_len());
         let mut cycle_end = Vec::with_capacity(self.coordinate_state_len());
         let mut cycle_residual = Vec::with_capacity(self.coordinate_state_len());
+        // `x_k − x_{k-1}` in the accelerator's difference-only contract; zero
+        // before the first cycle, where it is ignored.
+        let mut taken_step = vec![0.0_f64; self.coordinate_state_len()];
         let mut accepted_extrapolations = 0usize;
         for iteration in 1..=max_iter {
             self.snapshot_coordinates(&mut cycle_start);
@@ -1933,19 +1977,33 @@ impl SaeSupportSparseTerm {
             self.snapshot_coordinates(&mut cycle_end);
             self.wrapped_coordinate_residual(&cycle_start, &cycle_end, &mut cycle_residual);
             let proposal = accelerator
-                .propose(&cycle_start, &cycle_residual)
+                .propose(&cycle_residual, &taken_step)
                 .map_err(|error| format!("SaeSupportSparseTerm::solve_fixed_point: {error}"))?;
-            let Some(proposal) = proposal else {
-                continue;
-            };
-            self.install_coordinates(&proposal)?;
-            let extrapolated =
-                self.penalized_objective(target, lambda_smooth, ard_precisions)?;
-            if extrapolated < objective {
-                accepted_extrapolations += 1;
-            } else {
-                self.install_coordinates(&cycle_end)?;
-                accelerator.reset();
+            // The step that reached the NEXT cycle's iterate, whichever arm is
+            // taken. The accelerator only ever sees differences, so this is the
+            // one piece of state the caller owes it.
+            taken_step.clear();
+            match proposal {
+                None => taken_step.extend_from_slice(&cycle_residual),
+                Some(proposal) => {
+                    // The extrapolated step is applied through the SAME
+                    // retraction the line search uses, from the cycle's own
+                    // starting iterate — so `x_start + step` is on the manifold
+                    // by construction, and the step the accelerator is told
+                    // about is exactly the one that was taken.
+                    self.install_coordinates(&cycle_start)?;
+                    self.retract_coordinates(&proposal)?;
+                    let extrapolated =
+                        self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+                    if extrapolated < objective {
+                        accepted_extrapolations += 1;
+                        taken_step.extend_from_slice(&proposal);
+                    } else {
+                        self.install_coordinates(&cycle_end)?;
+                        accelerator.reset();
+                        taken_step.extend_from_slice(&cycle_residual);
+                    }
+                }
             }
             log::info!(
                 "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
@@ -2212,6 +2270,174 @@ mod tests {
             .expect("cluster-Jacobi tier builds on a matrix-free system");
         AdditiveSchwarzPreconditioner::from_arrow_schur(&system, &htt, 0.0, &backend, 1)
             .expect("additive-Schwarz tier builds on a matrix-free system");
+    }
+
+    /// Two atoms active on EVERY row, so the alternating map is genuinely
+    /// coupled: each atom's exact decoder block is solved against a residual the
+    /// other atom is about to move, which is the structure that produces a
+    /// linear rate near one (#2575).
+    fn coupled_two_atom_fixture() -> (SaeSupportSparseTerm, Array2<f64>) {
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let rows = 24usize;
+        let atoms = vec![
+            atom(
+                "left",
+                SaeAtomBasisKind::Linear,
+                1,
+                Arc::clone(&evaluator),
+                &[0.0],
+                array![[0.10, -0.05], [0.90, 0.20]],
+            ),
+            atom(
+                "right",
+                SaeAtomBasisKind::Linear,
+                1,
+                evaluator,
+                &[0.0],
+                array![[-0.05, 0.10], [0.20, 0.85]],
+            ),
+        ];
+        let state = SaeAssignmentState::from_topk_support(
+            rows,
+            2,
+            2,
+            2,
+            vec![vec![0, 1]; rows],
+            vec![vec![1.0, 1.0]; rows],
+            (0..rows)
+                .map(|row| {
+                    let t = row as f64 / rows as f64;
+                    vec![t - 0.5, 0.5 - t]
+                })
+                .collect(),
+        )
+        .expect("state");
+        let term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let mut target = Array2::<f64>::zeros((rows, 2));
+        for row in 0..rows {
+            let t = row as f64 / rows as f64;
+            // Not in the dictionary's span: a curved response two straight
+            // decoders must trade against each other to fit.
+            target[[row, 0]] = (3.0 * t).sin() + 0.20 * t;
+            target[[row, 1]] = (2.0 * t).cos() - 0.15 * t * t;
+        }
+        (term, target)
+    }
+
+    /// Drive the PLAIN alternating map with the same certificate
+    /// `solve_fixed_point` applies, and report the cycle it recurs on.
+    ///
+    /// The certificate is restated here on purpose: production no longer runs
+    /// the un-accelerated map, and an A/B needs both arms measured under one
+    /// standard.
+    fn plain_cycles_to_recur(
+        term: &mut SaeSupportSparseTerm,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+        max_iter: usize,
+        tolerance: f64,
+        trust_radius: f64,
+    ) -> Option<usize> {
+        let mut previous_candidate = false;
+        let mut last_objective: Option<f64> = None;
+        for iteration in 1..=max_iter {
+            term.decoder_sweep(target, lambda_smooth).expect("decoder");
+            term.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)
+                .expect("coordinates");
+            let residual = term.raw_residual(target).expect("residual");
+            let stationarity = term
+                .raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)
+                .expect("kkt");
+            let objective = term
+                .penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)
+                .expect("objective");
+            let scale = objective.abs().max(1.0);
+            let recurred = last_objective
+                .map(|previous: f64| (objective - previous).abs() <= tolerance * scale)
+                .unwrap_or(false);
+            last_objective = Some(objective);
+            let candidate = recurred && stationarity.max_abs() <= tolerance * scale;
+            if candidate && previous_candidate {
+                return Some(iteration);
+            }
+            previous_candidate = candidate;
+        }
+        None
+    }
+
+    /// #2575 — acceleration must reach the certificate in no more cycles than
+    /// the plain map, and the point it certifies must genuinely satisfy the
+    /// certificate.
+    ///
+    /// The second half is the one that matters: Anderson has no descent
+    /// guarantee, so an unsafeguarded extrapolation can land on a point that
+    /// merely LOOKS recurred because two consecutive objectives happen to agree.
+    /// The safeguard is what forbids that, and this re-checks the returned state
+    /// against the same bar from scratch.
+    #[test]
+    fn acceleration_certifies_the_same_point_in_no_more_cycles() {
+        let tolerance = 1.0e-6;
+        let trust_radius = 1.0;
+        let lambda = vec![1.0e-3, 1.0e-3];
+        let ard = vec![vec![1.0e-4], vec![1.0e-4]];
+        let budget = 4_000usize;
+
+        let (mut plain, target) = coupled_two_atom_fixture();
+        let plain_cycles = plain_cycles_to_recur(
+            &mut plain,
+            target.view(),
+            &lambda,
+            &ard,
+            budget,
+            tolerance,
+            trust_radius,
+        );
+
+        let (mut accelerated, target) = coupled_two_atom_fixture();
+        let report = accelerated
+            .solve_fixed_point(
+                target.view(),
+                &lambda,
+                &ard,
+                budget,
+                tolerance,
+                trust_radius,
+            )
+            .expect("the accelerated fixed point recurs");
+        assert!(report.recurred);
+
+        // The certificate, re-derived at the returned state.
+        let stationarity = accelerated
+            .raw_stationarity(target.view(), &lambda, &ard)
+            .expect("kkt");
+        let objective = accelerated
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        let scale = objective.abs().max(1.0);
+        assert!(
+            stationarity.max_abs() <= tolerance * scale,
+            "the certified point must be stationary: {:.3e} > {:.3e}",
+            stationarity.max_abs(),
+            tolerance * scale
+        );
+
+        // Both arms must find the same optimum, not merely stop.
+        let plain_objective = plain
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("plain objective");
+        if let Some(plain_cycles) = plain_cycles {
+            assert!(
+                (objective - plain_objective).abs() <= 1.0e-6 * scale,
+                "accelerated {objective:.9e} vs plain {plain_objective:.9e}"
+            );
+            assert!(
+                report.iterations <= plain_cycles,
+                "acceleration must not cost cycles: {} vs plain {plain_cycles}",
+                report.iterations
+            );
+        }
     }
 
     #[test]
