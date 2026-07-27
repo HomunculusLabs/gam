@@ -2432,6 +2432,11 @@ struct RhoGradientLadderRow2454 {
     penalized_rank: usize,
     declared_null_dim: usize,
     beta_null_energy: f64,
+    /// The rank the criterion's `−½log|S(λ)|₊` ranges over, and its value. The
+    /// criterion's asymptotic slope in ρ is `½(penalized_rank − logdet_rank)`,
+    /// so these two integers decide whether an interior optimum exists at all.
+    logdet_rank: usize,
+    logdet_value: f64,
 }
 
 /// Run the #2454 ladder on the fixture the issue was opened against: the
@@ -2642,6 +2647,8 @@ fn rho_gradient_part_ladder_2454(
                 penalized_rank: frame.map_or(0, |f| f.e_rows),
                 declared_null_dim: frame.map_or(0, |f| f.null_dim),
                 beta_null_energy: frame.map_or(f64::NAN, |f| f.beta_null_energy),
+                logdet_rank: frame.map_or(0, |f| f.penalty_logdet_rank),
+                logdet_value: frame.map_or(f64::NAN, |f| f.penalty_logdet_value),
             });
         }
     }
@@ -2769,17 +2776,23 @@ fn outer_rho_gradient_error_does_not_scale_with_lambda_2454() {
 /// only as a sum.
 #[test]
 fn zz_measure_rho_gradient_part_decomposition_2454() {
-    let rows = rho_gradient_part_ladder_2454(&[6.0, 9.0, 12.0, 15.0], 3e-4);
+    let rows = rho_gradient_part_ladder_2454(
+        &[6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 27.0, 30.0],
+        3e-4,
+    );
     for row in &rows {
         if row.coordinate == 0 {
             eprintln!(
                 "[zz-parts-2454] rho={:5.1} COST={:+.12e} penalized_rank={} null_dim={} \
+                 logdet_rank={} logdet_S={:+.6e} \
                  beta_null_energy={:.4e} energy criterion={:+.12e} blocks={:+.12e} \
                  ratio={:.10}",
                 row.rho,
                 row.cost,
                 row.penalized_rank,
                 row.declared_null_dim,
+                row.logdet_rank,
+                row.logdet_value,
                 row.beta_null_energy,
                 row.penalty_energy_criterion,
                 row.penalty_energy_blocks,

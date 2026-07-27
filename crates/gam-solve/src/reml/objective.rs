@@ -1262,6 +1262,8 @@ impl<'a> RemlState<'a> {
                         })
                         .collect(),
                     qs_deviation_from_identity: qs_deviation,
+                    penalty_logdet_rank: beta.len().saturating_sub(nullspace_dim as usize),
+                    penalty_logdet_value: penalty_logdet.value,
                 },
             );
         }

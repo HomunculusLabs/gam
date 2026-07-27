@@ -462,6 +462,16 @@ pub struct PenaltyFrameAudit {
     /// Per-block `(Πβ_t)ᵀ S_k^t (Πβ_t)` with `Π = I − U_⊥U_⊥ᵀ`: the block
     /// quadratic restricted to the subspace the criterion actually penalizes.
     pub projected_frame_blocks: Vec<f64>,
+    /// The rank the criterion's own `−½ log|S(λ)|₊` term ranges over, and its
+    /// value. This is the OTHER half of the same-penalty question (#2454): the
+    /// `fixed_beta` channel and `H` both carry the split-projected `S̃`, whose
+    /// rank is `e_rows`, while `log|S|₊` is taken on `Σ_k λ_k S_k` and can
+    /// therefore charge MORE directions than `½log|H|` will ever inflate. The
+    /// asymptotic slope of the criterion in ρ is `½(rank(S̃) − penalty_rank)`,
+    /// so any gap between these two integers is a linear-in-ρ ramp with no
+    /// interior optimum.
+    pub penalty_logdet_rank: usize,
+    pub penalty_logdet_value: f64,
 }
 
 /// One outer evaluation's ρ-block audit: the criterion value decomposition and
