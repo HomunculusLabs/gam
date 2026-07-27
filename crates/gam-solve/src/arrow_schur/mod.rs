@@ -97,6 +97,7 @@
 // `crate::arrow_schur::<Item>` paths used across the crate keep
 // resolving unchanged.
 
+mod evidence_factor;
 mod factorization;
 mod newton_step;
 mod penalty_ops;
@@ -113,6 +114,7 @@ mod tests;
 pub(crate) use factorization::*;
 // `SPECTRAL_DEFLATION_REL_FLOOR` is consumed cross-crate (gam-sae streaming plan)
 // so it needs a `pub` re-export path; the rest of `factorization` stays crate-local.
+pub use evidence_factor::*;
 pub use factorization::SPECTRAL_DEFLATION_REL_FLOOR;
 // The step-side gauge-fix null directions (#1095/#2228 second root): the SAE
 // inner solve projects each row's coordinate step onto the identifiable
