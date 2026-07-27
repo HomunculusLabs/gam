@@ -593,10 +593,17 @@ impl SaeSupportSparseTerm {
         let better = |left: &Candidate, right: &Candidate| {
             left.score > right.score || (left.score == right.score && left.atom < right.atom)
         };
-        let mut indices = Vec::with_capacity(target.nrows());
-        let mut gate_params = Vec::with_capacity(target.nrows());
-        let mut coords = Vec::with_capacity(target.nrows());
-        for row in target.rows() {
+        // Each row's routing reads only that row and the frozen decoders, so the
+        // sweep is parallel by construction; an indexed `collect` restores row
+        // order, making the result identical to the serial sweep it replaces.
+        // This is the dominant cost of an out-of-sample reconstruct -- it scores
+        // every atom against every row -- and it was leaving a 30-core box at
+        // load 10.
+        type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
+        let per_row: Vec<RowRoute> = target
+            .axis_iter(ndarray::Axis(0))
+            .into_par_iter()
+            .map(|row| -> Result<RowRoute, String> {
             let row_values = row.as_slice().ok_or_else(|| {
                 "SaeSupportSparseTerm::reroute_fixed_decoder: target row is not contiguous"
                     .to_string()
@@ -651,19 +658,24 @@ impl SaeSupportSparseTerm {
                 }
             }
             selected.sort_by_key(|candidate| candidate.atom);
-            indices.push(
-                selected
-                    .iter()
-                    .map(|candidate| candidate.atom as u32)
-                    .collect(),
-            );
-            gate_params.push(selected.iter().map(|candidate| candidate.score).collect());
-            coords.push(
-                selected
-                    .into_iter()
-                    .flat_map(|candidate| candidate.coords)
-                    .collect(),
-            );
+            let row_indices: Vec<u32> =
+                selected.iter().map(|candidate| candidate.atom as u32).collect();
+            let row_gates: Vec<f64> =
+                selected.iter().map(|candidate| candidate.score).collect();
+            let row_coords: Vec<f64> = selected
+                .into_iter()
+                .flat_map(|candidate| candidate.coords)
+                .collect();
+            Ok((row_indices, row_gates, row_coords))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut indices = Vec::with_capacity(target.nrows());
+        let mut gate_params = Vec::with_capacity(target.nrows());
+        let mut coords = Vec::with_capacity(target.nrows());
+        for (row_indices, row_gates, row_coords) in per_row {
+            indices.push(row_indices);
+            gate_params.push(row_gates);
+            coords.push(row_coords);
         }
         let atom_specs = self
             .atoms
