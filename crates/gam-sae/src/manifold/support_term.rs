@@ -8,6 +8,7 @@
 
 use crate::assignment::AssignmentMode;
 use crate::assignment_state::{SaeAssignmentAtomSpec, SaeAssignmentState};
+use gam_linalg::anderson::AndersonAccelerator;
 use gam_linalg::utils::KahanSum;
 use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
@@ -25,6 +26,23 @@ use super::*;
 /// work per row, narrow enough that a 4-core host still gets even load at the
 /// smallest shapes the lane admits.
 const RECONSTRUCT_ROW_CHUNK: usize = 64;
+
+/// Order of the Anderson multisecant model on the support fixed point (#2575).
+///
+/// This is a COST bound, not a tuning knob. The accelerator drops every
+/// difference column whose contribution is below its own roundoff floor, so a
+/// history longer than the map's informative secant subspace costs memory and
+/// buys nothing rather than mispricing anything — which is why the depth can be
+/// declared here instead of derived from the problem. What it bounds:
+/// `2·depth·(N·support_k)` doubles of history, and an `order × order`
+/// eigendecomposition per cycle, both negligible against one sweep's
+/// `N·support_k·M·P` work.
+///
+/// Eight is the upper end of the range the literature reports gains over
+/// (Walker & Ni, *SINUM* 2011, §4; Fang & Saad, *NLAA* 2009): past it, the
+/// stored differences on a slowly-contracting map are numerically dependent and
+/// the extra columns are exactly the ones the roundoff floor discards.
+const SUPPORT_ANDERSON_DEPTH: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SaeSupportStationarity {
@@ -408,6 +426,76 @@ impl SaeSupportSparseTerm {
     /// axis, `Some(period)` on a circular one.
     fn atom_axis_periods(&self, atom: usize) -> &[Option<f64>] {
         &self.atom_axis_periods[atom]
+    }
+
+    /// Total width of the compact coordinate state `T` — the concatenation of
+    /// every row's active coordinate block.
+    pub fn coordinate_state_len(&self) -> usize {
+        (0..self.n_obs())
+            .map(|row| self.assignment.coords_row(row).len())
+            .sum()
+    }
+
+    /// Copy `T` into caller storage, row-major over rows and slot-major within
+    /// a row — the same order `install_coordinates` and
+    /// `wrapped_coordinate_residual` read.
+    fn snapshot_coordinates(&self, out: &mut Vec<f64>) {
+        out.clear();
+        for row in 0..self.n_obs() {
+            out.extend_from_slice(self.assignment.coords_row(row));
+        }
+    }
+
+    /// Install a whole `T`, projecting each row onto its atoms' manifolds.
+    fn install_coordinates(&mut self, values: &[f64]) -> Result<(), String> {
+        let mut cursor = 0usize;
+        for row in 0..self.n_obs() {
+            let width = self.assignment.coords_row(row).len();
+            let end = cursor + width;
+            if end > values.len() {
+                return Err(format!(
+                    "SaeSupportSparseTerm::install_coordinates: state width {} is short of                      row {row}'s block end {end}",
+                    values.len()
+                ));
+            }
+            self.assignment.set_row_coords(row, &values[cursor..end])?;
+            cursor = end;
+        }
+        if cursor != values.len() {
+            return Err(format!(
+                "SaeSupportSparseTerm::install_coordinates: state width {} != compact                  coordinate width {cursor}",
+                values.len()
+            ));
+        }
+        Ok(())
+    }
+
+    /// `after - before` on each coordinate axis, taken on the axis's own
+    /// manifold.
+    ///
+    /// On a periodic axis the sweep's projection returns the image to a
+    /// principal branch, so a literal difference across the branch cut reads as
+    /// a whole period where the step was infinitesimal. Wrapping to the
+    /// principal branch is what makes the residual the honest step — and what
+    /// lets the accelerator treat `before + residual` as a lifted image whose
+    /// differences are consistent across cycles.
+    fn wrapped_coordinate_residual(&self, before: &[f64], after: &[f64], out: &mut Vec<f64>) {
+        out.clear();
+        let mut cursor = 0usize;
+        for row in 0..self.n_obs() {
+            for &atom in self.assignment.support_indices(row) {
+                for &period in self.atom_axis_periods(atom as usize) {
+                    let delta = after[cursor] - before[cursor];
+                    out.push(match period {
+                        Some(period) if period.is_finite() && period > 0.0 => {
+                            delta - period * (delta / period).round()
+                        }
+                        _ => delta,
+                    });
+                    cursor += 1;
+                }
+            }
+        }
     }
 
     pub fn n_obs(&self) -> usize {
@@ -1765,7 +1853,21 @@ impl SaeSupportSparseTerm {
         let mut previous_candidate = false;
         let mut last_max_change = f64::NAN;
         let mut last_objective: Option<f64> = None;
+        // #2575: the alternating map's contraction is linear at ρ ≈ 0.975 on
+        // real activations, so most cycles are spent crawling the tail rather
+        // than resolving a nonlinearity. Anderson extrapolates over the
+        // COORDINATE block alone, which is the whole state of the map: the
+        // decoder sweep is the EXACT block minimiser of `B` given `T`, so the
+        // fixed point is `T ↦ C(D(T))` and carrying `B` in the history would
+        // store `Σ_k M_k·P` redundant numbers per column.
+        let mut accelerator = AndersonAccelerator::new(SUPPORT_ANDERSON_DEPTH)
+            .map_err(|error| format!("SaeSupportSparseTerm::solve_fixed_point: {error}"))?;
+        let mut cycle_start = Vec::with_capacity(self.coordinate_state_len());
+        let mut cycle_end = Vec::with_capacity(self.coordinate_state_len());
+        let mut cycle_residual = Vec::with_capacity(self.coordinate_state_len());
+        let mut accepted_extrapolations = 0usize;
         for iteration in 1..=max_iter {
+            self.snapshot_coordinates(&mut cycle_start);
             let decoder_change = self.decoder_sweep(target, lambda_smooth)?;
             let coordinate_change =
                 self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
@@ -1798,14 +1900,15 @@ impl SaeSupportSparseTerm {
             last_objective = Some(objective);
             let candidate =
                 objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
-            log::info!(
-                "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} max_change={:.3e} objective={:.6e}",
-                stationarity.max_abs(),
-                stationarity.max_abs() / kkt_scale,
-                max_change,
-                objective
-            );
             if candidate && previous_candidate {
+                log::info!(
+                    "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
+                     max_change={:.3e} objective={:.6e} anderson_accepted={accepted_extrapolations}",
+                    stationarity.max_abs(),
+                    stationarity.max_abs() / kkt_scale,
+                    max_change,
+                    objective
+                );
                 return Ok(SaeSupportFixedPointReport {
                     iterations: iteration,
                     objective,
@@ -1815,6 +1918,46 @@ impl SaeSupportSparseTerm {
                 });
             }
             previous_candidate = candidate;
+
+            // The certified point is ALWAYS a plain post-sweep iterate: the
+            // certificate above has already been evaluated and either returned
+            // or not, and what follows only chooses where the NEXT cycle starts.
+            //
+            // Anderson has no descent guarantee, so the proposal is safeguarded
+            // on the objective the certificate itself uses, at the SAME decoder
+            // this cycle solved — a like-for-like comparison, and a conservative
+            // one, because the next cycle's exact decoder solve can only lower
+            // it further. On rejection the plain iterate is restored and the
+            // history is dropped: differences taken across a rejected candidate
+            // would fit a secant model to a trajectory that never happened.
+            self.snapshot_coordinates(&mut cycle_end);
+            self.wrapped_coordinate_residual(&cycle_start, &cycle_end, &mut cycle_residual);
+            let proposal = accelerator
+                .propose(&cycle_start, &cycle_residual)
+                .map_err(|error| format!("SaeSupportSparseTerm::solve_fixed_point: {error}"))?;
+            let Some(proposal) = proposal else {
+                continue;
+            };
+            self.install_coordinates(&proposal)?;
+            let extrapolated =
+                self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+            if extrapolated < objective {
+                accepted_extrapolations += 1;
+            } else {
+                self.install_coordinates(&cycle_end)?;
+                accelerator.reset();
+            }
+            log::info!(
+                "support fixed-point cycle {iteration}: raw KKT max={:.3e} rel={:.3e} \
+                 max_change={:.3e} objective={:.6e} anderson={}/{} order={}",
+                stationarity.max_abs(),
+                stationarity.max_abs() / kkt_scale,
+                max_change,
+                objective,
+                accepted_extrapolations,
+                iteration,
+                accelerator.history_len()
+            );
         }
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
         let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
