@@ -1,23 +1,49 @@
-name: Non-Linux cross-check
+name: Compile gate (native Linux + non-Linux cross)
 
-# #2377: every wheel platform except Linux was silently broken for three
-# releases because no CI job COMPILES a non-Linux target between releases —
-# `-D warnings` breaks in `cfg(target_os = "linux")` neighbourhoods (unused
-# imports/variables on the non-Linux side of the cfg) only surfaced inside the
-# release wheel matrix, whose failure skipped the upload while the run looked
-# green. This job cross-checks the workspace for a Windows target on every
-# push to main, so a non-Linux `-D warnings` break fails loudly the moment it
-# lands instead of at the next release.
+# THE push gate on main: does this commit compile, everywhere, with the
+# repository's own bans enforced? Two jobs, because "compiles" has two halves
+# that no single `cargo check` covers.
+#
+# NATIVE LINUX (#2582). Before this job existed, the only push-triggered Rust
+# gate compiled for `x86_64-pc-windows-gnu`, so every
+# `cfg(target_os = "linux")` neighbourhood — including the crates that take
+# `cudarc` only on Linux — was compiled by nothing on push. The dispatch-only
+# `test.yml` archive build is the workspace's real native compile, and it runs
+# on a schedule at best. Meanwhile `cargo check -p <member-crate>`, which is how
+# a lane verifies its own work, never runs the ROOT crate's `build.rs` and so
+# has zero coverage of the ban scanner: `cc4a72e0c` landed a banned `let _`
+# that way and broke every root-crate target — the entire 455-test quality
+# suite came back BUILDFAIL instead of reporting model quality, and a 3h15m run
+# was lost. This job is the answer to "is THIS commit buildable on the platform
+# everyone runs it on", and it is minutes, not hours.
+#
+# The ban scanner runs FIRST, and standalone. It is the root `build.rs`, which
+# is std-only and reads the tree through `CARGO_MANIFEST_DIR`, so `scripts/
+# ban_scanner.sh` compiles and runs THE SAME CODE cargo runs — not a
+# re-implementation of its rules — in about four seconds. That matters for the
+# third defect #2582 names: as a build-script side effect the report is
+# attributed to "failed to run custom build command for `gam`" and buried
+# several hundred `cargo:rerun-if-changed=` lines from the `file:line` it
+# names. Run directly, the violation list IS the step output. It also gives
+# every lane a four-second pre-land check that a per-crate `cargo check` cannot
+# provide.
+#
+# NON-LINUX CROSS (#2377). Every wheel platform except Linux was silently
+# broken for three releases because no CI job COMPILES a non-Linux target
+# between releases — `-D warnings` breaks in `cfg(target_os = "linux")`
+# neighbourhoods (unused imports/variables on the non-Linux side of the cfg)
+# only surfaced inside the release wheel matrix, whose failure skipped the
+# upload while the run looked green.
 #
 # windows-gnu is deliberate: it exercises the not-linux side of every
 # `cfg(target_os = "linux")` split with a toolchain that cross-installs on the
 # ubuntu runner in seconds. `cargo check` needs no linker for rlib targets, so
 # mingw is only needed for build scripts — installed anyway for safety.
-# gam-pyffi is excluded ONLY because checking pyo3 for a foreign target needs a
-# cross Python interpreter config; the release wheel matrix (which builds
-# pyffi natively per-OS) keeps covering it, and every `cfg(target_os)`
-# neighbourhood that broke historically lives in the engine crates this job
-# does cover.
+# gam-pyffi is excluded from BOTH jobs: checking pyo3 for a foreign target
+# needs a cross Python interpreter config, and its native surface is compiled
+# on every push by the rolling-wheel workflow, which builds the extension
+# module itself. Every `cfg(target_os)` neighbourhood that broke historically
+# lives in the engine crates these jobs do cover.
 
 on:
   push:
@@ -46,7 +72,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  linux-native-check:
+    name: Native Linux — ban scanner + workspace --all-targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ban scanner (root build.rs, run standalone)
+        run: |
+          set +e
+          scripts/ban_scanner.sh .
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=Ban scanner::This commit contains banned constructs; every offending file:line is printed above in this step. The same check aborts the root crate's build, which fails EVERY root-crate target including the whole quality suite."
+          fi
+          exit "$status"
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Check workspace natively (deny warnings)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "-D warnings"
+          CARGO_INCREMENTAL: "0"
+        run: |
+          cargo check --workspace --exclude gam-pyffi --all-targets
+
   windows-gnu-check:
+    name: Non-Linux cross (x86_64-pc-windows-gnu)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
