@@ -6,6 +6,28 @@
 //! `(basis kind, latent dimension)` family. The generic optimizer therefore
 //! sees the number of heterogeneous families, while the inner model still has
 //! distinct decoder functions and coordinates for every occupied atom.
+//!
+//! ## The criterion is ONE functional (#2576)
+//!
+//! `2·cost(ρ) = log|H| − log|S_ρ|₊ + df·(1 + ln(τ·D_p/df))`, and the only part
+//! of it that is not closed-form at the inner optimum is the Laplace normalizer
+//! `log|H| = Σ_i log|H_tt^(i)| + log|S|` on the bordered arrow Hessian.
+//!
+//! Both halves of that normalizer come from the SAME place: the #2080 frozen
+//! rational surrogate ([`SurrogateLaneState`]), which the dense manifold
+//! criterion also runs. The value is its estimate; the smoothing gradient is its
+//! `directional_derivative` contracted against `∂S/∂ρ_g`, which is exactly the
+//! group-restricted penalty apply because `H_ββ` is the only block carrying a
+//! smoothing coordinate. So `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g` and value and
+//! gradient are one function of ρ by construction.
+//!
+//! This lane previously took its factor cache from a Newton STEP it discarded
+//! and estimated that trace with a SECOND, independent Hutchinson family — its
+//! own probes, its own unshifted `S⁻¹` solves, one per smoothing group. That
+//! cost the evaluation's whole wall-clock, left value and gradient free to
+//! describe different functions, and never ran at all: the step entry returns
+//! no reduced-Schur log-determinant under `InexactPCG`, so the criterion refused
+//! on every host without a CUDA device.
 
 use std::collections::BTreeMap;
 
