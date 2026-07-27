@@ -523,11 +523,15 @@ fn sphere_strict_lat_bound_at_90() {
     // success from a guard that is deliberately a refusal. What is actually
     // worth pinning is that the refusal is diagnosable: it must identify the
     // degenerate axis and stay a typed configuration error, not a solver crash.
-    let error = r.expect_err(
-        "a sphere smooth on a constant-longitude arc is unidentifiable along lon \
-         and must be refused, not silently fitted",
-    );
-    let message = error.to_string();
+    // Matched rather than `expect_err`: that helper formats the Ok value on
+    // failure, so it requires `FitResult: Debug`, which it is not.
+    let message = match r {
+        Ok(_) => panic!(
+            "a sphere smooth on a constant-longitude arc is unidentifiable along lon \
+             and must be refused, not silently fitted"
+        ),
+        Err(error) => error.to_string(),
+    };
     assert!(
         message.contains("lon") && message.contains("constant"),
         "the refusal must name the constant axis so the user can act on it (got: {message})"
