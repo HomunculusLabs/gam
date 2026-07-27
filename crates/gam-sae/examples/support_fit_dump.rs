@@ -28,16 +28,33 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
     // cannot support a gap claim, so this has to be varied and reported.
-    let seed_arg: u64 = if args.len() == 12 {
+    let seed_arg: u64 = if args.len() >= 12 {
         args[11].parse().map_err(|e| format!("seed: {e}"))?
     } else {
         0
     };
+    // Which model this run fits must be legible from the command line. A
+    // rebuild once changed it silently, and the resulting runs were reported as
+    // a fixed-smoothing confirmation while actually alternating REML.
+    let reml_arg: bool = args.len() >= 13 && args[12] == "reml";
+    // Coordinate-prior precision. Fixed at 1.0 for the whole campaign because
+    // nothing selected it; `0` removes the prior entirely, which is the arm the
+    // containment argument needs.
+    let alpha_arg: f64 = if args.len() >= 14 {
+        args[13].parse().map_err(|e| format!("alpha: {e}"))?
+    } else {
+        1.0
+    };
+    println!("alpha: {alpha_arg}");
+    println!(
+        "mode: {}",
+        if reml_arg { "REML per-atom smoothing alternation" } else { "fixed smoothing" }
+    );
     let rows: usize = args[2].parse().map_err(|e| format!("rows: {e}"))?;
     let cols: usize = args[3].parse().map_err(|e| format!("cols: {e}"))?;
     let k_atoms: usize = args[4].parse().map_err(|e| format!("k: {e}"))?;
@@ -100,7 +117,7 @@ fn main() -> Result<(), String> {
     })?;
     let k_ret = term_seed.term.k_atoms();
     let ard: Vec<Vec<f64>> = (0..k_ret)
-        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
+        .map(|atom| vec![alpha_arg; term_seed.term.assignment.atom_coord_dim(atom)])
         .collect();
     let lambda: Vec<f64> = vec![1.0_f64; k_ret];
     println!("seeded: retained {k_ret} of {k_atoms}");
@@ -119,7 +136,7 @@ fn main() -> Result<(), String> {
             .term
             .solve_fixed_point(centered.view(), &lambda, &ard, max_cycles, 1.0e-4, 1.0)?;
     let mut ard = ard;
-    loop {
+    while reml_arg {
         let updated = term_seed
             .term
             .fellner_schall_smoothing(centered.view(), &lambda)?;

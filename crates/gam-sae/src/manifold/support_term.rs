@@ -96,6 +96,12 @@ pub struct SaeSupportCoordinateFixedPointReport {
 /// `map_init`), it is sized once for the first `(m, d, p)` it sees and only
 /// resized when a later atom needs a different shape — so a homogeneous atom
 /// portfolio allocates once per worker per sweep instead of once per pair.
+/// Rows per task in the decoder sweep's row reduction. Sized so a chunk carries
+/// enough work to cover task overhead while leaving many chunks per atom; the
+/// value affects scheduling only, never the result, since the reduction it
+/// splits is a plain sum.
+const DECODER_ROW_CHUNK: usize = 512;
+
 #[derive(Debug, Default, Clone)]
 struct ActiveAtomScratch {
     /// `(1, m)` — the evaluator's own buffer shape.
@@ -1715,23 +1721,58 @@ impl SaeSupportSparseTerm {
                     let row_count = atom_rows.len();
                     let mut phi_rows = Array2::<f64>::zeros((row_count, m));
                     let mut decoded_rows = Array2::<f64>::zeros((row_count, self.output_dim));
-                    let mut scratch = ActiveAtomScratch::default();
-                    for (index, &(row, slot)) in atom_rows.iter().enumerate() {
-                        self.fill_active(row, slot, &mut scratch)?;
-                        let phi = scratch.phi_row();
-                        for left in 0..m {
-                            for right in 0..m {
-                                gram[[left, right]] += phi[left] * phi[right];
-                            }
-                            for output in 0..self.output_dim {
-                                let residual_without = target[[row, output]]
-                                    - fitted[[row, output]]
-                                    + scratch.decoded[output];
-                                rhs[[left, output]] += phi[left] * residual_without;
-                            }
-                        }
-                        phi_rows.row_mut(index).assign(&phi);
-                        decoded_rows.row_mut(index).assign(&scratch.decoded);
+                    // ROW-PARALLEL reduction. `gram` and `rhs` are sums over this
+                    // atom's OWN rows, so they parallelise as a reduction without
+                    // changing the update: the shared `fitted` snapshot is read,
+                    // never written, and the Gauss-Seidel order across atoms and
+                    // colour classes is untouched. This is the parallelism the
+                    // colouring cannot provide -- with top_k = 8 the conflict
+                    // graph is dense and the sweep degenerates to a mean width of
+                    // three atoms per class, so the width has to come from the
+                    // rows instead.
+                    let chunk = phi_rows
+                        .axis_chunks_iter_mut(ndarray::Axis(0), DECODER_ROW_CHUNK)
+                        .into_par_iter()
+                        .zip(
+                            decoded_rows
+                                .axis_chunks_iter_mut(ndarray::Axis(0), DECODER_ROW_CHUNK)
+                                .into_par_iter(),
+                        )
+                        .enumerate()
+                        .map(
+                            |(block, (mut phi_block, mut decoded_block))|
+                             -> Result<(Array2<f64>, Array2<f64>), String> {
+                                let base = block * DECODER_ROW_CHUNK;
+                                let mut local_gram = Array2::<f64>::zeros((m, m));
+                                let mut local_rhs =
+                                    Array2::<f64>::zeros((m, self.output_dim));
+                                let mut scratch = ActiveAtomScratch::default();
+                                for local in 0..phi_block.nrows() {
+                                    let (row, slot) = atom_rows[base + local];
+                                    self.fill_active(row, slot, &mut scratch)?;
+                                    let phi = scratch.phi_row();
+                                    for left in 0..m {
+                                        for right in 0..m {
+                                            local_gram[[left, right]] += phi[left] * phi[right];
+                                        }
+                                        for output in 0..self.output_dim {
+                                            let residual_without = target[[row, output]]
+                                                - fitted[[row, output]]
+                                                + scratch.decoded[output];
+                                            local_rhs[[left, output]] +=
+                                                phi[left] * residual_without;
+                                        }
+                                    }
+                                    phi_block.row_mut(local).assign(&phi);
+                                    decoded_block.row_mut(local).assign(&scratch.decoded);
+                                }
+                                Ok((local_gram, local_rhs))
+                            },
+                        )
+                        .collect::<Result<Vec<_>, String>>()?;
+                    for (local_gram, local_rhs) in chunk {
+                        gram += &local_gram;
+                        rhs += &local_rhs;
                     }
                     let decoder = Self::solve_psd_minimum_norm(
                         &gram,
