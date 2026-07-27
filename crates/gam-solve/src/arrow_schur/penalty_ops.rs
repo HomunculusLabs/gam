@@ -28,41 +28,117 @@ pub(crate) struct BetaCouplingGraph {
 }
 
 impl BetaCouplingGraph {
-    pub(crate) fn build(block_offsets: &[Range<usize>], htbeta_rows: &[Array2<f64>]) -> Self {
-        let num_blocks = block_offsets.len();
+    /// Build the β co-firing graph over `sys.block_offsets`, through the
+    /// system's ROUTED `H_tβ` convention.
+    ///
+    /// # Why this takes the system and not the row slabs (#2572)
+    ///
+    /// This used to take `&[Array2<f64>]` and every one of its five call sites
+    /// passed `sys.rows.iter().map(|r| r.htbeta.clone()).collect()` — a raw read
+    /// of the DENSE per-row cross block. A matrix-free system does not have one:
+    /// `set_row_htbeta_operator` installs `H_tβ` as a matvec pair and the row
+    /// slabs are allocated at zero columns, which is exactly what the
+    /// overcomplete support-sparse lane assembles
+    /// (`SaeSupportSparseTerm::assemble_arrow_schur`: `htbeta_cols = 0`, plus
+    /// per-atom `block_offsets`). Subscripting a `(d, 0)` slab at a border
+    /// column is `ndarray: index out of bounds`, on whichever rayon worker the
+    /// escalated PCG tier happens to run on.
+    ///
+    /// Every OTHER reduced-Schur kernel was already taught this — see
+    /// `assemble_local_schur_block` and `build_schur_scalar_inv`, whose comments
+    /// say "never a raw `row.htbeta` read at the global `sys.d`: matvec-backed
+    /// rows carry absent/zero-sized slabs by contract (a raw read is wrong or
+    /// panics)". This was the one place on the preconditioner ladder that was
+    /// not, and it is what ClusterJacobi, AdditiveSchwarz,
+    /// DiagAssembledSchwarz, BlockIncompleteCholesky and the co-visibility group
+    /// builder all construct first.
+    ///
+    /// The row's cross block is recovered EXACTLY, one row at a time, by
+    /// applying the routed transpose to each unit vector of the row's own latent
+    /// space: `H_βt^(i) e_c` is row `c` of `H_tβ^(i)`. That is `d_i` operator
+    /// applications, and the per-column activity is accumulated in ABSOLUTE
+    /// value so a column that is nonzero in two latent rows and sums to zero
+    /// across them still reads as active — the predicate is "some entry is
+    /// nonzero", which is what the previous element scan tested.
+    ///
+    /// Taking the system also removes the clone: the old signature copied every
+    /// row's `(d, k)` slab, `O(n·d·k)` of transient memory on a dense system.
+    ///
+    /// # Cost
+    ///
+    /// One linear pass over the cross-block data: `Σ_i d_i · k`. The element
+    /// scan it replaces exited early per block, so it usually touched only the
+    /// first nonzero column of each — cheaper by roughly the average block
+    /// width. That early exit needs random access to individual entries, which
+    /// is precisely what a matrix-free operator does not offer, and for a dense
+    /// system the new pass is one sweep over slabs the system is already holding
+    /// resident (a system whose `Σ_i d_i · k` did not fit could not have
+    /// allocated them). The graph is built once per preconditioner escalation.
+    pub(crate) fn build_from_system(sys: &ArrowSchurSystem) -> Self {
+        let num_blocks = sys.block_offsets.len();
         if num_blocks == 0 {
-            return Self {
-                num_blocks: 0,
-                edges: Vec::new(),
-                adj_start: vec![0],
-                adj_targets: Vec::new(),
-                adj_weights: Vec::new(),
-            };
+            return Self::empty();
         }
-
-        // Accumulate the co-firing MULTIPLICITY per undirected pair: the number
-        // of rows where the two blocks are simultaneously active. The unweighted
-        // edge set (for `component_partition`) is its key set; the counts become
-        // the co-visibility weights that drive the bounded cluster partition.
+        let k = sys.k;
+        let mut column_mass = vec![0.0_f64; k];
+        let mut probe = Array1::<f64>::zeros(k);
+        let mut active = Vec::<usize>::new();
+        let mut unit = Array1::<f64>::zeros(sys.d.max(1));
         let mut edge_count = std::collections::BTreeMap::<(usize, usize), f64>::new();
-        for row in htbeta_rows {
-            let mut active = Vec::<usize>::new();
-            for (block, range) in block_offsets.iter().enumerate() {
-                if range
-                    .clone()
-                    .any(|col| (0..row.nrows()).any(|axis| row[[axis, col]] != 0.0))
-                {
+        for (row_idx, row) in sys.rows.iter().enumerate() {
+            let latent_dim = sys.row_dims[row_idx];
+            column_mass.fill(0.0);
+            for axis in 0..latent_dim {
+                unit.fill(0.0);
+                unit[axis] = 1.0;
+                probe.fill(0.0);
+                let unit_row = unit.slice(ndarray::s![..latent_dim]);
+                sys_htbeta_accumulate_transpose(sys, row_idx, row, unit_row, &mut probe);
+                for (mass, value) in column_mass.iter_mut().zip(probe.iter()) {
+                    *mass += value.abs();
+                }
+            }
+            active.clear();
+            for (block, range) in sys.block_offsets.iter().enumerate() {
+                if range.clone().any(|col| column_mass[col] != 0.0) {
                     active.push(block);
                 }
             }
-            for i in 0..active.len() {
-                for j in (i + 1)..active.len() {
-                    let key = (active[i].min(active[j]), active[i].max(active[j]));
-                    *edge_count.entry(key).or_insert(0.0) += 1.0;
-                }
+            Self::count_co_firing(&active, &mut edge_count);
+        }
+        Self::from_edge_counts(num_blocks, edge_count)
+    }
+
+    fn empty() -> Self {
+        Self {
+            num_blocks: 0,
+            edges: Vec::new(),
+            adj_start: vec![0],
+            adj_targets: Vec::new(),
+            adj_weights: Vec::new(),
+        }
+    }
+
+    /// Accumulate the co-firing MULTIPLICITY per undirected pair: the number of
+    /// rows where the two blocks are simultaneously active. The unweighted edge
+    /// set (for `component_partition`) is its key set; the counts become the
+    /// co-visibility weights that drive the bounded cluster partition.
+    fn count_co_firing(
+        active: &[usize],
+        edge_count: &mut std::collections::BTreeMap<(usize, usize), f64>,
+    ) {
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                let key = (active[i].min(active[j]), active[i].max(active[j]));
+                *edge_count.entry(key).or_insert(0.0) += 1.0;
             }
         }
+    }
 
+    fn from_edge_counts(
+        num_blocks: usize,
+        edge_count: std::collections::BTreeMap<(usize, usize), f64>,
+    ) -> Self {
         let edges: Vec<_> = edge_count.keys().map(|&(a, b)| BetaEdge { a, b }).collect();
         let weights: Vec<f64> = edge_count.values().copied().collect();
         let mut degree = vec![0usize; num_blocks];

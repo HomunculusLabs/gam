@@ -1603,6 +1603,143 @@ pub(crate) fn evidence_row_spectral_deflation_count_is_stable_across_the_cutoff(
     );
 }
 
+/// #2572 — the β-coupling graph must be identical whether `H_tβ` arrives as a
+/// dense per-row slab or as the routed matvec pair, and a matrix-free system
+/// (whose row slabs are allocated at ZERO columns) must not be subscripted.
+///
+/// Before the fix this built from `sys.rows[i].htbeta` directly. On the
+/// overcomplete support-sparse lane — `htbeta_cols = 0` plus per-atom
+/// `block_offsets` — that read `(d, 0)[[axis, col]]` and aborted with
+/// `ndarray: index out of bounds`, on whichever rayon worker the escalated PCG
+/// tier ran on. Measured on a seeded `K = 24 > P = 8`, `top_k = 4` term:
+/// `ClusterJacobiPreconditioner::from_arrow_schur` and
+/// `AdditiveSchwarzPreconditioner::from_arrow_schur` both aborted with exactly
+/// that message (`examples/issue_2572_precond_probe.rs` in `gam-sae`).
+#[test]
+fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
+    // Four β blocks of two columns each. Rows 0 and 1 co-fire blocks (0, 1);
+    // row 2 co-fires (2, 3); nothing bridges the two pairs, so the component
+    // partition must be exactly {{0, 1}, {2, 3}} and block 0 must never be
+    // reported as co-firing with block 2.
+    let k = 8usize;
+    let block_offsets: Arc<[Range<usize>]> = vec![0..2, 2..4, 4..6, 6..8].into();
+    let entries: [(usize, [(usize, f64); 4]); 3] = [
+        (0, [(0, 1.0), (1, -0.5), (2, 0.25), (3, 2.0)]),
+        (1, [(0, 0.5), (1, 1.5), (2, -1.0), (3, 0.75)]),
+        (2, [(4, 1.0), (5, -2.0), (6, 0.5), (7, 1.25)]),
+    ];
+
+    let dense = {
+        let mut sys = ArrowSchurSystem::new(3, 1, k);
+        for (row, cols) in entries {
+            for (col, value) in cols {
+                sys.rows[row].htbeta[[0, col]] = value;
+            }
+        }
+        sys.set_block_offsets(Arc::clone(&block_offsets));
+        sys
+    };
+    let matrix_free = {
+        // Same operator, no dense slab at all: `htbeta_cols = 0`, exactly what
+        // `SaeSupportSparseTerm::assemble_arrow_schur` allocates.
+        let mut sys = ArrowSchurSystem::new_with_per_row_dims_empty_hbb_and_htbeta_cols(
+            vec![1, 1, 1],
+            k,
+            0,
+        );
+        assert_eq!(sys.rows[0].htbeta.dim(), (1, 0));
+        sys.set_row_htbeta_operator(
+            move |row_idx, x, out| {
+                for (row, cols) in entries {
+                    if row == row_idx {
+                        for (col, value) in cols {
+                            out[0] += value * x[col];
+                        }
+                    }
+                }
+            },
+            move |row_idx, v, out| {
+                for (row, cols) in entries {
+                    if row == row_idx {
+                        for (col, value) in cols {
+                            out[col] += value * v[0];
+                        }
+                    }
+                }
+            },
+        );
+        sys.set_block_offsets(Arc::clone(&block_offsets));
+        sys
+    };
+
+    let dense_graph = BetaCouplingGraph::build_from_system(&dense);
+    let free_graph = BetaCouplingGraph::build_from_system(&matrix_free);
+    let partition = |graph: &BetaCouplingGraph| -> Vec<Vec<usize>> {
+        let mut parts = graph.component_partition();
+        for part in parts.iter_mut() {
+            part.sort_unstable();
+        }
+        parts.sort();
+        parts
+    };
+    assert_eq!(partition(&dense_graph), vec![vec![0, 1], vec![2, 3]]);
+    assert_eq!(
+        partition(&free_graph),
+        partition(&dense_graph),
+        "the routed operator and the dense slab describe the same H_tbeta, so \
+         they must describe the same coupling graph"
+    );
+    let weights = |graph: &BetaCouplingGraph| -> Vec<(usize, usize, f64)> {
+        graph
+            .edges
+            .iter()
+            .zip(0..)
+            .map(|(edge, _)| {
+                let weight = graph
+                    .weighted_neighbours(edge.a)
+                    .find(|(node, _)| *node == edge.b)
+                    .map(|(_, w)| w)
+                    .expect("edge carries its co-firing weight");
+                (edge.a, edge.b, weight)
+            })
+            .collect()
+    };
+    assert_eq!(weights(&free_graph), weights(&dense_graph));
+
+    // A column that is nonzero in two latent rows but sums to zero across them
+    // is still ACTIVE: the predicate is "some entry is nonzero", which the
+    // element scan tested and an unsigned probe would have missed.
+    let cancelling = {
+        let mut sys = ArrowSchurSystem::new_with_per_row_dims_empty_hbb_and_htbeta_cols(
+            vec![2],
+            4,
+            0,
+        );
+        sys.set_row_htbeta_operator(
+            |_row, x, out| {
+                out[0] += x[0] + x[2];
+                out[1] += -x[0] + x[2];
+            },
+            |_row, v, out| {
+                out[0] += v[0] - v[1];
+                out[2] += v[0] + v[1];
+            },
+        );
+        sys.set_block_offsets(vec![0..2, 2..4].into());
+        sys
+    };
+    let mut cancelling_parts = BetaCouplingGraph::build_from_system(&cancelling).component_partition();
+    for part in cancelling_parts.iter_mut() {
+        part.sort_unstable();
+    }
+    assert_eq!(
+        cancelling_parts,
+        vec![vec![0, 1]],
+        "column 0 cancels under a ones-probe but is genuinely active, so both \
+         blocks co-fire and the graph is one component"
+    );
+}
+
 #[test]
 pub(crate) fn sys_htbeta_materialize_row_sums_operator_and_dense_slab() {
     let mut sys = ArrowSchurSystem::new(1, 1, 3);
@@ -6512,13 +6649,7 @@ pub(crate) fn covisibility_partition_recovers_groups_and_beats_scalar_jacobi() {
     // The co-firing graph must be a SINGLE connected component (the ceiling
     // regime), and the bounded co-visibility partition must recover the planted
     // groups: n_groups clusters, each exactly one group's columns.
-    let graph = BetaCouplingGraph::build(
-        &sys.block_offsets,
-        &sys.rows
-            .iter()
-            .map(|r| r.htbeta.clone())
-            .collect::<Vec<_>>(),
-    );
+    let graph = BetaCouplingGraph::build_from_system(&sys);
     assert_eq!(
         graph.component_partition().len(),
         1,

@@ -4222,13 +4222,7 @@ pub(crate) fn covisibility_column_groups(sys: &ArrowSchurSystem) -> Vec<Vec<usiz
     if sys.block_offsets.is_empty() {
         return vec![(0..sys.k).collect()];
     }
-    let graph = BetaCouplingGraph::build(
-        &sys.block_offsets,
-        &sys.rows
-            .iter()
-            .map(|r| r.htbeta.clone())
-            .collect::<Vec<_>>(),
-    );
+    let graph = BetaCouplingGraph::build_from_system(sys);
     graph
         .covisibility_cluster_partition(&sys.block_offsets, covisibility_cluster_max_cols())
         .iter()
@@ -4264,13 +4258,7 @@ impl ClusterJacobiPreconditioner {
             let cols: Vec<usize> = (0..sys.k).collect();
             return Self::build_from_column_groups(sys, htt_factors, ridge_beta, backend, &[cols]);
         }
-        let graph = BetaCouplingGraph::build(
-            &sys.block_offsets,
-            &sys.rows
-                .iter()
-                .map(|r| r.htbeta.clone())
-                .collect::<Vec<_>>(),
-        );
+        let graph = BetaCouplingGraph::build_from_system(sys);
         let col_groups: Vec<Vec<usize>> = graph
             .component_partition()
             .iter()
@@ -4401,13 +4389,7 @@ impl AdditiveSchwarzPreconditioner {
                 weights: vec![1.0f64; sys.k],
             });
         }
-        let graph = BetaCouplingGraph::build(
-            &sys.block_offsets,
-            &sys.rows
-                .iter()
-                .map(|r| r.htbeta.clone())
-                .collect::<Vec<_>>(),
-        );
+        let graph = BetaCouplingGraph::build_from_system(sys);
         let col_groups: Vec<Vec<usize>> = graph
             .component_partition()
             .iter()
@@ -4503,13 +4485,7 @@ impl DiagAssembledSchwarzPreconditioner {
         let col_groups: Vec<Vec<usize>> = if sys.block_offsets.is_empty() {
             vec![(0..sys.k).collect()]
         } else {
-            let graph = BetaCouplingGraph::build(
-                &sys.block_offsets,
-                &sys.rows
-                    .iter()
-                    .map(|r| r.htbeta.clone())
-                    .collect::<Vec<_>>(),
-            );
+            let graph = BetaCouplingGraph::build_from_system(sys);
             graph
                 .component_partition()
                 .iter()
@@ -4767,13 +4743,7 @@ impl BlockIncompleteCholeskyPreconditioner {
         let col_groups: Vec<Vec<usize>> = if sys.block_offsets.is_empty() {
             vec![(0..sys.k).collect()]
         } else {
-            let graph = BetaCouplingGraph::build(
-                &sys.block_offsets,
-                &sys.rows
-                    .iter()
-                    .map(|r| r.htbeta.clone())
-                    .collect::<Vec<_>>(),
-            );
+            let graph = BetaCouplingGraph::build_from_system(sys);
             graph
                 .component_partition()
                 .iter()
