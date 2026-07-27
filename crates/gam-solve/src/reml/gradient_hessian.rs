@@ -6584,8 +6584,18 @@ impl<'a> RemlState<'a> {
 
         let lambdas =
             Array1::from_vec(gam_problem::checked_exp_log_strengths(rho.iter().copied())?);
+        // The sparse-native inner solve takes its penalty from
+        // `sparse_native_reparam.s_transformed` -- the split-projected `S~` in
+        // identity coordinates -- so the outer system it is graded against, and
+        // the `log|S|_+` that normalizes it, have to be built from the same
+        // components (#2454). `Pi` is lambda-invariant, so this is computed once
+        // here and seeded into the bundle's cache below rather than rebuilt.
+        let applied_penalties = super::applied_canonical_penalties_for(
+            &pirls_result.reparam_result,
+            &self.canonical_penalties,
+        )?;
         let mut s_lambda = Array2::<f64>::zeros((self.p, self.p));
-        for (k, cp) in self.canonical_penalties.iter().enumerate() {
+        for (k, cp) in applied_penalties.iter().enumerate() {
             if k < lambdas.len() && lambdas[k] != 0.0 {
                 cp.accumulate_weighted(&mut s_lambda, lambdas[k]);
             }
@@ -6625,7 +6635,7 @@ impl<'a> RemlState<'a> {
             )
         })?;
         let penalty_logdet = super::penalty_logdet::PenaltyPseudologdet::from_penalties(
-            &self.canonical_penalties,
+            &applied_penalties,
             lambdas_slice,
             ridge_passport.penalty_logdet_ridge(),
             self.p,
@@ -6634,7 +6644,7 @@ impl<'a> RemlState<'a> {
         let penalty_rank = penalty_logdet.rank();
         let logdet_s_pos = penalty_logdet.value();
         let (det1_values, _) =
-            penalty_logdet.rho_derivatives_from_penalties(&self.canonical_penalties, lambdas_slice);
+            penalty_logdet.rho_derivatives_from_penalties(&applied_penalties, lambdas_slice);
         let firth_dense_operator_original = if let Some(jeffreys_link) =
             reml_robust_jeffreys_link(&self.config)
         {
@@ -6696,7 +6706,15 @@ impl<'a> RemlState<'a> {
             firth_dense_operator: None,
             firth_dense_operator_original,
             penalty_pseudologdet: std::sync::OnceLock::new(),
-            applied_canonical_penalties: std::sync::OnceLock::new(),
+            // Seeded, not left empty: this bundle's sparse system and its
+            // `logdet_s_pos` / `det1_values` were already built from THESE
+            // components, and a later consumer re-deriving them would be free
+            // to land on a different set (#2454).
+            applied_canonical_penalties: {
+                let cell = std::sync::OnceLock::new();
+                let _ = cell.set(applied_penalties);
+                cell
+            },
             penalty_scores_at_mode: std::sync::OnceLock::new(),
             block_local_correction: std::sync::OnceLock::new(),
         })

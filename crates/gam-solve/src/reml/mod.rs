@@ -5074,6 +5074,53 @@ pub(crate) struct EvalShared {
         std::sync::OnceLock<(usize, Arc<outer_eval::TkCorrectionTerms>)>,
 }
 
+/// The penalty components the criterion APPLIES, `S̃_k = Π S_k Π`, for an inner
+/// solve that ran under `reparam` (#2454).
+///
+/// A free function rather than a method, because the sparse-exact lane has to
+/// build this BEFORE its `EvalShared` exists — and building it twice from two
+/// places is exactly the split this whole issue is about. `EvalShared` caches
+/// the result of this call; the sparse builder seeds that cache with the same
+/// object it used itself.
+///
+/// The identity `Arc` comes back whenever the split declares nothing null, the
+/// penalty list is empty, or every projection falls below the roots' own
+/// representation noise — so the ordinary fit allocates nothing and keeps each
+/// penalty's `op` handle, block chart and cached spectrum.
+pub(crate) fn applied_canonical_penalties_for(
+    reparam: &gam_terms::construction::ReparamResult,
+    canonical_penalties: &Arc<Vec<gam_terms::construction::CanonicalPenalty>>,
+) -> Result<Arc<Vec<gam_terms::construction::CanonicalPenalty>>, EstimationError> {
+    let split = reparam.null_split();
+    if split.declared_null_dim() == 0 || canonical_penalties.is_empty() {
+        return Ok(Arc::clone(canonical_penalties));
+    }
+    let projected = canonical_penalties
+        .iter()
+        .map(|penalty| {
+            split.project_canonical(penalty, gam_terms::construction::PenaltyFrame::Original)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            EstimationError::LayoutError(format!(
+                "projecting the canonical penalties onto the reparameterization's penalized \
+                 subspace failed: {error}"
+            ))
+        })?;
+    // `project_canonical` returns the penalty itself when the projection is
+    // below the root's own noise, so an all-unchanged result IS the identity
+    // and is handed back as the original `Arc` rather than as a copy.
+    if projected
+        .iter()
+        .zip(canonical_penalties.iter())
+        .all(|(a, b)| a.root == b.root && a.col_range == b.col_range)
+    {
+        Ok(Arc::clone(canonical_penalties))
+    } else {
+        Ok(Arc::new(projected))
+    }
+}
+
 impl EvalShared {
     pub(crate) fn matches(&self, key: &Option<Vec<u64>>) -> bool {
         match (&self.key, key) {
@@ -5113,35 +5160,8 @@ impl EvalShared {
         if let Some(applied) = self.applied_canonical_penalties.get() {
             return Ok(Arc::clone(applied));
         }
-        let split = self.pirls_result.reparam_result.null_split();
-        let applied = if split.declared_null_dim() == 0 || canonical_penalties.is_empty() {
-            Arc::clone(canonical_penalties)
-        } else {
-            let projected = canonical_penalties
-                .iter()
-                .map(|penalty| {
-                    split.project_canonical(penalty, gam_terms::construction::PenaltyFrame::Original)
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
-                    EstimationError::LayoutError(format!(
-                        "projecting the canonical penalties onto the reparameterization's \
-                         penalized subspace failed: {error}"
-                    ))
-                })?;
-            // `project_canonical` clones when the projection is below the
-            // roots' own noise, so an all-unchanged result is the identity and
-            // is returned as the original `Arc` rather than a copy.
-            if projected
-                .iter()
-                .zip(canonical_penalties.iter())
-                .all(|(a, b)| a.root == b.root && a.col_range == b.col_range)
-            {
-                Arc::clone(canonical_penalties)
-            } else {
-                Arc::new(projected)
-            }
-        };
+        let applied =
+            applied_canonical_penalties_for(&self.pirls_result.reparam_result, canonical_penalties)?;
         match self.applied_canonical_penalties.set(Arc::clone(&applied)) {
             Ok(()) => Ok(applied),
             Err(_) => Ok(Arc::clone(
