@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -50,7 +50,15 @@ fn main() -> Result<(), String> {
     } else {
         1.0
     };
-    println!("alpha: {alpha_arg}");
+    // Smoothing strength. Same unselected-penalty asymmetry as `alpha`: this
+    // charges `lambda * tr(B' S B)` on the decoder while the TopK SAE baseline
+    // carries no decoder penalty at all.
+    let lambda_arg: f64 = if args.len() >= 15 {
+        args[14].parse().map_err(|e| format!("lambda: {e}"))?
+    } else {
+        1.0
+    };
+    println!("alpha: {alpha_arg}  lambda: {lambda_arg}");
     println!(
         "mode: {}",
         if reml_arg { "REML per-atom smoothing alternation" } else { "fixed smoothing" }
@@ -119,7 +127,7 @@ fn main() -> Result<(), String> {
     let ard: Vec<Vec<f64>> = (0..k_ret)
         .map(|atom| vec![alpha_arg; term_seed.term.assignment.atom_coord_dim(atom)])
         .collect();
-    let lambda: Vec<f64> = vec![1.0_f64; k_ret];
+    let lambda: Vec<f64> = vec![lambda_arg; k_ret];
     println!("seeded: retained {k_ret} of {k_atoms}");
 
     let t0 = Instant::now();
