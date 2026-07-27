@@ -2258,51 +2258,57 @@ impl<'a> RemlState<'a> {
         };
 
         let p_eff = x_eff_dense.ncols();
-        // KNOWN RESIDUAL EXPOSURE (#2454, not an instance — read before extending).
+        // These penalties are consumed below as `A_k β̂ = λ_k S_k β̂` and
+        // `tr(λ_k S_k P)` — both of them `∂H/∂ρ_k` objects. `H` contains the
+        // split-projected `S̃(λ) = E(λ)ᵀE(λ)`, so the penalty spelled here has
+        // to be `λ_k Π S_k Π` for exactly the reason it does in the outer
+        // ρ-gradient (#2454): the difference between the two is β̂'s energy in
+        // the directions the λ-invariant split declares null, multiplied by
+        // `λ_k` — an additive `c·λ` that is invisible at `‖ρ‖ ≤ 1` and grows
+        // without bound above it.
         //
-        // These penalties are UNPROJECTED: they are the raw canonical blocks
-        // `S_k`, not the split-projected `S̃_k = Π S_k Π` that the criterion's
-        // penalty `S̃(λ) = E(λ)ᵀE(λ)` is built from and that `finish_assembly`
-        // now hands the unified evaluator. They are consumed below as
-        // `A_k β̂ = λ_k S_k β̂` and `tr(λ_k S_k P)` — both of them `∂H/∂ρ_k`
-        // objects, and `H` contains `S̃`, so the exactly-correct spelling here
-        // is `λ_k Π S_k Π` for the same reason it is in the outer ρ-gradient.
-        //
-        // Where the two differ, the difference is β̂'s energy in the directions
-        // the λ-invariant split declares null, multiplied by `λ_k` — the
-        // additive `c·λ` shape of #2454. It is only nonzero when a block's own
-        // root rank EXCEEDS the split's penalized rank, i.e. when the balanced
-        // penalty spectrum spans more than the split's `1e-12` relative rank
-        // tolerance (an ill-conditioned kernel, e.g. a Matérn whose length
-        // scale dwarfs the data's span).
-        //
-        // Left unprojected deliberately: this is the Tierney–Kadane channel,
-        // reached only for robust-Jeffreys/Firth links (Gaussian identity
-        // returns early in `validate_tk_ext_coords`), and no fixture yet
-        // exhibits the divergence here — #2454's own binomial-logit arm asserts
-        // TK is NOT engaged. Projecting would mean rebuilding `CanonicalPenalty`
-        // values per evaluation on the #1575 batched hot path, whose
-        // `from_dense_root` recomputes `positive_eigenvalues`. The correct fix
-        // when an instance appears is to project β̂ and `P` once per evaluation
-        // (`λ_k Π S_k Π β̂ = λ_k Π S_k (Π β̂)` and
-        // `tr(Π S_k Π · P) = tr(S_k · Π P Π)`), which is exact and costs two
-        // `O(p·m)` products rather than a penalty rebuild.
+        // `project_canonical` returns the penalty untouched when the projection
+        // is below the roots' own representation noise, which is the ordinary
+        // case, so the #1575 batched hot path pays only a comparison. The
+        // sparse-native original-basis arm reads the bundle's cached applied
+        // set (`Π` is λ-invariant, so it is built once per bundle); the
+        // transformed arms project the transformed-frame roots against the
+        // transformed-frame basis, and the active-set arm composes the two
+        // projections in the order `Zᵀ (Π S_k Π) Z`.
+        let null_split = pirls_result.reparam_result.null_split();
         let tk_penalties: Vec<gam_terms::construction::CanonicalPenalty> = if use_original_basis {
-            self.canonical_penalties.as_ref().clone()
-        } else if let Some(z) = free_basis_opt.as_ref() {
-            pirls_result
+            bundle
+                .applied_canonical_penalties(&self.canonical_penalties)?
+                .as_ref()
+                .clone()
+        } else {
+            let transformed = pirls_result
                 .reparam_result
                 .canonical_transformed
                 .iter()
                 .map(|cp| {
-                    gam_terms::construction::CanonicalPenalty::from_dense_root(
-                        cp.root.dot(z),
-                        p_eff,
-                    )
+                    null_split
+                        .project_canonical(cp, gam_terms::construction::PenaltyFrame::Transformed)
                 })
-                .collect()
-        } else {
-            pirls_result.reparam_result.canonical_transformed.clone()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    EstimationError::LayoutError(format!(
+                        "projecting the Tierney-Kadane penalty blocks onto the \
+                         reparameterization's penalized subspace failed: {error}"
+                    ))
+                })?;
+            match free_basis_opt.as_ref() {
+                Some(z) => transformed
+                    .iter()
+                    .map(|cp| {
+                        gam_terms::construction::CanonicalPenalty::from_dense_root(
+                            cp.full_width_root().dot(z),
+                            p_eff,
+                        )
+                    })
+                    .collect(),
+                None => transformed,
+            }
         };
         let lambdas = gam_problem::checked_exp_log_strengths(rho.iter().copied())?;
         let beta = if use_original_basis {

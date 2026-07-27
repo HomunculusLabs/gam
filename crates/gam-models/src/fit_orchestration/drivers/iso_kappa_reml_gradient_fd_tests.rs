@@ -2766,6 +2766,104 @@ fn outer_rho_gradient_error_does_not_scale_with_lambda_2454() {
     }
 }
 
+/// #2454 GATE: the criterion's two determinant terms must be two views of ONE
+/// penalty, so `log|S|₊` may not charge a rank `log|H|` cannot inflate.
+///
+/// `V = −ℓ + ½β̂ᵀS̃β̂ + ½log|H| − ½log|S|₊` with `H = −∇²ℓ + S̃`, where
+/// `S̃(λ) = Π(Σ_k λ_k S_k)Π` is the penalty the reparameterization built and the
+/// inner solve minimized. `½log|H|` therefore grows at most `rank(S̃)/2` per
+/// unit ρ, no matter how large λ becomes. If `−½log|S|₊` is taken on a penalty
+/// of a DIFFERENT rank `r`, the two halves saturate at different rates and
+///
+///     ∂V/∂ρ → ½(rank(S̃) − r)   per unit ρ, forever,
+///
+/// which for `r > rank(S̃)` is a criterion unbounded below: no interior
+/// optimum, no λ=∞ face, and an outer search that arrives at the box edge.
+/// That is what this fixture measured — `rank(S̃) = 8` against `r = 10`, giving
+/// a `−1` per unit ρ tail that COST followed from ρ≈27 onward.
+///
+/// The gate is expressed as a rank identity rather than as a tolerance on the
+/// criterion, because it is exact at EVERY λ — it does not need the FD oracle
+/// to be sharp, or `log|H|` to have saturated, or the search to have reached
+/// the tail. Both halves are read off the criterion's own recorded state: the
+/// declared rank, and the growth of `log|S|₊` itself, which is affine in ρ at
+/// fixed rank with slope exactly `rank(S)`.
+///
+/// Deliberately NOT read off the gradient's `logdet_s` part. That attribution
+/// is route-dependent: the cancellation-free fused route returns
+/// `tr(G_ε·Ḣ_k) − det1_k` as one number and books it whole to `logdet_h`, which
+/// is honest but makes `logdet_s` zero. The criterion value carries the same
+/// fact with no such ambiguity.
+#[test]
+fn penalty_logdet_ranks_the_same_subspace_the_hessian_carries_2454() {
+    let rungs = [6.0_f64, 12.0, 18.0, 24.0];
+    let rows = rho_gradient_part_ladder_2454(&rungs, 3e-4);
+    assert!(!rows.is_empty(), "ladder produced no rungs");
+
+    let report = || -> String {
+        rows.iter()
+            .filter(|row| row.coordinate == 0)
+            .map(|row| {
+                format!(
+                    "rho={:5.1} COST={:+.10e} penalized_rank={} logdet_rank={} \
+                     log|S|_+={:+.8e}",
+                    row.rho, row.cost, row.penalized_rank, row.logdet_rank, row.logdet_value,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    };
+
+    for row in &rows {
+        assert!(
+            row.penalized_rank > 0 && row.logdet_rank > 0,
+            "the penalty-frame audit did not report both ranks; the gate would then be \
+             grading an unarmed instrument\n  {}",
+            report()
+        );
+        // 1. The two ranks are one rank. `H` carries `S̃`; `log|S|₊` must too.
+        assert_eq!(
+            row.logdet_rank,
+            row.penalized_rank,
+            "#2454: the criterion's log|S|_+ ranges over rank {} while the penalty H \
+             carries has rank {} at rho={:.1}. The LAML pair's asymptotic slope is then \
+             {:+.1} per unit rho and the criterion has no interior optimum.\n  {}",
+            row.logdet_rank,
+            row.penalized_rank,
+            row.rho,
+            0.5 * (row.penalized_rank as f64 - row.logdet_rank as f64),
+            report()
+        );
+    }
+
+    // 2. The same statement as a RATE, which is what the tail actually feels.
+    //    Every ρ coordinate moves together on this ladder, so
+    //    `Δlog|S|₊/Δρ = Σ_k λ_k tr(S⁺S_k) = tr(S⁺S) = rank(S)` exactly, and
+    //    `½log|H|` can answer at most `rank(S̃)` of it.
+    let at = |rho: f64| -> Option<&RhoGradientLadderRow2454> {
+        rows.iter().find(|row| row.rho == rho && row.coordinate == 0)
+    };
+    for pair in rungs.windows(2) {
+        let (Some(low), Some(high)) = (at(pair[0]), at(pair[1])) else {
+            continue;
+        };
+        let charged = (high.logdet_value - low.logdet_value) / (pair[1] - pair[0]);
+        let carried = high.penalized_rank as f64;
+        assert!(
+            (charged - carried).abs() <= 1.0e-6 * carried.max(1.0),
+            "#2454: over rho {:.1} -> {:.1} the criterion's log|S|_+ grows at \
+             {charged:.9} per unit rho while H carries only {carried:.1} penalized \
+             directions. The LAML pair therefore keeps a residual slope of {:+.4} per \
+             unit rho that no lambda can cancel, and the criterion has no interior \
+             optimum.\n  {}",
+            pair[0],
+            pair[1],
+            0.5 * (carried - charged),
+            report()
+        );
+    }
+}
+
 /// #2454 MEASUREMENT (reports, never fails): the full part decomposition.
 ///
 /// Prints, per ρ and per ρ-coordinate, each criterion component's analytic
