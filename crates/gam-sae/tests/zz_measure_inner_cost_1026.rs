@@ -84,7 +84,10 @@ fn planted_micro(n: usize, p: usize, seed: u64) -> Array2<f64> {
 
 #[test]
 fn zz_measure_inner_joint_fit_cost_at_zoo_micro_shape() {
-    let (n, p, k_atoms, num_basis) = (3000usize, 48usize, 12usize, 8usize);
+    // num_basis must be ODD: PeriodicHarmonicEvaluator spans 2H+1 functions
+    // (one DC term plus H complete sin/cos pairs). 8 requested half a pair and
+    // the evaluator correctly refused. 9 = H4 is the next valid size up.
+    let (n, p, k_atoms, num_basis) = (3000usize, 48usize, 12usize, 9usize);
     let z = planted_micro(n, p, 7);
 
     // Production PCA seed for all K charts (the cold-path seeder), then

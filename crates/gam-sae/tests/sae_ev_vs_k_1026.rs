@@ -274,7 +274,11 @@ fn linear_single_atom_ev(z: ArrayView2<'_, f64>) -> f64 {
 fn curved_atom_beats_linear_atom_on_circle_at_matched_k_1026() {
     let z = planted_circle(80, 6, 11);
     let ev_lin = linear_single_atom_ev(z.view());
-    let ev_curved = curved_single_atom_ev(z.view(), 4);
+    // PeriodicHarmonicEvaluator spans [1, sin/cos(1..H)] = 2H+1 functions, so
+    // num_basis must be ODD; 4 would be half a sin/cos conjugate pair, and a
+    // span missing one half of a pair is not phase-shift invariant, i.e. not a
+    // periodic basis at all. 5 = H2 is the next valid size up.
+    let ev_curved = curved_single_atom_ev(z.view(), 5);
     println!("#1026 K=1 circle: linear EV={ev_lin:.4}  curved EV={ev_curved:.4}");
 
     // A single linear direction cannot exceed the rank-1 cap on a full ring
