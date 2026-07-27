@@ -566,6 +566,15 @@ pub(crate) struct CostStallGuard {
     /// once exhausted the guard halts a far-above-tolerance stall as an ordinary
     /// flat-valley floor so the loop still terminates.
     stuck_escapes: usize,
+    /// The incumbent objective at the moment the previous escape was granted,
+    /// so the NEXT stall can ask whether that escape bought anything at all.
+    ///
+    /// An escape is a bet: the residual gradient says feasible descent remains,
+    /// so reopen the window and let the search take it. Whether the bet paid is
+    /// measurable, and the budget should be spent on escapes rather than on
+    /// repetitions of one that provably did not. `None` before the first escape
+    /// of a streak, and cleared wherever [`Self::stuck_escapes`] is replenished.
+    best_value_at_last_escape: Option<f64>,
     /// #2241 — the most recent trusted accepted iterates `(ρ_i, f_i)` (finite
     /// cost, inner solve converged), newest last, capped at `window + 1`
     /// entries. This is the raw evidence for the probe-noise-floor flat
@@ -597,6 +606,7 @@ impl CostStallGuard {
             infeasible_streak: 0,
             accepted_iters: 0,
             stuck_escapes: 0,
+            best_value_at_last_escape: None,
             recent: std::collections::VecDeque::new(),
             exit,
         }
@@ -872,6 +882,7 @@ impl CostStallGuard {
             // relative floor and the criterion is bounded below, so only
             // finitely many resets can occur.
             self.stuck_escapes = 0;
+            self.best_value_at_last_escape = None;
         }
         if self.no_improve_streak < self.window {
             return CostStallVerdict::Continue;
@@ -1148,8 +1159,30 @@ impl CostStallGuard {
             .min(FLAT_VALLEY_STALL_GRAD_CEILING);
         let non_stationary_stall =
             best_grad_norm.is_finite() && best_grad_norm > keep_descending_threshold;
-        if non_stationary_stall && self.stuck_escapes < STUCK_STALL_MAX_ESCAPES {
+        // Spend the budget on ESCAPES, not on repetitions of one that provably
+        // did nothing. Each escape reopens a full `window` of accepted outer
+        // steps, so a fruitless one is not free — measured on the geo_latlon
+        // binomial fuzz scenarios, all eight fired back to back at a
+        // BIT-IDENTICAL incumbent (value=1.590092e2, |g|=3.055e-1 on every one)
+        // and the seven repeats cost about half the seed's wall clock before
+        // the guard halted with the verdict escape 1 would have produced.
+        //
+        // The test is deliberately at the ROUNDOFF resolution, not at
+        // `rel_tol`: the budget of eight was sized for a multi-shelf descent
+        // whose 7th escape bought a 36-point objective drop (#2253), and any
+        // escape that buys real descent — however far below the stall floor —
+        // still keeps its budget. Only an escape that moved the incumbent by
+        // less than the criterion can even represent is treated as evidence
+        // that repeating it cannot help.
+        let previous_escape_bought_nothing = self.best_value_at_last_escape.is_some_and(|before| {
+            !(before - best_value > f64::EPSILON * (1.0 + before.abs()))
+        });
+        if non_stationary_stall
+            && self.stuck_escapes < STUCK_STALL_MAX_ESCAPES
+            && !previous_escape_bought_nothing
+        {
             self.stuck_escapes = self.stuck_escapes.saturating_add(1);
+            self.best_value_at_last_escape = Some(best_value);
             // Reset BOTH no-progress streaks: the optimizer should be allowed a
             // fresh window of accepted/infeasible steps to climb out of the
             // stuck state. Do NOT publish a halt — leave the shared exit cell
@@ -1162,6 +1195,17 @@ impl CostStallGuard {
                 residual_grad_norm: best_grad_norm,
                 escape_threshold: keep_descending_threshold,
             };
+        }
+        if non_stationary_stall && previous_escape_bought_nothing {
+            log::info!(
+                "[OUTER] cost-stall escape budget cut at {}/{}: escape {} reopened a full                  {}-step window and moved the incumbent by less than the criterion's own                  roundoff resolution (best={:.9e}, |g|={:.3e}); halting rather than                  re-exploring a window measured not to descend.",
+                self.stuck_escapes,
+                STUCK_STALL_MAX_ESCAPES,
+                self.stuck_escapes,
+                self.window,
+                best_value,
+                best_grad_norm,
+            );
         }
         if let Ok(mut slot) = self.exit.lock() {
             *slot = Some(CostStallExit {
