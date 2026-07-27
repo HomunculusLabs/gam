@@ -83,7 +83,11 @@ runs:
                     "gsl","quantreg","mlt","tram","basefun","loo","jsonlite",
                     "spheresmooth","Directional","nprotreg","compositions",
                     "robCompositions","scoringrules","gamboostLSS","mboost","bamlss",
-                    "gamlss.add","DirichletReg")
+                    "gamlss.add","DirichletReg",
+                    # KFAS: mature R state-space/Kalman smoother — the second
+                    # opinion beside INLA on the RW2/SPDE penalised-baseline
+                    # arm, where gam currently has only one comparator.
+                    "KFAS")
           for (p in pkgs) if (!requireNamespace(p, quietly=TRUE))
             try(install.packages(p), silent=TRUE)
           # SECOND pass: anything still missing (a binary that mismatched the
@@ -202,6 +206,28 @@ runs:
         # documented kwarg constructor the scripts are written against.
         pip install numpyro "arviz<1.0" pymc || true
         pip install interpret ngboost || true
+        # gamlss2: the modern rewrite of gamlss. Seven location-scale arms
+        # currently miss against gamlss; a second independent location-scale
+        # implementation tells us whether gam is wrong or gamlss is simply a
+        # hard baseline. Not on CRAN yet, so from its own repo.
+        Rscript -e 'if (!requireNamespace("gamlss2", quietly=TRUE))
+          try(install.packages("gamlss2",
+              repos=c("https://gamlss-dev.r-universe.dev","https://cloud.r-project.org")),
+              silent=TRUE)' || true
+        # MSSM (Mixed-Sparse-Smooth-Models): Python GAMM toolbox — a comparator
+        # for the smooth + random-effect arms (quality_vs_lme4_mgcv_random_
+        # intercept_by_smooth), which today only have R comparators.
+        pip install mssm || true
+        # MAPIE: the standard conformal-prediction library. gam ships
+        # full_conformal.rs and several coverage/calibration arms with NO
+        # conformal comparator at all — this closes that gap.
+        pip install mapie || true
+        # Neural/interpretable GAM family, alongside the existing EBM + pyGAM
+        # predictive arms. Best-effort: these are research-grade and several
+        # publish no stable package, so a miss here is an ungated REF_ERROR.
+        pip install nodegam || true
+        pip install igann || true
+        pip install nam || true
         pip install xgboostlss lightgbmlss || true
         python -c "import numpy,scipy,sklearn,statsmodels,pandas; print('core python refs ok')"
 
