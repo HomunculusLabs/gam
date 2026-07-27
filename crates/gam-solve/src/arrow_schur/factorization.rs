@@ -800,30 +800,64 @@ pub(crate) fn factor_one_row_result(
     row_gauges: &[Array1<f64>],
     allow_spectral_deflation: bool,
 ) -> Result<ArrowRowFactorResult, ArrowSchurError> {
-    // Dimension mismatches in caller-supplied row blocks must surface as a
-    // typed error rather than aborting the process. The BA/SAE assembler can
-    // mis-size a row (for instance when latent_dim disagrees between the
-    // design and the term that materialized the block), and downstream code
-    // — including the LM outer loop — needs to recover by escalating ridge
-    // or rebuilding the system, not by panicking.
-    if row.htt.dim() != (d, d) {
+    // `d` is an UPPER BOUND, not the row's dimension.
+    //
+    // [`ArrowSchurSystem::d`] is documented as `max_i row_dims[i]`: for a
+    // homogeneous system it equals every row's dimension, but a heterogeneous
+    // one — the SAE support-sparse lane's whole point, where a row's latent
+    // width is the sum of its TopK atoms' chart dimensions and those atoms have
+    // different dimensions by construction — has rows strictly narrower than
+    // it. So the ROW BLOCK is the authority on its own dimension and `d` only
+    // bounds it.
+    //
+    // This used to demand `row.htt.dim() == (d, d)`, which made the two callers
+    // of this function disagree: `factor_blocks_for_system`'s gauge-deflation
+    // branch passes `sys.row_dims[row_idx]` (per-row, correct), while its
+    // OTHER branch goes through `BatchedBlockSolver::factor_blocks_with_policy`,
+    // which has only the scalar `sys.d` to pass and handed that same bound to
+    // every row. A heterogeneous system with no installed gauge deflation —
+    // exactly the support-sparse evidence factorization — was therefore refused
+    // outright at row 0 (#2576). Deriving the dimension here is what makes the
+    // two branches unable to disagree again.
+    //
+    // The original check's purpose is kept: a genuinely mis-sized block (a
+    // non-square `H_tt`, a `g_t` that disagrees with it, or a row wider than the
+    // system says any row can be) is an assembler error, and it still surfaces
+    // as a typed `PerRowFactorFailed` the LM loop can recover from rather than a
+    // panic.
+    let (htt_rows, htt_cols) = row.htt.dim();
+    if htt_rows != htt_cols {
         return Err(ArrowSchurError::PerRowFactorFailed {
             row: row_idx,
             reason: format!(
-                "row {row_idx} H_tt shape {:?} does not match per_point_hessian_block dimension ({d}, {d})",
+                "row {row_idx} H_tt shape {:?} is not square; a per-row latent Hessian block \
+                 must be",
                 row.htt.dim()
             ),
         });
     }
-    if row.gt.len() != d {
+    if htt_rows > d {
         return Err(ArrowSchurError::PerRowFactorFailed {
             row: row_idx,
             reason: format!(
-                "row {row_idx} g_t length {} does not match latent dimension {d}",
+                "row {row_idx} H_tt shape {:?} exceeds the system's declared maximum per-row \
+                 latent dimension ({d}, {d})",
+                row.htt.dim()
+            ),
+        });
+    }
+    if row.gt.len() != htt_rows {
+        return Err(ArrowSchurError::PerRowFactorFailed {
+            row: row_idx,
+            reason: format!(
+                "row {row_idx} g_t length {} does not match its own H_tt latent dimension \
+                 {htt_rows}",
                 row.gt.len()
             ),
         });
     }
+    // Everything below indexes the block, so it must use the block's dimension.
+    let d = htt_rows;
     // Per-row adaptive Tikhonov ridge. A non-convex objective (e.g. softmax
     // assignment) can leave an individual token's latent Hessian H_tt^(i)
     // indefinite, so `H_tt + ridge_t·I` has a negative Cholesky pivot. Rather

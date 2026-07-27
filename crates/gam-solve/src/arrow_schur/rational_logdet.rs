@@ -727,7 +727,7 @@ impl RationalLogdetPlan {
 /// is one shifted-solve implementation and one convergence certificate, not
 /// two that could drift apart.
 pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
-    ShiftedDiagonalPreconditioner { inverse: None };
+    ShiftedDiagonalPreconditioner { diagonal: None };
 
 /// Diagonal preconditioner for the SHIFTED systems `(A + tI)` a rational
 /// log-determinant plan solves.
@@ -742,7 +742,7 @@ pub(crate) const IDENTITY_SHIFT_PRECONDITIONER: ShiftedDiagonalPreconditioner =
 /// exactly the spread that stalls an unpreconditioned CG (#2576).
 #[derive(Debug, Clone)]
 pub struct ShiftedDiagonalPreconditioner {
-    inverse: Option<Array1<f64>>,
+    diagonal: Option<Array1<f64>>,
 }
 
 impl ShiftedDiagonalPreconditioner {
@@ -755,28 +755,34 @@ impl ShiftedDiagonalPreconditioner {
             .iter()
             .any(|value| !(value.is_finite() && *value > 0.0))
         {
-            return Self { inverse: None };
+            return Self { diagonal: None };
         }
         Self {
-            inverse: Some(diagonal.clone()),
+            diagonal: Some(diagonal.clone()),
         }
     }
 
     pub fn identity() -> Self {
-        Self { inverse: None }
+        Self { diagonal: None }
     }
 
     /// Whether this preconditioner does anything.
     pub fn is_identity(&self) -> bool {
-        self.inverse.is_none()
+        self.diagonal.is_none()
     }
 
     fn apply(&self, residual: &Array1<f64>, shift: f64) -> Array1<f64> {
-        match &self.inverse {
+        match &self.diagonal {
             Some(diagonal) => {
                 let mut out = residual.clone();
                 for (value, scale) in out.iter_mut().zip(diagonal.iter()) {
                     let denominator = scale + shift;
+                    // `from_operator_diagonal` admits only strictly positive
+                    // finite entries and the plan's shifts are non-negative, so
+                    // this can fail only on overflow. Leaving that entry
+                    // unscaled keeps `M` symmetric positive definite (unit on
+                    // that coordinate) instead of emitting an infinity that
+                    // would break the recurrence.
                     if denominator > 0.0 && denominator.is_finite() {
                         *value /= denominator;
                     }
@@ -1417,6 +1423,107 @@ mod tests {
             "returned shifted solve must satisfy its true-residual contract"
         );
         assert_eq!(iterations, 2);
+    }
+
+    /// #2576 — the preconditioner must change ITERATION COUNT and nothing else.
+    ///
+    /// On a diagonally-scaled SPD operator (the arrow border's atom
+    /// firing-count spread, in miniature), the identity-preconditioned shifted
+    /// CG needs many iterations to reach a tight tolerance while the
+    /// diagonally-preconditioned one converges almost immediately — and both
+    /// return the SAME solve, because both are certified against the same true
+    /// residual before they are accepted. If a future edit made the
+    /// preconditioner alter the answer rather than the path to it, the equality
+    /// limb catches it; if it made the preconditioner a no-op, the iteration
+    /// limb catches that.
+    #[test]
+    fn shifted_pcg_diagonal_scaling_cuts_iterations_without_moving_the_solve() {
+        // Diagonal 1, 10, 100, ..., 1e7: kappa = 1e7, so unpreconditioned CG
+        // needs O(sqrt(kappa)) iterations while the exact diagonal solves it in
+        // one. Diagonal-only so the preconditioner is EXACT here and the
+        // contrast is unambiguous.
+        let dim = 8usize;
+        let scales: Vec<f64> = (0..dim).map(|i| 10.0_f64.powi(i as i32)).collect();
+        let diagonal = Array1::from(scales.clone());
+        let matvec = |v: ArrayView1<f64>| -> Array1<f64> { &diagonal * &v.to_owned() };
+        let rhs = Array1::from_shape_fn(dim, |i| 1.0 + (i as f64) * 0.25);
+        let zero = Array1::<f64>::zeros(dim);
+        let preconditioner = ShiftedDiagonalPreconditioner::from_operator_diagonal(&diagonal);
+        assert!(
+            !preconditioner.is_identity(),
+            "a strictly positive finite diagonal must produce a real preconditioner"
+        );
+
+        for shift in [0.0_f64, 0.5, 25.0] {
+            let (plain, plain_iters) = shifted_pcg(
+                &matvec,
+                &IDENTITY_SHIFT_PRECONDITIONER,
+                shift,
+                &rhs,
+                &zero,
+                1.0e-13,
+                10_000,
+            )
+            .expect("unpreconditioned shifted CG must converge on an SPD diagonal");
+            let (scaled, scaled_iters) = shifted_pcg(
+                &matvec,
+                &preconditioner,
+                shift,
+                &rhs,
+                &zero,
+                1.0e-13,
+                10_000,
+            )
+            .expect("preconditioned shifted CG must converge on an SPD diagonal");
+
+            // `diag(A + tI) = diag(A) + t`, so ONE diagonal serves every shift:
+            // the preconditioner is exact at each of them and one step suffices.
+            assert!(
+                scaled_iters < plain_iters,
+                "shift {shift}: preconditioning must reduce iterations \
+                 (plain {plain_iters}, scaled {scaled_iters})"
+            );
+            assert!(
+                scaled_iters <= 2,
+                "shift {shift}: an EXACT diagonal preconditioner must solve a \
+                 diagonal system in one reliable step, took {scaled_iters}"
+            );
+
+            // Same solve, to the certified residual both had to meet.
+            let exact = Array1::from_shape_fn(dim, |i| rhs[i] / (scales[i] + shift));
+            for (label, solved) in [("plain", &plain), ("scaled", &scaled)] {
+                for i in 0..dim {
+                    let gap = (solved[i] - exact[i]).abs();
+                    assert!(
+                        gap <= 1.0e-10 * exact[i].abs().max(1.0e-12),
+                        "shift {shift}, {label} component {i}: {} vs exact {} (gap {gap:.3e})",
+                        solved[i],
+                        exact[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// A degenerate diagonal carries no scale, so the preconditioner must
+    /// degrade to the identity rather than fabricate one (or divide by zero).
+    #[test]
+    fn shifted_diagonal_preconditioner_refuses_a_non_positive_diagonal() {
+        for degenerate in [
+            array![1.0, 0.0, 4.0],
+            array![1.0, -2.0, 4.0],
+            array![1.0, f64::NAN, 4.0],
+            array![1.0, f64::INFINITY, 4.0],
+        ] {
+            assert!(
+                ShiftedDiagonalPreconditioner::from_operator_diagonal(&degenerate).is_identity(),
+                "a diagonal containing {degenerate:?} has no usable scale"
+            );
+        }
+        assert!(
+            !ShiftedDiagonalPreconditioner::from_operator_diagonal(&array![1.0, 2.0, 4.0])
+                .is_identity()
+        );
     }
 
     #[test]

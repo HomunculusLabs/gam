@@ -874,4 +874,171 @@ mod tests {
             );
         }
     }
+
+    /// #2576 regression, the blunt one: the criterion must PRODUCE A NUMBER.
+    ///
+    /// Before this issue it could not, on any host without a CUDA device. The
+    /// lane took its factor cache from `solve_arrow_newton_step_with_options`
+    /// under `InexactPCG`, which never forms a dense reduced-Schur factor, so
+    /// `schur_factor_is_undamped` stayed false, `compute_undamped_arrow_log_det`
+    /// returned `None` for `k > 0`, and `arrow_log_det()` refused —
+    /// `"support LAML factor cache has no joint log determinant"` on the very
+    /// first outer evaluation, before the trace estimator the issue was filed
+    /// about was ever reached. The whole grouped-LAML engine was dead code with
+    /// no test that would notice, because every existing test isolated one
+    /// channel and none called `evaluate`.
+    ///
+    /// This test calls it. It is also the CPU-only gate: nothing here builds a
+    /// device operator, so it exercises the host lane that used to have no
+    /// matrix-free `log|S|` at all.
+    #[test]
+    fn support_outer_evaluate_mints_a_finite_value_and_gradient() {
+        let mut objective = build_objective();
+        let rho = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let evaluation = objective
+            .evaluate(&rho)
+            .expect("the grouped-LAML criterion must evaluate on a CPU-only host");
+        assert!(
+            evaluation.cost.is_finite(),
+            "criterion value must be finite, got {}",
+            evaluation.cost
+        );
+        assert_eq!(evaluation.gradient.len(), objective.layout.group_keys.len());
+        assert!(
+            evaluation.gradient.iter().all(|value| value.is_finite()),
+            "every smoothing gradient component must be finite, got {:?}",
+            evaluation.gradient
+        );
+        assert!(
+            evaluation.fixed_point.recurred,
+            "the fixture's inner fixed point must recur so the evaluation is at a \
+             stationary inner state"
+        );
+
+        // The frozen surrogate is the criterion's identity: a second evaluation
+        // at the same ρ must reuse it and reproduce the value BITWISE. A plan
+        // rebuilt per evaluation would make the outer search descend a different
+        // function at every point and would show up here as a value that moves.
+        let again = objective.evaluate(&rho).expect("second evaluation");
+        assert_eq!(
+            evaluation.cost, again.cost,
+            "the frozen log|S| surrogate must make the criterion bit-reproducible at a \
+             fixed ρ"
+        );
+        assert_eq!(evaluation.gradient, again.gradient);
+    }
+
+    /// #2576's decisive oracle for the channel that REPLACED the Hutchinson
+    /// trace estimator.
+    ///
+    /// The lane no longer estimates `tr(H⁻¹ ∂H/∂ρ_g)` with its own probe family.
+    /// It contracts the log-determinant surrogate's own derivative bundle
+    /// against `∂S/∂ρ_g`, on the claim that
+    ///
+    ///   (a) only `H_ββ` carries a smoothing coordinate, so
+    ///       `∂S/∂ρ_g = Σ_{k∈g} λ_k (S_k ⊗ I_P)` — `schur_derivative_matvec`; and
+    ///   (b) `log|H| = Σ_i log|H_tt^(i)| + log|S|` has a ρ-INDEPENDENT row half,
+    ///       so `tr(H⁻¹ ∂H/∂ρ_g) = ∂log|S|/∂ρ_g`.
+    ///
+    /// Both claims are tested at once by central-differencing the production
+    /// `evidence_log_det` — the FULL `log|H|`, row half included — through λ
+    /// alone at a FROZEN inner state, against the analytic contraction. A wrong
+    /// `∂S/∂ρ_g` (missing the `⊗ I_P`, wrong group mask, `λ` instead of
+    /// `∂λ/∂ρ = λ`) fails; a row half that secretly moved with ρ fails; a plan
+    /// rebuilt between the FD legs fails, because then the two legs would be
+    /// values of two different functions.
+    #[test]
+    fn support_outer_logdet_gradient_matches_fd_of_its_own_surrogate() {
+        let mut objective = build_objective();
+        let base = array![0.4_f64.ln(), 2.2_f64.ln()];
+        let groups = objective.layout.group_keys.len();
+
+        // One clean inner solve, then FREEZE: the log-det channel's contract is
+        // the partial derivative through λ at a fixed inner state, which is
+        // exactly what the LAML gradient's trace term is.
+        objective.reset();
+        let lambda_base = objective.layout.expand(&base).expect("expand");
+        objective
+            .term
+            .solve_fixed_point(
+                objective.target.view(),
+                &lambda_base,
+                &objective.ard_precisions,
+                objective.max_inner_iter,
+                objective.inner_tolerance,
+                objective.trust_radius,
+            )
+            .expect("base inner fixed point");
+
+        let assemble = |objective: &SaeSupportOuterObjective, rho: &Array1<f64>| {
+            let lambda = objective.layout.expand(rho).expect("expand");
+            let system = objective
+                .term
+                .assemble_arrow_schur(
+                    objective.target.view(),
+                    &lambda,
+                    &objective.ard_precisions,
+                )
+                .expect("assemble arrow schur");
+            (system, lambda)
+        };
+
+        let (base_system, _) = assemble(&objective, &base);
+        let (base_logdet, bundle) = objective
+            .evidence_log_det(&base_system)
+            .expect("base evidence log-determinant");
+        assert!(base_logdet.is_finite());
+
+        let (beta_offsets, beta_dim) = objective.beta_layout().expect("beta layout");
+        let analytic = (0..groups)
+            .map(|group| {
+                bundle
+                    .directional_derivative(&|vector: ArrayView1<f64>| {
+                        objective.schur_derivative_matvec(
+                            group,
+                            &lambda_base,
+                            &beta_offsets,
+                            beta_dim,
+                            vector,
+                        )
+                    })
+                    .expect("surrogate directional derivative")
+            })
+            .collect::<Vec<_>>();
+
+        let h = 1.0e-5;
+        for group in 0..groups {
+            let mut plus = base.clone();
+            let mut minus = base.clone();
+            plus[group] += h;
+            minus[group] -= h;
+            let (system_plus, _) = assemble(&objective, &plus);
+            let (system_minus, _) = assemble(&objective, &minus);
+            let value_plus = objective
+                .evidence_log_det(&system_plus)
+                .expect("perturbed evidence log-determinant")
+                .0;
+            let value_minus = objective
+                .evidence_log_det(&system_minus)
+                .expect("perturbed evidence log-determinant")
+                .0;
+            let fd = (value_plus - value_minus) / (2.0 * h);
+            let gap = (analytic[group] - fd).abs();
+            assert!(
+                gap <= 1.0e-5 * (1.0 + fd.abs()),
+                "group {group} ({}): analytic ∂log|H|/∂ρ = {:.9e} disagrees with the \
+                 central difference of the SAME frozen surrogate {fd:.9e} (gap {gap:.3e})",
+                objective.layout.group_keys[group],
+                analytic[group],
+            );
+            // A positive-semidefinite ∂S with a strictly positive-rank penalty
+            // block can only INCREASE log|S|; a sign flip in the contraction is
+            // the failure this catches independently of the FD magnitude.
+            assert!(
+                analytic[group] > 0.0,
+                "group {group}: an SPD ∂S/∂ρ must raise log|H|, got {:.9e}",
+                analytic[group]
+            );
+        }
+    }
 }
