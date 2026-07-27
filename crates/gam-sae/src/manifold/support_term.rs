@@ -1603,6 +1603,74 @@ impl SaeSupportSparseTerm {
         Ok(out)
     }
 
+    /// MacKay selection of the coordinate-prior precisions, per atom and axis.
+    ///
+    /// ```text
+    ///   alpha_ka <- n_ka / (sum_i sq_equiv(t_i) + sum_i 1/H_ii)
+    /// ```
+    ///
+    /// `sq_equiv` is the Euclidean-equivalent `t^2` the prior exposes precisely
+    /// so this fixed point stays consistent with the von-Mises energy on a
+    /// periodic axis, and `H_ii` is the coordinate curvature the inner solver
+    /// assembles: the Gauss-Newton `||gamma'(t_i)||^2` plus the prior's PSD
+    /// majorizer. Both come from `fill_active`, which already decodes the atom's
+    /// tangent into the scratch jacobian.
+    ///
+    /// An axis with no occupied slots keeps its incoming precision: there is no
+    /// evidence to select from. Like the smoothing update this is an OUTER-loop
+    /// quantity -- moving alpha moves the objective, and `solve_fixed_point`
+    /// certifies at fixed priors.
+    pub fn mackay_ard_precisions(
+        &self,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<Vec<Vec<f64>>, String> {
+        self.validate_ard(ard_precisions)?;
+        let mut updated = ard_precisions.to_vec();
+        let mut scratch = ActiveAtomScratch::default();
+        for atom_idx in 0..self.k_atoms() {
+            let dim = self.assignment.atom_coord_dim(atom_idx);
+            if dim == 0 || self.atom_rows[atom_idx].is_empty() {
+                continue;
+            }
+            let periods = self.atom_axis_periods(atom_idx).to_vec();
+            let mut energy = vec![0.0_f64; dim];
+            let mut inverse_curvature = vec![0.0_f64; dim];
+            let mut count = vec![0.0_f64; dim];
+            for &(row, slot) in &self.atom_rows[atom_idx] {
+                self.fill_active(row, slot, &mut scratch)?;
+                let coords = self.assignment.coords_for_slot(row, slot);
+                for axis in 0..dim {
+                    let alpha = ard_precisions[atom_idx][axis];
+                    let prior = ArdAxisPrior::eval(alpha, coords[axis], periods[axis]);
+                    // Gauss-Newton coordinate curvature: the decoded tangent's
+                    // squared norm plus the prior curvature the assembly installs.
+                    let mut tangent_sq = 0.0_f64;
+                    for channel in 0..self.output_dim {
+                        let value = scratch.jacobian[[axis, channel]];
+                        tangent_sq += value * value;
+                    }
+                    let curvature = tangent_sq + prior.psd_majorizer_hess();
+                    if !(curvature > 0.0) {
+                        continue;
+                    }
+                    energy[axis] += prior.sq_equiv;
+                    inverse_curvature[axis] += 1.0 / curvature;
+                    count[axis] += 1.0;
+                }
+            }
+            for axis in 0..dim {
+                let denominator = energy[axis] + inverse_curvature[axis];
+                if count[axis] > 0.0 && denominator > 0.0 {
+                    let candidate = count[axis] / denominator;
+                    if candidate.is_finite() && candidate > 0.0 {
+                        updated[atom_idx][axis] = candidate;
+                    }
+                }
+            }
+        }
+        Ok(updated)
+    }
+
     fn decoder_sweep(
         &mut self,
         target: ArrayView2<'_, f64>,

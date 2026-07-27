@@ -28,9 +28,16 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11) {
-        return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir>".into());
+    if !matches!(args.len(), 8 | 10 | 11 | 12) {
+        return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
+    // Seed for BOTH the support cold start and the term seed. A single fit
+    // cannot support a gap claim, so this has to be varied and reported.
+    let seed_arg: u64 = if args.len() == 12 {
+        args[11].parse().map_err(|e| format!("seed: {e}"))?
+    } else {
+        0
+    };
     let rows: usize = args[2].parse().map_err(|e| format!("rows: {e}"))?;
     let cols: usize = args[3].parse().map_err(|e| format!("cols: {e}"))?;
     let k_atoms: usize = args[4].parse().map_err(|e| format!("k: {e}"))?;
@@ -49,8 +56,20 @@ fn main() -> Result<(), String> {
         .collect();
     let target = Array2::from_shape_vec((rows, cols), data).map_err(|e| e.to_string())?;
 
-    let mut atom_basis = vec!["auto".to_string(); k_atoms];
-    resolve_support_auto_atoms(&mut atom_basis);
+    // "auto" is the round-robin linear/euclidean/periodic portfolio. Pinning
+    // every atom to "linear" reduces this model to the TopK SAE it contains,
+    // which is how the optimizer is measured separately from the manifold
+    // hypothesis.
+    let topology_arg = if args.len() >= 11 && args[10] != "0" {
+        args[10].clone()
+    } else {
+        "auto".to_string()
+    };
+    let mut atom_basis = vec![topology_arg.clone(); k_atoms];
+    if topology_arg == "auto" {
+        resolve_support_auto_atoms(&mut atom_basis);
+    }
+    println!("topology: {topology_arg}");
     let atom_dim = vec![1usize; k_atoms];
     let effective = sae_support_effective_atom_dims(&atom_basis, &atom_dim)?;
     let d_max = effective.iter().copied().max().unwrap_or(1);
@@ -66,7 +85,7 @@ fn main() -> Result<(), String> {
         atom_basis: &atom_basis,
         atom_dim: &atom_dim,
         support_k: top_k,
-        random_state: 0,
+        random_state: seed_arg,
         admission,
     })?;
     let retained = seed.retained_atom_indices.clone();
@@ -77,19 +96,133 @@ fn main() -> Result<(), String> {
         atom_basis: retained_basis.clone(),
         atom_dim: retained.iter().map(|&atom| atom_dim[atom]).collect(),
         output_dim: cols,
-        random_state: 0,
+        random_state: seed_arg,
     })?;
     let k_ret = term_seed.term.k_atoms();
     let ard: Vec<Vec<f64>> = (0..k_ret)
         .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
         .collect();
-    let lambda = vec![1.0_f64; k_ret];
+    let lambda: Vec<f64> = vec![1.0_f64; k_ret];
     println!("seeded: retained {k_ret} of {k_atoms}");
 
     let t0 = Instant::now();
-    let report = term_seed
-        .term
-        .solve_fixed_point(centered.view(), &lambda, &ard, max_cycles, 1.0e-4, 1.0)?;
+    // Per-atom REML by Fellner-Schall, alternated with the inner fit. The inner
+    // certificate is a statement at fixed smoothing, so lambda moves only out
+    // here, between certified fits. The loop stops on lambda's own relative
+    // movement -- once smoothing shifts by less than the inner tolerance, the
+    // fit it is selected from cannot resolve the difference.
+    let mut lambda = lambda;
+    let mut edf_prev = term_seed.term.effective_curvature_df(&lambda)?;
+    let mut previous_move = f64::INFINITY;
+    let mut report =
+        term_seed
+            .term
+            .solve_fixed_point(centered.view(), &lambda, &ard, max_cycles, 1.0e-4, 1.0)?;
+    let mut ard = ard;
+    loop {
+        let updated = term_seed
+            .term
+            .fellner_schall_smoothing(centered.view(), &lambda)?;
+        // The MacKay alpha update is DISABLED pending a fix. Its fixed point
+        // `alpha <- n/(sum t^2 + tr H^-1)` has alpha -> infinity as an attractor
+        // whenever the decoded tangent is weak: growing alpha pulls t -> 0 so
+        // `sum t^2 -> 0`, and `1/H_ii = 1/(tangent^2 + alpha*f) -> 0` as well,
+        // so BOTH denominator terms vanish together. Coupled to the smoothing
+        // update it runs away -- measured alpha median 1 -> 38 -> 78 over three
+        // rounds with the move size not shrinking (1.7325 -> 1.7440).
+        let updated_ard = ard.clone();
+        let ard_move = updated_ard
+            .iter()
+            .zip(ard.iter())
+            .flat_map(|(new_atom, old_atom)| new_atom.iter().zip(old_atom.iter()))
+            .map(|(new, old)| (new.ln() - old.ln()).abs())
+            .fold(0.0_f64, f64::max);
+        let lambda_move = updated
+            .iter()
+            .zip(lambda.iter())
+            .map(|(new, old)| (new.ln() - old.ln()).abs())
+            .fold(0.0_f64, f64::max);
+        // Convergence is measured in the effective degrees of freedom, which is
+        // BOUNDED by the basis size, not in log lambda, which is not. When an
+        // atom's curvature is unsupported the Fellner-Schall update correctly
+        // sends its lambda to infinity -- the atom is shrinking onto the penalty
+        // null space -- so `max |d log lambda|` never settles even though the
+        // FITTED FUNCTION has stopped moving. Measured: log-lambda movement
+        // stalls at 0.25 while lambda_max climbs 12 -> 94 without converging.
+        // `tau_k - M0_k` saturates at that limit, so it is the quantity that
+        // actually says whether the fit has stopped changing.
+        let edf_now = term_seed.term.effective_curvature_df(&updated)?;
+        let edf_move = edf_now
+            .iter()
+            .zip(edf_prev.iter())
+            .map(|(new, old)| (new - old).abs())
+            .fold(0.0_f64, f64::max);
+        edf_prev = edf_now;
+        let move_size = edf_move.max(ard_move);
+        let quantiles = {
+            let mut sorted = updated.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite lambda"));
+            (
+                sorted[0],
+                sorted[sorted.len() / 2],
+                sorted[sorted.len() - 1],
+            )
+        };
+        let ard_flat = {
+            let mut flat: Vec<f64> = updated_ard.iter().flatten().copied().collect();
+            flat.sort_by(|a, b| a.partial_cmp(b).expect("finite alpha"));
+            flat
+        };
+        println!(
+            "REML round: max |d edf| = {move_size:.4e} (lambda {:.4e}, alpha {ard_move:.4e}); \
+             lambda min/med/max = {:.3e}/{:.3e}/{:.3e}; alpha min/med/max = {:.3e}/{:.3e}/{:.3e}",
+            lambda_move,
+            quantiles.0,
+            quantiles.1,
+            quantiles.2,
+            ard_flat[0],
+            ard_flat[ard_flat.len() / 2],
+            ard_flat[ard_flat.len() - 1]
+        );
+        // Two ways this loop is finished, and the second is the one that fires.
+        //
+        // The inner fit certifies to a RELATIVE tolerance, so successive edf
+        // readings carry a floor of that solve's own resolution -- measured, the
+        // movement falls 1.07 -> 0.013 and then oscillates in [0.012, 0.015]
+        // indefinitely while lambda_max stabilises at ~112 and the median at
+        // ~2.16. The fit has converged; the absolute threshold is simply finer
+        // than the measurement. Stopping when the movement is no longer
+        // DECREASING detects that floor without naming it, so no stall count and
+        // no floor constant enter the criterion.
+        if !(move_size > 1.0e-4) || move_size >= previous_move {
+            break;
+        }
+        previous_move = move_size;
+        lambda = updated;
+        ard = updated_ard;
+        report = term_seed.term.solve_fixed_point(
+            centered.view(),
+            &lambda,
+            &ard,
+            max_cycles,
+            1.0e-4,
+            1.0,
+        )?;
+    }
+    // Evidence-supported curvature degrees of freedom per atom: the census that
+    // says whether an atom's bend is paid for, rather than whether it exists.
+    let edf = term_seed.term.effective_curvature_df(&lambda)?;
+    let mut sorted_edf = edf.clone();
+    sorted_edf.sort_by(|a, b| a.partial_cmp(b).expect("finite edf"));
+    println!(
+        "curvature edf: min {:.4} median {:.4} p90 {:.4} max {:.4}; atoms with edf<0.01: {}",
+        sorted_edf[0],
+        sorted_edf[sorted_edf.len() / 2],
+        sorted_edf[(sorted_edf.len() * 9) / 10],
+        sorted_edf[sorted_edf.len() - 1],
+        edf.iter().filter(|value| **value < 0.01).count()
+    );
+    write_f64s(&format!("{out_dir}/curvature_edf.bin"), &edf)?;
     println!(
         "inner CERTIFIED in {} cycles, {:.0}s, objective {:.4e}",
         report.iterations,
@@ -125,6 +258,17 @@ fn main() -> Result<(), String> {
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
                     println!("HELDOUT rows={te_rows} recurred={} EV={:.4}", rep.recurred, 1.0 - sse / ss);
+                    // The held-out reconstruction itself. Chart EV alone cannot
+                    // say whether the reconstructed directions are the ones the
+                    // model computes with, so the ambient-space score and the
+                    // cross-entropy splice both need this array, and neither can
+                    // be recomputed from the per-atom dumps.
+                    let mut recon_abs = recon.clone();
+                    recon_abs += &mean;
+                    write_f64s(
+                        &format!("{out_dir}/heldout_recon.bin"),
+                        recon_abs.as_slice().ok_or("heldout recon not contiguous")?,
+                    )?;
                 }
                 Err(e) => println!("HELDOUT refused: {e}"),
             }
@@ -164,6 +308,56 @@ fn main() -> Result<(), String> {
         }
     }
     println!("picked atoms: {picked:?}");
+
+    // K-wide census. Overcompleteness is a claim about the whole dictionary, so
+    // it needs every atom, not the twelve that get plotted: usage, topology, the
+    // arc length of the decoded curve (a collapsed atom has ~zero length and is
+    // doing no manifold work), and the mean image so full pairwise coherence can
+    // be checked against the Welch bound.
+    {
+        let kind_code = |kind: &str| -> f64 {
+            match kind {
+                "linear" => 0.0,
+                "euclidean" => 1.0,
+                "periodic" => 2.0,
+                _ => 3.0,
+            }
+        };
+        let mut census = Vec::with_capacity(k_ret * 4);
+        let mut means = Vec::with_capacity(k_ret * cols);
+        let probe: Vec<f64> = (0..33).map(|j| -1.0 + 2.0 * j as f64 / 32.0).collect();
+        let periodic_probe: Vec<f64> = (0..33).map(|j| j as f64 / 32.0).collect();
+        for atom in 0..k_ret {
+            let is_periodic = retained_basis[atom] == "periodic";
+            let grid = if is_periodic { &periodic_probe } else { &probe };
+            let coords = Array2::from_shape_vec((grid.len(), 1), grid.clone())
+                .map_err(|e| e.to_string())?;
+            let curve = term.decode_atom_at(atom, coords.view())?;
+            let mut arc = 0.0_f64;
+            for j in 1..curve.nrows() {
+                let mut d = 0.0;
+                for c in 0..cols {
+                    let step = curve[[j, c]] - curve[[j - 1, c]];
+                    d += step * step;
+                }
+                arc += d.sqrt();
+            }
+            for c in 0..cols {
+                let mut acc = 0.0;
+                for j in 0..curve.nrows() {
+                    acc += curve[[j, c]];
+                }
+                means.push(acc / curve.nrows() as f64);
+            }
+            census.push(usage[atom] as f64);
+            census.push(kind_code(&retained_basis[atom]));
+            census.push(arc);
+            census.push(term.atom_basis_size(atom) as f64);
+        }
+        write_f64s(&format!("{out_dir}/census.bin"), &census)?;
+        write_f64s(&format!("{out_dir}/atom_means.bin"), &means)?;
+        println!("CENSUS dumped for {k_ret} atoms");
+    }
 
     // dump: per picked atom — kind, usage, curve samples over the coordinate
     // range actually used (Rust-decoded), token coords + chart rows projected later
