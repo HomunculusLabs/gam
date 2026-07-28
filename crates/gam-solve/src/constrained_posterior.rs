@@ -157,7 +157,16 @@ pub struct ConstrainedPosteriorCorrection {
     /// coordinate is a half-line" is the encoding of a model saved before upper
     /// limits existed, which is exactly what those models meant. Live
     /// constructions always carry one entry per retained row.
-    #[serde(default)]
+    ///
+    /// `+∞` is the COMMON case here — every one-sided shape or box constraint
+    /// contributes one — and JSON has no literal for it. Without an explicit
+    /// codec `serde_json` writes the entry as `null` and `Vec<f64>` then refuses
+    /// its own output on the way back in, which made every shape-constrained fit
+    /// that retains a face unloadable (#2601). `serde_extended_real::vec_f64`
+    /// makes `null` mean `+∞` in both directions; that is byte-identical to what
+    /// was already being written, so models saved before the codec existed read
+    /// back with the meaning they always had.
+    #[serde(default, with = "gam_problem::serde_extended_real::vec_f64")]
     pub normal_upper_limits: Vec<f64>,
 }
 
@@ -2653,6 +2662,83 @@ mod tests {
             two_sided.removed_normal_variance[[0, 0]],
             one_sided.removed_normal_variance[[0, 0]],
             "no reachable upper limit must reproduce the half-line variance exactly"
+        );
+    }
+
+    /// A retained face whose coordinates are half-lines must SURVIVE
+    /// persistence (#2601).
+    ///
+    /// `+∞` is the value an unbounded upper limit takes — not a sentinel, not a
+    /// defect — and JSON has no literal for it. Before the extended-real codec,
+    /// `serde_json` wrote each one as `null` and `Vec<f64>` refused its own
+    /// output on the way back in with `invalid type: null, expected f64`, so
+    /// every shape-constrained fit that retained a face produced a model that
+    /// could not be loaded. The failure surfaced at LOAD, arbitrarily far from
+    /// the fit, and named neither the field nor the fit.
+    ///
+    /// This is the type-level guard: whatever the fit produces, a correction
+    /// carrying infinite, finite, and mixed limits must come back bit-for-bit.
+    #[test]
+    fn a_half_line_upper_limit_survives_the_json_round_trip_2601() {
+        for limits in [
+            vec![f64::INFINITY; 3],
+            vec![2.5, f64::INFINITY, 1e300],
+            Vec::new(),
+        ] {
+            let q = limits.len().max(1);
+            let correction = ConstrainedPosteriorCorrection {
+                lift: Array2::<f64>::zeros((4, q)),
+                removed_normal_variance: Array2::<f64>::eye(q),
+                normal_mean_shift: Array1::<f64>::zeros(q),
+                rows: (0..q).collect(),
+                normal_upper_limits: limits.clone(),
+            };
+            let json = serde_json::to_string(&correction).expect("serialize correction");
+            let back: ConstrainedPosteriorCorrection =
+                serde_json::from_str(&json).unwrap_or_else(|e| {
+                    panic!("a correction with limits {limits:?} must reload: {e}\n{json}")
+                });
+            assert_eq!(
+                back.normal_upper_limits, limits,
+                "upper limits must round-trip bit for bit"
+            );
+            assert_eq!(back.upper_limits(), correction.upper_limits());
+        }
+    }
+
+    /// The end-to-end shape of the same defect: a correction produced by the
+    /// solver (not hand-built) must reload. `Σ = I` with a lower bound only
+    /// gives exactly the `+∞`-limit face that #2601's `[concave]` fit produced.
+    #[test]
+    fn a_solver_produced_half_line_correction_reloads_2601() {
+        let columns = 3;
+        let covariance = Array2::<f64>::eye(columns);
+        let centre = array![0.6, 0.0, 0.0];
+        let mut lower_only = Array2::<f64>::zeros((1, columns));
+        lower_only[[0, 0]] = 1.0;
+        let correction = constrained_posterior_correction_from_covariance(
+            &covariance,
+            &centre,
+            &LinearInequalityConstraints::new(lower_only, array![0.0]).expect("lower wall"),
+        )
+        .expect("one-sided correction")
+        .expect("an active lower bound corrects the posterior");
+        assert_eq!(
+            correction.normal_upper_limits,
+            vec![f64::INFINITY],
+            "precondition: a half-line coordinate carries an infinite upper limit"
+        );
+
+        let json = serde_json::to_string(&correction).expect("serialize");
+        let back: ConstrainedPosteriorCorrection =
+            serde_json::from_str(&json).expect("a solver-produced correction must reload");
+        assert_eq!(back.normal_upper_limits, vec![f64::INFINITY]);
+
+        // And the structural write-side guard must NOT mistake the legitimate
+        // half-line for the defect it exists to catch.
+        assert!(
+            gam_problem::ensure_serialized_floats_are_finite(&correction).is_ok(),
+            "an unbounded upper limit is a value, not a non-finite defect"
         );
     }
 
