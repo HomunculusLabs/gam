@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -314,6 +314,16 @@ fn main() -> Result<(), String> {
     let unroll_arg = args.len() >= 17 && args[16] == "unroll";
     if unroll_arg {
         println!("topology unroll: armed");
+    }
+    // Optional admission-pricing arg: "price" charges every routing decision
+    // the amortized description length of the atom's parameters, at the noise
+    // floor certified by the initial solve (#2502: unpriced SSE admission is
+    // why held-out EV degrades monotonically with the d>=2 atom share).
+    let price_arg = args.len() >= 18 && args[17] == "price";
+    if price_arg {
+        let sigma2 = 2.0 * report.objective / ((rows * cols) as f64);
+        term_seed.term.set_admission_dof_pricing(Some(sigma2));
+        println!("admission pricing: armed (sigma2 = {sigma2:.6e})");
     }
     if args.len() >= 16 && args[15] == "fista" {
         term_seed.term.set_decoder_fista_passes(Some(6));

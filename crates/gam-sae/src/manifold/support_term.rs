@@ -384,7 +384,12 @@ pub struct SaeSupportSparseTerm {
     /// `Some(passes)` selects the accelerated parallel decoder update for
     /// this term's fixed-point solves; `None` keeps the exact colour-class
     /// Gauss-Seidel sweep. See [`Self::set_decoder_fista_passes`].
-    decoder_fista_passes: Option<usize>,
+    decoder_fista_passes: Option<usize>,    /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
+    /// ranking expression subtracts the amortized description length of the
+    /// atom's own parameters, `2*sigma2*ln2 * (m*P*(1/2)log2 N) / firings`,
+    /// and the certified objective carries the matching per-used-atom charge.
+    /// `None` (the default) is bit-identical to the unpriced router.
+    admission_dof_sigma2: Option<f64>,
 }
 
 impl SaeSupportSparseTerm {
@@ -467,6 +472,7 @@ impl SaeSupportSparseTerm {
             output_dim,
             atom_rows,
             decoder_fista_passes: None,
+            admission_dof_sigma2: None,
             atom_axis_periods,
         })
     }
@@ -825,6 +831,28 @@ impl SaeSupportSparseTerm {
         // Multi-axis atoms fall through to the marginal path below: a product
         // grid is exponential in the latent dimension, and the overcomplete
         // lane this serves admits 1-D charts.
+        // #2502 DoF-priced admission. Raw SSE improvement rewards flexibility
+        // twice -- a wider basis both fits better AND is searched on a finer
+        // grid -- so when armed, every ranking expression below subtracts the
+        // atom's amortized parameter cost: matched_dl's `m*P*(1/2)log2 N`
+        // bits, divided by the atom's current firing count, converted at
+        // `2*sigma2*ln 2` per bit to the gain scale. All-zero when disarmed,
+        // so the priced router IS the unpriced router.
+        let dof_charge: Vec<f64> = match self.admission_dof_sigma2 {
+            None => vec![0.0_f64; self.k_atoms()],
+            Some(sigma2) => {
+                let l_param = 0.5 * (target.nrows().max(2) as f64).log2();
+                (0..self.k_atoms())
+                    .map(|atom| {
+                        let bits = self.atoms[atom].basis_size() as f64
+                            * self.output_dim as f64
+                            * l_param;
+                        let firings = self.atom_rows[atom].len().max(1) as f64;
+                        2.0 * sigma2 * std::f64::consts::LN_2 * bits / firings
+                    })
+                    .collect()
+            }
+        };
         if self.atoms.iter().all(|atom| atom.latent_dim() == 1) {
             let k_atoms = self.k_atoms();
             let mut grid_offset = Vec::with_capacity(k_atoms + 1);
@@ -899,7 +927,10 @@ impl SaeSupportSparseTerm {
                                 for c in 0..self.output_dim {
                                     cross += residual[c] * gamma[[slot, c]];
                                 }
-                                let gain = 2.0 * cross - self_term[slot] - prior_term[slot];
+                                let gain = 2.0 * cross
+                                    - self_term[slot]
+                                    - prior_term[slot]
+                                    - dof_charge[atom_index];
                                 if gain > best_gain {
                                     best_gain = gain;
                                     best_atom = atom_index;
@@ -955,7 +986,10 @@ impl SaeSupportSparseTerm {
                 gate_params,
                 coords,
             )?;
-            return Self::new(self.atoms.clone(), assignment);
+            let mut routed = Self::new(self.atoms.clone(), assignment)?;
+            routed.decoder_fista_passes = self.decoder_fista_passes;
+            routed.admission_dof_sigma2 = self.admission_dof_sigma2;
+            return Ok(routed);
         }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
         let per_row: Vec<RowRoute> = target
@@ -1043,7 +1077,8 @@ impl SaeSupportSparseTerm {
                     .iter()
                     .zip(decoded.iter())
                     .map(|(truth, fit)| 2.0 * truth * fit - fit * fit)
-                    .sum::<f64>();
+                    .sum::<f64>()
+                    - dof_charge[atom_index];
                 let candidate = Candidate {
                     atom: atom_index,
                     score,
@@ -1104,7 +1139,10 @@ impl SaeSupportSparseTerm {
             gate_params,
             coords,
         )?;
-        Self::new(self.atoms.clone(), assignment)
+        let mut routed = Self::new(self.atoms.clone(), assignment)?;
+        routed.decoder_fista_passes = self.decoder_fista_passes;
+        routed.admission_dof_sigma2 = self.admission_dof_sigma2;
+        Ok(routed)
     }
 
     pub(crate) fn beta_layout(&self) -> Result<(Vec<usize>, usize), String> {
@@ -1548,6 +1586,23 @@ impl SaeSupportSparseTerm {
                 row_value
             })
             .sum::<f64>();
+        // #2502: the acceptance gate certifies the same priced objective the
+        // router ranks by -- each atom in use charges its parameter bits at
+        // the armed noise floor (objective scale: sigma2*ln2 per bit).
+        if let Some(sigma2) = self.admission_dof_sigma2 {
+            let l_param = 0.5 * (self.n_obs().max(2) as f64).log2();
+            value += sigma2
+                * std::f64::consts::LN_2
+                * self
+                    .atoms
+                    .iter()
+                    .enumerate()
+                    .filter(|(atom_index, _)| !self.atom_rows[*atom_index].is_empty())
+                    .map(|(_, atom)| {
+                        atom.basis_size() as f64 * self.output_dim as f64 * l_param
+                    })
+                    .sum::<f64>();
+        }
         if value.is_finite() {
             Ok(value)
         } else {
@@ -2482,6 +2537,13 @@ impl SaeSupportSparseTerm {
     /// the exact colour-class sweep. A typed knob on the term rather than an
     /// environment variable, so an A/B is two constructed terms, not two
     /// process environments.
+    /// Arm or disarm DoF-priced admission with the noise floor `sigma2` the
+    /// charge is denominated in (bits convert at `sigma2 * ln 2` on the
+    /// objective scale, twice that on the router's gain scale).
+    pub fn set_admission_dof_pricing(&mut self, sigma2: Option<f64>) {
+        self.admission_dof_sigma2 = sigma2;
+    }
+
     pub fn set_decoder_fista_passes(&mut self, passes: Option<usize>) {
         self.decoder_fista_passes = passes;
     }

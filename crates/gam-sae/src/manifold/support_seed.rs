@@ -771,6 +771,96 @@ mod tests {
         }
     }
 
+    /// #2502 DoF-priced admission: disarmed pricing must be bit-identical to
+    /// the unpriced router, and an absurd price must push support toward the
+    /// smaller-basis atoms (the A/B's "absurd arm" in unit form).
+    #[test]
+    fn admission_pricing_disarmed_is_identity_and_absurd_price_prefers_thrift() {
+        let n = 24usize;
+        let p = 5usize;
+        let target = Array2::from_shape_fn((n, p), |(row, col)| {
+            ((row * 3 + col * 5) as f64 * 0.41).sin()
+        });
+        let basis: Vec<String> = (0..8)
+            .map(|atom| if atom % 2 == 0 { "linear" } else { "euclidean" }.to_string())
+            .collect();
+        let dims = vec![1usize; basis.len()];
+        let seed = build_sae_support_seed(SaeSupportSeedRequest {
+            target: target.view(),
+            atom_basis: &basis,
+            atom_dim: &dims,
+            support_k: 2,
+            random_state: 5,
+            admission: admitted(n, p, basis.len(), 1, 2),
+        })
+        .expect("sparse seed");
+        let retained_basis: Vec<String> = seed
+            .retained_atom_indices
+            .iter()
+            .map(|&atom| basis[atom].clone())
+            .collect();
+        let retained_dims: Vec<usize> = seed
+            .retained_atom_indices
+            .iter()
+            .map(|&atom| dims[atom])
+            .collect();
+        let term = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+            assignment: seed.assignment,
+            atom_basis: retained_basis.clone(),
+            atom_dim: retained_dims,
+            output_dim: p,
+            random_state: 9,
+        })
+        .expect("term seed")
+        .term;
+        let unpriced = term
+            .reroute_fixed_decoder(target.view(), 2, 0)
+            .expect("unpriced route");
+        let mut disarmed = term.clone();
+        disarmed.set_admission_dof_pricing(None);
+        let disarmed = disarmed
+            .reroute_fixed_decoder(target.view(), 2, 0)
+            .expect("disarmed route");
+        for row in 0..n {
+            assert_eq!(
+                unpriced.assignment.support_indices(row),
+                disarmed.assignment.support_indices(row),
+                "row {row}: disarmed pricing must not change routing"
+            );
+        }
+        // Absurd price: wide-basis atoms must not GAIN support share.
+        let mut priced = term.clone();
+        priced.set_admission_dof_pricing(Some(1.0e6));
+        let priced = priced
+            .reroute_fixed_decoder(target.view(), 2, 0)
+            .expect("priced route");
+        let width = |basis_name: &str| retained_basis
+            .iter()
+            .filter(|b| b.as_str() == basis_name)
+            .count();
+        assert!(width("euclidean") > 0, "fixture needs wide atoms retained");
+        let wide_share = |routed: &crate::manifold::SaeSupportSparseTerm| {
+            let mut wide = 0usize;
+            let mut total = 0usize;
+            for row in 0..n {
+                for &atom in routed.assignment.support_indices(row) {
+                    total += 1;
+                    if retained_basis[atom as usize] == "euclidean" {
+                        wide += 1;
+                    }
+                }
+            }
+            wide as f64 / total.max(1) as f64
+        };
+        assert!(
+            wide_share(&priced) <= wide_share(&unpriced) + 1.0e-12,
+            "an absurd DoF price must not increase the wide-basis support share \
+             (priced {:.3} vs unpriced {:.3})",
+            wide_share(&priced),
+            wide_share(&unpriced)
+        );
+    }
+
     #[test]
     fn k_10000_seed_retains_only_active_support() {
         let target = array![[1.0, -2.0], [0.5, 3.0], [-1.0, 0.25]];
