@@ -4095,14 +4095,74 @@ fn solve_strictly_convex_quadratic_with_constraint_set_dual(
     // other row, so a stale hint costs a skipped queue pop and nothing else.
     let warm_tight =
         constraint_set_rows_tight_at_point(set, beta_start, warm_active_set.unwrap_or(&[]))?;
-    solve_operator_metric_projection_dual_active_set(
+    let (candidate, dual_basis) = solve_operator_metric_projection_dual_active_set(
         hessian,
         rhs,
         &unconstrained,
         &factor,
         &ops,
         &warm_tight,
-    )
+    )?;
+
+    // ── what "active" means to a caller ─────────────────────────────────────
+    //
+    // `dual_basis` is what the dual walk ADMITTED, and it admits a row only
+    // when the running candidate VIOLATES it. A row the caller handed in as its
+    // current face, which the answer still lies on, is therefore never admitted
+    // and never listed. Every consumer reads this set as the FACE the answer
+    // lies on: it nulls the set's tangent before certifying curvature, seeds the
+    // next cycle's working set from it, and decides which blockers were
+    // resolved. A silently dropped face row makes the consumer count a direction
+    // free that the polytope pins — which is precisely how a PHANTOM saddle is
+    // manufactured, a failure `resolve_constrained_converged_mode` already names
+    // and repairs with `widen_active_sets_to_tight_face` at one call site
+    // (#2589; #2432 turned six reduced-face tests red on exactly this, each
+    // reporting `[1]` where the face is `[0, 1]`).
+    //
+    // So report the rows the solve actually established the answer on: the ones
+    // it admitted, plus the caller's incoming face rows that the ANSWER is tight
+    // on. Note that is tight at the ANSWER, not at `beta_start`: a warm row can
+    // be slack at entry and pinned at the endpoint, which is exactly the
+    // projection case (`beta_start = 1e-9`, answer `0`), so `warm_tight` above
+    // is the wrong set to widen with.
+    //
+    // Rank-reduce the union, because a degenerate vertex can hand back four
+    // parallel rows for one geometric face and this is a face description, not a
+    // row list. Deliberately NOT a rescan of every row: an operator carrier can
+    // present thousands of equivalent rows (a Khatri-Rao cone tight at one
+    // coefficient point) and expanding to all of them is what
+    // `operator_cone_does_not_materialize_a_whole_tight_face` forbids. The union
+    // is bounded by the rows this solve was already given or found.
+    let dual_basis_rows = dual_basis.len();
+    let mut face_candidates = dual_basis;
+    for row in constraint_set_rows_tight_at_point(set, &candidate, warm_active_set.unwrap_or(&[]))?
+    {
+        if !face_candidates.contains(&row) {
+            face_candidates.push(row);
+        }
+    }
+    if face_candidates.len() == dual_basis_rows {
+        return Ok((candidate, face_candidates));
+    }
+    // The dual's own rows lead, so rank reduction keeps them as the
+    // representatives when an incoming row is parallel to one of them.
+    let gathered = ops.gather_unit_rows(&face_candidates)?;
+    let groups: Vec<Vec<usize>> = face_candidates.iter().map(|row| vec![*row]).collect();
+    let (_, _, kept, _) =
+        rank_reduce_rows_pivoted_qr_with_dependence(gathered.a, gathered.b, groups);
+    // One id per kept group, not every member of it. Rank reduction MERGES a
+    // parallel class into a single group rather than dropping its members, so
+    // flattening would hand back all four rows of a degenerate vertex and
+    // undo the reduction. The lowest index is the canonical representative,
+    // which is also what `accepted_face_is_canonical_across_degenerate_qp_row_bases`
+    // expects of a face that must not carry the path that produced it.
+    let mut face_rows: Vec<usize> = kept
+        .into_iter()
+        .filter_map(|group| group.into_iter().min())
+        .collect();
+    face_rows.sort_unstable();
+    face_rows.dedup();
+    Ok((candidate, face_rows))
 }
 
 pub fn solve_quadratic_with_constraint_set(

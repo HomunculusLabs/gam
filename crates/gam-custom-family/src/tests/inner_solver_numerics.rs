@@ -2520,7 +2520,21 @@ pub(crate) fn quadratic_linear_constraints_accept_boundary_kkt_after_rank_reduct
 }
 
 #[test]
-pub(crate) fn quadratic_linear_constraints_singular_kkt_uses_pseudoinverse_fallback() {
+pub(crate) fn quadratic_linear_constraints_refuse_a_metric_with_no_unique_minimizer() {
+    // A ZERO Hessian. `½βᵀHβ − rhsᵀβ` is then identically zero on the whole
+    // feasible set: every feasible point is a minimizer and none of them is
+    // *the* minimizer. There is no metric to project in either, since a metric
+    // projection is defined only for a positive-definite metric.
+    //
+    // This test used to demand a pseudoinverse fallback and assert the
+    // arbitrary answer it produced (β = 0, active = [0]). #2432 replaced that
+    // path with the dual metric projection, whose contract is explicit: a
+    // quadratic-projection API returns the certified minimizer or an error, and
+    // never substitutes a merely-feasible point for one (#979). Erroring is the
+    // honest verdict here — pseudoinverting invents an answer and hands it back
+    // with the same authority as a certified one — so the test now asserts the
+    // refusal, and asserts that it names the actual reason rather than failing
+    // somewhere downstream with a confusing symptom (#2589).
     let hessian = Array2::<f64>::zeros((2, 2));
     let rhs = array![0.0, 0.0];
     let beta_start = array![0.0, 0.0];
@@ -2529,19 +2543,40 @@ pub(crate) fn quadratic_linear_constraints_singular_kkt_uses_pseudoinverse_fallb
         b: array![0.0],
     };
 
-    let (beta, active) = solve_quadratic_with_linear_constraints(
+    let error = solve_quadratic_with_linear_constraints(
         &hessian,
         &rhs,
         &beta_start,
         &constraints,
         Some(&[0]),
     )
-    .expect("singular KKT system should fall back to a finite pseudoinverse solve");
+    .expect_err("a semidefinite metric has no unique constrained minimizer to certify");
 
-    assert!(beta.iter().all(|value| value.is_finite()));
+    let message = error.to_string();
+    assert!(
+        message.contains("strictly positive-definite Hessian"),
+        "the refusal must name the violated premise, got: {message}"
+    );
+
+    // The premise is exactly positive definiteness, not "the Hessian is
+    // small": the same geometry with a PD metric still returns the certified
+    // minimizer, so this is a real boundary and not a blanket refusal.
+    let positive_definite = Array2::<f64>::eye(2);
+    let (beta, active) = solve_quadratic_with_linear_constraints(
+        &positive_definite,
+        &rhs,
+        &beta_start,
+        &constraints,
+        Some(&[0]),
+    )
+    .expect("a positive-definite metric has a unique constrained minimizer");
     assert_relative_eq!(beta[0], 0.0, epsilon = 1e-14);
     assert_relative_eq!(beta[1], 0.0, epsilon = 1e-14);
-    assert_eq!(active, vec![0]);
+    assert_eq!(
+        active,
+        vec![0],
+        "β=0 sits exactly on x+y>=0, so the row is on the returned face"
+    );
 }
 
 #[test]
