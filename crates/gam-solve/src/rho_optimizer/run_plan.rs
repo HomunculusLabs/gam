@@ -753,6 +753,22 @@ pub(crate) fn run_outer_with_plan(
 
     let mut best: Option<CertifiedOuterCandidate> = None;
     let mut best_checkpoint: Option<OuterResult> = None;
+    // Best-scoring point whose SOLVER claimed convergence and whose analytic
+    // certification then refused it (#2596). Distinct from `best_checkpoint`,
+    // which also collects budget-exhausted iterates: this slot holds only
+    // points the optimizer itself believes are optima, so comparing the
+    // published winner against it is a like-for-like comparison of optima and
+    // not a comparison against a half-finished search.
+    //
+    // A certificate is an ADMISSIBILITY filter, not an ordering. When the best
+    // admissible candidate scores materially worse than a refused optimum the
+    // run already measured, the multistart has not found the optimum — it has
+    // fallen back to one — and that has to be visible. It was not: on #2596 a
+    // ρ-box corner (where the box-KKT projection makes |Pg| identically zero,
+    // so it certifies whatever its criterion says) was published at cost
+    // 110.94 while a refused interior optimum at cost 4.19 sat in this slot,
+    // with nothing in the log naming the inversion.
+    let mut best_refused_optimum: Option<OuterResult> = None;
     // First confirmed-tail snapped reseed published by a refused certification
     // (#2348 Inc 2b). Consumed once, after the seed cascade, for a single
     // polishing retry pinned at the snapped rail point.
@@ -2356,6 +2372,10 @@ pub(crate) fn run_outer_with_plan(
                         if saddle_escape_reseed_point.is_none() {
                             saddle_escape_reseed_point = checkpoint.saddle_escape_reseed.clone();
                         }
+                        retain_best_outer_checkpoint(
+                            &mut best_refused_optimum,
+                            checkpoint.clone(),
+                        );
                         retain_best_outer_checkpoint(&mut best_checkpoint, checkpoint);
                         rejection_reasons.push((seed_idx, "certificate", error.to_string()));
                         continue 'seed_attempts;
@@ -2441,6 +2461,58 @@ pub(crate) fn run_outer_with_plan(
                 );
                 rejection_reasons.push((seed_idx, "solver", e.to_string()));
             }
+        }
+    }
+
+    // #2596 — criterion inversion between the published winner and a refused
+    // optimum.
+    //
+    // A certificate answers "is this ρ stationary?". It does not answer "is
+    // this the best ρ we found?". Those come apart at a ρ-box corner: the
+    // box-KKT projection zeroes the outward half of the gradient, so a corner
+    // certifies with |Pg| identically zero NO MATTER what its criterion says,
+    // while an interior optimum has to earn its certificate against a real
+    // residual gradient. When the interior optimum's certificate is refused,
+    // the corner is the only survivor and is published silently — on #2596 at
+    // an outer criterion 26× worse than the interior point the same run had
+    // already measured.
+    //
+    // The screening/mint standard split that produced that particular refusal
+    // is fixed at its root in `run.rs` (a screening pass may no longer refuse
+    // on a bound the mint would widen). This is the second, independent half:
+    // whatever the reason, an inversion of this kind is a fact about the search
+    // that must reach the log rather than be absorbed. It changes no verdict —
+    // deliberately, because the refused point is by definition uncertified and
+    // publishing it would substitute one silent decision for another — but it
+    // makes the fallback legible, and it is what turns "the smooth vanished"
+    // into "the winner scored 110.94 against a refused 4.19 at ρ=(0.38,−4.98)".
+    if let (Some(certified), Some(refused)) = (best.as_ref(), best_refused_optimum.as_ref()) {
+        let winner = certified.result();
+        let scale = winner
+            .final_value
+            .abs()
+            .max(refused.final_value.abs())
+            .max(1.0);
+        let inverted_by = winner.final_value - refused.final_value;
+        if winner.final_value.is_finite()
+            && refused.final_value.is_finite()
+            && inverted_by > PARSIMONY_TIE_REL_BAND * scale
+        {
+            log::warn!(
+                "[OUTER] {context}: the published optimum scores WORSE than a refused one — \
+                 winner rho={:?} cost={:.6e} (certified), refused rho={:?} cost={:.6e} \
+                 (gap {:.3e}, {:.1}× the {:.1e} relative tie band). A ρ-box corner certifies \
+                 with |Pg| ≡ 0 whatever its criterion says, so a refused interior optimum \
+                 leaves the corner as the only survivor; the published λ is a fallback, not \
+                 the best λ this search found (#2596).",
+                winner.rho.to_vec(),
+                winner.final_value,
+                refused.rho.to_vec(),
+                refused.final_value,
+                inverted_by,
+                inverted_by / (PARSIMONY_TIE_REL_BAND * scale),
+                PARSIMONY_TIE_REL_BAND,
+            );
         }
     }
 
