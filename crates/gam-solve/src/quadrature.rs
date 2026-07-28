@@ -373,6 +373,28 @@ const CLOGLOG_GUMBEL_QUAD_ETA_HI: f64 = 6.0;
 // value-underflow fallback, and the σ < 8 side already scales to MAX_NODES.
 // A full `gam-models` A/B (1400 passed / 125 failed, IDENTICAL failure sets on
 // both arms) shows no behavioural regression.
+//
+// #2566 CORRECTION — the `120 σ²` model above UNDERSTATES its own exponent, and
+// 513 is not where this stops mattering. Measured paired at 513 vs 1025 nodes
+// (same fixture, lane and base commit), `log σ = 5` improves a further **335×**:
+// `disagreement` 4.856923e-4 → 1.451435e-6, i.e. `3.750 → 0.016` of the FD
+// ladder's own budget. `120 σ²` predicts only ~1.7e-5 of residual there against
+// 4.86e-4 observed, 30× short — because the shift `k σ²` enters the log-σ
+// derivative TWICE, so second-derivative amplification carries **σ⁴**
+// (`4.85e8` at that row, predicting ~3e-3, which brackets the observation).
+// Read the exponent as σ⁴, not σ².
+//
+// The floor is NOT raised to 1025 here, and the reason is the more useful half
+// of that measurement. At `log σ = 6` the analytic negative Hessian is
+// `-9.586485e-2` under BOTH node counts — identical to every printed figure —
+// while the same doubling moves the FD authority by 34% (2.188519e-3 →
+// 1.452708e-3). The value/gradient channel obeys this constant at that row and
+// the second-derivative channel does not, so the two are not routing through the
+// same branch there, and no quadrature resolution can reach the row where the
+// sign still inverts. Doubling every σ ≥ 8 evaluation to fix a row that was
+// already going to be superseded is a cost with no gate behind it. What #2566
+// needs next is the ROUTING question: which branch the negative Hessian takes at
+// `log σ = 6`, and why it ignores this constant.
 const CLOGLOG_GUMBEL_QUAD_MIN_NODES: usize = 513;
 // Node-density scale: below σ = 8 the Φ transition narrows to width σ, so the
 // node count grows like SCALE / σ to keep the transition resolved on the
