@@ -2728,6 +2728,15 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
     };
     let mut r = &b - &apply(&y);
     let b_norm = b.dot(&b).sqrt().max(f64::MIN_POSITIVE);
+    // One matvec buffer reused across every CG iteration. `apply_owned` builds a
+    // fresh `Array1::zeros(k)` per call, which at this scale is an ~11 MB
+    // mmap/munmap pair with first-touch faults and a TLB shootdown EVERY
+    // iteration -- and this solve runs to its iteration cap on the LAML path.
+    // Reuse is the contract `schur_matvec` already documents and enforces: it
+    // accumulates, so it clears `out` itself, which also makes the `zeros()`
+    // inside `apply_owned` a second redundant zeroing of a buffer about to be
+    // discarded.
+    let mut ap = Array1::<f64>::zeros(b.len());
     let mut z = precondition(&r);
     let mut p = z.clone();
     let mut rs = r.dot(&z);
@@ -2738,7 +2747,7 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
     let tol = cg_rel_tol * b_norm;
     let mut iters = 0usize;
     while residual_norm_sq.sqrt() > tol && iters < cg_max_iters {
-        let ap = apply(&p);
+        op.apply_into(&p, &mut ap);
         let denom = p.dot(&ap);
         if !(denom.is_finite() && denom > 0.0) {
             return None;
@@ -2760,7 +2769,10 @@ fn reduced_schur_cg_solve<B: BatchedBlockSolver + Sync>(
         if !(rs_new.is_finite() && residual_norm_sq.is_finite()) {
             return None;
         }
-        p = &z + &(&p * (rs_new / rs));
+        // In place: `&z + &(&p * c)` allocates two more full-length temporaries
+        // per iteration for the same arithmetic.
+        p *= rs_new / rs;
+        p += &z;
         rs = rs_new;
         iters += 1;
     }
