@@ -705,6 +705,91 @@ fn zz_measure_hifreq_tensor_k8_lambda_readout() {
     );
 }
 
+// #2607: `hifreq_tensor_k10` converges in ONE outer iteration at edf ~ 1.294 of
+// p = 576 -- the intercept -- because the seed prepass hands the optimizer the rho
+// ceiling in every coordinate. The prepass is not a guess that can be "wrong": it
+// keeps the STRICTLY-CHEAPEST of {base, initial_sp, summed_diagonal} under
+// `compute_cost`, so the logged `[0,0,0] -> [30,30,30]` already proves
+// `cost(wall) < cost(origin)` on this fixture.
+//
+// That leaves two readings, which demand completely different fixes:
+//   (1) `compute_cost` degenerates at the boundary -- the pseudo-logdet / rank
+//       handling stops being comparable to interior points as lambda -> e^30; or
+//   (2) it is right, and the criterion genuinely cannot see the high-frequency
+//       signal in this design. Truth here is y = sin(10*theta)*cos(pi*h), so (2)
+//       would be a serious statement about the criterion, not about this fixture.
+//
+// `d71fb42f2` made the prepass report every candidate's cost next to the point it
+// scored, but `log::info!` needs a backend and this harness installs none, so that
+// line is invisible here. This probe installs a capturing logger for exactly that
+// one line. If `base` is finite and merely larger, that is reading (2); if it is
+// non-finite or on an incomparable scale, that is reading (1). One run separates
+// them, and until now nothing could.
+//
+// zz_measure discipline: numbers eprintln'd, NO assertion. The name contains
+// `hifreq_tensor_k10` so it inherits the dedicated slow-timeout override in
+// `.config/nextest.toml`.
+struct SeedCostLogger;
+
+static SEED_COST_LOGGER: SeedCostLogger = SeedCostLogger;
+
+impl log::Log for SeedCostLogger {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        let message = format!("{}", record.args());
+        // Only the seed line. The rest of an `info` fit stream is six figures of
+        // lines and would bury the one thing this exists to read.
+        if message.contains("initial.sp selected seed") {
+            eprintln!("[zz:2607] {message}");
+        }
+    }
+    fn flush(&self) {}
+}
+
+#[test]
+fn zz_measure_hifreq_tensor_k10_seed_costs() {
+    init_parallelism();
+    // Both calls deliberately swallow errors: another test in this binary may have
+    // installed a logger first, and losing the capture is a reason to print
+    // nothing, never to fail.
+    let _ = log::set_logger(&SEED_COST_LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+
+    let (data, formula, n_train, sigma) = hifreq_tensor_dataset(10);
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    eprintln!("[zz:2607] fitting hifreq_tensor k=10 (n_train={n_train} sigma={sigma:.3})");
+    let result = match fit_from_formula(&formula, &data, &cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[zz:2607] fit refused (no minted optimum): {e}");
+            return;
+        }
+    };
+    let FitResult::Standard(fit) = result else {
+        eprintln!("[zz:2607] unexpected non-standard fit result");
+        return;
+    };
+    let log_lambdas: Vec<f64> = fit
+        .fit
+        .log_lambdas
+        .iter()
+        .map(|v| (v * 1000.0).round() / 1000.0)
+        .collect();
+    eprintln!(
+        "[zz:2607] p_coef={} edf_total={:.4} log_lambdas={log_lambdas:?} outer_iters={} \
+         reml={:.6e}",
+        fit.fit.beta.len(),
+        fit.fit.edf_total().unwrap_or(f64::NAN),
+        fit.fit.outer_iterations,
+        fit.fit.reml_score().unwrap_or(f64::NAN),
+    );
+}
+
 // =====================================================================
 // Probe 2: Bimodal / sharp signal
 // =====================================================================
