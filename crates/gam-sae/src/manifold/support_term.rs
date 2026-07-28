@@ -3812,6 +3812,55 @@ mod tests {
             .expect("additive-Schwarz tier builds on a matrix-free system");
     }
 
+    /// The FISTA decoder update must DESCEND the same objective the exact
+    /// sweep minimizes, on the coupled fixture whose shared rows are exactly
+    /// what makes plain Jacobi diverge. Six majorized passes are not required
+    /// to match the exact block optimum, but they must strictly improve the
+    /// objective and land in its neighbourhood -- the pre-registered A/B then
+    /// prices the wall-clock.
+    #[test]
+    fn fista_decoder_descends_the_coupled_objective() {
+        let (mut exact, target) = coupled_two_atom_fixture();
+        let (mut fista, _) = coupled_two_atom_fixture();
+        let lambda = vec![0.1, 0.1];
+        let ard = vec![vec![1.0e-8], vec![1.0e-8]];
+        let before = exact
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        let mut fitted_exact = exact.reconstruct().expect("reconstruct");
+        exact
+            .decoder_sweep(target.view(), &lambda, &mut fitted_exact)
+            .expect("exact sweep");
+        let exact_after = exact
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        let mut fitted_fista = fista.reconstruct().expect("reconstruct");
+        fista
+            .decoder_sweep_fista(target.view(), &lambda, &mut fitted_fista, 6)
+            .expect("fista sweep");
+        let fista_after = fista
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        assert!(
+            fista_after < before,
+            "FISTA must descend: {before} -> {fista_after}"
+        );
+        let gap = (fista_after - exact_after) / exact_after.abs().max(1.0);
+        assert!(
+            gap < 0.05,
+            "six FISTA passes should reach the exact sweep neighbourhood: \
+             exact {exact_after}, fista {fista_after}, relative gap {gap}"
+        );
+        // The maintained fitted matrix must remain exact for the state.
+        let fresh = fista.reconstruct().expect("reconstruct");
+        let drift = fitted_fista
+            .iter()
+            .zip(fresh.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(drift < 1.0e-10, "fitted-state drift {drift}");
+    }
+
     /// Two atoms active on EVERY row, so the alternating map is genuinely
     /// coupled: each atom's exact decoder block is solved against a residual the
     /// other atom is about to move, which is the structure that produces a
@@ -3842,7 +3891,11 @@ mod tests {
             rows,
             2,
             2,
-            2,
+            // d_max: the fixture atoms are 1-D linear charts; declaring 2 here
+            // demanded a coordinate width of 4 per row against the width-2
+            // blocks below, so every test built on this fixture refused at
+            // construction -- silently, in the red baseline nobody ran.
+            1,
             vec![vec![0, 1]; rows],
             vec![vec![1.0, 1.0]; rows],
             (0..rows)
