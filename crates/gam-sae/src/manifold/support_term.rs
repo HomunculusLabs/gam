@@ -1900,8 +1900,16 @@ impl SaeSupportSparseTerm {
             for axis in 0..dim {
                 // gamma == 0 means the prior already owns the axis: updating
                 // from no likelihood evidence is exactly the runaway, so keep
-                // the incoming precision instead.
-                if count[axis] > 0.0 && gamma[axis] > 0.0 && energy[axis] > 0.0 {
+                // the incoming precision instead. The 1% determination floor
+                // is the same statement at finite precision -- measured, axes
+                // under it drove alpha 33 -> 172 -> 4.8e3 -> 1.6e5 across
+                // four rounds (each round's smaller gamma dividing a smaller
+                // energy), and the resulting priors pinned the OUT-OF-SAMPLE
+                // coordinate solve hard enough to refuse the held-out eval.
+                if count[axis] > 0.0
+                    && gamma[axis] > 0.01 * count[axis]
+                    && energy[axis] > 0.0
+                {
                     let candidate = gamma[axis] / energy[axis];
                     if candidate.is_finite() && candidate > 0.0 {
                         updated[atom_idx][axis] = candidate;

@@ -222,13 +222,6 @@ fn main() -> Result<(), String> {
     // away; three hours of compute produced no artifact at all. Report the miss
     // loudly, then re-enter for one cycle at the tolerance the iterate actually
     // reached so the caller gets a real report and the atoms can be dumped.
-    // Optional decoder-strategy arg: "fista" runs the accelerated parallel
-    // decoder update (6 majorized passes/cycle) instead of the colour-class
-    // sweep -- a typed knob for the A/B, never an environment variable.
-    if args.len() >= 16 && args[15] == "fista" {
-        term_seed.term.set_decoder_fista_passes(Some(6));
-        println!("decoder strategy: FISTA (6 passes/cycle)");
-    }
     let mut report = match term_seed.term.solve_fixed_point(
         centered.view(),
         &lambda,
@@ -278,6 +271,13 @@ fn main() -> Result<(), String> {
                 })?
         }
     };
+    // Optional decoder-strategy arg: "fista" runs the accelerated parallel
+    // decoder update (6 majorized passes/cycle) instead of the colour-class
+    // sweep -- a typed knob for the A/B, never an environment variable.
+    if args.len() >= 16 && args[15] == "fista" {
+        term_seed.term.set_decoder_fista_passes(Some(6));
+        println!("decoder strategy: FISTA (6 passes/cycle)");
+    }
     let mut ard = ard;
     while reml_arg {
         let updated = term_seed
@@ -513,6 +513,20 @@ fn main() -> Result<(), String> {
                 }
                 Err(last_error)
             })();
+            // Every rung refused: the final iterate is still a real point of
+            // the model, and 12,000 rows of evaluation do not stop existing
+            // because a certificate declined. Score it, labelled.
+            let heldout = heldout.or_else(|error| {
+                println!("HELDOUT stalled uncertified: {error}");
+                Ok::<_, String>(gam_sae::manifold::SaeSupportCoordinateFixedPointReport {
+                    iterations: 0,
+                    objective: f64::NAN,
+                    coordinate_l2: f64::NAN,
+                    coordinate_max_abs: f64::NAN,
+                    max_recurrence_change: f64::NAN,
+                    recurred: false,
+                })
+            });
             match heldout {
                 Ok(rep) => {
                     let recon = te_term.reconstruct()?;
