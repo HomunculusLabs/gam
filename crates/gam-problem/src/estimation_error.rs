@@ -789,29 +789,22 @@ impl EstimationError {
             Self::CustomFamily(err) => err.is_trial_point_infeasible(),
             // The producer said so directly (#2531).
             Self::TrialPointRefused { .. } => true,
-            // ⚠ KNOWN DIVERGENCE, deliberately left alone. These five are
-            // exactly [`Self::is_inner_solve_retreat`]'s list, and that
-            // method's own words for them are "the inner problem at this rho
-            // is too hard to evaluate, try a different rho" — which is this
-            // predicate's definition. So two classifiers of one question
-            // disagree, and a P-IRLS budget exhaustion is a retreat at one
-            // layer and a fatal at this one.
-            //
-            // Reclassifying them belongs to its own change with its own
-            // measurement: the outer-objective boundary consumes THIS
-            // predicate, so flipping five long-standing verdicts changes which
-            // trials the search survives across every family at once. #2590 is
-            // about refusals that were never classified at all, and mixing the
-            // two would make neither attributable.
+            // "The inner problem at THIS rho is too hard to evaluate, try a
+            // different rho" — [`Self::is_inner_solve_retreat`]'s own words for
+            // exactly these five, and verbatim this predicate's definition. The
+            // two used to disagree, so a P-IRLS budget exhaustion was a retreat
+            // at one layer and a fatal at this one; #2593 unified them, and
+            // `is_inner_solve_retreat` now reads this table rather than keeping
+            // a second one.
             Self::ModelIsIllConditioned { .. }
             | Self::PerfectSeparationDetected { .. }
             | Self::MultinomialSeparationDetected { .. }
             | Self::PirlsDidNotConverge { .. }
-            | Self::FixedLambdaNewtonDidNotConverge { .. }
+            | Self::FixedLambdaNewtonDidNotConverge { .. } => true,
             // A structural failure, an already-terminal outer verdict, or a
             // statement about the configuration, the data, or the prediction
             // request: none of these becomes true or false by moving rho.
-            | Self::InvalidStabilization { .. }
+            Self::InvalidStabilization { .. }
             | Self::BasisError { .. }
             | Self::LinearSystemSolveFailed { .. }
             | Self::EigendecompositionFailed { .. }
@@ -899,14 +892,18 @@ impl EstimationError {
     }
 
     pub fn is_inner_solve_retreat(&self) -> bool {
-        matches!(
-            self,
-            EstimationError::ModelIsIllConditioned { .. }
-                | EstimationError::PerfectSeparationDetected { .. }
-                | EstimationError::MultinomialSeparationDetected { .. }
-                | EstimationError::PirlsDidNotConverge { .. }
-                | EstimationError::FixedLambdaNewtonDidNotConverge { .. }
-        )
+        // ONE table. This method and `is_trial_point_infeasible` ask the same
+        // question -- "is this a statement about this rho, or about the
+        // problem?" -- and used to answer it from two separate variant lists
+        // that had drifted apart. Keeping a second list here is what let them
+        // drift, so there is no longer a second list (#2593).
+        //
+        // The relation is delegation, not equality: `is_trial_point_infeasible`
+        // is strictly wider, because it also asks the producer through
+        // `CustomFamily(..)` and honours the typed `TrialPointRefused`. Every
+        // retreat is an infeasibility; not every infeasibility arrives as one
+        // of the five inner-solve shapes.
+        self.is_trial_point_infeasible()
     }
 }
 
@@ -914,13 +911,12 @@ impl EstimationError {
 mod trial_point_classification_tests {
     use super::*;
 
-    /// Pins the divergence documented in `is_trial_point_infeasible` so it is
-    /// a recorded state of the code rather than an accident: every variant
-    /// `is_inner_solve_retreat` calls a retreat is, today, NOT a trial-point
-    /// infeasibility. Whoever unifies them will delete this test, which is the
-    /// intent — it exists to make the unification a deliberate act.
+    /// The two classifiers now agree by construction, and this is what pins
+    /// that: every inner-solve retreat is a trial-point infeasibility. The test
+    /// it replaces pinned the opposite, deliberately, so that unifying them had
+    /// to be a decision rather than a drift (#2593).
     #[test]
-    fn the_retreat_list_and_the_infeasibility_list_still_disagree() {
+    fn every_inner_solve_retreat_is_a_trial_point_infeasibility() {
         let retreats = [
             EstimationError::ModelIsIllConditioned {
                 condition_number: 1.0e18,
@@ -946,9 +942,8 @@ mod trial_point_classification_tests {
                 "fixture must be a retreat: {error}"
             );
             assert!(
-                !error.is_trial_point_infeasible(),
-                "unifying the two classifiers is a deliberate change with its own \
-                 measurement; delete this test when you make it: {error}"
+                error.is_trial_point_infeasible(),
+                "a retreat is by its own definition a trial-point infeasibility: {error}"
             );
         }
     }
