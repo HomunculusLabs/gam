@@ -642,11 +642,14 @@ pub fn gaussian_reml_stationary_set(
     let mut roots = Vec::new();
     let mut root_brackets = Vec::new();
     let mut root_gradients = Vec::new();
-    let selection = enumerate_and_select_rho(&eval, &enclose, init_rho, |root, e| {
-        roots.push(root.rho);
-        root_brackets.push(root.bracket);
-        root_gradients.push(e.grad);
-    })?;
+    let selection = {
+        let mut observer = |root: StationaryRoot, e: &ObjectiveEval| {
+            roots.push(root.rho);
+            root_brackets.push(root.bracket);
+            root_gradients.push(e.grad);
+        };
+        enumerate_and_select_rho(&eval, &enclose, init_rho, Some(&mut observer))?
+    };
     Ok(GaussianRemlStationarySet {
         roots,
         root_brackets,
@@ -749,7 +752,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
                 b,
             )
         };
-        enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho
+        enumerate_and_select_rho(eval, enclose, init_rho, None)?.rho
     };
     let objective = eval(rho);
     let lambda = gam_problem::checked_exp_log_strength(rho)
@@ -4454,7 +4457,7 @@ fn enumerate_and_select_rho_with_controls(
     enclose: impl Fn(f64, f64) -> (Interval, Interval),
     init_rho: Option<f64>,
     controls: ProfileSearchControls,
-    mut visit: impl FnMut(StationaryRoot, &ObjectiveEval),
+    mut visit: Option<&mut dyn FnMut(StationaryRoot, &ObjectiveEval)>,
 ) -> Result<ProfileSelection, EstimationError> {
     const CAP: usize = MAX_DEPTH + 4;
     let lower_eval = eval(controls.lower);
@@ -4590,7 +4593,9 @@ fn enumerate_and_select_rho_with_controls(
                         best_rho = root.rho;
                         best_eval = e;
                     }
-                    visit(root, &e);
+                    if let Some(observer) = visit.as_deref_mut() {
+                        observer(root, &e);
+                    }
                     last_root = Some(root);
                 }
             }
@@ -4644,7 +4649,7 @@ fn enumerate_and_select_rho(
     eval: impl Fn(f64) -> ObjectiveEval,
     enclose: impl Fn(f64, f64) -> (Interval, Interval),
     init_rho: Option<f64>,
-    visit: impl FnMut(StationaryRoot, &ObjectiveEval),
+    visit: Option<&mut dyn FnMut(StationaryRoot, &ObjectiveEval)>,
 ) -> Result<ProfileSelection, EstimationError> {
     enumerate_and_select_rho_with_controls(
         eval,
@@ -4768,9 +4773,9 @@ fn rho_landscape_certificate_from_parts(
                 b,
             )
         };
-        enumerate_and_select_rho(&eval, &enclose, init_rho, |root, _| {
-            root_brackets.push(root.bracket)
-        })?
+        let mut observer =
+            |root: StationaryRoot, _: &ObjectiveEval| root_brackets.push(root.bracket);
+        enumerate_and_select_rho(&eval, &enclose, init_rho, Some(&mut observer))?
     };
 
     let stationary_count = root_brackets.len();
@@ -4847,7 +4852,7 @@ fn optimize_rho(
             b,
         )
     };
-    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho)
+    Ok(enumerate_and_select_rho(eval, enclose, init_rho, None)?.rho)
 }
 
 fn fill_weighted_rhs_no_alloc(
@@ -4993,7 +4998,7 @@ fn optimize_rho_no_alloc(
             b,
         )
     };
-    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho)
+    Ok(enumerate_and_select_rho(eval, enclose, init_rho, None)?.rho)
 }
 
 fn fill_coefficients_no_alloc(
