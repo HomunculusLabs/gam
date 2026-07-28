@@ -1227,6 +1227,353 @@ impl SaeBasisThirdJet for SphericalHarmonicEvaluator {
     }
 }
 
+/// One column of [`AmbientSphereHarmonicEvaluator`], pre-differentiated in `z`.
+#[derive(Debug, Clone)]
+struct AmbientSphereColumn {
+    /// Spherical-harmonic degree `l`.
+    degree: usize,
+    /// Signed order `m`. `m >= 0` selects the `Re[w^{|m|}]` phase, `m < 0` the
+    /// `Im[w^{|m|}]` phase — the same convention as the chart evaluator's
+    /// `cos(m·lon)` / `sin(|m|·lon)`.
+    m: i64,
+    /// `|m|`, the power of `w = x + iy` this column carries.
+    am: usize,
+    /// Orthonormalization constant `N_{l,m}` (includes the `√2` for `m != 0`).
+    norm: f64,
+    /// `d^r/dz^r Q_l^{|m|}` for `r = 0..=3`, ascending-power coefficients.
+    /// Third order is the deepest jet any consumer asks for, so all four are
+    /// materialized once at construction and the hot path never differentiates.
+    assoc_derivatives: [Vec<f64>; 4],
+    /// `true` iff `l >= 2` — the curved (η-dialed) refinement above the base
+    /// monopole+dipole embedding, matching [`SphericalHarmonicEvaluator`].
+    curved: bool,
+}
+
+/// `Re[w^k]` and `Im[w^k]` for `w = x + iy`, by direct recurrence.
+#[inline]
+fn ambient_complex_power(x: f64, y: f64, k: usize) -> (f64, f64) {
+    let (mut re, mut im) = (1.0_f64, 0.0_f64);
+    for _ in 0..k {
+        let next_re = re * x - im * y;
+        let next_im = re * y + im * x;
+        re = next_re;
+        im = next_im;
+    }
+    (re, im)
+}
+
+/// Horner evaluation of an ascending-power coefficient vector.
+#[inline]
+fn ambient_poly_eval(coefficients: &[f64], z: f64) -> f64 {
+    let mut acc = 0.0_f64;
+    for &coefficient in coefficients.iter().rev() {
+        acc = acc * z + coefficient;
+    }
+    acc
+}
+
+/// `∂^p_x ∂^q_y A_m(x, y)` where `A_m = Re[w^{|m|}]` for `m >= 0` and
+/// `Im[w^{|m|}]` for `m < 0`.
+///
+/// One identity covers every order: `∂^p_x ∂^q_y w^a = i^q · a^{↓(p+q)} ·
+/// w^{a−p−q}`, because `∂_x w = 1` and `∂_y w = i`. So the derivative is a
+/// falling factorial, a lower power of `w`, and a rotation by `q` quarter
+/// turns — no case analysis per jet order, and exact at every point including
+/// the poles, where a `(lat, lon)` chart's longitude derivative collapses.
+#[inline]
+fn ambient_angular_partial(am: usize, sine_phase: bool, x: f64, y: f64, p: usize, q: usize) -> f64 {
+    let order = p + q;
+    if order > am {
+        // `w^a` is a polynomial of degree `a`; past that every partial is zero.
+        return 0.0;
+    }
+    let mut falling = 1.0_f64;
+    for step in 0..order {
+        falling *= (am - step) as f64;
+    }
+    let (re, im) = ambient_complex_power(x, y, am - order);
+    // Multiply by `i^q`: rotate the pair by `q` quarter turns.
+    let (re, im) = match q % 4 {
+        0 => (re, im),
+        1 => (-im, re),
+        2 => (-re, -im),
+        _ => (im, -re),
+    };
+    falling * if sine_phase { im } else { re }
+}
+
+/// Real spherical harmonics on `S²` in **ambient Cartesian coordinates**
+/// `u = (x, y, z)` — the pole-free sibling of [`SphericalHarmonicEvaluator`].
+///
+/// # Why ambient
+///
+/// `S²` admits no global 2-D chart, so every `(lat, lon)` parameterization pays
+/// for that at the poles, in four distinct ways:
+///
+///   * **The pole is a wall, not a point.** A `lat ∈ [-π/2, π/2]` latent is an
+///     `Interval`, whose retraction clamps and whose tangent projection zeroes
+///     the outward velocity at the bound. On the sphere the pole is an ordinary
+///     interior point you walk straight through.
+///   * **The trust-region metric is wrong by `cos²(lat)`.** The round metric is
+///     `dlat² + cos²(lat)·dlon²`, but a product latent's metric weights are
+///     per-axis constants, so a fixed coordinate step is a large geodesic move
+///     at the equator and a vanishing one near a pole.
+///   * **Longitude is gauge at the poles.** `cos(lat) = 0` collapses every
+///     longitude to one physical point and kills the longitude jet, leaving a
+///     singular `H_tt` block that a coordinate prior can still push around.
+///   * **A fixed low-degree chart block need not be rotation-covariant.**
+///
+/// Parameterizing by the ambient unit vector removes all four. The latent
+/// manifold is [`gam_terms::latent::LatentManifold::Sphere`], whose retraction
+/// `(u+ξ)/‖u+ξ‖` is globally smooth with no cut and no boundary, whose tangent
+/// projection `v − (u·v)u` is exact, and whose uniform ambient metric restricts
+/// to *precisely* the round metric on the tangent space. Rotation covariance is
+/// automatic: each degree-`l` block spans a full `SO(3)` irrep.
+///
+/// # The same function space, exactly
+///
+/// The columns are the identical real harmonics, not an approximation of them.
+/// Writing `w = x + iy`, the chart's longitude factor times its `cos(lat)`
+/// power is a *polynomial*:
+///
+/// ```text
+/// cos(lat)^{|m|} · cos(|m|·lon) = Re[w^{|m|}]
+/// cos(lat)^{|m|} · sin(|m|·lon) = Im[w^{|m|}]
+/// ```
+///
+/// and the Legendre factor `Q_l^{|m|}(sin lat)` is just `Q_l^{|m|}(z)`. So
+/// column `(l, m)` is `N_{l,m} · Q_l^{|m|}(z) · A_m(x, y)`, a polynomial in
+/// `(x, y, z)` whose derivatives of every order are finite EVERYWHERE, poles
+/// included. `ambient_sphere_matches_chart_on_the_sphere` pins that equality
+/// against [`SphericalHarmonicEvaluator`] to 1e-12, so this evaluator inherits
+/// its orthonormality and spectral metadata rather than re-deriving them.
+///
+/// # Ambient jets are deliberately unprojected
+///
+/// The polynomial is the harmonic ambient extension off the sphere, so its
+/// ambient gradient carries a radial component that is not tangential data.
+/// Removing it is the *manifold's* job, not the basis's:
+/// `LatentManifold::project_to_tangent` and `riemannian_hessian_matrix` (with
+/// its `add_normal_pinning`) do exactly that, and they are the single authority
+/// for it. Projecting here as well would double-apply the correction. The jets
+/// below are therefore the raw polynomial derivatives.
+///
+/// Coordinates are *not* required to be exactly unit-norm: line-search trials
+/// legitimately evaluate slightly off the sphere before the retraction pulls
+/// them back, and the polynomial is well-defined there. Only on `‖u‖ = 1` do
+/// the columns coincide with the orthonormal harmonics.
+#[derive(Debug, Clone)]
+pub struct AmbientSphereHarmonicEvaluator {
+    degree: usize,
+    columns: Vec<AmbientSphereColumn>,
+}
+
+impl AmbientSphereHarmonicEvaluator {
+    pub fn new(degree: usize) -> Result<Self, String> {
+        let side = degree.checked_add(1).ok_or_else(|| {
+            "AmbientSphereHarmonicEvaluator: basis width overflowed usize".to_string()
+        })?;
+        let basis_size = side.checked_mul(side).ok_or_else(|| {
+            "AmbientSphereHarmonicEvaluator: basis width overflowed usize".to_string()
+        })?;
+        let polys = legendre_polynomials(degree);
+        let mut columns = Vec::with_capacity(basis_size);
+        for l in 0..=degree {
+            for m in -(l as i64)..=(l as i64) {
+                let am = m.unsigned_abs() as usize;
+                let assoc = polynomial_derivative(&polys[l], am);
+                columns.push(AmbientSphereColumn {
+                    degree: l,
+                    m,
+                    am,
+                    norm: spherical_harmonic_norm(l, m),
+                    assoc_derivatives: [
+                        polynomial_derivative(&assoc, 0),
+                        polynomial_derivative(&assoc, 1),
+                        polynomial_derivative(&assoc, 2),
+                        polynomial_derivative(&assoc, 3),
+                    ],
+                    curved: l >= 2,
+                });
+            }
+        }
+        Ok(Self { degree, columns })
+    }
+
+    pub fn degree(&self) -> usize {
+        self.degree
+    }
+
+    pub fn basis_size(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Exact `(l, m)` and Laplace-eigenvalue metadata in evaluator column order,
+    /// in the same layout and units as [`SphericalHarmonicEvaluator`] — the two
+    /// evaluators are the same basis in different coordinates, so a quotient
+    /// construction can consume either cover with one character table.
+    pub fn spectral_modes(&self) -> Vec<SphericalHarmonicMode> {
+        self.columns
+            .iter()
+            .map(|column| {
+                let degree = column.degree as f64;
+                SphericalHarmonicMode {
+                    degree: column.degree,
+                    order: column.m,
+                    laplace_eigenvalue: degree * (degree + 1.0),
+                    l2_gram_weight: 1.0,
+                }
+            })
+            .collect()
+    }
+
+    /// The mixed partial `∂^p_x ∂^q_y ∂^r_z` of one column at `(x, y, z)`.
+    ///
+    /// The column is separable as `N · Q^{(r)}(z) · ∂^p_x ∂^q_y A_m(x, y)`, so
+    /// every jet order routes through this one function and no derivative rule
+    /// is written twice.
+    #[inline]
+    fn partial(
+        &self,
+        column: &AmbientSphereColumn,
+        x: f64,
+        y: f64,
+        z: f64,
+        p: usize,
+        q: usize,
+        r: usize,
+    ) -> f64 {
+        debug_assert!(r <= 3, "ambient sphere jets are materialized to order 3");
+        let radial = ambient_poly_eval(&column.assoc_derivatives[r], z);
+        if radial == 0.0 {
+            return 0.0;
+        }
+        let angular = ambient_angular_partial(column.am, column.m < 0, x, y, p, q);
+        column.norm * radial * angular
+    }
+
+    /// Count how many of the requested axes are `x`, `y`, and `z`.
+    #[inline]
+    fn axis_counts(axes: &[usize]) -> (usize, usize, usize) {
+        let mut counts = (0_usize, 0_usize, 0_usize);
+        for &axis in axes {
+            match axis {
+                0 => counts.0 += 1,
+                1 => counts.1 += 1,
+                _ => counts.2 += 1,
+            }
+        }
+        counts
+    }
+
+    fn check_coords(&self, coords: ArrayView2<'_, f64>, what: &str) -> Result<(), String> {
+        if coords.ncols() != 3 {
+            return Err(format!(
+                "AmbientSphereHarmonicEvaluator::{what}: expected ambient dim == 3 (x, y, z), got {}",
+                coords.ncols()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SaeBasisEvaluator for AmbientSphereHarmonicEvaluator {
+    fn phi_eta_split(&self, n_basis: usize) -> Result<PhiEtaSplit, String> {
+        let expected = self.basis_size();
+        if n_basis != expected {
+            return Err(format!(
+                "AmbientSphereHarmonicEvaluator::phi_eta_split: n_basis {n_basis} != evaluator width {expected}"
+            ));
+        }
+        // Base (η-invariant) block: monopole + dipole `l <= 1`, i.e. the base
+        // sphere embedding itself. `l >= 2` is the η-dialed refinement, matching
+        // the chart evaluator so the homotopy means the same thing either way.
+        let curved = self
+            .columns
+            .iter()
+            .map(|column| column.curved)
+            .collect::<Vec<_>>();
+        Ok(PhiEtaSplit::from_curved_mask(curved))
+    }
+
+    /// The `(l, m)` triangular indexing is not a clean per-axis tensor product.
+    fn factor_basis_sizes(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
+        Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
+    }
+
+    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
+        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
+    }
+
+    fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
+        self.check_coords(coords, "evaluate")?;
+        let n = coords.nrows();
+        let m = self.basis_size();
+        let mut phi = Array2::<f64>::zeros((n, m));
+        let mut jet = Array3::<f64>::zeros((n, m, 3));
+        for row in 0..n {
+            let (x, y, z) = (coords[[row, 0]], coords[[row, 1]], coords[[row, 2]]);
+            for (col_idx, column) in self.columns.iter().enumerate() {
+                phi[[row, col_idx]] = self.partial(column, x, y, z, 0, 0, 0);
+                jet[[row, col_idx, 0]] = self.partial(column, x, y, z, 1, 0, 0);
+                jet[[row, col_idx, 1]] = self.partial(column, x, y, z, 0, 1, 0);
+                jet[[row, col_idx, 2]] = self.partial(column, x, y, z, 0, 0, 1);
+            }
+        }
+        Ok((phi, jet))
+    }
+}
+
+impl SaeBasisSecondJet for AmbientSphereHarmonicEvaluator {
+    fn second_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array4<f64>, String> {
+        self.check_coords(coords, "second_jet")?;
+        let n = coords.nrows();
+        let m = self.basis_size();
+        let mut h = Array4::<f64>::zeros((n, m, 3, 3));
+        for row in 0..n {
+            let (x, y, z) = (coords[[row, 0]], coords[[row, 1]], coords[[row, 2]]);
+            for (col_idx, column) in self.columns.iter().enumerate() {
+                for axis_a in 0..3 {
+                    for axis_b in 0..3 {
+                        let (p, q, r) = Self::axis_counts(&[axis_a, axis_b]);
+                        h[[row, col_idx, axis_a, axis_b]] =
+                            self.partial(column, x, y, z, p, q, r);
+                    }
+                }
+            }
+        }
+        Ok(h)
+    }
+}
+
+impl SaeBasisThirdJet for AmbientSphereHarmonicEvaluator {
+    fn third_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array5<f64>, String> {
+        self.check_coords(coords, "third_jet")?;
+        let n = coords.nrows();
+        let m = self.basis_size();
+        let mut t3 = Array5::<f64>::zeros((n, m, 3, 3, 3));
+        for row in 0..n {
+            let (x, y, z) = (coords[[row, 0]], coords[[row, 1]], coords[[row, 2]]);
+            for (col_idx, column) in self.columns.iter().enumerate() {
+                for axis_a in 0..3 {
+                    for axis_b in 0..3 {
+                        for axis_c in 0..3 {
+                            let (p, q, r) = Self::axis_counts(&[axis_a, axis_b, axis_c]);
+                            t3[[row, col_idx, axis_a, axis_b, axis_c]] =
+                                self.partial(column, x, y, z, p, q, r);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(t3)
+    }
+}
+
 /// Select the working spherical-harmonic degree by the spectral-noise-floor
 /// bandwidth doctrine: fit the full `max_degree` basis on the chart, form the
 /// per-degree mean coefficient energy `E_l = ‖coefficients at degree l‖² /
