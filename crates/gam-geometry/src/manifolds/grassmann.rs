@@ -63,6 +63,8 @@ impl RiemannianManifold for GrassmannManifold {
     }
 
     fn tangent_basis(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Array2<f64>> {
+        // Caller-side shape validation (see `projected_standard_basis_tangent`,
+        // which documents that each caller keeps its own input validation).
         from_flat(point, self.n, self.k)?;
         projected_standard_basis_tangent(self, point, self.n, self.k)
     }

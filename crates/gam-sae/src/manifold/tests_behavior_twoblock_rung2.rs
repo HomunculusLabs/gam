@@ -12,6 +12,11 @@
 //! behavior does not vary earns a ≈ 0 behavior decoder while keeping its
 //! activation decoder.
 
+// `manifold/mod.rs` declares this module as
+// `#[cfg(test)] mod tests_behavior_twoblock_rung2;`; declaring the test scope
+// in-file makes that a claim the compiler enforces.
+#![cfg(test)]
+
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 

@@ -812,12 +812,18 @@ fn record_simplex(
             ));
         }
     }
-    match cardinality {
-        1 => inventory.vertices.push(simplex.to_vec()),
-        2 => inventory.edges.push(simplex.to_vec()),
-        3 => inventory.triangles.push(simplex.to_vec()),
-        4 => inventory.tetrahedra.push(simplex.to_vec()),
-        _ => {}
+    let roster = match cardinality {
+        1 => Some(&mut inventory.vertices),
+        2 => Some(&mut inventory.edges),
+        3 => Some(&mut inventory.triangles),
+        4 => Some(&mut inventory.tetrahedra),
+        // Simplices of dimension 4 and above are counted and folded into the
+        // Euler characteristic above, but the inventory keeps explicit rosters
+        // only through tetrahedra.
+        _ => None,
+    };
+    if let Some(roster) = roster {
+        roster.push(simplex.to_vec());
     }
     Ok(())
 }

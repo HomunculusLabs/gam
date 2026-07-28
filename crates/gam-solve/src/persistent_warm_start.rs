@@ -230,8 +230,8 @@ fn store_json_record<T: Serialize>(key: &str, record: &T) -> Result<(), String> 
     fp.absorb_str(b"warm-start-key", key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map(drop)
-        .map_err(|e| format!("failed to persist warm-start cache record: {e}"))
+        .map_err(|e| format!("failed to persist warm-start cache record: {e}"))?;
+    Ok(())
 }
 
 fn load_json_record<T: for<'de> Deserialize<'de>>(key: &str) -> Option<T> {
@@ -329,8 +329,8 @@ pub fn store_fit_artifact(
     fp.absorb_str(b"fit-artifact-descriptor", &key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map(drop)
-        .map_err(|e| format!("failed to persist fit-artifact record: {e}"))
+        .map_err(|e| format!("failed to persist fit-artifact record: {e}"))?;
+    Ok(())
 }
 
 /// Load the newest valid cross-fit [`FitArtifact`] whose descriptor key

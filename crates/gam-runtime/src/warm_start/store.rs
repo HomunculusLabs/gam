@@ -1491,16 +1491,15 @@ mod tests {
         let mut stale_bin = None;
         for entry in fs::read_dir(&stale_dir).unwrap() {
             let p = entry.unwrap().path();
-            match p.extension().and_then(|s| s.to_str()) {
-                Some("json") => {
-                    let raw = fs::read(&p).unwrap();
-                    let mut parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-                    parsed["schema_version"] = serde_json::json!(SCHEMA_VERSION + 99);
-                    fs::write(&p, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
-                    stale_meta = Some(p);
-                }
-                Some("bin") => stale_bin = Some(p),
-                _ => {}
+            let extension = p.extension().and_then(|s| s.to_str()).map(str::to_owned);
+            if extension.as_deref() == Some("json") {
+                let raw = fs::read(&p).unwrap();
+                let mut parsed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                parsed["schema_version"] = serde_json::json!(SCHEMA_VERSION + 99);
+                fs::write(&p, serde_json::to_vec_pretty(&parsed).unwrap()).unwrap();
+                stale_meta = Some(p);
+            } else if extension.as_deref() == Some("bin") {
+                stale_bin = Some(p);
             }
         }
         let stale_meta = stale_meta.expect("saved entry should have metadata");

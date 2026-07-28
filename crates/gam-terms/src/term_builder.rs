@@ -1037,19 +1037,20 @@ fn parse_periodic_axes_option(
     // we only need to NOT mis-read "true" as an axis index (#1074). `false`
     // means no axis is periodic.
     let lowered = raw_axes.trim().to_ascii_lowercase();
-    match lowered.as_str() {
-        "true" | "yes" | "y" => return Ok(Some(periods)),
-        // `false` means NO axis is periodic. Return `None` — NOT
-        // `Some(vec![None; dim])` — because the radial 1-D consumer treats a
-        // `Some([None])` as "periodicity requested, derive the wrap period from
-        // the data range" (see the Duchon builder arm below, which back-fills
-        // `axes[0] = data_span` for a lone `None`) and the 1-D builder routes on
-        // `spec.periodic.is_some()`. Emitting `Some([None])` here therefore
-        // silently produced a *periodic* smooth for an explicit `periodic=false`
-        // — the exact regression this arm now avoids, matching the bracketed
-        // `[false]` form handled by the per-axis boolean block below.
-        "false" | "no" | "n" => return Ok(None),
-        _ => {}
+    if matches!(lowered.as_str(), "true" | "yes" | "y") {
+        return Ok(Some(periods));
+    }
+    // `false` means NO axis is periodic. Return `None` — NOT
+    // `Some(vec![None; dim])` — because the radial 1-D consumer treats a
+    // `Some([None])` as "periodicity requested, derive the wrap period from
+    // the data range" (see the Duchon builder arm below, which back-fills
+    // `axes[0] = data_span` for a lone `None`) and the 1-D builder routes on
+    // `spec.periodic.is_some()`. Emitting `Some([None])` here therefore
+    // silently produced a *periodic* smooth for an explicit `periodic=false`
+    // — the exact regression this branch now avoids, matching the bracketed
+    // `[false]` form handled by the per-axis boolean block below.
+    if matches!(lowered.as_str(), "false" | "no" | "n") {
+        return Ok(None);
     }
     let axes = split_list_option(raw_axes);
     if axes.is_empty() {
@@ -1173,13 +1174,13 @@ fn parse_periodic_axes(
     let mut axes = vec![false; dim];
     if let Some(raw) = options.get("periodic").or_else(|| options.get("cyclic")) {
         let lowered = raw.trim().to_ascii_lowercase();
-        match lowered.as_str() {
-            "true" | "yes" | "y" => {
-                axes.fill(true);
-                return Ok(axes);
-            }
-            "false" | "no" | "n" => return Ok(axes),
-            _ => {}
+        if matches!(lowered.as_str(), "true" | "yes" | "y") {
+            axes.fill(true);
+            return Ok(axes);
+        }
+        // `false` leaves every axis non-periodic, which `axes` already is.
+        if matches!(lowered.as_str(), "false" | "no" | "n") {
+            return Ok(axes);
         }
         for axis_raw in parse_option_list(raw) {
             let axis = axis_raw
@@ -3854,7 +3855,21 @@ pub fn enable_scale_dimensions(spec: &mut TermCollectionSpec) {
                     duchon.aniso_log_scales = Some(vec![0.0; d]);
                 }
             }
-            _ => {}
+            // Bases with no per-axis length-scale vector to seed: either
+            // single-axis, factor-indexed, or (tensor) already anisotropic by
+            // construction through their marginals. Enumerated rather than
+            // wildcarded so a new basis kind has to answer this question.
+            SmoothBasisSpec::ByVariable { .. }
+            | SmoothBasisSpec::FactorSumToZero { .. }
+            | SmoothBasisSpec::BSpline1D { .. }
+            | SmoothBasisSpec::BySmooth { .. }
+            | SmoothBasisSpec::FactorSmooth { .. }
+            | SmoothBasisSpec::ThinPlate { .. }
+            | SmoothBasisSpec::Sphere { .. }
+            | SmoothBasisSpec::ConstantCurvature { .. }
+            | SmoothBasisSpec::MeasureJet { .. }
+            | SmoothBasisSpec::Pca { .. }
+            | SmoothBasisSpec::TensorBSpline { .. } => {}
         }
     }
 }
@@ -4807,13 +4822,18 @@ pub fn parse_periodic_domain_1d(
 fn parse_matern_nu(raw: &str) -> Result<MaternNu, String> {
     let trimmed = raw.trim();
     let lowered = trimmed.to_ascii_lowercase();
-    match lowered.as_str() {
-        "1/2" | "0.5" | "half" => return Ok(MaternNu::Half),
-        "3/2" | "1.5" => return Ok(MaternNu::ThreeHalves),
-        "5/2" | "2.5" => return Ok(MaternNu::FiveHalves),
-        "7/2" | "3.5" => return Ok(MaternNu::SevenHalves),
-        "9/2" | "4.5" => return Ok(MaternNu::NineHalves),
-        _ => {}
+    // Exact spellings of the half-integer smoothnesses that have closed-form
+    // kernels; anything else falls through to the numeric parse below.
+    let named = match lowered.as_str() {
+        "1/2" | "0.5" | "half" => Some(MaternNu::Half),
+        "3/2" | "1.5" => Some(MaternNu::ThreeHalves),
+        "5/2" | "2.5" => Some(MaternNu::FiveHalves),
+        "7/2" | "3.5" => Some(MaternNu::SevenHalves),
+        "9/2" | "4.5" => Some(MaternNu::NineHalves),
+        _ => None,
+    };
+    if let Some(nu) = named {
+        return Ok(nu);
     }
 
     let value = if let Some((num, den)) = trimmed.split_once('/') {

@@ -2227,7 +2227,14 @@ fn full_log_likelihood_row(
                 ));
             }
         }
-        _ => {}
+        // Continuous responses: the weight is a genuine prior weight, not a
+        // frequency count, so there is no integrality contract to enforce.
+        // Enumerated so a newly added count family has to declare itself here
+        // instead of silently skipping the check.
+        ResponseFamily::Gaussian
+        | ResponseFamily::Gamma
+        | ResponseFamily::Tweedie { .. }
+        | ResponseFamily::RoystonParmar => {}
     }
     if matches!(&likelihood.spec.response, ResponseFamily::Poisson) {
         let saturated = poisson_saturated_log_likelihood(y);

@@ -63,12 +63,15 @@ impl PirlsWorkspace {
     /// workspace's five observation-length vectors would reintroduce O(n)
     /// work before the zero-iteration branch can consume those statistics.
     pub fn coefficient_only(p: usize) -> Self {
-        Self::new(0, p, 0, 0)
+        Self::new(0, p)
     }
 
-    pub fn new(n: usize, p: usize, _: usize, _: usize) -> Self {
-        // Default implementation ignores this parameter.
-        // Default implementation ignores this parameter.
+    /// Scratch for an `n`-row, `p`-coefficient PIRLS solve.
+    ///
+    /// Penalty-block extents are deliberately *not* parameters: every stage
+    /// buffer that depends on them is allocated on demand by the path that
+    /// needs it, so sizing them here only pre-committed memory no consumer read.
+    pub fn new(n: usize, p: usize) -> Self {
         // Stage buffers are allocated lazily: historically these were pre-sized to
         // worst-case dimensions, which inflates memory when many PIRLS workspaces
         // exist concurrently (e.g. parallel REML evals).

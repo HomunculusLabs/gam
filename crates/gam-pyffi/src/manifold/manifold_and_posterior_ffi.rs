@@ -1045,7 +1045,18 @@ fn frozen_factor_levels_by_col(
                     record(spec.group_col, frozen);
                 }
             }
-            _ => {}
+            // Leaf geometric bases: they wrap no inner basis to recurse into
+            // and carry no frozen factor levels. Enumerated rather than left to
+            // a wildcard so a new basis variant has to be classified here.
+            SmoothBasisSpec::BSpline1D { .. }
+            | SmoothBasisSpec::ThinPlate { .. }
+            | SmoothBasisSpec::Sphere { .. }
+            | SmoothBasisSpec::ConstantCurvature { .. }
+            | SmoothBasisSpec::Matern { .. }
+            | SmoothBasisSpec::MeasureJet { .. }
+            | SmoothBasisSpec::Duchon { .. }
+            | SmoothBasisSpec::Pca { .. }
+            | SmoothBasisSpec::TensorBSpline { .. } => {}
         }
     }
 

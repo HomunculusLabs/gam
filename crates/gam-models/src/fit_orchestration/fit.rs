@@ -1927,7 +1927,17 @@ fn optimize_survival_transformation_smoothing(
             &mut candidate,
             gam_problem::Coefficients::new(warm_beta.borrow().clone()),
             &opts,
-            None,
+            Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
+                log::trace!(
+                    "[SURV-TRANS inner] iter={} deviance={:.6e} |grad|={:.6e} step={:.3e} \
+                     halvings={}",
+                    info.iteration,
+                    info.deviance,
+                    info.gradient_norm,
+                    info.step_size,
+                    info.step_halving
+                );
+            }),
         )?;
         // The envelope gradient exists only at a certified beta optimum. A
         // finite exhausted state is a checkpoint, not a derivative-bearing
@@ -3200,7 +3210,18 @@ pub(crate) fn fit_survival_transformation_model(
                     &mut model,
                     gam_problem::Coefficients::new(beta0),
                     &opts,
-                    None,
+                    Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
+                        log::trace!(
+                            "[SURV-BASELINE pirls] parameter_checkpoint={:?} iter={} \
+                                 deviance={:.6e} |grad|={:.6e} step={:.3e} halvings={}",
+                            parameter_checkpoint,
+                            info.iteration,
+                            info.deviance,
+                            info.gradient_norm,
+                            info.step_size,
+                            info.step_halving
+                        );
+                    }),
                 )
                 .map_err(|error| {
                     format!(
@@ -3281,8 +3302,8 @@ pub(crate) fn fit_survival_transformation_model(
         .iter()
         .any(|&t| t > crate::survival::ENTRY_AT_ORIGIN_THRESHOLD);
     let p_time_total = prepared.time_design_exit.ncols();
-    let (survival_outer_iterations, survival_outer_certificate) =
-        if let Some(selection) = optimize_survival_transformation_smoothing(
+    let (survival_outer_iterations, survival_outer_certificate) = if let Some(selection) =
+        optimize_survival_transformation_smoothing(
             &model,
             &penalty_blocks,
             num_smoothing_blocks,
@@ -3291,21 +3312,21 @@ pub(crate) fn fit_survival_transformation_model(
             p_time_total,
             is_left_truncated,
         )? {
-            model
-                .set_penalty_lambdas(&selection.lambdas)
-                .map_err(|e| e.to_string())?;
-            for (block, &lam) in penalty_blocks.iter_mut().zip(selection.lambdas.iter()) {
-                block.lambda = lam;
-            }
-            (selection.outer_iterations, selection.criterion_certificate)
-        } else {
-            // No smoothing coordinate was optimized (e.g. the fixed-λ parametric
-            // Weibull baseline path): the fit is fixed-outer, so it carries 0 outer
-            // iterations and no analytic certificate — assembly reads that as
-            // `Fixed` convergence evidence rather than demanding a certificate
-            // (#2301 defect D).
-            (0, None)
-        };
+        model
+            .set_penalty_lambdas(&selection.lambdas)
+            .map_err(|e| e.to_string())?;
+        for (block, &lam) in penalty_blocks.iter_mut().zip(selection.lambdas.iter()) {
+            block.lambda = lam;
+        }
+        (selection.outer_iterations, selection.criterion_certificate)
+    } else {
+        // No smoothing coordinate was optimized (e.g. the fixed-λ parametric
+        // Weibull baseline path): the fit is fixed-outer, so it carries 0 outer
+        // iterations and no analytic certificate — assembly reads that as
+        // `Fixed` convergence evidence rather than demanding a certificate
+        // (#2301 defect D).
+        (0, None)
+    };
     let opts = gam_solve::pirls::WorkingModelPirlsOptions {
         max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
         convergence_tolerance: SURVIVAL_TRANSFORMATION_PIRLS_CONVERGENCE_TOL,
@@ -3346,7 +3367,18 @@ pub(crate) fn fit_survival_transformation_model(
         &mut model,
         gam_problem::Coefficients::new(beta_start),
         &opts,
-        None,
+        Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
+            log::trace!(
+                "[SURV-TRANS final] parameter_checkpoint={:?} iter={} deviance={:.6e} \
+                     |grad|={:.6e} step={:.3e} halvings={}",
+                rho_for_cache,
+                info.iteration,
+                info.deviance,
+                info.gradient_norm,
+                info.step_size,
+                info.step_halving
+            );
+        }),
     )
     .map_err(|error| {
         format!(

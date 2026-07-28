@@ -558,7 +558,21 @@ fn emit_stagewise_progress(
                 fmt(event.joint_penalized_quasi_laplace_after),
             );
         }
-        _ => {}
+        // Every other stage event is a progress tick whose cadence is
+        // per-row or per-candidate; logging them here would turn this into a
+        // hot-path log. They reach the caller through `progress` below.
+        StagewiseEventKind::SeedReady
+        | StagewiseEventKind::BirthRoundStarted
+        | StagewiseEventKind::ResidualModelStarted
+        | StagewiseEventKind::ResidualModelFitted
+        | StagewiseEventKind::CurrentEvidenceStarted
+        | StagewiseEventKind::CurrentEvidenceFinished
+        | StagewiseEventKind::CandidateStarted
+        | StagewiseEventKind::CandidateFinished
+        | StagewiseEventKind::BackfitSweepStarted
+        | StagewiseEventKind::BackfitSweepAccepted
+        | StagewiseEventKind::BackfitSweepRejected
+        | StagewiseEventKind::TerminalEvidenceCompleted => {}
     }
     if let Some(callback) = progress.as_deref_mut() {
         callback(event)?;

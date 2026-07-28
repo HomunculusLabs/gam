@@ -45,7 +45,18 @@ impl SurvivalMarginalSlopeFamily {
         let final_acc = gam_problem::outer_subsample::RowSet::All.par_try_reduce_fold(
             self.n,
             make_acc,
-            |mut acc, row, _| -> Result<_, String> {
+            |mut acc, row, row_weight| -> Result<_, String> {
+                // Full-data pass: `RowSet::All` folds with a literal weight of
+                // 1, which is what licenses the unweighted sums below. A
+                // Horvitz-Thompson weight from a subsampled row set would bias
+                // every accumulated term instead, so refuse rather than
+                // silently ignore the argument that carries the premise.
+                if row_weight != 1.0 {
+                    return Err(format!(
+                        "survival marginal-slope joint eval: full-data pass saw row {row} with \
+                         Horvitz-Thompson weight {row_weight}, expected 1"
+                    ));
+                }
                 let (state, q_geom) = &mut acc;
                 self.row_dynamic_q_geometry_into(row, block_states, q_geom)?;
                 let (row_nll, f_pi, f_pipi) = if flex_active {

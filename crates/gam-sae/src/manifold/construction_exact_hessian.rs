@@ -682,7 +682,11 @@ impl SaeManifoldTerm {
                     probe_for_row,
                     v_t_for_row,
                     &v_beta_row,
-                    |row, _, t_row, beta_row| {
+                    |row, row_vars, t_row, beta_row| {
+                        // The callback's per-row var count must agree with the
+                        // row slice it is handed; a mismatch would silently
+                        // scatter a short row into the wrong output offsets.
+                        assert_eq!(t_row.len(), row_vars);
                         let base = cache.row_offsets[row];
                         for (a, &value) in t_row.iter().enumerate() {
                             out_ref.t[base + a] += value;

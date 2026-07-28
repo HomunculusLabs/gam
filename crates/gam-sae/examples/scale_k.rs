@@ -432,18 +432,17 @@ fn parse_args() -> Result<Args, String> {
     let mut i = 3usize;
     while i < raw.len() {
         let key = raw[i].as_str();
-        match key {
-            "--raw-ok" => {
-                args.raw_ok = true;
-                i += 1;
-                continue;
-            }
-            "--post-peel" => {
-                args.post_peel = true;
-                i += 1;
-                continue;
-            }
-            _ => {}
+        // Valueless flags consume one argument; everything else below consumes
+        // a `--key value` pair.
+        if key == "--raw-ok" {
+            args.raw_ok = true;
+            i += 1;
+            continue;
+        }
+        if key == "--post-peel" {
+            args.post_peel = true;
+            i += 1;
+            continue;
         }
         let value = raw
             .get(i + 1)

@@ -56,13 +56,13 @@ impl EuclideanManifold {
     skip_from_py_object
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CircleManifold {}
+pub(crate) struct CircleManifold;
 
 #[pymethods]
 impl CircleManifold {
     #[new]
     fn new() -> Self {
-        Self {}
+        Self
     }
 
     fn __repr__(&self) -> String {
@@ -316,7 +316,7 @@ pub(crate) struct ProductManifold {
 impl ProductManifold {
     #[new]
     #[pyo3(signature = (*parts))]
-    fn new(_py: Python<'_>, parts: &Bound<'_, PyTuple>) -> Self {
+    fn new(parts: &Bound<'_, PyTuple>) -> Self {
         Self {
             parts: parts.iter().map(|part| part.clone().unbind()).collect(),
         }

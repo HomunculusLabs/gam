@@ -112,7 +112,7 @@ impl<'a> RemlState<'a> {
                 cp.accumulate_weighted(&mut s_lambda, lambdas[k]);
             }
         }
-        let mut workspace = PirlsWorkspace::new(self.y.len(), self.p, 0, 0);
+        let mut workspace = PirlsWorkspace::new(self.y.len(), self.p);
         Ok(
             match workspace.sparse_penalized_system_stats(x_sparse, &s_lambda) {
                 Ok(stats)

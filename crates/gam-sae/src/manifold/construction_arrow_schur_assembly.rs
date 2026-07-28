@@ -2331,7 +2331,10 @@ impl SaeManifoldTerm {
                         projection,
                     );
                 }
-                _ => {}
+                // A non-nuclear Ψ-tier penalty curves the latent coordinates
+                // and a ρ-tier penalty curves the hyperparameters; neither
+                // contributes to the β-border block assembled here.
+                PenaltyTier::Psi | PenaltyTier::Rho => {}
             }
         }
         Ok(hbb_c)

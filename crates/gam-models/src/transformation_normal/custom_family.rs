@@ -134,13 +134,20 @@ impl CustomFamily for TransformationNormalFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
         crate::block_layout::block_count::validate_block_count::<TransformationNormalError>(
             "TransformationNormalFamily",
             1,
             block_states.len(),
         )?;
+        if !self.inner_coefficient_hessian_hvp_available(specs) {
+            return Err(TransformationNormalError::InvalidInput {
+                reason: "TransformationNormalFamily joint gradient evaluation received incompatible block specs"
+                    .to_string(),
+            }
+            .into());
+        }
         let beta = &block_states[0].beta;
         let row_quantities = self.row_quantities(beta)?;
         let log_likelihood = row_quantities.log_likelihood;
@@ -337,13 +344,30 @@ impl CustomFamily for TransformationNormalFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_index: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
         assert!(!block_spec.name.is_empty());
         if block_index != 0 {
             return Ok(None);
+        }
+        // The cone built below constrains the coefficients of exactly this
+        // block, so its width has to agree with the state the active-set solve
+        // will carry, not only with the spec's design.
+        let Some(state) = block_states.get(block_index) else {
+            return Err(format!(
+                "CTN linear constraints: block index {block_index} out of range for {} parameter block state(s)",
+                block_states.len(),
+            ));
+        };
+        if state.beta.len() != block_spec.design.ncols() {
+            return Err(format!(
+                "CTN linear constraints: block '{}' state width {} != spec design width {}",
+                block_spec.name,
+                state.beta.len(),
+                block_spec.design.ncols(),
+            ));
         }
         // Direct-alpha CTN is linear in the coefficient matrix A. The response
         // derivative basis is non-negative, so global monotonicity on the
@@ -425,7 +449,7 @@ impl CustomFamily for TransformationNormalFamily {
     fn exact_newton_joint_psi_terms(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &CustomFamilyHyperLayout,
         psi_index: usize,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
@@ -433,6 +457,14 @@ impl CustomFamily for TransformationNormalFamily {
             return Err(
                 "TransformationNormalFamily does not declare family-owned hyper axes".to_string(),
             );
+        }
+        if !self.inner_coefficient_hessian_hvp_available(specs) {
+            return Err(TransformationNormalError::InvalidInput {
+                reason:
+                    "TransformationNormalFamily joint psi terms received incompatible block specs"
+                        .to_string(),
+            }
+            .into());
         }
         let psi_derivs = hyper_layout.design_derivative_blocks();
         if psi_derivs.is_empty() || psi_index >= psi_derivs[0].len() {
@@ -472,7 +504,7 @@ impl CustomFamily for TransformationNormalFamily {
     fn exact_newton_joint_psisecond_order_terms(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &CustomFamilyHyperLayout,
         psi_i: usize,
         psi_j: usize,
@@ -481,6 +513,13 @@ impl CustomFamily for TransformationNormalFamily {
             return Err(
                 "TransformationNormalFamily does not declare family-owned hyper axes".to_string(),
             );
+        }
+        if !self.inner_coefficient_hessian_hvp_available(specs) {
+            return Err(TransformationNormalError::InvalidInput {
+                reason: "TransformationNormalFamily joint psi-psi terms received incompatible block specs"
+                    .to_string(),
+            }
+            .into());
         }
         let psi_derivs = hyper_layout.design_derivative_blocks();
         if psi_derivs.is_empty() || psi_i >= psi_derivs[0].len() || psi_j >= psi_derivs[0].len() {
@@ -584,7 +623,7 @@ impl CustomFamily for TransformationNormalFamily {
     fn exact_newton_joint_psihessian_directional_derivative(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &CustomFamilyHyperLayout,
         psi_index: usize,
         d_beta_flat: &Array1<f64>,
@@ -593,6 +632,13 @@ impl CustomFamily for TransformationNormalFamily {
             return Err(
                 "TransformationNormalFamily does not declare family-owned hyper axes".to_string(),
             );
+        }
+        if !self.inner_coefficient_hessian_hvp_available(specs) {
+            return Err(TransformationNormalError::InvalidInput {
+                reason: "TransformationNormalFamily joint psi-Hessian directional derivative received incompatible block specs"
+                    .to_string(),
+            }
+            .into());
         }
         let psi_derivs = hyper_layout.design_derivative_blocks();
         if psi_derivs.is_empty() || psi_index >= psi_derivs[0].len() {

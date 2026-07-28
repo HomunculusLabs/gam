@@ -161,6 +161,29 @@ impl FloatWalker {
 /// other key shape falls back to a positional index so the path stays useful.
 struct KeyRenderer;
 
+impl KeyRenderer {
+    /// A key serde offered as a compound value. JSON object keys are strings,
+    /// so there is no spelling for it; name the shape that was offered so the
+    /// `<key>` placeholder that lands in the path can be traced back to the type
+    /// that produced it.
+    fn not_a_scalar(shape: impl Display) -> WalkError {
+        WalkError::Custom(format!("map key is not a scalar: {shape}"))
+    }
+
+    /// Spelling of an enum variant used as a map key. `variant` is what the JSON
+    /// writer emits as the object key, so it is what the path segment must be —
+    /// but `derive` is not the only source of `Serialize` impls, and an empty
+    /// name would splice an invisible segment into the path. Fall back to the
+    /// enum and the variant index, which serde always supplies.
+    fn variant_key(name: &'static str, variant_index: u32, variant: &'static str) -> String {
+        if variant.is_empty() {
+            format!("{name}#{variant_index}")
+        } else {
+            variant.to_string()
+        }
+    }
+}
+
 impl Serializer for KeyRenderer {
     type Ok = String;
     type Error = WalkError;
@@ -232,8 +255,11 @@ impl Serializer for KeyRenderer {
         Ok(value.to_string())
     }
 
-    fn serialize_bytes(self, _: &[u8]) -> Result<String, WalkError> {
-        Ok("<bytes>".to_string())
+    fn serialize_bytes(self, value: &[u8]) -> Result<String, WalkError> {
+        // Byte strings have no JSON object-key spelling. The length is the one
+        // property that distinguishes two such keys in the path without
+        // rendering an unbounded blob into it.
+        Ok(format!("<{} bytes>", value.len()))
     }
 
     fn serialize_none(self) -> Result<String, WalkError> {
@@ -257,79 +283,105 @@ impl Serializer for KeyRenderer {
 
     fn serialize_unit_variant(
         self,
-        _: &'static str,
-        _: u32,
+        name: &'static str,
+        variant_index: u32,
         variant: &'static str,
     ) -> Result<String, WalkError> {
-        Ok(variant.to_string())
+        Ok(Self::variant_key(name, variant_index, variant))
     }
 
-    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<String, WalkError>
+    fn serialize_newtype_struct<T>(self, name: &'static str, value: &T) -> Result<String, WalkError>
     where
         T: Serialize + ?Sized,
     {
-        value.serialize(self)
+        // A newtype struct is transparent in JSON: the key is the inner value's
+        // spelling. If the inner value has no spelling, name the wrapper — that
+        // is the type the caller wrote, and the only one they can act on.
+        value
+            .serialize(self)
+            .map_err(|inner| WalkError::Custom(format!("inside newtype struct `{name}`: {inner}")))
     }
 
     fn serialize_newtype_variant<T>(
         self,
-        _: &'static str,
-        _: u32,
+        name: &'static str,
+        variant_index: u32,
         variant: &'static str,
-        _: &T,
+        value: &T,
     ) -> Result<String, WalkError>
     where
         T: Serialize + ?Sized,
     {
-        Ok(variant.to_string())
+        // Two entries keyed by the same variant but carrying different payloads
+        // are distinct keys, so the payload belongs in the spelling. Dropping it
+        // (as this did) collapsed them onto one path segment.
+        let inner = value.serialize(KeyRenderer)?;
+        Ok(format!(
+            "{}({inner})",
+            Self::variant_key(name, variant_index, variant)
+        ))
     }
 
-    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, WalkError> {
+        Err(Self::not_a_scalar(match len {
+            Some(len) => format!("a sequence of {len} elements"),
+            None => "a sequence of unannounced length".to_string(),
+        }))
     }
 
-    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, WalkError> {
+        Err(Self::not_a_scalar(format_args!("a {len}-tuple")))
     }
 
     fn serialize_tuple_struct(
         self,
-        _: &'static str,
-        _: usize,
+        name: &'static str,
+        len: usize,
     ) -> Result<Self::SerializeTupleStruct, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+        Err(Self::not_a_scalar(format_args!(
+            "tuple struct `{name}` with {len} fields"
+        )))
     }
 
     fn serialize_tuple_variant(
         self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
     ) -> Result<Self::SerializeTupleVariant, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+        Err(Self::not_a_scalar(format_args!(
+            "tuple variant `{name}::{variant}` (variant #{variant_index}) with {len} fields"
+        )))
     }
 
-    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, WalkError> {
+        Err(Self::not_a_scalar(match len {
+            Some(len) => format!("a map of {len} entries"),
+            None => "a map of unannounced length".to_string(),
+        }))
     }
 
     fn serialize_struct(
         self,
-        _: &'static str,
-        _: usize,
+        name: &'static str,
+        len: usize,
     ) -> Result<Self::SerializeStruct, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+        Err(Self::not_a_scalar(format_args!(
+            "struct `{name}` with {len} fields"
+        )))
     }
 
     fn serialize_struct_variant(
         self,
-        _: &'static str,
-        _: u32,
-        _: &'static str,
-        _: usize,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
     ) -> Result<Self::SerializeStructVariant, WalkError> {
-        Err(WalkError::Custom("map key is not a scalar".to_string()))
+        Err(Self::not_a_scalar(format_args!(
+            "struct variant `{name}::{variant}` (variant #{variant_index}) with {len} fields"
+        )))
     }
 }
 
@@ -355,52 +407,60 @@ impl<'a> Serializer for &'a mut FloatWalker {
         self.check(f64::from(value))
     }
 
+    // The integer widths and `char` carry no finiteness verdict, and saying so
+    // once per width states that decision fourteen times over. The narrow widths
+    // widen losslessly into the widest one of their signedness — the shape
+    // `KeyRenderer` already uses above — so "an integer is not a float" is
+    // decided in one place per signedness, and a future verdict (a range check,
+    // say) has one place to live.
+
     fn serialize_bool(self, _: bool) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i8(self, _: i8) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_i8(self, value: i8) -> Result<(), WalkError> {
+        self.serialize_i64(i64::from(value))
     }
 
-    fn serialize_i16(self, _: i16) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_i16(self, value: i16) -> Result<(), WalkError> {
+        self.serialize_i64(i64::from(value))
     }
 
-    fn serialize_i32(self, _: i32) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_i32(self, value: i32) -> Result<(), WalkError> {
+        self.serialize_i64(i64::from(value))
     }
 
-    fn serialize_i64(self, _: i64) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_i64(self, value: i64) -> Result<(), WalkError> {
+        self.serialize_i128(i128::from(value))
     }
 
     fn serialize_i128(self, _: i128) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u8(self, _: u8) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_u8(self, value: u8) -> Result<(), WalkError> {
+        self.serialize_u64(u64::from(value))
     }
 
-    fn serialize_u16(self, _: u16) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_u16(self, value: u16) -> Result<(), WalkError> {
+        self.serialize_u64(u64::from(value))
     }
 
-    fn serialize_u32(self, _: u32) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_u32(self, value: u32) -> Result<(), WalkError> {
+        self.serialize_u64(u64::from(value))
     }
 
-    fn serialize_u64(self, _: u64) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_u64(self, value: u64) -> Result<(), WalkError> {
+        self.serialize_u128(u128::from(value))
     }
 
     fn serialize_u128(self, _: u128) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_char(self, _: char) -> Result<(), WalkError> {
-        Ok(())
+    fn serialize_char(self, value: char) -> Result<(), WalkError> {
+        // JSON writes a `char` as the one-character string it encodes to.
+        self.serialize_str(value.encode_utf8(&mut [0u8; 4]))
     }
 
     fn serialize_str(self, _: &str) -> Result<(), WalkError> {
@@ -448,8 +508,8 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_newtype_variant<T>(
         self,
-        _: &'static str,
-        _: u32,
+        name: &'static str,
+        variant_index: u32,
         variant: &'static str,
         value: &T,
     ) -> Result<(), WalkError>
@@ -457,78 +517,89 @@ impl<'a> Serializer for &'a mut FloatWalker {
         T: Serialize + ?Sized,
     {
         // Externally tagged enums serialize as `{"Variant": payload}`, so the
-        // variant name IS a path segment in the emitted JSON.
+        // variant name IS a path segment in the emitted JSON — and an empty one
+        // would splice an invisible segment into the reported path.
+        assert!(
+            !variant.is_empty(),
+            "`{name}` variant #{variant_index} has an empty name; \
+             its path segment would be invisible"
+        );
         let restore = self.push_field(variant);
         let outcome = value.serialize(&mut *self);
         self.pop_to(restore);
         outcome
     }
 
-    fn serialize_seq(self, _: Option<usize>) -> Result<SeqWalker<'a>, WalkError> {
-        Ok(SeqWalker {
-            walker: self,
-            index: 0,
-        })
+    fn serialize_seq(self, len: Option<usize>) -> Result<SeqWalker<'a>, WalkError> {
+        Ok(SeqWalker::new(self, len, Origin::plain("a sequence")))
     }
 
     fn serialize_tuple(self, len: usize) -> Result<SeqWalker<'a>, WalkError> {
-        self.serialize_seq(Some(len))
+        Ok(SeqWalker::new(self, Some(len), Origin::plain("a tuple")))
     }
 
     fn serialize_tuple_struct(
         self,
-        _: &'static str,
+        name: &'static str,
         len: usize,
     ) -> Result<SeqWalker<'a>, WalkError> {
-        self.serialize_seq(Some(len))
+        Ok(SeqWalker::new(self, Some(len), Origin::plain(name)))
     }
 
     fn serialize_tuple_variant(
         self,
-        _: &'static str,
-        _: u32,
+        name: &'static str,
+        variant_index: u32,
         variant: &'static str,
-        _: usize,
+        len: usize,
     ) -> Result<VariantSeqWalker<'a>, WalkError> {
+        let origin = Origin::variant(name, variant_index, variant);
         let restore = self.push_field(variant);
         Ok(VariantSeqWalker {
-            seq: SeqWalker {
-                walker: self,
-                index: 0,
-            },
+            seq: SeqWalker::new(self, Some(len), origin),
             restore,
         })
     }
 
-    fn serialize_map(self, _: Option<usize>) -> Result<MapWalker<'a>, WalkError> {
+    fn serialize_map(self, len: Option<usize>) -> Result<MapWalker<'a>, WalkError> {
         Ok(MapWalker {
             walker: self,
             restore: None,
+            announced: len,
+            entries: 0,
+            origin: Origin::plain("a map"),
         })
     }
 
     fn serialize_struct(
         self,
-        _: &'static str,
-        _: usize,
+        name: &'static str,
+        len: usize,
     ) -> Result<StructWalker<'a>, WalkError> {
         Ok(StructWalker {
             walker: self,
             restore: None,
+            announced: len,
+            fields: 0,
+            origin: Origin::plain(name),
         })
     }
 
     fn serialize_struct_variant(
         self,
-        _: &'static str,
-        _: u32,
+        name: &'static str,
+        variant_index: u32,
         variant: &'static str,
-        _: usize,
+        len: usize,
     ) -> Result<StructWalker<'a>, WalkError> {
+        let origin = Origin::variant(name, variant_index, variant);
         let restore = self.push_field(variant);
         Ok(StructWalker {
             walker: self,
             restore: Some(restore),
+            announced: len,
+            fields: 0,
+            origin,
         })
     }
 
@@ -548,10 +619,81 @@ impl<'a> Serializer for &'a mut FloatWalker {
     }
 }
 
+/// What opened a compound, named for the length-coverage assertion below.
+#[derive(Clone, Copy)]
+struct Origin {
+    /// The type name serde supplied, or a literal for the anonymous compounds
+    /// (a bare sequence or map has no name in the data model).
+    type_name: &'static str,
+    /// `Some((variant, variant_index))` when the compound is an enum variant.
+    variant: Option<(&'static str, u32)>,
+}
+
+impl Origin {
+    fn plain(type_name: &'static str) -> Self {
+        Origin {
+            type_name,
+            variant: None,
+        }
+    }
+
+    fn variant(type_name: &'static str, variant_index: u32, variant: &'static str) -> Self {
+        Origin {
+            type_name,
+            variant: Some((variant, variant_index)),
+        }
+    }
+}
+
+impl Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.variant {
+            Some((variant, variant_index)) => write!(
+                f,
+                "`{}::{variant}` (variant #{variant_index})",
+                self.type_name
+            ),
+            None => f.write_str(self.type_name),
+        }
+    }
+}
+
+/// serde's contract: a compound that announces a length emits exactly that many
+/// elements. The guard's whole claim — *every* float the writer emits is
+/// checked — rests on the walk seeing the same elements the writer will, so a
+/// compound that emits a different number than it announced has subtrees the
+/// walk never visited. That is precisely the silent coverage loss this module
+/// exists to prevent (#2601), so announced lengths are checked, not ignored.
+fn assert_announced_len(origin: &Origin, announced: Option<usize>, emitted: usize) {
+    if let Some(announced) = announced {
+        assert_eq!(
+            emitted, announced,
+            "{origin} announced {announced} elements but emitted {emitted}"
+        );
+    }
+}
+
 /// Sequence / tuple cursor: elements are addressed by position.
 struct SeqWalker<'a> {
     walker: &'a mut FloatWalker,
     index: usize,
+    announced: Option<usize>,
+    origin: Origin,
+}
+
+impl<'a> SeqWalker<'a> {
+    fn new(walker: &'a mut FloatWalker, announced: Option<usize>, origin: Origin) -> Self {
+        SeqWalker {
+            walker,
+            index: 0,
+            announced,
+            origin,
+        }
+    }
+
+    fn finish(&self) {
+        assert_announced_len(&self.origin, self.announced, self.index);
+    }
 }
 
 impl SerializeSeq for SeqWalker<'_> {
@@ -570,6 +712,7 @@ impl SerializeSeq for SeqWalker<'_> {
     }
 
     fn end(self) -> Result<(), WalkError> {
+        self.finish();
         Ok(())
     }
 }
@@ -586,7 +729,7 @@ impl SerializeTuple for SeqWalker<'_> {
     }
 
     fn end(self) -> Result<(), WalkError> {
-        Ok(())
+        SerializeSeq::end(self)
     }
 }
 
@@ -602,7 +745,7 @@ impl SerializeTupleStruct for SeqWalker<'_> {
     }
 
     fn end(self) -> Result<(), WalkError> {
-        Ok(())
+        SerializeSeq::end(self)
     }
 }
 
@@ -624,6 +767,7 @@ impl SerializeTupleVariant for VariantSeqWalker<'_> {
     }
 
     fn end(self) -> Result<(), WalkError> {
+        self.seq.finish();
         self.seq.walker.pop_to(self.restore);
         Ok(())
     }
@@ -634,6 +778,9 @@ struct MapWalker<'a> {
     walker: &'a mut FloatWalker,
     /// Set while a key has been consumed and its value not yet walked.
     restore: Option<usize>,
+    announced: Option<usize>,
+    entries: usize,
+    origin: Origin,
 }
 
 impl SerializeMap for MapWalker<'_> {
@@ -651,6 +798,7 @@ impl SerializeMap for MapWalker<'_> {
             .serialize(KeyRenderer)
             .unwrap_or_else(|_| "<key>".to_string());
         self.restore = Some(self.walker.push_field(&rendered));
+        self.entries += 1;
         Ok(())
     }
 
@@ -666,6 +814,7 @@ impl SerializeMap for MapWalker<'_> {
     }
 
     fn end(self) -> Result<(), WalkError> {
+        assert_announced_len(&self.origin, self.announced, self.entries);
         Ok(())
     }
 }
@@ -676,6 +825,9 @@ struct StructWalker<'a> {
     /// `Some` for a struct *variant*, whose variant-name segment must be popped
     /// when the compound ends.
     restore: Option<usize>,
+    announced: usize,
+    fields: usize,
+    origin: Origin,
 }
 
 impl SerializeStruct for StructWalker<'_> {
@@ -689,10 +841,12 @@ impl SerializeStruct for StructWalker<'_> {
         let restore = self.walker.push_field(key);
         let outcome = value.serialize(&mut *self.walker);
         self.walker.pop_to(restore);
+        self.fields += 1;
         outcome
     }
 
     fn end(self) -> Result<(), WalkError> {
+        assert_announced_len(&self.origin, Some(self.announced), self.fields);
         if let Some(restore) = self.restore {
             self.walker.pop_to(restore);
         }
@@ -856,6 +1010,51 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.path, "second");
+    }
+
+    #[test]
+    fn enum_keyed_map_reports_the_variant_as_its_key() {
+        // A unit-variant key is written as the bare variant name, so that is the
+        // segment the path must carry.
+        #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+        enum Term {
+            Linear,
+            Smooth,
+        }
+        #[derive(Serialize)]
+        struct Holder {
+            by_term: BTreeMap<Term, f64>,
+        }
+        let err = ensure_serialized_floats_are_finite(&Holder {
+            by_term: BTreeMap::from([(Term::Linear, 1.0), (Term::Smooth, f64::NAN)]),
+        })
+        .unwrap_err();
+        assert_eq!(err.path, "by_term.Smooth");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "announced 2 elements but emitted 1")]
+    fn a_compound_that_under_emits_its_announced_length_is_caught() {
+        // The coverage claim is only as good as serde's length contract: a
+        // compound that emits fewer elements than it announced has subtrees the
+        // walk never visited, and would otherwise pass by silence.
+        struct UnderEmitting;
+        impl Serialize for UnderEmitting {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(2))?;
+                seq.serialize_element(&1.0f64)?;
+                seq.end()
+            }
+        }
+        // `assert_announced_len` panics before this returns, which is what
+        // `#[should_panic]` catches. Asserting on the result anyway keeps the
+        // test honest: were that assertion ever removed, the under-emitting
+        // walk would return `Ok` and this would fail rather than pass silently.
+        assert!(
+            ensure_serialized_floats_are_finite(&UnderEmitting).is_err(),
+            "a compound emitting fewer elements than it announced must not pass"
+        );
     }
 
     #[test]

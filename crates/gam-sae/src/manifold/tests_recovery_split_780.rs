@@ -2,6 +2,13 @@
 // Split from tests.rs under the #780 oversized-file gate: recovery-suite +
 // registry/assignment tests from line ~6560 onward. Shared fixtures come via
 // the parent-module glob below.
+//
+// `manifold/mod.rs` declares this module only as `#[cfg(test)] mod
+// tests_recovery_split_780;`, and this attribute states that test-only scope in
+// the file itself — a claim the compiler enforces rather than one carried by
+// the filename.
+#![cfg(test)]
+
 use super::derivative_oracle::{
     BranchCertificate, EigenDerivativeRoute, MajorizerAnchorMode, PivotBranch,
 };

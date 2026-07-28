@@ -74,8 +74,16 @@ impl PredictionTransform for TransformationNormalPredictor {
         Ok(eta.clone())
     }
 
-    fn response_jacobian_rows(&self, _: PredictPass) -> ResponseInterval {
-        ResponseInterval::IdentityEta
+    fn response_jacobian_rows(&self, pass: PredictPass) -> ResponseInterval {
+        match pass {
+            // `response` is the identity here (the offset already carries the
+            // response-scale conditional mean), so there is no link to
+            // transform or delta-propagate through in either pass: an η
+            // interval already IS the response interval.
+            PredictPass::FullUncertainty | PredictPass::PosteriorMean => {
+                ResponseInterval::IdentityEta
+            }
+        }
     }
 
     fn bounds(&self) -> ResponseBounds {

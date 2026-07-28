@@ -1276,8 +1276,8 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(z)
                 .launch(cfg)
         }
-        .map(drop)
-        .gpu_ctx("reml_trace launch fill_rademacher")
+        .gpu_ctx("reml_trace launch fill_rademacher")?;
+        Ok(())
     }
 
     fn launch_reduce_q_dense(
@@ -1314,8 +1314,8 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(q)
                 .launch(cfg)
         }
-        .map(drop)
-        .gpu_ctx("reml_trace launch reduce_q_dense")
+        .gpu_ctx("reml_trace launch reduce_q_dense")?;
+        Ok(())
     }
 
     fn launch_reduce_q_weighted_gram(
@@ -1353,8 +1353,8 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(q)
                 .launch(cfg)
         }
-        .map(drop)
-        .gpu_ctx("reml_trace launch reduce_q_weighted_gram")
+        .gpu_ctx("reml_trace launch reduce_q_weighted_gram")?;
+        Ok(())
     }
 
     fn copy_device_slice(

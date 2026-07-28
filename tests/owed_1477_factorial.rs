@@ -434,7 +434,16 @@ fn extract_constrained_penalties(
                 assert!(primary.is_none(), "expected exactly one Primary block");
                 primary = Some(block.local.clone());
             }
-            _ => {}
+            // No other source participates in the S_c / P pairing extracted
+            // here; enumerated (not `_`) so a new source must be classified.
+            PenaltySource::OperatorMass
+            | PenaltySource::OperatorTension
+            | PenaltySource::OperatorStiffness
+            | PenaltySource::OperatorRelevance { .. }
+            | PenaltySource::TensorMarginal { .. }
+            | PenaltySource::TensorSeparable { .. }
+            | PenaltySource::TensorGlobalRidge
+            | PenaltySource::Other(_) => {}
         }
     }
     let s_c = primary.expect("double-penalty s(x) must emit a Primary wiggliness penalty");

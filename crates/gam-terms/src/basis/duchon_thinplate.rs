@@ -1349,7 +1349,7 @@ pub fn select_thin_plate_knots(
     num_knots: usize,
 ) -> Result<Array2<f64>, BasisError> {
     let d = data.ncols();
-    let selected = select_thin_plate_knot_rows_with_observer(data, num_knots, |_| {})?;
+    let (selected, _profile_builds) = select_thin_plate_knot_rows(data, num_knots)?;
     let mut knots = Array2::<f64>::zeros((selected.len(), d));
     for (r, &idx) in selected.iter().enumerate() {
         knots.row_mut(r).assign(&data.row(idx));
@@ -1357,21 +1357,19 @@ pub fn select_thin_plate_knots(
     Ok(knots)
 }
 
-/// [`select_thin_plate_knots`] as the row indices it selects, with an observer on
-/// the number of `O(n·d + n log n)` support-distance profiles the shared
-/// tie-break actually builds.
+/// [`select_thin_plate_knots`] as the row indices it selects, paired with the
+/// number of `O(n·d + n log n)` support-distance profiles the shared tie-break
+/// actually built getting there.
 ///
-/// Production callers pass a zero-sized no-op that optimizes away; tests use the
-/// same production path to state the tie-break's cost contract in operation
-/// counts rather than in wall-clock noise.
-fn select_thin_plate_knot_rows_with_observer<F>(
+/// The count is a plain second return value rather than an observer callback:
+/// production ignores it, and tests read it to state the tie-break's cost
+/// contract in operation counts rather than in wall-clock noise — over the same
+/// production code path either way.
+fn select_thin_plate_knot_rows(
     data: ArrayView2<f64>,
     num_knots: usize,
-    mut on_profile_builds: F,
-) -> Result<Vec<usize>, BasisError>
-where
-    F: FnMut(usize),
-{
+) -> Result<(Vec<usize>, usize), BasisError> {
+    let mut profile_builds = 0usize;
     let n = data.nrows();
     let d = data.ncols();
     if d == 0 {
@@ -1486,8 +1484,8 @@ where
     // an exact symmetry — builds none at all. See
     // [`crate::basis::invariant_tie_break`] for why this is the same total
     // preorder the two-profile comparator scan applied.
-    let resolve_profile_tie = |tied: &[usize], observer: &mut F| -> Vec<usize> {
-        resolve_sorted_profile_tie(n, tied, &pair_dist2, observer)
+    let resolve_profile_tie = |tied: &[usize], builds: &mut usize| -> Vec<usize> {
+        resolve_sorted_profile_tie(n, tied, &pair_dist2, &mut |built: usize| *builds += built)
     };
 
     let distinct_orbit = |candidates: &[usize], already_selected: &[usize]| -> Vec<usize> {
@@ -1533,7 +1531,7 @@ where
     let seed_tied: Vec<usize> = (0..n)
         .filter(|&i| dist2_to_centroid[i] <= seed_min + tie_tol)
         .collect();
-    let seed_class = resolve_profile_tie(&seed_tied, &mut on_profile_builds);
+    let seed_class = resolve_profile_tie(&seed_tied, &mut profile_builds);
     // When an indivisible symmetry orbit is larger than the entire knot budget,
     // no rule can pick an *equivariant* strict subset of it — the orbit's members
     // are interchangeable under the data's symmetry group (#2319). The previous
@@ -1618,7 +1616,7 @@ where
         // after every intrinsic key is an indivisible symmetry orbit. A single
         // surviving candidate has already won every refinement of the keys it
         // attained, so the profile is not built at all there.
-        let candidates = resolve_profile_tie(&candidates, &mut on_profile_builds);
+        let candidates = resolve_profile_tie(&candidates, &mut profile_builds);
         let remaining = num_knots - selected.len();
         // Cap an oversized indivisible orbit to the remaining budget rather than
         // refusing the fit (see the seed-orbit note above): take its lowest-row
@@ -1662,7 +1660,7 @@ where
         );
     }
 
-    Ok(selected)
+    Ok((selected, profile_builds))
 }
 
 #[inline(always)]
@@ -3237,7 +3235,7 @@ pub fn auto_centers_1d_equal_mass(
 
 #[cfg(test)]
 mod knot_selection_tie_break_cost_tests {
-    use super::{select_thin_plate_knot_rows_with_observer, select_thin_plate_knots};
+    use super::{select_thin_plate_knot_rows, select_thin_plate_knots};
     use ndarray::Array2;
 
     /// The knot rows the production selector picks, together with the number of
@@ -3249,11 +3247,8 @@ mod knot_selection_tie_break_cost_tests {
     }
 
     fn select_with_profile_count(data: &Array2<f64>, num_knots: usize) -> KnotSelection {
-        let mut profile_builds = 0usize;
-        let rows = select_thin_plate_knot_rows_with_observer(data.view(), num_knots, |built| {
-            profile_builds += built
-        })
-        .expect("fixture admits the requested knot budget");
+        let (rows, profile_builds) = select_thin_plate_knot_rows(data.view(), num_knots)
+            .expect("fixture admits the requested knot budget");
         KnotSelection {
             rows,
             profile_builds,

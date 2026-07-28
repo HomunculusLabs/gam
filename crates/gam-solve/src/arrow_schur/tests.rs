@@ -1,5 +1,5 @@
-#![cfg(test)]
 //! Unit tests for the arrow-Schur solver.
+#![cfg(test)]
 
 use super::*;
 use approx::assert_abs_diff_eq;

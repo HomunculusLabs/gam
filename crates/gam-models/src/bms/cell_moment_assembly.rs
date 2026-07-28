@@ -1891,11 +1891,14 @@ impl BernoulliMarginalSlopeFamily {
             if required_degree == 21 {
                 if let Some(stored_d15) = cache.row_cell_moments_d15.get() {
                     match stored_d15 {
-                        Ok(Some(d15)) if d15.covers_all_rows() => {
-                            return self.extend_row_cell_moments_bundle(d15, required_degree);
+                        Ok(maybe_d15) => {
+                            if let Some(d15) = maybe_d15
+                                && d15.covers_all_rows()
+                            {
+                                return self.extend_row_cell_moments_bundle(d15, required_degree);
+                            }
                         }
                         Err(err) => return Err(err.clone()),
-                        _ => {}
                     }
                 }
             }

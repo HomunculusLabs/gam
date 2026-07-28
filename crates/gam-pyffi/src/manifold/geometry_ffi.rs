@@ -1664,7 +1664,7 @@ impl SparsityPenalty {
     ) -> PyResult<Self> {
         let weight = py_object_or_string_default(py, weight, "auto");
         let target = py_object_or_string_default(py, target, "t");
-        validate_sparsity_weight(py, weight.bind(py), "SparsityPenalty")?;
+        validate_sparsity_weight(weight.bind(py), "SparsityPenalty")?;
         if !matches!(kind.as_str(), "smooth_l1" | "hoyer" | "log") {
             return Err(PyValueError::new_err(format!(
                 "SparsityPenalty.kind must be one of 'smooth_l1' | 'hoyer' | 'log', got {kind:?}"
@@ -1724,19 +1724,19 @@ impl SparsityPenalty {
         Ok(format!(
             "SparsityPenalty(kind={}, weight={}, eps={}, eps_weight={}, target={}, weight_schedule={})",
             self.kind.as_str(),
-            py_repr(py, self.weight.bind(py))?,
+            py_repr(self.weight.bind(py))?,
             self.eps,
             self.eps_weight.as_str(),
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
     }
 }
 
-fn validate_sparsity_weight(py: Python<'_>, weight: &Bound<'_, PyAny>, name: &str) -> PyResult<()> {
+fn validate_sparsity_weight(weight: &Bound<'_, PyAny>, name: &str) -> PyResult<()> {
     if let Ok(value) = weight.extract::<String>() {
         if value == "auto" {
             return Ok(());
@@ -1751,7 +1751,7 @@ fn validate_sparsity_weight(py: Python<'_>, weight: &Bound<'_, PyAny>, name: &st
         }
         return Err(PyValueError::new_err(format!(
             "{name}.weight must be > 0, got {}",
-            py_repr(py, weight)?
+            py_repr(weight)?
         )));
     }
     Err(PyTypeError::new_err(format!(
@@ -1813,7 +1813,7 @@ fn validate_target_eager(
     )))
 }
 
-fn py_repr(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
+fn py_repr(value: &Bound<'_, PyAny>) -> PyResult<String> {
     value.repr()?.extract()
 }
 
@@ -1865,9 +1865,9 @@ impl ARDPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "ARDPenalty(target={}, weight_schedule={})",
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -1944,9 +1944,9 @@ impl PyTopKActivationPenalty {
             "TopKActivationPenalty(k={}, weight={}, target={}, weight_schedule={})",
             self.k,
             self.weight,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2050,9 +2050,9 @@ impl SmoothThresholdPenalty {
             self.thresholds,
             self.weight,
             self.smoothing_eps,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2060,13 +2060,13 @@ impl SmoothThresholdPenalty {
 }
 
 fn topk_weight_schedule_descriptor(
-    _py: Python<'_>,
+    py: Python<'_>,
     schedule: &Option<PyObject>,
 ) -> PyResult<Option<PyObject>> {
     let Some(schedule) = schedule else {
         return Ok(None);
     };
-    let bound = schedule.bind(_py);
+    let bound = schedule.bind(py);
     if bound.hasattr("to_rust_descriptor")? {
         return Ok(Some(
             bound.call_method0("to_rust_descriptor")?.unbind().into(),
@@ -2246,9 +2246,9 @@ impl BlockSparsityPenalty {
             self.n_eff,
             self.smoothing_eps,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2398,11 +2398,11 @@ impl SoftmaxAssignmentSparsityPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "SoftmaxAssignmentSparsityPenalty(target={}, k_atoms={}, temperature={}, weight_schedule={})",
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             self.k_atoms,
             self.temperature,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2431,7 +2431,7 @@ impl IsometryPenalty {
     ) -> PyResult<Self> {
         let weight = py_object_or_string_default(py, weight, "auto");
         let target = py_object_or_string_default(py, target, "t");
-        validate_sparsity_weight(py, weight.bind(py), "IsometryPenalty")?;
+        validate_sparsity_weight(weight.bind(py), "IsometryPenalty")?;
         Ok(Self {
             target,
             weight,
@@ -2464,10 +2464,10 @@ impl IsometryPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "IsometryPenalty(weight={}, target={}, weight_schedule={})",
-            py_repr(py, self.weight.bind(py))?,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.weight.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2569,17 +2569,17 @@ impl PyOrderedBetaBernoulliPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "OrderedBetaBernoulliPenalty(target={}, k_max={}, alpha={}, tau={}, learnable={}, temperature_schedule={}, weight_schedule={})",
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             self.k_max,
             self.alpha,
             self.tau,
             self.learnable,
             match &self.temperature_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             },
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -2753,12 +2753,12 @@ impl TotalVariationPenalty {
             "TotalVariationPenalty(weight={}, n_eff={}, difference_op={}, smoothing_eps={}, learnable={}, target={}, weight_schedule={})",
             self.weight,
             self.n_eff,
-            py_repr(py, self.difference_op.bind(py))?,
+            py_repr(self.difference_op.bind(py))?,
             self.smoothing_eps,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -3032,16 +3032,16 @@ impl ParametricAuxConditionalPriorPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "ParametricAuxConditionalPriorPenalty(aux={}, alpha_init={}, beta_init={}, mu_init={}, weight={}, n_eff={}, learnable={}, target={}, weight_schedule={})",
-            py_repr(py, self.aux.bind(py))?,
-            py_repr(py, self.alpha_init.bind(py))?,
-            py_repr(py, self.beta_init.bind(py))?,
-            py_repr(py, self.mu_init.bind(py))?,
+            py_repr(self.aux.bind(py))?,
+            py_repr(self.alpha_init.bind(py))?,
+            py_repr(self.beta_init.bind(py))?,
+            py_repr(self.mu_init.bind(py))?,
             self.weight,
             self.n_eff,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -3192,9 +3192,9 @@ impl OrthogonalityPenalty {
             self.weight,
             self.n_eff,
             if self.learnable { "True" } else { "False" },
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -3301,9 +3301,9 @@ impl ScadMcpPenalty {
             self.variant.as_str(),
             self.smoothing_eps,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -3433,14 +3433,14 @@ impl IvaeRidgeMeanGauge {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "IvaeRidgeMeanGauge(aux={}, weight={}, n_eff={}, ridge_eps={}, learnable={}, target={}, weight_schedule={})",
-            py_repr(py, self.aux.bind(py))?,
+            py_repr(self.aux.bind(py))?,
             self.weight,
             self.n_eff,
             self.ridge_eps,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -3965,13 +3965,13 @@ impl BlockOrthogonalityPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "BlockOrthogonalityPenalty(target={}, groups={:?}, weight={}, n_eff={}, learnable={}, weight_schedule={})",
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             self.groups,
             self.weight,
             self.n_eff,
             self.learnable,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -4337,13 +4337,13 @@ impl AuxConditionalPriorPenalty {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "AuxConditionalPriorPenalty(lambda_per_row={}, weight={}, n_eff={}, learnable={}, target={}, weight_schedule={})",
-            py_repr(py, self.lambda_per_row.bind(py))?,
+            py_repr(self.lambda_per_row.bind(py))?,
             self.weight,
             self.n_eff,
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))
@@ -4508,9 +4508,9 @@ impl NuclearNormPenalty {
                 None => "None".to_string(),
             },
             self.learnable,
-            py_repr(py, self.target.bind(py))?,
+            py_repr(self.target.bind(py))?,
             match &self.weight_schedule {
-                Some(schedule) => py_repr(py, schedule.bind(py))?,
+                Some(schedule) => py_repr(schedule.bind(py))?,
                 None => "None".to_string(),
             }
         ))

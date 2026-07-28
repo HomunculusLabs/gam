@@ -62,7 +62,8 @@
 //! guard the caller falls back to the exact per-trial PIRLS rebuild. This is the
 //! cleanest correct PIECE; the full mechanism-(c) endgame (a precision/SPDE
 //! representation whose data-fit operator is ψ-free, paying the n-dependence
-//! once for the CONVERGED objective) is documented in [`endgame_path`] below.
+//! once for the CONVERGED objective) is documented in the "full mechanism-(c)
+//! endgame" section at the end of these module docs.
 //!
 //! ### Current wiring
 //!
@@ -118,6 +119,34 @@
 //! ([`weight_drift_within`] for the value lane,
 //! [`FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL`] for the gradient lane)
 //! that keep the approximation honest.
+//!
+//! ### The full mechanism-(c) endgame, for the next builder
+//!
+//! This module lands the FIRST correct piece: the frozen-`W` weighted-slab
+//! tensor that serves the warm-β ψ-sweep's first Fisher step n-free. The
+//! remaining path to the GLM n-independence ENDGAME, in increasing scope:
+//!
+//! 1. **Per-PIRLS-iteration reuse (low-rank W correction).** Across inner
+//!    iterations only `diag(W)` changes (the design `X(ψ)` is frozen WITHIN a
+//!    ψ-trial). When the working-weight change between iterations is low-rank or
+//!    well-approximated by a rank-`q` diagonal correction `ΔW`, the data-fit
+//!    Gram updates as `XᵀWX ← XᵀWX + Xᵀ ΔW X`, where `Xᵀ ΔW X` is a rank-`q`
+//!    contraction — O(n·q·k) instead of O(n·k²) per iteration. The honest hook
+//!    is to express `ΔW = √(Δw)·√(Δw)ᵀ`-shaped diagonal updates against the
+//!    frozen-W slabs already stored here. (Distinct from this module's CROSS-ψ
+//!    reuse; this is WITHIN-ψ across IRLS steps.)
+//!
+//! 2. **Joint (ψ, working-weight) tensor.** Tensor the slabs in BOTH ψ and a
+//!    scalar weight-summary coordinate so the converged `W(ψ)` is captured
+//!    analytically, retiring the frozen-`W` approximation. Requires certifying
+//!    a 2-D Chebyshev box and a contraction that respects the per-row coupling
+//!    `w_i = w_i(x_i(ψ)ᵀβ)` — a genuine research item.
+//!
+//! 3. **Precision/SPDE representation (the real endgame).** A representation in
+//!    which the data-fit operator is ψ-FREE and only a k×k prior precision moves
+//!    with ψ (the Gaussian 1-D scan #1030 is the θ-free-operator instance). For
+//!    a GLM this is per-family and is the separate large build the issue calls
+//!    out — the converged objective becomes n-free, not just the first step.
 
 use crate::psi_gram_tensor::PsiGramTensor;
 use ndarray::{Array1, Array2, ArrayView1};
@@ -404,38 +433,6 @@ impl FrozenWeightGramTensor {
         Some(beta)
     }
 }
-
-/// The full mechanism-(c) endgame, documented for the next builder.
-///
-/// This module lands the FIRST correct piece: the frozen-`W` weighted-slab
-/// tensor that serves the warm-β ψ-sweep's first Fisher step n-free. The
-/// remaining path to the GLM n-independence ENDGAME, in increasing scope:
-///
-/// 1. **Per-PIRLS-iteration reuse (low-rank W correction).** Across inner
-///    iterations only `diag(W)` changes (the design `X(ψ)` is frozen WITHIN a
-///    ψ-trial). When the working-weight change between iterations is low-rank or
-///    well-approximated by a rank-`q` diagonal correction `ΔW`, the data-fit
-///    Gram updates as `XᵀWX ← XᵀWX + Xᵀ ΔW X`, where `Xᵀ ΔW X` is a rank-`q`
-///    contraction — O(n·q·k) instead of O(n·k²) per iteration. The honest hook
-///    is to express `ΔW = √(Δw)·√(Δw)ᵀ`-shaped diagonal updates against the
-///    frozen-W slabs already stored here. (Distinct from this module's CROSS-ψ
-///    reuse; this is WITHIN-ψ across IRLS steps.)
-///
-/// 2. **Joint (ψ, working-weight) tensor.** Tensor the slabs in BOTH ψ and a
-///    scalar weight-summary coordinate so the converged `W(ψ)` is captured
-///    analytically, retiring the frozen-`W` approximation. Requires certifying
-///    a 2-D Chebyshev box and a contraction that respects the per-row coupling
-///    `w_i = w_i(x_i(ψ)ᵀβ)` — a genuine research item.
-///
-/// 3. **Precision/SPDE representation (the real endgame).** A representation in
-///    which the data-fit operator is ψ-FREE and only a k×k prior precision moves
-///    with ψ (the Gaussian 1-D scan #1030 is the θ-free-operator instance). For
-///    a GLM this is per-family and is the separate large build the issue calls
-///    out — the converged objective becomes n-free, not just the first step.
-///
-/// This is a documentation-only marker so the path is discoverable from the
-/// code that lands step one.
-pub mod endgame_path {}
 
 #[cfg(test)]
 mod tests {

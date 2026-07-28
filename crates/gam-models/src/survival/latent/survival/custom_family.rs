@@ -158,11 +158,21 @@ impl CustomFamily for LatentSurvivalFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
         assert!(!block_spec.name.is_empty());
+        // Constraints are requested per block, so the index must address a
+        // block that actually carries state.
+        if block_idx >= block_states.len() {
+            return Err(format!(
+                "block_linear_constraints: block {block_idx} ({}) is outside the {} \
+                 parameter blocks carrying state",
+                block_spec.name,
+                block_states.len()
+            ));
+        }
         if block_idx == Self::BLOCK_TIME {
             Ok(self
                 .time_linear_constraints
@@ -184,8 +194,18 @@ impl CustomFamily for LatentSurvivalFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        // States and specs are parallel per-block arrays; a length mismatch
+        // means the caller assembled an inconsistent parameter partition.
+        if block_specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_hessian_workspace: {} parameter-block specs for {} \
+                 block states",
+                block_specs.len(),
+                block_states.len()
+            ));
+        }
         Ok(Some(Arc::new(LatentSurvivalHessianWorkspace::new(
             self.clone(),
             block_states.to_vec(),
@@ -195,8 +215,17 @@ impl CustomFamily for LatentSurvivalFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        // Same parallel-array precondition as the workspace hook above.
+        if block_specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_gradient_evaluation: {} parameter-block specs for {} \
+                 block states",
+                block_specs.len(),
+                block_states.len()
+            ));
+        }
         self.evaluate_exact_newton_joint_gradient_dense(block_states)
             .map(|(log_likelihood, gradient)| {
                 Some(ExactNewtonJointGradientEvaluation {
@@ -434,11 +463,21 @@ impl CustomFamily for LatentBinaryFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
         assert!(!block_spec.name.is_empty());
+        // Constraints are requested per block, so the index must address a
+        // block that actually carries state.
+        if block_idx >= block_states.len() {
+            return Err(format!(
+                "block_linear_constraints: block {block_idx} ({}) is outside the {} \
+                 parameter blocks carrying state",
+                block_spec.name,
+                block_states.len()
+            ));
+        }
         if block_idx == Self::BLOCK_TIME {
             Ok(self
                 .time_linear_constraints
@@ -460,8 +499,18 @@ impl CustomFamily for LatentBinaryFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        // States and specs are parallel per-block arrays; a length mismatch
+        // means the caller assembled an inconsistent parameter partition.
+        if block_specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_hessian_workspace: {} parameter-block specs for {} \
+                 block states",
+                block_specs.len(),
+                block_states.len()
+            ));
+        }
         Ok(Some(Arc::new(LatentBinaryHessianWorkspace::new(
             self.clone(),
             block_states.to_vec(),
@@ -471,8 +520,17 @@ impl CustomFamily for LatentBinaryFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        // Same parallel-array precondition as the workspace hook above.
+        if block_specs.len() != block_states.len() {
+            return Err(format!(
+                "exact_newton_joint_gradient_evaluation: {} parameter-block specs for {} \
+                 block states",
+                block_specs.len(),
+                block_states.len()
+            ));
+        }
         self.evaluate_exact_newton_joint_dense(block_states)
             .map(|(log_likelihood, gradient, _)| {
                 Some(ExactNewtonJointGradientEvaluation {

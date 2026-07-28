@@ -203,7 +203,20 @@ fn disable_duchon_operator_penalties_in_basis(basis: &mut gam_terms::smooth::Smo
         SmoothBasisSpec::BySmooth { smooth, .. } => {
             disable_duchon_operator_penalties_in_basis(smooth);
         }
-        _ => {}
+        // Bases that neither carry a Duchon operator overlay nor nest another
+        // `SmoothBasisSpec` — their marginals are B-spline / kernel / matrix
+        // specs, so there is no Duchon spec reachable through them. Enumerated
+        // rather than matched by `_` so a newly added basis kind has to state
+        // here whether it carries Duchon operator penalties.
+        SmoothBasisSpec::BSpline1D { .. }
+        | SmoothBasisSpec::FactorSmooth { .. }
+        | SmoothBasisSpec::ThinPlate { .. }
+        | SmoothBasisSpec::Sphere { .. }
+        | SmoothBasisSpec::ConstantCurvature { .. }
+        | SmoothBasisSpec::Matern { .. }
+        | SmoothBasisSpec::MeasureJet { .. }
+        | SmoothBasisSpec::Pca { .. }
+        | SmoothBasisSpec::TensorBSpline { .. } => {}
     }
 }
 

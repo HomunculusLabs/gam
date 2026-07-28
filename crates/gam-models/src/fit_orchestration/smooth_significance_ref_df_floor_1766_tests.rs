@@ -19,6 +19,11 @@
 //! (non-significant) p-value, while a genuinely wiggly smooth is still flagged
 //! and the floor never inflates its reference d.f.
 
+//! Declared only as `#[cfg(test)] mod smooth_significance_ref_df_floor_1766_tests;`
+//! in `fit_orchestration.rs`; the inner attribute states that scope in the file
+//! itself so the compiler enforces it rather than a naming convention.
+#![cfg(test)]
+
 use super::entry::materialize;
 use super::request::{FitConfig, FitRequest};
 use csv::StringRecord;

@@ -509,7 +509,10 @@ impl DeviationRuntime {
                 }
                 .into());
             }
-            _ => {}
+            // No anchor correction was saved, so a zero-column anchor design
+            // (or no anchor design at all) is the consistent no-anchor replay
+            // and needs no cross-check.
+            (None, None) | (None, Some(_)) => {}
         }
 
         Ok(Self {

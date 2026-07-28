@@ -1,8 +1,9 @@
-#![cfg(test)]
 // Child module of `gamlss::tests` (see the `#[path]` declaration there):
 // wiggle-family FD gates, binomial location-scale expected-info and release
 // cells, NB dispersion convergence, and the zz2155 mode-geography probes.
 // Split out of tests.rs for the source-file length budget only.
+#![cfg(test)]
+
 use super::*;
 
 /// Build the nontrivial-design BLS Wiggle family + designs + wiggle block
@@ -19,16 +20,20 @@ pub(crate) fn wiggle_nontrivial_fixture() -> (
     let y = Array1::from_vec(vec![0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
     let weights = Array1::from_vec(vec![1.0; n]);
     let t_grid = Array1::linspace(0.0, 1.0, n);
-    let threshold_x = Array2::from_shape_fn((n, 3), |(i, j)| match j {
-        0 => 1.0,
-        1 => t_grid[i] - 0.5,
-        2 => (2.0 * std::f64::consts::PI * t_grid[i]).sin(),
-        _ => unreachable!(),
+    // Columns are basis functions of `t`, so the column index is bounded by the
+    // basis length by construction and no out-of-range case exists to handle.
+    let threshold_basis: [fn(f64) -> f64; 3] = [
+        |_| 1.0,
+        |t| t - 0.5,
+        |t| (2.0 * std::f64::consts::PI * t).sin(),
+    ];
+    let log_sigma_basis: [fn(f64) -> f64; 2] =
+        [|_| 1.0, |t| (3.0 * std::f64::consts::PI * t).cos()];
+    let threshold_x = Array2::from_shape_fn((n, threshold_basis.len()), |(i, j)| {
+        threshold_basis[j](t_grid[i])
     });
-    let log_sigma_x = Array2::from_shape_fn((n, 2), |(i, j)| match j {
-        0 => 1.0,
-        1 => (3.0 * std::f64::consts::PI * t_grid[i]).cos(),
-        _ => unreachable!(),
+    let log_sigma_x = Array2::from_shape_fn((n, log_sigma_basis.len()), |(i, j)| {
+        log_sigma_basis[j](t_grid[i])
     });
     let threshold_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
         threshold_x.clone(),

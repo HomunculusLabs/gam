@@ -2372,15 +2372,19 @@ pub(crate) fn penalized_multinomial_formula_parts(
             );
         }
     };
-    if data.column_kinds.get(y_col) == Some(&ColumnKindTag::Binary) {
-        // Promote to a 2-level categorical for the multinomial driver; the
-        // caller explicitly asked for multinomial, so we route through the
-        // K-1 = 1 active-class softmax (equivalent math to logistic).
-    } else if data.column_kinds.get(y_col) != Some(&ColumnKindTag::Categorical) {
+    // A Binary response is promoted to a 2-level categorical for the
+    // multinomial driver: the caller explicitly asked for multinomial, so we
+    // route through the K-1 = 1 active-class softmax (equivalent math to
+    // logistic). Anything that is neither Binary nor Categorical has no class
+    // set to softmax over.
+    let y_column_kind = data.column_kinds.get(y_col);
+    if y_column_kind != Some(&ColumnKindTag::Binary)
+        && y_column_kind != Some(&ColumnKindTag::Categorical)
+    {
         crate::bail_invalid_estim!(
             "multinomial fit: response '{response_name}' must be a categorical column \
              (got column kind {:?})",
-            data.column_kinds.get(y_col)
+            y_column_kind
         );
     }
     let (y_one_hot, _) = one_hot_categorical_response(data, y_col, &response_name)?;

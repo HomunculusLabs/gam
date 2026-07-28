@@ -1,4 +1,11 @@
+//! Real-OLMo-activation manifold tests.
+//!
+//! The only declaration of this module (`crate::manifold`) is
+//! `#[cfg(test)] mod tests_olmo;`, so the inner attribute below is a no-op — it
+//! just makes the test-only scope a claim the compiler checks in this file
+//! rather than one carried by the filename.
 #![cfg(test)]
+
 use gam_linalg::faer_ndarray::fast_ata;
 
 use super::*;

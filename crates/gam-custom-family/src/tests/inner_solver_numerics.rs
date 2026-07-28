@@ -4,6 +4,61 @@
 use super::*;
 use gam_solve::active_set::solve_quadratic_with_linear_constraints;
 
+/// Shared precondition for the hand-written fixture families below.
+///
+/// Each fixture returns curvature of a hard-coded shape, so it is a valid
+/// family for exactly one block layout. Checking the layout the engine actually
+/// handed over turns a silent shape mismatch — a test quietly exercising a
+/// different geometry than the one it is named for — into the family error the
+/// solver already propagates.
+fn require_layout(
+    block_states: &[ParameterBlockState],
+    expected_blocks: usize,
+    expected_coefficients: usize,
+    context: &str,
+) -> Result<(), String> {
+    if block_states.len() != expected_blocks {
+        return Err(format!(
+            "{context}: expected {expected_blocks} parameter block(s), got {}",
+            block_states.len()
+        ));
+    }
+    let coefficients: usize = block_states.iter().map(|state| state.beta.len()).sum();
+    if coefficients != expected_coefficients {
+        return Err(format!(
+            "{context}: expected {expected_coefficients} coefficient(s), got {coefficients}"
+        ));
+    }
+    Ok(())
+}
+
+/// Precondition for the spec-aware fixture hooks: those size their curvature
+/// from the specs alone, which is only correct when the states the engine hands
+/// over describe the same block geometry as the specs it hands over.
+fn require_states_match_specs(
+    block_states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    context: &str,
+) -> Result<(), String> {
+    if block_states.len() != specs.len() {
+        return Err(format!(
+            "{context}: {} block state(s) for {} spec(s)",
+            block_states.len(),
+            specs.len()
+        ));
+    }
+    for (index, (state, spec)) in block_states.iter().zip(specs).enumerate() {
+        if state.beta.len() != spec.design.ncols() {
+            return Err(format!(
+                "{context}: block[{index}] carries {} coefficient(s) for a design with {} column(s)",
+                state.beta.len(),
+                spec.design.ncols()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// gam#1088 fixture. A coupled two-block family whose joint Hessian carries
 /// a `NaN` curvature entry — the degenerate-curvature signature seen in the
 /// link-wiggle and location-scale benchmark timeouts (a collapsed/`0÷0` row
@@ -36,8 +91,14 @@ impl CustomFamily for TwoBlockNonFiniteCurvatureFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            2,
+            2,
+            "TwoBlockNonFiniteCurvatureFamily::exact_newton_joint_hessian",
+        )?;
         // A finite, symmetric, otherwise-PD curvature with a single NaN
         // diagonal entry: exactly the degenerate `H_pen` spectrum the guard
         // exists to catch (a real collapsed-weight curvature defect).
@@ -46,9 +107,15 @@ impl CustomFamily for TwoBlockNonFiniteCurvatureFamily {
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            2,
+            2,
+            "TwoBlockNonFiniteCurvatureFamily::exact_newton_joint_hessian_directional_derivative",
+        )?;
         assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(Some(Array2::zeros((2, 2))))
     }
@@ -90,19 +157,29 @@ impl CustomFamily for TwoBlockJointSurrogateFamily {
 
     fn exact_newton_joint_hessian_with_specs(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_states_match_specs(
+            block_states,
+            specs,
+            "TwoBlockJointSurrogateFamily::exact_newton_joint_hessian_with_specs",
+        )?;
         let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
         Ok(Some(Array2::eye(p)))
     }
 
     fn exact_newton_joint_hessian_directional_derivative_with_specs(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        require_states_match_specs(
+            block_states,
+            specs,
+            "TwoBlockJointSurrogateFamily::exact_newton_joint_hessian_directional_derivative_with_specs",
+        )?;
         assert!(arr.iter().all(|v| !v.is_nan()));
         let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
         Ok(Some(Array2::zeros((p, p))))
@@ -110,11 +187,16 @@ impl CustomFamily for TwoBlockJointSurrogateFamily {
 
     fn exact_newton_joint_hessian_second_directional_derivative_with_specs(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
         arr: &Array1<f64>,
         arr2: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        require_states_match_specs(
+            block_states,
+            specs,
+            "TwoBlockJointSurrogateFamily::exact_newton_joint_hessian_second_directional_derivative_with_specs",
+        )?;
         assert!(arr.iter().all(|v| !v.is_nan()));
         assert!(arr2.iter().all(|v| !v.is_nan()));
         let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
@@ -152,27 +234,50 @@ impl CustomFamily for OneBlockPseudoLaplaceExactFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockPseudoLaplaceExactFamily::exact_newton_joint_hessian",
+        )?;
         Ok(Some(array![[2.0]]))
     }
 
     fn exact_newton_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
+        block_states: &[ParameterBlockState],
+        block: usize,
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // Default implementation ignores this parameter.
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockPseudoLaplaceExactFamily::exact_newton_hessian_directional_derivative",
+        )?;
+        if block != 0 {
+            return Err(format!(
+                "OneBlockPseudoLaplaceExactFamily::exact_newton_hessian_directional_derivative: \
+                 block index {block} out of range for a one-block family"
+            ));
+        }
         assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(Some(array![[0.0]]))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockPseudoLaplaceExactFamily::exact_newton_joint_hessian_directional_derivative",
+        )?;
         assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(Some(array![[0.0]]))
     }
@@ -182,7 +287,8 @@ impl CustomFamily for OneBlockPseudoLaplaceExactFamily {
 pub(crate) struct OneBlockExactPsiHookFamily;
 
 impl CustomFamily for OneBlockExactPsiHookFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        require_layout(block_states, 1, 1, "OneBlockExactPsiHookFamily::evaluate")?;
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![BlockWorkingSet::ExactNewton {
@@ -198,39 +304,81 @@ impl CustomFamily for OneBlockExactPsiHookFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockExactPsiHookFamily::exact_newton_joint_hessian",
+        )?;
         Ok(Some(array![[1.0]]))
     }
 
     fn exact_newton_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
+        block_states: &[ParameterBlockState],
+        block: usize,
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // Default implementation ignores this parameter.
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockExactPsiHookFamily::exact_newton_hessian_directional_derivative",
+        )?;
+        if block != 0 {
+            return Err(format!(
+                "OneBlockExactPsiHookFamily::exact_newton_hessian_directional_derivative: \
+                 block index {block} out of range for a one-block family"
+            ));
+        }
         assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(Some(array![[0.0]]))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         arr: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockExactPsiHookFamily::exact_newton_joint_hessian_directional_derivative",
+        )?;
         assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(Some(array![[0.0]]))
     }
 
     fn exact_newton_joint_psi_terms(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
-        _: &CustomFamilyHyperLayout,
-        _: usize,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        hyper_layout: &CustomFamilyHyperLayout,
+        psi_index: usize,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
-        // Default implementation ignores this parameter.
+        require_states_match_specs(
+            block_states,
+            specs,
+            "OneBlockExactPsiHookFamily::exact_newton_joint_psi_terms",
+        )?;
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockExactPsiHookFamily::exact_newton_joint_psi_terms",
+        )?;
+        // The scalar psi terms below are the same for every coordinate, but
+        // they are only defined for coordinates the layout actually carries.
+        if psi_index >= hyper_layout.len() {
+            return Err(format!(
+                "OneBlockExactPsiHookFamily::exact_newton_joint_psi_terms: psi index {psi_index} \
+                 out of range for a layout with {} coordinate(s)",
+                hyper_layout.len()
+            ));
+        }
         Ok(Some(ExactNewtonJointPsiTerms {
             objective_psi: 3.5,
             score_psi: array![0.0],
@@ -244,7 +392,13 @@ impl CustomFamily for OneBlockExactPsiHookFamily {
 pub(crate) struct OneBlockIndefinitePseudoLaplaceFamily;
 
 impl CustomFamily for OneBlockIndefinitePseudoLaplaceFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockIndefinitePseudoLaplaceFamily::evaluate",
+        )?;
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![BlockWorkingSet::ExactNewton {
@@ -260,8 +414,14 @@ impl CustomFamily for OneBlockIndefinitePseudoLaplaceFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            1,
+            "OneBlockIndefinitePseudoLaplaceFamily::exact_newton_joint_hessian",
+        )?;
         Ok(Some(array![[-1.0]]))
     }
 }
@@ -293,8 +453,14 @@ impl CustomFamily for OneBlockNearlySymmetricPseudoLaplaceFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
+        require_layout(
+            block_states,
+            1,
+            2,
+            "OneBlockNearlySymmetricPseudoLaplaceFamily::exact_newton_joint_hessian",
+        )?;
         Ok(Some(array![[2.0, 0.1], [3.0, 2.0]]))
     }
 }
@@ -3045,16 +3211,28 @@ pub(crate) fn exact_newton_dh_closure_rejects_non_finite_directional_derivative(
 
         fn exact_newton_joint_hessian(
             &self,
-            _: &[ParameterBlockState],
+            block_states: &[ParameterBlockState],
         ) -> Result<Option<Array2<f64>>, String> {
+            require_layout(
+                block_states,
+                1,
+                1,
+                "OneBlockNonFiniteJointDhFamily::exact_newton_joint_hessian",
+            )?;
             Ok(Some(array![[1.0]]))
         }
 
         fn exact_newton_joint_hessian_directional_derivative(
             &self,
-            _: &[ParameterBlockState],
+            block_states: &[ParameterBlockState],
             arr: &Array1<f64>,
         ) -> Result<Option<Array2<f64>>, String> {
+            require_layout(
+                block_states,
+                1,
+                1,
+                "OneBlockNonFiniteJointDhFamily::exact_newton_joint_hessian_directional_derivative",
+            )?;
             assert!(arr.iter().all(|v| !v.is_nan()));
             Ok(Some(array![[f64::NAN]]))
         }
@@ -4289,7 +4467,8 @@ pub(crate) fn projected_stationarity_vector_uses_penalized_residual_not_raw_scor
 pub(crate) fn zero_psi_derivative_operator_acts_as_zero_map() {
     let n = 17usize;
     let p = 5usize;
-    let op = ZeroPsiDerivativeOperator::new(n, p);
+    // Axes 0 and 1 are exercised below, including as a cross pair.
+    let op = ZeroPsiDerivativeOperator::new(n, p, 2);
 
     assert_eq!(op.n_data(), n);
     assert_eq!(op.p_out(), p);
@@ -4407,7 +4586,7 @@ pub(crate) fn zero_psi_derivative_operator_resolves_to_zero_design_map() {
     let n = 12usize;
     let p = 4usize;
     let zero_op: Arc<dyn CustomFamilyPsiDerivativeOperator> =
-        Arc::new(ZeroPsiDerivativeOperator::new(n, p));
+        Arc::new(ZeroPsiDerivativeOperator::new(n, p, 1));
     let deriv = CustomFamilyBlockPsiDerivative {
         penalty_index: None,
         x_psi: Array2::<f64>::zeros((0, 0)),
@@ -4458,7 +4637,7 @@ pub(crate) fn mismatched_implicit_x_psi_operator_cannot_be_reinterpreted_as_zero
         s_psi_psi: None,
         s_psi_psi_components: None,
         s_psi_psi_penalty_components: None,
-        implicit_operator: Some(Arc::new(ZeroPsiDerivativeOperator::new(n, p + 1))),
+        implicit_operator: Some(Arc::new(ZeroPsiDerivativeOperator::new(n, p + 1, 1))),
         implicit_axis: 0,
         implicit_group_id: None,
     };

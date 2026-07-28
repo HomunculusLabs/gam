@@ -1021,8 +1021,8 @@ impl BlockwiseTermFitResult {
             noisespec_resolved: self.noisespec_resolved.clone(),
             mean_design: self.mean_design.clone(),
             noise_design: self.noise_design.clone(),
-        })
-        .map(drop)
+        })?;
+        Ok(())
     }
 }
 
@@ -1942,7 +1942,14 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                 &mean_boot_design,
                 &noise_boot_design,
             )
-            .map(drop)
+            .and_then(|blocks| {
+                if blocks.is_empty() {
+                    Err("analytic psi derivative construction produced no parameter blocks"
+                        .to_string())
+                } else {
+                    Ok(())
+                }
+            })
     } else {
         Err(
             "analytic spatial psi derivatives are unavailable for this location-scale family"

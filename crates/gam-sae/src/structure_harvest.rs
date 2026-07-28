@@ -6138,10 +6138,16 @@ pub fn run_structure_search_rounds(
                             cooldown.record(members, cfg.cooldown_rounds);
                         }
                     }
-                    StructureMove::Death { atom } if flatten_atoms.contains(atom) => {
-                        cooldown.record(&[*atom], cfg.cooldown_rounds);
+                    StructureMove::Death { atom } => {
+                        if flatten_atoms.contains(atom) {
+                            cooldown.record(&[*atom], cfg.cooldown_rounds);
+                        }
                     }
-                    _ => {}
+                    // Only the curl/flatten inverse pair (Birth/Death) needs
+                    // hysteresis; the remaining moves have no cooldown ledger.
+                    StructureMove::Fission { .. }
+                    | StructureMove::Fusion { .. }
+                    | StructureMove::Glue { .. } => {}
                 }
             }
             cooldown.tick();

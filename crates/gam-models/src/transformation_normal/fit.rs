@@ -664,10 +664,7 @@ pub fn fit_transformation_normal(
                 mode: selection,
             })
         },
-        |_,
-         _: &[TermCollectionSpec],
-         _: &[TermCollectionDesign],
-         _| {
+        |_, _: &[TermCollectionSpec], _: &[TermCollectionDesign], _| {
             Err::<ExactJointEfsEvaluation<crate::custom_family::CustomFamilyJointHyperModeSelection>, String>("transformation-normal EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string())
         },
         |_: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),

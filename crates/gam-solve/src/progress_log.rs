@@ -186,10 +186,16 @@ pub fn init_logging_at(level: LevelFilter) {
     // First caller wins the backend registration; an already-installed logger
     // is fine — we still want to (re-)apply the requested level below, so do
     // not gate `set_max_level` on the registration result.
-    if log::set_logger(&LOGGER).is_err() {
-        // backend already installed by an earlier call — fall through.
-    }
+    let installed_backend = log::set_logger(&LOGGER).is_ok();
     log::set_max_level(level);
+    if !installed_backend {
+        // Not an error, but it is the answer to "why does the trace not look
+        // like ours?": some other backend owns the global sink, and all this
+        // call did was move the level filter.
+        log::debug!(
+            "[log] a logging backend was already installed; re-applied max level {level} only"
+        );
+    }
     // Log the GPU backend inventory once at startup so the "are GPUs being
     // used?" answer is visible at the top of the log, before any solver
     // dispatch site lazily checks for device support.

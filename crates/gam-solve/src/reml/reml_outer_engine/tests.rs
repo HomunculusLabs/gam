@@ -1,4 +1,11 @@
+//! Unit tests for the REML outer engine.
+//!
+//! The single declaration of this module (`reml_outer_engine.rs`) is
+//! `#[cfg(test)] mod tests;`, so the file is test-only. Declaring that scope
+//! here with an inner attribute makes it a claim the compiler enforces rather
+//! than a claim in a filename.
 #![cfg(test)]
+
 use super::*;
 use crate::estimate::smooth_floor_dp;
 use crate::estimate::smoothing_correction::DP_FLOOR;
@@ -1394,13 +1401,11 @@ pub(crate) fn synthetic_h_with_small_eig(
         SmallEigPlacement::InsideRangeSPlus => (0, vec![0, 1, 2, 3]),
     };
     h_full[[small_idx, small_idx]] = small_eig;
-    // Anchor the non-small in-subspace direction at a moderately large
-    // eigenvalue so the "outside" placement still produces a noticeable
-    // contrast against the full-H result.
-    if matches!(placement, SmallEigPlacement::OutsideRangeSPlus) {
-        // Boost diag entry 0 so the full-H block on `range(S_+)` is
-        // well-conditioned — only the e_4 direction is degenerate.
-    }
+    // Every non-small direction keeps the unit diagonal set above. For the
+    // OUTSIDE placement that already leaves the full-H block on `range(S_+)`
+    // perfectly conditioned (condition number 1), so `small_eig` in e_4 is the
+    // only degenerate direction and the whole contrast against the full-H
+    // result is attributable to it.
     let mut u_s = Array2::<f64>::zeros((p, r));
     for (col_pos, &row) in u_s_cols.iter().enumerate() {
         u_s[[row, col_pos]] = 1.0;

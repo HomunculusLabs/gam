@@ -68,7 +68,6 @@ use gam_problem::{
 };
 use gam_terms::construction::{KroneckerReparamResult, ReparamResult};
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ArrayView2, s};
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -857,20 +856,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
     let link_function = config.link_function();
 
-    use gam_terms::construction::{
-        EngineDims, create_balanced_penalty_root_from_canonical,
-        stable_reparameterization_engine_canonical,
-    };
-
-    let eb_cow: Cow<'_, Array2<f64>> = if let Some(precomputed) = penalty.balanced_penalty_root {
-        Cow::Borrowed(precomputed)
-    } else {
-        Cow::Owned(create_balanced_penalty_root_from_canonical(
-            penalty.canonical_penalties,
-            penalty.p,
-        )?)
-    };
-    let eb: &Array2<f64> = eb_cow.as_ref();
+    use gam_terms::construction::{EngineDims, stable_reparameterization_engine_canonical};
 
     // Build a cheap weighted penalty sum for the sparse-native decision
     // WITHOUT running the expensive eigendecomposition engine.
@@ -944,17 +930,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             .and_then(|dense| sparse_from_denseview(dense.view()));
         auto_sparse.unwrap_or(x_original)
     };
-    let ebrows = eb.nrows();
-    let erows = if let Some((_, _, penalty_diag)) = kronecker_runtime.as_ref() {
-        penalty_diag.rank()
-    } else {
-        // Compute penalty root rank cheaply from canonical penalties.
-        penalty
-            .canonical_penalties
-            .iter()
-            .map(|cp| cp.rank())
-            .sum::<usize>()
-    };
     // A value-only Gaussian probe is already represented completely by its
     // coefficient-space sufficient statistics and shared frozen row carrier.
     // It exits through the exact zero-iteration branch below, so constructing
@@ -964,7 +939,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     let mut workspace = if cost_only_gaussian_rows.is_some() {
         PirlsWorkspace::coefficient_only(x_original.ncols())
     } else {
-        PirlsWorkspace::new(x_original.nrows(), x_original.ncols(), ebrows, erows)
+        PirlsWorkspace::new(x_original.nrows(), x_original.ncols())
     };
     let solver_decision = if cost_only_gaussian_rows.is_some() {
         SparsePirlsDecision {
@@ -2198,7 +2173,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     // borrow checker, then keep the real workspace alive for the EDF call.
     let mut saved_workspace = std::mem::replace(
         &mut working_model.workspace,
-        PirlsWorkspace::new(0, 0, 0, 0),
+        PirlsWorkspace::new(0, 0),
     );
     let final_state = working_model.into_final_state();
     let GamModelFinalState {

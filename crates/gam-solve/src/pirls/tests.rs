@@ -173,7 +173,7 @@ mod tests {
     pub(crate) fn dense_workspace_xtwx_preserves_signed_observed_weights() {
         let x = array![[1.0, 2.0], [3.0, -1.0], [-2.0, 4.0], [0.5, -3.0]];
         let weights = array![2.0, -1.5, 0.25, -3.0];
-        let mut workspace = PirlsWorkspace::new(x.nrows(), x.ncols(), 0, 0);
+        let mut workspace = PirlsWorkspace::new(x.nrows(), x.ncols());
         let mut streamed = Array2::<f64>::zeros((x.ncols(), x.ncols()).f());
 
         PirlsWorkspace::add_dense_xtwx_signed(
@@ -1086,7 +1086,7 @@ mod tests {
             [0.0, 1.0]
         ]));
         let s = array![[1.0, 0.0], [0.0, 1.0]];
-        let mut workspace = PirlsWorkspace::new(2, 2, 0, 0);
+        let mut workspace = PirlsWorkspace::new(2, 2);
         let decision = should_use_sparse_native_pirls(&mut workspace, &x, &s, None, None);
         assert_eq!(decision.path, PirlsLinearSolvePath::DenseTransformed);
         assert_eq!(decision.reason, "design_not_sparse");
@@ -1220,7 +1220,7 @@ mod tests {
             .expect("sparse identity should build");
         let x = DesignMatrix::from(x);
         let s = Array2::from_diag(&Array1::ones(300));
-        let mut workspace = PirlsWorkspace::new(300, 300, 0, 0);
+        let mut workspace = PirlsWorkspace::new(300, 300);
         let decision = should_use_sparse_native_pirls(&mut workspace, &x, &s, None, None);
         assert_eq!(decision.path, PirlsLinearSolvePath::SparseNative);
         assert_eq!(decision.reason, "sparse_native_eligible");
@@ -1237,7 +1237,7 @@ mod tests {
             .expect("sparse identity should build");
         let x = DesignMatrix::from(x);
         let s = Array2::from_diag(&Array1::ones(64));
-        let mut workspace = PirlsWorkspace::new(64, 64, 0, 0);
+        let mut workspace = PirlsWorkspace::new(64, 64);
         let decision = should_use_sparse_native_pirls(&mut workspace, &x, &s, None, None);
         assert_eq!(decision.path, PirlsLinearSolvePath::SparseNative);
         assert_eq!(decision.reason, "sparse_native_eligible");
@@ -1256,7 +1256,7 @@ mod tests {
         let s = Array2::from_diag(&Array1::ones(64));
         let mut lower_bounds = Array1::from_elem(64, f64::NEG_INFINITY);
         lower_bounds[0] = 0.0;
-        let mut workspace = PirlsWorkspace::new(64, 64, 0, 0);
+        let mut workspace = PirlsWorkspace::new(64, 64);
         let decision =
             should_use_sparse_native_pirls(&mut workspace, &x, &s, Some(&lower_bounds), None);
         assert_eq!(decision.path, PirlsLinearSolvePath::DenseTransformed);
@@ -1306,7 +1306,7 @@ mod tests {
         let rho = array![-12.0, 12.0];
         let lambdas = rho.mapv(f64::exp);
         let weighted_penalty = &canonical[0].local * lambdas[0] + &canonical[1].local * lambdas[1];
-        let mut routing_workspace = PirlsWorkspace::new(n, p, 0, 0);
+        let mut routing_workspace = PirlsWorkspace::new(n, p);
         let decision = should_use_sparse_native_pirls(
             &mut routing_workspace,
             &x_design,
@@ -1620,7 +1620,7 @@ mod tests {
             .expect("banded sparse design assembles");
         let x_sparse_design: DesignMatrix = x_sparse_mat.clone().into();
 
-        let mut ws = PirlsWorkspace::new(n, p, 0, 0);
+        let mut ws = PirlsWorkspace::new(n, p);
         let sparse_decision =
             should_use_sparse_native_pirls(&mut ws, &x_sparse_design, &penalty, None, None);
         assert_eq!(
@@ -1760,7 +1760,7 @@ mod tests {
         let weights = array![2.0, 3.0, 5.0];
         let s_lambda = array![[4.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 8.0]];
         let ridge = 1e-8;
-        let mut workspace = PirlsWorkspace::new(3, 3, 0, 0);
+        let mut workspace = PirlsWorkspace::new(3, 3);
         let assembled = super::sparse_reml_penalized_hessian(
             &mut workspace,
             &x,

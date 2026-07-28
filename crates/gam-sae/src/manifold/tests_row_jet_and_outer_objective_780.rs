@@ -4,6 +4,10 @@
 //! of `tests.rs` to keep that tracked file under the #780 10k-line gate.
 //! Declared as a sibling `#[cfg(test)] mod` in `mod.rs`; the shared
 //! `gamma_fd_tiny_fixture` is sourced from the sibling `tests` module.
+//!
+//! That "declared as a `#[cfg(test)] mod`" claim is restated below as an inner
+//! attribute so the compiler enforces it here, not just in `mod.rs`.
+#![cfg(test)]
 
 use super::tests::gamma_fd_tiny_fixture;
 use super::*;

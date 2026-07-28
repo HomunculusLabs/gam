@@ -208,8 +208,18 @@ mod tests {
                 .filter(|&i| sorted_profile_cmp(&profile(i), &profile(pivot)).is_eq())
                 .collect();
 
-            let got = resolve_sorted_profile_tie(n, &tied, &pair_key, &mut |_| {});
+            let mut builds = 0usize;
+            let got = resolve_sorted_profile_tie(n, &tied, &pair_key, &mut |b| builds += b);
             assert_eq!(got, expected, "tie class {tied:?} resolved differently");
+            // The equivalence above is only worth having at the advertised
+            // cost, so hold every class the scan agrees on to the operation
+            // count the module claims: one profile per candidate, none at all
+            // for a lone one — against the `4·|C| − 2` the comparator built.
+            assert_eq!(
+                builds,
+                if tied.len() > 1 { tied.len() } else { 0 },
+                "tie class {tied:?} built {builds} profiles"
+            );
         }
     }
 

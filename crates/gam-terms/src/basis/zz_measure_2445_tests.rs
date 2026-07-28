@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! Measurement probe for #2445 / #2444 — the `DoublePenaltyNullspace` rebuild
 //! frame, before and after the structural-frame fix.
 //!
@@ -19,6 +18,8 @@
 //!  3. the shipped ridge's range is the STRUCTURAL frame
 //!     `{γ : Tγ ∈ span(poly block)} = null(T[..kernel_cols, :])`, which is
 //!     ψ-invariant under the frozen chart by construction.
+
+#![cfg(test)]
 
 use ndarray::{Array2, ArrayView2, s};
 

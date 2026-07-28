@@ -706,23 +706,17 @@ fn dtm_vietoris_rips_persistence(
             let birth = ordered_filt[low];
             let death = ordered_filt[j];
             let bar = PersistenceBar { birth, death };
-            match ordered_dim[low] {
-                0 => {
-                    if death > birth {
-                        h0.push(bar);
-                    }
+            // `PersistenceDiagram` carries H0/H1/H2 only; classes of higher
+            // dimension are not recorded.
+            let dim = ordered_dim[low];
+            if death > birth {
+                if dim == 0 {
+                    h0.push(bar);
+                } else if dim == 1 {
+                    h1.push(bar);
+                } else if dim == 2 && max_homology_dim >= 2 {
+                    h2.push(bar);
                 }
-                1 => {
-                    if death > birth {
-                        h1.push(bar);
-                    }
-                }
-                2 => {
-                    if max_homology_dim >= 2 && death > birth {
-                        h2.push(bar);
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -735,11 +729,14 @@ fn dtm_vietoris_rips_persistence(
                 birth: ordered_filt[j],
                 death: f64::INFINITY,
             };
-            match ordered_dim[j] {
-                0 => h0.push(bar),
-                1 => h1.push(bar),
-                2 if max_homology_dim >= 2 => h2.push(bar),
-                _ => {}
+            // As above: only H0/H1/H2 are recorded.
+            let dim = ordered_dim[j];
+            if dim == 0 {
+                h0.push(bar);
+            } else if dim == 1 {
+                h1.push(bar);
+            } else if dim == 2 && max_homology_dim >= 2 {
+                h2.push(bar);
             }
         }
     }

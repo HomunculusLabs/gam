@@ -1942,21 +1942,21 @@ mod tests {
         let assign = Array1::<f64>::ones(n);
         let decoded = Array2::<f64>::zeros((n, 2));
         let data = Array2::<f64>::zeros((n, 2));
+        let Err(refusal) = build_atom_candidates(
+            coords.view(),
+            assign.view(),
+            decoded.view(),
+            data.view(),
+            6,
+            None,
+            Some(0.0),
+            coords.len(),
+            0.0,
+        ) else {
+            panic!("a degenerate coordinate span must be refused, not accepted (#2362)");
+        };
         assert!(
-            build_atom_candidates(
-                coords.view(),
-                assign.view(),
-                decoded.view(),
-                data.view(),
-                6,
-                None,
-                Some(0.0),
-                coords.len(),
-                0.0,
-            )
-            .map(drop)
-            .unwrap_err()
-                == AtomCandidateRefusal::CoordinateCollapse,
+            refusal == AtomCandidateRefusal::CoordinateCollapse,
             "a degenerate coordinate span must be refused as a coordinate collapse (#2362)"
         );
     }

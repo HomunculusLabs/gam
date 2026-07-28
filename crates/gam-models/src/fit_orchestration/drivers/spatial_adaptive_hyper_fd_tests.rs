@@ -71,6 +71,7 @@ fn build_spatial_adaptive_joint_hyper_scaffold(
         std::sync::Arc::new(gam_custom_family::ZeroPsiDerivativeOperator::new(
             baseline.design.design.nrows(),
             baseline.design.design.ncols(),
+            hyperspecs.len(),
         ));
     let derivative_blocks = vec![
         hyperspecs

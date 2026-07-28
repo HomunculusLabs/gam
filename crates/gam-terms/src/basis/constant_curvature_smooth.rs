@@ -802,7 +802,15 @@ fn select_constant_curvature_centers(
                 return Ok(centers);
             }
         }
-        _ => {}
+        // Every data-driven strategy picks its centers from the cloud and can
+        // therefore miss the chart origin, so all of them get the pole-aware
+        // replacement below. Enumerated rather than wildcarded so a new
+        // strategy has to state whether its centers are user-authored.
+        CenterStrategy::EqualMass { .. }
+        | CenterStrategy::EqualMassCovarRepresentative { .. }
+        | CenterStrategy::FarthestPoint { .. }
+        | CenterStrategy::KMeans { .. }
+        | CenterStrategy::UniformGrid { .. } => {}
     }
     if centers.nrows() == 0 || centers.ncols() == 0 {
         return Ok(centers);

@@ -593,7 +593,13 @@ mod tests_softmax_hand_reference {
                                 second[a][b][out_col] = coeff * d2[atom_a][axis_a][axis_b][out_col];
                             }
                         }
-                        _ => {}
+                        // Distinct atoms (the guard above took `atom_a == atom_b`):
+                        // an atom's decoder sees only its own coordinates, so the
+                        // cross-atom coord×coord block is a structural zero and the
+                        // caller's zeroed `second` entry already holds it. Naming
+                        // the variants keeps a new `SaeLocalRowVar` from silently
+                        // inheriting this "block is zero" claim.
+                        (SaeLocalRowVar::Coord { .. }, SaeLocalRowVar::Coord { .. }) => {}
                     }
                 }
             }

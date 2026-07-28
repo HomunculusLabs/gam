@@ -2093,7 +2093,7 @@ fn writable_inner_seed_hook_does_not_authorize_off_target_evaluations() {
                     inner_beta_hint: Some(array![11.0]),
                 })
             },
-            Some(|_: &mut State| {}),
+            None::<fn(&mut State)>,
             None::<fn(&mut State, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
         )
         .with_seed_inner_state(|state: &mut State, _: &Array1<f64>| {
@@ -2168,7 +2168,7 @@ fn auxiliary_psi_is_never_synthetically_oversmoothed() {
                     inner_beta_hint: Some(array![7.0]),
                 })
             },
-            Some(|_: &mut State| {}),
+            None::<fn(&mut State)>,
             None::<fn(&mut State, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
         )
         .with_seed_inner_state(|_: &mut State, _: &Array1<f64>| Ok(SeedOutcome::Installed));
@@ -4814,7 +4814,16 @@ impl OuterObjective for ReactiveDomainObjective {
         self.domain_open = matches!(self.mode, ReactiveDomainMode::FiniteAtColdSeed);
     }
 
-    fn seed_inner_state(&mut self, _: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
+    fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
+        // No inner slot to fill, but the driver must still only ever offer a
+        // finite seed; a non-finite one is a driver defect this double would
+        // otherwise swallow behind `NoSlot`.
+        if beta.iter().any(|value| !value.is_finite()) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "reactive test objective was offered a non-finite inner seed of length {}",
+                beta.len()
+            )));
+        }
         Ok(SeedOutcome::NoSlot)
     }
 
@@ -4855,7 +4864,19 @@ impl OuterObjective for ReactiveDomainObjective {
         Ok(())
     }
 
-    fn commit_reactive_domain_waypoint(&mut self, _: &Array1<f64>) -> Result<(), EstimationError> {
+    fn commit_reactive_domain_waypoint(
+        &mut self,
+        rho: &Array1<f64>,
+    ) -> Result<(), EstimationError> {
+        // The committed waypoint is the state produced by the value evaluation
+        // AT `rho`, and this objective declares `n_params = 1`, so any other
+        // shape — or a non-finite coordinate — is a driver defect.
+        if rho.len() != 1 || !rho[0].is_finite() {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "reactive test commit at a malformed rho of length {} (n_params = 1)",
+                rho.len()
+            )));
+        }
         self.checkpoint_domain_open.take().ok_or_else(|| {
             EstimationError::RemlOptimizationFailed(
                 "reactive test commit without checkpoint".to_string(),
@@ -4983,13 +5004,14 @@ struct ModelUpperMaskAudit {
 }
 
 fn model_upper_mask_audit_cost(
-    // Bare `_`, not `_state`: the audit records ORDERED evaluations, and a
-    // value-only cost call carries no mask decision to record. The ban scanner
-    // rejects a fake binding name for the same reason.
-    _: &mut ModelUpperMaskAudit,
+    state: &mut ModelUpperMaskAudit,
     theta: &Array1<f64>,
 ) -> Result<f64, EstimationError> {
-    Ok(-theta[0])
+    // A value-only cost call carries no mask decision, so it must produce
+    // exactly the scalar the ordered evaluator's value-only lane produces and
+    // record nothing. Routing through that lane (which returns before touching
+    // `state.calls`) is what keeps the two from drifting apart.
+    Ok(model_upper_mask_audit_ordered_eval(state, theta, OuterEvalOrder::Value)?.cost)
 }
 
 fn model_upper_mask_audit_ordered_eval(
@@ -7933,8 +7955,20 @@ impl OuterObjective for BimodalTerminalObjective {
     fn finalize_outer_result(
         &mut self,
         rho: &Array1<f64>,
-        _: &OuterPlan,
+        plan: &OuterPlan,
     ) -> Result<(), EstimationError> {
+        // This fixture's whole premise is the warm-started, DERIVATIVE-bearing
+        // inner solve of `basin_solve` (see `eval_with_order`). A solver that
+        // never requests derivatives would not exercise the parity flip these
+        // tests measure, so refuse it rather than record an install whose
+        // meaning the assertions do not cover.
+        if matches!(plan.solver, Solver::Efs | Solver::HybridEfs) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "bimodal terminal fixture reached finalize under solver {:?}, which never \
+                 requests a derivative-bearing evaluation",
+                plan.solver
+            )));
+        }
         // Install the owned coefficient mode: record the objective value the
         // mode carries, exactly as the custom-family evaluator does.
         let installed = self.basin_solve(rho).cost;
@@ -7947,8 +7981,16 @@ impl OuterObjective for BimodalTerminalObjective {
     fn reset(&mut self) {
         *self.warm_bumped.lock().unwrap() = false;
     }
-    fn seed_inner_state(&mut self, _: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
-        // The bimodal basin is carried by `warm_bumped`, not an inner-β slot.
+    fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
+        // The bimodal basin is carried by `warm_bumped`, not an inner-β slot —
+        // but the offered seed must still be finite, or the driver handed this
+        // fixture a state no warm start could legitimately resume from.
+        if beta.iter().any(|value| !value.is_finite()) {
+            return Err(EstimationError::RemlOptimizationFailed(format!(
+                "bimodal terminal fixture was offered a non-finite inner seed of length {}",
+                beta.len()
+            )));
+        }
         Ok(SeedOutcome::NoSlot)
     }
 }

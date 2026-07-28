@@ -13,6 +13,8 @@
 //! author tripwire), so the issue's `fit_from_formula` path is exercised here
 //! in `gam-models`, which builds standalone.
 
+#![cfg(test)]
+
 use super::entry::fit_from_formula;
 use super::request::{FitConfig, FitResult, StandardFitResult};
 use csv::StringRecord;

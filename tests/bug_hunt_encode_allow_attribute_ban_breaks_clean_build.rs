@@ -125,10 +125,10 @@ fn attr_brackets_balanced(s: &str) -> bool {
     };
     let mut depth = 0i32;
     for b in s[start..].bytes() {
-        match b {
-            b'[' => depth += 1,
-            b']' => depth -= 1,
-            _ => {}
+        if b == b'[' {
+            depth += 1;
+        } else if b == b']' {
+            depth -= 1;
         }
     }
     depth <= 0

@@ -431,29 +431,51 @@ struct FisherDirection {
     v: f64,
 }
 
+/// One perturbed active-class mass `p_a exp(delta_a)` together with the base
+/// point it was seeded from and the observation weight it is stored with.
+///
+/// The two perturbation orders reach the same normalized channels from
+/// different sides: the first-directional layout evaluates the scalar closed
+/// form in `probability`/`direction_u` (and folds `weight` straight into its
+/// single contiguous channel), while the mixed-second layout multiplies `mass`
+/// by the shared `inverse` denominator and leaves the weight for the assembled
+/// Fisher entry. Bundling the base point keeps one `channels` signature across
+/// both orders without forcing either impl to carry an unused positional
+/// argument — the same reason [`FisherDirection`] exists.
+#[derive(Clone, Copy)]
+struct PerturbedMass<S> {
+    probability: f64,
+    direction_u: f64,
+    weight: f64,
+    mass: S,
+}
+
 trait FisherPerturbation: JetScalar<0> {
     type Channels: Copy;
     const CONTIGUOUS_FULL: bool;
+    /// Where the single application of the observation weight lands. `true`
+    /// folds it into the stored channels (so the assembled Fisher entry is
+    /// built at unit weight); `false` leaves the channels unweighted and
+    /// applies the weight once to the assembled entry. Exactly one of the two
+    /// carries it, so the weight is never squared.
+    const WEIGHT_IN_CHANNELS: bool;
 
     fn seed(direction: FisherDirection) -> Self;
     fn coefficient(&self) -> f64;
     fn from_channels(base: f64, channels: Self::Channels) -> Self;
-    fn normalized_channels(
-        probability: f64,
-        direction_u: f64,
-        mass: &Self,
-        inverse: &Self,
-    ) -> Self::Channels;
-    fn store_channels(channels: Self::Channels, weight: f64) -> Self::Channels;
-    fn fisher_weight(weight: f64) -> f64;
+    /// Normalize one perturbed mass by the shared reciprocal denominator and
+    /// store the live nilpotent coefficients, applying the weight iff
+    /// [`Self::WEIGHT_IN_CHANNELS`].
+    fn channels(perturbed: &PerturbedMass<Self>, inverse: &Self) -> Self::Channels;
     fn denominator<F>(m: usize, perturbed_mass: &F) -> Self
     where
-        F: Fn(usize) -> (f64, f64, Self);
+        F: Fn(usize) -> PerturbedMass<Self>;
 }
 
 impl FisherPerturbation for OneSeed<0> {
     type Channels = f64;
     const CONTIGUOUS_FULL: bool = true;
+    const WEIGHT_IN_CHANNELS: bool = true;
 
     #[inline(always)]
     fn seed(direction: FisherDirection) -> Self {
@@ -477,33 +499,23 @@ impl FisherPerturbation for OneSeed<0> {
     }
 
     #[inline(always)]
-    fn normalized_channels(
-        probability: f64,
-        direction_u: f64,
-        _: &Self,
-        inverse: &Self,
-    ) -> Self::Channels {
-        probability * (direction_u + gam_math::nested_dual::JetField::value(&inverse.eps))
-    }
-
-    #[inline(always)]
-    fn store_channels(channels: Self::Channels, weight: f64) -> Self::Channels {
-        channels * weight
-    }
-
-    #[inline(always)]
-    fn fisher_weight(_: f64) -> f64 {
-        1.0
+    fn channels(perturbed: &PerturbedMass<Self>, inverse: &Self) -> Self::Channels {
+        // Only the single eps channel of `mass * inverse` survives at first
+        // order, and `mass = p_a (1 + eps u)` with `inverse.base = 1`, so the
+        // product collapses to this closed form without touching `mass`.
+        perturbed.probability
+            * (perturbed.direction_u + gam_math::nested_dual::JetField::value(&inverse.eps))
+            * perturbed.weight
     }
 
     #[inline(always)]
     fn denominator<F>(m: usize, perturbed_mass: &F) -> Self
     where
-        F: Fn(usize) -> (f64, f64, Self),
+        F: Fn(usize) -> PerturbedMass<Self>,
     {
         let mut eps_coefficient = 0.0;
         for a in 0..m {
-            eps_coefficient += gam_math::nested_dual::JetField::value(&perturbed_mass(a).2.eps);
+            eps_coefficient += gam_math::nested_dual::JetField::value(&perturbed_mass(a).mass.eps);
         }
         Self {
             base: <Order2<0> as JetScalar<0>>::constant(1.0),
@@ -515,6 +527,7 @@ impl FisherPerturbation for OneSeed<0> {
 impl FisherPerturbation for TwoSeed<0> {
     type Channels = [f64; 3];
     const CONTIGUOUS_FULL: bool = false;
+    const WEIGHT_IN_CHANNELS: bool = false;
 
     #[inline(always)]
     fn seed(direction: FisherDirection) -> Self {
@@ -542,8 +555,11 @@ impl FisherPerturbation for TwoSeed<0> {
     }
 
     #[inline(always)]
-    fn normalized_channels(_: f64, _: f64, mass: &Self, inverse: &Self) -> Self::Channels {
-        let normalized = gam_math::nested_dual::JetField::mul(mass, inverse);
+    fn channels(perturbed: &PerturbedMass<Self>, inverse: &Self) -> Self::Channels {
+        // Mixed second order keeps all three live channels of `mass * inverse`
+        // and leaves the weight on the assembled Fisher entry
+        // (`WEIGHT_IN_CHANNELS = false`), so it is not applied here.
+        let normalized = gam_math::nested_dual::JetField::mul(&perturbed.mass, inverse);
         [
             gam_math::nested_dual::JetField::value(&normalized.eps),
             gam_math::nested_dual::JetField::value(&normalized.del),
@@ -552,26 +568,19 @@ impl FisherPerturbation for TwoSeed<0> {
     }
 
     #[inline(always)]
-    fn store_channels(channels: Self::Channels, _: f64) -> Self::Channels {
-        channels
-    }
-
-    #[inline(always)]
-    fn fisher_weight(weight: f64) -> f64 {
-        weight
-    }
-
-    #[inline(always)]
     fn denominator<F>(m: usize, perturbed_mass: &F) -> Self
     where
-        F: Fn(usize) -> (f64, f64, Self),
+        F: Fn(usize) -> PerturbedMass<Self>,
     {
         let mut denominator = Self::constant(1.0);
         for a in 0..m {
-            let (probability, _, mass) = perturbed_mass(a);
+            let perturbed = perturbed_mass(a);
             denominator = gam_math::nested_dual::JetField::add(
                 &denominator,
-                &gam_math::nested_dual::JetField::sub(&mass, &Self::constant(probability)),
+                &gam_math::nested_dual::JetField::sub(
+                    &perturbed.mass,
+                    &Self::constant(perturbed.probability),
+                ),
             );
         }
         denominator
@@ -670,6 +679,13 @@ fn softmax_fisher_perturbation<S: FisherPerturbation>(
 ) {
     assert_eq!(normalized.len(), m);
     assert_eq!(fisher.len(), m * m);
+    // The observation weight is applied exactly once: either folded into the
+    // stored channels or applied to the assembled Fisher entry, never both.
+    let (channel_weight, output_weight) = if S::WEIGHT_IN_CHANNELS {
+        (weight, 1.0)
+    } else {
+        (1.0, weight)
+    };
     let perturbed_mass = |a| {
         let pa = probability(a);
         let direction_u = direction_u(a);
@@ -681,19 +697,19 @@ fn softmax_fisher_perturbation<S: FisherPerturbation>(
             &gam_math::nested_dual::JetField::compose_unary(&delta, [1.0; 5]),
             pa,
         );
-        (pa, direction_u, mass)
+        PerturbedMass {
+            probability: pa,
+            direction_u,
+            weight: channel_weight,
+            mass,
+        }
     };
     let denominator = S::denominator(m, &perturbed_mass);
     let inverse =
         gam_math::nested_dual::JetField::compose_unary(&denominator, [1.0, -1.0, 2.0, -6.0, 24.0]);
     for (a, channels) in normalized.iter_mut().enumerate() {
-        let (pa, direction_u, mass) = perturbed_mass(a);
-        *channels = S::store_channels(
-            S::normalized_channels(pa, direction_u, &mass, &inverse),
-            weight,
-        );
+        *channels = S::channels(&perturbed_mass(a), &inverse);
     }
-    let output_weight = S::fisher_weight(weight);
     let lifted = |a| S::from_channels(probability(a), normalized[a]);
     if m == 2 {
         let p0 = lifted(0);
@@ -1142,6 +1158,38 @@ impl MultinomialFamily {
     /// Total stacked-coefficient dimension `(K − 1) · P`.
     pub fn beta_flat_dim(&self) -> usize {
         self.active_classes() * self.design.ncols()
+    }
+
+    /// Cross-check the caller's per-block specs against this family's flat
+    /// coefficient layout.
+    ///
+    /// Every exact-Newton joint quantity we hand back (gradient, Hessian
+    /// operator) is laid out as `m` contiguous `p`-wide blocks in spec order,
+    /// so a spec list whose combined coefficient width disagrees with
+    /// [`Self::beta_flat_dim`] would silently misalign the caller's flattened
+    /// `β`. Callers are allowed to omit the specs entirely (the trait passes an
+    /// empty slice when it has none to offer); an empty list carries no layout
+    /// claim and is accepted.
+    fn check_spec_coefficient_width(
+        &self,
+        specs: &[ParameterBlockSpec],
+        what: &str,
+    ) -> Result<(), String> {
+        if specs.is_empty() {
+            return Ok(());
+        }
+        let spec_width: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        let flat_dim = self.beta_flat_dim();
+        if spec_width != flat_dim {
+            return Err(format!(
+                "MultinomialFamily {what}: {} block specs carry {spec_width} coefficients but the \
+                 family's flat layout is {} classes x {} columns = {flat_dim}",
+                specs.len(),
+                self.active_classes(),
+                self.design.ncols()
+            ));
+        }
+        Ok(())
     }
 
     /// Build the reference-symmetric ("centered") full-width smoothing
@@ -2305,8 +2353,9 @@ impl CustomFamily for MultinomialFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        self.check_spec_coefficient_width(specs, "joint gradient")?;
         let eta = self.collect_eta_matrix(block_states)?;
         let (log_lik, grad_eta_logl) = self
             .likelihood
@@ -2322,8 +2371,9 @@ impl CustomFamily for MultinomialFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        self.check_spec_coefficient_width(specs, "joint Hessian workspace")?;
         // Freeze the per-row softmax probabilities once at construction: the
         // Fisher block H_{n,a,b} = w_n (δ_ab p_a − p_a p_b) is constant in the
         // matvec direction v, so every PCG H·v contraction reuses these probs

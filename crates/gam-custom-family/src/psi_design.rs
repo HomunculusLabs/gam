@@ -214,11 +214,31 @@ impl MaterializablePsiDerivativeOperator for EmbeddedImplicitPsiDerivativeOperat
 pub struct ZeroPsiDerivativeOperator {
     pub(crate) n: usize,
     pub(crate) p: usize,
+    pub(crate) n_axes: usize,
 }
 
 impl ZeroPsiDerivativeOperator {
-    pub fn new(n: usize, p: usize) -> Self {
-        Self { n, p }
+    /// `n_axes` is the number of ψ coordinates this operator stands in for.
+    /// The derivative blocks are all zero, but the *domain* is not: an axis
+    /// index outside `0..n_axes` names a hyperparameter this operator was
+    /// never built for, and is a wiring bug rather than a zero block.
+    pub fn new(n: usize, p: usize, n_axes: usize) -> Self {
+        Self { n, p, n_axes }
+    }
+
+    fn validate_axis(
+        &self,
+        axis: usize,
+        context: &str,
+    ) -> Result<(), gam_terms::basis::BasisError> {
+        if axis < self.n_axes {
+            Ok(())
+        } else {
+            Err(gam_terms::basis::BasisError::Other(format!(
+                "{context}: axis {axis} is outside the {}-coordinate ψ domain of this zero operator",
+                self.n_axes
+            )))
+        }
     }
 }
 
@@ -237,30 +257,30 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn transpose_mul(
         &self,
-        _: usize,
+        axis: usize,
         v: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi transpose_mul")?;
         assert_eq!(v.len(), self.n, "zero psi transpose_mul length mismatch");
         Ok(Array1::<f64>::zeros(self.p))
     }
 
     fn forward_mul(
         &self,
-        _: usize,
+        axis: usize,
         u: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi forward_mul")?;
         assert_eq!(u.len(), self.p, "zero psi forward_mul length mismatch");
         Ok(Array1::<f64>::zeros(self.n))
     }
 
     fn transpose_mul_second_diag(
         &self,
-        _: usize,
+        axis: usize,
         v: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi transpose_mul_second_diag")?;
         assert_eq!(
             v.len(),
             self.n,
@@ -271,12 +291,12 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn transpose_mul_second_cross(
         &self,
-        _: usize,
-        _: usize,
+        axis_d: usize,
+        axis_e: usize,
         v: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis_d, "zero psi transpose_mul_second_cross")?;
+        self.validate_axis(axis_e, "zero psi transpose_mul_second_cross")?;
         assert_eq!(
             v.len(),
             self.n,
@@ -287,10 +307,10 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn forward_mul_second_diag(
         &self,
-        _: usize,
+        axis: usize,
         u: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi forward_mul_second_diag")?;
         assert_eq!(
             u.len(),
             self.p,
@@ -301,12 +321,12 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn forward_mul_second_cross(
         &self,
-        _: usize,
-        _: usize,
+        axis_d: usize,
+        axis_e: usize,
         u: &ArrayView1<'_, f64>,
     ) -> Result<Array1<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis_d, "zero psi forward_mul_second_cross")?;
+        self.validate_axis(axis_e, "zero psi forward_mul_second_cross")?;
         assert_eq!(
             u.len(),
             self.p,
@@ -317,10 +337,10 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn row_chunk_first(
         &self,
-        _: usize,
+        axis: usize,
         rows: Range<usize>,
     ) -> Result<Array2<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi row_chunk_first")?;
         assert!(
             rows.start <= rows.end && rows.end <= self.n,
             "zero psi row_chunk_first row range out of bounds"
@@ -330,11 +350,11 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn row_vector_first_into(
         &self,
-        _: usize,
+        axis: usize,
         row: usize,
         mut out: ArrayViewMut1<'_, f64>,
     ) -> Result<(), gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi row_vector_first_into")?;
         assert!(
             row < self.n,
             "zero psi row_vector_first_into row out of bounds"
@@ -350,10 +370,10 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn row_chunk_second_diag(
         &self,
-        _: usize,
+        axis: usize,
         rows: Range<usize>,
     ) -> Result<Array2<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis, "zero psi row_chunk_second_diag")?;
         assert!(
             rows.start <= rows.end && rows.end <= self.n,
             "zero psi row_chunk_second_diag row range out of bounds"
@@ -363,12 +383,12 @@ impl CustomFamilyPsiDerivativeOperator for ZeroPsiDerivativeOperator {
 
     fn row_chunk_second_cross(
         &self,
-        _: usize,
-        _: usize,
+        axis_d: usize,
+        axis_e: usize,
         rows: Range<usize>,
     ) -> Result<Array2<f64>, gam_terms::basis::BasisError> {
-        // Default implementation ignores this parameter.
-        // Default implementation ignores this parameter.
+        self.validate_axis(axis_d, "zero psi row_chunk_second_cross")?;
+        self.validate_axis(axis_e, "zero psi row_chunk_second_cross")?;
         assert!(
             rows.start <= rows.end && rows.end <= self.n,
             "zero psi row_chunk_second_cross row range out of bounds"

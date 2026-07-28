@@ -656,7 +656,23 @@ impl PenaltyOp for FrozenAnalyticPenaltyOp {
                 }
                 return dense;
             }
-            _ => {}
+            // No closed-form dense materialization: fall through to the
+            // column-by-column PSD-majorizer probe below. Enumerated rather
+            // than wildcarded so a newly registered penalty has to state
+            // which side of this split it is on.
+            AnalyticPenaltyKind::Sparsity(_)
+            | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
+            | AnalyticPenaltyKind::OrderedBetaBernoulli(_)
+            | AnalyticPenaltyKind::Ard(_)
+            | AnalyticPenaltyKind::TopKActivation(_)
+            | AnalyticPenaltyKind::SmoothThreshold(_)
+            | AnalyticPenaltyKind::HarmonicRoughness(_)
+            | AnalyticPenaltyKind::NuclearNorm(_)
+            | AnalyticPenaltyKind::Monotonicity(_)
+            | AnalyticPenaltyKind::NestedPrefix(_)
+            | AnalyticPenaltyKind::ScadMcp(_)
+            | AnalyticPenaltyKind::DecoderIncoherence(_)
+            | AnalyticPenaltyKind::SheafConsistency(_) => {}
         }
         let n = self.target.len();
         let mut m = Array2::<f64>::zeros((n, n));
@@ -721,7 +737,29 @@ impl FrozenAnalyticPenaltyOp {
                 }
                 return d;
             }
-            _ => {}
+            // No cached HVP state to exploit: fall through to the generic
+            // unit-probe loop below. Enumerated rather than wildcarded so a
+            // newly registered penalty has to state which side it is on.
+            AnalyticPenaltyKind::Sparsity(_)
+            | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
+            | AnalyticPenaltyKind::OrderedBetaBernoulli(_)
+            | AnalyticPenaltyKind::Ard(_)
+            | AnalyticPenaltyKind::TopKActivation(_)
+            | AnalyticPenaltyKind::SmoothThreshold(_)
+            | AnalyticPenaltyKind::TotalVariation(_)
+            | AnalyticPenaltyKind::HarmonicRoughness(_)
+            | AnalyticPenaltyKind::NuclearNorm(_)
+            | AnalyticPenaltyKind::BlockSparsity(_)
+            | AnalyticPenaltyKind::MechanismSparsity(_)
+            | AnalyticPenaltyKind::Monotonicity(_)
+            | AnalyticPenaltyKind::NestedPrefix(_)
+            | AnalyticPenaltyKind::RowPrecisionPrior(_)
+            | AnalyticPenaltyKind::IvaeRidgeMeanGauge(_)
+            | AnalyticPenaltyKind::ParametricRowPrecisionPrior(_)
+            | AnalyticPenaltyKind::ScadMcp(_)
+            | AnalyticPenaltyKind::BlockOrthogonality(_)
+            | AnalyticPenaltyKind::DecoderIncoherence(_)
+            | AnalyticPenaltyKind::SheafConsistency(_) => {}
         }
         let n = self.target.len();
         let mut d = Array1::<f64>::zeros(n);
@@ -788,7 +826,29 @@ impl FrozenAnalyticPenaltyOp {
                 }
                 return diag;
             }
-            _ => {}
+            // No cached HVP state to exploit: fall through to the generic
+            // Hutchinson probe loop below. Enumerated rather than wildcarded
+            // so a newly registered penalty has to state which side it is on.
+            AnalyticPenaltyKind::Sparsity(_)
+            | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
+            | AnalyticPenaltyKind::OrderedBetaBernoulli(_)
+            | AnalyticPenaltyKind::Ard(_)
+            | AnalyticPenaltyKind::TopKActivation(_)
+            | AnalyticPenaltyKind::SmoothThreshold(_)
+            | AnalyticPenaltyKind::TotalVariation(_)
+            | AnalyticPenaltyKind::HarmonicRoughness(_)
+            | AnalyticPenaltyKind::NuclearNorm(_)
+            | AnalyticPenaltyKind::BlockSparsity(_)
+            | AnalyticPenaltyKind::MechanismSparsity(_)
+            | AnalyticPenaltyKind::Monotonicity(_)
+            | AnalyticPenaltyKind::NestedPrefix(_)
+            | AnalyticPenaltyKind::RowPrecisionPrior(_)
+            | AnalyticPenaltyKind::IvaeRidgeMeanGauge(_)
+            | AnalyticPenaltyKind::ParametricRowPrecisionPrior(_)
+            | AnalyticPenaltyKind::ScadMcp(_)
+            | AnalyticPenaltyKind::BlockOrthogonality(_)
+            | AnalyticPenaltyKind::DecoderIncoherence(_)
+            | AnalyticPenaltyKind::SheafConsistency(_) => {}
         }
         let n = self.target.len();
         let samples = HUTCHINSON_DIAG_SAMPLES.max(1);

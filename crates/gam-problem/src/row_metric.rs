@@ -537,7 +537,13 @@ impl RowMetric {
                         .to_string(),
                 );
             }
-            _ => {}
+            // The remaining (kind, record) pairs are exactly the consistent
+            // ones: an ExactFull factor with no omitted-trace record, a
+            // CertifiedPsdLowerBound with one, and UncertifiedApproximation,
+            // which asserts nothing about the omitted mass either way.
+            FisherFactorKind::ExactFull
+            | FisherFactorKind::CertifiedPsdLowerBound
+            | FisherFactorKind::UncertifiedApproximation => {}
         }
         self.fisher_factor_kind = Some(kind);
         Ok(self)

@@ -1523,8 +1523,8 @@ pub fn launch_row_reweight_on_stream(
     // `n` elements each (validated above); input buffers are caller-supplied
     // with length n. Grid covers all n rows; threads guard `if (i >= n) return`.
     unsafe { builder.launch(cfg) }
-        .map(|_| ())
-        .gpu_ctx_with(|err| format!("row reweight launch({}): {err}", family.kernel_name()))
+        .gpu_ctx_with(|err| format!("row reweight launch({}): {err}", family.kernel_name()))?;
+    Ok(())
 }
 
 /// Stage 6: device-side row reweight launcher for JIT-compiled
@@ -1578,8 +1578,8 @@ pub fn launch_row_reweight_jit_on_stream(
     // SAFETY: JIT spec's `cuda_source` builder emits the same kernel
     // signature as `cuda_source_for`; arg order/types match one-for-one.
     unsafe { builder.launch(cfg) }
-        .map(|_| ())
-        .gpu_ctx_with(|err| format!("JIT row reweight launch({kernel_name}): {err}"))
+        .gpu_ctx_with(|err| format!("JIT row reweight launch({kernel_name}): {err}"))?;
+    Ok(())
 }
 
 /// **solve-row** mode launcher.
@@ -1650,8 +1650,8 @@ pub fn launch_solve_row_on_stream(
     // 4 outputs match the 4 SolveRowBuffers fields; grid covers all n rows with
     // per-thread guard `if (i >= n) return`.
     unsafe { builder.launch(cfg) }
-        .map(|_| ())
-        .gpu_ctx_with(|err| format!("solve-row launch({kernel_name}): {err}"))
+        .gpu_ctx_with(|err| format!("solve-row launch({kernel_name}): {err}"))?;
+    Ok(())
 }
 
 /// **candidate-objective / fused alpha-ladder** launcher.
@@ -1723,8 +1723,8 @@ pub fn launch_alpha_ladder_on_stream(
     // Atomic double-precision add to objective_out[blockIdx.y]; each thread
     // owns status_out[blockIdx.y * n + i].
     unsafe { builder.launch(cfg) }
-        .map(|_| ())
-        .gpu_ctx_with(|err| format!("alpha-ladder launch({kernel_name}): {err}"))
+        .gpu_ctx_with(|err| format!("alpha-ladder launch({kernel_name}): {err}"))?;
+    Ok(())
 }
 
 // ────────────────────────────────────────────────────────────────────────

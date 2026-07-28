@@ -3459,8 +3459,9 @@ fn gaussian_reml_cholesky_lower(xtwx: Array2<f64>) -> Result<Array2<f64>, Estima
             condition_number: f64::INFINITY,
         });
     }
+    let schedule = RidgeSchedule::geometric(1e-12 * trace / (p as f64), 6);
     escalate_ridge(
-        RidgeSchedule::geometric(1e-12 * trace / (p as f64), 6),
+        schedule,
         |jitter| {
             let mut jittered = xtwx.clone();
             for i in 0..p {
@@ -3477,8 +3478,20 @@ fn gaussian_reml_cholesky_lower(xtwx: Array2<f64>) -> Result<Array2<f64>, Estima
         },
     )
     .map(|success| success.value)
-    .map_err(|_| EstimationError::ModelIsIllConditioned {
-        condition_number: f64::INFINITY,
+    .map_err(|exhausted| {
+        // Cholesky failed at every escalation. The largest shift actually tried
+        // is one growth factor below the one the schedule would try next, and
+        // X'WX is still not numerically PSD there, so `trace / last_attempted`
+        // is a measured lower bound on the conditioning rather than a blanket
+        // `INFINITY`.
+        let last_attempted = exhausted.next_ridge / schedule.growth;
+        EstimationError::ModelIsIllConditioned {
+            condition_number: if last_attempted > 0.0 && last_attempted.is_finite() {
+                trace / last_attempted
+            } else {
+                f64::INFINITY
+            },
+        }
     })
 }
 

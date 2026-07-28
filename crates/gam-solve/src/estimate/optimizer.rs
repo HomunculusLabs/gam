@@ -45,12 +45,12 @@ fn certify_factorized_inference_solve(
         &residual,
         label,
     )
-    .map(drop)
     .map_err(|error| {
         EstimationError::RemlOptimizationFailed(format!(
             "exact factorized inference solve did not certify: {error}"
         ))
-    })
+    })?;
+    Ok(())
 }
 
 fn certify_factorized_inference_vector_solve(
@@ -2916,22 +2916,33 @@ where
     // carries only the power), so their kernels read the fitted scale from
     // `likelihood_scale` directly and there is nothing on the family to sync.
     let mut reported_family = opts.family.clone();
-    match (&mut reported_family.response, likelihood_scale_field) {
-        (
-            ResponseFamily::NegativeBinomial { theta, .. },
-            LikelihoodScaleMetadata::EstimatedNegBinTheta {
-                theta: fitted_theta,
-            },
-        ) => {
-            *theta = fitted_theta;
+    match likelihood_scale_field {
+        LikelihoodScaleMetadata::EstimatedNegBinTheta {
+            theta: fitted_theta,
+        } => {
+            if let ResponseFamily::NegativeBinomial { theta, .. } = &mut reported_family.response {
+                *theta = fitted_theta;
+            }
         }
-        (
-            ResponseFamily::Beta { phi },
-            LikelihoodScaleMetadata::EstimatedBetaPhi { phi: fitted_phi },
-        ) => {
-            *phi = fitted_phi;
+        LikelihoodScaleMetadata::EstimatedBetaPhi { phi: fitted_phi } => {
+            if let ResponseFamily::Beta { phi } = &mut reported_family.response {
+                *phi = fitted_phi;
+            }
         }
-        _ => {}
+        // Every other scale metadata is either fixed (nothing was estimated to
+        // thread back), or belongs to a family whose variant carries no
+        // dispersion at all — Gamma shape and Tweedie φ live only on
+        // `likelihood_scale`, as the comment above records. Enumerated so a new
+        // estimated-dispersion metadata has to declare here whether its family
+        // variant needs syncing.
+        LikelihoodScaleMetadata::ProfiledGaussian
+        | LikelihoodScaleMetadata::FixedDispersion { .. }
+        | LikelihoodScaleMetadata::FixedGammaShape { .. }
+        | LikelihoodScaleMetadata::EstimatedGammaShape { .. }
+        | LikelihoodScaleMetadata::FixedBetaPhi { .. }
+        | LikelihoodScaleMetadata::EstimatedTweediePhi { .. }
+        | LikelihoodScaleMetadata::FixedNegBinTheta { .. }
+        | LikelihoodScaleMetadata::Unspecified => {}
     }
     // The fully-normalized reporting kernel (#2096) reads a CONCRETE dispersion
     // `φ = σ̂²` for Gaussian off `likelihood.scale`. A profiled Gaussian carries

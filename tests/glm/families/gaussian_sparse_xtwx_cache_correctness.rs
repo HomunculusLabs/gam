@@ -99,7 +99,7 @@ fn sparse_xtwx_cache_matches_per_call_recompute_bitwise() {
     let ridge: f64 = 1e-8;
 
     // Baseline: per-call SpGEMM recompute (precomputed_xtwx = None).
-    let mut workspace_no_cache = PirlsWorkspace::new(N, p, 0, 0);
+    let mut workspace_no_cache = PirlsWorkspace::new(N, p);
     let h_no_cache = assemble_and_factor_sparse_penalized_system(
         &mut workspace_no_cache,
         &x,
@@ -112,7 +112,7 @@ fn sparse_xtwx_cache_matches_per_call_recompute_bitwise() {
 
     // Cached: precompute XᵀWX once, then assemble using the cache.
     let precomp = SparseXtwxPrecomputed::build(&x, &weights).expect("build precomp");
-    let mut workspace_cached = PirlsWorkspace::new(N, p, 0, 0);
+    let mut workspace_cached = PirlsWorkspace::new(N, p);
     let h_cached = assemble_and_factor_sparse_penalized_system(
         &mut workspace_cached,
         &x,

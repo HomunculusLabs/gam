@@ -146,16 +146,17 @@ fn collect_called_idents(code: &str, out: &mut Vec<String>) {
             let mut p = i - 1;
             let mut open = None;
             loop {
-                match bytes[p] {
-                    b'>' => depth += 1,
-                    b'<' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            open = Some(p);
-                            break;
-                        }
+                // Only the two angle brackets move the depth; every other byte
+                // is passed over, so this is an `if` on those two rather than a
+                // match with a do-nothing rest.
+                if bytes[p] == b'>' {
+                    depth += 1;
+                } else if bytes[p] == b'<' {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(p);
+                        break;
                     }
-                    _ => {}
                 }
                 if p == 0 {
                     break;

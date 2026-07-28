@@ -32,6 +32,12 @@
 //! environment (a `build.rs` author tripwire, see the #1762 sibling test
 //! file), so this exercises the identical formula-fit path one layer down,
 //! in `gam-models`, which builds standalone.
+//!
+//! The single declaration of this module in `fit_orchestration.rs` is
+//! `#[cfg(test)] mod ...;`, so this file is test-only. Declaring that
+//! scope here with an inner attribute makes it a claim the compiler
+//! enforces rather than a claim in a filename.
+#![cfg(test)]
 
 use super::entry::fit_from_formula;
 use super::request::{FitConfig, FitResult, StandardFitResult};

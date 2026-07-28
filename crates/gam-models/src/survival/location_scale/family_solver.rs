@@ -1099,9 +1099,13 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     fn joint_jeffreys_information_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys directional derivative",
+        )?;
         self.exact_newton_joint_hessian_directional_derivative_rescaled(
             block_states,
             d_beta_flat,
@@ -1185,10 +1189,14 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     fn joint_jeffreys_information_second_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys second directional derivative",
+        )?;
         self.exact_newton_joint_hessian_second_directional_derivative_rescaled(
             block_states,
             d_beta_u_flat,
@@ -1723,10 +1731,32 @@ impl CustomFamily for SurvivalLocationScaleFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
+        // Every constraint below is sized from `spec`, so it only constrains
+        // anything if `spec` really describes the block the solver is carrying
+        // at `block_idx`.
+        let Some(state) = block_states.get(block_idx) else {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "survival location-scale linear constraints requested for block {block_idx}, but only {} block states were supplied",
+                    block_states.len()
+                ),
+            }
+            .into());
+        };
+        if state.beta.len() != spec.design.ncols() {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "survival location-scale linear constraints for block {block_idx}: spec width {} does not match the carried coefficient width {}",
+                    spec.design.ncols(),
+                    state.beta.len()
+                ),
+            }
+            .into());
+        }
         if block_idx == Self::BLOCK_LINK_WIGGLE {
             return Ok(monotone_wiggle_nonnegative_constraints(spec.design.ncols()));
         }
@@ -1758,8 +1788,13 @@ impl CustomFamily for SurvivalLocationScaleFamily {
     fn joint_trust_metric_block_floor(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array1<f64>>, String> {
+        // The floor is returned in the packed joint coefficient space this
+        // family lays out, so the caller's blocks must be the blocks that
+        // layout describes — otherwise the returned vector would be applied to
+        // a metric it does not index.
+        self.validate_joint_specs(specs, "SurvivalLocationScaleFamily joint trust metric floor")?;
         // Scale-aware trust-metric floor for the coupled smooth-scale fit
         // (issue #1569). The free scale predictor `η_σ` enters the likelihood
         // through the standardized index `u = inv_sigma·(h − η_t)` with
@@ -1840,12 +1875,34 @@ impl CustomFamily for SurvivalLocationScaleFamily {
 
     fn post_update_block_beta(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
         beta: Array1<f64>,
     ) -> Result<Array1<f64>, String> {
         assert!(!block_spec.name.is_empty());
+        // A post-update hook may change the coefficients' VALUES but never
+        // their layout: the vector returned here replaces the block the solver
+        // is carrying, so it must have that block's width.
+        let Some(state) = block_states.get(block_idx) else {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "survival location-scale post-update for block {block_idx}, but only {} block states were supplied",
+                    block_states.len()
+                ),
+            }
+            .into());
+        };
+        if beta.len() != state.beta.len() {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "survival location-scale post-update for block {block_idx} received {} coefficients but the block carries {}",
+                    beta.len(),
+                    state.beta.len()
+                ),
+            }
+            .into());
+        }
         if block_idx == Self::BLOCK_TIME
             && let Some(constraints) = self.time_linear_constraints.as_ref()
         {

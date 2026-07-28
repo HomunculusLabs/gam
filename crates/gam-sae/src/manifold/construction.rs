@@ -5711,7 +5711,31 @@ impl SaeManifoldTerm {
                         value += per_atom.value(beta.slice(s![start..end]), rho_local);
                     }
                 }
-                _ => {}
+                // Every other registered kind is excluded by the contract
+                // documented above: it either double-counts a native `loss.*`
+                // twin or is a coordinate-tier / gauge-only term that is not
+                // part of the penalized deviance this scalar scores. Spelled
+                // out rather than wildcarded so a newly registered penalty kind
+                // has to state which side of that line it falls on.
+                AnalyticPenaltyKind::Isometry(_)
+                | AnalyticPenaltyKind::Sparsity(_)
+                | AnalyticPenaltyKind::SoftmaxAssignmentSparsity(_)
+                | AnalyticPenaltyKind::OrderedBetaBernoulli(_)
+                | AnalyticPenaltyKind::Ard(_)
+                | AnalyticPenaltyKind::TopKActivation(_)
+                | AnalyticPenaltyKind::SmoothThreshold(_)
+                | AnalyticPenaltyKind::TotalVariation(_)
+                | AnalyticPenaltyKind::HarmonicRoughness(_)
+                | AnalyticPenaltyKind::BlockSparsity(_)
+                | AnalyticPenaltyKind::Monotonicity(_)
+                | AnalyticPenaltyKind::NestedPrefix(_)
+                | AnalyticPenaltyKind::RowPrecisionPrior(_)
+                | AnalyticPenaltyKind::IvaeRidgeMeanGauge(_)
+                | AnalyticPenaltyKind::ParametricRowPrecisionPrior(_)
+                | AnalyticPenaltyKind::ScadMcp(_)
+                | AnalyticPenaltyKind::BlockOrthogonality(_)
+                | AnalyticPenaltyKind::Orthogonality(_)
+                | AnalyticPenaltyKind::SheafConsistency(_) => {}
             }
         }
         Ok(value)

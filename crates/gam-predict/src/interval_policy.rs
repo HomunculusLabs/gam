@@ -608,7 +608,7 @@ pub trait PredictionTransform {
     /// multipliers (the same masses the symmetric band would target).
     fn observation_band(
         &self,
-        _: &PredictInput,
+        input: &PredictInput,
         mean: &Array1<f64>,
         mean_se: &Array1<f64>,
         z_lower: &Array1<f64>,
@@ -616,7 +616,9 @@ pub trait PredictionTransform {
     ) -> Result<Option<(Array1<f64>, Array1<f64>)>, EstimationError> {
         // Default: no skew-aware band. The generic symmetric construction is
         // used instead. Validate the per-row inputs the driver hands every
-        // transform so an overriding impl and this default agree on shape.
+        // transform so an overriding impl and this default agree on shape:
+        // one entry per row of the prediction design.
+        assert_eq!(mean.len(), input.design.nrows());
         assert_eq!(mean.len(), mean_se.len());
         assert_eq!(mean.len(), z_lower.len());
         assert_eq!(mean.len(), z_upper.len());

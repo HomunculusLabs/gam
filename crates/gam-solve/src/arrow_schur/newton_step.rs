@@ -271,8 +271,10 @@ pub fn probe_undamped_evidence_row_factors(
         options.evidence_policy.factors_undamped_evidence(),
         &CpuBatchedBlockSolver,
         options.gpu_policy,
-    )
-    .map(drop)
+    )?;
+    // The factors themselves are discarded: this is a feasibility probe, and
+    // the caller's stationary-point factorization is the authority on values.
+    Ok(())
 }
 
 pub(crate) fn estimated_htbeta_bytes(n: usize, d: usize, k: usize) -> Option<usize> {

@@ -16,6 +16,130 @@ pub(crate) fn test_design_hyper_layout(
     .expect("test design-hyper layout must satisfy the typed axis contract")
 }
 
+// Precondition guards shared by the mock `CustomFamily` /
+// `ExactNewtonJoint*Workspace` implementations below.
+//
+// A mock hook usually returns a canned answer that does not depend on the
+// geometry it is handed. It still owes the caller the trait's stated
+// precondition: the solver must pass self-consistent specs, finite block
+// states, and probe directions that span the space the answer claims to
+// describe. Checking that at the hook boundary is what turns a canned answer
+// into a contract observation -- if a solver change starts feeding these hooks
+// malformed geometry, the failure surfaces here instead of being absorbed by a
+// constant.
+
+/// The specs a family hook receives must be mutually consistent (unique block
+/// names, matching offset/design dimensions, paired stacked design/offset).
+pub(crate) fn assert_specs_consistent(specs: &[ParameterBlockSpec], context: &str) {
+    if let Err(reason) = validate_blockspec_consistency(specs) {
+        panic!("{context}: inconsistent parameter block specs: {reason}");
+    }
+}
+
+/// The block states a family hook receives must carry a finite coefficient
+/// vector and a finite linear predictor for every block.
+pub(crate) fn assert_states_finite(block_states: &[ParameterBlockState], context: &str) {
+    for (block_idx, state) in block_states.iter().enumerate() {
+        assert!(
+            state.beta.iter().all(|value| value.is_finite()),
+            "{context}: block {block_idx} coefficients must be finite"
+        );
+        assert!(
+            state.eta.iter().all(|value| value.is_finite()),
+            "{context}: block {block_idx} linear predictor must be finite"
+        );
+    }
+}
+
+/// A directional-derivative probe must be a finite direction; a NaN direction
+/// would make any curvature answer built from it vacuously "correct".
+pub(crate) fn assert_direction_finite(direction: &Array1<f64>, context: &str) {
+    assert!(
+        direction.iter().all(|value| value.is_finite()),
+        "{context}: probe direction must be finite"
+    );
+}
+
+/// A joint coefficient curvature spans every block's coefficients, so its
+/// order must equal the total coefficient count of the states it is evaluated
+/// at.
+pub(crate) fn assert_joint_dim(block_states: &[ParameterBlockState], order: usize, context: &str) {
+    assert_states_finite(block_states, context);
+    let total: usize = block_states.iter().map(|state| state.beta.len()).sum();
+    assert_eq!(
+        total, order,
+        "{context}: joint curvature of order {order} does not span the {total} coefficients it \
+         was evaluated at"
+    );
+}
+
+/// A joint directional derivative is contracted against a direction in the
+/// same flat coefficient space as the joint curvature itself.
+pub(crate) fn assert_joint_direction(
+    block_states: &[ParameterBlockState],
+    d_beta_flat: &Array1<f64>,
+    context: &str,
+) {
+    assert_direction_finite(d_beta_flat, context);
+    assert_joint_dim(block_states, d_beta_flat.len(), context);
+}
+
+/// A psi index handed to a hyper-derivative hook must name an axis of the
+/// layout the same call carries.
+pub(crate) fn assert_psi_axis_in_layout(
+    hyper_layout: &CustomFamilyHyperLayout,
+    psi_index: usize,
+    context: &str,
+) {
+    assert!(
+        hyper_layout.axis(psi_index).is_some(),
+        "{context}: psi index {psi_index} is outside the {}-axis hyper layout",
+        hyper_layout.len()
+    );
+}
+
+/// Fit options reaching a family hook must carry usable tolerances.
+pub(crate) fn assert_options_well_formed(options: &BlockwiseFitOptions, context: &str) {
+    assert!(
+        options.inner_tol.is_finite() && options.inner_tol >= 0.0,
+        "{context}: inner_tol must be finite and non-negative, got {}",
+        options.inner_tol
+    );
+    assert!(
+        options.outer_tol.is_finite() && options.outer_tol >= 0.0,
+        "{context}: outer_tol must be finite and non-negative, got {}",
+        options.outer_tol
+    );
+}
+
+/// The inequality face a family returns for `block_idx` lives in that block's
+/// coefficient coordinates: it must be as wide as the block's design, as tall
+/// as its own right-hand side, and it describes the face at the current mode,
+/// which must therefore be finite.
+pub(crate) fn assert_block_face(
+    block_states: &[ParameterBlockState],
+    block_idx: usize,
+    block_spec: &ParameterBlockSpec,
+    a: &Array2<f64>,
+    b: &Array1<f64>,
+) {
+    assert!(
+        !block_spec.name.is_empty(),
+        "block {block_idx} constraint face: the block must be named"
+    );
+    assert_states_finite(block_states, "block linear constraints");
+    assert_eq!(
+        a.nrows(),
+        b.len(),
+        "block {block_idx} constraint rows and bound length must agree"
+    );
+    assert_eq!(
+        a.ncols(),
+        block_spec.design.ncols(),
+        "block {block_idx} constraint face must live in that block's coefficient coordinates"
+    );
+}
+
 #[derive(Clone)]
 pub(crate) struct BatchedOuterHessianTestFamily {
     pub(crate) matrix: Array2<f64>,
@@ -49,21 +173,24 @@ impl gam_problem::HessianOperator for TestHessianOperator {
 }
 
 impl CustomFamily for BatchedOuterHessianTestFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        assert_states_finite(block_states, "batched outer-Hessian family evaluate");
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![],
         })
     }
 
-    fn outer_hyper_hessian_hvp_available(&self, _: &[ParameterBlockSpec]) -> bool {
+    fn outer_hyper_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        assert_specs_consistent(specs, "batched outer-Hessian HVP availability");
         true
     }
 
     fn outer_hyper_hessian_operator(
         &self,
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Option<Arc<dyn gam_problem::HessianOperator>> {
+        assert_specs_consistent(specs, "batched outer-Hessian operator");
         Some(Arc::new(TestHessianOperator {
             matrix: self.matrix.clone(),
         }))
@@ -1587,37 +1714,52 @@ pub(crate) struct InnerPreludeCountingWorkspace {
     pub(crate) dense_calls: Arc<AtomicUsize>,
 }
 
+/// What a fused-trial workspace reports when the line search asks it for the
+/// joint log-likelihood. Every variant here is answerable *by a workspace*, so
+/// the workspace's own match over it is total.
 #[derive(Clone, Copy)]
-pub(crate) enum FusedTrialWorkspaceOutcome {
-    MissingWorkspace,
-    MissingLogLikelihood,
-    LogLikelihoodError,
+pub(crate) enum FusedTrialLogLikelihood {
+    Missing,
+    Error,
     Value(f64),
 }
 
+/// What the family does when the fused-trial hook is called. "No workspace at
+/// all" lives here rather than in [`FusedTrialLogLikelihood`], so a constructed
+/// workspace cannot carry an outcome it is unable to answer.
+#[derive(Clone, Copy)]
+pub(crate) enum FusedTrialWorkspaceOutcome {
+    MissingWorkspace,
+    Workspace(FusedTrialLogLikelihood),
+}
+
 pub(crate) struct FusedTrialWorkspace {
-    pub(crate) outcome: FusedTrialWorkspaceOutcome,
+    pub(crate) log_likelihood: FusedTrialLogLikelihood,
 }
 
 impl ExactNewtonJointHessianWorkspace for FusedTrialWorkspace {
-    fn warm_up_outer_caches_for_mode(&self, _: EvalMode) -> Result<(), String> {
-        Ok(())
+    fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+        // No directional cache to prime, in any mode.
+        match eval_mode {
+            EvalMode::ValueOnly | EvalMode::ValueAndGradient | EvalMode::ValueGradientHessian => {
+                Ok(())
+            }
+        }
     }
 
-    fn directional_derivative(&self, _: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+    fn directional_derivative(
+        &self,
+        direction: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_direction_finite(direction, "fused-trial workspace directional derivative");
         Ok(None)
     }
 
     fn joint_log_likelihood_evaluation(&self) -> Result<Option<f64>, String> {
-        match self.outcome {
-            FusedTrialWorkspaceOutcome::MissingLogLikelihood => Ok(None),
-            FusedTrialWorkspaceOutcome::LogLikelihoodError => {
-                Err("fused-trial-log-likelihood-error".to_string())
-            }
-            FusedTrialWorkspaceOutcome::Value(value) => Ok(Some(value)),
-            FusedTrialWorkspaceOutcome::MissingWorkspace => {
-                unreachable!("missing-workspace outcome never constructs a workspace")
-            }
+        match self.log_likelihood {
+            FusedTrialLogLikelihood::Missing => Ok(None),
+            FusedTrialLogLikelihood::Error => Err("fused-trial-log-likelihood-error".to_string()),
+            FusedTrialLogLikelihood::Value(value) => Ok(Some(value)),
         }
     }
 }
@@ -1629,23 +1771,33 @@ pub(crate) struct FusedTrialWorkspaceFamily {
 }
 
 impl CustomFamily for FusedTrialWorkspaceFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
-        unreachable!("the fused-trial contract test never evaluates the scalar family")
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        panic!(
+            "the fused-trial contract test must never scalarize through the family, but \
+             evaluate() was called with {} block states",
+            block_states.len()
+        )
     }
 
     fn exact_newton_joint_hessian_workspace_with_options(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
-        _: &BlockwiseFitOptions,
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        assert_states_finite(states, "fused-trial workspace construction");
+        assert_specs_consistent(specs, "fused-trial workspace construction");
+        assert_options_well_formed(options, "fused-trial workspace construction");
         match self.outcome {
             FusedTrialWorkspaceOutcome::MissingWorkspace => Ok(None),
-            outcome => Ok(Some(Arc::new(FusedTrialWorkspace { outcome }))),
+            FusedTrialWorkspaceOutcome::Workspace(log_likelihood) => {
+                Ok(Some(Arc::new(FusedTrialWorkspace { log_likelihood })))
+            }
         }
     }
 
-    fn inner_joint_workspace_log_likelihood_available(&self, _: &[ParameterBlockSpec]) -> bool {
+    fn inner_joint_workspace_log_likelihood_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        assert_specs_consistent(specs, "fused-trial log-likelihood availability");
         self.advertises_log_likelihood
     }
 }
@@ -1693,7 +1845,7 @@ pub(crate) fn fused_trial_advertised_missing_workspace_fails_closed() {
 pub(crate) fn fused_trial_advertised_missing_likelihood_fails_closed() {
     let family = FusedTrialWorkspaceFamily {
         advertises_log_likelihood: true,
-        outcome: FusedTrialWorkspaceOutcome::MissingLogLikelihood,
+        outcome: FusedTrialWorkspaceOutcome::Workspace(FusedTrialLogLikelihood::Missing),
     };
     let error = match joint_line_search_log_likelihood_with_workspace(
         &family,
@@ -1714,7 +1866,7 @@ pub(crate) fn fused_trial_advertised_missing_likelihood_fails_closed() {
 pub(crate) fn fused_trial_workspace_error_is_not_scalarized() {
     let family = FusedTrialWorkspaceFamily {
         advertises_log_likelihood: true,
-        outcome: FusedTrialWorkspaceOutcome::LogLikelihoodError,
+        outcome: FusedTrialWorkspaceOutcome::Workspace(FusedTrialLogLikelihood::Error),
     };
     let error = match fused_first_attempt_log_likelihood(
         &family,
@@ -1734,7 +1886,7 @@ pub(crate) fn fused_trial_workspace_error_is_not_scalarized() {
 pub(crate) fn fused_trial_returns_workspace_and_exact_likelihood_together() {
     let family = FusedTrialWorkspaceFamily {
         advertises_log_likelihood: true,
-        outcome: FusedTrialWorkspaceOutcome::Value(-3.25),
+        outcome: FusedTrialWorkspaceOutcome::Workspace(FusedTrialLogLikelihood::Value(-3.25)),
     };
     let (value, _) = joint_line_search_log_likelihood_with_workspace(
         &family,
@@ -1748,8 +1900,13 @@ pub(crate) fn fused_trial_returns_workspace_and_exact_likelihood_together() {
 }
 
 impl ExactNewtonJointHessianWorkspace for InnerPreludeCountingWorkspace {
-    fn warm_up_outer_caches_for_mode(&self, _: EvalMode) -> Result<(), String> {
-        Ok(())
+    fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+        // No directional cache to prime, in any mode.
+        match eval_mode {
+            EvalMode::ValueOnly | EvalMode::ValueAndGradient | EvalMode::ValueGradientHessian => {
+                Ok(())
+            }
+        }
     }
 
     fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
@@ -1757,7 +1914,11 @@ impl ExactNewtonJointHessianWorkspace for InnerPreludeCountingWorkspace {
         Ok(Some(array![[1.0]]))
     }
 
-    fn directional_derivative(&self, _: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+    fn directional_derivative(
+        &self,
+        direction: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_direction_finite(direction, "inner-prelude workspace directional derivative");
         Ok(None)
     }
 }
@@ -1772,7 +1933,8 @@ pub(crate) struct InnerPreludeWorkspaceFamily {
 }
 
 impl CustomFamily for InnerPreludeWorkspaceFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        assert_states_finite(block_states, "inner-prelude family evaluate");
         self.evaluations.fetch_add(1, Ordering::Relaxed);
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
@@ -1785,9 +1947,11 @@ impl CustomFamily for InnerPreludeWorkspaceFamily {
 
     fn exact_newton_joint_hessian_workspace(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        assert_states_finite(states, "inner-prelude workspace construction");
+        assert_specs_consistent(specs, "inner-prelude workspace construction");
         self.workspace_builds.fetch_add(1, Ordering::Relaxed);
         if !self.provide_workspace {
             return Ok(None);
@@ -1799,28 +1963,34 @@ impl CustomFamily for InnerPreludeWorkspaceFamily {
 
     fn exact_newton_joint_gradient_evaluation(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        assert_states_finite(states, "inner-prelude joint gradient");
+        assert_specs_consistent(specs, "inner-prelude joint gradient");
         Ok(Some(ExactNewtonJointGradientEvaluation {
             log_likelihood: 0.0,
             gradient: array![0.0],
         }))
     }
 
-    fn inner_coefficient_hessian_hvp_available(&self, _: &[ParameterBlockSpec]) -> bool {
+    fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        assert_specs_consistent(specs, "inner-prelude coefficient HVP availability");
         true
     }
 
-    fn inner_joint_workspace_gradient_available(&self, _: &[ParameterBlockSpec]) -> bool {
+    fn inner_joint_workspace_gradient_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+        assert_specs_consistent(specs, "inner-prelude workspace gradient availability");
         self.advertise_workspace_gradient
     }
 
     fn joint_trust_metric_block_floor(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array1<f64>>, String> {
+        assert_states_finite(states, "inner-prelude trust-metric floor");
+        assert_specs_consistent(specs, "inner-prelude trust-metric floor");
         Err("inner-prelude-workspace-cycle0-reached".to_string())
     }
 }
@@ -2315,7 +2485,11 @@ pub(crate) fn workspace_first_order_terms_are_single_authority_without_direct_re
     }
 
     impl CustomFamily for CountingFamily {
-        fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        fn evaluate(
+            &self,
+            block_states: &[ParameterBlockState],
+        ) -> Result<FamilyEvaluation, String> {
+            assert_states_finite(block_states, "workspace-authority family evaluate");
             Ok(FamilyEvaluation {
                 log_likelihood: 0.0,
                 blockworking_sets: Vec::new(),
@@ -2324,11 +2498,18 @@ pub(crate) fn workspace_first_order_terms_are_single_authority_without_direct_re
 
         fn exact_newton_joint_psi_terms(
             &self,
-            _: &[ParameterBlockState],
-            _: &[ParameterBlockSpec],
-            _: &CustomFamilyHyperLayout,
-            _: usize,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            hyper_layout: &CustomFamilyHyperLayout,
+            psi_index: usize,
         ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+            assert_states_finite(block_states, "workspace-authority direct psi terms");
+            assert_specs_consistent(specs, "workspace-authority direct psi terms");
+            assert_psi_axis_in_layout(
+                hyper_layout,
+                psi_index,
+                "workspace-authority direct psi terms",
+            );
             self.direct_calls.fetch_add(1, Ordering::Relaxed);
             let mut terms = ExactNewtonJointPsiTerms::zeros(1);
             terms.objective_psi = 99.0;
@@ -2351,18 +2532,24 @@ pub(crate) fn workspace_first_order_terms_are_single_authority_without_direct_re
 
         fn second_order_terms(
             &self,
-            _: usize,
-            _: usize,
+            psi_i: usize,
+            psi_j: usize,
         ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
-            Err("first-order construction must not request pair terms".to_string())
+            Err(format!(
+                "first-order construction must not request pair terms, got ({psi_i}, {psi_j})"
+            ))
         }
 
         fn hessian_directional_derivative(
             &self,
-            _: usize,
-            _: &Array1<f64>,
+            psi_index: usize,
+            d_beta_flat: &Array1<f64>,
         ) -> Result<Option<DriftDerivResult>, String> {
-            Err("first-order construction must not request Hessian drift".to_string())
+            Err(format!(
+                "first-order construction must not request Hessian drift, got axis {psi_index} \
+                 with a length-{} direction",
+                d_beta_flat.len()
+            ))
         }
     }
 
@@ -2421,7 +2608,11 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
     }
 
     impl CustomFamily for WorkspaceJeffreysFamily {
-        fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        fn evaluate(
+            &self,
+            block_states: &[ParameterBlockState],
+        ) -> Result<FamilyEvaluation, String> {
+            assert_states_finite(block_states, "workspace-Jeffreys family evaluate");
             Ok(FamilyEvaluation {
                 log_likelihood: 0.0,
                 blockworking_sets: Vec::new(),
@@ -2434,9 +2625,11 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
 
         fn joint_jeffreys_information_with_specs(
             &self,
-            _: &[ParameterBlockState],
-            _: &[ParameterBlockSpec],
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
         ) -> Result<Option<Array2<f64>>, String> {
+            assert_states_finite(block_states, "workspace-Jeffreys information");
+            assert_specs_consistent(specs, "workspace-Jeffreys information");
             // Inside the absolute conditioning-gate band, so both the mixed
             // value derivative and the explicit H_phi derivative are active.
             Ok(Some(array![[0.5]]))
@@ -2444,27 +2637,33 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
 
         fn joint_jeffreys_information_directional_derivative_with_specs(
             &self,
-            _: &[ParameterBlockState],
-            _: &[ParameterBlockSpec],
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
             direction: &Array1<f64>,
         ) -> Result<Option<Array2<f64>>, String> {
+            assert_states_finite(block_states, "workspace-Jeffreys information drift");
+            assert_specs_consistent(specs, "workspace-Jeffreys information drift");
             assert_eq!(direction.len(), 1);
             Ok(Some(array![[0.0]]))
         }
 
         fn exact_newton_joint_psihessian_directional_derivative(
             &self,
-            _: &[ParameterBlockState],
-            _: &[ParameterBlockSpec],
-            _: &CustomFamilyHyperLayout,
-            _: usize,
-            _: &Array1<f64>,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            hyper_layout: &CustomFamilyHyperLayout,
+            psi_index: usize,
+            d_beta_flat: &Array1<f64>,
         ) -> Result<Option<Array2<f64>>, String> {
             self.direct_mixed_calls.fetch_add(1, Ordering::Relaxed);
-            Err(
-                "a present exact-psi workspace must not be crossed with the direct mixed hook"
-                    .to_string(),
-            )
+            Err(format!(
+                "a present exact-psi workspace must not be crossed with the direct mixed hook \
+                 ({} blocks, {} specs, axis {psi_index} of {}, length-{} direction)",
+                block_states.len(),
+                specs.len(),
+                hyper_layout.len(),
+                d_beta_flat.len()
+            ))
         }
     }
 
@@ -2485,9 +2684,12 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
 
         fn second_order_terms(
             &self,
-            _: usize,
-            _: usize,
+            psi_i: usize,
+            psi_j: usize,
         ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+            // The fixture declares exactly one explicit family axis, so the
+            // only pair the caller may ask for is (0, 0).
+            assert_eq!((psi_i, psi_j), (0, 0));
             Ok(None)
         }
 
@@ -2563,7 +2765,11 @@ pub(crate) fn psi_drift_deriv_workspace_preserves_block_local_operator() {
     struct ZeroFamily;
 
     impl CustomFamily for ZeroFamily {
-        fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        fn evaluate(
+            &self,
+            block_states: &[ParameterBlockState],
+        ) -> Result<FamilyEvaluation, String> {
+            assert_states_finite(block_states, "zero family evaluate");
             Ok(FamilyEvaluation {
                 log_likelihood: 0.0,
                 blockworking_sets: vec![],
@@ -2576,11 +2782,13 @@ pub(crate) fn psi_drift_deriv_workspace_preserves_block_local_operator() {
     impl ExactNewtonJointPsiWorkspace for BlockLocalPsiWorkspace {
         fn second_order_terms(
             &self,
-            _: usize,
-            _: usize,
+            psi_i: usize,
+            psi_j: usize,
         ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
-            // Default implementation ignores this parameter.
-            // Default implementation ignores this parameter.
+            // This fixture exposes only the per-axis drift operator, and it
+            // carries a single psi axis, so (0, 0) is the only pair the caller
+            // may name.
+            assert_eq!((psi_i, psi_j), (0, 0));
             Ok(None)
         }
 
@@ -2638,11 +2846,15 @@ pub(crate) fn contracted_psi_hook_declines_partial_axis_coverage_before_pair_tab
     impl ExactNewtonJointPsiWorkspace for PartialContractedPsiWorkspace {
         fn second_order_terms(
             &self,
-            _: usize,
-            _: usize,
+            psi_i: usize,
+            psi_j: usize,
         ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
-            // Default implementation ignores this parameter.
-            // Default implementation ignores this parameter.
+            // The fixture layout declares two design psi axes; no pair table
+            // is exposed for either of them.
+            assert!(
+                psi_i < 2 && psi_j < 2,
+                "psi pair ({psi_i}, {psi_j}) is outside the 2-axis partial-coverage fixture"
+            );
             Ok(None)
         }
 
@@ -2665,10 +2877,13 @@ pub(crate) fn contracted_psi_hook_declines_partial_axis_coverage_before_pair_tab
 
         fn hessian_directional_derivative(
             &self,
-            _: usize,
+            psi_index: usize,
             d_beta_flat: &Array1<f64>,
         ) -> Result<Option<DriftDerivResult>, String> {
-            // Default implementation ignores this parameter.
+            assert!(
+                psi_index < 2,
+                "psi axis {psi_index} is outside the 2-axis partial-coverage fixture"
+            );
             assert_eq!(d_beta_flat.len(), 1);
             Ok(None)
         }
@@ -2732,11 +2947,12 @@ pub(crate) fn contracted_psi_hook_rejects_wrong_score_width_before_installing_op
     impl ExactNewtonJointPsiWorkspace for WrongScoreWidthPsiWorkspace {
         fn second_order_terms(
             &self,
-            _: usize,
-            _: usize,
+            psi_i: usize,
+            psi_j: usize,
         ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
-            // Default implementation ignores this parameter.
-            // Default implementation ignores this parameter.
+            // The fixture layout declares one design psi axis and exposes no
+            // pair table for it.
+            assert_eq!((psi_i, psi_j), (0, 0));
             Ok(None)
         }
 
@@ -2756,10 +2972,10 @@ pub(crate) fn contracted_psi_hook_rejects_wrong_score_width_before_installing_op
 
         fn hessian_directional_derivative(
             &self,
-            _: usize,
+            psi_index: usize,
             d_beta_flat: &Array1<f64>,
         ) -> Result<Option<DriftDerivResult>, String> {
-            // Default implementation ignores this parameter.
+            assert_eq!(psi_index, 0);
             assert_eq!(d_beta_flat.len(), 1);
             Ok(None)
         }
@@ -2832,9 +3048,11 @@ pub(crate) fn custom_family_outer_derivatives_respects_missing_second_order_capa
 
         fn exact_outer_derivative_order(
             &self,
-            _: &[ParameterBlockSpec],
-            _: &BlockwiseFitOptions,
+            specs: &[ParameterBlockSpec],
+            options: &BlockwiseFitOptions,
         ) -> ExactOuterDerivativeOrder {
+            assert_specs_consistent(specs, "first-order-only outer derivative order");
+            assert_options_well_formed(options, "first-order-only outer derivative order");
             ExactOuterDerivativeOrder::First
         }
     }
@@ -2884,10 +3102,13 @@ impl CustomFamily for DefaultDiagonalExactHookFamily {
     fn diagonalworking_weights_directional_derivative(
         &self,
         block_states: &[ParameterBlockState],
-        _: usize,
+        block_idx: usize,
         d_eta: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // Default implementation ignores this parameter.
+        // Single-block fixture: the weight derivative below reads block 0's
+        // predictor, so any other block index would silently answer for the
+        // wrong block.
+        assert_eq!(block_idx, 0);
         Ok(Some((&block_states[0].eta * d_eta) * 2.0))
     }
 
@@ -2991,8 +3212,12 @@ struct OwnedTerminalWorkingSetFamily {
 }
 
 impl CustomFamily for OwnedTerminalWorkingSetFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
-        Err("terminal Hessian materialization must not re-evaluate the family".to_string())
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        Err(format!(
+            "terminal Hessian materialization must not re-evaluate the family, but evaluate() \
+             was called with {} block states",
+            block_states.len()
+        ))
     }
 
     fn likelihood_blocks_uncoupled(&self) -> bool {
@@ -3338,12 +3563,19 @@ impl CustomFamily for OneBlockQuarticExactFamily {
 
     fn exact_newton_hessian_second_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         u: &Array1<f64>,
         v: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
         assert_eq!(block_idx, 0);
+        // The quartic's fourth derivative is constant in beta, so the value
+        // below does not read the mode -- but the caller still owes a finite
+        // one, and a non-finite mode would make the returned constant a lie.
+        assert_states_finite(
+            block_states,
+            "quartic exact-Newton second directional derivative",
+        );
         let value = 2.0 * self.curvature * self.second_scale * u[0] * v[0];
         Ok(Some(array![[value]]))
     }
@@ -3479,9 +3711,11 @@ impl CustomFamily for OuterJeffreysModeCountingFamily {
 
     fn joint_jeffreys_information_with_specs(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "outer-Jeffreys information");
+        assert_specs_consistent(specs, "outer-Jeffreys information");
         self.information_calls.fetch_add(1, Ordering::Relaxed);
         // Below the absolute conditioning threshold, so the exact gate is active.
         Ok(Some(array![[0.5]]))
@@ -3489,19 +3723,27 @@ impl CustomFamily for OuterJeffreysModeCountingFamily {
 
     fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "outer-Jeffreys all-axes drift");
+        assert_specs_consistent(specs, "outer-Jeffreys all-axes drift");
         self.axis_batch_calls.fetch_add(1, Ordering::Relaxed);
         Ok(Some(vec![array![[0.0]]]))
     }
 
     fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
         &self,
-        _: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
-        _: &Array2<f64>,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "outer-Jeffreys contracted trace Hessian");
+        assert_specs_consistent(specs, "outer-Jeffreys contracted trace Hessian");
+        assert!(
+            weight.iter().all(|value| value.is_finite()),
+            "outer-Jeffreys contracted trace Hessian: trace weight must be finite"
+        );
         self.completion_calls.fetch_add(1, Ordering::Relaxed);
         Ok(Some(array![[0.0]]))
     }
@@ -4025,23 +4267,28 @@ impl CustomFamily for OneBlockGaussianFamily {
 
     fn diagonalworking_weights_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
         d_eta: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // Default implementation ignores this parameter.
+        // Gaussian IRLS weights are the constant 1, so every directional
+        // derivative is zero -- but only for the single block this fixture
+        // owns, and only at a finite mode.
+        assert_eq!(block_idx, 0);
+        assert_states_finite(block_states, "Gaussian diagonal weight drift");
         Ok(Some(Array1::zeros(d_eta.len())))
     }
 
     fn diagonalworking_weights_second_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
         d_eta_u: &Array1<f64>,
-        arr: &Array1<f64>,
+        d_eta_v: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_eq!(block_idx, 0);
+        assert_states_finite(block_states, "Gaussian diagonal weight second drift");
+        assert_direction_finite(d_eta_v, "Gaussian diagonal weight second drift");
         Ok(Some(Array1::zeros(d_eta_u.len())))
     }
 }
@@ -4074,17 +4321,19 @@ impl CustomFamily for OneBlockConstrainedExactFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx != 0 {
             return Ok(None);
         }
+        let a = array![[1.0]];
+        let b = array![self.lower];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: array![[1.0]],
-            b: array![self.lower],
+            a,
+            b,
         })))
     }
 }
@@ -4180,17 +4429,19 @@ impl CustomFamily for TwoCoefConstrainedExactFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx != 0 {
             return Ok(None);
         }
+        let a = Array2::eye(2);
+        let b = Array1::zeros(2);
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: Array2::eye(2),
-            b: Array1::zeros(2),
+            a,
+            b,
         })))
     }
 }
@@ -4199,7 +4450,11 @@ impl CustomFamily for TwoCoefConstrainedExactFamily {
 pub(crate) struct OneBlockConstrainedNaNHessianFamily;
 
 impl CustomFamily for OneBlockConstrainedNaNHessianFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        // The NaN curvature below is the fixture's whole point; the *mode* it
+        // is reported at must still be finite, or the test would not be
+        // isolating the curvature defect.
+        assert_states_finite(block_states, "NaN-Hessian family evaluate");
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![BlockWorkingSet::ExactNewton {
@@ -4211,17 +4466,19 @@ impl CustomFamily for OneBlockConstrainedNaNHessianFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx != 0 {
             return Ok(None);
         }
+        let a = array![[1.0]];
+        let b = array![0.0];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: array![[1.0]],
-            b: array![0.0],
+            a,
+            b,
         })))
     }
 }
@@ -4230,7 +4487,8 @@ impl CustomFamily for OneBlockConstrainedNaNHessianFamily {
 pub(crate) struct OneBlockConstrainedIndefiniteHessianFamily;
 
 impl CustomFamily for OneBlockConstrainedIndefiniteHessianFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        assert_states_finite(block_states, "indefinite-Hessian family evaluate");
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![BlockWorkingSet::ExactNewton {
@@ -4242,17 +4500,19 @@ impl CustomFamily for OneBlockConstrainedIndefiniteHessianFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx != 0 {
             return Ok(None);
         }
+        let a = array![[1.0]];
+        let b = array![1.0];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: array![[1.0]],
-            b: array![1.0],
+            a,
+            b,
         })))
     }
 }
@@ -4285,7 +4545,8 @@ impl CustomFamily for OneBlockLinearLikelihoodExactFamily {
 pub(crate) struct PreferJointExactFamily;
 
 impl CustomFamily for PreferJointExactFamily {
-    fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        assert_states_finite(block_states, "prefer-joint family evaluate");
         Ok(FamilyEvaluation {
             log_likelihood: 0.0,
             blockworking_sets: vec![BlockWorkingSet::ExactNewton {
@@ -4297,31 +4558,33 @@ impl CustomFamily for PreferJointExactFamily {
 
     fn exact_newton_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        direction: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
-        Err(
-            "blockwise exact-newton path should not be used when joint path is available"
-                .to_string(),
-        )
+        Err(format!(
+            "blockwise exact-newton path should not be used when joint path is available \
+             (block {block_idx} of {}, length-{} direction)",
+            block_states.len(),
+            direction.len()
+        ))
     }
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
-        Ok(Some(array![[2.0]]))
+        let hessian = array![[2.0]];
+        assert_joint_dim(block_states, hessian.nrows(), "prefer-joint Hessian");
+        Ok(Some(hessian))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_joint_direction(block_states, d_beta_flat, "prefer-joint Hessian drift");
         Ok(Some(array![[0.0]]))
     }
 }
@@ -4357,33 +4620,37 @@ impl CustomFamily for TwoBlockJointConstrainedFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
-        Ok(Some(array![[1.0, self.coupling], [self.coupling, 1.0]]))
+        let hessian = array![[1.0, self.coupling], [self.coupling, 1.0]];
+        assert_joint_dim(block_states, hessian.nrows(), "two-block joint Hessian");
+        Ok(Some(hessian))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_joint_direction(block_states, d_beta_flat, "two-block joint Hessian drift");
         Ok(Some(Array2::zeros((2, 2))))
     }
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx >= 2 {
             return Ok(None);
         }
+        let a = array![[1.0]];
+        let b = array![0.0];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: array![[1.0]],
-            b: array![0.0],
+            a,
+            b,
         })))
     }
 }
@@ -4418,17 +4685,19 @@ impl CustomFamily for TwoBlockJointActiveFaceFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
-        Ok(Some(array![[1.0, self.coupling], [self.coupling, 1.0]]))
+        let hessian = array![[1.0, self.coupling], [self.coupling, 1.0]];
+        assert_joint_dim(block_states, hessian.nrows(), "active-face joint Hessian");
+        Ok(Some(hessian))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_joint_direction(block_states, d_beta_flat, "active-face joint Hessian drift");
         Ok(Some(Array2::zeros((2, 2))))
     }
 
@@ -4438,17 +4707,19 @@ impl CustomFamily for TwoBlockJointActiveFaceFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        assert!(!block_spec.name.is_empty());
         if block_idx >= 2 {
             return Ok(None);
         }
+        let a = array![[1.0]];
+        let b = array![0.0];
+        assert_block_face(block_states, block_idx, block_spec, &a, &b);
         Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a: array![[1.0]],
-            b: array![0.0],
+            a,
+            b,
         })))
     }
 }
@@ -4477,17 +4748,27 @@ impl CustomFamily for TwoBlockPersistentGradientFamily {
 
     fn exact_newton_joint_hessian(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array2<f64>>, String> {
-        Ok(Some(array![[1.0, 0.25], [0.25, 1.0]]))
+        let hessian = array![[1.0, 0.25], [0.25, 1.0]];
+        assert_joint_dim(
+            block_states,
+            hessian.nrows(),
+            "persistent-gradient joint Hessian",
+        );
+        Ok(Some(hessian))
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_joint_direction(
+            block_states,
+            d_beta_flat,
+            "persistent-gradient joint Hessian drift",
+        );
         Ok(Some(Array2::zeros((2, 2))))
     }
 
@@ -4507,15 +4788,28 @@ pub(crate) struct ReturnedModeSaddleWorkspace {
 }
 
 impl ExactNewtonJointHessianWorkspace for ReturnedModeSaddleWorkspace {
-    fn warm_up_outer_caches_for_mode(&self, _: EvalMode) -> Result<(), String> {
-        Ok(())
+    fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+        // No directional cache to prime, in any mode.
+        match eval_mode {
+            EvalMode::ValueOnly | EvalMode::ValueAndGradient | EvalMode::ValueGradientHessian => {
+                Ok(())
+            }
+        }
     }
 
     fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
         Ok(Some(self.hessian.clone()))
     }
 
-    fn directional_derivative(&self, _: &Array1<f64>) -> Result<Option<Array2<f64>>, String> {
+    fn directional_derivative(
+        &self,
+        direction: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_eq!(
+            direction.len(),
+            self.hessian.nrows(),
+            "returned-saddle workspace direction must span the joint coefficient space"
+        );
         Ok(None)
     }
 }
@@ -4624,8 +4918,9 @@ impl CustomFamily for OneStepReturnedSaddleFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        assert_specs_consistent(specs, "returned-saddle workspace construction");
         let (x, y) = self.coordinates(states)?;
         Ok(Some(Arc::new(ReturnedModeSaddleWorkspace {
             hessian: self.hessian(x, y),
@@ -5019,8 +5314,13 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
     struct FixedJointQuadraticWorkspace;
 
     impl ExactNewtonJointHessianWorkspace for FixedJointQuadraticWorkspace {
-        fn warm_up_outer_caches_for_mode(&self, _: EvalMode) -> Result<(), String> {
-            Ok(())
+        fn warm_up_outer_caches_for_mode(&self, eval_mode: EvalMode) -> Result<(), String> {
+            // No directional cache to prime, in any mode.
+            match eval_mode {
+                EvalMode::ValueOnly
+                | EvalMode::ValueAndGradient
+                | EvalMode::ValueGradientHessian => Ok(()),
+            }
         }
 
         fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
@@ -5067,13 +5367,18 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
 
         fn exact_newton_joint_hessian_workspace(
             &self,
-            _: &[ParameterBlockState],
-            _: &[ParameterBlockSpec],
+            states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
         ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+            // The workspace below hands back a fixed 2x2 curvature, so the
+            // states it is built from must span exactly two coefficients.
+            assert_joint_dim(states, 2, "joint-quadratic workspace construction");
+            assert_specs_consistent(specs, "joint-quadratic workspace construction");
             Ok(Some(Arc::new(FixedJointQuadraticWorkspace)))
         }
 
-        fn inner_coefficient_hessian_hvp_available(&self, _: &[ParameterBlockSpec]) -> bool {
+        fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
+            assert_specs_consistent(specs, "joint-quadratic coefficient HVP availability");
             true
         }
     }
@@ -5219,16 +5524,27 @@ pub(crate) fn owned_mode_finalizer_preserves_prior_and_active_jeffreys_without_r
 
         fn exact_newton_joint_hessian(
             &self,
-            _: &[ParameterBlockState],
+            block_states: &[ParameterBlockState],
         ) -> Result<Option<Array2<f64>>, String> {
-            Ok(Some(array![[0.5]]))
+            let hessian = array![[0.5]];
+            assert_joint_dim(
+                block_states,
+                hessian.nrows(),
+                "active-Jeffreys joint Hessian",
+            );
+            Ok(Some(hessian))
         }
 
         fn exact_newton_joint_hessian_directional_derivative(
             &self,
-            _: &[ParameterBlockState],
-            _: &Array1<f64>,
+            block_states: &[ParameterBlockState],
+            d_beta_flat: &Array1<f64>,
         ) -> Result<Option<Array2<f64>>, String> {
+            assert_joint_direction(
+                block_states,
+                d_beta_flat,
+                "active-Jeffreys joint Hessian drift",
+            );
             Ok(Some(array![[0.0]]))
         }
 

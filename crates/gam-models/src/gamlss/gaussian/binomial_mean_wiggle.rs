@@ -63,6 +63,25 @@ pub(crate) struct BinomialMeanWiggleJointPsiDirection {
 }
 
 impl BinomialMeanWiggleFamily {
+    /// Check a caller-supplied block-state set against this family's fixed
+    /// two-block layout (η, wiggle).
+    ///
+    /// The per-block hooks are handed the whole state set alongside a
+    /// `block_idx` into it, so a set of the wrong length means `block_idx` is
+    /// indexing a layout this family does not own. Callers are permitted to
+    /// pass an empty slice when they have no states to offer (the constraint
+    /// cone and the non-negativity projection are both β-local), and an empty
+    /// slice makes no layout claim to check.
+    fn check_supplied_block_states(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<(), String> {
+        if block_states.is_empty() {
+            return Ok(());
+        }
+        validate_block_count::<String>("BinomialMeanWiggleFamily", 2, block_states.len())
+    }
+
     pub const BLOCK_ETA: usize = 0;
     pub const BLOCK_WIGGLE: usize = 1;
 
@@ -703,10 +722,11 @@ impl CustomFamily for BinomialMeanWiggleFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
+        self.check_supplied_block_states(block_states)?;
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(None);
         }
@@ -719,11 +739,12 @@ impl CustomFamily for BinomialMeanWiggleFamily {
 
     fn post_update_block_beta(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
         beta: Array1<f64>,
     ) -> Result<Array1<f64>, String> {
+        self.check_supplied_block_states(block_states)?;
         assert!(!block_spec.name.is_empty());
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(beta);

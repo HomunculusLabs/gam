@@ -1796,9 +1796,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                     batched_gradient_override = Some(gradient);
                 } else {
                     let no_dh =
-                        |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
-                            Ok(None)
-                        };
+                        |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
                     let no_d2h = |_: &Array1<f64>,
                                   _: &Array1<f64>|
                      -> Result<Option<DriftDerivResult>, String> {

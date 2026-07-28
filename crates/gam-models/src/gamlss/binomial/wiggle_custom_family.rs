@@ -68,24 +68,76 @@ impl CustomFamily for BinomialLocationScaleWiggleFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
+        validate_block_count::<GamlssError>(
+            "BinomialLocationScaleWiggleFamily",
+            3,
+            block_states.len(),
+        )?;
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(None);
+        }
+        // The nonnegativity rows are built from the design width, and the
+        // active-set solve applies them to the block's coefficient vector, so
+        // the two widths must agree.
+        let beta_dim = block_states
+            .get(block_idx)
+            .map(|state| state.beta.len())
+            .ok_or_else(|| GamlssError::DimensionMismatch {
+                reason: format!(
+                    "BinomialLocationScaleWiggleFamily wiggle-block constraints: block index {block_idx} is out of range for {} blocks",
+                    block_states.len()
+                ),
+            })?;
+        if spec.design.ncols() != beta_dim {
+            return Err(GamlssError::DimensionMismatch {
+                reason: format!(
+                    "BinomialLocationScaleWiggleFamily wiggle-block constraints: design has {} columns but the block coefficient vector has {beta_dim}",
+                    spec.design.ncols()
+                ),
+            }
+            .into());
         }
         Ok(monotone_wiggle_nonnegative_constraints(spec.design.ncols()))
     }
 
     fn post_update_block_beta(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
         beta: Array1<f64>,
     ) -> Result<Array1<f64>, String> {
         assert!(!block_spec.name.is_empty());
+        validate_block_count::<GamlssError>(
+            "BinomialLocationScaleWiggleFamily",
+            3,
+            block_states.len(),
+        )?;
+        // The post-update hook may only rewrite the block in place: the
+        // returned vector is written straight back into this block's state, so
+        // it must keep the block's coefficient dimension.
+        let beta_dim = block_states
+            .get(block_idx)
+            .map(|state| state.beta.len())
+            .ok_or_else(|| GamlssError::DimensionMismatch {
+                reason: format!(
+                    "BinomialLocationScaleWiggleFamily post-update: block index {block_idx} is out of range for {} blocks",
+                    block_states.len()
+                ),
+            })?;
+        if beta.len() != beta_dim {
+            return Err(GamlssError::DimensionMismatch {
+                reason: format!(
+                    "BinomialLocationScaleWiggleFamily post-update: block {block_idx} updated beta has {} entries but the block holds {beta_dim}",
+                    beta.len()
+                ),
+            }
+            .into());
+        }
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(beta);
         }
@@ -314,19 +366,13 @@ impl CustomFamily for BinomialLocationScaleWiggleFamily {
         // This avoids maintaining a second, partially duplicated derivation for
         // the block-local case and keeps the exact-newton block callback aligned
         // with the already-validated joint formulas.
+        // `range_start..range_end` is the block's own slice of the flattened
+        // joint coefficient vector, so embedding `d_beta` there is the same
+        // per-block placement for all three blocks.
         let mut d_beta_flat = Array1::<f64>::zeros(total);
-        match block_idx {
-            Self::BLOCK_T => {
-                d_beta_flat.slice_mut(s![0..pt]).assign(d_beta);
-            }
-            Self::BLOCK_LOG_SIGMA => {
-                d_beta_flat.slice_mut(s![pt..pt + pls]).assign(d_beta);
-            }
-            Self::BLOCK_WIGGLE => {
-                d_beta_flat.slice_mut(s![pt + pls..]).assign(d_beta);
-            }
-            _ => {}
-        }
+        d_beta_flat
+            .slice_mut(s![range_start..range_end])
+            .assign(d_beta);
         let d_joint = self
             .exact_newton_joint_hessian_directional_derivative(block_states, &d_beta_flat)?
             .ok_or_else(|| "missing exact wiggle joint dH".to_string())?;

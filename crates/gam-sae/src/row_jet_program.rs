@@ -1244,20 +1244,33 @@ mod tests_schedule_source {
             0
         }
 
-        fn beta_border_atom(&self, _: usize) -> usize {
-            panic!("owned row-program oracle has no beta borders")
+        // `n_beta_borders()` is 0 for the owned oracle, so every border index is
+        // out of range by construction. Report the index that was asked for:
+        // the whole point of a failure here is to name the caller that invented
+        // a border this source does not have.
+        fn beta_border_atom(&self, border: usize) -> usize {
+            panic!(
+                "owned row-program oracle has no beta borders, but border {border} was requested"
+            )
         }
 
-        fn beta_border_basis_value(&self, _: usize) -> f64 {
-            panic!("owned row-program oracle has no beta borders")
+        fn beta_border_basis_value(&self, border: usize) -> f64 {
+            panic!(
+                "owned row-program oracle has no beta borders, but border {border} was requested"
+            )
         }
 
-        fn beta_border_basis_first(&self, _: usize, _: usize) -> f64 {
-            panic!("owned row-program oracle has no beta borders")
+        fn beta_border_basis_first(&self, border: usize, axis: usize) -> f64 {
+            panic!(
+                "owned row-program oracle has no beta borders, but border {border} axis {axis} \
+                 was requested"
+            )
         }
 
-        fn beta_border_output(&self, _: usize) -> &[f64] {
-            panic!("owned row-program oracle has no beta borders")
+        fn beta_border_output(&self, border: usize) -> &[f64] {
+            panic!(
+                "owned row-program oracle has no beta borders, but border {border} was requested"
+            )
         }
     }
 }

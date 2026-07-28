@@ -5166,7 +5166,19 @@ pub fn auto_init_length_scale_in_basis(data: ArrayView2<'_, f64>, basis: &mut Sm
         SmoothBasisSpec::BySmooth { smooth, .. } => {
             auto_init_length_scale_in_basis(data, smooth);
         }
-        _ => {}
+        // Enumerated rather than wildcarded so a new basis family has to state
+        // whether it carries an auto-seeded length scale. None of these do:
+        // B-spline marginals (`FactorSmooth`, `TensorBSpline`) and `Pca` are
+        // knot/column constructions with no kernel bandwidth, and the
+        // `Sphere` / `ConstantCurvature` / `MeasureJet` / `Duchon` specs carry
+        // no `length_scale` field to resolve.
+        SmoothBasisSpec::FactorSmooth { .. }
+        | SmoothBasisSpec::Sphere { .. }
+        | SmoothBasisSpec::ConstantCurvature { .. }
+        | SmoothBasisSpec::MeasureJet { .. }
+        | SmoothBasisSpec::Duchon { .. }
+        | SmoothBasisSpec::Pca { .. }
+        | SmoothBasisSpec::TensorBSpline { .. } => {}
     }
 }
 
@@ -8806,7 +8818,18 @@ pub fn build_single_local_smooth_term(
                     }
                     *metadata_scale = realized_input_scale;
                 }
-                _ => {}
+                // `build_thin_plate_basis` emits exactly one of the two arms
+                // above (TPS, or its Duchon auto-promotion). Any other metadata
+                // means the standardized-coordinate patch above silently did not
+                // run, which would leave the frozen input scale unset and break
+                // freeze→replay; refuse instead of shipping the unpatched design.
+                _ => {
+                    crate::bail_invalid_basis!(
+                        "term '{}' thin-plate build produced metadata that is neither ThinPlate \
+                         nor its Duchon auto-promotion, so the realized input scale cannot be frozen",
+                        term.name
+                    );
+                }
             }
             result
         }

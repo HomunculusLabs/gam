@@ -125,6 +125,18 @@ impl<S> BasinBundle<S> {
             }
             return Ok(());
         }
+        self.admit_distinct(state, value)
+    }
+
+    /// Admit a state that is known to be distinct from every stored member,
+    /// without consulting a basin-identity predicate.
+    ///
+    /// The canonical caller is a bundle that is still empty: there is no member
+    /// to compare against, so the duplicate branch of [`admit`](Self::admit)
+    /// cannot fire and any predicate handed to it would be inert. Same capacity
+    /// contract as `admit` — a distinct state beyond `member_capacity` is
+    /// refused explicitly.
+    pub fn admit_distinct(&mut self, state: S, value: f64) -> Result<(), BasinAdmissionError> {
         if self.members.len() >= self.member_capacity {
             return Err(BasinAdmissionError {
                 member_capacity: self.member_capacity,

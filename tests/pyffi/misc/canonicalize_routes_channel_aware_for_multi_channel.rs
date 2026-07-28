@@ -269,27 +269,26 @@ fn channel_aware_audit_flags_fatal_for_same_channel_alias() {
         result.as_ref().map(|c| &c.audit.summary[..]).unwrap_or(""),
     );
 
-    // The error must be IdentifiabilityFailure (not a shape mismatch).
-    match result.unwrap_err() {
-        gam::families::custom_family::CustomFamilyError::IdentifiabilityFailure { audit } => {
-            assert!(
-                audit.fatal,
-                "IdentifiabilityFailure audit must be fatal; got: {}",
-                audit.summary,
-            );
-            // The summary must mention both aliased block names.
-            assert!(
-                audit.summary.contains("block_a") || audit.summary.contains("block_b"),
-                "refusal summary must name at least one of the aliased blocks; \
-                 got: {}",
-                audit.summary,
-            );
-        }
-        _ => {
-            // DimensionMismatch is also acceptable when the channel-aware
-            // audit fails to construct operators — but the invariant is that
-            // the fit must NOT succeed silently.
-        }
+    // The invariant already asserted above is that the fit must NOT succeed
+    // silently, and any error satisfies it — `DimensionMismatch` in particular
+    // is acceptable when the channel-aware audit cannot construct operators.
+    // When the error IS the identifiability refusal, it carries two further
+    // obligations, checked here.
+    if let gam::families::custom_family::CustomFamilyError::IdentifiabilityFailure { audit } =
+        result.unwrap_err()
+    {
+        assert!(
+            audit.fatal,
+            "IdentifiabilityFailure audit must be fatal; got: {}",
+            audit.summary,
+        );
+        // The summary must mention both aliased block names.
+        assert!(
+            audit.summary.contains("block_a") || audit.summary.contains("block_b"),
+            "refusal summary must name at least one of the aliased blocks; \
+             got: {}",
+            audit.summary,
+        );
     }
 }
 

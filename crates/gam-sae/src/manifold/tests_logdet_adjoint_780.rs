@@ -5,6 +5,8 @@
 //! `gamma_fd_tiny_fixture` / `fixed_state_logdet_sample` are sourced from the sibling
 //! `tests` module.
 
+#![cfg(test)]
+
 use super::construction::{active_softmax_gershgorin_majorizer_entry, softmax_majorizer_log_mean};
 use super::derivative_oracle::{
     DerivativeTraceChannel, ExactTraceChannel, ExactTraceReport, MajorizerAnchorMode, PivotBranch,

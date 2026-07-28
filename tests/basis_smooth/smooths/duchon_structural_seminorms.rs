@@ -112,7 +112,10 @@ fn build(data: &Array2<f64>, spec: &DuchonBasisSpec) -> BuiltDuchon {
         match &penalty.info.source {
             PenaltySource::Primary => primary = Some(penalty.matrix.clone()),
             PenaltySource::DoublePenaltyNullspace => ridge = Some(penalty.matrix.clone()),
-            _ => {}
+            // A Duchon basis emits only the analytic roughness Gram and its
+            // null-space ridge; the operator/tensor sources belong to other
+            // basis kinds and must not appear here.
+            other => panic!("unexpected Duchon penalty source {other:?}"),
         }
     }
 

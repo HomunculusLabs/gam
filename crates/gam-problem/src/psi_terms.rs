@@ -88,9 +88,25 @@ pub struct ExactNewtonJointPsiSecondOrderContracted {
 }
 
 pub trait ExactNewtonJointPsiWorkspace: Send + Sync {
-    fn first_order_terms(&self, _: usize) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
-        // Default implementation ignores this parameter.
-        Ok(None)
+    fn first_order_terms(
+        &self,
+        psi_index: usize,
+    ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+        // A workspace that materializes every axis in one pass still answers
+        // the per-index query: select row `psi_index` out of that batch. A
+        // workspace that implements neither method falls through to `Ok(None)`
+        // and the caller uses the family's own per-index path.
+        let Some(all) = self.first_order_terms_all()? else {
+            return Ok(None);
+        };
+        let materialized = all.len();
+        match all.into_iter().nth(psi_index) {
+            Some(terms) => Ok(Some(terms)),
+            None => Err(format!(
+                "ExactNewtonJointPsiWorkspace: psi index {psi_index} is out of range for the \
+                 {materialized} axes this workspace materialized"
+            )),
+        }
     }
 
     fn first_order_terms_all(&self) -> Result<Option<Vec<ExactNewtonJointPsiTerms>>, String> {

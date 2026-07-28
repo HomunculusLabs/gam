@@ -218,10 +218,12 @@ fn absorb_strongest_pair(
     for (idx, (i, j, s_ij)) in off.iter().enumerate() {
         let e_ij = whitened_off_block(&lowers[*i], &lowers[*j], s_ij);
         let f = frobenius_sq(&e_ij).sqrt();
-        match best {
-            None => best = Some((idx, f)),
-            Some((_, bf)) if f > bf => best = Some((idx, f)),
-            _ => {}
+        let improves = match best {
+            None => true,
+            Some((_, best_f)) => f > best_f,
+        };
+        if improves {
+            best = Some((idx, f));
         }
     }
     let (best_idx, _) =

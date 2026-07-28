@@ -2704,7 +2704,20 @@ fn collect_by_variable_numeric_axes(
         SmoothBasisSpec::FactorSumToZero { inner, .. } => {
             collect_by_variable_numeric_axes(inner, n_training_headers, out);
         }
-        _ => {}
+        // Leaf bases: they carry no wrapped inner spec and no `by=` column, so
+        // there is neither an axis to exempt nor a recursion to continue.
+        // Enumerated rather than wildcarded so a new wrapper variant breaks
+        // this match instead of silently losing its `by=` axis.
+        SmoothBasisSpec::BSpline1D { .. }
+        | SmoothBasisSpec::FactorSmooth { .. }
+        | SmoothBasisSpec::ThinPlate { .. }
+        | SmoothBasisSpec::Sphere { .. }
+        | SmoothBasisSpec::ConstantCurvature { .. }
+        | SmoothBasisSpec::Matern { .. }
+        | SmoothBasisSpec::MeasureJet { .. }
+        | SmoothBasisSpec::Duchon { .. }
+        | SmoothBasisSpec::Pca { .. }
+        | SmoothBasisSpec::TensorBSpline { .. } => {}
     }
 }
 
@@ -2893,7 +2906,24 @@ impl FittedModel {
                         }
                     }
                 }
-                _ => {}
+                // No periodic axis is exempted for these. The leaf bases have
+                // no wrap-around coordinate at all; the three wrappers
+                // (`ByVariable`, `BySmooth`, `FactorSumToZero`) are matched at
+                // top level only and are deliberately not descended into here,
+                // so a periodic marginal nested inside one stays subject to the
+                // training-range clip. Enumerated rather than wildcarded so a
+                // newly added periodic basis breaks this match instead of
+                // silently having its axis clipped.
+                SmoothBasisSpec::ByVariable { .. }
+                | SmoothBasisSpec::BySmooth { .. }
+                | SmoothBasisSpec::FactorSumToZero { .. }
+                | SmoothBasisSpec::FactorSmooth { .. }
+                | SmoothBasisSpec::ThinPlate { .. }
+                | SmoothBasisSpec::ConstantCurvature { .. }
+                | SmoothBasisSpec::Matern { .. }
+                | SmoothBasisSpec::MeasureJet { .. }
+                | SmoothBasisSpec::Duchon { .. }
+                | SmoothBasisSpec::Pca { .. } => {}
             }
         }
         out
@@ -3140,7 +3170,9 @@ impl FittedModel {
         match (payload.fit_result.is_none(), payload.unified.is_none()) {
             (true, false) => payload.fit_result = payload.unified.clone(),
             (false, true) => payload.unified = payload.fit_result.clone(),
-            _ => {}
+            // Both populated (already mirrored) or both absent (no fit to
+            // mirror) — nothing to copy either way.
+            (true, true) | (false, false) => {}
         }
         payload.used_device = payload
             .fit_result
@@ -3151,52 +3183,73 @@ impl FittedModel {
         let Some(fit) = payload.fit_result.as_ref().or(payload.unified.as_ref()) else {
             return;
         };
-        match (&mut payload.family_state, &fit.fitted_link) {
-            (
-                FittedFamily::Standard {
-                    likelihood,
-                    latent_cloglog_state,
-                    ..
-                },
-                FittedLinkState::LatentCLogLog { state },
-            ) if likelihood.is_latent_cloglog() => {
-                *latent_cloglog_state = Some(*state);
+        // Only the `Standard` family shape owns stateful-link slots; the
+        // location-scale / marginal-slope / survival / transformation shapes
+        // have nowhere to mirror a fitted link state to.
+        let FittedFamily::Standard {
+            likelihood,
+            latent_cloglog_state,
+            mixture_state,
+            sas_state,
+            ..
+        } = &mut payload.family_state
+        else {
+            return;
+        };
+        // Each stateful link mirrors into the slot its own likelihood owns. The
+        // likelihood check is inside the arm, not a match guard, so that this
+        // match stays exhaustive over `FittedLinkState`: a new stateful link
+        // has to be given a home here instead of falling through a wildcard.
+        // A state whose likelihood disagrees is a builder inconsistency, not a
+        // routine case, so it is reported rather than dropped in silence.
+        match &fit.fitted_link {
+            // Stateless: the link is fully described by the spec already on the
+            // payload, so there is nothing to mirror.
+            FittedLinkState::Standard(_) => {}
+            FittedLinkState::LatentCLogLog { state } => {
+                if likelihood.is_latent_cloglog() {
+                    *latent_cloglog_state = Some(*state);
+                } else {
+                    log::warn!(
+                        "fitted latent-cloglog link state discarded: likelihood {likelihood:?} \
+                         has no latent-cloglog slot"
+                    );
+                }
             }
-            (
-                FittedFamily::Standard {
-                    likelihood,
-                    sas_state,
-                    ..
-                },
-                FittedLinkState::Sas { state, covariance },
-            ) if likelihood.is_binomial_sas() => {
-                *sas_state = Some(*state);
-                payload.sas_param_covariance = covariance.as_ref().map(array2_to_nested_vec);
+            FittedLinkState::Sas { state, covariance } => {
+                if likelihood.is_binomial_sas() {
+                    *sas_state = Some(*state);
+                    payload.sas_param_covariance = covariance.as_ref().map(array2_to_nested_vec);
+                } else {
+                    log::warn!(
+                        "fitted SAS link state discarded: likelihood {likelihood:?} is not \
+                         binomial-SAS"
+                    );
+                }
             }
-            (
-                FittedFamily::Standard {
-                    likelihood,
-                    sas_state,
-                    ..
-                },
-                FittedLinkState::BetaLogistic { state, covariance },
-            ) if likelihood.is_binomial_beta_logistic() => {
-                *sas_state = Some(*state);
-                payload.sas_param_covariance = covariance.as_ref().map(array2_to_nested_vec);
+            FittedLinkState::BetaLogistic { state, covariance } => {
+                if likelihood.is_binomial_beta_logistic() {
+                    *sas_state = Some(*state);
+                    payload.sas_param_covariance = covariance.as_ref().map(array2_to_nested_vec);
+                } else {
+                    log::warn!(
+                        "fitted beta-logistic link state discarded: likelihood {likelihood:?} is \
+                         not binomial beta-logistic"
+                    );
+                }
             }
-            (
-                FittedFamily::Standard {
-                    likelihood,
-                    mixture_state,
-                    ..
-                },
-                FittedLinkState::Mixture { state, covariance },
-            ) if likelihood.is_binomial_mixture() => {
-                *mixture_state = Some(state.clone());
-                payload.mixture_link_param_covariance =
-                    covariance.as_ref().map(array2_to_nested_vec);
+            FittedLinkState::Mixture { state, covariance } => {
+                if likelihood.is_binomial_mixture() {
+                    *mixture_state = Some(state.clone());
+                    payload.mixture_link_param_covariance =
+                        covariance.as_ref().map(array2_to_nested_vec);
+                } else {
+                    log::warn!(
+                        "fitted mixture link state discarded: likelihood {likelihood:?} is not a \
+                         binomial mixture link"
+                    );
+                }
             }
-            _ => {}
         }
     }
 
@@ -4067,7 +4120,20 @@ impl FittedModel {
                     PenaltySource::Primary => {
                         fused = Some(read_lambda(info.global_index)?);
                     }
-                    _ => {}
+                    // Not a measure-jet scale amplitude. The nullspace ridge is
+                    // excluded on purpose (see above); the operator/tensor
+                    // sources belong to other basis kinds and never carry a
+                    // `measure_jet_scale_*` λ. Enumerated so a new penalty
+                    // source has to be classified here rather than silently
+                    // dropping out of the spectrum.
+                    PenaltySource::DoublePenaltyNullspace
+                    | PenaltySource::OperatorMass
+                    | PenaltySource::OperatorTension
+                    | PenaltySource::OperatorStiffness
+                    | PenaltySource::OperatorRelevance { .. }
+                    | PenaltySource::TensorMarginal { .. }
+                    | PenaltySource::TensorSeparable { .. }
+                    | PenaltySource::TensorGlobalRidge => {}
                 }
             }
             let mut lambda_phys = Vec::with_capacity(n_levels);

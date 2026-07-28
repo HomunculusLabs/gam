@@ -1,6 +1,10 @@
 #![cfg(test)]
 //! Tests for the survival marginal-slope family (relocated verbatim).
 
+// The parent declares this module as `#[cfg(test)] mod tests;`; declaring the
+// test scope in-file makes that a claim the compiler enforces.
+#![cfg(test)]
+
 use super::*;
 use crate::custom_family::{CustomFamily, ExactOuterDerivativeOrder};
 use approx::assert_relative_eq;

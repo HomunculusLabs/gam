@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! #1782 — `sae_manifold_fit` with `threshold_gate`/`softmax` assignments and
 //! `euclidean`/`linear` topologies failed at "no candidate seeds passed outer
 //! startup validation" on clean planted-circle data where `ordered_beta_bernoulli`+`circle`
@@ -18,6 +17,8 @@
 //! ("SAE manifold") cascade, and assert each assignment/topology combination now
 //! converges to a finite reconstruction EV instead of throwing
 //! `RemlConvergenceError`.
+
+#![cfg(test)]
 
 use super::tests::{global_ev, planted_circle_embedded};
 use super::*;

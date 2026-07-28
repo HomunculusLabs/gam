@@ -158,7 +158,16 @@ fn collect_categorical_role_columns(terms: &[ParsedTerm], out: &mut BTreeSet<Str
             ParsedTerm::LogSlopeSurface { terms, .. } => {
                 collect_categorical_role_columns(terms, out);
             }
-            _ => {}
+            // Deliberately not categorical-by-role — see the doc comment above
+            // for why bare linear terms and smooth arguments are excluded.
+            ParsedTerm::Linear { .. }
+            | ParsedTerm::BoundedLinear { .. }
+            | ParsedTerm::Smooth { .. }
+            | ParsedTerm::Interaction { .. }
+            | ParsedTerm::LinkWiggle { .. }
+            | ParsedTerm::TimeWiggle { .. }
+            | ParsedTerm::LinkConfig { .. }
+            | ParsedTerm::SurvivalConfig { .. } => {}
         }
     }
 }

@@ -1337,8 +1337,11 @@ mod tests {
             }
         }
 
-        fn coefficient(&self, _: usize, _: usize) -> f64 {
-            panic!("compiled graph quadratic lowering must preserve matrix-free multiply")
+        fn coefficient(&self, row: usize, column: usize) -> f64 {
+            panic!(
+                "compiled graph quadratic lowering must preserve matrix-free multiply, \
+                 but entry ({row}, {column}) was read densely"
+            )
         }
     }
 
@@ -1356,8 +1359,11 @@ mod tests {
             output.copy_from_slice(input);
         }
 
-        fn coefficient(&self, _: usize, _: usize) -> f64 {
-            panic!("compiled graph quadratic lowering must preserve matrix-free multiply")
+        fn coefficient(&self, row: usize, column: usize) -> f64 {
+            panic!(
+                "compiled graph quadratic lowering must preserve matrix-free multiply, \
+                 but entry ({row}, {column}) was read densely"
+            )
         }
     }
 
@@ -1377,8 +1383,11 @@ mod tests {
             output.copy_from_slice(input);
         }
 
-        fn coefficient(&self, _: usize, _: usize) -> f64 {
-            panic!("compiled graph quadratic lowering must preserve matrix-free multiply")
+        fn coefficient(&self, row: usize, column: usize) -> f64 {
+            panic!(
+                "compiled graph quadratic lowering must preserve matrix-free multiply, \
+                 but entry ({row}, {column}) was read densely"
+            )
         }
     }
 

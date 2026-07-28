@@ -153,7 +153,10 @@ fn load_static_cuda_driver_library() -> Result<&'static Library, GpuError> {
 pub fn preload_cuda_driver() -> Result<(), GpuError> {
     static PRELOAD: OnceLock<Result<(), GpuError>> = OnceLock::new();
     PRELOAD
-        .get_or_init(|| load_static_cuda_driver_library().map(drop))
+        .get_or_init(|| {
+            load_static_cuda_driver_library()?;
+            Ok(())
+        })
         .clone()
 }
 
@@ -256,8 +259,10 @@ fn preload_cuda_userspace_libraries() -> Result<(), String> {
             Ok(loaded)
         })
         .as_ref()
-        .map(drop)
-        .map_err(Clone::clone)
+        .map_err(Clone::clone)?;
+    // The loaded handles stay resident in `PRELOAD` for the process lifetime,
+    // which is the whole point of the preload; callers need only the verdict.
+    Ok(())
 }
 
 /// Require that the platform loader can open the named CUDA compute library

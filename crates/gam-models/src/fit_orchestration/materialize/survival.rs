@@ -803,33 +803,36 @@ pub(crate) fn materialize_survival<'a>(
     } else {
         None
     };
-    match survival_mode {
-        SurvivalLikelihoodMode::Transformation | SurvivalLikelihoodMode::Weibull
-            if config.frailty.is_active() =>
-        {
-            return Err(WorkflowError::InvalidConfig {
-                reason: "frailty is not supported for transformation/weibull survival models"
-                    .to_string(),
-            }
-            .into());
+    if config.frailty.is_active()
+        && matches!(
+            survival_mode,
+            SurvivalLikelihoodMode::Transformation | SurvivalLikelihoodMode::Weibull
+        )
+    {
+        return Err(WorkflowError::InvalidConfig {
+            reason: "frailty is not supported for transformation/weibull survival models"
+                .to_string(),
         }
-        SurvivalLikelihoodMode::LocationScale if config.frailty.is_active() => {
-            return Err(WorkflowError::InvalidConfig {
-                reason: "config.frailty is not implemented for survival-likelihood=location-scale"
-                    .to_string(),
-            }
-            .into());
+        .into());
+    }
+    if config.frailty.is_active() && survival_mode == SurvivalLikelihoodMode::LocationScale {
+        return Err(WorkflowError::InvalidConfig {
+            reason: "config.frailty is not implemented for survival-likelihood=location-scale"
+                .to_string(),
         }
-        SurvivalLikelihoodMode::Latent | SurvivalLikelihoodMode::LatentBinary
-            if effective_timewiggle.is_some() =>
-        {
-            return Err(WorkflowError::InvalidConfig {
-                reason: "timewiggle is not implemented for latent survival/binary likelihoods"
-                    .to_string(),
-            }
-            .into());
+        .into());
+    }
+    if effective_timewiggle.is_some()
+        && matches!(
+            survival_mode,
+            SurvivalLikelihoodMode::Latent | SurvivalLikelihoodMode::LatentBinary
+        )
+    {
+        return Err(WorkflowError::InvalidConfig {
+            reason: "timewiggle is not implemented for latent survival/binary likelihoods"
+                .to_string(),
         }
-        _ => {}
+        .into());
     }
     let latent_loading = if matches!(
         survival_mode,

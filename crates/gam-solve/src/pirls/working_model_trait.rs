@@ -28,10 +28,19 @@ pub trait WorkingModel {
         &mut self,
         beta: &Coefficients,
         arr: &Array1<f64>,
-        _: &LinearPredictor,
+        current_eta: &LinearPredictor,
         curvature: HessianCurvatureKind,
     ) -> Result<CandidateEvaluation, EstimationError> {
         assert!(arr.iter().all(|v| !v.is_nan()));
+        // A screen is defined relative to the accepted linear predictor it
+        // steps away from. This default impl re-runs a full update rather than
+        // stepping η itself, so it would otherwise be the one path that accepts
+        // a corrupt base η silently; refuse it here instead.
+        if !current_eta.as_ref().iter().all(|v| v.is_finite()) {
+            crate::bail_invalid_estim!(
+                "PIRLS candidate screen requires a finite current linear predictor"
+            );
+        }
         self.update_candidate(beta, curvature)
             .map(CandidateEvaluation::Full)
     }

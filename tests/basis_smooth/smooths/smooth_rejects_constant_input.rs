@@ -22,9 +22,8 @@ fn try_fit(formula: &str) -> Result<(), String> {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
     };
-    fit_from_formula(formula, &data, &cfg)
-        .map(drop)
-        .map_err(|e| e.to_string())
+    fit_from_formula(formula, &data, &cfg).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[test]

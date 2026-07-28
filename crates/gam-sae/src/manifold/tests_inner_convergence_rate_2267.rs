@@ -189,8 +189,12 @@ fn zz_measure_inner_contraction_and_curvature_fidelity_2267() {
 fn zz_measure_inner_step_acceptance_trace_2267() {
     struct ForwardingTestLogger;
     impl log::Log for ForwardingTestLogger {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            // Forward exactly what the probe asked for. `set_max_level(Debug)`
+            // below already gates the macros, but `log::log_enabled!` and any
+            // logger that consults us directly must get the same answer, or the
+            // trace this probe reads would silently disagree with the filter.
+            metadata.level() <= log::Level::Debug
         }
         fn log(&self, record: &log::Record<'_>) {
             eprintln!("[{}] {}", record.level(), record.args());

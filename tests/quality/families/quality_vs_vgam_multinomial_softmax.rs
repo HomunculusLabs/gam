@@ -946,19 +946,20 @@ fn gam_multinomial_softmax_recovers_true_simplex_on_real_data() {
             }
         };
         // Drop incomplete rows (penguins has a few NA morphometrics).
-        match (
+        let (Some(b), Some(f), Some(m)) = (
             parse(rec.get(i_bill)),
             parse(rec.get(i_flip)),
             parse(rec.get(i_mass)),
-        ) {
-            (Some(b), Some(f), Some(m)) if !sp.is_empty() => {
-                species_all.push(sp);
-                bill_all.push(b);
-                flip_all.push(f);
-                mass_all.push(m);
-            }
-            _ => {}
+        ) else {
+            continue;
+        };
+        if sp.is_empty() {
+            continue;
         }
+        species_all.push(sp);
+        bill_all.push(b);
+        flip_all.push(f);
+        mass_all.push(m);
     }
     let mut per_level_kept = [0usize; K];
     let mut species: Vec<String> = Vec::new();

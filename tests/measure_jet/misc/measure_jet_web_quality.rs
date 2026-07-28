@@ -338,7 +338,17 @@ fn measure_jet_extrapolation_variance_for_fit(
                 PenaltySource::Primary => {
                     fused = Some(lambda);
                 }
-                _ => {}
+                // The measure-jet term carries only its own scale penalties and
+                // the fused primary; no other penalty source contributes to the
+                // scale spectrum this gate reads.
+                PenaltySource::DoublePenaltyNullspace
+                | PenaltySource::OperatorMass
+                | PenaltySource::OperatorTension
+                | PenaltySource::OperatorStiffness
+                | PenaltySource::OperatorRelevance { .. }
+                | PenaltySource::TensorMarginal { .. }
+                | PenaltySource::TensorSeparable { .. }
+                | PenaltySource::TensorGlobalRidge => {}
             }
         }
         let mut lambda_phys = Vec::with_capacity(n_levels);

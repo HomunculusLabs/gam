@@ -314,8 +314,11 @@ fn manifold_circle_mixture_seed_eval_terminates_2132() {
     // lines surface without needing RUST_LOG (max level is set to Debug directly).
     struct ForwardingTestLogger;
     impl log::Log for ForwardingTestLogger {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            // The point of this logger is the engine's `log::debug!` arbiter
+            // lines, so enable exactly what the installed max level admits
+            // rather than claiming every record regardless of its level.
+            metadata.level() <= log::max_level()
         }
         fn log(&self, record: &log::Record<'_>) {
             eprintln!("[{}] {}", record.level(), record.args());

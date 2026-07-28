@@ -36,8 +36,13 @@ mod tests {
     /// own account of WHY it refused.
     struct ForwardingTestLogger;
     impl log::Log for ForwardingTestLogger {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            // Honour the filter this logger installs (`Debug`, in
+            // `install_test_logger`) instead of claiming every record is
+            // enabled: a caller that queries `log_enabled!` before building an
+            // expensive diagnostic must get the same answer the `log!` macros'
+            // own `max_level` check would give it.
+            metadata.level() <= log::max_level()
         }
         fn log(&self, record: &log::Record<'_>) {
             eprintln!("[{}] {}", record.level(), record.args());

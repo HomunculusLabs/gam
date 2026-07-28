@@ -262,12 +262,12 @@ impl BetaCouplingGraph {
                     if assigned[cand] || cols + block_cols(cand) > cap {
                         continue;
                     }
-                    match best {
-                        None => best = Some((cand, g)),
-                        Some((bi, bg)) if g > bg || (g == bg && cand < bi) => {
-                            best = Some((cand, g))
-                        }
-                        _ => {}
+                    let improves = match best {
+                        None => true,
+                        Some((bi, bg)) => g > bg || (g == bg && cand < bi),
+                    };
+                    if improves {
+                        best = Some((cand, g));
                     }
                 }
                 let Some((cand, _)) = best else {

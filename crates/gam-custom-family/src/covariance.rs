@@ -2224,7 +2224,13 @@ mod required_covariance_tests {
     struct TrivialFamily;
 
     impl CustomFamily for TrivialFamily {
-        fn evaluate(&self, _: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        fn evaluate(&self, states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+            if states.len() != 1 {
+                return Err(format!(
+                    "TrivialFamily is a single-block fixture; got {} blocks",
+                    states.len()
+                ));
+            }
             Ok(FamilyEvaluation {
                 log_likelihood: 0.0,
                 blockworking_sets: vec![],
@@ -2249,11 +2255,17 @@ mod required_covariance_tests {
 
         fn block_linear_constraints(
             &self,
-            _: &[ParameterBlockState],
+            states: &[ParameterBlockState],
             block_idx: usize,
-            _: &ParameterBlockSpec,
+            spec: &ParameterBlockSpec,
         ) -> Result<Option<ConstraintSet>, String> {
             assert_eq!(block_idx, 0);
+            assert_eq!(
+                states[block_idx].beta.len(),
+                1,
+                "block `{}` must carry the single bounded coefficient this constraint row addresses",
+                spec.name
+            );
             Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
                 a: array![[1.0]],
                 b: array![0.0],
@@ -2350,11 +2362,17 @@ mod required_covariance_tests {
 
         fn block_linear_constraints(
             &self,
-            _: &[ParameterBlockState],
+            states: &[ParameterBlockState],
             block_idx: usize,
-            _: &ParameterBlockSpec,
+            spec: &ParameterBlockSpec,
         ) -> Result<Option<ConstraintSet>, String> {
             assert_eq!(block_idx, 0);
+            assert_eq!(
+                states[block_idx].beta.len(),
+                2,
+                "block `{}` must carry both coefficients the constraint row spans",
+                spec.name
+            );
             Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
                 a: array![[1.0, 0.0]],
                 b: array![0.0],

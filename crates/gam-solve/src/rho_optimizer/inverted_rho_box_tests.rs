@@ -22,11 +22,38 @@
 use super::*;
 use ndarray::array;
 
-fn quadratic_cost(_: &mut (), rho: &Array1<f64>) -> Result<f64, EstimationError> {
+/// Evaluation tally carried as the objective's state.
+///
+/// The positive controls below assert that an ordered box still SOLVES. Without
+/// a tally, "solves" is only "the runner returned `Ok` with a rho near zero" —
+/// which a runner that refused to touch the surface and handed back its seed
+/// `rho = 0` would also satisfy. Counting the evaluations is what makes those
+/// two controls actually exercise the guarded path.
+#[derive(Default)]
+struct QuadraticProbe {
+    cost_evals: usize,
+    derivative_evals: usize,
+}
+
+impl QuadraticProbe {
+    fn total_evals(&self) -> usize {
+        self.cost_evals + self.derivative_evals
+    }
+}
+
+fn quadratic_cost(
+    probe: &mut QuadraticProbe,
+    rho: &Array1<f64>,
+) -> Result<f64, EstimationError> {
+    probe.cost_evals += 1;
     Ok(0.5 * rho.dot(rho))
 }
 
-fn quadratic_eval(_: &mut (), rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+fn quadratic_eval(
+    probe: &mut QuadraticProbe,
+    rho: &Array1<f64>,
+) -> Result<OuterEval, EstimationError> {
+    probe.derivative_evals += 1;
     Ok(OuterEval {
         cost: 0.5 * rho.dot(rho),
         gradient: rho.clone(),
@@ -51,11 +78,11 @@ fn quadratic_problem(bounds: Option<(Array1<f64>, Array1<f64>)>) -> OuterProblem
 macro_rules! quadratic_objective {
     ($problem:expr) => {
         $problem.build_objective(
-            (),
+            QuadraticProbe::default(),
             quadratic_cost,
             quadratic_eval,
-            None::<fn(&mut ())>,
-            None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+            None::<fn(&mut QuadraticProbe)>,
+            None::<fn(&mut QuadraticProbe, &Array1<f64>) -> Result<EfsEval, EstimationError>>,
         )
     };
 }
@@ -120,6 +147,10 @@ fn an_ordered_box_still_solves_2370() {
         "the ordered-box solve must reach the interior optimum at rho=0, got {}",
         result.rho[0],
     );
+    assert!(
+        objective.state.total_evals() > 0,
+        "the ordered box must reach the objective, not be answered from the seed alone"
+    );
 }
 
 #[test]
@@ -135,4 +166,8 @@ fn a_problem_with_no_explicit_box_still_solves_2370() {
 
     run_outer(&mut objective, &config, "default-box-2370")
         .expect("the default rho box must solve normally");
+    assert!(
+        objective.state.total_evals() > 0,
+        "the +/-rho_bound fallback must reach the objective, not be answered from the seed alone"
+    );
 }

@@ -37,16 +37,14 @@ fn strip_cfg_test_regions(src: &str) -> String {
                 let mut depth = 0i32;
                 let mut j = brace;
                 while j < bytes.len() {
-                    match bytes[j] {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                j += 1;
-                                break;
-                            }
+                    if bytes[j] == b'{' {
+                        depth += 1;
+                    } else if bytes[j] == b'}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
                         }
-                        _ => {}
                     }
                     j += 1;
                 }

@@ -379,15 +379,14 @@ pub(crate) fn primary_direction_from_psi_row(
 ) -> Array1<f64> {
     let mut out = Array1::<f64>::zeros(N_PRIMARY);
     let value = psi_row.dot(beta_block);
-    match block_idx {
-        1 => {
-            out[0] = value;
-            out[1] = value;
-        }
-        2 => {
-            out[3] = value;
-        }
-        _ => {}
+    // Only blocks 1 and 2 carry a loading onto primary space (see
+    // `spatial_block_primary_loading`); every other block leaves the direction
+    // at zero.
+    if block_idx == 1 {
+        out[0] = value;
+        out[1] = value;
+    } else if block_idx == 2 {
+        out[3] = value;
     }
     out
 }
@@ -424,15 +423,14 @@ pub(crate) fn primary_direction_from_psi_row_flex(
 ) -> Array1<f64> {
     let mut out = Array1::<f64>::zeros(primary.total);
     let value = psi_row.dot(beta_block);
-    match block_idx {
-        1 => {
-            out[primary.q0] = value;
-            out[primary.q1] = value;
-        }
-        2 => {
-            out[primary.g] = value;
-        }
-        _ => {}
+    // Only blocks 1 and 2 carry a loading onto primary space (see
+    // `spatial_block_primary_loading_flex`); every other block leaves the
+    // direction at zero.
+    if block_idx == 1 {
+        out[primary.q0] = value;
+        out[primary.q1] = value;
+    } else if block_idx == 2 {
+        out[primary.g] = value;
     }
     out
 }
@@ -445,15 +443,14 @@ pub(crate) fn primary_psi_action_from_psi_row(
 ) -> Array1<f64> {
     let mut out = Array1::<f64>::zeros(N_PRIMARY);
     let value = psi_row.dot(&d_beta_block);
-    match block_idx {
-        1 => {
-            out[0] = value;
-            out[1] = value;
-        }
-        2 => {
-            out[3] = value;
-        }
-        _ => {}
+    // Only blocks 1 and 2 carry a loading onto primary space (see
+    // `spatial_block_primary_loading`); every other block contributes nothing
+    // to the psi action.
+    if block_idx == 1 {
+        out[0] = value;
+        out[1] = value;
+    } else if block_idx == 2 {
+        out[3] = value;
     }
     out
 }
@@ -466,15 +463,14 @@ pub(crate) fn primary_psi_action_from_psi_row_flex(
 ) -> Array1<f64> {
     let mut out = Array1::<f64>::zeros(primary.total);
     let value = psi_row.dot(&d_beta_block);
-    match block_idx {
-        1 => {
-            out[primary.q0] = value;
-            out[primary.q1] = value;
-        }
-        2 => {
-            out[primary.g] = value;
-        }
-        _ => {}
+    // Only blocks 1 and 2 carry a loading onto primary space (see
+    // `spatial_block_primary_loading_flex`); every other block contributes
+    // nothing to the psi action.
+    if block_idx == 1 {
+        out[primary.q0] = value;
+        out[primary.q1] = value;
+    } else if block_idx == 2 {
+        out[primary.g] = value;
     }
     out
 }

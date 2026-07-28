@@ -1169,6 +1169,27 @@ extern "C" __global__ void normal_kernel(
         Ok(Array1::from_vec(out_host))
     }
 
+    /// `LaunchArgs::launch` hands back a `(start, end)` `CudaEvent` pair only
+    /// when the builder was configured with timing flags. None of the PG
+    /// kernels below ask for timing, so a returned pair would mean the launch
+    /// was built differently than this module assumes — and the two recorded
+    /// events would be dropped unobserved. Report that as a driver-call fault
+    /// rather than silently discarding them.
+    fn expect_untimed_launch(
+        timing_events: Option<(cudarc::driver::CudaEvent, cudarc::driver::CudaEvent)>,
+        kernel: &str,
+    ) -> Result<(), GpuError> {
+        if timing_events.is_some() {
+            return Err(GpuError::DriverCallFailed {
+                reason: format!(
+                    "polya_gamma launch {kernel}: the driver returned a timing event pair for a \
+                     launch configured without timing flags"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn launch_pg1(
         stream: &Arc<CudaStream>,
         module: &Arc<CudaModule>,
@@ -1200,8 +1221,8 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(drop)
         .gpu_ctx("polya_gamma launch pg1_kernel")
+        .and_then(|timing_events| expect_untimed_launch(timing_events, "pg1_kernel"))
     }
 
     fn launch_sp(
@@ -1237,8 +1258,8 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(drop)
         .gpu_ctx("polya_gamma launch sp_kernel")
+        .and_then(|timing_events| expect_untimed_launch(timing_events, "sp_kernel"))
     }
 
     fn launch_normal(
@@ -1273,8 +1294,8 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(drop)
         .gpu_ctx("polya_gamma launch normal_kernel")
+        .and_then(|timing_events| expect_untimed_launch(timing_events, "normal_kernel"))
     }
 }
 

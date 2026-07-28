@@ -858,10 +858,15 @@ mod tests {
                     );
                 }
             }
-            match (&first, label) {
-                (None, _) => first = Some(got),
-                (Some(f), "w1-again") => assert_eq!(*f, got, "repeat of w1 changed after w2"),
-                _ => {}
+            match first.as_ref() {
+                None => first = Some(got),
+                Some(f) if label == "w1-again" => {
+                    assert_eq!(*f, got, "repeat of w1 changed after w2");
+                }
+                Some(_) => assert_eq!(
+                    label, "w2",
+                    "only the w2 pass may differ from the stored w1 result"
+                ),
             }
         }
     }

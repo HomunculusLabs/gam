@@ -131,7 +131,16 @@ fn factor_by_double_penalty_ridge_is_per_level_in_constrained_chart() {
             match &penalty.info.source {
                 PenaltySource::Primary => primaries.push(&penalty.matrix),
                 PenaltySource::DoublePenaltyNullspace => ridges.push(&penalty.matrix),
-                _ => {}
+                // Irrelevant to the ridge-vs-primary pairing under test;
+                // enumerated (not `_`) so a new source must be classified here.
+                PenaltySource::OperatorMass
+                | PenaltySource::OperatorTension
+                | PenaltySource::OperatorStiffness
+                | PenaltySource::OperatorRelevance { .. }
+                | PenaltySource::TensorMarginal { .. }
+                | PenaltySource::TensorSeparable { .. }
+                | PenaltySource::TensorGlobalRidge
+                | PenaltySource::Other(_) => {}
             }
         }
         assert!(

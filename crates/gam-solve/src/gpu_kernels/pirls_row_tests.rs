@@ -1,4 +1,7 @@
+// `pirls_row.rs` declares this file as `#[cfg(test)] mod pirls_row_tests;`;
+// declaring the test scope in-file makes that a claim the compiler enforces.
 #![cfg(test)]
+
 use super::*;
 
 #[cfg(target_os = "linux")]

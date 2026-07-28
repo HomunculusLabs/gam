@@ -10,7 +10,9 @@ use crate::families::custom_family::joint_newton_defaults::{
     joint_hessian_has_cross_block_coupling,
 };
 use crate::families::custom_family::options::{
-    BlockwiseFitOptions, OuterDerivativePolicy, assert_hyper_layout_matches_specs,
+    BlockwiseFitOptions, OuterDerivativePolicy, assert_block_index_matches_spec,
+    assert_block_local_beta_direction, assert_block_local_eta_direction,
+    assert_blockstates_are_a_point, assert_hyper_layout_matches_specs, assert_psi_index_in_layout,
     assert_rho_matches_specs, assert_states_match_specs, assert_valid_blockspecs,
     assert_valid_options, default_coefficient_hessian_cost, default_outer_derivative_policy_costs,
     exact_outer_order_with_outer_hvp, validate_hessian_workspace_ready,
@@ -190,15 +192,9 @@ pub trait CustomFamily {
     /// those scalars. Static families return `None` and skip that audit.
     fn current_identifiability_family_scalars(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Arc<dyn std::any::Any + Send + Sync>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
+        assert_blockstates_are_a_point(block_states, "current identifiability family scalars");
         Ok(None)
     }
 
@@ -386,8 +382,9 @@ pub trait CustomFamily {
     fn exact_outer_derivative_order(
         &self,
         specs: &[ParameterBlockSpec],
-        _: &BlockwiseFitOptions,
+        options: &BlockwiseFitOptions,
     ) -> ExactOuterDerivativeOrder {
+        assert_valid_options(options, "exact outer derivative order");
         let coefficient_work = self
             .coefficient_hessian_cost(specs)
             .max(self.coefficient_gradient_cost(specs));
@@ -533,15 +530,20 @@ pub trait CustomFamily {
     /// current values of other blocks.
     fn block_geometry(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         spec: &ParameterBlockSpec,
     ) -> Result<(DesignMatrix, Array1<f64>), String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
+        // The default geometry is static, but returning `spec`'s own design is
+        // only an answer about *these* states if the spec is one of the blocks
+        // they describe - a spec borrowed from another model would otherwise be
+        // echoed back as this fit's geometry.
         assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
+            block_states
+                .iter()
+                .any(|state| state.beta.len() == spec.design.ncols()),
+            "block geometry: spec '{}' describes no block of the {} supplied states",
+            spec.name,
+            block_states.len()
         );
         Ok((spec.design.clone(), spec.offset.clone()))
     }
@@ -584,41 +586,52 @@ pub trait CustomFamily {
     /// when that declaration is false.
     fn block_geometry_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
         block_spec: &ParameterBlockSpec,
-        arr: &Array1<f64>,
+        d_beta: &Array1<f64>,
     ) -> Result<Option<BlockGeometryDirectionalDerivative>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
-        );
-        // Default implementation ignores this parameter.
+        // The default declares "no drift", which is only a truthful answer for
+        // a well-formed query: the index, the spec and the direction must all
+        // name the same block.
         assert!(!block_spec.name.is_empty());
-        assert!(arr.iter().all(|v| !v.is_nan()));
+        assert_block_index_matches_spec(
+            block_states,
+            block_index,
+            block_spec,
+            "block geometry directional derivative",
+        );
+        assert_block_local_beta_direction(
+            block_states,
+            block_index,
+            d_beta,
+            "block geometry directional derivative",
+        );
         Ok(None)
     }
 
     /// Optional per-block coefficient projection applied after each block update.
     fn post_update_block_beta(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
         block_spec: &ParameterBlockSpec,
         beta: Array1<f64>,
     ) -> Result<Array1<f64>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
-        );
-        // Default implementation ignores this parameter.
+        // The identity projection is only correct if the coefficients handed in
+        // really are block `block_index`'s, under that block's own spec.
         assert!(!block_spec.name.is_empty());
+        assert_block_index_matches_spec(
+            block_states,
+            block_index,
+            block_spec,
+            "post-update block beta",
+        );
+        assert_eq!(
+            beta.len(),
+            block_spec.design.ncols(),
+            "post-update block beta: proposed beta does not match block {block_index}"
+        );
         Ok(beta)
     }
 
@@ -638,19 +651,18 @@ pub trait CustomFamily {
     /// Returns `None` if no barrier constraint applies (the default).
     fn max_feasible_step_size(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        delta: &Array1<f64>,
     ) -> Result<Option<f64>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        // "No barrier applies" is a claim about `beta + alpha * delta`, so the
+        // step has to be addable to that block's coefficients in the first place.
+        assert_block_local_beta_direction(
+            block_states,
+            block_index,
+            delta,
+            "max feasible step size",
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(None)
     }
 
@@ -689,22 +701,15 @@ pub trait CustomFamily {
     /// default) for every family that has no free-scale-coupled block.
     fn joint_trust_metric_block_floor(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
     ) -> Result<Option<Array1<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
-        assert!(
-            specs.len() == states.len(),
-            "a family hook received {} block specs for {} block states",
-            specs.len(),
-            states.len()
-        );
+        // A returned floor is indexed over the full joint coefficient vector,
+        // so states and specs must agree on what that vector is before any
+        // implementor - including an override calling back into this default -
+        // can size one.
+        assert_valid_blockspecs(specs, "joint trust metric block floor");
+        assert_states_match_specs(block_states, specs, "joint trust metric block floor");
         Ok(None)
     }
 
@@ -715,19 +720,19 @@ pub trait CustomFamily {
     /// factored monotonicity cone so the row set never materializes.
     fn block_linear_constraints(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
-        );
-        // Default implementation ignores this parameter.
+        // "Unconstrained" is a statement about one specific block; the index
+        // and the spec must therefore agree on which block that is.
         assert!(!block_spec.name.is_empty());
+        assert_block_index_matches_spec(
+            block_states,
+            block_index,
+            block_spec,
+            "block linear constraints",
+        );
         Ok(None)
     }
 
@@ -743,19 +748,16 @@ pub trait CustomFamily {
     /// `None` as unavailable rather than silently substituting zero.
     fn exact_newton_hessian_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_beta: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        assert_block_local_beta_direction(
+            block_states,
+            block_index,
+            d_beta,
+            "exact Newton Hessian directional derivative",
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(None)
     }
 
@@ -771,21 +773,23 @@ pub trait CustomFamily {
     /// Hessian drift is unavailable.
     fn exact_newton_hessian_second_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
-        arr: &Array1<f64>,
-        arr2: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_beta_u: &Array1<f64>,
+        d_beta_v: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        assert_block_local_beta_direction(
+            block_states,
+            block_index,
+            d_beta_u,
+            "exact Newton Hessian second directional derivative (u)",
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
-        assert!(arr2.iter().all(|v| !v.is_nan()));
+        assert_block_local_beta_direction(
+            block_states,
+            block_index,
+            d_beta_v,
+            "exact Newton Hessian second directional derivative (v)",
+        );
         Ok(None)
     }
 
@@ -825,15 +829,14 @@ pub trait CustomFamily {
     /// coefficient space without building per-block Hessian working sets.
     fn exact_newton_joint_gradient_evaluation(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
+        assert_valid_blockspecs(specs, "exact Newton joint gradient evaluation");
+        assert_states_match_specs(
+            block_states,
+            specs,
+            "exact Newton joint gradient evaluation",
         );
         assert!(
             specs.len() == states.len(),
@@ -852,15 +855,9 @@ pub trait CustomFamily {
     /// on its legacy hand-assembled gradient.
     fn exact_newton_joint_loglik_gradient(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<Array1<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
+        assert_blockstates_are_a_point(block_states, "exact Newton joint log-likelihood gradient");
         Ok(None)
     }
 
@@ -909,22 +906,11 @@ pub trait CustomFamily {
     /// calls made by the unified outer evaluator.
     fn exact_newton_joint_hessian_workspace(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
-        assert!(
-            specs.len() == states.len(),
-            "a family hook received {} block specs for {} block states",
-            specs.len(),
-            states.len()
-        );
+        assert_valid_blockspecs(specs, "exact Newton joint Hessian workspace");
+        assert_states_match_specs(block_states, specs, "exact Newton joint Hessian workspace");
         Ok(None)
     }
 
@@ -1058,7 +1044,7 @@ pub trait CustomFamily {
     fn prefers_matrix_free_inner_joint(
         &self,
         specs: &[ParameterBlockSpec],
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> bool {
         // The default does not consult these, but they are still a contract:
         // a NaN coefficient reaching a family hook is a bug in the caller,
@@ -1074,6 +1060,7 @@ pub trait CustomFamily {
             states.len()
         );
         assert_valid_blockspecs(specs, "matrix-free inner-joint preference");
+        assert_states_match_specs(block_states, specs, "matrix-free inner-joint preference");
         false
     }
 
@@ -1717,15 +1704,9 @@ pub trait CustomFamily {
     /// return derivatives in that same scaled curvature space.
     fn exact_newton_outer_curvature(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
     ) -> Result<Option<ExactNewtonOuterCurvature>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
+        assert_blockstates_are_a_point(block_states, "exact Newton outer curvature");
         Ok(None)
     }
 
@@ -1743,9 +1724,17 @@ pub trait CustomFamily {
     fn exact_newton_outer_curvature_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        // Dropping the specs on the way to the spec-free variant is only sound
+        // when they describe the very states being differentiated.
+        assert_valid_blockspecs(specs, "exact Newton outer curvature directional derivative");
+        assert_states_match_specs(
+            block_states,
+            specs,
+            "exact Newton outer curvature directional derivative",
+        );
         self.exact_newton_outer_curvature_directional_derivative(block_states, d_beta_flat)
     }
 
@@ -1768,10 +1757,21 @@ pub trait CustomFamily {
     fn exact_newton_outer_curvature_second_directional_derivative_with_specs(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        // Same contract as the first-order sibling: the specs may only be
+        // dropped once they are known to describe these states.
+        assert_valid_blockspecs(
+            specs,
+            "exact Newton outer curvature second directional derivative",
+        );
+        assert_states_match_specs(
+            block_states,
+            specs,
+            "exact Newton outer curvature second directional derivative",
+        );
         self.exact_newton_outer_curvature_second_directional_derivative(
             block_states,
             d_beta_u_flat,
@@ -1961,19 +1961,16 @@ pub trait CustomFamily {
     /// this with zero unless the family truly has constant working weights.
     fn diagonalworking_weights_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_eta: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        assert_block_local_eta_direction(
+            block_states,
+            block_index,
+            d_eta,
+            "diagonal working-weight directional derivative",
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(None)
     }
 
@@ -1990,21 +1987,23 @@ pub trait CustomFamily {
     /// first-order geometry while building `d²H`.
     fn diagonalworking_weights_second_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
-        block: usize,
-        arr: &Array1<f64>,
-        arr2: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_eta_u: &Array1<f64>,
+        d_eta_v: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        assert_block_local_eta_direction(
+            block_states,
+            block_index,
+            d_eta_u,
+            "diagonal working-weight second directional derivative (u)",
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
-        assert!(arr2.iter().all(|v| !v.is_nan()));
+        assert_block_local_eta_direction(
+            block_states,
+            block_index,
+            d_eta_v,
+            "diagonal working-weight second directional derivative (v)",
+        );
         Ok(None)
     }
 
@@ -2036,25 +2035,15 @@ pub trait CustomFamily {
     /// evaluation must use this flattened-coefficient hook instead.
     fn exact_newton_joint_psi_terms(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
-        _: &CustomFamilyHyperLayout,
-        block: usize,
+        hyper_layout: &CustomFamilyHyperLayout,
+        psi_index: usize,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
-        );
-        assert!(
-            specs.len() == states.len(),
-            "block {block} received {} block specs for {} block states",
-            specs.len(),
-            states.len()
-        );
-        // Default implementation ignores this parameter.
+        assert_valid_blockspecs(specs, "exact Newton joint psi terms");
+        assert_states_match_specs(block_states, specs, "exact Newton joint psi terms");
+        assert_hyper_layout_matches_specs(hyper_layout, specs, "exact Newton joint psi terms");
+        assert_psi_index_in_layout(hyper_layout, psi_index, "exact Newton joint psi terms");
         Ok(None)
     }
 
@@ -2071,24 +2060,32 @@ pub trait CustomFamily {
     /// contributions and profile/Laplace corrections.
     fn exact_newton_joint_psisecond_order_terms(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
-        _: &CustomFamilyHyperLayout,
-        psi_i: usize,
-        psi_j: usize,
+        hyper_layout: &CustomFamilyHyperLayout,
+        psi_index_i: usize,
+        psi_index_j: usize,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the psi pair makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "psi pair ({psi_i}, {psi_j}) received a NaN coefficient"
+        assert_valid_blockspecs(specs, "exact Newton joint psi second-order terms");
+        assert_states_match_specs(
+            block_states,
+            specs,
+            "exact Newton joint psi second-order terms",
         );
-        assert!(
-            specs.len() == states.len(),
-            "psi pair ({psi_i}, {psi_j}) received {} block specs for {} block states",
-            specs.len(),
-            states.len()
+        assert_hyper_layout_matches_specs(
+            hyper_layout,
+            specs,
+            "exact Newton joint psi second-order terms",
+        );
+        assert_psi_index_in_layout(
+            hyper_layout,
+            psi_index_i,
+            "exact Newton joint psi second-order terms (i)",
+        );
+        assert_psi_index_in_layout(
+            hyper_layout,
+            psi_index_j,
+            "exact Newton joint psi second-order terms (j)",
         );
         Ok(None)
     }
@@ -2105,23 +2102,13 @@ pub trait CustomFamily {
     /// above when no workspace is provided.
     fn exact_newton_joint_psi_workspace(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
-        _: &CustomFamilyHyperLayout,
+        hyper_layout: &CustomFamilyHyperLayout,
     ) -> Result<Option<Arc<dyn ExactNewtonJointPsiWorkspace>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "a family hook received a NaN coefficient"
-        );
-        assert!(
-            specs.len() == states.len(),
-            "a family hook received {} block specs for {} block states",
-            specs.len(),
-            states.len()
-        );
+        assert_valid_blockspecs(specs, "exact Newton joint psi workspace");
+        assert_states_match_specs(block_states, specs, "exact Newton joint psi workspace");
+        assert_hyper_layout_matches_specs(hyper_layout, specs, "exact Newton joint psi workspace");
         Ok(None)
     }
 
@@ -2175,27 +2162,27 @@ pub trait CustomFamily {
     /// `exact_newton_joint_psi_workspace()` instead.
     fn exact_newton_joint_psihessian_directional_derivative(
         &self,
-        states: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
-        _: &CustomFamilyHyperLayout,
-        block: usize,
-        arr: &Array1<f64>,
+        hyper_layout: &CustomFamilyHyperLayout,
+        psi_index: usize,
+        d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        // The default does not consult these, but they are still a contract:
-        // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
-        assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+        let context = "exact Newton joint psi Hessian directional derivative";
+        assert_valid_blockspecs(specs, context);
+        assert_states_match_specs(block_states, specs, context);
+        assert_hyper_layout_matches_specs(hyper_layout, specs, context);
+        assert_psi_index_in_layout(hyper_layout, psi_index, context);
+        // `u` is flattened over every block, not block-local.
+        assert_eq!(
+            d_beta_flat.len(),
+            block_states.iter().map(|s| s.beta.len()).sum::<usize>(),
+            "{context}: direction is not in the joint coefficient space"
         );
         assert!(
-            specs.len() == states.len(),
-            "block {block} received {} block specs for {} block states",
-            specs.len(),
-            states.len()
+            d_beta_flat.iter().all(|v| !v.is_nan()),
+            "{context}: NaN entry in the joint coefficient direction"
         );
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
         Ok(None)
     }
 

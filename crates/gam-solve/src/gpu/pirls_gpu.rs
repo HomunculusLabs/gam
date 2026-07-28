@@ -1867,9 +1867,8 @@ extern "C" __global__ void chol_logdet_col_major(
         builder.arg(&p_i);
         // SAFETY: x_dev is n*p col-major f64; w_dev is length n; a_dev is p*p;
         // num_pairs threads each write one lower-tri entry A[j + k*p].
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("xtwx_lower launch: {e}"))
-            .map(drop)
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("xtwx_lower launch: {e}"))?;
+        Ok(())
     }
 
     /// Launch the `xtscore` kernel: one thread per output index `j`,
@@ -1907,9 +1906,8 @@ extern "C" __global__ void chol_logdet_col_major(
         builder.arg(&p_i);
         // SAFETY: x_dev is n*p col-major f64; score_dev is length n; s_dev is length p;
         // p threads each write one output entry s[j].
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("xtscore launch: {e}"))
-            .map(drop)
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("xtscore launch: {e}"))?;
+        Ok(())
     }
 
     /// Launch the `symmetrize_lower` kernel: one thread per strict lower-tri
@@ -1946,9 +1944,8 @@ extern "C" __global__ void chol_logdet_col_major(
         builder.arg(&p_i);
         // SAFETY: a_dev is p*p col-major f64; each of the num_strict threads
         // writes one upper-triangle entry mirrored from the lower triangle.
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("symmetrize_lower launch: {e}"))
-            .map(drop)
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("symmetrize_lower launch: {e}"))?;
+        Ok(())
     }
 
     /// Launch the device-side Cholesky-factor logdet kernel and download
@@ -3378,9 +3375,8 @@ extern "C" __global__ void status_first_ladder(
         builder.arg(&n_i);
         // SAFETY: axpy_n signature is (double, const double*, double*, int);
         // both vectors length n.
-        unsafe { builder.launch(cfg) }
-            .map(|_| ())
-            .map_err(|e| format!("axpy launch: {e}"))
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("axpy launch: {e}"))?;
+        Ok(())
     }
 
     fn launch_scalar_reduction(

@@ -483,11 +483,19 @@ impl PredictionTransform for BinomialLocationScalePredictor {
         Ok(prob)
     }
 
-    fn response_jacobian_rows(&self, _: PredictPass) -> ResponseInterval {
-        // Probability already evaluated post-transformation: delta-method
-        // response interval with the threshold-scale η interval collapsed onto
-        // the point predictor.
-        ResponseInterval::CollapsedDelta
+    fn response_jacobian_rows(&self, pass: PredictPass) -> ResponseInterval {
+        match pass {
+            // Probability already evaluated post-transformation, on BOTH
+            // passes: the threshold-scale η interval is not meaningful on the
+            // response scale, so it collapses onto the point predictor and the
+            // response interval comes from the delta-method mean SE. Contrast
+            // `DispersionLocationScalePredictor`, whose posterior-mean pass
+            // transforms the η endpoints — sound only when the response is a
+            // monotone inverse-link image of η, which this one is not.
+            PredictPass::FullUncertainty | PredictPass::PosteriorMean => {
+                ResponseInterval::CollapsedDelta
+            }
+        }
     }
 
     fn bounds(&self) -> ResponseBounds {

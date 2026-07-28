@@ -1,4 +1,10 @@
+//! Estimate-policy unit tests.
+//!
+//! Declared only as `#[cfg(test)] mod estimate_policy_tests;` in
+//! `estimate/mod.rs`; the inner attribute below states that scope in the file
+//! itself, so the compiler enforces it rather than a naming convention.
 #![cfg(test)]
+
 use super::evaluation::{
     sas_effective_epsilon, sas_effective_epsilon_second, sas_log_delta_edge_barriercostgrad,
     sas_log_delta_edge_barriercostgradhess,
@@ -2129,13 +2135,16 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
             // Presence itself is part of the invariant: a fit that has a
             // criterion cold and none warm (or the reverse) is exactly the
             // cache-dependent provenance this guard exists to catch.
-            (cold_score, warm_score) if cold_score.is_some() != warm_score.is_some() => {
+            (Some(_), None) | (None, Some(_)) => {
+                let (cold_score, warm_score) = (cold.reml_score, warm.reml_score);
                 failures.push(format!(
                     "[{name}] the outer criterion's EXISTENCE depends on cache state: \
                      cold={cold_score:?} warm={warm_score:?}"
                 ));
             }
-            _ => {}
+            // Neither arm reported a criterion: the absence agrees, so there is
+            // no cache-dependent provenance to report here.
+            (None, None) => {}
         }
         if let Some(gap) = first_bitwise_gap(
             cold.beta.as_slice().expect("contiguous cold β"),

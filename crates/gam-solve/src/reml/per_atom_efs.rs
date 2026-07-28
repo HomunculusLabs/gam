@@ -804,11 +804,16 @@ mod tests {
                 }
             }
 
-            fn eval_cost(&mut self, _: &Array1<f64>) -> Result<f64, EstimationError> {
+            fn eval_cost(&mut self, rho: &Array1<f64>) -> Result<f64, EstimationError> {
+                // The failure is unconditional, but the caller must still hand
+                // this objective a point of its declared dimension — otherwise
+                // the test would pass on a mis-wired line search.
+                assert_eq!(rho.len(), self.capability().n_params);
                 Err(EstimationError::InvalidInput(SENTINEL.to_string()))
             }
 
-            fn eval(&mut self, _: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+            fn eval(&mut self, rho: &Array1<f64>) -> Result<OuterEval, EstimationError> {
+                assert_eq!(rho.len(), self.capability().n_params);
                 Err(EstimationError::InvalidInput(SENTINEL.to_string()))
             }
 
@@ -816,8 +821,14 @@ mod tests {
 
             fn seed_inner_state(
                 &mut self,
-                _: &Array1<f64>,
+                beta: &Array1<f64>,
             ) -> Result<SeedOutcome, EstimationError> {
+                // No inner state to seed, but an empty β is the documented
+                // "no warm-start" sentinel; anything else must be a real
+                // coefficient vector for the single declared parameter.
+                if !beta.is_empty() {
+                    assert_eq!(beta.len(), self.capability().n_params);
+                }
                 Ok(SeedOutcome::NoSlot)
             }
         }

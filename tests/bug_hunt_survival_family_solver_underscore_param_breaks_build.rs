@@ -52,15 +52,13 @@ fn parameter_list(src: &str, name: &str) -> String {
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     for (offset, byte) in bytes[open..].iter().enumerate() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return src[open + 1..open + offset].to_string();
-                }
+        if *byte == b'(' {
+            depth += 1;
+        } else if *byte == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return src[open + 1..open + offset].to_string();
             }
-            _ => {}
         }
     }
     panic!("unbalanced parens in signature of `{name}`");

@@ -1846,7 +1846,8 @@ fn fit_array(
 #[pyfunction]
 fn load_model(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<()> {
     detach_py_result(py, "load_model", move || {
-        load_model_impl(&model_bytes).map(drop)
+        load_model_impl(&model_bytes)?;
+        Ok(())
     })
 }
 
@@ -4600,20 +4601,20 @@ enum RemlFitView<'py> {
 #[pyfunction]
 fn extract_reml_score(py: Python<'_>, fit: Py<PyAny>) -> PyResult<f64> {
     let fit = fit.bind(py);
-    extract_reml_score_impl(py, fit)
+    extract_reml_score_impl(fit)
 }
 
 #[pyfunction]
 fn extract_reml_score_raw(py: Python<'_>, fit: Py<PyAny>) -> PyResult<f64> {
     let fit = fit.bind(py);
-    extract_reml_score_raw_impl(py, fit)
+    extract_reml_score_raw_impl(fit)
 }
 
 #[pyfunction]
 fn extract_reml_edf(py: Python<'_>, fit: Py<PyAny>) -> PyResult<Option<f64>> {
     let fit = fit.bind(py);
-    let view = reml_fit_view(py, fit)?;
-    extract_edf_from_view(py, &view)
+    let view = reml_fit_view(fit)?;
+    extract_edf_from_view(&view)
 }
 
 #[pyfunction(signature = (fits, names = None, cv_scores = None))]
@@ -4660,12 +4661,12 @@ fn compare_reml_fits(
     let mut candidates = Vec::with_capacity(fits.len());
     for (index, (name, fit)) in labels.into_iter().zip(fits.iter()).enumerate() {
         let fit = fit.bind(py);
-        let view = reml_fit_view(py, fit)?;
+        let view = reml_fit_view(fit)?;
         candidates.push(RemlCandidate {
             index,
             name,
-            score: extract_reml_score_from_view(py, &view)?,
-            edf: extract_edf_from_view(py, &view)?,
+            score: extract_reml_score_from_view(&view)?,
+            edf: extract_edf_from_view(&view)?,
             log_lik: extract_log_lik_from_view(&view)?,
             family: extract_family_from_view(&view)?,
             n_obs: extract_n_obs_from_view(&view)?,
@@ -4720,18 +4721,18 @@ fn compare_reml_fits(
     Ok(out.unbind())
 }
 
-fn extract_reml_score_impl(py: Python<'_>, fit: &Bound<'_, PyAny>) -> PyResult<f64> {
-    let view = reml_fit_view(py, fit)?;
-    extract_reml_score_from_view(py, &view)
+fn extract_reml_score_impl(fit: &Bound<'_, PyAny>) -> PyResult<f64> {
+    let view = reml_fit_view(fit)?;
+    extract_reml_score_from_view(&view)
 }
 
-fn extract_reml_score_from_view(py: Python<'_>, view: &RemlFitView<'_>) -> PyResult<f64> {
+fn extract_reml_score_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     let raw = extract_reml_score_raw_from_view(view)?;
-    with_tierney_kadane_normalizer_from_view(py, view, raw)
+    with_tierney_kadane_normalizer_from_view(view, raw)
 }
 
-fn extract_reml_score_raw_impl(py: Python<'_>, fit: &Bound<'_, PyAny>) -> PyResult<f64> {
-    let view = reml_fit_view(py, fit)?;
+fn extract_reml_score_raw_impl(fit: &Bound<'_, PyAny>) -> PyResult<f64> {
+    let view = reml_fit_view(fit)?;
     extract_reml_score_raw_from_view(&view)
 }
 
@@ -4753,11 +4754,10 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
 }
 
 fn with_tierney_kadane_normalizer_from_view(
-    py: Python<'_>,
     view: &RemlFitView<'_>,
     score: f64,
 ) -> PyResult<f64> {
-    let Some(null_dim) = extract_null_dim_from_view(py, view)? else {
+    let Some(null_dim) = extract_null_dim_from_view(view)? else {
         return Ok(score);
     };
     comparable_reml_score(
@@ -4829,12 +4829,12 @@ fn comparable_reml_score_from_summary_payload(payload: &serde_json::Value) -> Py
     .map_err(PyValueError::new_err)
 }
 
-fn extract_null_dim_from_view(py: Python<'_>, view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
+fn extract_null_dim_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
     if let Some(null_dim) = extract_float_metadata_from_view(view, NULL_DIM_KEYS)? {
         return Ok(Some(null_dim));
     }
     if let Some(nullity) = extract_float_metadata_from_view(view, NULLITY_KEYS)? {
-        return Ok(Some(nullity * extract_output_dim_from_view(py, view)?));
+        return Ok(Some(nullity * extract_output_dim_from_view(view)?));
     }
     let dim_h = extract_float_metadata_from_view(view, DIM_KEYS)?;
     let penalty_rank = extract_float_metadata_from_view(view, PENALTY_RANK_KEYS)?;
@@ -4844,7 +4844,7 @@ fn extract_null_dim_from_view(py: Python<'_>, view: &RemlFitView<'_>) -> PyResul
     })
 }
 
-fn extract_output_dim_from_view(_py: Python<'_>, view: &RemlFitView<'_>) -> PyResult<f64> {
+fn extract_output_dim_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     match view {
         RemlFitView::SavedSummary(payload) => Ok(json_output_dim(payload)),
         RemlFitView::PythonObject(_) => {
@@ -4864,7 +4864,7 @@ fn extract_output_dim_from_view(_py: Python<'_>, view: &RemlFitView<'_>) -> PyRe
     }
 }
 
-fn extract_edf_from_view(_py: Python<'_>, view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
+fn extract_edf_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
     match view {
         RemlFitView::SavedSummary(payload) => Ok(json_lookup_edf(payload, EDF_KEYS)),
         RemlFitView::PythonObject(_) => {
@@ -4946,7 +4946,7 @@ fn extract_float_metadata_from_view(
     }
 }
 
-fn reml_fit_view<'py>(py: Python<'py>, fit: &Bound<'py, PyAny>) -> PyResult<RemlFitView<'py>> {
+fn reml_fit_view<'py>(fit: &Bound<'py, PyAny>) -> PyResult<RemlFitView<'py>> {
     if let Ok(model_bytes) = fit.extract::<Vec<u8>>() {
         return Ok(RemlFitView::SavedSummary(summary_payload_from_model_bytes(
             &model_bytes,
@@ -4958,7 +4958,7 @@ fn reml_fit_view<'py>(py: Python<'py>, fit: &Bound<'py, PyAny>) -> PyResult<Reml
             &model_bytes,
         )?));
     }
-    if let Some(payload) = py_summary_payload(py, fit)? {
+    if let Some(payload) = py_summary_payload(fit)? {
         return Ok(RemlFitView::PythonObject(payload));
     }
     Ok(RemlFitView::PythonObject(fit.clone()))
@@ -4968,10 +4968,7 @@ fn summary_payload_from_model_bytes(model_bytes: &[u8]) -> PyResult<serde_json::
     summary_payload_value_from_model_bytes(model_bytes).map_err(PyValueError::new_err)
 }
 
-fn py_summary_payload<'py>(
-    _py: Python<'py>,
-    fit: &Bound<'py, PyAny>,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+fn py_summary_payload<'py>(fit: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
     if !fit.hasattr("summary")? {
         return Ok(None);
     }

@@ -6244,17 +6244,28 @@ mod tests {
     struct FixedRoystonParmarTransform;
 
     impl PredictionTransform for FixedRoystonParmarTransform {
-        fn point_state(&self, _: &PredictInput) -> Result<LinearState, EstimationError> {
+        fn point_state(&self, input: &PredictInput) -> Result<LinearState, EstimationError> {
             // Deliberately different from the posterior-integrated mean below;
             // the full driver must not parameterize a fresh-response law with
             // this plug-in state.
             let mean = array![0.4_f64, 0.9, 0.1];
+            // This fixture hard-codes a three-row state, so a driver that
+            // batched any other number of rows would silently pair up
+            // mismatched vectors downstream.
+            if input.design.nrows() != mean.len() {
+                return Err(EstimationError::InvalidInput(format!(
+                    "FixedRoystonParmarTransform is a {}-row fixture, got {} design rows",
+                    mean.len(),
+                    input.design.nrows()
+                )));
+            }
+            let n = mean.len();
             let eta = mean.mapv(|survival| (-survival.ln()).ln());
             Ok(LinearState {
                 eta,
                 mean,
-                eta_se: Some(Array1::from_elem(3, 0.01)),
-                mean_se: Some(Array1::from_elem(3, 0.01)),
+                eta_se: Some(Array1::from_elem(n, 0.01)),
+                mean_se: Some(Array1::from_elem(n, 0.01)),
                 covariance_source: InferenceCovarianceMode::Conditional,
             })
         }
@@ -6262,13 +6273,30 @@ mod tests {
         fn linear_state(
             &self,
             input: &PredictInput,
-            _: &UnifiedFitResult,
+            fit: &UnifiedFitResult,
             pass: PredictPass,
-            _: InferenceCovarianceMode,
+            covariance_mode: InferenceCovarianceMode,
         ) -> Result<LinearState, EstimationError> {
             let mut state = self.point_state(input)?;
             if matches!(pass, PredictPass::PosteriorMean) {
                 state.mean = array![0.5, 0.999, 0.001];
+            } else {
+                // The full-uncertainty pass consumes the requested covariance:
+                // absence is an error rather than a silent fall back to
+                // conditional, and the state records the one actually used.
+                let available = match covariance_mode {
+                    InferenceCovarianceMode::Conditional => fit.beta_covariance().is_some(),
+                    InferenceCovarianceMode::SmoothingCorrected => {
+                        fit.beta_covariance_corrected().is_some()
+                    }
+                };
+                if !available {
+                    return Err(EstimationError::InvalidInput(format!(
+                        "FixedRoystonParmarTransform: fit carries no {} covariance",
+                        covariance_mode.as_str()
+                    )));
+                }
+                state.covariance_source = covariance_mode;
             }
             Ok(state)
         }
@@ -6277,8 +6305,16 @@ mod tests {
             Ok(eta.mapv(|value| (-value.exp()).exp()))
         }
 
-        fn response_jacobian_rows(&self, _: PredictPass) -> ResponseInterval {
-            ResponseInterval::SymmetricDelta
+        fn response_jacobian_rows(&self, pass: PredictPass) -> ResponseInterval {
+            // The horizon indicator reports a genuine η interval *and* a
+            // response-scale delta SE on both passes, so the policy is the same
+            // either way. Enumerating the passes keeps that a stated fact: a new
+            // pass has to come back here and choose.
+            match pass {
+                PredictPass::FullUncertainty | PredictPass::PosteriorMean => {
+                    ResponseInterval::SymmetricDelta
+                }
+            }
         }
 
         fn bounds(&self) -> ResponseBounds {

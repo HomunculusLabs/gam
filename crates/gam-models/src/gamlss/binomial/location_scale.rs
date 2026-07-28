@@ -2523,16 +2523,30 @@ impl CustomFamily for BinomialLocationScaleFamily {
 
     fn diagonalworking_weights_directional_derivative(
         &self,
-        _: &[ParameterBlockState],
-        _: usize,
-        arr: &Array1<f64>,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_eta: &Array1<f64>,
     ) -> Result<Option<Array1<f64>>, String> {
-        // Default implementation ignores this parameter.
-        assert!(arr.iter().all(|v| !v.is_nan()));
-        Err(
-            "BinomialLocationScaleFamily no longer supports diagonal working weights; exact curvature is required"
-                .to_string(),
-        )
+        // The refusal is unconditional, but a caller that names a block this
+        // family does not have, or a direction outside that block's predictor
+        // space, is a wiring bug that must not hide behind the refusal — and
+        // the block it asked about belongs in the message.
+        assert!(
+            block_index < block_states.len(),
+            "diagonal working-weight directional derivative: block index {block_index} out of range for {} blocks",
+            block_states.len()
+        );
+        assert_eq!(
+            d_eta.len(),
+            block_states[block_index].eta.len(),
+            "diagonal working-weight directional derivative: direction is not in block {block_index}'s predictor space"
+        );
+        assert!(d_eta.iter().all(|v| !v.is_nan()));
+        Err(format!(
+            "BinomialLocationScaleFamily no longer supports diagonal working weights; exact \
+             curvature is required (refused for block {block_index} of {})",
+            block_states.len()
+        ))
     }
 
     fn exact_newton_joint_psi_terms(

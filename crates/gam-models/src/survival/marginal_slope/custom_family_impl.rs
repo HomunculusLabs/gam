@@ -297,8 +297,15 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "survival marginal-slope exact-Newton joint gradient: specs/block_states length mismatch {} vs {}",
+                specs.len(),
+                block_states.len()
+            ));
+        }
         if self.per_z_logslope_active() {
             let (log_likelihood, gradient, _) =
                 self.evaluate_exact_newton_joint_dense_per_z(block_states)?;
@@ -331,8 +338,15 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "survival marginal-slope exact-Newton joint Hessian workspace: specs/block_states length mismatch {} vs {}",
+                specs.len(),
+                block_states.len()
+            ));
+        }
         if self.per_z_logslope_active() {
             return Ok(None);
         }
@@ -352,9 +366,16 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn exact_newton_joint_hessian_workspace_with_options(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "survival marginal-slope exact-Newton joint Hessian workspace with options: specs/block_states length mismatch {} vs {}",
+                specs.len(),
+                block_states.len()
+            ));
+        }
         if self.per_z_logslope_active() {
             return Ok(None);
         }
@@ -720,11 +741,18 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn exact_newton_joint_psisecond_order_terms(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         psi_i: usize,
         psi_j: usize,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "survival marginal-slope exact-Newton joint psi second-order terms: specs/block_states length mismatch {} vs {}",
+                specs.len(),
+                block_states.len()
+            ));
+        }
         let axis_i = self.family_hyper_role(hyper_layout, psi_i)?;
         let axis_j = self.family_hyper_role(hyper_layout, psi_j)?;
         match (axis_i, axis_j) {
@@ -772,11 +800,18 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn exact_newton_joint_psihessian_directional_derivative(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         psi_index: usize,
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "survival marginal-slope exact-Newton joint psi-Hessian directional derivative: specs/block_states length mismatch {} vs {}",
+                specs.len(),
+                block_states.len()
+            ));
+        }
         match self.family_hyper_role(hyper_layout, psi_index)? {
             None => self.psi_hessian_directional_derivative(
                 block_states,
@@ -842,33 +877,55 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
         assert!(!block_spec.name.is_empty());
-        if block_idx == 0 {
-            return Ok(self
-                .effective_time_linear_constraints()?
-                .map(ConstraintSet::Dense));
-        }
-        if self.score_warp.is_some() && block_idx == 3 {
-            return Ok(self
-                .score_warp
+        // Every constraint set built below is expressed in the coefficient
+        // basis of block `block_idx`, so the block must exist in the supplied
+        // state vector and the rows must be exactly as wide as its coefficient
+        // vector; otherwise the projector downstream would silently constrain
+        // the wrong columns. `shift_linear_constraints_to_delta` enforces the
+        // same width later — this reports it where the mismatch is created.
+        let beta_dim = block_states
+            .get(block_idx)
+            .map(|state| state.beta.len())
+            .ok_or_else(|| {
+                format!(
+                    "survival marginal-slope block constraints: block index {block_idx} ('{}') is out of range for {} parameter blocks",
+                    block_spec.name,
+                    block_states.len()
+                )
+            })?;
+        let link_block_idx = if self.score_warp.is_some() { 4 } else { 3 };
+        let constraints = if block_idx == 0 {
+            self.effective_time_linear_constraints()?
+                .map(ConstraintSet::Dense)
+        } else if self.score_warp.is_some() && block_idx == 3 {
+            self.score_warp
                 .as_ref()
                 .map(|runtime| self.score_warp_linear_constraints(runtime))
                 .transpose()?
-                .map(ConstraintSet::Dense));
-        }
-        let link_block_idx = if self.score_warp.is_some() { 4 } else { 3 };
-        if self.link_dev.is_some() && block_idx == link_block_idx {
-            return Ok(self
-                .link_dev
+                .map(ConstraintSet::Dense)
+        } else if self.link_dev.is_some() && block_idx == link_block_idx {
+            self.link_dev
                 .as_ref()
                 .map(DeviationRuntime::structural_monotonicity_constraints)
-                .map(ConstraintSet::Dense));
+                .map(ConstraintSet::Dense)
+        } else {
+            None
+        };
+        if let Some(set) = &constraints
+            && set.ncols() != beta_dim
+        {
+            return Err(format!(
+                "survival marginal-slope block constraints: block {block_idx} ('{}') constraint width {} does not match its coefficient dimension {beta_dim}",
+                block_spec.name,
+                set.ncols()
+            ));
         }
-        Ok(None)
+        Ok(constraints)
     }
 
     fn max_feasible_step_size(

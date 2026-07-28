@@ -6751,7 +6751,7 @@ impl<'a> RemlState<'a> {
             }
         }
 
-        let mut workspace = PirlsWorkspace::new(self.y.len(), self.p, 0, 0);
+        let mut workspace = PirlsWorkspace::new(self.y.len(), self.p);
         // Gaussian-Identity fast path: reuse the per-RemlState `XᵀWX` cache
         // built once from constant weights. The outer REML loop never
         // mutates W for Gaussian, so the inner sparse assemble can scatter

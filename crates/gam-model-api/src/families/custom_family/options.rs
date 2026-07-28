@@ -101,6 +101,121 @@ pub(crate) fn assert_states_match_specs(
     }
 }
 
+/// Precondition check for the hooks that receive block states *without* the
+/// matching specs (`exact_newton_outer_curvature`,
+/// `exact_newton_joint_loglik_gradient`, ...).
+///
+/// Those hooks are asked for curvature/score *at the supplied point*, so the
+/// point has to be one: a NaN beta or eta is not an iterate, and a family that
+/// returns `None` (the trait default) would otherwise let the NaN travel on to
+/// whichever path the caller falls back to, surfacing as an unattributable
+/// non-finite outer derivative several layers up.
+pub(crate) fn assert_blockstates_are_a_point(states: &[ParameterBlockState], context: &str) {
+    for (block, state) in states.iter().enumerate() {
+        assert!(
+            state.beta.iter().all(|v| !v.is_nan()),
+            "{context}: NaN beta in block {block}"
+        );
+        assert!(
+            state.eta.iter().all(|v| !v.is_nan()),
+            "{context}: NaN eta in block {block}"
+        );
+    }
+}
+
+/// Precondition check for the per-block hooks that take `(states, block_index,
+/// spec)`: the index must select a block of `states`, and the spec handed
+/// alongside it must be *that* block's spec, not a different block's.
+///
+/// The index and the spec are two independent ways of naming the same block, so
+/// a caller that advances one without the other silently asks the family to
+/// project block `i`'s coefficients onto block `j`'s geometry.
+pub(crate) fn assert_block_index_matches_spec(
+    states: &[ParameterBlockState],
+    block_index: usize,
+    spec: &ParameterBlockSpec,
+    context: &str,
+) {
+    assert!(
+        block_index < states.len(),
+        "{context}: block index {block_index} out of range for {} blocks",
+        states.len()
+    );
+    assert_eq!(
+        states[block_index].beta.len(),
+        spec.design.ncols(),
+        "{context}: spec does not describe block {block_index}"
+    );
+}
+
+/// Precondition check for the per-block hooks that take `(states, block_index,
+/// direction)` where `direction` lives in the block's *coefficient* space
+/// (`exact_newton_hessian_directional_derivative`, `max_feasible_step_size`, ...).
+pub(crate) fn assert_block_local_beta_direction(
+    states: &[ParameterBlockState],
+    block_index: usize,
+    direction: &Array1<f64>,
+    context: &str,
+) {
+    assert!(
+        block_index < states.len(),
+        "{context}: block index {block_index} out of range for {} blocks",
+        states.len()
+    );
+    assert_eq!(
+        direction.len(),
+        states[block_index].beta.len(),
+        "{context}: direction is not in block {block_index}'s coefficient space"
+    );
+    assert!(
+        direction.iter().all(|v| !v.is_nan()),
+        "{context}: NaN entry in block {block_index} coefficient direction"
+    );
+}
+
+/// Precondition check for the per-block hooks that take `(states, block_index,
+/// d_eta)` where the direction lives in the block's *predictor* space
+/// (`diagonalworking_weights_directional_derivative` and its second-order
+/// sibling): `dw` is indexed by row, so a coefficient-space vector slipped in
+/// here would silently produce a weight derivative of the wrong length.
+pub(crate) fn assert_block_local_eta_direction(
+    states: &[ParameterBlockState],
+    block_index: usize,
+    d_eta: &Array1<f64>,
+    context: &str,
+) {
+    assert!(
+        block_index < states.len(),
+        "{context}: block index {block_index} out of range for {} blocks",
+        states.len()
+    );
+    assert_eq!(
+        d_eta.len(),
+        states[block_index].eta.len(),
+        "{context}: direction is not in block {block_index}'s predictor space"
+    );
+    assert!(
+        d_eta.iter().all(|v| !v.is_nan()),
+        "{context}: NaN entry in block {block_index} predictor direction"
+    );
+}
+
+/// Precondition check for the psi hooks that name an outer coordinate by its
+/// global index into the hyper-layout: the index must resolve to a real axis,
+/// otherwise the family is being asked to differentiate a coordinate that the
+/// layout does not carry.
+pub(crate) fn assert_psi_index_in_layout(
+    hyper_layout: &CustomFamilyHyperLayout,
+    psi_index: usize,
+    context: &str,
+) {
+    assert!(
+        hyper_layout.axis(psi_index).is_some(),
+        "{context}: psi index {psi_index} is not an axis of a layout with {} coordinates",
+        hyper_layout.len()
+    );
+}
+
 pub(crate) fn assert_hyper_layout_matches_specs(
     hyper_layout: &CustomFamilyHyperLayout,
     specs: &[ParameterBlockSpec],

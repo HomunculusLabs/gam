@@ -256,8 +256,11 @@ pub(crate) fn reduce_row_schur_contributions<B: BatchedBlockSolver + Sync>(
                     #[cfg(target_os = "linux")]
                     {
                         if let Some(ctx) = gam_gpu::device_runtime::cuda_context_for(ordinal) {
-                            if ctx.bind_to_thread().is_err() {
-                                // Fall through: this tile reduces on the CPU.
+                            if let Err(err) = ctx.bind_to_thread() {
+                                log::debug!(
+                                    "arrow-schur tile {ordinal}: CUDA context bind failed ({err}); \
+                                     this tile reduces on the CPU"
+                                );
                             }
                         }
                     }

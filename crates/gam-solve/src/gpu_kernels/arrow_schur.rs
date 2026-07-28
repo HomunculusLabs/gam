@@ -3492,8 +3492,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         // SAFETY: all buffers have length n and belong to `stream`; the kernel only
         // reads/writes indices `< n`.
         unsafe { builder.launch(pcg_launch_config(n)?) }
-            .map(drop)
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        Ok(())
     }
 
     fn launch_update_p(
@@ -3513,8 +3513,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         // SAFETY: z/p both have length n and belong to `stream`; the kernel only
         // reads/writes indices `< n`.
         unsafe { builder.launch(pcg_launch_config(n)?) }
-            .map(drop)
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        Ok(())
     }
 
     struct DeviceSaePcgBuffers {
@@ -3839,8 +3839,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         // entries on `stream`; the kernel writes one in-bounds element per
         // launched index below `n`.
         unsafe { builder.launch(pcg_launch_config(n)?) }
-            .map(drop)
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        Ok(())
     }
 
     fn launch_sae_penalty_matvec(
@@ -4137,8 +4137,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
             // SAFETY: `scatter_partial` is sized `n_chunks · k` and `diag` is sized
             // `k`; exactly one thread updates each in-bounds `diag[a]`.
             unsafe { builder.launch(cfg) }
-                .map(drop)
-                .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+                .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+            Ok(())
         }
     }
 
@@ -5697,8 +5697,8 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
         // SAFETY: diag + cross-block + ainv are live buffers; one thread owns
         // each a<k and walks every row, with c/d bounded by q<=max_q.
         unsafe { b.launch(cfg) }
-            .map(drop)
-            .map_err(|_| ArrowSchurGpuFailure::Unavailable)
+            .map_err(|_| ArrowSchurGpuFailure::Unavailable)?;
+        Ok(())
     }
 
     /// #1551 kernel-isolating seam: evaluate the framed reduced-Schur matvec

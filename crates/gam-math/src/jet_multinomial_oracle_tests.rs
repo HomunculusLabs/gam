@@ -43,6 +43,12 @@
 //!   same [`verify_kernel_channels`] universal oracle every other family uses.
 //! The comparison holds at `rel_tol = 1e-11`, tighter than the issue's ~1e-10 ask.
 
+// `lib.rs` declares this module only as `#[cfg(test)] mod
+// jet_multinomial_oracle_tests;`; this attribute states that test-only scope in
+// the file itself, as a claim the compiler enforces rather than one carried by
+// the filename.
+#![cfg(test)]
+
 use crate::jet_scalar::JetScalar;
 use crate::jet_tower::{
     KernelChannels, RowProgram, Tower4, program_full_tower, verify_kernel_channels,

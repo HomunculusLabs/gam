@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! Penalized-objective finite-difference gradient contract tests, split verbatim
 //! out of `tests.rs` to keep that tracked file under the #780 10k-line gate.
 //! Declared as a sibling `#[cfg(test)] mod` in `mod.rs`.
@@ -9,6 +8,7 @@
 //! `sae_reml_extra_penalty_energy_counts_live_isometry_once`) and their shared
 //! `SaeFd*` / `sae_fd_*` / `sae_pen_*` fixtures. All production symbols are in
 //! scope via `super::*`.
+#![cfg(test)]
 
 use super::*;
 use approx::assert_abs_diff_eq;

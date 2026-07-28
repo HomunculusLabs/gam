@@ -302,15 +302,14 @@ fn apply_kind_specific(
 ) -> Result<(), String> {
     // Recurse through the row-gating envelopes so the override targets the
     // geometric core, not the gating wrapper.
-    match basis {
+    let gating_envelope_core: Option<&mut SmoothBasisSpec> = match basis {
         SmoothBasisSpec::ByVariable { inner, .. }
-        | SmoothBasisSpec::FactorSumToZero { inner, .. } => {
-            return apply_kind_specific(inner, kind, descriptor, symbol);
-        }
-        SmoothBasisSpec::BySmooth { smooth, .. } => {
-            return apply_kind_specific(smooth, kind, descriptor, symbol);
-        }
-        _ => {}
+        | SmoothBasisSpec::FactorSumToZero { inner, .. } => Some(&mut **inner),
+        SmoothBasisSpec::BySmooth { smooth, .. } => Some(&mut **smooth),
+        _ => None,
+    };
+    if let Some(core) = gating_envelope_core {
+        return apply_kind_specific(core, kind, descriptor, symbol);
     }
 
     let normalized = kind.to_ascii_lowercase();

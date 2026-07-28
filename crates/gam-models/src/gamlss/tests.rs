@@ -2,6 +2,12 @@
 // Behavior tests for the gamlss family stack (real `#[cfg(test)] mod tests`).
 // `super::*` resolves to the parent `gamlss` module, whose flat re-exports
 // surface every concern-submodule item these tests exercise.
+//
+// The scope claim above is made to the compiler, not just to the filename: the
+// sole declaration of this module (`crates/gam-models/src/gamlss.rs`) is
+// `#[cfg(test)] mod tests;`, so the inner attribute below is a no-op that makes
+// the test-only scope checkable in this file.
+#![cfg(test)]
 
 use super::*;
 // Helpers exercised only by these tests; imported here (not at module scope)

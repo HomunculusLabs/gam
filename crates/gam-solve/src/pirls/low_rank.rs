@@ -262,7 +262,7 @@ mod low_rank_weight_pirls_tests {
         let u = Array2::<f64>::zeros((5, 0));
         let v = Array2::<f64>::zeros((5, 0));
         let weight = LowRankWeight::new(d.view(), u.view(), v.view()).unwrap();
-        let mut ws = PirlsWorkspace::new(5, 3, 0, 0);
+        let mut ws = PirlsWorkspace::new(5, 3);
         let got = compute_xtwx_low_rank(&mut ws, &design, &weight).unwrap();
         let want = design
             .xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(&d).unwrap())

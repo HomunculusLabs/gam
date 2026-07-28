@@ -270,27 +270,25 @@ impl BasisHessianLipschitz for AmbientSphereHarmonicEvaluator {
     /// rather than tabulated, so raising the working degree updates the bound
     /// instead of invalidating it. Independent of the point, hence of the chart
     /// region.
-    fn value_sup(&self, _: &ChartRegion) -> f64 {
-        // Bare `_`, which the scanner explicitly permits: it does not preserve a
-        // fake binding name. These four bounds are genuinely chart-INDEPENDENT
-        // (see the doc above -- they come from the columns' own coefficients on
-        // the unit sphere, not from any point), and `BasisHessianLipschitz` fixes
-        // the signature so the parameter cannot be deleted. Three other spellings
-        // are all banned in their own right: `_chart` (underscore-prefixed name),
-        // `std::hint::black_box`, and `debug_assert!`. Bare `_` is the form the
-        // rule leaves for exactly this case.
+    fn value_sup(&self, chart: &ChartRegion) -> f64 {
+        // The bound itself is chart-independent, but a certificate is still only
+        // meaningful over a genuine region — see [`ChartRegion::assert_valid`].
+        chart.assert_valid();
         self.column_jet_bound()
     }
 
-    fn jacobian_sup(&self, _: &ChartRegion) -> f64 {
+    fn jacobian_sup(&self, chart: &ChartRegion) -> f64 {
+        chart.assert_valid();
         self.column_jet_bound() * self.degree() as f64
     }
 
-    fn hessian_sup(&self, _: &ChartRegion) -> f64 {
+    fn hessian_sup(&self, chart: &ChartRegion) -> f64 {
+        chart.assert_valid();
         self.column_jet_bound() * (self.degree() as f64).powi(2)
     }
 
-    fn third_sup(&self, _: &ChartRegion) -> f64 {
+    fn third_sup(&self, chart: &ChartRegion) -> f64 {
+        chart.assert_valid();
         self.column_jet_bound() * (self.degree() as f64).powi(3)
     }
 }

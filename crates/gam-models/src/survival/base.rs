@@ -735,10 +735,34 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         spec: &crate::custom_family::ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
+        // The constraint rows built below live in block `block_idx`'s coefficient
+        // space, so the index and the spec must agree on which block that is —
+        // otherwise the returned cone would be imposed on the wrong coordinates.
+        let state = block_states.get(block_idx).ok_or_else(|| {
+            SurvivalError::CauseSpecificDimensionMismatch {
+                reason: format!(
+                    "cause-specific survival expected block index < {}, got {block_idx}",
+                    block_states.len()
+                ),
+            }
+            .to_string()
+        })?;
+        if state.beta.len() != spec.design.ncols() {
+            return Err(SurvivalError::CauseSpecificDimensionMismatch {
+                reason: format!(
+                    "cause-specific survival block {block_idx} carries {} coefficient(s) but spec \
+                     '{}' has {} design column(s)",
+                    state.beta.len(),
+                    spec.name,
+                    spec.design.ncols()
+                ),
+            }
+            .into());
+        }
         let block = self.blocks.get(block_idx).ok_or_else(|| {
             SurvivalError::CauseSpecificDimensionMismatch {
                 reason: format!(
@@ -2990,7 +3014,22 @@ impl WorkingModelSurvival {
             &mut candidate,
             Coefficients::new(beta0.clone()),
             &opts,
-            None,
+            // This shim exists so a caller can finite-difference the survival
+            // LAML surface in rho. When such a check disagrees with the
+            // analytic gradient, the inner trajectory that produced beta-hat(rho)
+            // is the first thing to inspect, so trace it instead of discarding
+            // it.
+            Some(&mut |info: &gam_solve::pirls::WorkingModelIterationInfo| {
+                log::trace!(
+                    "[survival LAML shim] inner PIRLS iter={} deviance={:.6e} \
+                     |grad|={:.3e} step={:.3e} halvings={}",
+                    info.iteration,
+                    info.deviance,
+                    info.gradient_norm,
+                    info.step_size,
+                    info.step_halving
+                );
+            }),
         )?;
         let mut beta = summary.beta.as_ref().to_owned();
 

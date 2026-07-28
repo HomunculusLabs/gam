@@ -201,18 +201,15 @@ fn public_fit_penalties(
         ));
     }
     let gamma = scad_mcp_gamma.unwrap_or(if coord_sparsity == "scad" { 3.7 } else { 2.5 });
-    match coord_sparsity.as_str() {
-        "scad" if !gamma.is_finite() || gamma <= 2.0 => {
-            return Err(format!(
-                "sae_manifold_fit: scad_mcp_gamma must be finite and > 2 for SCAD; got {gamma}"
-            ));
-        }
-        "mcp" if !gamma.is_finite() || gamma <= 1.0 => {
-            return Err(format!(
-                "sae_manifold_fit: scad_mcp_gamma must be finite and > 1 for MCP; got {gamma}"
-            ));
-        }
-        _ => {}
+    if coord_sparsity == "scad" && (!gamma.is_finite() || gamma <= 2.0) {
+        return Err(format!(
+            "sae_manifold_fit: scad_mcp_gamma must be finite and > 2 for SCAD; got {gamma}"
+        ));
+    }
+    if coord_sparsity == "mcp" && (!gamma.is_finite() || gamma <= 1.0) {
+        return Err(format!(
+            "sae_manifold_fit: scad_mcp_gamma must be finite and > 1 for MCP; got {gamma}"
+        ));
     }
 
     let mut descriptors = Vec::new();

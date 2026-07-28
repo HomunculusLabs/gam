@@ -614,9 +614,23 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_outer_derivative_order(
         &self,
         specs: &[ParameterBlockSpec],
-        _: &BlockwiseFitOptions,
+        options: &BlockwiseFitOptions,
     ) -> crate::custom_family::ExactOuterDerivativeOrder {
         use crate::custom_family::ExactOuterDerivativeOrder;
+
+        // This reports CAPABILITY, so the caller's `use_outer_hessian` /
+        // subsample choices must not change the answer. The options are still
+        // a precondition of the reported order being usable: the declared
+        // order is consumed against the outer convergence test, and a
+        // non-finite or negative outer tolerance would make that test
+        // meaningless. Reject it here rather than downstream — the same check
+        // `assert_valid_options` bottoms out in on the trait's own
+        // options-carrying entry points.
+        assert!(
+            options.outer_tol.is_finite() && options.outer_tol >= 0.0,
+            "BernoulliMarginalSlopeFamily exact outer derivative order: \
+             outer_tol must be finite and non-negative"
+        );
 
         let flex_active = self.score_warp.is_some() || self.link_dev.is_some();
         let coefficient_work = self
@@ -669,11 +683,13 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 "direct-dense"
             };
             log::info!(
-                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic inner_route={} matrix_free_inner_requested={} dense_available={} outer_hvp_available={} coefficient_work={}",
+                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic outer_hessian_requested={} outer_subsample={} inner_route={} matrix_free_inner_requested={} dense_available={} outer_hvp_available={} coefficient_work={}",
                 self.y.len(),
                 p_total,
                 flex_active,
                 order,
+                options.use_outer_hessian,
+                options.outer_score_subsample.is_some(),
                 inner_route,
                 matrix_free_inner_requested,
                 dense_available,
@@ -1298,8 +1314,11 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_newton_joint_gradient_evaluation(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<ExactNewtonJointGradientEvaluation>, String> {
+        crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
+            format!("BernoulliMarginalSlopeFamily exact Newton joint gradient evaluation: {err}")
+        })?;
         self.validate_exact_monotonicity(block_states)?;
         if !self.effective_flex_active(block_states)? {
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
@@ -1326,8 +1345,11 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_newton_joint_hessian_workspace(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
+            format!("BernoulliMarginalSlopeFamily exact Newton joint Hessian workspace: {err}")
+        })?;
         if !self.effective_flex_active(block_states)? {
             // Rigid path: use generic RowKernel<2> operator
             let kern = BernoulliRigidRowKernel::new(self.clone(), block_states.to_vec());
@@ -1347,9 +1369,14 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_newton_joint_hessian_workspace_with_options(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Arc<dyn ExactNewtonJointHessianWorkspace>>, String> {
+        crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
+            format!(
+                "BernoulliMarginalSlopeFamily exact Newton joint Hessian workspace with options: {err}"
+            )
+        })?;
         if !self.effective_flex_active(block_states)? {
             // Rigid path: RowKernel<2> operator wired through the supplied
             // `RowSet`. With no outer subsample this is `RowSet::All`
@@ -1428,9 +1455,14 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// free path wins well below that — drop the `p` floor for this family.
     fn prefers_matrix_free_inner_joint(
         &self,
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         states: &[ParameterBlockState],
     ) -> bool {
+        assert!(
+            crate::custom_family::validate_blockspec_consistency(specs).is_ok(),
+            "BernoulliMarginalSlopeFamily matrix-free inner-joint preference: \
+             inconsistent parameter block specs"
+        );
         if self.y.len() < 16_384 {
             return false;
         }
@@ -1811,11 +1843,14 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_newton_joint_psisecond_order_terms(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         psi_i: usize,
         psi_j: usize,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+        crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
+            format!("BernoulliMarginalSlopeFamily exact Newton joint psi second-order terms: {err}")
+        })?;
         let axis_i = hyper_layout.axis(psi_i).ok_or_else(|| {
             format!(
                 "BernoulliMarginalSlopeFamily hyper axis {psi_i} is out of range for {} axes",
@@ -1870,11 +1905,16 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn exact_newton_joint_psihessian_directional_derivative(
         &self,
         block_states: &[ParameterBlockState],
-        _: &[ParameterBlockSpec],
+        specs: &[ParameterBlockSpec],
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
         psi_index: usize,
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        crate::custom_family::validate_blockspec_consistency(specs).map_err(|err| {
+            format!(
+                "BernoulliMarginalSlopeFamily exact Newton joint psi-Hessian directional derivative: {err}"
+            )
+        })?;
         match hyper_layout.axis(psi_index) {
             Some(crate::custom_family::CustomFamilyHyperAxis::Family { family_axis: 0 }) => {
                 return self.sigma_exact_joint_psihessian_directional_derivative(

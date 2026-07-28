@@ -1545,19 +1545,22 @@ impl FitConvergenceEvidence {
             ));
         }
         match &raw.outer {
-            FitOuterConvergenceEvidence::Fixed if raw.outer_iterations != 0 => {
-                return Err(format!(
-                    "fixed-outer convergence evidence cannot carry {} outer iterations",
-                    raw.outer_iterations
-                ));
+            FitOuterConvergenceEvidence::Fixed => {
+                if raw.outer_iterations != 0 {
+                    return Err(format!(
+                        "fixed-outer convergence evidence cannot carry {} outer iterations",
+                        raw.outer_iterations
+                    ));
+                }
             }
-            FitOuterConvergenceEvidence::Analytic(certificate) if !certificate.certifies() => {
-                return Err(format!(
-                    "analytic outer convergence evidence does not certify: {}",
-                    certificate.summary()
-                ));
+            FitOuterConvergenceEvidence::Analytic(certificate) => {
+                if !certificate.certifies() {
+                    return Err(format!(
+                        "analytic outer convergence evidence does not certify: {}",
+                        certificate.summary()
+                    ));
+                }
             }
-            _ => {}
         }
         Ok(Self {
             inner_status: raw.inner_status,
@@ -3296,12 +3299,12 @@ pub fn validate_explicit_dense_hessian_for_whitening(
     hessian
         .to_owned()
         .cholesky(Side::Lower)
-        .map(drop)
         .map_err(|err| {
             EstimationError::InvalidInput(format!(
                 "{label} must be positive definite for HMC/NUTS whitening; Cholesky failed: {err:?}"
             ))
-        })
+        })?;
+    Ok(())
 }
 
 fn log_lambdas_match_lambdas(log_lambdas: &Array1<f64>, lambdas: &Array1<f64>) -> bool {

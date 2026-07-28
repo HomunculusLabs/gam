@@ -1,4 +1,5 @@
 #![cfg(test)]
+
 use super::*;
 use crate::custom_family::BlockWorkingSet;
 use faer::sparse::{SparseColMat, Triplet};

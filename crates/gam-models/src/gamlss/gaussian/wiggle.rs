@@ -2048,10 +2048,25 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
 
     fn block_linear_constraints(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         spec: &ParameterBlockSpec,
     ) -> Result<Option<ConstraintSet>, String> {
+        let state = block_states.get(block_idx).ok_or_else(|| {
+            format!(
+                "GaussianLocationScaleWiggleFamily block constraints: block {block_idx} is out of \
+                 range for {} blocks",
+                block_states.len()
+            )
+        })?;
+        if state.beta.len() != spec.design.ncols() {
+            return Err(format!(
+                "GaussianLocationScaleWiggleFamily block constraints: block {block_idx} carries {} \
+                 coefficients but its design has {} columns",
+                state.beta.len(),
+                spec.design.ncols()
+            ));
+        }
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(None);
         }
@@ -2060,12 +2075,27 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
 
     fn post_update_block_beta(
         &self,
-        _: &[ParameterBlockState],
+        block_states: &[ParameterBlockState],
         block_idx: usize,
         block_spec: &ParameterBlockSpec,
         beta: Array1<f64>,
     ) -> Result<Array1<f64>, String> {
         assert!(!block_spec.name.is_empty());
+        let state = block_states.get(block_idx).ok_or_else(|| {
+            format!(
+                "GaussianLocationScaleWiggleFamily post-update: block {block_idx} is out of range \
+                 for {} blocks",
+                block_states.len()
+            )
+        })?;
+        if state.beta.len() != beta.len() {
+            return Err(format!(
+                "GaussianLocationScaleWiggleFamily post-update: block {block_idx} was updated from \
+                 {} coefficients to {}",
+                state.beta.len(),
+                beta.len()
+            ));
+        }
         if block_idx != Self::BLOCK_WIGGLE {
             return Ok(beta);
         }

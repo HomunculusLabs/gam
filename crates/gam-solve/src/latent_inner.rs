@@ -497,9 +497,18 @@ mod tests {
         fn assemble(
             &mut self,
             arr: ArrayView1<'_, f64>,
-            _: &LatentCoordValues,
+            latent: &LatentCoordValues,
         ) -> Result<ArrowSchurSystem, String> {
             assert!(arr.iter().all(|v| !v.is_nan()));
+            // The system this fixture returns is sized (n, d, k); the latent
+            // field it is handed must be the one that sizing describes.
+            assert_eq!(
+                latent.as_flat().len(),
+                self.n * self.d,
+                "assembler configured for {} rows x {} latent axes",
+                self.n,
+                self.d
+            );
             let mut sys = ArrowSchurSystem::new(self.n, self.d, self.k);
             for j in 0..self.k {
                 sys.hbb[[j, j]] = 1.0;
@@ -515,9 +524,10 @@ mod tests {
         fn objective(
             &mut self,
             arr: ArrayView1<'_, f64>,
-            _: &LatentCoordValues,
+            latent: &LatentCoordValues,
         ) -> Result<f64, String> {
             assert!(arr.iter().all(|v| !v.is_nan()));
+            assert_eq!(latent.as_flat().len(), self.n * self.d);
             Ok(0.0)
         }
     }

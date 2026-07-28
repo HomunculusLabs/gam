@@ -809,8 +809,16 @@ mod tests {
 
         fn commit_reactive_domain_waypoint(
             &mut self,
-            _: &Array1<f64>,
+            rho: &Array1<f64>,
         ) -> Result<(), crate::model_types::EstimationError> {
+            // The trait documents the committed waypoint as the full inner
+            // state produced by the value evaluation AT `rho`, so a commit must
+            // name the rho this objective was last evaluated at.
+            assert_eq!(
+                self.rho_evaluated.last(),
+                Some(rho),
+                "commit_reactive_domain_waypoint must name the last evaluated rho"
+            );
             self.checkpoint_full_state_marker
                 .take()
                 .expect("active waypoint checkpoint");

@@ -127,7 +127,10 @@ fn fixture() -> (usize, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64) {
 
 
 /// Fit one survival location-scale arm and print the full smoothing readout.
-fn run_survival_case(label: &str, formula: &str, cfg_mut: impl FnOnce(&mut FitConfig)) {
+/// The only fit knob this probe varies across cases is the number of internal
+/// time knots, so it is a plain argument rather than a general
+/// `&mut FitConfig` hook that four of the five call sites had nothing to say to.
+fn run_survival_case(label: &str, formula: &str, time_num_internal_knots: usize) {
     let (n, t, event, x, z, sigma_true) = fixture();
     let headers: Vec<String> = ["t", "event", "x", "z"]
         .into_iter()
@@ -149,14 +152,13 @@ fn run_survival_case(label: &str, formula: &str, cfg_mut: impl FnOnce(&mut FitCo
     let z_idx = col["z"];
     let ncols = ds.headers.len();
 
-    let mut cfg = FitConfig {
+    let cfg = FitConfig {
         survival_likelihood: Some("location-scale".to_string()),
         survival_distribution: "gaussian".to_string(),
-        time_num_internal_knots: 2,
+        time_num_internal_knots,
         outer_max_iter: Some(80),
         ..FitConfig::default()
     };
-    cfg_mut(&mut cfg);
 
     eprintln!("\n================ CASE {label}: {formula} ================");
     let result = match fit_from_formula(formula, &ds, &cfg) {
@@ -271,7 +273,7 @@ fn probe_fixture() {
     run_survival_case(
         "A-fixture-k10",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
-        |_| {},
+        2,
     );
 }
 
@@ -279,22 +281,22 @@ fn probe_2596_variants() {
     run_survival_case(
         "B-k5",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=5)"#,
-        |_| {},
+        2,
     );
     run_survival_case(
         "C-single-penalty",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=10, double_penalty=false)"#,
-        |_| {},
+        2,
     );
     run_survival_case(
         "D-pspline",
         r#"Surv(t, event) ~ x + s(z, bs="ps", k=10)"#,
-        |_| {},
+        2,
     );
     run_survival_case(
         "E-default-time-knots",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
-        |c| c.time_num_internal_knots = 8,
+        8,
     );
 }
 

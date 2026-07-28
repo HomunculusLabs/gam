@@ -1424,7 +1424,7 @@ impl BernoulliMarginalSlopeFamily {
                             axis.block_idx,
                             &psi_row.local_vec,
                             &right_primary,
-                        );
+                        )?;
                         slot.2.add_pullback(self, row, slices, primary, &third);
                     }
                 }
@@ -1731,7 +1731,7 @@ impl BernoulliMarginalSlopeFamily {
                                     bij.block_idx,
                                     &bij.local_vec,
                                     &right_primary_ij,
-                                );
+                                )?;
                             }
 
                             // --- br_i outer br_j * f_pipi[[idx_i, idx_j]] + transpose ---
@@ -1754,7 +1754,7 @@ impl BernoulliMarginalSlopeFamily {
                                 block_i,
                                 &br_i.local_vec,
                                 &right_primary_i,
-                            );
+                            )?;
 
                             // --- br_j outer pullback(third_i[idx_j,:]) + transpose ---
                             let right_primary_j = third_i.row(idx_j).to_owned();
@@ -1766,7 +1766,7 @@ impl BernoulliMarginalSlopeFamily {
                                 block_j,
                                 &br_j.local_vec,
                                 &right_primary_j,
-                            );
+                            )?;
 
                             // --- fourth tensor pullback ---
                             acc.2.add_pullback(self, row, slices, primary, &fourth);
@@ -2154,7 +2154,7 @@ impl BernoulliMarginalSlopeFamily {
                                 block_i,
                                 &psi_local_ij_alpha,
                                 &right_primary_ij,
-                            );
+                            )?;
                         }
                         // br_i outer br_j(α) * f_pipi[[idx_i, idx_j]] (contracted over j)
                         for j in 0..psi_dim {
@@ -2184,7 +2184,7 @@ impl BernoulliMarginalSlopeFamily {
                                 block_i,
                                 &psi_local[i],
                                 &right_primary_i,
-                            );
+                            )?;
                         }
                         // br_j(α) outer pullback(third_i.row(idx_j)) + transpose
                         for j in 0..psi_dim {
@@ -2202,7 +2202,7 @@ impl BernoulliMarginalSlopeFamily {
                                 axes[j].block,
                                 &psi_local[j],
                                 &right_primary_j,
-                            );
+                            )?;
                         }
                         // fourth tensor pullback (fourth already α-weighted via dir(α))
                         block_acc.add_pullback(self, row, slices, primary, &fourth);
@@ -2379,7 +2379,7 @@ impl BernoulliMarginalSlopeFamily {
                         psi_row.block_idx,
                         &psi_row.local_vec,
                         &right_primary,
-                    );
+                    )?;
                     acc.add_pullback(self, row, slices, primary, &fourth);
                     let mut third_action = self.row_primary_third_contracted(
                         row,
@@ -2520,7 +2520,7 @@ impl BernoulliMarginalSlopeFamily {
                         psi_row.block_idx,
                         &psi_row.local_vec,
                         &right_primary,
-                    );
+                    )?;
                     acc.add_pullback(self, row, slices, primary, &fourth);
                     let mut third_action = self.row_primary_third_contracted(
                         row,

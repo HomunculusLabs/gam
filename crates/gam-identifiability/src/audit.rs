@@ -274,15 +274,17 @@ pub fn compute_skewness_mu3(z: &[f64]) -> f64 {
 pub fn bias_shift_for_pair(z_a: Option<&[f64]>, z_b: Option<&[f64]>, s2_a: f64, s2_b: f64) -> f64 {
     // Both blocks have the same row scaling → shift cancels.
     match (z_a, z_b) {
-        (Some(za), Some(zb)) if za.len() == zb.len() => {
-            // Pointwise equality check: if the vectors are identical, shift = 0.
-            let same = za.iter().zip(zb.iter()).all(|(a, b)| a == b);
-            if same {
-                return 0.0;
-            }
+        // Pointwise equality check: if the vectors are identical, shift = 0.
+        (Some(za), Some(zb))
+            if za.len() == zb.len() && za.iter().zip(zb.iter()).all(|(a, b)| a == b) =>
+        {
+            return 0.0;
         }
         (None, None) => return 0.0,
-        _ => {}
+        // Different lengths, different values, or only one side row-scaled: the
+        // scaled and unscaled columns are not from the same distribution, so
+        // the shift does not cancel and is derived from the dominant μ_3 below.
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {}
     }
     // Identify which block's scaling to use for μ_3.
     // Use the block whose column has the LARGER S2 (dominates the null width)
@@ -4108,9 +4110,21 @@ mod tests {
     impl BlockEffectiveJacobian for FixedMultiChannelJac {
         fn effective_jacobian_rows(
             &self,
-            _: &FamilyLinearizationState<'_>,
+            state: &FamilyLinearizationState<'_>,
             rows: std::ops::Range<usize>,
         ) -> Result<Array2<f64>, String> {
+            // The fixture's Jacobian is precomputed and therefore β-independent,
+            // but the linearization point still has to be the one this block
+            // owns: a β of the wrong width means the caller is slicing a
+            // different block's coefficients into us, which a constant Jacobian
+            // would otherwise absorb without complaint.
+            if state.beta.len() != self.p {
+                return Err(format!(
+                    "FixedMultiChannelJac linearization beta has {} entries, expected p = {}",
+                    state.beta.len(),
+                    self.p
+                ));
+            }
             let start = rows.start.min(self.n);
             let end = rows.end.min(self.n);
             let chunk = end - start;

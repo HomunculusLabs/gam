@@ -1244,7 +1244,15 @@ fn extract_spatial_operator_runtime_caches(
                     stiffness_local_idx = Some(active_local_idx);
                     stiffness_norm = Some(penalty.info.normalization_scale);
                 }
-                _ => {}
+                // Not an explicit {mass, tension, stiffness} operator channel,
+                // so it carries no slot in the spatial-operator runtime cache.
+                PenaltySource::Primary
+                | PenaltySource::DoublePenaltyNullspace
+                | PenaltySource::OperatorRelevance { .. }
+                | PenaltySource::TensorMarginal { .. }
+                | PenaltySource::TensorSeparable { .. }
+                | PenaltySource::TensorGlobalRidge
+                | PenaltySource::Other(_) => {}
             }
         }
         // The Charbonnier adaptive overlay rebuilds the {mass, tension,
@@ -1837,6 +1845,7 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
         std::sync::Arc::new(gam_custom_family::ZeroPsiDerivativeOperator::new(
             baseline.design.design.nrows(),
             baseline.design.design.ncols(),
+            hyperspecs.len(),
         ));
     let derivative_blocks = vec![
         hyperspecs
@@ -4273,18 +4282,19 @@ fn validate_bounded_observation_inputs(
     let resolved_scale = likelihood
         .resolved_scale()
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-    match &family.response {
-        ResponseFamily::Tweedie { p } if !(p.is_finite() && *p > 1.0 && *p < 2.0) => {
-            crate::bail_invalid_estim!(
-                "bounded Tweedie power must be finite and strictly inside (1, 2), got {p}"
-            );
-        }
-        ResponseFamily::NegativeBinomial { theta, .. } if !(theta.is_finite() && *theta > 0.0) => {
-            crate::bail_invalid_estim!(
-                "bounded negative-binomial theta must be finite and positive, got {theta}"
-            );
-        }
-        _ => {}
+    if let ResponseFamily::Tweedie { p } = &family.response
+        && !(p.is_finite() && *p > 1.0 && *p < 2.0)
+    {
+        crate::bail_invalid_estim!(
+            "bounded Tweedie power must be finite and strictly inside (1, 2), got {p}"
+        );
+    }
+    if let ResponseFamily::NegativeBinomial { theta, .. } = &family.response
+        && !(theta.is_finite() && *theta > 0.0)
+    {
+        crate::bail_invalid_estim!(
+            "bounded negative-binomial theta must be finite and positive, got {theta}"
+        );
     }
     // Atomic whole-vector preflight: an invalid later weight wins before any
     // response or predictor row is inspected.

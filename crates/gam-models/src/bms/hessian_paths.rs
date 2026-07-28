@@ -1,6 +1,34 @@
 use super::family::BernoulliMarginalSlopeFamily;
 use super::*;
 
+/// Which coefficient sub-block a psi row lives in.
+///
+/// `resolve_psi_axis_spec` admits only block 0 (marginal) and block 1
+/// (log-slope) and rejects every other index before an axis exists, so the
+/// Hessian scatter paths only ever see those two. Carrying that as a
+/// two-variant type lets them match exhaustively — a third spatial block
+/// forces each scatter site to be revisited rather than having its
+/// contribution silently dropped by a wildcard arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PsiBlock {
+    Marginal,
+    Logslope,
+}
+
+impl PsiBlock {
+    /// Convert a spatial block index as produced by `resolve_psi_axis_spec`.
+    pub(super) fn from_index(block_idx: usize) -> Result<Self, String> {
+        match block_idx {
+            0 => Ok(Self::Marginal),
+            1 => Ok(Self::Logslope),
+            other => Err(format!(
+                "bernoulli marginal-slope psi Hessian: spatial block {other} has no psi \
+                 coefficient sub-block (expected 0 = marginal or 1 = log-slope)"
+            )),
+        }
+    }
+}
+
 /// Block-local psi derivative row: avoids allocating a full p-vector
 /// when the psi derivative lives in a single channel (marginal or logslope).
 pub(super) struct BlockPsiRow {
@@ -437,7 +465,8 @@ impl BernoulliBlockHessianAccumulator {
         psi_block_idx: usize,
         psi_row: &Array1<f64>,
         right_primary: &Array1<f64>,
-    ) {
+    ) -> Result<(), String> {
+        let psi_block = PsiBlock::from_index(psi_block_idx)?;
         let need_marg = right_primary[0] != 0.0;
         let need_log = right_primary[1] != 0.0;
         let marg_chunk = if need_marg {
@@ -465,8 +494,8 @@ impl BernoulliBlockHessianAccumulator {
 
         // Marginal component of right_primary
         if let Some(x_row) = x_row {
-            match psi_block_idx {
-                0 => {
+            match psi_block {
+                PsiBlock::Marginal => {
                     // psi=marginal, right=marginal -> h_mm, symmetric rank-2
                     // h_mm += s * (psi outer x_row + x_row outer psi)
                     let s = right_primary[0];
@@ -490,7 +519,7 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                1 => {
+                PsiBlock::Logslope => {
                     // psi=logslope, right=marginal -> h_mg (marginal x logslope)
                     // h_mg += right_primary[0] * outer(x_row, psi)
                     let s = right_primary[0];
@@ -509,14 +538,13 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                _ => {}
             }
         }
 
         // Logslope component of right_primary
         if let Some(g_row) = g_row {
-            match psi_block_idx {
-                0 => {
+            match psi_block {
+                PsiBlock::Marginal => {
                     // psi=marginal, right=logslope -> h_mg (marginal x logslope)
                     // h_mg += right_primary[1] * outer(psi, g_row)
                     let s = right_primary[1];
@@ -536,7 +564,7 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                1 => {
+                PsiBlock::Logslope => {
                     // psi=logslope, right=logslope -> h_gg, symmetric rank-2
                     // h_gg += s * (psi outer g_row + g_row outer psi)
                     let s = right_primary[1];
@@ -559,16 +587,14 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                _ => {}
             }
         }
 
         // h/w components -> dense_correction
         if let Some(ref mut dc) = self.dense_correction {
-            let psi_range = if psi_block_idx == 0 {
-                slices.marginal.clone()
-            } else {
-                slices.logslope.clone()
+            let psi_range = match psi_block {
+                PsiBlock::Marginal => slices.marginal.clone(),
+                PsiBlock::Logslope => slices.logslope.clone(),
             };
             if let (Some(ph), Some(bh)) = (primary.h.as_ref(), slices.h.as_ref()) {
                 let h_part = right_primary.slice(ndarray::s![ph.start..ph.end]);
@@ -591,6 +617,7 @@ impl BernoulliBlockHessianAccumulator {
                 }
             }
         }
+        Ok(())
     }
 
     /// Add outer product of two psi block-local rows (possibly in different blocks).

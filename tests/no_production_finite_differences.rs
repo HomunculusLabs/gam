@@ -297,16 +297,15 @@ fn cfg_all_args_have_direct_test_clause(args: &str) -> bool {
     let mut depth = 0usize;
     let mut arg_start = 0usize;
     for (i, byte) in bytes.iter().enumerate() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => {
-                if args[arg_start..i].trim() == "test" {
-                    return true;
-                }
-                arg_start = i + 1;
+        if *byte == b'(' {
+            depth += 1;
+        } else if *byte == b')' {
+            depth = depth.saturating_sub(1);
+        } else if *byte == b',' && depth == 0 {
+            if args[arg_start..i].trim() == "test" {
+                return true;
             }
-            _ => {}
+            arg_start = i + 1;
         }
     }
     args[arg_start..].trim() == "test"

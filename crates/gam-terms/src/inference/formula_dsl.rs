@@ -139,14 +139,10 @@ pub fn parse_formula_dsl(formula: &str) -> Result<FormulaDslParse, String> {
     let mut rhs_terms: Option<Vec<String>> = None;
 
     for part in formula_pair.into_inner() {
-        match part.as_rule() {
-            Rule::expr if response_expr.is_none() => {
-                response_expr = Some(part.as_str().trim().to_string());
-            }
-            Rule::rhs => {
-                rhs_terms = Some(extract_rhs_terms(part)?);
-            }
-            _ => {}
+        if part.as_rule() == Rule::rhs {
+            rhs_terms = Some(extract_rhs_terms(part)?);
+        } else if part.as_rule() == Rule::expr && response_expr.is_none() {
+            response_expr = Some(part.as_str().trim().to_string());
         }
     }
 
@@ -182,25 +178,26 @@ fn validate_balanced_delimiters(input: &str, prefix: &str) -> Result<(), String>
     let mut in_double = false;
 
     for ch in input.chars() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '(' | '[' | '{' if !in_single && !in_double => stack.push(ch),
-            ')' | ']' | '}' if !in_single && !in_double => {
-                let expected = match ch {
-                    ')' => '(',
-                    ']' => '[',
-                    // The outer match arm guarantees ch is one of ')', ']', '}'.
-                    _ => '{',
-                };
-                if stack.pop() != Some(expected) {
-                    return Err(FormulaDslError::ParseError {
-                        reason: delimiter_balance_error(prefix),
-                    }
-                    .into());
+        let quoted = in_single || in_double;
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if !quoted && matches!(ch, '(' | '[' | '{') {
+            stack.push(ch);
+        } else if !quoted && matches!(ch, ')' | ']' | '}') {
+            let expected = match ch {
+                ')' => '(',
+                ']' => '[',
+                // The enclosing `matches!` guarantees ch is one of ')', ']', '}'.
+                _ => '{',
+            };
+            if stack.pop() != Some(expected) {
+                return Err(FormulaDslError::ParseError {
+                    reason: delimiter_balance_error(prefix),
                 }
+                .into());
             }
-            _ => {}
         }
     }
 
@@ -236,30 +233,32 @@ fn extract_rhs_terms(rhs: Pair<'_, Rule>) -> Result<Vec<String>, String> {
     let bytes = text.as_bytes();
     for (idx, &b) in bytes.iter().enumerate() {
         let ch = b as char;
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '(' | '[' | '{' if !in_single && !in_double => depth += 1,
-            ')' | ']' | '}' if !in_single && !in_double && depth > 0 => depth -= 1,
-            '+' if !in_single
-                && !in_double
-                && depth == 0
-                && !matches!(
-                    last_significant,
-                    None | Some(':' | '*' | '/' | '^' | '+' | '-')
-                ) =>
-            {
-                let term = text[start..idx].trim();
-                if term.is_empty() {
-                    return Err(FormulaDslError::ParseError {
-                        reason: "formula RHS contains an empty term".to_string(),
-                    }
-                    .into());
+        let quoted = in_single || in_double;
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if !quoted && matches!(ch, '(' | '[' | '{') {
+            depth += 1;
+        } else if !quoted && matches!(ch, ')' | ']' | '}') && depth > 0 {
+            depth -= 1;
+        } else if ch == '+'
+            && !quoted
+            && depth == 0
+            && !matches!(
+                last_significant,
+                None | Some(':' | '*' | '/' | '^' | '+' | '-')
+            )
+        {
+            let term = text[start..idx].trim();
+            if term.is_empty() {
+                return Err(FormulaDslError::ParseError {
+                    reason: "formula RHS contains an empty term".to_string(),
                 }
-                out.push(term.to_string());
-                start = idx + 1;
+                .into());
             }
-            _ => {}
+            out.push(term.to_string());
+            start = idx + 1;
         }
         if !ch.is_ascii_whitespace() {
             last_significant = Some(ch);
@@ -733,50 +732,42 @@ fn parse_call_pair(call: Pair<'_, Rule>) -> Result<FunctionCallSpec, String> {
     let mut name: Option<String> = None;
     let mut args = Vec::<CallArgSpec>::new();
     for part in call.into_inner() {
-        match part.as_rule() {
-            Rule::ident => {
-                if name.is_none() {
-                    name = Some(part.as_str().trim().to_string());
+        if part.as_rule() == Rule::ident {
+            if name.is_none() {
+                name = Some(part.as_str().trim().to_string());
+            }
+        } else if part.as_rule() == Rule::arg_list {
+            for a in part.into_inner() {
+                if a.as_rule() != Rule::arg {
+                    continue;
+                }
+                let mut a_inner = a.into_inner();
+                let Some(first) = a_inner.next() else {
+                    continue;
+                };
+                if first.as_rule() == Rule::named_arg {
+                    let mut ni = first.into_inner();
+                    let key = ni
+                        .next()
+                        .ok_or_else(|| FormulaDslError::ParseError {
+                            reason: "invalid named argument key".to_string(),
+                        })?
+                        .as_str()
+                        .trim()
+                        .to_ascii_lowercase();
+                    let value = ni
+                        .next()
+                        .ok_or_else(|| FormulaDslError::ParseError {
+                            reason: "invalid named argument value".to_string(),
+                        })?
+                        .as_str()
+                        .trim()
+                        .to_string();
+                    args.push(CallArgSpec::Named { key, value });
+                } else if first.as_rule() == Rule::expr {
+                    args.push(CallArgSpec::Positional(first.as_str().trim().to_string()));
                 }
             }
-            Rule::arg_list => {
-                for a in part.into_inner() {
-                    if a.as_rule() != Rule::arg {
-                        continue;
-                    }
-                    let mut a_inner = a.into_inner();
-                    let Some(first) = a_inner.next() else {
-                        continue;
-                    };
-                    match first.as_rule() {
-                        Rule::named_arg => {
-                            let mut ni = first.into_inner();
-                            let key = ni
-                                .next()
-                                .ok_or_else(|| FormulaDslError::ParseError {
-                                    reason: "invalid named argument key".to_string(),
-                                })?
-                                .as_str()
-                                .trim()
-                                .to_ascii_lowercase();
-                            let value = ni
-                                .next()
-                                .ok_or_else(|| FormulaDslError::ParseError {
-                                    reason: "invalid named argument value".to_string(),
-                                })?
-                                .as_str()
-                                .trim()
-                                .to_string();
-                            args.push(CallArgSpec::Named { key, value });
-                        }
-                        Rule::expr => {
-                            args.push(CallArgSpec::Positional(first.as_str().trim().to_string()));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
         }
     }
     let name = name.ok_or_else(|| FormulaDslError::ParseError {
@@ -2307,13 +2298,17 @@ fn top_level_formula_separator(input: &str) -> Result<Option<usize>, String> {
     let mut in_double = false;
 
     for (idx, ch) in input.char_indices() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '(' | '[' | '{' if !in_single && !in_double => depth += 1,
-            ')' | ']' | '}' if !in_single && !in_double && depth > 0 => depth -= 1,
-            '~' if !in_single && !in_double && depth == 0 => return Ok(Some(idx)),
-            _ => {}
+        let quoted = in_single || in_double;
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+        } else if ch == '"' && !in_single {
+            in_double = !in_double;
+        } else if !quoted && matches!(ch, '(' | '[' | '{') {
+            depth += 1;
+        } else if !quoted && matches!(ch, ')' | ']' | '}') && depth > 0 {
+            depth -= 1;
+        } else if ch == '~' && !quoted && depth == 0 {
+            return Ok(Some(idx));
         }
     }
 
@@ -2426,10 +2421,10 @@ pub fn parse_formula(formula: &str) -> Result<ParsedFormula, FormulaDslError> {
                 .chars()
                 .scan(0i32, |depth, ch| {
                     let d_before = *depth;
-                    match ch {
-                        '(' | '[' | '{' => *depth += 1,
-                        ')' | ']' | '}' if *depth > 0 => *depth -= 1,
-                        _ => {}
+                    if matches!(ch, '(' | '[' | '{') {
+                        *depth += 1;
+                    } else if matches!(ch, ')' | ']' | '}') && *depth > 0 {
+                        *depth -= 1;
                     }
                     Some((d_before, ch))
                 })

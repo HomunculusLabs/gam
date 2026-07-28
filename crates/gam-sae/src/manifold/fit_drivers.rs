@@ -2597,7 +2597,24 @@ impl SaeManifoldTerm {
                         out.push(g);
                     }
                 }
-                _ => {}
+                // The remaining kinds deflate no dense step gauge, each for its
+                // own reason — spelled out as named arms so a new topology has
+                // to state its gauge orbit here instead of silently inheriting
+                // "none" from a wildcard.
+                //
+                // * `Mobius`: the half-twist lives in the parity culling of the
+                //   basis (`trig(πks)·wᵐ`, `k + m` even), so a constant shift of
+                //   the double-cover phase is NOT a symmetry of the culled span
+                //   the way it is for `Periodic`/`Torus`; there is no enumerated
+                //   continuous orbit to project out.
+                // * `FiniteSet`: the latent is CATEGORICAL (anchor indicators),
+                //   so there is no continuous coordinate to move along at all.
+                // * `Precomputed`: the basis is supplied from outside this
+                //   module and carries no declared gauge structure, so nothing
+                //   may be assumed deflatable.
+                SaeAtomBasisKind::Mobius
+                | SaeAtomBasisKind::FiniteSet
+                | SaeAtomBasisKind::Precomputed(_) => {}
             }
         }
         if p == 0 {
@@ -2843,7 +2860,15 @@ impl SaeManifoldTerm {
                     }
                 }
             }
-            _ => {}
+            // No row gauge direction, for the same per-kind reasons spelled out
+            // in `dense_step_gauge_vectors`: `Mobius`'s parity-culled basis has
+            // no enumerated continuous phase orbit, `FiniteSet`'s latent is
+            // categorical rather than continuous, and `Precomputed` carries no
+            // declared gauge structure. Named so a new topology cannot inherit
+            // "none" silently.
+            SaeAtomBasisKind::Mobius
+            | SaeAtomBasisKind::FiniteSet
+            | SaeAtomBasisKind::Precomputed(_) => {}
         }
         Ok(())
     }
@@ -6743,17 +6768,14 @@ impl SaeManifoldTerm {
             let descent_direction_ok = directional_decrease.is_finite()
                 && directional_decrease > 0.0
                 && directional_decrease > directional_decrease_floor;
-            if !descent_direction_ok {
-                // The ordinary-fit coarse KKT gate above already breaks on a small
-                // gradient. Evidence polish intentionally bypasses that gate, so
-                // this arm is also its numerical fixed-point route: try the
-                // existing proximal correction once, then stop below when even
-                // that correction cannot produce a strict objective decrease.
-            }
-
             // No Armijo bound is meaningful along a non-descent direction, so
             // the whole line search is gated on `descent_direction_ok` and a
             // non-descent delta routes straight to the proximal correction.
+            // The ordinary-fit coarse KKT gate above already breaks on a small
+            // gradient; evidence polish intentionally bypasses that gate, so
+            // the non-descent route is also its numerical fixed-point route:
+            // try the existing proximal correction once, then stop below when
+            // even that correction cannot produce a strict objective decrease.
             // Each trial re-applies the Newton step from the pre-step
             // `snapshot` (reset-before-reapply after the first trial); a trial
             // whose step application or objective evaluation errors is INVALID
@@ -7180,7 +7202,6 @@ impl SaeManifoldTerm {
                 term.fix_decoder_scale_gauge()?;
                 if term.frames_active() {
                     term.refresh_active_frames_from_data(target)
-                        .map(drop)
                         .map_err(|err| {
                             format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}")
                         })?;
@@ -7279,11 +7300,10 @@ impl SaeManifoldTerm {
                         analytic_penalties,
                         obj_scale,
                         |term| {
-                            term.refresh_active_frames_from_data(target)
-                                .map(drop)
-                                .map_err(|err| {
-                                    format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}")
-                                })
+                            term.refresh_active_frames_from_data(target).map_err(|err| {
+                                format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}")
+                            })?;
+                            Ok(())
                         },
                     )?;
                 }
@@ -7539,22 +7559,18 @@ impl SaeManifoldTerm {
                 .and_then(|()| {
                     if frames {
                         self.refresh_active_frames_from_data(target)
-                            .map(drop)
-                            .map_err(|err| format!("sweep frame re-polar: {err}"))
-                    } else {
-                        Ok(())
+                            .map_err(|err| format!("sweep frame re-polar: {err}"))?;
                     }
+                    Ok(())
                 })
                 .and_then(|()| self.seed_coords_by_decoder_projection(target))
                 .and_then(|()| self.refit_decoder_least_squares_at_current_state(target, Some(rho)))
                 .and_then(|()| {
                     if frames {
                         self.refresh_active_frames_from_data(target)
-                            .map(drop)
-                            .map_err(|err| format!("sweep frame re-polar: {err}"))
-                    } else {
-                        Ok(())
+                            .map_err(|err| format!("sweep frame re-polar: {err}"))?;
                     }
+                    Ok(())
                 })
                 .and_then(|()| {
                     self.penalized_objective_total(target, rho, analytic_penalties, 1.0)
@@ -7597,11 +7613,9 @@ impl SaeManifoldTerm {
                 .and_then(|()| {
                     if frames {
                         self.refresh_active_frames_from_data(target)
-                            .map(drop)
-                            .map_err(|err| format!("sweep frame re-polar: {err}"))
-                    } else {
-                        Ok(())
+                            .map_err(|err| format!("sweep frame re-polar: {err}"))?;
                     }
+                    Ok(())
                 })
                 .and_then(|()| self.seed_coords_by_decoder_projection(target))
                 .and_then(|()| self.refit_decoder_least_squares_at_current_state(target, Some(rho)))

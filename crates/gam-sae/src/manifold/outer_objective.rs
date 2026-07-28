@@ -1590,8 +1590,11 @@ impl SaeManifoldOuterObjective {
     /// is part of the declared optimization path: an encoder/atlas failure is
     /// propagated instead of silently changing the basin-entry algorithm.
     fn record_warm_start(&mut self, outcome: Result<usize, String>) -> Result<(), String> {
+        // The row count is the telemetry's business (folded in above); the
+        // caller only needs the failure to propagate.
         self.warm_start_telemetry.record(&outcome);
-        outcome.map(drop)
+        outcome?;
+        Ok(())
     }
 
     /// Stamp the currently installed state with a successful outer search's
@@ -2756,7 +2759,7 @@ impl SaeManifoldOuterObjective {
         // re-converged below.
         if self.basin_bundle.is_empty() {
             self.basin_bundle
-                .admit(self.term.clone(), f64::INFINITY, |_, _| false)
+                .admit_distinct(self.term.clone(), f64::INFINITY)
                 .map_err(|error| format!("SAE basin-envelope seed admission refused: {error}"))?;
         }
 

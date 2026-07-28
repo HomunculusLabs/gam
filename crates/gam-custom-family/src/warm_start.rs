@@ -700,27 +700,30 @@ pub fn blockwise_fit_from_parts(
     // gate prevents direct assembly callers from bypassing that contract.
     require_converged_outer_for_assembly(outer_converged)?;
     match criterion_certificate.as_ref() {
-        Some(certificate) if !certificate.certifies() => {
-            return Err(CustomFamilyError::Optimization {
-                context: "blockwise_fit_from_parts",
-                reason: format!(
-                    "refusing to assemble a fit whose analytic outer certificate failed: {}; \
-                     no fit was assembled",
-                    certificate.summary()
-                ),
+        Some(certificate) => {
+            if !certificate.certifies() {
+                return Err(CustomFamilyError::Optimization {
+                    context: "blockwise_fit_from_parts",
+                    reason: format!(
+                        "refusing to assemble a fit whose analytic outer certificate failed: {}; \
+                         no fit was assembled",
+                        certificate.summary()
+                    ),
+                }
+                .into());
             }
-            .into());
         }
-        None if outer_iterations > 0 => {
-            return Err(CustomFamilyError::Optimization {
-                context: "blockwise_fit_from_parts",
-                reason: "refusing to assemble a fit after an outer optimization without its \
-                         analytic convergence certificate"
-                    .to_string(),
+        None => {
+            if outer_iterations > 0 {
+                return Err(CustomFamilyError::Optimization {
+                    context: "blockwise_fit_from_parts",
+                    reason: "refusing to assemble a fit after an outer optimization without its \
+                             analytic convergence certificate"
+                        .to_string(),
+                }
+                .into());
             }
-            .into());
         }
-        _ => {}
     }
     if block_states.is_empty() {
         return Err(CustomFamilyError::UnsupportedConfiguration {

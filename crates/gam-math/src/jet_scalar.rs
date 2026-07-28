@@ -904,15 +904,25 @@ impl<'arena> RuntimeJetScalar<'arena> for RuntimeValue {
     #[inline(always)]
     fn affine_compose(
         &self,
-        _: f64,
-        _: f64,
+        input_scale: f64,
+        input_shift: f64,
         derivative_stack: [f64; 5],
-        &(): &'arena Self::Workspace,
+        workspace: &'arena Self::Workspace,
     ) -> Self {
-        Self {
-            value: derivative_stack[0],
-            dimension: self.dimension,
-        }
+        // Route the affine pre-composition through the shared default instead
+        // of hand-rolling the zero-order shortcut: `compose_unary` already
+        // reduces to `derivative_stack[0]` for this scalar, so the result is
+        // unchanged, but the scale and shift now travel the same path every
+        // other implementation uses rather than being dropped on the floor.
+        affine_compose_default(
+            self,
+            input_scale,
+            input_shift,
+            derivative_stack,
+            Self::scale,
+            |value, constant| value.add_constant(constant, workspace),
+            Self::compose_unary,
+        )
     }
 
     #[inline(always)]
@@ -3962,6 +3972,9 @@ impl DynamicOrder2Accumulator {
 /// are plain lane-wise IEEE arithmetic, so a vector op equals the scalar op on
 /// each lane bit-for-bit.
 pub trait Lane: Copy {
+    /// How many rows one value of this field carries: 1 for the `f64` oracle,
+    /// 4 for [`wide::f64x4`]. [`Lane::lane`] indices are bounded by this.
+    const LANES: usize;
     /// Broadcast a scalar to every lane.
     fn splat(x: f64) -> Self;
     /// Lane-wise `self + o`.
@@ -3970,7 +3983,8 @@ pub trait Lane: Copy {
     fn sub(self, o: Self) -> Self;
     /// Lane-wise `self * o`.
     fn mul(self, o: Self) -> Self;
-    /// The `f64` in lane `i` (`i < LANES`; `f64` ignores `i`).
+    /// The `f64` in lane `i`. Panics when `i >= LANES` — a row index past the
+    /// end of the field is a caller bug, not a value to silently substitute.
     fn lane(self, i: usize) -> f64;
     /// Build the order-≤2 derivative stack `[f(u), f′(u), f″(u)]` **per lane**
     /// from the lane value `u`, via the SAME scalar `stack` closure the
@@ -3990,6 +4004,7 @@ pub trait Lane: Copy {
 }
 
 impl Lane for f64 {
+    const LANES: usize = 1;
     #[inline]
     fn splat(x: f64) -> Self {
         x
@@ -4007,7 +4022,11 @@ impl Lane for f64 {
         self * o
     }
     #[inline]
-    fn lane(self, _: usize) -> f64 {
+    fn lane(self, i: usize) -> f64 {
+        assert!(
+            i < <Self as Lane>::LANES,
+            "the f64 Lane carries one row; lane {i} does not exist"
+        );
         self
     }
     #[inline]
@@ -4021,6 +4040,7 @@ impl Lane for f64 {
 }
 
 impl Lane for wide::f64x4 {
+    const LANES: usize = 4;
     #[inline]
     fn splat(x: f64) -> Self {
         wide::f64x4::splat(x)
