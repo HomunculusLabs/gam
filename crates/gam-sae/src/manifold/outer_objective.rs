@@ -1102,7 +1102,13 @@ impl SaeManifoldOuterObjective {
             .block_log_lambda_gradient(rho)
             .map_err(OuterGradientError::internal)?
         {
-            let tail = gradient.len() - block_grad.len();
+            // The block weights are NOT the last sub-vector any more: #2604
+            // appends per-atom curvature after them. Locating the block tail by
+            // `len - block_len` was correct only while it was last, and would
+            // silently write the block gradient into the curvature slots for any
+            // dictionary carrying both. Subtract every tail that follows it.
+            let trailing = rho.kappa.len();
+            let tail = gradient.len() - trailing - block_grad.len();
             for (block, value) in block_grad.into_iter().enumerate() {
                 gradient[tail + block] += value;
             }
