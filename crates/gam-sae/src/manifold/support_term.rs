@@ -2380,6 +2380,27 @@ impl SaeSupportSparseTerm {
                 }
             }
             None => {
+                // The search resolved NO decrease above the objective`s own
+                // summation floor. Measured on a failing row: best |objective
+                // delta| 1.11e-16 against resolution 1.48e-11 -- five orders
+                // under it -- with a tangential slope of 1.90e-7 beneath a raw
+                // gradient of 9.82. The row is at a fixed point the arithmetic
+                // cannot see past, so take NO step rather than fail the fit.
+                //
+                // The pre-loop guard bounds the same thing from the Armijo bound
+                // at full step, but that estimate is not tight: here it missed by
+                // a factor of 1.28. This checks what the search actually observed.
+                //
+                // The existing round-off tie-accept cannot cover this: its third
+                // conjunct needs `trial_gradient_max < raw_gradient_max`, and at a
+                // step of 6e-8 the two are indistinguishable, so it is unreachable
+                // in exactly the regime it exists for.
+                if best_objective_delta.is_finite()
+                    && best_objective_delta.abs() <= objective_resolution
+                {
+                    return Ok(0.0);
+                }
+
                 self.assignment.project_row_coords(row, old_coords, coords_row)?;
                 return Err(format!(
                     "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
