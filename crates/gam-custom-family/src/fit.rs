@@ -430,7 +430,15 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// This can only TIGHTEN, and only for terms that were previously exempt: when
 /// `edf_max > EFFECTIVE_DF_FLOOR` the target is still the absolute floor, so
 /// every term the guard already bounded is byte-identical.
-pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.5;
+///
+/// Chosen on evidence, not picked. At `0.5` the penguins linear direction came
+/// back and accuracy went `0.8421 → 0.9649` (#2579), leaving one failing
+/// assertion: held-out log-loss `0.26080` against `nnet`'s `0.09494`, i.e. the
+/// right class picked but under-confidently (#2612). A larger fraction retains
+/// more of the linear df that dataset is made of, so `0.75` is the next point on
+/// that curve rather than a new guess — and if log-loss does not move, the
+/// under-confidence is not a smoothing bias and #2612 says where to look next.
+pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.75;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on
 /// top of which each term's per-coordinate [`EFFECTIVE_DF_FLOOR`] bound is
