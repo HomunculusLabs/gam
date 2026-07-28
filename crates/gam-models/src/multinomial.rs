@@ -4480,6 +4480,66 @@ mod reference_class_invariance_tests {
             .fold(0.0_f64, f64::max)
     }
 
+    /// #2579 diagnostic (zz_measure): print the λ that
+    /// `multinomial_fit_is_invariant_to_reference_class_1587` actually selects
+    /// in each of its three labelings.
+    ///
+    /// The `#1587` gate asserts that predicted probabilities are invariant to
+    /// the reference class. On penguins every one of the sixteen selected λ is
+    /// railed at `exp(EFFECTIVE_DF_CEILING) = 162754.79141900392` to the last
+    /// bit, and all-λ-equal is invariant TRIVIALLY. If this fixture's λ are
+    /// likewise all pinned to that same wall, the gate is currently satisfied by
+    /// railing rather than by the `M⊗S_t` symmetry it was written to protect —
+    /// which means any fix that frees λ (i.e. the `#2579` fix, teaching
+    /// `effective_df_floor_rho_upper_bounds` the joint bundle) will trip it for
+    /// a reason that is not a regression in the symmetry. Prints only; never
+    /// asserts a bound.
+    #[test]
+    fn zz_measure_2579_reference_class_gate_lambdas() {
+        let td = tempdir().expect("tempdir");
+        let dir = td.path();
+        let (x, cls) = sample_classes(0, 300);
+        let wall = gam_custom_family::EFFECTIVE_DF_CEILING.exp();
+
+        for (tag, name_map) in [
+            ("abc", ["A", "B", "C"]),
+            ("bca", ["B", "C", "A"]),
+            ("cab", ["C", "A", "B"]),
+        ] {
+            let labels: Vec<String> = cls.iter().map(|&c| name_map[c].to_string()).collect();
+            let train = dataset_xy(dir, tag, &x, &labels);
+            let config = FitConfig::default();
+            let model = fit_penalized_multinomial_formula(&MultinomialFitRequest {
+                init_lambda: 1.0,
+                max_iter: 60,
+                tol: 1e-6,
+                ..MultinomialFitRequest::new(&train, "y ~ s(x)", &config)
+            })
+            .expect("multinomial formula fit must succeed");
+
+            // "Railed" is bit-equality with the wall, exactly as the
+            // `EFFECTIVE_DF_CEILING` doc defines it.
+            let railed = model.lambdas.iter().filter(|l| **l == wall).count();
+            eprintln!(
+                "#2579 gate-lambda probe [{tag}]: n_lambda={} railed_at_exp12={}/{} \
+                 per_block={:?}",
+                model.lambdas.len(),
+                railed,
+                model.lambdas.len(),
+                model.lambdas_per_block
+            );
+            for (i, l) in model.lambdas.iter().enumerate() {
+                eprintln!(
+                    "#2579 gate-lambda probe [{tag}]:   lambda[{i}] = {l:.17e}  ln = {:.12}  \
+                     railed = {}",
+                    l.ln(),
+                    *l == wall
+                );
+            }
+        }
+        eprintln!("#2579 gate-lambda probe: wall = exp(12) = {wall:.17e}");
+    }
+
     // gam#1587: now that the reference-symmetric centered `M⊗S_t` joint penalty
     // is wired through the custom-family outer REML loop (per-eval
     // `JointPenaltyBundle` + outer penalty_coords/logdet/operator), the

@@ -9255,6 +9255,111 @@ mod tests {
         }
     }
 
+    /// #2566 diagnostic (zz_measure): the WHOLE ladder that
+    /// `latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566`
+    /// asserts, printed without asserting.
+    ///
+    /// The gate stops at its first failure, so it reports one row and hides the
+    /// shape of the residual across the rest of the range. This probe runs the
+    /// identical construction and prints every row, which is what an A/B over
+    /// the quadrature node count has to compare.
+    ///
+    /// Pre-registered reading for that A/B: `e187d267f` raised
+    /// `CLOGLOG_GUMBEL_QUAD_MIN_NODES` 97 → 513 and left the gate red at
+    /// `log σ = 5` with `disagreement/uncertainty ≈ 3.75`. If the remaining
+    /// residual is still quadrature INPUT error, raising the node cap must move
+    /// `disagreement` materially; if it is structural in the derivative program,
+    /// `disagreement` will be unchanged and node count is not the lever.
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2566_curvature_fd_ladder_full() {
+        let quadctx = QuadratureContext::new();
+        let row = LatentSurvivalRow::right_censored(0.3, 0.67, 0.01, 0.02);
+        let point_at = |log_sigma: f64| LatentSurvivalPrimaryPoint {
+            q_entry: -1.2,
+            q_exit: -0.4,
+            qdot_exit: 0.73,
+            q_right: 0.5,
+            mu: -0.15,
+            sigma: log_sigma.exp(),
+        };
+        let analytic_at = |log_sigma: f64| {
+            latent_survival_row_primary_gradient_hessian(
+                &quadctx,
+                &row,
+                point_at(log_sigma),
+                true,
+            )
+            .expect("analytic latent-survival row")
+        };
+        let value_gradient_authority = |log_sigma: f64| {
+            let step = f64::EPSILON.cbrt() * (1.0 + log_sigma.abs());
+            richardson_central_difference(
+                |at| latent_survival_value_fd_authority(&quadctx, &row, point_at(at)),
+                log_sigma,
+                step,
+            )
+        };
+        let gradient_sample = |log_sigma: f64| {
+            let (_, gradient, _) = analytic_at(log_sigma);
+            let analytic = gradient[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA];
+            let authority = value_gradient_authority(log_sigma);
+            (
+                analytic,
+                (analytic - authority.value).abs() + authority.uncertainty,
+            )
+        };
+
+        eprintln!(
+            "#2566 ladder: log_sigma  analytic        fd_authority    disagreement    \
+             uncertainty     ratio"
+        );
+        for log_sigma in [-3.0_f64, 0.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+            let step = f64::EPSILON.cbrt() * (1.0 + log_sigma.abs());
+            let (_, _, negative_hessian) = analytic_at(log_sigma);
+            let analytic = negative_hessian[[
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+            ]];
+
+            let (gradient_coarse_plus, error_coarse_plus) = gradient_sample(log_sigma + step);
+            let (gradient_coarse_minus, error_coarse_minus) = gradient_sample(log_sigma - step);
+            let half_step = 0.5 * step;
+            let (gradient_fine_plus, error_fine_plus) = gradient_sample(log_sigma + half_step);
+            let (gradient_fine_minus, error_fine_minus) = gradient_sample(log_sigma - half_step);
+
+            let coarse = -(gradient_coarse_plus - gradient_coarse_minus) / (2.0 * step);
+            let fine = -(gradient_fine_plus - gradient_fine_minus) / (2.0 * half_step);
+            let authority = (4.0 * fine - coarse) / 3.0;
+
+            let coarse_input_uncertainty =
+                (error_coarse_plus + error_coarse_minus) / (2.0 * step);
+            let fine_input_uncertainty =
+                (error_fine_plus + error_fine_minus) / (2.0 * half_step);
+            let gamma = floating_point_gamma(3);
+            let coarse_roundoff = gamma
+                * (gradient_coarse_plus.abs() + gradient_coarse_minus.abs())
+                / (2.0 * step);
+            let fine_roundoff = gamma
+                * (gradient_fine_plus.abs() + gradient_fine_minus.abs())
+                / (2.0 * half_step);
+            let combine_roundoff = gamma * (4.0 * fine.abs() + coarse.abs()) / 3.0;
+            let uncertainty = (fine - coarse).abs() / 3.0
+                + (4.0 * (fine_input_uncertainty + fine_roundoff)
+                    + coarse_input_uncertainty
+                    + coarse_roundoff)
+                    / 3.0
+                + combine_roundoff;
+            let disagreement = (analytic - authority).abs();
+
+            eprintln!(
+                "#2566 ladder: {log_sigma:>9.1}  {analytic:>14.6e}  {authority:>14.6e}  \
+                 {disagreement:>14.6e}  {uncertainty:>14.6e}  {:>8.3}",
+                disagreement / uncertainty
+            );
+        }
+    }
+
     /// The primary-jet producer must REFUSE a non-finite operating coordinate
     /// rather than carry it into the channels it returns.
     ///
