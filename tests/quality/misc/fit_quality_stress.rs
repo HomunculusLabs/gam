@@ -485,9 +485,43 @@ fn hifreq_sphere_l8() -> Result<(), String> {
 /// zz_measure λ-readout sibling: y = sin(k·θ)·cos(π·h) on a 24×24 grid, σ=0.10,
 /// fit with te(theta[periodic], h[natural]), kb=(2k+4).max(10) per margin.
 /// Returns (data, formula, n_train, sigma).
+/// Tensor-margin basis size for the `hifreq_tensor` family. Hoisted so the grid
+/// can size itself against the basis (#2607) instead of the two drifting apart.
+fn kb_for(k: usize) -> usize {
+    (2 * k + 4).max(10)
+}
+
 fn hifreq_tensor_dataset(k: usize) -> (gam::data::EncodedDataset, String, usize, f64) {
-    let n_theta = 24;
-    let n_h = 24;
+    // #2607: the grid must stay ahead of the basis, or the design SATURATES and
+    // the arm stops measuring what its siblings measure.
+    //
+    // `kb = (2k + 4).max(10)` and the tensor is `kb x kb`, so `p` grows with `k`
+    // while the grid did not:
+    //
+    //   k =  4  kb = 12  p = 144  p/n = 0.25
+    //   k =  6  kb = 16  p = 256  p/n = 0.44
+    //   k =  8  kb = 20  p = 400  p/n = 0.69
+    //   k = 10  kb = 24  p = 576  p/n = 1.00   <- p = n EXACTLY
+    //
+    // At `p = n` the model interpolates, REML has no residual degrees of freedom
+    // to estimate a scale from, and maximum smoothing is a legitimate optimum OF
+    // THE CRITERION -- measured, the rho ceiling scores 415 nats below the
+    // neutral origin. The k10 arm was varying TWO things where its siblings vary
+    // one (frequency AND saturation), which is also why its `edf` fell from the
+    // 227.938 the issue records to 1.294: the ladder walked off the end of its own
+    // grid rather than regressing.
+    //
+    // Grow the grid only when `kb` would push `p/n` past 0.75, so k4/k6/k8 are
+    // byte-identical and only the k10 arm moves (to `p/n = 0.5625`, between the
+    // k6 and k8 arms). The saturated case is worth testing -- but deliberately,
+    // under its own name, not as the top rung of a frequency ladder.
+    let side = if kb_for(k) * kb_for(k) * 100 > 24 * 24 * 75 {
+        32
+    } else {
+        24
+    };
+    let n_theta = side;
+    let n_h = side;
     let sigma = 0.10;
     let mut rng = Lcg::new(0xD7 * (k as u64) + 41);
     let mut theta = Vec::with_capacity(n_theta * n_h);
@@ -504,7 +538,7 @@ fn hifreq_tensor_dataset(k: usize) -> (gam::data::EncodedDataset, String, usize,
         }
     }
     let data = make_dataset_2d_named("theta", &theta, "h", &h, &y_noisy);
-    let kb = (2 * k + 4).max(10);
+    let kb = kb_for(k);
     let formula =
         format!("y ~ te(theta, h, bc=['periodic', 'natural'], period=[2*pi, None], k={kb})");
     (data, formula, n_theta * n_h, sigma)
