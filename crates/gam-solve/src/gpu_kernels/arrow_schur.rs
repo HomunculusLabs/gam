@@ -432,7 +432,6 @@ fn pack_block(
 /// the fused kernel at small shapes the heuristic would otherwise route through
 /// the cuSOLVER/cuBLAS Layer A+B+C path. The symbol only exists on the target
 /// that provides the NVRTC implementation.
-#[doc(hidden)]
 #[cfg(target_os = "linux")]
 pub fn solve_arrow_newton_step_fused_force(
     sys: &ArrowSchurSystem,
@@ -935,7 +934,6 @@ pub fn solve_reduced_beta_pcg(
         .map(|(x, _)| x)
 }
 
-#[doc(hidden)]
 pub fn solve_reduced_beta_pcg_with_diagnostics(
     s_acc: &Array2<f64>,
     rhs_beta: &Array1<f64>,
@@ -1458,7 +1456,6 @@ pub fn compute_ainv_host(
 /// operator — a check that is independent of solver conditioning (unlike a
 /// solved-`δβ` comparison, which can diverge purely because dense Cholesky and
 /// iterative PCG resolve an ill-conditioned `S` to different accuracies).
-#[doc(hidden)]
 #[cfg(target_os = "linux")]
 pub fn framed_schur_matvec_once_on_device(
     sys: &ArrowSchurSystem,
@@ -1482,7 +1479,6 @@ pub fn framed_schur_matvec_once_on_device(
 /// runs it twice to prove run-to-run bit stability — the two gates that let this
 /// operator feed the SLQ `log|S|` evidence lane without breaking its determinism
 /// contract.
-#[doc(hidden)]
 #[cfg(target_os = "linux")]
 pub fn framed_reduced_schur_det_once_on_device(
     sys: &ArrowSchurSystem,
@@ -1503,7 +1499,6 @@ pub fn framed_reduced_schur_det_once_on_device(
 /// Reference dense back-end used by tests and as the fallback when the
 /// GPU declines. Kept here (not in `arrow_schur_gpu.rs`) so the validation
 /// suite has one canonical baseline.
-#[doc(hidden)]
 pub fn solve_arrow_newton_step_dense_reference(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
@@ -1576,7 +1571,6 @@ pub fn solve_arrow_newton_step_dense_reference(
 /// accumulation order matches the device kernels exactly.
 ///
 /// `out` is OVERWRITTEN: first set to `ρ_β·x`, then the penalty blocks add in.
-#[doc(hidden)]
 pub fn sae_framed_penalty_matvec_cpu(
     data: &DeviceSaePcgData,
     ridge_beta: f64,
@@ -1644,7 +1638,6 @@ pub fn sae_framed_penalty_matvec_cpu(
 /// `H_tt^(i)+ρ_t I` Cholesky factor, and scatters the transpose back. This is
 /// the size-independent bit-parity oracle the device kernel mirrors; it is also
 /// the matvec the GPU PCG iterates.
-#[doc(hidden)]
 pub fn sae_framed_schur_matvec_cpu(
     sys: &ArrowSchurSystem,
     data: &DeviceSaePcgData,

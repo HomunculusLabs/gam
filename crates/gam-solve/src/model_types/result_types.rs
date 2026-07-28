@@ -2557,16 +2557,13 @@ pub struct UnifiedFitResultParts {
     pub fitted_link: FittedLinkState,
     pub geometry: Option<FitGeometry>,
     pub block_states: Vec<gam_problem::ParameterBlockState>,
-    // Backward-compatible fields (all have sensible defaults).
-    #[doc(hidden)]
+    // Fields every construction site already fills. They were `#[doc(hidden)]`
+    // as "backward-compatible" leftovers, which hid five REQUIRED fields from
+    // the docs of a struct whose whole job is to be filled in completely.
     pub pirls_status: crate::pirls::PirlsStatus,
-    #[doc(hidden)]
     pub max_abs_eta: f64,
-    #[doc(hidden)]
     pub constraint_kkt: Option<crate::pirls::ConstraintKktDiagnostics>,
-    #[doc(hidden)]
     pub artifacts: FitArtifacts,
-    #[doc(hidden)]
     pub inner_cycles: usize,
 }
 

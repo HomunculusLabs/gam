@@ -435,7 +435,6 @@ impl AssignmentMode {
 /// first `K - 1` logits (`0` coordinates for `K = 1`). Gate-style modes keep
 /// all `K` logits as identifiable scalar parameters. `coords[k]` holds
 /// `t_{.,k}` for atom `k`.
-#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct SaeAssignment {
     pub logits: Array2<f64>,
