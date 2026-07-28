@@ -9265,13 +9265,31 @@ mod tests {
     /// routing through the same branch there, and no amount of quadrature
     /// resolution reaches the row where the sign inverts.
     ///
-    /// The candidate mechanism is `max_k`. `latent_kernel_primary_jet` requests
-    /// `base_max_k + 2·max_primary_increment + max_suffix_increment`, which is
-    /// STRICTLY LARGER for the second-order path than for the gradient path, and
-    /// the bundle's shift is `k·σ²`. A larger `k` therefore reaches further into
-    /// the tail at the same σ and can cross into a branch that does not read
-    /// `CLOGLOG_GUMBEL_QUAD_MIN_NODES` at all. `LogLognormalKernelBundle` carries
-    /// its own `mode`, so this does not have to be inferred — it can be read.
+    /// RESULT (measured, run 30364896222): the `max_k` hypothesis this was built
+    /// to test is **REFUTED**, and so is a second idea it was going to support.
+    ///
+    /// The mode is CONSTANT in `k` across `0..8` at every `log σ ≥ 3`, so the
+    /// second-order path's larger `k` does not flip the branch:
+    ///
+    /// ```text
+    ///   log σ = 2  ->  S S Q Q Q Q Q Q Q     (the only QuadratureFallback rows)
+    ///   log σ = 3  ->  A A A A A A A A A
+    ///   log σ = 6  ->  A A A A A A A A A
+    ///   log σ = 7  ->  A A A A A A A A A
+    /// ```
+    ///
+    /// Two things follow, both negative and both worth keeping:
+    ///
+    /// * **`mode` cannot be the fidelity signal a consumer refuses on.** It is
+    ///   `ControlledAsymptotic` at `log σ = 4` (ratio 0.85, healthy) and equally
+    ///   `ControlledAsymptotic` at `log σ = 7` (ratio 402, sign inverted). It does
+    ///   not separate the good rows from the catastrophic ones, so surfacing it
+    ///   out of `latent_survival_row_primary_gradient_hessian` — which currently
+    ///   drops it, while `logk_q_derivatives` keeps it — would buy nothing.
+    /// * **`mode` is a fidelity CLASS, not a record of which kernel ran.** The
+    ///   513-vs-1025 A/B moved `log σ = 5` by 335×, and this probe reports that
+    ///   row as `A`, not `Q`. So a row can be node-count-sensitive while
+    ///   reporting a non-quadrature mode; do not read the tags as routing.
     ///
     /// Prints only; never asserts a bound.
     #[test]
@@ -9279,8 +9297,9 @@ mod tests {
         let quadctx = QuadratureContext::new();
         let mu = -0.15_f64;
         eprintln!(
-            "#2566 routing: mode per (log_sigma, q, max_k); mu={mu}. \
-             QuadratureFallback is the only mode that reads the node count."
+            "#2566 routing: mode per (log_sigma, q, max_k); mu={mu}. NOTE: the tag \
+             is a fidelity CLASS, not a record of which kernel ran — log_sigma=5 \
+             reports A yet moved 335% under a node-count change."
         );
         for log_sigma in [-3.0_f64, 0.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
             let sigma = log_sigma.exp();
