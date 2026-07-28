@@ -8517,3 +8517,176 @@ fn joint_rho_psi_optimum_certifies_when_only_the_psi_coordinate_rails_2425() {
         cert.lambdas_railed
     );
 }
+
+// ─── #2596: one stationarity standard for screening and mint ──────────────
+
+/// Build a one-coordinate flat-valley objective `c + ½·curvature·(ρ − ρ*)²`
+/// with an analytic Hessian, and certify the point `ρ* + offset` at `fidelity`.
+///
+/// `curvature` sets the Newton decrement at a given gradient: a LARGE curvature
+/// makes `½gᵀH⁻¹g` tiny, which is precisely the regime the
+/// curvature-resolvability rung exists to certify — a residual gradient that
+/// buys no resolvable objective decrease.
+fn certify_flat_valley_point_2596(
+    curvature: f64,
+    offset: f64,
+    fidelity: CertificationFidelity,
+    order_log: Arc<Mutex<Vec<OuterEvalOrder>>>,
+) -> Result<OuterCriterionCertificate, EstimationError> {
+    let problem = OuterProblem::new(1)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Dense);
+    let mut obj = problem.build_objective_with_eval_order(
+        (),
+        move |_: &mut (), rho: &Array1<f64>| Ok(1.0 + 0.5 * curvature * rho[0] * rho[0]),
+        |_: &mut (), _: &Array1<f64>| {
+            Err(EstimationError::InvalidInput(
+                "this objective is driven through the derivative-order seam".to_string(),
+            ))
+        },
+        move |_: &mut (), rho: &Array1<f64>, order: OuterEvalOrder| {
+            order_log.lock().expect("order log").push(order);
+            Ok(OuterEval {
+                cost: 1.0 + 0.5 * curvature * rho[0] * rho[0],
+                gradient: array![curvature * rho[0]],
+                hessian: match order {
+                    OuterEvalOrder::ValueGradientHessian => {
+                        HessianValue::Dense(array![[curvature]])
+                    }
+                    OuterEvalOrder::Value | OuterEvalOrder::ValueAndGradient => {
+                        HessianValue::Unavailable
+                    }
+                },
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let mut result = OuterResult::new(
+        array![offset],
+        1.0 + 0.5 * curvature * offset * offset,
+        1,
+        true,
+        OuterPlan {
+            solver: Solver::Bfgs,
+            hessian_source: HessianSource::BfgsApprox,
+        },
+    );
+    certify_outer_optimality_with_fidelity(
+        &mut obj,
+        &OuterConfig::default(),
+        "screening-vs-mint-2596",
+        &mut result,
+        fidelity,
+    )
+}
+
+/// #2596 — the screening pass must never refuse what the mint would certify.
+///
+/// The stationarity bound is a LADDER, and its curvature-resolvability rung
+/// (`‖Pg‖·√(objective_tol / ½gᵀH⁻¹g)`) is owned by the analytic outer Hessian.
+/// `Screening` reserves the order-four ladder for the mint (#2359) — a
+/// reservation argued on the CURVATURE CONJUNCT, where a missing verdict is
+/// permissive. But the same Hessian owns a rung of the BOUND, where a missing
+/// verdict is not permissive at all: it reverts the pass to the un-widened
+/// solver band. Screening therefore applied a strictly TIGHTER standard than
+/// the audit that mints, and the multi-start DISCARDS a screening refusal —
+/// on #2596 discarding the correct interior optimum and publishing the ρ-box
+/// corner (which certifies with `|Pg| ≡ 0` by construction) at 26× the cost.
+///
+/// The invariant, swept across four decades of residual gradient: whatever the
+/// mint certifies, screening certifies. Any future re-tiering of the ladder by
+/// fidelity fails here.
+#[test]
+fn screening_never_refuses_what_mint_certifies_2596() {
+    // Large curvature ⇒ a tiny Newton decrement at every gradient below, so
+    // each of these points is stationary at the resolution the criterion can be
+    // optimized even where its raw |Pg| exceeds the solver band.
+    let curvature = 1.0e4;
+    for &offset in &[0.0, 1.0e-12, 1.0e-10, 1.0e-9, 1.0e-8, 1.0e-7] {
+        let mint = certify_flat_valley_point_2596(
+            curvature,
+            offset,
+            CertificationFidelity::Mint,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let screening = certify_flat_valley_point_2596(
+            curvature,
+            offset,
+            CertificationFidelity::Screening,
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let mint_certifies = mint.as_ref().is_ok_and(OuterCriterionCertificate::certifies);
+        let screening_certifies = screening
+            .as_ref()
+            .is_ok_and(OuterCriterionCertificate::certifies);
+        assert!(
+            !mint_certifies || screening_certifies,
+            "offset={offset:e}: the mint certified but screening refused — the cheap \
+             per-candidate filter is applying a tighter standard than the audit that \
+             mints, so the multi-start discards optima the engine itself calls \
+             stationary (#2596). mint={:?} screening={:?}",
+            mint.as_ref().map(OuterCriterionCertificate::summary),
+            screening.as_ref().map(|c| c.summary()),
+        );
+    }
+}
+
+/// #2596 companion — the point the fixture actually died on.
+///
+/// A residual `|Pg|` a small multiple above the solver band, on curvature that
+/// makes the Newton decrement orders below the objective tolerance, is
+/// stationary: no model-resolvable step lowers the criterion. Screening must
+/// say so. Before the fix this refused, and the refusal is what left the
+/// vacuously-certified ρ-box corner as the only survivor.
+#[test]
+fn screening_certifies_a_flat_valley_gradient_above_the_solver_band_2596() {
+    let curvature = 1.0e4;
+    let offset = 1.0e-8;
+    let orders = Arc::new(Mutex::new(Vec::new()));
+    let certificate = certify_flat_valley_point_2596(
+        curvature,
+        offset,
+        CertificationFidelity::Screening,
+        Arc::clone(&orders),
+    )
+    .unwrap_or_else(|error| {
+        panic!("screening must certify a curvature-resolvable flat-valley point: {error}")
+    });
+    assert!(
+        certificate.certifies(),
+        "screening certificate must accept the point: {}",
+        certificate.summary()
+    );
+    let orders = orders.lock().expect("order log");
+    assert!(
+        orders.contains(&OuterEvalOrder::ValueGradientHessian),
+        "the escalation is what supplies the curvature-resolvability rung, so a \
+         would-refuse screening pass must have spent order four: {orders:?}"
+    );
+}
+
+/// #2596 — and it must stay free for every healthy fit.
+///
+/// The escalation is gated on the un-widened bound ALREADY refusing. A point
+/// whose projected gradient clears the solver band must reach the same verdict
+/// on first-order evidence alone, spending no order-four evaluation — which is
+/// what keeps #2359's "order four exactly once, at the mint" true in practice.
+#[test]
+fn screening_at_a_clean_optimum_spends_no_order_four_2596() {
+    let orders = Arc::new(Mutex::new(Vec::new()));
+    let certificate = certify_flat_valley_point_2596(
+        1.0e4,
+        0.0,
+        CertificationFidelity::Screening,
+        Arc::clone(&orders),
+    )
+    .expect("an exactly-stationary point certifies on first-order evidence");
+    assert!(certificate.certifies(), "{}", certificate.summary());
+    let orders = orders.lock().expect("order log");
+    assert!(
+        !orders.contains(&OuterEvalOrder::ValueGradientHessian),
+        "a candidate that clears its first-order band must pay nothing extra: {orders:?}"
+    );
+}
