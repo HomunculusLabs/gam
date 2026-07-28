@@ -3146,6 +3146,11 @@ impl SaeSupportSparseTerm {
                 if support_k > 0 {
                     let mut moved =
                         self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
+                    // The re-routed term is freshly constructed, which resets
+                    // typed solver knobs to their defaults -- carrying the
+                    // decoder strategy across is what keeps an accepted move
+                    // from silently reverting the solve to the colour sweep.
+                    moved.set_decoder_fista_passes(self.decoder_fista_passes);
                     // The proposal arrives on the routing grid -- one of
                     // `basis_size` samples per atom -- while the incumbent sits
                     // at a converged continuous fixed point. Comparing them
@@ -3229,6 +3234,7 @@ impl SaeSupportSparseTerm {
                     // move (the exact discard shape this lane keeps re-finding).
                     let mut moved =
                         self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
+                    moved.set_decoder_fista_passes(self.decoder_fista_passes);
                     let polished = moved.solve_coordinates_fixed_decoder(
                         target,
                         ard_precisions,
