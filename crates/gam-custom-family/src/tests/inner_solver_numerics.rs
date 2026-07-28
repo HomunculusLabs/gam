@@ -2238,10 +2238,61 @@ pub(crate) fn exact_newton_block_enforces_linear_constraints() {
     };
     let fit = fit_custom_family(&family, &[spec], &BlockwiseFitOptions::default())
         .expect("constrained exact-newton fit");
+
+    // The reported coefficient is the TRUNCATED POSTERIOR MEAN, not the mode.
+    // SPEC: "Posterior mean must always be the default (never MAP)", and
+    // `fixed_constrained_fit_reports_truncated_mean_and_retains_boundary_mode`
+    // is named for exactly this pair. This test used to assert the mode and
+    // read the mean, so it was red on main against a fit that was right.
+    //
+    // Here the closed form is available and pins the value far harder than the
+    // old assertion did. The likelihood is `-1/2 (beta - 0)^2` with unit exact
+    // curvature and no penalty, so the unconstrained posterior is N(0, 1); the
+    // constraint `beta >= 1` truncates it at one standard deviation. The mean of
+    // a standard normal truncated to `z >= a` is the inverse Mills ratio
+    // `phi(a) / (1 - Phi(a))`, which at `a = 1` is
+    //
+    //     phi(1) = 0.24197072451914337
+    //     1 - Phi(1) = 0.15865525393145707
+    //     phi(1) / (1 - Phi(1)) = 1.5251352761609812
+    //
+    // and that is the value the solver returns, to the last bit.
+    const TRUNCATED_MEAN_AT_ONE_SIGMA: f64 = 1.525_135_276_160_981_2;
     let beta = fit.block_states[0].beta[0];
     assert!(
-        (beta - 1.0).abs() < 1e-8,
-        "expected constrained optimum at lower bound, got {beta}"
+        (beta - TRUNCATED_MEAN_AT_ONE_SIGMA).abs() < 1e-9,
+        "reported coefficient must be the truncated posterior mean \
+         phi(1)/(1-Phi(1))={TRUNCATED_MEAN_AT_ONE_SIGMA}, got {beta}"
+    );
+
+    // What "enforces linear constraints" actually claims, kept and stated
+    // against the object that carries it: the retained boundary MODE sits on
+    // the bound, and the reported coefficient is the persisted posterior-mean
+    // identity rather than an independently computed number that happens to
+    // agree.
+    let constrained = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("a constrained fit must persist its constrained-posterior geometry");
+    assert!(
+        (constrained.mode[0] - 1.0).abs() < 1e-8,
+        "the constrained MODE must sit on the lower bound, got {}",
+        constrained.mode[0],
+    );
+    assert!(
+        constrained.unconstrained_center[0].abs() < 1e-8,
+        "the unconstrained centre is the target 0.0, got {}",
+        constrained.unconstrained_center[0],
+    );
+    assert_eq!(
+        fit.block_states[0].beta,
+        constrained.posterior_mean(),
+        "the reported coefficient and the persisted posterior identity must agree",
+    );
+    assert!(
+        beta > constrained.mode[0],
+        "a lower-truncated posterior mean must lie strictly above its boundary mode",
     );
 }
 
