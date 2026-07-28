@@ -388,7 +388,16 @@ fn main() -> Result<(), String> {
                             accepted = Some(report);
                             break;
                         }
-                        Err(_) => {}
+                        // This tolerance did not certify; the loop escalates to
+                        // the next one, and `accepted` staying `None` after the
+                        // last is what the `match` below reports. Naming the
+                        // refusal makes an all-tolerances failure diagnosable
+                        // instead of silent.
+                        Err(refusal) => {
+                            eprintln!(
+                                "[reml] tolerance {tolerance:.0e} did not certify: {refusal}"
+                            );
+                        }
                     }
                 }
                 match accepted {
