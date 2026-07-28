@@ -329,9 +329,23 @@ pub fn weighted_auc_from_predictions(
         .enumerate()
         .map(|(index, (&y, &prediction))| (prediction, y > 0.5, weight_at(index)))
         .collect();
-    // AUC is invariant to independent positive/negative class weight scales.
-    // Normalize twice (by class maximum, then class total) so a harmless common
-    // factor near f64::MAX cannot overflow the pair products or denominator.
+    // AUC is invariant to independent positive/negative class weight scales,
+    // so divide each class by its own MAXIMUM weight. That is what keeps a
+    // harmless common factor near `f64::MAX` from overflowing the pair
+    // products: every scaled weight is then <= 1, so the concordant total is
+    // bounded by `n_positive * n_negative` and the denominator by the same.
+    //
+    // The class TOTAL is deliberately NOT folded in here. It used to be, and
+    // dividing before summing destroyed the statistic's exactness: with unit
+    // weights each row contributed `1/n`, and n copies of `1/n` do not sum to
+    // 1.0 unless n is a power of two. A perfectly separable ranking — whose
+    // Mann-Whitney value is exactly 1 — came back as 0.9999999999999986,
+    // failing `test_gamclassifier_score_is_auc_and_metrics_panel_is_sane`'s
+    // `assert perfect == 1.0`. Dividing ONCE at the end instead keeps the
+    // unit-weight accumulation in exact integer-and-half arithmetic (every
+    // term is a whole number or a whole number plus 0.5, all exact in f64 well
+    // past any realistic row count), so the exact rational answer is returned
+    // exactly.
     let positive_scale = pairs
         .iter()
         .filter(|(_, positive, _)| *positive)
@@ -370,19 +384,22 @@ pub fn weighted_auc_from_predictions(
         let positive_in_group: f64 = pairs[start..end]
             .iter()
             .filter(|(_, positive, _)| *positive)
-            .map(|(_, _, weight)| (weight / positive_scale) / positive_weight)
+            .map(|(_, _, weight)| weight / positive_scale)
             .sum();
         let negative_in_group: f64 = pairs[start..end]
             .iter()
             .filter(|(_, positive, _)| !*positive)
-            .map(|(_, _, weight)| (weight / negative_scale) / negative_weight)
+            .map(|(_, _, weight)| weight / negative_scale)
             .sum();
         concordant += positive_in_group * negative_weight_below;
         concordant += 0.5 * positive_in_group * negative_in_group;
         negative_weight_below += negative_in_group;
         start = end;
     }
-    let auc = concordant;
+    // One division, at the end. `positive_weight` and `negative_weight` are
+    // both strictly positive here: each class maximum is > 0 (checked above), so
+    // the row achieving it contributes exactly 1.0 to its class total.
+    let auc = concordant / (positive_weight * negative_weight);
     if auc.is_finite() {
         Ok(auc)
     } else {
@@ -1089,6 +1106,63 @@ mod tests {
                 .unwrap(),
             0.5
         );
+    }
+
+    /// A perfect ranking has Mann-Whitney AUC exactly 1, and the estimator must
+    /// return exactly that — not 1 - 6ulp.
+    ///
+    /// The old accumulation divided each row by its class TOTAL before summing,
+    /// so it added `n` copies of `1/n`; that equals 1.0 only when `n` is a power
+    /// of two. `n = 100` (and 97, and 63) are the ordinary cases where it does
+    /// not, and `test_gamclassifier_score_is_auc_and_metrics_panel_is_sane` had
+    /// been failing on exactly this: `separable ranking must give AUC 1.0; got
+    /// 0.9999999999999986`.
+    ///
+    /// The class sizes below are deliberately NOT powers of two, and are
+    /// unequal, so the test would have failed before the fix and cannot pass by
+    /// accident of a representable denominator.
+    #[test]
+    fn a_perfectly_separable_ranking_scores_exactly_one() {
+        for (negatives, positives) in [(100usize, 100usize), (97, 63), (13, 501)] {
+            let mut observed = Vec::with_capacity(negatives + positives);
+            let mut predicted = Vec::with_capacity(negatives + positives);
+            for index in 0..negatives {
+                observed.push(0.0);
+                predicted.push(index as f64);
+            }
+            for index in 0..positives {
+                observed.push(1.0);
+                predicted.push((negatives + index) as f64);
+            }
+            let auc = auc_from_predictions(&observed, &predicted).unwrap();
+            assert_eq!(
+                auc, 1.0,
+                "separable ranking with {negatives} negatives and {positives} positives \
+                 must score exactly 1.0, got {auc:?}"
+            );
+
+            // The mirror image is exactly 0 by the same argument; an estimator
+            // that is exact at one end and not the other is still rounding.
+            let reversed: Vec<f64> = observed.iter().map(|y| 1.0 - y).collect();
+            let auc_reversed = auc_from_predictions(&reversed, &predicted).unwrap();
+            assert_eq!(auc_reversed, 0.0, "reversed ranking must score exactly 0.0");
+        }
+    }
+
+    /// Unit weights must remain the identity of the weighted path after the
+    /// normalization change, at a size where the old per-row division rounded.
+    #[test]
+    fn unit_weights_match_the_unweighted_score_at_scale() {
+        let observed: Vec<f64> = (0..200).map(|i| f64::from(i % 3 == 0)).collect();
+        let predicted: Vec<f64> = (0..200).map(|i| ((i * 37) % 101) as f64).collect();
+        let plain = auc_from_predictions(&observed, &predicted).unwrap();
+        let unit =
+            weighted_auc_from_predictions(&observed, &predicted, Some(&vec![1.0; 200])).unwrap();
+        assert_eq!(plain, unit);
+        // A common positive factor is a no-op: AUC is scale-invariant per class.
+        let doubled =
+            weighted_auc_from_predictions(&observed, &predicted, Some(&vec![2.0; 200])).unwrap();
+        assert_eq!(plain, doubled);
     }
 
     #[test]
