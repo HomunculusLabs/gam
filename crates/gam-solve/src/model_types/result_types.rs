@@ -3353,6 +3353,22 @@ pub const NO_CRITERION_AT_EXACT_FIT: &str =
      are undefined for an exactly-interpolating fit; compare it on predictive accuracy \
      instead, or refit on data whose response is not an exact function of the design";
 
+/// The exact-fit Gaussian boundary, from the three quantities that define it.
+///
+/// A free function rather than a method so the ONE definition serves both the
+/// accessor on a built fit and the constructor gate, which runs before a `self`
+/// exists. Two copies of this predicate is precisely how a fit could come to
+/// report a criterion the accessor then refuses to read.
+fn is_zero_dispersion_boundary(
+    likelihood_family: Option<&LikelihoodSpec>,
+    likelihood_scale: LikelihoodScaleMetadata,
+    standard_deviation: f64,
+) -> bool {
+    likelihood_family.is_some_and(|family| family.is_gaussian_identity())
+        && matches!(likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
+        && standard_deviation == 0.0
+}
+
 /// Render a possibly-absent criterion for human output.
 ///
 /// One helper so every reporting surface — CLI fit lines, the HTML report, the
@@ -3383,8 +3399,8 @@ impl UnifiedFitResult {
     ///
     /// `None` is not "unavailable"; it is the statement that the criterion is
     /// unbounded — see the field documentation. Callers that rank, compare, or
-    /// normalize must propagate the absence, not substitute a number for it;
-    /// [`Self::require_reml_score`] produces the standard refusal.
+    /// normalize must propagate the absence, not substitute a number for it —
+    /// [`NO_CRITERION_AT_EXACT_FIT`] is the one explanation to refuse with.
     ///
     /// The answer is decided by [`Self::at_zero_dispersion_boundary`] and not
     /// by the stored number alone. Payloads written before the criterion could
@@ -3406,11 +3422,11 @@ impl UnifiedFitResult {
     /// family, scale metadata and `σ̂`, so a model loaded from disk reaches the
     /// same verdict as the live one, and no separate flag can drift from it.
     pub fn at_zero_dispersion_boundary(&self) -> bool {
-        self.likelihood_family
-            .as_ref()
-            .is_some_and(|family| family.is_gaussian_identity())
-            && matches!(self.likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
-            && self.standard_deviation == 0.0
+        is_zero_dispersion_boundary(
+            self.likelihood_family.as_ref(),
+            self.likelihood_scale,
+            self.standard_deviation,
+        )
     }
 
     /// The fit's log-likelihood, or `None` when the fit declined to claim one.
@@ -3423,18 +3439,6 @@ impl UnifiedFitResult {
     /// comparison and wins on nothing.
     pub fn reported_log_likelihood(&self) -> Option<f64> {
         (!self.at_zero_dispersion_boundary()).then_some(self.log_likelihood)
-    }
-
-    /// The fit's criterion, or the canonical refusal explaining why the fit has
-    /// none.
-    ///
-    /// One message for every ranking surface (summary, `evidence`,
-    /// `compare_models`, Bayes factors) so a user who hits the exact-fit
-    /// boundary reads the same explanation wherever they hit it.
-    pub fn require_reml_score(&self) -> Result<f64, EstimationError> {
-        self.reml_score.ok_or_else(|| {
-            EstimationError::InvalidInput(NO_CRITERION_AT_EXACT_FIT.to_string())
-        })
     }
 
     /// Public objective value reported for the fit; absent exactly when
@@ -3604,11 +3608,11 @@ impl UnifiedFitResult {
         // constructor means no present or future route can reintroduce the
         // placeholder that #2595 traced `Summary.raw_reml_score = 0.0` to,
         // whether it arrives from a fast path, a saved payload, or a re-stamp.
-        let at_boundary = likelihood_family
-            .as_ref()
-            .is_some_and(|family| family.is_gaussian_identity())
-            && matches!(likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
-            && standard_deviation == 0.0;
+        let at_boundary = is_zero_dispersion_boundary(
+            likelihood_family.as_ref(),
+            likelihood_scale,
+            standard_deviation,
+        );
         if at_boundary && let Some(reml_score) = reml_score {
             crate::bail_invalid_estim!(
                 "UnifiedFitResult reports a REML/LAML criterion {reml_score} at the exact-fit \

@@ -4553,7 +4553,6 @@ fn no_criterion_error(payload: &serde_json::Value, surface: &str) -> pyo3::PyErr
     }
 }
 
-
 const EDF_KEYS: &[&str] = &["edf_total", "edf", "effective_dof"];
 
 const LOG_LIK_KEYS: &[&str] = &["log_likelihood", "loglik", "log_lik"];
