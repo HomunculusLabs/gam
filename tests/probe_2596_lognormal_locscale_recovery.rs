@@ -7,7 +7,6 @@
 //! Run with:
 //!   cargo test --test probe_2596_lognormal_locscale_recovery -- --nocapture --ignored
 
-use gam::estimate::BlockRole;
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
 use gam::test_support::reference::rmse;
@@ -125,12 +124,10 @@ fn fixture() -> (usize, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64) {
     (n, t, event, x, z, sigma_true)
 }
 
-#[test]
-#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
-fn probe_2596_lognormal_locscale_recovery() {
-    init_parallelism();
-    let (n, t, event, x, z, sigma_true) = fixture();
 
+/// Fit one survival location-scale arm and print the full smoothing readout.
+fn run_survival_case(label: &str, formula: &str, cfg_mut: impl FnOnce(&mut FitConfig)) {
+    let (n, t, event, x, z, sigma_true) = fixture();
     let headers: Vec<String> = ["t", "event", "x", "z"]
         .into_iter()
         .map(str::to_string)
@@ -151,15 +148,23 @@ fn probe_2596_lognormal_locscale_recovery() {
     let z_idx = col["z"];
     let ncols = ds.headers.len();
 
-    let cfg = FitConfig {
+    let mut cfg = FitConfig {
         survival_likelihood: Some("location-scale".to_string()),
         survival_distribution: "gaussian".to_string(),
         time_num_internal_knots: 2,
         outer_max_iter: Some(80),
         ..FitConfig::default()
     };
-    let result = fit_from_formula(r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#, &ds, &cfg)
-        .expect("gam lognormal location-scale AFT fit");
+    cfg_mut(&mut cfg);
+
+    eprintln!("\n================ CASE {label}: {formula} ================");
+    let result = match fit_from_formula(formula, &ds, &cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[{label}] FIT ERROR: {e}");
+            return;
+        }
+    };
     let FitResult::SurvivalLocationScale(fit) = result else {
         panic!("expected a survival location-scale fit result");
     };
@@ -168,20 +173,15 @@ fn probe_2596_lognormal_locscale_recovery() {
     eprintln!("block roles: {:?}", unified.block_roles());
     for b in unified.blocks.iter() {
         eprintln!(
-            "  role={:?} p={} lambdas={:?} edf_by_block={:?}",
+            "  role={:?} p={} lambdas={:?} edf={:.4}",
             b.role,
             b.beta.len(),
             b.lambdas.to_vec(),
-            b.edf.as_ref().map(|e| e.to_vec()),
+            b.edf,
         );
+        eprintln!("    beta={:?}", b.beta.to_vec());
     }
     eprintln!("edf_total = {:?}", unified.edf_total());
-    eprintln!("lambdas_threshold = {:?}", unified.lambdas_threshold().to_vec());
-    eprintln!("lambdas_time      = {:?}", unified.lambdas_time().to_vec());
-    eprintln!("lambdas_log_sigma = {:?}", unified.lambdas_log_sigma().to_vec());
-    eprintln!("beta_threshold    = {:?}", unified.beta_threshold().to_vec());
-    eprintln!("beta_time         = {:?}", unified.beta_time().to_vec());
-    eprintln!("beta_log_sigma    = {:?}", unified.beta_log_sigma().to_vec());
 
     let beta_location = unified.beta_threshold();
     let beta_log_sigma = unified.beta_log_sigma();
@@ -195,6 +195,24 @@ fn probe_2596_lognormal_locscale_recovery() {
         build_term_collection_design(train_grid.view(), &fit.fit.resolved_thresholdspec)
             .expect("rebuild location design");
     let gam_mu_train: Vec<f64> = loc_design.design.apply(&beta_location).to_vec();
+
+    // Per-column contribution magnitude: which location columns actually carry
+    // signal, and which sit at (numerically) zero.
+    let dense = loc_design.design.to_dense();
+    eprintln!(
+        "location design: {} rows x {} cols; per-column rms(X_j)*|beta_j| =",
+        dense.nrows(),
+        dense.ncols()
+    );
+    for j in 0..dense.ncols().min(beta_location.len()) {
+        let colrms =
+            (dense.column(j).iter().map(|v| v * v).sum::<f64>() / dense.nrows() as f64).sqrt();
+        eprintln!(
+            "   col {j:2}: rms(X)={colrms:.4e} beta={:+.6e} contrib_rms={:.4e}",
+            beta_location[j],
+            colrms * beta_location[j].abs()
+        );
+    }
 
     let ls_design =
         build_term_collection_design(train_grid.view(), &fit.fit.resolved_log_sigmaspec)
@@ -211,37 +229,125 @@ fn probe_2596_lognormal_locscale_recovery() {
     let gam_truth_rmse = rmse(&gam_mu_c, &truth_c);
     let signal_rms = (truth_c.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
     let fitted_rms = (gam_mu_c.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
-
-    // Regress the fitted centered surface on the truth: slope < 1 means shrinkage.
-    let num: f64 = gam_mu_c
-        .iter()
-        .zip(&truth_c)
-        .map(|(&g, &tr)| g * tr)
-        .sum::<f64>();
+    let num: f64 = gam_mu_c.iter().zip(&truth_c).map(|(&g, &tr)| g * tr).sum();
     let den: f64 = truth_c.iter().map(|v| v * v).sum::<f64>();
-    let slope = num / den;
 
-    // Split the location predictor into its x-part and z-part by refitting the
-    // truth pieces separately is not possible here; instead report how much of
-    // the fitted surface is explained by x alone.
     eprintln!(
-        "\n#2596 PROBE: n={n} signal_rms={signal_rms:.4} fitted_rms={fitted_rms:.4} \
-         truth_rmse={gam_truth_rmse:.4} shrink_slope={slope:.4}\n\
-         log_sigma: gam={gam_log_sigma:.4} truth={:.4} err={:.4}",
+        "[{label}] signal_rms={signal_rms:.4} fitted_rms={fitted_rms:.4} \
+         truth_rmse={gam_truth_rmse:.4} shrink_slope={:.4} \
+         log_sigma gam={gam_log_sigma:.4} truth={:.4} err={:.4}",
+        num / den,
         sigma_true.ln(),
         (gam_log_sigma - sigma_true.ln()).abs()
     );
+}
 
-    // Print the fitted location surface against z on a sorted grid so the shape
-    // is legible in the log.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| z[a].partial_cmp(&z[b]).expect("finite z"));
-    eprintln!("z, truth_c, gam_mu_c (every 10th row, sorted by z):");
-    for (k, &i) in order.iter().enumerate() {
-        if k % 10 == 0 {
-            eprintln!("  {:+.4} {:+.4} {:+.4}", z[i], truth_c[i], gam_mu_c[i]);
-        }
+#[test]
+#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
+fn probe_2596_lognormal_locscale_recovery() {
+    init_parallelism();
+    gam::test_support::install_diagnostic_logger();
+    run_survival_case(
+        "A-fixture-k10",
+        r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
+        |_| {},
+    );
+}
+
+#[test]
+#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
+fn probe_2596_variants() {
+    init_parallelism();
+    run_survival_case(
+        "B-k5",
+        r#"Surv(t, event) ~ x + s(z, bs="tp", k=5)"#,
+        |_| {},
+    );
+    run_survival_case(
+        "C-single-penalty",
+        r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
+        |c| c.double_penalty = false,
+    );
+    run_survival_case(
+        "D-pspline",
+        r#"Surv(t, event) ~ x + s(z, bs="ps", k=10)"#,
+        |_| {},
+    );
+    run_survival_case(
+        "E-default-time-knots",
+        r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
+        |c| c.time_num_internal_knots = 8,
+    );
+}
+
+/// Control: the SAME z-effect and the SAME rows, but a plain uncensored Gaussian
+/// GAM on the event rows only. If gam recovers `s(z)` here and not on the
+/// survival route, the defect is on the survival route, not in the thin-plate
+/// smooth or its REML selection.
+#[test]
+#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
+fn probe_2596_gaussian_control() {
+    init_parallelism();
+    let (n, t, event, x, z, sigma_true) = fixture();
+    let keep: Vec<usize> = (0..n).filter(|&i| event[i] > 0.5).collect();
+    let headers: Vec<String> = ["y", "x", "z"].into_iter().map(str::to_string).collect();
+    let rows: Vec<csv::StringRecord> = keep
+        .iter()
+        .map(|&i| {
+            csv::StringRecord::from(vec![
+                format!("{:.17e}", t[i].ln()),
+                format!("{:.17e}", x[i]),
+                format!("{:.17e}", z[i]),
+            ])
+        })
+        .collect();
+    let ds = encode_recordswith_inferred_schema(headers, rows).expect("encode");
+    let col = ds.column_map();
+    let x_idx = col["x"];
+    let z_idx = col["z"];
+    let ncols = ds.headers.len();
+    let m = keep.len();
+
+    let cfg = FitConfig {
+        family: Some("gaussian".to_string()),
+        ..FitConfig::default()
+    };
+    let result = fit_from_formula(r#"y ~ x + s(z, bs="tp", k=10)"#, &ds, &cfg)
+        .expect("gaussian control fit");
+    let FitResult::Standard(std_fit) = result else {
+        panic!("expected a standard gaussian fit");
+    };
+    eprintln!("\n================ CONTROL: uncensored gaussian on event rows ================");
+    for b in std_fit.fit.blocks.iter() {
+        eprintln!(
+            "  role={:?} p={} lambdas={:?} edf={:.4}",
+            b.role,
+            b.beta.len(),
+            b.lambdas.to_vec(),
+            b.edf,
+        );
     }
+    eprintln!("edf_total={:?}", std_fit.fit.edf_total());
 
-    let _ = BlockRole::Threshold;
+    let mut grid = Array2::<f64>::zeros((m, ncols));
+    for (r, &i) in keep.iter().enumerate() {
+        grid[[r, x_idx]] = x[i];
+        grid[[r, z_idx]] = z[i];
+    }
+    let design = build_term_collection_design(grid.view(), &std_fit.resolvedspec)
+        .expect("rebuild gaussian design");
+    let mu: Vec<f64> = design.design.apply(&std_fit.fit.beta).to_vec();
+    let truth: Vec<f64> = keep
+        .iter()
+        .map(|&i| 0.8 * x[i] + z_effect_truth(z[i]))
+        .collect();
+    let truth_mean = truth.iter().sum::<f64>() / m as f64;
+    let truth_c: Vec<f64> = truth.iter().map(|&v| v - truth_mean).collect();
+    let mu_mean = mu.iter().sum::<f64>() / m as f64;
+    let mu_c: Vec<f64> = mu.iter().map(|&v| v - mu_mean).collect();
+    let signal_rms = (truth_c.iter().map(|v| v * v).sum::<f64>() / m as f64).sqrt();
+    eprintln!(
+        "[CONTROL] m={m} signal_rms={signal_rms:.4} truth_rmse={:.4} (sigma_true={sigma_true:.4})",
+        rmse(&mu_c, &truth_c),
+    );
 }

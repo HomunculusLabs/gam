@@ -6129,7 +6129,7 @@ mod decoder_smoothness_dispatch_2393_tests {
 
 /// #2593 — the coverage the two independent substring ladders did not have.
 #[cfg(test)]
-mod probe_refusal_classification_2593 {
+mod probe_refusal_classification_2593_tests {
     use super::{OuterProbeTelemetry, ProbeRefusalKind, SaeManifoldOuterObjective};
 
     /// One representative rendered message per kind, taken from the producer
