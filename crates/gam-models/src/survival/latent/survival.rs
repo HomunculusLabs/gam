@@ -9449,6 +9449,57 @@ mod tests {
         }
     }
 
+    /// #2566 diagnostic (zz_measure): what the CERTIFICATE reports across the
+    /// ladder, so a threshold can be set from data rather than guessed.
+    ///
+    /// The gate currently asserts `disagreement <= uncertainty` at every row and
+    /// is permanently red from `log σ = 5` up — the curvature is a cancelling
+    /// difference and becomes noise there, so no implementation can satisfy it.
+    /// The replacement invariant is "never silently wrong": a row may be
+    /// inaccurate, or certified-untrustworthy, but never both accurate=false and
+    /// certified=true.
+    ///
+    /// That needs a tolerance, and picking one blind is how a gate gets
+    /// accidentally weakened — too loose and the certificate calls a broken row
+    /// trustworthy, which is exactly the failure the invariant exists to catch.
+    /// This prints the certificate's relative error beside the gate's own
+    /// accuracy verdict at every row, so the tolerance can be read off.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2566_certificate_across_ladder() {
+        let quadctx = QuadratureContext::new();
+        let row = LatentSurvivalRow::right_censored(0.3, 0.67, 0.01, 0.02);
+        let point_at = |log_sigma: f64| LatentSurvivalPrimaryPoint {
+            q_entry: -1.2,
+            q_exit: -0.4,
+            qdot_exit: 0.73,
+            q_right: 0.5,
+            mu: -0.15,
+            sigma: log_sigma.exp(),
+        };
+        eprintln!(
+            "#2566 cert: log_sigma  curvature       abs_error       rel_error     \
+             trustworthy@(0.01/0.05/0.25)"
+        );
+        for log_sigma in [-3.0_f64, 0.0, 2.0, 3.0, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0] {
+            match latent_survival_log_sigma_curvature_certified(&quadctx, &row, point_at(log_sigma))
+            {
+                Ok(certified) => eprintln!(
+                    "#2566 cert: {log_sigma:>9.1}  {:>14.6e}  {:>14.6e}  {:>12.6e}   \
+                     {} {} {}",
+                    certified.curvature,
+                    certified.estimated_absolute_error,
+                    certified.relative_error(),
+                    certified.is_trustworthy(0.01),
+                    certified.is_trustworthy(0.05),
+                    certified.is_trustworthy(0.25),
+                ),
+                Err(error) => eprintln!("#2566 cert: {log_sigma:>9.1}  REFUSED: {error}"),
+            }
+        }
+    }
+
     /// #2566 diagnostic (zz_measure): a FINE log-σ sweep of the curvature, to
     /// find the discontinuity the coarse ladder can only bracket.
     ///
