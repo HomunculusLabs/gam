@@ -48,6 +48,7 @@ pub mod riemannian_retraction;
 // gam-solve can store/return them without a back-edge into gam-inference; the
 // computation stays UP in the monolith `inference::rho_posterior`.
 pub mod rho_posterior;
+pub mod roundoff;
 pub mod row_measure;
 pub mod row_metric;
 pub mod schedule;
@@ -102,6 +103,7 @@ pub use finite_validation::{
 pub use fisher_rao::{
     FisherRaoDefiniteness, normalize_fisher_rao_blocks, normalize_fisher_rao_blocks_pd,
 };
+pub use roundoff::{roundoff_growth_factor, weighted_residual_is_at_roundoff_floor};
 use gam_linalg::dense;
 pub use gam_linalg::faer_ndarray::{in_nested_parallel_region, with_nested_parallel};
 pub use gauge::Gauge;

@@ -1845,10 +1845,35 @@ where
             eta
         };
         let resid = y_o.to_owned() - &fitted;
-        w_o.iter()
+        let raw: f64 = w_o
+            .iter()
             .zip(resid.iter())
             .map(|(&wi, &ri)| wi * ri * ri)
-            .sum()
+            .sum();
+        // An identity-link fit whose residual sits at the arithmetic's own
+        // resolution has NOT estimated a small residual variance — it has
+        // reproduced the response, and the number left over is the rounding in
+        // `η = Σ_j x_ij β_j`. Reporting `σ̂ ≈ 4e-16` there hands the caller
+        // standard errors and a criterion that move by orders of magnitude if
+        // the rows are permuted.
+        //
+        // Snapping it to an exact zero is the SAME decision the formula path's
+        // deterministic-Gaussian dispatch already makes one level up; making it
+        // here, where the dispersion is actually estimated, is what stops the
+        // two entry points from reporting different inference for identical
+        // data (#2595). `weighted_residual_is_at_roundoff_floor` is the shared
+        // certificate, and `|y_i| + |η_i|` is a LOWER bound on the operand scale
+        // that formed each residual, so this fires conservatively — never on a
+        // fit that genuinely misses.
+        let at_floor = gam_problem::weighted_residual_is_at_roundoff_floor(
+            raw,
+            w_o.iter().copied(),
+            y_o.iter()
+                .zip(fitted.iter())
+                .map(|(&yi, &fi)| yi.abs() + fi.abs()),
+            beta_orig.len() + 1,
+        );
+        if at_floor { 0.0 } else { raw }
     } else {
         0.0
     };
