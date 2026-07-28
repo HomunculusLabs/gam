@@ -381,6 +381,10 @@ pub struct SaeSupportSparseTerm {
     /// which are fixed when the assignment state is built and are never
     /// mutated after, so resolving it per call was re-deriving a constant.
     atom_axis_periods: Vec<Vec<Option<f64>>>,
+    /// `Some(passes)` selects the accelerated parallel decoder update for
+    /// this term's fixed-point solves; `None` keeps the exact colour-class
+    /// Gauss-Seidel sweep. See [`Self::set_decoder_fista_passes`].
+    decoder_fista_passes: Option<usize>,
 }
 
 impl SaeSupportSparseTerm {
@@ -462,6 +466,7 @@ impl SaeSupportSparseTerm {
             assignment,
             output_dim,
             atom_rows,
+            decoder_fista_passes: None,
             atom_axis_periods,
         })
     }
@@ -1907,6 +1912,166 @@ impl SaeSupportSparseTerm {
         Ok(updated)
     }
 
+    /// Accelerated parallel decoder update on the joint decoder quadratic.
+    ///
+    /// Given coordinates the decoder problem is a convex quadratic whose full
+    /// Hessian is majorized by the block-diagonal `s*G_k + lambda_k*S_k`
+    /// (each row couples at most `s = top_k` blocks, so the row-wise
+    /// Cauchy-Schwarz bound `(sum of s terms)^2 <= s * sum of squares` gives
+    /// the `s` factor). One proximal step against that majorizer descends
+    /// monotonically with EVERY atom updated at once -- width `K`, no colour
+    /// classes -- and FISTA momentum recovers the rate the damping costs.
+    /// Plain Jacobi is this update with the majorizer replaced by `G_k`
+    /// alone, which is exactly why it diverges on shared rows.
+    ///
+    /// The majorizer factorizations are per-call constants (`phi` depends
+    /// only on the frozen coordinates), so each pass costs one residual
+    /// gather and one triangular solve per atom, all row- and atom-parallel.
+    /// `fitted` obeys the same contract as [`Self::decoder_sweep`]: exact at
+    /// entry, exact at exit.
+    fn decoder_sweep_fista(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        lambda_smooth: &[f64],
+        fitted: &mut Array2<f64>,
+        passes: usize,
+    ) -> Result<f64, String> {
+        self.validate_smoothing(lambda_smooth)?;
+        if fitted.dim() != (self.n_obs(), self.output_dim) {
+            return Err(format!(
+                "SaeSupportSparseTerm::decoder_sweep_fista: fitted {:?} != ({}, {})",
+                fitted.dim(),
+                self.n_obs(),
+                self.output_dim
+            ));
+        }
+        let support = self
+            .assignment
+            .support_indices(0)
+            .len()
+            .max(1) as f64;
+        // Per-atom basis rows over the atom's support, gathered once: phi is a
+        // function of the frozen coordinates only.
+        let k_atoms = self.k_atoms();
+        let phi_rows: Vec<Array2<f64>> = (0..k_atoms)
+            .into_par_iter()
+            .map_init(ActiveAtomScratch::default, |scratch, atom_idx| {
+                let m = self.atoms[atom_idx].basis_size();
+                let rows = self.atom_rows[atom_idx].len();
+                let mut phi = Array2::<f64>::zeros((rows, m));
+                for (local, &(row, slot)) in self.atom_rows[atom_idx].iter().enumerate() {
+                    self.fill_active(row, slot, scratch)?;
+                    phi.row_mut(local).assign(&scratch.phi_row());
+                }
+                Ok::<_, String>(phi)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Inverse routing map: for each row, its slots as (atom, local index
+        // into that atom's row list). Built once; this is what lets the apply
+        // parallelize over ROWS while the deltas are computed over ATOMS.
+        let mut row_slot_map: Vec<Vec<(usize, usize)>> =
+            vec![Vec::with_capacity(support as usize); self.n_obs()];
+        for atom_idx in 0..k_atoms {
+            for (local, &(row, _slot)) in self.atom_rows[atom_idx].iter().enumerate() {
+                row_slot_map[row].push((atom_idx, local));
+            }
+        }
+        // Majorizer factorizations: s*G_k with the penalty applied through the
+        // same solver the exact sweep trusts (it never forms G + lambda*S).
+        let grams: Vec<Array2<f64>> = (0..k_atoms)
+            .into_par_iter()
+            .map(|atom_idx| {
+                let phi = &phi_rows[atom_idx];
+                phi.t().dot(phi) * support
+            })
+            .collect();
+        let mut previous: Vec<Array2<f64>> = (0..k_atoms)
+            .map(|atom_idx| self.atoms[atom_idx].decoder_coefficients().clone())
+            .collect();
+        let mut momentum_t = 1.0_f64;
+        let mut max_change = 0.0_f64;
+        for _pass in 0..passes {
+            // grad_k = -Phi_k^T R|rows(k) + lambda_k S_k B_k ; step against the
+            // majorizer via the penalized solver:
+            //   (s G_k + lambda_k S_k) D_k = Phi_k^T R|rows(k) - lambda_k S_k B_k
+            //   B_k <- B_k + D_k
+            let residual = &target - &*fitted;
+            let updates: Vec<(Array2<f64>, Array2<f64>)> = (0..k_atoms)
+                .into_par_iter()
+                .map(|atom_idx| -> Result<(Array2<f64>, Array2<f64>), String> {
+                    let phi = &phi_rows[atom_idx];
+                    let m = phi.ncols();
+                    let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
+                    for (local, &(row, _slot)) in self.atom_rows[atom_idx].iter().enumerate() {
+                        let phi_row = phi.row(local);
+                        for basis in 0..m {
+                            rhs.row_mut(basis)
+                                .scaled_add(phi_row[basis], &residual.row(row));
+                        }
+                    }
+                    let decoder = self.atoms[atom_idx].decoder_coefficients();
+                    let penalized =
+                        self.atoms[atom_idx].smooth_penalty().dot(decoder) * lambda_smooth[atom_idx];
+                    rhs -= &penalized;
+                    let delta = Self::solve_penalized_normal_equations(
+                        &grams[atom_idx],
+                        self.atoms[atom_idx].smooth_penalty(),
+                        lambda_smooth[atom_idx],
+                        &rhs,
+                        "SaeSupportSparseTerm::decoder_sweep_fista",
+                    )?;
+                    let new = decoder + &delta;
+                    Ok((new, delta))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // FISTA extrapolation over the block iterates, then install and
+            // refresh `fitted` with each row's own delta -- rows are disjoint
+            // writes, so the refresh parallelizes over row chunks.
+            let next_t = 0.5 * (1.0 + (1.0 + 4.0 * momentum_t * momentum_t).sqrt());
+            let beta = (momentum_t - 1.0) / next_t;
+            momentum_t = next_t;
+            let mut installed: Vec<Array2<f64>> = Vec::with_capacity(k_atoms);
+            for (atom_idx, (new, delta)) in updates.into_iter().enumerate() {
+                for value in delta.iter() {
+                    max_change = max_change.max(value.abs());
+                }
+                let extrapolated = &new + &((&new - &previous[atom_idx]) * beta);
+                previous[atom_idx] = new;
+                installed.push(extrapolated);
+            }
+            // fitted deltas per atom (atom-parallel), THEN a row-parallel
+            // apply through the inverted (row, slot) -> (atom, local) map:
+            // rows are disjoint writes, so this is the full-width apply the
+            // colour classes could never give the exact sweep.
+            let fitted_deltas: Vec<Array2<f64>> = (0..k_atoms)
+                .into_par_iter()
+                .map(|atom_idx| {
+                    let step =
+                        &installed[atom_idx] - self.atoms[atom_idx].decoder_coefficients();
+                    phi_rows[atom_idx].dot(&step)
+                })
+                .collect();
+            for (atom_idx, decoder) in installed.into_iter().enumerate() {
+                self.atoms[atom_idx].set_decoder_coefficients(decoder)?;
+            }
+            fitted
+                .axis_chunks_iter_mut(ndarray::Axis(0), RECONSTRUCT_ROW_CHUNK)
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(chunk, mut block)| {
+                    let base = chunk * RECONSTRUCT_ROW_CHUNK;
+                    for local_row in 0..block.nrows() {
+                        let row = base + local_row;
+                        let mut out = block.row_mut(local_row);
+                        for &(atom_idx, atom_local) in &row_slot_map[row] {
+                            out += &fitted_deltas[atom_idx].row(atom_local);
+                        }
+                    }
+                });
+        }
+        Ok(max_change)
+    }
+
     /// `fitted` is the CALLER's decoded matrix and must be exact for the
     /// current state at entry; the sweep keeps it exact through every decoder
     /// update (it already maintained an internal copy incrementally — the
@@ -2155,6 +2320,16 @@ impl SaeSupportSparseTerm {
                 })?;
         }
         Ok(max_change)
+    }
+
+    /// Select the accelerated parallel decoder update for this term's
+    /// fixed-point solves: `Some(passes)` runs [`Self::decoder_sweep_fista`]
+    /// with that many majorized passes per cycle, `None` (the default) keeps
+    /// the exact colour-class sweep. A typed knob on the term rather than an
+    /// environment variable, so an A/B is two constructed terms, not two
+    /// process environments.
+    pub fn set_decoder_fista_passes(&mut self, passes: Option<usize>) {
+        self.decoder_fista_passes = passes;
     }
 
     /// Per-slot offset ranges into a row's compact coordinate block.
@@ -2879,7 +3054,12 @@ impl SaeSupportSparseTerm {
         let mut objective_at_last_reroute = f64::INFINITY;
         for iteration in 1..=max_iter {
             self.snapshot_coordinates(&mut cycle_start);
-            let decoder_change = self.decoder_sweep(target, lambda_smooth, &mut fitted_state)?;
+            let decoder_change = match self.decoder_fista_passes {
+                Some(passes) => {
+                    self.decoder_sweep_fista(target, lambda_smooth, &mut fitted_state, passes)?
+                }
+                None => self.decoder_sweep(target, lambda_smooth, &mut fitted_state)?,
+            };
             let coordinate_change = self.coordinate_sweep(
                 target,
                 ard_precisions,

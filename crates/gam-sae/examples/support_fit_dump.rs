@@ -271,6 +271,13 @@ fn main() -> Result<(), String> {
                 })?
         }
     };
+    // Optional decoder-strategy arg: "fista" runs the accelerated parallel
+    // decoder update (6 majorized passes/cycle) instead of the colour-class
+    // sweep -- a typed knob for the A/B, never an environment variable.
+    if args.len() >= 15 && args[14] == "fista" {
+        term_seed.term.set_decoder_fista_passes(Some(6));
+        println!("decoder strategy: FISTA (6 passes/cycle)");
+    }
     let mut ard = ard;
     while reml_arg {
         let updated = term_seed
@@ -378,6 +385,35 @@ fn main() -> Result<(), String> {
     // The per-atom smoothing the fit ACTUALLY used -- without it a wiggly
     // curve in a gallery cannot be told apart from an under-smoothed one.
     write_f64s(&format!("{out_dir}/lambda.bin"), &lambda)?;
+    {
+        // Full fitted state, enough to rehydrate the model outside this
+        // process (#2567): per-atom decoder blocks (concatenated row-major,
+        // widths from atom_basis_size), the support grid, and every row's
+        // compact coordinate block.
+        let mut decoder_flat: Vec<f64> = Vec::new();
+        let mut decoder_meta: Vec<f64> = Vec::new();
+        for atom in 0..k_ret {
+            let block = term_seed.term.atoms[atom].decoder_coefficients();
+            decoder_meta.push(block.nrows() as f64);
+            decoder_flat.extend(block.iter().copied());
+        }
+        write_f64s(&format!("{out_dir}/decoder_blocks.bin"), &decoder_flat)?;
+        write_f64s(&format!("{out_dir}/decoder_rows.bin"), &decoder_meta)?;
+        let mut support_flat: Vec<f64> = Vec::with_capacity(rows * top_k);
+        let mut coords_flat: Vec<f64> = Vec::new();
+        let mut coords_len: Vec<f64> = Vec::with_capacity(rows);
+        for row in 0..rows {
+            for &atom in term_seed.term.assignment.support_indices(row) {
+                support_flat.push(atom as f64);
+            }
+            let rc = term_seed.term.assignment.coords_row(row);
+            coords_len.push(rc.len() as f64);
+            coords_flat.extend_from_slice(rc);
+        }
+        write_f64s(&format!("{out_dir}/support.bin"), &support_flat)?;
+        write_f64s(&format!("{out_dir}/coords.bin"), &coords_flat)?;
+        write_f64s(&format!("{out_dir}/coords_len.bin"), &coords_len)?;
+    }
     println!(
         "inner CERTIFIED in {} cycles, {:.0}s, objective {:.4e}",
         report.iterations,
@@ -656,6 +692,32 @@ fn main() -> Result<(), String> {
             tok_flat.push(value);
         }
         write_f64s(&format!("{out_dir}/tokens_{idx}.bin"), &tok_flat)?;
+        {
+            let cap = 2000usize.min(toks.len());
+            let mut partial: Vec<f64> = Vec::with_capacity(cap * (1 + cols));
+            for &(row, _t, _v) in toks.iter().take(cap) {
+                let support = term.assignment.support_indices(row);
+                let mut own = vec![0.0_f64; cols];
+                for (slot, &atom_id) in support.iter().enumerate() {
+                    if atom_id as usize == a {
+                        let coords_slice = term.assignment.coords_for_slot(row, slot);
+                        let coords = Array2::from_shape_vec(
+                            (1, coords_slice.len()),
+                            coords_slice.to_vec(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let decoded = term.decode_atom_at(a, coords.view())?;
+                        own.copy_from_slice(decoded.row(0).to_slice().ok_or("contig")?);
+                        break;
+                    }
+                }
+                partial.push(row as f64);
+                for c in 0..cols {
+                    partial.push(centered[[row, c]] - fitted[[row, c]] + own[c]);
+                }
+            }
+            write_f64s(&format!("{out_dir}/partial_{idx}.bin"), &partial)?;
+        }
         if !atom_token_coords[a].is_empty() {
             let width = atom_token_coords[a][0].1.len();
             let mut wide: Vec<f64> = Vec::with_capacity(atom_token_coords[a].len() * (width + 1));
