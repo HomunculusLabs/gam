@@ -232,7 +232,7 @@ impl Serializer for KeyRenderer {
         Ok(value.to_string())
     }
 
-    fn serialize_bytes(self, _value: &[u8]) -> Result<String, WalkError> {
+    fn serialize_bytes(self, _: &[u8]) -> Result<String, WalkError> {
         Ok("<bytes>".to_string())
     }
 
@@ -257,14 +257,14 @@ impl Serializer for KeyRenderer {
 
     fn serialize_unit_variant(
         self,
-        _name: &'static str,
-        _index: u32,
+        _: &'static str,
+        _: u32,
         variant: &'static str,
     ) -> Result<String, WalkError> {
         Ok(variant.to_string())
     }
 
-    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<String, WalkError>
+    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<String, WalkError>
     where
         T: Serialize + ?Sized,
     {
@@ -273,10 +273,10 @@ impl Serializer for KeyRenderer {
 
     fn serialize_newtype_variant<T>(
         self,
-        _name: &'static str,
-        _index: u32,
+        _: &'static str,
+        _: u32,
         variant: &'static str,
-        _value: &T,
+        _: &T,
     ) -> Result<String, WalkError>
     where
         T: Serialize + ?Sized,
@@ -284,50 +284,50 @@ impl Serializer for KeyRenderer {
         Ok(variant.to_string())
     }
 
-    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, WalkError> {
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
-    fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, WalkError> {
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
     fn serialize_tuple_struct(
         self,
-        _name: &'static str,
-        _len: usize,
+        _: &'static str,
+        _: usize,
     ) -> Result<Self::SerializeTupleStruct, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
     fn serialize_tuple_variant(
         self,
-        _name: &'static str,
-        _index: u32,
-        _variant: &'static str,
-        _len: usize,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
     ) -> Result<Self::SerializeTupleVariant, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
-    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, WalkError> {
+    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
     fn serialize_struct(
         self,
-        _name: &'static str,
-        _len: usize,
+        _: &'static str,
+        _: usize,
     ) -> Result<Self::SerializeStruct, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
 
     fn serialize_struct_variant(
         self,
-        _name: &'static str,
-        _index: u32,
-        _variant: &'static str,
-        _len: usize,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
     ) -> Result<Self::SerializeStructVariant, WalkError> {
         Err(WalkError::Custom("map key is not a scalar".to_string()))
     }
@@ -355,59 +355,59 @@ impl<'a> Serializer for &'a mut FloatWalker {
         self.check(f64::from(value))
     }
 
-    fn serialize_bool(self, _value: bool) -> Result<(), WalkError> {
+    fn serialize_bool(self, _: bool) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i8(self, _value: i8) -> Result<(), WalkError> {
+    fn serialize_i8(self, _: i8) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i16(self, _value: i16) -> Result<(), WalkError> {
+    fn serialize_i16(self, _: i16) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i32(self, _value: i32) -> Result<(), WalkError> {
+    fn serialize_i32(self, _: i32) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i64(self, _value: i64) -> Result<(), WalkError> {
+    fn serialize_i64(self, _: i64) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_i128(self, _value: i128) -> Result<(), WalkError> {
+    fn serialize_i128(self, _: i128) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u8(self, _value: u8) -> Result<(), WalkError> {
+    fn serialize_u8(self, _: u8) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u16(self, _value: u16) -> Result<(), WalkError> {
+    fn serialize_u16(self, _: u16) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u32(self, _value: u32) -> Result<(), WalkError> {
+    fn serialize_u32(self, _: u32) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u64(self, _value: u64) -> Result<(), WalkError> {
+    fn serialize_u64(self, _: u64) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_u128(self, _value: u128) -> Result<(), WalkError> {
+    fn serialize_u128(self, _: u128) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_char(self, _value: char) -> Result<(), WalkError> {
+    fn serialize_char(self, _: char) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_str(self, _value: &str) -> Result<(), WalkError> {
+    fn serialize_str(self, _: &str) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_bytes(self, _value: &[u8]) -> Result<(), WalkError> {
+    fn serialize_bytes(self, _: &[u8]) -> Result<(), WalkError> {
         Ok(())
     }
 
@@ -426,20 +426,20 @@ impl<'a> Serializer for &'a mut FloatWalker {
         Ok(())
     }
 
-    fn serialize_unit_struct(self, _name: &'static str) -> Result<(), WalkError> {
+    fn serialize_unit_struct(self, _: &'static str) -> Result<(), WalkError> {
         Ok(())
     }
 
     fn serialize_unit_variant(
         self,
-        _name: &'static str,
-        _index: u32,
-        _variant: &'static str,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
     ) -> Result<(), WalkError> {
         Ok(())
     }
 
-    fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<(), WalkError>
+    fn serialize_newtype_struct<T>(self, _: &'static str, value: &T) -> Result<(), WalkError>
     where
         T: Serialize + ?Sized,
     {
@@ -448,8 +448,8 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_newtype_variant<T>(
         self,
-        _name: &'static str,
-        _index: u32,
+        _: &'static str,
+        _: u32,
         variant: &'static str,
         value: &T,
     ) -> Result<(), WalkError>
@@ -464,7 +464,7 @@ impl<'a> Serializer for &'a mut FloatWalker {
         outcome
     }
 
-    fn serialize_seq(self, _len: Option<usize>) -> Result<SeqWalker<'a>, WalkError> {
+    fn serialize_seq(self, _: Option<usize>) -> Result<SeqWalker<'a>, WalkError> {
         Ok(SeqWalker {
             walker: self,
             index: 0,
@@ -477,7 +477,7 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_tuple_struct(
         self,
-        _name: &'static str,
+        _: &'static str,
         len: usize,
     ) -> Result<SeqWalker<'a>, WalkError> {
         self.serialize_seq(Some(len))
@@ -485,10 +485,10 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_tuple_variant(
         self,
-        _name: &'static str,
-        _index: u32,
+        _: &'static str,
+        _: u32,
         variant: &'static str,
-        _len: usize,
+        _: usize,
     ) -> Result<VariantSeqWalker<'a>, WalkError> {
         let restore = self.push_field(variant);
         Ok(VariantSeqWalker {
@@ -500,7 +500,7 @@ impl<'a> Serializer for &'a mut FloatWalker {
         })
     }
 
-    fn serialize_map(self, _len: Option<usize>) -> Result<MapWalker<'a>, WalkError> {
+    fn serialize_map(self, _: Option<usize>) -> Result<MapWalker<'a>, WalkError> {
         Ok(MapWalker {
             walker: self,
             restore: None,
@@ -509,8 +509,8 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_struct(
         self,
-        _name: &'static str,
-        _len: usize,
+        _: &'static str,
+        _: usize,
     ) -> Result<StructWalker<'a>, WalkError> {
         Ok(StructWalker {
             walker: self,
@@ -520,10 +520,10 @@ impl<'a> Serializer for &'a mut FloatWalker {
 
     fn serialize_struct_variant(
         self,
-        _name: &'static str,
-        _index: u32,
+        _: &'static str,
+        _: u32,
         variant: &'static str,
-        _len: usize,
+        _: usize,
     ) -> Result<StructWalker<'a>, WalkError> {
         let restore = self.push_field(variant);
         Ok(StructWalker {
@@ -532,7 +532,7 @@ impl<'a> Serializer for &'a mut FloatWalker {
         })
     }
 
-    fn collect_str<T>(self, _value: &T) -> Result<(), WalkError>
+    fn collect_str<T>(self, _: &T) -> Result<(), WalkError>
     where
         T: Display + ?Sized,
     {
