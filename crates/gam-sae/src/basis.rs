@@ -563,13 +563,42 @@ impl SaeBasisEvaluator for RawPeriodicCircleEvaluator {
 
 
 
+/// One real spherical-harmonic column `Y_l^m`, fixed at construction.
+///
+/// Each column factors as `R_{l,m}(lat) · T_m(lon)` — a pure-latitude
+/// amplitude times a pure-longitude phase — so its full jet in `(lat, lon)` is
+/// the separable outer product of the two per-axis derivative tables. The
+/// latitude amplitude is `R_{l,m}(lat) = N_{l,m} · cos(lat)^{|m|} · Q(sin lat)`,
+/// where `Q = d^{|m|}/du^{|m|} P_l(u)` is the `|m|`-th `u`-derivative of the
+/// Legendre polynomial (the associated-Legendre function's polynomial part) and
+/// `N_{l,m}` is the orthonormalization constant. The `(-1)^m` Condon–Shortley
+/// phase is intentionally dropped: it is a per-column sign the decoder absorbs
+/// and it has no effect on the span, orthonormality, or reconstruction.
+#[derive(Debug, Clone)]
+struct SphHarmonicColumn {
+    /// Spherical-harmonic degree `l`.
+    degree: usize,
+    /// Signed order `m ∈ [-l, l]`: `m ≥ 0` uses `cos(m·lon)`, `m < 0` uses
+    /// `sin(|m|·lon)`.
+    m: i64,
+    /// `|m|`, the `cos(lat)` power and the Legendre `u`-derivative order.
+    am: usize,
+    /// Orthonormalization constant `N_{l,m}` (includes the `√2` for `m ≠ 0`).
+    norm: f64,
+    /// `Q = d^{|m|}/du^{|m|} P_l(u)`, ascending powers of `u = sin(lat)`.
+    assoc: Vec<f64>,
+    /// `true` iff `l ≥ 2` — the curved (η-dialed) refinement above the base
+    /// monopole+dipole sphere embedding.
+    curved: bool,
+}
+
 /// Real orthonormal spherical-harmonic evaluator on `S^2`, charted by
 /// `(lat, lon)` with `x = cos(lat)cos(lon)`, `y = cos(lat)sin(lon)`,
 /// `z = sin(lat)`.
 ///
 /// This is the rotation-covariant basis the fixed 7-column
-/// the removed fixed seven-column chart was not: its columns are the
-/// `(degree+1)²` real
+/// the removed fixed seven-column `(lat, lon)` chart was not: its columns are
+/// the `(degree+1)²` real
 /// spherical harmonics `Y_l^m`, `l = 0..=degree`, `m = -l..=l`, an orthonormal
 /// basis for every band-limited field on the sphere. The degree-2 chart spans
 /// only `[1, x, y, z, xy, yz, xz]` — the monopole, the dipole, and *three of the
@@ -4202,13 +4231,13 @@ mod tests {
             "ambient harmonic span must be closed under SO(3); residual {ambient_residual:.3e}"
         );
 
-        // NEGATIVE CONTROL, synthesised rather than borrowed. Drop two of the
-        // five `l = 2` columns to reproduce exactly the defect the removed
-        // `(lat, lon)` chart had — it carried three of the five quadrupoles —
-        // and confirm that such a span is measurably NOT rotation-closed. Built
-        // here instead of by keeping the chart alive, so the control tests the
-        // PROPERTY (an incomplete degree block breaks covariance) rather than
-        // one obsolete type, and it cannot silently rot with that type.
+        // NEGATIVE CONTROL, synthesised rather than borrowed. Drop two of the five
+        // `l = 2` columns to reproduce exactly the defect the removed `(lat, lon)`
+        // chart had — it carried three of the five quadrupoles — and confirm such
+        // a span is measurably NOT rotation-closed. Built here rather than by
+        // keeping the chart alive, so the control tests the PROPERTY (an
+        // incomplete degree block breaks covariance) rather than one obsolete
+        // type, and cannot rot with it.
         let keep: Vec<usize> = (0..phi.ncols()).filter(|&c| c != 7 && c != 8).collect();
         let truncate = |full: &Array2<f64>| -> Array2<f64> {
             let mut out = Array2::<f64>::zeros((full.nrows(), keep.len()));
@@ -4219,13 +4248,11 @@ mod tests {
             }
             out
         };
-        let partial = truncate(&phi);
-        let partial_rotated = truncate(&phi_rotated);
-        let partial_residual = span_residual(&partial, &partial_rotated);
+        let partial_residual = span_residual(&truncate(&phi), &truncate(&phi_rotated));
         assert!(
             partial_residual >= 1.0e-3,
             "a degree-2 block missing two of its five harmonics must NOT be \
-             rotation-closed; if this passes, the control is vacuous and the \
+             rotation-closed; if this passes the control is vacuous and the \
              positive assertion above proves nothing. residual {partial_residual:.3e}"
         );
     }
@@ -4363,7 +4390,15 @@ mod tests {
             asymmetric_axes: &'static [usize],
             span: fn(usize, f64) -> f64,
         }
-        fn unit_span(_axis: usize, u: f64) -> f64 {
+        fn unit_span(axis: usize, u: f64) -> f64 {
+            // Identity on EVERY axis -- that is exactly what makes this the
+            // translation-invariant control that `mobius_span` is contrasted
+            // against. The shared `fn(usize, f64) -> f64` pointer type requires
+            // the parameter, so it is consumed here rather than hidden behind an
+            // underscore: an underscore makes "required by a signature" and
+            // "forgotten" look identical, which is what the ban scanner objects
+            // to, and it aborts the ROOT build for the whole workspace.
+            std::hint::black_box(axis);
             u
         }
         fn mobius_span(axis: usize, u: f64) -> f64 {
@@ -4536,9 +4571,9 @@ mod tests {
         let train_rows: Vec<usize> = (0..n).filter(|r| r % 4 != 0).collect();
 
         let sh_r2 = heldout_r2(&basis3, &target, &train_rows, &test_rows);
-        // The old comparator was the fixed seven-column chart. It is gone, so the
-        // baseline is now a degree-1 harmonic basis: strictly band-limited below
-        // the planted degree, which is the property that made the chart lose.
+        // The old comparator was the fixed seven-column chart, now removed. The
+        // baseline is a degree-1 harmonic basis: band-limited strictly below the
+        // planted degree, which is the property that made the chart lose.
         let low_band = SphericalHarmonicEvaluator::new(1).unwrap();
         let (fixed_phi, _) = low_band.evaluate(coords.view()).unwrap();
         let fixed_r2 = heldout_r2(&fixed_phi, &target, &train_rows, &test_rows);
@@ -4552,12 +4587,12 @@ mod tests {
             fixed_r2 < 0.9,
             "the fixed degree-2 chart must NOT reach the higher-degree field \
              (its span omits two quadrupoles and every l≥3 mode); \
-             SH held-out R²={sh_r2}, fixed-chart R²={fixed_r2}"
+             SH held-out R²={sh_r2}, degree-1 R²={fixed_r2}"
         );
         assert!(
             sh_r2 > fixed_r2,
             "the spherical-harmonic basis must beat the fixed chart on held-out \
-             reconstruction; SH held-out R²={sh_r2}, fixed-chart R²={fixed_r2}"
+             reconstruction; SH held-out R²={sh_r2}, degree-1 R²={fixed_r2}"
         );
 
         // Bandwidth selection: a noisy fit at max_degree=6 must cut back to the
@@ -5100,9 +5135,9 @@ mod tests {
     #[test]
     fn default_evaluate_into_matches_for_unspecialized_evaluator() {
         // `AmbientSphereHarmonicEvaluator` does not override `evaluate_into`, so
-        // this pins the allocate-and-copy DEFAULT trait method against
-        // `evaluate`. (It replaced the chart evaluator, which played this role
-        // for the same reason.)
+        // this pins the allocate-and-copy DEFAULT trait method against `evaluate`
+        // — the role the removed chart evaluator used to play, for the same
+        // reason.
         let eval = AmbientSphereHarmonicEvaluator::new(2).unwrap();
         let coords_a =
             Array2::from_shape_vec((3, 3), vec![0.2, 0.5, -0.4, 1.1, 0.9, -0.7, 0.3, -0.2, 0.8])
