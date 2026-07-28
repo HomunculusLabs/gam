@@ -114,9 +114,21 @@ fn effective_atom(
     let latent_dim = match kind {
         // Public periodic dimension is harmonic resolution; its chart is 1-D.
         SaeAtomBasisKind::Periodic => 1,
-        SaeAtomBasisKind::Sphere
-        | SaeAtomBasisKind::ProjectivePlane
-        | SaeAtomBasisKind::Torus
+        // `S²` and its antipodal quotient are 2-dimensional but carry THREE
+        // coordinates: they admit no global 2-D chart, so the ambient unit
+        // vector is the only pole-free parameterisation. The public dimension
+        // stays 2 (it names the manifold's intrinsic dimension, which is what a
+        // caller means by `atom_dim`) while the live chart is 3-wide -- the same
+        // public-vs-effective split `Periodic` already uses in the arm above.
+        SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
+            if public_dim != 2 {
+                return Err(format!(
+                    "build_sae_support_seed: atom {atom} basis requires atom_dim == 2; got {public_dim}"
+                ));
+            }
+            3
+        }
+        SaeAtomBasisKind::Torus
         | SaeAtomBasisKind::KleinBottle
         | SaeAtomBasisKind::Mobius => {
             if public_dim != 2 {
@@ -217,10 +229,12 @@ pub(super) fn chart_coordinate(kind: &SaeAtomBasisKind, axis: usize, raw: f64) -
         SaeAtomBasisKind::Periodic | SaeAtomBasisKind::Torus | SaeAtomBasisKind::KleinBottle => {
             0.5 + raw.atan() / std::f64::consts::PI
         }
-        SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane if axis == 0 => raw.atan(),
-        SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
-            std::f64::consts::PI + 2.0 * raw.atan()
-        }
+        // The ambient sphere needs no per-axis squashing: its coordinate is a
+        // DIRECTION, and the only constraint (unit norm) couples all three axes,
+        // so no per-axis function can express it. The raw projection is passed
+        // through as a direction and the manifold normalises the block -- see
+        // the projection step in `build_sae_support_seed`.
+        SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => raw,
         SaeAtomBasisKind::Mobius if axis == 0 => 1.0 + 2.0 * raw.atan() / std::f64::consts::PI,
         SaeAtomBasisKind::Mobius => raw.tanh(),
         _ => raw,
@@ -342,10 +356,26 @@ pub fn build_sae_support_seed(
         for entry in selected {
             row_indices.push(entry.atom as u32);
             row_gates.push(entry.score);
+            let block_start = row_coords.len();
             for axis in 0..effective_atom_dim[entry.atom] {
                 let raw = projection(&centered, entry.atom, axis + 1, request.random_state);
                 row_coords.push(chart_coordinate(&atom_kinds[entry.atom], axis, raw));
             }
+            // A seed must LIE ON the manifold it seeds. `chart_coordinate` is
+            // per-axis and so cannot express any constraint that couples axes --
+            // the unit norm of an ambient sphere coordinate is not a property
+            // any single axis has. The manifold is the sole authority for its
+            // own point set, so the freshly-built block is projected onto it
+            // before the seed is accepted. On Euclidean, circle and interval
+            // charts `project_point` is the identity or the wrap/clamp those
+            // charts already imply, so no existing seed moves.
+            let block = ndarray::Array1::from_vec(row_coords[block_start..].to_vec());
+            let projected = atom_specs[entry.atom].manifold.project_point(block.view());
+            row_coords[block_start..].copy_from_slice(
+                projected
+                    .as_slice()
+                    .expect("a projected coordinate block is contiguous"),
+            );
         }
         indices.push(row_indices);
         gates.push(row_gates);
