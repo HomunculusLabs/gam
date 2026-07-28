@@ -3076,19 +3076,19 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
 /// independent authority says it could be wrong by. A consumer that needs a
 /// definite Hessian refuses on the ratio rather than on a scale cutoff.
 #[derive(Clone, Copy, Debug)]
-pub struct CertifiedLogSigmaCurvature {
+pub(crate) struct CertifiedLogSigmaCurvature {
     /// The production negative-Hessian `∂²/∂(log σ)²` entry.
-    pub curvature: f64,
+    pub(crate) curvature: f64,
     /// Measured bound on `|curvature − truth|`: the observed disagreement with an
     /// independent finite-difference authority, plus that authority's own
     /// numerical error. Not a proved bound — an estimate, from measurement.
-    pub estimated_absolute_error: f64,
+    pub(crate) estimated_absolute_error: f64,
 }
 
 impl CertifiedLogSigmaCurvature {
     /// Relative error, or `f64::INFINITY` for a zero curvature carrying any
     /// error at all (a zero that could be anything is not a usable zero).
-    pub fn relative_error(&self) -> f64 {
+    pub(crate) fn relative_error(&self) -> f64 {
         if self.curvature == 0.0 {
             if self.estimated_absolute_error == 0.0 {
                 0.0
@@ -3101,7 +3101,7 @@ impl CertifiedLogSigmaCurvature {
     }
 
     /// Whether the curvature is usable at the caller's relative tolerance.
-    pub fn is_trustworthy(&self, relative_tolerance: f64) -> bool {
+    pub(crate) fn is_trustworthy(&self, relative_tolerance: f64) -> bool {
         self.curvature.is_finite() && self.relative_error() <= relative_tolerance
     }
 }
@@ -3170,7 +3170,11 @@ fn latent_richardson_derivative(
 /// The result is a MEASURED estimate, not a proved bound. A proved bound on the
 /// `ControlledAsymptotic` branch is a much larger piece of work; the reformulation
 /// that would remove the need for either is tracked separately.
-pub fn latent_survival_log_sigma_curvature_certified(
+// Crate-visible rather than `pub`: `LatentSurvivalPrimaryPoint` is private to
+// this module, and a `pub fn` taking it is a private-in-public error. Widening the
+// point type is a real API decision and not one this certificate should force --
+// every consumer that needs the refusal today lives inside `gam-models`.
+pub(crate) fn latent_survival_log_sigma_curvature_certified(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
