@@ -32,10 +32,16 @@
 //! *unpenalized*, fixed-knot Royston-Parmar model (df chosen by hand). `scam`
 //! regresses a Nelson-Aalen log-cumulative-hazard on `log t` (a Gaussian smoother,
 //! no survival likelihood, no covariate). Neither is a penalized baseline +
-//! penalized covariate smooth with REML smoothing selection. `rstpm2::pstpm2`
-//! (`link.type="PH"`, `criterion="REML"`, thin-plate penalized splines on `log t`
-//! and on the covariate) is exactly that model, so it is the apt mature baseline
-//! for gam's `survival_likelihood="transformation"` family on held-out C.
+//! penalized covariate smooth. `rstpm2::pstpm2` (`link.type="PH"`, thin-plate
+//! penalized splines on `log t` and on the covariate) is exactly that model, so
+//! it is the apt mature baseline for gam's
+//! `survival_likelihood="transformation"` family on held-out C.
+//!
+//! The peer selects its own smoothing parameter its own way: `pstpm2` offers
+//! `criterion` in {"GCV", "BIC"} only and defaults to GCV, so this comparison is
+//! gam's REML against the baseline the tool actually ships. An earlier revision
+//! passed `criterion="REML"`, which `match.arg` rejects outright — the fit never
+//! ran and the arm reported REF_ERROR rather than a number.
 //!
 //! Real data: the PBC `cirrhosis.csv` cohort (n≈418). Time is `N_Days`, the
 //! event is death (`Status == "D"`); transplant (`CL`) and alive (`C`) are
@@ -292,16 +298,16 @@ fn gam_penalized_baseline_predicts_heldout_survival_on_cirrhosis() {
             ta <- c({test_ages})
             # Penalized generalized survival model: thin-plate penalized spline on
             # log-time (the flexible baseline) + penalized smooth covariate effect,
-            # PH link (g = log cumulative hazard), REML smoothing selection. Fit on
-            # the TRAIN rows that the harness placed in `df`.
+            # PH link (g = log cumulative hazard). Smoothing selection is left to
+            # pstpm2's own default (GCV; it offers only GCV/BIC). Fit on the TRAIN
+            # rows that the harness placed in `df`.
             # pstpm2's MAIN formula takes only plain covariates; every smooth term
             # (baseline AND covariate) must live in smooth.formula, else
             # model.frame() rejects the list-valued s() column.
             m <- pstpm2(Surv(N_Days, event) ~ 1,
                         data = df,
                         smooth.formula = ~ s(log(N_Days)) + s(Age_years),
-                        link.type = "PH",
-                        control = list(criterion = "REML"))
+                        link.type = "PH")
             # Covariate risk score for each held-out subject: log Λ(tref | Age),
             # evaluated at a fixed reference time. The shared baseline is a per-time
             # constant, so on a single tref the ordering of these values is exactly
