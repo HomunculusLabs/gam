@@ -1337,13 +1337,19 @@ impl SaeSupportSparseTerm {
             ));
         }
         for (atom, values) in ard_precisions.iter().enumerate() {
+            // alpha == 0.0 is the typed prior EXEMPTION for an axis whose
+            // prior family is constant on its manifold (any axis of an
+            // ambient unit vector): the prior evaluates to exact zeros there,
+            // and the MacKay update never re-selects an exempt axis. Negative,
+            // non-finite, and (to keep the exemption deliberate) subnormal
+            // values remain refused.
             if values.len() != self.assignment.atom_coord_dim(atom)
                 || values
                     .iter()
-                    .any(|value| !value.is_finite() || *value <= 0.0)
+                    .any(|value| !value.is_finite() || *value < 0.0)
             {
                 return Err(format!(
-                    "SaeSupportSparseTerm: atom {atom} ARD must contain {} finite positive precisions",
+                    "SaeSupportSparseTerm: atom {atom} ARD must contain {} finite non-negative precisions",
                     self.assignment.atom_coord_dim(atom)
                 ));
             }
