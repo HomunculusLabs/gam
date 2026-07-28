@@ -308,12 +308,19 @@ tr <- df[df$is_train > 0.5, ]
 te <- df[df$is_train < 0.5, ]
 tr$yc <- as.integer(round(tr$yc))
 # multinom(K) models classes 0..K against reference 0; gam uses K-1=2 active.
+# optimizer: mgcv's DEFAULT outer optimizer is "newton", and on this fit it
+# diverges before returning -- `Error in if (sum(uconv.ind) == 0) ... : missing
+# value where TRUE/FALSE needed` out of `gam.outer -> newton`, which is that
+# routine reading a NaN smoothing gradient. "bfgs" is mgcv's own documented
+# outer alternative for exactly that case. Without it the reference never fits
+# and the arm reports REF_ERROR instead of a comparable log-loss.
 fit <- gam(
   list(
     yc ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + te(x1, x2, bs = c("cc","tp")),
         ~ s(x1, bs = "cc", k = 8) + s(x2, bs = "tp", k = 5) + te(x1, x2, bs = c("cc","tp"))
   ),
-  family = multinom(K = 2), data = tr
+  family = multinom(K = 2), data = tr,
+  optimizer = c("outer", "bfgs")
 )
 # predict type="response" gives P(class=1..K) per row as a (n x K) matrix.
 pr <- predict(fit, newdata = te, type = "response")
