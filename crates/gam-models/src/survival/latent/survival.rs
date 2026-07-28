@@ -9255,6 +9255,67 @@ mod tests {
         }
     }
 
+    /// #2566 diagnostic (zz_measure): which BRANCH the kernel bundle takes, as a
+    /// function of `log σ` and of the requested `max_k`.
+    ///
+    /// This is the instrument for the question the 513-vs-1025 A/B left open. At
+    /// `log σ = 6` the analytic negative Hessian did not move to any printed
+    /// figure across a doubling of the quadrature node count, while the same
+    /// doubling shifted the FD authority by 34% — so the two channels are not
+    /// routing through the same branch there, and no amount of quadrature
+    /// resolution reaches the row where the sign inverts.
+    ///
+    /// The candidate mechanism is `max_k`. `latent_kernel_primary_jet` requests
+    /// `base_max_k + 2·max_primary_increment + max_suffix_increment`, which is
+    /// STRICTLY LARGER for the second-order path than for the gradient path, and
+    /// the bundle's shift is `k·σ²`. A larger `k` therefore reaches further into
+    /// the tail at the same σ and can cross into a branch that does not read
+    /// `CLOGLOG_GUMBEL_QUAD_MIN_NODES` at all. `LogLognormalKernelBundle` carries
+    /// its own `mode`, so this does not have to be inferred — it can be read.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2566_kernel_bundle_routing_by_k() {
+        let quadctx = QuadratureContext::new();
+        let mu = -0.15_f64;
+        eprintln!(
+            "#2566 routing: mode per (log_sigma, q, max_k); mu={mu}. \
+             QuadratureFallback is the only mode that reads the node count."
+        );
+        for log_sigma in [-3.0_f64, 0.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0] {
+            let sigma = log_sigma.exp();
+            // The ladder fixture's three time coordinates; the latent path calls
+            // the bundle with `state.q.exp()` and one of these is that `q`.
+            for q in [-1.2_f64, -0.4, 0.5] {
+                let mut row = String::new();
+                for max_k in 0..=8usize {
+                    match log_kernel_bundle(&quadctx, q.exp(), mu, sigma, max_k) {
+                        Ok(bundle) => {
+                            let tag = match format!("{:?}", bundle.mode).as_str() {
+                                "ExactClosedForm" => "C",
+                                "ExactSpecialFunction" => "S",
+                                "ControlledAsymptotic" => "A",
+                                "QuadratureFallback" => "Q",
+                                other => {
+                                    eprintln!("#2566 routing: UNKNOWN mode {other}");
+                                    "?"
+                                }
+                            };
+                            row.push_str(tag);
+                        }
+                        Err(_) => row.push('E'),
+                    }
+                }
+                eprintln!(
+                    "#2566 routing: log_sigma={log_sigma:>5.1} q={q:>5.1}  \
+                     max_k=0..8 -> {row}"
+                );
+            }
+        }
+        eprintln!("#2566 routing: legend C=ExactClosedForm S=ExactSpecialFunction \
+                   A=ControlledAsymptotic Q=QuadratureFallback E=refused");
+    }
+
     /// #2566 diagnostic (zz_measure): the WHOLE ladder that
     /// `latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566`
     /// asserts, printed without asserting.
