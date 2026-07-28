@@ -866,7 +866,7 @@ impl SaeSupportSparseTerm {
                     }
                     vec![best_t]
                 } else {
-                    (0..atom.latent_dim())
+                    let raw: Vec<f64> = (0..atom.latent_dim())
                         .map(|axis| {
                             let raw = super::support_seed::projection(
                                 row_values,
@@ -876,7 +876,19 @@ impl SaeSupportSparseTerm {
                             );
                             super::support_seed::chart_coordinate(atom.basis_kind(), axis, raw)
                         })
-                        .collect::<Vec<_>>()
+                        .collect();
+                    // A candidate must LIE ON the manifold it scores -- the
+                    // same invariant the seed path enforces. chart_coordinate
+                    // is per-axis and cannot express the unit-norm constraint
+                    // that couples an ambient sphere's axes; without this
+                    // projection a reroute installs off-manifold coordinates
+                    // and the tangent projector at a non-unit point stops
+                    // being a projection (measured: rhs_dot_delta = -0.67
+                    // killed the first embedded-sphere fit).
+                    let manifold = atom.basis_kind().latent_manifold(atom.latent_dim());
+                    manifold
+                        .project_point(Array1::from_vec(raw).view())
+                        .to_vec()
                 };
                 let coordinate =
                     Array2::from_shape_vec((1, atom.latent_dim()), candidate_coords.clone())
@@ -1847,6 +1859,13 @@ impl SaeSupportSparseTerm {
                 let coords = self.assignment.coords_for_slot(row, slot);
                 for axis in 0..dim {
                     let alpha = ard_precisions[atom_idx][axis];
+                    // alpha == 0.0 is the typed prior exemption (an axis whose
+                    // prior family is constant on its manifold, e.g. any axis
+                    // of an ambient unit vector); evidence selection on such
+                    // an axis would be fitting noise, so it stays exempt.
+                    if alpha == 0.0 {
+                        continue;
+                    }
                     let prior = ArdAxisPrior::eval(alpha, coords[axis], periods[axis]);
                     // Gauss-Newton coordinate curvature: the decoded tangent's
                     // squared norm plus the prior curvature the assembly installs.
@@ -2840,6 +2859,18 @@ impl SaeSupportSparseTerm {
         // the certificate never rests on incrementally-maintained state.
         let mut fitted_state = self.reconstruct()?;
         let mut trial_fitted = Array2::<f64>::zeros(fitted_state.dim());
+        // Support-move cadence. Measured on the #2502 lane: reroute proposals
+        // ACCEPTED in early cycles carry the largest single-step objective
+        // drops in the whole fit (1.85e6 -> 1.18e6 at cycle 3; 1.68e6 ->
+        // 1.13e6 at cycle 56), yet the proposal only fired when the
+        // certificate happened to -- an arm that never certifies at its
+        // requested tolerance never re-routes at all. A plateau trigger
+        // (>= 25 cycles since the last proposal AND < 0.5% relative
+        // improvement since it) proposes the same guarded move on a schedule
+        // the objective itself sets. The guard is unchanged -- accept only a
+        // strict decrease -- so monotonicity survives by construction.
+        let mut last_reroute_cycle = 0usize;
+        let mut objective_at_last_reroute = f64::INFINITY;
         for iteration in 1..=max_iter {
             self.snapshot_coordinates(&mut cycle_start);
             let decoder_change = self.decoder_sweep(target, lambda_smooth, &mut fitted_state)?;
@@ -2955,6 +2986,8 @@ impl SaeSupportSparseTerm {
                         );
                         *self = moved;
                         self.reconstruct_into(&mut fitted_state)?;
+                        last_reroute_cycle = iteration;
+                        objective_at_last_reroute = after;
                         // The map itself changed, so every difference the
                         // accelerator holds describes a map that no longer
                         // exists, and the two-cycle recurrence has to be
@@ -2988,6 +3021,71 @@ impl SaeSupportSparseTerm {
                 });
             }
             previous_candidate = candidate;
+
+            if iteration == 1 {
+                // The baseline the first plateau test compares against; an
+                // infinite sentinel here would make the trigger unsatisfiable.
+                objective_at_last_reroute = objective;
+            }
+            let plateau = iteration >= last_reroute_cycle + 25
+                && objective > objective_at_last_reroute * (1.0 - 5.0e-3);
+            if plateau {
+                let support_k = match self.assignment.mode() {
+                    AssignmentMode::TopK { k } => k,
+                    _ => 0,
+                };
+                if support_k > 0 {
+                    last_reroute_cycle = iteration;
+                    objective_at_last_reroute = objective;
+                    // A proposal that cannot be polished is a REJECTED proposal,
+                    // never a dead fit: the incumbent is untouched, so erroring
+                    // out here would discard a healthy model over a speculative
+                    // move (the exact discard shape this lane keeps re-finding).
+                    let mut moved =
+                        self.reroute_fixed_decoder_ard(target, support_k, 0, ard_precisions)?;
+                    let polished = moved.solve_coordinates_fixed_decoder(
+                        target,
+                        ard_precisions,
+                        max_iter,
+                        tolerance,
+                        trust_radius,
+                    );
+                    match polished {
+                        Err(error) => {
+                            // fall through to the normal cycle tail: the
+                            // accelerator bookkeeping must see every cycle.
+                            log::info!(
+                                "plateau support move unpolishable at cycle {iteration}: {error}"
+                            );
+                        }
+                        Ok(_) => {
+                            let after = moved.penalized_objective(
+                                target,
+                                lambda_smooth,
+                                ard_precisions,
+                            )?;
+                            if after < objective {
+                                log::info!(
+                                    "plateau support move accepted at cycle {iteration}: \
+                                     objective {objective:.6e} -> {after:.6e}"
+                                );
+                                *self = moved;
+                                self.reconstruct_into(&mut fitted_state)?;
+                                accelerator.reset();
+                                taken_step.clear();
+                                taken_step.resize(self.coordinate_state_len(), 0.0);
+                                last_objective = None;
+                                previous_candidate = false;
+                                continue;
+                            }
+                            log::info!(
+                                "plateau support move rejected at cycle {iteration}: \
+                                 objective {objective:.6e} -> {after:.6e}"
+                            );
+                        }
+                    }
+                }
+            }
 
             // The certified point is ALWAYS a plain post-sweep iterate: the
             // certificate above has already been evaluated and either returned
