@@ -314,7 +314,12 @@ pub fn solve_arrow_newton_step(
                 }
                 // Unavailable / GpuRequiresDenseSystem: fall through to the
                 // single-device paths (already shape-validated above).
-                Err(_) => {}
+                // Named rather than wildcarded so a new failure variant has to
+                // declare whether it is fall-through or must surface.
+                Err(
+                    ArrowSchurGpuFailure::Unavailable
+                    | ArrowSchurGpuFailure::GpuRequiresDenseSystem { .. },
+                ) => {}
             }
         }
         // Layer D admission: when the system shape passes the
@@ -331,10 +336,16 @@ pub fn solve_arrow_newton_step(
                 Err(ArrowSchurGpuFailure::RidgeBumpRequired { row, bump }) => {
                     return Err(ArrowSchurGpuFailure::RidgeBumpRequired { row, bump });
                 }
-                // Any other failure (Unavailable, SchurFactorFailed) falls
+                // Unavailable / SchurFactorFailed / GpuRequiresDenseSystem fall
                 // through to the unfused path so a flaky NVRTC compile or
                 // shared-mem allocation does not abort the outer Newton step.
-                Err(_) => {}
+                // Named rather than wildcarded so a new failure variant has to
+                // declare whether it is fall-through or must surface.
+                Err(
+                    ArrowSchurGpuFailure::Unavailable
+                    | ArrowSchurGpuFailure::SchurFactorFailed { .. }
+                    | ArrowSchurGpuFailure::GpuRequiresDenseSystem { .. },
+                ) => {}
             }
         }
         cuda::solve(sys, ridge_t, ridge_beta)
