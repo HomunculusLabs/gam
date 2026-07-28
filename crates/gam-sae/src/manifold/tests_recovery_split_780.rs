@@ -106,21 +106,21 @@ pub(crate) fn sae_torus_atom_recovers_two_frequency_synthetic() {
 pub(crate) fn sae_sphere_atom_recovers_synthetic_signal() {
     let n = 96usize;
     let p = 3usize;
-    let d = 2usize;
-    // True (lat, lon) coords.
+    // Ambient coordinate width: `S²` is intrinsically 2-D but carried as a unit
+    // 3-vector.
+    let d = 3usize;
+    // A spiral of true directions. The generating (lat, lon) is a convenient way
+    // to trace one, but the COORDINATE is the direction it names.
     let mut true_coords = Array2::<f64>::zeros((n, d));
-    for i in 0..n {
-        let t = (i as f64) / (n as f64);
-        true_coords[[i, 0]] = -0.5 + 1.0 * t; // lat in [-0.5, 0.5]
-        true_coords[[i, 1]] = -std::f64::consts::PI + 2.0 * std::f64::consts::PI * t;
-    }
     let mut z = Array2::<f64>::zeros((n, p));
     for i in 0..n {
-        let lat = true_coords[[i, 0]];
-        let lon = true_coords[[i, 1]];
-        let x = lat.cos() * lon.cos();
-        let y = lat.cos() * lon.sin();
-        let zc = lat.sin();
+        let t = (i as f64) / (n as f64);
+        let lat = -0.5 + 1.0 * t;
+        let lon = -std::f64::consts::PI + 2.0 * std::f64::consts::PI * t;
+        let (x, y, zc) = (lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+        true_coords[[i, 0]] = x;
+        true_coords[[i, 1]] = y;
+        true_coords[[i, 2]] = zc;
         z[[i, 0]] = x;
         z[[i, 1]] = y;
         z[[i, 2]] = zc;
@@ -147,24 +147,16 @@ pub(crate) fn sae_sphere_atom_recovers_synthetic_signal() {
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
         vec![true_coords],
-        vec![LatentManifold::Product(vec![
-            LatentManifold::Interval {
-                lo: -std::f64::consts::FRAC_PI_2,
-                hi: std::f64::consts::FRAC_PI_2,
-            },
-            LatentManifold::Circle {
-                period: std::f64::consts::TAU,
-            },
-        ])],
+        vec![LatentManifold::Sphere { dim: 3 }],
         AssignmentMode::softmax(0.5),
     )
     .unwrap();
     let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
-    // The sphere atom's coordinate is a dim-2 product manifold (lat × lon),
-    // so per-axis ARD must carry one log-precision per axis (`atom dim = 2`).
-    // A length-1 block would be indexed out of bounds at `axis == 1` in the
-    // per-axis assembly loop and is rejected by the per-axis ARD contract.
-    let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(2)]);
+    // The sphere atom's coordinate is a 3-wide ambient vector, so per-axis ARD
+    // carries one log-precision per AMBIENT axis. A shorter block would be
+    // indexed out of bounds in the per-axis assembly loop and is rejected by
+    // the per-axis ARD contract.
+    let mut rho = SaeManifoldRho::new(0.0, -4.0, vec![Array1::<f64>::zeros(3)]);
     let ridge = 1.0e-6;
     for _ in 0..10 {
         let loss = term

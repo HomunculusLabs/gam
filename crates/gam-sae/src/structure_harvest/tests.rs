@@ -538,10 +538,13 @@ fn auto_primary_topology_selects_curved_sphere_and_beats_circle_2238_2239() {
     )
     .unwrap();
 
-    let mut sphere_coords = Array2::<f64>::zeros((n, 2));
+    // The sphere candidate takes the AMBIENT direction the (lat, lon) pair
+    // names, not the pair itself.
+    let mut sphere_coords = Array2::<f64>::zeros((n, 3));
     for row in 0..n {
-        sphere_coords[[row, 0]] = lat[row];
-        sphere_coords[[row, 1]] = lon[row];
+        sphere_coords[[row, 0]] = lat[row].cos() * lon[row].cos();
+        sphere_coords[[row, 1]] = lat[row].cos() * lon[row].sin();
+        sphere_coords[[row, 2]] = lat[row].sin();
     }
     let sphere_spec = TopologyCandidateSpec::new(
         AutoTopologyKind::Sphere,

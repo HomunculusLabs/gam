@@ -172,7 +172,14 @@ pub(crate) fn isometry_exact_hvp_sphere_matches_grad_fd_and_uses_refreshed_k() {
             [-0.48, 0.6, -0.64]
         ],
         4,
-        array![[0.31, -0.27], [-0.18, 0.22], [0.14, 0.19], [-0.25, -0.11]],
+        // One tangent-direction entry per AMBIENT axis, matching the 3-wide
+        // sphere coordinate above.
+        array![
+            [0.31, -0.27, 0.11],
+            [-0.18, 0.22, -0.07],
+            [0.14, 0.19, 0.23],
+            [-0.25, -0.11, 0.16]
+        ],
     );
 }
 
@@ -198,7 +205,7 @@ pub(crate) fn isometry_exact_hvp_sphere_and_torus_collapse_to_gn_at_zero_residua
             [0.36, 0.48, 0.8]
         ],
         4,
-        array![[0.17, -0.21], [-0.13, 0.08], [0.22, 0.19]],
+        array![[0.17, -0.21, 0.09], [-0.13, 0.08, -0.24], [0.22, 0.19, 0.05]],
     );
     assert_exact_isometry_hvp_collapses_to_gn_at_zero_residual(
         Arc::new(TorusHarmonicEvaluator::new(2, 2).unwrap()),
@@ -511,12 +518,15 @@ pub(crate) fn refresh_isometry_caches_pairs_each_penalty_to_its_own_atom() {
 /// compact coordinate block. The corrected per-atom clone must therefore
 /// carry the atom-local `(N * d_atom, d_atom)` target before its Jacobian cache
 /// is refreshed. Otherwise the d=1 atom below installs `(N, p)` and `value`
-/// reads the stale d=2 target, requesting `(N, 2p)` and panicking.
+/// reads the stale wider target, requesting `(N, 3p)` and panicking. The
+/// heterogeneity is now d=1 against d=3, since the sphere atom carries an
+/// ambient 3-vector — a wider spread than the d=1/d=2 pair it replaced, so the
+/// retarget it exercises is strictly harder.
 #[test]
 pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
     let p_out = 4usize;
     let coords_d1 = array![[0.05], [0.20], [0.55], [0.80]];
-    let coords_d2 = array![
+    let coords_d3 = array![
             [0.0, 0.0, 1.0],
             [0.6, -0.8, 0.0],
             [0.36, 0.48, 0.8],
@@ -530,17 +540,17 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
         p_out,
         0.53,
     );
-    let (atom_d2, _, _) = build_isometry_atom_for_evaluator(
+    let (atom_d3, _, _) = build_isometry_atom_for_evaluator(
         Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
         SaeAtomBasisKind::Sphere,
-        &coords_d2,
+        &coords_d3,
         p_out,
         1.37,
     );
 
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((coords_d1.nrows(), 2)),
-        vec![coords_d1, coords_d2],
+        vec![coords_d1, coords_d3],
         vec![
             LatentManifold::Circle { period: 1.0 },
             LatentManifold::Product(vec![
