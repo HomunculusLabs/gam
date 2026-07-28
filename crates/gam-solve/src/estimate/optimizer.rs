@@ -1869,6 +1869,7 @@ where
     // criterion's own observation count (which drives λ selection) lives in the
     // inner-solution assembly and must apply the same positive-weight count.
     let n = w_o.iter().filter(|&&wi| wi > 0.0).count() as f64;
+    let mut identity_fit_is_exact = false;
     let weighted_rss = if matches!(cfg.link_function(), LinkFunction::Identity) {
         let fitted = {
             let mut eta = offset_o.clone();
@@ -1896,6 +1897,12 @@ where
         // certificate, and `|y_i| + |η_i|` is a LOWER bound on the operand scale
         // that formed each residual, so this fires conservatively — never on a
         // fit that genuinely misses.
+        //
+        // The term count is the full design width, matching what
+        // `exact_unpenalized_gaussian_beta` counts. On a sparse row that
+        // overstates the operations actually summed, widening the bound by at
+        // most a factor of `p` — still `p·ε` RELATIVE to the row's own scale
+        // (≈2e-13 at p = 1000), orders below any signal a fit could be missing.
         let at_floor = gam_problem::weighted_residual_is_at_roundoff_floor(
             raw,
             w_o.iter().copied(),
@@ -1904,6 +1911,7 @@ where
                 .map(|(&yi, &fi)| yi.abs() + fi.abs()),
             beta_orig.len() + 1,
         );
+        identity_fit_is_exact = at_floor;
         if at_floor { 0.0 } else { raw }
     } else {
         0.0
@@ -3009,7 +3017,15 @@ where
         finalgrad_norm,
         outer_converged,
         pirls_status,
-        deviance: pirls_res.deviance,
+        // The Gaussian identity deviance IS this weighted RSS, so it follows the
+        // same snap: reporting `1.1e-29` next to `σ̂ = 0` would leave
+        // `deviance/(n − edf) ≠ σ̂²` in the same record, and the formula path's
+        // exact-fit route already reports an exact zero here.
+        deviance: if identity_fit_is_exact {
+            0.0
+        } else {
+            pirls_res.deviance
+        },
         stable_penalty_term: pirls_res.stable_penalty_term,
         used_device: pirls_res.used_device,
         max_abs_eta: pirls_res.max_abs_eta,

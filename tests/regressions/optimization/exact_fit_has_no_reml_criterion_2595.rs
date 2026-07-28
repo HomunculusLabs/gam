@@ -88,6 +88,14 @@ fn both_entry_points_agree_that_an_exact_gaussian_fit_has_no_criterion() {
             fit.fit.standard_deviation, 0.0,
             "a residual at the arithmetic's own resolution is not a scale estimate"
         );
+        // The record has to be internally consistent, not merely honest about
+        // the criterion: `deviance / (n - edf)` is `sigma-hat^2`, so a deviance
+        // of 1.1e-29 sitting next to a scale of exactly 0 is the same class of
+        // defect one field over.
+        assert_eq!(
+            fit.fit.deviance, 0.0,
+            "the Gaussian identity deviance IS the weighted RSS and must follow it"
+        );
         assert_eq!(
             fit.fit.reported_log_likelihood(),
             None,
