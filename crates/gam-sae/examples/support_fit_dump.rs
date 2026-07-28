@@ -121,7 +121,14 @@ fn main() -> Result<(), String> {
     // fitted atom a curve regardless of the topology requested.
     fn atom_dim_for_basis(basis: &str) -> usize {
         match basis {
-            "sphere" | "torus" | "projective_plane" | "klein_bottle" => 2,
+            // The embedded sphere: three ambient coordinates for two intrinsic
+            // dimensions buys a global chart -- no latitude boundary, no pole
+            // gauge, and the trust-region metric IS the round metric (#2602).
+            // The (lat, lon) chart form (latent_dim 2) additionally cannot be
+            // SEEDED at current main: the seeder emits three directions for a
+            // sphere candidate and the dim-2 plan refuses the width.
+            "sphere" => 3,
+            "torus" | "projective_plane" | "klein_bottle" => 2,
             _ => 1,
         }
     }
