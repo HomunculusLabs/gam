@@ -87,6 +87,7 @@ use crate::frames::GrassmannFrame;
 use crate::manifold::{
     AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, GraphCompressionKind,
     GraphStructureSelection, LearnedGraphAtom, OccupancyLaw, SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+    SAE_EUCLIDEAN_PATCH_MAX_DEGREE,
     SAE_MAX_PERIODIC_HARMONICS,
     SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeManifoldAtom, SaeManifoldRho,
     SaeManifoldTerm, SaeReferenceMetricPlan, SphereChartTransition, UnitSpeedChartTransition,
@@ -3051,6 +3052,39 @@ fn topology_candidates_for_dim(
                 LatentManifold::Euclidean,
                 coords_d(2),
             )?);
+            // #2604 — the estimated-curvature candidate: a monomial patch in the
+            // TANGENT chart of `M_kappa`, whose penalty carries the curvature and
+            // whose `kappa` the outer optimizer fits. Seeded at `kappa = 0`
+            // because flat is an INTERIOR point of `S^d <- R^d -> H^d`, so the
+            // fit can move either way from the seed; a log parameterisation
+            // could not express that seed at all.
+            //
+            // It races as its OWN candidate rather than replacing the fixed
+            // forms. #944's fusion would collapse `Euclidean` and `Sphere` into
+            // this one, and for `Euclidean` that is exact — at `kappa = 0` this
+            // IS the polynomial patch, same basis and same chart. It is NOT true
+            // for `Sphere`, which this race realizes with
+            // `AmbientSphereHarmonics`: a monomial patch in a tangent chart does
+            // not span the `l = 2` harmonics, so fusing would swap the basis
+            // rather than estimate curvature, and would LOSE expressiveness.
+            // Adding the candidate is therefore strictly additive; fusing is a
+            // separate claim that does not yet hold here.
+            specs.push(TopologyCandidateSpec::new(
+                AutoTopologyKind::ConstantCurvature,
+                SaeAtomGeometryPlan::new(
+                    SaeAtomBasisKind::Poincare,
+                    2,
+                    SaeBasisResolution::Polynomial {
+                        degree: SAE_EUCLIDEAN_PATCH_MAX_DEGREE,
+                    },
+                    SaeReferenceMetricPlan::ConstantCurvatureChart {
+                        kappa: 0.0,
+                        reference_coords: coords_d(2),
+                    },
+                )?,
+                LatentManifold::Euclidean,
+                coords_d(2),
+            )?);
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::Cylinder,
                 SaeAtomGeometryPlan::new(
@@ -4181,12 +4215,28 @@ fn race_spec_set(
         // The race is over EXACTLY the candidate set we built; do not let the
         // selector's constant-curvature fuse drop one — pass them through as-is.
         candidates: specs.iter().map(|s| s.kind).collect(),
-        // This race realizes FIXED space forms: a flat Duchon/patch candidate and
-        // a unit-curvature sphere. Neither fits κ, so the constant-curvature
-        // fusion must not fire. Declaring that honestly is what lets the fixed
-        // forms race as themselves and be reported as what they are. Wiring
-        // `gam_geometry::ConstantCurvature` as a real κ-estimating atom is the
-        // follow-up that flips this to `true` (#2603).
+        // κ IS now estimable here (#2604): the `ConstantCurvature` candidate
+        // above carries a fitted `kappa` in `rho`, and the outer gradient
+        // carries `dH/dkappa_a = lambda_a * dS_a/dkappa`. The earlier reason for
+        // this `false` — "this race fits no κ" — is therefore DEAD, and is not
+        // what keeps the flag down.
+        //
+        // What keeps it down is that this flag does not gate ESTIMATION, it
+        // gates `fuse_constant_curvature_family`, which DELETES every
+        // `is_fixed_constant_curvature_form` candidate and replaces them with
+        // the κ-fitting one. That is only sound for a fixed form the fused
+        // candidate SUBSUMES. It subsumes `Euclidean` exactly — at `kappa = 0`
+        // it is the same monomial patch in the same chart. It does NOT subsume
+        // `Sphere`, which this race realizes as `AmbientSphereHarmonics`: a
+        // monomial patch in a tangent chart does not span the `l = 2` spherical
+        // harmonics, and no κ makes it do so. Fusing would swap the basis and
+        // LOSE that span, reporting the loss as "curvature was estimated".
+        //
+        // So estimability is necessary but NOT sufficient for the fusion, and
+        // flipping this to `true` requires the subsumption claim, not the
+        // estimation one. Until the fusion is expressed over candidates the
+        // fitted-κ atom actually spans, the fixed forms race as themselves and
+        // `ConstantCurvature` races beside them as a third, honest candidate.
         curvature_is_estimable: false,
         // PER-OBSERVATION normalization (a common `n` divisor across candidates).
         // The candidate scores are now PROPER closed-form REML marginal
@@ -4208,27 +4258,30 @@ fn race_spec_set(
     //
     // #944 stage 4 would FUSE the fixed simply-connected constant-curvature forms
     // (Euclidean κ = 0 ∪ Sphere κ > 0) into ONE estimated-κ `ConstantCurvature`
-    // candidate. The premise is right — euclidean-vs-sphere IS a curvature
-    // estimation rather than two discrete topologies — but the conclusion only
-    // follows for a consumer that actually FITS κ. This race realizes fixed space
-    // forms and fits no κ, so it declares `curvature_is_estimable: false` and the
-    // fusion does not fire: the flat patch and the unit sphere race as themselves
-    // and are reported as what they are.
+    // candidate. The premise is right for `Euclidean` — flat-vs-curved IS a
+    // curvature estimation rather than two discrete topologies — and this race
+    // now DOES fit κ, so the old objection ("no consumer fits κ") is gone.
+    //
+    // The fusion still does not fire, for a sharper reason: it deletes the fixed
+    // forms, and deletion is only sound where the fitted-κ atom spans what it
+    // replaces. It spans the flat patch (κ = 0 is the same monomial patch); it
+    // does not span the AMBIENT-HARMONIC sphere. See `curvature_is_estimable`
+    // above for the full argument.
     //
     // Realizing the fused candidate by the sphere basis (as this used to do) does
-    // not rescue the premise. A unit-curvature sphere cannot express κ = 0, so
-    // the "estimated" curvature was pinned at a constant the fit never chose.
+    // not rescue the premise either. A unit-curvature sphere cannot express κ = 0,
+    // so the "estimated" curvature was pinned at a constant the fit never chose.
     let mut by_kind: std::collections::HashMap<AutoTopologyKind, &TopologyCandidateSpec> =
         std::collections::HashMap::with_capacity(specs.len() + 1);
     for spec in &specs {
         by_kind.insert(spec.kind, spec);
     }
-    // A ConstantCurvature key is deliberately NOT synthesized here. It used to be
-    // aliased to the sphere spec (or the flat patch), so a race could report a
-    // `ConstantCurvature` winner that was a FIXED-curvature fit — a κ nobody
-    // estimated. The selector now declares `curvature_is_estimable: false`, so
-    // the fusion does not fire and this key is never requested. When a real
-    // κ-estimating candidate exists, it gets registered here as itself.
+    // A ConstantCurvature key is still deliberately NOT synthesized here — and no
+    // longer needs to be. It used to be ALIASED to the sphere spec (or the flat
+    // patch), so a race could report a `ConstantCurvature` winner that was a
+    // FIXED-curvature fit: a κ nobody estimated. The key now arrives the only
+    // honest way, as a real entry in `specs` above whose plan carries a fitted
+    // `kappa`, so the loop below indexes it like any other candidate.
     let ranked = select_topology_with_fit(&selector, |kind| {
         let spec = by_kind.get(&kind).ok_or_else(|| {
             format!(
