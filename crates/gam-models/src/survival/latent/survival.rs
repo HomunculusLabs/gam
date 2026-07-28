@@ -3070,6 +3070,42 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
     .map_err(|error| error.to_string())
 }
 
+/// # Accuracy of the `log σ` curvature (#2566)
+///
+/// The value and gradient channels are trustworthy across the whole σ range. The
+/// **second-derivative** channel is not, and the boundary has been measured
+/// rather than estimated.
+///
+/// A 0.05-step sweep of `log σ` on the #2566 fixture
+/// (`zz_measure_2566_curvature_fine_sweep`) shows `value` and `gradient` smooth
+/// and monotone to every printed digit while the returned curvature degrades
+/// progressively — relative step-to-step jumps run `0.05, 0.07, 0.19, 0.47, 0.84,
+/// 2.89, 9.78` — and past `log σ ≈ 5.45` it **changes sign between adjacent
+/// samples**, repeatedly.
+///
+/// That is catastrophic cancellation in forming the second cumulant, not a
+/// routing switch: a branch gives a consistently wrong value on one side of a
+/// threshold, whereas this oscillates. Three consequences the measurements
+/// already settled, so nobody has to re-derive them:
+///
+/// * more quadrature resolution MOVES the crossing and cannot remove it — going
+///   513 → 1025 nodes bought 335× at `log σ = 5` and left `log σ ≥ 6` untouched,
+///   because the cancelled quantity keeps shrinking while the roundoff floor does
+///   not;
+/// * `max_k` is not the mechanism (the bundle mode is constant in `k` over
+///   `0..8`), and `IntegratedExpectationMode` cannot flag it — the mode is
+///   `ControlledAsymptotic` at both the healthy `log σ = 4` and the inverted
+///   `log σ = 7`;
+/// * past the crossing the curvature stops tracking its inputs at all: a node
+///   change that moved the gradient channel 34% left the Hessian unmoved.
+///
+/// **Usable to `log σ ≈ 5.4` on this fixture.** Beyond it there is no correct
+/// value to return, so a consumer needing a definite Hessian must refuse rather
+/// than scale its tolerance. The discriminator to refuse ON already exists — the
+/// gate's Richardson construction reads `0.853` at `log σ = 4` against `109.765`
+/// at `log σ = 6` — and exporting it is #2566's remaining work. A genuine repair
+/// needs the cumulant formed without the cancelling difference, which is a
+/// reformulation rather than a tolerance.
 fn latent_survival_row_primary_gradient_hessian(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
