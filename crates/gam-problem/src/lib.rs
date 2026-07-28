@@ -52,6 +52,11 @@ pub mod roundoff;
 pub mod row_measure;
 pub mod row_metric;
 pub mod schedule;
+// JSON-representation contracts for numeric payloads: `serde_extended_real`
+// gives `+∞` an encoding (JSON has none), and `serde_finite` refuses every
+// OTHER non-finite float structurally, naming its path (#2601).
+pub mod serde_extended_real;
+pub mod serde_finite;
 // #1521 contract-downs: pure-data carriers + caller-supplied sampler/verdict
 // traits so gam-solve can call up-tier work (NUTS sampling, topology verdicts)
 // without a back-edge into gam-inference/gam-sae; computation stays UP.
@@ -100,6 +105,7 @@ pub use finite_validation::{
     bail_if_cached_beta_non_finite, ensure_finite_scalar, ensure_finite_scalar_estimation,
     validate_all_finite, validate_all_finite_estimation, validate_all_finite_trial_point,
 };
+pub use serde_finite::{NonFiniteFloat, ensure_serialized_floats_are_finite};
 pub use fisher_rao::{
     FisherRaoDefiniteness, normalize_fisher_rao_blocks, normalize_fisher_rao_blocks_pd,
 };
