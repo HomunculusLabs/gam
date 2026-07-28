@@ -86,7 +86,8 @@ use crate::description_length::{BirthMdlPrescreen, predicted_birth_dl_bits};
 use crate::frames::GrassmannFrame;
 use crate::manifold::{
     AssignmentMode, AtlasSeamKind, AtlasTopologyReadout, GraphCompressionKind,
-    GraphStructureSelection, LearnedGraphAtom, OccupancyLaw, SAE_MAX_PERIODIC_HARMONICS,
+    GraphStructureSelection, LearnedGraphAtom, OccupancyLaw, SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+    SAE_MAX_PERIODIC_HARMONICS,
     SaeAtomBasisKind, SaeAtomGeometryPlan, SaeBasisResolution, SaeManifoldAtom, SaeManifoldRho,
     SaeManifoldTerm, SaeReferenceMetricPlan, SphereChartTransition, UnitSpeedChartTransition,
     amplitude_concentration_certificate, anisotropic_flat_product_torus_penalty,
@@ -3010,7 +3011,9 @@ fn topology_candidates_for_dim(
                 SaeAtomGeometryPlan::new(
                     SaeAtomBasisKind::Sphere,
                     3,
-                    SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+                    SaeBasisResolution::AmbientSphereHarmonics {
+                        degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+                    },
                     SaeReferenceMetricPlan::RoundSphere,
                 )?,
                 // The sphere candidate races as an actual sphere: an ambient
@@ -3027,20 +3030,16 @@ fn topology_candidates_for_dim(
                 sphere_coords_ambient(),
             )?);
             }
-            specs.push(TopologyCandidateSpec::new(
-                AutoTopologyKind::ProjectivePlane,
-                SaeAtomGeometryPlan::projective_plane(1)?,
-                LatentManifold::Product(vec![
-                    LatentManifold::Interval {
-                        lo: -std::f64::consts::FRAC_PI_2,
-                        hi: std::f64::consts::FRAC_PI_2,
-                    },
-                    LatentManifold::Circle {
-                        period: std::f64::consts::TAU,
-                    },
-                ]),
-                coords_d(2),
-            )?);
+            // `RP²` is `S²/{u ~ -u}`, so it needs the sphere's three seed
+            // directions for the same reason and is gated with it.
+            if d_seed >= 3 {
+                specs.push(TopologyCandidateSpec::new(
+                    AutoTopologyKind::ProjectivePlane,
+                    SaeAtomGeometryPlan::projective_plane(1)?,
+                    LatentManifold::Sphere { dim: 3 },
+                    sphere_coords_ambient(),
+                )?);
+            }
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::Euclidean,
                 SaeAtomGeometryPlan::new(
@@ -4502,37 +4501,23 @@ pub fn discover_primary_atom_topologies(
                         SaeAtomGeometryPlan::new(
                             SaeAtomBasisKind::Sphere,
                             3,
-                            SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+                            SaeBasisResolution::AmbientSphereHarmonics {
+                        degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+                    },
                             SaeReferenceMetricPlan::RoundSphere,
                         )?,
-                        sphere_manifold,
+                        sphere_manifold.clone(),
                         coords.clone(),
                     )?);
-                    // `RP²` still races on the `(lat, lon)` cover, so it needs
-                    // its own 2-wide coordinates rather than the sphere's
-                    // ambient direction. It inherits the cover's pole defects
-                    // until its quotient evaluator is rebuilt on the ambient
-                    // cover -- tracked on #2602; the character table transfers
-                    // unchanged, because the ambient and chart harmonics are the
-                    // same basis in different coordinates.
-                    let mut cover_coords = Array2::<f64>::zeros((n_obs, 2));
-                    for row in 0..n_obs {
-                        cover_coords[[row, 0]] = coords[[row, 2]].clamp(-1.0, 1.0).asin();
-                        cover_coords[[row, 1]] = coords[[row, 1]].atan2(coords[[row, 0]]);
-                    }
+                    // `RP²` shares the sphere's ambient cover exactly: the
+                    // antipodal map is the ambient `u -> -u`, so the quotient
+                    // reads the same direction the sphere does. No separate
+                    // `(lat, lon)` cover, and therefore no pole.
                     specs.push(TopologyCandidateSpec::new(
                         AutoTopologyKind::ProjectivePlane,
                         SaeAtomGeometryPlan::projective_plane(1)?,
-                        LatentManifold::Product(vec![
-                            LatentManifold::Interval {
-                                lo: -std::f64::consts::FRAC_PI_2,
-                                hi: std::f64::consts::FRAC_PI_2,
-                            },
-                            LatentManifold::Circle {
-                                period: std::f64::consts::TAU,
-                            },
-                        ]),
-                        cover_coords,
+                        sphere_manifold.clone(),
+                        coords.clone(),
                     )?);
                 }
                 if n_pcs >= 3 {

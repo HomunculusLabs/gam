@@ -222,10 +222,10 @@ pub fn sae_build_atom_plans(
                 });
             }
             SaeAtomBasisKind::Sphere => {
-                // The (lat, lon) chart fixes latent_dim = 2 and basis_size = 7
-                // regardless of the user-supplied `atom_dim` — the chart
-                // already captures the embedded S² geometry. Reject any
-                // d_atom other than 2 to keep the contract honest.
+                // `atom_dim` names the manifold's INTRINSIC dimension, which for
+                // `S²` is 2; the live chart is the ambient unit 3-vector, since
+                // `S²` admits no global 2-D chart. Reject any other `atom_dim`
+                // to keep the contract honest.
                 if d != 2 {
                     return Err(format!(
                         "sae_build_atom_plans: atom {atom_idx} basis 'sphere' requires atom_dim == 2, got {d}"
@@ -234,9 +234,11 @@ pub fn sae_build_atom_plans(
                 plans.push(SaeAtomBuildPlan {
                     geometry: SaeAtomGeometryPlan::new(
                         SaeAtomBasisKind::Sphere,
-                        2,
-                        SaeBasisResolution::SphereChart,
-                        SaeReferenceMetricPlan::SphereChart,
+                        3,
+                        SaeBasisResolution::AmbientSphereHarmonics {
+                            degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+                        },
+                        SaeReferenceMetricPlan::RoundSphere,
                     )?,
                 });
             }

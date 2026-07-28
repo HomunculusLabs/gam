@@ -2337,8 +2337,70 @@ impl QuotientSpectralEvaluator {
 
         let cover = SphericalHarmonicEvaluator::new(max_degree)?;
         let cover_width = cover.basis_size();
-        let characters = cover
-            .spectral_modes()
+        let modes = cover.spectral_modes();
+        Self::projective_plane_from_cover(
+            "projective-plane",
+            Arc::new(cover),
+            cover_width,
+            modes,
+            expected_width,
+        )
+    }
+
+    /// `RP²` on the AMBIENT spherical cover — the pole-free sibling of
+    /// [`Self::projective_plane`].
+    ///
+    /// The construction is *identical*: same antipodal deck involution, same
+    /// Reynolds projector, same width theorem. Only the cover's COORDINATES
+    /// change, from `(lat, lon)` to the ambient unit vector — and that is
+    /// legitimate precisely because [`AmbientSphereHarmonicEvaluator`] is the
+    /// same basis in different coordinates, pinned to 1e-12 by
+    /// `ambient_sphere_matches_chart_on_the_sphere`. Its `spectral_modes()`
+    /// therefore carry the same `(degree, order)` in the same column order, so
+    /// the character table transfers unchanged rather than being re-derived.
+    ///
+    /// The quotient is also stated more honestly here. `RP² = S²/{u ~ -u}`, and
+    /// the antipodal map IS the ambient `u -> -u`; in the chart the same map is
+    /// the awkward `(lat, lon) -> (-lat, lon + π)`, whose Killing directions the
+    /// chart cannot even evaluate at its own poles.
+    pub fn projective_plane_ambient(harmonic_order: usize) -> Result<Self, String> {
+        if harmonic_order == 0 {
+            return Err(
+                "QuotientSpectralEvaluator::projective_plane_ambient requires harmonic_order >= 1"
+                    .to_string(),
+            );
+        }
+        let max_degree = harmonic_order.checked_mul(2).ok_or_else(|| {
+            "QuotientSpectralEvaluator::projective_plane_ambient: maximum cover degree overflowed usize"
+                .to_string()
+        })?;
+        let expected_width = projective_plane_basis_size(harmonic_order)?;
+        let cover = AmbientSphereHarmonicEvaluator::new(max_degree)?;
+        let cover_width = cover.basis_size();
+        let modes = cover.spectral_modes();
+        Self::projective_plane_from_cover(
+            "projective-plane-ambient",
+            Arc::new(cover),
+            cover_width,
+            modes,
+            expected_width,
+        )
+    }
+
+    /// Shared `RP²` construction over either spherical cover.
+    ///
+    /// Antipodal parity is `Y_lm(-u) = (-1)^l Y_lm(u)`, hence precisely the even
+    /// degrees survive — a statement about the HARMONICS, not about the
+    /// coordinates they are written in, which is why one implementation serves
+    /// both covers.
+    fn projective_plane_from_cover(
+        quotient_name: &str,
+        cover: Arc<dyn SaeBasisThirdJet>,
+        cover_width: usize,
+        modes: Vec<SphericalHarmonicMode>,
+        expected_width: usize,
+    ) -> Result<Self, String> {
+        let characters = modes
             .into_iter()
             .map(|mode| CoverSpectralCharacter {
                 deck_character: if mode.degree % 2 == 0 {
@@ -2353,15 +2415,11 @@ impl QuotientSpectralEvaluator {
                 curved_if_retained: mode.degree > 2,
             })
             .collect::<Vec<_>>();
-        let evaluator = Self::from_diagonal_involution_characters(
-            "projective-plane",
-            Arc::new(cover),
-            cover_width,
-            characters,
-        )?;
+        let evaluator =
+            Self::from_diagonal_involution_characters(quotient_name, cover, cover_width, characters)?;
         if evaluator.basis_size() != expected_width {
             return Err(format!(
-                "QuotientSpectralEvaluator::projective_plane: group average produced width {}, expected {expected_width}",
+                "QuotientSpectralEvaluator::{quotient_name}: group average produced width {}, expected {expected_width}",
                 evaluator.basis_size()
             ));
         }

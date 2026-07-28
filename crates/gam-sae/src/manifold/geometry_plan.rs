@@ -9,6 +9,15 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 
+/// Working degree of an ambient sphere atom built from a user request.
+///
+/// Degree 2 spans the monopole, the dipole and ALL FIVE `l = 2` harmonics — a
+/// strict superset of the superseded seven-column chart, which carried only
+/// three of the five and so was not closed under rotation. It is the smallest
+/// degree at which a sphere atom is `SO(3)`-covariant, which is why it is the
+/// default rather than a tuned constant.
+pub const SAE_AMBIENT_SPHERE_DEFAULT_DEGREE: usize = 2;
+
 /// Basis-native resolution of one analytic atom family.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -33,6 +42,15 @@ pub enum SaeBasisResolution {
         per_axis_order: usize,
     },
     ProjectivePlaneHarmonics {
+        quotient_order: usize,
+    },
+    /// `RP²` through `quotient_order`, on the AMBIENT spherical cover
+    /// (`latent_dim == 3`). Same quotient and same width as
+    /// [`Self::ProjectivePlaneHarmonics`]; only the cover's coordinates differ,
+    /// so the antipodal map is the ambient `u -> -u` and the cover carries no
+    /// pole. Distinguished from the charted form by `latent_dim`, exactly as the
+    /// sphere's two forms are.
+    AmbientProjectivePlaneHarmonics {
         quotient_order: usize,
     },
     KleinBottleHarmonics {
@@ -189,6 +207,15 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order },
                 SaeReferenceMetricPlan::RoundProjectivePlane,
             ) => *quotient_order >= 1,
+            // The ambient cover carries three coordinates for the same 2-D
+            // quotient. The reference metric is unchanged: the round quotient
+            // metric is a property of `RP²`, not of the coordinates used.
+            (
+                SaeAtomBasisKind::ProjectivePlane,
+                3,
+                SaeBasisResolution::AmbientProjectivePlaneHarmonics { quotient_order },
+                SaeReferenceMetricPlan::RoundProjectivePlane,
+            ) => *quotient_order >= 1,
             (
                 SaeAtomBasisKind::KleinBottle,
                 2,
@@ -270,11 +297,12 @@ impl SaeAtomGeometryPlan {
         Ok(plan)
     }
 
+    /// `RP²` on the AMBIENT cover — the default, and the only pole-free one.
     pub fn projective_plane(quotient_order: usize) -> Result<Self, String> {
         Self::new(
             SaeAtomBasisKind::ProjectivePlane,
-            2,
-            SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order },
+            3,
+            SaeBasisResolution::AmbientProjectivePlaneHarmonics { quotient_order },
             SaeReferenceMetricPlan::RoundProjectivePlane,
         )
     }
@@ -318,7 +346,8 @@ impl SaeAtomGeometryPlan {
         match &self.resolution {
             // The ambient sphere is the only member of the menu whose
             // coordinate is wider than the manifold it parameterises.
-            SaeBasisResolution::AmbientSphereHarmonics { .. } => 2,
+            SaeBasisResolution::AmbientSphereHarmonics { .. }
+            | SaeBasisResolution::AmbientProjectivePlaneHarmonics { .. } => 2,
             _ => self.latent_dim,
         }
     }
@@ -360,7 +389,8 @@ impl SaeAtomGeometryPlan {
                 TorusHarmonicEvaluator::new(self.latent_dim, *per_axis_order)
                     .map(|evaluator| evaluator.basis_size())
             }
-            SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order } => {
+            SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order }
+            | SaeBasisResolution::AmbientProjectivePlaneHarmonics { quotient_order } => {
                 projective_plane_basis_size(*quotient_order)
             }
             SaeBasisResolution::KleinBottleHarmonics { per_axis_order } => {
@@ -407,6 +437,9 @@ impl SaeAtomGeometryPlan {
             ),
             SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order } => Arc::new(
                 QuotientSpectralEvaluator::projective_plane(*quotient_order)?,
+            ),
+            SaeBasisResolution::AmbientProjectivePlaneHarmonics { quotient_order } => Arc::new(
+                QuotientSpectralEvaluator::projective_plane_ambient(*quotient_order)?,
             ),
             SaeBasisResolution::KleinBottleHarmonics { per_axis_order } => {
                 Arc::new(QuotientSpectralEvaluator::klein_bottle(*per_axis_order)?)
@@ -528,6 +561,11 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::ProjectivePlaneHarmonics { quotient_order },
                 SaeReferenceMetricPlan::RoundProjectivePlane,
             ) => QuotientSpectralEvaluator::projective_plane(*quotient_order)?.spectral_penalty(2),
+            (
+                SaeBasisResolution::AmbientProjectivePlaneHarmonics { quotient_order },
+                SaeReferenceMetricPlan::RoundProjectivePlane,
+            ) => QuotientSpectralEvaluator::projective_plane_ambient(*quotient_order)?
+                .spectral_penalty(2),
             (
                 SaeBasisResolution::KleinBottleHarmonics { per_axis_order },
                 SaeReferenceMetricPlan::FlatKleinBottle,
