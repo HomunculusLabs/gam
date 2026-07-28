@@ -30,6 +30,13 @@
 //! `edf_total` feeds `σ̂² = RSS/(n − edf_total)`, conditional AIC, the
 //! likelihood-ratio reference df and every interval width, so a disagreement
 //! here is not a reporting curiosity.
+//!
+//! Because the floor `mp` is stated here, this is also the one place that can
+//! see `edf_total` LAND on it — a fit that kept none of the penalized
+//! directions its design offered and returned the model no amount of smoothing
+//! can remove. #2607 and #2579 both produced exactly that, by unrelated routes,
+//! and both reported `Converged` with nothing said. `collapsed_to_penalty_null_space`
+//! names the state by its outcome, so one check covers every route into it.
 
 /// The three EDF quantities a fit publishes, produced together so they cannot
 /// disagree with one another.
@@ -99,11 +106,71 @@ pub fn penalized_edf_bundle(
     let p = coefficient_count as f64;
     let edf_total = (p - super::penalty::kahan_sum(penalty_block_trace.iter().copied()))
         .clamp(joint_penalty_nullity.min(p), p);
+    if collapsed_to_penalty_null_space(edf_total, coefficient_count, joint_penalty_nullity) {
+        let mp = joint_penalty_nullity.clamp(0.0, p);
+        log::warn!(
+            "fit collapsed to its penalty null space: effective df {edf_total:.3} of {p} \
+             coefficients, against a joint penalty nullity of {mp}. The {} penalized \
+             directions this design offered were smoothed away entirely -- the model \
+             returned is the one no amount of smoothing can remove. On a saturated or \
+             near-saturated design that is the criterion's own optimum rather than a \
+             solver failure; otherwise it is the signature of a lambda railed at its \
+             ceiling (#2607).",
+            p - mp,
+        );
+    }
     EdfBundle {
         edf_total,
         edf_by_block,
         penalty_block_trace,
     }
+}
+
+/// How many of the penalized directions a design offered survived into the fit,
+/// and whether that count is small enough to call the result the penalty's own
+/// null model.
+///
+/// `mp = p − rank(Σ_k S_k)` is the dimension smoothing cannot touch, so
+/// `attainable = p − mp` is what λ-selection actually chooses over and
+/// `spent = edf_total − mp` is what it kept. #2607 and #2579 reached the SAME
+/// visible end state — `Converged`, `edf` within rounding of the intercept —
+/// from two unrelated mechanisms (a saturated design whose REML optimum is
+/// maximum smoothing; a df floor that iterated an emptied penalty list). Naming
+/// the state by its *outcome* rather than by either route is what makes one
+/// check cover both, and any third route that lands here.
+///
+/// The two bounds are what separate a collapse from an ordinary answer:
+///
+/// * `spent <= 0.5` — less than half of ONE direction retained out of every
+///   direction on offer. `hifreq_tensor_k10` measured `edf = 1.294` against
+///   `mp = 1`, i.e. `spent = 0.294` of an attainable 575.
+/// * `attainable >= 20` — a single smooth term legitimately shrinks to its own
+///   null space whenever the truth really is linear, and a `k = 10` marginal
+///   offers only ~8 penalized directions, so firing there would report a
+///   correct model selection as a defect. Twenty is the point past which a
+///   design has been given substantial flexibility and kept none of it; it is a
+///   threshold on how much was discarded, not on how well the fit did.
+///
+/// Returns `false` for any non-finite input rather than warning about arithmetic
+/// that has already failed somewhere upstream.
+pub fn collapsed_to_penalty_null_space(
+    edf_total: f64,
+    coefficient_count: usize,
+    joint_penalty_nullity: f64,
+) -> bool {
+    /// Penalized directions a design must offer before keeping none of them is
+    /// reported as a collapse rather than as a linear truth being found.
+    const MIN_ATTAINABLE_DIRECTIONS: f64 = 20.0;
+    /// Retained penalized df, below which the fit IS its penalty null model.
+    const MAX_RETAINED_DF: f64 = 0.5;
+    if !edf_total.is_finite() || !joint_penalty_nullity.is_finite() {
+        return false;
+    }
+    let p = coefficient_count as f64;
+    let mp = joint_penalty_nullity.clamp(0.0, p);
+    let attainable = p - mp;
+    let spent = edf_total - mp;
+    attainable >= MIN_ATTAINABLE_DIRECTIONS && spent <= MAX_RETAINED_DF
 }
 
 /// Length agreement between the traces and their ranks is a caller contract, not
@@ -188,5 +255,57 @@ mod tests {
     #[should_panic(expected = "aligned 1:1 with the penalty blocks")]
     fn mismatched_traces_and_ranks_are_refused_not_zipped_short() {
         penalized_edf_bundle(&[1.0, 2.0], &[3], 5, 0.0);
+    }
+
+    #[test]
+    fn the_state_2607_recorded_is_detected_by_its_outcome() {
+        // The numbers `hifreq_tensor_k10` reported while it was saturated:
+        // `edf = 1.294` of `p = 576`, joint penalty nullity 1 (the intercept —
+        // a te() double penalty leaves nothing else unpenalized). Every one of
+        // the 575 penalized directions was smoothed away, the fit reported
+        // `Converged`, and nothing said so.
+        assert!(collapsed_to_penalty_null_space(1.294, 576, 1.0));
+        // The same fixture BEFORE the collapse, from the history #2585 records:
+        // `edf = 227.938` of the same 576. Same design, same nullity — only the
+        // outcome differs, which is the whole point of naming the state by its
+        // outcome.
+        assert!(!collapsed_to_penalty_null_space(227.938, 576, 1.0));
+    }
+
+    #[test]
+    fn a_linear_truth_under_one_smooth_is_a_selection_not_a_collapse() {
+        // A `k = 10` marginal offers ~8 penalized directions on top of a
+        // 2-dimensional null space. When the truth really is linear, REML
+        // shrinking that smooth to exactly its null space is the CORRECT
+        // answer, and reporting it as a collapse would turn a good model
+        // selection into a warning on a large fraction of honest fits.
+        assert!(!collapsed_to_penalty_null_space(2.0, 10, 2.0));
+        // Widen the same shape past the point where keeping nothing stops being
+        // an ordinary selection, holding `spent` fixed at zero: the bound is on
+        // how much was discarded, so this and the case above must disagree.
+        assert!(collapsed_to_penalty_null_space(2.0, 30, 2.0));
+    }
+
+    #[test]
+    fn an_unpenalized_design_can_never_collapse() {
+        // `mp = p` means λ selects over nothing at all: `edf_total` is pinned to
+        // `p` by construction, so there is no collapse available to report and a
+        // predicate keyed on `spent` alone would fire on every such fit.
+        assert!(!collapsed_to_penalty_null_space(40.0, 40, 40.0));
+    }
+
+    #[test]
+    fn a_non_finite_edf_is_not_reported_as_a_collapse() {
+        // NaN compares false against every bound, so `spent <= 0.5` would be
+        // false for NaN but true for −inf. Neither is a statement about
+        // smoothing: the arithmetic already failed upstream, and the finiteness
+        // validators own that.
+        for edf in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY] {
+            assert!(
+                !collapsed_to_penalty_null_space(edf, 576, 1.0),
+                "non-finite edf {edf} is an upstream arithmetic failure, not a collapse"
+            );
+        }
+        assert!(!collapsed_to_penalty_null_space(1.294, 576, f64::NAN));
     }
 }
