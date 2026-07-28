@@ -4320,26 +4320,50 @@ fn enumerate_and_select_rho_with_controls(
     mut visit: impl FnMut(StationaryRoot, &ObjectiveEval),
 ) -> Result<ProfileSelection, EstimationError> {
     const CAP: usize = MAX_DEPTH + 4;
-    let mut stack = [(0.0f64, 0.0f64, 0usize); CAP];
-    let mut top = 0usize;
-    stack[top] = (controls.lower, controls.upper, 0);
-    top += 1;
-
     let lower_eval = eval(controls.lower);
     let upper_eval = eval(controls.upper);
+    // Every cell carries the objective jets of BOTH its endpoints. A bisection
+    // shares three of its four child endpoints with the parent — (a, mid) and
+    // (mid, b) reuse `a`, `b` and the ONE newly evaluated midpoint — so the DFS
+    // evaluates each ρ point exactly once instead of re-evaluating both
+    // endpoints of every popped cell. Each evaluation is an O(p) sweep over the
+    // penalty spectrum, and on the saturated p ≈ n designs where this search
+    // subdivides hardest that redundancy was two thirds of the evaluation work.
+    // `eval` is a deterministic function of ρ over borrowed data, so the reused
+    // jets are bit-identical to the recomputed ones (#2585).
+    let mut stack = [(
+        controls.lower,
+        lower_eval,
+        controls.upper,
+        upper_eval,
+        0usize,
+    ); CAP];
+    let mut top = 1usize;
+
     let (mut best_rho, mut best_eval) = if upper_eval.cost < lower_eval.cost {
         (controls.upper, upper_eval)
     } else {
         (controls.lower, lower_eval)
     };
     let mut last_root: Option<StationaryRoot> = None;
+    // Search-effort tally. The branch-and-bound's cost is its CELL COUNT, which
+    // is a property of the data (how tight the outward enclosure is on this
+    // spectrum), not of `p` alone — so it has to be measured rather than
+    // predicted. Reported once per search at `info` (#2585).
+    let mut cells_visited = 0usize;
+    let mut evaluations = 2usize;
+    let mut deepest = 0usize;
+    let mut unbounded_enclosures = 0usize;
 
     while top > 0 {
         top -= 1;
-        let (a, b, depth) = stack[top];
-        let ea = eval(a);
-        let eb = eval(b);
+        let (a, ea, b, eb, depth) = stack[top];
+        cells_visited += 1;
+        deepest = deepest.max(depth);
         let (dv, dvv) = enclose(a, b);
+        if !(dv.lo.is_finite() && dv.hi.is_finite()) {
+            unbounded_enclosures += 1;
+        }
         if !(interval_contains(dv, ea.grad)
             && interval_contains(dv, eb.grad)
             && interval_contains(dvv, ea.hess)
@@ -4366,7 +4390,10 @@ fn enumerate_and_select_rho_with_controls(
                 &eval,
                 0.5 * (a + b),
                 format!(
-                    "stationary structure remained non-monotone on [{a}, {b}] at rho resolution {}",
+                    "stationary structure remained non-monotone on [{a}, {b}] at rho resolution {} \
+                     after {cells_visited} branch-and-bound cells ({evaluations} objective \
+                     evaluations, deepest bisection {deepest}, {unbounded_enclosures} cells whose \
+                     derivative enclosure was unbounded)",
                     controls.resolution
                 ),
             ));
@@ -4403,11 +4430,21 @@ fn enumerate_and_select_rho_with_controls(
                 format!("stationary subdivision could not continue on [{a}, {b}]"),
             ));
         }
-        stack[top] = (mid, b, depth + 1);
+        let emid = eval(mid);
+        evaluations += 1;
+        stack[top] = (mid, emid, b, eb, depth + 1);
         top += 1;
-        stack[top] = (a, mid, depth + 1);
+        stack[top] = (a, ea, mid, emid, depth + 1);
         top += 1;
     }
+    log::info!(
+        "[REML-BNB] certified 1-D rho search over [{}, {}]: {cells_visited} cells, \
+         {evaluations} objective evaluations, deepest bisection {deepest}/{}, \
+         {unbounded_enclosures} unbounded enclosures",
+        controls.lower,
+        controls.upper,
+        controls.max_depth,
+    );
 
     if !(best_eval.cost.is_finite() && best_eval.grad.is_finite()) {
         return Err(EstimationError::InvalidInput(
