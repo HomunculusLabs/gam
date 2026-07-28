@@ -586,7 +586,7 @@ mod tests {
         )
         .unwrap();
         let (phi_stack, jet_stack, penalty_stack, basis_sizes, _) =
-            sae_build_padded_basis_stacks(&plans, seed_coords.view(), 3).unwrap();
+            sae_build_padded_basis_stacks(&plans, seed_coords.view(), 2).unwrap();
 
         assert_eq!(
             plans[0].geometry,
