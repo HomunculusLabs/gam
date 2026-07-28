@@ -1443,7 +1443,9 @@ impl AmbientSphereHarmonicEvaluator {
         q: usize,
         r: usize,
     ) -> f64 {
-        debug_assert!(r <= 3, "ambient sphere jets are materialized to order 3");
+        // `r` counts the z-axes among at most three requested axes, so it is
+        // structurally in `0..=3` and indexes the materialized derivatives
+        // directly; a wider jet order would be a caller bug and panics here.
         let radial = ambient_poly_eval(&column.assoc_derivatives[r], z);
         if radial == 0.0 {
             return 0.0;
