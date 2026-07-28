@@ -267,12 +267,42 @@ struct QuadraticCandidateComparison {
 }
 
 impl QuadraticCandidateComparison {
-    fn certifies_strict_improvement(&self) -> bool {
+    /// Does the candidate satisfy the constrained-minimization theorem against
+    /// the feasible reference?
+    ///
+    /// That theorem requires exactly one inequality — the candidate is NO WORSE
+    /// than the reference in the quadratic,
+    ///
+    ///     q(reference) - q(candidate)
+    ///       = directional_descent - 1/2 ||delta||_M^2 = model_decrease >= 0,
+    ///
+    /// checked at the shared tolerance. Two further exact-sign conjuncts used to
+    /// stand beside it, and both were stronger than the theorem they guarded:
+    ///
+    /// * `directional_descent > 0.0` is redundant. `M` is positive by
+    ///   construction (every shifted curvature is floored above zero), so
+    ///   `metric_norm_squared >= 0` and hence `model_decrease <=
+    ///   directional_descent`; the toleranced decrease test already implies
+    ///   `directional_descent >= -tolerance`. It could therefore only ever
+    ///   reject on the sign of a quantity the decrease test had already
+    ///   accepted — that is, on rounding noise.
+    /// * `metric_norm_squared > 0.0` forbade a zero step. A candidate that
+    ///   equals the reference is trivially no worse; refusing it is refusing a
+    ///   converged solve for having arrived.
+    ///
+    /// Together they refused a genuine no-op at convergence: with `||delta||_M =
+    /// 1.5e-15` and `step_inf = 1.0e-17`, `directional_descent` evaluated to
+    /// `-2.7e-16` — a difference of nearly equal quantities whose sign is pure
+    /// roundoff — while `model_decrease + tolerance` was positive by eight
+    /// orders of magnitude. The fit was aborted for it (gam#2586).
+    ///
+    /// `metric_norm_squared >= 0.0` is kept: `M` is positive by construction, so
+    /// a negative metric norm means the metric is broken, not the step.
+    fn certifies_no_inferiority(&self) -> bool {
         self.directional_descent.is_finite()
             && self.metric_norm_squared.is_finite()
             && self.model_decrease.is_finite()
-            && self.directional_descent > 0.0
-            && self.metric_norm_squared > 0.0
+            && self.metric_norm_squared >= 0.0
             && self.model_decrease + self.tolerance >= 0.0
     }
 }
@@ -781,7 +811,7 @@ fn certified_reduced_face_candidate(
         &feasible_base,
         &candidate,
     )?;
-    if !comparison.certifies_strict_improvement() {
+    if !comparison.certifies_no_inferiority() {
         let reference_delta_inf = (&candidate - &feasible_base)
             .iter()
             .map(|value| value.abs())
@@ -1002,8 +1032,9 @@ mod exact_face_newton_tests {
         )
         .expect("old comparison algebra");
         assert!(
-            infeasible_base_comparison.model_decrease < 0.0
-                && !infeasible_base_comparison.certifies_strict_improvement(),
+            infeasible_base_comparison.model_decrease
+                < -infeasible_base_comparison.tolerance
+                && !infeasible_base_comparison.certifies_no_inferiority(),
             "the infeasible-base theorem must reproduce the live false refusal"
         );
 
@@ -1015,7 +1046,7 @@ mod exact_face_newton_tests {
         )
         .expect("feasible comparison algebra");
         assert!(
-            feasible_base_comparison.certifies_strict_improvement(),
+            feasible_base_comparison.certifies_no_inferiority(),
             "the same minimizer must improve the unchanged QP objective over a feasible point"
         );
 
@@ -1036,7 +1067,7 @@ mod exact_face_newton_tests {
         .expect("worse comparison algebra");
         assert!(
             worse_comparison.model_decrease < -worse_comparison.tolerance
-                && !worse_comparison.certifies_strict_improvement(),
+                && !worse_comparison.certifies_no_inferiority(),
             "a genuinely worse feasible candidate must remain outside the descent gate"
         );
 
