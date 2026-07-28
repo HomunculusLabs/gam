@@ -573,13 +573,33 @@ fn hifreq_tensor_k6() -> Result<(), String> {
 //   a p³ law predicts    ->   k10 = 2.99 x k8 = 218 s
 //   measured (CI)        ->   k10 = 6310 s = 86 x k8's 73 s
 //
-// 29x above the cube-law prediction; the implied exponent is ~12. Driving the
-// same fixture through the CLI at k = 4/6/8 shows why: per-EVALUATION cost does
-// scale as about p^2.3 (73 / 288 / 734 ms — the O(n p²) assembly plus the O(p³)
-// factorization, so that half of the old note was right), while the number of
-// outer evaluations is 404 / 441 / 180 and is not a function of p at all. To
-// reach 6310 s, k10 must be spending ~4300 outer evaluations on a problem with
-// two or three λ.
+// 29x above the cube-law prediction; the implied exponent is ~12.
+//
+// WHERE IT ACTUALLY GOES — measured at k10 rather than extrapolated to it. An
+// earlier revision of this note (mine) inferred from k = 4/6/8 that the outer
+// EVALUATION COUNT must be exploding, and put a figure of ~4300 evaluations on
+// it. That was wrong, and running k10 says so:
+//
+//   k    p     wall        outer evals    ms/eval
+//   8    400     132.2 s          180        734
+//   10   576    9452.3 s          191     49,489
+//
+// The evaluation count is FLAT (180 -> 191). It is the per-evaluation cost that
+// jumps 67x, for p rising only 1.44x. So the extrapolation had the two factors
+// exactly backwards, and the honest reading of k = 4/6/8 alone is that it does
+// not determine k10.
+//
+// Attributing every second of that run to the last non-heartbeat log line
+// preceding it puts **96.5% of the 9451 s after an `[HGB]` line** — the
+// variance-targeted stochastic trace estimator in `reml/gradient_hessian.rs`
+// and `reml/state_caches.rs`, which sizes its probe count to hit a `target_mse`.
+// The instrumented `[STAGE]` brackets together account for about 185 s, i.e.
+// 2%. Neither the assembly nor the factorization is the cost here.
+//
+// That estimator is the same one #2576 measures at 95% of wall clock in the
+// overcomplete support lane, where its unpreconditioned CG stagnates at its
+// iteration cap. Whether these are one defect in two lanes is untested and
+// should be stated as a hypothesis, not a finding.
 //
 // The structural reason is in this file's own fixture: the grid is 24 x 24, so
 // `n = 576`, and at k10 `kb = 24` gives `p = kb² = 576`. **p = n exactly** — a
