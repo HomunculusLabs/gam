@@ -17,7 +17,7 @@ import sys
 
 import numpy as np
 
-I2502 = os.path.expanduser("~/i2502")
+I2502 = os.path.expanduser("~/i2502v2")
 P = 128
 
 
@@ -107,7 +107,10 @@ def main() -> int:
     g = gam / np.maximum(np.linalg.norm(gam, axis=1, keepdims=True), 1e-12)
     coh = np.abs(g @ g.T)
     np.fill_diagonal(coh, 0.0)
-    k_total = int(os.path.basename(fit_dir).replace("fit_k", ""))
+    # K comes from the census dump, not from parsing the directory name: the
+    # name encodes the ARM (alpha, seed), and inferring a model dimension
+    # from a path is how a rename silently changes a reported number.
+    k_total = len(np.fromfile(f"{fit_dir}/census.bin", dtype=np.float64).reshape(-1, 4))
     welch = np.sqrt((k_total - P) / (P * (k_total - 1)))
 
     fig2, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))

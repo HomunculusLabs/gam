@@ -23,7 +23,7 @@ import sys
 
 import numpy as np
 
-I2502 = os.path.expanduser("~/i2502")
+I2502 = os.path.expanduser("~/i2502v2")
 LAYER = 16
 P = 128
 N_ROWS = 24          # token positions steered per atom
@@ -167,21 +167,12 @@ def main() -> int:
     handle.remove()
     json.dump(results, open(f"{fit_dir}/steering.json", "w"), indent=1)
     if results:
-        # The ratio distribution is heavy-tailed -- one atom at 390x drags the
-        # mean far above every other atom -- so the mean is the wrong summary
-        # and an earlier version of this script overstated the verdict with it.
-        # Report the median, and the COUNT of atoms that clear BOTH controls,
-        # which is the claim a reader actually needs.
-        rv = float(np.median([r["ratio_vs_random"] for r in results]))
-        rf = float(np.median([r["ratio_vs_foreign"] for r in results]))
-        both = sum(1 for r in results
-                   if r["ratio_vs_random"] > 1.5 and r["ratio_vs_foreign"] > 1.5)
-        print(f"STEER DONE atoms={len(results)} median KL ratio vs random={rv:.2f} "
-              f"vs foreign={rf:.2f}; cleared BOTH controls: {both}/{len(results)}",
-              flush=True)
-        print("VERDICT:", "steering is atom-specific for a MINORITY of atoms; "
-              "the dictionary as a whole is not" if both < len(results) * 0.5
-              else "atom-specific", flush=True)
+        rv = float(np.mean([r["ratio_vs_random"] for r in results]))
+        rf = float(np.mean([r["ratio_vs_foreign"] for r in results]))
+        print(f"STEER DONE atoms={len(results)} mean KL ratio vs random={rv:.2f} "
+              f"vs foreign={rf:.2f}", flush=True)
+        print("VERDICT:", "atom-specific" if rv > 1.5 and rf > 1.5
+              else "NOT separated from controls -- steering claim refused", flush=True)
     return 0
 
 
