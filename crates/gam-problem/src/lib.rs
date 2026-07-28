@@ -97,7 +97,7 @@ pub use execution_path::ExecutionPath;
 pub use family_options::{ExactNewtonOuterObjective, ExactOuterDerivativeOrder};
 pub use finite_validation::{
     bail_if_cached_beta_non_finite, ensure_finite_scalar, ensure_finite_scalar_estimation,
-    validate_all_finite, validate_all_finite_estimation,
+    validate_all_finite, validate_all_finite_estimation, validate_all_finite_trial_point,
 };
 pub use fisher_rao::{
     FisherRaoDefiniteness, normalize_fisher_rao_blocks, normalize_fisher_rao_blocks_pd,

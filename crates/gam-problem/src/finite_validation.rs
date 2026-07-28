@@ -27,6 +27,35 @@ where
     Ok(())
 }
 
+/// Same check as [`validate_all_finite_estimation`], for a quantity whose
+/// non-finiteness is a statement about THIS TRIAL POINT rather than about the
+/// configuration.
+///
+/// An inference-only matrix derived from `H⁻¹` at the fitted mode -- the
+/// frequentist covariance, the influence matrix, the weighted Gram -- goes
+/// non-finite when the curvature at this rho is singular or unstable. That
+/// becomes true or false by moving rho, so the outer search should retreat from
+/// the point rather than abort, and the difference is carried by the variant
+/// instead of being recovered downstream by matching `"must be finite"` against
+/// a list of field names (#2593).
+///
+/// The rendered message is identical to `validate_all_finite_estimation`'s --
+/// `TrialPointRefused` displays the bare reason -- so nothing that reads the
+/// text sees a change.
+pub fn validate_all_finite_trial_point<I>(label: &str, values: I) -> Result<(), EstimationError>
+where
+    I: IntoIterator<Item = f64>,
+{
+    for (idx, value) in values.into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(EstimationError::TrialPointRefused {
+                reason: format!("{label}[{idx}] must be finite, got {value}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[inline]
 pub fn bail_if_cached_beta_non_finite(beta: &Array1<f64>) -> Result<(), EstimationError> {
     if beta.iter().any(|v| !v.is_finite()) {

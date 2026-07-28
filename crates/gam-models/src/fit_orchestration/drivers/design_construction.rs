@@ -7806,30 +7806,15 @@ fn fit_score(fit: &UnifiedFitResult) -> f64 {
 /// Everything else (layout/topology invariants, over-parameterization, and
 /// arbitrary invalid inputs) stays fatal so genuine bugs are never masked.
 fn is_recoverable_trial_point_error(err: &EstimationError) -> bool {
-    matches!(err, EstimationError::BasisError(_))
-        // The producer's own verdict, which `is_inner_solve_retreat` is a
-        // subset of. Asking it here as well is what lets a typed
-        // `TrialPointRefused` — or a custom-family refusal that delegates to
-        // its own classifier — be retreated from rather than aborted, instead
-        // of this driver maintaining a third, narrower answer to the same
-        // question (#2531/#2590).
-        || err.is_trial_point_infeasible()
-        || is_recoverable_fit_inference_finiteness_error(err)
-}
-
-fn is_recoverable_fit_inference_finiteness_error(err: &EstimationError) -> bool {
-    let EstimationError::InvalidInput(message) = err else {
-        return false;
-    };
-
-    message.contains("must be finite")
-        && [
-            "fit_result.beta_covariance_frequentist",
-            "fit_result.coefficient_influence",
-            "fit_result.weighted_gram",
-        ]
-        .iter()
-        .any(|field| message.contains(field))
+    // The producer's own verdict, and nothing else. `is_inner_solve_retreat` is
+    // a subset of it, and the non-finite inference-matrix case that used to be
+    // recovered here by matching `"must be finite"` against three field names
+    // now arrives as `TrialPointRefused` from
+    // `validate_all_finite_trial_point` (#2593). A verdict carried in prose is
+    // one `format!` away from silently changing meaning, and this driver was
+    // the third place in the workspace maintaining its own answer to a question
+    // the producer had already answered (#2531/#2590/#2553).
+    matches!(err, EstimationError::BasisError(_)) || err.is_trial_point_infeasible()
 }
 
 #[cfg(test)]
@@ -7838,13 +7823,23 @@ mod spatial_trial_recovery_tests {
 
     #[test]
     fn nonfinite_frequentist_covariance_is_recoverable_trial_point() {
-        let err = EstimationError::InvalidInput(
-            "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
-        );
+        // Exactly what `validate_all_finite_trial_point` produces, including
+        // the unchanged message text.
+        let err = EstimationError::TrialPointRefused {
+            reason: "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
+        };
 
         assert!(
             is_recoverable_trial_point_error(&err),
             "singular trial-point curvature should make spatial κ retreat, not abort"
+        );
+        // The same TEXT as an `InvalidInput` must NOT be recoverable: the
+        // verdict now comes from the variant, so prose can no longer buy it.
+        assert!(
+            !is_recoverable_trial_point_error(&EstimationError::InvalidInput(
+                "fit_result.beta_covariance_frequentist[0] must be finite, got NaN".to_string(),
+            )),
+            "recoverability must come from the producer's variant, not from the message"
         );
     }
 

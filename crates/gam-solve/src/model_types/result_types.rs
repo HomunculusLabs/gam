@@ -3139,17 +3139,28 @@ impl FitInference {
         if let Some(v) = self.beta_standard_errors.as_ref() {
             validate_all_finite_estimation("fit_result.beta_standard_errors", v.iter().copied())?;
         }
+        // These three are INFERENCE-ONLY objects derived from `H⁻¹` at the
+        // fitted mode, not the fitted mean coefficients. They go non-finite
+        // when the curvature at THIS rho is singular or unstable, which is a
+        // property of the trial point, so they refuse with the variant that
+        // says so (#2593). The message text is unchanged.
         if let Some(v) = self.beta_covariance_frequentist.as_ref() {
-            validate_all_finite_estimation(
+            gam_problem::validate_all_finite_trial_point(
                 "fit_result.beta_covariance_frequentist",
                 v.iter().copied(),
             )?;
         }
         if let Some(v) = self.coefficient_influence.as_ref() {
-            validate_all_finite_estimation("fit_result.coefficient_influence", v.iter().copied())?;
+            gam_problem::validate_all_finite_trial_point(
+                "fit_result.coefficient_influence",
+                v.iter().copied(),
+            )?;
         }
         if let Some(v) = self.weighted_gram.as_ref() {
-            validate_all_finite_estimation("fit_result.weighted_gram", v.iter().copied())?;
+            gam_problem::validate_all_finite_trial_point(
+                "fit_result.weighted_gram",
+                v.iter().copied(),
+            )?;
         }
         if let Some(v) = self.bias_correction_beta.as_ref() {
             validate_all_finite_estimation("fit_result.bias_correction_beta", v.iter().copied())?;
