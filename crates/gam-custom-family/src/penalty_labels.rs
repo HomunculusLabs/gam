@@ -311,6 +311,7 @@ mod tests {
             matrix: Array2::<f64>::eye(2),
             initial_log_lambda,
             nullspace_dim: 0,
+            group: None,
         }
     }
 

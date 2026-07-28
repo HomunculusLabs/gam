@@ -5098,6 +5098,7 @@ pub(crate) fn owned_joint_penalty_geometry_uses_terminal_workspace_without_famil
         matrix: Array2::eye(2),
         initial_log_lambda: 0.0,
         nullspace_dim: 0,
+        group: None,
     };
     let layout = penalty_label_layout_with_joint(&specs, vec![0], vec![joint_spec])
         .expect("valid joint-penalty layout");

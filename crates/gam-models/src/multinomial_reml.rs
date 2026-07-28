@@ -1199,6 +1199,9 @@ impl MultinomialFamily {
                     matrix,
                     initial_log_lambda: self.joint_seed(t),
                     nullspace_dim: raw_total - m * rank_s,
+                    // One spec per term here, but declare it anyway so the
+                    // shared-centered and equivariant carriers group alike.
+                    group: Some(t),
                 })
             })
             .collect()
@@ -1283,6 +1286,11 @@ impl MultinomialFamily {
                     matrix,
                     initial_log_lambda: self.joint_seed(t * k + c),
                     nullspace_dim,
+                    // #2579: the K per-class specs of term `t` are one term seen
+                    // through K contrasts. A relabeling permutes them among
+                    // themselves, so a consumer needing a reference-invariant
+                    // per-term quantity aggregates over this group.
+                    group: Some(t),
                 });
             }
         }

@@ -640,6 +640,25 @@ pub(crate) fn design_penalty_range_gammas(
         return None;
     }
     let gram = x.t().dot(&x);
+    penalty_range_gammas_from_gram(&gram, &s_dense)
+}
+
+/// The pencil core of [`design_penalty_range_gammas`], reading the unit-weight
+/// Gram directly instead of a [`DesignMatrix`].
+///
+/// A [`gam_problem::JointPenaltySpec`] has no `DesignMatrix` of its own: its
+/// matrix spans the CONCATENATION of every block's coefficients, so there is no
+/// single block whose design it multiplies. Splitting the core out here is what
+/// lets a joint penalty reach the identical structural-edf machinery, with
+/// [`stacked_block_design_gram`] supplying the matching Gram (#2579).
+pub(crate) fn penalty_range_gammas_from_gram(
+    gram: &Array2<f64>,
+    s_dense: &Array2<f64>,
+) -> Option<Vec<f64>> {
+    let p = s_dense.nrows();
+    if p == 0 || s_dense.ncols() != p || gram.nrows() != p || gram.ncols() != p {
+        return None;
+    }
     // Eigendecompose the penalty to find its range space S = U D Uᵀ.
     let (s_evals, s_evecs) = s_dense.eigh(Side::Lower).ok()?;
     let s_max = s_evals.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
@@ -681,7 +700,7 @@ pub(crate) fn design_penalty_range_gammas(
             y[(row, col)] = u[row] * w;
         }
     }
-    let mut b = y.t().dot(&gram).dot(&y);
+    let mut b = y.t().dot(gram).dot(&y);
     if !null_cols.is_empty() {
         // Quotient the null space out of the range curvature. In the penalty
         // eigenbasis, with A = UᵀGU partitioned into null (0) and range (r)
@@ -704,8 +723,8 @@ pub(crate) fn design_penalty_range_gammas(
                 u0[(row, col)] = u[row];
             }
         }
-        let g00 = u0.t().dot(&gram).dot(&u0); // r0×r0
-        let g_r0 = y.t().dot(&gram).dot(&u0); // r×r0, already D_r^{-1/2}-scaled rows
+        let g00 = u0.t().dot(gram).dot(&u0); // r0×r0
+        let g_r0 = y.t().dot(gram).dot(&u0); // r×r0, already D_r^{-1/2}-scaled rows
         // A₀₀⁺ through the null-block eigendecomposition (r0 is small); the
         // pseudo-inverse (not an inverse) because the design need not have
         // full column support on ker(S).
@@ -809,7 +828,6 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
     // they are finite and correctly ordered, so this body can read them
     // without re-validating and no caller can transpose them.
     let ceiling = rho_box.ceiling();
-    let lower = rho_box.lower();
     let mut upper = Array1::<f64>::from_elem(n_rho, ceiling);
     let mut physical = 0usize;
     for spec in specs {
@@ -822,21 +840,189 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
             let Some(gammas) = design_penalty_range_gammas(&spec.design, penalty) else {
                 continue; // un-projectable geometry: keep the uniform ceiling.
             };
-            // Maximum attainable structural edf (ρ → −∞) is the number of
-            // design-supported penalized directions. If it cannot reach the
-            // floor even unpenalized, the floor is not enforceable for this term
-            // (a single-dimension range space with the floor at its own cap), so
-            // keep the uniform ceiling.
-            let edf_max = unit_weight_term_edf_at_physical_strength(&gammas, 0.0);
-            if !(edf_max > EFFECTIVE_DF_FLOOR) {
-                continue;
+            tighten_effective_df_floor_bound(&gammas, rho_box, &mut upper[outer])?;
+        }
+    }
+    // #2579: for the one family that carries JOINT penalties, the loop above
+    // iterates nothing. `#1587` emptied the multinomial's per-block `penalties`
+    // lists — the centered `M ⊗ S_t` bundle became the sole smoothing carrier —
+    // so `spec.penalties` is empty on every multinomial fit and the guard runs
+    // zero times, while `multinomial.rs` cites this function BY NAME as the
+    // protection that keeps a near-separable fit off the smoothing wall. A `for`
+    // over an empty list is not an error, so nothing reported it: on penguins all
+    // sixteen selected λ railed at `exp(EFFECTIVE_DF_CEILING)` to the last bit and
+    // the fit collapsed to the base rate. `MultinomialFamily` is the only
+    // non-default implementor of `joint_penalty_specs()`, so this hole was
+    // multinomial-only and every other family's bounds are byte-identical.
+    //
+    // The joint specs reach the SAME bisection through the same helper; only the
+    // Gram differs, because a joint penalty spans the stacked block vector rather
+    // than one block's columns.
+    //
+    // The bound is aggregated within a DECLARED group before it is applied, and
+    // that granularity is the whole difficulty. A bound computed per SPEC is
+    // reference-DEPENDENT: the K per-class specs of a term are not a permutation
+    // orbit in the stacked ALR basis, because the reference class's centering row
+    // is `−𝟙ᵀ/K` while an active class's is `e_cᵀ − 𝟙ᵀ/K`. Relabeling therefore
+    // changes each spec's pencil and its bound, and the measured fit drifts by
+    // 1.637e-2 against the 1e-3 bar of
+    // `multinomial_fit_is_invariant_to_reference_class_1587` (refit noise
+    // exactly 0 — structural, not numerical).
+    //
+    // Any aggregation over a set that MAPS TO ITSELF under relabeling restores
+    // invariance, but not every such set is acceptable. Aggregating over ALL
+    // joint specs does restore it — and collapses every coordinate onto one
+    // shared wall (measured: all λ bit-identical at `exp(10.684)`), which
+    // destroys the per-class heterogeneity #1855 exists for AND makes the #1587
+    // gate vacuous, since all-λ-equal is invariant trivially. That is a guard
+    // silently becoming a tautology while its test goes green.
+    //
+    // The GROUP is the finest aggregation that is still invariant: relabeling
+    // permutes a term's K per-class specs among themselves, so the minimum over
+    // the group is invariant while the components (wiggliness vs null-space)
+    // keep their own separate bounds. A spec that declares no group stands
+    // alone — which is what every family other than the multinomial gets, since
+    // `group` defaults to `None`.
+    if !layout.joint_specs.is_empty() {
+        if let Some(joint_gram) = stacked_block_design_gram(specs) {
+            // (group, tightest bound) — group counts are tiny, so a linear scan
+            // beats a map and keeps the emission order deterministic.
+            let mut group_bounds: Vec<(usize, f64)> = Vec::new();
+            let mut solo: Vec<(usize, f64)> = Vec::new();
+            for (joint_idx, joint) in layout.joint_specs.iter().enumerate() {
+                let Some(gammas) = penalty_range_gammas_from_gram(&joint_gram, &joint.matrix)
+                else {
+                    continue; // un-projectable geometry: keep the uniform ceiling.
+                };
+                let Some(rho_star) = effective_df_floor_bound(&gammas, rho_box)? else {
+                    continue; // floor not enforceable inside the box.
+                };
+                match joint.group {
+                    Some(group) => match group_bounds.iter_mut().find(|(g, _)| *g == group) {
+                        Some((_, best)) => *best = best.min(rho_star),
+                        None => group_bounds.push((group, rho_star)),
+                    },
+                    None => {
+                        if let Some(&outer) = layout.joint_to_outer.get(joint_idx) {
+                            solo.push((outer, rho_star));
+                        }
+                    }
+                }
             }
-            // Bisect for ρ* with edf(ρ*) = floor on [lower, ceiling]; edf is
-            // monotone decreasing in ρ. If edf at the ceiling still exceeds the
-            // floor, the uniform ceiling already retains enough df — keep it.
-            if unit_weight_term_edf(&gammas, ceiling)? >= EFFECTIVE_DF_FLOOR {
-                continue;
+            let mut apply = |outer: usize, rho_star: f64| {
+                if outer < n_rho {
+                    let slot = &mut upper[outer];
+                    if rho_star < *slot {
+                        *slot = rho_star;
+                    }
+                }
+            };
+            for (joint_idx, joint) in layout.joint_specs.iter().enumerate() {
+                let Some(group) = joint.group else { continue };
+                let Some(&(_, rho_star)) =
+                    group_bounds.iter().find(|(g, _)| *g == group)
+                else {
+                    continue;
+                };
+                let Some(&outer) = layout.joint_to_outer.get(joint_idx) else {
+                    continue;
+                };
+                apply(outer, rho_star);
             }
+            for (outer, rho_star) in solo {
+                apply(outer, rho_star);
+            }
+        }
+    }
+    Ok(upper)
+}
+
+/// Unit-weight Gram of the STACKED block parameter vector, `blkdiag(X_bᵀ X_b)`.
+///
+/// A joint penalty matrix is `(total_compiled, total_compiled)`: it acts on the
+/// concatenation of every block's coefficients, in block order. The design that
+/// matches that vector is the block-diagonal stacking of the per-block designs,
+/// so its Gram is the block diagonal of the per-block Grams — the off-diagonal
+/// blocks are structurally zero, because block `b`'s design columns multiply
+/// only block `b`'s coefficients.
+///
+/// Returns `None` when a block's design cannot be densified to its declared
+/// width, so the caller keeps the uniform bound rather than bounding ρ against a
+/// mis-shaped curvature.
+fn stacked_block_design_gram(specs: &[ParameterBlockSpec]) -> Option<Array2<f64>> {
+    let total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut gram = Array2::<f64>::zeros((total, total));
+    let mut offset = 0usize;
+    for spec in specs {
+        let p = spec.design.ncols();
+        if p == 0 {
+            continue;
+        }
+        let x = spec.design.to_dense();
+        if x.ncols() != p {
+            return None;
+        }
+        let block = x.t().dot(&x);
+        for i in 0..p {
+            for j in 0..p {
+                gram[(offset + i, offset + j)] = block[(i, j)];
+            }
+        }
+        offset += p;
+    }
+    Some(gram)
+}
+
+/// Tighten one ρ upper bound to the edf-floor crossing of a term's structural γ
+/// spectrum.
+///
+/// Shared by the per-block and the joint (#2579) paths so both obey exactly the
+/// same three enforceability guards, the same 64-step bisection, and the same
+/// tightest-wins rule on a shared coordinate. Keeping one body is the point: a
+/// second copy is how the per-block path and the joint path would drift.
+fn tighten_effective_df_floor_bound(
+    gammas: &[f64],
+    rho_box: RhoBox,
+    slot: &mut f64,
+) -> Result<(), CustomFamilyError> {
+    if let Some(rho_star) = effective_df_floor_bound(gammas, rho_box)? {
+        if rho_star < *slot {
+            *slot = rho_star;
+        }
+    }
+    Ok(())
+}
+
+/// The edf-floor crossing itself, or `None` when the floor is not enforceable
+/// strictly inside the box.
+///
+/// Split out of [`tighten_effective_df_floor_bound`] because the joint path must
+/// AGGREGATE bounds across a group before applying any of them; applying each
+/// spec's own bound is what breaks reference invariance (#2579).
+fn effective_df_floor_bound(
+    gammas: &[f64],
+    rho_box: RhoBox,
+) -> Result<Option<f64>, CustomFamilyError> {
+    let ceiling = rho_box.ceiling();
+    let lower = rho_box.lower();
+    // Maximum attainable structural edf (ρ → −∞) is the number of
+    // design-supported penalized directions. If it cannot reach the floor even
+    // unpenalized, the floor is not enforceable for this term (a
+    // single-dimension range space with the floor at its own cap), so keep the
+    // uniform ceiling.
+    let edf_max = unit_weight_term_edf_at_physical_strength(gammas, 0.0);
+    if !(edf_max > EFFECTIVE_DF_FLOOR) {
+        return Ok(None);
+    }
+    // Bisect for ρ* with edf(ρ*) = floor on [lower, ceiling]; edf is monotone
+    // decreasing in ρ. If edf at the ceiling still exceeds the floor, the
+    // uniform ceiling already retains enough df — keep it.
+    if unit_weight_term_edf(gammas, ceiling)? >= EFFECTIVE_DF_FLOOR {
+        return Ok(None);
+    }
             // If the existing lower side of the box has already smoothed this
             // term below the structural floor, the floor is not enforceable
             // inside the optimizer's admissible domain. Do not manufacture an
@@ -850,30 +1036,27 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
             // wall of the rho box. Evaluating at `lower` (the real floor) rather
             // than `-ceiling` guarantees the crossing bracketed below is strictly
             // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
-            if unit_weight_term_edf(&gammas, lower)? <= EFFECTIVE_DF_FLOOR {
-                continue;
-            }
-            let mut lo = lower;
-            let mut hi = ceiling;
-            for _ in 0..64 {
-                let mid = 0.5 * (lo + hi);
-                if unit_weight_term_edf(&gammas, mid)? >= EFFECTIVE_DF_FLOOR {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            let rho_star = 0.5 * (lo + hi);
-            // Tied coordinates: take the tightest (smallest) bound across terms,
-            // so every term sharing this λ retains at least the floor. Guarding
-            // on `lower` keeps the emitted upper strictly above the box floor.
-            let slot = &mut upper[outer];
-            if rho_star > lower + 1e-6 && rho_star < *slot {
-                *slot = rho_star;
-            }
+    if unit_weight_term_edf(gammas, lower)? <= EFFECTIVE_DF_FLOOR {
+        return Ok(None);
+    }
+    let mut lo = lower;
+    let mut hi = ceiling;
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        if unit_weight_term_edf(gammas, mid)? >= EFFECTIVE_DF_FLOOR {
+            lo = mid;
+        } else {
+            hi = mid;
         }
     }
-    Ok(upper)
+    let rho_star = 0.5 * (lo + hi);
+    // Guarding on `lower` keeps the emitted upper strictly above the box floor.
+    // Callers apply tightest-wins: a coordinate must retain the floor for EVERY
+    // term contributing to it.
+    if rho_star > lower + 1e-6 {
+        return Ok(Some(rho_star));
+    }
+    Ok(None)
 }
 
 /// Seed the outer search with the mode the *definition* of `θ̂(ρ)` names, rather
@@ -2548,6 +2731,9 @@ fn pulled_back_joint_penalty_specs<F: CustomFamily + Clone + Send + Sync + 'stat
                 matrix: pulled,
                 initial_log_lambda: spec.initial_log_lambda,
                 nullspace_dim,
+                // The grouping is a property of the term, not of the basis, so
+                // it survives the pullback unchanged (#2579).
+                group: spec.group,
             };
             out.validate()
                 .map_err(|e| CustomFamilyError::ConstraintViolation {

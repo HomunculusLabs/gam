@@ -61,6 +61,20 @@ pub struct JointPenaltySpec {
     pub initial_log_lambda: f64,
     /// Structural nullspace dimension of `matrix` (i.e. `total_compiled - rank`).
     pub nullspace_dim: usize,
+    /// Optional term grouping, declared by the producing family.
+    ///
+    /// Specs sharing a group are the SAME smooth term seen through different
+    /// class contrasts, so a relabeling permutes them among themselves. Any
+    /// consumer that needs a reference-INVARIANT quantity per term must
+    /// aggregate over the group rather than read one spec: an individual spec's
+    /// matrix is expressed in the stacked ALR basis, whose meaning depends on
+    /// which class is the reference (#2579). This is deliberately a declared
+    /// integer and not something recovered by parsing [`Self::label`] — a
+    /// substring classifier over a formatted name is exactly the failure #2593
+    /// was closed for.
+    ///
+    /// `None` means "stands alone", which is every family that does not group.
+    pub group: Option<usize>,
 }
 
 /// Reason a [`JointPenaltySpec`] failed validation.
@@ -419,6 +433,7 @@ mod tests {
             matrix,
             initial_log_lambda: -1.5,
             nullspace_dim: 2,
+            group: None,
         }
     }
 
@@ -485,6 +500,7 @@ mod tests {
             matrix: Array2::zeros((3, 4)),
             initial_log_lambda: 0.0,
             nullspace_dim: 0,
+            group: None,
         };
         assert!(matches!(
             spec.validate(),
@@ -502,6 +518,7 @@ mod tests {
             matrix,
             initial_log_lambda: 0.0,
             nullspace_dim: 0,
+            group: None,
         };
         assert!(matches!(
             spec.validate(),
@@ -516,6 +533,7 @@ mod tests {
             matrix: Array2::zeros((3, 3)),
             initial_log_lambda: 0.0,
             nullspace_dim: 4,
+            group: None,
         };
         assert!(matches!(
             spec.validate(),
@@ -533,6 +551,7 @@ mod tests {
             matrix: Array2::zeros((2, 2)),
             initial_log_lambda: f64::NAN,
             nullspace_dim: 0,
+            group: None,
         };
         assert!(matches!(
             spec.validate(),
@@ -594,6 +613,7 @@ mod tests {
             matrix: array![[2.0_f64, 1.0], [1.0, 2.0]],
             initial_log_lambda: 0.0,
             nullspace_dim: 0,
+            group: None,
         };
         let log_lambda = -0.4_f64;
         let lam = log_lambda.exp();
@@ -676,6 +696,7 @@ mod tests {
             matrix: Array2::<f64>::eye(3),
             initial_log_lambda: 0.0,
             nullspace_dim: 0,
+            group: None,
         };
         let err = JointPenaltyBundle::new(std::sync::Arc::new(vec![spec]), vec![0.0], 4)
             .expect_err("dim mismatch must reject");
@@ -689,6 +710,7 @@ mod tests {
             matrix: Array2::<f64>::eye(2),
             initial_log_lambda: 0.0,
             nullspace_dim: 0,
+            group: None,
         };
         let err = JointPenaltyBundle::new(std::sync::Arc::new(vec![spec]), vec![], 2)
             .expect_err("count mismatch must reject");
