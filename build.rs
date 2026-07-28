@@ -4108,10 +4108,29 @@ fn scan_for_probation_oversized_files(root: &Path, offenders: &mut Vec<(PathBuf,
         }
     }
 
+    // Carry probation ACROSS RENAMES before enforcing anything.
+    //
+    // The prune arm below cannot distinguish a deletion from a rename, and a
+    // rename is the cheapest possible escape from probation: `foo.rs` ->
+    // `foo/mod.rs` is a one-line change to a `mod` declaration that clears the
+    // ledger without removing a single line of the file. That is the same shape
+    // of dodge as shaving to 9.9k, which is what this gate exists to close, so
+    // the ledger follows the file instead of forgetting it.
+    for key in ledger.clone() {
+        if counts.contains_key(&key) {
+            continue;
+        }
+        if let Some(successor) = probation_successor(&key, &counts) {
+            ledger.remove(&key);
+            ledger.insert(successor);
+        }
+    }
+
     // Enforce + prune. Iterate a snapshot so we can mutate `ledger`.
     for key in ledger.clone() {
         match counts.get(&key) {
-            // No longer tracked (deleted/renamed) — nothing to enforce; prune.
+            // Genuinely gone: no tracked file and no successor (the rename pass
+            // above already re-pointed anything that merely moved). Prune.
             None => {
                 ledger.remove(&key);
             }
@@ -4137,6 +4156,40 @@ fn scan_for_probation_oversized_files(root: &Path, offenders: &mut Vec<(PathBuf,
     }
 
     save_probation_ledger(&ledger_path, &ledger);
+}
+
+/// Where a probation entry moved to, when its path is no longer tracked.
+///
+/// Only the mechanical Rust module-split renames are recognised, in both
+/// directions:
+///
+/// ```text
+///   a/b.rs      ->  a/b/mod.rs      (splitting a file into a directory module)
+///   a/b/mod.rs  ->  a/b.rs          (collapsing one back)
+/// ```
+///
+/// That is deliberately narrow. It closes the rename that costs nothing and
+/// happens by accident — the one an author reaches for WHILE splitting an
+/// oversized file, which is exactly when probation must not evaporate. A rename
+/// to an unrelated path still clears the entry, but that takes deliberate effort
+/// and leaves an obvious diff, which is a different thing from a loophole.
+fn probation_successor(
+    key: &str,
+    counts: &std::collections::BTreeMap<String, usize>,
+) -> Option<String> {
+    if let Some(stem) = key.strip_suffix(".rs") {
+        let candidate = format!("{stem}/mod.rs");
+        if counts.contains_key(&candidate) {
+            return Some(candidate);
+        }
+    }
+    if let Some(stem) = key.strip_suffix("/mod.rs") {
+        let candidate = format!("{stem}.rs");
+        if counts.contains_key(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn load_probation_ledger(path: &Path) -> std::collections::BTreeSet<String> {
