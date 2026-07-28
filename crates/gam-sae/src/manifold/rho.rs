@@ -220,6 +220,25 @@ pub struct SaeManifoldRho {
     /// analytic outer gradient is
     /// [`crate::manifold::behavior::profiled_penalized_quasi_laplace_block_log_lambda_gradient`].
     pub log_lambda_block: Vec<f64>,
+    /// #2604 — per-atom sectional curvature `kappa` for constant-curvature
+    /// atoms, in atom order. EMPTY for every dictionary without one, which is
+    /// the historical case: the curvature sub-vector is APPENDED to the flat
+    /// layout AFTER the block tail, so an empty vector leaves every existing
+    /// cursor arithmetic and the plain-SAE flat vector byte-identical — the
+    /// same discipline `log_lambda_block` follows.
+    ///
+    /// Carried RAW, not as `log kappa`, matching the constant-curvature
+    /// convention in `gam-models`' spatial optimizer: the family
+    /// `S^d <- R^d -> H^d` passes continuously through `kappa = 0`, so flat
+    /// space must be an INTERIOR point of the coordinate. A log parameterisation
+    /// would put it at an unreachable boundary and could never fit a flat atom,
+    /// nor cross from spherical to hyperbolic.
+    ///
+    /// The criterion moves with `kappa` only through the atom's penalty Gram —
+    /// a constant-curvature atom's basis is a monomial patch in the TANGENT
+    /// coordinate and does not depend on `kappa` — so the whole channel is
+    /// `gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative`.
+    pub kappa: Vec<f64>,
 }
 
 impl SaeManifoldRho {
@@ -238,6 +257,7 @@ impl SaeManifoldRho {
             log_ard,
             ard_sharing: ArdSharing::PerAtom,
             log_lambda_block: Vec::new(),
+            kappa: Vec::new(),
         }
     }
 
@@ -257,6 +277,7 @@ impl SaeManifoldRho {
             log_ard,
             ard_sharing: ArdSharing::PerAtom,
             log_lambda_block: Vec::new(),
+            kappa: Vec::new(),
         }
     }
 
@@ -278,6 +299,7 @@ impl SaeManifoldRho {
             log_ard,
             ard_sharing: ArdSharing::Shared,
             log_lambda_block: Vec::new(),
+            kappa: Vec::new(),
         }
     }
 
@@ -287,6 +309,15 @@ impl SaeManifoldRho {
     /// byte-identical layout. The block order must match a term's
     /// [`crate::manifold::CrosscoderLayout::block_dims`].
     #[must_use]
+    /// Attach per-atom sectional curvatures (atom order). Empty restores the
+    /// curvature-free layout, which is what every dictionary without a
+    /// constant-curvature atom carries.
+    #[must_use]
+    pub fn with_curvature(mut self, kappa: Vec<f64>) -> Self {
+        self.kappa = kappa;
+        self
+    }
+
     pub fn with_log_lambda_block(mut self, log_lambda_block: Vec<f64>) -> Self {
         self.log_lambda_block = log_lambda_block;
         self
@@ -689,7 +720,9 @@ impl SaeManifoldRho {
                 let k = self.log_lambda_smooth.len();
                 let ard_len: usize = self.log_ard.iter().map(|a| a.len()).sum();
                 let block_len = self.log_lambda_block.len();
-                let mut out = Array1::<f64>::zeros(smooth_start + k + ard_len + block_len);
+                let kappa_len = self.kappa.len();
+                let mut out =
+                    Array1::<f64>::zeros(smooth_start + k + ard_len + block_len + kappa_len);
                 if let Some(index) = self.sparse_flat_index() {
                     out[index] = self.log_lambda_sparse;
                 }
@@ -709,13 +742,21 @@ impl SaeManifoldRho {
                     out[cursor] = v;
                     cursor += 1;
                 }
+                // #2604 — per-atom curvature is APPENDED after the block tail,
+                // by the same rule and for the same reason.
+                for &v in &self.kappa {
+                    out[cursor] = v;
+                    cursor += 1;
+                }
                 out
             }
             ArdSharing::Shared => {
                 let k = self.log_lambda_smooth.len();
                 let max_d = self.max_ard_axes();
                 let block_len = self.log_lambda_block.len();
-                let mut out = Array1::<f64>::zeros(smooth_start + k + max_d + block_len);
+                let kappa_len = self.kappa.len();
+                let mut out =
+                    Array1::<f64>::zeros(smooth_start + k + max_d + block_len + kappa_len);
                 if let Some(index) = self.sparse_flat_index() {
                     out[index] = self.log_lambda_sparse;
                 }
@@ -739,6 +780,9 @@ impl SaeManifoldRho {
                 }
                 // #2231 §2a — crosscoder block weights appended after the shared
                 // ARD block (empty ⇒ byte-identical).
+                for (b, &v) in self.kappa.iter().enumerate() {
+                    out[smooth_start + k + max_d + block_len + b] = v;
+                }
                 for (b, &v) in self.log_lambda_block.iter().enumerate() {
                     out[smooth_start + k + max_d + b] = v;
                 }
@@ -766,7 +810,8 @@ impl SaeManifoldRho {
                 let k = self.log_lambda_smooth.len();
                 let ard_len: usize = self.log_ard.iter().map(|a| a.len()).sum();
                 let block_len = self.log_lambda_block.len();
-                let expected = smooth_start + k + ard_len + block_len;
+                let kappa_len = self.kappa.len();
+                let expected = smooth_start + k + ard_len + block_len + kappa_len;
                 if flat.len() != expected {
                     return Err(format!(
                         "SaeManifoldRho::from_flat: flat length {} != sparse_dim + K + \
@@ -789,6 +834,8 @@ impl SaeManifoldRho {
                 }
                 // #2231 §2a — the appended crosscoder block tail (empty ⇒ no-op).
                 let log_lambda_block: Vec<f64> = (0..block_len).map(|b| flat[cursor + b]).collect();
+                let kappa: Vec<f64> =
+                    (0..kappa_len).map(|b| flat[cursor + block_len + b]).collect();
                 SaeManifoldRho {
                     log_lambda_sparse: self
                         .sparse_flat_index()
@@ -798,13 +845,15 @@ impl SaeManifoldRho {
                     log_ard,
                     ard_sharing: ArdSharing::PerAtom,
                     log_lambda_block,
+                    kappa,
                 }
             }
             ArdSharing::Shared => {
                 let k = self.log_lambda_smooth.len();
                 let max_d = self.max_ard_axes();
                 let block_len = self.log_lambda_block.len();
-                let expected = smooth_start + k + max_d + block_len;
+                let kappa_len = self.kappa.len();
+                let expected = smooth_start + k + max_d + block_len + kappa_len;
                 if flat.len() != expected {
                     return Err(format!(
                         "SaeManifoldRho::from_flat: shared-ARD flat length {} != sparse_dim + K + \
@@ -831,6 +880,9 @@ impl SaeManifoldRho {
                 let log_lambda_block: Vec<f64> = (0..block_len)
                     .map(|b| flat[smooth_start + k + max_d + b])
                     .collect();
+                let kappa: Vec<f64> = (0..kappa_len)
+                    .map(|b| flat[smooth_start + k + max_d + block_len + b])
+                    .collect();
                 SaeManifoldRho {
                     log_lambda_sparse: self
                         .sparse_flat_index()
@@ -840,10 +892,55 @@ impl SaeManifoldRho {
                     log_ard,
                     ard_sharing: ArdSharing::Shared,
                     log_lambda_block,
+                    kappa,
                 }
             }
         };
         rebuilt.validate_log_strength_domain()?;
         Ok(rebuilt)
     }
+
+    /// The curvature tail round-trips through the flat layout, and an EMPTY tail
+    /// leaves that layout byte-identical.
+    ///
+    /// The second half is the load-bearing one: every dictionary without a
+    /// constant-curvature atom must produce exactly the flat vector it produced
+    /// before the coordinate existed, or adding it silently re-indexes every
+    /// existing outer optimisation. That is the same contract
+    /// `log_lambda_block` carries, checked the same way.
+    #[test]
+    fn curvature_tail_round_trips_and_is_absent_when_empty() {
+        let base = SaeManifoldRho::new(-1.0, -2.0, vec![Array1::zeros(2), Array1::zeros(2)]);
+        let without = base.to_flat();
+
+        let with_kappa = base.clone().with_curvature(vec![0.75, -1.25]);
+        let flat = with_kappa.to_flat();
+        assert_eq!(
+            flat.len(),
+            without.len() + 2,
+            "the curvature tail must extend the layout by exactly one entry per atom"
+        );
+        for i in 0..without.len() {
+            assert_eq!(
+                flat[i], without[i],
+                "appending curvature must not disturb any earlier coordinate at index {i}"
+            );
+        }
+        assert_eq!(flat[without.len()], 0.75);
+        assert_eq!(flat[without.len() + 1], -1.25);
+
+        let rebuilt = with_kappa.from_flat(flat.view()).unwrap();
+        assert_eq!(rebuilt.kappa, vec![0.75, -1.25]);
+
+        // Raw, not log: zero curvature is representable and round-trips, which is
+        // the whole reason flat space is an interior point of the coordinate.
+        let flat_zero = base.clone().with_curvature(vec![0.0, 0.0]).to_flat();
+        let zero_rebuilt = base
+            .clone()
+            .with_curvature(vec![0.0, 0.0])
+            .from_flat(flat_zero.view())
+            .unwrap();
+        assert_eq!(zero_rebuilt.kappa, vec![0.0, 0.0]);
+    }
+
 }
