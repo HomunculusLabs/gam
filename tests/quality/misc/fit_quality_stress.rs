@@ -741,7 +741,12 @@ impl log::Log for SeedCostLogger {
         let message = format!("{}", record.args());
         // Only the seed line. The rest of an `info` fit stream is six figures of
         // lines and would bury the one thing this exists to read.
-        if message.contains("initial.sp selected seed") {
+        // The seed line answers WHICH point was chosen and why. The `[STAGE]`
+        // lines answer where the wall-clock goes -- this fit does not finish
+        // inside the focused lane's 600s run budget even after #2585's 920x on
+        // the branch-and-bound, and nothing currently says what replaced it as
+        // the dominant cost.
+        if message.contains("initial.sp selected seed") || message.starts_with("[STAGE]") {
             eprintln!("[zz:2607] {message}");
         }
     }

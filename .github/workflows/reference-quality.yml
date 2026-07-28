@@ -9,6 +9,21 @@ name: Reference Quality Suite
 # Python. A missing reference dependency is a HARD failure (no skipping), so this
 # job provisions the full reference stack.
 #
+# ITERATING ON ONE TEST: do not wait for this job. It is a periodic dashboard
+# over the whole grouped quality target, so the loop from "edit one reference
+# test" to "see its number" was hours. `focused-rust-proof.yml` now takes an
+# `r_packages` input, so a single test can be run with its comparator installed:
+#
+#   gh workflow run focused-rust-proof.yml --ref main \
+#     -f package=gam -f target=integration -f test_binary=quality \
+#     -f filters=<test_name> -f r_packages="nnet"      # or "mgcv gamlss survival"
+#
+# 163 of the 187 files under tests/quality call an R comparator, and without one
+# the harness reports REFERENCE_ENV_MISSING -- correctly labelled NOT MEASURED,
+# but indistinguishable from a real failure at the run's exit code. Passing
+# `r_packages` is what turns that into a verdict. This job remains the authority
+# for the SUITE; the fast lane is for iterating on one test.
+#
 # Philosophy: a test whose assertion FAILS because gam genuinely diverges from
 # the mature reference is an honest, useful measurement. This job RUNS every
 # quality test (no fail-fast — it collects EVERY failure and a pass/fail/
