@@ -444,7 +444,7 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 ///   0.50   0.26080    0.9649    [0.961, 0.909, 1.000]
 ///   0.75   0.17614    0.9649    [0.961, 0.909, 1.000]
 ///   0.85   0.14087    0.9649    [0.961, 0.909, 1.000]     bar = 0.14494
-///   0.90   0.12057    0.9649    [0.961, 0.909, 1.000]
+///   0.90   0.12057    0.9649    [0.961, 0.909, 1.000]   <- chosen
 /// ```
 ///
 /// Monotone, 0.140 nats over the sweep. Accuracy and every per-class recall are
@@ -452,24 +452,38 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// classification — the failure really was residual shrinkage of the linear
 /// direction, which is reading (1) of the pre-registration.
 ///
-/// `0.85` AND NOT `0.90`, WHICH THE CURVE ALONE WOULD HAVE CHOSEN. The sweep
-/// above watches ONE train/test split. `f` has a second effect it cannot see:
-/// capping ρ lower means less shrinkage, hence a WIDER Laplace posterior, and
-/// `MultinomialPosteriorIntegrationControl` documents its Smolyak level ceiling
-/// as mattering only for wide posteriors. At `f = 0.90` the sibling stride-4 arm
-/// stops PREDICTING — `logistic-normal quadrature did not converge through
-/// Smolyak level 12` — against a same-base `f = 0.75` control where it passes at
-/// log-loss 0.20708. That is attributable to this constant and it is a hard
-/// failure, not a metric regression.
+/// THE CURVE ALONE DOES NOT CHOOSE THIS CONSTANT, because the sweep above
+/// watches ONE train/test split and `f` has a second effect it cannot see.
+/// Capping ρ lower means less shrinkage, hence a WIDER Laplace posterior, and at
+/// `f = 0.90` a sibling split (stride 4) stopped PREDICTING outright —
+/// `logistic-normal quadrature did not converge through Smolyak level 12` —
+/// against a same-base `f = 0.75` control where it passes. That is attributable
+/// to this constant, and it is a hard failure rather than a metric regression.
 ///
-/// So the admissible range is bounded on BOTH sides, and by different things: the
-/// log-loss bar is crossed near `f ≈ 0.83`, and the quadrature stops certifying
-/// somewhere in `(0.85, 0.90]`. `0.85` is measured green on both arms — stride-3
-/// at 0.14087 against the 0.14494 bar, stride-4 at 0.20708 against nnet's
-/// 0.76930. The stride-3 margin is only 0.004 nats, which is thin, and the reason
-/// it cannot simply be widened is the quadrature ceiling rather than anything
-/// about smoothing. `ρ*(0.85) = ln γ − 1.73` is finite and moderate; it is `f → 1`
-/// that sends `ρ*` to `−∞`, and this is a wide margin short of it.
+/// So this value was bounded on BOTH sides, by different things: the log-loss bar
+/// is crossed near `f ≈ 0.83`, and the quadrature stopped certifying in
+/// `(0.85, 0.90]`. `0.85` sat in that window with only 0.004 nats of margin.
+///
+/// The upper bound is now GONE rather than respected. The failing fit had spent
+/// 9633 of its 2000000 evaluations, so the LEVEL ceiling was binding and not the
+/// cost guard; raising it to 16 (see `MultinomialPosteriorIntegrationControl`,
+/// the same move #2350 made from 8) lets that split certify. Measured at
+/// `f = 0.90` with the raised ceiling, in one run, BOTH arms pass:
+///
+/// ```text
+///   stride-3   log-loss 0.12057   vs nnet 0.09494   (bar 0.14494)
+///   stride-4   log-loss 0.17246   vs nnet 0.76930
+/// ```
+///
+/// Strictly better than `0.85` on both — 0.12057 against 0.14087, and 0.17246
+/// against 0.20708 — and the stride-3 margin goes 0.004 → 0.024 nats, which is
+/// the difference between a bar that holds and one that flips on noise. It costs
+/// wall clock: that pair ran 515s against 244s, because a wider posterior really
+/// does visit the deeper levels. A well-conditioned fit certifies early and never
+/// pays it.
+///
+/// `ρ*(0.90) = ln γ − 2.20` is finite and moderate; it is `f → 1` that sends `ρ*`
+/// to `−∞`, and this stays a wide margin short of it.
 ///
 /// What this does NOT fix, measured rather than assumed: `predict_multinomial_formula`
 /// publishes `E[softmax(η)]` while `nnet` publishes `softmax(η̂)`, and the same
@@ -477,7 +491,7 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// Posterior width therefore accounts for `0.011` nats — about an eighth of the
 /// gap that remained there. The rest was the mode, which is why moving this
 /// constant is the right instrument and not a coincidence.
-pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.85;
+pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on
 /// top of which each term's per-coordinate [`EFFECTIVE_DF_FLOOR`] bound is

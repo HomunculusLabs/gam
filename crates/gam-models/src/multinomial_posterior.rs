@@ -68,12 +68,28 @@ impl Default for MultinomialPosteriorIntegrationControl {
         // with only ~0.1% of the evaluation budget spent (#2350). The
         // evaluation ceiling remains the cost guard; the streaming evaluator
         // never stores the node set.
+        //
+        // RAISED 12 -> 16 (#2612), for the same reason #2350 raised it 8 -> 12,
+        // and the evidence is the same shape. `#2612` needed the multinomial df
+        // floor fraction `f` raised to sharpen under-confident penguin
+        // probabilities; a larger `f` caps rho lower, hence less shrinkage, hence
+        // a WIDER posterior — and at `f = 0.90` a sibling train/test split stopped
+        // PREDICTING with `did not converge through Smolyak level 12`, having
+        // spent 9633 of its 2000000 evaluations. 0.5% of the cost guard: the LEVEL
+        // bound was binding, not the budget. At 16 that split certifies and scores
+        // held-out log-loss 0.17246 against nnet's 0.76930.
+        //
+        // This costs nothing where nothing is wrong. A converged integrand
+        // certifies early and never visits the deeper levels, so the extra
+        // headroom is only ever spent by the wide posteriors that need it — which
+        // is why the ceiling, and not the evaluation budget, is the right thing to
+        // move.
         let tolerance = f64::EPSILON.sqrt();
         Self {
             absolute_tolerance: tolerance,
             relative_tolerance: tolerance,
             minimum_sparse_level: 2,
-            maximum_sparse_level: 12,
+            maximum_sparse_level: 16,
             maximum_function_evaluations: 2_000_000,
         }
     }
