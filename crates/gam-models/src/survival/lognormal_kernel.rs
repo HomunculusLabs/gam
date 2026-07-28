@@ -315,6 +315,17 @@ pub fn log_kernel_term(
 #[derive(Clone, Debug)]
 pub struct LogLognormalKernelBundle {
     pub log_values: Vec<f64>,
+    /// The Laplace half of each `log_values` entry, kept apart from the
+    /// analytic prefix (#2610).
+    ///
+    /// `log K_k = prefix_k + laplace_k` with `prefix_k = k·μ + σ²k²/2` known in
+    /// closed form. Storing the two halves summed is enough to READ a kernel
+    /// value but not enough to difference one accurately, because the prefix
+    /// grows quadratically in `k` and swamps the Laplace part it is added to.
+    /// Retaining `laplace_k` costs one `f64` per rung and is what lets
+    /// [`Self::second_cumulant_ratio`] recover the exact part of a second
+    /// difference instead of subtracting it away.
+    pub log_laplace: Vec<f64>,
     pub mode: IntegratedExpectationMode,
 }
 
@@ -327,6 +338,69 @@ impl LogLognormalKernelBundle {
     #[inline]
     pub fn len(&self) -> usize {
         self.log_values.len()
+    }
+
+    /// `K_{k+2}/K_k − (K_{k+1}/K_k)²`, formed without the cancelling
+    /// subtraction (#2610).
+    ///
+    /// The naive route evaluates both ratios and subtracts. In the large-σ
+    /// regime they agree to `~1/(120σ²)` of their own size, so the difference
+    /// keeps only the bits they do NOT share and the result is noise past
+    /// `log σ ≈ 5.4` — no working precision repairs that, because the cancelled
+    /// quantity keeps shrinking while the roundoff floor does not (#2566).
+    ///
+    /// Factoring the common ratio out first turns the subtraction into one
+    /// `expm1`:
+    ///
+    /// ```text
+    /// R₂ − R₁² = R₂ · (1 − e^Δ) = −R₂ · expm1(Δ),   Δ = 2L_{k+1} − L_{k+2} − L_k
+    /// ```
+    ///
+    /// `expm1` is exact to full relative precision as `Δ → 0`, which is
+    /// precisely where the difference form fails. That alone would only move
+    /// the problem into `Δ`, a second difference of large log-values — except
+    /// that the prefix's second difference is available in closed form:
+    ///
+    /// ```text
+    /// prefix_{k+2} − 2·prefix_{k+1} + prefix_k = σ²   exactly, for every k and μ
+    /// ```
+    ///
+    /// So `Δ = −(σ² + D²laplace)`: the dominant term is exact, and only the
+    /// slowly-varying Laplace half is differenced numerically. For `m = 0` the
+    /// Laplace half is identically zero and `Δ = −σ²` is exact outright.
+    ///
+    /// Returns `None` when the rung is missing or any input is non-finite —
+    /// a caller that cannot form this must fall back rather than receive a
+    /// silently degraded number.
+    pub fn second_cumulant_ratio(&self, k: usize, sigma: f64) -> Option<f64> {
+        if k + 2 >= self.log_values.len() || k + 2 >= self.log_laplace.len() {
+            return None;
+        }
+        let log_k0 = self.log_values[k];
+        let log_k2 = self.log_values[k + 2];
+        if !log_k0.is_finite() || !log_k2.is_finite() {
+            return None;
+        }
+        let (lap0, lap1, lap2) = (
+            self.log_laplace[k],
+            self.log_laplace[k + 1],
+            self.log_laplace[k + 2],
+        );
+        if !(lap0.is_finite() && lap1.is_finite() && lap2.is_finite()) {
+            return None;
+        }
+        let sigma2 = sigma * sigma;
+        if !sigma2.is_finite() {
+            return None;
+        }
+        // Differencing as (lap2 - lap1) - (lap1 - lap0) rather than
+        // lap2 - 2*lap1 + lap0: the two first differences are each small, so
+        // neither intermediate is a large quantity waiting to cancel.
+        let second_difference_laplace = (lap2 - lap1) - (lap1 - lap0);
+        let delta = -(sigma2 + second_difference_laplace);
+        let ratio2 = (log_k2 - log_k0).exp();
+        let value = -ratio2 * delta.exp_m1();
+        if value.is_finite() { Some(value) } else { None }
     }
 }
 
@@ -360,8 +434,12 @@ pub fn log_kernel_bundle(
             log_values.push(prefix);
             prefix += mu + (k as f64 + 0.5) * sigma2;
         }
+        // No Laplace factor on this branch: the kernel IS its prefix, so the
+        // second difference of the Laplace half is exactly zero (#2610).
+        let log_laplace = vec![0.0; max_k + 1];
         return Ok(LogLognormalKernelBundle {
             log_values,
+            log_laplace,
             mode: IntegratedExpectationMode::ExactClosedForm,
         });
     }
@@ -376,6 +454,7 @@ pub fn log_kernel_bundle(
     let mut shifted_mu = mu + log_m;
     let mut prefix = 0.0;
     let mut mode = IntegratedExpectationMode::ExactClosedForm;
+    let mut log_laplace_values = Vec::with_capacity(max_k + 1);
     for k in 0..=max_k {
         let (log_laplace, val_mode) =
             lognormal_laplace_unit_log_term_shared(quadctx, shifted_mu, sigma);
@@ -384,11 +463,20 @@ pub fn log_kernel_bundle(
         } else {
             f64::NEG_INFINITY
         });
+        // Kept unclamped on purpose: the summed entry above collapses a
+        // non-finite Laplace term to −∞, which is the right reading for a
+        // kernel VALUE but would erase the information a second difference
+        // needs. `second_cumulant_ratio` refuses on non-finite instead (#2610).
+        log_laplace_values.push(log_laplace);
         mode = worst_mode(mode, val_mode);
         prefix += mu + (k as f64 + 0.5) * sigma2;
         shifted_mu += sigma2;
     }
-    Ok(LogLognormalKernelBundle { log_values, mode })
+    Ok(LogLognormalKernelBundle {
+        log_values,
+        log_laplace: log_laplace_values,
+        mode,
+    })
 }
 
 /// Computes the value-space derivative ratios `∂ⁿ_μ K_{k,m} / K_{k,m}`
@@ -1235,6 +1323,85 @@ impl LatentSurvivalRowJet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2610 acceptance: the second cumulant must stay smooth through
+    /// `log σ = 7`, where the differenced form is noise.
+    ///
+    /// #2566 measured the differenced channel's step-to-step relative jump
+    /// growing `0.05, 0.07, 0.19, 0.47, 0.84, 2.89, 9.78` and changing SIGN
+    /// between adjacent samples past `log σ ≈ 5.45`. Sign flips between
+    /// neighbouring points of a smooth function are the signature of
+    /// cancellation, not of a branch. This walks the same ladder and compares
+    /// the two formations on identical bundles, so the only difference is the
+    /// arithmetic.
+    #[test]
+    fn zz_measure_2610_second_cumulant_stays_smooth_past_the_cancellation_wall() {
+        let quadctx = QuadratureContext::new();
+        let (mass, mu) = (1.0_f64, 0.0_f64);
+
+        let mut rows: Vec<(f64, f64, f64)> = Vec::new();
+        let mut log_sigma = 4.0_f64;
+        while log_sigma <= 7.0001 {
+            let sigma = log_sigma.exp();
+            let bundle = log_kernel_bundle(&quadctx, mass, mu, sigma, 4)
+                .expect("bundle over the measured range");
+            // Differenced form: exactly what a consumer writes today.
+            let ratio1 = (bundle.get(1) - bundle.get(0)).exp();
+            let ratio2 = (bundle.get(2) - bundle.get(0)).exp();
+            let differenced = ratio2 - ratio1 * ratio1;
+            let stable = bundle
+                .second_cumulant_ratio(0, sigma)
+                .expect("cancellation-free form is defined on this range");
+            println!(
+                "[2610] log_sigma={log_sigma:.2} differenced={differenced:.12e} stable={stable:.12e}"
+            );
+            rows.push((log_sigma, differenced, stable));
+            log_sigma += 0.1;
+        }
+
+        // Step-to-step relative jump, the quantity #2566 reported.
+        let jump = |a: f64, b: f64| -> f64 {
+            let scale = a.abs().max(b.abs());
+            if scale > 0.0 { (b - a).abs() / scale } else { 0.0 }
+        };
+        let mut worst_stable = 0.0_f64;
+        let mut sign_flips_differenced = 0usize;
+        let mut sign_flips_stable = 0usize;
+        for pair in rows.windows(2) {
+            let (d0, s0) = (pair[0].1, pair[0].2);
+            let (log_sigma_hi, d1, s1) = (pair[1].0, pair[1].1, pair[1].2);
+            let stable_jump = jump(s0, s1);
+            if stable_jump > worst_stable {
+                worst_stable = stable_jump;
+            }
+            if d0 * d1 < 0.0 {
+                sign_flips_differenced += 1;
+            }
+            if s0 * s1 < 0.0 {
+                sign_flips_stable += 1;
+                println!("[2610] stable changed sign approaching log_sigma={log_sigma_hi:.2}");
+            }
+        }
+        println!(
+            "[2610] worst stable step jump={worst_stable:.6}  \
+             sign flips: differenced={sign_flips_differenced} stable={sign_flips_stable}"
+        );
+
+        assert!(
+            rows.iter().all(|row| row.2.is_finite()),
+            "#2610: the cancellation-free second cumulant must be finite across the whole ladder"
+        );
+        assert_eq!(
+            sign_flips_stable, 0,
+            "#2610: a smooth cumulant must not change sign between adjacent 0.1 samples -- \
+             that is the cancellation signature this reformulation exists to remove"
+        );
+        assert!(
+            worst_stable < 1.0,
+            "#2610 acceptance: step-to-step relative jump must stay below 1 through log sigma = 7, \
+             got {worst_stable}"
+        );
+    }
 
     #[test]
     fn frailty_scale_validation_distinguishes_fixed_and_learned_domains() {
