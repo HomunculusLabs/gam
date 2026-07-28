@@ -1221,10 +1221,40 @@ fn box_truncated_moments(
                 .as_ref()
                 .map(|last| moment_relative_change(last, &current, covariance))
                 .unwrap_or(f64::INFINITY);
+            // Report the FACE, not only the verdict on it. "Did not converge"
+            // names a number without the geometry that decided it, and the two
+            // properties that actually govern this integrand's difficulty are
+            // measurable in three lines: how deep the walls sit in standardized
+            // units, and how correlated the constraint normals are. Measured
+            // on synthetic faces (`orthant_depth_measure_2601_tests`), depth
+            // alone is harmless — an 11-dimensional face 4 sd deep with
+            // UNCORRELATED normals converges in 16k nodes — while intermediate
+            // correlation at the same depth does not converge at 2^20 (#2601).
+            let depth: Vec<f64> = (0..q)
+                .map(|i| -mean[i] / covariance[[i, i]].sqrt())
+                .collect();
+            let depth_min = depth.iter().copied().fold(f64::INFINITY, f64::min);
+            let depth_max = depth.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let mut corr_max: f64 = 0.0;
+            for i in 0..q {
+                for j in 0..i {
+                    let denominator = (covariance[[i, i]] * covariance[[j, j]]).sqrt();
+                    if denominator > 0.0 {
+                        corr_max = corr_max.max((covariance[[i, j]] / denominator).abs());
+                    }
+                }
+            }
+            log::debug!(
+                "[orthant-face] q={q} mean={:?} covariance={:?}",
+                mean.as_slice().map(<[f64]>::to_vec),
+                covariance.as_slice().map(<[f64]>::to_vec),
+            );
             return Err(format!(
                 "truncated moments for a {q}-dimensional constraint face did not converge: \
                  relative moment change {change:.3e} still exceeds \
-                 {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e} at {evaluated} cubature nodes"
+                 {ORTHANT_MOMENT_RELATIVE_TOLERANCE:.1e} at {evaluated} cubature nodes \
+                 (wall depth {depth_min:.2}..{depth_max:.2} sd, \
+                 max |correlation| between constraint normals {corr_max:.3})"
             ));
         }
         previous = Some(current);
@@ -3150,6 +3180,206 @@ mod tests {
 ///
 /// Among procedures that reach nominal coverage, expected interval length is
 /// the tie-break.
+#[cfg(test)]
+mod orthant_depth_measure_2601_tests {
+    use super::*;
+
+    /// Genz--Bretz variable reordering, applied as an EXPERIMENT on top of the
+    /// existing rule so the two orders are measured on identical faces.
+    ///
+    /// At each elimination step, among the coordinates not yet placed, choose
+    /// the one whose CONDITIONAL feasible interval carries the least
+    /// probability given the coordinates already placed, and eliminate it next.
+    /// The production order is a static ascending-slack walk (a property of the
+    /// mean alone); this one is conditional, so it can see the correlation
+    /// structure that the sweep above identifies as the actual driver.
+    ///
+    /// Returns the permutation; the caller permutes `mean`/`W` by it and
+    /// re-factorizes.
+    fn genz_order(mean: &Array1<f64>, w: &Array2<f64>, upper: &[f64]) -> Vec<usize> {
+        use gam_math::probability::{normal_cdf, normal_sf};
+        let q = mean.len();
+        let mut order: Vec<usize> = (0..q).collect();
+        // `l` is the partial Cholesky in the CHOSEN order; `y` the expected
+        // standardized value of each already-placed coordinate.
+        let mut l = Array2::<f64>::zeros((q, q));
+        let mut y = Array1::<f64>::zeros(q);
+        for k in 0..q {
+            let mut best: Option<(usize, f64)> = None;
+            for pos in k..q {
+                let i = order[pos];
+                let mut var = w[[i, i]];
+                for j in 0..k {
+                    var -= l[[pos, j]] * l[[pos, j]];
+                }
+                if !(var > 0.0) {
+                    continue;
+                }
+                let d = var.sqrt();
+                let mut shift = 0.0;
+                for j in 0..k {
+                    shift += l[[pos, j]] * y[j];
+                }
+                let alpha = (-mean[i] + shift) / d;
+                let beta = if upper[i].is_finite() {
+                    (upper[i] - mean[i] + shift) / d
+                } else {
+                    f64::INFINITY
+                };
+                // `normal_sf` keeps the upper tail that `1 - cdf` destroys, so
+                // a deeply pinned coordinate still reports a positive mass.
+                let mass = if beta.is_finite() {
+                    (normal_cdf(beta) - normal_cdf(alpha)).max(0.0)
+                } else {
+                    normal_sf(alpha)
+                };
+                if best.map(|(_, m)| mass < m).unwrap_or(true) {
+                    best = Some((pos, mass));
+                }
+            }
+            let Some((chosen_pos, _)) = best else { break };
+            order.swap(k, chosen_pos);
+            for j in 0..k {
+                let tmp = l[[k, j]];
+                l[[k, j]] = l[[chosen_pos, j]];
+                l[[chosen_pos, j]] = tmp;
+            }
+            // Complete column `k` of the partial factor in the chosen order.
+            let ik = order[k];
+            let mut var = w[[ik, ik]];
+            for j in 0..k {
+                var -= l[[k, j]] * l[[k, j]];
+            }
+            let dk = var.max(f64::MIN_POSITIVE).sqrt();
+            l[[k, k]] = dk;
+            for pos in (k + 1)..q {
+                let i = order[pos];
+                let mut cross = w[[i, ik]];
+                for j in 0..k {
+                    cross -= l[[pos, j]] * l[[k, j]];
+                }
+                l[[pos, k]] = cross / dk;
+            }
+            // Expected standardized value on the conditional interval.
+            let mut shift = 0.0;
+            for j in 0..k {
+                shift += l[[k, j]] * y[j];
+            }
+            let alpha = (-mean[ik] + shift) / dk;
+            let tail = normal_sf(alpha).max(f64::MIN_POSITIVE);
+            let density = (-0.5 * alpha * alpha).exp() / (2.0 * std::f64::consts::PI).sqrt();
+            y[k] = density / tail;
+        }
+        order
+    }
+
+    /// #2601 mechanism 3: characterize the orthant cubature on the face a
+    /// `shape=monotone_decreasing` fit on INCREASING data actually produces.
+    ///
+    /// That face is the worst regime this integrand has: every one of the `q`
+    /// coordinates is a half-line, the unconstrained centre sits on the wrong
+    /// side of all of them at once, and the constraint normals of adjacent
+    /// monotonicity rows are strongly correlated. Measure how the relative
+    /// moment change decays with node count as a function of depth `c` and
+    /// correlation, so any change to the rule is judged against a number rather
+    /// than against the one fixture that failed.
+    #[test]
+    fn zz_measure_2601_deep_tail_orthant_convergence() {
+        for &q in &[4usize, 8, 11] {
+            for &c in &[0.5_f64, 1.0, 2.0, 4.0] {
+                for &corr in &[0.0_f64, 0.6, 0.9] {
+                    let mut w = Array2::<f64>::zeros((q, q));
+                    for i in 0..q {
+                        for j in 0..q {
+                            w[[i, j]] = corr.powi((i as i32 - j as i32).abs());
+                        }
+                        w[[i, i]] = 1.0;
+                    }
+                    let mean_raw = Array1::<f64>::from_elem(q, -c);
+                    let upper_raw = vec![f64::INFINITY; q];
+                    for order_label in ["static", "genz"] {
+                        let order: Vec<usize> = if order_label == "genz" {
+                            genz_order(&mean_raw, &w, &upper_raw)
+                        } else {
+                            (0..q).collect()
+                        };
+                        let mut w = {
+                            let mut permuted = Array2::<f64>::zeros((q, q));
+                            for (a, &ia) in order.iter().enumerate() {
+                                for (b, &ib) in order.iter().enumerate() {
+                                    permuted[[a, b]] = w[[ia, ib]];
+                                }
+                            }
+                            permuted
+                        };
+                        let mean = Array1::from_iter(order.iter().map(|&i| mean_raw[i]));
+                        let upper: Vec<f64> = order.iter().map(|&i| upper_raw[i]).collect();
+                        // Plain lower Cholesky of the correlation matrix, written
+                        // out so the measurement depends on no other module.
+                        let mut factor = Array2::<f64>::zeros((q, q));
+                        for i in 0..q {
+                            for j in 0..=i {
+                                let mut sum = w[[i, j]];
+                                for k in 0..j {
+                                    sum -= factor[[i, k]] * factor[[j, k]];
+                                }
+                                if i == j {
+                                    factor[[i, i]] = sum.sqrt();
+                                } else {
+                                    factor[[i, j]] = sum / factor[[j, j]];
+                                }
+                            }
+                        }
+                        symmetrize_in_place(&mut w);
+                    let generator = kronecker_generator(q);
+                    let mut accumulator = OrthantAccumulator::new(q);
+                    let mut evaluated = 0usize;
+                    let mut previous: Option<(Array1<f64>, Array2<f64>)> = None;
+                    let mut trail = String::new();
+                    let mut converged_at = 0usize;
+                    loop {
+                        let target = if evaluated == 0 {
+                            ORTHANT_MOMENT_INITIAL_POINTS
+                        } else {
+                            evaluated * 2
+                        };
+                        accumulate_orthant_nodes(
+                            &mut accumulator,
+                            &mean,
+                            &upper,
+                            None,
+                            factor.view(),
+                            &generator,
+                            evaluated,
+                            target,
+                        )
+                        .expect("orthant nodes");
+                        evaluated = target;
+                        let current = accumulator.moments().expect("moments");
+                        if let Some(ref last) = previous {
+                            let change = moment_relative_change(last, &current, &w);
+                            trail.push_str(&format!(" {evaluated}:{change:.2e}"));
+                            if change <= ORTHANT_MOMENT_RELATIVE_TOLERANCE && converged_at == 0 {
+                                converged_at = evaluated;
+                                break;
+                            }
+                        }
+                        if evaluated >= ORTHANT_MOMENT_MAXIMUM_POINTS {
+                            break;
+                        }
+                        previous = Some(current);
+                    }
+                    println!(
+                        "MEASURE2601 order={order_label} q={q} depth={c} corr={corr} \
+                         converged_at={converged_at}{trail}"
+                    );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod coverage_gate_tests {
     use super::*;
