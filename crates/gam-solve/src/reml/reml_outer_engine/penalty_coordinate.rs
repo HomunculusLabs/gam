@@ -209,49 +209,16 @@ impl PenaltySubspaceTrace {
         h
     }
 
-    /// Projected bilinear pseudo-inverse `aᵀ · K⁺ · b` where
-    /// `K⁺ = U_S · H_proj⁻¹ · U_Sᵀ`.
-    ///
-    /// Used by the rank-deficient LAML IFT correction path: when `b ∈
-    /// col(S_k) ⊂ range(S_+)`, applying the projected pseudo-inverse
-    /// instead of the full `H⁻¹` strips spurious null-space noise from
-    /// `a` (≈ the outer-stationarity residual `r`) before the inverse,
-    /// without biasing the numerator. Costs `O(p·r + r²)` versus the
-    /// `O(p²·r)` full solve.
-    pub fn bilinear_pseudo_inverse(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
-        let proj_a = gam_linalg::faer_ndarray::fast_atv(&self.u_s, a);
-        let proj_b = gam_linalg::faer_ndarray::fast_atv(&self.u_s, b);
-        let h_proj_inv_b = self.h_proj_inverse.dot(&proj_b);
-        proj_a.dot(&h_proj_inv_b)
-    }
-
-    /// Euclidean projection onto the retained penalty/Hessian range used by
-    /// this projected kernel: `P_S a = U_S U_Sᵀ a`.
-    pub fn project_onto_subspace(&self, a: &Array1<f64>) -> Array1<f64> {
-        let proj_a = gam_linalg::faer_ndarray::fast_atv(&self.u_s, a);
-        gam_linalg::faer_ndarray::fast_av(&self.u_s, &proj_a)
-    }
-
     /// Apply the projected pseudo-inverse `K = U_S · H_proj⁻¹ · U_Sᵀ` to a
     /// vector `a`, returning the minimum-norm solution `v = K · a` of the
     /// system `H v = a` restricted to `range(S₊)`.
     ///
-    /// This is the correct stand-in for `H⁻¹ · a` in all per-coordinate
-    /// outer-gradient/Hessian formulas when the rank-deficient LAML fix is
-    /// active (`penalty_subspace_trace = Some`). The full `H⁻¹ · a` solve
-    /// amplifies any component of `a` outside `range(H_free)` by
-    /// `1/σ_min(H_active_normal)` — which on large-scale survival
-    /// marginal-slope is ~10¹² and propagates into outer gradients of
-    /// magnitude 10¹⁴, suppressed by the envelope tripwire downstream and
-    /// killing every seed before the fit can take a step. Dropping the
-    /// `ker(M)` component of `a` is exactly what the cost `½ log|M|₊` demands —
-    /// that subspace is the cost's gauge, so the drop is bit-invariant for the
-    /// correction regardless of the residual's gauge-direction magnitude;
-    /// `ProjectedKktResidual::projected_into_reduced_range` certifies only that
-    /// the dropped component is genuinely invisible to this kernel (no retained-
-    /// range leakage / orthonormal `U_S`) before the IFT correction uses it. The
-    /// returned gradient lives on the identifiable manifold, matching the
-    /// projected `½ log|M|₊` term.
+    /// This is the projected inverse action required by trace contractions and
+    /// by the active-face kernel when the rank-deficient LAML convention is
+    /// active (`penalty_subspace_trace = Some`). It is deliberately not the
+    /// unconstrained inner-mode response: that response uses the full Hessian
+    /// operator unless an active constraint explicitly restricts its tangent
+    /// space.
     ///
     /// Costs `O(p·r + r²)` for the two `U_S`-contractions plus the `r × r`
     /// solve — strictly cheaper than the `O(p²)` full `hop.solve_multi`
@@ -585,100 +552,5 @@ impl<'s> ThetaModeResponseKernel<'s> {
                 );
             }
         }
-    }
-}
-
-impl ProjectedKktResidual {
-    pub(crate) fn projected_into_reduced_range(
-        &self,
-        kernel: &PenaltySubspaceTrace,
-    ) -> Result<Self, String> {
-        match self.subspace {
-            KktResidualSubspace::ReducedRange => Ok(self.clone()),
-            KktResidualSubspace::ActiveProjected => {
-                let reduced_residual = kernel.project_onto_subspace(&self.residual);
-                let dropped = &self.residual - &reduced_residual;
-                // Validity invariant for reducing `r_A → r_R = U_S U_Sᵀ r_A`
-                // before the projected IFT correction `−½ rᵀ K r`, `K = U_S
-                // H_proj⁻¹ U_Sᵀ`.
-                //
-                // Since #901 the kernel's `U_S` is the ORTHONORMAL eigenbasis of
-                // the full LAML Hessian `M = H + Sλ (+ H_Φ)` over its identifiable
-                // range (`|σ| > positive_eigenvalue_threshold`), the SAME kept-set
-                // that defines the cost's pseudo-logdet `½ log|M|₊`
-                // (`joint_penalty_subspace_trace_parts`). The dropped component
-                // `r_A − r_R = (I − U_S U_Sᵀ) r_A` therefore lives in `ker(M)` —
-                // the genuine gauge of the cost surface — and is ANNIHILATED by the
-                // kernel: `K (r_A − r_R) = U_S H_proj⁻¹ (U_Sᵀ(I − U_S U_Sᵀ) r_A) = 0`
-                // because `U_Sᵀ(I − U_S U_Sᵀ) = 0` for orthonormal `U_S`. Dropping
-                // it leaves the correction `−½ rᵀ K r` (and every `tr(K·)` trace)
-                // bit-identical, so a gauge-direction residual of ANY magnitude is
-                // valid to reduce.
-                //
-                // The magnitude the inner solver leaves in `ker(M)` is NOT bounded
-                // by the KKT stationarity tolerance: those are the weakly-/un-
-                // identified directions where `M`'s curvature is below threshold, so
-                // a Newton step to resolve their residual is `r/σ` — far outside the
-                // trust region — and the inner correctly leaves them unmoved
-                // (gam#1040 gauge/plateau exit), the outer projected pseudo-inverse
-                // correctly discards them, and the cost `½ log|M|₊` never included
-                // them. Comparing that gauge mass to `residual_tol` (the previous
-                // gate) is a category error inherited from the pre-#901 `range(Sλ)`
-                // kernel, whose dropped subspace `null(Sλ)` DID contain likelihood-
-                // identified curvature; it rejected every oversmoothed marginal-slope
-                // fit as a false "unresolved mass" contract violation.
-                //
-                // The one property that IS required — and that this reduction must
-                // certify — is that the dropped component is genuinely invisible to
-                // the kernel, i.e. carries no RETAINED-range mass. For an orthonormal
-                // `U_S` the leakage `U_Sᵀ(r_A − r_R)` is identically zero; a nonzero
-                // value can only mean `U_S` is not orthonormal / the kernel and
-                // residual desynced (the actual failure class the guard exists to
-                // catch), in which case reducing WOULD alter the correction.
-                let retained_leak = gam_linalg::faer_ndarray::fast_atv(&kernel.u_s, &dropped);
-                let leak_inf = retained_leak
-                    .iter()
-                    .map(|value| value.abs())
-                    .fold(0.0_f64, f64::max);
-                let residual_inf = self
-                    .residual
-                    .iter()
-                    .map(|value| value.abs())
-                    .fold(0.0_f64, f64::max);
-                // Orthonormal-projection round-off floor: `U_Sᵀ(I − U_S U_Sᵀ) r`
-                // accumulates only `O(r_cols · ε · ‖r‖)` numerical noise, so a
-                // relative floor of `1e-8·(1 + ‖r‖∞)` clears every well-formed
-                // kernel by orders of magnitude while a genuinely non-orthonormal
-                // `U_S` leaks `O(‖r‖)` and trips it.
-                let leak_floor = 1e-8 * (1.0 + residual_inf);
-                if leak_inf > leak_floor {
-                    return Err(format!(
-                        "projected KKT residual reduction leaks retained-range mass: \
-                         |U_Sᵀ(r_A − r_R)|∞={leak_inf:.3e} > floor={leak_floor:.3e}; the \
-                         reduced-range kernel U_S is not orthonormal or is desynced from the \
-                         residual, so projecting r_A onto range(U_S) would change the IFT \
-                         correction −½ rᵀ U_S H_proj⁻¹ U_Sᵀ r instead of leaving it invariant"
-                    ));
-                }
-                let mut reduced = Self::from_reduced_range(reduced_residual);
-                reduced.residual_tol = self.residual_tol;
-                reduced.free_rank = self.free_rank;
-                Ok(reduced)
-            }
-        }
-    }
-
-    /// The KKT-stationarity tolerance the inner solver applied at the
-    /// producing iterate. Returns `None` when the residual was built
-    /// from a legacy site that hasn't been threaded yet; downstream
-    /// consumers should substitute `f64::NAN` in that case.
-    pub fn residual_tol(&self) -> Option<f64> {
-        self.residual_tol
-    }
-
-    /// Dimensionality of the free subspace: `total_p - active_set_size`
-    /// at the producing iterate. `None` from legacy construction sites.
-    pub fn free_rank(&self) -> Option<usize> {
-        self.free_rank
     }
 }

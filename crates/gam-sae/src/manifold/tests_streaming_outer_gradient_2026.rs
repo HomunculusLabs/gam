@@ -1,30 +1,16 @@
-//! Streaming/matrix-free evidence route — outer-gradient lane parity and the
-//! large-K/wide-border completion contract (W11).
+//! Streaming/matrix-free evidence route — operator primitives, memory
+//! admission, and exact-observed-information capability refusal.
 //!
-//! Two properties are pinned here that the pre-existing #1026 streaming-cache
-//! test (`tests_streaming_efs_cache_1026`) did NOT cover:
+//! #2509 established that the Arrow-Schur streaming functional represents the
+//! positive majorizer `B`, while the canonical criterion prices exact observed
+//! information `A=B+ΔC`. The low-level matrix-free `B` applies and inverse-probe
+//! contractions remain useful and are tested here under honest names, but an
+//! end-to-end streaming criterion may return only when a structural certificate
+//! proves `ΔC≡0`; otherwise it must return the dedicated capability refusal.
 //!
-//!  1. **Outer-gradient parity.** The #1026 test proved the cache returned by
-//!     `penalized_quasi_laplace_criterion_streaming_exact_with_cache` is a drop-in for the EFS
-//!     consumers (`ard_inverse_traces` / `reconstruction_dispersion`). But the
-//!     ANALYTIC OUTER ρ-GRADIENT lane (`outer_gradient_arrow_solver` →
-//!     `analytic_outer_rho_gradient_components`) also reads the returned cache,
-//!     and it is that lane the seed startup-validation and the small-BFGS regime
-//!     consume. This test forces the streaming route at a size where the dense
-//!     path also fits and asserts the outer gradient assembled off the streaming
-//!     cache is bit-identical to the one assembled off the dense cache — i.e. the
-//!     streaming cache is a faithful drop-in for the gradient lane, not just the
-//!     EFS traces.
-//!
-//!  2. **Large-K/wide-border completion.** A whitened (`WhitenedStructured` row
-//!     metric) fit at K=32, p=128, n=500 — the composition regime whose predicted
-//!     dense evidence cache (`N·q·border_dim`, q=K(1+d), border_dim=Σ_k M_k·p)
-//!     exceeds the in-core budget — must ROUTE to the streaming criterion and
-//!     COMPLETE with a finite penalized quasi-Laplace value rather than hard-erroring. We pin both
-//!     halves deterministically: (a) the memory planner refuses the dense direct
-//!     plan at this shape but admits the matrix-free plan, so the auto-router
-//!     selects streaming; and (b) the streaming value path itself returns a finite
-//!     criterion on the whitened term.
+//! The tests separately pin (a) the planner's storage decision, (b) propagation
+//! of capability refusal through the production outer route, and (c) the
+//! low-level matrix-free algebra that a future full-A functional can reuse.
 
 use super::*;
 use crate::assignment::{AssignmentMode, SaeAssignment};
@@ -39,119 +25,6 @@ use super::tests::{
     planted_circle_seed_term, small_two_atom_periodic_term,
 };
 use std::sync::Arc;
-
-/// The analytic outer ρ-gradient assembled off the STREAMING cache
-/// (`penalized_quasi_laplace_criterion_streaming_exact_with_cache`) must be bit-identical to the one
-/// assembled off the DENSE cache (`penalized_quasi_laplace_criterion_with_cache`). Both entries
-/// converge the inner (t, β) state through the SAME
-/// `converge_inner_for_undamped_logdet` driver with the SAME undamped Direct
-/// options, so the returned factor caches — and therefore the selected-inverse
-/// reads the outer-gradient solver takes (logdet trace, third-order envelope
-/// correction) — must agree. A regression that let the streaming cache diverge
-/// from the dense one on the gradient lane (stale inner state, mismatched Schur
-/// factor, wrong deflation) would surface here on a small dictionary where BOTH
-/// caches are formable, rather than only in a multi-GB large-K fit where the dense
-/// cache cannot be built at all. This is the gradient-lane analogue of the #1026
-/// EFS-trace drop-in contract.
-#[test]
-fn streaming_cache_outer_gradient_matches_dense_cache() {
-    // Reuse the exact-recurrence K=1 planted circle from the decisive #2253
-    // value/gradient identity. Cache-route parity needs nontrivial smoothness
-    // and ARD channels, not a second chart; the former K=2 fixture exercised an
-    // unrelated non-idempotent inner map and was correctly refused before cache
-    // comparison. This branch is already certified KKT-stationary and recurrent.
-    let target = planted_circle_embedded(32, 4, 0.02);
-    let mut term0 = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
-    term0.atoms[0].basis_second_jet = Some(Arc::new(
-        PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"),
-    ));
-    let rho = SaeManifoldRho::new(0.0, 0.05_f64.ln(), vec![Array1::<f64>::zeros(1)]);
-    let inner_max_iter = 40;
-    let learning_rate = 1.0;
-    let ridge = 1.0e-6;
-    let mut dense = term0.clone();
-    let mut streaming = term0;
-
-    let (dense_cost, dense_loss, dense_cache) = dense
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            inner_max_iter,
-            learning_rate,
-            ridge,
-            ridge,
-        )
-        .expect("dense cache criterion");
-    let (stream_cost, stream_loss, stream_cache) = streaming
-        .penalized_quasi_laplace_criterion_streaming_exact_with_cache(
-            target.view(),
-            &rho,
-            None,
-            inner_max_iter,
-            learning_rate,
-            ridge,
-            ridge,
-        )
-        .expect("streaming cache criterion");
-
-    // Precondition: the two entries agree on the scalar criterion (the #1026
-    // contract) — so any gradient difference below is a gradient-lane defect, not
-    // an inner-state divergence.
-    assert_abs_diff_eq!(stream_cost, dense_cost, epsilon = 1.0e-8);
-
-    // Assemble the analytic outer ρ-gradient off EACH cache through the identical
-    // production path the seed-validation / small-BFGS lane uses.
-    let smooth = rho.lambda_smooth_vec().unwrap();
-    let dense_solver = dense
-        .outer_gradient_arrow_solver(&dense_cache, &smooth)
-        .expect("dense outer-gradient solver");
-    let dense_grad = dense
-        .analytic_outer_rho_gradient_components(
-            target.view(),
-            &rho,
-            &dense_loss,
-            &dense_cache,
-            &dense_solver,
-        )
-        .expect("dense outer-gradient components")
-        .gradient();
-
-    let stream_solver = streaming
-        .outer_gradient_arrow_solver(&stream_cache, &smooth)
-        .expect("streaming outer-gradient solver");
-    let stream_grad = streaming
-        .analytic_outer_rho_gradient_components(
-            target.view(),
-            &rho,
-            &stream_loss,
-            &stream_cache,
-            &stream_solver,
-        )
-        .expect("streaming outer-gradient components")
-        .gradient();
-
-    assert_eq!(
-        dense_grad.len(),
-        stream_grad.len(),
-        "streaming outer gradient has a different ρ dimension than the dense one"
-    );
-    for (i, (d, s)) in dense_grad.iter().zip(stream_grad.iter()).enumerate() {
-        assert!(
-            d.is_finite() && s.is_finite(),
-            "outer-gradient component {i} must be finite (dense={d}, streaming={s})"
-        );
-        assert_abs_diff_eq!(d, s, epsilon = 1.0e-8);
-    }
-    // The gradient must be non-trivial (a zero vector would make the parity
-    // assertion vacuous).
-    let g2: f64 = dense_grad.iter().map(|v| v * v).sum();
-    assert!(
-        g2 > 0.0 && g2.is_finite(),
-        "the dense outer gradient must be non-trivial to make the parity check meaningful; ‖g‖²={g2}"
-    );
-    assert_abs_diff_eq!(stream_loss.total(), dense_loss.total(), epsilon = 1.0e-8);
-}
 
 // ---- Large-K / wide-border whitened completion ------------------------------
 
@@ -248,11 +121,12 @@ fn fit_structured_metric(n: usize, p: usize) -> gam_problem::RowMetric {
 /// 64·128 = 8192`, so the dense direct evidence peak (`N·q·border_dim`,
 /// q=K(1+d)=64) is ≈2.6 GB and exceeds a representative 2 GiB in-core budget,
 /// while the matrix-free plan's peak (chunk window + sparse row-cross + border
-/// vector workspace) stays in the tens of MB. The planner must therefore REFUSE
-/// the dense direct plan (routing the criterion to streaming) while ADMITTING the
-/// matrix-free plan — the exact regime the streaming route was built for.
+/// vector workspace) stays in the tens of MB. The storage planner must therefore
+/// refuse the dense direct plan while admitting the matrix-free working set.
+/// This is memory admission only; #2509's exact-observed-information capability
+/// check remains a separate value-side authority.
 #[test]
-fn wide_border_routes_to_streaming_with_complete_analytic_gradient_certificate() {
+fn wide_border_storage_plan_admits_matrix_free_working_set() {
     let (n, p, k, d_max) = (500usize, 128usize, 32usize, 1usize);
     let total_basis = 2 * k; // width-2 euclidean basis per atom.
     let border_dim = total_basis * p;
@@ -277,17 +151,12 @@ fn wide_border_routes_to_streaming_with_complete_analytic_gradient_certificate()
     );
     assert!(
         plan.matrix_free_admitted,
-        "the matrix-free plan ({} bytes) must be admitted so the fit has a route",
+        "the matrix-free working set ({} bytes) must fit the memory budget",
         plan.estimated_matrix_free_peak_bytes
     );
     assert!(
         plan.streaming,
         "a non-direct-admitted plan must select streaming"
-    );
-    assert_eq!(
-        sae_outer_gradient_capability(),
-        Derivative::Analytic,
-        "matrix-free SAE must advertise the complete rational-value/single-adjoint gradient"
     );
     let dense_plan = sae_streaming_plan_from_budget(
         n,
@@ -313,39 +182,26 @@ fn wide_border_routes_to_streaming_with_complete_analytic_gradient_certificate()
          exact-gradient block; the outer-plan crossover decides whether that block \
          is consumed, not whether the coordinate has an analytic root"
     );
-    // The admission gate must accept the plan (no 'working set exceeds budget'
-    // hard error) precisely because the matrix-free lane is admitted.
+    // The memory admission gate must accept the working set. It does not mint
+    // the distinct exact-A criterion certificate.
     plan.admitted_or_error(n, border_dim, k)
         .expect("matrix-free-admitted plan must not hard-error at the admission gate");
 }
 
-/// Production-objective routing pin for #2080(A). Force the small, exactly
-/// checkable planted-circle objective through the same streaming artifact used
-/// when the memory planner rejects direct evidence, then compare its returned
-/// `(value, gradient)` with the ordinary dense production evaluation. At this
-/// tiny border the derived-rank surrogate captures the whole reduced space, so
-/// the comparison is an exact-route parity check rather than a stochastic error
-/// budget. Calling the objective helper (not the component assembler directly)
-/// prevents the production branch from regressing to a zero gradient while the
-/// lower-level parity test remains green.
+/// #2509 production routing pin. Force a planted-circle objective through the
+/// streaming route. Its non-empty coordinate block admits potentially live
+/// residual / ARD curvature `ΔC`, so the route must propagate the dedicated
+/// exact-observed-information capability refusal before constructing a
+/// value/gradient artifact. This must never become a dense retry or a synthetic
+/// zero gradient.
 #[test]
-fn production_objective_forced_streaming_value_gradient_matches_dense() {
+fn production_outer_route_propagates_streaming_exact_a_capability_refusal_2509() {
     let target = planted_circle_embedded(32, 4, 0.02);
     let mut term = planted_circle_seed_term(target.view(), PlantedCircleAssignmentMode::Softmax).0;
     term.atoms[0].basis_second_jet = Some(Arc::new(
         PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"),
     ));
     let seed_rho = SaeManifoldRho::new(0.0, 0.05_f64.ln(), vec![Array1::<f64>::zeros(1)]);
-    let mut dense = SaeManifoldOuterObjective::new(
-        term.clone(),
-        target.clone(),
-        None,
-        seed_rho.clone(),
-        40,
-        1.0,
-        1.0e-6,
-        1.0e-6,
-    );
     let mut streaming =
         SaeManifoldOuterObjective::new(term, target, None, seed_rho, 40, 1.0, 1.0e-6, 1.0e-6);
 
@@ -355,59 +211,34 @@ fn production_objective_forced_streaming_value_gradient_matches_dense() {
     // the correct two-coordinate layout.  Drive each route from that owned
     // authority; retaining the pre-construction seed here would test a phantom
     // parameter that the production objective correctly refuses.
-    let rho_flat = dense.baseline_rho.to_flat();
+    let rho_flat = streaming.baseline_rho.to_flat();
     let rho = streaming
         .baseline_rho
         .from_flat(rho_flat.view())
-        .expect("dense and streaming objectives must own the same typed rho layout");
+        .expect("streaming objective must own its typed rho layout");
     assert_eq!(
         rho_flat.len(),
         2,
         "K=1 Softmax has no assignment-strength coordinate"
     );
 
-    let dense_eval =
-        OuterObjective::eval(&mut dense, &rho_flat).expect("dense production value+gradient");
-    let streaming_artifact = streaming
-        .evaluate_outer_criterion_route(&rho, false, false)
-        .expect("forced streaming production artifact");
-    let streaming_gradient = streaming
-        .analytic_gradient_for_outer_evaluation(&rho, &streaming_artifact)
-        .expect("forced streaming production gradient");
-    let streaming_eval = OuterEval {
-        cost: streaming_artifact.cost,
-        gradient: streaming_gradient,
-        hessian: HessianValue::Unavailable,
-        inner_beta_hint: Some(streaming.term.flatten_beta()),
+    let error = match streaming.evaluate_outer_criterion_route(&rho, false, false) {
+        Err(error) => error,
+        Ok(_) => panic!("forced streaming route must not return a B-priced artifact"),
     };
-
-    assert!(dense_eval.cost.is_finite() && streaming_eval.cost.is_finite());
-    assert_eq!(dense_eval.gradient.len(), streaming_eval.gradient.len());
-    let dense_norm_sq = dense_eval.gradient.dot(&dense_eval.gradient);
-    assert!(
-        dense_norm_sq.is_finite() && dense_norm_sq > 1.0e-12,
-        "route parity must exercise a nonzero analytic gradient; norm^2={dense_norm_sq}"
-    );
-    assert_abs_diff_eq!(streaming_eval.cost, dense_eval.cost, epsilon = 1.0e-7);
-    for (coordinate, (&streamed, &direct)) in streaming_eval
-        .gradient
-        .iter()
-        .zip(dense_eval.gradient.iter())
-        .enumerate()
-    {
-        assert_abs_diff_eq!(streamed, direct, epsilon = 1.0e-6);
-        assert!(
-            streamed.is_finite(),
-            "streaming gradient coordinate {coordinate} is non-finite"
-        );
-    }
+    assert!(matches!(
+        error,
+        SaeCriterionError::ExactObservedInformationUnavailable {
+            route: "streaming"
+        }
+    ));
 }
 
 /// Hybrid-EFS must replace the former held-zero non-ordered Beta--Bernoulli assignment coordinate
 /// with the exact penalized quasi-Laplace derivative and expose that same root-equivalent update to
-/// the final fixed-point proof hook. This dense fixture exercises the exact dense
-/// sibling cheaply; the complete-gradient parity test below pins the matrix-free
-/// sibling to identical math.
+/// the final fixed-point proof hook. This dense fixture exercises the admitted
+/// exact-A route; the unrepresented streaming sibling is covered by the typed
+/// refusal tests above.
 #[test]
 fn fixed_point_certificate_covers_non_ordered_beta_bernoulli_exact_gradient() {
     let make_objective = || {
@@ -511,11 +342,11 @@ fn fixed_point_certificate_covers_ordered_beta_bernoulli_complete_gradient() {
     }
 }
 
-/// The non-ordered Beta--Bernoulli assignment-strength `0.5 tr(H^-1 dH/dlog_lambda_sparse)` channel
-/// must be reconstructible from the same reduced-Schur inverse-probe bundle as
-/// the smoothness, ARD, and theta-adjoint channels. Full-basis probes with exact
-/// dense `S^-1` make the bundle identity exact, so this isolates the new matrix-
-/// free contraction from stochastic-CG error.
+/// The B-majorizer assignment-strength
+/// `0.5 tr(B^-1 dB/dlog_lambda_sparse)` primitive must be reconstructible from
+/// its reduced-Schur inverse-probe bundle. Full-basis probes with exact dense
+/// `S^-1` make this low-level identity exact, isolating the contraction from
+/// stochastic-CG error without claiming that B is the canonical A criterion.
 #[test]
 fn assignment_strength_trace_from_probes_matches_dense_softmax() {
     let (n, p, k) = (24usize, 2usize, 2usize);
@@ -582,134 +413,13 @@ fn assignment_strength_trace_from_probes_matches_dense_softmax() {
     assert_abs_diff_eq!(matrix_free, dense, epsilon = 1.0e-9);
 }
 
-/// #2080(A) massive-K completion: the COMPLETE matrix-free outer ρ-gradient
-/// (all coordinates — sparse assignment strength, per-atom smoothness, per-atom
-/// ARD, plus the single-adjoint IFT correction on each) must equal the dense
-/// complete gradient bit-close. The matrix-free assembler routes its three trace
-/// channels through the `(z, S⁻¹z)` probe bundle AND its single adjoint solve
-/// `a = A⁺Γ` through `solve_exact_stationarity_matrix_free` (reduced-Schur CG),
-/// with `DeflatedArrowSolver::plain` for the cheap per-row coordinate-block
-/// subtractions — the K≥4096 route. Full-basis probes with an exact reduced-Schur
-/// inverse make the bundle identity exact, so any gap is a matrix-free-adjoint or
-/// channel defect, not stochastic-CG noise. This is the all-coordinate analogue of
-/// `assignment_strength_trace_from_probes_matches_dense_softmax` (which pins only
-/// the sparse coordinate) and the massive-K analogue of
-/// `streaming_cache_outer_gradient_matches_dense_cache`.
+/// End-to-end #2509 refusal on a whitened multi-atom fit. Whitening changes the
+/// residual-curvature contraction but does not remove `ΔC`; the non-empty local
+/// block therefore cannot be priced through the B-only streaming operator.
+/// The exact entry must return its capability error, not a finite approximate
+/// criterion.
 #[test]
-fn complete_matrix_free_outer_gradient_matches_dense_softmax() {
-    let (n, p, k) = (24usize, 2usize, 2usize);
-    let term = build_softmax_term(n, p, k);
-    let rho = SaeManifoldRho::new(
-        0.7_f64.ln(),
-        0.8_f64.ln(),
-        vec![Array1::from_elem(1, 1.2_f64.ln()); k],
-    );
-    // A deterministic residual around this term's own nonzero reconstruction
-    // keeps the fixture on the positive-rank Laplace branch (same rationale as
-    // the sibling sparse-coordinate test).
-    let fitted = term
-        .try_fitted_for_rho(&rho)
-        .expect("softmax positive-rank fixture reconstruction");
-    let target = Array2::<f64>::from_shape_fn((n, p), |(row, col)| {
-        fitted[[row, col]] + 1.0e-3 * ((row + 2 * col) as f64 * 0.17).sin()
-    });
-
-    let system = term
-        .assemble_full_matrix_free_evidence_system(target.view(), &rho, None, None)
-        .expect("softmax matrix-free evidence system");
-    let options = ArrowSolveOptions::direct().with_positive_definite_evidence();
-    let (_, _, cache) = solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
-        .expect("direct factorization");
-    assert!(
-        cache.deflated_row_directions.iter().all(Vec::is_empty),
-        "the probe identity is defined on the plain undeflated fixture"
-    );
-
-    // Exact full-basis reduced-Schur inverse probe bundle (no CG error).
-    let border_dim = cache.k;
-    let sqrt_dim = (border_dim as f64).sqrt();
-    let probes = (0..border_dim)
-        .map(|column| {
-            let mut probe = Array1::<f64>::zeros(border_dim);
-            probe[column] = sqrt_dim;
-            probe
-        })
-        .collect::<Vec<_>>();
-    let inverse_probes = probes
-        .iter()
-        .map(|probe| {
-            cache
-                .schur_inverse_apply(probe.view())
-                .expect("exact reduced-Schur inverse probe")
-        })
-        .collect::<Vec<_>>();
-
-    let plain_solver = DeflatedArrowSolver::plain(&cache);
-    let loss = term.loss(target.view(), &rho).expect("softmax loss");
-
-    // Dense complete gradient (all coordinates), the production reference.
-    let dense = term
-        .analytic_outer_rho_gradient_components(target.view(), &rho, &loss, &cache, &plain_solver)
-        .expect("dense complete outer gradient")
-        .gradient();
-
-    // Matrix-free complete gradient: from-probes trace channels + matrix-free
-    // single adjoint (`Some(system)`).
-    let matrix_free = term
-        .analytic_outer_rho_gradient_components_with_bundle(
-            target.view(),
-            &rho,
-            &loss,
-            &cache,
-            &plain_solver,
-            Some((&probes, &inverse_probes)),
-            Some(&system),
-        )
-        .expect("matrix-free complete outer gradient")
-        .gradient();
-
-    assert_eq!(
-        dense.len(),
-        matrix_free.len(),
-        "matrix-free gradient has a different ρ dimension than the dense one"
-    );
-    // Non-trivial: a zero gradient would make the parity check vacuous.
-    let g2: f64 = dense.iter().map(|v| v * v).sum();
-    assert!(
-        g2 > 1.0e-10 && g2.is_finite(),
-        "the dense complete gradient must be non-trivial to make parity meaningful; ‖g‖²={g2}"
-    );
-    let mut max_abs = 0.0_f64;
-    for (i, (d, m)) in dense.iter().zip(matrix_free.iter()).enumerate() {
-        assert!(
-            d.is_finite() && m.is_finite(),
-            "gradient component {i} must be finite (dense={d}, matrix_free={m})"
-        );
-        max_abs = max_abs.max((d - m).abs());
-        assert_abs_diff_eq!(d, m, epsilon = 1.0e-8);
-    }
-    eprintln!(
-        "[complete_matrix_free_outer_gradient] max|dense-matrix_free| over {} coords = {:.3e}",
-        dense.len(),
-        max_abs
-    );
-}
-
-/// End-to-end: the whitened streaming penalized quasi-Laplace criterion (`penalized_quasi_laplace_criterion_streaming_
-/// exact`) must COMPLETE with a finite value rather than surfacing the
-/// `cost-only streaming route is required` hard-error class. The streaming lane is
-/// size-INVARIANT — it runs the identical `converge_inner_for_undamped_logdet` +
-/// chunked `streaming_exact_arrow_log_det` code regardless of K/p — so, exactly as
-/// the sibling #1026 streaming-cache test pins its equivalence at small K
-/// ("infeasible to exercise [at massive K] in a unit test"), we exercise the full
-/// streaming path here at a small, fast, memory-bounded whitened multi-atom fit.
-/// The production K=32/p=128 shape is covered upstream by
-/// `wide_border_routes_to_streaming_with_complete_analytic_gradient_certificate`, which pins that the memory
-/// planner refuses the dense direct plan and admits the matrix-free plan at that
-/// shape — the two together establish that a wide-border large-K whitened fit
-/// routes to, and runs through, the streaming lane without hard-erroring.
-#[test]
-fn whitened_streaming_criterion_completes() {
+fn whitened_streaming_criterion_refuses_unrepresented_exact_a_2509() {
     let (n, p, k) = (128usize, 16usize, 8usize);
     let mut term = build_softmax_term(n, p, k);
     let metric = fit_structured_metric(n, p);
@@ -730,7 +440,7 @@ fn whitened_streaming_criterion_completes() {
         vec![Array1::<f64>::from_elem(1, 0.0); k],
     );
 
-    let (cost, loss) = term
+    let error = term
         .penalized_quasi_laplace_criterion_streaming_exact(
             target.view(),
             &rho,
@@ -740,15 +450,11 @@ fn whitened_streaming_criterion_completes() {
             1.0e-4,
             1.0e-4,
         )
-        .expect("whitened streaming criterion must complete, not hard-error");
-    assert!(
-        cost.is_finite(),
-        "streaming penalized quasi-Laplace criterion must be finite; got {cost}"
-    );
-    assert!(
-        loss.total().is_finite() && loss.data_fit.is_finite(),
-        "whitened loss components must be finite (data_fit={}, total={})",
-        loss.data_fit,
-        loss.total()
-    );
+        .expect_err("whitened streaming criterion must not price B as exact A");
+    assert!(matches!(
+        error,
+        SaeCriterionError::ExactObservedInformationUnavailable {
+            route: "streaming"
+        }
+    ));
 }

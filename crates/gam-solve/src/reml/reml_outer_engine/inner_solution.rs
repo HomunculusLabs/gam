@@ -221,27 +221,17 @@ pub struct InnerSolution<'dp> {
     /// outer REML/LAML objective.
     pub barrier_config: Option<BarrierConfig>,
 
-    /// Optional inner KKT residual `r = ∇_β L_pen(β̂)` at the converged β̂,
-    /// already projected onto the free subspace (see [`ProjectedKktResidual`]
-    /// for the invariant and why the type wraps this). `Some` activates the
-    /// implicit-function-theorem corrections in `reml_laml_evaluate` (cost
-    /// gets `−½ rᵀ H⁻¹ r`, ρ-gradient and ρρ Hessian get the matching first
-    /// and second derivatives of that same scalar correction). `None` keeps
-    /// the envelope-only behaviour for callers that genuinely guarantee
-    /// exact KKT.
-    pub kkt_residual: Option<ProjectedKktResidual>,
+    /// Required proof that the inner coefficient mode passed its producing
+    /// solver's KKT-stationarity contract. The residual is retained only for
+    /// inner-error diagnostics; the outer criterion is the exact stationary
+    /// REML/LAML envelope and never applies a residual-response surrogate.
+    pub stationarity_certificate: InnerStationarityCertificate,
 
-    /// Optional active linear-inequality constraints at the converged inner
-    /// iterate. `Some(rows)` means the joint constraint matrix's row indices
-    /// in `rows.active_indices` are pinned (treated as equality constraints
-    /// at the cert point). The unified evaluator combines this with the
-    /// `penalty_subspace_trace` to form the **constraint-aware** kernel
-    /// `K_T = K_S − K_S Aᵀ (A K_S Aᵀ)⁻¹ A K_S` for per-coordinate IFT mode
-    /// responses `v_k = ∂β/∂ρ_k`. See [`ConstrainedSubspaceKernel`] for
-    /// the full derivation and consistency with `log|U_Tᵀ H U_T|`.
-    ///
-    /// `None` is the legacy/unconstrained path (no active inequality
-    /// constraints to project against).
+    /// Strict active linear-inequality face at the converged inner iterate.
+    /// `Some(rows)` carries exactly the independent rows with positive KKT
+    /// multipliers; numerically tight zero-multiplier rows remain free
+    /// directions. The evaluator restricts mode responses and determinant
+    /// geometry to `ker(rows.a)`. `None` means there is no strict active face.
     pub active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
 
     /// Fit-level stochastic trace state. Shared by stochastic trace batches so
@@ -262,6 +252,7 @@ pub struct InnerSolutionBuilder<'dp> {
     pub(crate) penalty_logdet: PenaltyLogdetDerivs,
     pub(crate) n_observations: usize,
     pub(crate) dispersion: DispersionHandling,
+    pub(crate) stationarity_certificate: InnerStationarityCertificate,
     // Optional fields with defaults
     pub(crate) deriv_provider: Box<dyn HessianDerivativeProvider + 'dp>,
     pub(crate) firth: Option<ExactJeffreysTerm>,
@@ -277,7 +268,6 @@ pub struct InnerSolutionBuilder<'dp> {
     pub(crate) fixed_drift_deriv: Option<SharedFixedDriftDerivFn>,
     pub(crate) contracted_psi_second_order: Option<ContractedPsiSecondOrderFn>,
     pub(crate) barrier_config: Option<BarrierConfig>,
-    pub(crate) kkt_residual: Option<ProjectedKktResidual>,
     pub(crate) active_constraints: Option<Arc<ActiveLinearConstraintBlock>>,
     pub(crate) gaussian_weight_log_sum_half: f64,
     pub(crate) dp_floor_scale: f64,
@@ -294,7 +284,9 @@ impl<'dp> InnerSolutionBuilder<'dp> {
         penalty_coords: Vec<PenaltyCoordinate>,
         penalty_logdet: PenaltyLogdetDerivs,
         dispersion: DispersionHandling,
+        stationarity_certificate: InnerStationarityCertificate,
     ) -> Self {
+        let active_constraints = stationarity_certificate.active_constraints_arc();
         Self {
             log_likelihood,
             penalty_quadratic,
@@ -317,8 +309,8 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             fixed_drift_deriv: None,
             contracted_psi_second_order: None,
             barrier_config: None,
-            kkt_residual: None,
-            active_constraints: None,
+            stationarity_certificate,
+            active_constraints,
             gaussian_weight_log_sum_half: 0.0,
             dp_floor_scale: 1.0,
         }
@@ -412,20 +404,6 @@ impl<'dp> InnerSolutionBuilder<'dp> {
 
     pub fn barrier_config(mut self, config: Option<BarrierConfig>) -> Self {
         self.barrier_config = config;
-        self
-    }
-
-    pub fn kkt_residual(mut self, residual: Option<ProjectedKktResidual>) -> Self {
-        self.kkt_residual = residual;
-        self
-    }
-
-    /// Stash the active linear-inequality constraint block carried alongside the
-    /// inner solution. Used by `PenaltySubspaceTrace::with_active_constraints`
-    /// at REML/LAML evaluation time to form the constraint-aware kernel
-    /// `K_T = K_S − K_S Aᵀ (A K_S Aᵀ)⁻¹ A K_S`.
-    pub fn active_constraints(mut self, block: Option<Arc<ActiveLinearConstraintBlock>>) -> Self {
-        self.active_constraints = block;
         self
     }
 
@@ -547,7 +525,7 @@ impl<'dp> InnerSolutionBuilder<'dp> {
             fixed_drift_deriv: self.fixed_drift_deriv,
             contracted_psi_second_order: self.contracted_psi_second_order,
             barrier_config: self.barrier_config,
-            kkt_residual: self.kkt_residual,
+            stationarity_certificate: self.stationarity_certificate,
             active_constraints: self.active_constraints,
             stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
         }

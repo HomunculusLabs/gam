@@ -83,8 +83,6 @@ pub(crate) fn symmetrize_and_clip_covariance(cov: &Array2<f64>) -> Array2<f64> {
 
 pub(crate) struct LowRankGaussianFactor {
     pub(crate) factor: Array2<f64>,
-    pub(crate) eigenvectors: Array2<f64>,
-    pub(crate) inv_sqrt_eigenvalues: Array1<f64>,
 }
 
 // Exact projected-Gaussian handling for possibly singular covariance blocks.
@@ -120,37 +118,87 @@ pub(crate) fn factorize_psd_covariance(
         .filter_map(|(idx, &ev)| (ev > tol).then_some((idx, ev.sqrt())))
         .collect::<Vec<_>>();
     let mut factor = Array2::<f64>::zeros((covariance.nrows(), active.len()));
-    let mut eigenvectors = Array2::<f64>::zeros((covariance.nrows(), active.len()));
-    let mut inv_sqrt_eigenvalues = Array1::<f64>::zeros(active.len());
     for (col, (idx, sqrt_ev)) in active.into_iter().enumerate() {
-        eigenvectors
-            .column_mut(col)
-            .assign(&eigenvectors_full.column(idx));
         factor
             .column_mut(col)
             .assign(&(&eigenvectors_full.column(idx) * sqrt_ev));
-        inv_sqrt_eigenvalues[col] = 1.0 / sqrt_ev;
     }
 
-    Ok(LowRankGaussianFactor {
-        factor,
-        eigenvectors,
-        inv_sqrt_eigenvalues,
-    })
+    Ok(LowRankGaussianFactor { factor })
 }
 
-pub(crate) fn apply_low_rank_gaussian_factor3(
-    mu: [f64; 3],
+fn apply_low_rank_gaussian_factor(
+    mean: &Array1<f64>,
     factor: &Array2<f64>,
     z: &[f64],
-) -> [f64; 3] {
-    let mut x = mu;
-    for row in 0..3 {
+) -> Array1<f64> {
+    let mut x = mean.clone();
+    for row in 0..x.len() {
         for (col, &latent) in z.iter().enumerate() {
             x[row] += factor[[row, col]] * latent;
         }
     }
     x
+}
+
+fn low_rank_normal_expectation_pair_from_factor<F>(
+    quadctx: &crate::quadrature::QuadratureContext,
+    mean: &Array1<f64>,
+    factor: &Array2<f64>,
+    max_n: usize,
+    label: &str,
+    integrand: F,
+) -> Result<(f64, f64), String>
+where
+    F: Fn(&Array1<f64>) -> Result<(f64, f64), String>,
+{
+    if factor.nrows() != mean.len() {
+        return Err(SurvivalLocationScaleError::DimensionMismatch {
+            reason: format!(
+                "{label} factor has {} rows for a mean of length {}",
+                factor.nrows(),
+                mean.len()
+            ),
+        }
+        .into());
+    }
+    match factor.ncols() {
+        0 => integrand(mean),
+        1 => crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
+            quadctx,
+            [0.0],
+            [[1.0]],
+            max_n,
+            |z| {
+                let latent = [z[0]];
+                integrand(&apply_low_rank_gaussian_factor(mean, factor, &latent))
+            },
+        ),
+        2 => crate::quadrature::normal_expectation_nd_adaptive_result::<2, _, _, String>(
+            quadctx,
+            [0.0, 0.0],
+            [[1.0, 0.0], [0.0, 1.0]],
+            max_n,
+            |z| {
+                let latent = [z[0], z[1]];
+                integrand(&apply_low_rank_gaussian_factor(mean, factor, &latent))
+            },
+        ),
+        3 => crate::quadrature::normal_expectation_nd_adaptive_result::<3, _, _, String>(
+            quadctx,
+            [0.0, 0.0, 0.0],
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            max_n,
+            |z| {
+                let latent = [z[0], z[1], z[2]];
+                integrand(&apply_low_rank_gaussian_factor(mean, factor, &latent))
+            },
+        ),
+        rank => Err(SurvivalLocationScaleError::InternalInvariant {
+            reason: format!("{label} unexpectedly has rank {rank} > 3"),
+        }
+        .into()),
+    }
 }
 
 pub(crate) fn low_rank_normal_expectation_pair_3d_result<F>(
@@ -162,130 +210,32 @@ pub(crate) fn low_rank_normal_expectation_pair_3d_result<F>(
     integrand: F,
 ) -> Result<(f64, f64), String>
 where
-    F: Fn([f64; 3], &[f64]) -> Result<(f64, f64), String>,
+    F: Fn([f64; 3]) -> Result<(f64, f64), String>,
 {
     let factorization = factorize_psd_covariance(&covariance3_to_array2(covariance), label)?;
-    match factorization.factor.ncols() {
-        0 => integrand(mu, &[]),
-        1 => crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
-            quadctx,
-            [0.0],
-            [[1.0]],
-            max_n,
-            |z| {
-                let latent = [z[0]];
-                integrand(
-                    apply_low_rank_gaussian_factor3(mu, &factorization.factor, &latent),
-                    &latent,
-                )
-            },
-        ),
-        2 => crate::quadrature::normal_expectation_nd_adaptive_result::<2, _, _, String>(
-            quadctx,
-            [0.0, 0.0],
-            [[1.0, 0.0], [0.0, 1.0]],
-            max_n,
-            |z| {
-                let latent = [z[0], z[1]];
-                integrand(
-                    apply_low_rank_gaussian_factor3(mu, &factorization.factor, &latent),
-                    &latent,
-                )
-            },
-        ),
-        3 => crate::quadrature::normal_expectation_nd_adaptive_result::<3, _, _, String>(
-            quadctx,
-            [0.0, 0.0, 0.0],
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            max_n,
-            |z| {
-                let latent = [z[0], z[1], z[2]];
-                integrand(
-                    apply_low_rank_gaussian_factor3(mu, &factorization.factor, &latent),
-                    &latent,
-                )
-            },
-        ),
-        rank => Err(SurvivalLocationScaleError::InternalInvariant {
-            reason: format!("{label} unexpectedly has rank {rank} > 3"),
-        }
-        .into()),
-    }
+    low_rank_normal_expectation_pair_from_factor(
+        quadctx,
+        &Array1::from_vec(mu.to_vec()),
+        &factorization.factor,
+        max_n,
+        label,
+        |x| integrand([x[0], x[1], x[2]]),
+    )
 }
 
-/// Symmetric fraction-to-boundary clip of ONE coordinate's realized
-/// displacement in a `β ≥ 0` cone-constrained block (#2390, pattern from
-/// #2375).
-///
-/// Returns `α_j · d_j` for the largest `α_j ∈ [0, 1]` that keeps BOTH
-/// `β̂_j + α_j·d_j` and `β̂_j − α_j·d_j` on the half-line `β_j ≥ 0`:
-///
-/// ```text
-///   α_j = min( 1,  max(β̂_j, 0) / |d_j| ),        α_j = 1 when d_j = 0
-///   α_j · d_j = d_j                    if |d_j| ≤ max(β̂_j, 0)
-///             = sign(d_j)·max(β̂_j, 0)  otherwise
-/// ```
-///
-/// The clipped form is returned rather than the factor because the second
-/// branch is then EXACT: `β̂_j ± sign(d_j)·β̂_j` is `0` or `2·β̂_j` with no
-/// rounding, so no realized coordinate can land an ulp below the wall the way
-/// `β̂_j + (β̂_j/|d_j|)·d_j` can.
-///
-/// Depending only on `|d_j|` makes the clip sign-symmetric (`clip(β̂_j, −d_j) =
-/// −clip(β̂_j, d_j)`), so a symmetric quadrature rule displaced by the clipped
-/// amount stays symmetric about `β̂` and the posterior mean of every linear
-/// functional is exactly unbiased. A coordinate already pinned at its wall
-/// (`β̂_j ≤ 0` from round-off, with `d_j ≠ 0`) collapses ITS OWN displacement to
-/// zero rather than admitting an infeasible vector; an interior coordinate
-/// (`|d_j| ≤ β̂_j`) is returned bit-for-bit unchanged. A non-finite `d_j` is
-/// passed through so it fails loudly downstream instead of being silently
-/// sanitized to the wall.
-///
-/// # Why per coordinate, and not one factor for the whole block
-///
-/// The cone the fit certifies for the monotone link-wiggle block is `A = I`,
-/// `b = 0` (`monotone_wiggle_nonnegative_constraints`) — a Cartesian product
-/// of independent half-lines. Coordinate `j`'s wall constrains coordinate `j`
-/// and nothing else, so the feasibility clip is separable. A single global
-/// `min_j` factor is the fraction-to-boundary rule for a step along ONE ray of
-/// a coupled polytope; #2375's spherical-radial cubature nodes
-/// (`β̂ ± α_k·f_{·,k}`) genuinely have that shape and correctly carry one
-/// factor per direction. The conditional-mean displacement here does not: each
-/// coordinate of `regression · z` moves independently, and a global factor
-/// lets the tightest coordinate's wall govern every other coordinate.
-///
-/// That is not conservatism, it is silent erasure. The terminal covariance is
-/// already computed on the ACTIVE FACE (`Σ = Z (ZᵀHZ)⁻¹ Zᵀ`, zero rows and
-/// columns for constraints tight within `ACTIVE_SET_WORKING_FACE_TOL = 1e-10`),
-/// so a genuinely PINNED coordinate arrives with an exactly-zero covariance row
-/// and contributes `d_j = 0` — it never binds a global minimum in the first
-/// place. The coordinates that DO bind are the near-wall but still-slack ones
-/// just outside that band, and the inner constrained solve's own KKT tolerance
-/// band is `1e-6·scale + 1e-10` (see `MONOTONE_WIGGLE_ACTIVE_SET_TOL`), so
-/// that region is routinely occupied. For such a coordinate
-/// `max(β̂_j, 0)/|d_j|` is on the order of `1e-8`; a global factor multiplies
-/// EVERY coordinate's displacement by it, freezing the conditional mean at
-/// `β̂_w` for every latent node. The response-moment integral then degenerates
-/// to a plug-in at the mode and drops the entire link-wiggle ↔
-/// `(h, threshold, log σ)` cross-covariance — a wrong number with no symptom,
-/// which is the #2385 shape all over again.
-#[inline]
-pub(crate) fn cone_clipped_coordinate_displacement(beta: f64, displacement: f64) -> f64 {
-    let wall = beta.max(0.0);
-    if displacement.abs() > wall {
-        wall.copysign(displacement)
-    } else {
-        displacement
-    }
-}
-
-// Exact response moments must stay in the original Gaussian coordinates:
-// [h, threshold, log_sigma] for non-wiggle predictions, with a nested
-// conditional Gaussian over the scalar link-wiggle contribution when present.
+// Exact response moments stay in the original Gaussian coordinates for an
+// unconstrained fit. A link-wiggle fit instead uses the multivariate
+// cone-pushforward rule carried from `gam-solve`: its discrete coordinates are
+// feasible coefficient vectors and its Gaussian residual lies in the cone's
+// tangent space.
 pub(crate) fn exact_survival_response_moments_row(
     input: &SurvivalLocationScalePredictInput,
     fit: &UnifiedFitResult,
     covariance: &Array2<f64>,
+    constrained_rule: Option<(
+        &gam_solve::constrained_posterior::ConstrainedPosteriorNodeRule,
+        &Gauge,
+    )>,
     x_threshold_dense: &Array2<f64>,
     x_log_sigma_dense: &Array2<f64>,
     row: usize,
@@ -319,7 +269,7 @@ pub(crate) fn exact_survival_response_moments_row(
         covariance, &a_h, &a_t, &a_ls, p_time, p_t, p_ls,
     );
 
-    if let (Some(beta_w), Some(wiggle_range)) = (beta_link_wiggle.as_ref(), wiggle) {
+    if let (Some(_), Some(wiggle_range)) = (beta_link_wiggle.as_ref(), wiggle) {
         let knots = input
             .link_wiggle_knots
             .as_ref()
@@ -336,128 +286,149 @@ pub(crate) fn exact_survival_response_moments_row(
                     .to_string()
             })?;
 
-        let htl_factor = factorize_psd_covariance(
-            &covariance3_to_array2(cov_htl),
-            "survival response-moment projected covariance",
+        let (node_rule, gauge) = constrained_rule.ok_or_else(|| {
+            SurvivalLocationScaleError::InvalidConfiguration {
+                reason: "predict_survival_location_scale: a link-wiggle posterior requires \
+                         its fitted inequality-truncated geometry"
+                    .to_string(),
+            }
+        })?;
+        let output_dimension = 3 + pw;
+        let p_total = covariance.nrows();
+        let mut raw_projection = Array2::<f64>::zeros((output_dimension, p_total));
+        raw_projection
+            .slice_mut(s![0, time.start..time.end])
+            .assign(&a_h);
+        raw_projection
+            .slice_mut(s![1, threshold.start..threshold.end])
+            .assign(&a_t);
+        raw_projection
+            .slice_mut(s![2, log_sigma.start..log_sigma.end])
+            .assign(&a_ls);
+        for j in 0..pw {
+            raw_projection[[3 + j, wiggle_range.start + j]] = 1.0;
+        }
+        let mut raw_offset = Array1::<f64>::zeros(output_dimension);
+        raw_offset[0] = input.eta_time_offset_exit[row];
+        raw_offset[1] = input.eta_threshold_offset[row];
+        raw_offset[2] = input.eta_log_sigma_offset[row];
+        let (active_projection, active_offset) =
+            gauge.restrict_design_and_offset(&raw_projection, &raw_offset);
+        let pushforward = node_rule.affine_pushforward(&active_projection, &active_offset)?;
+        // Every link-wiggle coefficient has its own non-negativity wall, so the
+        // independent Gaussian remainder must have exactly zero variance in
+        // those coordinates. Certify that invariant before discarding the
+        // round-off left by `CΣC' - CGWG'(CG)'`; then integrate only the true
+        // three-coordinate response tangent. Letting an eigensolver turn that
+        // subtraction residue back into a wiggle displacement would forfeit the
+        // support guarantee precisely at a wall node.
+        let tangent_scale = pushforward
+            .residual_covariance
+            .diag()
+            .iter()
+            .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+        let tangent_zero_tolerance =
+            PSD_EIGENVALUE_ABS_FLOOR + PSD_EIGENVALUE_REL_TOL * tangent_scale;
+        for i in 3..output_dimension {
+            for j in 0..output_dimension {
+                let value = pushforward.residual_covariance[[i, j]];
+                if value.abs() > tangent_zero_tolerance {
+                    return Err(SurvivalLocationScaleError::InternalInvariant {
+                        reason: format!(
+                            "survival constrained response tangent moves link-wiggle \
+                             coordinate {} through its wall: covariance ({i},{j})={value:.6e}, \
+                             zero tolerance={tangent_zero_tolerance:.6e}",
+                            i - 3
+                        ),
+                    }
+                    .into());
+                }
+            }
+        }
+        let response_tangent_covariance = pushforward
+            .residual_covariance
+            .slice(s![0..3, 0..3])
+            .to_owned();
+        let residual = factorize_psd_covariance(
+            &response_tangent_covariance,
+            "survival constrained response-moment tangent covariance",
         )?;
 
-        let cov_wy = {
-            let mut out = Array2::<f64>::zeros((pw, 3));
-            let cov_wh = covariance
-                .slice(s![
-                    wiggle_range.start..wiggle_range.end,
-                    time.start..time.end
-                ])
-                .to_owned();
-            let cov_wt = covariance
-                .slice(s![
-                    wiggle_range.start..wiggle_range.end,
-                    threshold.start..threshold.end
-                ])
-                .to_owned();
-            let cov_wl = covariance
-                .slice(s![
-                    wiggle_range.start..wiggle_range.end,
-                    log_sigma.start..log_sigma.end
-                ])
-                .to_owned();
-            out.column_mut(0).assign(&cov_wh.dot(&a_h));
-            out.column_mut(1).assign(&cov_wt.dot(&a_t));
-            out.column_mut(2).assign(&cov_wl.dot(&a_ls));
-            out
-        };
-        let cov_ww = covariance
-            .slice(s![
-                wiggle_range.start..wiggle_range.end,
-                wiggle_range.start..wiggle_range.end
-            ])
-            .to_owned();
-        let mut regression = cov_wy.dot(&htl_factor.eigenvectors);
-        for col in 0..regression.ncols() {
-            let scale = htl_factor.inv_sqrt_eigenvalues[col];
-            regression
-                .column_mut(col)
-                .mapv_inplace(|value| value * scale);
-        }
-        let cov_cond =
-            symmetrize_and_clip_covariance(&(cov_ww - regression.dot(&regression.t().to_owned())));
-
-        return low_rank_normal_expectation_pair_3d_result(
-            quadctx,
-            mu,
-            cov_htl,
-            15,
-            "survival response-moment projected covariance",
-            |x, z| {
-                // #2390 (#2385 instance, pattern from #2375): `cond_mean` is a
-                // REALIZED coefficient vector for the cone-constrained
-                // link-wiggle block (`β_w ≥ 0`, the structural monotone
-                // I-spline warp the fit certified). A cone coordinate at or
-                // near its wall has `β̂_w,j ≈ 0`, so an unconstrained
-                // conditional displacement manufactures a warp the model does
-                // not admit. Clip each coordinate's displacement by its OWN
-                // symmetric fraction-to-boundary factor: the cone is a product
-                // of independent half-lines, so coordinate `j`'s wall binds
-                // coordinate `j` alone and a single global factor would let the
-                // tightest wall freeze the whole block (see
-                // `cone_clipped_coordinate_displacement`). The clip depends
-                // only on `|d_j|`, so the realized vector at `−z` is the exact
-                // mirror of the one at `+z` and the rule stays symmetric about
-                // `β̂` (the posterior mean of linear functionals stays exactly
-                // unbiased). An interior `β̂` with modest spread leaves every
-                // coordinate untouched, recovering the unconstrained rule
-                // verbatim.
-                let mut cond_mean = beta_w.to_owned();
-                for j in 0..pw {
-                    let mut displacement = 0.0;
-                    for (col, &latent) in z.iter().enumerate() {
-                        displacement += regression[[j, col]] * latent;
+        let mut first = gam_linalg::utils::KahanSum::default();
+        let mut second = gam_linalg::utils::KahanSum::default();
+        let mut mass = gam_linalg::utils::KahanSum::default();
+        for node in &pushforward.nodes {
+            let beta_node = node.conditional_mean.slice(s![3..]);
+            if let Some((j, &value)) = beta_node
+                .iter()
+                .enumerate()
+                .find(|(_, value)| **value < 0.0)
+            {
+                return Err(SurvivalLocationScaleError::InternalInvariant {
+                    reason: format!(
+                        "constraint-normal node escaped the link-wiggle cone at coordinate \
+                         {j}: {value:.6e}"
+                    ),
+                }
+                .into());
+            }
+            let response_mean = node.conditional_mean.slice(s![0..3]).to_owned();
+            let pair = low_rank_normal_expectation_pair_from_factor(
+                quadctx,
+                &response_mean,
+                &residual.factor,
+                15,
+                "survival constrained response-moment tangent covariance",
+                |x| {
+                    let q0 = survival_q0_from_eta(x[1], x[2]);
+                    let q0_arr = Array1::from_vec(vec![q0]);
+                    let basis = survival_wiggle_basis_with_options(
+                        q0_arr.view(),
+                        knots,
+                        degree,
+                        BasisOptions::value(),
+                    )?;
+                    if basis.ncols() != beta_node.len() {
+                        return Err(SurvivalLocationScaleError::DimensionMismatch { reason: format!(
+                            "predict_survival_location_scale: link-wiggle basis/beta mismatch: {} vs {}",
+                            basis.ncols(),
+                            beta_node.len()
+                        ) }.into());
                     }
-                    cond_mean[j] +=
-                        cone_clipped_coordinate_displacement(beta_w[j], displacement);
-                }
-                let q0 = survival_q0_from_eta(x[1], x[2]);
-                let q0_arr = Array1::from_vec(vec![q0]);
-                let basis = survival_wiggle_basis_with_options(
-                    q0_arr.view(),
-                    knots,
-                    degree,
-                    BasisOptions::value(),
-                )?;
-                if basis.ncols() != cond_mean.len() {
-                    return Err(SurvivalLocationScaleError::DimensionMismatch { reason: format!(
-                        "predict_survival_location_scale: link-wiggle basis/beta mismatch: {} vs {}",
-                        basis.ncols(),
-                        cond_mean.len()
-                    ) }.into());
-                }
-                let b = basis.row(0).to_owned();
-                let w_mean = b.dot(&cond_mean);
-                let w_var = b.dot(&cov_cond.dot(&b)).max(0.0);
-                // #2446: the cone is accounted for ONCE, upstream. Since
-                // `0b8611a65` the covariance reaching here is `Σ_π` and
-                // `beta_link_wiggle` is `E_π[β_w]` — both already carry the
-                // `β_w ≥ 0` truncation — so `(w_mean, w_var)` are the moments
-                // of the constrained law. Truncating the scalar again would
-                // apply the same correction twice; measured, that costs a
-                // factor of 40 to 300 in `E[S]`, and the ordering does not flip
-                // out to thirty times the tolerance the upstream moments are
-                // converged to (`ORTHANT_MOMENT_RELATIVE_TOLERANCE = 1e-3`).
-                // See `artifacts/issue_2446_double_truncation_robustness.py`.
-                crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
-                    quadctx,
-                    [x[0] + q0 + w_mean],
-                    [[w_var]],
-                    21,
-                    |eta| {
-                        let p =
-                            inverse_link_survival_prob_checked(&input.inverse_link, eta[0])?;
-                        Ok((p, p * p))
-                    },
-                )
-            },
-        )
-        .map(|(first, second)| (first.clamp(0.0, 1.0), second.clamp(0.0, 1.0)));
+                    let warp = basis.row(0).dot(&beta_node);
+                    if warp < 0.0 {
+                        return Err(SurvivalLocationScaleError::InternalInvariant {
+                            reason: format!(
+                                "a feasible link-wiggle node produced negative scalar warp \
+                                 {warp:.6e}"
+                            ),
+                        }
+                        .into());
+                    }
+                    let p = inverse_link_survival_prob_checked(
+                        &input.inverse_link,
+                        x[0] + q0 + warp,
+                    )?;
+                    Ok((p, p * p))
+                },
+            )?;
+            first.add(node.weight * pair.0);
+            second.add(node.weight * pair.1);
+            mass.add(node.weight);
+        }
+        let mass = mass.sum();
+        if !(mass.is_finite() && mass > 0.0) {
+            return Err(SurvivalLocationScaleError::InternalInvariant {
+                reason: format!(
+                    "survival constrained response-moment node rule has invalid mass {mass:?}"
+                ),
+            }
+            .into());
+        }
+        return Ok((
+            (first.sum() / mass).clamp(0.0, 1.0),
+            (second.sum() / mass).clamp(0.0, 1.0),
+        ));
     }
 
     low_rank_normal_expectation_pair_3d_result(
@@ -466,7 +437,7 @@ pub(crate) fn exact_survival_response_moments_row(
         cov_htl,
         15,
         "survival response-moment projected covariance",
-        |x, _| {
+        |x| {
             let p = inverse_link_survival_prob_checked(
                 &input.inverse_link,
                 x[0] + survival_q0_from_eta(x[1], x[2]),
@@ -521,6 +492,55 @@ pub(crate) fn exact_survival_response_moments(
         .into());
     }
 
+    let constrained_node_rule = if pw > 0 {
+        let geometry = fit.geometry.as_ref().ok_or_else(|| {
+            SurvivalLocationScaleError::InvalidConfiguration {
+                reason: "predict_survival_location_scale: link-wiggle response moments require \
+                         fitted coefficient geometry"
+                    .to_string(),
+            }
+        })?;
+        let constrained = geometry.constrained_posterior.as_ref().ok_or_else(|| {
+            SurvivalLocationScaleError::InvalidConfiguration {
+                reason: "predict_survival_location_scale: link-wiggle response moments require \
+                         the fitted inequality-truncated posterior identity"
+                    .to_string(),
+            }
+        })?;
+        if geometry.coefficient_gauge.raw_total() != p_total {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "predict_survival_location_scale: coefficient gauge has raw width {}, \
+                     expected {p_total}",
+                    geometry.coefficient_gauge.raw_total()
+                ),
+            }
+            .into());
+        }
+        let ambient = gam_linalg::utils::certified_spd_inverse(
+            geometry.penalized_hessian.as_array(),
+            "survival constrained response-moment ambient precision",
+        )
+        .map_err(|error| SurvivalLocationScaleError::InvalidConfiguration {
+            reason: format!(
+                "predict_survival_location_scale: constrained response moments require the \
+                 exact ambient covariance: {error}"
+            ),
+        })?
+        .into_inverse();
+        Some(
+            gam_solve::constrained_posterior::ConstrainedPosteriorNodeRule::new(
+                &ambient,
+                constrained,
+            )?,
+        )
+    } else {
+        None
+    };
+    let constrained_gauge = fit
+        .geometry
+        .as_ref()
+        .map(|geometry| &geometry.coefficient_gauge);
     let x_threshold_dense = input.x_threshold.to_dense_arc();
     let x_log_sigma_dense = input.x_log_sigma.to_dense_arc();
     let mut first = Array1::<f64>::zeros(n);
@@ -529,20 +549,12 @@ pub(crate) fn exact_survival_response_moments(
     // chunks.  Per-chunk construction wastes work (each chunk's first call
     // re-derives the Gauss-Hermite rule from scratch via OnceLock) and risks
     // the OnceLock-inside-rayon deadlock pattern (see repo memory) if the
-    // rule init were ever to spawn nested parallel work.  Warm the rule sizes
-    // that the per-row evaluator actually uses (15 for the projected 3D
-    // path, 21 for the 1D wiggle fallback) so the worker threads only hit
-    // the cached rule lookup.
+    // rule init were ever to spawn nested parallel work. Warm the rule size
+    // that the per-row evaluator actually uses (15 for the projected Gaussian
+    // tangent) so worker threads only hit the cached rule lookup.
     let quadctx = crate::quadrature::QuadratureContext::new();
     {
         // Warm GH rule caches on the calling thread with cheap probes.
-        crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
-            &quadctx,
-            [0.0_f64],
-            [[1.0_f64]],
-            21,
-            |_x: [f64; 1]| Ok((0.0_f64, 0.0_f64)),
-        )?;
         crate::quadrature::normal_expectation_nd_adaptive_result::<1, _, _, String>(
             &quadctx,
             [0.0_f64],
@@ -572,6 +584,7 @@ pub(crate) fn exact_survival_response_moments(
                             input,
                             fit,
                             covariance,
+                            constrained_node_rule.as_ref().zip(constrained_gauge),
                             &x_threshold_dense,
                             &x_log_sigma_dense,
                             row,
@@ -589,6 +602,7 @@ pub(crate) fn exact_survival_response_moments(
                 input,
                 fit,
                 covariance,
+                constrained_node_rule.as_ref().zip(constrained_gauge),
                 &x_threshold_dense,
                 &x_log_sigma_dense,
                 row,

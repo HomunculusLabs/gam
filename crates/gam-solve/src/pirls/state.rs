@@ -159,7 +159,13 @@ impl WorkingState {
     ///     scaling (so the natural scale is dominated by a single component).
     #[inline]
     pub fn certifies_kkt(&self, g_norm: f64, tol: f64) -> bool {
-        g_norm < tol * self.kkt_dimension_scale() || self.relative_gradient_norm(g_norm) < tol
+        g_norm
+            < scaled_kkt_stationarity_bound(
+                tol,
+                self.eta.len(),
+                self.gradient.len(),
+                self.gradient_natural_scale,
+            )
     }
 
     /// Near-stationary band (10× the strict KKT tolerance) under EITHER
@@ -174,9 +180,13 @@ impl WorkingState {
     /// precision).
     #[inline]
     pub fn near_stationary_kkt(&self, g_norm: f64, tol: f64) -> bool {
-        let near_tol = tol * 10.0;
-        g_norm <= near_tol * self.kkt_dimension_scale()
-            || self.relative_gradient_norm(g_norm) <= near_tol
+        g_norm
+            <= scaled_kkt_stationarity_bound(
+                tol * 10.0,
+                self.eta.len(),
+                self.gradient.len(),
+                self.gradient_natural_scale,
+            )
     }
 }
 
@@ -192,6 +202,24 @@ impl WorkingState {
 #[inline]
 pub fn array1_l2_norm(v: &Array1<f64>) -> f64 {
     v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+/// Absolute form of P-IRLS' disjunctive dimension-scale / natural-scale KKT
+/// test. Keeping this algebra in one producer-side helper prevents outer
+/// stationarity certification from drifting away from the inner convergence
+/// rule.
+#[inline]
+fn scaled_kkt_stationarity_bound(
+    tolerance: f64,
+    observation_count: usize,
+    represented_dimension: usize,
+    gradient_natural_scale: f64,
+) -> f64 {
+    let n = observation_count.max(1) as f64;
+    let p = represented_dimension.max(1) as f64;
+    let dimension_bound = tolerance * (n * p).sqrt();
+    let natural_bound = tolerance * (1.0 + gradient_natural_scale);
+    dimension_bound.max(natural_bound)
 }
 
 /// Adaptive KKT tolerance parameters for the inner PIRLS convergence test.
@@ -434,6 +462,14 @@ pub struct PirlsResult {
     pub iteration: usize,
     pub max_abs_eta: f64,
     pub lastgradient_norm: f64,
+    /// Exact KKT tolerance used by the producing inner solver for this result.
+    ///
+    /// This is a producer fact, not a value to reconstruct from the outer
+    /// objective's current configuration: adaptive inner solves may tighten or
+    /// loosen the configured base tolerance. REML/LAML stationarity
+    /// certification combines this value with the accepted state's dimension
+    /// and natural-gradient scales.
+    pub(crate) stationarity_tolerance: f64,
     /// Natural scale of the penalized gradient at the accepted PIRLS state,
     /// equal to ‖Xᵀ(weighted residual)‖₂ + ‖Sβ‖₂ (+ ridge·‖β‖₂ when active).
     /// Mirrors `WorkingState::gradient_natural_scale` so that callers reading
@@ -444,15 +480,16 @@ pub struct PirlsResult {
     /// Penalized inner KKT residual `r = ∇_β L_pen(β̂) = Sβ̂ − ∇ℓ(β̂) (+ridge·β̂)`
     /// at the accepted P-IRLS iterate, in the STABLE/TRANSFORMED coefficient
     /// basis (the same frame as `beta_transformed` and the transformed penalized
-    /// Hessian). This is the exact vector whose L2 norm `lastgradient_norm`
-    /// records (see `WorkingState::gradient`, assembled as `Xᵀ(η−z)·w + Sβ`,
-    /// which equals `Sβ − ∇ℓ` because `Xᵀ(η−z)·w = −∇ℓ`). Storing the vector —
-    /// not just its norm — lets the outer REML/LAML evaluator engage the
-    /// inner-KKT envelope correction `Ṽ = V − ½·rᵀH⁻¹r` on design-moving
-    /// flexible-link and ψ/anisotropy paths, where the outer optimizer may
-    /// accept β̂ at a first-order inner cap short of exact stationarity. The
-    /// correction and its θ-gradient vanish as `r → 0`, so a fully-converged
-    /// fit is unchanged. See [`crate::model_types::ProjectedKktResidual`].
+    /// Hessian). For an unconstrained fit its L2 norm is `lastgradient_norm`.
+    /// With active inequalities, `lastgradient_norm` instead records the
+    /// producer's constraint-projected norm; the declared constraint geometry
+    /// projects this raw vector into the matching free space when the outer
+    /// certificate is minted. The vector is assembled as
+    /// `Xᵀ(η−z)·w + Sβ = Sβ − ∇ℓ`. Storing it — not just its norm — lets the
+    /// producing solver mint the checked stationarity certificate required by
+    /// the outer REML/LAML evaluator and retain a numerical inner-error
+    /// diagnostic without redefining the criterion off mode. See
+    /// [`crate::model_types::ProjectedKktResidual`].
     pub penalized_gradient_transformed: Array1<f64>,
     pub last_deviance_change: f64,
     pub last_step_halving: usize,
@@ -498,6 +535,22 @@ pub struct PirlsResult {
 }
 
 impl PirlsResult {
+    /// Absolute stationarity bound that governed this producer's KKT
+    /// convergence decision, evaluated in the coefficient dimension represented
+    /// by the exported residual.
+    ///
+    /// The effective tolerance is stored on the result because an adaptive
+    /// inner solve need not use the outer configuration's base tolerance.
+    #[inline]
+    pub(crate) fn stationarity_bound(&self, represented_dimension: usize) -> f64 {
+        scaled_kkt_stationarity_bound(
+            self.stationarity_tolerance,
+            self.final_eta.len(),
+            represented_dimension,
+            self.gradient_natural_scale,
+        )
+    }
+
     /// Export the stabilized transformed Hessian as an exact dense matrix for
     /// downstream solve paths that require explicit Hessians.
     ///
@@ -585,10 +638,11 @@ impl PirlsResult {
             iteration: self.iteration,
             max_abs_eta: self.max_abs_eta,
             lastgradient_norm: self.lastgradient_norm,
+            stationarity_tolerance: self.stationarity_tolerance,
             gradient_natural_scale: self.gradient_natural_scale,
             // Length-p vector; carried across compaction/rehydration so the
-            // inner-KKT envelope correction survives an LRU round-trip without
-            // rebuilding the score from the (dropped) transformed design.
+            // stationarity certificate can be rebuilt without reconstructing
+            // the score from the dropped transformed design.
             penalized_gradient_transformed: self.penalized_gradient_transformed.clone(),
             last_deviance_change: self.last_deviance_change,
             last_step_halving: self.last_step_halving,
@@ -684,10 +738,11 @@ impl PirlsResult {
             iteration: self.iteration,
             max_abs_eta: self.max_abs_eta,
             lastgradient_norm: self.lastgradient_norm,
+            stationarity_tolerance: self.stationarity_tolerance,
             gradient_natural_scale: self.gradient_natural_scale,
             // Length-p vector; carried across compaction/rehydration so the
-            // inner-KKT envelope correction survives an LRU round-trip without
-            // rebuilding the score from the (dropped) transformed design.
+            // stationarity certificate can be rebuilt without reconstructing
+            // the score from the dropped transformed design.
             penalized_gradient_transformed: self.penalized_gradient_transformed.clone(),
             last_deviance_change: self.last_deviance_change,
             last_step_halving: self.last_step_halving,

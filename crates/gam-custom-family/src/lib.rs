@@ -50,12 +50,12 @@ pub(crate) use gam_solve::estimate::reml::reml_outer_engine::{
     compute_hybrid_efs_update, exact_pseudo_logdet, hessian_factorization_geometric_scale,
     positive_eigenvalue_threshold, spectral_epsilon, spectral_regularize,
 };
-// `ActiveLinearConstraintBlock`, `FitGeometry`, and `ProjectedKktResidual` are
-// the model-estimation contract types that still live in the (not-yet-carved)
+// These model-estimation contract types still live in the (not-yet-carved)
 // crate-root `model_types` module; `EstimationError` already descended to
 // `gam-problem` and arrives via the `gam_problem::*` glob below.
 pub(crate) use gam_solve::model_types::{
-    ActiveLinearConstraintBlock, FitGeometry, ProjectedKktResidual, WorkingGeometry,
+    ActiveLinearConstraintBlock, FitGeometry, InnerStationarityCertificate,
+    ProjectedKktResidual, StationarityNorm, WorkingGeometry,
 };
 pub(crate) use gam_solve::pirls::solve_newton_directionwith_lower_bounds;
 
@@ -140,13 +140,13 @@ pub use assembly::*;
 pub(crate) use blockwise_solve::*;
 pub use coefficient_groups::*;
 pub(crate) use covariance::*;
-// Two covariance helpers are part of the public flat-namespace API consumed by
-// the relocated families (`crate::{use_joint_matrix_free_path,
-// projected_linear_constraint_stationarity_vector}`); surface them publicly
-// (the `pub(crate) use covariance::*` glob above keeps them crate-internal).
+// A small covariance/stationarity API is consumed by relocated families;
+// surface those items publicly (the `pub(crate) use covariance::*` glob above
+// keeps the remainder crate-internal).
 pub use covariance::{
-    JOINT_MATRIX_FREE_MIN_DIM, joint_exact_analytic_outer_hessian_available,
-    projected_linear_constraint_stationarity_vector, use_joint_matrix_free_path,
+    JOINT_MATRIX_FREE_MIN_DIM, LinearConstraintStationarityProjection,
+    joint_exact_analytic_outer_hessian_available, projected_linear_constraint_stationarity_vector,
+    use_joint_matrix_free_path,
 };
 pub use fit::*;
 pub(crate) use inner_blockwise_fit::*;

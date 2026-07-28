@@ -237,6 +237,6 @@ include!("zz_measure_2425_kappa_tests.rs");
 
 // #2450 criterion-identity instrumentation. A PAIRED A/B over `rho_prior` at
 // one SHA: same data, same seed, same spec, only the prior varies, so the
-// reported difference is the criterion own bias. Measurement-only, same
+// reported difference is the criterion's own bias. Measurement-only, same
 // contract as the probe above. Self-contained `#[cfg(test)] mod`.
 include!("zz_measure_2450_rho_prior_criterion_tests.rs");

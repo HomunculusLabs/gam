@@ -9,8 +9,8 @@
 //! - [`traces`]: the derivative-trace computers shared by both paths (adjoint
 //!   shortcut, fourth-derivative traces, IFT correction, base/cross logdet
 //!   traces, dense-spectral and stochastic variants).
-//! - [`kkt`]: the KKT-residual ρ corrections and the shared
-//!   `RemlDerivativeWorkspace` gradient→Hessian intermediates.
+//! - [`workspace`]: the shared `RemlDerivativeWorkspace` gradient→Hessian
+//!   intermediates and active-coordinate mask.
 //! - [`dense`]: the dense `K × K` assembled outer Hessian
 //!   ([`compute_outer_hessian`]).
 //! - [`operator`]: the matrix-free assembled outer-Hessian operator
@@ -26,13 +26,12 @@ use super::*;
 
 #[path = "outer_derivatives/dense.rs"]
 mod dense_assembly;
-mod kkt;
 mod operator;
 mod routing;
 mod traces;
+mod workspace;
 
 pub(crate) use dense_assembly::*;
-pub(crate) use kkt::*;
 pub(crate) use operator::*;
 // Re-flatten `routing` at each item's own declared visibility: the outer-Hessian
 // routing predicates/thresholds (`OuterHessianRoutePlan`, `outer_hessian_route_plan`,
@@ -47,6 +46,7 @@ pub(crate) use operator::*;
 // re-export — which the compiler rejects as an ambiguous-visibility glob import.
 pub use routing::*;
 pub(crate) use traces::*;
+pub(crate) use workspace::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Extended Fellner–Schall (EFS) update for all hyperparameters
