@@ -3070,7 +3070,8 @@ mod sae_assignment_kind_tests {
 mod sae_linear_atom_tests {
     use super::sae_atom_basis_kind_name;
     use gam::terms::sae::manifold::{
-        EuclideanPatchEvaluator, SaeAtomBasisKind, SaeBasisEvaluator, sae_atom_basis_kind_from_str,
+        EuclideanPatchEvaluator, SaeAtomBasisKind, SaeBasisEvaluator, sae_atom_basis_kind_from_artifact_str,
+        sae_atom_basis_kind_from_str,
     };
     use ndarray::Array2;
 
@@ -3080,13 +3081,14 @@ mod sae_linear_atom_tests {
     #[test]
     fn linear_topology_is_first_class_and_round_trips() {
         assert_eq!(
-            sae_atom_basis_kind_from_str("linear"),
+            sae_atom_basis_kind_from_str("linear")
+                .expect("the canonical linear token parses"),
             SaeAtomBasisKind::Linear,
             "the canonical token must parse to the genuinely-linear atom"
         );
         for removed in ["linear_rank1", "affine", "LINEAR"] {
             assert_eq!(
-                sae_atom_basis_kind_from_str(removed),
+                sae_atom_basis_kind_from_artifact_str(removed),
                 SaeAtomBasisKind::Precomputed(removed.to_string()),
                 "removed alias {removed:?} must remain an opaque native artifact tag"
             );
@@ -3099,13 +3101,14 @@ mod sae_linear_atom_tests {
         // The quadratic patch is a DIFFERENT kind — `"linear"` must not collapse
         // onto it, or the curved-vs-linear comparison would be mislabeled again.
         assert_eq!(
-            sae_atom_basis_kind_from_str("euclidean"),
+            sae_atom_basis_kind_from_str("euclidean")
+                .expect("the canonical euclidean token parses"),
             SaeAtomBasisKind::EuclideanPatch,
             "the canonical euclidean token is the degree-2 patch"
         );
         for removed in ["euclidean_patch", "euclidean_quadratic_patch"] {
             assert_eq!(
-                sae_atom_basis_kind_from_str(removed),
+                sae_atom_basis_kind_from_artifact_str(removed),
                 SaeAtomBasisKind::Precomputed(removed.to_string()),
                 "removed alias {removed:?} must remain an opaque native artifact tag"
             );

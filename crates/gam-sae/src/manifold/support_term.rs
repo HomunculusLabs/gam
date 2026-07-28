@@ -1800,7 +1800,8 @@ impl SaeSupportSparseTerm {
     /// MacKay selection of the coordinate-prior precisions, per atom and axis.
     ///
     /// ```text
-    ///   alpha_ka <- n_ka / (sum_i sq_equiv(t_i) + sum_i 1/H_ii)
+    ///   alpha_ka <- gamma_ka / sum_i sq_equiv(t_i),
+    ///   gamma_ka  = sum_i clamp(1 - alpha_ka / H_ii, 0, 1)
     /// ```
     ///
     /// `sq_equiv` is the Euclidean-equivalent `t^2` the prior exposes precisely
@@ -1809,6 +1810,17 @@ impl SaeSupportSparseTerm {
     /// assembles: the Gauss-Newton `||gamma'(t_i)||^2` plus the prior's PSD
     /// majorizer. Both come from `fill_active`, which already decodes the atom's
     /// tangent into the scratch jacobian.
+    ///
+    /// `gamma` is the WELL-DETERMINED count -- each slot contributes the
+    /// fraction of its coordinate the likelihood (rather than the prior) has
+    /// pinned down. This is what makes the fixed point self-limiting: the
+    /// crude `n / (sum t^2 + sum 1/H)` form kept a constant numerator while
+    /// growing alpha drove BOTH denominator terms to zero together, so
+    /// alpha -> infinity was an attractor whenever the decoded tangent was
+    /// weak (measured: median 1 -> 38 -> 78 over three rounds, and the update
+    /// stayed disabled for it). With gamma in the numerator a growing alpha
+    /// erases its own evidence: alpha/H_ii -> 1, gamma -> 0, and the iteration
+    /// settles instead of railing.
     ///
     /// An axis with no occupied slots keeps its incoming precision: there is no
     /// evidence to select from. Like the smoothing update this is an OUTER-loop
@@ -1828,7 +1840,7 @@ impl SaeSupportSparseTerm {
             }
             let periods = self.atom_axis_periods(atom_idx).to_vec();
             let mut energy = vec![0.0_f64; dim];
-            let mut inverse_curvature = vec![0.0_f64; dim];
+            let mut gamma = vec![0.0_f64; dim];
             let mut count = vec![0.0_f64; dim];
             for &(row, slot) in &self.atom_rows[atom_idx] {
                 self.fill_active(row, slot, &mut scratch)?;
@@ -1848,14 +1860,19 @@ impl SaeSupportSparseTerm {
                         continue;
                     }
                     energy[axis] += prior.sq_equiv;
-                    inverse_curvature[axis] += 1.0 / curvature;
+                    // The slot's well-determined fraction, clamped to [0, 1]:
+                    // curvature carries the prior majorizer, so alpha/curvature
+                    // can exceed 1 only through majorizer slack, never evidence.
+                    gamma[axis] += (1.0 - (alpha / curvature).min(1.0)).max(0.0);
                     count[axis] += 1.0;
                 }
             }
             for axis in 0..dim {
-                let denominator = energy[axis] + inverse_curvature[axis];
-                if count[axis] > 0.0 && denominator > 0.0 {
-                    let candidate = count[axis] / denominator;
+                // gamma == 0 means the prior already owns the axis: updating
+                // from no likelihood evidence is exactly the runaway, so keep
+                // the incoming precision instead.
+                if count[axis] > 0.0 && gamma[axis] > 0.0 && energy[axis] > 0.0 {
+                    let candidate = gamma[axis] / energy[axis];
                     if candidate.is_finite() && candidate > 0.0 {
                         updated[atom_idx][axis] = candidate;
                     }

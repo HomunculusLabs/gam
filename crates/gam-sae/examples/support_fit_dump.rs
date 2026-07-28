@@ -129,6 +129,24 @@ fn main() -> Result<(), String> {
             _ => 1,
         }
     }
+    // Decode-grid helper for the embedded sphere: a (lat, lon) lattice mapped
+    // to ambient unit vectors, so the dump samples ON the manifold. `side x
+    // side` rows, 3 columns.
+    fn sphere_grid(side: usize) -> Vec<f64> {
+        let mut out = Vec::with_capacity(side * side * 3);
+        for i in 0..side {
+            // open at the poles to avoid duplicated rows
+            let lat = -std::f64::consts::FRAC_PI_2
+                + std::f64::consts::PI * (i as f64 + 0.5) / side as f64;
+            for j in 0..side {
+                let lon = 2.0 * std::f64::consts::PI * j as f64 / (side - 1) as f64;
+                out.push(lat.cos() * lon.cos());
+                out.push(lat.cos() * lon.sin());
+                out.push(lat.sin());
+            }
+        }
+        out
+    }
     let atom_dim: Vec<usize> = atom_basis
         .iter()
         .map(|basis| atom_dim_for_basis(basis))
@@ -247,14 +265,13 @@ fn main() -> Result<(), String> {
         let updated = term_seed
             .term
             .fellner_schall_smoothing(centered.view(), &lambda)?;
-        // The MacKay alpha update is DISABLED pending a fix. Its fixed point
-        // `alpha <- n/(sum t^2 + tr H^-1)` has alpha -> infinity as an attractor
-        // whenever the decoded tangent is weak: growing alpha pulls t -> 0 so
-        // `sum t^2 -> 0`, and `1/H_ii = 1/(tangent^2 + alpha*f) -> 0` as well,
-        // so BOTH denominator terms vanish together. Coupled to the smoothing
-        // update it runs away -- measured alpha median 1 -> 38 -> 78 over three
-        // rounds with the move size not shrinking (1.7325 -> 1.7440).
-        let updated_ard = ard.clone();
+        // The alpha update is LIVE again: the runaway that disabled it was the
+        // crude fixed point's constant numerator (`n / (sum t^2 + tr H^-1)`
+        // drives alpha -> infinity whenever the tangent is weak, measured
+        // median 1 -> 38 -> 78). The update now iterates MacKay's gamma form,
+        // whose numerator is the well-determined count and erases itself as
+        // alpha grows, so the coupled alternation has a finite attractor.
+        let updated_ard = term_seed.term.mackay_ard_precisions(&ard)?;
         let ard_move = updated_ard
             .iter()
             .zip(ard.iter())
@@ -503,7 +520,13 @@ fn main() -> Result<(), String> {
             // coordinate PAIR; passing a single column is rejected outright
             // ("coords width 1 != atom latent dim 2") and killed the whole dump.
             let dim = atom_dim_for_basis(&retained_basis[atom]);
-            let coords = if dim == 2 {
+            let coords = if retained_basis[atom] == "sphere" {
+                // The ambient sphere decodes at width 3; its probe lattice
+                // lives ON the sphere, not on a coordinate square.
+                let side = 9usize;
+                Array2::from_shape_vec((side * side, 3), sphere_grid(side))
+                    .map_err(|e| e.to_string())?
+            } else if dim == 2 {
                 let side = 9usize;
                 let mut pairs = Vec::with_capacity(side * side * 2);
                 for i in 0..side {
@@ -572,7 +595,10 @@ fn main() -> Result<(), String> {
             .collect();
         let dim = atom_dim_for_basis(kind);
         let grid_n = if dim == 2 { 33usize } else { samples };
-        let coords = if dim == 2 {
+        let coords = if kind == "sphere" {
+            Array2::from_shape_vec((grid_n * grid_n, 3), sphere_grid(grid_n))
+                .map_err(|e| e.to_string())?
+        } else if dim == 2 {
             // Square grid over both axes -> a SURFACE, reshaped downstream via
             // `grid_n`. Both axes share the observed range because `atom_tokens`
             // carries one coordinate per token, not a pair.
