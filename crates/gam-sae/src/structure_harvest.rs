@@ -2991,6 +2991,20 @@ fn topology_candidates_for_dim(
                 ]),
                 coords_d(2),
             )?);
+            // `S²` needs THREE independent seed directions. With only two, the
+            // seed confines every row to a great circle -- a measure-zero subset
+            // on which the degree-2 harmonic design is rank-deficient, so the
+            // observed-information Hessian is singular and the candidate cannot
+            // converge to a maximum. Worse, a sphere is not even identifiable
+            // from a circle there: the data cannot distinguish them.
+            //
+            // The superseded `(lat, lon)` chart hid this. It needed only two
+            // columns, so it would happily mint a "sphere" from data that cannot
+            // support one -- returning a confident answer to an unanswerable
+            // question. Requiring the third direction is the honest condition,
+            // and it is the same guard the birth site already applies as
+            // `n_pcs >= 3`.
+            if d_seed >= 3 {
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::Sphere,
                 SaeAtomGeometryPlan::new(
@@ -3012,6 +3026,7 @@ fn topology_candidates_for_dim(
                 LatentManifold::Sphere { dim: 3 },
                 sphere_coords_ambient(),
             )?);
+            }
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::ProjectivePlane,
                 SaeAtomGeometryPlan::projective_plane(1)?,
