@@ -900,6 +900,14 @@ impl SaeManifoldRho {
         Ok(rebuilt)
     }
 
+
+}
+
+#[cfg(test)]
+mod curvature_coordinate_tests {
+    use super::*;
+    use ndarray::Array1;
+
     /// The curvature tail round-trips through the flat layout, and an EMPTY tail
     /// leaves that layout byte-identical.
     ///
@@ -942,5 +950,4 @@ impl SaeManifoldRho {
             .unwrap();
         assert_eq!(zero_rebuilt.kappa, vec![0.0, 0.0]);
     }
-
 }
