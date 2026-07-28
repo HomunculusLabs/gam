@@ -1512,11 +1512,21 @@ pub(crate) fn reml_fixed_glm_dispersion(
     }
 }
 
-/// Minimum importance-sampling effective-sample fraction below which the #784
-/// block-local sampled marginalization is declined (the Monte-Carlo estimate
-/// would be noisier than the Laplace error it corrects). Auto-derived constant,
-/// not a tunable flag.
-pub(crate) const MIN_IMPORTANCE_ESS_FRACTION: f64 = 0.10;
+// `MIN_IMPORTANCE_ESS_FRACTION = 0.10` used to live here: the minimum
+// importance-sampling effective-sample fraction below which the #784 block-local
+// sampled marginalization was declined, on the stated grounds that a smaller
+// fraction meant "the Monte-Carlo estimate would be noisier than the Laplace
+// error it corrects".
+//
+// That reasoning was right and the quantity was wrong. `ESS/S` is a relative
+// EFFICIENCY of the importance weights; the noise of the estimate is
+// `se(Δ_b) = sqrt(1/ESS − 1/S)`, which depends on `S` as well and is what has to
+// be compared against anything. Measured on a `geo_latlon`-shaped fit the weights
+// are near-uniform (`ESS = 508/512`), so the fraction never fired at all, while
+// `se` exceeded `|Δ_b|` outright as the search converged (gam#2584). The gate now
+// tests `se < |Δ_b|` directly in `block_local_sampled_correction_compute`, which
+// needs no fraction: `se ≥ |Δ_b|` is the estimate failing to distinguish its own
+// correction from zero.
 
 /// Block-local non-Gaussian-remainder target for the adaptive Laplace-to-
 /// sampling fallback (issue #784).

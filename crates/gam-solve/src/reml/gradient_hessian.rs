@@ -2788,22 +2788,47 @@ impl<'a> RemlState<'a> {
         };
         let laplace_floor = if n_eff > 0.0 { 1.0 / n_eff } else { f64::INFINITY };
 
-        // Trust gate: an importance estimate with too few effective draws is
-        // noisier than the Laplace error it is meant to correct, so we keep the
-        // plain Laplace summary rather than splicing in Monte-Carlo jitter.
-        let min_ess = (sampled.n_draws as f64 * MIN_IMPORTANCE_ESS_FRACTION).max(1.0);
-        if sampled.importance_ess < min_ess {
+        // Trust gate: splice `Δ_b` only when the estimate resolves it.
+        //
+        // The gate this replaces was `importance_ess < 0.10·S`. That is a
+        // relative-EFFICIENCY test and it says nothing about how precisely `Δ_b`
+        // is known — and measured on a `geo_latlon`-shaped fit (n=960, ~9%
+        // prevalence, duchon smooth, gam#2584) it is INERT: the importance
+        // weights are near-uniform, `ESS = 508/512`, so it never fires. What it
+        // fails to see is the number that matters:
+        //
+        //   early in the search   Δ_b = 7.07e-2   se = 1.35e-2   se/|Δ_b| = 0.19
+        //   at convergence        Δ_b = -9.35e-4  se = 1.98e-3   se/|Δ_b| = 2.12
+        //
+        // The correction is well resolved while it is large and becomes SMALLER
+        // THAN ITS OWN STANDARD ERROR as the search converges — precisely where
+        // a roughened objective costs the most, and `S* = 2.3e5` draws says no
+        // affordable budget repairs it (512 are taken; each is a full n-row
+        // deviance sweep).
+        //
+        // `se ≥ |Δ_b|` is the estimate failing to distinguish its own correction
+        // from zero at one standard error. Splicing a value that is not
+        // distinguishable from zero adds variance to the objective without
+        // removing bias, so declining is better in mean-squared error, not
+        // merely cheaper. The threshold is the ratio 1 — not a tuned fraction:
+        // it is the point where the correction stops carrying information.
+        //
+        // This also SUBSUMES the efficiency test it replaces, since
+        // `se = sqrt(1/ESS − 1/S)` grows without bound as `ESS → 0`; what it
+        // additionally admits is a LARGE correction known to good relative
+        // precision from few effective draws, which the old gate rejected and
+        // which is exactly the case worth splicing.
+        if !(sampled.standard_error < abs_value) {
             log::info!(
-                "[#784] block-local fallback declined: importance ESS {:.1} < {:.1} \
-                 (m={m} dirs, max|γ|={:.3}, τ={:.3}) \
-                 [budget audit: Δ_b={:.4e} se={:.4e} se/|Δ_b|={:.3e} S={} S*={:.3e} 1/n_eff={:.3e}]",
-                sampled.importance_ess,
-                min_ess,
+                "[#784] block-local fallback declined: the sampled correction is not resolved by \
+                 its own draws — se={:.4e} ≥ |Δ_b|={:.4e} (se/|Δ_b|={:.3e}) \
+                 (m={m} dirs, max|γ|={:.3}, τ={:.3}, ESS={:.1}/{}, S*={:.3e}, 1/n_eff={:.3e})",
+                sampled.standard_error,
+                abs_value,
+                relative_se,
                 verdict.max_abs_skewness,
                 verdict.threshold,
-                sampled.value,
-                sampled.standard_error,
-                relative_se,
+                sampled.importance_ess,
                 sampled.n_draws,
                 draws_for_target,
                 laplace_floor,
