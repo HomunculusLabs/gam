@@ -196,6 +196,43 @@ fn seed_passes_startup_validation(
     Ok(eval.cost)
 }
 
+/// #2609 bisect: the EFS lane and the ordinary value lane evaluate the SAME
+/// seed of the SAME model, so if one is finite and the other is not, the
+/// divergence is in the LANE rather than in the model, the data, or the seed.
+///
+/// `circle/ordered_beta_bernoulli` is the cell that reports
+/// "EFS seed cost is non-finite (inf)" in the matrix below — notable because
+/// #1782 records it as the one configuration that used to be the ONLY survivor.
+/// This narrows where to look before anyone instruments the criterion.
+#[test]
+fn efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609() {
+    let z = planted_circle_embedded(48, 6, 0.03);
+    let (mut objective, seed) = objective_and_seed(
+        z.view(),
+        4,
+        Topo::Circle,
+        AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
+    );
+    let value_lane = objective.eval(&seed).map(|evaluation| evaluation.cost);
+    let efs_lane = objective.eval_efs(&seed).map(|evaluation| evaluation.cost);
+    eprintln!("2609 value lane = {value_lane:?}");
+    eprintln!("2609 efs   lane = {efs_lane:?}");
+
+    let value_cost = value_lane.expect("the value lane must evaluate the seed");
+    let efs_cost = efs_lane.expect("the EFS lane must evaluate the seed");
+    assert!(
+        value_cost.is_finite(),
+        "the value lane returned a non-finite seed cost ({value_cost}); the defect is \
+         then in the criterion itself, not in the EFS step"
+    );
+    assert!(
+        efs_cost.is_finite(),
+        "the value lane is finite ({value_cost}) but the EFS lane is not ({efs_cost}); \
+         the two evaluate the same seed of the same model, so the divergence is in the \
+         Fellner-Schall step rather than in the model or the seed"
+    );
+}
+
 /// The #1782 startup-validation matrix: on identical clean planted-circle data
 /// every assignment kind (ordered_beta_bernoulli, softmax, threshold_gate) and every
 /// atom topology (circle, euclidean, linear) must PASS outer startup validation.
