@@ -2911,3 +2911,149 @@ fn curl_killer_demo_planted_circle_wins_race() {
     assert!(flatten.recommend_flatten, "diameter must flatten");
     assert_eq!(flatten.residual_rank, 1, "diameter must flatten to rank 1");
 }
+
+/// #2604 item 5 — EVERY registered d=2 topology must actually FIT at least once.
+///
+/// The natural instrument for this is "run the race and see that it succeeds",
+/// and that instrument is invalid: `select_topology_with_fit` hits a bare
+/// `continue` when a candidate's fit returns `Err`, so a failing candidate is
+/// silently dropped from the race. A green race is therefore consistent with
+/// every exotic topology refusing and `Euclidean` winning by walkover — the
+/// race reports a winner, not a coverage count.
+///
+/// So this fits each candidate DIRECTLY through `fit_topology_candidate`, the
+/// same call the race makes, and counts the kinds that produced evidence. That
+/// is the difference between "the race ran" and "Mobius fitted".
+///
+/// Prints the per-kind table under `--nocapture` so a refusal names itself.
+#[test]
+fn every_registered_d2_topology_fits_at_least_once_2604() {
+    let n = 96usize;
+    // A seed that spans 3-space: the ambient sphere needs three coordinate
+    // columns, and a 2-column seed puts every point on a great circle (which is
+    // rank-deficient for a degree-2 design, so the sphere would refuse for a
+    // reason that has nothing to do with the sphere).
+    let coords = Array2::<f64>::from_shape_fn((n, 3), |(row, axis)| {
+        let t = row as f64 / n as f64;
+        match axis {
+            0 => t * 2.0,
+            1 => t * 3.0 - 1.5,
+            _ => (t * std::f64::consts::TAU).cos(),
+        }
+    });
+    let specs = topology_candidates_for_dim(coords.view(), 2).expect("d=2 candidates build");
+    assert!(!specs.is_empty(), "the d=2 race must register candidates");
+
+    // A generic smooth target: this test asks whether each topology can FIT at
+    // all, not which one wins, so the target must not be shaped to favour any
+    // single candidate.
+    let p = 4usize;
+    let target = Array2::<f64>::from_shape_fn((n, p), |(row, col)| {
+        let a = coords[[row, 0]];
+        let b = coords[[row, 1]];
+        match col {
+            0 => (std::f64::consts::TAU * a).cos(),
+            1 => (std::f64::consts::TAU * a).sin(),
+            2 => b,
+            _ => 0.25 * b * b + 0.1 * (std::f64::consts::TAU * a).cos(),
+        }
+    });
+    let weights = Array1::<f64>::ones(n);
+
+    let mut fitted: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for spec in &specs {
+        let kind = format!("{:?}", spec.geometry.kind());
+        match fit_topology_candidate(spec, target.view(), weights.view()) {
+            Ok(evidence) => {
+                assert!(
+                    evidence.raw_reml.is_finite(),
+                    "{kind} reported a NON-FINITE evidence {}; an Ok carrying a \
+                     non-finite score is a refusal wearing a success",
+                    evidence.raw_reml
+                );
+                println!(
+                    "[2604-fit] {kind:<24} raw_reml={:>14.4} edf={:>8.3}",
+                    evidence.raw_reml, evidence.effective_dim
+                );
+                fitted.push(kind);
+            }
+            Err(message) => {
+                println!("[2604-fit] {kind:<24} REFUSED: {message}");
+                refused.push(format!("{kind}: {message}"));
+            }
+        }
+    }
+    println!(
+        "[2604-fit] {} of {} d=2 candidates fitted",
+        fitted.len(),
+        specs.len()
+    );
+    // MOBIUS is not registered by `topology_candidates_for_dim` at all — it is
+    // built by `discover_primary_atom_topologies`, off a >=3-PC projection, via
+    // `mobius_double_cover_coords_from_projection`. So the loop above cannot
+    // reach it, and a "d=2 candidates all fit" claim would silently exclude the
+    // one non-orientable band. Fit it the way that builder does.
+    let n_pcs = 3usize;
+    let proj = Array2::<f64>::from_shape_fn((n, n_pcs), |(row, axis)| {
+        // A band that closes with a half-twist: the angular coordinate runs
+        // once around while the transverse offset flips sign, which is the
+        // structure the double-cover routine is looking for.
+        let theta = std::f64::consts::TAU * (row as f64) / (n as f64);
+        let w = 0.35 * ((row % 7) as f64 / 6.0 - 0.5);
+        match axis {
+            0 => (1.0 + w * (0.5 * theta).cos()) * theta.cos(),
+            1 => (1.0 + w * (0.5 * theta).cos()) * theta.sin(),
+            _ => w * (0.5 * theta).sin(),
+        }
+    });
+    let rows: Vec<usize> = (0..n).collect();
+    let mobius_coords =
+        crate::manifold::mobius_double_cover_coords_from_projection(proj.view(), &rows)
+            .expect("the half-twist band admits double-cover coordinates");
+    let mobius_spec = TopologyCandidateSpec::new(
+        AutoTopologyKind::Mobius,
+        SaeAtomGeometryPlan::new(
+            SaeAtomBasisKind::Mobius,
+            2,
+            SaeBasisResolution::MobiusHarmonics {
+                circle_order: 3,
+                width_degree: 2,
+            },
+            SaeReferenceMetricPlan::MobiusQuotient,
+        )
+        .expect("mobius plan builds"),
+        LatentManifold::Product(vec![
+            LatentManifold::Circle { period: 2.0 },
+            LatentManifold::Interval { lo: -1.0, hi: 1.0 },
+        ]),
+        mobius_coords,
+    )
+    .expect("mobius candidate builds");
+    match fit_topology_candidate(&mobius_spec, target.view(), weights.view()) {
+        Ok(evidence) => {
+            assert!(
+                evidence.raw_reml.is_finite(),
+                "Mobius reported a NON-FINITE evidence {}",
+                evidence.raw_reml
+            );
+            println!(
+                "[2604-fit] {:<24} raw_reml={:>14.4} edf={:>8.3}",
+                "Mobius", evidence.raw_reml, evidence.effective_dim
+            );
+            fitted.push("Mobius".to_string());
+        }
+        Err(message) => {
+            println!("[2604-fit] {:<24} REFUSED: {message}", "Mobius");
+            refused.push(format!("Mobius: {message}"));
+        }
+    }
+
+    println!("[2604-fit] fitted kinds: {fitted:?}");
+    assert!(
+        refused.is_empty(),
+        "every registered d=2 topology must fit at least once; {} refused:\n{}",
+        refused.len(),
+        refused.join("\n")
+    );
+}
