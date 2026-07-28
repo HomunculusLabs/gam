@@ -30,7 +30,8 @@ pub use manifold::{GeometryError, GeometryResult, ManifoldSpec, RiemannianManifo
 pub use manifolds::{
     CircleManifold, ConstantCurvature, EuclideanManifold, GrassmannManifold, ProductManifold,
     SpdManifold, SphereManifold, StiefelManifold, TorusManifold,
-    constant_curvature_dirichlet_penalty, distance_kappa_jet, exp_map_kappa_jet,
+    constant_curvature_dirichlet_penalty,
+    constant_curvature_dirichlet_penalty_kappa_derivative, distance_kappa_jet, exp_map_kappa_jet,
     log_map_kappa_jet, spd_frechet_mean,
 };
 pub use optimizer::{RiemannianLBFGS, RiemannianObjective, RiemannianTrustRegion};

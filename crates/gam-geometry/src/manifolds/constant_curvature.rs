@@ -472,6 +472,204 @@ fn tn_and_derivative(kappa: f64, r: f64) -> GeometryResult<(f64, f64)> {
     Ok((tn, tn_prime))
 }
 
+/// Per-point weight coefficients of the constant-curvature Dirichlet Gram and
+/// their `κ`-derivatives.
+///
+/// Returns `(iso, rad, d_iso, d_rad)` where `G = iso·(I − t̂t̂ᵀ) + rad·t̂t̂ᵀ`.
+/// Splitting this out is what lets the value and the `κ`-derivative share one
+/// assembly loop, so the two cannot drift apart.
+///
+/// The derivative is taken in LOGARITHMIC form,
+///
+/// ```text
+///   ∂iso/∂κ = iso·[ (d−2)·λ̇/λ + (d−3)·ė_t/e_t + ė_r/e_r ]
+///   ∂rad/∂κ = rad·[ (d−2)·λ̇/λ + (d−1)·ė_t/e_t − ė_r/e_r ]
+/// ```
+///
+/// because each coefficient is a product of powers; that keeps the chain rule to
+/// one line per factor instead of expanding a quotient of four `κ`-dependent
+/// terms. The factor derivatives come from the `u = κr²` series already in this
+/// module (`u̇ = r²`):
+///
+/// ```text
+///   A  = d(S/C)/du,   tn = r·S/C,   ṫn = r³·A
+///   tn′ = S/C + 2u·A,               ∂tn′/∂κ = r²·(3A + 2u·A′)
+///   λ  = 2/(1 + κ·tn²),             λ̇ = −(λ²/2)·(tn² + 2κ·tn·ṫn)
+/// ```
+fn dirichlet_weight_coefficients(
+    kappa: f64,
+    r: f64,
+    d: usize,
+) -> GeometryResult<(f64, f64, f64, f64)> {
+    if r <= GEOMETRY_EPS {
+        // `D exp₀(0) = I`, so both eigenvalues are 1 and `λ = 2`; the weight is
+        // isotropic and its κ-movement vanishes with `r`.
+        let iso = 2.0_f64.powi(d as i32 - 2);
+        return Ok((iso, iso, 0.0, 0.0));
+    }
+    let u = kappa * r * r;
+    let (c_stack, s_stack) = cs_stacks(u);
+    let (c, s) = (c_stack[0], s_stack[0]);
+    if c.abs() <= GEOMETRY_EPS {
+        return Err(GeometryError::Singular(
+            "constant-curvature Dirichlet weight at a conjugate point (cos(√κ r) = 0)",
+        ));
+    }
+    let (c1, s1, c2, s2) = (c_stack[1], s_stack[1], c_stack[2], s_stack[2]);
+    // A = d(S/C)/du and A′ = d²(S/C)/du².
+    let a = (s1 * c - s * c1) / (c * c);
+    let a_prime = (s2 * c - s * c2) / (c * c) - 2.0 * c1 * (s1 * c - s * c1) / (c * c * c);
+
+    let tn = r * s / c;
+    let tn_dot = r * r * r * a;
+    let tn_prime = s / c + 2.0 * u * a;
+    let tn_prime_dot = r * r * (3.0 * a + 2.0 * u * a_prime);
+
+    let gauge = 1.0 + kappa * tn * tn;
+    if gauge <= GEOMETRY_EPS {
+        return Err(GeometryError::InvalidPoint(
+            "constant-curvature Dirichlet weight: exp of the tangent coordinate leaves the chart",
+        ));
+    }
+    let lambda = 2.0 / gauge;
+    let lambda_dot = -0.5 * lambda * lambda * (tn * tn + 2.0 * kappa * tn * tn_dot);
+
+    let e_t = tn / r;
+    let e_t_dot = tn_dot / r;
+    let e_r = tn_prime;
+    let e_r_dot = tn_prime_dot;
+    if !(e_t > 0.0 && e_r > 0.0) {
+        return Err(GeometryError::Singular(
+            "constant-curvature Dirichlet weight: exp differential is degenerate",
+        ));
+    }
+
+    let lam_pow = lambda.powi(d as i32 - 2);
+    let iso = lam_pow * e_t.powi(d as i32 - 3) * e_r;
+    let rad = lam_pow * e_t.powi(d as i32 - 1) / e_r;
+    let d_log_lambda = lambda_dot / lambda;
+    let d_log_e_t = e_t_dot / e_t;
+    let d_log_e_r = e_r_dot / e_r;
+    let base = (d as f64 - 2.0) * d_log_lambda;
+    let d_iso = iso * (base + (d as f64 - 3.0) * d_log_e_t + d_log_e_r);
+    let d_rad = rad * (base + (d as f64 - 1.0) * d_log_e_t - d_log_e_r);
+    Ok((iso, rad, d_iso, d_rad))
+}
+
+/// `∂S/∂κ` of [`constant_curvature_dirichlet_penalty`] — the κ-movement of the
+/// penalty Gram.
+///
+/// This is the whole κ-channel for a constant-curvature ATOM. Its basis is a
+/// monomial patch in the TANGENT coordinate, which does not depend on κ at all,
+/// so unlike the constant-curvature GAM smooth (whose kernel design moves with
+/// κ) there is no `∂X/∂κ` term. κ enters the criterion only here.
+///
+/// Same assembly as the value, with the coefficient derivatives substituted —
+/// which is why they are computed together in
+/// [`dirichlet_weight_coefficients`] rather than in two places.
+pub fn constant_curvature_dirichlet_penalty_kappa_derivative(
+    coords: ArrayView2<'_, f64>,
+    basis_jacobian: ndarray::ArrayView3<'_, f64>,
+    kappa: f64,
+) -> GeometryResult<Array2<f64>> {
+    dirichlet_gram_assembly(coords, basis_jacobian, kappa, true)
+}
+
+/// Shared assembly for the Dirichlet Gram and its `κ`-derivative.
+///
+/// `differentiate` selects which pair of per-point coefficients is accumulated.
+/// The loop is identical either way, which is the point: the value and its
+/// derivative are the same sum over the same points with the same projections,
+/// so they cannot disagree about anything except the two scalars.
+fn dirichlet_gram_assembly(
+    coords: ArrayView2<'_, f64>,
+    basis_jacobian: ndarray::ArrayView3<'_, f64>,
+    kappa: f64,
+    differentiate: bool,
+) -> GeometryResult<Array2<f64>> {
+    if !kappa.is_finite() {
+        return Err(GeometryError::InvalidPoint(
+            "constant-curvature Dirichlet weight needs a finite kappa",
+        ));
+    }
+    let n = coords.nrows();
+    let d = coords.ncols();
+    let jet_shape = basis_jacobian.shape();
+    if jet_shape[0] != n {
+        return Err(GeometryError::DimensionMismatch {
+            context: "constant_curvature_dirichlet_penalty: jacobian rows vs coords rows",
+            expected: n,
+            got: jet_shape[0],
+        });
+    }
+    if jet_shape[2] != d {
+        return Err(GeometryError::DimensionMismatch {
+            context: "constant_curvature_dirichlet_penalty: jacobian latent axes vs coords cols",
+            expected: d,
+            got: jet_shape[2],
+        });
+    }
+    let m = jet_shape[1];
+    let mut gram = Array2::<f64>::zeros((m, m));
+    if n == 0 || m == 0 {
+        return Ok(gram);
+    }
+    let mut grad = vec![0.0_f64; m];
+    let mut proj = vec![0.0_f64; m];
+    for row in 0..n {
+        let t = coords.row(row);
+        let norm = t.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let (iso, rad, d_iso, d_rad) = dirichlet_weight_coefficients(kappa, norm, d)?;
+        let (iso_coeff, rad_coeff) = if differentiate {
+            (d_iso, d_rad)
+        } else {
+            (iso, rad)
+        };
+        if !(iso_coeff.is_finite() && rad_coeff.is_finite()) {
+            continue;
+        }
+        for axis in 0..d {
+            for k in 0..m {
+                grad[k] = basis_jacobian[[row, k, axis]];
+            }
+            for i in 0..m {
+                let gi = grad[i];
+                if gi == 0.0 {
+                    continue;
+                }
+                let scaled = iso_coeff * gi;
+                for j in 0..m {
+                    gram[[i, j]] += scaled * grad[j];
+                }
+            }
+        }
+        if norm > GEOMETRY_EPS {
+            let radial_weight = rad_coeff - iso_coeff;
+            if radial_weight != 0.0 {
+                let inv_norm = 1.0 / norm;
+                for k in 0..m {
+                    let mut acc = 0.0;
+                    for axis in 0..d {
+                        acc += basis_jacobian[[row, k, axis]] * t[axis];
+                    }
+                    proj[k] = acc * inv_norm;
+                }
+                for i in 0..m {
+                    let pi = proj[i];
+                    if pi == 0.0 {
+                        continue;
+                    }
+                    let scaled = radial_weight * pi;
+                    for j in 0..m {
+                        gram[[i, j]] += scaled * proj[j];
+                    }
+                }
+            }
+        }
+    }
+    Ok(gram)
+}
+
 /// Pullback Dirichlet Gram of a basis whose latent is the TANGENT COORDINATE at
 /// the origin of `M_κ` — the κ-generic form of
 /// [`crate::manifolds::poincare::conformal_dirichlet_penalty`].
@@ -518,103 +716,7 @@ pub fn constant_curvature_dirichlet_penalty(
     basis_jacobian: ndarray::ArrayView3<'_, f64>,
     kappa: f64,
 ) -> GeometryResult<Array2<f64>> {
-    if !kappa.is_finite() {
-        return Err(GeometryError::InvalidPoint(
-            "constant-curvature Dirichlet weight needs a finite kappa",
-        ));
-    }
-    let n = coords.nrows();
-    let d = coords.ncols();
-    let jet_shape = basis_jacobian.shape();
-    if jet_shape[0] != n {
-        return Err(GeometryError::DimensionMismatch {
-            context: "constant_curvature_dirichlet_penalty: jacobian rows vs coords rows",
-            expected: n,
-            got: jet_shape[0],
-        });
-    }
-    if jet_shape[2] != d {
-        return Err(GeometryError::DimensionMismatch {
-            context: "constant_curvature_dirichlet_penalty: jacobian latent axes vs coords cols",
-            expected: d,
-            got: jet_shape[2],
-        });
-    }
-    let m = jet_shape[1];
-    let mut gram = Array2::<f64>::zeros((m, m));
-    if n == 0 || m == 0 {
-        return Ok(gram);
-    }
-    let e_iso = d as i32 - 2;
-    let e_perp = d as i32 - 3;
-    let e_rad = d as i32 - 1;
-    let mut grad = vec![0.0_f64; m];
-    let mut proj = vec![0.0_f64; m];
-    for row in 0..n {
-        let t = coords.row(row);
-        let norm = t.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let (e_t, e_r, lambda) = if norm <= GEOMETRY_EPS {
-            // `D exp₀(0) = I`; the radial block below switches itself off.
-            (1.0, 1.0, 2.0)
-        } else {
-            let (tn, tn_prime) = tn_and_derivative(kappa, norm)?;
-            let gauge = 1.0 + kappa * tn * tn;
-            if gauge <= GEOMETRY_EPS {
-                return Err(GeometryError::InvalidPoint(
-                    "constant-curvature Dirichlet weight: exp of the tangent coordinate leaves the chart",
-                ));
-            }
-            (tn / norm, tn_prime, 2.0 / gauge)
-        };
-        if !(e_t > 0.0 && e_r > 0.0 && lambda.is_finite()) {
-            continue;
-        }
-        let lam_pow = lambda.powi(e_iso);
-        let iso_coeff = lam_pow * e_t.powi(e_perp) * e_r;
-        let rad_coeff = lam_pow * e_t.powi(e_rad) / e_r;
-        if !(iso_coeff.is_finite() && rad_coeff.is_finite()) {
-            continue;
-        }
-        for axis in 0..d {
-            for k in 0..m {
-                grad[k] = basis_jacobian[[row, k, axis]];
-            }
-            for i in 0..m {
-                let gi = grad[i];
-                if gi == 0.0 {
-                    continue;
-                }
-                let scaled = iso_coeff * gi;
-                for j in 0..m {
-                    gram[[i, j]] += scaled * grad[j];
-                }
-            }
-        }
-        if norm > GEOMETRY_EPS {
-            let radial_weight = rad_coeff - iso_coeff;
-            if radial_weight != 0.0 {
-                let inv_norm = 1.0 / norm;
-                for k in 0..m {
-                    let mut acc = 0.0;
-                    for axis in 0..d {
-                        acc += basis_jacobian[[row, k, axis]] * t[axis];
-                    }
-                    proj[k] = acc * inv_norm;
-                }
-                for i in 0..m {
-                    let pi = proj[i];
-                    if pi == 0.0 {
-                        continue;
-                    }
-                    let scaled = radial_weight * pi;
-                    for j in 0..m {
-                        gram[[i, j]] += scaled * proj[j];
-                    }
-                }
-            }
-        }
-    }
-    Ok(gram)
+    dirichlet_gram_assembly(coords, basis_jacobian, kappa, false)
 }
 
 /// The unified constant-curvature manifold `M_κ` in the κ-stereographic
@@ -1879,6 +1981,84 @@ mod tests {
                 );
             }
         }
+    }
+
+
+    /// The analytic `∂S/∂κ` must match a central difference of the Gram itself.
+    /// SPEC bans finite differences outside tests precisely so that the analytic
+    /// derivative is the one that ships; this is the test that earns it.
+    ///
+    /// Checked across the sign of curvature, because the `κ`-series changes
+    /// branch at zero and a derivative that only worked on one side would be a
+    /// silent wrong smoothing on the other.
+    #[test]
+    fn constant_curvature_dirichlet_kappa_derivative_matches_finite_differences() {
+        let coords = ndarray::arr2(&[[0.11_f64, -0.27], [0.33, 0.08], [-0.19, 0.24]]);
+        let mut jacobian = ndarray::Array3::<f64>::zeros((3, 4, 2));
+        for row in 0..3 {
+            for k in 0..4 {
+                for axis in 0..2 {
+                    jacobian[[row, k, axis]] =
+                        0.37 * (row as f64 + 1.0) - 0.19 * (k as f64) + 0.23 * (axis as f64);
+                }
+            }
+        }
+        let h = 1.0e-6_f64;
+        for &kappa in &[-1.3_f64, -0.5, 0.0, 0.5, 1.3] {
+            let analytic = constant_curvature_dirichlet_penalty_kappa_derivative(
+                coords.view(),
+                jacobian.view(),
+                kappa,
+            )
+            .unwrap();
+            let plus =
+                constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), kappa + h)
+                    .unwrap();
+            let minus =
+                constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), kappa - h)
+                    .unwrap();
+            let mut worst = 0.0_f64;
+            for i in 0..analytic.nrows() {
+                for j in 0..analytic.ncols() {
+                    let fd = (plus[[i, j]] - minus[[i, j]]) / (2.0 * h);
+                    let scale = analytic[[i, j]].abs().max(fd.abs()).max(1.0);
+                    worst = worst.max((analytic[[i, j]] - fd).abs() / scale);
+                }
+            }
+            assert!(
+                worst <= 1.0e-6,
+                "analytic dS/dkappa disagrees with central differences at kappa={kappa}: \
+                 worst relative gap {worst:.3e}"
+            );
+        }
+    }
+
+    /// At `κ = 0` the weight is `2^{d−2} I` for every `t`, but it is NOT
+    /// stationary there: flat space is an interior point of the family, so the
+    /// criterion must feel which way curvature would move. A zero derivative at
+    /// zero curvature would silently pin every fit to flat.
+    #[test]
+    fn constant_curvature_dirichlet_kappa_derivative_is_nonzero_at_flat() {
+        let coords = ndarray::arr2(&[[0.30_f64, -0.20], [0.15, 0.40]]);
+        let mut jacobian = ndarray::Array3::<f64>::zeros((2, 3, 2));
+        for row in 0..2 {
+            for k in 0..3 {
+                for axis in 0..2 {
+                    jacobian[[row, k, axis]] = 0.5 + 0.2 * (k as f64) - 0.3 * (axis as f64);
+                }
+            }
+        }
+        let d_zero = constant_curvature_dirichlet_penalty_kappa_derivative(
+            coords.view(),
+            jacobian.view(),
+            0.0,
+        )
+        .unwrap();
+        let magnitude = d_zero.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+        assert!(
+            magnitude > 1.0e-6,
+            "kappa = 0 must not be a stationary point of the penalty; got {magnitude:.3e}"
+        );
     }
 
 }
