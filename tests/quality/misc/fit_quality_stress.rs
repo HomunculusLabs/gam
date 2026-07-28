@@ -590,16 +590,29 @@ fn hifreq_tensor_k6() -> Result<(), String> {
 // not determine k10.
 //
 // Attributing every second of that run to the last non-heartbeat log line
-// preceding it puts **96.5% of the 9451 s after an `[HGB]` line** — the
-// variance-targeted stochastic trace estimator in `reml/gradient_hessian.rs`
-// and `reml/state_caches.rs`, which sizes its probe count to hit a `target_mse`.
-// The instrumented `[STAGE]` brackets together account for about 185 s, i.e.
-// 2%. Neither the assembly nor the factorization is the cost here.
+// preceding it puts **96.5% of the 9451 s after an `[HGB]` line**, and the
+// instrumented `[STAGE]` brackets together account for about 185 s — 2%. The
+// `[STAGE] outer eval start/end order` pair is 111 evaluations at 1.67 s each,
+// so ~98% of this fit elapses OUTSIDE any bracketed outer evaluation. Neither
+// the `O(n p²)` assembly nor the `O(p³)` factorization is the cost.
 //
-// That estimator is the same one #2576 measures at 95% of wall clock in the
-// overcomplete support lane, where its unpreconditioned CG stagnates at its
-// iteration cap. Whether these are one defect in two lanes is untested and
-// should be stated as a hypothesis, not a finding.
+// `[HGB]` names the REGION, not the consumer, and the distinction matters. It
+// is emitted by a BUDGET-SETTING routine (`reml/gradient_hessian.rs`): it
+// computes `k_target` and writes `solve_rel_tol_override` /
+// `monotone_probe_floor` into `trace_state`, then returns. It does no heavy
+// work, and its own `k=` field — the requested stochastic-trace probe floor —
+// reads **`k=0` in every run at every k** (4, 6, 8, 10). So what consumes the
+// time is whatever runs after that line and before the next log line of any
+// kind, and it is UNINSTRUMENTED. This attribution localises the cost to a
+// region; it does not identify a component, and an earlier revision of this
+// note (also mine) overstated it by naming one.
+//
+// The leading candidate is still the stochastic trace path, because that is
+// what `[HGB]` configures, and #2576 measures the same estimator at 95% of
+// wall clock in the overcomplete support lane. That is an inference from what
+// the budget routine writes, not from where time was attributed — a hypothesis
+// to test, not a finding. The next measurement is a `perf` profile of the k10
+// fit, or a `[STAGE]` bracket around the un-logged region.
 //
 // The structural reason is in this file's own fixture: the grid is 24 x 24, so
 // `n = 576`, and at k10 `kb = 24` gives `p = kb² = 576`. **p = n exactly** — a
