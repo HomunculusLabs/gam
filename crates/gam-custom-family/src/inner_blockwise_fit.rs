@@ -1899,6 +1899,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     block_constraints: &[Option<ConstraintSet>],
     cached_active_sets: &[Option<Vec<usize>>],
     saddle_escapes_used: usize,
+    previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
     jeffreys_completion_calls: &mut usize,
 ) -> Result<ConstrainedModeResolution, String> {
@@ -1933,6 +1934,7 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         block_constraints,
         tight_active_sets,
         saddle_escapes_used,
+        previous_escape_lambda_min,
         objective_tol,
         jeffreys_completion_calls,
         0,
@@ -1957,6 +1959,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
     block_constraints: &[Option<ConstraintSet>],
     tight_active_sets: Vec<Option<Vec<usize>>>,
     saddle_escapes_used: usize,
+    previous_escape_lambda_min: Option<f64>,
     objective_tol: f64,
     jeffreys_completion_calls: &mut usize,
     face_exchanges: usize,
@@ -1987,6 +1990,37 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
         return Ok(ConstrainedModeResolution::Certified {
             workspace: certificate.workspace,
         });
+    }
+    // ── did the last escape actually escape? ────────────────────────────────
+    //
+    // The escape takes a fixed-length step along a direction of negative
+    // curvature and keeps it unconditionally. Nothing checked whether the step
+    // improved the quantity the escape exists to improve, and #2587 measured
+    // what that costs: with the budget raised to 12 the curvature WANDERS
+    // rather than converging --
+    //
+    //     attempt 1  -1.894e0     attempt 5  -2.580e0
+    //     attempt 2  -3.803e-1    attempt 6  -1.784e-1   <- best seen
+    //     attempt 3  -1.912e0     attempt 7  -4.945e-1
+    //     attempt 4  -2.239e0     attempt 8  -3.806e0    <- worse than the start
+    //
+    // -- ending twice as indefinite as it began, having walked away from two
+    // perfectly good points on the way. Five of those eight steps made
+    // `lambda_min` worse and every one was kept.
+    //
+    // A step taken because the model says it should help, with nothing checking
+    // whether it did, is the same defect as the sizing bug this issue opened
+    // with. `lambda_min` is negative, so improvement means CLOSER TO ZERO: a
+    // fresh certificate no better than the one the escape left is proof that
+    // this direction is not a way out of this saddle, and spending the rest of
+    // the budget on it only travels further. Stop and refuse honestly, naming
+    // both values so the refusal states what was tried.
+    if let Some(previous) = previous_escape_lambda_min
+        && lambda_min <= previous
+    {
+        return Err(format!(
+            "joint Newton returned-mode curvature is still a strict saddle after a negative-curvature escape that did not improve it: lambda_min={lambda_min:.6e} is no closer to zero than the pre-escape {previous:.6e} (floor={numerical_floor:.6e}, escapes spent={saddle_escapes_used}); the escape direction is not a way out of this saddle, so the remaining budget would only travel further",
+        ));
     }
     if saddle_escapes_used >= MAX_SADDLE_ESCAPES {
         return Err(format!(
@@ -2154,6 +2188,7 @@ fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + S
             block_constraints,
             widened_face,
             saddle_escapes_used,
+            previous_escape_lambda_min,
             objective_tol,
             jeffreys_completion_calls,
             face_exchanges + 1,
@@ -3132,6 +3167,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         // `MAX_SADDLE_ESCAPES` before the honest typed refusal.
         let mut returned_constrained_mode_pending = false;
         let mut saddle_escapes_used = 0usize;
+        // The curvature the last accepted escape left behind, so the next
+        // certificate can tell whether that escape was worth anything (#2587).
+        let mut previous_escape_lambda_min: Option<f64> = None;
 
         // Fit-level wall-clock budget guard at inner-solve ENTRY. The
         // per-cycle guard below only fires from `cycle > 0`, so it returns a
@@ -3177,6 +3215,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     &escape_block_constraints,
                     &cached_active_sets,
                     saddle_escapes_used,
+                    previous_escape_lambda_min,
                     escape_objective_tol,
                     &mut jeffreys_completion_calls,
                 )? {
@@ -3201,6 +3240,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                         }
                         refresh_all_block_etas(family, specs, &mut states)?;
                         saddle_escapes_used += 1;
+                        previous_escape_lambda_min = Some(lambda_min);
                         log::info!(
                             "[PIRLS/joint-Newton saddle-escape] attempt={} lambda_min={:.6e} alpha={:.6e}",
                             saddle_escapes_used,
