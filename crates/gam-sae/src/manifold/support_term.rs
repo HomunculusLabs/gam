@@ -2195,7 +2195,48 @@ impl SaeSupportSparseTerm {
         // until #2574.
         let delta = opt::solve_psd_trust_region(gram.view(), rhs_vector.view(), trust_radius)
         .map_err(|error| format!("SaeSupportSparseTerm::coordinate_sweep: {error}"))?;
-        let directional = rhs_vector.dot(&delta);
+        // `retract_row_coords` moves the point with the manifold exponential map,
+        // which travels only the TANGENT component of the step -- anything radial is
+        // discarded. So a step certified in the full ambient chart space is not the
+        // step taken. MEASURED on a failing row: one axis asked to move 7.12e-1 --
+        // `delta_max`, the largest component of the whole step -- realized exactly
+        // 0.0, while every other axis realized its request to rel ~1e-9. Backtracking
+        // then rescales only the components that do move and never revives the one
+        // that does not, so no step size can satisfy Armijo and the row aborts at the
+        // resolution floor. That is why intrinsic dimension >= 2 has never fitted,
+        // while every 1-D chart was fine: on a flat chart the tangent space is
+        // everything, `project_to_tangent` is the identity, and this is inert.
+        //
+        // Project the STEP, and only the step. The gradient must NOT be projected:
+        // measured, doing so zeros entries that are genuinely large (-6.08 at a
+        // coordinate pinned at pi/2), which corrupts both the trust-region right-hand
+        // side and the descent certificate computed from it.
+        let mut delta = delta;
+        self.assignment.project_row_tangent(
+            row,
+            coords_row,
+            delta.as_slice_mut().expect("trust-region step is contiguous"),
+        )?;
+        let mut directional = rhs_vector.dot(&delta);
+        if !(directional > 0.0) {
+            // Projection and the Gram solve do not commute, so the projected step is
+            // not guaranteed to remain an ascent direction for the right-hand side.
+            // Steepest descent within the tangent space is one by construction, and
+            // is a real step rather than a failed row.
+            let mut fallback = rhs_vector.to_owned();
+            self.assignment.project_row_tangent(
+                row,
+                coords_row,
+                fallback.as_slice_mut().expect("fallback step is contiguous"),
+            )?;
+            let norm = fallback.dot(&fallback).sqrt();
+            if !(norm > 0.0) {
+                return Ok(0.0);
+            }
+            delta = fallback * (trust_radius / norm);
+            directional = rhs_vector.dot(&delta);
+        }
+
         let delta_max = delta
             .iter()
             .map(|value| value.abs())

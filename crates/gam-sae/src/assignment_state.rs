@@ -476,6 +476,58 @@ impl SaeAssignmentState {
 
     /// [`Self::apply_row_coord_step`] against a caller-held coordinate block —
     /// the identical per-atom retraction.
+    /// Project a compact row step onto each atom's tangent space at its current
+    /// coordinates.
+    ///
+    /// [`Self::retract_row_coords`] travels only the tangent component of a
+    /// step, because the manifold exponential map discards any part of the
+    /// vector that leaves the tangent space. A caller that certifies descent
+    /// against the un-projected step therefore certifies a direction it will
+    /// not travel, and for a dim-2 sphere -- whose tangent space is a line --
+    /// that silently drops one of the two coordinates being optimised. Callers
+    /// project the step through here first so the certificate and the motion
+    /// describe the same vector.
+    ///
+    /// For Euclidean atoms the tangent space is the whole ambient space and
+    /// `project_tangent` is the identity, so this is a no-op on flat charts.
+    pub fn project_row_tangent(
+        &self,
+        row: usize,
+        coords: &[f64],
+        delta: &mut [f64],
+    ) -> Result<(), String> {
+        if row >= self.n_obs {
+            return Err(format!(
+                "SaeAssignmentState::project_row_tangent: row {row} out of range N={}",
+                self.n_obs
+            ));
+        }
+        if delta.len() != coords.len() {
+            return Err(format!(
+                "SaeAssignmentState::project_row_tangent: row {row} delta width {} != compact coordinate width {}",
+                delta.len(),
+                coords.len()
+            ));
+        }
+        let mut cursor = 0usize;
+        for &atom in &self.indices[row] {
+            let meta = &self.atom_coord_meta[atom as usize];
+            let end = cursor + meta.latent_dim;
+            let point = Array1::from_vec(coords[cursor..end].to_vec());
+            let vector = Array1::from_vec(delta[cursor..end].to_vec());
+            let projected = meta
+                .manifold
+                .project_to_tangent(point.view(), vector.view());
+            delta[cursor..end].copy_from_slice(
+                projected
+                    .as_slice()
+                    .expect("tangent projection is contiguous"),
+            );
+            cursor = end;
+        }
+        Ok(())
+    }
+
     pub fn retract_row_coords(
         &self,
         row: usize,
