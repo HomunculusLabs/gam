@@ -1057,28 +1057,56 @@ jobs:
             2>&1 | tee python-logs/parity.log || status="${PIPESTATUS[0]}"
           exit "$status"
 
+      # ── every measurement below runs, even after one above it fails ──────
+      #
+      # Each step here MEASURES a different suite; none is a precondition for
+      # the next. Left unguarded they inherit step-sequential semantics, so the
+      # FIRST red step silently cancels every measurement after it and the job
+      # reports one failure where it could have reported the true set. That is
+      # not hypothetical: the `python_rust_ffi_parity_gaussian_linear` case
+      # above went red on 07-23 and again on 07-28 (#2595, `raw_reml_score`
+      # returning 0), and both times it took `tests/test_python_api.py` down
+      # with it — unrun, unreported, and indistinguishable from passing. #2432
+      # was filed on the day that suite next executed, and its own title records
+      # the consequence: "first visible run of this suite in a week". Eight
+      # user-facing API tests had been failing into a void.
+      #
+      # `!cancelled()` (not `always()`): a real cancellation still stops the
+      # job, but a FAILURE upstream no longer decides what gets measured. The
+      # job conclusion is unaffected — a failed step fails the job whether or
+      # not later steps run — so this only ever ADDS evidence. That is the same
+      # reason the aggregate step at the end already carries `always()`; the
+      # steps that produce its input should never have been the exception.
+      #
       # Every pytest step below writes a JUnit report. This is purely additive
       # (no pipe, so no exit-status change) and gives the aggregate per-test
       # identities instead of a job-level pass/fail bit.
       - name: Run Python API + pipeline smoke tests
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_python_api.py -v --tb=short --junitxml=python-reports/api.xml
 
       - name: Run Python tables tests
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_tables.py -v --tb=short --junitxml=python-reports/tables.xml
 
       - name: Run numeric by-variable predict-clip contract
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_bug_hunt_numeric_by_variable_clamped_to_training_range_at_predict.py -v --tb=short --junitxml=python-reports/predict_clip.xml
 
       - name: Run curv() constant-curvature sign-recovery contract (#1464)
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_bug_hunt_curv_smooth_hyperbolic_recovered_as_spherical.py -v --tb=short --junitxml=python-reports/curv.xml
 
       - name: Run weighted sample_replicates weight-column contract (#2033)
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_bug_hunt_2033_sample_replicates_weighted_model_drops_weight_column.py -v --tb=short --junitxml=python-reports/sample_replicates.xml
 
       - name: Run Tweedie estimated-power conditional coverage contract (#2026)
+        if: ${{ !cancelled() }}
         run: python -m pytest tests/test_bug_hunt_2026_tweedie_estimated_power_conditional_coverage.py -v --tb=short --junitxml=python-reports/tweedie.xml
 
       - name: Run survival API regression + save/load roundtrip tests
+        if: ${{ !cancelled() }}
         run: |
           python -m pytest \
             tests/test_survival_api_regressions.py \
@@ -1086,6 +1114,7 @@ jobs:
             -v --tb=short --junitxml=python-reports/survival.xml
 
       - name: Run benchmark configuration / mapping tests
+        if: ${{ !cancelled() }}
         run: |
           python -m pytest \
             tests/bench_run_suite_mapping_test.py \
@@ -1095,18 +1124,22 @@ jobs:
             -v --tb=short --junitxml=python-reports/bench.xml
 
       - name: Guard against orphaned Python tests (#1512)
+        if: ${{ !cancelled() }}
         run: |
           python -m pytest tests/test_ci_no_orphan_python_tests_1512.py -v --tb=short --junitxml=python-reports/orphan_guard.xml
 
       - name: Build gam release binary
+        if: ${{ !cancelled() }}
         run: cargo build --release -p gam-cli
 
       - name: Run CLI integration scripts (numeric contract checks)
+        if: ${{ !cancelled() }}
         run: |
           python tests/integration_marginal_slope.py
           python tests/integration_pit_pipeline.py
 
       - name: Run full Python test suite (all Python tests in tests/)
+        if: ${{ !cancelled() }}
         # SPEC 16 (no XFAIL): red is red. Files documenting still-open engine
         # bugs stand red here and the JOB reports red with them — a green job
         # over failing tests is the workflow-level XFAIL pattern SPEC 16
