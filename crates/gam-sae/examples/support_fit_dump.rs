@@ -222,6 +222,13 @@ fn main() -> Result<(), String> {
     // away; three hours of compute produced no artifact at all. Report the miss
     // loudly, then re-enter for one cycle at the tolerance the iterate actually
     // reached so the caller gets a real report and the atoms can be dumped.
+    // Optional decoder-strategy arg: "fista" runs the accelerated parallel
+    // decoder update (6 majorized passes/cycle) instead of the colour-class
+    // sweep -- a typed knob for the A/B, never an environment variable.
+    if args.len() >= 16 && args[15] == "fista" {
+        term_seed.term.set_decoder_fista_passes(Some(6));
+        println!("decoder strategy: FISTA (6 passes/cycle)");
+    }
     let mut report = match term_seed.term.solve_fixed_point(
         centered.view(),
         &lambda,
@@ -271,13 +278,6 @@ fn main() -> Result<(), String> {
                 })?
         }
     };
-    // Optional decoder-strategy arg: "fista" runs the accelerated parallel
-    // decoder update (6 majorized passes/cycle) instead of the colour-class
-    // sweep -- a typed knob for the A/B, never an environment variable.
-    if args.len() >= 16 && args[15] == "fista" {
-        term_seed.term.set_decoder_fista_passes(Some(6));
-        println!("decoder strategy: FISTA (6 passes/cycle)");
-    }
     let mut ard = ard;
     while reml_arg {
         let updated = term_seed
