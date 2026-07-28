@@ -2209,13 +2209,22 @@ fn birth_topology_race_d2_includes_and_selects_cylinder() {
 
     // The d=2 candidate set must literally CONTAIN the cylinder candidate.
     let n = 120usize;
-    let coords = Array2::<f64>::from_shape_fn((n, 2), |(row, axis)| {
+    // THREE seed directions, because the menu this asserts includes a sphere
+    // and `S²` needs three. With only two the seed confines every row to a
+    // great circle, where a sphere is not identifiable from a circle at all and
+    // its degree-2 design is rank-deficient — so no honest sphere candidate
+    // exists to enumerate. The superseded `(lat, lon)` chart needed only two
+    // columns and so was offered unconditionally, which is what let this
+    // fixture assert a complete menu from an incomplete seed.
+    let coords = Array2::<f64>::from_shape_fn((n, 3), |(row, axis)| {
         // axis 0: a phase that completes ~2 revolutions over the rows;
-        // axis 1: a monotone unbounded coordinate.
-        if axis == 0 {
-            (row as f64 / n as f64) * 2.0
-        } else {
-            (row as f64 / n as f64) * 3.0 - 1.5
+        // axis 1: a monotone unbounded coordinate;
+        // axis 2: an independent direction, so the seed spans 3-space.
+        let t = row as f64 / n as f64;
+        match axis {
+            0 => t * 2.0,
+            1 => t * 3.0 - 1.5,
+            _ => (t * TAU).cos(),
         }
     });
     let specs = topology_candidates_for_dim(coords.view(), 2).expect("d=2 candidates build");
