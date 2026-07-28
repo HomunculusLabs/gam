@@ -563,7 +563,7 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, true),
     )
     .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom_d1, atom_d2], assignment).unwrap();
+    let term = SaeManifoldTerm::new(vec![atom_d1, atom_d3], assignment).unwrap();
 
     // This mirrors production: one default-on registry penalty is sized from
     // the heterogeneous latent spec's maximum dimension and shared by both
