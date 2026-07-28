@@ -1127,24 +1127,29 @@ mod tests {
         }
     }
 
+    /// `derivative_signs` carries one entry per AMBIENT axis, so its length is
+    /// the atom's coordinate width. It used to be a fixed `[f64; 2]`, which
+    /// silently assumed every deck-quotient chart is 2-wide — true for the Klein
+    /// bottle's torus cover, false for `RP²` once its cover became the ambient
+    /// sphere.
     fn assert_deck_twin_rebuild(
         geometry: SaeAtomGeometryPlan,
         coords: Array2<f64>,
-        derivative_signs: [f64; 2],
+        derivative_signs: &[f64],
     ) {
         let width = geometry.basis_size().unwrap();
         let spec = SaeOosAtomSpec::new(geometry.clone(), Array2::zeros((width, 1))).unwrap();
         let atom = build_oos_atom(0, &spec, coords.view(), 1).unwrap();
         assert_eq!(atom.geometry_plan(), Some(&geometry));
         assert_eq!(atom.basis_kind(), geometry.kind());
-        assert_eq!(atom.latent_dim(), 2);
+        assert_eq!(atom.latent_dim(), derivative_signs.len());
         assert_eq!(atom.smooth_penalty()[[0, 0]], 0.0);
         for column in 0..width {
             assert!(
                 (atom.basis_values[[0, column]] - atom.basis_values[[1, column]]).abs() <= 1.0e-12,
                 "deck-twin value mismatch at column {column}"
             );
-            for axis in 0..2 {
+            for axis in 0..derivative_signs.len() {
                 assert!(
                     (atom.basis_jacobian[[1, column, axis]]
                         - derivative_signs[axis] * atom.basis_jacobian[[0, column, axis]])
@@ -1158,22 +1163,31 @@ mod tests {
 
     #[test]
     fn typed_oos_replays_projective_plane_deck_invariance() {
-        let latitude = 0.31;
-        let longitude = -0.47;
+        // `RP² = S²/{u ~ -u}`, so on the ambient cover the deck twin is simply
+        // the ANTIPODE. In the superseded chart the same map was the awkward
+        // `(lat, lon) -> (-lat, lon + π)`.
+        //
+        // Retained even-degree harmonics satisfy `Φ(-u) = Φ(u)`, so
+        // differentiating gives `∇Φ(-u) = -∇Φ(u)`: every ambient axis flips,
+        // where the chart flipped latitude and fixed longitude.
+        let u = [0.48, -0.60, 0.64];
+        let norm = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
         let coords = Array2::from_shape_vec(
-            (2, 2),
+            (2, 3),
             vec![
-                latitude,
-                longitude,
-                -latitude,
-                longitude + std::f64::consts::PI,
+                u[0] / norm,
+                u[1] / norm,
+                u[2] / norm,
+                -u[0] / norm,
+                -u[1] / norm,
+                -u[2] / norm,
             ],
         )
         .unwrap();
         assert_deck_twin_rebuild(
             SaeAtomGeometryPlan::projective_plane(2).unwrap(),
             coords,
-            [-1.0, 1.0],
+            &[-1.0, -1.0, -1.0],
         );
     }
 
@@ -1185,7 +1199,7 @@ mod tests {
         assert_deck_twin_rebuild(
             SaeAtomGeometryPlan::klein_bottle(2).unwrap(),
             coords,
-            [1.0, -1.0],
+            &[1.0, -1.0],
         );
     }
 

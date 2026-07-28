@@ -135,7 +135,9 @@ fn auto_primary_topology_never_falls_back_on_race_failure_2238_2239() {
 fn quotient_surface_candidates_are_reachable_with_their_cover_geometry() {
     use gam_solve::AutoTopologyKind;
 
-    let coords = Array2::<f64>::zeros((32, 2));
+    // Three seed directions: `RP²` is `S²/{u ~ -u}` and needs the sphere's three
+    // to be identifiable at all, so it is enrolled under the same guard.
+    let coords = Array2::<f64>::zeros((32, 3));
     let specs = topology_candidates_for_dim(coords.view(), 2).unwrap();
     let projective = specs
         .iter()
@@ -273,7 +275,10 @@ fn projective_plane_veronese_embedding_beats_the_unquotiented_sphere_chart() {
 
     let (n_latitude, n_longitude) = (10usize, 16usize);
     let n = n_latitude * n_longitude;
-    let mut coords = Array2::<f64>::zeros((n, 2));
+    // The grid is still generated in (latitude, longitude) because that is a
+    // convenient way to tile the sphere evenly; the COORDINATE handed to the
+    // atoms is the ambient direction it names.
+    let mut coords = Array2::<f64>::zeros((n, 3));
     let mut target = Array2::<f64>::zeros((n, 4));
     for latitude_index in 0..n_latitude {
         let latitude = -std::f64::consts::FRAC_PI_2
@@ -281,26 +286,19 @@ fn projective_plane_veronese_embedding_beats_the_unquotiented_sphere_chart() {
         for longitude_index in 0..n_longitude {
             let longitude = std::f64::consts::TAU * longitude_index as f64 / n_longitude as f64;
             let row = latitude_index * n_longitude + longitude_index;
-            coords[[row, 0]] = latitude;
-            coords[[row, 1]] = longitude;
             let x = latitude.cos() * longitude.cos();
             let y = latitude.cos() * longitude.sin();
             let z = latitude.sin();
+            coords[[row, 0]] = x;
+            coords[[row, 1]] = y;
+            coords[[row, 2]] = z;
             target[[row, 0]] = x * y;
             target[[row, 1]] = y * z;
             target[[row, 2]] = z * x;
             target[[row, 3]] = 0.5 * (x * x - y * y);
         }
     }
-    let manifold = LatentManifold::Product(vec![
-        LatentManifold::Interval {
-            lo: -std::f64::consts::FRAC_PI_2,
-            hi: std::f64::consts::FRAC_PI_2,
-        },
-        LatentManifold::Circle {
-            period: std::f64::consts::TAU,
-        },
-    ]);
+    let manifold = LatentManifold::Sphere { dim: 3 };
     let projective = TopologyCandidateSpec::new(
         AutoTopologyKind::ProjectivePlane,
         SaeAtomGeometryPlan::projective_plane(1).unwrap(),
@@ -308,13 +306,18 @@ fn projective_plane_veronese_embedding_beats_the_unquotiented_sphere_chart() {
         coords.clone(),
     )
     .unwrap();
+    // The comparison is now quotient-vs-cover on EQUAL footing: both are ambient
+    // harmonic bases over the same degree-2 span, differing only in that `RP²`
+    // keeps the even degrees the antipodal deck admits. Against the legacy chart
+    // the win was partly an artifact of the chart's missing quadrupoles, which
+    // made it a weaker opponent for reasons unrelated to the quotient.
     let sphere = TopologyCandidateSpec::new(
         AutoTopologyKind::Sphere,
         SaeAtomGeometryPlan::new(
             SaeAtomBasisKind::Sphere,
-            2,
-            SaeBasisResolution::SphereChart,
-            SaeReferenceMetricPlan::SphereChart,
+            3,
+            SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+            SaeReferenceMetricPlan::RoundSphere,
         )
         .unwrap(),
         manifold,
@@ -325,10 +328,11 @@ fn projective_plane_veronese_embedding_beats_the_unquotiented_sphere_chart() {
     let projective_fit = fit_topology_candidate(&projective, target.view(), weights.view())
         .expect("RP2 Veronese fit");
     let sphere_fit = fit_topology_candidate(&sphere, target.view(), weights.view())
-        .expect("unquotiented sphere-chart fit");
+        .expect("unquotiented ambient-sphere fit");
     assert!(
         projective_fit.raw_reml < sphere_fit.raw_reml,
-        "RP2 invariant basis must win its Veronese DGP: RP2={}, sphere={}",
+        "RP2 invariant basis must win its Veronese DGP against the ambient sphere \
+         at equal degree: RP2={}, sphere={}",
         projective_fit.raw_reml,
         sphere_fit.raw_reml
     );

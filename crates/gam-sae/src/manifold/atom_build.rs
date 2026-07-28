@@ -558,13 +558,17 @@ mod tests {
     #[test]
     fn quotient_plans_drive_padded_stack_width_penalty_and_deck_twins() {
         let z = Array2::<f64>::zeros((2, 1));
-        let mut seed_coords = Array3::<f64>::zeros((2, 2, 2));
-        let latitude = 0.29;
-        let longitude = -0.41;
-        seed_coords[[0, 0, 0]] = latitude;
-        seed_coords[[0, 0, 1]] = longitude;
-        seed_coords[[0, 1, 0]] = -latitude;
-        seed_coords[[0, 1, 1]] = longitude + std::f64::consts::PI;
+        // `D_max = 3`: `RP²` rides the ambient spherical cover (3 wide) while the
+        // Klein bottle rides its torus cover (2 wide), and the padded stack is
+        // exactly the machinery for such heterogeneous widths.
+        let mut seed_coords = Array3::<f64>::zeros((2, 2, 3));
+        // The `RP²` deck twin is the ANTIPODE `u ~ -u`, stated directly on the
+        // ambient cover instead of as `(lat, lon) -> (-lat, lon + π)`.
+        let u = [0.36, -0.48, 0.8];
+        for axis in 0..3 {
+            seed_coords[[0, 0, axis]] = u[axis];
+            seed_coords[[0, 1, axis]] = -u[axis];
+        }
         let theta = 0.17;
         let phi = 0.23;
         seed_coords[[1, 0, 0]] = theta;
@@ -582,7 +586,7 @@ mod tests {
         )
         .unwrap();
         let (phi_stack, jet_stack, penalty_stack, basis_sizes, _) =
-            sae_build_padded_basis_stacks(&plans, seed_coords.view(), 2).unwrap();
+            sae_build_padded_basis_stacks(&plans, seed_coords.view(), 3).unwrap();
 
         assert_eq!(
             plans[0].geometry,
