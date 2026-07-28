@@ -208,11 +208,15 @@ fn main() {
         &mut dead_guard_const_offenders,
     );
 
-    // Underscore-prefixed function parameter names. `_name: T` silences the
+    // Underscore function parameter names. `_name: T` silences the
     // unused-parameter warning by hiding it from the lint rather than fixing
     // it. Use the parameter, restructure the API so it isn't passed, or
-    // delete the param. Bare `_: T` placeholders remain legal because they do
-    // not preserve a fake binding name. Build.rs is exempt.
+    // delete the param. The bare `_: T` placeholder is banned identically:
+    // it is the same admission that the signature carries an argument the
+    // body never reads, and dropping the name only makes the dead argument
+    // harder to grep for. There is no exemption — not for macro-threaded
+    // tokens (`_py: Python<'_>`), not for trait-method signatures, not for
+    // callback shims. Change the signature. Build.rs is exempt.
     let mut underscore_fn_arg_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
     scan_for_underscore_fn_args(
         &manifest_dir,
@@ -487,7 +491,7 @@ fn main() {
     if !underscore_fn_arg_offenders.is_empty() {
         sections.push(Section {
             title:
-                "underscore-prefixed fn parameter (use the value, restructure the API, or delete the param)"
+                "underscore fn parameter, `_name: T` or bare `_: T` (use the value, restructure the API, or delete the param)"
                     .to_string(),
             rows: underscore_fn_arg_offenders
                 .iter()
@@ -1427,6 +1431,57 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         ("spin_loop()", "spin_loop", false),
         ("thread::yield_now(", "thread::yield_now", false),
         ("std::thread::yield_now(", "std::thread::yield_now", false),
+        // ---- no-op family ----
+        // A construct that provably does nothing is either dead weight or a
+        // silencer for a signal someone did not want to read. Delete it, or
+        // make the call site stop requiring it.
+        //
+        // Empty block bodies: `fn f() {}`, `if cond {}`, `for x in xs {}`.
+        // An empty function is an unimplemented stub wearing a green check;
+        // an empty `if` is a condition evaluated for nothing. Strict
+        // everywhere — a test with an empty body passes vacuously, which is
+        // exactly the failure mode this table exists to stop.
+        (") {}", "empty block body", false),
+        (") { }", "empty block body", false),
+        // No-op closures. `|_| ()` / `|_| {}` is the callback spelling of
+        // `let _ = x;`: an observer wired up to discard what it observes, or
+        // a required-argument placeholder. `res.map(|_| ())` in particular
+        // only exists to erase a value the caller then ignores — return the
+        // value or drop the call.
+        ("|_| ()", "no-op closure", false),
+        ("|_| {}", "no-op closure", false),
+        ("|_, _| ()", "no-op closure", false),
+        ("|_, _| {}", "no-op closure", false),
+        // `std::convert::identity` is a function whose contract is to do
+        // nothing. Every use is a slot that should have been left empty.
+        ("convert::identity", "convert::identity", false),
+        // Constant conditions. `if true` / `if false` / `while false` are
+        // dead-by-construction guards in the same family as the already
+        // banned `const X: bool = false;` and `#[cfg(any())]`.
+        ("if true", "if true", false),
+        ("if false", "if false", false),
+        ("while true", "while true", false),
+        ("while false", "while false", false),
+        // `_ => ()` is an empty catch-all arm: every variant the author did
+        // not enumerate silently does nothing, and a new variant added later
+        // inherits that silence instead of a compile error.
+        ("_ => ()", "_ => ()", false),
+        // `return ();` is a bare `return` with extra syntax.
+        ("return ();", "return ()", false),
+        // `let () = expr;` and `if let _ = expr` are the pattern-shaped
+        // dodges around the banned `let _ = expr;` — same discard, spelled
+        // so a name-based scanner misses it.
+        ("let () =", "let () =", false),
+        ("if let _", "if let _", false),
+        // `#[rustfmt::skip]` opts a region out of the formatter the way
+        // `#[allow(...)]` opts it out of a lint. Same "turn the tool off
+        // rather than fix the code" failure mode; banned identically.
+        ("#[rustfmt::skip]", "#[rustfmt::skip]", false),
+        // `#[doc(hidden)]` hides a `pub` item from the documented API
+        // surface while leaving it reachable. It is the documentation
+        // equivalent of `#[allow(dead_code)]`: the item is either public
+        // API (document it) or it is not (make it private or delete it).
+        ("#[doc(hidden)]", "#[doc(hidden)]", false),
     ]
 }
 
@@ -4297,9 +4352,10 @@ fn collect_scannable_files(root: &Path, dir: &Path, files: &mut Vec<ScannedFile>
     }
 }
 
-/// Flags function definitions whose parameter list contains an
-/// underscore-prefixed name (e.g. `fn foo(_x: i32)`). Bare `_` placeholders
-/// are allowed; only `_<ident>` is banned. Skips closures and `fn(...)`
+/// Flags function definitions whose parameter list contains an underscore
+/// name (e.g. `fn foo(_x: i32)`) or a bare underscore placeholder
+/// (`fn foo(_: i32)`). Both are banned: each declares an argument the body
+/// never reads. Skips closures and `fn(...)`
 /// type positions (the `fn` is not followed by an identifier). Handles
 /// both `{ ... }` bodies and bodyless trait-method signatures
 /// (`fn foo(_x: i32);`). Build.rs is exempt.
@@ -4482,20 +4538,7 @@ fn scan_for_underscore_fn_args(
                 if !rest.starts_with(':') {
                     continue;
                 }
-                if name == "_" {
-                    continue;
-                }
                 if name.starts_with('_') {
-                    // PyO3 convention: `_py: Python<'_>` (or `Python<'py>`) is
-                    // the GIL token that #[pyfunction] / #[pymethods] macros
-                    // thread through every entry point. The body of helpers
-                    // called from those entry points often doesn't touch it,
-                    // but removing the parameter forces the call site to drop
-                    // it too, which breaks the macro contract. Exempt it.
-                    let type_after_colon = rest[1..].trim_start();
-                    if type_after_colon.starts_with("Python<") {
-                        continue;
-                    }
                     // Compute the byte offset of the parameter NAME (not the
                     // leading whitespace/attribute/mut prefix) so the line
                     // mapping points to the underscore-prefixed identifier
