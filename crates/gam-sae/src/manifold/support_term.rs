@@ -2469,6 +2469,26 @@ impl SaeSupportSparseTerm {
             }
             None => {
                 self.assignment.project_row_coords(row, old_coords, coords_row)?;
+                // The floor rung's REQUIRED Armijo decrease. When even that is
+                // below the objective's own round-off resolution, the search
+                // has bottomed out demanding verification of a decrease it
+                // cannot measure -- no trial at any smaller step could ever
+                // certify. Measured on the #2502 REML lane (row 228530):
+                // required 9.5e-13 against resolution 1.7e-11, raw KKT 31 --
+                // a real gradient whose descent is unresolvable at f64. Taking
+                // no step leaves the row's KKT high, so the outer certificate
+                // honestly refuses to certify; erroring instead discarded a
+                // whole fitted model over one unmeasurable row.
+                let floor_required = 1.0e-4 * 2.0_f64.powi(-24) * directional;
+                if floor_required <= objective_resolution {
+                    log::info!(
+                        "coordinate row {row}: line search unmeasurable at its floor \
+                         (required decrease {floor_required:.3e} <= objective resolution \
+                         {objective_resolution:.3e}, raw KKT max={raw_gradient_max:.3e}); \
+                         taking no step"
+                    );
+                    return Ok(max_change);
+                }
                 return Err(format!(
                     "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
                      (raw KKT max={raw_gradient_max:.17e}, rhs_dot_delta={directional:.17e}, \
