@@ -5,7 +5,7 @@
 //! and the truth-recovery RMSE.
 //!
 //! Run with:
-//!   cargo test --test probe_2596_lognormal_locscale_recovery -- --nocapture --ignored
+//!   cargo run --example probe_2596_lognormal_locscale_recovery
 
 use gam::matrix::LinearOperator;
 use gam::smooth::build_term_collection_design;
@@ -242,11 +242,7 @@ fn run_survival_case(label: &str, formula: &str, cfg_mut: impl FnOnce(&mut FitCo
     );
 }
 
-#[test]
-#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
-fn probe_2596_lognormal_locscale_recovery() {
-    init_parallelism();
-    gam::test_support::install_diagnostic_logger();
+fn probe_fixture() {
     run_survival_case(
         "A-fixture-k10",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
@@ -254,10 +250,7 @@ fn probe_2596_lognormal_locscale_recovery() {
     );
 }
 
-#[test]
-#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
 fn probe_2596_variants() {
-    init_parallelism();
     run_survival_case(
         "B-k5",
         r#"Surv(t, event) ~ x + s(z, bs="tp", k=5)"#,
@@ -265,8 +258,8 @@ fn probe_2596_variants() {
     );
     run_survival_case(
         "C-single-penalty",
-        r#"Surv(t, event) ~ x + s(z, bs="tp", k=10)"#,
-        |c| c.double_penalty = false,
+        r#"Surv(t, event) ~ x + s(z, bs="tp", k=10, double_penalty=false)"#,
+        |_| {},
     );
     run_survival_case(
         "D-pspline",
@@ -284,10 +277,7 @@ fn probe_2596_variants() {
 /// GAM on the event rows only. If gam recovers `s(z)` here and not on the
 /// survival route, the defect is on the survival route, not in the thin-plate
 /// smooth or its REML selection.
-#[test]
-#[ignore = "diagnostic probe for #2596; run explicitly with --ignored --nocapture"]
 fn probe_2596_gaussian_control() {
-    init_parallelism();
     let (n, t, event, x, z, sigma_true) = fixture();
     let keep: Vec<usize> = (0..n).filter(|&i| event[i] > 0.5).collect();
     let headers: Vec<String> = ["y", "x", "z"].into_iter().map(str::to_string).collect();
@@ -350,4 +340,12 @@ fn probe_2596_gaussian_control() {
         "[CONTROL] m={m} signal_rms={signal_rms:.4} truth_rmse={:.4} (sigma_true={sigma_true:.4})",
         rmse(&mu_c, &truth_c),
     );
+}
+
+fn main() {
+    init_parallelism();
+    gam::test_support::install_diagnostic_logger();
+    probe_fixture();
+    probe_2596_gaussian_control();
+    probe_2596_variants();
 }

@@ -1315,6 +1315,35 @@ pub(crate) enum CachedValueProbeOutcome {
     Fatal(String),
 }
 
+/// Compact rendering of an outer θ point for the `[STAGE] outer eval` trace.
+///
+/// The trace used to report the VERDICT of an outer evaluation (its cost, its
+/// gradient norm) without the POINT the verdict was measured at, so a log of a
+/// finished search says how the criterion moved but not where — and "λ̂ railed
+/// at the box" versus "λ̂ interior" is exactly the distinction that log has to
+/// settle (#2596). Rendering θ costs one short string per evaluation on a path
+/// whose per-evaluation work is an entire penalized fit.
+///
+/// Long vectors are elided after [`OUTER_TRACE_MAX_COORDS`] coordinates so a
+/// wide model does not turn one log line into a page.
+pub(crate) fn format_outer_theta(theta: &Array1<f64>) -> String {
+    const OUTER_TRACE_MAX_COORDS: usize = 12;
+    let shown = theta.len().min(OUTER_TRACE_MAX_COORDS);
+    let mut out = String::with_capacity(4 + 9 * shown);
+    out.push('[');
+    for (i, value) in theta.iter().take(shown).enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("{value:+.4}"));
+    }
+    if theta.len() > shown {
+        out.push_str(&format!(",…+{}", theta.len() - shown));
+    }
+    out.push(']');
+    out
+}
+
 pub(crate) fn trial_rho_distance(reference: Option<&Array1<f64>>, trial: &Array1<f64>) -> f64 {
     let Some(reference) = reference else {
         return f64::NAN;
@@ -1477,8 +1506,9 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 // noise, not a globally-infeasible neighbourhood.
                 self.consecutive_probe_refusals = 0;
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={})",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s theta={} cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={})",
                     stage_start.elapsed().as_secs_f64(),
+                    format_outer_theta(x),
                     cost,
                     trial_rho_distance,
                     self.iter_count
@@ -1668,10 +1698,12 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
         self.value_probe_cache
             .retain(|entry| value_probe_reject_outcome(&entry.outcome));
         log::info!(
-            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s cost={:.6e} |g|={:.3e} (first-order bridge, iter={})",
+            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s theta={} cost={:.6e} |g|={:.3e} g={} (first-order bridge, iter={})",
             stage_start.elapsed().as_secs_f64(),
+            format_outer_theta(x),
             eval.cost,
             g_norm,
+            format_outer_theta(&gradient),
             self.iter_count,
         );
         self.iter_count = self.iter_count.saturating_add(1);

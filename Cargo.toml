@@ -430,3 +430,7 @@ codegen-units = 1
 panic = "unwind"
 debug = false
 strip = true
+
+[[example]]
+name = "probe_2596_lognormal_locscale_recovery"
+path = "examples/probe_2596_lognormal_locscale_recovery.rs"
