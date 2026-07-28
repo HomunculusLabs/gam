@@ -522,7 +522,9 @@ for li, lam in enumerate(LAMBDAS):
          gam best eta RMSE {gam_best_rmse:.5} exceeds PyMC {pymc_best_rmse:.5} * 1.10"
     );
 
-    std::fs::remove_dir_all(&dir).ok();
+    if let Err(err) = std::fs::remove_dir_all(&dir) {
+        eprintln!("[cleanup] could not remove {}: {err}", dir.display());
+    }
 }
 
 /// REAL-DATA ARM of the same capability (penalized binomial GAM, posterior

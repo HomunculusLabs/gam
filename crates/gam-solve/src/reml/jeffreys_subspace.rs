@@ -192,10 +192,7 @@ pub(crate) fn jeffreys_antiderivative_floor_sensitivity(lam: f64, floor: f64) ->
 /// must remain on one fixed branch; [`JointJeffreysPlan`] checks those stratum
 /// boundaries before emitting second-order trace weights.
 #[inline]
-pub(crate) fn jeffreys_antiderivative_floor_second_sensitivity(
-    lam: f64,
-    floor: f64,
-) -> f64 {
+pub(crate) fn jeffreys_antiderivative_floor_second_sensitivity(lam: f64, floor: f64) -> f64 {
     let cap = jeffreys_cap(floor);
     if lam >= cap {
         if cap > CONDITIONING_GATE_ABSOLUTE_CLEAR {
@@ -1055,8 +1052,7 @@ impl JointJeffreysExplicitMixedTraceWeights {
         let value = beta_term + mixed_term;
         if !value.is_finite() {
             return Err(
-                "joint Jeffreys explicit mixed contraction produced a non-finite value"
-                    .to_string(),
+                "joint Jeffreys explicit mixed contraction produced a non-finite value".to_string(),
             );
         }
         Ok(value)
@@ -1065,10 +1061,7 @@ impl JointJeffreysExplicitMixedTraceWeights {
 
 impl JointJeffreysPlan {
     /// Build the exact reduced-information spectrum and conditioning gate once.
-    pub fn prepare(
-        h_joint: ArrayView2<'_, f64>,
-        z_j: ArrayView2<'_, f64>,
-    ) -> Result<Self, String> {
+    pub fn prepare(h_joint: ArrayView2<'_, f64>, z_j: ArrayView2<'_, f64>) -> Result<Self, String> {
         let p = h_joint.nrows();
         if h_joint.ncols() != p {
             return Err(format!(
@@ -1116,8 +1109,7 @@ impl JointJeffreysPlan {
         let lambda_max = evals.iter().cloned().fold(0.0_f64, f64::max);
         let lambda_min = evals.iter().cloned().fold(f64::INFINITY, f64::min);
         let gate_weight = conditioning_gate_weight(lambda_min, lambda_max);
-        let floor = (REDUCED_INFO_RELATIVE_FLOOR * lambda_max)
-            .max(REDUCED_INFO_ABSOLUTE_FLOOR);
+        let floor = (REDUCED_INFO_RELATIVE_FLOOR * lambda_max).max(REDUCED_INFO_ABSOLUTE_FLOOR);
         let floor_in_relative_regime = lambda_max > 0.0
             && REDUCED_INFO_RELATIVE_FLOOR * lambda_max >= REDUCED_INFO_ABSOLUTE_FLOOR;
         let mut idx_min = 0usize;
@@ -1205,10 +1197,7 @@ impl JointJeffreysPlan {
         // `max(w_abs, w_rel)` is not even C¹ where two moving interior branches
         // tie.  These policy strata are just as real as an eigenvalue/floor
         // branch knot, so reject them before the inactive-gate fast path.
-        for knot in [
-            CONDITIONING_GATE_ABSOLUTE,
-            CONDITIONING_GATE_ABSOLUTE_CLEAR,
-        ] {
+        for knot in [CONDITIONING_GATE_ABSOLUTE, CONDITIONING_GATE_ABSOLUTE_CLEAR] {
             if (self.lambda_min - knot).abs() <= branch_tol {
                 return Err(format!(
                     "joint Jeffreys explicit mixed trace weights reached an absolute-gate stratum at λ_min={:e}, knot={knot:e}, tolerance={branch_tol:e}",
@@ -1217,10 +1206,7 @@ impl JointJeffreysPlan {
             }
         }
         if self.lambda_max > 0.0 && self.lambda_min.is_finite() {
-            for ratio_knot in [
-                CONDITIONING_GATE_RELATIVE,
-                CONDITIONING_GATE_RELATIVE_CLEAR,
-            ] {
+            for ratio_knot in [CONDITIONING_GATE_RELATIVE, CONDITIONING_GATE_RELATIVE_CLEAR] {
                 let signed_distance = self.lambda_min - ratio_knot * self.lambda_max;
                 if signed_distance.abs() <= branch_tol {
                     return Err(format!(
@@ -1271,12 +1257,8 @@ impl JointJeffreysPlan {
             });
         }
 
-        let cap_policy_tol = 64.0
-            * f64::EPSILON
-            * self
-                .floor
-                .abs()
-                .max(CONDITIONING_GATE_ABSOLUTE_CLEAR);
+        let cap_policy_tol =
+            64.0 * f64::EPSILON * self.floor.abs().max(CONDITIONING_GATE_ABSOLUTE_CLEAR);
         if (self.floor - CONDITIONING_GATE_ABSOLUTE_CLEAR).abs() <= cap_policy_tol {
             return Err(format!(
                 "joint Jeffreys explicit mixed trace weights reached the cap-policy stratum: floor={:e}, gate cap={:e}, tolerance={cap_policy_tol:e}",
@@ -1309,11 +1291,8 @@ impl JointJeffreysPlan {
             }
         }
         let relative_floor = REDUCED_INFO_RELATIVE_FLOOR * self.lambda_max;
-        let floor_knot_tol = 64.0
-            * f64::EPSILON
-            * relative_floor
-                .abs()
-                .max(REDUCED_INFO_ABSOLUTE_FLOOR);
+        let floor_knot_tol =
+            64.0 * f64::EPSILON * relative_floor.abs().max(REDUCED_INFO_ABSOLUTE_FLOOR);
         if (relative_floor - REDUCED_INFO_ABSOLUTE_FLOOR).abs() <= floor_knot_tol {
             return Err(format!(
                 "joint Jeffreys explicit mixed trace weights reached the relative/absolute floor stratum: REL·λ_max={relative_floor:e}, ABS={:e}",
@@ -1329,8 +1308,7 @@ impl JointJeffreysPlan {
         let mut p_reduced = Array2::<f64>::zeros((m, m));
         for i in 0..m {
             for j in 0..m {
-                p_reduced[[i, j]] =
-                    0.5 * (p_reduced_raw[[i, j]] + p_reduced_raw[[j, i]]);
+                p_reduced[[i, j]] = 0.5 * (p_reduced_raw[[i, j]] + p_reduced_raw[[j, i]]);
             }
         }
         let p_eigen = self.evecs.t().dot(&p_reduced).dot(&self.evecs);
@@ -1349,8 +1327,7 @@ impl JointJeffreysPlan {
         for i in 0..m {
             let lambda = self.evals[i];
             value_ungated += jeffreys_antiderivative(lambda, self.floor);
-            floor_first_sum +=
-                jeffreys_antiderivative_floor_sensitivity(lambda, self.floor);
+            floor_first_sum += jeffreys_antiderivative_floor_sensitivity(lambda, self.floor);
             floor_second_sum +=
                 jeffreys_antiderivative_floor_second_sensitivity(lambda, self.floor);
             d[i] = floored_inverse(lambda, self.floor);
@@ -1428,12 +1405,10 @@ impl JointJeffreysPlan {
         let mut mixed_information = ambient_basis.dot(&b_eigen).dot(&ambient_basis.t());
         for i in 0..p {
             for j in (i + 1)..p {
-                let beta_symmetric =
-                    0.5 * (beta_information[[i, j]] + beta_information[[j, i]]);
+                let beta_symmetric = 0.5 * (beta_information[[i, j]] + beta_information[[j, i]]);
                 beta_information[[i, j]] = beta_symmetric;
                 beta_information[[j, i]] = beta_symmetric;
-                let mixed_symmetric =
-                    0.5 * (mixed_information[[i, j]] + mixed_information[[j, i]]);
+                let mixed_symmetric = 0.5 * (mixed_information[[i, j]] + mixed_information[[j, i]]);
                 mixed_information[[i, j]] = mixed_symmetric;
                 mixed_information[[j, i]] = mixed_symmetric;
             }
@@ -3110,14 +3085,9 @@ mod tests {
         let mixed_derivative = array![[0.0, 0.0], [0.0, 0.4]];
 
         let plan = JointJeffreysPlan::prepare(h0.view(), z.view()).unwrap();
-        let weights = plan
-            .explicit_param_mixed_trace_weights(&explicit)
-            .unwrap();
+        let weights = plan.explicit_param_mixed_trace_weights(&explicit).unwrap();
         let frobenius = |left: &Array2<f64>, right: &Array2<f64>| -> f64 {
-            left.iter()
-                .zip(right.iter())
-                .map(|(&a, &b)| a * b)
-                .sum()
+            left.iter().zip(right.iter()).map(|(&a, &b)| a * b).sum()
         };
         let a_dot_d = frobenius(&weights.beta_information, &beta_derivative);
         let b_dot_e = frobenius(&weights.mixed_information, &mixed_derivative);
@@ -3136,8 +3106,7 @@ mod tests {
         // the entire floor-motion channel, far above this bound. <A,D> keeps
         // its tight bound: its λ_min dependence enters only through the
         // perturbation projection, not the eigenvalue.
-        let eigh_backward_bound =
-            8.0 * (plan.reduced_dim as f64) * f64::EPSILON * plan.lambda_max;
+        let eigh_backward_bound = 8.0 * (plan.reduced_dim as f64) * f64::EPSILON * plan.lambda_max;
         let b_dot_e_conditioning =
             0.4 * 0.5 * REDUCED_INFO_RELATIVE_FLOOR / (plan.floor * plan.floor);
         assert!(
@@ -3168,10 +3137,7 @@ mod tests {
         );
 
         let phi_at = |s: f64, t: f64| -> f64 {
-            let h = &h0
-                + &(s * &explicit)
-                + &(t * &beta_derivative)
-                + &(s * t * &mixed_derivative);
+            let h = &h0 + &(s * &explicit) + &(t * &beta_derivative) + &(s * t * &mixed_derivative);
             joint_jeffreys_term(h.view(), z.view(), |_: &Array1<f64>| {
                 Ok(Some(Array2::<f64>::zeros((2, 2))))
             })
@@ -3179,8 +3145,7 @@ mod tests {
             .0
         };
         let eps = 1.0e-3;
-        let fd = (phi_at(eps, eps) - phi_at(eps, -eps) - phi_at(-eps, eps)
-            + phi_at(-eps, -eps))
+        let fd = (phi_at(eps, eps) - phi_at(eps, -eps) - phi_at(-eps, eps) + phi_at(-eps, -eps))
             / (4.0 * eps * eps);
         // The FD is noise-limited, not truncation-limited, on this fixture: φ
         // depends on the floored eigenvalue with sensitivity ∂φ/∂λ_min =

@@ -1,3 +1,7 @@
+// `manifold/mod.rs` declares this module only as `#[cfg(test)] mod tests_sparse_curvature_operator_2500;`,
+// so every item here is test-only. Stating that scope in the file makes it a
+// claim the compiler enforces rather than one carried by the filename.
+#![cfg(test)]
 //! #2500 — the assignment prior's sparse log-strength curvature operator
 //! `∂H_tt/∂ρ_sparse` must be MODELLED for every family that mints a sparse outer
 //! coordinate, not only for softmax — and it must be the derivative of the

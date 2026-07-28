@@ -1,3 +1,7 @@
+// `manifold/mod.rs` declares this module only as `#[cfg(test)] mod tests_device_engage_1783;`,
+// so every item here is test-only. Stating that scope in the file makes it a
+// claim the compiler enforces rather than one carried by the filename.
+#![cfg(test)]
 //! #1783 regression gate — the `d_atom = 1` (1-D curve / circle) manifold-SAE
 //! fit must ROUTE to the device-resident SAE PCG at realistic scale, not run the
 //! inner arrow-Schur on one CPU core with the GPU idle at 0%.

@@ -963,10 +963,12 @@ impl<T: Clone> Clone for RayonSafeOnce<T> {
     fn clone(&self) -> Self {
         let cloned = Self::new();
         if let Some(value) = self.slot.get() {
-            cloned
-                .slot
-                .set(value.clone())
-                .expect("a freshly constructed RayonSafeOnce slot is still empty");
+            // `get_or_init` rather than `set(..).expect(..)`: the slot of a
+            // freshly constructed `Self` is empty, so the initializer always
+            // runs — and this spelling has no `Result` to discard, which keeps
+            // the impl's bound at `T: Clone` instead of forcing `T: Debug` on
+            // every caller just to name a panic that cannot happen.
+            cloned.slot.get_or_init(|| value.clone());
         }
         cloned
     }

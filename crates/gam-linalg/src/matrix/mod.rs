@@ -6601,7 +6601,11 @@ mod tests {
 
         let gram = op.diag_xtw_x(&weights).expect("signed random-effect Gram");
         assert_eq!(gram, Array2::from_diag(&expected_diag));
-        assert_eq!(op.diag_gram(&weights).unwrap(), expected_diag);
+        assert_eq!(
+            op.diag_gram(&weights)
+                .expect("fixture design and weight vector share n rows"),
+            expected_diag
+        );
 
         let dense = array![[1.0, 2.0], [3.0, -1.0], [4.0, 0.5], [9.0, 9.0], [-2.0, 3.0]];
         let cross = op
@@ -6614,12 +6618,15 @@ mod tests {
         assert_eq!(cross, expected_cross);
 
         let beta = array![4.0, -2.0];
-        let finite = FiniteSignedWeightsView::try_from_array(&weights).unwrap();
+        let finite = FiniteSignedWeightsView::try_from_array(&weights)
+            .expect("fixture weights are finite and signed-representable");
         let normal = op.apply_weighted_normal(finite, &beta, None, 0.0);
         assert_eq!(normal, &expected_diag * &beta);
 
         let y = array![1.0, 2.0, -4.0, 100.0, 0.5];
-        let got_xtwy = op.compute_xtwy(&weights, &y).unwrap();
+        let got_xtwy = op
+            .compute_xtwy(&weights, &y)
+            .expect("fixture design and weight vector share n rows");
         let expected_xtwy = re_dense.t().dot(&(&weights * &y));
         assert_eq!(got_xtwy, expected_xtwy);
     }
@@ -6635,13 +6642,17 @@ mod tests {
         let weights = array![2.0, -4.0, 0.5, -1.5];
         let weighted = &dense * &weights.view().insert_axis(Axis(1));
         let expected_gram = dense.t().dot(&weighted);
-        let got_gram = conditioned.diag_xtw_x(&weights).unwrap();
+        let got_gram = conditioned
+            .diag_xtw_x(&weights)
+            .expect("fixture design and weight vector share n rows");
         assert!(
             (&got_gram - &expected_gram)
                 .iter()
                 .all(|value| value.abs() < 1e-12)
         );
-        let got_diag = conditioned.diag_gram(&weights).unwrap();
+        let got_diag = conditioned
+            .diag_gram(&weights)
+            .expect("fixture design and weight vector share n rows");
         assert!(
             (&got_diag - &expected_gram.diag())
                 .iter()
@@ -6650,7 +6661,9 @@ mod tests {
 
         let y = array![0.5, -2.0, 3.0, 1.25];
         let expected_xtwy = dense.t().dot(&(&weights * &y));
-        let got_xtwy = conditioned.compute_xtwy(&weights, &y).unwrap();
+        let got_xtwy = conditioned
+            .compute_xtwy(&weights, &y)
+            .expect("fixture design and weight vector share n rows");
         assert!(
             (&got_xtwy - &expected_xtwy)
                 .iter()
@@ -6661,7 +6674,8 @@ mod tests {
     #[test]
     fn weighted_operator_certification_reports_smallest_nonfinite_row() {
         let channel = DesignMatrix::Dense(DenseDesignMatrix::from(array![[1.0], [2.0], [3.0]]));
-        let op = MultiChannelOperator::new(vec![channel]).unwrap();
+        let op = MultiChannelOperator::new(vec![channel])
+            .expect("a single channel is a valid multi-channel operator");
         let bad = array![1.0, f64::NAN, f64::INFINITY];
 
         for err in [
@@ -7236,7 +7250,7 @@ mod tests {
         }
 
         let op = TensorProductDesignOperator::new(vec![Arc::new(b1.clone()), Arc::new(b2.clone())])
-            .unwrap();
+            .expect("fixture marginals share a row count");
 
         // Build dense reference via explicit Kronecker row products.
         let p = q1 * q2;
@@ -7293,7 +7307,9 @@ mod tests {
             }
             out
         };
-        let op_xtwx = op.diag_xtw_x(&w).unwrap();
+        let op_xtwx = op
+            .diag_xtw_x(&w)
+            .expect("fixture design and weight vector share n rows");
         let max_diff = (&op_xtwx - &ref_xtwx)
             .iter()
             .map(|v: &f64| v.abs())
@@ -7323,7 +7339,7 @@ mod tests {
         let op = TensorProductDesignOperator::new(
             marginals.iter().map(|m| Arc::new(m.clone())).collect(),
         )
-        .unwrap();
+        .expect("fixture marginals share a row count");
 
         // Dense reference.
         let p: usize = dims.iter().copied().product();
@@ -7379,7 +7395,8 @@ mod tests {
                 dense[[i, col]] = val;
             }
         }
-        let sparse = faer::sparse::SparseColMat::try_new_from_triplets(n, p, &triplets).unwrap();
+        let sparse = faer::sparse::SparseColMat::try_new_from_triplets(n, p, &triplets)
+            .expect("fixture triplets lie inside the declared shape");
         let design = DesignMatrix::Sparse(SparseDesignMatrix::new(sparse));
         let weights = Array1::from_iter((0..n).map(|i| match i % 7 {
             0 => 0.0,
@@ -7388,9 +7405,10 @@ mod tests {
 
         let got = <DesignMatrix as LinearOperator>::xt_diag_x_signed_op(
             &design,
-            FiniteSignedWeightsView::try_from_array(&weights).unwrap(),
+            FiniteSignedWeightsView::try_from_array(&weights)
+                .expect("fixture weights are finite and signed-representable"),
         )
-        .unwrap();
+        .expect("fixture design and weight vector share n rows");
         let mut reference = Array2::<f64>::zeros((p, p));
         for i in 0..n {
             let wi = weights[i];
@@ -7416,7 +7434,9 @@ mod tests {
             "sparse xtwx mismatch: max_diff={max_diff}"
         );
 
-        let got_diag = design.diag_gram(&weights).unwrap();
+        let got_diag = design
+            .diag_gram(&weights)
+            .expect("fixture design and weight vector share n rows");
         let ref_diag = reference.diag().to_owned();
         let max_diag_diff = (&got_diag - &ref_diag)
             .iter()
@@ -7446,8 +7466,8 @@ mod tests {
                 cov_dense[[i, col]] = val;
             }
         }
-        let cov_sparse =
-            faer::sparse::SparseColMat::try_new_from_triplets(n, p_cov, &triplets).unwrap();
+        let cov_sparse = faer::sparse::SparseColMat::try_new_from_triplets(n, p_cov, &triplets)
+            .expect("fixture triplets lie inside the declared shape");
         let cov = DesignMatrix::Sparse(SparseDesignMatrix::new(cov_sparse));
         let mut time = Array2::<f64>::zeros((n, p_time));
         for i in 0..n {
@@ -7455,9 +7475,12 @@ mod tests {
                 time[[i, t]] = (((i + 1) * (t + 3)) as f64).cos() * 0.1 + 0.4;
             }
         }
-        let op = RowwiseKroneckerOperator::new(cov, Arc::new(time.clone())).unwrap();
+        let op = RowwiseKroneckerOperator::new(cov, Arc::new(time.clone()))
+            .expect("covariate and time marginals share n rows");
         let weights = Array1::from_iter((0..n).map(|i| 0.25 + ((i % 11) as f64) * 0.05));
-        let got = op.diag_xtw_x(&weights).unwrap();
+        let got = op
+            .diag_xtw_x(&weights)
+            .expect("fixture design and weight vector share n rows");
 
         let p_total = p_cov * p_time;
         let mut reference = Array2::<f64>::zeros((p_total, p_total));

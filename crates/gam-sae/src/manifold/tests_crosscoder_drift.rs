@@ -1,3 +1,7 @@
+// `manifold/mod.rs` declares this module only as `#[cfg(test)] mod tests_crosscoder_drift;`,
+// so every item here is test-only. Stating that scope in the file makes it a
+// claim the compiler enforces rather than one carried by the filename.
+#![cfg(test)]
 //! Cross-layer drift statistic tests (gam#2231 Inc E).
 //!
 //! The drift geometry is measured on the atoms' honest-units per-layer decoders, so

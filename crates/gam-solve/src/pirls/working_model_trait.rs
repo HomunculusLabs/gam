@@ -368,9 +368,8 @@ impl WorkingLikelihood for GlmLikelihoodSpec {
         integrated: Option<IntegratedWorkingInput<'_>>,
         derivatives: Option<WorkingDerivativeBuffersMut<'_>>,
     ) -> Result<(), EstimationError> {
-        match (&self.spec.response, &self.spec.link, integrated.is_some()) {
-            (ResponseFamily::Binomial, _, true) => {
-                let integ = integrated.unwrap();
+        match (&self.spec.response, &self.spec.link, integrated) {
+            (ResponseFamily::Binomial, _, Some(integ)) => {
                 update_glmvectors_integrated_by_family(
                     integ.quadctx,
                     y,
@@ -387,7 +386,7 @@ impl WorkingLikelihood for GlmLikelihoodSpec {
                 )?;
                 Ok(())
             }
-            (ResponseFamily::Binomial, link, false) => {
+            (ResponseFamily::Binomial, link, None) => {
                 if matches!(link, InverseLink::Mixture(_)) {
                     crate::bail_invalid_estim!(
                         "BinomialMixture IRLS update requires explicit mixture link state"

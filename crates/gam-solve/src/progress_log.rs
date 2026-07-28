@@ -34,7 +34,12 @@ impl Log for ProgressLogger {
         let log_lock_guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut stderr = io::stderr().lock();
         for line in lines {
-            writeln!(stderr, "{line}").ok();
+            // stderr is gone (closed pipe, full disk): further lines cannot land
+            // either, and logging the failure would recurse into this `Log` impl,
+            // so stop writing this record rather than spin through every line.
+            if writeln!(stderr, "{line}").is_err() {
+                break;
+            }
         }
         drop(log_lock_guard);
     }

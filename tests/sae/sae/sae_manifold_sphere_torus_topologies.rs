@@ -19,7 +19,7 @@
 //! No `let _`, no `#[allow]`, no `#[ignore]`, no env vars, no `unwrap_or`
 //! masks.
 
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::f64::consts::PI;
 use std::sync::Arc;
 
 use ndarray::{Array1, Array2};

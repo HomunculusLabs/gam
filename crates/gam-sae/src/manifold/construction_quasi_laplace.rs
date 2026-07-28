@@ -2057,21 +2057,30 @@ impl SaeManifoldTerm {
                     match self.assemble_arrow_schur(target, rho_fixed, registry) {
                         Ok(mut trial_sys) => {
                             let g = Self::system_grad_norm_sq(&trial_sys).sqrt();
-                            let decrement = self
-                                .factor_deflated_evidence_with_grad_norms(
-                                    &mut trial_sys,
-                                    lambda_smooth,
-                                    options,
-                                )
-                                .map(|factor| {
+                            // Bound first so the `&mut trial_sys` borrow ends
+                            // before the decrease below reads `&trial_sys`.
+                            let factored = self.factor_deflated_evidence_with_grad_norms(
+                                &mut trial_sys,
+                                lambda_smooth,
+                                options,
+                            );
+                            let decrement = match factored {
+                                Ok(factor) => Some(
                                     sae_manifold_newton_directional_decrease(
                                         &trial_sys,
                                         factor.delta_t.view(),
                                         factor.delta_beta.view(),
                                     )
-                                    .max(0.0)
-                                })
-                                .ok();
+                                    .max(0.0),
+                                ),
+                                Err(err) => {
+                                    log::debug!(
+                                        "[SAE polish] Newton decrement unavailable this \
+                                         trial ({err}); accepting on the KKT gradient norm alone"
+                                    );
+                                    None
+                                }
+                            };
                             (Some(g), decrement)
                         }
                         Err(_) => (None, None),

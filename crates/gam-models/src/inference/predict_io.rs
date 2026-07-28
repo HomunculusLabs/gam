@@ -190,7 +190,10 @@ impl BernoulliMarginalSlopePredictor {
         // Score-warp anchor layout is `[marginal | logslope]` (parametric
         // only; flex-flex anchoring goes the other direction).
         let score_warp = if needs_score {
-            let runtime = self.score_warp_runtime.as_ref().unwrap();
+            let runtime = self
+                .score_warp_runtime
+                .as_ref()
+                .expect("needs_score is derived from this runtime being present");
             self.validate_runtime_anchor_layout_parametric_only(runtime, "score_warp")?;
             runtime
                 .anchor_correction_matrix(parametric_rows.view())
@@ -204,7 +207,10 @@ impl BernoulliMarginalSlopePredictor {
         // columns first, then (if a FlexEvaluation component is present)
         // the score-warp runtime's reparameterised basis at predict rows.
         let (link_dev_anchor_rows, link_dev) = if needs_link {
-            let runtime = self.link_deviation_runtime.as_ref().unwrap();
+            let runtime = self
+                .link_deviation_runtime
+                .as_ref()
+                .expect("needs_link is derived from this runtime being present");
             // Determine whether the saved link-dev residual carries a
             // FlexEvaluation tail and validate ordering matches the
             // fit-time invariant (all parametric components first, then
@@ -1961,8 +1967,11 @@ impl BernoulliMarginalSlopePredictor {
             return self.transform_internal_eta_to_base_scale(final_eta_internal, None);
         }
 
-        let a_q_vec = a_q_vec.unwrap();
-        let a_b_vec = a_b_vec.unwrap();
+        // Both were allocated by `need_gradient.then(..)`, and the early return
+        // above already handled the `!need_gradient` case.
+        let allocated = "need_gradient is true past the early return, so this was allocated";
+        let a_q_vec = a_q_vec.expect(allocated);
+        let a_b_vec = a_b_vec.expect(allocated);
 
         // Emit chunk Jacobians using precomputed scalars; each worker writes
         // directly into its exclusive `axis_chunks_iter_mut` slice of the

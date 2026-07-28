@@ -36,8 +36,13 @@ fn circle_atom(
     col_cos: usize,
     coords: &Array2<f64>,
 ) -> SaeManifoldAtom {
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("an odd harmonic count is a valid periodic basis size"));
-    let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("an odd harmonic count is a valid periodic basis size"),
+    );
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("fixture coords are already wrapped into the evaluator's unit period");
     // PeriodicHarmonicEvaluator(3) emits [1, sin(2πt), cos(2πt)].
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, col_sin]] = 1.0;
@@ -79,7 +84,8 @@ fn zz_e2_collateral_on_manifold_beats_flat_at_matched_norm() {
         AssignmentMode::softmax(1.0),
     )
     .expect("fixture assignment: one logit column and one coord block per atom");
-    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).expect("fixture term: every atom's basis width matches its assignment block");
+    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
 
     // Sweep a dose range; steer atom 0 (axis 0), measure collateral vs atom 1.
     let doses = [0.02_f64, 0.05, 0.1, 0.15, 0.2];

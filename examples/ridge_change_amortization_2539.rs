@@ -121,7 +121,8 @@ mod harness {
         );
 
         // ---- arm A: what the curved tier does today on every rejected step ----
-        ResidentArrowFrameHandle::new(&sys, ridge_ladder(0).0, ridge_ladder(0).1).ok();
+        ResidentArrowFrameHandle::new(&sys, ridge_ladder(0).0, ridge_ladder(0).1)
+            .expect("warm-up host rebuild at the first ladder rung");
         let mut rebuild_total = Duration::ZERO;
         for k in 0..n_changes {
             let (rt, rb) = ridge_ladder(k);
@@ -136,7 +137,7 @@ mod harness {
 
         // ---- arm B: the same ladder, re-factored on-device from resident blocks ----
         base.refactor_and_solve(ridge_ladder(0).0, ridge_ladder(0).1)
-            .ok();
+            .expect("warm-up device refactor at the first ladder rung");
         let mut refactor_total = Duration::ZERO;
         for k in 0..n_changes {
             let (rt, rb) = ridge_ladder(k);

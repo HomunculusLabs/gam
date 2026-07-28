@@ -7884,7 +7884,11 @@ impl BimodalTerminalObjective {
     /// audit working correctly; it was the fixture that was modelling the wrong
     /// thing.
     fn basin_value(&self, rho: &Array1<f64>) -> f64 {
-        let bump = if *self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned") {
+        let bump = if *self
+            .warm_bumped
+            .lock()
+            .expect("the warm_bumped mutex is not poisoned")
+        {
             BASIN_BUMP
         } else {
             0.0
@@ -7897,7 +7901,10 @@ impl BimodalTerminalObjective {
     /// disagree unless a `reset()` re-baselines between them.
     fn basin_solve(&self, rho: &Array1<f64>) -> OuterEval {
         let cost = self.basin_value(rho);
-        let mut warm = self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned");
+        let mut warm = self
+            .warm_bumped
+            .lock()
+            .expect("the warm_bumped mutex is not poisoned");
         *warm = !*warm; // consecutive warm-started solves alternate basins
         OuterEval {
             cost,
@@ -7982,7 +7989,10 @@ impl OuterObjective for BimodalTerminalObjective {
         self.owns_terminal
     }
     fn reset(&mut self) {
-        *self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned") = false;
+        *self
+            .warm_bumped
+            .lock()
+            .expect("the warm_bumped mutex is not poisoned") = false;
     }
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // The bimodal basin is carried by `warm_bumped`, not an inner-β slot —

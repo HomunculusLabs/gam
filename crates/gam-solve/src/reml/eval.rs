@@ -439,16 +439,13 @@ pub(crate) fn sigma_cubature_evaluate_cpu_rayon(
     // per-rho reparameterization `Qs` differs at every sigma point, and
     // `fit_model_for_fixed_rho_with_adaptive_kkt` takes its warm start in the
     // original basis and applies each point's own transform itself.
-    let centre_beta = centre_fit.map(|fit| {
-        Coefficients::new(fit.reparam_result.qs.dot(fit.beta_transformed.as_ref()))
-    });
+    let centre_beta = centre_fit
+        .map(|fit| Coefficients::new(fit.reparam_result.qs.dot(fit.beta_transformed.as_ref())));
     let rows: Vec<Result<SigmaPointResult, EstimationError>> = (0..sigma_points.len())
         .into_par_iter()
         .map(|idx| -> Result<SigmaPointResult, EstimationError> {
-            let fit_point = state.execute_pirls_stateless_for_cubature(
-                &sigma_points[idx],
-                centre_beta.as_ref(),
-            )?;
+            let fit_point = state
+                .execute_pirls_stateless_for_cubature(&sigma_points[idx], centre_beta.as_ref())?;
             let h_point = map_hessian_to_original_basis(fit_point.as_ref())?;
             let cov_point = crate::gpu_kernels::sigma_cubature::certified_sigma_point_covariance(
                 &h_point,
@@ -564,7 +561,9 @@ impl<'a> RemlState<'a> {
             .map(|r_k| gam_linalg::faer_ndarray::fast_atb(r_k, r_k))
             .collect();
 
-        let lambdas_slice = lambdas.as_slice().unwrap();
+        let lambdas_slice = lambdas
+            .as_slice()
+            .expect("owned Array1 is contiguous, so as_slice always succeeds");
 
         let pld = PenaltyPseudologdet::from_components(&s_k_matrices, lambdas_slice, ridge)
             .map_err(EstimationError::LayoutError)?;
@@ -607,7 +606,9 @@ impl<'a> RemlState<'a> {
         // under orthogonal reparameterization, so this is correct regardless of
         // whether P-IRLS uses standard or factored Qs.
         if let Some(ref kron) = self.kronecker_penalty_system {
-            let lambdas_slice = lambdas.as_slice().unwrap();
+            let lambdas_slice = lambdas
+                .as_slice()
+                .expect("owned Array1 is contiguous, so as_slice always succeeds");
             let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(lambdas_slice, ridge);
             return Ok((logdet, rank, det1, det2));
         }
@@ -622,7 +623,9 @@ impl<'a> RemlState<'a> {
             ));
         }
 
-        let lambdas_slice = lambdas.as_slice().unwrap();
+        let lambdas_slice = lambdas
+            .as_slice()
+            .expect("owned Array1 is contiguous, so as_slice always succeeds");
 
         // ONE factorization per evaluation point (#931): the same object also
         // serves the τ/ψ hyper-coordinate components in hyper.rs, so the
@@ -828,8 +831,13 @@ impl<'a> RemlState<'a> {
         use SmoothingCorrectionFallbackSeverity::{NumericalFailure, Routine};
 
         // Always compute the fast first-order correction first.
-        let first_order =
-            super::compute_smoothing_correction(self, final_rho, final_lambdas, final_fit, outer_gradient);
+        let first_order = super::compute_smoothing_correction(
+            self,
+            final_rho,
+            final_lambdas,
+            final_fit,
+            outer_gradient,
+        );
         let first_order_correction = first_order.correction.clone();
         let first_order_rho_covariance = first_order.rho_covariance.clone();
         let first_order_method = first_order.correction.as_ref().map(|_| {
@@ -844,26 +852,26 @@ impl<'a> RemlState<'a> {
                 rho_covariance: first_order_rho_covariance,
             });
         }
-        let first_order_routine = |correction: Option<Array2<f64>>,
-                                   reason: std::borrow::Cow<'static, str>| {
-            SmoothingCorrectionOutcome::FirstOrder {
-                correction,
-                rho_covariance: first_order_rho_covariance.clone(),
-                reason,
-                severity: Routine,
-                method: first_order_method,
-            }
-        };
-        let first_order_numerical = |correction: Option<Array2<f64>>,
-                                     reason: std::borrow::Cow<'static, str>| {
-            SmoothingCorrectionOutcome::FirstOrder {
-                correction,
-                rho_covariance: first_order_rho_covariance.clone(),
-                reason,
-                severity: NumericalFailure,
-                method: first_order_method,
-            }
-        };
+        let first_order_routine =
+            |correction: Option<Array2<f64>>, reason: std::borrow::Cow<'static, str>| {
+                SmoothingCorrectionOutcome::FirstOrder {
+                    correction,
+                    rho_covariance: first_order_rho_covariance.clone(),
+                    reason,
+                    severity: Routine,
+                    method: first_order_method,
+                }
+            };
+        let first_order_numerical =
+            |correction: Option<Array2<f64>>, reason: std::borrow::Cow<'static, str>| {
+                SmoothingCorrectionOutcome::FirstOrder {
+                    correction,
+                    rho_covariance: first_order_rho_covariance.clone(),
+                    reason,
+                    severity: NumericalFailure,
+                    method: first_order_method,
+                }
+            };
         let n_rho = final_rho.len();
         if n_rho == 0 {
             // No hyperparameters: the unified corrected covariance equals H^{-1}.
@@ -912,7 +920,8 @@ impl<'a> RemlState<'a> {
         if final_fit.beta_transformed.len() > AUTO_CUBATURE_MAX_BETA_DIM {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "beta dimension exceeds AUTO_CUBATURE_MAX_BETA_DIM: cubature cost prohibitive".into(),
+                "beta dimension exceeds AUTO_CUBATURE_MAX_BETA_DIM: cubature cost prohibitive"
+                    .into(),
             ));
         }
         let near_boundary = final_rho
@@ -2680,9 +2689,13 @@ mod smoothing_correction_outcome_tests {
 
             // Real outer-gradient norm at the forced ρ (finite, for the gate's
             // highgrad arm); near_boundary already guarantees cubature entry.
-            let finalgrad = state
-                .compute_gradient(&final_rho)
-                .unwrap_or_else(|_| Array1::<f64>::zeros(0));
+            let finalgrad = state.compute_gradient(&final_rho).unwrap_or_else(|err| {
+                log::debug!(
+                    "[REML gate] outer gradient unavailable at the forced ρ ({err}); \
+                     reporting a zero-length gradient"
+                );
+                Array1::<f64>::zeros(0)
+            });
             let finalgrad_norm = finalgrad.dot(&finalgrad).sqrt();
 
             let before = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);

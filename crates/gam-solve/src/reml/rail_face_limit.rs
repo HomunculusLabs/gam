@@ -66,9 +66,13 @@ impl RemlState<'_> {
             Some("the fit carries coefficient constraints, so the limit is a constrained optimum")
         } else if self.runtime_mixture_link_state.is_some() || self.runtime_sas_link_state.is_some()
         {
-            Some("the link carries runtime state, so the criterion is not one the closed forms model")
+            Some(
+                "the link carries runtime state, so the criterion is not one the closed forms model",
+            )
         } else if self.penalty_shrinkage_floor.is_some() {
-            Some("a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes")
+            Some(
+                "a penalty shrinkage floor perturbs S_lambda away from the pencil this form assumes",
+            )
         } else if !self
             .rho_prior
             .upper_tail_gradient_vanishes_everywhere(rho.len())
@@ -384,10 +388,7 @@ mod rail_face_limit_tests {
         cubic_fixture_sized(curvature, 96)
     }
 
-    fn cubic_fixture_sized(
-        curvature: f64,
-        n: usize,
-    ) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+    fn cubic_fixture_sized(curvature: f64, n: usize) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
         let mut x = Array2::<f64>::zeros((n, 4));
         let mut raw_noise = Array1::<f64>::zeros(n);
         let mut signal = Array1::<f64>::zeros(n);
@@ -821,8 +822,7 @@ mod rail_face_limit_tests {
             "the fixture must sit on an upper tail in both face coordinates; \
              measured joint pencil {measured_joint:.6e}"
         );
-        let joint_rel =
-            (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
+        let joint_rel = (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
         assert!(
             joint_rel < 5.0e-3,
             "the analytic JOINT constant must reproduce the production gradient summed \
@@ -856,8 +856,7 @@ mod rail_face_limit_tests {
         // ranges. It is asserted here because it FAILS for the overlapping
         // face below, which is what makes that case the interesting one.
         let additive: f64 = proof.tail_constants.iter().sum();
-        let additive_rel =
-            (additive - proof.joint_tail_constant).abs() / proof.joint_tail_constant;
+        let additive_rel = (additive - proof.joint_tail_constant).abs() / proof.joint_tail_constant;
         assert!(
             additive_rel < 1.0e-10,
             "disjoint face blocks must make the joint constant additive: \
@@ -1046,8 +1045,7 @@ mod rail_face_limit_tests {
             .compute_outer_eval_with_order(&rho, OuterEvalOrder::ValueAndGradient)
             .expect("the production REML gradient must evaluate");
         let measured_joint = -(rho_face.exp()) * (eval.gradient[0] + eval.gradient[1]);
-        let joint_rel =
-            (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
+        let joint_rel = (proof.joint_tail_constant - measured_joint).abs() / measured_joint;
         assert!(
             joint_rel < 5.0e-3,
             "the joint law must hold on an OVERLAPPING face: analytic={:.9e} \
@@ -1090,10 +1088,7 @@ mod rail_face_limit_tests {
     ///   requires. (A near-constant `μ` gives a near-smooth `c⊙a`, whose
     ///   drift is almost entirely oblique shadow: measured at 0.14% of the
     ///   constant, below the instrument's own 0.1% floor.)
-    fn binomial_cubic_fixture(
-        curvature: f64,
-        n: usize,
-    ) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+    fn binomial_cubic_fixture(curvature: f64, n: usize) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
         let mut x = Array2::<f64>::zeros((n, 4));
         let mut y = Array1::<f64>::zeros(n);
         let mut carry = 0.0_f64;
@@ -1175,7 +1170,11 @@ mod rail_face_limit_tests {
     fn face_constant_from(limit: &RailFaceLimit) -> f64 {
         let a = &limit.released_penalties[0];
         let c = &limit.first_order_form;
-        assert_eq!(a.nrows(), 2, "the bend face releases exactly two directions");
+        assert_eq!(
+            a.nrows(),
+            2,
+            "the bend face releases exactly two directions"
+        );
         let det = a[[0, 0]] * a[[1, 1]] - a[[0, 1]] * a[[1, 0]];
         0.5 * (a[[1, 1]] * c[[0, 0]] - a[[0, 1]] * c[[1, 0]] - a[[1, 0]] * c[[0, 1]]
             + a[[0, 0]] * c[[1, 1]])
@@ -1193,8 +1192,8 @@ mod rail_face_limit_tests {
             .expect("the LAML form records its curvature drift");
         for a in 0..stripped.first_order_form.nrows() {
             for b in 0..stripped.first_order_form.ncols() {
-                stripped.first_order_form[[a, b]] -= stripped.released_score[a] * drift[b]
-                    + drift[a] * stripped.released_score[b];
+                stripped.first_order_form[[a, b]] -=
+                    stripped.released_score[a] * drift[b] + drift[a] * stripped.released_score[b];
             }
         }
         stripped

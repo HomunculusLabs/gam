@@ -2818,7 +2818,11 @@ impl<'a> RemlState<'a> {
         } else {
             f64::INFINITY
         };
-        let laplace_floor = if n_eff > 0.0 { 1.0 / n_eff } else { f64::INFINITY };
+        let laplace_floor = if n_eff > 0.0 {
+            1.0 / n_eff
+        } else {
+            f64::INFINITY
+        };
 
         // Trust gate: splice `Δ_b` only when the estimate resolves it.
         //
@@ -3896,8 +3900,10 @@ impl<'a> RemlState<'a> {
         // (#877), so the correction is taken at the coordinate the terms it
         // corrects were evaluated at.
         let anchor = self.rho_weight_anchor();
-        let theta =
-            crate::rho_prior_eval::pc_prior_rate(FIRTH_DEFAULT_PC_UPPER, FIRTH_DEFAULT_PC_TAIL_PROB);
+        let theta = crate::rho_prior_eval::pc_prior_rate(
+            FIRTH_DEFAULT_PC_UPPER,
+            FIRTH_DEFAULT_PC_TAIL_PROB,
+        );
         for (idx, &is_default) in mask.iter().enumerate() {
             if !is_default {
                 continue;
@@ -4759,11 +4765,7 @@ impl<'a> RemlState<'a> {
         );
         match decision.geometry {
             RemlGeometry::SparseExactSpd => {
-                match self.prepare_sparse_eval_bundlewithkey(
-                    rho,
-                    key.clone(),
-                    value_only_rows,
-                ) {
+                match self.prepare_sparse_eval_bundlewithkey(rho, key.clone(), value_only_rows) {
                     Ok(bundle) => Ok(bundle),
                     Err(err) => {
                         log::warn!(
@@ -5583,8 +5585,7 @@ impl<'a> RemlState<'a> {
 
         impl Drop for PersistentDiskGuard<'_> {
             fn drop(&mut self) {
-                self.enabled
-                    .store(self.restore_enabled, Ordering::Relaxed);
+                self.enabled.store(self.restore_enabled, Ordering::Relaxed);
             }
         }
 
@@ -7974,7 +7975,10 @@ impl<'a> RemlState<'a> {
                     }
                     self.store_persistent_warm_start();
                     // Cache only if key is valid (not NaN).
-                    if use_cache && !value_only_rows && let Some(key) = key_opt {
+                    if use_cache
+                        && !value_only_rows
+                        && let Some(key) = key_opt
+                    {
                         self.cache_manager
                             .pirls_cache
                             .write()
@@ -8476,10 +8480,7 @@ mod scheduled_inner_cap_exhaustion_tests {
     fn converged_and_stalled_states_are_not_scheduled_exhaustion() {
         for status in [PirlsStatus::Converged, PirlsStatus::StalledAtValidMinimum] {
             assert!(!inner_budget_exhaustion_was_scheduled(
-                status,
-                5,
-                5,
-                CONFIGURED,
+                status, 5, 5, CONFIGURED,
             ));
         }
     }

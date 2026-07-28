@@ -628,21 +628,17 @@ pub fn active_constraint_tangent_geometry(
         .map_err(|error| format!("active constraint tangent SVD failed: {error}"))?;
     let vt = vt.ok_or_else(|| "active constraint tangent SVD omitted Vᵀ".to_string())?;
     let smax = singular.iter().fold(0.0_f64, |largest, &s| largest.max(s));
-    let rank_threshold =
-        100.0 * f64::EPSILON * (a_act.nrows().max(p) as f64) * smax;
+    let rank_threshold = 100.0 * f64::EPSILON * (a_act.nrows().max(p) as f64) * smax;
     let rank = singular.iter().filter(|&&s| s > rank_threshold).count();
     if rank == 0 {
-        return Err(
-            "non-empty active constraint block has zero numerical row rank".to_string(),
-        );
+        return Err("non-empty active constraint block has zero numerical row rank".to_string());
     }
     if rank == p {
         return Ok(ActiveConstraintTangentGeometry::FullyPinned);
     }
 
     let null_count = p - rank;
-    let mut orthonormal_basis: Vec<Array1<f64>> =
-        (0..rank).map(|i| vt.row(i).to_owned()).collect();
+    let mut orthonormal_basis: Vec<Array1<f64>> = (0..rank).map(|i| vt.row(i).to_owned()).collect();
     let mut z = Array2::<f64>::zeros((p, null_count));
     let mut collected = 0usize;
     let independence_floor = 100.0 * f64::EPSILON * p as f64;

@@ -771,9 +771,9 @@ impl PenaltyPseudologdet {
         for (i, row) in rows.iter().enumerate() {
             stacked.row_mut(i).assign(row);
         }
-        let (_, singular, vt) = stacked.svd(false, true).map_err(|_| {
-            "PenaltyPseudologdet stacked-root SVD did not converge".to_string()
-        })?;
+        let (_, singular, vt) = stacked
+            .svd(false, true)
+            .map_err(|_| "PenaltyPseudologdet stacked-root SVD did not converge".to_string())?;
         let vt = vt.ok_or_else(|| {
             "PenaltyPseudologdet stacked-root SVD returned no right factor".to_string()
         })?;
@@ -2157,11 +2157,7 @@ mod tests {
             s_shrink[[i, i]] = 1.0;
         }
 
-        for &(l_bend, l_shrink) in &[
-            (1e13_f64, 1e-13_f64),
-            (1e-14, 1e12),
-            (1e10, 1e-18),
-        ] {
+        for &(l_bend, l_shrink) in &[(1e13_f64, 1e-13_f64), (1e-14, 1e12), (1e10, 1e-18)] {
             let pld = PenaltyPseudologdet::from_components(
                 &[s_bend.clone(), s_shrink.clone()],
                 &[l_bend, l_shrink],
@@ -2180,8 +2176,7 @@ mod tests {
                 "every structural mode keeps its coercivity at λ ratio {:.1e}",
                 l_bend / l_shrink
             );
-            let expected: f64 =
-                4.0 * (l_bend + l_shrink).ln() + 2.0 * l_shrink.ln();
+            let expected: f64 = 4.0 * (l_bend + l_shrink).ln() + 2.0 * l_shrink.ln();
             assert!(
                 (pld.value() - expected).abs() <= 1e-9 * expected.abs().max(1.0),
                 "exact diagonal pseudologdet at λ ratio {:.1e}: got {}, expected {expected}",

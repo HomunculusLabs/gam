@@ -25,9 +25,9 @@ mod inner_strategy;
 pub mod jeffreys_subspace;
 pub mod outer_eval;
 pub mod penalty_logdet;
-pub mod reparameterized_inner;
 pub mod per_atom_efs;
 pub mod reml_outer_engine;
+pub mod reparameterized_inner;
 mod rho_key;
 mod sparse_exact_penalty;
 mod trace;
@@ -914,7 +914,8 @@ mod tests {
 
         // A wide, ordered box: the emitted seed is finite and inside it. Its
         // value is the natural profiled ρ (nothing binds).
-        let wide = gam_problem::OrderedRhoBounds::new(-12.0, 12.0).unwrap();
+        let wide = gam_problem::OrderedRhoBounds::new(-12.0, 12.0)
+            .expect("ordered rho bounds: the fixture passes lo < hi");
         let seed_wide = state
             .analytic_gaussian_profiled_diagonal_rho(wide)
             .expect("no error")
@@ -935,7 +936,8 @@ mod tests {
         // the exact fixture geometry; `cap_lo < cap_hi` and both are finite.
         let cap_hi = natural - 2.0;
         let cap_lo = natural - 10.0;
-        let capped = gam_problem::OrderedRhoBounds::new(cap_lo, cap_hi).unwrap();
+        let capped = gam_problem::OrderedRhoBounds::new(cap_lo, cap_hi)
+            .expect("ordered rho bounds: the fixture passes lo < hi");
         let seed_capped = state
             .analytic_gaussian_profiled_diagonal_rho(capped)
             .expect("no error")
@@ -1454,7 +1456,12 @@ mod tests {
         }
         // Cache is exactly full; key[0] is the least-recently-used.
         assert_eq!(
-            cache.outer_eval_lru.read().unwrap().entries.len(),
+            cache
+                .outer_eval_lru
+                .read()
+                .expect("outer-eval LRU lock is poisoned: a writer panicked while holding it")
+                .entries
+                .len(),
             OUTER_EVAL_LRU_CAPACITY
         );
         // One more distinct key evicts the LRU (key[0]).
@@ -1463,7 +1470,12 @@ mod tests {
         let eval_overflow = make_eval(42.0);
         cache.store_outer_eval(&key_overflow, &eval_overflow);
         assert_eq!(
-            cache.outer_eval_lru.read().unwrap().entries.len(),
+            cache
+                .outer_eval_lru
+                .read()
+                .expect("outer-eval LRU lock is poisoned: a writer panicked while holding it")
+                .entries
+                .len(),
             OUTER_EVAL_LRU_CAPACITY,
             "capacity must stay bounded"
         );
@@ -1522,7 +1534,13 @@ mod tests {
             )
             .expect("outer eval should succeed");
 
-        let populated_len = state.cache_manager.pirls_cache.read().unwrap().map.len();
+        let populated_len = state
+            .cache_manager
+            .pirls_cache
+            .read()
+            .expect("PIRLS cache lock is poisoned: a writer panicked while holding it")
+            .map
+            .len();
         assert!(
             populated_len > 0,
             "evaluating the outer objective should populate the PIRLS LRU, got {populated_len}"
@@ -1530,7 +1548,13 @@ mod tests {
 
         state.reset_outer_seed_state();
 
-        let cleared_len = state.cache_manager.pirls_cache.read().unwrap().map.len();
+        let cleared_len = state
+            .cache_manager
+            .pirls_cache
+            .read()
+            .expect("PIRLS cache lock is poisoned: a writer panicked while holding it")
+            .map
+            .len();
         assert_eq!(
             cleared_len, 0,
             "reset_outer_seed_state must clear the cross-call PIRLS LRU; got {cleared_len} entries"
@@ -5160,8 +5184,10 @@ impl EvalShared {
         if let Some(applied) = self.applied_canonical_penalties.get() {
             return Ok(Arc::clone(applied));
         }
-        let applied =
-            applied_canonical_penalties_for(&self.pirls_result.reparam_result, canonical_penalties)?;
+        let applied = applied_canonical_penalties_for(
+            &self.pirls_result.reparam_result,
+            canonical_penalties,
+        )?;
         match self.applied_canonical_penalties.set(Arc::clone(&applied)) {
             Ok(()) => Ok(applied),
             Err(_) => Ok(Arc::clone(
@@ -5540,7 +5566,12 @@ impl EvalCacheManager {
         F: FnOnce() -> Result<outer_eval::PenaltySubspace, EstimationError>,
     {
         let key = PenaltySubspaceCacheKey::from_inputs(e_transformed, ridge_passport);
-        if let Some(hit) = self.penalty_subspace_cache.read().expect("penalty-subspace cache lock is poisoned: a writer panicked while holding it").get(&key) {
+        if let Some(hit) = self
+            .penalty_subspace_cache
+            .read()
+            .expect("penalty-subspace cache lock is poisoned: a writer panicked while holding it")
+            .get(&key)
+        {
             return Ok(hit);
         }
         let value = Arc::new(build()?);
@@ -5552,13 +5583,20 @@ impl EvalCacheManager {
     }
 
     pub(crate) fn cached_eval_bundle(&self, key: &Option<Vec<u64>>) -> Option<EvalShared> {
-        let guard = self.current_eval_bundle.read().expect("current eval bundle lock is poisoned: a writer panicked while holding it");
+        let guard = self
+            .current_eval_bundle
+            .read()
+            .expect("current eval bundle lock is poisoned: a writer panicked while holding it");
         let bundle: &EvalShared = guard.as_ref()?;
         bundle.matches(key).then(|| bundle.clone())
     }
 
     pub(crate) fn store_eval_bundle(&self, bundle: EvalShared) {
-        *self.current_eval_bundle.write().expect("current eval bundle lock is poisoned: a writer panicked while holding it") = Some(bundle);
+        *self
+            .current_eval_bundle
+            .write()
+            .expect("current eval bundle lock is poisoned: a writer panicked while holding it") =
+            Some(bundle);
     }
 
     pub(crate) fn cached_outer_eval(&self, key: &Option<Vec<u64>>) -> Option<OuterEval> {
@@ -5569,7 +5607,10 @@ impl EvalCacheManager {
         // serving revisited (non-immediate) rho-points. `get` is a tiny linear
         // scan (capacity is `OUTER_EVAL_LRU_CAPACITY`) that promotes the hit to
         // most-recently-used; hence the write lock.
-        self.outer_eval_lru.write().expect("outer-eval LRU lock is poisoned: a writer panicked while holding it").get(key)
+        self.outer_eval_lru
+            .write()
+            .expect("outer-eval LRU lock is poisoned: a writer panicked while holding it")
+            .get(key)
     }
 
     pub(crate) fn store_outer_eval(&self, key: &Option<Vec<u64>>, eval: &OuterEval) {
@@ -5577,7 +5618,9 @@ impl EvalCacheManager {
             // Keep the single-slot mirror for `previous_outer_gradient_norm`,
             // whose "immediately previous distinct eval" contract reads it
             // directly and must stay byte-for-byte unchanged.
-            *self.current_outer_eval.write().expect("current outer eval lock is poisoned: a writer panicked while holding it") = Some((key.clone(), eval.clone()));
+            *self.current_outer_eval.write().expect(
+                "current outer eval lock is poisoned: a writer panicked while holding it",
+            ) = Some((key.clone(), eval.clone()));
             self.outer_eval_lru
                 .write()
                 .expect("outer-eval LRU lock is poisoned: a writer panicked while holding it")
@@ -5586,14 +5629,26 @@ impl EvalCacheManager {
     }
 
     pub(crate) fn invalidate_eval_bundle(&self) {
-        self.current_eval_bundle.write().expect("current eval bundle lock is poisoned: a writer panicked while holding it").take();
-        self.current_outer_eval.write().expect("current outer eval lock is poisoned: a writer panicked while holding it").take();
-        self.outer_eval_lru.write().expect("outer-eval LRU lock is poisoned: a writer panicked while holding it").clear();
+        self.current_eval_bundle
+            .write()
+            .expect("current eval bundle lock is poisoned: a writer panicked while holding it")
+            .take();
+        self.current_outer_eval
+            .write()
+            .expect("current outer eval lock is poisoned: a writer panicked while holding it")
+            .take();
+        self.outer_eval_lru
+            .write()
+            .expect("outer-eval LRU lock is poisoned: a writer panicked while holding it")
+            .clear();
     }
 
     pub(crate) fn clear_eval_and_factor_caches(&self) {
         self.invalidate_eval_bundle();
-        self.penalty_subspace_cache.write().expect("penalty-subspace cache lock is poisoned: a writer panicked while holding it").clear();
+        self.penalty_subspace_cache
+            .write()
+            .expect("penalty-subspace cache lock is poisoned: a writer panicked while holding it")
+            .clear();
     }
 }
 

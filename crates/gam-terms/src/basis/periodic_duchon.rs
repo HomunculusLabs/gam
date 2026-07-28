@@ -1361,21 +1361,20 @@ pub(crate) fn build_duchon_basis_mixed_periodicity(
                     ) {
                         Ok(v) => out_row[j] = v,
                         Err(e) => {
-                            *kernel_err
-                                .lock()
-                                .expect("kernel-error slot is poisoned: a worker panicked \
-                                         while recording a kernel failure") = Some(e);
+                            *kernel_err.lock().expect(
+                                "kernel-error slot is poisoned: a worker panicked \
+                                         while recording a kernel failure",
+                            ) = Some(e);
                             return;
                         }
                     }
                 }
             }
         });
-    if let Some(e) = kernel_err
-        .into_inner()
-        .expect("kernel-error slot is poisoned: a worker panicked while recording a \
-                 kernel failure")
-    {
+    if let Some(e) = kernel_err.into_inner().expect(
+        "kernel-error slot is poisoned: a worker panicked while recording a \
+                 kernel failure",
+    ) {
         return Err(e);
     }
 

@@ -42,7 +42,10 @@ pub fn log_boundary_g(mu: f64, h: f64) -> f64 {
         h.is_finite() && h > 0.0,
         "boundary-g curvature h must be finite and positive, got {h}"
     );
-    assert!(mu.is_finite(), "boundary-g multiplier μ must be finite, got {mu}");
+    assert!(
+        mu.is_finite(),
+        "boundary-g multiplier μ must be finite, got {mu}"
+    );
     let half_log = 0.5 * ((2.0 * PI) / h).ln();
     if mu >= 0.0 {
         let u = mu / (2.0 * h).sqrt();
@@ -71,7 +74,10 @@ pub fn log_boundary_g_derivatives(mu: f64, h: f64) -> (f64, f64) {
         h.is_finite() && h > 0.0,
         "boundary-g curvature h must be finite and positive, got {h}"
     );
-    assert!(mu.is_finite(), "boundary-g multiplier μ must be finite, got {mu}");
+    assert!(
+        mu.is_finite(),
+        "boundary-g multiplier μ must be finite, got {mu}"
+    );
     let sqrt_h = h.sqrt();
     let m = reverse_mills(-mu / sqrt_h);
     let d_mu = mu / h - m / sqrt_h;
@@ -97,7 +103,10 @@ pub fn log_interior_boundary_g(s: f64, h: f64) -> f64 {
         h.is_finite() && h > 0.0,
         "interior boundary-g curvature h must be finite and positive, got {h}"
     );
-    assert!(s.is_finite(), "interior boundary-g slack s must be finite, got {s}");
+    assert!(
+        s.is_finite(),
+        "interior boundary-g slack s must be finite, got {s}"
+    );
     0.5 * ((2.0 * PI) / h).ln() + normal_logcdf(s * h.sqrt())
 }
 
@@ -111,7 +120,10 @@ pub fn log_interior_boundary_g_derivatives(s: f64, h: f64) -> (f64, f64) {
         h.is_finite() && h > 0.0,
         "interior boundary-g curvature h must be finite and positive, got {h}"
     );
-    assert!(s.is_finite(), "interior boundary-g slack s must be finite, got {s}");
+    assert!(
+        s.is_finite(),
+        "interior boundary-g slack s must be finite, got {s}"
+    );
     let sqrt_h = h.sqrt();
     let r = reverse_mills(s * sqrt_h);
     let d_s = sqrt_h * r;
@@ -308,17 +320,10 @@ mod tests {
 
     #[test]
     fn log_boundary_g_derivatives_match_central_difference() {
-        for &(mu, h) in &[
-            (0.0, 1.0),
-            (0.7, 2.0),
-            (-1.2, 0.6),
-            (3.0, 0.9),
-            (-0.4, 4.0),
-        ] {
+        for &(mu, h) in &[(0.0, 1.0), (0.7, 2.0), (-1.2, 0.6), (3.0, 0.9), (-0.4, 4.0)] {
             let (d_mu, d_h) = log_boundary_g_derivatives(mu, h);
             let eps = 1e-6;
-            let fd_mu =
-                (log_boundary_g(mu + eps, h) - log_boundary_g(mu - eps, h)) / (2.0 * eps);
+            let fd_mu = (log_boundary_g(mu + eps, h) - log_boundary_g(mu - eps, h)) / (2.0 * eps);
             let fd_h = (log_boundary_g(mu, h + eps) - log_boundary_g(mu, h - eps)) / (2.0 * eps);
             assert!(
                 (d_mu - fd_mu).abs() <= 1e-5 * fd_mu.abs().max(1.0),
@@ -354,7 +359,10 @@ mod tests {
         // limit tolerance (|logΦ(z)| ≈ φ(z)/z, ~1e-5 at z≈4.2 but ~1e-19 at z≈9).
         for &(s, h) in &[(10.0_f64, 1.0_f64), (30.0, 4.0), (13.0, 0.5)] {
             let z = s * h.sqrt();
-            assert!(z >= 9.0, "far-interior test case must keep s√h ≥ 9, got {z}");
+            assert!(
+                z >= 9.0,
+                "far-interior test case must keep s√h ≥ 9, got {z}"
+            );
             let got = log_interior_boundary_g(s, h);
             let want = 0.5 * ((2.0 * PI) / h).ln();
             assert!(
@@ -394,11 +402,9 @@ mod tests {
         for &(s, h) in &[(0.0, 1.0), (0.6, 2.0), (1.5, 0.6), (-0.3, 3.0), (2.0, 0.9)] {
             let (d_s, d_h) = log_interior_boundary_g_derivatives(s, h);
             let eps = 1e-6;
-            let fd_s = (log_interior_boundary_g(s + eps, h)
-                - log_interior_boundary_g(s - eps, h))
+            let fd_s = (log_interior_boundary_g(s + eps, h) - log_interior_boundary_g(s - eps, h))
                 / (2.0 * eps);
-            let fd_h = (log_interior_boundary_g(s, h + eps)
-                - log_interior_boundary_g(s, h - eps))
+            let fd_h = (log_interior_boundary_g(s, h + eps) - log_interior_boundary_g(s, h - eps))
                 / (2.0 * eps);
             assert!(
                 (d_s - fd_s).abs() <= 1e-5 * fd_s.abs().max(1.0),
@@ -423,7 +429,8 @@ mod tests {
         let s1 = u1_max / n as f64;
         let s2 = u2_max / n as f64;
         let f = |u1: f64, u2: f64| {
-            (-mu[0] * u1 - mu[1] * u2 - 0.5 * (h1 * u1 * u1 + h2 * u2 * u2 + 2.0 * c * u1 * u2)).exp()
+            (-mu[0] * u1 - mu[1] * u2 - 0.5 * (h1 * u1 * u1 + h2 * u2 * u2 + 2.0 * c * u1 * u2))
+                .exp()
         };
         let w = |i: usize| {
             if i == 0 || i == n {
@@ -515,7 +522,10 @@ mod tests {
             );
             // The Prop 4.3 estimate also sits inside its own rigor bracket.
             let est = log_gaussian_orthant(mu.view(), lam.view());
-            assert!(lo <= est && est <= hi, "c={c}: estimate {est} outside bracket");
+            assert!(
+                lo <= est && est <= hi,
+                "c={c}: estimate {est} outside bracket"
+            );
         }
     }
 
@@ -527,6 +537,9 @@ mod tests {
         let lam = precision_2x2([1.0, 1.0], 1.5); // s = 1.5 > diag 1.0
         let (lo, hi) = log_gaussian_orthant_bracket(mu.view(), lam.view());
         assert!(lo.is_finite());
-        assert!(hi.is_infinite(), "non-positive upper curvature must escalate to +∞");
+        assert!(
+            hi.is_infinite(),
+            "non-positive upper curvature must escalate to +∞"
+        );
     }
 }

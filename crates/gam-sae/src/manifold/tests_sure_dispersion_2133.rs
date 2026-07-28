@@ -63,9 +63,14 @@ fn fitted_circle(
             x[[i, j]] += sigma * lcg_normal(&mut s);
         }
     }
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("an odd harmonic count is a valid periodic basis size"));
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("an odd harmonic count is a valid periodic basis size"),
+    );
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r] / TAU);
-    let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("fixture coords are already wrapped into the evaluator's unit period");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, 0]] = radius;
     decoder[[2, 1]] = radius;
@@ -88,7 +93,8 @@ fn fitted_circle(
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
     .expect("fixture assignment: one logit column and one coord block per atom");
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("fixture term: every atom's basis width matches its assignment block");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 80, 1.0, 1e-7, 1e-7)
@@ -108,7 +114,9 @@ fn hand_correction(
 ) -> (f64, f64) {
     let p = term.output_dim();
     let n = term.n_obs();
-    let sj = term.atom_second_jets().expect("the periodic basis was installed with a second jet above");
+    let sj = term
+        .atom_second_jets()
+        .expect("the periodic basis was installed with a second jet above");
     let periods = term.assignment.coords[0].effective_axis_periods();
     let mut g1 = vec![0.0; p];
     let mut g2 = vec![0.0; p];
@@ -121,7 +129,9 @@ fn hand_correction(
             .expect("row index is below n_obs and the buffer is k_atoms wide");
         let a_k = a_row[0];
         let t = term.assignment.coords[0].row(i)[0];
-        let alpha = rho.ard_precisions().expect("the fixture rho was built with one ARD precision per atom")[0][0];
+        let alpha = rho
+            .ard_precisions()
+            .expect("the fixture rho was built with one ARD precision per atom")[0][0];
         let v_pp = ArdAxisPrior::eval(alpha, t, periods[0]).psd_majorizer_hess();
         term.atoms[0].fill_decoded_derivative_row(i, 0, &mut g1);
         term.atoms[0].fill_decoded_second_derivative_row(&sj[0], i, 0, &mut g2);
@@ -207,7 +217,9 @@ fn sure_correction_matches_fd_divergence_2133() {
     let residual = term
         .reconstruction_residual(x.view(), &rho)
         .expect("the joint fit above converged, so the residual is defined");
-    let alpha = rho.ard_precisions().expect("the fixture rho was built with one ARD precision per atom")[0][0];
+    let alpha = rho
+        .ard_precisions()
+        .expect("the fixture rho was built with one ARD precision per atom")[0][0];
     let periods = term.assignment.coords[0].effective_axis_periods();
 
     // Evaluate the atom's fitted image f(t) = a_k·Φ(t)·B and its coordinate MAP by
@@ -222,12 +234,15 @@ fn sure_correction_matches_fd_divergence_2133() {
             a_row[0]
         })
         .collect();
-    let ev = PeriodicHarmonicEvaluator::new(3).expect("an odd harmonic count is a valid periodic basis size");
+    let ev = PeriodicHarmonicEvaluator::new(3)
+        .expect("an odd harmonic count is a valid periodic basis size");
     let decoder = term.atoms[0].decoder_coefficients().clone();
     // f, f', f'' at arbitrary t (a·Φ·B and its coordinate derivatives).
     let jets_at = |t: f64, a: f64| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let coords = Array2::<f64>::from_elem((1, 1), t.rem_euclid(1.0));
-        let (phi, jet) = ev.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
+        let (phi, jet) = ev
+            .evaluate(coords.view())
+            .expect("fixture coords are already wrapped into the evaluator's unit period");
         let sj = crate::manifold::SaeBasisSecondJet::second_jet(&ev, coords.view())
             .expect("fixture coords are already wrapped into the evaluator's unit period");
         let (mut f, mut fp, mut fpp) = (vec![0.0; p], vec![0.0; p], vec![0.0; p]);
@@ -282,7 +297,9 @@ fn sure_correction_matches_fd_divergence_2133() {
     };
 
     // FD divergence + analytic GN baseline and exact (GN+correction) per row.
-    let sj = term.atom_second_jets().expect("the periodic basis was installed with a second jet above");
+    let sj = term
+        .atom_second_jets()
+        .expect("the periodic basis was installed with a second jet above");
     let mut g1 = vec![0.0; p];
     let mut g2 = vec![0.0; p];
     let (mut fd_div, mut gn_div, mut exact_div) = (0.0_f64, 0.0_f64, 0.0_f64);

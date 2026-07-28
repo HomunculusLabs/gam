@@ -456,17 +456,14 @@ fn surplus_phase_plane(
     let ncols = vt.ncols();
     let sources: Vec<ArrayView1<'_, f64>> = (0..vt.nrows()).map(|r| vt.row(r)).collect();
     let dirs = generic_ortho_combos(&sources, atom_idx, pc_pair_offset, k_atoms, 2);
-    match dirs.len() {
-        n if n >= 2 => {
-            let mut it = dirs.into_iter();
-            (it.next().unwrap(), it.next().unwrap(), true)
-        }
-        1 => (
-            dirs.into_iter().next().unwrap(),
-            Array1::zeros(ncols),
-            false,
-        ),
-        _ => (Array1::zeros(ncols), Array1::zeros(ncols), false),
+    // Take the directions the iterator actually yields, so "at least two" and
+    // "exactly one" are enforced by the pattern rather than re-asserted by an
+    // unwrap after a separate `len()` test.
+    let mut it = dirs.into_iter();
+    match (it.next(), it.next()) {
+        (Some(first), Some(second)) => (first, second, true),
+        (Some(only), None) => (only, Array1::zeros(ncols), false),
+        (None, _) => (Array1::zeros(ncols), Array1::zeros(ncols), false),
     }
 }
 

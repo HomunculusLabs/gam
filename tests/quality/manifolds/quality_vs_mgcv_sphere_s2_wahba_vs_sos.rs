@@ -213,7 +213,10 @@ fn gam_sphere_matches_mgcv_sos_on_geographic_surface() {
         .expect("rebuild frozen sphere design at grid points");
     let gam_surface: Vec<f64> = design.design.apply(&fit.fit.beta).to_vec();
     if let Err(err) = std::fs::remove_dir_all(&dir) {
-        eprintln!("temp reference dir cleanup failed for {}: {err}", dir.display());
+        eprintln!(
+            "temp reference dir cleanup failed for {}: {err}",
+            dir.display()
+        );
     }
 
     // ---- fit the SAME data with mgcv bs="sos" and predict on the SAME grid --

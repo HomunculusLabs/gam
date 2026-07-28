@@ -48,8 +48,13 @@ pub(crate) fn build_survival_time_initial_beta(
             // from `LinearInequalityConstraints::new` with matching A/b shapes.
             // On any unexpected error fall back to the zero seed described
             // above rather than panic out of this seed builder.
-            project_onto_linear_constraints(p, constraints, None)
-                .unwrap_or_else(|_| Array1::zeros(p))
+            project_onto_linear_constraints(p, constraints, None).unwrap_or_else(|err| {
+                log::debug!(
+                    "[survival seed] constraint projection failed ({err}); \
+                     falling back to the length-{p} zero seed"
+                );
+                Array1::zeros(p)
+            })
         },
     )
 }

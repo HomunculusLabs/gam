@@ -1026,11 +1026,12 @@ mod tests {
             [-0.15, 0.10],
         ];
         // Frozen ℓ: the κ=0 chart-scale auto rule (median 2‖Δ‖).
-        let ell_frozen = realized_constant_curvature_length_scale(centers.view(), 0.0).unwrap();
+        let ell_frozen = realized_constant_curvature_length_scale(centers.view(), 0.0)
+            .expect("fixture centers span a positive pairwise distance");
 
         let spread = |kappa: f64, ell: f64| -> f64 {
             let k = constant_curvature_kernel_matrix(centers.view(), centers.view(), kappa, ell)
-                .unwrap();
+                .expect("fixture centers are distinct and the length scale is positive");
             let m = k.nrows();
             let mut s = 0.0;
             let mut cnt = 0.0;
@@ -1066,14 +1067,16 @@ mod tests {
         // range. Print log det₊(S~) per κ to see whether the penalty-normalization
         // Occam term (not just the modest kernel-spread shift) is what rails κ.
         let weights = Array1::<f64>::ones(centers.nrows());
-        let z = weighted_coefficient_sum_to_zero_transform(weights.view()).unwrap();
+        let z = weighted_coefficient_sum_to_zero_transform(weights.view())
+            .expect("fixture weights are positive, so the sum-to-zero transform exists");
         let logdet_norm_penalty = |kappa: f64, ell: f64| -> f64 {
             let k = constant_curvature_kernel_matrix(centers.view(), centers.view(), kappa, ell)
-                .unwrap();
+                .expect("fixture centers are distinct and the length scale is positive");
             let s_raw = symmetrize(&z.t().dot(&k).dot(&z));
             let (s_norm, _c) = normalize_penalty(&s_raw);
             let sym = symmetrize(&s_norm);
-            let (evals, _v) = FaerEigh::eigh(&sym, faer::Side::Lower).unwrap();
+            let (evals, _v) = FaerEigh::eigh(&sym, faer::Side::Lower)
+                .expect("the fixture Gram is symmetric, so eigh converges");
             let max = evals.iter().cloned().fold(0.0_f64, f64::max);
             let tol = max * 1e-9;
             evals
@@ -1098,10 +1101,14 @@ mod tests {
             let mut dists = Vec::with_capacity(m * (m - 1) / 2);
             for i in 0..m {
                 for j in (i + 1)..m {
-                    dists.push(manifold.distance(centers.row(i), centers.row(j)).unwrap());
+                    dists.push(
+                        manifold
+                            .distance(centers.row(i), centers.row(j))
+                            .expect("fixture centers lie on the manifold"),
+                    );
                 }
             }
-            dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            dists.sort_by(|a, b| a.partial_cmp(b).expect("pairwise distances are finite"));
             dists[dists.len() / 2]
         };
         let gs_neg = spread(-2.0, geo_median_ell(-2.0));
@@ -1126,10 +1133,11 @@ mod tests {
         // Both should be κ-IDENTIFYING (a real interior optimum), not monotone.
         let logdet_raw = |kappa: f64, ell: f64, c0: f64| -> f64 {
             let k = constant_curvature_kernel_matrix(centers.view(), centers.view(), kappa, ell)
-                .unwrap();
+                .expect("fixture centers are distinct and the length scale is positive");
             let s_raw = symmetrize(&z.t().dot(&k).dot(&z));
             let scaled = s_raw.mapv(|v| v / c0);
-            let (evals, _v) = FaerEigh::eigh(&scaled, faer::Side::Lower).unwrap();
+            let (evals, _v) = FaerEigh::eigh(&scaled, faer::Side::Lower)
+                .expect("the fixture Gram is symmetric, so eigh converges");
             let max = evals.iter().cloned().fold(0.0_f64, f64::max);
             let tol = max * 1e-9;
             evals
@@ -1140,7 +1148,7 @@ mod tests {
         };
         // c₀ = ‖S_raw(κ=0)‖_F at frozen ℓ.
         let k0 = constant_curvature_kernel_matrix(centers.view(), centers.view(), 0.0, ell_frozen)
-            .unwrap();
+            .expect("fixture centers are distinct and the length scale is positive");
         let s_raw0 = symmetrize(&z.t().dot(&k0).dot(&z));
         let c0 = s_raw0.iter().map(|v| v * v).sum::<f64>().sqrt();
         let r_neg = logdet_raw(-2.0, ell_frozen, c0);
@@ -1166,13 +1174,17 @@ mod tests {
     #[test]
     pub(crate) fn effective_length_jet_matches_fd_of_implicit_solution() {
         let (data, centers) = oracle_disk_design_centers();
-        let ell_ref = realized_constant_curvature_length_scale(centers.view(), 0.0).unwrap();
+        let ell_ref = realized_constant_curvature_length_scale(centers.view(), 0.0)
+            .expect("fixture centers span a positive pairwise distance");
         // Reference fill at κ = 0 (the target L(κ) is pinned to).
-        let fill_star = data_center_reference_fill(data.view(), centers.view(), ell_ref).unwrap();
+        let fill_star = data_center_reference_fill(data.view(), centers.view(), ell_ref)
+            .expect("fixture data and centers share an ambient dimension");
         // Solve-only helper: the converged Newton root L(κ) for FD of the jet.
         let solve_l = |kappa: f64| -> f64 {
             constant_curvature_effective_length_jet(data.view(), centers.view(), ell_ref, kappa)
-                .unwrap()
+                .expect(
+                    "the Newton root for the effective length converges on the fixture geometry",
+                )
                 .0
         };
         let h = 1e-5_f64;
@@ -1183,9 +1195,10 @@ mod tests {
                 ell_ref,
                 kappa,
             )
-            .unwrap();
+            .expect("the Newton root for the effective length converges on the fixture geometry");
             // L solves the fill target: g(L, κ) = fill⋆.
-            let (g, ..) = data_center_fill_partials(data.view(), centers.view(), kappa, l).unwrap();
+            let (g, ..) = data_center_fill_partials(data.view(), centers.view(), kappa, l)
+                .expect("fixture data and centers share an ambient dimension");
             assert!(
                 (g - fill_star).abs() <= 1e-10 * (1.0 + fill_star.abs()),
                 "κ={kappa}: fill not held invariant: g(L,κ)={g} vs fill⋆={fill_star}"
@@ -1263,14 +1276,16 @@ mod tests {
             [-0.15, 0.10],
         ];
         let weights = Array1::<f64>::ones(centers.nrows());
-        let z = weighted_coefficient_sum_to_zero_transform(weights.view()).unwrap();
+        let z = weighted_coefficient_sum_to_zero_transform(weights.view())
+            .expect("fixture weights are positive, so the sum-to-zero transform exists");
         // Frozen auto length scale (the κ=0 chart-scale rule; 0.0 ⇒ auto), reused
         // across κ so the full-rank check is on the same resolution the basis uses.
-        let ell = realized_constant_curvature_length_scale(centers.view(), 0.0).unwrap();
+        let ell = realized_constant_curvature_length_scale(centers.view(), 0.0)
+            .expect("fixture centers span a positive pairwise distance");
 
         for &kappa in &[-2.0_f64, -0.5, 0.0, 0.5, 2.0] {
             let k = constant_curvature_kernel_matrix(centers.view(), centers.view(), kappa, ell)
-                .unwrap();
+                .expect("fixture centers are distinct and the length scale is positive");
             // Primary penalty exactly as the basis builder forms it: symmetrized
             // gauge-restricted kernel Gram.
             let raw = symmetrize(&z.t().dot(&k).dot(&z));
@@ -1278,7 +1293,8 @@ mod tests {
             // (a) The primary is full-rank PD: smallest eigenvalue is strictly
             // positive (well above the spectral tolerance), so there is no null
             // space for a Marra-Wood ridge to shrink.
-            let (evals, _v) = FaerEigh::eigh(&raw, faer::Side::Lower).unwrap();
+            let (evals, _v) = FaerEigh::eigh(&raw, faer::Side::Lower)
+                .expect("the fixture Gram is symmetric, so eigh converges");
             let max = evals.iter().cloned().fold(0.0_f64, f64::max);
             let min = evals.iter().cloned().fold(f64::INFINITY, f64::min);
             assert!(
@@ -1326,8 +1342,8 @@ mod tests {
                 [base[0], base[1]],
                 [base[0] + h, base[1]],
             ]);
-            let k =
-                constant_curvature_kernel_matrix(probe.view(), center.view(), kappa, ell).unwrap();
+            let k = constant_curvature_kernel_matrix(probe.view(), center.view(), kappa, ell)
+                .expect("fixture centers are distinct and the length scale is positive");
             (k[[0, 0]] - 2.0 * k[[1, 0]] + k[[2, 0]]) / (h * h)
         };
 
@@ -1359,5 +1375,4 @@ mod tests {
             off_center[2]
         );
     }
-
 }

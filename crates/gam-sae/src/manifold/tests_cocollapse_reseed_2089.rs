@@ -31,6 +31,8 @@
 //! (b) that refusal is classified RECOVERABLE. Pre-fix (b) FAILS (the message is
 //! not in the recoverable set); post-fix it PASSES.
 
+#![cfg(test)]
+
 use super::*;
 use crate::basis::{PeriodicHarmonicEvaluator, SaeBasisSecondJet};
 use ndarray::{Array2, ArrayView2, array, s};

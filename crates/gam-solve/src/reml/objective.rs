@@ -1,6 +1,5 @@
 use super::*;
 
-
 use gam_terms::construction::PenaltyFrame;
 
 impl<'a> RemlState<'a> {
@@ -1075,19 +1074,18 @@ impl<'a> RemlState<'a> {
             Some(z) => {
                 let original_coords = self.build_penalty_coords();
                 let transformed = &pirls_result.reparam_result.canonical_transformed;
-                let (base_coords, frame): (Vec<_>, _) = if transformed.len()
-                    == original_coords.len()
-                {
-                    (
-                        transformed
-                            .iter()
-                            .map(|cp| cp.to_penalty_coordinate())
-                            .collect(),
-                        PenaltyFrame::Transformed,
-                    )
-                } else {
-                    (original_coords, PenaltyFrame::Original)
-                };
+                let (base_coords, frame): (Vec<_>, _) =
+                    if transformed.len() == original_coords.len() {
+                        (
+                            transformed
+                                .iter()
+                                .map(|cp| cp.to_penalty_coordinate())
+                                .collect(),
+                            PenaltyFrame::Transformed,
+                        )
+                    } else {
+                        (original_coords, PenaltyFrame::Original)
+                    };
                 base_coords
                     .iter()
                     .map(|coord| {
@@ -1117,9 +1115,7 @@ impl<'a> RemlState<'a> {
             let qs_deviation = if qs.nrows() == qs.ncols() {
                 (0..qs.nrows())
                     .flat_map(|i| (0..qs.ncols()).map(move |j| (i, j)))
-                    .map(|(i, j)| {
-                        (qs[[i, j]] - if i == j { 1.0 } else { 0.0 }).abs()
-                    })
+                    .map(|(i, j)| (qs[[i, j]] - if i == j { 1.0 } else { 0.0 }).abs())
                     .fold(0.0_f64, f64::max)
             } else {
                 f64::NAN
@@ -1132,7 +1128,11 @@ impl<'a> RemlState<'a> {
                 beta.clone()
             };
             let sq = |m: &ndarray::Array2<f64>, v: &Array1<f64>| -> f64 {
-                if m.ncols() == v.len() { v.dot(&m.dot(v)) } else { f64::NAN }
+                if m.ncols() == v.len() {
+                    v.dot(&m.dot(v))
+                } else {
+                    f64::NAN
+                }
             };
             let esq = |m: &ndarray::Array2<f64>, v: &Array1<f64>| -> f64 {
                 if m.ncols() == v.len() {
@@ -2251,7 +2251,8 @@ impl<'a> RemlState<'a> {
                 &inner_solution,
                 rho.as_slice()
                     .expect("rho is an owned standard-layout 1-D array"),
-                gradient.as_slice()
+                gradient
+                    .as_slice()
                     .expect("the outer gradient is an owned standard-layout 1-D array"),
             )
             .map_err(EstimationError::InvalidInput)?;
@@ -2280,7 +2281,8 @@ impl<'a> RemlState<'a> {
                 &inner_solution,
                 rho.as_slice()
                     .expect("rho is an owned standard-layout 1-D array"),
-                gradient.as_slice()
+                gradient
+                    .as_slice()
                     .expect("the outer gradient is an owned standard-layout 1-D array"),
             )
             .map_err(EstimationError::InvalidInput)?;
@@ -2462,13 +2464,8 @@ impl<'a> RemlState<'a> {
         // #2305: the ψ/aniso path and the SAS/mixture link-extension path are
         // the same nested-optimization object. Both must evaluate the stationary
         // inner mode when a capped P-IRLS iterate carries a nonzero KKT residual.
-        let mut assembly = self.build_design_moving_assembly(
-            rho,
-            &bundle,
-            mode,
-            force_spectral_logdet,
-            false,
-        )?;
+        let mut assembly =
+            self.build_design_moving_assembly(rho, &bundle, mode, force_spectral_logdet, false)?;
         assembly.ext_coords = ext_coords;
         assembly.ext_coord_pair_fn = ext_pair_fn;
         assembly.rho_ext_pair_fn = rho_ext_pair_fn;
@@ -3014,13 +3011,8 @@ impl<'a> RemlState<'a> {
         // evaluator (value-only), so cost and gradient stay in sync. The
         // correction vanishes as `r → 0`, so a converged inner solve is
         // unchanged.
-        let mut assembly = self.build_design_moving_assembly(
-            rho,
-            &bundle,
-            mode,
-            force_spectral_logdet,
-            false,
-        )?;
+        let mut assembly =
+            self.build_design_moving_assembly(rho, &bundle, mode, force_spectral_logdet, false)?;
         let ext_dim = ext_coords.len();
         let p_dim = ext_coords.first().map(|coord| coord.g.len()).unwrap_or(0);
         assembly.ext_coords = ext_coords;

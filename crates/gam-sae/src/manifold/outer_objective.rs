@@ -12,6 +12,13 @@ use gam_solve::rho_optimizer::{
 /// (the single knob the fit-quality measurement tunes).
 const AMORTIZED_GATE_LOGIT_SCALE: f64 = 1.0;
 
+/// `SaeManifoldTerm::set_homotopy_eta` rejects exactly one thing: an η that is
+/// not finite or falls outside [0, 1]. Every call below passes a literal 0.0 /
+/// 1.0 or the curvature walk's own η, all of which satisfy that, so the call
+/// cannot fail. These sites sit on error and cleanup paths where propagating
+/// would change control flow, hence `expect` naming the invariant rather than `?`.
+const ETA_IN_UNIT_INTERVAL: &str = "η is finite and within [0, 1]";
+
 pub(crate) fn reconstruction_explained_variance(
     target: ArrayView2<'_, f64>,
     fitted: ArrayView2<'_, f64>,
@@ -1938,7 +1945,7 @@ impl SaeManifoldOuterObjective {
                 log::info!(
                     "[#1007] curvature anchor solve failed at η=0 ({err}); deferring to cascade"
                 );
-                self.term.set_homotopy_eta(1.0).ok();
+                self.term.set_homotopy_eta(1.0).expect(ETA_IN_UNIT_INTERVAL);
                 self.set_isometry_homotopy_weight(1.0, &isometry_targets);
                 return Ok(false);
             }
@@ -2019,7 +2026,12 @@ impl SaeManifoldOuterObjective {
                 let w_t = self
                     .term
                     .curvature_t_gradient_eta_derivative(self.target.view(), &rho)
-                    .unwrap_or_else(|_| Array1::<f64>::zeros(last_cache.delta_t_len()));
+                    .unwrap_or_else(|err| {
+                        log::debug!(
+                            "[#1007] curvature η-derivative unavailable at η={eta:.4}: {err}"
+                        );
+                        Array1::<f64>::zeros(last_cache.delta_t_len())
+                    });
                 if w_t.len() == last_cache.delta_t_len()
                     && let Ok((u_t, u_beta)) =
                         last_cache.full_inverse_apply(w_t.view(), dg_beta.view())
@@ -2028,9 +2040,16 @@ impl SaeManifoldOuterObjective {
                     let neg_u_t: Array1<f64> = u_t.iter().map(|v| -v).collect();
                     let neg_u_beta: Array1<f64> = u_beta.iter().map(|v| -v).collect();
                     // Refresh the basis so the corrector opens at the moved coords.
-                    self.term
-                        .apply_newton_step_impl(neg_u_t.view(), neg_u_beta.view(), d_eta, true)
-                        .ok();
+                    if let Err(err) = self.term.apply_newton_step_impl(
+                        neg_u_t.view(),
+                        neg_u_beta.view(),
+                        d_eta,
+                        true,
+                    ) {
+                        log::debug!(
+                            "[#1007] predictor basis refresh skipped at η={eta:.4}: {err}"
+                        );
+                    }
                 }
             }
 
@@ -2054,7 +2073,7 @@ impl SaeManifoldOuterObjective {
                     }
                     eta_step *= 0.5;
                     step_halvings += 1;
-                    self.term.set_homotopy_eta(eta).ok();
+                    self.term.set_homotopy_eta(eta).expect(ETA_IN_UNIT_INTERVAL);
                     self.set_isometry_homotopy_weight(eta, &isometry_targets);
                     continue 'walk;
                 }
@@ -2092,7 +2111,7 @@ impl SaeManifoldOuterObjective {
                 if eta_step > CURVATURE_WALK_MIN_ETA_STEP {
                     eta_step *= 0.5;
                     step_halvings += 1;
-                    self.term.set_homotopy_eta(eta).ok();
+                    self.term.set_homotopy_eta(eta).expect(ETA_IN_UNIT_INTERVAL);
                     self.set_isometry_homotopy_weight(eta, &isometry_targets);
                     continue 'walk;
                 }
@@ -2130,7 +2149,7 @@ impl SaeManifoldOuterObjective {
         // Leave the term at the real (η = 1) objective regardless of outcome so
         // an aborted walk hands the cascade the full basis.
         if !arrived {
-            self.term.set_homotopy_eta(1.0).ok();
+            self.term.set_homotopy_eta(1.0).expect(ETA_IN_UNIT_INTERVAL);
         }
         self.set_isometry_homotopy_weight(1.0, &isometry_targets);
         if arrived
@@ -2280,7 +2299,7 @@ impl SaeManifoldOuterObjective {
             // to the objective's frozen `inner_max_iter`.
             let recovery_iters = self.inner_max_iter.max(CURVATURE_WALK_RECOVERY_INNER_ITERS);
             let mut recovered_term = self.baseline_term.clone();
-            recovered_term.set_homotopy_eta(1.0).ok();
+            recovered_term.set_homotopy_eta(1.0).expect(ETA_IN_UNIT_INTERVAL);
             let mut recovery_rho = rho.clone();
             let recovery_fit = recovered_term.run_joint_fit_arrow_schur(
                 self.target.view(),
@@ -2320,7 +2339,7 @@ impl SaeManifoldOuterObjective {
                          floor (EV stayed {final_ev:.4}); demoting to a branch bifurcation"
                     );
                     arrived = false;
-                    self.term.set_homotopy_eta(1.0).ok();
+                    self.term.set_homotopy_eta(1.0).expect(ETA_IN_UNIT_INTERVAL);
                     if bifurcation.is_none() {
                         bifurcation = Some(CurvatureBifurcation {
                             eta: 1.0,
@@ -2358,8 +2377,17 @@ impl SaeManifoldOuterObjective {
             // η = 0; the explicit `set_homotopy_eta(0.0)` below is now a redundant
             // (harmless) reassertion kept for clarity.
             self.term.restore_mutable_state(&anchor_floor_state)?;
-            self.term.set_homotopy_eta(0.0).ok();
-            self.last_loss = self.term.loss(self.target.view(), &rho).ok();
+            self.term.set_homotopy_eta(0.0).expect(ETA_IN_UNIT_INTERVAL);
+            self.last_loss = match self.term.loss(self.target.view(), &rho) {
+                Ok(loss) => Some(loss),
+                Err(err) => {
+                    log::debug!(
+                        "[#1026] base-dominance restore: loss unavailable at the η=0 \
+                         anchor: {err}"
+                    );
+                    None
+                }
+            };
             // The certified anchor IS the delivered fit: mark arrival and clear any
             // mid-walk bifurcation so the outer seed loop adopts the anchor rather
             // than resetting to the (collapse-prone) cold cascade.

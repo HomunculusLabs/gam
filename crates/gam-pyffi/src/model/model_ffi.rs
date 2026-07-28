@@ -4753,10 +4753,7 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     }
 }
 
-fn with_tierney_kadane_normalizer_from_view(
-    view: &RemlFitView<'_>,
-    score: f64,
-) -> PyResult<f64> {
+fn with_tierney_kadane_normalizer_from_view(view: &RemlFitView<'_>, score: f64) -> PyResult<f64> {
     let Some(null_dim) = extract_null_dim_from_view(view)? else {
         return Ok(score);
     };
@@ -7521,7 +7518,7 @@ mod prediction_payload_tests {
                 .columns
                 .expect("columns present")
                 .get("survival_prob")
-                .unwrap(),
+                .expect("the survival predict output declares a survival_prob column"),
             &vec![0.0, 0.0]
         );
     }

@@ -168,8 +168,7 @@ mod tests {
         let weights = Array1::<f64>::ones(n);
         let offset = Array1::<f64>::zeros(n);
         let config = RemlConfig::external(gaussian_identity_glm_spec(), 1e-8, false);
-        let penalty =
-            gam_terms::construction::CanonicalPenalty::from_dense_root(Array2::eye(p), p);
+        let penalty = gam_terms::construction::CanonicalPenalty::from_dense_root(Array2::eye(p), p);
         let state = RemlState::newwith_offset(
             y.view(),
             x,

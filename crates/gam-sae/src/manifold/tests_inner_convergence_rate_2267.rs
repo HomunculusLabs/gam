@@ -23,6 +23,8 @@
 //! trajectory is numerically unchanged. The hypothesis does not reproduce here and
 //! the metric was reverted rather than kept as unpriced complexity.)
 
+#![cfg(test)]
+
 use super::arrow_solver::{SaeArrowVector, apply_cached_arrow_hessian};
 use super::tests_outer_quasi_laplace_probe_budget_2080::{
     one_circle_wide_target, two_circle_periodic_term,

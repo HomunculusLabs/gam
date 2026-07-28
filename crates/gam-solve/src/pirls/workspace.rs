@@ -143,7 +143,11 @@ impl PirlsWorkspace {
         s_lambda: &Array2<f64>,
     ) -> Result<SparsePenalizedSystemStats, EstimationError> {
         self.ensure_sparse_penalty_cache(x, s_lambda)?;
-        Ok(self.sparse_penalized_system_cache.as_ref().unwrap().stats())
+        Ok(self
+            .sparse_penalized_system_cache
+            .as_ref()
+            .expect("ensure_sparse_penalty_cache installs the cache or returns Err")
+            .stats())
     }
 
     // Phase 2 hook: numeric sparse penalized-system assembly in original coordinates.
@@ -158,7 +162,7 @@ impl PirlsWorkspace {
         self.ensure_sparse_penalty_cache(x, s_lambda)?;
         self.sparse_penalized_system_cache
             .as_mut()
-            .unwrap()
+            .expect("ensure_sparse_penalty_cache installs the cache or returns Err")
             .assemble_upper(x, weights, ridge, precomputed_xtwx)
     }
 }

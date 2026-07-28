@@ -295,7 +295,7 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     // The ground-truth ambient target: the exact decoded curve Φ(t*)·B at
     // unit amplitude, so a perfect fit reproduces the manifold exactly.
@@ -306,8 +306,9 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("fixture assignment: one logit column and one coord block per atom");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![1.0_f64.ln()]]);
 
     // Converge the inner (t, β) solve to stationarity before reading the
@@ -355,13 +356,20 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
     // smoothing bias — comparing against it would conflate encoder fidelity
     // with the smoother. We therefore compare the two PER-ROW encodes, decoded
     // through the SAME basis, exactly as the held-out arm below does.)
-    let amplitudes = term.fitted_assignment_amplitudes().unwrap();
+    let amplitudes = term
+        .fitted_assignment_amplitudes()
+        .expect("the fit above converged, so amplitudes are defined");
     let encodes = term
         .amortized_encode_target(target.view(), amplitudes.view())
         .expect("amortized encode runs");
     let atom0 = &term.atoms[0];
-    let evaluator = atom0.basis_evaluator.as_ref().unwrap();
-    let (phi_hat, _j) = evaluator.evaluate(encodes.coords[0].view()).unwrap();
+    let evaluator = atom0
+        .basis_evaluator
+        .as_ref()
+        .expect("the fixture atom was built with a basis evaluator");
+    let (phi_hat, _j) = evaluator
+        .evaluate(encodes.coords[0].view())
+        .expect("fixture coords are already wrapped into the evaluator's unit period");
     let decoded_hat = phi_hat.dot(atom0.decoder_coefficients()); // (n × p)
 
     // The exact per-row encode the sequential path would use as its teacher:
@@ -399,7 +407,7 @@ fn amortized_encoder_is_faithful_on_known_manifold() {
         certified_rows += 1;
         let exact_phi = evaluator
             .evaluate(exact_t.view().insert_axis(ndarray::Axis(0)))
-            .unwrap()
+            .expect("fixture coords are already wrapped into the evaluator's unit period")
             .0;
         let exact_decoded = exact_phi.dot(atom0.decoder_coefficients()); // (1 × p)
         for col in 0..p {
@@ -547,7 +555,7 @@ fn sae_isometry_assembled_curvature_is_decoder_scale_invariant() {
             decoder.clone(),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         // Target is the exact decoded curve at this scale, so the well-fit
         // residual (and thus the data-fit curvature) is the same shape at every
@@ -559,8 +567,9 @@ fn sae_isometry_assembled_curvature_is_decoder_scale_invariant() {
             vec![LatentManifold::Circle { period: 1.0 }],
             AssignmentMode::softmax(1.0),
         )
-        .unwrap();
-        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block");
 
         let mut registry = AnalyticPenaltyRegistry::new();
         registry.push(AnalyticPenaltyKind::Isometry(Arc::new(
@@ -655,7 +664,7 @@ fn sae_isometry_joint_fit_is_physical_coscale_invariant_2099() {
             decoder.clone(),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         let target = phi.dot(&decoder);
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -664,8 +673,9 @@ fn sae_isometry_joint_fit_is_physical_coscale_invariant_2099() {
             vec![LatentManifold::Circle { period: 1.0 }],
             AssignmentMode::softmax(1.0),
         )
-        .unwrap();
-        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block");
         // Residual covariance transforms as Σ -> c²Σ, so its precision factor
         // transforms as U -> U/c. The identical RowMetric also supplies the
         // isometry pullback, making (cJ)'(W/c²)(cJ) exactly invariant.
@@ -999,7 +1009,7 @@ fn ranking_and_gradient_lanes_match_bare_reml() {
         let rho_state = objective_grad
             .baseline_rho
             .from_flat(rho_flat.view())
-            .unwrap();
+            .expect("the flattened rho has the length the baseline rho declares");
         let (reml, _loss, _cache) = selected_term
             .penalized_quasi_laplace_criterion_with_cache(
                 target.view(),
@@ -1070,7 +1080,7 @@ fn amortized_warm_start_matches_or_beats_cold_inner_solve_on_known_manifold() {
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let target = phi.dot(&decoder);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -1079,8 +1089,9 @@ fn amortized_warm_start_matches_or_beats_cold_inner_solve_on_known_manifold() {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("fixture assignment: one logit column and one coord block per atom");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![1.0_f64.ln()]]);
 
     // (1) Cold (sequential) inner solve — the REML-then-distill baseline.
@@ -1088,7 +1099,9 @@ fn amortized_warm_start_matches_or_beats_cold_inner_solve_on_known_manifold() {
     term.run_joint_fit_arrow_schur(target.view(), &mut rho_cold, None, 12, 0.1, 1.0e-4, 1.0e-4)
         .expect("cold inner solve converges on the known periodic manifold");
     let cold_ev = {
-        let fitted = term.try_fitted_for_rho(&rho_cold).unwrap();
+        let fitted = term
+            .try_fitted_for_rho(&rho_cold)
+            .expect("the fit above converged, so a fitted surface exists");
         reconstruction_explained_variance(target.view(), fitted.view())
             .expect("explained variance is defined for the planted target")
     };
@@ -1117,7 +1130,9 @@ fn amortized_warm_start_matches_or_beats_cold_inner_solve_on_known_manifold() {
     term.run_joint_fit_arrow_schur(target.view(), &mut rho_warm, None, 12, 0.1, 1.0e-4, 1.0e-4)
         .expect("warm-started inner solve converges");
     let warm_ev = {
-        let fitted = term.try_fitted_for_rho(&rho_warm).unwrap();
+        let fitted = term
+            .try_fitted_for_rho(&rho_warm)
+            .expect("the fit above converged, so a fitted surface exists");
         reconstruction_explained_variance(target.view(), fitted.view())
             .expect("explained variance is defined for the planted target")
     };
@@ -1217,7 +1232,7 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
             decoder.clone(),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((n, 1)),
@@ -1225,8 +1240,9 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
             vec![LatentManifold::Circle { period: 1.0 }],
             AssignmentMode::softmax(1.0),
         )
-        .unwrap();
-        SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block")
     };
 
     // Held-out planted rows interleaved between the training coords (not an
@@ -1331,12 +1347,13 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
         let mut probe = build_term();
         // Warm-start the inner latents from the amortized encoder built on the
         // running dictionary, then rank by the co-trained criterion.
-        if let Err(err) = probe.warm_start_latents_from_amortized_encoder(target.view(), rho)
-        {
+        if let Err(err) = probe.warm_start_latents_from_amortized_encoder(target.view(), rho) {
             // The amortized encoder is an accelerator, not a precondition: this rho
             // still gets ranked from the cold latent seed. Report it so a warm start
             // that silently never engages cannot masquerade as Design A.
-            eprintln!("amortized warm start unavailable at this rho ({err}); ranking from the cold seed");
+            eprintln!(
+                "amortized warm start unavailable at this rho ({err}); ranking from the cold seed"
+            );
         }
         let Ok((cotrained, _loss, _consistency)) = probe
             .penalized_quasi_laplace_criterion_cotrained(
@@ -1362,11 +1379,11 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
     );
     let mut cot_term = build_term();
     let mut cot_rho = best_cot_rho.clone();
-    if let Err(err) =
-        cot_term.warm_start_latents_from_amortized_encoder(target.view(), &cot_rho)
-    {
+    if let Err(err) = cot_term.warm_start_latents_from_amortized_encoder(target.view(), &cot_rho) {
         // Same accelerator contract as the ranking loop above.
-        eprintln!("amortized warm start unavailable at the selected rho ({err}); using the cold seed");
+        eprintln!(
+            "amortized warm start unavailable at the selected rho ({err}); using the cold seed"
+        );
     }
     cot_term
         .run_joint_fit_arrow_schur(target.view(), &mut cot_rho, None, 64, 1.0, 1.0e-4, 1.0e-4)
@@ -1447,7 +1464,7 @@ fn sae_1026_curved_beats_linear_reconstruction_through_solver() {
             decoder_c.clone(),
             Array2::<f64>::eye(mc),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((n, 1)),
@@ -1455,19 +1472,28 @@ fn sae_1026_curved_beats_linear_reconstruction_through_solver() {
             vec![LatentManifold::Circle { period: 1.0 }],
             AssignmentMode::softmax(1.0),
         )
-        .unwrap();
-        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block");
         let mut rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![1.0_f64.ln()]]);
         term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 12, 0.1, 1.0e-4, 1.0e-4)
             .expect("curved inner solve converges on the planted circle");
-        let fitted = term.try_fitted_for_rho(&rho).unwrap();
-        reconstruction_explained_variance(target.view(), fitted.view()).unwrap()
+        let fitted = term
+            .try_fitted_for_rho(&rho)
+            .expect("the fit above converged, so a fitted surface exists");
+        reconstruction_explained_variance(target.view(), fitted.view())
+            .expect("target and reconstruction share a shape, so explained variance is defined")
     };
 
     // LINEAR arm: one degree-1 euclidean atom on the SAME circle target.
     let linear_ev = {
-        let evaluator = Arc::new(EuclideanPatchEvaluator::new(1, 1).unwrap());
-        let (phi_l, jet_l) = evaluator.evaluate(coords.view()).unwrap();
+        let evaluator = Arc::new(
+            EuclideanPatchEvaluator::new(1, 1)
+                .expect("a 1-D, 1-patch Euclidean basis is a valid evaluator"),
+        );
+        let (phi_l, jet_l) = evaluator
+            .evaluate(coords.view())
+            .expect("fixture coords are already wrapped into the evaluator's unit period");
         let ml = phi_l.ncols();
         let atom = SaeManifoldAtom::new_with_provided_function_gram(
             "linear",
@@ -1478,7 +1504,7 @@ fn sae_1026_curved_beats_linear_reconstruction_through_solver() {
             Array2::<f64>::zeros((ml, p)),
             Array2::<f64>::eye(ml),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_second_jet(evaluator);
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
             Array2::<f64>::zeros((n, 1)),
@@ -1486,13 +1512,17 @@ fn sae_1026_curved_beats_linear_reconstruction_through_solver() {
             vec![LatentManifold::Euclidean],
             AssignmentMode::softmax(1.0),
         )
-        .unwrap();
-        let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block");
         let mut rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![Array1::<f64>::zeros(1)]);
         term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 12, 0.1, 1.0e-4, 1.0e-4)
             .expect("linear inner solve converges");
-        let fitted = term.try_fitted_for_rho(&rho).unwrap();
-        reconstruction_explained_variance(target.view(), fitted.view()).unwrap()
+        let fitted = term
+            .try_fitted_for_rho(&rho)
+            .expect("the fit above converged, so a fitted surface exists");
+        reconstruction_explained_variance(target.view(), fitted.view())
+            .expect("target and reconstruction share a shape, so explained variance is defined")
     };
 
     eprintln!("#1026 solver reconstruction: curved EV={curved_ev:.4}, linear EV={linear_ev:.4}");
@@ -1534,7 +1564,7 @@ fn sae_1026_full_encode_decode_heldout_curved_certifies() {
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
@@ -1542,8 +1572,9 @@ fn sae_1026_full_encode_decode_heldout_curved_certifies() {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("fixture assignment: one logit column and one coord block per atom");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
     // Held-out, on-manifold circle points at FRESH angles, encoded from z alone.
     let n_test = 32usize;
     let theta_test = Array2::from_shape_fn((n_test, 1), |(r, _)| (r as f64 + 0.25) / n_test as f64);
@@ -1577,7 +1608,8 @@ fn sae_1026_full_encode_decode_heldout_curved_certifies() {
             recon[[r, c]] = rr[[0, c]];
         }
     }
-    let ev = reconstruction_explained_variance(z_test.view(), recon.view()).unwrap();
+    let ev = reconstruction_explained_variance(z_test.view(), recon.view())
+        .expect("target and reconstruction share a shape, so explained variance is defined");
     eprintln!("FULL_ENCODE_DECODE heldout EV={ev:.4} certified={certified}/{n_test}");
     assert!(
         ev > 0.95,
@@ -1640,7 +1672,7 @@ fn sae_1026_solver_recovers_separable_superposition_but_not_below_2k() {
             Array2::<f64>::zeros((m, p)),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         let a1 = SaeManifoldAtom::new_with_provided_function_gram(
             "cB",
@@ -1651,7 +1683,7 @@ fn sae_1026_solver_recovers_separable_superposition_but_not_below_2k() {
             Array2::<f64>::zeros((m, p)),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
         let logits = Array2::<f64>::from_elem((n, 2), 6.0 * 0.5);
         let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -1663,8 +1695,9 @@ fn sae_1026_solver_recovers_separable_superposition_but_not_below_2k() {
             ],
             AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
         )
-        .unwrap();
-        let mut term = SaeManifoldTerm::new(vec![a0, a1], assignment).unwrap();
+        .expect("fixture assignment: one logit column and one coord block per atom");
+        let mut term = SaeManifoldTerm::new(vec![a0, a1], assignment)
+            .expect("fixture term: every atom's basis width matches its assignment block");
         let mut rho = SaeManifoldRho::new(
             0.0,
             0.01_f64.ln(),
@@ -1672,8 +1705,11 @@ fn sae_1026_solver_recovers_separable_superposition_but_not_below_2k() {
         );
         term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 24, 0.1, 1.0e-4, 1.0e-4)
             .expect("K=2 inner solve converges");
-        let fitted = term.try_fitted_for_rho(&rho).unwrap();
-        reconstruction_explained_variance(target.view(), fitted.view()).unwrap()
+        let fitted = term
+            .try_fitted_for_rho(&rho)
+            .expect("the fit above converged, so a fitted surface exists");
+        reconstruction_explained_variance(target.view(), fitted.view())
+            .expect("target and reconstruction share a shape, so explained variance is defined")
     };
     let separable = recover(4, false);
     let under_determined = recover(3, true);
@@ -1821,8 +1857,8 @@ pub(crate) fn gauge_fixed_krylov_operator_matches_deflated_preconditioner_2253()
 #[test]
 pub(crate) fn pca_seed_handles_huge_equal_finite_columns_without_mean_overflow() {
     let z = array![[1.0e308_f64, 1.0e308], [1.0e308, 1.0e308]];
-    let coords =
-        sae_pca_seed_initial_coords(z.view(), &[SaeAtomBasisKind::Periodic], &[1]).unwrap();
+    let coords = sae_pca_seed_initial_coords(z.view(), &[SaeAtomBasisKind::Periodic], &[1])
+        .expect("the planted target has full enough rank to seed one 1-D atom");
     assert_eq!(coords.dim(), (1, 2, 1));
     assert!(
         coords.iter().all(|value| value.is_finite()),
@@ -1925,7 +1961,7 @@ fn smooth_threshold_hdiag_third_derivative_matches_central_difference_1415() {
                 Array2::<f64>::zeros((2, p)),
                 Array2::<f64>::eye(2),
             )
-            .unwrap()
+            .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
         })
         .collect();
     let coords: Vec<Array2<f64>> = (0..k).map(|_| Array2::<f64>::zeros((n, 1))).collect();
@@ -1937,11 +1973,14 @@ fn smooth_threshold_hdiag_third_derivative_matches_central_difference_1415() {
         AssignmentMode::threshold_gate(temperature, threshold),
     )
     .expect("valid smooth threshold assignment");
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("fixture term: every atom's basis width matches its assignment block");
     let rho = SaeManifoldRho::new(0.7_f64.ln(), -6.0, vec![Array1::<f64>::zeros(1); k]);
 
     let inv_tau = 1.0 / temperature;
-    let sparsity = rho.lambda_sparse().unwrap();
+    let sparsity = rho
+        .lambda_sparse()
+        .expect("the fixture rho was built with a sparsity lambda");
     // Exact, separately-certified Hessian diagonal P''(ℓ) as a function of ℓ.
     let p2 = |logit: f64| -> f64 {
         let a = gam_linalg::utils::stable_logistic((logit - threshold) * inv_tau);
@@ -2024,7 +2063,7 @@ fn encode_grad_hess_and_beta_eta_match_finite_differences() {
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap();
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction");
     let eval = TestPeriodicEvaluator;
     let amplitude = 0.8_f64;
 
@@ -2113,7 +2152,8 @@ fn robust_norm_row_weights_rebalances_heavy_tailed_objective() {
     let hi_sq: f64 = hi.iter().map(|&i| norms[i] * norms[i]).sum();
     let unweighted_share = hi_sq / total_sq;
 
-    let w = SaeManifoldTerm::robust_norm_row_weights(target.view(), 1.0).unwrap();
+    let w = SaeManifoldTerm::robust_norm_row_weights(target.view(), 1.0)
+        .expect("fixture rows are finite, so robust row weights are defined");
 
     // Mean-normalized (matches the set_row_loss_weights convention).
     let mean: f64 = w.iter().sum::<f64>() / n as f64;
@@ -2138,7 +2178,8 @@ fn robust_norm_row_weights_rebalances_heavy_tailed_objective() {
     // It must also be installable through the existing mechanism without error
     // (uniform-design guard: a flat slice yields all-1.0 and the unweighted path).
     let flat = Array2::<f64>::from_elem((4, p), 2.0);
-    let wf = SaeManifoldTerm::robust_norm_row_weights(flat.view(), 1.0).unwrap();
+    let wf = SaeManifoldTerm::robust_norm_row_weights(flat.view(), 1.0)
+        .expect("fixture rows are finite, so robust row weights are defined");
     assert!(
         wf.iter().all(|&x| (x - 1.0).abs() < 1e-12),
         "flat norms → uniform weights"

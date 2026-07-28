@@ -143,9 +143,13 @@ pub(super) fn default_beta_guess_external(
                 beta[intercept_col] = match link_function {
                     LinkFunction::Logit => (prevalence / (1.0 - prevalence)).ln(),
                     LinkFunction::Probit => {
-                        standard_normal_quantile(prevalence).unwrap_or_else(|_| {
+                        standard_normal_quantile(prevalence).unwrap_or_else(|err| {
                             // `prevalence` is clamped to (0, 1); this fallback is
                             // only for defensive robustness under non-finite upstream inputs.
+                            log::debug!(
+                                "[PIRLS init] probit intercept seed: Φ⁻¹({prevalence:.6}) \
+                                 failed ({err}); using the logit transform instead"
+                            );
                             (prevalence / (1.0 - prevalence)).ln()
                         })
                     }
@@ -159,8 +163,13 @@ pub(super) fn default_beta_guess_external(
                         sas_link_state,
                     )
                     .unwrap_or_else(|| {
-                        standard_normal_quantile(prevalence)
-                            .unwrap_or_else(|_| (prevalence / (1.0 - prevalence)).ln())
+                        standard_normal_quantile(prevalence).unwrap_or_else(|err| {
+                            log::debug!(
+                                "[PIRLS init] intercept seed: Φ⁻¹({prevalence:.6}) failed \
+                                 ({err}); using the logit transform instead"
+                            );
+                            (prevalence / (1.0 - prevalence)).ln()
+                        })
                     }),
                     LinkFunction::BetaLogistic => solve_intercept_for_prevalence(
                         link_function,
@@ -169,8 +178,13 @@ pub(super) fn default_beta_guess_external(
                         sas_link_state,
                     )
                     .unwrap_or_else(|| {
-                        standard_normal_quantile(prevalence)
-                            .unwrap_or_else(|_| (prevalence / (1.0 - prevalence)).ln())
+                        standard_normal_quantile(prevalence).unwrap_or_else(|err| {
+                            log::debug!(
+                                "[PIRLS init] intercept seed: Φ⁻¹({prevalence:.6}) failed \
+                                 ({err}); using the logit transform instead"
+                            );
+                            (prevalence / (1.0 - prevalence)).ln()
+                        })
                     }),
                     // Outer arm guard already filtered out Log/Identity; fall
                     // back to the canonical logit transform for defensive safety

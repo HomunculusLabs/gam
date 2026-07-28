@@ -8,6 +8,8 @@
 //! reconstruction paths. They share the parent module's fixtures via
 //! `super::tests`.
 
+#![cfg(test)]
+
 use super::tests::{
     TestPeriodicEvaluator, periodic_basis, small_two_atom_periodic_term, trivial_k1_euclidean_term,
 };

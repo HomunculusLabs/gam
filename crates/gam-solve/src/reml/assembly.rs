@@ -327,10 +327,8 @@ pub struct InnerAssembly<'dp> {
 
     // === Extended hyperparameter coordinates ===
     pub ext_coords: Vec<HyperCoord>,
-    pub ext_coord_pair_fn:
-        Option<Box<dyn Fn(usize, usize) -> HyperCoordPairResult + Send + Sync>>,
-    pub rho_ext_pair_fn:
-        Option<Box<dyn Fn(usize, usize) -> HyperCoordPairResult + Send + Sync>>,
+    pub ext_coord_pair_fn: Option<Box<dyn Fn(usize, usize) -> HyperCoordPairResult + Send + Sync>>,
+    pub rho_ext_pair_fn: Option<Box<dyn Fn(usize, usize) -> HyperCoordPairResult + Send + Sync>>,
     pub fixed_drift_deriv: Option<FixedDriftDerivFn>,
     /// Direction-contracted ψψ second-order hook (#740). When set, the
     /// outer-Hessian operator builder skips the `K²` per-pair ψψ assembly and

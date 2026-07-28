@@ -339,7 +339,11 @@ pub(crate) fn fused_rail_logdet_hessian_diagonal_beats_naive_and_restores_tail_s
     h[[0, 0]] += lambda * s_scalar;
     let op = DenseSpectralOperator::from_symmetric(&h).expect("rail SPD fixture");
     let p = op.n_dim;
-    assert_eq!(op.active_rank(), p, "smooth mode keeps the complete eigenbasis");
+    assert_eq!(
+        op.active_rank(),
+        p,
+        "smooth mode keeps the complete eigenbasis"
+    );
 
     let s_block = array![[s_scalar]];
     // Full-space drift A = λ_k S_k for the naive cross contraction.
@@ -387,7 +391,11 @@ pub(crate) fn fused_rail_logdet_hessian_diagonal_beats_naive_and_restores_tail_s
                 continue;
             }
             let c = a_tilde[[a, b]];
-            add(op.logdet_hessian_kernel[[a, b]] * c * c, &mut sum, &mut comp);
+            add(
+                op.logdet_hessian_kernel[[a, b]] * c * c,
+                &mut sum,
+                &mut comp,
+            );
         }
     }
     let reference = sum + comp;
@@ -451,11 +459,7 @@ pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_i
     use faer::Side;
     // 3-wide second-difference penalty on block [0..3]: rank 2, null space is
     // the constant vector [1,1,1] — the canonical rank-deficient smooth penalty.
-    let s_block = array![
-        [1.0_f64, -1.0, 0.0],
-        [-1.0, 2.0, -1.0],
-        [0.0, -1.0, 1.0],
-    ];
+    let s_block = array![[1.0_f64, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 1.0],];
     let range_root = array![[1.0_f64, -1.0, 0.0], [0.0, 1.0, -1.0]];
     let width = 3usize;
     let rank = 2usize;
@@ -477,7 +481,11 @@ pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_i
         }
     }
     let op = DenseSpectralOperator::from_symmetric(&h).expect("rail SPD fixture");
-    assert_eq!(op.active_rank(), p, "smooth mode keeps the complete eigenbasis");
+    assert_eq!(
+        op.active_rank(),
+        p,
+        "smooth mode keeps the complete eigenbasis"
+    );
 
     // Production naive form: full block trace, then subtract the integer rank.
     let trace = op.trace_logdet_block_local(&s_block, lambda, 0, width);
@@ -494,7 +502,9 @@ pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_i
     // Compensated (Neumaier) reference over mathematically equivalent
     // per-eigenpair terms, with an independently constructed range basis. The
     // `−rank` share is the range-projector mass `‖Qᵀ u_j^{blk}‖²`.
-    let (evals, evecs) = s_block.eigh(Side::Lower).expect("s_block eigendecomposition");
+    let (evals, evecs) = s_block
+        .eigh(Side::Lower)
+        .expect("s_block eigendecomposition");
     let max_ev = evals.iter().copied().fold(0.0_f64, f64::max);
     let tol = (width as f64) * f64::EPSILON * max_ev.max(1e-12);
     let active: Vec<usize> = evals
@@ -503,7 +513,11 @@ pub(crate) fn fused_rank_deficient_rail_gradient_preserves_value_and_projector_i
         .filter(|(_, v)| **v > tol)
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(active.len(), rank, "second-difference penalty must be rank {rank}");
+    assert_eq!(
+        active.len(),
+        rank,
+        "second-difference penalty must be rank {rank}"
+    );
 
     let g_block = op.g_factor.slice(ndarray::s![0..width, ..]);
     let u_block = op.eigenvectors.slice(ndarray::s![0..width, ..]);
@@ -630,13 +644,8 @@ pub(crate) fn fused_rank_projector_uses_root_chart_when_gram_leaks_into_nullspac
     h.scaled_add(lambda, &s_block);
     let op = DenseSpectralOperator::from_symmetric(&h).expect("leaky Gram Hessian");
     let naive = op.trace_logdet_block_local(&s_block, lambda, 0, 2) - 1.0;
-    let fused = op.fused_logdet_gradient_minus_rank_from_root_chart(
-        &s_block,
-        &range_root,
-        0,
-        2,
-        lambda,
-    );
+    let fused =
+        op.fused_logdet_gradient_minus_rank_from_root_chart(&s_block, &range_root, 0, 2, lambda);
     assert!(
         (fused - naive).abs() <= 1.0e-12 * (1.0 + naive.abs()),
         "root-chart fusion must subtract structural rank 1: fused={fused:.15e} naive={naive:.15e}"
@@ -700,7 +709,11 @@ fn assert_weighted_fused_kernel_gate(
 ) {
     let p = h.nrows();
     let op = DenseSpectralOperator::from_symmetric(h).expect("SPD fixture");
-    assert_eq!(op.active_rank(), p, "smooth mode keeps the complete eigenbasis");
+    assert_eq!(
+        op.active_rank(),
+        p,
+        "smooth mode keeps the complete eigenbasis"
+    );
 
     // Joint penalty S_λ = Σ λ_l S_l and its whitening W_S (W_S W_Sᵀ = S_λ⁺),
     // sourced from the same PenaltyPseudologdet the cost path uses.
@@ -708,11 +721,9 @@ fn assert_weighted_fused_kernel_gate(
     for (l, s) in s_k_full.iter().enumerate() {
         s_lambda.scaled_add(lambdas[l], s);
     }
-    let pld = super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(
-        s_lambda.clone(),
-        None,
-    )
-    .expect("joint penalty pseudologdet");
+    let pld =
+        super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(s_lambda.clone(), None)
+            .expect("joint penalty pseudologdet");
     let ws = &pld.w_factor;
     let (det1, _det2) = pld.rho_derivatives(s_k_full, lambdas);
     let det1_k = det1[target];
@@ -723,8 +734,7 @@ fn assert_weighted_fused_kernel_gate(
     );
 
     // Production naive: full block trace, then subtract the fractional det1.
-    let naive =
-        op.trace_logdet_block_local(&s_k_full[target], lambdas[target], 0, p) - det1_k;
+    let naive = op.trace_logdet_block_local(&s_k_full[target], lambdas[target], 0, p) - det1_k;
     // Production weighted fused.
     let (fused, weight_sum) =
         op.fused_logdet_gradient_weighted_block(&s_k_full[target], 0, p, lambdas[target], ws);
@@ -952,7 +962,11 @@ pub(crate) fn fused_rank_deficient_logdet_gradient_masked_null_matches_central_d
     );
     let masked_block_mass: f64 = (0..op.n_dim)
         .filter(|&j| !op.active_mask[j])
-        .map(|j| (0..width).map(|i| op.eigenvectors[[i, j]].powi(2)).sum::<f64>())
+        .map(|j| {
+            (0..width)
+                .map(|i| op.eigenvectors[[i, j]].powi(2))
+                .sum::<f64>()
+        })
         .sum();
     assert!(
         masked_block_mass > 0.5,
@@ -1148,9 +1162,8 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
     let mut s_lambda = Array2::<f64>::zeros((p, p));
     s_lambda.scaled_add(lambdas[0], &s0);
     s_lambda.scaled_add(lambdas[1], &s1);
-    let pld =
-        super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(s_lambda, None)
-            .expect("joint penalty pseudologdet");
+    let pld = super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(s_lambda, None)
+        .expect("joint penalty pseudologdet");
     let ws = &pld.w_factor;
     let (det1, _det2) = pld.rho_derivatives(&[s0.clone(), s1], &lambdas);
     let det1_0 = det1[0];
@@ -1159,8 +1172,7 @@ pub(crate) fn fused_logdet_gradient_reductions_exact_under_masked_null_space() {
         "weighted fixture det1[0]={det1_0:.6e} must be fractional"
     );
     let naive_w = op.trace_logdet_block_local(&s0, lambdas[0], 0, p) - det1_0;
-    let (fused_w, weight_sum) =
-        op.fused_logdet_gradient_weighted_block(&s0, 0, p, lambdas[0], ws);
+    let (fused_w, weight_sum) = op.fused_logdet_gradient_weighted_block(&s0, 0, p, lambdas[0], ws);
     // Completeness of the weight distribution survives the mask (Σ_j runs over
     // the full eigenbasis), so the self-consistency gate the call site trusts
     // still holds.
@@ -1197,11 +1209,9 @@ pub(crate) fn joint_penalty_logdet_differs_from_per_block_under_ridge_overlap() 
     for (l, s) in s_k.iter().enumerate() {
         s_lambda.scaled_add(lambdas[l], s);
     }
-    let pld = super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(
-        s_lambda.clone(),
-        None,
-    )
-    .expect("joint pld");
+    let pld =
+        super::super::penalty_logdet::PenaltyPseudologdet::from_assembled(s_lambda.clone(), None)
+            .expect("joint pld");
     let joint_value = pld.value();
 
     // Independent reference: Σ log σ_i over the positive spectrum of S_λ.
@@ -3128,20 +3138,24 @@ pub(crate) fn operator_hessian_matches_dense_with_operator_drifts_and_extended_g
             tk_eta_fixed: None,
             tk_x_fixed: None,
         }],
-        ext_coord_pair_fn: Some(Arc::new(|_, _| Ok(HyperCoordPair {
-            a: 0.09,
-            g: array![0.16, -0.12],
-            b_mat: array![[0.08, 0.03], [0.03, -0.04]],
-            b_operator: None,
-            ld_s: -0.05,
-        }))),
-        rho_ext_pair_fn: Some(Arc::new(|_, _| Ok(HyperCoordPair {
-            a: -0.14,
-            g: array![-0.18, 0.22],
-            b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
-            b_operator: None,
-            ld_s: 0.04,
-        }))),
+        ext_coord_pair_fn: Some(Arc::new(|_, _| {
+            Ok(HyperCoordPair {
+                a: 0.09,
+                g: array![0.16, -0.12],
+                b_mat: array![[0.08, 0.03], [0.03, -0.04]],
+                b_operator: None,
+                ld_s: -0.05,
+            })
+        })),
+        rho_ext_pair_fn: Some(Arc::new(|_, _| {
+            Ok(HyperCoordPair {
+                a: -0.14,
+                g: array![-0.18, 0.22],
+                b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
+                b_operator: None,
+                ld_s: 0.04,
+            })
+        })),
         fixed_drift_deriv: None,
         contracted_psi_second_order: None,
         barrier_config: None,
@@ -3326,20 +3340,24 @@ pub(crate) fn operator_hessian_with_contracted_psi_hook_matches_per_pair_dense()
                 tk_eta_fixed: None,
                 tk_x_fixed: None,
             }],
-            ext_coord_pair_fn: Some(Arc::new(move |_, _| Ok(HyperCoordPair {
-                a: psi_pair_a,
-                g: array![0.16, -0.12],
-                b_mat: pair_b_for_dense.clone(),
-                b_operator: None,
-                ld_s: psi_pair_ld_s,
-            }))),
-            rho_ext_pair_fn: Some(Arc::new(|_, _| Ok(HyperCoordPair {
-                a: -0.14,
-                g: array![-0.18, 0.22],
-                b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
-                b_operator: None,
-                ld_s: 0.04,
-            }))),
+            ext_coord_pair_fn: Some(Arc::new(move |_, _| {
+                Ok(HyperCoordPair {
+                    a: psi_pair_a,
+                    g: array![0.16, -0.12],
+                    b_mat: pair_b_for_dense.clone(),
+                    b_operator: None,
+                    ld_s: psi_pair_ld_s,
+                })
+            })),
+            rho_ext_pair_fn: Some(Arc::new(|_, _| {
+                Ok(HyperCoordPair {
+                    a: -0.14,
+                    g: array![-0.18, 0.22],
+                    b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
+                    b_operator: None,
+                    ld_s: 0.04,
+                })
+            })),
             fixed_drift_deriv: None,
             contracted_psi_second_order,
             barrier_config: None,
@@ -3470,13 +3488,15 @@ pub(crate) fn operator_hessian_with_contracted_psi_hook_matches_per_pair_dense()
     // term2-only: zero the ψψ second drift (pair.b_mat) → removes base_h2 ψψ.
     let dense_no_base = {
         let mut sol = build_solution(false);
-        sol.ext_coord_pair_fn = Some(Arc::new(move |_, _| Ok(HyperCoordPair {
-            a: psi_pair_a,
-            g: array![0.16, -0.12],
-            b_mat: Array2::zeros((2, 2)),
-            b_operator: None,
-            ld_s: psi_pair_ld_s,
-        })));
+        sol.ext_coord_pair_fn = Some(Arc::new(move |_, _| {
+            Ok(HyperCoordPair {
+                a: psi_pair_a,
+                g: array![0.16, -0.12],
+                b_mat: Array2::zeros((2, 2)),
+                b_operator: None,
+                ld_s: psi_pair_ld_s,
+            })
+        }));
         compute_outer_hessian(
             &sol,
             &rho,
@@ -3552,13 +3572,15 @@ pub(crate) fn operator_hessian_with_contracted_psi_hook_matches_per_pair_dense()
     let dense_without_psi_score_hvp = {
         let mut sol = build_solution(false);
         let pair_b_for_zero_score = psi_pair_b.clone();
-        sol.ext_coord_pair_fn = Some(Arc::new(move |_, _| Ok(HyperCoordPair {
-            a: psi_pair_a,
-            g: Array1::zeros(2),
-            b_mat: pair_b_for_zero_score.clone(),
-            b_operator: None,
-            ld_s: psi_pair_ld_s,
-        })));
+        sol.ext_coord_pair_fn = Some(Arc::new(move |_, _| {
+            Ok(HyperCoordPair {
+                a: psi_pair_a,
+                g: Array1::zeros(2),
+                b_mat: pair_b_for_zero_score.clone(),
+                b_operator: None,
+                ld_s: psi_pair_ld_s,
+            })
+        }));
         let dense_without_psi_score = compute_outer_hessian(
             &sol,
             &rho,
@@ -3918,20 +3940,24 @@ pub(crate) fn projected_operator_hessian_matches_dense_subspace_trace() {
             tk_eta_fixed: None,
             tk_x_fixed: None,
         }],
-        ext_coord_pair_fn: Some(Arc::new(|_, _| Ok(HyperCoordPair {
-            a: 0.09,
-            g: array![0.16, -0.12],
-            b_mat: array![[0.08, 0.03], [0.03, -0.04]],
-            b_operator: None,
-            ld_s: -0.05,
-        }))),
-        rho_ext_pair_fn: Some(Arc::new(|_, _| Ok(HyperCoordPair {
-            a: -0.14,
-            g: array![-0.18, 0.22],
-            b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
-            b_operator: None,
-            ld_s: 0.04,
-        }))),
+        ext_coord_pair_fn: Some(Arc::new(|_, _| {
+            Ok(HyperCoordPair {
+                a: 0.09,
+                g: array![0.16, -0.12],
+                b_mat: array![[0.08, 0.03], [0.03, -0.04]],
+                b_operator: None,
+                ld_s: -0.05,
+            })
+        })),
+        rho_ext_pair_fn: Some(Arc::new(|_, _| {
+            Ok(HyperCoordPair {
+                a: -0.14,
+                g: array![-0.18, 0.22],
+                b_mat: array![[0.05, -0.02], [-0.02, 0.07]],
+                b_operator: None,
+                ld_s: 0.04,
+            })
+        })),
         fixed_drift_deriv: None,
         contracted_psi_second_order: None,
         barrier_config: None,
@@ -8455,9 +8481,9 @@ pub(crate) fn tangent_projected_trace_logdet_operator_matches_densify_then_proje
 #[test]
 pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() {
     use gam_terms::basis::{
-        BasisBuildResult, BasisMetadata, CenterStrategy, DuchonBasisSpec,
-        DuchonNullspaceOrder, DuchonOperatorPenaltySpec, OneDimensionalBoundary,
-        SpatialIdentifiability, build_duchon_basis,
+        BasisBuildResult, BasisMetadata, CenterStrategy, DuchonBasisSpec, DuchonNullspaceOrder,
+        DuchonOperatorPenaltySpec, OneDimensionalBoundary, SpatialIdentifiability,
+        build_duchon_basis,
     };
 
     const N: usize = 96;
@@ -8510,8 +8536,8 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
         radial_reparam: None,
     };
     let base = build_duchon_basis(data.view(), &spec).expect("base Duchon preoptimizer build");
-    let rotated = build_duchon_basis(rotated_data.view(), &spec)
-        .expect("rotated Duchon preoptimizer build");
+    let rotated =
+        build_duchon_basis(rotated_data.view(), &spec).expect("rotated Duchon preoptimizer build");
 
     fn centers(built: &BasisBuildResult) -> &Array2<f64> {
         match &built.metadata {
@@ -8521,7 +8547,10 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
     }
     let expected_rotated_centers = rotate(centers(&base));
     let actual_rotated_centers = centers(&rotated);
-    assert_eq!(expected_rotated_centers.raw_dim(), actual_rotated_centers.raw_dim());
+    assert_eq!(
+        expected_rotated_centers.raw_dim(),
+        actual_rotated_centers.raw_dim()
+    );
     let mut unmatched = vec![true; actual_rotated_centers.nrows()];
     let mut worst_center_residual = 0.0_f64;
     for expected in expected_rotated_centers.rows() {
@@ -8592,13 +8621,17 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
             .expect("Duchon data Gram eigendecomposition");
         let gram_scale = gram_values.iter().copied().fold(0.0_f64, f64::max);
         assert!(
-            gram_values.iter().all(|&value| value > 1.0e-11 * gram_scale),
+            gram_values
+                .iter()
+                .all(|&value| value > 1.0e-11 * gram_scale),
             "preoptimizer Duchon design must be full column rank: {gram_values:?}"
         );
         let mut inverse_sqrt = gram_vectors;
         for (column, &value) in gram_values.iter().enumerate() {
             let scale = value.sqrt().recip();
-            inverse_sqrt.column_mut(column).mapv_inplace(|entry| entry * scale);
+            inverse_sqrt
+                .column_mut(column)
+                .mapv_inplace(|entry| entry * scale);
         }
         let orthonormal_design = design.dot(&inverse_sqrt);
         let projector = orthonormal_design.dot(&orthonormal_design.t());
@@ -8612,8 +8645,7 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
         (projector, spectrum)
     };
     let (base_projector, base_spectrum) = geometry(&base_design, &base_penalties);
-    let (rotated_projector, rotated_spectrum) =
-        geometry(&rotated_design, &rotated_penalties);
+    let (rotated_projector, rotated_spectrum) = geometry(&rotated_design, &rotated_penalties);
     let projector_defect = (&base_projector - &rotated_projector)
         .iter()
         .copied()
@@ -8660,12 +8692,9 @@ pub(crate) fn duchon_rotation_is_equivariant_before_outer_optimization_gh2319() 
             })
             .collect();
         let penalty_blocks: [&[Array2<f64>]; 1] = [penalties];
-        let penalty_logdet = compute_block_penalty_logdet_derivs(
-            std::slice::from_ref(&rho),
-            &penalty_blocks,
-            0.0,
-        )
-        .expect("exact Duchon penalty logdet derivatives");
+        let penalty_logdet =
+            compute_block_penalty_logdet_derivs(std::slice::from_ref(&rho), &penalty_blocks, 0.0)
+                .expect("exact Duchon penalty logdet derivatives");
         let solution = InnerSolution {
             log_likelihood: -0.5 * residual.dot(&residual),
             penalty_quadratic,

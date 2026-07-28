@@ -594,8 +594,7 @@ pub(crate) fn record_current_outer_rho_model_upper_bounds_for_ift(upper: &Array1
     IFT_CURRENT_OUTER_RHO_MODEL_UPPER_BOUNDS.with(|slot| *slot.borrow_mut() = value);
 }
 
-pub(crate) fn current_outer_rho_model_upper_bounds_for_ift(
-) -> Option<OuterRhoModelUpperBounds> {
+pub(crate) fn current_outer_rho_model_upper_bounds_for_ift() -> Option<OuterRhoModelUpperBounds> {
     IFT_CURRENT_OUTER_RHO_MODEL_UPPER_BOUNDS.with(|slot| slot.borrow().clone())
 }
 

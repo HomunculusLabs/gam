@@ -162,9 +162,7 @@ impl DenseSpectralOperator {
                 vec![true; n]
             }
             PseudoLogdetMode::HardPseudo => {
-                let sigma_max = eigenvalues
-                    .iter()
-                    .fold(0.0_f64, |acc, &s| acc.max(s.abs()));
+                let sigma_max = eigenvalues.iter().fold(0.0_f64, |acc, &s| acc.max(s.abs()));
                 let floor = epsilon.max(HARD_PSEUDO_RELATIVE_FLOOR * sigma_max);
                 eigenvalues.iter().map(|&s| s > floor).collect()
             }

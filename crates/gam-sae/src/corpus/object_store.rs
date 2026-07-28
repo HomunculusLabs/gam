@@ -493,7 +493,10 @@ mod tests {
         assert_eq!(ids_again, ids_r);
         assert_eq!(vals_again, vals_r);
         if let Err(err) = std::fs::remove_dir_all(&dir) {
-            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+            eprintln!(
+                "temp object store cleanup failed for {}: {err}",
+                dir.display()
+            );
         }
     }
 
@@ -516,7 +519,12 @@ mod tests {
         }
         fn fetch_range(&self, key: &str, offset: u64, len: usize) -> Result<Vec<u8>, ShardError> {
             if offset as usize >= HEADER_LEN {
-                self.payload_fetches.lock().unwrap().push(key.to_string());
+                self.payload_fetches
+                    .lock()
+                    .expect(
+                        "payload-fetch log lock is poisoned: a writer panicked while holding it",
+                    )
+                    .push(key.to_string());
             }
             self.inner.fetch_range(key, offset, len)
         }
@@ -548,7 +556,10 @@ mod tests {
         let first = src.next_batch().expect("batch").expect("some");
         assert_eq!(first.row_ids, vec![0]);
         {
-            let fetched = store.payload_fetches.lock().unwrap();
+            let fetched = store
+                .payload_fetches
+                .lock()
+                .expect("payload-fetch log lock is poisoned: a writer panicked while holding it");
             assert!(
                 fetched.len() <= 1 + PREFETCH_SHARDS_AHEAD,
                 "first batch fetched {} shard payloads; window allows {}",
@@ -562,10 +573,16 @@ mod tests {
         // Draining the rest touches every shard exactly once.
         let (ids, _) = drain(&mut src);
         assert_eq!(ids, vec![1, 2, 3, 4, 5]);
-        let fetched = store.payload_fetches.lock().unwrap();
+        let fetched = store
+            .payload_fetches
+            .lock()
+            .expect("payload-fetch log lock is poisoned: a writer panicked while holding it");
         assert_eq!(fetched.len(), 6, "each shard payload fetched exactly once");
         if let Err(err) = std::fs::remove_dir_all(&dir) {
-            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+            eprintln!(
+                "temp object store cleanup failed for {}: {err}",
+                dir.display()
+            );
         }
     }
 
@@ -594,7 +611,10 @@ mod tests {
         let err = ObjectStoreShardSource::open(store);
         assert!(matches!(err, Err(ShardError::WidthMismatch { .. })));
         if let Err(err) = std::fs::remove_dir_all(&dir) {
-            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+            eprintln!(
+                "temp object store cleanup failed for {}: {err}",
+                dir.display()
+            );
         }
     }
 }

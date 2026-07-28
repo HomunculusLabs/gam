@@ -912,7 +912,10 @@ fn sample_standard(
         ));
     }
     let penalty =
-        weighted_blockwise_penalty_sum(&design.penalties, fit.lambdas.as_slice().unwrap(), p);
+        weighted_blockwise_penalty_sum(&design.penalties, fit
+            .lambdas
+            .as_slice()
+            .expect("owned Array1 is contiguous, so as_slice always succeeds"), p);
 
     let saved_offset_vec = saved_offset(model, data, col_map)?;
     let base_offset =

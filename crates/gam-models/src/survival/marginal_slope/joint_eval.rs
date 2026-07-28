@@ -922,15 +922,18 @@ impl SurvivalMarginalSlopeFamily {
                     }
                     let d2j_m = [&d2j0m[..], &d2j1m[..], &d2jdm[..]];
 
+                    // `jt`/`jm` borrow owned `Array1` jet fields of `q_geom`,
+                    // which are contiguous, so `as_slice` cannot return None.
+                    let contiguous = "q_geom jets are owned contiguous Array1 buffers";
                     let jt_s: [&[f64]; 3] = [
-                        jt[0].as_slice().unwrap(),
-                        jt[1].as_slice().unwrap(),
-                        jt[2].as_slice().unwrap(),
+                        jt[0].as_slice().expect(contiguous),
+                        jt[1].as_slice().expect(contiguous),
+                        jt[2].as_slice().expect(contiguous),
                     ];
                     let jm_s: [&[f64]; 3] = [
-                        jm[0].as_slice().unwrap(),
-                        jm[1].as_slice().unwrap(),
-                        jm[2].as_slice().unwrap(),
+                        jm[0].as_slice().expect(contiguous),
+                        jm[1].as_slice().expect(contiguous),
+                        jm[2].as_slice().expect(contiguous),
                     ];
 
                     // ── Term B: bilinear cross-terms ────────────────────
@@ -1434,26 +1437,23 @@ impl SurvivalMarginalSlopeFamily {
             .as_sparse()
             .and_then(|s| s.to_csr_arc());
 
-        let time_sparse = time_csrs.is_some();
-        let marginal_sparse = marginal_csr.is_some();
-        let logslope_sparse = logslope_csr.is_some();
-
-        if time_sparse && marginal_sparse && logslope_sparse {
-            self.evaluate_blockwise_exact_newton_sparse(
-                block_states,
-                &time_csrs.unwrap(),
-                &marginal_csr.unwrap(),
-                &logslope_csr.unwrap(),
-            )
-        } else if !time_sparse && !marginal_sparse && !logslope_sparse {
-            self.evaluate_blockwise_exact_newton_dense(block_states)
-        } else {
-            self.evaluate_blockwise_exact_newton_mixed(
-                block_states,
-                time_csrs.as_ref(),
-                marginal_csr.as_ref(),
-                logslope_csr.as_ref(),
-            )
+        match (&time_csrs, &marginal_csr, &logslope_csr) {
+            (Some(time), Some(marginal), Some(logslope)) => self
+                .evaluate_blockwise_exact_newton_sparse(
+                    block_states,
+                    time,
+                    marginal,
+                    logslope,
+                ),
+            (None, None, None) => self.evaluate_blockwise_exact_newton_dense(block_states),
+            _ => {
+                self.evaluate_blockwise_exact_newton_mixed(
+                    block_states,
+                    time_csrs.as_ref(),
+                    marginal_csr.as_ref(),
+                    logslope_csr.as_ref(),
+                )
+            }
         }
     }
 

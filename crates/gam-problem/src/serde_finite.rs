@@ -133,9 +133,12 @@ impl FloatWalker {
 
     fn push_index(&mut self, index: usize) -> usize {
         let restore = self.path.len();
-        // `fmt::Write` for `String` never returns `Err`, so this states an
-        // invariant of the sink rather than hiding a failure mode.
-        write!(self.path, "[{index}]").expect("formatting into a String is infallible");
+        // `fmt::Write` for `String` never returns `Err`, so this names an
+        // invariant of the sink rather than hiding a failure mode. Do not
+        // "remove the Result" by writing `push_str(&index.to_string())`: that
+        // allocates once per sequence element and breaks this module's
+        // no-allocation-per-scalar promise.
+        write!(self.path, "[{index}]").expect("`String`'s `fmt::Write` impl is infallible");
         restore
     }
 

@@ -144,7 +144,10 @@ impl std::fmt::Debug for ReparameterizedInner<'_> {
             .field("beta_transformed_len", &self.beta_transformed.len())
             .field("penalty_logdet_value", &self.penalty_logdet.value)
             .field("has_deriv_provider", &self.deriv_provider.is_some())
-            .field("qs", &format_args!("{}x{}", self.qs.nrows(), self.qs.ncols()))
+            .field(
+                "qs",
+                &format_args!("{}x{}", self.qs.nrows(), self.qs.ncols()),
+            )
             .finish()
     }
 }

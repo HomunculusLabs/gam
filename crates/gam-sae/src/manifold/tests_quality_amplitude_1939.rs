@@ -81,7 +81,10 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
     let dims = vec![d; k];
     let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims)
         .expect("the planted target has full enough rank to seed k 1-D atoms");
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("an odd harmonic count is a valid periodic basis size"));
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(m)
+            .expect("an odd harmonic count is a valid periodic basis size"),
+    );
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -89,7 +92,9 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
+        let (phi, jet) = evaluator
+            .evaluate(coords.view())
+            .expect("fixture coords are already wrapped into the evaluator's unit period");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
