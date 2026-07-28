@@ -25,6 +25,21 @@ pub enum SaeBasisResolution {
     PeriodicHarmonics {
         order: usize,
     },
+    /// LEGACY, deserialization only. The fixed seven-column `(lat, lon)` chart
+    /// that `AmbientSphereHarmonics` replaced.
+    ///
+    /// No production path constructs this any more — asserted by
+    /// `no_production_path_mints_a_sphere_chart_plan`. It remains a variant
+    /// because an artifact FITTED under the chart has decoder coefficients in
+    /// the chart's seven-column basis, which are not the ambient nine; such a
+    /// model must load as the charted model it actually is, rather than be
+    /// refused or silently reinterpreted in a basis it was never fitted in.
+    ///
+    /// Its defects are recorded on #2602: the pole is an optimiser wall, the
+    /// trust-region metric is wrong by `cos²(lat)`, longitude is gauge at the
+    /// poles, the span is not closed under `SO(3)` (so sphere atoms were barred
+    /// from the exact-orbit identifiability path), and it would mint a confident
+    /// sphere from 2-D data where a sphere is not identifiable at all.
     SphereChart,
     /// Real spherical harmonics through `degree`, evaluated in AMBIENT
     /// coordinates on the unit sphere (`latent_dim == 3`).
@@ -1306,6 +1321,35 @@ mod tests {
     /// coordinates for two intrinsic dimensions is exactly what buys the global
     /// chart, so a 2-wide "ambient" plan would be a silently broken atom.
     /// The chart plan must keep validating, since both forms coexist.
+    /// The chart survives only to deserialize already-fitted artifacts. If any
+    /// production constructor starts minting one again, the geometry regresses
+    /// silently — every defect on #2602 comes back with it — so the seed path is
+    /// pinned here rather than trusted.
+    #[test]
+    fn no_production_path_mints_a_sphere_chart_plan() {
+        let z = Array2::<f64>::zeros((4, 3));
+        let seed_coords = ndarray::Array3::<f64>::zeros((1, 4, 2));
+        let plans = crate::manifold::sae_build_atom_plans(
+            z.view(),
+            &["sphere".to_string()],
+            &[2usize],
+            seed_coords.view(),
+            7,
+            &[None],
+        )
+        .expect("a sphere atom builds from the public seed path");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].geometry.resolution(),
+            &SaeBasisResolution::AmbientSphereHarmonics {
+                degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE
+            },
+            "the seed path must build the ambient sphere, never the legacy chart"
+        );
+        assert_eq!(plans[0].geometry.latent_dim(), 3);
+        assert_eq!(plans[0].geometry.intrinsic_dim(), 2);
+    }
+
     #[test]
     fn ambient_sphere_plan_requires_three_ambient_coordinates() {
         let ambient = SaeAtomGeometryPlan::new(
