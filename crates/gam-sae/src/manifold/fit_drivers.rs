@@ -8738,7 +8738,7 @@ fn union_output_frame_basis(frames: &[Array2<f64>], p: usize) -> Array2<f64> {
 #[cfg(test)]
 mod projection_policy_tests {
     use super::*;
-    use crate::basis::{SaeBasisEvaluator, SphereChartEvaluator};
+    use crate::basis::{AmbientSphereHarmonicEvaluator, SaeBasisEvaluator};
     use ndarray::array;
     use std::sync::Arc;
 
@@ -8750,17 +8750,17 @@ mod projection_policy_tests {
         // return Ok, rather than aborting the whole fit. (A fixed-lattice
         // projection is still never performed: honesty is preserved by not
         // moving the atom, not by erroring.)
-        let coordinates = array![[0.2, 0.3]];
-        let evaluator = Arc::new(SphereChartEvaluator);
+        let coordinates = array![[0.36, 0.48, 0.8]];
+        let evaluator = Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap());
         let (phi, jet) = evaluator.evaluate(coordinates.view()).unwrap();
         let atom = SaeManifoldAtom::new_with_provided_function_gram(
             "sphere",
             SaeAtomBasisKind::Sphere,
-            2,
+            3,
             phi,
             jet,
-            Array2::<f64>::zeros((7, 2)),
-            Array2::<f64>::eye(7),
+            Array2::<f64>::zeros((9, 3)),
+            Array2::<f64>::eye(9),
         )
         .unwrap()
         .with_basis_evaluator(evaluator);

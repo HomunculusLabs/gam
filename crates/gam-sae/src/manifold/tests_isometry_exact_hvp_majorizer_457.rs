@@ -163,9 +163,14 @@ pub(crate) fn assert_exact_isometry_hvp_collapses_to_gn_at_zero_residual(
 #[test]
 pub(crate) fn isometry_exact_hvp_sphere_matches_grad_fd_and_uses_refreshed_k() {
     assert_exact_isometry_hvp_matches_grad_fd(
-        Arc::new(SphereChartEvaluator),
+        Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
         SaeAtomBasisKind::Sphere,
-        array![[-0.61, 0.23], [-0.18, -1.07], [0.42, 0.81], [0.73, -0.39]],
+        array![
+            [0.0, 0.0, 1.0],
+            [0.6, -0.8, 0.0],
+            [0.36, 0.48, 0.8],
+            [-0.48, 0.6, -0.64]
+        ],
         4,
         array![[0.31, -0.27], [-0.18, 0.22], [0.14, 0.19], [-0.25, -0.11]],
     );
@@ -185,9 +190,13 @@ pub(crate) fn isometry_exact_hvp_torus_matches_grad_fd_and_uses_refreshed_k() {
 #[test]
 pub(crate) fn isometry_exact_hvp_sphere_and_torus_collapse_to_gn_at_zero_residual() {
     assert_exact_isometry_hvp_collapses_to_gn_at_zero_residual(
-        Arc::new(SphereChartEvaluator),
+        Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
         SaeAtomBasisKind::Sphere,
-        array![[-0.52, 0.17], [-0.11, -0.93], [0.39, 0.74]],
+        array![
+            [0.0, 0.0, 1.0],
+            [0.6, -0.8, 0.0],
+            [0.36, 0.48, 0.8]
+        ],
         4,
         array![[0.17, -0.21], [-0.13, 0.08], [0.22, 0.19]],
     );
@@ -322,14 +331,18 @@ pub(crate) fn assert_isometry_psd_majorizer_live_after_atom_refresh(
 #[test]
 pub(crate) fn isometry_psd_majorizer_live_after_sphere_refresh() {
     assert_isometry_psd_majorizer_live_after_atom_refresh(
-        Arc::new(SphereChartEvaluator),
+        Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
         SaeAtomBasisKind::Sphere,
-        array![[-0.61, 0.23], [-0.18, -1.07], [0.42, 0.81]],
+        array![
+            [0.0, 0.0, 1.0],
+            [0.6, -0.8, 0.0],
+            [0.36, 0.48, 0.8]
+        ],
         4,
         &[
-            array![[0.31, -0.27], [-0.18, 0.22], [0.14, 0.19]],
-            array![[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]],
-            array![[-2.3, 0.6], [-0.1, 1.4], [0.8, -1.7]],
+            array![[0.31, -0.27, 0.91], [-0.18, 0.22, 0.96], [0.14, 0.19, 0.97]],
+            array![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+            array![[-2.3, 0.6, 0.4], [-0.1, 1.4, 0.9], [0.8, -1.7, 0.2]],
         ],
     );
 }
@@ -503,7 +516,12 @@ pub(crate) fn refresh_isometry_caches_pairs_each_penalty_to_its_own_atom() {
 pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
     let p_out = 4usize;
     let coords_d1 = array![[0.05], [0.20], [0.55], [0.80]];
-    let coords_d2 = array![[-0.61, 0.23], [-0.18, -1.07], [0.42, 0.81], [0.73, -0.39]];
+    let coords_d2 = array![
+            [0.0, 0.0, 1.0],
+            [0.6, -0.8, 0.0],
+            [0.36, 0.48, 0.8],
+            [-0.48, 0.6, -0.64]
+        ];
 
     let (atom_d1, _, _) = build_isometry_atom_for_evaluator(
         Arc::new(PeriodicHarmonicEvaluator::new(5).unwrap()),
@@ -513,7 +531,7 @@ pub(crate) fn corrected_isometry_penalty_retargets_mixed_dimension_atoms() {
         0.53,
     );
     let (atom_d2, _, _) = build_isometry_atom_for_evaluator(
-        Arc::new(SphereChartEvaluator),
+        Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
         SaeAtomBasisKind::Sphere,
         &coords_d2,
         p_out,

@@ -86,9 +86,9 @@ pub(crate) fn phi_eta_one_reproduces_current_atom_bases_bit_for_bit() {
     let torus = TorusHarmonicEvaluator::new(2, 2).unwrap();
     assert_eta_one_parity(&torus, torus_coords.view(), 20);
 
-    let sphere_coords = array![[0.0_f64, 0.0], [0.3, 0.4], [-0.2, 1.1]];
-    let sphere = SphereChartEvaluator;
-    assert_eta_one_parity(&sphere, sphere_coords.view(), 3);
+    let sphere_coords = array![[0.0_f64, 0.0, 1.0], [0.6, -0.8, 0.0], [0.36, 0.48, 0.8]];
+    let sphere = AmbientSphereHarmonicEvaluator::new(2).unwrap();
+    assert_eta_one_parity(&sphere, sphere_coords.view(), 9);
 
     let centers = array![
         [-1.0_f64, -1.0],

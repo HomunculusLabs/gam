@@ -25,7 +25,7 @@
 //! future glue variant demotes-without-removing a genuinely covered atom.
 
 use gam_sae::assignment::{AssignmentMode, SaeAssignment};
-use gam_sae::basis::{PeriodicHarmonicEvaluator, SaeBasisEvaluator, SphereChartEvaluator};
+use gam_sae::basis::{AmbientSphereHarmonicEvaluator, PeriodicHarmonicEvaluator, SaeBasisEvaluator};
 use gam_sae::manifold::{
     AtlasOrientability, AtlasSeamKind, SaeAtomBasisKind, SaeManifoldAtom, SaeManifoldRho,
     SaeManifoldTerm, UnitSpeedChartTransition,
@@ -488,7 +488,7 @@ fn orientation_reversing_pair_registers_atlas_end_to_end() {
 fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
     assert!(n % 2 == 0 && n >= 8);
     let p = 4usize;
-    let evaluator = Arc::new(SphereChartEvaluator);
+    let evaluator = Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap());
     let half = n / 2;
 
     // Physical points on the unit sphere (ambient dims 0,1,2). Group A near A's
@@ -515,33 +515,53 @@ fn build_sphere_pair_term(n: usize) -> (SaeManifoldTerm, Array2<f64>) {
         q[[row, 2]] = -xb;
     }
 
-    // Per-atom (lat, lon) coordinates of EVERY physical point in each chart.
-    let mut coords_a = Array2::<f64>::zeros((n, 2));
-    let mut coords_b = Array2::<f64>::zeros((n, 2));
+    // Per-atom AMBIENT coordinates of every physical point in each frame. The
+    // asin/atan2 round-trip the chart needed is gone: each atom's coordinate is
+    // the unit vector itself, in that atom's own frame.
+    let mut coords_a = Array2::<f64>::zeros((n, 3));
+    let mut coords_b = Array2::<f64>::zeros((n, 3));
     for r in 0..n {
         let (q0, q1, q2) = (q[[r, 0]], q[[r, 1]], q[[r, 2]]);
-        coords_a[[r, 0]] = q2.clamp(-1.0, 1.0).asin();
-        coords_a[[r, 1]] = q1.atan2(q0);
+        coords_a[[r, 0]] = q0;
+        coords_a[[r, 1]] = q1;
+        coords_a[[r, 2]] = q2;
         // B-unit-vector of the same physical point: u_b = [-q2, q1, q0].
-        let (xb, yb, zb) = (-q2, q1, q0);
-        coords_b[[r, 0]] = zb.clamp(-1.0, 1.0).asin();
-        coords_b[[r, 1]] = yb.atan2(xb);
+        coords_b[[r, 0]] = -q2;
+        coords_b[[r, 1]] = q1;
+        coords_b[[r, 2]] = q0;
     }
 
     let (phi_a, jet_a) = evaluator.evaluate(coords_a.view()).unwrap();
     let (phi_b, jet_b) = evaluator.evaluate(coords_b.view()).unwrap();
 
-    // Pure linear sphere embeddings (quadratic rows zero). basis = [1,x,y,z,xy,yz,xz].
-    let mut decoder_a = Array2::<f64>::zeros((7, p));
-    decoder_a[[1, 0]] = 1.0; // x -> dim0
-    decoder_a[[2, 1]] = 1.0; // y -> dim1
-    decoder_a[[3, 2]] = 1.0; // z -> dim2
-    let mut decoder_b = Array2::<f64>::zeros((7, p));
-    decoder_b[[3, 0]] = 1.0; // z_b -> dim0
-    decoder_b[[2, 1]] = 1.0; // y_b -> dim1
-    decoder_b[[1, 2]] = -1.0; // x_b -> dim2 (negated)
+    // Pure linear sphere embeddings: only the degree-1 (dipole) block is used,
+    // every higher harmonic row left at zero. The columns are located by their
+    // (degree, order) rather than by a hardcoded layout, so this cannot silently
+    // decode the wrong harmonic if the column order ever changes. Each degree-1
+    // column is `N_{1,m}` times one ambient coordinate, with the SAME norm
+    // `sqrt(3/4π)` for all three orders, so dividing by it recovers `x, y, z`
+    // exactly:  m = +1 -> Re[w] = x,  m = 0 -> z,  m = -1 -> Im[w] = y.
+    let modes = AmbientSphereHarmonicEvaluator::new(2).unwrap().spectral_modes();
+    let dipole = |order: i64| -> usize {
+        modes
+            .iter()
+            .position(|mode| mode.degree == 1 && mode.order == order)
+            .expect("the degree-1 block is present at degree 2")
+    };
+    let (col_x, col_y, col_z) = (dipole(1), dipole(-1), dipole(0));
+    let width = modes.len();
+    let inverse_norm = 1.0 / (3.0 / (4.0 * std::f64::consts::PI)).sqrt();
 
-    let mut penalty = Array2::<f64>::eye(7);
+    let mut decoder_a = Array2::<f64>::zeros((width, p));
+    decoder_a[[col_x, 0]] = inverse_norm; // x -> dim0
+    decoder_a[[col_y, 1]] = inverse_norm; // y -> dim1
+    decoder_a[[col_z, 2]] = inverse_norm; // z -> dim2
+    let mut decoder_b = Array2::<f64>::zeros((width, p));
+    decoder_b[[col_z, 0]] = inverse_norm; // z_b -> dim0
+    decoder_b[[col_y, 1]] = inverse_norm; // y_b -> dim1
+    decoder_b[[col_x, 2]] = -inverse_norm; // x_b -> dim2 (negated)
+
+    let mut penalty = Array2::<f64>::eye(width);
     penalty *= 1.0e-4;
     let atom_a = SaeManifoldAtom::new_with_provided_function_gram(
         "sphere_a",

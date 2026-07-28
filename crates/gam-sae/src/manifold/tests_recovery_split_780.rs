@@ -126,7 +126,9 @@ pub(crate) fn sae_sphere_atom_recovers_synthetic_signal() {
         z[[i, 2]] = zc;
     }
     let sst: f64 = z.iter().map(|v| v * v).sum::<f64>();
-    let (phi0, jet0) = SphereChartEvaluator.evaluate(true_coords.view()).unwrap();
+    let (phi0, jet0) = AmbientSphereHarmonicEvaluator::new(2)
+        .unwrap()
+        .evaluate(true_coords.view()).unwrap();
     let m = phi0.ncols();
     let mut penalty = Array2::<f64>::eye(m);
     penalty *= 1.0e-4;
@@ -140,7 +142,7 @@ pub(crate) fn sae_sphere_atom_recovers_synthetic_signal() {
         penalty,
     )
     .unwrap()
-    .with_basis_evaluator(Arc::new(SphereChartEvaluator));
+    .with_basis_evaluator(Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()));
 
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
@@ -858,8 +860,12 @@ pub(crate) fn isometry_wiring_periodic_matches_fd() {
 #[test]
 pub(crate) fn isometry_wiring_sphere_matches_fd() {
     assert_isometry_wiring_matches_fd(
-        Arc::new(SphereChartEvaluator),
-        array![[-0.5, 0.3], [0.2, -1.1], [0.7, 0.9]],
+        Arc::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
+        array![
+            [0.0, 0.0, 1.0],
+            [0.6, -0.8, 0.0],
+            [0.36, 0.48, 0.8]
+        ],
     );
 }
 

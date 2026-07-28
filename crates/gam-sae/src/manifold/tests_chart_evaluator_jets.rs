@@ -62,15 +62,29 @@ pub(crate) fn sae_basis_evaluator_jacobians_match_central_differences() {
         1.0e-6,
     );
 
-    let sphere_coords = array![[-0.7, -1.2], [-0.25, 0.0], [0.35, 0.9], [0.8, 2.1]];
+    // Ambient unit vectors, poles INCLUDED: the ambient sphere has no boundary,
+    // so a pole is an ordinary sample point rather than a place to stay away
+    // from — which is the whole difference from the chart this replaced.
+    let sphere_coords = array![
+        [0.0, 0.0, 1.0],
+        [0.6, -0.8, 0.0],
+        [0.36, 0.48, 0.8],
+        [-0.48, 0.6, -0.64]
+    ];
     assert_jacobian_matches_central_difference(
-        &SphereChartEvaluator,
+        &AmbientSphereHarmonicEvaluator::new(2).unwrap(),
         sphere_coords.clone(),
         1.0e-6,
     );
-    let (sphere_phi, sphere_jet) = SphereChartEvaluator.evaluate(sphere_coords.view()).unwrap();
-    assert_eq!(sphere_phi.dim(), (sphere_coords.nrows(), 7));
-    assert_eq!(sphere_jet.dim(), (sphere_coords.nrows(), 7, 2));
+    let (sphere_phi, sphere_jet) = AmbientSphereHarmonicEvaluator::new(2)
+        .unwrap()
+        .evaluate(sphere_coords.view())
+        .unwrap();
+    // Degree 2 spans all nine harmonics through `l = 2`, where the removed
+    // chart carried seven — the monopole, the dipole, and three of the five
+    // quadrupoles.
+    assert_eq!(sphere_phi.dim(), (sphere_coords.nrows(), 9));
+    assert_eq!(sphere_jet.dim(), (sphere_coords.nrows(), 9, 3));
     for row in 0..sphere_coords.nrows() {
         let lat = sphere_coords[[row, 0]];
         let lon = sphere_coords[[row, 1]];
@@ -218,146 +232,6 @@ pub(crate) fn seed_coords_by_decoder_projection_rejects_shape_mismatch() {
         err.contains("target shape"),
         "expected a target-shape error, got: {err}"
     );
-}
-
-/// Parity guard for the sphere chart: the shared engine
-/// [`sphere_chart_basis_jet`] is the single source of derivative truth used
-/// by both the core SAE path ([`SphereChartEvaluator::evaluate`]) and the
-/// PyFFI `sphere_chart_basis_with_jet` helper, which route through the exact
-/// same function. The basis and its jet are now the *exact* analytic ones —
-/// `C^∞` in `(lat, lon)` with no clamp and no binary `chain_lat` gate — so
-/// this pins that the jet equals the closed-form analytic derivative at
-/// interior, boundary (`|lat| = π/2`), and beyond-`π/2` latitudes alike.
-#[test]
-pub(crate) fn sphere_chart_basis_jet_is_single_source_of_truth() {
-    // A mix of interior and former clamp-boundary / beyond-π/2 latitudes;
-    // the embedding and its jet are smooth everywhere, so all rows must hit
-    // the same exact analytic formulas.
-    let coords = array![
-        [-1.2, -2.4],                         // interior
-        [0.35, 0.9],                          // interior
-        [std::f64::consts::FRAC_PI_2, 0.4],   // upper boundary (former gate)
-        [-std::f64::consts::FRAC_PI_2, -1.1], // lower boundary (former gate)
-        [2.3, 0.7],                           // beyond +π/2
-        [-3.0, 1.9],                          // beyond -π/2
-    ];
-
-    // The core evaluator adapter must be bit-identical to the shared engine
-    // — they are the same code path, so any difference is a regression in
-    // the thin adapter rather than a tolerance question.
-    let (engine_phi, engine_jet) = sphere_chart_basis_jet(coords.view()).unwrap();
-    let (adapter_phi, adapter_jet) = SphereChartEvaluator.evaluate(coords.view()).unwrap();
-    assert_eq!(engine_phi, adapter_phi);
-    assert_eq!(engine_jet, adapter_jet);
-
-    for row in 0..coords.nrows() {
-        // No clamp: the basis uses the raw latitude directly.
-        let lat = coords[[row, 0]];
-        let lon = coords[[row, 1]];
-        let clat = lat.cos();
-        let slat = lat.sin();
-        let clon = lon.cos();
-        let slon = lon.sin();
-        let x = clat * clon;
-        let y = clat * slon;
-        let z = slat;
-
-        // Basis is the unit-sphere embedding evaluated at the raw latitude.
-        assert!((engine_phi[[row, 0]] - 1.0).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 1]] - x).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 2]] - y).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 3]] - z).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 4]] - x * y).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 5]] - y * z).abs() <= 1.0e-12);
-        assert!((engine_phi[[row, 6]] - x * z).abs() <= 1.0e-12);
-
-        // Longitude derivatives.
-        let dx_dlon = -clat * slon;
-        let dy_dlon = clat * clon;
-        assert!((engine_jet[[row, 1, 1]] - dx_dlon).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 2, 1]] - dy_dlon).abs() <= 1.0e-12);
-        assert_eq!(engine_jet[[row, 3, 1]], 0.0);
-        assert!((engine_jet[[row, 4, 1]] - (dx_dlon * y + x * dy_dlon)).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 5, 1]] - dy_dlon * z).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 6, 1]] - dx_dlon * z).abs() <= 1.0e-12);
-
-        // Latitude derivatives are the exact analytic values at EVERY row,
-        // including the former clamp boundary — no gating to zero. At the
-        // upper boundary lat = +π/2 the analytic dz/dlat = cos(π/2) = 0
-        // naturally (no discontinuous override), while dx/dlat, dy/dlat are
-        // nonzero whenever cos(lon)/sin(lon) are.
-        let dx_dlat = -slat * clon;
-        let dy_dlat = -slat * slon;
-        let dz_dlat = clat;
-        assert!((engine_jet[[row, 1, 0]] - dx_dlat).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 2, 0]] - dy_dlat).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 3, 0]] - dz_dlat).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 4, 0]] - (dx_dlat * y + x * dy_dlat)).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 5, 0]] - (dy_dlat * z + y * dz_dlat)).abs() <= 1.0e-12);
-        assert!((engine_jet[[row, 6, 0]] - (dx_dlat * z + x * dz_dlat)).abs() <= 1.0e-12);
-    }
-
-    // The chart penalty diagonal is also shared with the PyFFI helper.
-    assert_eq!(
-        SPHERE_CHART_PENALTY_DIAGONAL,
-        [1e-8, 1.0, 1.0, 1.0, 4.0, 4.0, 4.0]
-    );
-}
-
-/// Regression for #619 / #618-sphere: the lat/lon sphere chart jet must
-/// equal a central finite difference of the basis to ~1e-7 *at and beyond*
-/// the former clamp boundary `lat = ±π/2`, where the old binary `chain_lat`
-/// gate discontinuously zeroed the entire latitude jet and froze the atom.
-/// Also pins continuity of the basis across `lat = π/2`.
-#[test]
-pub(crate) fn sphere_chart_jet_matches_fd_at_clamp_boundary() {
-    // Latitudes spanning interior, exactly the former boundary, and beyond.
-    let coords = array![
-        [std::f64::consts::FRAC_PI_2, 0.4], // exactly +π/2 (former gate flip)
-        [-std::f64::consts::FRAC_PI_2, -1.1], // exactly -π/2
-        [1.45, 2.0],                        // just below +π/2
-        [1.69, -0.3],                       // just above +π/2
-        [2.3, 0.7],                         // well beyond +π/2
-        [0.35, 0.9],                        // interior control
-    ];
-
-    let (_, jet) = sphere_chart_basis_jet(coords.view()).unwrap();
-    let h = 1.0e-6;
-    for row in 0..coords.nrows() {
-        for axis in 0..2 {
-            let mut plus = coords.clone();
-            let mut minus = coords.clone();
-            plus[[row, axis]] += h;
-            minus[[row, axis]] -= h;
-            let (phi_p, _) = sphere_chart_basis_jet(plus.view()).unwrap();
-            let (phi_m, _) = sphere_chart_basis_jet(minus.view()).unwrap();
-            for col in 0..7 {
-                let fd = (phi_p[[row, col]] - phi_m[[row, col]]) / (2.0 * h);
-                let an = jet[[row, col, axis]];
-                assert!(
-                    (fd - an).abs() <= 1.0e-7,
-                    "row {row} col {col} axis {axis}: analytic {an} vs FD {fd}"
-                );
-            }
-        }
-    }
-
-    // Continuity of the basis across lat = π/2: the embedding does not jump.
-    let eps = 1.0e-8;
-    let lon = 0.4;
-    let below = array![[std::f64::consts::FRAC_PI_2 - eps, lon]];
-    let above = array![[std::f64::consts::FRAC_PI_2 + eps, lon]];
-    let (phi_below, _) = sphere_chart_basis_jet(below.view()).unwrap();
-    let (phi_above, _) = sphere_chart_basis_jet(above.view()).unwrap();
-    for col in 0..7 {
-        assert!(
-            (phi_below[[0, col]] - phi_above[[0, col]]).abs() <= 1.0e-6,
-            "basis discontinuous across lat = π/2 at col {col}: \
-                 {} vs {}",
-            phi_below[[0, col]],
-            phi_above[[0, col]]
-        );
-    }
 }
 
 /// Central-difference oracle for `second_jet`: differentiate the analytic
@@ -541,11 +415,17 @@ pub(crate) fn isometry_periodic_second_jet_matches_fd() -> Result<(), String> {
 
 #[test]
 pub(crate) fn isometry_sphere_second_jet_matches_fd() -> Result<(), String> {
-    // Stay inside the interior `(-π/2, π/2)` for lat so the chain factor
-    // is active — that is where the Hessian carries information.
-    let sphere_coords = array![[-0.7, -1.2], [-0.25, 0.0], [0.35, 0.9], [0.8, 2.1]];
+    // Ambient unit vectors, poles INCLUDED: the ambient sphere has no boundary,
+    // so a pole is an ordinary sample point rather than a place to stay away
+    // from — which is the whole difference from the chart this replaced.
+    let sphere_coords = array![
+        [0.0, 0.0, 1.0],
+        [0.6, -0.8, 0.0],
+        [0.36, 0.48, 0.8],
+        [-0.48, 0.6, -0.64]
+    ];
     assert_second_jet_matches_central_difference(
-        &SphereChartEvaluator,
+        &AmbientSphereHarmonicEvaluator::new(2).unwrap(),
         sphere_coords,
         1.0e-6,
         1.0e-5,
@@ -576,11 +456,17 @@ pub(crate) fn isometry_periodic_third_jet_matches_fd() -> Result<(), String> {
 
 #[test]
 pub(crate) fn isometry_sphere_third_jet_matches_fd() -> Result<(), String> {
-    // Interior of `(-π/2, π/2)` for lat so the chart chain factor is active —
-    // that is where the third-order curvature term carries information.
-    let sphere_coords = array![[-0.7, -1.2], [-0.25, 0.0], [0.35, 0.9], [0.8, 2.1]];
+    // Ambient unit vectors, poles INCLUDED: the ambient sphere has no boundary,
+    // so a pole is an ordinary sample point rather than a place to stay away
+    // from — which is the whole difference from the chart this replaced.
+    let sphere_coords = array![
+        [0.0, 0.0, 1.0],
+        [0.6, -0.8, 0.0],
+        [0.36, 0.48, 0.8],
+        [-0.48, 0.6, -0.64]
+    ];
     assert_third_jet_matches_central_difference(
-        &SphereChartEvaluator,
+        &AmbientSphereHarmonicEvaluator::new(2).unwrap(),
         sphere_coords,
         1.0e-6,
         1.0e-5,

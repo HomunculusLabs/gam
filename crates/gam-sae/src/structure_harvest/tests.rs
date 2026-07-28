@@ -547,20 +547,12 @@ fn auto_primary_topology_selects_curved_sphere_and_beats_circle_2238_2239() {
         AutoTopologyKind::Sphere,
         SaeAtomGeometryPlan::new(
             SaeAtomBasisKind::Sphere,
-            2,
-            SaeBasisResolution::SphereChart,
-            SaeReferenceMetricPlan::SphereChart,
+            3,
+            SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+            SaeReferenceMetricPlan::RoundSphere,
         )
         .unwrap(),
-        LatentManifold::Product(vec![
-            LatentManifold::Interval {
-                lo: -std::f64::consts::FRAC_PI_2,
-                hi: std::f64::consts::FRAC_PI_2,
-            },
-            LatentManifold::Circle {
-                period: std::f64::consts::TAU,
-            },
-        ]),
+        LatentManifold::Sphere { dim: 3 },
         sphere_coords,
     )
     .unwrap();
