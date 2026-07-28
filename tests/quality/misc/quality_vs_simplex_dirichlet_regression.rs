@@ -23,7 +23,7 @@
 //! A composition `y_i = (y_{i1}, …, y_{iK})` on the `K`-part simplex
 //! (`y_{ik} > 0`, `Σ_k y_{ik} = 1`) is modelled with a Dirichlet likelihood in
 //! the *common* (log-α) parameterization, the canonical Dirichlet GLM that
-//! `DirichletReg::DirichletReg()` fits by default:
+//! `DirichletReg::DirichReg()` fits by default:
 //!
 //!   α_{ik} = exp(η_{ik}) ,  η_{ik} = Xᵢ β_k  (k = 1..K, one block per part),
 //!   ℓ = Σ_i [ lnΓ(α_{i0}) − Σ_k lnΓ(α_{ik}) + Σ_k (α_{ik} − 1) ln y_{ik} ] ,
@@ -41,7 +41,7 @@
 //! reconstruction pattern.
 //!
 //! ## Comparator (best-in-class)
-//! `DirichletReg::DirichletReg(DR_data(Y) ~ -1 + basis_columns)` — the mature,
+//! `DirichletReg::DirichReg(DR_data(Y) ~ -1 + basis_columns)` — the mature,
 //! peer-reviewed R package for Dirichlet-response regression (Maier 2014). It
 //! has no penalized-smooth facility, so we give *both* engines the identical
 //! cubic-B-spline basis `X = [1 | B_centered]` and let each fit the SAME
@@ -837,7 +837,7 @@ fn gam_dirichlet_regression_recovers_truth() {
         r#"
         suppressPackageStartupMessages(library(DirichletReg))
         Y <- DR_data(cbind(df${p0}, df${p1}, df${p2}))
-        m <- DirichletReg(Y ~ -1 + {rhs}, data = df)
+        m <- DirichReg(Y ~ -1 + {rhs}, data = df)
         # Common model: one coefficient vector per simplex part, in part order.
         co <- coef(m)
         flat <- as.numeric(unlist(co))
