@@ -51,7 +51,20 @@ jobs:
       actions: read
     name: Python contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 60 was not enough to reach this workflow's own deliverable. Measured on
+    # run 30350788096: the maturin wheel build alone consumed ~25 min, the three
+    # targeted contracts ran, and the #1512 full-suite triage was then CANCELLED
+    # mid-run when the job hit the cap at exactly 60 min (10:26:55Z -> 11:27:20Z)
+    # — no JUnit inventory, no artifact, nothing published. The workflow's stated
+    # purpose is "a fast pass/fail inventory" of tests/, and it structurally
+    # could not produce one.
+    #
+    # The header's "20-30 min" estimate predates a much larger tests/ directory.
+    # 150 leaves the fixed ~25 min wheel build plus real room for the suite,
+    # while staying a bound rather than an open budget — every test inside it is
+    # already capped at 300 s by pytest-timeout, so this cannot become the
+    # multi-hour wedge that test.yml's unbounded equivalent became (2c75e2016).
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@v5
