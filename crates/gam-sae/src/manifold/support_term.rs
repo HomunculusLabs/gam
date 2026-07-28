@@ -1246,6 +1246,25 @@ impl SaeSupportSparseTerm {
     /// rows it takes, and writes into its own disjoint slice of the output.
     pub fn reconstruct(&self) -> Result<Array2<f64>, String> {
         let mut fitted = Array2::<f64>::zeros((self.n_obs(), self.output_dim));
+        self.reconstruct_into(&mut fitted)?;
+        Ok(fitted)
+    }
+
+    /// [`Self::reconstruct`] into a caller-owned buffer. This exists because
+    /// `solve_fixed_point` maintains ONE fitted matrix across its cycles
+    /// instead of decoding all `n x top_k` active pairs from scratch several
+    /// times per cycle — profiled at 97% of all frames on the #2502 lane, the
+    /// full-matrix decode WAS the fit's runtime, and both sweeps already know
+    /// exactly which rows they changed.
+    fn reconstruct_into(&self, fitted: &mut Array2<f64>) -> Result<(), String> {
+        if fitted.dim() != (self.n_obs(), self.output_dim) {
+            return Err(format!(
+                "SaeSupportSparseTerm::reconstruct_into: buffer {:?} != ({}, {})",
+                fitted.dim(),
+                self.n_obs(),
+                self.output_dim
+            ));
+        }
         let output_dim = self.output_dim;
         fitted
             .axis_chunks_iter_mut(ndarray::Axis(0), RECONSTRUCT_ROW_CHUNK)
@@ -1261,7 +1280,7 @@ impl SaeSupportSparseTerm {
                 }
                 Ok(())
             })?;
-        Ok(fitted)
+        Ok(())
     }
 
     /// Raw response residual `target - fitted`, deliberately before any
@@ -1837,13 +1856,26 @@ impl SaeSupportSparseTerm {
         Ok(updated)
     }
 
+    /// `fitted` is the CALLER's decoded matrix and must be exact for the
+    /// current state at entry; the sweep keeps it exact through every decoder
+    /// update (it already maintained an internal copy incrementally — the
+    /// per-cycle `reconstruct()` here existed only to seed it, and was the
+    /// profiled majority of the whole fit).
     fn decoder_sweep(
         &mut self,
         target: ArrayView2<'_, f64>,
         lambda_smooth: &[f64],
+        fitted: &mut Array2<f64>,
     ) -> Result<f64, String> {
         self.validate_smoothing(lambda_smooth)?;
-        let mut fitted = self.reconstruct()?;
+        if fitted.dim() != (self.n_obs(), self.output_dim) {
+            return Err(format!(
+                "SaeSupportSparseTerm::decoder_sweep: fitted {:?} != ({}, {})",
+                fitted.dim(),
+                self.n_obs(),
+                self.output_dim
+            ));
+        }
         let mut max_change = 0.0_f64;
         let classes = self.decoder_conflict_colors();
         // Parallel width of this sweep is the SIZE of a colour class, not the atom
@@ -1863,6 +1895,7 @@ impl SaeSupportSparseTerm {
             // Atoms in one class are row-disjoint: solve in parallel against
             // the shared `fitted` snapshot (each atom reads only its own rows),
             // then apply the disjoint updates.
+            let fitted_snapshot: &Array2<f64> = fitted;
             let solved: Vec<(usize, Array2<f64>, Array2<f64>, f64)> = class
                 .par_iter()
                 .map(|&atom_idx| -> Result<_, String> {
@@ -1924,7 +1957,7 @@ impl SaeSupportSparseTerm {
                                     let phi = scratch.phi_row();
                                     for output in 0..self.output_dim {
                                         residual_without[output] = target[[row, output]]
-                                            - fitted[[row, output]]
+                                            - fitted_snapshot[[row, output]]
                                             + scratch.decoded[output];
                                     }
                                     for left in 0..m {
@@ -1983,12 +2016,19 @@ impl SaeSupportSparseTerm {
     /// One direct active-row Gauss-Newton coordinate sweep with manifold-aware
     /// backtracking. Exact row snapshots provide rollback; inverse retractions
     /// are never assumed.
+    /// When `fitted` is given, rows whose coordinates moved are re-decoded
+    /// into it after the sweep, so it leaves exact for the new state. The
+    /// refresh is an exact recompute of exactly the changed rows — no
+    /// incremental drift enters from the coordinate side — and in the
+    /// converged tail, where the per-row KKT skip leaves most rows untouched,
+    /// it costs a small fraction of the full-matrix decode it replaces.
     fn coordinate_sweep(
         &mut self,
         target: ArrayView2<'_, f64>,
         ard_precisions: &[Vec<f64>],
         trust_radius: f64,
         stationarity_tolerance: f64,
+        fitted: Option<&mut Array2<f64>>,
     ) -> Result<f64, String> {
         self.validate_ard(ard_precisions)?;
         if !(trust_radius.is_finite() && trust_radius > 0.0) {
@@ -2026,8 +2066,42 @@ impl SaeSupportSparseTerm {
             .collect();
         self.assignment.restore_coords(coords_rows)?;
         let mut max_change = 0.0_f64;
+        let mut row_changes = Vec::with_capacity(row_results.len());
         for row_result in row_results {
-            max_change = max_change.max(row_result?);
+            let change = row_result?;
+            max_change = max_change.max(change);
+            row_changes.push(change);
+        }
+        if let Some(fitted) = fitted {
+            if fitted.dim() != (self.n_obs(), self.output_dim) {
+                return Err(format!(
+                    "SaeSupportSparseTerm::coordinate_sweep: fitted {:?} != ({}, {})",
+                    fitted.dim(),
+                    self.n_obs(),
+                    self.output_dim
+                ));
+            }
+            let output_dim = self.output_dim;
+            fitted
+                .axis_chunks_iter_mut(ndarray::Axis(0), RECONSTRUCT_ROW_CHUNK)
+                .into_par_iter()
+                .enumerate()
+                .try_for_each(|(chunk, mut block)| -> Result<(), String> {
+                    let mut scratch = ActiveAtomScratch::default();
+                    let mut row_fitted = Array1::<f64>::zeros(output_dim);
+                    let base = chunk * RECONSTRUCT_ROW_CHUNK;
+                    for local in 0..block.nrows() {
+                        // A row that took no step (skipped at its KKT
+                        // threshold, or every trial was rejected) decodes to
+                        // exactly what the buffer already holds.
+                        if row_changes[base + local] == 0.0 {
+                            continue;
+                        }
+                        self.reconstruct_row_into(base + local, &mut scratch, &mut row_fitted)?;
+                        block.row_mut(local).assign(&row_fitted);
+                    }
+                    Ok(())
+                })?;
         }
         Ok(max_change)
     }
@@ -2394,7 +2468,6 @@ impl SaeSupportSparseTerm {
                 }
             }
             None => {
-
                 self.assignment.project_row_coords(row, old_coords, coords_row)?;
                 return Err(format!(
                     "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
@@ -2505,36 +2578,60 @@ impl SaeSupportSparseTerm {
         target: ArrayView2<'_, f64>,
         ard_precisions: &[Vec<f64>],
     ) -> Result<(f64, f64), String> {
-        self.validate_ard(ard_precisions)?;
         let residual = self.raw_residual(target)?;
-        let mut coordinate_sq = 0.0;
-        let mut coordinate_max = 0.0_f64;
-        let mut scratch = ActiveAtomScratch::default();
-        for row in 0..self.n_obs() {
-            for slot in 0..self.assignment.support_indices(row).len() {
-                let atom = self.assignment.support_indices(row)[slot] as usize;
-                self.fill_active(row, slot, &mut scratch)?;
-                let periods = self.atom_axis_periods(atom);
-                for axis in 0..scratch.jacobian.nrows() {
-                    let likelihood_gradient = scratch
-                        .jacobian
-                        .row(axis)
-                        .iter()
-                        .zip(residual.row(row).iter())
-                        .map(|(jet, error)| -jet * error)
-                        .sum::<f64>();
-                    let gradient = likelihood_gradient
-                        + ArdAxisPrior::eval(
-                            ard_precisions[atom][axis],
-                            self.assignment.coords_for_slot(row, slot)[axis],
-                            periods[axis],
-                        )
-                        .grad;
-                    coordinate_sq += gradient * gradient;
-                    coordinate_max = coordinate_max.max(gradient.abs());
-                }
-            }
+        self.raw_coordinate_stationarity_with_residual(&residual, ard_precisions)
+    }
+
+    /// [`Self::raw_coordinate_stationarity`] off a caller-supplied residual —
+    /// the frozen-decoder certifier evaluates this every cycle, and the serial
+    /// row loop plus its own full-matrix decode was the profiled bulk of the
+    /// fallback certification stage. Row-parallel, same reduction as the
+    /// coordinate half of [`Self::raw_stationarity_with_residual`].
+    fn raw_coordinate_stationarity_with_residual(
+        &self,
+        residual: &Array2<f64>,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<(f64, f64), String> {
+        self.validate_ard(ard_precisions)?;
+        if residual.dim() != (self.n_obs(), self.output_dim) {
+            return Err(format!(
+                "SaeSupportSparseTerm::raw_coordinate_stationarity_with_residual: residual {:?} != ({}, {})",
+                residual.dim(),
+                self.n_obs(),
+                self.output_dim
+            ));
         }
+        let (coordinate_sq, coordinate_max) = (0..self.n_obs())
+            .into_par_iter()
+            .map_init(ActiveAtomScratch::default, |scratch, row| -> Result<(f64, f64), String> {
+                let mut sq = 0.0_f64;
+                let mut max = 0.0_f64;
+                for slot in 0..self.assignment.support_indices(row).len() {
+                    let atom = self.assignment.support_indices(row)[slot] as usize;
+                    self.fill_active(row, slot, scratch)?;
+                    let periods = self.atom_axis_periods(atom);
+                    for axis in 0..scratch.jacobian.nrows() {
+                        let likelihood_gradient = scratch
+                            .jacobian
+                            .row(axis)
+                            .iter()
+                            .zip(residual.row(row).iter())
+                            .map(|(jet, error)| -jet * error)
+                            .sum::<f64>();
+                        let gradient = likelihood_gradient
+                            + ArdAxisPrior::eval(
+                                ard_precisions[atom][axis],
+                                self.assignment.coords_for_slot(row, slot)[axis],
+                                periods[axis],
+                            )
+                            .grad;
+                        sq += gradient * gradient;
+                        max = max.max(gradient.abs());
+                    }
+                }
+                Ok((sq, max))
+            })
+            .try_reduce(|| (0.0, 0.0), |a, b| Ok((a.0 + b.0, a.1.max(b.1))))?;
         Ok((coordinate_sq.sqrt(), coordinate_max))
     }
 
@@ -2544,6 +2641,14 @@ impl SaeSupportSparseTerm {
         ard_precisions: &[Vec<f64>],
     ) -> Result<f64, String> {
         let residual = self.raw_residual(target)?;
+        self.frozen_decoder_coordinate_objective_with_residual(&residual, ard_precisions)
+    }
+
+    fn frozen_decoder_coordinate_objective_with_residual(
+        &self,
+        residual: &Array2<f64>,
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<f64, String> {
         let mut objective = 0.5 * residual.iter().map(|value| value * value).sum::<f64>();
         for row in 0..self.n_obs() {
             for (slot, &atom) in self.assignment.support_indices(row).iter().enumerate() {
@@ -2590,15 +2695,27 @@ impl SaeSupportSparseTerm {
         }
         let mut previous_candidate = false;
         let mut last_objective: Option<f64> = None;
+        // Decoders are frozen here, so the coordinate sweep's per-changed-row
+        // refresh is the ONLY thing that moves the decode: the maintained
+        // matrix stays exact (each changed row is recomputed from state, not
+        // incremented), and no drift re-verification is needed to certify.
+        let mut fitted_state = self.reconstruct()?;
         for iteration in 1..=max_iter {
-            let max_change =
-                self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
+            let max_change = self.coordinate_sweep(
+                target,
+                ard_precisions,
+                trust_radius,
+                tolerance,
+                Some(&mut fitted_state),
+            )?;
+            let residual = &target - &fitted_state;
             let (coordinate_l2, coordinate_max_abs) =
-                self.raw_coordinate_stationarity(target, ard_precisions)?;
+                self.raw_coordinate_stationarity_with_residual(&residual, ard_precisions)?;
             // Same scale-invariant certificate as solve_fixed_point: the raw
             // coordinate KKT sums data gradients over the full output width,
             // so it is certified relative to max(1, |objective|).
-            let objective = self.frozen_decoder_coordinate_objective(target, ard_precisions)?;
+            let objective = self
+                .frozen_decoder_coordinate_objective_with_residual(&residual, ard_precisions)?;
             let kkt_scale = objective.abs().max(1.0);
             let objective_recurred = last_objective
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
@@ -2668,15 +2785,29 @@ impl SaeSupportSparseTerm {
         // before the first cycle, where it is ignored.
         let mut taken_step = vec![0.0_f64; self.coordinate_state_len()];
         let mut accepted_extrapolations = 0usize;
+        // ONE decoded matrix for the whole solve. Seeded exactly once; the
+        // decoder sweep keeps it exact through its updates and the coordinate
+        // sweep re-decodes exactly the rows it moved, so the certificate
+        // residual below is a subtraction, not a fresh `n x top_k` decode.
+        // The decoder side accumulates increments, so any cycle that would
+        // CERTIFY re-verifies on a from-scratch recompute before returning —
+        // the certificate never rests on incrementally-maintained state.
+        let mut fitted_state = self.reconstruct()?;
+        let mut trial_fitted = Array2::<f64>::zeros(fitted_state.dim());
         for iteration in 1..=max_iter {
             self.snapshot_coordinates(&mut cycle_start);
-            let decoder_change = self.decoder_sweep(target, lambda_smooth)?;
-            let coordinate_change =
-                self.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)?;
+            let decoder_change = self.decoder_sweep(target, lambda_smooth, &mut fitted_state)?;
+            let coordinate_change = self.coordinate_sweep(
+                target,
+                ard_precisions,
+                trust_radius,
+                tolerance,
+                Some(&mut fitted_state),
+            )?;
             let max_change = decoder_change.max(coordinate_change);
             last_max_change = max_change;
-            let residual = self.raw_residual(target)?;
-            let stationarity =
+            let mut residual = &target - &fitted_state;
+            let mut stationarity =
                 self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
             // The raw KKT is EXTENSIVE: each decoder entry sums per-row data
             // gradients over every row on the atom's support, so its natural
@@ -2684,9 +2815,10 @@ impl SaeSupportSparseTerm {
             // scale-invariant first-order condition |g|_inf <= tol * max(1, |f|)
             // instead of an absolute bound an irreducible-residual problem can
             // never meet at any cycle budget.
-            let objective =
+            let previous_objective = last_objective;
+            let mut objective =
                 self.penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)?;
-            let kkt_scale = objective.abs().max(1.0);
+            let mut kkt_scale = objective.abs().max(1.0);
             // Both certificate limbs are relative AND gauge-invariant: the KKT
             // against the objective scale, and the OBJECTIVE's own recurrence
             // instead of a parameter step. A parameter-recurrence limb can
@@ -2696,12 +2828,30 @@ impl SaeSupportSparseTerm {
             // unchanged), so parameters keep moving at zero gradient. Measured
             // on real activations: relative KKT 6.9e-5 with per-cycle
             // parameter moves of 1.4e-1.
-            let objective_recurred = last_objective
+            let mut objective_recurred = last_objective
                 .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
                 .unwrap_or(false);
-            last_objective = Some(objective);
-            let candidate =
+            let mut candidate =
                 objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
+            if candidate && previous_candidate {
+                // About to certify: recompute the decode from scratch and
+                // re-evaluate both limbs on it. If the maintained state had
+                // drifted past the tolerance, this demotes the cycle to a
+                // non-candidate instead of certifying a stale number.
+                self.reconstruct_into(&mut fitted_state)?;
+                residual = &target - &fitted_state;
+                stationarity =
+                    self.raw_stationarity_with_residual(&residual, lambda_smooth, ard_precisions)?;
+                objective = self
+                    .penalized_objective_with_residual(&residual, lambda_smooth, ard_precisions)?;
+                kkt_scale = objective.abs().max(1.0);
+                objective_recurred = previous_objective
+                    .map(|previous: f64| (objective - previous).abs() <= tolerance * kkt_scale)
+                    .unwrap_or(false);
+                candidate =
+                    objective_recurred && stationarity.max_abs() <= tolerance * kkt_scale;
+            }
+            last_objective = Some(objective);
             if candidate && previous_candidate {
                 // The alternating sweeps hold the SUPPORT fixed, so a point that
                 // is stationary in the coordinates and the decoders can still be
@@ -2758,6 +2908,7 @@ impl SaeSupportSparseTerm {
                              {objective:.6e} -> {after:.6e}"
                         );
                         *self = moved;
+                        self.reconstruct_into(&mut fitted_state)?;
                         // The map itself changed, so every difference the
                         // accelerator holds describes a map that no longer
                         // exists, and the two-cycle recurrence has to be
@@ -2822,12 +2973,20 @@ impl SaeSupportSparseTerm {
                     // about is exactly the one that was taken.
                     self.install_coordinates(&cycle_start)?;
                     self.retract_coordinates(&proposal)?;
-                    let extrapolated =
-                        self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+                    self.reconstruct_into(&mut trial_fitted)?;
+                    let trial_residual = &target - &trial_fitted;
+                    let extrapolated = self.penalized_objective_with_residual(
+                        &trial_residual,
+                        lambda_smooth,
+                        ard_precisions,
+                    )?;
                     if extrapolated < objective {
                         accepted_extrapolations += 1;
                         taken_step.extend_from_slice(&proposal);
+                        std::mem::swap(&mut fitted_state, &mut trial_fitted);
                     } else {
+                        // Restored to the iterate `fitted_state` already
+                        // describes; the maintained state stays valid.
                         self.install_coordinates(&cycle_end)?;
                         accelerator.reset();
                         taken_step.extend_from_slice(&cycle_residual);
@@ -3394,8 +3553,10 @@ mod tests {
         let mut previous_candidate = false;
         let mut last_objective: Option<f64> = None;
         for iteration in 1..=max_iter {
-            term.decoder_sweep(target, lambda_smooth).expect("decoder");
-            term.coordinate_sweep(target, ard_precisions, trust_radius, tolerance)
+            let mut fitted = term.reconstruct().expect("reconstruct");
+            term.decoder_sweep(target, lambda_smooth, &mut fitted)
+                .expect("decoder");
+            term.coordinate_sweep(target, ard_precisions, trust_radius, tolerance, None)
                 .expect("coordinates");
             let residual = term.raw_residual(target).expect("residual");
             let stationarity = term
@@ -3519,7 +3680,9 @@ mod tests {
         let before = term
             .penalized_objective(target.view(), &[0.1], &ard)
             .expect("before");
-        term.decoder_sweep(target.view(), &[0.1]).expect("sweep");
+        let mut fitted = term.reconstruct().expect("reconstruct");
+        term.decoder_sweep(target.view(), &[0.1], &mut fitted)
+            .expect("sweep");
         let after = term
             .penalized_objective(target.view(), &[0.1], &ard)
             .expect("after");
