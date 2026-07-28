@@ -1,12 +1,12 @@
 {
   "workflow": "Focused Rust Proof",
-  "job_status": "failure",
-  "run_id": "30360552057",
-  "run_number": "277",
+  "job_status": "success",
+  "run_id": "30361332544",
+  "run_number": "278",
   "run_attempt": "1",
   "event": "workflow_dispatch",
-  "ref": "refs/heads/fix/2579-joint-edf-floor",
-  "sha": "b866beba06ecf5b6ed1157888ab0b59decb96d9b",
-  "completed_utc": "2026-07-28T12:57:13Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30360552057"
+  "ref": "refs/heads/main",
+  "sha": "1387a755cd377474c504a157d73a2af63063ad12",
+  "completed_utc": "2026-07-28T13:14:16Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30361332544"
 }
