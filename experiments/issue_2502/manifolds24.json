@@ -1,0 +1,170 @@
+[
+ {
+  "atom": 3215,
+  "kind": "linear",
+  "corr_t_proj": 0.6330104735959006,
+  "variance_share_along_atom": 0.00978404695187861,
+  "n": 4166
+ },
+ {
+  "atom": 1832,
+  "kind": "linear",
+  "corr_t_proj": 0.6902709259474652,
+  "variance_share_along_atom": 0.05153989519272723,
+  "n": 684
+ },
+ {
+  "atom": 3529,
+  "kind": "linear",
+  "corr_t_proj": 0.6977537306310082,
+  "variance_share_along_atom": 0.01439972462497973,
+  "n": 595
+ },
+ {
+  "atom": 3349,
+  "kind": "linear",
+  "corr_t_proj": 0.8412256423259892,
+  "variance_share_along_atom": 0.03610735580444201,
+  "n": 521
+ },
+ {
+  "atom": 1924,
+  "kind": "linear",
+  "corr_t_proj": 0.6787903127585007,
+  "variance_share_along_atom": 0.052286560682086355,
+  "n": 457
+ },
+ {
+  "atom": 3152,
+  "kind": "linear",
+  "corr_t_proj": 0.7392023448380041,
+  "variance_share_along_atom": 0.028865305537884703,
+  "n": 382
+ },
+ {
+  "atom": 1722,
+  "kind": "linear",
+  "corr_t_proj": 0.8796753624300246,
+  "variance_share_along_atom": 0.04712409105438426,
+  "n": 259
+ },
+ {
+  "atom": 2613,
+  "kind": "linear",
+  "corr_t_proj": 0.9793436561109814,
+  "variance_share_along_atom": 0.03932964527069698,
+  "n": 14
+ },
+ {
+  "atom": 1565,
+  "kind": "euclidean",
+  "corr_t_proj": 0.19847252946326052,
+  "variance_share_along_atom": 0.02142227025385707,
+  "n": 3466
+ },
+ {
+  "atom": 2181,
+  "kind": "euclidean",
+  "corr_t_proj": 0.1591954233416368,
+  "variance_share_along_atom": 0.02514307471568492,
+  "n": 873
+ },
+ {
+  "atom": 127,
+  "kind": "euclidean",
+  "corr_t_proj": 0.3311396601065331,
+  "variance_share_along_atom": 0.014546734017418449,
+  "n": 724
+ },
+ {
+  "atom": 3064,
+  "kind": "euclidean",
+  "corr_t_proj": -0.45564008905290154,
+  "variance_share_along_atom": 0.02805836318203775,
+  "n": 587
+ },
+ {
+  "atom": 3509,
+  "kind": "euclidean",
+  "corr_t_proj": -0.3697341309502213,
+  "variance_share_along_atom": 0.020926558166797768,
+  "n": 460
+ },
+ {
+  "atom": 3379,
+  "kind": "euclidean",
+  "corr_t_proj": 0.18473363632324888,
+  "variance_share_along_atom": 0.02310720170205682,
+  "n": 346
+ },
+ {
+  "atom": 3111,
+  "kind": "euclidean",
+  "corr_t_proj": -0.08444864542289889,
+  "variance_share_along_atom": 0.04654665234039699,
+  "n": 174
+ },
+ {
+  "atom": 1330,
+  "kind": "euclidean",
+  "corr_t_proj": 0.14974074729791687,
+  "variance_share_along_atom": 0.04714928208428705,
+  "n": 12
+ },
+ {
+  "atom": 385,
+  "kind": "periodic",
+  "corr_t_proj": -0.224734758406988,
+  "variance_share_along_atom": 0.013767601029800597,
+  "n": 2841
+ },
+ {
+  "atom": 2889,
+  "kind": "periodic",
+  "corr_t_proj": -0.20414286495425238,
+  "variance_share_along_atom": 0.013438794247048753,
+  "n": 841
+ },
+ {
+  "atom": 2109,
+  "kind": "periodic",
+  "corr_t_proj": 0.8093598741664966,
+  "variance_share_along_atom": 0.051002944980409026,
+  "n": 683
+ },
+ {
+  "atom": 1739,
+  "kind": "periodic",
+  "corr_t_proj": 0.4791937716027042,
+  "variance_share_along_atom": 0.0542520614899501,
+  "n": 570
+ },
+ {
+  "atom": 1721,
+  "kind": "periodic",
+  "corr_t_proj": 0.8632338261106823,
+  "variance_share_along_atom": 0.09125539382701714,
+  "n": 469
+ },
+ {
+  "atom": 173,
+  "kind": "periodic",
+  "corr_t_proj": 0.5469196029903243,
+  "variance_share_along_atom": 0.03634487905143227,
+  "n": 349
+ },
+ {
+  "atom": 1277,
+  "kind": "periodic",
+  "corr_t_proj": 0.9219440031627651,
+  "variance_share_along_atom": 0.10472621443255496,
+  "n": 204
+ },
+ {
+  "atom": 3435,
+  "kind": "periodic",
+  "corr_t_proj": 0.32045057098694,
+  "variance_share_along_atom": 0.0473524821529014,
+  "n": 12
+ }
+]
