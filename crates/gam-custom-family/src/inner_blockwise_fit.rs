@@ -2236,9 +2236,39 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     let has_joint_exacthessian = if has_workspace_source {
         true
     } else {
-        family
-            .exact_newton_joint_hessian_with_specs(&states, specs)?
-            .is_some()
+        // gam#1088's non-finite-curvature contract, on the branch that was
+        // missing it.
+        //
+        // `joint_hessian_source_finite_check` is called only inside the
+        // `joint_workspace_requested` block, and `joint_workspace_requested =
+        // use_joint_newton && has_workspace_source` with `has_workspace_source
+        // = inner_coefficient_hessian_hvp_available(...)`. A family that supplies
+        // its joint curvature as a DENSE `exact_newton_joint_hessian` and no HVP
+        // therefore takes the joint-exact route -- this very probe returns `true`
+        // for it -- while the guard meant to protect that route is on the other
+        // branch entirely. Measured: a family returning `[[NaN, 0.25], [0.25, 1.0]]`
+        // reached `phase=hessian_qp cycle=0`, produced `best_residual_inf=inf`,
+        // and left through the residual divergence/stall guard as
+        // `Ok(converged=false)` -- a fit minted from a curvature that does not
+        // exist, where the contract is a typed hard failure.
+        //
+        // This probe already materialises the curvature AT THE STARTING beta,
+        // which is exactly the case gam#1088 scopes to the loud arm: "a
+        // non-finite entry in the family's analytic joint curvature at the
+        // starting beta is a contract violation against the family's second
+        // derivative -- the solve cannot even begin". A non-finite entry that
+        // only emerges after the coupled loop has driven beta to an overflowing
+        // operating point is a genuine rho-degeneracy and still exits gracefully
+        // through the in-loop guard.
+        match family.exact_newton_joint_hessian_with_specs(&states, specs)? {
+            Some(joint_hessian) => {
+                crate::joint_newton::joint_hessian_source_finite_check(
+                    &crate::joint_newton::JointHessianSource::Dense(joint_hessian),
+                )?;
+                true
+            }
+            None => false,
+        }
     };
     // When the family declares its likelihood blocks UNCOUPLED
     // (`∂²L/∂β_a∂β_b = 0` for every a ≠ b) the joint penalized objective is
