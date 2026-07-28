@@ -3809,28 +3809,82 @@ mod tests {
                 .all(|value| *value == 0.0)
         );
 
+        // `RP²` on the ambient cover: the deck twin is the ANTIPODE `-u`, and
+        // `K_a(-u) = e_a × (-u) = -K_a(u)`, so ALL THREE axes flip. On the
+        // superseded `(lat, lon)` cover the same statement was the lopsided
+        // `[-1, +1]`, because that chart's deck was `(-lat, lon + π)`.
+        let u = [0.36_f64, 0.48, 0.8];
         let (rp2, rp2_view) = orbit_fixture(
             AtomTopology::ProjectivePlane,
-            Array2::from_shape_vec((2, 2), vec![0.2, 0.3, -0.2, 0.3 + std::f64::consts::PI])
-                .unwrap(),
+            Array2::from_shape_vec((2, 3), vec![u[0], u[1], u[2], -u[0], -u[1], -u[2]]).unwrap(),
         );
         let rp2_fields = exact_orbit_fields(&rp2, &rp2_view).unwrap();
         assert_eq!(rp2_fields.len(), 3);
         for (_, field, _) in rp2_fields {
-            for axis in 0..2 {
-                let deck_sign = if axis == 0 { -1.0 } else { 1.0 };
-                assert!((field[[1, axis]] - deck_sign * field[[0, axis]]).abs() <= 1.0e-12);
+            for axis in 0..3 {
+                assert!(
+                    (field[[1, axis]] + field[[0, axis]]).abs() <= 1.0e-12,
+                    "the antipodal deck must negate every ambient component of a Killing field"
+                );
+            }
+        }
+
+        // The SPHERE now reaches this path too, which is the point of the
+        // change: it previously emitted NOTHING here and was routed to a weaker
+        // frame path, so its own quotient carried a stronger certificate than it
+        // did. Its three generators are the same `e_a × u`, and they must be
+        // exactly tangent — a Killing field of `S²` cannot have a radial part.
+        let (sphere, sphere_view) = orbit_fixture(
+            AtomTopology::Sphere,
+            Array2::from_shape_vec((2, 3), vec![u[0], u[1], u[2], 0.0, 0.0, 1.0]).unwrap(),
+        );
+        let sphere_fields = exact_orbit_fields(&sphere, &sphere_view).unwrap();
+        assert_eq!(
+            sphere_fields.len(),
+            3,
+            "Isom(S²) = O(3) has three connected generators; the sphere used to emit zero"
+        );
+        for (_, field, _) in &sphere_fields {
+            for row in 0..2 {
+                let point = if row == 0 { u } else { [0.0, 0.0, 1.0] };
+                let radial: f64 =
+                    (0..3).map(|axis| field[[row, axis]] * point[axis]).sum();
+                assert!(
+                    radial.abs() <= 1.0e-12,
+                    "a Killing field of S² is tangent, so u·K(u) = 0; got {radial:.3e}"
+                );
             }
         }
     }
 
+    /// The ambient cover has no pole, so there is nothing left to refuse. This
+    /// replaces `projective_orbit_certificate_refuses_the_cover_pole`, which
+    /// asserted that the `(lat, lon)` cover REJECTED `lat = π/2` because
+    /// longitude has a nontrivial stabiliser there. The ambient generators are
+    /// defined at every unit vector, so the former failure point is now an
+    /// ordinary sample — and asserting that is the honest successor to
+    /// asserting the refusal.
     #[test]
-    fn projective_orbit_certificate_refuses_the_cover_pole() {
+    fn ambient_cover_has_no_pole_to_refuse() {
         let (rp2, view) = orbit_fixture(
             AtomTopology::ProjectivePlane,
-            Array2::from_shape_vec((1, 2), vec![std::f64::consts::FRAC_PI_2, 0.0]).unwrap(),
+            Array2::from_shape_vec((1, 3), vec![0.0, 0.0, 1.0]).unwrap(),
         );
-        assert!(exact_orbit_fields(&rp2, &view).is_err());
+        let fields = exact_orbit_fields(&rp2, &view)
+            .expect("the former pole is an ordinary point on the ambient cover");
+        assert_eq!(fields.len(), 3);
+        // At the north pole `e_z × u = 0`, which is correct and not a failure:
+        // the rotation about `z` fixes that point. The other two generators are
+        // non-degenerate there, so the orbit is still two-dimensional.
+        let magnitudes: Vec<f64> = fields
+            .iter()
+            .map(|(_, field, _)| (0..3).map(|a| field[[0, a]].abs()).fold(0.0, f64::max))
+            .collect();
+        assert_eq!(
+            magnitudes.iter().filter(|m| **m > 1.0e-12).count(),
+            2,
+            "at a pole exactly one generator (the rotation fixing it) vanishes"
+        );
     }
 
     /// #1097: the per-atom penalty-debiased functional point summaries must
