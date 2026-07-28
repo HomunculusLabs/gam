@@ -406,6 +406,32 @@ pub(crate) fn wire_output_channels<F: CustomFamily + ?Sized>(
 /// indistinguishable from its null-space limit".
 pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 
+/// Fraction of a rank-deficient term's ATTAINABLE df that the floor retains
+/// (#2608).
+///
+/// [`EFFECTIVE_DF_FLOOR`] is absolute, and a rank-1 penalty's structural edf
+/// `γ/(γ + e^ρ)` ranges over `(0, 1]` — it reaches 1 only as `λ → 0`. So the
+/// absolute floor is UNREACHABLE for every rank-1 term and the guard skipped
+/// them all. The null-space half of a Marra–Wood double penalty is rank-1, so
+/// the LINEAR direction of every smooth was exempt from the only protection
+/// against its own collapse: measured on penguins at `edf = 4.6e-5`, dead to
+/// five decimals, while `nnet::multinom` scores 0.9912 there with a purely
+/// LINEAR softmax.
+///
+/// A term that cannot reach the absolute floor is instead asked to retain this
+/// fraction of what it CAN reach. For rank 1 the crossing is closed form,
+/// `ρ*(f) = ln γ + ln((1 − f)/f)`, finite for every `f ∈ (0, 1)` — so the
+/// relative floor is well posed exactly where the absolute one is not, and it is
+/// γ-ADAPTIVE rather than a uniform wall: a well-supported direction (`γ = 1e4`)
+/// is held only 2.8 nats below the ceiling while a weakly supported one
+/// (`γ = 1e-2`) is held 16.6. The fraction sets how much of the attainable df to
+/// keep; the DATA sets where that lands.
+///
+/// This can only TIGHTEN, and only for terms that were previously exempt: when
+/// `edf_max > EFFECTIVE_DF_FLOOR` the target is still the absolute floor, so
+/// every term the guard already bounded is byte-identical.
+pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.5;
+
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on
 /// top of which each term's per-coordinate [`EFFECTIVE_DF_FLOOR`] bound is
 /// tightened. Two forces bracket it:
@@ -1031,13 +1057,25 @@ fn effective_df_floor_bound(
     // coordinates share a bound (the #2579 grouping above) touches it, because
     // this term never reaches the bisection at all.
     let edf_max = unit_weight_term_edf_at_physical_strength(gammas, 0.0);
-    if !(edf_max > EFFECTIVE_DF_FLOOR) {
+    // #2608: a term that can reach the absolute floor is held to it, exactly as
+    // before. A term that CANNOT (any rank-1 penalty, whose edf sup is 1.0 and is
+    // attained only at λ = 0) is held to a fraction of what it can reach, instead
+    // of being skipped entirely.
+    let target = if edf_max > EFFECTIVE_DF_FLOOR {
+        EFFECTIVE_DF_FLOOR
+    } else {
+        EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION * edf_max
+    };
+    // Still refuse when even the relative target is unreachable — a term with no
+    // design support at all (`edf_max = 0`) has nothing to retain, and bounding ρ
+    // against it would manufacture a wall out of an empty range space.
+    if !(edf_max > target) {
         return Ok(None);
     }
     // Bisect for ρ* with edf(ρ*) = floor on [lower, ceiling]; edf is monotone
     // decreasing in ρ. If edf at the ceiling still exceeds the floor, the
     // uniform ceiling already retains enough df — keep it.
-    if unit_weight_term_edf(gammas, ceiling)? >= EFFECTIVE_DF_FLOOR {
+    if unit_weight_term_edf(gammas, ceiling)? >= target {
         return Ok(None);
     }
             // If the existing lower side of the box has already smoothed this
@@ -1053,14 +1091,14 @@ fn effective_df_floor_bound(
             // wall of the rho box. Evaluating at `lower` (the real floor) rather
             // than `-ceiling` guarantees the crossing bracketed below is strictly
             // inside `(lower, ceiling)`, so the emitted upper stays above `lower`.
-    if unit_weight_term_edf(gammas, lower)? <= EFFECTIVE_DF_FLOOR {
+    if unit_weight_term_edf(gammas, lower)? <= target {
         return Ok(None);
     }
     let mut lo = lower;
     let mut hi = ceiling;
     for _ in 0..64 {
         let mid = 0.5 * (lo + hi);
-        if unit_weight_term_edf(gammas, mid)? >= EFFECTIVE_DF_FLOOR {
+        if unit_weight_term_edf(gammas, mid)? >= target {
             lo = mid;
         } else {
             hi = mid;
