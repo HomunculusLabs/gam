@@ -1,14 +1,20 @@
-//! Integration test for SAE-manifold sphere and torus atom topologies.
+//! Integration test for SAE-manifold torus atom topologies.
 //!
-//! Regression cover for GitHub issues #170, #172, #179: spherical and toroidal
-//! `atom_topology`s used to fall through to the Duchon collocation validator
-//! and panic. The Rust dispatch now routes them to `SphereChartEvaluator`
-//! (latent_dim = 2, 7-column lat/lon chart) and `TorusHarmonicEvaluator`
-//! (tensor-product periodic harmonic basis of size `(2H+1)^d`). This test
-//! drives both through the public `SaeManifoldTerm::run_joint_fit_arrow_schur`
-//! Newton loop on synthetic data drawn from S² and T² and asserts the
-//! in-sample reconstruction R² clears the 0.5 floor specified by the issue
-//! repro plans.
+//! Regression cover for GitHub issue #172: toroidal `atom_topology` used to fall
+//! through to the Duchon collocation validator and panic. The Rust dispatch now
+//! routes it to `TorusHarmonicEvaluator` (tensor-product periodic harmonic basis
+//! of size `(2H+1)^d`). This test drives it through the public
+//! `SaeManifoldTerm::run_joint_fit_arrow_schur` Newton loop on synthetic data
+//! drawn from T² and asserts the in-sample reconstruction R² clears the 0.5
+//! floor specified by the issue repro plans.
+//!
+//! The sphere half lived here until `b4150e873` (`feat(#2602)!: delete the
+//! (lat, lon) sphere chart, no legacy path`) removed `SphereChartEvaluator`.
+//! Its replacement is the ambient-sphere basis, pinned against the chart, the
+//! poles and SO(3) by the tests `71d7a391e` added in `gam-sae/src/basis.rs` —
+//! so the coverage moved rather than being dropped. Porting this file's sphere
+//! case was not a rename: `AmbientSphereHarmonicEvaluator::new(degree)` is
+//! `latent_dim = 3`, against the chart's 2.
 //!
 //! No `let _`, no `#[allow]`, no `#[ignore]`, no env vars, no `unwrap_or`
 //! masks.
@@ -23,7 +29,7 @@ use gam::terms::{
     sae::manifold::PeriodicHarmonicEvaluator, sae::manifold::SaeAssignment,
     sae::manifold::SaeAtomBasisKind, sae::manifold::SaeBasisEvaluator,
     sae::manifold::SaeManifoldAtom, sae::manifold::SaeManifoldRho, sae::manifold::SaeManifoldTerm,
-    sae::manifold::SphereChartEvaluator, sae::manifold::TorusHarmonicEvaluator,
+    sae::manifold::TorusHarmonicEvaluator,
 };
 
 /// Newton loop driver shared by both topology tests. Mirrors the inner loop
@@ -67,66 +73,6 @@ fn reconstruction_r2(z: &Array2<f64>, fitted: &Array2<f64>) -> f64 {
         sse += r * r;
     }
     1.0 - sse / sst.max(1.0e-12)
-}
-
-/// Issue #170 / #179: `atom_topology='sphere'`, `d_atom=2` must route to
-/// `SphereChartEvaluator` rather than the Duchon collocation validator.
-/// Synthesise n=300 points on S² (lat/lon → unit-vector in R³), fit a single
-/// sphere atom from the true coords, and confirm R² ≥ 0.5.
-#[test]
-fn sphere_topology_recovers_synthetic_signal() {
-    let n = 300usize;
-    let p = 3usize;
-    let d = 2usize;
-    let mut true_coords = Array2::<f64>::zeros((n, d));
-    let mut z = Array2::<f64>::zeros((n, p));
-    for i in 0..n {
-        // Deterministic interleave over the lat × lon strip, avoiding the
-        // poles where the chart degenerates.
-        let t = (i as f64 + 0.5) / (n as f64);
-        let s = (((i * 7) % n) as f64 + 0.5) / (n as f64);
-        let lat = -0.45 * PI + 0.9 * PI * t;
-        let lon = -PI + 2.0 * PI * s;
-        true_coords[[i, 0]] = lat;
-        true_coords[[i, 1]] = lon;
-        z[[i, 0]] = lat.cos() * lon.cos();
-        z[[i, 1]] = lat.cos() * lon.sin();
-        z[[i, 2]] = lat.sin();
-    }
-    let (phi0, jet0) = SphereChartEvaluator
-        .evaluate(true_coords.view())
-        .expect("sphere chart evaluation");
-    let m = phi0.ncols();
-    assert_eq!(m, 7, "sphere chart basis must have 7 columns");
-    let mut penalty = Array2::<f64>::eye(m);
-    penalty *= 1.0e-4;
-    let atom = SaeManifoldAtom::new_with_provided_function_gram(
-        "sphere_atom",
-        SaeAtomBasisKind::Sphere,
-        d,
-        phi0,
-        jet0,
-        Array2::<f64>::zeros((m, p)),
-        penalty,
-    )
-    .expect("sphere atom")
-    .with_basis_evaluator(Arc::new(SphereChartEvaluator) as Arc<dyn SaeBasisEvaluator>);
-
-    let latent = LatentManifold::Product(vec![
-        LatentManifold::Interval {
-            lo: -FRAC_PI_2,
-            hi: FRAC_PI_2,
-        },
-        LatentManifold::Circle {
-            period: std::f64::consts::TAU,
-        },
-    ]);
-    let fitted = fit_single_atom(&z, atom, true_coords, latent, 12);
-    let r2 = reconstruction_r2(&z, &fitted);
-    assert!(
-        r2 >= 0.5,
-        "sphere SAE reconstruction R² too low: {r2:.4} (n={n}, p={p})"
-    );
 }
 
 /// Issue #172: `atom_topology='torus'` must route to the product-of-circles
