@@ -672,11 +672,12 @@ mod module_path_lock_tests {
     fn gpu_device_runtime_module_path_is_canonical() {
         // Resolving `GpuRuntime` through the `device_runtime` module path
         // pins the honest name; if the module is renamed this stops compiling.
-        _ = crate::device_runtime::GpuRuntime::resolution_call_count();
+        let resolutions = crate::device_runtime::GpuRuntime::resolution_call_count();
         let type_name = std::any::type_name::<crate::device_runtime::GpuRuntime>();
         assert!(
             type_name.contains("device_runtime"),
-            "GpuRuntime must live in the `device_runtime` module (got {type_name})"
+            "GpuRuntime must live in the `device_runtime` module \
+             (got {type_name}, after {resolutions} resolution call(s))"
         );
     }
 }

@@ -12,10 +12,16 @@ use ndarray::Zip;
 ///
 /// Single source of truth for the `p_dim == 0` short-circuit shared by the
 /// tau- and rho-direction hyper-coordinate builders.
+/// `is_penalty_like` is optional rather than a predicate every caller must
+/// supply: two of the four call sites have no penalty-like coordinates at all,
+/// and expressing that as `|_| false` is a closure that ignores its argument to
+/// return a constant. `None` says the same thing as data, so the "no coordinate
+/// is penalty-like" case is visible in the call rather than encoded in a body
+/// the reader has to open.
 fn empty_hyper_coords(
     count: usize,
     b_depends_on_beta: bool,
-    is_penalty_like: impl Fn(usize) -> bool,
+    is_penalty_like: Option<&dyn Fn(usize) -> bool>,
 ) -> Vec<super::reml_outer_engine::HyperCoord> {
     (0..count)
         .map(|j| super::reml_outer_engine::HyperCoord {
@@ -24,7 +30,7 @@ fn empty_hyper_coords(
             drift: super::reml_outer_engine::HyperCoordDrift::none(),
             ld_s: 0.0,
             b_depends_on_beta,
-            is_penalty_like: is_penalty_like(j),
+            is_penalty_like: is_penalty_like.is_some_and(|predicate| predicate(j)),
             firth_g: None,
             tk_eta_fixed: None,
             tk_x_fixed: None,
@@ -1373,9 +1379,11 @@ impl<'a> RemlState<'a> {
         }
         let p_dim = beta_eval.len();
         if p_dim == 0 {
-            return Ok(empty_hyper_coords(psi_dim, false, |j| {
-                hyper_dirs[j].is_penalty_like
-            }));
+            return Ok(empty_hyper_coords(
+                psi_dim,
+                false,
+                Some(&|j| hyper_dirs[j].is_penalty_like),
+            ));
         }
 
         // Working residual u = w ⊙ (z − η̂).
@@ -2128,9 +2136,11 @@ impl<'a> RemlState<'a> {
         let p_dim = beta_eval.len();
         let n_obs = self.y.len();
         if p_dim == 0 {
-            return Ok(empty_hyper_coords(psi_dim, false, |j| {
-                hyper_dirs[j].is_penalty_like
-            }));
+            return Ok(empty_hyper_coords(
+                psi_dim,
+                false,
+                Some(&|j| hyper_dirs[j].is_penalty_like),
+            ));
         }
 
         for (j, dir) in hyper_dirs.iter().enumerate() {
@@ -2930,7 +2940,7 @@ impl<'a> RemlState<'a> {
         let aux_dim = 2usize; // epsilon, log_delta
 
         if p_dim == 0 {
-            return Ok(empty_hyper_coords(aux_dim, true, |_| false));
+            return Ok(empty_hyper_coords(aux_dim, true, None));
         }
 
         // Per-observation link jet with parameter partials.
@@ -3129,7 +3139,7 @@ impl<'a> RemlState<'a> {
         }
 
         if p_dim == 0 {
-            return Ok(empty_hyper_coords(aux_dim, true, |_| false));
+            return Ok(empty_hyper_coords(aux_dim, true, None));
         }
 
         let mut direct_ll = vec![0.0_f64; aux_dim];
