@@ -4020,9 +4020,64 @@ fn solve_operator_metric_projection_dual_active_set(
     if stationarity > ACTIVE_SET_KKT_STATIONARITY_TOL
         && stationarity / gradient_scale > ACTIVE_SET_KKT_STATIONARITY_TOL
     {
+        // WHICH of the two things failed is not recoverable from `residual`
+        // alone, and they need opposite repairs (#2592).
+        //
+        // Stationarity here is `|| g - A_Aᵀ μ ||` for the multipliers this walk
+        // recovered. That number is large either because
+        //
+        //   (a) the point is not stationary on its own face -- `g` has real
+        //       mass in the face TANGENT, which no multipliers can absorb, so
+        //       the solve stopped somewhere that is not the constrained
+        //       minimizer; or
+        //   (b) the point IS stationary and the MULTIPLIERS are wrong -- `g`
+        //       lies (nearly) in the row space of `A_A`, and the walk simply
+        //       failed to recover the `μ` that represents it, e.g. on a
+        //       rank-deficient face.
+        //
+        // The discriminator is the smallest residual ANY multipliers could
+        // achieve, `min_μ || g - A_Aᵀ μ ||`, which is exactly the norm of `g`
+        // projected onto the face tangent. Report it beside the achieved one:
+        // near zero means (b), near `residual` means (a). A ridge keeps the
+        // normal-equation solve defined on a rank-deficient face, which is the
+        // very case this diagnostic exists to name; it only makes the reported
+        // achievable residual an UPPER bound, so it can never turn (a) into (b).
+        let achievable = if active_ids.is_empty() {
+            Some(gradient_inf_norm(&gradient))
+        } else {
+            ops.gather_unit_rows(&active_ids).ok().and_then(|rows| {
+                let gram = rows.a.dot(&rows.a.t());
+                let ridge = 1.0e-12 * gram.diag().iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                let mut regularized = gram;
+                for i in 0..regularized.nrows() {
+                    regularized[[i, i]] += ridge.max(f64::MIN_POSITIVE);
+                }
+                regularized.cholesky(Side::Lower).ok().map(|factor| {
+                    let least_squares = factor.solvevec(&rows.a.dot(&gradient));
+                    gradient_inf_norm(&(&gradient - &rows.a.t().dot(&least_squares)))
+                })
+            })
+        };
+        let achievable_report = achievable.map_or_else(
+            || "unmeasured".to_string(),
+            |value| format!("{value:.3e}"),
+        );
+        let verdict = match achievable {
+            Some(value) if value > 0.5 * stationarity => {
+                "the face TANGENT carries the residual, so this point is not the \
+                 constrained minimizer of its own face"
+            }
+            Some(_) => {
+                "the residual lies in the face ROW SPACE, so the point is stationary \
+                 and the recovered multipliers do not represent its gradient"
+            }
+            None => "achievable residual unmeasured (face gram not factorizable)",
+        };
         return Err(EstimationError::ParameterConstraintViolation(format!(
             "operator metric projection failed stationarity certification: \
-             residual={stationarity:.3e}, relative={:.3e}, active={}, transitions={transitions}",
+             residual={stationarity:.3e}, relative={:.3e}, active={}, transitions={transitions}, \
+             achievable={achievable_report} (best over all multipliers), gradient_scale={gradient_scale:.3e}; \
+             {verdict}",
             stationarity / gradient_scale,
             active_ids.len(),
         )));
