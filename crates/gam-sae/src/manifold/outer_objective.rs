@@ -315,6 +315,137 @@ impl AmortizedWarmStartTelemetry {
 /// makes an infeasible PROBE return the typed refusal after a single diagnostic
 /// pass, so `infeasible_*` can be large while the fit still terminates in a
 /// bounded number of criterion evals.
+/// Why a ρ-probe has no defined penalized quasi-Laplace value.
+///
+/// # One table, because there were two and they had drifted
+///
+/// Recoverability (`is_recoverable_value_probe_refusal`) and telemetry kind
+/// (`OuterProbeTelemetry::record_refusal_kind`) are two READS of one
+/// classification. Until #2593 each parsed the rendered message with its own
+/// independent substring ladder, and the two had already fallen out of step:
+/// the gated-design and co-collapse refusals were recoverable but counted by
+/// nobody, and the telemetry ladder accepted a bare "Schur complement Cholesky
+/// failed" where the recoverability ladder required a non-PD pivot as well.
+///
+/// The classification is a property of WHAT REFUSED, so it wants to be decided
+/// once. `classify` is now the only place in this crate that reads the prose,
+/// and both consumers derive from it; adding a kind without a counter fails
+/// `every_refusal_kind_is_counted_exactly_once`.
+///
+/// # Why this is still a parse, and what it is waiting on
+///
+/// The right home for this bit is the producer: each refusal site knows its own
+/// class and should hand out a typed value, exactly as
+/// `EstimationError::TrialPointRefused` now does for the custom-family boundary.
+/// gam-sae cannot do that yet — its inner spine is `Result<_, String>` end to
+/// end (149 such signatures across the three modules on this path alone, ~400
+/// across the manifold module), so there is no type between producer and
+/// consumer to carry it. Collapsing four readers to one does not need that
+/// refactor and does not block it: when the spine is typed, `classify` is the
+/// single call site to delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeRefusalKind {
+    /// The fixed-ρ inner solve exhausted its budget without reaching KKT.
+    InnerNotConverged,
+    /// A per-row H_tt block was not positive definite before KKT stationarity.
+    NonPdPerRow,
+    /// The reduced joint-Hessian Schur complement was indefinite.
+    NonPdSchur,
+    /// A gate turned an atom off at every row (#2087).
+    AllZeroGatedDesign,
+    /// Certified same-state decoder disappearance after the reseed budget
+    /// (#2089 / #2362).
+    TotalCoCollapse,
+}
+
+impl ProbeRefusalKind {
+    /// Every kind. `infeasible_total` and the coverage test iterate this, so a
+    /// new variant cannot be added and then silently left uncounted.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::InnerNotConverged,
+        Self::NonPdPerRow,
+        Self::NonPdSchur,
+        Self::AllZeroGatedDesign,
+        Self::TotalCoCollapse,
+    ];
+
+    /// Classify a rendered refusal, or `None` when it is a genuine defect.
+    ///
+    /// `None` is the fail-loud default: a message this does not recognise stays
+    /// fatal and propagates, so a producer that rewords itself loses ρ-locality
+    /// (one wasted seed) rather than having a real defect masked as +∞.
+    pub(crate) fn classify(err: &str) -> Option<Self> {
+        if err.contains("inner solve did not converge at fixed ρ") {
+            return Some(Self::InnerNotConverged);
+        }
+        if err.contains(
+            "undamped criterion factorization hit a non-PD per-row H_tt block before KKT",
+        ) {
+            return Some(Self::NonPdPerRow);
+        }
+        // #1782 — at a seed ρ, a K>1 threshold-gate/softmax (or a rank-deficient
+        // euclidean/linear) fit's OFF-OPTIMUM inner state can leave the
+        // reduced joint-Hessian Schur complement indefinite, so the undamped
+        // Schur-complement Cholesky in `run_joint_fit_arrow_schur` /
+        // `converge_inner_for_undamped_logdet` refuses with
+        // `ArrowSchurError::SchurFactorFailed` (rendered
+        // "arrow-Schur: Schur complement Cholesky failed: … not positive
+        // definite"). That is the SAME infeasible-ρ-probe class as the
+        // per-row non-PD refusal above: the indefinite basin is
+        // adjacent to the PD optimum, so the outer optimizer must read it as
+        // +∞ and steer back into the PD region rather than reject the seed and
+        // abort the whole fit ("no candidate seeds passed outer startup
+        // validation"). `ordered_beta_bernoulli`+`circle`'s seed lands in the PD region and
+        // never trips this, which is exactly why it converged on identical
+        // data while the other assignments/topologies did not.
+        //
+        // Requires BOTH markers so a genuine shape / dimension / non-finite
+        // Schur defect (a `SchurFactorFailed` whose reason is NOT a non-PD
+        // pivot, e.g. "non-finite entry" or "non-square") still hard-errors
+        // and is not silently masked as a recoverable probe.
+        if err.contains("Schur complement Cholesky failed")
+            && err.contains("not positive definite")
+        {
+            return Some(Self::NonPdSchur);
+        }
+        // #2087 — at a seed ρ a K>1 threshold-gate assignment can give an
+        // atom OFF at every row, so the sequential-deflation refit's gated design
+        // `diag(a_·k)·Φ_k` is all-zero and the reduced joint problem is
+        // rank-deficient with an undefined quasi-Laplace score — the SAME infeasible-ρ
+        // class as the non-PD Schur / Hessian refusals above. `run_joint_fit_arrow_schur`
+        // → `enforce_decoder_norm_guard` → `refit_decoder_sequential_deflation`
+        // surfaces the DISTINCT "gated off at every row (all-zero gated design)"
+        // marker (NOT the generic `solve_design_least_squares` "zero numerical rank",
+        // which stays fatal for genuinely defective designs), so the outer solver
+        // reads it as an infeasible trial and steers ρ back to where the gate
+        // turns atoms on rather than treating it as a finite objective value
+        // with "no candidate seeds passed outer startup validation".
+        if err.contains("gated off at every row (all-zero gated design)") {
+            return Some(Self::AllZeroGatedDesign);
+        }
+        // #2089 — a ρ whose smoothing / sparsity penalty makes every gated
+        // decoder numerically disappear, or produces #2362 structural
+        // co-collapse, after the bounded reseed multi-start is a genuine
+        // infeasibility of that ρ — the same class as the non-PD Hessian /
+        // all-zero gated-design probes above. A neighbouring, weaker-penalty ρ admits a non-degenerate
+        // fit, so the outer optimizer must read this as an infeasible trial
+        // (+∞) and steer ρ back toward the feasible region
+        // NOT abort the entire alpha="auto" search the first time a line search
+        // overshoots into a co-collapsing ρ. Aborting there fails fits that have a
+        // perfectly good feasible ρ the search had not yet reached; and letting
+        // the reseed multi-start GRIND at every such probe (the pre-guard
+        // behaviour) is exactly what thrashed the host to an OOM / watchdog
+        // SIGKILL (exit 137). `run_joint_fit_arrow_schur` emits this DISTINCT
+        // "did not escape total co-collapse" marker only after the reseed budget
+        // is spent and same-state disappearance is still certified, so a
+        // healthy or merely-uncompetitive fit never trips it.
+        if err.contains("did not escape total co-collapse") {
+            return Some(Self::TotalCoCollapse);
+        }
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct OuterProbeTelemetry {
     /// Full penalized quasi-Laplace criterion evaluations requested through the generic outer
@@ -326,6 +457,12 @@ pub struct OuterProbeTelemetry {
     pub infeasible_schur: usize,
     /// Probes refused because the inner solve did not converge at fixed ρ.
     pub infeasible_inner_not_converged: usize,
+    /// Probes refused because a gate turned an atom off at every row, leaving
+    /// the sequential-deflation refit an all-zero gated design (#2087).
+    pub infeasible_all_zero_gated_design: usize,
+    /// Probes refused because the reseed budget was spent and same-state
+    /// decoder disappearance was still certified (#2089 / #2362).
+    pub infeasible_total_co_collapse: usize,
     /// Outer criterion evaluations that returned the optimizer's conventional
     /// infeasible value (`+inf`) because the quasi-Laplace score was undefined or
     /// the fixed-ρ inner solve refused. A finite, data-collapsed fit is not an
@@ -362,19 +499,61 @@ pub struct OuterProbeTelemetry {
 }
 
 impl OuterProbeTelemetry {
+    /// Count one refused probe under its own kind.
+    ///
+    /// Reads [`ProbeRefusalKind`] rather than re-parsing the message. Before
+    /// #2593 this was a SECOND independent substring ladder over the same
+    /// string, and the two had already drifted apart in both directions:
+    ///
+    /// * `AllZeroGatedDesign` and `TotalCoCollapse` were recoverable but had no
+    ///   counter here at all, so every such probe was invisible to
+    ///   `infeasible_total()` — the load-bearing metric of #2080's bounded
+    ///   probe-budget test, which therefore under-reported on exactly the
+    ///   co-collapsing ρ that motivated the guard;
+    /// * this ladder matched a bare "Schur complement Cholesky failed" while
+    ///   the recoverability predicate required it AND "not positive definite",
+    ///   so the two disagreed about what a Schur refusal even is.
+    ///
+    /// Deriving both from one classification is what makes that drift
+    /// unrepresentable, and `every_refusal_kind_is_counted_exactly_once` fails
+    /// if a future kind is added without a counter.
     fn record_refusal_kind(&mut self, err: &str) {
-        if err.contains("inner solve did not converge at fixed ρ") {
-            self.infeasible_inner_not_converged += 1;
-        } else if err.contains("Schur complement Cholesky failed") {
-            self.infeasible_schur += 1;
-        } else if err.contains("non-PD per-row H_tt block") {
-            self.infeasible_non_pd_per_row += 1;
+        let Some(kind) = ProbeRefusalKind::classify(err) else {
+            return;
+        };
+        *self.counter_mut(kind) += 1;
+    }
+
+    fn counter_mut(&mut self, kind: ProbeRefusalKind) -> &mut usize {
+        match kind {
+            ProbeRefusalKind::InnerNotConverged => &mut self.infeasible_inner_not_converged,
+            ProbeRefusalKind::NonPdPerRow => &mut self.infeasible_non_pd_per_row,
+            ProbeRefusalKind::NonPdSchur => &mut self.infeasible_schur,
+            ProbeRefusalKind::AllZeroGatedDesign => &mut self.infeasible_all_zero_gated_design,
+            ProbeRefusalKind::TotalCoCollapse => &mut self.infeasible_total_co_collapse,
         }
     }
 
     /// Total infeasible probes across all refusal kinds.
+    ///
+    /// Sums over [`ProbeRefusalKind::ALL`] so a new kind is included here the
+    /// moment it exists, instead of being silently omitted the way
+    /// `AllZeroGatedDesign` and `TotalCoCollapse` were.
     pub fn infeasible_total(&self) -> usize {
-        self.infeasible_non_pd_per_row + self.infeasible_schur + self.infeasible_inner_not_converged
+        ProbeRefusalKind::ALL
+            .iter()
+            .map(|kind| self.counter_of(*kind))
+            .sum()
+    }
+
+    fn counter_of(&self, kind: ProbeRefusalKind) -> usize {
+        match kind {
+            ProbeRefusalKind::InnerNotConverged => self.infeasible_inner_not_converged,
+            ProbeRefusalKind::NonPdPerRow => self.infeasible_non_pd_per_row,
+            ProbeRefusalKind::NonPdSchur => self.infeasible_schur,
+            ProbeRefusalKind::AllZeroGatedDesign => self.infeasible_all_zero_gated_design,
+            ProbeRefusalKind::TotalCoCollapse => self.infeasible_total_co_collapse,
+        }
     }
 }
 
@@ -2256,63 +2435,13 @@ impl SaeManifoldOuterObjective {
         !value.is_finite()
     }
 
+    /// Whether a refused probe is ρ-local — the criterion is undefined HERE and
+    /// a neighbouring ρ admits a fit — rather than a genuine defect.
+    ///
+    /// One line, because the classification lives in [`ProbeRefusalKind`] and
+    /// the telemetry counters read the same table (#2593).
     pub(crate) fn is_recoverable_value_probe_refusal(err: &str) -> bool {
-        err.contains("inner solve did not converge at fixed ρ")
-            || err.contains(
-                "undamped criterion factorization hit a non-PD per-row H_tt block before KKT",
-            )
-            // #1782 — at a seed ρ, a K>1 threshold-gate/softmax (or a rank-deficient
-            // euclidean/linear) fit's OFF-OPTIMUM inner state can leave the
-            // reduced joint-Hessian Schur complement indefinite, so the undamped
-            // Schur-complement Cholesky in `run_joint_fit_arrow_schur` /
-            // `converge_inner_for_undamped_logdet` refuses with
-            // `ArrowSchurError::SchurFactorFailed` (rendered
-            // "arrow-Schur: Schur complement Cholesky failed: … not positive
-            // definite"). That is the SAME infeasible-ρ-probe class as the
-            // per-row non-PD refusal above: the indefinite basin is
-            // adjacent to the PD optimum, so the outer optimizer must read it as
-            // +∞ and steer back into the PD region rather than reject the seed and
-            // abort the whole fit ("no candidate seeds passed outer startup
-            // validation"). `ordered_beta_bernoulli`+`circle`'s seed lands in the PD region and
-            // never trips this, which is exactly why it converged on identical
-            // data while the other assignments/topologies did not.
-            //
-            // Requires BOTH markers so a genuine shape / dimension / non-finite
-            // Schur defect (a `SchurFactorFailed` whose reason is NOT a non-PD
-            // pivot, e.g. "non-finite entry" or "non-square") still hard-errors
-            // and is not silently masked as a recoverable probe.
-            || (err.contains("Schur complement Cholesky failed")
-                && err.contains("not positive definite"))
-            // #2087 — at a seed ρ a K>1 threshold-gate assignment can give an
-            // atom OFF at every row, so the sequential-deflation refit's gated design
-            // `diag(a_·k)·Φ_k` is all-zero and the reduced joint problem is
-            // rank-deficient with an undefined quasi-Laplace score — the SAME infeasible-ρ
-            // class as the non-PD Schur / Hessian refusals above. `run_joint_fit_arrow_schur`
-            // → `enforce_decoder_norm_guard` → `refit_decoder_sequential_deflation`
-            // surfaces the DISTINCT "gated off at every row (all-zero gated design)"
-            // marker (NOT the generic `solve_design_least_squares` "zero numerical rank",
-            // which stays fatal for genuinely defective designs), so the outer solver
-            // reads it as an infeasible trial and steers ρ back to where the gate
-            // turns atoms on rather than treating it as a finite objective value
-            // with "no candidate seeds passed outer startup validation".
-            || err.contains("gated off at every row (all-zero gated design)")
-            // #2089 — a ρ whose smoothing / sparsity penalty makes every gated
-            // decoder numerically disappear, or produces #2362 structural
-            // co-collapse, after the bounded reseed multi-start is a genuine
-            // infeasibility of that ρ — the same class as the non-PD Hessian /
-            // all-zero gated-design probes above. A neighbouring, weaker-penalty ρ admits a non-degenerate
-            // fit, so the outer optimizer must read this as an infeasible trial
-            // (+∞) and steer ρ back toward the feasible region
-            // NOT abort the entire alpha="auto" search the first time a line search
-            // overshoots into a co-collapsing ρ. Aborting there fails fits that have a
-            // perfectly good feasible ρ the search had not yet reached; and letting
-            // the reseed multi-start GRIND at every such probe (the pre-guard
-            // behaviour) is exactly what thrashed the host to an OOM / watchdog
-            // SIGKILL (exit 137). `run_joint_fit_arrow_schur` emits this DISTINCT
-            // "did not escape total co-collapse" marker only after the reseed budget
-            // is spent and same-state disappearance is still certified, so a
-            // healthy or merely-uncompetitive fit never trips it.
-            || err.contains("did not escape total co-collapse")
+        ProbeRefusalKind::classify(err).is_some()
     }
 
     /// #2080 (a) — take the single-shot probe handoff, returning its converged
@@ -5995,5 +6124,98 @@ mod decoder_smoothness_dispatch_2393_tests {
                 );
             }
         }
+    }
+}
+
+/// #2593 — the coverage the two independent substring ladders did not have.
+#[cfg(test)]
+mod probe_refusal_classification_2593 {
+    use super::{OuterProbeTelemetry, ProbeRefusalKind, SaeManifoldOuterObjective};
+
+    /// One representative rendered message per kind, taken from the producer
+    /// that emits it.
+    fn representative(kind: ProbeRefusalKind) -> &'static str {
+        match kind {
+            ProbeRefusalKind::InnerNotConverged => {
+                "SaeManifoldTerm::penalized_quasi_laplace_criterion: inner solve did not \
+                 converge at fixed ρ; refusing to rank an off-optimum state"
+            }
+            ProbeRefusalKind::NonPdPerRow => {
+                "SaeManifoldTerm::penalized_quasi_laplace_criterion: undamped criterion \
+                 factorization hit a non-PD per-row H_tt block before KKT stationarity"
+            }
+            ProbeRefusalKind::NonPdSchur => {
+                "arrow-Schur: Schur complement Cholesky failed: leading minor is not \
+                 positive definite"
+            }
+            ProbeRefusalKind::AllZeroGatedDesign => {
+                "run_joint_fit_arrow_schur: atom 2 is gated off at every row (all-zero \
+                 gated design)"
+            }
+            ProbeRefusalKind::TotalCoCollapse => {
+                "run_joint_fit_arrow_schur: reseed budget spent and the fit did not \
+                 escape total co-collapse"
+            }
+        }
+    }
+
+    /// Every kind classifies to itself, is recoverable, and lands in exactly one
+    /// counter that `infeasible_total` sums.
+    ///
+    /// This is the gate the crate lacked. `AllZeroGatedDesign` and
+    /// `TotalCoCollapse` were recoverable with NO counter at all, so
+    /// `infeasible_total()` under-reported precisely on the co-collapsing ρ
+    /// that #2080's bounded probe-budget test exists to observe. Iterating
+    /// `ALL` means a kind added without a counter cannot pass.
+    #[test]
+    fn every_refusal_kind_is_counted_exactly_once() {
+        for kind in ProbeRefusalKind::ALL {
+            let message = representative(kind);
+            assert_eq!(
+                ProbeRefusalKind::classify(message),
+                Some(kind),
+                "representative message must classify as its own kind: {message}"
+            );
+            assert!(
+                SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(message),
+                "a classified refusal is ρ-local by construction: {message}"
+            );
+            let mut telemetry = OuterProbeTelemetry::default();
+            telemetry.record_refusal_kind(message);
+            assert_eq!(
+                telemetry.infeasible_total(),
+                1,
+                "{kind:?} must increment exactly one counter that infeasible_total sums"
+            );
+        }
+    }
+
+    /// A genuine defect stays fatal and uncounted. `None` is the fail-loud
+    /// default: an unrecognised message must never be masked as +∞.
+    #[test]
+    fn an_unclassified_defect_is_fatal_and_uncounted() {
+        let defect = "SaeManifoldTerm::penalized_quasi_laplace_criterion: \
+                      arrow_log_det_from_cache returned None (undamped joint Hessian \
+                      log-det unavailable for the Laplace normaliser)";
+        assert_eq!(ProbeRefusalKind::classify(defect), None);
+        assert!(!SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
+            defect
+        ));
+        let mut telemetry = OuterProbeTelemetry::default();
+        telemetry.record_refusal_kind(defect);
+        assert_eq!(telemetry.infeasible_total(), 0);
+    }
+
+    /// The Schur conjunct is load-bearing and the two ladders disagreed on it:
+    /// the telemetry one matched a bare "Schur complement Cholesky failed".
+    /// A `SchurFactorFailed` whose reason is NOT a non-PD pivot is a real
+    /// defect and must stay fatal.
+    #[test]
+    fn a_schur_failure_that_is_not_a_non_pd_pivot_stays_fatal() {
+        let defect = "arrow-Schur: Schur complement Cholesky failed: non-finite entry";
+        assert_eq!(ProbeRefusalKind::classify(defect), None);
+        assert!(!SaeManifoldOuterObjective::is_recoverable_value_probe_refusal(
+            defect
+        ));
     }
 }
