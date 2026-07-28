@@ -1800,7 +1800,7 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                             Ok(None)
                         };
                     let no_d2h = |_: &Array1<f64>,
-                                  _v: &Array1<f64>|
+                                  _: &Array1<f64>|
                      -> Result<Option<DriftDerivResult>, String> {
                         Ok(None)
                     };

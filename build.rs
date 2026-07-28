@@ -4560,11 +4560,23 @@ fn scan_for_underscore_closure_params(
                 i += 1;
                 continue;
             }
-            for part in split_top_level_params(params) {
-                let mut name = part.trim();
-                for prefix in ["mut ", "&mut ", "&", "ref "] {
-                    if let Some(rest) = name.strip_prefix(prefix) {
-                        name = rest.trim_start();
+            for (part_offset, part) in split_top_level_params(params) {
+                let mut name = part;
+                let mut skipped = 0usize;
+                loop {
+                    let trimmed = name.trim_start();
+                    skipped += name.len() - trimmed.len();
+                    name = trimmed;
+                    let before = name.len();
+                    for prefix in ["mut ", "&mut ", "&", "ref "] {
+                        if let Some(rest) = name.strip_prefix(prefix) {
+                            skipped += prefix.len();
+                            name = rest;
+                            break;
+                        }
+                    }
+                    if name.len() == before {
+                        break;
                     }
                 }
                 let ident: String = name
@@ -4572,7 +4584,12 @@ fn scan_for_underscore_closure_params(
                     .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
                     .collect();
                 if ident.len() > 1 && ident.starts_with('_') {
-                    let idx = owner.get(i).copied().unwrap_or(0);
+                    // Anchor the report at the PARAMETER, not at the opening
+                    // bar: a parameter list split over several lines would
+                    // otherwise point at a line that does not contain the name,
+                    // which is the one thing a report must never do.
+                    let at = i + 1 + part_offset + skipped;
+                    let idx = owner.get(at).copied().unwrap_or(0);
                     let raw = raw_lines.get(idx).copied().unwrap_or("");
                     offenders.push((rel.to_path_buf(), idx + 1, raw.to_string()));
                 }
@@ -4582,8 +4599,9 @@ fn scan_for_underscore_closure_params(
     });
 }
 
-/// Split a parameter list on commas that are not inside brackets.
-fn split_top_level_params(params: &str) -> Vec<&str> {
+/// Split a parameter list on commas that are not inside brackets, keeping each
+/// part's byte offset within `params` so a report can point at the parameter.
+fn split_top_level_params(params: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut depth: i32 = 0;
     let mut start = 0usize;
@@ -4592,13 +4610,13 @@ fn split_top_level_params(params: &str) -> Vec<&str> {
             '(' | '[' | '<' | '{' => depth += 1,
             ')' | ']' | '>' | '}' => depth -= 1,
             ',' if depth == 0 => {
-                out.push(&params[start..i]);
+                out.push((start, &params[start..i]));
                 start = i + 1;
             }
             _ => {}
         }
     }
-    out.push(&params[start..]);
+    out.push((start, &params[start..]));
     out
 }
 
