@@ -1170,7 +1170,7 @@ mod tests {
         // Retained even-degree harmonics satisfy `Φ(-u) = Φ(u)`, so
         // differentiating gives `∇Φ(-u) = -∇Φ(u)`: every ambient axis flips,
         // where the chart flipped latitude and fixed longitude.
-        let u = [0.48, -0.60, 0.64];
+        let u = [0.48_f64, -0.60, 0.64];
         let norm = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
         let coords = Array2::from_shape_vec(
             (2, 3),

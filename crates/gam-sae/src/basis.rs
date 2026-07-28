@@ -4622,6 +4622,214 @@ mod tests {
         }
     }
 
+    /// Directional derivative of every basis column along a coordinate-space
+    /// vector field: `(J · K)[row, col] = Σ_a jet[row, col, a] · K[row, a]`.
+    fn derivative_along_field(
+        jet: &Array3<f64>,
+        field: &Array2<f64>,
+    ) -> Array2<f64> {
+        let (n, width, d) = jet.dim();
+        let mut out = Array2::<f64>::zeros((n, width));
+        for row in 0..n {
+            for col in 0..width {
+                let mut acc = 0.0_f64;
+                for axis in 0..d {
+                    acc += jet[[row, col, axis]] * field[[row, axis]];
+                }
+                out[[row, col]] = acc;
+            }
+        }
+        out
+    }
+
+    /// A constant coordinate-space field — a translation generator, which is
+    /// what every flat chart's continuous isometries are.
+    fn constant_field(n: usize, d: usize, axis: usize) -> Array2<f64> {
+        let mut field = Array2::<f64>::zeros((n, d));
+        for row in 0..n {
+            field[[row, axis]] = 1.0;
+        }
+        field
+    }
+
+    /// THE LAW, applied to EVERY analytic topology in the menu.
+    ///
+    /// `AtomTopology` declares each topology's isometry group, and
+    /// `identifiability::exact_orbit_fields` materialises those generators as
+    /// exact Killing fields — but nothing ever checked the atom's BASIS against
+    /// them. That gap is how a topology got to claim `S²` while its latent was a
+    /// cylinder (#2602): every individual piece looked right, and no invariant
+    /// tied the basis to the geometry it was supposed to represent.
+    ///
+    /// The law is one line. Sliding a point along a Killing field is a motion the
+    /// geometry cannot distinguish, so it cannot change WHICH functions the atom
+    /// can represent:
+    ///
+    /// ```text
+    ///     J(p) · K(p)  ∈  span{Φ}   for every Killing generator K.
+    /// ```
+    ///
+    /// Asserting it per-topology turns "the basis matches the manifold" from a
+    /// property maintained by review into one maintained by the suite.
+    #[test]
+    fn every_topology_basis_is_closed_under_its_declared_killing_fields() {
+        let n = 400usize;
+        let mut rng = uniform_stream(0xC0FFEE);
+
+        // --- flat charts: the continuous isometries are TRANSLATIONS ---------
+        // Fraction-of-period coordinates for the periodic families; the Möbius
+        // cover circle has period 2 and its width is a bounded interval.
+        struct FlatCase {
+            name: &'static str,
+            evaluator: Box<dyn SaeBasisEvaluator>,
+            dim: usize,
+            /// Axes whose translation IS a continuous isometry.
+            symmetric_axes: &'static [usize],
+            /// Axes whose translation is NOT — asserted to FAIL closure, so the
+            /// test cannot pass by a basis that is accidentally translation
+            /// invariant in every direction.
+            asymmetric_axes: &'static [usize],
+            span: fn(usize, f64) -> f64,
+        }
+        fn unit_span(_axis: usize, u: f64) -> f64 {
+            u
+        }
+        fn mobius_span(axis: usize, u: f64) -> f64 {
+            if axis == 0 { 2.0 * u } else { 2.0 * u - 1.0 }
+        }
+        let cases: Vec<FlatCase> = vec![
+            FlatCase {
+                name: "periodic S1",
+                evaluator: Box::new(PeriodicHarmonicEvaluator::new(7).unwrap()),
+                dim: 1,
+                symmetric_axes: &[0],
+                asymmetric_axes: &[],
+                span: unit_span,
+            },
+            FlatCase {
+                name: "flat torus T2",
+                evaluator: Box::new(TorusHarmonicEvaluator::new(2, 3).unwrap()),
+                dim: 2,
+                symmetric_axes: &[0, 1],
+                asymmetric_axes: &[],
+                span: unit_span,
+            },
+            FlatCase {
+                name: "cylinder S1 x R",
+                evaluator: Box::new(CylinderHarmonicEvaluator::new(3, 2).unwrap()),
+                dim: 2,
+                // Both factors translate: the circle shifts, the line slides.
+                symmetric_axes: &[0, 1],
+                asymmetric_axes: &[],
+                span: unit_span,
+            },
+            FlatCase {
+                name: "mobius band",
+                evaluator: Box::new(MobiusHarmonicEvaluator::new(3, 2).unwrap()),
+                dim: 2,
+                // Only the cover circle. Sliding the WIDTH is not an isometry —
+                // the band has a boundary, and the deck flips `w`.
+                symmetric_axes: &[0],
+                asymmetric_axes: &[1],
+                span: mobius_span,
+            },
+            FlatCase {
+                name: "klein bottle",
+                evaluator: Box::new(QuotientSpectralEvaluator::klein_bottle(3).unwrap()),
+                dim: 2,
+                // `Isom` carries the first cover-circle translation only. The
+                // second axis contributes a DISCRETE Z2 deck, not a second
+                // shift: invariance `f(θ+½, −φ) = f(θ, φ)` makes `∂_φ f`
+                // ANTI-invariant, so it provably leaves the retained span.
+                symmetric_axes: &[0],
+                asymmetric_axes: &[1],
+                span: unit_span,
+            },
+            FlatCase {
+                name: "euclidean patch",
+                evaluator: Box::new(EuclideanPatchEvaluator::new(2, 2).unwrap()),
+                dim: 2,
+                symmetric_axes: &[0, 1],
+                asymmetric_axes: &[],
+                span: |_axis, u| 4.0 * u - 2.0,
+            },
+        ];
+
+        for case in &cases {
+            let mut coords = Array2::<f64>::zeros((n, case.dim));
+            for row in 0..n {
+                for axis in 0..case.dim {
+                    coords[[row, axis]] = (case.span)(axis, rng());
+                }
+            }
+            let (phi, jet) = case.evaluator.evaluate(coords.view()).unwrap();
+            for &axis in case.symmetric_axes {
+                let field = constant_field(n, case.dim, axis);
+                let derivative = derivative_along_field(&jet, &field);
+                let residual = span_residual(&phi, &derivative);
+                assert!(
+                    residual <= 1.0e-8,
+                    "{}: translation along axis {axis} is a declared isometry, but it \
+                     carries the basis OUT of its own span (residual {residual:.3e})",
+                    case.name
+                );
+            }
+            for &axis in case.asymmetric_axes {
+                let field = constant_field(n, case.dim, axis);
+                let derivative = derivative_along_field(&jet, &field);
+                let residual = span_residual(&phi, &derivative);
+                assert!(
+                    residual >= 1.0e-6,
+                    "{}: axis {axis} is NOT a declared isometry, so closure here would \
+                     mean the basis carries a symmetry the manifold does not have \
+                     (residual {residual:.3e})",
+                    case.name
+                );
+            }
+        }
+
+        // --- the sphere and its quotient: `Isom = O(3)`, `K_a(u) = e_a × u` ---
+        let (_, ambient) = sphere_sample(0x511E, n);
+        let spherical: Vec<(&str, Box<dyn SaeBasisEvaluator>)> = vec![
+            (
+                "ambient sphere",
+                Box::new(AmbientSphereHarmonicEvaluator::new(2).unwrap()),
+            ),
+            (
+                "ambient RP2",
+                Box::new(QuotientSpectralEvaluator::projective_plane_ambient(1).unwrap()),
+            ),
+        ];
+        for (name, evaluator) in &spherical {
+            let (phi, jet) = evaluator.evaluate(ambient.view()).unwrap();
+            for generator in 0..3 {
+                let mut field = Array2::<f64>::zeros((n, 3));
+                for row in 0..n {
+                    let u = [
+                        ambient[[row, 0]],
+                        ambient[[row, 1]],
+                        ambient[[row, 2]],
+                    ];
+                    let k = match generator {
+                        0 => [0.0, -u[2], u[1]],
+                        1 => [u[2], 0.0, -u[0]],
+                        _ => [-u[1], u[0], 0.0],
+                    };
+                    for axis in 0..3 {
+                        field[[row, axis]] = k[axis];
+                    }
+                }
+                let derivative = derivative_along_field(&jet, &field);
+                let residual = span_residual(&phi, &derivative);
+                assert!(
+                    residual <= 1.0e-8,
+                    "{name}: SO(3) generator {generator} carries the basis out of its own \
+                     span (residual {residual:.3e})"
+                );
+            }
+        }
+    }
+
     /// A band-limited field on `S²` (degree ≤ 3) lies exactly in the real
     /// spherical-harmonic span, so the `Y_l^m` basis reconstructs held-out rows
     /// to near-exactness — while the fixed degree-2 lat/lon chart, which spans
