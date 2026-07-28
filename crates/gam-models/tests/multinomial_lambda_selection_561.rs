@@ -31,6 +31,7 @@ use gam_data::encode_recordswith_inferred_schema;
 use gam_models::fit_orchestration::FitConfig;
 use gam_models::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
+    predict_multinomial_formula_plugin,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -199,5 +200,103 @@ fn multinomial_outer_reml_selects_per_term_lambda_and_recovers_truth() {
         "every selected λ equals the init seed 50.0 — the outer smoothing search \
          never moved (dead selection): {:?}",
         model_hi.lambdas
+    );
+}
+
+/// #2612: the plug-in predictor reads the SAME fitted model at its mode.
+///
+/// `predict_multinomial_formula` publishes `E[softmax(η)]` and
+/// `predict_multinomial_formula_plugin` publishes `softmax(x'β̂)`. Two estimands,
+/// one model — so the plug-in has to clear every structural bar the integrated
+/// one does, and it has to recover the SAME data-generating truth. What it must
+/// NOT do is agree numerically: the difference between them is the whole reason
+/// the function exists, and a test that pinned them together would be satisfied
+/// by a plug-in that silently returned the integrated answer.
+///
+/// The class-column convention is the real hazard for a new predictor. The
+/// reference class carries `η = 0` and sits LAST, and getting that wrong rotates
+/// every column while leaving each row a perfectly valid simplex — invisible to a
+/// shape check, fatal to a log-loss. Truth recovery is what catches it: the truth
+/// table is indexed by the DGP's own class codes, so a rotated predictor scores
+/// nothing like the fit it came from.
+#[test]
+fn the_plug_in_predictor_reads_the_same_model_at_its_mode() {
+    let (ds, truth) = synth();
+    let cfg = FitConfig::default();
+    let model = fit_penalized_multinomial_formula(&MultinomialFitRequest {
+        init_lambda: 1.0,
+        max_iter: 40,
+        tol: 1e-8,
+        ..MultinomialFitRequest::new(&ds, "y ~ s(x1, k=6) + s(x2, k=6) + x3", &cfg)
+    })
+    .expect("gam multinomial fit");
+
+    let plugin = predict_multinomial_formula_plugin(&model, &ds).expect("plug-in predict");
+    assert_eq!(
+        plugin.dim(),
+        (N, K),
+        "plug-in prediction must be one row per observation and one column per class"
+    );
+
+    // STRUCTURE: every row is a valid simplex.
+    for i in 0..N {
+        let mut row_sum = 0.0;
+        for k in 0..K {
+            let p = plugin[[i, k]];
+            assert!(
+                p.is_finite() && (-0.0..=1.0 + 1e-12).contains(&p),
+                "plug-in probability out of [0, 1] at row {i} class {k}: {p}"
+            );
+            row_sum += p;
+        }
+        assert!(
+            (row_sum - 1.0).abs() < 1e-9,
+            "plug-in probabilities for row {i} sum to {row_sum}, not 1"
+        );
+    }
+
+    // COLUMN CONVENTION + QUALITY: score the plug-in against the DGP truth with
+    // the same class-code mapping the integrated predictor is scored under. A
+    // rotated reference class still forms a simplex but cannot recover this.
+    let col_code: Vec<usize> = model
+        .class_levels
+        .iter()
+        .map(|l| {
+            l.trim_start_matches('c')
+                .parse::<usize>()
+                .expect("synthetic class levels are c0/c1/c2")
+        })
+        .collect();
+    let mut squared_error = 0.0;
+    for k in 0..K {
+        for i in 0..N {
+            let d = plugin[[i, k]] - truth[i][col_code[k]];
+            squared_error += d * d;
+        }
+    }
+    let plugin_rmse = (squared_error / (N * K) as f64).sqrt();
+    assert!(
+        plugin_rmse < 0.065,
+        "plug-in prediction did not recover the true simplex: RMSE={plugin_rmse:.5}; \
+         the same bar the integrated predictor clears on this fit"
+    );
+
+    // The two estimands are CLOSE but need not be equal, and the direction of
+    // the difference is not asserted: integrating a softmax over posterior width
+    // moves probability toward the centre of the simplex for a confident row and
+    // can move it the other way near the middle, so a per-row inequality is not a
+    // theorem. What IS required is that both read the same model — a plug-in that
+    // had lost the fit entirely would not land within a probability of it.
+    let integrated = predict_multinomial_formula(&model, &ds).expect("integrated predict");
+    let mut max_gap: f64 = 0.0;
+    for i in 0..N {
+        for k in 0..K {
+            max_gap = max_gap.max((plugin[[i, k]] - integrated[[i, k]]).abs());
+        }
+    }
+    assert!(
+        max_gap < 0.5,
+        "plug-in and integrated predictions differ by {max_gap:.4} somewhere; they \
+         are different estimands of the SAME fit, not different fits"
     );
 }
