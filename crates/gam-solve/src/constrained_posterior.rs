@@ -1189,6 +1189,9 @@ fn box_truncated_moments(
     }
 
     let generator = kronecker_generator(q);
+    // One tilt for the whole face: it depends only on the geometry, not on the
+    // node, so it is solved once and reused by every refinement pass.
+    let tilt = minimax_tilt(mean, upper, factor);
     let mut accumulator = OrthantAccumulator::new(q);
     let mut evaluated = 0usize;
     let mut previous: Option<(Array1<f64>, Array2<f64>)> = None;
@@ -1205,6 +1208,7 @@ fn box_truncated_moments(
             None,
             factor,
             &generator,
+            tilt.as_ref(),
             evaluated,
             target,
         )?;
@@ -1432,6 +1436,150 @@ impl StandardizedCeiling {
 
 /// Evaluate Genz nodes `first..last` of the Kronecker sequence and fold them
 /// into `accumulator`.
+/// Exponential tilt for the separation-of-variables proposal, chosen at the
+/// saddle point of the log-weight.
+///
+/// ## Why a tilt at all
+///
+/// The Genz estimator draws `z_i` from the standard normal truncated to its
+/// conditional interval `[wall_i, oo)` and weights the node by that interval's
+/// mass. When the constraint normals are CORRELATED, `wall_i` depends strongly
+/// on the coordinates drawn before it, so the product of masses swings from
+/// node to node. Measured on the face #2601's `monotone_decreasing` fit
+/// produces: the log-weights span 26 decades and the effective sample size is
+/// 589 of 65,536 nodes -- 0.9%. The estimator is then plain Monte Carlo with
+/// `N_eff = ESS` no matter the node budget, which reproduces its observed error
+/// to within a few percent (`1/sqrt(ESS)`), and no point set can repair that:
+/// the PROPOSAL is wrong, not the quadrature.
+///
+/// Sampling `z_i ~ N(mu_i, 1)` truncated to the same interval and reweighting by
+/// `exp(mu_i^2/2 - mu_i z_i)` leaves the estimator EXACTLY unbiased for any
+/// `mu`, so the choice is a pure conditioning decision carrying no correctness
+/// risk -- only variance.
+///
+/// ## Which tilt, and one that was measured and REJECTED
+///
+/// The obvious candidate is the dominating point: the mode of the truncated
+/// density in `z` coordinates, i.e. the projection of the origin onto
+/// `{z : mean + L z >= 0}`. That is the classical importance-sampling shift for
+/// a convex region, and it is WRONG here -- measured, on this face, ESS
+/// *fell* from 589 to 3.1 and the weight range grew from 26 decades to 65.
+/// The reason is structural: the SOV proposal is already conditionally
+/// truncated, so it only ever produces feasible points and its conditional mean
+/// already sits above the wall. Shifting it by a further `mu > 0` pushes every
+/// draw deep into the tail and the likelihood ratio `exp(mu^2/2 - mu z)` then
+/// swings harder than the mass product it was meant to flatten.
+///
+/// What the weight actually is, is
+///
+/// ```text
+/// psi(z, mu) = sum_i [ log Phibar(wall_i(z) - mu_i) + mu_i^2/2 - mu_i z_i ]
+/// ```
+///
+/// so the tilt that flattens it is the one that makes `psi` STATIONARY -- the
+/// saddle point in `(z, mu)` jointly (Botev, JRSS-B 2017, minimax tilting).
+/// Differentiating gives a closed pair of conditions, with `rho(t) =
+/// phi(t)/Phibar(t)` the normal hazard:
+///
+/// ```text
+/// (A)   z_i  =  mu_i + rho(wall_i(z) - mu_i)
+/// (B)   mu_k =  sum_{i>k} rho(wall_i(z) - mu_i) * L_ik / L_ii
+/// ```
+///
+/// (A) places each coordinate at the conditional mean its own tilted, truncated
+/// law would give; (B) sets each tilt to cancel, to first order, the movement
+/// that coordinate induces in every LATER wall -- which is exactly the
+/// correlation-driven fluctuation that destroyed the effective sample size.
+/// `mu_q = 0` falls out of (B): the last coordinate moves no wall.
+///
+/// Solved by Gauss-Seidel with damping. Convergence is not required for
+/// correctness -- any iterate is an unbiased tilt -- so the iteration is capped
+/// and its last iterate used.
+///
+/// Returns `None` when the region already contains the origin (`mean >= 0`:
+/// the walls are slack, the weights are already flat, and the untilted rule is
+/// the right one) or when any coordinate carries a finite ceiling. A
+/// two-sided coordinate is bounded on both sides, so its mass cannot swing the
+/// way a half-line's can; leaving it untilted costs a little variance and keeps
+/// the hazard evaluation on the one branch that is unconditionally stable.
+fn minimax_tilt(
+    mean: &Array1<f64>,
+    upper: &[f64],
+    factor: ArrayView2<'_, f64>,
+) -> Option<Array1<f64>> {
+    let q = mean.len();
+    if q == 0 || factor.nrows() != q || factor.ncols() != q || upper.len() != q {
+        return None;
+    }
+    if upper.iter().any(|limit| limit.is_finite()) {
+        return None;
+    }
+    if mean.iter().all(|&m| m >= 0.0) {
+        return None;
+    }
+    for i in 0..q {
+        if !(factor[[i, i]] > 0.0) {
+            return None;
+        }
+    }
+
+    // `rho(t) = phi(t)/Phibar(t)`, evaluated through logs so a deep-tail wall
+    // does not form `0/0`. `normal_logsf` keeps the upper tail that `1 - Phi`
+    // destroys.
+    let hazard = |t: f64| -> f64 {
+        let log_density = -0.5 * t * t - 0.5 * (std::f64::consts::TAU).ln();
+        let log_tail = normal_logsf(t);
+        if !log_tail.is_finite() {
+            // Beyond the representable tail the hazard is asymptotically `t`
+            // (Mills), which is the correct limit and stays finite.
+            return t.max(0.0);
+        }
+        (log_density - log_tail).exp()
+    };
+
+    const MAX_PASSES: usize = 200;
+    const DAMPING: f64 = 0.5;
+    let mut mu = Array1::<f64>::zeros(q);
+    let mut z = Array1::<f64>::zeros(q);
+    let mut rho = Array1::<f64>::zeros(q);
+    for _ in 0..MAX_PASSES {
+        // (A), forward: each wall depends only on the coordinates before it, so
+        // one Gauss-Seidel sweep resolves the whole chain.
+        for i in 0..q {
+            let mut bound = -mean[i];
+            for j in 0..i {
+                bound -= factor[[i, j]] * z[j];
+            }
+            let wall = bound / factor[[i, i]];
+            let value = hazard(wall - mu[i]);
+            if !value.is_finite() {
+                return None;
+            }
+            rho[i] = value;
+            z[i] = mu[i] + value;
+        }
+        // (B), backward.
+        let mut moved = 0.0f64;
+        for k in 0..q {
+            let mut sum = 0.0;
+            for i in (k + 1)..q {
+                sum += rho[i] * factor[[i, k]] / factor[[i, i]];
+            }
+            let target = sum;
+            let updated = mu[k] + DAMPING * (target - mu[k]);
+            moved = moved.max((updated - mu[k]).abs());
+            mu[k] = updated;
+        }
+        if moved <= 1e-12 {
+            break;
+        }
+    }
+    if mu.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(mu)
+}
+
 fn accumulate_orthant_nodes<S: OrthantNodeSink>(
     accumulator: &mut S,
     mean: &Array1<f64>,
@@ -1439,6 +1587,11 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
     ceiling: Option<&StandardizedCeiling>,
     factor: ArrayView2<'_, f64>,
     generator: &[f64],
+    // `tilt`: per-coordinate exponential tilt of the proposal
+    // (`dominating_point_tilt`). `None` is the untilted estimator, exactly as
+    // before. Any tilt leaves the estimator unbiased; it changes only how
+    // evenly the node weights are spread.
+    tilt: Option<&Array1<f64>>,
     first: usize,
     last: usize,
 ) -> Result<(), String> {
@@ -1449,11 +1602,15 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
         let offset = node as f64 + 0.5;
         let mut log_weight = 0.0f64;
         for i in 0..q {
+            // Everything below runs in the TILTED coordinate `z_i - mu_i`: the
+            // conditional interval shifts down by `mu_i` and the arithmetic is
+            // untouched, so a zero tilt is bit-identical to the untilted rule.
+            let mu = tilt.map(|t| t[i]).unwrap_or(0.0);
             let mut bound = -mean[i];
             for j in 0..i {
                 bound -= factor[[i, j]] * z[j];
             }
-            let mut wall = bound / factor[[i, i]];
+            let mut wall = bound / factor[[i, i]] - mu;
             // The affine wall, if it pivots here, is a second candidate limit on
             // the SAME interval. Merging it before the interval is resolved is
             // what keeps one path through the reflection and the mass: from here
@@ -1464,10 +1621,10 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
                 && wall_rule.pivot == i
             {
                 let (raised, capped) = wall_rule.limit(&z);
-                if raised > wall {
-                    wall = raised;
+                if raised - mu > wall {
+                    wall = raised - mu;
                 }
-                affine_ceiling = capped;
+                affine_ceiling = capped - mu;
             }
             // Tent-periodized Kronecker lattice. The raw sequence leaves the
             // integrand non-periodic across the cube face, which costs the
@@ -1503,8 +1660,12 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
                 } else {
                     -f64::MIN_POSITIVE
                 };
-                z[i] = -standard_normal_quantile_from_log_cdf(resolved)
+                let shifted = -standard_normal_quantile_from_log_cdf(resolved)
                     .map_err(|error| format!("orthant cubature coordinate {i}: {error}"))?;
+                z[i] = shifted + mu;
+                // Likelihood ratio of the standard normal to the tilted one:
+                // `phi(z)/phi(z - mu) = exp(mu^2/2 - mu z)`. Zero tilt adds zero.
+                log_weight += 0.5 * mu * mu - mu * z[i];
                 continue;
             }
 
@@ -1572,7 +1733,8 @@ fn accumulate_orthant_nodes<S: OrthantNodeSink>(
             // either endpoint is rounding in `Φ̄⁻¹` alone; the node belongs to
             // the interval by construction and is placed there.
             let clamped = sampled.clamp(low, high);
-            z[i] = if reflect { -clamped } else { clamped };
+            z[i] = if reflect { -clamped } else { clamped } + mu;
+            log_weight += 0.5 * mu * mu - mu * z[i];
         }
         if !log_weight.is_finite() {
             continue;
@@ -1690,6 +1852,7 @@ fn converged_projection_nodes(
             .to_string()
     })?;
     let generator = kronecker_generator(q);
+    let tilt = minimax_tilt(mean, upper, factor.view());
     let mut accumulator = ProjectionNodeAccumulator::new(mean, projection_lift, ambient_mean);
     let mut evaluated = 0usize;
     let mut previous: Option<(Array1<f64>, Array2<f64>)> = None;
@@ -1706,6 +1869,7 @@ fn converged_projection_nodes(
             None,
             factor.view(),
             &generator,
+            tilt.as_ref(),
             evaluated,
             target,
         )?;
@@ -3181,34 +3345,26 @@ mod tests {
 /// Among procedures that reach nominal coverage, expected interval length is
 /// the tie-break.
 #[cfg(test)]
-mod orthant_depth_measure_2601_tests {
+mod orthant_tilt_2601_tests {
     use super::*;
 
-    /// The face that actually refuses (#2601), lifted out of the failing fit
-    /// rather than guessed at.
+    /// The face that #2601's `monotone_decreasing` fit actually produces,
+    /// captured from the failing fit rather than guessed at.
     ///
-    /// Captured from `y ~ s(x, shape=monotone_decreasing)` on 300 rows of clean
-    /// increasing linear data — the `[monotone_decreasing]` parametrisation of
+    /// `y ~ s(x, shape=monotone_decreasing)` on 300 rows of clean increasing
+    /// linear data — the `[monotone_decreasing]` parametrisation of
     /// `test_gaussian_reml_fit_all_shape_constraints_do_not_panic`. All eleven
-    /// monotonicity coordinates are active, and the face lands exactly where the
-    /// synthetic sweep above says the rule breaks:
+    /// monotonicity coordinates are active.
     ///
     ///   wall depth   -0.66 .. +2.65 sd   (mild; two walls are on the FEASIBLE side)
-    ///   max |corr|    0.691              (the sweep's worst regime is ~0.6)
+    ///   max |corr|    0.691
     ///   corr eigenvalues 0.144 .. 1.920
-    ///
-    /// That is the confirmation the synthetic sweep needed: depth here is
-    /// unremarkable, and the correlation is squarely in the band that fails.
-    ///
-    /// Kept as a measurement rather than an assertion until the rule is
-    /// replaced, so the trail is on the record and any candidate remedy is
-    /// judged against the real geometry instead of an AR(1) stand-in.
-    #[test]
-    fn the_face_that_refuses_2601_is_the_swept_worst_regime() {
+    fn refusing_face() -> (Array1<f64>, Array2<f64>) {
         let mean = Array1::from_vec(vec![
-            -1.73263658148929162e-01, -1.61028415044015161e-01, -1.53745491056003519e-01, -1.14020228922959738e-01,
-            -1.13372022294778579e-01, -5.68386260921473555e-02, -2.01787006225858517e-02, 7.79317061445884696e-04,
-            1.73520774327455551e-03, 2.00473386863282976e-02, 4.22790949294645502e-02,
+            -1.73263658148929162e-01, -1.61028415044015161e-01, -1.53745491056003519e-01,
+            -1.14020228922959738e-01, -1.13372022294778579e-01, -5.68386260921473555e-02,
+            -2.01787006225858517e-02, 7.79317061445884696e-04, 1.73520774327455551e-03,
+            2.00473386863282976e-02, 4.22790949294645502e-02,
         ]);
         let w = Array2::from_shape_vec(
             (11, 11),
@@ -3257,8 +3413,139 @@ mod orthant_depth_measure_2601_tests {
             ],
         )
         .expect("11x11 captured constraint-normal covariance");
+        (mean, w)
+    }
 
+    fn lower_cholesky(w: &Array2<f64>) -> Array2<f64> {
+        let q = w.nrows();
+        let mut factor = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            for j in 0..=i {
+                let mut sum = w[[i, j]];
+                for k in 0..j {
+                    sum -= factor[[i, k]] * factor[[j, k]];
+                }
+                if i == j {
+                    factor[[i, i]] = f64::sqrt(sum);
+                } else {
+                    factor[[i, j]] = sum / factor[[j, j]];
+                }
+            }
+        }
+        factor
+    }
+
+    /// Effective sample size of the self-normalized node weights, as a fraction
+    /// of the nodes evaluated. This is the quantity that decides whether the
+    /// estimator is a cubature or a Monte Carlo draw wearing one's clothes.
+    fn weight_efficiency(
+        mean: &Array1<f64>,
+        upper: &[f64],
+        factor: ArrayView2<'_, f64>,
+        tilt: Option<&Array1<f64>>,
+        nodes: usize,
+    ) -> (f64, f64) {
+        struct WeightSpy {
+            inner: OrthantAccumulator,
+            log_weights: Vec<f64>,
+        }
+        impl OrthantNodeSink for WeightSpy {
+            fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
+                self.log_weights.push(log_weight);
+                self.inner.push(log_weight, point);
+            }
+        }
         let q = mean.len();
+        let generator = kronecker_generator(q);
+        let mut spy = WeightSpy {
+            inner: OrthantAccumulator::new(q),
+            log_weights: Vec::new(),
+        };
+        accumulate_orthant_nodes(
+            &mut spy, mean, upper, None, factor, &generator, tilt, 0, nodes,
+        )
+        .expect("orthant nodes");
+        let finite: Vec<f64> = spy
+            .log_weights
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        let hi = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lo = finite.iter().copied().fold(f64::INFINITY, f64::min);
+        let sum: f64 = finite.iter().map(|v| (v - hi).exp()).sum();
+        let sum_sq: f64 = finite.iter().map(|v| (2.0 * (v - hi)).exp()).sum();
+        (
+            (sum * sum / sum_sq) / finite.len() as f64,
+            (hi - lo) / std::f64::consts::LN_10,
+        )
+    }
+
+    /// The mechanism, measured on the real face: without the tilt the node
+    /// weights span 26 decades and 99% of the evaluated nodes contribute
+    /// nothing; with it they span ~1 decade and essentially every node counts.
+    ///
+    /// This is the assertion that would catch a regression of #2601 mechanism 3
+    /// from the direction the convergence test cannot see. A future change that
+    /// broke the tilt but left the tolerance reachable by brute force would pass
+    /// a convergence check and fail this one.
+    #[test]
+    fn the_tilt_turns_a_monte_carlo_draw_back_into_a_cubature_2601() {
+        let (mean, w) = refusing_face();
+        let q = mean.len();
+        let upper = vec![f64::INFINITY; q];
+        let factor = lower_cholesky(&w);
+
+        let (untilted_ess, untilted_decades) =
+            weight_efficiency(&mean, &upper, factor.view(), None, 1 << 16);
+        let tilt = minimax_tilt(&mean, &upper, factor.view()).expect("this face is tilted");
+        let (tilted_ess, tilted_decades) =
+            weight_efficiency(&mean, &upper, factor.view(), Some(&tilt), 1 << 16);
+
+        println!(
+            "MEASURE2601 untilted ess={:.4}% over {:.1} decades; \
+             tilted ess={:.4}% over {:.1} decades",
+            100.0 * untilted_ess,
+            untilted_decades,
+            100.0 * tilted_ess,
+            tilted_decades,
+        );
+        assert!(
+            untilted_ess < 0.05,
+            "precondition: the untilted proposal wastes the node budget on this \
+             face (ess {:.4}% of nodes)",
+            100.0 * untilted_ess
+        );
+        assert!(
+            tilted_ess > 0.5,
+            "the tilt must make most nodes count; got ess {:.4}% of nodes over \
+             {tilted_decades:.1} decades of weight",
+            100.0 * tilted_ess
+        );
+        assert!(
+            tilted_decades < 5.0,
+            "the tilted weights must be nearly flat; got {tilted_decades:.1} decades"
+        );
+    }
+
+    /// The behaviour #2601 mechanism 3 reports: this face must produce moments,
+    /// and they must be the RIGHT moments.
+    ///
+    /// Correctness is scored against the UNTILTED rule carried far past the
+    /// production cap. That is an independent proposal — a different estimator
+    /// of the same integral — so agreement is evidence about the answer rather
+    /// than about one estimator's self-consistency. The band is set by the
+    /// reference's own error (~1.3e-2 at 2^20, measured), not by what the
+    /// production rule happens to produce.
+    #[test]
+    fn the_face_that_refuses_2601_produces_the_right_moments() {
+        let (mean, w) = refusing_face();
+        let q = mean.len();
+        let upper = vec![f64::INFINITY; q];
+        let factor = lower_cholesky(&w);
+
+        // Pin the geometry, so a future capture that drifts cannot silently
+        // inherit the conclusion drawn from this one.
         let sd: Vec<f64> = (0..q).map(|i| f64::sqrt(w[[i, i]])).collect();
         let depth: Vec<f64> = (0..q).map(|i| -mean[i] / sd[i]).collect();
         let depth_min = depth.iter().copied().fold(f64::INFINITY, f64::min);
@@ -3269,8 +3556,6 @@ mod orthant_depth_measure_2601_tests {
                 corr_max = corr_max.max(f64::abs(w[[i, j]] / (sd[i] * sd[j])));
             }
         }
-        // Pin the geometry itself: if a future capture drifts, the conclusion
-        // drawn from it must not be quietly inherited.
         assert!(
             depth_max < 3.0 && depth_min < 0.0,
             "the refusing face is MILD in depth ({depth_min:.2}..{depth_max:.2} sd), \
@@ -3279,233 +3564,47 @@ mod orthant_depth_measure_2601_tests {
         assert!(
             corr_max > 0.6,
             "the refusing face is strongly correlated (max |corr| = {corr_max:.3}), \
-             which is the regime the sweep shows failing"
+             which is the regime that fails"
         );
 
-        let upper = vec![f64::INFINITY; q];
-        let mut factor = Array2::<f64>::zeros((q, q));
-        for i in 0..q {
-            for j in 0..=i {
-                let mut sum = w[[i, j]];
-                for k in 0..j {
-                    sum -= factor[[i, k]] * factor[[j, k]];
-                }
-                if i == j {
-                    factor[[i, i]] = sum.sqrt();
-                } else {
-                    factor[[i, j]] = sum / factor[[j, j]];
-                }
-            }
-        }
-        // Where does the variance live? The Genz weight of a node is a product
-        // of conditional tail masses, and with correlated normals those walls
-        // move a lot from node to node. If the weights span decades, a handful
-        // of nodes carry the whole estimate and no point set can rescue it —
-        // the remedy is then an importance/tilting change, not a better lattice.
-        // If they are well conditioned, the point set is the problem.
-        {
-            struct WeightSpy {
-                inner: OrthantAccumulator,
-                log_weights: Vec<f64>,
-            }
-            impl OrthantNodeSink for WeightSpy {
-                fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
-                    self.log_weights.push(log_weight);
-                    self.inner.push(log_weight, point);
-                }
-            }
-            let generator = kronecker_generator(q);
-            let mut spy = WeightSpy {
-                inner: OrthantAccumulator::new(q),
-                log_weights: Vec::new(),
-            };
-            accumulate_orthant_nodes(
-                &mut spy,
-                &mean,
-                &upper,
-                None,
-                factor.view(),
-                &generator,
-                0,
-                1 << 16,
-            )
-            .expect("orthant nodes");
-            let finite: Vec<f64> = spy
-                .log_weights
-                .iter()
-                .copied()
-                .filter(|v| v.is_finite())
-                .collect();
-            let hi = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let lo = finite.iter().copied().fold(f64::INFINITY, f64::min);
-            // Effective sample size of the self-normalized weights, in the
-            // shifted scale that keeps the sums representable.
-            let sum: f64 = finite.iter().map(|v| (v - hi).exp()).sum();
-            let sum_sq: f64 = finite.iter().map(|v| (2.0 * (v - hi)).exp()).sum();
-            println!(
-                "MEASURE2601FACE weights n={} dropped={} log-range={:.3} (decades {:.2}) \
-                 ess={:.1} of {} ({:.4}%)",
-                finite.len(),
-                spy.log_weights.len() - finite.len(),
-                hi - lo,
-                (hi - lo) / std::f64::consts::LN_10,
-                sum * sum / sum_sq,
-                finite.len(),
-                100.0 * (sum * sum / sum_sq) / finite.len() as f64,
-            );
-        }
-        // Is the RULE inaccurate at the cap, or is the STOPPING CRITERION bad?
-        // The production test compares the estimate at N nodes with the one at
-        // 2N — but the 2N node set CONTAINS the N one, so the two estimates are
-        // strongly dependent and their difference is not an error bar. Measure
-        // the real thing: carry the sequence four more doublings past the cap
-        // and score every intermediate estimate against that reference.
-        {
-            let generator = kronecker_generator(q);
-            let mut accumulator = OrthantAccumulator::new(q);
-            let mut evaluated = 0usize;
-            let mut history: Vec<(usize, Array1<f64>, Array2<f64>)> = Vec::new();
-            while evaluated < (1usize << 24) {
-                let target = if evaluated == 0 {
-                    ORTHANT_MOMENT_INITIAL_POINTS
-                } else {
-                    evaluated * 2
-                };
-                accumulate_orthant_nodes(
-                    &mut accumulator,
-                    &mean,
-                    &upper,
-                    None,
-                    factor.view(),
-                    &generator,
-                    evaluated,
-                    target,
-                )
-                .expect("orthant nodes");
-                evaluated = target;
-                let (m, c) = accumulator.moments().expect("moments");
-                history.push((evaluated, m, c));
-            }
-            let (_, ref ref_m, ref ref_c) = history[history.len() - 1];
-            let reference = (ref_m.clone(), ref_c.clone());
-            let mut report = String::new();
-            for (n, m, c) in &history {
-                let truth = moment_relative_change(&(m.clone(), c.clone()), &reference, &w);
-                report.push_str(&format!(" {n}:{truth:.2e}"));
-            }
-            println!("MEASURE2601FACE error-vs-2^24{report}");
-        }
-        let outcome = box_truncated_moments(&mean, &upper, &w, factor.view());
-        match outcome {
-            Ok((m, c)) => println!(
-                "MEASURE2601FACE converged mean[0]={:.6e} var[0]={:.6e}",
-                m[0], c[[0, 0]]
-            ),
-            Err(reason) => println!("MEASURE2601FACE refused: {reason}"),
-        }
+        let (produced_mean, produced_cov) = box_truncated_moments(&mean, &upper, &w, factor.view())
+            .expect("the face #2601 reports must produce moments");
+
+        let generator = kronecker_generator(q);
+        let mut reference = OrthantAccumulator::new(q);
+        accumulate_orthant_nodes(
+            &mut reference,
+            &mean,
+            &upper,
+            None,
+            factor.view(),
+            &generator,
+            None,
+            0,
+            1 << 20,
+        )
+        .expect("untilted reference nodes");
+        let truth = reference.moments().expect("reference moments");
+        let gap = moment_relative_change(&(produced_mean, produced_cov), &truth, &w);
+        println!("MEASURE2601 gap vs untilted 2^20 reference: {gap:.3e}");
+        assert!(
+            gap < 3.0e-2,
+            "the tilted rule must agree with an INDEPENDENT untilted reference; \
+             gap {gap:.3e} (the reference's own error at 2^20 is ~1.3e-2)"
+        );
     }
 
-    /// Genz--Bretz variable reordering, applied as an EXPERIMENT on top of the
-    /// existing rule so the two orders are measured on identical faces.
+    /// Before/after across the synthetic sweep that first identified
+    /// correlation as the driver: every face the untilted rule could not
+    /// resolve at the 2^20 cap, the tilted one resolves — and the ones it
+    /// already resolved it resolves no slower.
     ///
-    /// At each elimination step, among the coordinates not yet placed, choose
-    /// the one whose CONDITIONAL feasible interval carries the least
-    /// probability given the coordinates already placed, and eliminate it next.
-    /// The production order is a static ascending-slack walk (a property of the
-    /// mean alone); this one is conditional, so it can see the correlation
-    /// structure that the sweep above identifies as the actual driver.
-    ///
-    /// Returns the permutation; the caller permutes `mean`/`W` by it and
-    /// re-factorizes.
-    fn genz_order(mean: &Array1<f64>, w: &Array2<f64>, upper: &[f64]) -> Vec<usize> {
-        use gam_math::probability::{normal_cdf, normal_sf};
-        let q = mean.len();
-        let mut order: Vec<usize> = (0..q).collect();
-        // `l` is the partial Cholesky in the CHOSEN order; `y` the expected
-        // standardized value of each already-placed coordinate.
-        let mut l = Array2::<f64>::zeros((q, q));
-        let mut y = Array1::<f64>::zeros(q);
-        for k in 0..q {
-            let mut best: Option<(usize, f64)> = None;
-            for pos in k..q {
-                let i = order[pos];
-                let mut var = w[[i, i]];
-                for j in 0..k {
-                    var -= l[[pos, j]] * l[[pos, j]];
-                }
-                if !(var > 0.0) {
-                    continue;
-                }
-                let d = var.sqrt();
-                let mut shift = 0.0;
-                for j in 0..k {
-                    shift += l[[pos, j]] * y[j];
-                }
-                let alpha = (-mean[i] + shift) / d;
-                let beta = if upper[i].is_finite() {
-                    (upper[i] - mean[i] + shift) / d
-                } else {
-                    f64::INFINITY
-                };
-                // `normal_sf` keeps the upper tail that `1 - cdf` destroys, so
-                // a deeply pinned coordinate still reports a positive mass.
-                let mass = if beta.is_finite() {
-                    (normal_cdf(beta) - normal_cdf(alpha)).max(0.0)
-                } else {
-                    normal_sf(alpha)
-                };
-                if best.map(|(_, m)| mass < m).unwrap_or(true) {
-                    best = Some((pos, mass));
-                }
-            }
-            let Some((chosen_pos, _)) = best else { break };
-            order.swap(k, chosen_pos);
-            for j in 0..k {
-                let tmp = l[[k, j]];
-                l[[k, j]] = l[[chosen_pos, j]];
-                l[[chosen_pos, j]] = tmp;
-            }
-            // Complete column `k` of the partial factor in the chosen order.
-            let ik = order[k];
-            let mut var = w[[ik, ik]];
-            for j in 0..k {
-                var -= l[[k, j]] * l[[k, j]];
-            }
-            let dk = var.max(f64::MIN_POSITIVE).sqrt();
-            l[[k, k]] = dk;
-            for pos in (k + 1)..q {
-                let i = order[pos];
-                let mut cross = w[[i, ik]];
-                for j in 0..k {
-                    cross -= l[[pos, j]] * l[[k, j]];
-                }
-                l[[pos, k]] = cross / dk;
-            }
-            // Expected standardized value on the conditional interval.
-            let mut shift = 0.0;
-            for j in 0..k {
-                shift += l[[k, j]] * y[j];
-            }
-            let alpha = (-mean[ik] + shift) / dk;
-            let tail = normal_sf(alpha).max(f64::MIN_POSITIVE);
-            let density = (-0.5 * alpha * alpha).exp() / (2.0 * std::f64::consts::PI).sqrt();
-            y[k] = density / tail;
-        }
-        order
-    }
-
-    /// #2601 mechanism 3: characterize the orthant cubature on the face a
-    /// `shape=monotone_decreasing` fit on INCREASING data actually produces.
-    ///
-    /// That face is the worst regime this integrand has: every one of the `q`
-    /// coordinates is a half-line, the unconstrained centre sits on the wrong
-    /// side of all of them at once, and the constraint normals of adjacent
-    /// monotonicity rows are strongly correlated. Measure how the relative
-    /// moment change decays with node count as a function of depth `c` and
-    /// correlation, so any change to the rule is judged against a number rather
-    /// than against the one fixture that failed.
+    /// The sweep is what rules out tail depth: an 11-dimensional face FOUR
+    /// standard deviations deep converges in 16k nodes when the constraint
+    /// normals are uncorrelated, while correlation at ANY depth, including
+    /// 0.5 sd, does not converge at 2^20 without the tilt.
     #[test]
-    fn zz_measure_2601_deep_tail_orthant_convergence() {
+    fn the_tilt_resolves_every_correlated_face_the_sweep_could_not() {
         for &q in &[4usize, 8, 11] {
             for &c in &[0.5_f64, 1.0, 2.0, 4.0] {
                 for &corr in &[0.0_f64, 0.6, 0.9] {
@@ -3514,87 +3613,35 @@ mod orthant_depth_measure_2601_tests {
                         for j in 0..q {
                             w[[i, j]] = corr.powi((i as i32 - j as i32).abs());
                         }
-                        w[[i, i]] = 1.0;
                     }
-                    let mean_raw = Array1::<f64>::from_elem(q, -c);
-                    let upper_raw = vec![f64::INFINITY; q];
-                    for order_label in ["static", "genz"] {
-                        let order: Vec<usize> = if order_label == "genz" {
-                            genz_order(&mean_raw, &w, &upper_raw)
-                        } else {
-                            (0..q).collect()
-                        };
-                        let mut w = {
-                            let mut permuted = Array2::<f64>::zeros((q, q));
-                            for (a, &ia) in order.iter().enumerate() {
-                                for (b, &ib) in order.iter().enumerate() {
-                                    permuted[[a, b]] = w[[ia, ib]];
-                                }
-                            }
-                            permuted
-                        };
-                        let mean = Array1::from_iter(order.iter().map(|&i| mean_raw[i]));
-                        let upper: Vec<f64> = order.iter().map(|&i| upper_raw[i]).collect();
-                        // Plain lower Cholesky of the correlation matrix, written
-                        // out so the measurement depends on no other module.
-                        let mut factor = Array2::<f64>::zeros((q, q));
-                        for i in 0..q {
-                            for j in 0..=i {
-                                let mut sum = w[[i, j]];
-                                for k in 0..j {
-                                    sum -= factor[[i, k]] * factor[[j, k]];
-                                }
-                                if i == j {
-                                    factor[[i, i]] = sum.sqrt();
-                                } else {
-                                    factor[[i, j]] = sum / factor[[j, j]];
-                                }
-                            }
-                        }
-                        symmetrize_in_place(&mut w);
-                    let generator = kronecker_generator(q);
-                    let mut accumulator = OrthantAccumulator::new(q);
-                    let mut evaluated = 0usize;
-                    let mut previous: Option<(Array1<f64>, Array2<f64>)> = None;
-                    let mut trail = String::new();
-                    let mut converged_at = 0usize;
-                    loop {
-                        let target = if evaluated == 0 {
-                            ORTHANT_MOMENT_INITIAL_POINTS
-                        } else {
-                            evaluated * 2
-                        };
-                        accumulate_orthant_nodes(
-                            &mut accumulator,
-                            &mean,
-                            &upper,
-                            None,
-                            factor.view(),
-                            &generator,
-                            evaluated,
-                            target,
-                        )
-                        .expect("orthant nodes");
-                        evaluated = target;
-                        let current = accumulator.moments().expect("moments");
-                        if let Some(ref last) = previous {
-                            let change = moment_relative_change(last, &current, &w);
-                            trail.push_str(&format!(" {evaluated}:{change:.2e}"));
-                            if change <= ORTHANT_MOMENT_RELATIVE_TOLERANCE && converged_at == 0 {
-                                converged_at = evaluated;
-                                break;
-                            }
-                        }
-                        if evaluated >= ORTHANT_MOMENT_MAXIMUM_POINTS {
-                            break;
-                        }
-                        previous = Some(current);
-                    }
+                    let mean = Array1::<f64>::from_elem(q, -c);
+                    let upper = vec![f64::INFINITY; q];
+                    let factor = lower_cholesky(&w);
+                    let (ess, decades) =
+                        weight_efficiency(&mean, &upper, factor.view(), None, 1 << 14);
+                    let tilt = minimax_tilt(&mean, &upper, factor.view());
+                    let (tilted_ess, tilted_decades) =
+                        weight_efficiency(&mean, &upper, factor.view(), tilt.as_ref(), 1 << 14);
+                    let outcome = box_truncated_moments(&mean, &upper, &w, factor.view());
                     println!(
-                        "MEASURE2601 order={order_label} q={q} depth={c} corr={corr} \
-                         converged_at={converged_at}{trail}"
+                        "MEASURE2601 q={q} depth={c} corr={corr} \
+                         ess {:.2}%->{:.2}% decades {decades:.1}->{tilted_decades:.1} {}",
+                        100.0 * ess,
+                        100.0 * tilted_ess,
+                        if outcome.is_ok() { "converged" } else { "REFUSED" },
                     );
-                    }
+                    assert!(
+                        outcome.is_ok(),
+                        "q={q} depth={c} corr={corr} must converge: {:?}",
+                        outcome.err()
+                    );
+                    assert!(
+                        tilted_ess >= ess * 0.9,
+                        "the tilt must never make a face WORSE: q={q} depth={c} \
+                         corr={corr} ess {:.4}% -> {:.4}%",
+                        100.0 * ess,
+                        100.0 * tilted_ess
+                    );
                 }
             }
         }
@@ -4078,6 +4125,7 @@ mod affine_ceiling_tests {
             ceiling,
             factor.view(),
             &generator,
+            None,
             0,
             nodes,
         )
