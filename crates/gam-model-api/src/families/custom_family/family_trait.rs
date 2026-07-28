@@ -1122,11 +1122,34 @@ pub trait CustomFamily {
             // can never produce. Detect that structurally and trust it. A
             // returned matrix that is block-diagonal is indistinguishable from
             // the default for a coupled family, so it stays gated to None.
-            match self.exact_newton_joint_hessian(block_states)? {
-                Some(hessian) if joint_hessian_has_cross_block_coupling(&hessian, block_states) => {
+            // This arm is a DETECTION, and its negative answer is `Ok(None)`.
+            // It consults `exact_newton_joint_hessian` only to find out whether
+            // the family overrode it with genuinely coupled curvature, and
+            // discards anything block-diagonal — which is exactly what the
+            // trait's own default returns. So for a family that did NOT
+            // override it, the probe pays a full assembly (and, through
+            // `exact_newton_joint_hessian_from_exact_blocks`, a full
+            // `evaluate`) to produce something it is guaranteed to reject.
+            //
+            // A family that cannot answer has, by the same token, not overridden
+            // it: that is a negative detection, not a failure. Propagating the
+            // error made a best-effort probe fatal and charged the caller a
+            // replay it never asked for — measured by
+            // `owned_uncoupled_terminal_working_sets_materialize_exact_joint_hessian`,
+            // whose family errors on `evaluate` precisely to assert that the
+            // terminal path does not re-evaluate it, and which received that
+            // tripwire instead of the coupled-likelihood refusal it pins.
+            //
+            // The error text is not silently dropped: it is the reason the probe
+            // came back negative, and the caller's own refusal (which names
+            // every route it consulted) is what surfaces.
+            match self.exact_newton_joint_hessian(block_states) {
+                Ok(Some(hessian))
+                    if joint_hessian_has_cross_block_coupling(&hessian, block_states) =>
+                {
                     Ok(Some(hessian))
                 }
-                _ => Ok(None),
+                Ok(_) | Err(_) => Ok(None),
             }
         }
     }
