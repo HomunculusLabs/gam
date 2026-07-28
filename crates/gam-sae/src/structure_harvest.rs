@@ -4182,6 +4182,13 @@ fn race_spec_set(
         // The race is over EXACTLY the candidate set we built; do not let the
         // selector's constant-curvature fuse drop one — pass them through as-is.
         candidates: specs.iter().map(|s| s.kind).collect(),
+        // This race realizes FIXED space forms: a flat Duchon/patch candidate and
+        // a unit-curvature sphere. Neither fits κ, so the constant-curvature
+        // fusion must not fire. Declaring that honestly is what lets the fixed
+        // forms race as themselves and be reported as what they are. Wiring
+        // `gam_geometry::ConstantCurvature` as a real κ-estimating atom is the
+        // follow-up that flips this to `true` (#2603).
+        curvature_is_estimable: false,
         // PER-OBSERVATION normalization (a common `n` divisor across candidates).
         // The candidate scores are now PROPER closed-form REML marginal
         // likelihoods (see `fit_topology_candidate`), which ALREADY price model
@@ -4200,32 +4207,29 @@ fn race_spec_set(
     // Index the realized specs by kind so the fit closure can find the right
     // evaluator/coords for the kind the selector hands it.
     //
-    // #944 stage 4: `select_topology_with_fit` FUSES the fixed simply-connected
-    // constant-curvature forms (Euclidean κ = 0 ∪ Sphere κ > 0) into ONE
-    // estimated-κ `ConstantCurvature` candidate when both are present (the d = 2
-    // case: euclidean-patch + sphere). That fusion is correct — euclidean-vs-sphere
-    // IS a curvature estimation, not two discrete topologies — so the fused
-    // `ConstantCurvature` candidate is realized by the CURVED (sphere) basis, the
-    // simply-connected form that can express both flat and positively-curved
-    // images under its fitted decoder. The race then adjudicates that one
-    // constant-curvature form against the genuinely non-homotopic `Torus`. For
-    // d = 1 no fusion fires (Circle is not simply connected), so circle-vs-line
-    // races as two discrete candidates.
+    // #944 stage 4 would FUSE the fixed simply-connected constant-curvature forms
+    // (Euclidean κ = 0 ∪ Sphere κ > 0) into ONE estimated-κ `ConstantCurvature`
+    // candidate. The premise is right — euclidean-vs-sphere IS a curvature
+    // estimation rather than two discrete topologies — but the conclusion only
+    // follows for a consumer that actually FITS κ. This race realizes fixed space
+    // forms and fits no κ, so it declares `curvature_is_estimable: false` and the
+    // fusion does not fire: the flat patch and the unit sphere race as themselves
+    // and are reported as what they are.
+    //
+    // Realizing the fused candidate by the sphere basis (as this used to do) does
+    // not rescue the premise. A unit-curvature sphere cannot express κ = 0, so
+    // the "estimated" curvature was pinned at a constant the fit never chose.
     let mut by_kind: std::collections::HashMap<AutoTopologyKind, &TopologyCandidateSpec> =
         std::collections::HashMap::with_capacity(specs.len() + 1);
     for spec in &specs {
         by_kind.insert(spec.kind, spec);
     }
-    if !by_kind.contains_key(&AutoTopologyKind::ConstantCurvature) {
-        // Resolve the fused candidate to the curved simply-connected realization
-        // (sphere) when present, else the flat patch (euclidean) — whichever the
-        // realizable set carries.
-        if let Some(sphere) = specs.iter().find(|s| s.kind == AutoTopologyKind::Sphere) {
-            by_kind.insert(AutoTopologyKind::ConstantCurvature, sphere);
-        } else if let Some(euclid) = specs.iter().find(|s| s.kind == AutoTopologyKind::Euclidean) {
-            by_kind.insert(AutoTopologyKind::ConstantCurvature, euclid);
-        }
-    }
+    // A ConstantCurvature key is deliberately NOT synthesized here. It used to be
+    // aliased to the sphere spec (or the flat patch), so a race could report a
+    // `ConstantCurvature` winner that was a FIXED-curvature fit — a κ nobody
+    // estimated. The selector now declares `curvature_is_estimable: false`, so
+    // the fusion does not fire and this key is never requested. When a real
+    // κ-estimating candidate exists, it gets registered here as itself.
     let ranked = select_topology_with_fit(&selector, |kind| {
         let spec = by_kind.get(&kind).ok_or_else(|| {
             format!(
