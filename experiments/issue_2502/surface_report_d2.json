@@ -1,0 +1,98 @@
+[
+ {
+  "atom": 948,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 32001,
+  "pc3_variance": 0.9768456478565974,
+  "s2_over_s1": 0.7708914130428908
+ },
+ {
+  "atom": 128,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 1991,
+  "pc3_variance": 0.86620689914199,
+  "s2_over_s1": 0.6804770937307943
+ },
+ {
+  "atom": 1382,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 936,
+  "pc3_variance": 0.8970390245375621,
+  "s2_over_s1": 0.6219288754812944
+ },
+ {
+  "atom": 1730,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 490,
+  "pc3_variance": 0.816750587522886,
+  "s2_over_s1": 0.6842579438138392
+ },
+ {
+  "atom": 1291,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 280,
+  "pc3_variance": 0.905518430680292,
+  "s2_over_s1": 0.8522933946272174
+ },
+ {
+  "atom": 517,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 148,
+  "pc3_variance": 0.9097487116758918,
+  "s2_over_s1": 0.7971481828904006
+ },
+ {
+  "atom": 192,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 67,
+  "pc3_variance": 0.9539395961927016,
+  "s2_over_s1": 0.7907523342695921
+ },
+ {
+  "atom": 1023,
+  "kind": "sphere",
+  "dim": 2,
+  "usage": 12,
+  "pc3_variance": 0.9812564666280794,
+  "s2_over_s1": 0.7348838191080213
+ },
+ {
+  "atom": 614,
+  "kind": "linear",
+  "dim": 1,
+  "usage": 15528,
+  "pc3_variance": 1.0,
+  "s2_over_s1": 1.621069233758839e-16
+ },
+ {
+  "atom": 434,
+  "kind": "linear",
+  "dim": 1,
+  "usage": 2246,
+  "pc3_variance": 1.0,
+  "s2_over_s1": 2.5610597313392016e-16
+ },
+ {
+  "atom": 9,
+  "kind": "linear",
+  "dim": 1,
+  "usage": 1131,
+  "pc3_variance": 1.0,
+  "s2_over_s1": 1.529281485994184e-16
+ },
+ {
+  "atom": 1313,
+  "kind": "linear",
+  "dim": 1,
+  "usage": 543,
+  "pc3_variance": 1.0,
+  "s2_over_s1": 2.7617721686507085e-16
+ }
+]
