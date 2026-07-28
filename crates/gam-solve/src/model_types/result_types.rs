@@ -2538,9 +2538,14 @@ pub struct UnifiedFitResultParts {
     pub log_likelihood_normalization: LogLikelihoodNormalization,
     pub log_likelihood: f64,
     pub deviance: f64,
-    pub reml_score: f64,
+    /// The fit's REML/LAML criterion, or `None` when no finite criterion exists
+    /// at this fit (the exact-fit Gaussian boundary). See
+    /// [`UnifiedFitResult::reml_score`].
+    pub reml_score: Option<f64>,
     pub stable_penalty_term: f64,
-    pub penalized_objective: f64,
+    /// Absent exactly when [`Self::reml_score`] is absent; the constructor
+    /// rejects any other pairing.
+    pub penalized_objective: Option<f64>,
     pub used_device: bool,
     pub outer_iterations: usize,
     pub outer_converged: bool,
@@ -2938,13 +2943,33 @@ pub struct UnifiedFitResult {
     pub log_likelihood: f64,
     /// Explicit deviance reported by the fitting path.
     pub deviance: f64,
-    /// Complete REML/LAML objective value used for smoothing selection.
-    pub reml_score: f64,
+    /// Complete REML/LAML objective value used for smoothing selection, when
+    /// the fit has one.
+    ///
+    /// `None` is a typed statement that **no finite criterion value exists at
+    /// this fit** — it is never "not recorded" and never a stand-in for zero.
+    /// The one state that produces it is the exact-fit Gaussian boundary: when
+    /// the fitted mean reproduces the response to floating-point resolution the
+    /// profiled scale `φ̂` is zero, the restricted likelihood is unbounded, and
+    /// every quantity derived from the criterion (`Summary.raw_reml_score`, the
+    /// Tierney-Kadane comparable score, `compare_models`, Bayes factors) is
+    /// undefined rather than large. Consumers that rank, compare, or normalize
+    /// must refuse `None` by name; the field is private precisely so that a
+    /// consumer cannot read a criterion the fit never had (#2595).
+    ///
+    /// This mirrors the decline already carried one field up:
+    /// `log_likelihood = 0.0` tagged [`LogLikelihoodNormalization::UserProvided`]
+    /// at the same boundary. Wire-compatible in both directions — a payload
+    /// written before this field became optional carries a bare number and
+    /// still deserializes as `Some`. The key itself stays mandatory: a payload
+    /// that omits it is malformed, not a fit whose criterion is absent.
+    reml_score: Option<f64>,
     /// Stable quadratic penalty term βᵀSβ, including any solver ridge quadratic.
     pub stable_penalty_term: f64,
     /// Public objective value reported for the fit. For REML/LAML fits this is
-    /// the same complete objective as `reml_score`, not `-ℓ + penalty + reml_score`.
-    pub penalized_objective: f64,
+    /// the same complete objective as `reml_score`, not `-ℓ + penalty + reml_score`,
+    /// and it is absent on exactly the fits whose criterion is absent.
+    penalized_objective: Option<f64>,
     /// Whether the converged fit used a GPU execution path for its final inner solve.
     #[serde(default)]
     pub used_device: bool,
@@ -3316,6 +3341,18 @@ fn flatten_block_lambdas(blocks: &[FittedBlock]) -> Array1<f64> {
     flatten_blocks_field(blocks, |b| &b.lambdas)
 }
 
+/// The one explanation every ranking surface gives for an absent criterion.
+///
+/// Kept as a single constant so the summary, `evidence`, `compare_models` and
+/// the Bayes-factor path cannot drift into describing the same state three
+/// different ways (#2595).
+pub const NO_CRITERION_AT_EXACT_FIT: &str =
+    "this fit has no REML/LAML criterion value: the fitted mean reproduces the response to \
+     floating-point resolution, so the profiled Gaussian scale is exactly zero and the \
+     restricted likelihood is unbounded. Evidence, Bayes factors and cross-model comparison \
+     are undefined for an exactly-interpolating fit; compare it on predictive accuracy \
+     instead, or refit on data whose response is not an exact function of the design";
+
 impl UnifiedFitResult {
     /// Proof carried by every fitted model. Callers never need to re-check a
     /// convergence boolean; construction has already consumed and validated
@@ -3327,6 +3364,35 @@ impl UnifiedFitResult {
     /// Number of original training rows / experimental units.
     pub fn training_sample_size(&self) -> usize {
         self.training_sample_size.get()
+    }
+
+    /// The fit's REML/LAML criterion, or `None` when no finite criterion exists
+    /// at this fit.
+    ///
+    /// `None` is not "unavailable"; it is the statement that the criterion is
+    /// unbounded — see the field documentation. Callers that rank, compare, or
+    /// normalize must propagate the absence, not substitute a number for it;
+    /// [`Self::require_reml_score`] produces the standard refusal.
+    pub fn reml_score(&self) -> Option<f64> {
+        self.reml_score
+    }
+
+    /// The fit's criterion, or the canonical refusal explaining why the fit has
+    /// none.
+    ///
+    /// One message for every ranking surface (summary, `evidence`,
+    /// `compare_models`, Bayes factors) so a user who hits the exact-fit
+    /// boundary reads the same explanation wherever they hit it.
+    pub fn require_reml_score(&self) -> Result<f64, EstimationError> {
+        self.reml_score.ok_or_else(|| {
+            EstimationError::InvalidInput(NO_CRITERION_AT_EXACT_FIT.to_string())
+        })
+    }
+
+    /// Public objective value reported for the fit; absent exactly when
+    /// [`Self::reml_score`] is absent.
+    pub fn penalized_objective(&self) -> Option<f64> {
+        self.penalized_objective
     }
 
     /// Denominator degrees of freedom for estimated-scale Wald/F references.
@@ -3440,9 +3506,25 @@ impl UnifiedFitResult {
         }
         ensure_finite_scalar_estimation("fit_result.log_likelihood", log_likelihood)?;
         ensure_finite_scalar_estimation("fit_result.deviance", deviance)?;
-        ensure_finite_scalar_estimation("fit_result.reml_score", reml_score)?;
+        // A criterion that is PRESENT must still be finite: `None` is the only
+        // legal way to report "no criterion", and `inf`/`NaN` remain rejected.
+        if let Some(reml_score) = reml_score {
+            ensure_finite_scalar_estimation("fit_result.reml_score", reml_score)?;
+        }
         ensure_finite_scalar_estimation("fit_result.stable_penalty_term", stable_penalty_term)?;
-        ensure_finite_scalar_estimation("fit_result.penalized_objective", penalized_objective)?;
+        if let Some(penalized_objective) = penalized_objective {
+            ensure_finite_scalar_estimation("fit_result.penalized_objective", penalized_objective)?;
+        }
+        // The two are the same objective under different names for every REML /
+        // LAML fit, so one cannot exist without the other. Allowing the pair to
+        // disagree on presence would let a consumer that reads only one of them
+        // silently recover the value the other declined to state.
+        if reml_score.is_none() != penalized_objective.is_none() {
+            crate::bail_invalid_estim!(
+                "UnifiedFitResult reml_score and penalized_objective must be present or absent \
+                 together; got reml_score={reml_score:?}, penalized_objective={penalized_objective:?}"
+            );
+        }
         if let Some(g) = outer_gradient_norm {
             ensure_finite_scalar_estimation("fit_result.outer_gradient_norm", g)?;
         }
