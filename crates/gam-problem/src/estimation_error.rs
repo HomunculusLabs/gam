@@ -676,27 +676,6 @@ pub enum EstimationError {
     LayoutError(String),
 
     #[error(
-        "Model is over-parameterized: {num_coeffs} coefficients for {num_samples} samples.\n\n\
-        Coefficient Breakdown:\n\
-          - Intercept:                     {intercept_coeffs}\n\
-          - Binary Main Effects:           {binary_main_coeffs}\n\
-          - Primary Smooth Effects:        {primary_smooth_coeffs}\n\
-          - Binary×Primary Interactions:   {binary_primary_interaction_coeffs}\n\
-          - Auxiliary Main Effects:        {aux_main_coeffs}\n\
-          - Auxiliary Interactions:        {aux_interaction_coeffs}"
-    )]
-    ModelOverparameterized {
-        num_coeffs: usize,
-        num_samples: usize,
-        intercept_coeffs: usize,
-        binary_main_coeffs: usize,
-        primary_smooth_coeffs: usize,
-        aux_main_coeffs: usize,
-        binary_primary_interaction_coeffs: usize,
-        aux_interaction_coeffs: usize,
-    },
-
-    #[error(
         "Model is ill-conditioned with condition number {condition_number:.2e}. This typically occurs when the model is over-parameterized (too many knots relative to data points). Consider reducing the number of knots or increasing regularization."
     )]
     ModelIsIllConditioned { condition_number: f64 },
@@ -830,7 +809,6 @@ impl EstimationError {
             | Self::FitDidNotConverge { .. }
             | Self::GradientUnavailable { .. }
             | Self::LayoutError { .. }
-            | Self::ModelOverparameterized { .. }
             | Self::InvalidInput { .. }
             | Self::InverseLinkDomainViolation { .. }
             | Self::PirlsRowGeometryUnrepresentable { .. }
