@@ -1507,7 +1507,10 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         (".unwrap_or_else(|_", "error discarded by drop", false),
         // `.ok();` in STATEMENT position: the `Result` becomes an `Option`
         // that nothing reads, so the failure reaches nobody. Handle it
-        // (`if let Err(error) = ...`) or propagate it (`?`). `.ok()` inside a
+        // (`if let Err(error) = ...`) or propagate it (`?`). When the failure
+        // genuinely carries nothing — `OnceCell::set` losing a race — the one
+        // sanctioned spelling is `drop(expr);`, which says "discarded on
+        // purpose" in a form that greps. `.ok()` inside a
         // larger expression — `.ok()?`, `if let Some(v) = f().ok()` — is a
         // conversion whose absence the caller still has to deal with, and is
         // not matched here.
@@ -1519,6 +1522,7 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // legal: the message IS the justification the panic rule asks for.
         // Test-aware — an unwrap in a test is how a test asserts.
         (".unwrap()", "unwrap: a panic with the reason left out", true),
+        (".unwrap_err()", "unwrap: a panic with the reason left out", true),
         // `.expect("")` is `.unwrap()` wearing the justified form's clothes.
         (".expect(\"\")", "unwrap: a panic with the reason left out", false),
         (".map_err(|_| ())", "error discarded by drop", false),
@@ -4681,13 +4685,57 @@ fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, 
                 if !rest.starts_with('}') {
                     continue;
                 }
-                if let Some(kind) = classify_empty_block(&stripped[idx][..col]) {
+                let siblings_panic = enclosing_match_asserts(&stripped, idx);
+                if let Some(kind) = classify_empty_block(&stripped[idx][..col], siblings_panic) {
                     let raw = lines.get(idx).copied().unwrap_or("");
                     offenders.push((rel.to_path_buf(), idx + 1, format!("[{kind}] {raw}")));
                 }
             }
         }
     });
+}
+
+/// True when the `match` enclosing line `idx` has an arm that panics, asserts,
+/// or returns an error — which makes an empty arm the ACCEPT branch of an
+/// assertion rather than a swallowed case.
+///
+/// The enclosing block is found by walking back until a line closes fewer
+/// braces than it opens (the `match ... {` header) and forward to its matching
+/// close. If that header is not a `match`, there is no assertion to speak of.
+fn enclosing_match_asserts(stripped: &[String], idx: usize) -> bool {
+    let mut depth: i32 = 0;
+    let mut opener = None;
+    for j in (0..=idx).rev() {
+        let line = &stripped[j];
+        let opens = line.matches('{').count() as i32;
+        let closes = line.matches('}').count() as i32;
+        if j < idx {
+            depth += closes - opens;
+            if depth < 0 {
+                opener = Some(j);
+                break;
+            }
+        }
+    }
+    let Some(open_line) = opener else {
+        return false;
+    };
+    if !line_has_keyword(&stripped[open_line], "match") {
+        return false;
+    }
+    let mut depth: i32 = 0;
+    for line in &stripped[open_line..] {
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        for needle in ["panic!(", "unreachable!(", "assert!(", "assert_eq!(", "assert_ne!("] {
+            if line_has_banned_code_fragment(line, needle) {
+                return true;
+            }
+        }
+        if depth <= 0 {
+            break;
+        }
+    }
+    false
 }
 
 /// Decide whether an empty brace block at this header is a no-op worth
@@ -4722,9 +4770,22 @@ fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, 
 ///   hides the future.
 /// * `json!({})`, `quote! { leaves {} }`, `Foo {}` — expression braces. A
 ///   value, not a code path.
-fn classify_empty_block(header: &str) -> Option<&'static str> {
+fn classify_empty_block(header: &str, siblings_panic: bool) -> Option<&'static str> {
     let h = header.trim_end();
     if let Some(pattern) = h.strip_suffix("=>") {
+        if siblings_panic {
+            // The match is an assertion, and this arm is its accept branch:
+            //
+            //     match m.sectional_curvature(p, (u, v)) {
+            //         Err(GeometryError::Unsupported(_)) => {}
+            //         other => panic!("expected Unsupported, got {other:?}"),
+            //     }
+            //
+            // Nothing is swallowed — the arm IS the pass condition, and every
+            // case it does not cover fails loudly. Filling the block in would
+            // add noise, not handling.
+            return None;
+        }
         if pattern_has_top_level_wildcard(pattern) {
             return Some("empty wildcard match arm");
         }
@@ -4784,6 +4845,111 @@ fn pattern_has_top_level_wildcard(pattern: &str) -> bool {
     false
 }
 
+/// Every trait NAME declared anywhere in this repository.
+///
+/// The underscore-parameter rule names a remedy — use the value, restructure
+/// the API, or delete the parameter. Inside `impl <Trait> for <Type>` that
+/// remedy exists only when the trait is ours. `impl Serializer for ...` cannot
+/// drop a parameter serde declared, and `impl Log for ...` cannot narrow
+/// `log`'s signature: for those, EVERY legal spelling is banned and no edit to
+/// the file complies, which is a broken rule rather than a strict one. Our own
+/// traits get no such pass — a stub that ignores half its parameters is the
+/// trait telling you it is too wide, and that one we can fix.
+fn locally_declared_traits(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for file in scannable_files(root) {
+        if file.rel.extension().and_then(OsStr::to_str) != Some("rs") {
+            continue;
+        }
+        for line in strip_file_lines(&file.content) {
+            if !line_has_keyword(&line, "trait") {
+                continue;
+            }
+            let Some(pos) = line.find("trait ") else {
+                continue;
+            };
+            let before = line[..pos].trim();
+            // `trait Foo` as an item, not `impl Trait`/`dyn Trait` bounds.
+            if !before.is_empty()
+                && !before.ends_with("pub")
+                && !before.ends_with("unsafe")
+                && !before.ends_with(')')
+            {
+                continue;
+            }
+            let ident: String = line[pos + 6..]
+                .trim_start()
+                .chars()
+                .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
+                .collect();
+            if !ident.is_empty() {
+                names.insert(ident);
+            }
+        }
+    }
+    names
+}
+
+/// The trait implemented by the `impl ... for ...` block enclosing line `idx`,
+/// as its last path segment. `None` for a free function or an inherent impl.
+fn enclosing_impl_trait(stripped: &[String], idx: usize) -> Option<String> {
+    let mut depth: i32 = 0;
+    let mut opener = None;
+    for j in (0..idx).rev() {
+        let line = &stripped[j];
+        depth += line.matches('}').count() as i32 - line.matches('{').count() as i32;
+        if depth < 0 {
+            opener = Some(j);
+            break;
+        }
+    }
+    let header = &stripped[opener?];
+    if !line_has_keyword(header, "impl") || !line_has_keyword(header, "for") {
+        return None;
+    }
+    let after_impl = header.split_once("impl")?.1;
+    // Skip the impl's own generics — `impl<S, const K: usize> Trait for X` —
+    // by matching angle brackets. Splitting on `<` instead would read
+    // "S, const K: usize> Trait" as the trait name and exempt a LOCAL trait,
+    // which is a hole rather than a mercy.
+    let rest = after_impl.trim_start();
+    let rest = if rest.starts_with('<') {
+        let bytes = rest.as_bytes();
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, b) in bytes.iter().enumerate() {
+            match *b {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[end?..]
+    } else {
+        rest
+    };
+    let (trait_part, _) = rest.rsplit_once(" for ")?;
+    let last = trait_part
+        .trim()
+        .rsplit("::")
+        .next()?
+        .split('<')
+        .next()?
+        .trim()
+        .trim_start_matches('!');
+    if last.is_empty() {
+        None
+    } else {
+        Some(last.to_string())
+    }
+}
+
 /// Flags function definitions whose parameter list contains an underscore
 /// name (e.g. `fn foo(_x: i32)`) or a bare underscore placeholder
 /// (`fn foo(_: i32)`). Both are banned: each declares an argument the body
@@ -4796,6 +4962,7 @@ fn scan_for_underscore_fn_args(
     dir: &Path,
     offenders: &mut Vec<(PathBuf, usize, String)>,
 ) {
+    let local_traits = locally_declared_traits(root);
     visit_files(root, dir, &mut |rel, content| {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         if rel_str == "build.rs" {
@@ -4971,6 +5138,13 @@ fn scan_for_underscore_fn_args(
                     continue;
                 }
                 if name.starts_with('_') {
+                    // A signature owned by a foreign trait cannot be changed
+                    // from here; see `locally_declared_traits`.
+                    if let Some(trait_name) = enclosing_impl_trait(&stripped_lines, sig_start)
+                        && !local_traits.contains(&trait_name)
+                    {
+                        continue;
+                    }
                     // Compute the byte offset of the parameter NAME (not the
                     // leading whitespace/attribute/mut prefix) so the line
                     // mapping points to the underscore-prefixed identifier
