@@ -49,7 +49,9 @@ pub fn solve_arrow_newton_step_gpu(
                     opts.gpu_matvec = Some(gpu_matvec);
                 }
                 Err(ArrowSchurGpuFailure::Unavailable) => {
-                    // No device matvec available; CPU InexactPCG owns the solve.
+                    log::debug!(
+                        "arrow-Schur: no device matvec available; CPU InexactPCG owns the solve"
+                    );
                 }
                 Err(ArrowSchurGpuFailure::RidgeBumpRequired { row, bump }) => {
                     return Err(ArrowSchurError::PerRowFactorFailed {
@@ -60,8 +62,10 @@ pub fn solve_arrow_newton_step_gpu(
                     });
                 }
                 Err(ArrowSchurGpuFailure::GpuRequiresDenseSystem { .. }) => {
-                    // The matvec builder cannot lift this system either; CPU
-                    // InexactPCG matvec handles the reduction.
+                    log::debug!(
+                        "arrow-Schur: matvec builder cannot lift this system; \
+                         CPU InexactPCG matvec handles the reduction"
+                    );
                 }
                 Err(ArrowSchurGpuFailure::SchurFactorFailed { reason }) => {
                     return Err(ArrowSchurError::SchurFactorFailed { reason });

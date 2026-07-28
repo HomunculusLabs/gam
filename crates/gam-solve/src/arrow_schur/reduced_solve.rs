@@ -1057,10 +1057,16 @@ pub fn solve_streaming_reduced_beta(
                 options.trust_region.steihaug_relative_tolerance,
             ) {
                 Ok(delta_beta) => return Ok(delta_beta),
-                Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {}
-                Err(_) => {
+                Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {
+                    log::debug!("reduced solve: device unavailable; CPU path owns the solve");
+                }
+                Err(declined) => {
                     // Device declined this `schur` (e.g. non-PD Jacobi diag);
                     // let the CPU path confirm and escalate the proximal ridge.
+                    log::debug!(
+                        "reduced solve: device declined ({declined:?}); \
+                         CPU path confirms and escalates the proximal ridge"
+                    );
                 }
             }
         }
@@ -1813,7 +1819,9 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
         ) {
             Ok(Some(matvec)) => return Ok(Some(matvec)),
             Ok(None) => {}
-            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {}
+            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {
+                log::debug!("resident evidence matvec build: device unavailable; CPU matvec");
+            }
             Err(failure) => {
                 return Err(device_failure_as_arrow_error(
                     "resident evidence matvec build",

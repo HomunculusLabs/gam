@@ -1062,7 +1062,9 @@ pub fn prepare_sae_resident_frame(
     if let Some(frame) = existing {
         match frame.refresh(sys) {
             Ok(()) => return Ok(Some(frame)),
-            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {}
+            Err(crate::gpu_kernels::arrow_schur::ArrowSchurGpuFailure::Unavailable) => {
+                log::debug!("resident SAE frame refresh: device unavailable; rebuilding on CPU");
+            }
             Err(failure) => {
                 return Err(device_failure_as_arrow_error(
                     "resident SAE frame refresh",
@@ -2557,10 +2559,15 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
                         ) => {
                             return Err(ArrowSchurError::SchurFactorFailed { reason });
                         }
-                        // Unavailable / framed-mismatch / transient ⇒ the device
-                        // genuinely declined; fall through to the CPU PCG path
-                        // transparently (`used_device_arrow` stays false — honest).
-                        Err(_) => {}
+                        Err(declined) => {
+                            // Unavailable / framed-mismatch / transient ⇒ the device
+                            // genuinely declined; fall through to the CPU PCG path
+                            // transparently (`used_device_arrow` stays false — honest).
+                            log::debug!(
+                                "arrow-Schur device declined the framed solve ({declined:?}); \
+                                 falling through to CPU PCG"
+                            );
+                        }
                     }
                 }
             }

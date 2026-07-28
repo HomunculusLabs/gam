@@ -2380,7 +2380,14 @@ pub fn assert_sweep_parity_vs_sequential(
                     ));
                 }
             }
-            (Err(_), Err(_)) => {}
+            (Err(sequential), Err(multiplexed)) => {
+                // Both paths refused. Parity is about agreement, and they agree
+                // here, so this is not a parity failure - but a sweep where every
+                // fit refuses would otherwise pass silently.
+                log::debug!(
+                    "sweep parity: fit {idx} refused on both paths (seq: {sequential}; mux: {multiplexed})"
+                );
+            }
             _ => {
                 return Err(format!(
                     "sweep parity: fit {idx} success/failure disagrees seq-vs-mux"

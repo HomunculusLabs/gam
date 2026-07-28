@@ -410,8 +410,10 @@ pub fn evidence_derivatives_hutchinson_gpu(
             match linux_cuda::evidence_derivatives(&input) {
                 Ok(evidence) => return Ok(evidence),
                 Err(GpuError::NoDeviceKernel { .. }) => {
-                    // No device kernel for this path on this build: fall
-                    // through to the CPU reference.
+                    log::debug!(
+                        "reml-trace evidence derivatives: no device kernel in this build; \
+                         falling through to the CPU reference"
+                    );
                 }
                 Err(other) => return Err(String::from(other)),
             }

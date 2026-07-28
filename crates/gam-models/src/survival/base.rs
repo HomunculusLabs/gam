@@ -3179,7 +3179,14 @@ impl WorkingModelSurvival {
                         let residual_ok = tn.is_finite() && tn < r_norm;
                         Ok((armijo_ok || residual_ok).then_some((ft, trial)))
                     },
-                    |_, _| true,
+                    // The accept/reject decision is made inside the trial
+                    // closure above, which returns `Ok(None)` to shrink. What
+                    // is left for this predicate is the contract that closure
+                    // promises: it only yields a candidate whose objective is
+                    // finite (both `armijo_ok` and `residual_ok` require it).
+                    // Checking it here enforces that promise at the seam where
+                    // `opt` turns a trial into an accepted step.
+                    |_, value| value.is_finite(),
                 ) {
                     Ok(result) => result,
                     Err(never) => match never {},
