@@ -4517,6 +4517,37 @@ impl<'a> RemlState<'a> {
             .inner_pirls_solve_count
             .fetch_add(1, Ordering::Relaxed);
         let decision = self.select_reml_geometry(rho)?;
+        // #2569: since #2413 replaced the small-problem size heuristic, the
+        // MEASURED penalized-Hessian density is the routing authority — but the
+        // decision was observable on only one of its two outcomes. A fit that
+        // routed dense logged nothing, so `penalized_hessian_too_dense` (a
+        // density genuinely measured above the threshold) could not be told from
+        // `design_not_sparse`, `constraints_present`,
+        // `penalty_blocks_not_separable`, `firth_bias_reduction_active` or
+        // `sparse_stats_failed` — four of which never measure a density at all.
+        // "Which side of SPARSE_HESSIAN_MAX_DENSITY does this design land on"
+        // was therefore unanswerable from a log for exactly the shapes where it
+        // decides the cost. Report the decision itself, with the threshold it
+        // was compared against, on BOTH branches.
+        log::info!(
+            "[reml-geometry] {} reason={} p={} nnz_x={} nnz_h_est={} density_h_est={} threshold={:.4}",
+            match decision.geometry {
+                RemlGeometry::SparseExactSpd => "sparse_exact_spd",
+                RemlGeometry::DenseSpectral => "dense_spectral",
+            },
+            decision.reason,
+            decision.p,
+            decision.nnz_x,
+            decision
+                .nnz_h_upper_est
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "na".to_string()),
+            decision
+                .density_h_upper_est
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "na".to_string()),
+            Self::SPARSE_HESSIAN_MAX_DENSITY,
+        );
         match decision.geometry {
             RemlGeometry::SparseExactSpd => {
                 match self.prepare_sparse_eval_bundlewithkey(
@@ -4524,23 +4555,7 @@ impl<'a> RemlState<'a> {
                     key.clone(),
                     value_only_rows,
                 ) {
-                    Ok(bundle) => {
-                        log::info!(
-                            "[reml-geometry] sparse_exact_spd reason={} p={} nnz_x={} nnz_h_est={} density_h_est={}",
-                            decision.reason,
-                            decision.p,
-                            decision.nnz_x,
-                            decision
-                                .nnz_h_upper_est
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "na".to_string()),
-                            decision
-                                .density_h_upper_est
-                                .map(|v| format!("{v:.4}"))
-                                .unwrap_or_else(|| "na".to_string()),
-                        );
-                        Ok(bundle)
-                    }
+                    Ok(bundle) => Ok(bundle),
                     Err(err) => {
                         log::warn!(
                             "[reml-geometry] sparse_exact_spd failed ({}); falling back to dense spectral",
