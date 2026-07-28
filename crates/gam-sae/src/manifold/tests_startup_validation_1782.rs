@@ -233,6 +233,49 @@ fn efs_and_value_lanes_agree_on_finiteness_at_the_seed_2609() {
     );
 }
 
+/// #2609 localisation sweep. Both lanes diverge identically, so the `+inf` is
+/// in the criterion; this asks WHICH knob of the ordered-Beta assignment
+/// carries it, by moving one at a time on identical data.
+///
+/// `alpha` sets the column shapes `a_k = 1/expm1((k+1)·ln(1+1/α))`, `tau` sets
+/// the concrete-logit sharpness, and `k` sets how many columns exist — so a
+/// divergence that tracks `alpha` implicates the marginal, one that tracks
+/// `tau` implicates the logits saturating, and one that tracks `k` implicates
+/// the column ladder. Printed as a table rather than asserted, because the
+/// point is to say where the boundary IS before anyone claims a cause.
+#[test]
+fn ordered_beta_finiteness_sweep_2609() {
+    let z = planted_circle_embedded(48, 6, 0.03);
+    let mut any_finite = false;
+    for &k in &[2usize, 4, 8] {
+        for &tau in &[0.25_f64, 1.0, 4.0] {
+            for &alpha in &[0.25_f64, 1.0, 4.0] {
+                let (mut objective, seed) = objective_and_seed(
+                    z.view(),
+                    k,
+                    Topo::Circle,
+                    AssignmentMode::ordered_beta_bernoulli(tau, alpha, false),
+                );
+                let cost = objective.eval(&seed).map(|evaluation| evaluation.cost);
+                let verdict = match &cost {
+                    Ok(value) if value.is_finite() => {
+                        any_finite = true;
+                        format!("finite {value:.6e}")
+                    }
+                    Ok(value) => format!("NON-FINITE {value}"),
+                    Err(error) => format!("Err {error}"),
+                };
+                eprintln!("2609sweep k={k} tau={tau} alpha={alpha}: {verdict}");
+            }
+        }
+    }
+    assert!(
+        any_finite,
+        "every ordered-Beta configuration diverged, so the sweep localises nothing; \
+         widen it before concluding the assignment kind itself is at fault"
+    );
+}
+
 /// The #1782 startup-validation matrix: on identical clean planted-circle data
 /// every assignment kind (ordered_beta_bernoulli, softmax, threshold_gate) and every
 /// atom topology (circle, euclidean, linear) must PASS outer startup validation.
