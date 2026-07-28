@@ -75,6 +75,7 @@ use crate::model_types::EstimationError;
 use crate::multinomial_reml::MultinomialFamily;
 use crate::multinomial_posterior::{
     MultinomialPosteriorIntegrationControl, integrate_multinomial_design_moments,
+    softmax_with_reference,
 };
 use crate::penalized_vector_glm::{
     PenalizedVectorGlmInputs, VectorGlmResume, VectorGlmSolve, fit_penalized_vector_glm,
@@ -3299,6 +3300,53 @@ pub fn predict_multinomial_formula(
     model.validate()?;
     let x_dense = build_multinomial_predict_design(model, data)?;
     model.predict_probabilities(x_dense.view())
+}
+
+/// Plug-in class probabilities `softmax(x'β̂)` at the posterior MODE, for a
+/// saved multinomial model on fresh data.
+///
+/// [`predict_multinomial_formula`] returns a different estimand: the
+/// posterior-mean probability `E[softmax(η)]`, integrated over the Laplace
+/// posterior of the coefficients. Both are legitimate; they are not
+/// interchangeable, and the difference is one-sided. `softmax` is concave along
+/// the winning coordinate near a confident prediction, so integrating over
+/// posterior width pulls the answer TOWARD the centre of the simplex — the
+/// argmax is unchanged while the probability attached to it falls. A model whose
+/// posterior is wider than the data warrants therefore reads as under-confident
+/// on any proper scoring rule, at unchanged accuracy.
+///
+/// That is not a hypothetical shape. `nnet::multinom`, `scikit-learn`,
+/// `statsmodels` and every other softmax reference report the plug-in quantity,
+/// so a held-out log-loss comparison against any of them is a comparison of two
+/// estimands unless this function is the one supplying gam's side. #2612
+/// measures exactly that gap on penguins (accuracy 0.9649 against nnet's 0.9912,
+/// log-loss 0.26080 against 0.09494 — right class, flattened posterior), and
+/// until now gam could not produce the plug-in number at all, so nothing could
+/// say how much of the gap was the estimand and how much was the fit.
+///
+/// This is deliberately NOT a fallback: `multinomial_posterior` refuses to
+/// degrade to a plug-in when its quadrature cannot certify, and that refusal
+/// stands. A caller who wants the mode's own probability has to ask for it here,
+/// by name.
+pub fn predict_multinomial_formula_plugin(
+    model: &MultinomialSavedModel,
+    data: &EncodedDataset,
+) -> Result<Array2<f64>, EstimationError> {
+    model.validate()?;
+    let x_dense = build_multinomial_predict_design(model, data)?;
+    let coefficients = model.coefficients_active()?;
+    let eta = x_dense.dot(&coefficients);
+    let n_rows = eta.nrows();
+    let n_classes = model.n_active_classes + 1;
+    let mut probabilities = Array2::<f64>::zeros((n_rows, n_classes));
+    for (row, mut destination) in eta.rows().into_iter().zip(probabilities.rows_mut()) {
+        let active: Vec<f64> = row.iter().copied().collect();
+        let row_probabilities = softmax_with_reference(&active)?;
+        for (class, probability) in row_probabilities.iter().enumerate() {
+            destination[class] = *probability;
+        }
+    }
+    Ok(probabilities)
 }
 
 /// Draw `n_draws` posterior-predictive replicate class-label assignments for a

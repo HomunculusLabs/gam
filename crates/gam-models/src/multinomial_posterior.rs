@@ -955,7 +955,15 @@ fn binomial_as_f64(n: usize, k: usize) -> Result<f64, EstimationError> {
     Ok(value)
 }
 
-fn softmax_with_reference(active_eta: &[f64]) -> Result<Vec<f64>, EstimationError> {
+/// Reference-coded softmax of one row of ACTIVE logits, with the reference
+/// class's `η = 0` appended last — the plug-in probability `softmax(η)` at a
+/// single point, with no posterior integration.
+///
+/// Shared with `multinomial::predict_multinomial_formula_plugin` rather than
+/// re-derived there: the max-shift, the implicit reference logit and the class
+/// ordering are all conventions this module owns, and a second copy of them is
+/// a second place for the reference class to move.
+pub(crate) fn softmax_with_reference(active_eta: &[f64]) -> Result<Vec<f64>, EstimationError> {
     let mut probabilities = zeroed_vec(active_eta.len() + 1, "softmax result")?;
     softmax_with_reference_into(active_eta, &mut probabilities)?;
     Ok(probabilities)

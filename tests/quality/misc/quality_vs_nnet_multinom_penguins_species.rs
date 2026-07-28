@@ -48,10 +48,21 @@
 //! NOT a pass criterion — nnet fits a purely-linear softmax while gam fits a
 //! penalized smooth-additive one, so the two land on materially different
 //! surfaces; matching nnet's noisy linear fit would prove nothing about quality.
+//!
+//! The log-loss halves of criterion 3 are not the same estimand, and the
+//! real-data arm now prints both so a reader can see which one a failure is
+//! about (#2612). `predict_multinomial_formula` publishes the posterior-MEAN
+//! probability `E[softmax(η)]`; `nnet` publishes the plug-in `softmax(η̂)`.
+//! Posterior integration moves probability toward the centre of the simplex
+//! without moving the argmax, so an over-wide posterior costs log-loss at
+//! unchanged accuracy — the exact signature #2612 records. `gam_logloss_plugin`
+//! is gam's own plug-in number from the SAME fit; the comparison is only
+//! estimand-matched at that column.
 
 use csv::StringRecord;
 use gam::families::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
+    predict_multinomial_formula_plugin,
 };
 use gam::test_support::reference::{Column, relative_l2, run_r};
 use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
@@ -395,11 +406,41 @@ fn gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_d
     // Context only (NOT a pass criterion): closeness of the two probability mats.
     let prob_rel_vs_nnet = relative_l2(&gam_probs_flat, nn_probs);
 
+    // #2612 CONTEXT, NOT A CRITERION: the two sides of the log-loss comparison
+    // above are not the same estimand. `predict_multinomial_formula` returns the
+    // posterior-MEAN probability `E[softmax(η)]`, integrated over the Laplace
+    // posterior; `nnet::multinom` returns the plug-in `softmax(η̂)` at its mode.
+    // Integration is one-sided — it moves probability toward the centre of the
+    // simplex without moving the argmax — so a posterior wider than the data
+    // warrants reads as exactly what #2612 measured: right class, flattened
+    // probabilities, accuracy intact. Printing gam's OWN plug-in number from the
+    // SAME fit splits the gap in two: `gam_logloss_plugin` against nnet's is what
+    // is left once the estimand is matched, and `gam_logloss` minus it is what
+    // the posterior width costs. Neither is asserted here; the pass criterion
+    // stays the estimand gam actually publishes.
+    let gam_plugin_mat = predict_multinomial_formula_plugin(&model, &test_ds)
+        .expect("gam plug-in predict held-out");
+    assert_eq!(
+        gam_plugin_mat.dim(),
+        (n_test, K),
+        "gam held-out plug-in prob shape"
+    );
+    let mut gam_plugin_flat = Vec::with_capacity(n_test * K);
+    for i in 0..n_test {
+        for c in 0..K {
+            gam_plugin_flat.push(gam_plugin_mat[[i, c]]);
+        }
+    }
+    let gam_plugin_acc = accuracy(&gam_plugin_flat, &test_labels, K);
+    let gam_plugin_log_loss = mean_log_loss(&gam_plugin_flat, &test_labels, K);
+
     eprintln!(
         "penguin species multinomial (real-data arm, stride={STRIDE}): \
          n_train={} n_test={n_test} K={K} \
          gam_acc={gam_acc:.4} nnet_acc={nn_acc:.4} \
          gam_logloss={gam_log_loss:.5} nnet_logloss={nn_log_loss:.5} \
+         gam_acc_plugin(context)={gam_plugin_acc:.4} \
+         gam_logloss_plugin(context)={gam_plugin_log_loss:.5} \
          gam_recall={gam_recall:?} \
          prob_rel_l2_vs_nnet(context)={prob_rel_vs_nnet:.4} class_levels={class_levels:?}",
         train_idx.len(),
