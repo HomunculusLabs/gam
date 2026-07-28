@@ -605,11 +605,26 @@ mod tests {
                 assert!(
                     (phi_stack[[atom, 0, column]] - phi_stack[[atom, 1, column]]).abs() <= 1.0e-12
                 );
-                let axis_signs = if atom == 0 { [-1.0, 1.0] } else { [1.0, -1.0] };
-                for axis in 0..2 {
+                // Deck-twin derivative signs, per ambient axis of THAT atom.
+                //
+                // `RP²` rides the ambient spherical cover, where the deck is the
+                // antipode `u -> -u`. Retained even-degree harmonics satisfy
+                // `Φ(-u) = Φ(u)`, so `∇Φ(-u) = -∇Φ(u)`: all three axes flip.
+                // (On the superseded chart the same map was
+                // `(lat, lon) -> (-lat, lon + π)`, which flipped latitude and
+                // fixed longitude — hence the old `[-1, 1]`.)
+                //
+                // The Klein bottle rides its 2-wide torus cover, where the deck
+                // `(θ, φ) -> (θ + ½, -φ)` fixes θ and flips φ.
+                let axis_signs: &[f64] = if atom == 0 {
+                    &[-1.0, -1.0, -1.0]
+                } else {
+                    &[1.0, -1.0]
+                };
+                for (axis, &sign) in axis_signs.iter().enumerate() {
                     assert!(
                         (jet_stack[[atom, 1, column, axis]]
-                            - axis_signs[axis] * jet_stack[[atom, 0, column, axis]])
+                            - sign * jet_stack[[atom, 0, column, axis]])
                         .abs()
                             <= 1.0e-11
                     );
