@@ -4231,6 +4231,10 @@ fn race_spec_set(
 /// and the latent dimension that kind carries.
 pub struct PrimaryTopologyChoice {
     pub basis_kind: SaeAtomBasisKind,
+    /// Width of the coordinate the seed dictionary must allocate — a STORAGE
+    /// width, not a count of degrees of freedom. They differ for `S²`, which is
+    /// intrinsically 2-D but carried as an ambient unit 3-vector. Price an atom
+    /// by `geometry.intrinsic_dim()`; index its storage by this.
     pub latent_dim: usize,
     /// Complete geometry selected by evidence, after resolution growth. This is
     /// the only way a continuously optimized reference metric can cross the

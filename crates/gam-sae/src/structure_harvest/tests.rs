@@ -472,7 +472,19 @@ fn auto_primary_topology_selects_curved_sphere_and_beats_circle_2238_2239() {
         SaeAtomBasisKind::Sphere,
         "the curved 2-sphere factor must be discovered as a sphere chart, not a circle/patch"
     );
-    assert_eq!(choices[0].latent_dim, 2, "a sphere is intrinsically 2-D");
+    // Intrinsic dimension and coordinate width are DIFFERENT numbers for `S²`,
+    // and both are asserted so neither can drift. The sphere is intrinsically
+    // 2-D, but it admits no global 2-D chart, so it is carried as an ambient
+    // unit 3-vector; any 2-D parameterisation buys a pole for the privilege.
+    assert_eq!(
+        choices[0].geometry.intrinsic_dim(),
+        2,
+        "a sphere is intrinsically 2-D"
+    );
+    assert_eq!(
+        choices[0].latent_dim, 3,
+        "a sphere carries three AMBIENT coordinates for those two dimensions"
+    );
 
     // Reconstruction proof of "beats the circle-pinned recovery": fit the
     // circle chart (longitude only) and the sphere chart (lat, lon) to the

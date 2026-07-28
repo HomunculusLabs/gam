@@ -292,8 +292,35 @@ impl SaeAtomGeometryPlan {
         &self.kind
     }
 
+    /// Width of this atom's coordinate storage.
+    ///
+    /// This is a STORAGE width, not a count of degrees of freedom — see
+    /// [`Self::intrinsic_dim`], which is the one to price against.
     pub fn latent_dim(&self) -> usize {
         self.latent_dim
+    }
+
+    /// The manifold's INTRINSIC dimension: how many degrees of freedom a point
+    /// on it actually has.
+    ///
+    /// Usually this equals [`Self::latent_dim`], and for every flat or product
+    /// chart in the menu it does. `S²` is the exception that forces the
+    /// distinction: it is intrinsically 2-D but carries THREE ambient
+    /// coordinates, because it admits no global 2-D chart and any 2-D
+    /// parameterisation buys a pole for the privilege.
+    ///
+    /// Anything that PRICES an atom — parameter counts, rank charges,
+    /// parity accounting between competing dictionaries — must use this;
+    /// anything that INDEXES coordinate storage must use `latent_dim`. Charging
+    /// a sphere three degrees of freedom for its two would overstate its cost
+    /// by half and silently tilt any equal-parameter comparison against it.
+    pub fn intrinsic_dim(&self) -> usize {
+        match &self.resolution {
+            // The ambient sphere is the only member of the menu whose
+            // coordinate is wider than the manifold it parameterises.
+            SaeBasisResolution::AmbientSphereHarmonics { .. } => 2,
+            _ => self.latent_dim,
+        }
     }
 
     pub fn resolution(&self) -> &SaeBasisResolution {
