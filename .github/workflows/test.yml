@@ -1027,7 +1027,8 @@ jobs:
       - name: Install Python test extras
         run: |
           python -m pip install \
-            'pytest>=8' 'pytest-xdist>=3' 'numpy>=1.26' 'pandas>=2.0' \
+            'pytest>=8' 'pytest-xdist>=3' 'pytest-timeout>=2' \
+            'numpy>=1.26' 'pandas>=2.0' \
             'pyarrow>=14' 'matplotlib>=3.8' 'scikit-learn>=1.4'
 
       - name: Install cargo-nextest
@@ -1149,10 +1150,23 @@ jobs:
         # Runs LAST (after the release-CLI build) so the CLI-driven
         # `*_test.py` repros actually execute instead of capability-skipping
         # on the missing binary, and so its failure hides no other step.
+        # `--timeout=300`: without a per-test bound this step can wedge the
+        # whole job indefinitely, and one test doing so costs every measurement
+        # after it plus the JUnit upload the aggregate reads. Observed directly
+        # on run 30339488124, which sat in THIS step for over 3.5 hours; the
+        # steps above it had already finished in ~40 minutes. It had never been
+        # noticed because the job used to die at the FFI parity step and never
+        # reached here at all (the sequencing bug fixed in 414888eb3) — removing
+        # that blindfold is what exposed this.
+        #
+        # 300 s and `-n auto` are copied deliberately from `python-contracts.yml`'s
+        # #1512 triage step, which runs the SAME `pytest tests/` on the same
+        # wheel and completes in 20-30 minutes. Two workflows running one command
+        # should not disagree about whether it is allowed to hang.
         run: |
           python -m pytest tests/ \
             -m "not slow" \
-            -n auto \
+            -n auto --timeout=300 \
             --tb=short -q --junitxml=python-reports/full_suite.xml
 
       # Turn this job's measurements into ONE log in the same row format the
