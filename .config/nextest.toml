@@ -103,24 +103,24 @@ failure-output = "immediate-final"
 success-output = "never"
 
 # #1082: the two high-frequency 2D tensor recovery probes
-# (`hifreq_tensor_k8`/`hifreq_tensor_k10` in the `quality` binary) carry a
-# genuinely IRREDUCIBLE compute cost: a `te(theta, h, bc=['periodic','natural'],
-# k=2k+4)` fits a tensor of coefficient dimension p = kb² ≈ 400 (k8) / 576 (k10),
-# whose dominant per-PIRLS-iteration cost is the dense O(p³) Cholesky of
-# `XᵀWX + S_λ`. The penalty side is already fully Kronecker-diagonalized
-# (so its log-det is O(p)), but the DATA Gram `XᵀWX` under a general data-
-# dependent PIRLS weight W does NOT factor as `A ⊗ B`, so the data-Gram
-# factorization is irreducibly dense p³. `kb` cannot be capped to shrink p
-# without breaking the recovery the probes verify: `sin(k·θ)` needs ≥ k Fourier
-# modes in the periodic marginal (kb ≳ 18 for k8/k10).
+# (`hifreq_tensor_k8`/`hifreq_tensor_k10` in the `quality` binary) fit a
+# `te(theta, h, bc=['periodic','natural'], k=2k+4)` of coefficient dimension
+# p = kb² ≈ 400 (k8) / 576 (k10), and take long enough that the default 600s
+# SIGKILL would end them BEFORE their assertion runs — turning designed coverage
+# into an opaque "TERMINATING". Rather than `#[ignore]` them (which drops the
+# coverage), give ONLY these two a generous per-test budget. The `quality` binary
+# is sharded into 8 nextest partitions in CI (#1393), so the two heavy tests
+# spread across shards and each shard's summed wall-clock stays under the
+# per-partition cap. Every other test keeps the default 300s/600s budget.
 #
-# This is a real cost split, not a perf bug, and the high-frequency recovery is
-# coverage worth keeping — so rather than `#[ignore]` them (which would drop the
-# coverage), give ONLY these two tests a generous per-test budget so the nightly
-# run completes and asserts them instead of SIGKILLing at the default 600s. The
-# `quality` binary is sharded into 8 nextest partitions in CI (#1393), so the two
-# heavy tests spread across shards and each shard's summed wall-clock stays under
-# the per-partition cap. Every other test keeps the default 300s/600s budget.
+# THIS NOTE USED TO CALL THE COST IRREDUCIBLE and attribute it to the dense
+# O(p³) Cholesky of `XᵀWX + S_λ`. `hifreq_tensor_stress`'s own note refutes both
+# halves with measurements — k10 ran 86× k8 for p rising 1.44×, ~29× above any
+# cube law, with ~98% of the wall clock outside every instrumented outer
+# evaluation. The budget below exists because these probes are SLOW, which is
+# measured; not because the cost is irreducible, which is not. That attribution
+# lives with the measurements in `tests/quality/misc/fit_quality_stress.rs` and
+# must not be re-stated here, where it cannot be checked against them.
 [[profile.default.overrides]]
 filter = 'test(/hifreq_tensor_k(8|10)/)'
 slow-timeout = { period = "600s", terminate-after = 4 }
