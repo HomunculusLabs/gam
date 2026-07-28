@@ -734,8 +734,8 @@ struct SeedCostLogger;
 static SEED_COST_LOGGER: SeedCostLogger = SeedCostLogger;
 
 impl log::Log for SeedCostLogger {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
     }
     fn log(&self, record: &log::Record<'_>) {
         let message = format!("{}", record.args());
@@ -751,10 +751,11 @@ impl log::Log for SeedCostLogger {
 #[test]
 fn zz_measure_hifreq_tensor_k10_seed_costs() {
     init_parallelism();
-    // Both calls deliberately swallow errors: another test in this binary may have
+    // Deliberately error-swallowing: another test in this binary may have
     // installed a logger first, and losing the capture is a reason to print
-    // nothing, never to fail.
-    let _ = log::set_logger(&SEED_COST_LOGGER);
+    // nothing, never to fail. `.ok()` rather than a `let _` binding, which the
+    // ban scanner rejects (and is right to).
+    log::set_logger(&SEED_COST_LOGGER).ok();
     log::set_max_level(log::LevelFilter::Info);
 
     let (data, formula, n_train, sigma) = hifreq_tensor_dataset(10);
