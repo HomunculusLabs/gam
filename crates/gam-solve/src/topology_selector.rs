@@ -248,17 +248,6 @@ impl AutoTopologyKind {
         }
     }
 
-    pub fn all() -> Vec<Self> {
-        vec![
-            AutoTopologyKind::Euclidean,
-            AutoTopologyKind::Circle,
-            AutoTopologyKind::Sphere,
-            AutoTopologyKind::Torus,
-            AutoTopologyKind::Cylinder,
-            AutoTopologyKind::ProjectivePlane,
-            AutoTopologyKind::KleinBottle,
-        ]
-    }
 
     /// `true` iff this candidate is a FIXED member of the simply-connected
     /// constant-curvature space-form family `M_κ` — the geometries that differ
@@ -431,9 +420,21 @@ pub struct TopologyAutoSelector {
 }
 
 impl TopologyAutoSelector {
-    pub fn new(candidates: Option<Vec<AutoTopologyKind>>) -> Self {
+    /// A race is over an EXPLICIT candidate set.
+    ///
+    /// There used to be a `None` default backed by `AutoTopologyKind::all()`,
+    /// which returned seven kinds — omitting `Mobius` and `DuchonSheet`, which
+    /// the SAE race does realize, and `Mixture` / `RingOfClusters` / `Union`,
+    /// which NO consumer realizes. It was therefore neither "all" nor "all
+    /// raceable" but a hand-maintained subset with a name that claimed
+    /// otherwise, and nothing ever called it: every real caller passes its own
+    /// realizable set, because only the caller knows what it can realize.
+    ///
+    /// Requiring the set makes that explicit instead of offering a default that
+    /// would be wrong for whoever first accepted it.
+    pub fn new(candidates: Vec<AutoTopologyKind>) -> Self {
         Self {
-            candidates: candidates.unwrap_or_else(AutoTopologyKind::all),
+            candidates,
             score_scale: TopologyScoreScale::PerEffectiveDim,
             curvature_is_estimable: false,
         }
@@ -3626,10 +3627,10 @@ mod tests {
 
     #[test]
     fn topology_selector_retains_failed_candidate_records() {
-        let selector = TopologyAutoSelector::new(Some(vec![
+        let selector = TopologyAutoSelector::new(vec![
             AutoTopologyKind::Circle,
             AutoTopologyKind::Torus,
-        ]));
+        ]);
         let result = select_topology_with_fit(&selector, |kind| match kind {
             AutoTopologyKind::Circle => Err("inner REML stationarity failed".to_string()),
             AutoTopologyKind::Torus => Ok(TopologyAutoFitEvidence {
