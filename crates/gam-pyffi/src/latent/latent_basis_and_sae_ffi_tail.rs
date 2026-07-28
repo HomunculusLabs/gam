@@ -599,6 +599,24 @@ fn sae_manifold_fit_model<'py>(
         let support_k = top_k.ok_or_else(|| {
             py_value_error("overcomplete assignment='topk' requires top_k".to_string())
         })?;
+        // #2573: the support-sparse lane is CPU-only. `gpu_policy` is parsed and
+        // validated above, then threaded ONLY into the dense constructor below,
+        // which this branch never reaches -- so the argument was silently
+        // dropped and `gpu="required"` completed a multi-hour CPU fit reporting
+        // success (measured: K=32,000/P=128/N=44,818, 2h06m at 0% GPU). That
+        // contradicts `GpuPolicy::Required`'s own definition, "require GPU
+        // kernels and error if the requested path is unsupported", so refuse
+        // rather than downgrade. `auto` and `off` both legitimately run on CPU
+        // here and are unchanged.
+        if matches!(gpu_policy, gam::gpu::GpuPolicy::Required) {
+            return Err(py_value_error(format!(
+                "sae_manifold_fit gpu='required' cannot be honoured for an overcomplete \
+                 (K={k_atoms} > P={p_out}) assignment='topk' dictionary: the support-sparse \
+                 lane has no GPU kernels and would run entirely on the CPU (#2573). Pass \
+                 gpu='off' or gpu='auto' to accept a CPU fit, or use a dense (K <= P) \
+                 dictionary, which does have a GPU path."
+            )));
+        }
         if !has_declared_bases
             && matches!(
                 atom_topology.as_deref(),
