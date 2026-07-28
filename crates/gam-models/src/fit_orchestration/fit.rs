@@ -1948,9 +1948,9 @@ fn optimize_survival_transformation_smoothing(
         // certification, so a refused probe leaves the previous good β̂ in place.
         *warm_beta.borrow_mut() = beta.clone();
         let state = candidate.update_state(&beta).map_err(|error| {
-            gam_solve::estimate::EstimationError::InvalidInput(format!(
-                "survival smoothing inner state evaluation failed: {error}"
-            ))
+            // Same rule as the LAML wrapper below: keep the source's
+            // classification, add only context (#2531).
+            error.wrap_preserving_trial_point("survival smoothing inner state evaluation failed")
         })?;
         // Active-penalty ρ over ALL active blocks (smoothing + fixed ridge), in
         // block order, as the unified survival LAML evaluator requires. The
@@ -1972,10 +1972,12 @@ fn optimize_survival_transformation_smoothing(
         );
         let (cost, grad_full) = candidate
             .unified_lamlobjective_and_rhogradient(&beta, &state, &full_rho)
+            // Adding context must not change the verdict. Re-rendering the
+            // source into `InvalidInput` overwrote the producer's "this trial
+            // point, not this problem" with "this configuration is wrong", and
+            // the outer boundary reads only the variant (#2531).
             .map_err(|error| {
-                gam_solve::estimate::EstimationError::InvalidInput(format!(
-                    "survival smoothing LAML evaluation failed: {error}"
-                ))
+                error.wrap_preserving_trial_point("survival smoothing LAML evaluation failed")
             })?;
         // Project onto the smoothing coordinates. The active-block enumeration
         // lists the smoothing blocks first (they are constructed first and the

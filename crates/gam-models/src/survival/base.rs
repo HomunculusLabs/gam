@@ -2671,14 +2671,27 @@ impl WorkingModelSurvival {
         if !projected_norm.is_finite()
             || !state.certifies_kkt(projected_norm, SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL)
         {
-            return Err(EstimationError::InvalidInput(format!(
-                "survival LAML requires a stationary inner mode: projected KKT residual \
-                 {projected_norm:.3e} (relative {:.3e}) is not certified by the inner \
-                 solver's convergence test at tolerance \
-                 {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
-                 surrogate is not a differentiable substitute for the Laplace mode",
-                state.relative_gradient_norm(projected_norm)
-            )));
+            // DECLINING is right and stays: a one-step residual surrogate is
+            // not a differentiable substitute for a Laplace mode, so this
+            // trial has no LAML value to report. What was wrong is the KIND of
+            // refusal. `InvalidInput` is a statement about the configuration,
+            // and `is_trial_point_infeasible` answers `false` for it, so the
+            // outer lambda-search — whose documented response to "no value
+            // here" is to mark the point infeasible and step away — aborted
+            // the whole fit at the first such rho instead (#2531, and #1123's
+            // own closed guard went red on it). The inner mode's stationarity
+            // is a property of THIS rho: the same design at a neighbouring
+            // lambda converges perfectly well, which is why the CLI fits it.
+            return Err(EstimationError::TrialPointRefused {
+                reason: format!(
+                    "survival LAML requires a stationary inner mode: projected KKT residual \
+                     {projected_norm:.3e} (relative {:.3e}) is not certified by the inner \
+                     solver's convergence test at tolerance \
+                     {SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL:.3e}; a one-step residual \
+                     surrogate is not a differentiable substitute for the Laplace mode",
+                    state.relative_gradient_norm(projected_norm)
+                ),
+            });
         }
 
         // λ_k = e^{ρ_k}, in active-block (== ρ) order. Shared by the joint

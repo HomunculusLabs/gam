@@ -7807,7 +7807,13 @@ fn fit_score(fit: &UnifiedFitResult) -> f64 {
 /// arbitrary invalid inputs) stays fatal so genuine bugs are never masked.
 fn is_recoverable_trial_point_error(err: &EstimationError) -> bool {
     matches!(err, EstimationError::BasisError(_))
-        || err.is_inner_solve_retreat()
+        // The producer's own verdict, which `is_inner_solve_retreat` is a
+        // subset of. Asking it here as well is what lets a typed
+        // `TrialPointRefused` — or a custom-family refusal that delegates to
+        // its own classifier — be retreated from rather than aborted, instead
+        // of this driver maintaining a third, narrower answer to the same
+        // question (#2531/#2590).
+        || err.is_trial_point_infeasible()
         || is_recoverable_fit_inference_finiteness_error(err)
 }
 

@@ -565,6 +565,25 @@ pub enum EstimationError {
     #[error("REML smoothing optimization failed to converge: {0}")]
     RemlOptimizationFailed(String),
 
+    /// A numerical refusal evaluated AT ONE TRIAL POINT of the outer smoothing
+    /// search: no Laplace mode at this rho, an inner solve that missed its KKT
+    /// bar at this rho, an indefinite trial Hessian at this rho.
+    ///
+    /// The outer search's response to this is to map the point to
+    /// `OuterEval::infeasible` and step away — which is a normal thing for a
+    /// lambda-search to consume, and the only response it *has*, since the only
+    /// thing it can change is rho. Saying so in the type is the whole point:
+    /// these refusals used to be reported as
+    /// [`InvalidInput`](Self::InvalidInput) or `RemlOptimizationFailed`, both
+    /// of which carry prose and both of which
+    /// [`Self::is_trial_point_infeasible`] answers `false` for, so a correct
+    /// per-rho verdict aborted the entire fit (#2531, #2590).
+    ///
+    /// It renders as the bare reason so a producer switching to it does not
+    /// change the message a user or a regression test reads.
+    #[error("{reason}")]
+    TrialPointRefused { reason: String },
+
     #[error("Fatal outer-objective evaluation failure ({context}): {source}")]
     OuterObjectiveEvaluationFailed {
         context: String,
@@ -768,6 +787,8 @@ impl EstimationError {
         match self {
             // The producer classified it; ask it (#2553).
             Self::CustomFamily(err) => err.is_trial_point_infeasible(),
+            // The producer said so directly (#2531).
+            Self::TrialPointRefused { .. } => true,
             // ⚠ KNOWN DIVERGENCE, deliberately left alone. These five are
             // exactly [`Self::is_inner_solve_retreat`]'s list, and that
             // method's own words for them are "the inner problem at this rho
@@ -856,6 +877,27 @@ impl EstimationError {
     /// response is to back away from this rho — not to terminate the fit.
     /// All three variants encode "the inner problem at this rho is too hard
     /// to evaluate, try a different rho".
+    /// Re-report this failure with more context WITHOUT changing whether it
+    /// is a trial-point refusal.
+    ///
+    /// A wrapper that renders its source into a string and then picks a fresh
+    /// variant silently overwrites the producer's verdict. That is how a
+    /// per-rho survival-LAML stationarity refusal reached the outer boundary
+    /// as `InvalidInput` and killed the fit (#2531), and how a typed
+    /// `InnerSolveNotConverged` reached it as `RemlOptimizationFailed` and did
+    /// the same (#2590). Any site that adds context to an error it did not
+    /// produce should use this instead of choosing a variant for it.
+    #[must_use]
+    pub fn wrap_preserving_trial_point(self, context: &str) -> Self {
+        let infeasible = self.is_trial_point_infeasible();
+        let reason = format!("{context}: {self}");
+        if infeasible {
+            Self::TrialPointRefused { reason }
+        } else {
+            Self::InvalidInput(reason)
+        }
+    }
+
     pub fn is_inner_solve_retreat(&self) -> bool {
         matches!(
             self,
