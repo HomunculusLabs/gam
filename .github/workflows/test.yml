@@ -398,11 +398,14 @@ jobs:
           status=0
           # `-E 'not ...'` filters two families the Rust-only shard cannot run:
           #
-          #  * `test(python_rust_ffi_parity_gaussian_linear_case)` — the root-crate
-          #    `pyffi` integration binary holds one test that shells out to
-          #    `python3 -c "import gamfit"` and needs the maturin-built extension,
-          #    which this Rust-only shard does not install. It runs in the
-          #    python-tests job instead (#1251).
+          #  * `test(python_rust_ffi_parity_gaussian)` — the root-crate `pyffi`
+          #    integration binary holds the parity CASES that shell out to
+          #    `python3 -c "import gamfit"` and need the maturin-built extension,
+          #    which this Rust-only shard does not install. They run in the
+          #    python-tests job instead (#1251). The filter matches the family
+          #    rather than one case name: the exact-fit companion case added for
+          #    #2595 would otherwise have run HERE, where gamfit is absent, and
+          #    not there, where it is.
           #
           #  * `binary(=quality)` — the grouped `tests/quality.rs` integration
           #    target (the `quality_vs_*` reference-comparison suite). Every test
@@ -435,7 +438,7 @@ jobs:
             --partition "count:${{ matrix.shard }}/${{ needs.setup.outputs.total }}" \
             --no-fail-fast \
             --test-threads 1 \
-            -E 'not test(python_rust_ffi_parity_gaussian_linear_case) and not binary(=quality)' \
+            -E 'not test(python_rust_ffi_parity_gaussian) and not binary(=quality)' \
             2>&1 | tee "$log" || status="${PIPESTATUS[0]}"
           echo "nextest exit status: ${status}"
           # Surface this shard's own pass/fail in the matrix UI; the aggregate
@@ -1054,7 +1057,7 @@ jobs:
           status=0
           cargo nextest run --all-features \
             --test pyffi \
-            -E 'test(python_rust_ffi_parity_gaussian_linear_case)' \
+            -E 'test(python_rust_ffi_parity_gaussian)' \
             2>&1 | tee python-logs/parity.log || status="${PIPESTATUS[0]}"
           exit "$status"
 

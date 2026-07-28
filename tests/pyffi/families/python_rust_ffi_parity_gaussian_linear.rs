@@ -75,6 +75,13 @@ print(json.dumps(out))
     let out = Command::new("python3")
         .arg("-c")
         .arg(&py)
+        // Run from a directory that contains no `./gamfit`. From the repo root
+        // the source package shadows the installed wheel on `sys.path` (cwd is
+        // searched first) and has no compiled `_rust`, so the import dies and
+        // the parity assertions below never execute. CI works around this by
+        // copying the built extension into the source tree; not depending on
+        // that makes the test give the same verdict wherever it is run.
+        .current_dir(std::env::temp_dir())
         .output()
         .expect("run python");
     assert!(
