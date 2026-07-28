@@ -187,8 +187,24 @@ fn seed_passes_startup_validation(
         seed.len()
     );
     let eval = objective.eval_efs(&seed).map_err(|e| e.to_string())?;
+    if eval.cost == f64::INFINITY {
+        // `+inf` is not a numerical accident here: `OuterEval::infeasible` uses it
+        // as the CONVENTIONAL representation of an infeasible trial point, so this
+        // is the criterion delivering a feasibility VERDICT. Saying "non-finite"
+        // instead sends the reader hunting a singularity that does not exist
+        // (#2609 records a full pass lost to exactly that).
+        return Err(
+            "seed rejected: the criterion reports this rho INFEASIBLE (cost = +inf, the              conventional infeasible encoding) — look at the feasibility test and the              seed, not at a numerical divergence"
+                .to_string(),
+        );
+    }
     if !eval.cost.is_finite() {
-        return Err(format!("EFS seed cost is non-finite ({})", eval.cost));
+        // NaN or -inf, which the infeasible convention does not cover and which
+        // would be a genuine numerical failure.
+        return Err(format!(
+            "EFS seed cost is numerically invalid ({}) — this is NOT the infeasible              convention and does indicate a divergence",
+            eval.cost
+        ));
     }
     if let Some((idx, v)) = eval.steps.iter().enumerate().find(|(_, v)| !v.is_finite()) {
         return Err(format!("EFS seed step[{idx}] is non-finite ({v})"));
