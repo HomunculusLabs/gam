@@ -84,7 +84,7 @@ use crate::chart_canonicalization::CanonicalChartTopology;
 use crate::inference::layer_transport::{ChartTopology, TransportLadderReport, transport_ladder};
 use crate::inference::probe_runner::{ProbeRunner, RealizedProbe};
 use crate::inference::riesz::{RieszInput, SmoothFunctional, debias_with_dense_hessian};
-use crate::manifold::{SaeManifoldTerm, projective_plane_cover_killing_directions};
+use crate::manifold::SaeManifoldTerm;
 use faer::Side;
 use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_with_permutation,
@@ -2273,35 +2273,60 @@ fn exact_orbit_fields(
                 format!("{}: Klein S1 theta translation [exact orbit]", atom.name),
             ));
         }
-        AtomTopology::ProjectivePlane => {
-            if d != 2 {
+        // `S²` and `RP²` share one implementation because they share one group
+        // and one cover. `Isom(S²) = O(3)`, and on the ambient cover its Killing
+        // fields are simply `K_a(u) = e_a × u` — LINEAR in the coordinate,
+        // pole-free, and identical for the quotient, whose deck `u ~ −u` commutes
+        // with every rotation.
+        //
+        // The sphere used to be excluded from this path entirely ("the sphere's
+        // legacy chart basis is not closed under ambient rotations, so sphere
+        // atoms remain on the frame path"), and `RP²` reached it only through
+        // nonlinear `(lat, lon)` cover velocities that could not be evaluated at
+        // the cover's own poles. Both were consequences of the chart, and both
+        // go with it: the ambient basis IS closed under these generators, which
+        // `ambient_sphere_basis_is_closed_under_its_own_killing_fields` asserts
+        // to 1e-9. So the sphere now earns the exact-orbit certificate its own
+        // quotient already had.
+        AtomTopology::Sphere | AtomTopology::ProjectivePlane => {
+            if d != 3 {
                 return Err(format!(
-                    "exact_orbit_fields({}): RP2 cover requires two (latitude, longitude) coordinates; got {d}",
+                    "exact_orbit_fields({}): the spherical cover is the ambient unit vector and needs three coordinates; got {d}",
                     atom.name
                 ));
             }
-            let mut rotation_x = Array2::<f64>::zeros((n, 2));
-            let mut rotation_y = Array2::<f64>::zeros((n, 2));
-            let mut rotation_z = Array2::<f64>::zeros((n, 2));
+            let mut rotation_x = Array2::<f64>::zeros((n, 3));
+            let mut rotation_y = Array2::<f64>::zeros((n, 3));
+            let mut rotation_z = Array2::<f64>::zeros((n, 3));
             for row in 0..n {
-                let latitude = view.coords[[row, 0]];
-                let longitude = view.coords[[row, 1]];
-                let directions = projective_plane_cover_killing_directions(latitude, longitude)
-                    .map_err(|error| {
-                        format!("exact_orbit_fields({}): RP2 row {row}: {error}", atom.name)
-                    })?;
-                for axis in 0..2 {
-                    rotation_x[[row, axis]] = directions[0][axis];
-                    rotation_y[[row, axis]] = directions[1][axis];
-                    rotation_z[[row, axis]] = directions[2][axis];
+                let u = [
+                    view.coords[[row, 0]],
+                    view.coords[[row, 1]],
+                    view.coords[[row, 2]],
+                ];
+                // `e_x × u`, `e_y × u`, `e_z × u`.
+                let generators = [
+                    [0.0, -u[2], u[1]],
+                    [u[2], 0.0, -u[0]],
+                    [-u[1], u[0], 0.0],
+                ];
+                for axis in 0..3 {
+                    rotation_x[[row, axis]] = generators[0][axis];
+                    rotation_y[[row, axis]] = generators[1][axis];
+                    rotation_z[[row, axis]] = generators[2][axis];
                 }
             }
+            let label = if matches!(atom.topology, AtomTopology::Sphere) {
+                "S2"
+            } else {
+                "RP2"
+            };
             for (axis, field) in [("x", rotation_x), ("y", rotation_y), ("z", rotation_z)] {
                 out.push((
                     GeneratorFamily::IsomAtom,
                     field,
                     format!(
-                        "{}: RP2 SO(3) rotation about {axis} [exact cover orbit]",
+                        "{}: {label} SO(3) rotation about {axis} [exact ambient orbit]",
                         atom.name
                     ),
                 ));
@@ -2321,7 +2346,6 @@ fn exact_orbit_fields(
                 }
             }
         }
-        AtomTopology::Sphere => {}
     }
     // Equal-ARD rotations between tied axes, on linearly-acting charts only.
     if !matches!(
@@ -2840,11 +2864,6 @@ fn residual_gauge_exact_inputs(
     let mut exact_verdicts: Vec<GeneratorVerdict> = Vec::new();
     for (k, (atom, view)) in model.atoms.iter().zip(views.iter()).enumerate() {
         let Some(view) = view else { continue };
-        // Sphere charts: nonlinear group action — refuse exactness, keep the
-        // calibrated frame path for this atom rather than pretending.
-        if matches!(atom.topology, AtomTopology::Sphere) {
-            continue;
-        }
         exact_verdicts.extend(exact_orbit_verdicts(atom, view, penalty_ops[k].as_ref())?);
         mask[k] = true;
     }

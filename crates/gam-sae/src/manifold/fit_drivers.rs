@@ -341,6 +341,22 @@ impl DictionaryCollapseVerdict {
     }
 }
 
+/// Killing fields of `Isom(S²) = O(3)` at an ambient unit vector: `K_a(u) = e_a × u`.
+///
+/// Shared by `S²` and `RP²` because they share a group and a cover — the deck
+/// `u ~ −u` commutes with every rotation, so the quotient inherits the
+/// generators unchanged. Linear in the coordinate and defined everywhere, where
+/// the superseded `(lat, lon)` cover velocities were nonlinear and could not be
+/// evaluated at the cover's own poles (longitude has a nontrivial stabiliser
+/// there).
+pub(crate) fn ambient_sphere_killing_directions(u: [f64; 3]) -> [[f64; 3]; 3] {
+    [
+        [0.0, -u[2], u[1]],
+        [u[2], 0.0, -u[0]],
+        [-u[1], u[0], 0.0],
+    ]
+}
+
 impl SaeManifoldTerm {
     /// Compute [`DictionaryCollapseVerdict`] from one internally consistent
     /// fitted state.
@@ -2526,10 +2542,10 @@ impl SaeManifoldTerm {
                         out.push(g);
                     }
                 }
-                SaeAtomBasisKind::ProjectivePlane => {
-                    if d != 2 {
+                SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
+                    if d != 3 {
                         return Err(format!(
-                            "dense_step_gauge_vectors: RP2 atom {atom_idx} requires latent dimension 2, got {d}"
+                            "dense_step_gauge_vectors: spherical atom {atom_idx} rides the ambient cover and requires latent dimension 3, got {d}"
                         ));
                     }
                     let mut fields = [
@@ -2538,17 +2554,13 @@ impl SaeManifoldTerm {
                         Array2::<f64>::zeros((n, d)),
                     ];
                     for row in 0..n {
-                        let directions = projective_plane_cover_killing_directions(
+                        let directions = ambient_sphere_killing_directions([
                             coords[[row, 0]],
                             coords[[row, 1]],
-                        )
-                        .map_err(|error| {
-                            format!(
-                                "dense_step_gauge_vectors: RP2 atom {atom_idx}, row {row}: {error}"
-                            )
-                        })?;
+                            coords[[row, 2]],
+                        ]);
                         for generator in 0..3 {
-                            for axis in 0..2 {
+                            for axis in 0..3 {
                                 fields[generator][[row, axis]] = directions[generator][axis];
                             }
                         }
@@ -2788,25 +2800,21 @@ impl SaeManifoldTerm {
                     row_dirs.push(phase);
                 }
             }
-            SaeAtomBasisKind::ProjectivePlane => {
-                if d != 2 {
+            SaeAtomBasisKind::Sphere | SaeAtomBasisKind::ProjectivePlane => {
+                if d != 3 {
                     return Err(format!(
-                        "push_atom_row_gauge_deflations: RP2 atom {atom_idx} requires latent dimension 2, got {d}"
+                        "push_atom_row_gauge_deflations: spherical atom {atom_idx} rides the ambient cover and requires latent dimension 3, got {d}"
                     ));
                 }
                 let coords = self.assignment.coords[atom_idx].as_matrix();
-                let directions = projective_plane_cover_killing_directions(
+                let directions = ambient_sphere_killing_directions([
                     coords[[row, 0]],
                     coords[[row, 1]],
-                )
-                .map_err(|error| {
-                    format!(
-                        "push_atom_row_gauge_deflations: RP2 atom {atom_idx}, row {row}: {error}"
-                    )
-                })?;
+                    coords[[row, 2]],
+                ]);
                 for direction in directions {
                     let mut decoded_motion = vec![0.0_f64; self.output_dim()];
-                    for axis in 0..2 {
+                    for axis in 0..3 {
                         self.atoms[atom_idx].fill_decoded_derivative_row(row, axis, &mut tangent);
                         for output in 0..decoded_motion.len() {
                             decoded_motion[output] += direction[axis] * tangent[output];
