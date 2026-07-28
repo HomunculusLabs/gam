@@ -1324,8 +1324,8 @@ impl LatentSurvivalRowJet {
 mod tests {
     use super::*;
 
-    /// #2610 acceptance: the second cumulant must stay smooth through
-    /// `log σ = 7`, where the differenced form is noise.
+    /// #2610: the reformulation is an IDENTITY, so where the differenced form is
+    /// trustworthy the two must agree to near machine epsilon.
     ///
     /// #2566 measured the differenced channel's step-to-step relative jump
     /// growing `0.05, 0.07, 0.19, 0.47, 0.84, 2.89, 9.78` and changing SIGN
@@ -1334,8 +1334,17 @@ mod tests {
     /// cancellation, not of a branch. This walks the same ladder and compares
     /// the two formations on identical bundles, so the only difference is the
     /// arithmetic.
+    ///
+    /// SCOPE: on this fixture (`m = 1`, `mu = 0`, rung `k = 0`) the differenced
+    /// form does NOT degrade -- worst step jump `0.095`, no sign flips -- because
+    /// `rk2/rk1^2` grows like `e^(sigma^2)` here, so the two moments diverge
+    /// instead of colliding. The regime #2566 reported therefore lives in the
+    /// jet combination or the two-term mixture, not in the raw ratios, and
+    /// locating it in terms of `(m, mu, k)` is still open. What this test
+    /// establishes is that the reformulation is the SAME NUMBER as the thing it
+    /// replaces; that it also repairs the bad regime is not yet demonstrated.
     #[test]
-    fn zz_measure_2610_second_cumulant_stays_smooth_past_the_cancellation_wall() {
+    fn zz_measure_2610_reformulation_reproduces_the_differenced_value_it_replaces() {
         let quadctx = QuadratureContext::new();
         let (mass, mu) = (1.0_f64, 0.0_f64);
 
@@ -1364,17 +1373,10 @@ mod tests {
             let scale = a.abs().max(b.abs());
             if scale > 0.0 { (b - a).abs() / scale } else { 0.0 }
         };
-        let mut worst_stable = 0.0_f64;
         let mut worst_differenced = 0.0_f64;
         let mut sign_flips_differenced = 0usize;
-        let mut sign_flips_stable = 0usize;
         for pair in rows.windows(2) {
-            let (d0, s0) = (pair[0].1, pair[0].2);
-            let (log_sigma_hi, d1, s1) = (pair[1].0, pair[1].1, pair[1].2);
-            let stable_jump = jump(s0, s1);
-            if stable_jump > worst_stable {
-                worst_stable = stable_jump;
-            }
+            let (d0, d1) = (pair[0].1, pair[1].1);
             let differenced_jump = jump(d0, d1);
             if differenced_jump > worst_differenced {
                 worst_differenced = differenced_jump;
@@ -1382,43 +1384,52 @@ mod tests {
             if d0 * d1 < 0.0 {
                 sign_flips_differenced += 1;
             }
-            if s0 * s1 < 0.0 {
-                sign_flips_stable += 1;
-                println!("[2610] stable changed sign approaching log_sigma={log_sigma_hi:.2}");
+        }
+
+        let mut worst_disagreement = 0.0_f64;
+        for row in &rows {
+            let scale = row.1.abs().max(row.2.abs());
+            if scale > 0.0 {
+                let relative = (row.1 - row.2).abs() / scale;
+                if relative > worst_disagreement {
+                    worst_disagreement = relative;
+                }
             }
         }
         println!(
-            "[2610] worst step jump: differenced={worst_differenced:.6} stable={worst_stable:.6}  \
-             sign flips: differenced={sign_flips_differenced} stable={sign_flips_stable}"
+            "[2610] worst differenced step jump={worst_differenced:.6} \
+             sign flips={sign_flips_differenced} worst disagreement={worst_disagreement:.3e}"
         );
 
-        // The control. Asserting only that the STABLE channel behaves would pass
-        // just as happily on a fixture that never reaches the cancelling regime,
-        // and would then be proving nothing at all. Both channels are read off
-        // the SAME bundles, so this pins that the ladder really does destroy the
-        // differenced form here -- if this ever stops firing, the fixture has
-        // drifted out of the regime and the assertions below are vacuous.
+        // Measured, not assumed: this ladder is WELL CONDITIONED. The differenced
+        // form is smooth here and never changes sign, which is exactly what makes
+        // the equivalence check below a statement about the algebra rather than
+        // about which of two noisy channels is noisier.
+        //
+        // It also bounds what this test may be read as saying. It does NOT reach
+        // the regime #2566 reported. An earlier revision asserted only that the
+        // reformulated channel behaved, and passed -- on a ladder where the
+        // channel it replaces was already fine. That green meant nothing, and
+        // this assertion exists so the same mistake cannot be made silently.
         assert!(
-            worst_differenced > 1.0 || sign_flips_differenced > 0,
-            "#2610 control: the differenced form must actually degrade on this ladder, \
-             otherwise this test cannot distinguish a repair from a fixture that never \
-             reached the cancellation regime (worst jump {worst_differenced}, \
+            worst_differenced < 1.0 && sign_flips_differenced == 0,
+            "#2610: this ladder is supposed to be well conditioned, so that agreement \
+             between the two formations means something (worst jump {worst_differenced}, \
              {sign_flips_differenced} sign flips)"
         );
-
         assert!(
             rows.iter().all(|row| row.2.is_finite()),
-            "#2610: the cancellation-free second cumulant must be finite across the whole ladder"
+            "#2610: the cancellation-free second cumulant must be finite across the ladder"
         );
-        assert_eq!(
-            sign_flips_stable, 0,
-            "#2610: a smooth cumulant must not change sign between adjacent 0.1 samples -- \
-             that is the cancellation signature this reformulation exists to remove"
-        );
+        // `-R2 * expm1(D)` is an IDENTITY for `R2 - R1^2`, so where the
+        // subtraction is trustworthy the two must agree to near machine epsilon.
+        // The tightness is the point: a sign slip, or a wrong closed form for the
+        // prefix's second difference, would miss this by orders rather than
+        // slightly.
         assert!(
-            worst_stable < 1.0,
-            "#2610 acceptance: step-to-step relative jump must stay below 1 through log sigma = 7, \
-             got {worst_stable}"
+            worst_disagreement < 1.0e-12,
+            "#2610: the reformulation must reproduce the differenced value wherever that \
+             value is trustworthy; worst relative disagreement {worst_disagreement:e}"
         );
     }
 
