@@ -1469,15 +1469,13 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // inherits that silence instead of a compile error.
         ("_ => ()", "_ => ()", false),
         ("{ () }", "empty block body", false),
-        // No-op closures. `|_| ()` / `|_| {}` is the callback spelling of
-        // `let _ = x;`: an observer wired up to discard what it observes, or
-        // a required-argument placeholder. `res.map(|_| ())` in particular
-        // only exists to erase a value the caller then ignores — return the
-        // value or drop the call.
+        // No-op closures. `|_| ()` is the callback spelling of `let _ = x;`:
+        // `res.map(|_| ())` exists only to erase a value the caller then
+        // ignores — return the value or drop the call. The brace form
+        // (`|_| {}`, `|_a, _b| {}`) is `scan_for_empty_blocks`'s job, since a
+        // needle would miss every parameter spelling and every line break.
         ("|_| ()", "no-op closure", false),
-        ("|_| {}", "no-op closure", false),
         ("|_, _| ()", "no-op closure", false),
-        ("|_, _| {}", "no-op closure", false),
         // Constant-valued predicates. `|_| true` / `|_| false` answer a
         // question the callee bothered to ask by ignoring the argument; the
         // caller wants a different entry point, not a rigged predicate.
@@ -4576,18 +4574,19 @@ fn collect_scannable_files(root: &Path, dir: &Path, files: &mut Vec<ScannedFile>
     }
 }
 
-/// Flags every brace block whose body is empty: `fn f() {}`, `else {}`,
-/// `loop {}`, `Err(_) => {}`, `impl T for U {}`, and the same constructs
-/// with the braces on separate lines. A lexical needle cannot do this job —
-/// `) {}` is dodged by pressing Enter — so the check walks the stripped
-/// source and reports any `{` whose next non-whitespace character is `}`.
+/// Flags empty brace blocks in the positions where emptiness means "this
+/// path does nothing and nobody will be told": `_ => {}`, `if cond {}`,
+/// `} else {}`, `loop {}`, `|args| {}`, `mod m {}`, `struct S {}`. A lexical
+/// needle cannot do this job — `) {}` is dodged by pressing Enter — so the
+/// check walks the stripped source and reports any `{` whose next
+/// non-whitespace character is `}`, however many lines apart.
 ///
 /// Comments are stripped before the walk, so a block holding only a comment
-/// counts as empty. That is deliberate: `Err(_) => { // nothing to do }` is
-/// a branch that swallows an error, and the comment explaining why is not
-/// the handling. Either handle it, or restructure so the branch does not
-/// exist — narrow the enum, split the trait, add the entry point that does
-/// not take the callback. Build.rs is exempt.
+/// counts as empty. That is deliberate: `if x.is_err() { // can't happen }`
+/// swallows the error, and the comment saying why is not the handling.
+///
+/// `classify_empty_block` decides which positions count; see there for the
+/// exemptions. Build.rs is exempt.
 fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, usize, String)>) {
     visit_files(root, dir, &mut |rel, content| {
         let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -4613,13 +4612,104 @@ fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, 
                     j += 1;
                     rest = stripped[j].trim_start();
                 }
-                if rest.starts_with('}') {
+                if !rest.starts_with('}') {
+                    continue;
+                }
+                if let Some(kind) = classify_empty_block(&stripped[idx][..col]) {
                     let raw = lines.get(idx).copied().unwrap_or("");
-                    offenders.push((rel.to_path_buf(), idx + 1, raw.to_string()));
+                    offenders.push((rel.to_path_buf(), idx + 1, format!("[{kind}] {raw}")));
                 }
             }
         }
     });
+}
+
+/// Decide whether an empty brace block at this header is a no-op worth
+/// stopping the build for. `header` is the stripped text preceding the `{`.
+///
+/// Flagged, because each is a branch or item that silently does nothing and
+/// each has a restructuring available:
+///
+/// * `_ => {}` — a wildcard arm covers every variant the author did not
+///   enumerate, so a variant added later inherits the silence instead of a
+///   compile error. Match on the variants, or return a value from the match.
+/// * `if cond {}` / `} else {}` — a condition evaluated for nothing; the
+///   `is_err()` guard with an empty body is the error-swallowing shape.
+/// * `loop {}` / `while c {}` / `for x in xs {}` — a spin with no body.
+/// * `|args| {}` — a callback wired up to do nothing; the caller wants the
+///   entry point that does not take the callback.
+/// * `mod m {}` / `struct S {}` / `trait T {}` — an item with no contents
+///   (`struct S;` is the honest spelling; an empty module is dead weight).
+///
+/// Exempt, because the emptiness is required by a contract the author does
+/// not own, or because the braces are not a block at all:
+///
+/// * `impl Eq for X {}` / `impl std::error::Error for X {}` — opting into a
+///   trait whose methods all have defaults. There is no other spelling.
+/// * `fn flush(&self) {}` — a trait method that genuinely has nothing to do.
+///   The signature belongs to the trait, and `todo!()`/`unimplemented!()`
+///   (the actual "stub" markers) are already banned outright.
+/// * `enum Handle {}` — an uninhabited type is a real type, deliberately
+///   chosen to make a state unrepresentable.
+/// * `Node::Constant(_) => {}` — a NAMED variant with an empty body is
+///   honest: adding a variant still breaks the match. Only the wildcard
+///   hides the future.
+/// * `json!({})`, `quote! { leaves {} }`, `Foo {}` — expression braces. A
+///   value, not a code path.
+fn classify_empty_block(header: &str) -> Option<&'static str> {
+    let h = header.trim_end();
+    if let Some(pattern) = h.strip_suffix("=>") {
+        return if pattern_has_top_level_wildcard(pattern) {
+            Some("empty wildcard match arm")
+        } else {
+            None
+        };
+    }
+    if h.ends_with('|') {
+        return Some("empty closure body");
+    }
+    if line_has_keyword(h, "impl") || line_has_keyword(h, "fn") || line_has_keyword(h, "enum") {
+        return None;
+    }
+    if line_has_keyword(h, "if") || line_has_keyword(h, "else") {
+        return Some("empty if/else block");
+    }
+    if line_has_keyword(h, "loop") || line_has_keyword(h, "while") || line_has_keyword(h, "for") {
+        return Some("empty loop body");
+    }
+    if line_has_keyword(h, "mod")
+        || line_has_keyword(h, "struct")
+        || line_has_keyword(h, "trait")
+        || line_has_keyword(h, "union")
+    {
+        return Some("empty item declaration");
+    }
+    None
+}
+
+/// True if `pattern` contains a `_` wildcard at bracket depth zero — the
+/// catch-all that makes an arm cover variants nobody enumerated. A `_` inside
+/// `Err(_)`, `Node::Constant(_)`, or `Foo { field: _ }` is at depth one or
+/// deeper: it discards a payload, not a variant, and the match still fails to
+/// compile when the enum grows.
+fn pattern_has_top_level_wildcard(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut depth: i32 = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        match *b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'_' if depth == 0 => {
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after_ok = i + 1 == bytes.len() || !is_ident_byte(bytes[i + 1]);
+                if before_ok && after_ok {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Flags function definitions whose parameter list contains an underscore
