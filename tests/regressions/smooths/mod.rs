@@ -32,6 +32,7 @@ mod posterior_sampling_monotone_shape_constraint_1509;
 mod pure_duchon_probit_repro;
 mod quadrature_alo_smooth_test;
 mod regression_scale_basis_parsimony_501;
+mod shape_constrained_fit_survives_its_own_inference_2601;
 mod smooth_extrapolation_axes_whole_class;
 mod smooth_fit_term_collection_bug_hunt_2_3;
 mod smooth_not_covariate_scale_invariant;
