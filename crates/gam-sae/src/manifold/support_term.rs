@@ -1739,6 +1739,15 @@ impl SaeSupportSparseTerm {
         self.validate_smoothing(lambda_smooth)?;
         let mut out = vec![0.0_f64; self.k_atoms()];
         for atom_idx in 0..self.k_atoms() {
+            // An atom no row routes to has NO evidence: its supported
+            // curvature df is zero, full stop. Falling through computed
+            // `0 - null_dim` = -1 for every such atom -- an impossible edf
+            // that then poisoned any consumer differencing the census: one
+            // support-move flip produced |d edf| = 1.0 EXACTLY, which is the
+            // value the REML alternation kept stopping on.
+            if self.atom_rows[atom_idx].is_empty() {
+                continue;
+            }
             let m = self.atoms[atom_idx].basis_size();
             let penalty = self.atoms[atom_idx].smooth_penalty().clone();
             let mut gram = Array2::<f64>::zeros((m, m));

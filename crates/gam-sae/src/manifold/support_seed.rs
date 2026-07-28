@@ -618,6 +618,82 @@ mod tests {
         admit_topk_manifold_with_budget(n, p, k, d, s, usize::MAX).expect("admitted")
     }
 
+    /// The #2502 mixed portfolio, end to end through BOTH seed stages, in
+    /// milliseconds. This is the micro-repro for the #2602 sphere seam: the
+    /// sparse seed builds a 3-wide ambient state for a public-dim-2 sphere,
+    /// and the term-seed planner must ask for the geometry by that width --
+    /// requesting the public width selected the chart form and refused its
+    /// own seed. A 250k-row fit was the only thing that exercised this path.
+    #[test]
+    fn mixed_portfolio_with_spheres_seeds_end_to_end() {
+        let n = 24usize;
+        let p = 6usize;
+        let target = Array2::from_shape_fn((n, p), |(row, col)| {
+            ((row * 7 + col * 3) as f64 * 0.37).sin()
+        });
+        let k = 10usize;
+        let basis: Vec<String> = (0..k)
+            .map(|atom| {
+                match atom % 5 {
+                    0 => "linear",
+                    1 => "euclidean",
+                    2 => "periodic",
+                    _ => "sphere",
+                }
+                .to_string()
+            })
+            .collect();
+        let dims: Vec<usize> = basis
+            .iter()
+            .map(|b| if b == "sphere" { 2 } else { 1 })
+            .collect();
+        let seed = build_sae_support_seed(SaeSupportSeedRequest {
+            target: target.view(),
+            atom_basis: &basis,
+            atom_dim: &dims,
+            support_k: 3,
+            random_state: 11,
+            // admission is charged at the EFFECTIVE chart width (the ambient
+            // sphere is 3-wide), exactly as the front door computes it via
+            // sae_support_effective_atom_dims.
+            admission: admitted(n, p, k, 3, 3),
+        })
+        .expect("sparse seed accepts the mixed portfolio");
+        // Retention drops unrouted atoms; the term seed takes the RETAINED
+        // metadata, exactly as the fitting harness maps it.
+        let retained_basis: Vec<String> = seed
+            .retained_atom_indices
+            .iter()
+            .map(|&atom| basis[atom].clone())
+            .collect();
+        let retained_dims: Vec<usize> = seed
+            .retained_atom_indices
+            .iter()
+            .map(|&atom| dims[atom])
+            .collect();
+        let report = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+            assignment: seed.assignment,
+            atom_basis: retained_basis.clone(),
+            atom_dim: retained_dims,
+            output_dim: p,
+            random_state: 11,
+        })
+        .expect("term seed accepts the sparse state the seed built");
+        assert!(
+            retained_basis.iter().any(|b| b == "sphere"),
+            "the retention must keep at least one sphere for this test to bite"
+        );
+        for (atom, plan) in report.atom_plans.iter().enumerate() {
+            if retained_basis[atom] == "sphere" {
+                assert_eq!(
+                    plan.latent_dim(),
+                    3,
+                    "sphere atom {atom} must carry the ambient (pole-free) chart"
+                );
+            }
+        }
+    }
+
     #[test]
     fn k_10000_seed_retains_only_active_support() {
         let target = array![[1.0, -2.0], [0.5, 3.0], [-1.0, 0.25]];
