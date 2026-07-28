@@ -648,25 +648,28 @@ fn hifreq_tensor_k6() -> Result<(), String> {
 // to test, not a finding. The next measurement is a `perf` profile of the k10
 // fit, or a `[STAGE]` bracket around the un-logged region.
 //
-// The structural reason is in this file's own fixture: the grid is 24 x 24, so
-// `n = 576`, and at k10 `kb = 24` gives `p = kb² = 576`. **p = n exactly** — a
-// saturated design with zero residual degrees of freedom, where the REML profile
-// has a genuine λ→0 boundary singularity and (per the `zz_measure` note below)
-// the null-space λ rails at the ρ ceiling. k8 is p = 400 against n = 576, i.e. a
-// perfectly ordinary problem, and it costs 73 s. One step of `k` crosses from
-// penalized regression into saturated interpolation.
+// EVERY k10 FIGURE ABOVE WAS MEASURED ON A DESIGN THAT NO LONGER EXISTS, and
+// that is the first thing to know before reusing any of them. They were taken
+// when the grid was a fixed 24 x 24, so `n = 576`, and `kb = 24` at k10 gave
+// `p = kb² = 576` — **p = n exactly**, a saturated design with zero residual
+// degrees of freedom, whose REML optimum is maximum smoothing (#2607). k8 was
+// `p = 400` against the same `n = 576`, i.e. a perfectly ordinary problem, and
+// cost 73 s; one step of `k` crossed from penalized regression into saturated
+// interpolation, and the 86x is that crossing as much as it is any component's
+// complexity. `hifreq_tensor_dataset` now sizes the grid against `kb` (the k10
+// arm runs on 32 x 32, `p/n = 0.5625`), so the k10 cost has to be re-measured
+// before it means anything. The k8 numbers stand: that arm is byte-identical.
 //
-// What remains true from the old note: the PENALTY side already exploits the
-// tensor's Kronecker structure fully (marginal penalties are simultaneously
-// diagonalized by `kronecker_reparameterization_engine`, so `S_λ` is diagonal
-// and its log-det + λ-derivatives are O(p)); the DATA Gram `XᵀWX` does not
-// inherit that structure under a general PIRLS weight W, so its factorization is
-// a true dense p×p one. And `kb` cannot be capped to shrink p: the ground truth
-// is `sin(k·θ)`, whose periodic marginal needs ≥ k Fourier modes, so k8/k10
-// require kb ≳ 18. The conclusion that does NOT follow is that `n = p` is an
-// acceptable design — the grid should grow with `kb` — but that is a fixture
-// question and #2585 keeps it deliberately behind the engine fix, so the outer
-// loop is measured against the hard case rather than the case being deleted.
+// What does NOT depend on the saturation is the shape of the cost. The PENALTY
+// side already exploits the tensor's Kronecker structure fully (marginal
+// penalties are simultaneously diagonalized by
+// `kronecker_reparameterization_engine`, so `S_λ` is diagonal and its log-det +
+// λ-derivatives are O(p)); the DATA Gram `XᵀWX` does not inherit that structure
+// under a general PIRLS weight W, so its factorization is a true dense p×p one.
+// And `kb` cannot be capped to shrink p: the ground truth is `sin(k·θ)`, whose
+// periodic marginal needs ≥ k Fourier modes, so k8/k10 require kb ≳ 18. Growing
+// the grid, not capping the basis, is what keeps `p/n` bounded — which is what
+// the fixture now does.
 #[test]
 fn hifreq_tensor_k8() -> Result<(), String> {
     hifreq_tensor_probe(8)
