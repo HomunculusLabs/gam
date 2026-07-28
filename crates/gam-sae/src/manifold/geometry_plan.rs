@@ -105,10 +105,19 @@ pub enum SaeReferenceMetricPlan {
     FlatKleinBottle,
     EuclideanDuchon,
     EuclideanPolynomial,
-    /// Unit-curvature Poincare ball with the fixed reference rows that define
-    /// the conformal Dirichlet function Gram. These rows are model data: OOS
-    /// rebuild must replay them exactly, never replace them with query rows.
-    UnitPoincareBall {
+    /// Constant-curvature tangent chart at sectional curvature `kappa`, with
+    /// the fixed reference rows that define the conformal Dirichlet function
+    /// Gram. These rows are model data: OOS rebuild must replay them exactly,
+    /// never replace them with query rows.
+    ///
+    /// `kappa` is carried rather than assumed. `kappa < 0` is the hyperbolic
+    /// (Poincare) member, `kappa = 0` the flat one, `kappa > 0` the spherical
+    /// one — one family, not three special cases. The weight is
+    /// `gam_geometry::constant_curvature_dirichlet_penalty`, which reduces
+    /// EXACTLY to the former hyperbolic-only penalty at `kappa = -1` (asserted
+    /// in that crate), so freeing the parameter changed no existing fit.
+    ConstantCurvatureChart {
+        kappa: f64,
         reference_coords: Array2<f64>,
     },
     CylinderProduct,
@@ -242,8 +251,12 @@ impl SaeAtomGeometryPlan {
                 SaeAtomBasisKind::Poincare,
                 _,
                 SaeBasisResolution::Polynomial { degree },
-                SaeReferenceMetricPlan::UnitPoincareBall { reference_coords },
+                SaeReferenceMetricPlan::ConstantCurvatureChart {
+                    kappa,
+                    reference_coords,
+                },
             ) => {
+                kappa.is_finite()
                 *degree == SAE_EUCLIDEAN_PATCH_MAX_DEGREE
                     && reference_coords.nrows() > 0
                     && reference_coords.ncols() == latent_dim
@@ -355,8 +368,8 @@ impl SaeAtomGeometryPlan {
 
     pub(crate) fn reference_roughness_kind(&self) -> SaeReferenceRoughnessKind {
         match &self.reference_metric {
-            SaeReferenceMetricPlan::UnitPoincareBall { .. } => {
-                SaeReferenceRoughnessKind::PoincareConformalDirichlet
+            SaeReferenceMetricPlan::ConstantCurvatureChart { .. } => {
+                SaeReferenceRoughnessKind::ConstantCurvatureDirichlet
             }
             _ => SaeReferenceRoughnessKind::ProvidedFunctionGram,
         }
@@ -572,17 +585,21 @@ impl SaeAtomGeometryPlan {
             ) => Ok(polynomial_reference_penalty(self.latent_dim, *degree)),
             (
                 SaeBasisResolution::Polynomial { .. },
-                SaeReferenceMetricPlan::UnitPoincareBall { reference_coords },
+                SaeReferenceMetricPlan::ConstantCurvatureChart {
+                    kappa,
+                    reference_coords,
+                },
             ) => {
+                kappa.is_finite()
                 let (_, reference_jacobian) = evaluator.evaluate(reference_coords.view())?;
-                gam_geometry::manifolds::poincare::conformal_dirichlet_penalty(
+                gam_geometry::constant_curvature_dirichlet_penalty(
                     reference_coords.view(),
                     reference_jacobian.view(),
-                    -1.0,
+                    *kappa,
                 )
                 .map_err(|error| {
                     format!(
-                        "SaeAtomGeometryPlan::reference_penalty: Poincare conformal Dirichlet Gram failed: {error}"
+                        "SaeAtomGeometryPlan::reference_penalty: constant-curvature conformal Dirichlet Gram failed: {error}"
                     )
                 })
             }

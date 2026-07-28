@@ -18,21 +18,30 @@ pub enum SaeReferenceRoughness {
     /// fallback: the caller is explicitly declaring the reference measure
     /// `nu_ref` and differential operator `L` represented by the matrix.
     ProvidedFunctionGram(Array2<f64>),
-    /// Hyperbolic Dirichlet seminorm evaluated at a fixed set of Poincare
-    /// tangent-chart reference coordinates. The coordinates are part of the
-    /// declaration, not the fitted latent state. Construction fails if their
-    /// shape or values are invalid or if the analytic geometry builder fails.
-    PoincareConformalDirichlet { reference_coords: Array2<f64> },
+    /// Constant-curvature Dirichlet seminorm evaluated at a fixed set of
+    /// tangent-chart reference coordinates, at sectional curvature `kappa`.
+    ///
+    /// `kappa` is carried rather than assumed: `kappa < 0` is the hyperbolic
+    /// (Poincare) member, `kappa = 0` the flat one, `kappa > 0` the spherical
+    /// one — a single family rather than three special cases. It used to be the
+    /// hardcoded `POINCARE_REFERENCE_CURVATURE = -1.0`, which is what made a
+    /// Poincare atom a fixed geometry instead of `kappa < 0` of the family.
+    ///
+    /// The coordinates are part of the declaration, not the fitted latent
+    /// state. Construction fails if their shape or values are invalid or if the
+    /// analytic geometry builder fails.
+    ConstantCurvatureDirichlet {
+        kappa: f64,
+        reference_coords: Array2<f64>,
+    },
 }
 
 /// Provenance of the frozen reference-function Gram retained by an atom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaeReferenceRoughnessKind {
     ProvidedFunctionGram,
-    PoincareConformalDirichlet,
+    ConstantCurvatureDirichlet,
 }
-
-const POINCARE_REFERENCE_CURVATURE: f64 = -1.0;
 
 /// Basis/topology tag for one SAE manifold atom.
 ///
@@ -94,7 +103,7 @@ pub enum SaeAtomBasisKind {
     /// (the wrapped / tangent parameterisation) and the decoder is the same
     /// polynomial-in-`t` expansion — but its smoothness penalty is measured in
     /// *hyperbolic* arc length rather than flat tangent length
-    /// ([`SaeReferenceRoughness::PoincareConformalDirichlet`]). For the `d = 1`
+    /// ([`SaeReferenceRoughness::ConstantCurvatureDirichlet`]). For the `d = 1`
     /// tangent chart the
     /// coordinate runs at a constant multiple of arc length (geodesic distance
     /// `= 2|t|`), so the intrinsic reweighting is a *constant* — coinciding with
@@ -877,7 +886,10 @@ impl SaeManifoldAtom {
                 Self::validate_reference_function_gram(gram, m, false)?,
                 SaeReferenceRoughnessKind::ProvidedFunctionGram,
             )),
-            SaeReferenceRoughness::PoincareConformalDirichlet { reference_coords } => {
+            SaeReferenceRoughness::ConstantCurvatureDirichlet {
+                kappa,
+                reference_coords,
+            } => {
                 if !matches!(basis_kind, SaeAtomBasisKind::Poincare) {
                     return Err(
                         "SaeManifoldAtom::materialize_reference_roughness: Poincare conformal-Dirichlet norm requires a Poincare atom"
@@ -902,10 +914,10 @@ impl SaeManifoldAtom {
                             .into(),
                     );
                 }
-                let gram = gam_geometry::manifolds::poincare::conformal_dirichlet_penalty(
+                let gram = gam_geometry::constant_curvature_dirichlet_penalty(
                     reference_coords.view(),
                     basis_jacobian,
-                    POINCARE_REFERENCE_CURVATURE,
+                    *kappa,
                 )
                 .map_err(|error| {
                     format!(
@@ -914,7 +926,7 @@ impl SaeManifoldAtom {
                 })?;
                 Ok((
                     Self::validate_reference_function_gram(gram, m, true)?,
-                    SaeReferenceRoughnessKind::PoincareConformalDirichlet,
+                    SaeReferenceRoughnessKind::ConstantCurvatureDirichlet,
                 ))
             }
         }
@@ -1999,7 +2011,7 @@ mod tests {
         let mut penalty = Array2::<f64>::zeros((3, 3));
         penalty[[2, 2]] = 1.0;
         let reference_roughness = if matches!(kind, SaeAtomBasisKind::Poincare) {
-            SaeReferenceRoughness::PoincareConformalDirichlet {
+            SaeReferenceRoughness::ConstantCurvatureDirichlet {
                 reference_coords: Array2::from_shape_vec((n, 1), ts.to_vec()).unwrap(),
             }
         } else {
@@ -2264,10 +2276,10 @@ mod tests {
 
         // Exact wiring: the effective Gram IS the geometry crate's hyperbolic
         // conformal Dirichlet Gram at unit curvature.
-        let expected = gam_geometry::manifolds::poincare::conformal_dirichlet_penalty(
+        let expected = gam_geometry::constant_curvature_dirichlet_penalty(
             coords.view(),
             poincare.basis_jacobian.view(),
-            POINCARE_REFERENCE_CURVATURE,
+            -1.0,
         )
         .unwrap();
         for i in 0..3 {
@@ -2310,7 +2322,7 @@ mod tests {
         }
         assert_eq!(
             poincare.reference_roughness_kind,
-            SaeReferenceRoughnessKind::PoincareConformalDirichlet
+            SaeReferenceRoughnessKind::ConstantCurvatureDirichlet
         );
         assert!(
             poincare.smooth_penalty[[1, 1]] > 1e-6,

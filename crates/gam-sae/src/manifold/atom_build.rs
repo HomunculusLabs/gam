@@ -368,7 +368,13 @@ pub fn sae_build_atom_plans(
                     SaeBasisResolution::Polynomial {
                         degree: SAE_EUCLIDEAN_PATCH_MAX_DEGREE,
                     },
-                    SaeReferenceMetricPlan::UnitPoincareBall {
+                    SaeReferenceMetricPlan::ConstantCurvatureChart {
+                        // The `poincare` kind names the HYPERBOLIC member, so it
+                        // seeds at unit negative curvature — the value that used
+                        // to be hardcoded. Nothing about an existing fit moves;
+                        // what changes is that the parameter now exists and a
+                        // constant-curvature candidate can carry a different one.
+                        kappa: -1.0,
                         reference_coords: seed_coords
                             .slice(s![atom_idx, 0..n_obs, 0..d])
                             .to_owned(),

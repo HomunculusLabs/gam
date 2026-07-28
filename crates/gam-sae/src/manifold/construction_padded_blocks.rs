@@ -169,7 +169,11 @@ pub fn term_from_padded_blocks_with_mode(
         let b = decoder_coefficients.slice(s![k, 0..m, 0..p_out]).to_owned();
         let s = smooth_penalties.slice(s![k, 0..m, 0..m]).to_owned();
         let reference_roughness = if matches!(basis_kinds[k], SaeAtomBasisKind::Poincare) {
-            SaeReferenceRoughness::PoincareConformalDirichlet {
+            SaeReferenceRoughness::ConstantCurvatureDirichlet {
+                // `Poincare` is the hyperbolic member of the constant-curvature
+                // family, so it carries unit negative curvature. This is the
+                // value that was hardcoded before the parameter existed.
+                kappa: -1.0,
                 reference_coords: coords[k].clone(),
             }
         } else {
