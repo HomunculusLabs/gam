@@ -230,7 +230,7 @@ fn store_json_record<T: Serialize>(key: &str, record: &T) -> Result<(), String> 
     fp.absorb_str(b"warm-start-key", key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map(|_| ())
+        .map(drop)
         .map_err(|e| format!("failed to persist warm-start cache record: {e}"))
 }
 
@@ -329,7 +329,7 @@ pub fn store_fit_artifact(
     fp.absorb_str(b"fit-artifact-descriptor", &key);
     store
         .save(&fp.finalize(), &bytes, None, None, EntryKind::Checkpoint)
-        .map(|_| ())
+        .map(drop)
         .map_err(|e| format!("failed to persist fit-artifact record: {e}"))
 }
 

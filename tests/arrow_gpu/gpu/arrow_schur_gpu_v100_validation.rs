@@ -553,7 +553,7 @@ fn arrow_schur_gpu_v100_hill_climb_speedup_over_cpu_host_loop() {
         "cpu_host_loop",
         Box::new(|| {
             solve_arrow_newton_step_dense_reference(&sys, ridge_t, ridge_beta)
-                .map(|_| ())
+                .map(drop)
                 .map_err(|e| e.to_string())
         }),
     );

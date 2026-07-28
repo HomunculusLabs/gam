@@ -465,8 +465,8 @@ pub trait OuterObjective {
             Solver::Arc => Some(OuterEvalOrder::ValueGradientHessian),
         });
         match order {
-            Some(order) => self.eval_with_order(rho, order).map(|_| ()),
-            None => self.eval_efs(rho).map(|_| ()),
+            Some(order) => self.eval_with_order(rho, order).map(drop),
+            None => self.eval_efs(rho).map(drop),
         }
     }
 }

@@ -127,7 +127,7 @@ mod harness {
         let sys = build_fixture(N, D, K, 0xB10B_A11C_5CA1_E5DE);
 
         let cpu = time_path("cpu_host_loop", ITERS, || {
-            solve_arrow_newton_step_dense_reference(&sys, RIDGE_T, RIDGE_BETA).map(|_| ())
+            solve_arrow_newton_step_dense_reference(&sys, RIDGE_T, RIDGE_BETA).map(drop)
         });
         let abc = time_path("layer_abc", ITERS, || {
             match solve_arrow_newton_step(&sys, RIDGE_T, RIDGE_BETA) {

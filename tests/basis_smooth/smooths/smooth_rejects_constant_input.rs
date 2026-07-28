@@ -23,7 +23,7 @@ fn try_fit(formula: &str) -> Result<(), String> {
         ..FitConfig::default()
     };
     fit_from_formula(formula, &data, &cfg)
-        .map(|_| ())
+        .map(drop)
         .map_err(|e| e.to_string())
 }
 

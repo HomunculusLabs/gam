@@ -1276,7 +1276,7 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(z)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("reml_trace launch fill_rademacher")
     }
 
@@ -1314,7 +1314,7 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(q)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("reml_trace launch reduce_q_dense")
     }
 
@@ -1353,7 +1353,7 @@ extern "C" __global__ void reduce_q_weighted_gram(
                 .arg(q)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("reml_trace launch reduce_q_weighted_gram")
     }
 

@@ -1153,7 +1153,7 @@ impl AnalyticPenalty for IsometryPenalty {
         if rho.len() != 1 {
             return Err(format!("isometry rho length {} != 1", rho.len()));
         }
-        resolve_learnable_weight(self.scalar_weight, rho[self.rho_index]).map(|_| ())
+        resolve_learnable_weight(self.scalar_weight, rho[self.rho_index]).map(drop)
     }
 
     fn rho_coordinate_domains(&self) -> Result<Vec<(f64, f64)>, String> {

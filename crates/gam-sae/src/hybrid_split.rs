@@ -1954,7 +1954,7 @@ mod tests {
                 coords.len(),
                 0.0,
             )
-            .map(|_| ())
+            .map(drop)
             .unwrap_err()
                 == AtomCandidateRefusal::CoordinateCollapse,
             "a degenerate coordinate span must be refused as a coordinate collapse (#2362)"

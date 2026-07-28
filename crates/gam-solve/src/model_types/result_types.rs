@@ -3296,7 +3296,7 @@ pub fn validate_explicit_dense_hessian_for_whitening(
     hessian
         .to_owned()
         .cholesky(Side::Lower)
-        .map(|_| ())
+        .map(drop)
         .map_err(|err| {
             EstimationError::InvalidInput(format!(
                 "{label} must be positive definite for HMC/NUTS whitening; Cholesky failed: {err:?}"

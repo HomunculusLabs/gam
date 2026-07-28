@@ -45,7 +45,7 @@ fn certify_factorized_inference_solve(
         &residual,
         label,
     )
-    .map(|_| ())
+    .map(drop)
     .map_err(|error| {
         EstimationError::RemlOptimizationFailed(format!(
             "exact factorized inference solve did not certify: {error}"

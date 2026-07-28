@@ -1200,7 +1200,7 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("polya_gamma launch pg1_kernel")
     }
 
@@ -1237,7 +1237,7 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("polya_gamma launch sp_kernel")
     }
 
@@ -1273,7 +1273,7 @@ extern "C" __global__ void normal_kernel(
                 .arg(out)
                 .launch(cfg)
         }
-        .map(|_| ())
+        .map(drop)
         .gpu_ctx("polya_gamma launch normal_kernel")
     }
 }

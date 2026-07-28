@@ -1869,7 +1869,7 @@ extern "C" __global__ void chol_logdet_col_major(
         // num_pairs threads each write one lower-tri entry A[j + k*p].
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("xtwx_lower launch: {e}"))
-            .map(|_| ())
+            .map(drop)
     }
 
     /// Launch the `xtscore` kernel: one thread per output index `j`,
@@ -1909,7 +1909,7 @@ extern "C" __global__ void chol_logdet_col_major(
         // p threads each write one output entry s[j].
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("xtscore launch: {e}"))
-            .map(|_| ())
+            .map(drop)
     }
 
     /// Launch the `symmetrize_lower` kernel: one thread per strict lower-tri
@@ -1948,7 +1948,7 @@ extern "C" __global__ void chol_logdet_col_major(
         // writes one upper-triangle entry mirrored from the lower triangle.
         unsafe { builder.launch(cfg) }
             .map_err(|e| format!("symmetrize_lower launch: {e}"))
-            .map(|_| ())
+            .map(drop)
     }
 
     /// Launch the device-side Cholesky-factor logdet kernel and download

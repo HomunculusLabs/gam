@@ -272,7 +272,7 @@ pub fn probe_undamped_evidence_row_factors(
         &CpuBatchedBlockSolver,
         options.gpu_policy,
     )
-    .map(|_| ())
+    .map(drop)
 }
 
 pub(crate) fn estimated_htbeta_bytes(n: usize, d: usize, k: usize) -> Option<usize> {

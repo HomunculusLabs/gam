@@ -63,7 +63,7 @@ impl RiemannianManifold for GrassmannManifold {
     }
 
     fn tangent_basis(&self, point: ArrayView1<'_, f64>) -> GeometryResult<Array2<f64>> {
-        from_flat(point, self.n, self.k).map(|_| ())?;
+        from_flat(point, self.n, self.k)?;
         projected_standard_basis_tangent(self, point, self.n, self.k)
     }
 

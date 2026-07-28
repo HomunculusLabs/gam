@@ -153,7 +153,7 @@ fn load_static_cuda_driver_library() -> Result<&'static Library, GpuError> {
 pub fn preload_cuda_driver() -> Result<(), GpuError> {
     static PRELOAD: OnceLock<Result<(), GpuError>> = OnceLock::new();
     PRELOAD
-        .get_or_init(|| load_static_cuda_driver_library().map(|_| ()))
+        .get_or_init(|| load_static_cuda_driver_library().map(drop))
         .clone()
 }
 
@@ -256,7 +256,7 @@ fn preload_cuda_userspace_libraries() -> Result<(), String> {
             Ok(loaded)
         })
         .as_ref()
-        .map(|_| ())
+        .map(drop)
         .map_err(Clone::clone)
 }
 

@@ -126,7 +126,7 @@ fn test_saved_linkwiggle_basis(
     match model.saved_link_wiggle()? {
         None => Ok(None),
         Some(runtime) => {
-            runtime.derivative_q0(q0).map(|_| ())?;
+            runtime.derivative_q0(q0)?;
             runtime
                 .constrained_basis(q0, basis_options)
                 .map(Some)

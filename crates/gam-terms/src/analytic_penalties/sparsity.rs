@@ -611,7 +611,7 @@ impl AnalyticPenalty for SoftmaxAssignmentSparsityPenalty {
                 rho.len()
             ));
         }
-        resolve_learnable_weight(self.weight, rho[0]).map(|_| ())
+        resolve_learnable_weight(self.weight, rho[0]).map(drop)
     }
 
     fn rho_coordinate_domains(&self) -> Result<Vec<(f64, f64)>, String> {

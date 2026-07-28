@@ -1585,7 +1585,7 @@ impl SaeManifoldOuterObjective {
     /// propagated instead of silently changing the basin-entry algorithm.
     fn record_warm_start(&mut self, outcome: Result<usize, String>) -> Result<(), String> {
         self.warm_start_telemetry.record(&outcome);
-        outcome.map(|_| ())
+        outcome.map(drop)
     }
 
     /// Stamp the currently installed state with a successful outer search's
