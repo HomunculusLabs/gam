@@ -96,6 +96,25 @@ pub struct BlockSampledMarginal {
     pub importance_ess: f64,
     /// Number of draws used.
     pub n_draws: usize,
+    /// The estimator's OWN Monte-Carlo standard error on `value`, in the same
+    /// log-likelihood units as `value` itself.
+    ///
+    /// `Δ_b = log( (1/S) Σ_s w_s )` with `w_s = exp(−ΔF(t_s))`, so by the delta
+    /// method `se(Δ_b) = se(w̄)/w̄ = cv(w)/√S`, and with the Kish
+    /// `ESS = (Σw)²/Σw²` that is exactly
+    ///
+    /// ```text
+    ///     se(Δ_b) = sqrt(1/ESS − 1/S)
+    /// ```
+    ///
+    /// — a closed form in quantities the estimator already accumulates, costing
+    /// nothing to report. It is the quantity a trust gate on a *stochastic
+    /// splice into a deterministic objective* has to compare against: `ESS`
+    /// alone is a relative-efficiency number and says nothing about how
+    /// precisely `Δ_b` is known, so a gate written on `ESS/S` can accept an
+    /// imprecise estimate obtained efficiently and reject a precise one
+    /// obtained inefficiently (gam#2584).
+    pub standard_error: f64,
     /// Gradient-channel moments for the exact (b)–(d) assembly; `None` only when
     /// the block is empty (`m == 0`, where the correction is zero).
     pub moments: Option<BlockSampledMoments>,

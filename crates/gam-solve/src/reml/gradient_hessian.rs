@@ -2749,6 +2749,45 @@ impl<'a> RemlState<'a> {
             .block_sampled_marginal_correction(&target)
             .map_err(EstimationError::InvalidInput)?;
 
+        // Budget audit for the one stochastic channel that is NOT under the
+        // variance-targeted hypergradient budget (gam#2584).
+        //
+        // `block_sampling_draws` picks `256 + 256·m` draws from the block
+        // dimension and from nothing else — not from the achieved Monte-Carlo
+        // error of `Δ_b`, and not from the precision the outer search can act
+        // on — while `update_hypergradient_budget_after_outer_eval` already
+        // sizes the inner, linear and trace channels to a `target_mse`. The
+        // three numbers below are what a variance-targeted budget for this
+        // channel would consume, so a single `--log-level info` run measures
+        // whether the constant is over- or under-provisioned instead of
+        // leaving it an argument:
+        //
+        //   * `se`      — the estimator's own standard error `sqrt(1/ESS − 1/S)`,
+        //     in the same log-likelihood units as `Δ_b`;
+        //   * `se/|Δ_b|` — the relative precision actually achieved. At `≥ 1`
+        //     the splice is dominated by its own sampling noise;
+        //   * `S*`      — the draws that WOULD reach `HGB_TARGET_FRACTION`
+        //     relative precision, i.e. the same 10%-of-its-own-magnitude
+        //     target the hypergradient budget applies to its channels. From
+        //     `se² = cv²/S`, `S* = S·se²/(HGB_TARGET_FRACTION·|Δ_b|)²`.
+        //
+        // Also reported: `1/n_eff`, the order of the Laplace floor error this
+        // correction exists to remove. A correction whose `se` exceeds it adds
+        // more noise to the objective than the bias it takes out.
+        let abs_value = sampled.value.abs();
+        let target_se = HGB_TARGET_FRACTION * abs_value;
+        let relative_se = if abs_value > 0.0 {
+            sampled.standard_error / abs_value
+        } else {
+            f64::INFINITY
+        };
+        let draws_for_target = if target_se > 0.0 && sampled.standard_error.is_finite() {
+            (sampled.n_draws as f64) * (sampled.standard_error / target_se).powi(2)
+        } else {
+            f64::INFINITY
+        };
+        let laplace_floor = if n_eff > 0.0 { 1.0 / n_eff } else { f64::INFINITY };
+
         // Trust gate: an importance estimate with too few effective draws is
         // noisier than the Laplace error it is meant to correct, so we keep the
         // plain Laplace summary rather than splicing in Monte-Carlo jitter.
@@ -2756,23 +2795,35 @@ impl<'a> RemlState<'a> {
         if sampled.importance_ess < min_ess {
             log::info!(
                 "[#784] block-local fallback declined: importance ESS {:.1} < {:.1} \
-                 (m={m} dirs, max|γ|={:.3}, τ={:.3})",
+                 (m={m} dirs, max|γ|={:.3}, τ={:.3}) \
+                 [budget audit: Δ_b={:.4e} se={:.4e} se/|Δ_b|={:.3e} S={} S*={:.3e} 1/n_eff={:.3e}]",
                 sampled.importance_ess,
                 min_ess,
                 verdict.max_abs_skewness,
                 verdict.threshold,
+                sampled.value,
+                sampled.standard_error,
+                relative_se,
+                sampled.n_draws,
+                draws_for_target,
+                laplace_floor,
             );
             return Ok(zero());
         }
 
         log::info!(
             "[#784] block-local sampled marginalization ENGAGED: m={m} curvature-heavy dirs, \
-             max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, ESS={:.1}/{}",
+             max|γ|={:.3}, τ={:.3}, Δ_b={:.4e}, ESS={:.1}/{} \
+             [budget audit: se={:.4e} se/|Δ_b|={:.3e} S*={:.3e} 1/n_eff={:.3e}]",
             verdict.max_abs_skewness,
             verdict.threshold,
             sampled.value,
             sampled.importance_ess,
             sampled.n_draws,
+            sampled.standard_error,
+            relative_se,
+            draws_for_target,
+            laplace_floor,
         );
 
         // `Δ_b` is added to the marginal log-likelihood ⇒ subtracted from the

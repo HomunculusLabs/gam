@@ -6052,6 +6052,9 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
             rho_gradient: Array1::zeros(k),
             importance_ess: 0.0,
             n_draws: 0,
+            // An empty block has an exactly-zero correction, not an estimated
+            // one: no draw is taken, so there is no sampling error to report.
+            standard_error: 0.0,
             moments: None,
         });
     }
@@ -6212,6 +6215,21 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
     } else {
         0.0
     };
+    // The estimator's own Monte-Carlo standard error on `value`, in `value`'s
+    // units. `Δ_b = log w̄` ⇒ `se(Δ_b) = cv(w)/√S = sqrt(1/ESS − 1/S)`; see
+    // `BlockSampledMarginal::standard_error`. Both terms are already on hand,
+    // so this costs two divides and reports the one number a consumer needs to
+    // decide whether splicing this correction adds more noise than the Laplace
+    // bias it removes (gam#2584). Clamped at zero: `ESS ≤ S` always, but a
+    // degenerate single-surviving-draw case can put the difference a rounding
+    // step below zero.
+    let standard_error = if importance_ess > 0.0 && n_draws > 0 {
+        (1.0 / importance_ess - 1.0 / n_draws as f64)
+            .max(0.0)
+            .sqrt()
+    } else {
+        f64::INFINITY
+    };
 
     if !value.is_finite() || rho_gradient.iter().any(|v| !v.is_finite()) {
         return Err(
@@ -6236,6 +6254,7 @@ pub fn block_sampled_marginal_correction<T: BlockExcessTarget + ?Sized>(
         rho_gradient,
         importance_ess,
         n_draws,
+        standard_error,
         moments,
     })
 }
