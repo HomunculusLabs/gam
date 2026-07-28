@@ -1851,6 +1851,18 @@ pub(crate) fn exact_joint_mode_curvature_certificate<
 /// the honest typed refusal is kept on the final attempt.
 const MAX_SADDLE_ESCAPES: usize = 2;
 
+/// How many times one saddle resolution may move a blocking row onto the
+/// certified face before it gives the honest refusal instead.
+///
+/// Each exchange costs a full exact curvature certificate — the expensive
+/// object in this function — and strictly grows the face, so this is an
+/// operational budget rather than the termination proof (the face cannot grow
+/// past the constraint count, which is the mathematical bound and far too large
+/// to spend). A genuine constrained mode is expected to certify within one or
+/// two exchanges; needing more says the face is degenerate in a way the refusal
+/// should report rather than grind at.
+const MAX_ESCAPE_FACE_EXCHANGES: usize = 3;
+
 /// Verdict of second-order certification at a constrained first-order KKT point.
 enum ConstrainedModeResolution {
     /// The active-face-tangent curvature is PSD: a genuine Laplace mode.
@@ -1908,6 +1920,47 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         states,
         cached_active_sets,
     )?;
+    resolve_constrained_converged_mode_on_face(
+        family,
+        states,
+        specs,
+        options,
+        ranges,
+        s_lambdas,
+        joint_mode_diagonal_ridge,
+        joint_bundle,
+        total_p,
+        block_constraints,
+        tight_active_sets,
+        saddle_escapes_used,
+        objective_tol,
+        jeffreys_completion_calls,
+        0,
+    )
+}
+
+/// The body of [`resolve_constrained_converged_mode`] with the certified face
+/// supplied rather than derived, so a blocked escape can retry on a wider one.
+///
+/// `face_exchanges` counts the rows this resolution has already moved onto the
+/// face; it bounds the recursion at [`MAX_ESCAPE_FACE_EXCHANGES`].
+fn resolve_constrained_converged_mode_on_face<F: CustomFamily + Clone + Send + Sync + 'static>(
+    family: &F,
+    states: &[ParameterBlockState],
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    ranges: &[(usize, usize)],
+    s_lambdas: &[Array2<f64>],
+    joint_mode_diagonal_ridge: f64,
+    joint_bundle: Option<&gam_problem::JointPenaltyBundle>,
+    total_p: usize,
+    block_constraints: &[Option<ConstraintSet>],
+    tight_active_sets: Vec<Option<Vec<usize>>>,
+    saddle_escapes_used: usize,
+    objective_tol: f64,
+    jeffreys_completion_calls: &mut usize,
+    face_exchanges: usize,
+) -> Result<ConstrainedModeResolution, String> {
     let mode_active_block =
         assemble_active_constraint_block(block_constraints, &tight_active_sets, ranges, total_p);
     let certificate = exact_joint_mode_curvature_certificate(
@@ -1994,6 +2047,12 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         flatten_joint_active_set(&tight_active_sets, block_constraints).unwrap_or_default();
     let mut feasible_positive = f64::INFINITY;
     let mut feasible_negative = f64::INFINITY;
+    // WHICH row truncates the chord, per sign. A chord shorter than
+    // `decrease_floor` is not a length problem to be solved by stepping
+    // further: it says this row pins the direction, and the active-set response
+    // to that is to put the row on the face (#2587).
+    let mut blocker_positive: Option<usize> = None;
+    let mut blocker_negative: Option<usize> = None;
     if let Some(joint_constraints) =
         assemble_joint_linear_constraints(block_constraints, ranges, total_p)?
     {
@@ -2017,16 +2076,24 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
             }
             let scaled_rate = values_direction[row] / norm;
             if scaled_rate < 0.0 {
-                feasible_positive = feasible_positive.min(scaled_slack / -scaled_rate);
+                let step = scaled_slack / -scaled_rate;
+                if step < feasible_positive {
+                    feasible_positive = step;
+                    blocker_positive = Some(row);
+                }
             } else if scaled_rate > 0.0 {
-                feasible_negative = feasible_negative.min(scaled_slack / scaled_rate);
+                let step = scaled_slack / scaled_rate;
+                if step < feasible_negative {
+                    feasible_negative = step;
+                    blocker_negative = Some(row);
+                }
             }
         }
     }
-    let (sign, feasible_cap) = if feasible_positive >= feasible_negative {
-        (1.0_f64, feasible_positive)
+    let (sign, feasible_cap, blocking_row) = if feasible_positive >= feasible_negative {
+        (1.0_f64, feasible_positive, blocker_positive)
     } else {
-        (-1.0_f64, feasible_negative)
+        (-1.0_f64, feasible_negative, blocker_negative)
     };
     let feasible_cap = if feasible_cap.is_finite() {
         // Land strictly inside the blocker (matching the reduced-face solver's
@@ -2036,6 +2103,62 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
         feasible_cap
     };
     let magnitude = base_magnitude.min(feasible_cap);
+    // ── an escape that cannot escape ────────────────────────────────────────
+    //
+    // `decrease_floor` is the length at which the guaranteed decrease
+    // `½s²|γ_min|` first clears solver noise. When FEASIBILITY truncates the
+    // chord below it, the step is — by this function's own definition —
+    // indistinguishable from not moving, and taking it spends one of
+    // `MAX_SADDLE_ESCAPES` on a provable no-op.
+    //
+    // Measured (#2587, instrumented transformation-normal arm): `binding=
+    // feasible` on both escapes, `feasible_cap=3.706317e-4` against
+    // `decrease_floor=6.671092e-3` (18x below) and `1.457053e-3` against
+    // `8.098159e-3` (5.6x below). Neither the locality cap nor the floor ever
+    // bound. So the DIRECTION fails, not the length: it lies almost entirely in
+    // the normal cone of `blocking_row` — exactly the phantom-saddle geometry
+    // this function's header describes.
+    //
+    // The active-set answer to "this direction is pinned by that row" is to put
+    // the row ON the face and ask the curvature question again there. Either the
+    // narrower tangent certifies — the point was a constrained mode all along
+    // and the negative curvature was normal to a row the face omitted — or it
+    // yields a direction with a feasible length to travel. An exchange, not a
+    // retry: the face strictly grows each time.
+    if let Some(row) = blocking_row
+        && magnitude < decrease_floor
+        && face_exchanges < MAX_ESCAPE_FACE_EXCHANGES
+    {
+        log::info!(
+            "[PIRLS/joint-Newton saddle-escape exchange] lambda_min={lambda_min:.6e} \
+             feasible_cap={feasible_cap:.6e} < decrease_floor={decrease_floor:.6e}; \
+             moving blocking row {row} onto the certified face (exchange {})",
+            face_exchanges + 1,
+        );
+        let mut widened = joint_active;
+        widened.push(row);
+        widened.sort_unstable();
+        widened.dedup();
+        let widened_face =
+            crate::blockwise_solve::scatter_joint_active_set(&widened, block_constraints);
+        return resolve_constrained_converged_mode_on_face(
+            family,
+            states,
+            specs,
+            options,
+            ranges,
+            s_lambdas,
+            joint_mode_diagonal_ridge,
+            joint_bundle,
+            total_p,
+            block_constraints,
+            widened_face,
+            saddle_escapes_used,
+            objective_tol,
+            jeffreys_completion_calls,
+            face_exchanges + 1,
+        );
+    }
     if !(magnitude.is_finite() && magnitude > 0.0) {
         return Err(format!(
             "joint Newton returned-mode curvature is a strict saddle (lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}) with no feasible escape length along the negative-curvature tangent (locality_cap={locality_cap:.6e}, decrease_floor={decrease_floor:.6e}, feasible_cap={feasible_cap:.6e})",
