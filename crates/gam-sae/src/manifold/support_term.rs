@@ -1908,9 +1908,23 @@ impl SaeSupportSparseTerm {
                 // coordinate solve hard enough to refuse the held-out eval.
                 if count[axis] > 0.0
                     && gamma[axis] > 0.01 * count[axis]
-                    && energy[axis] > 0.0
+                    && energy[axis] > 1.0e-4 * count[axis]
                 {
-                    let candidate = gamma[axis] / energy[axis];
+                    // Damped fixed-point step: an initial selection from the
+                    // near-zero seed may jump to 64 outright (the measured
+                    // healthy round-1 attractor is ~33); after that one round
+                    // moves alpha by at most 4x in either direction (the
+                    // measured ESCAPE rate was ~28x/round, so damping turns
+                    // it into a drift the stall rule ends); and 1e3 is a
+                    // conditioning ceiling -- tangent curvature on this data
+                    // is O(1..100), so beyond ~1e3 a larger alpha changes no
+                    // decision, only the stiffness that froze the held-out
+                    // solve.
+                    let incoming = ard_precisions[atom_idx][axis];
+                    let candidate = (gamma[axis] / energy[axis])
+                        .min((incoming * 4.0).max(64.0))
+                        .max(incoming / 4.0)
+                        .min(1.0e3);
                     if candidate.is_finite() && candidate > 0.0 {
                         updated[atom_idx][axis] = candidate;
                     }
