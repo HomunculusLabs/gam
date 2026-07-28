@@ -387,6 +387,60 @@ fn gaussian_reml_logdet_term(
     (term, edf)
 }
 
+/// Residual-deviance decomposition `dp_j(ρ) = r0_j + Σ_i c²_ij·u_i(ρ)`.
+///
+/// The profiled residual is defined as `dp_j(ρ) = ywy_j − Σ_i c²_ij·v_i(ρ)`.
+/// Evaluated that way it is a DIFFERENCE of two quantities that become equal as
+/// ρ → −∞ on a design that interpolates its response (`p = n`, no residual
+/// degrees of freedom), so it loses every significant digit exactly where the
+/// smoothing search needs it. At the saturated `24×24` tensor fixture of gam#2585
+/// the small-λ end has `u ≈ 9e−17`, small enough that `v = 1 − u` rounds to
+/// exactly `1.0` and the difference returns literally zero.
+///
+/// `ModalKernels` guarantees `u + v == 1` exactly — one is always built as
+/// `1 − other` — so the identity
+///
+/// ```text
+///   dp_j(ρ) = (ywy_j − Σ_i c²_ij) + Σ_i c²_ij·u_i(ρ) = r0_j + Σ_i c²_ij·u_i(ρ)
+/// ```
+///
+/// is exact algebra, and the right-hand form is a SUM OF NON-NEGATIVES: `r0_j`
+/// is the ρ-independent unpenalized residual deviance (`≥ 0`, exactly `0` for a
+/// saturated design) and every `u_i ≥ 0`. The cancellation is confined to `r0_j`,
+/// which no longer depends on ρ and therefore cannot differ between two cells of
+/// the ρ search.
+///
+/// Shared by the evaluator, the domain check, the profiled dispersion and the
+/// interval enclosure: a bound that encloses a different expression than the
+/// evaluator computes is the objective↔enclosure desync this file exists to
+/// prevent.
+#[inline]
+fn dispersion_residual_parts(
+    cache: &GaussianRemlEigenCache,
+    ywy: ArrayView1<'_, f64>,
+    projected_rhs_squared: ArrayView2<'_, f64>,
+    output: usize,
+    rho: f64,
+) -> (f64, f64, f64, f64) {
+    let mut total_c2 = 0.0;
+    let mut penalized_residual = 0.0;
+    let mut dp_grad = 0.0;
+    let mut dp_hess = 0.0;
+    for eig in 0..cache.penalty_eigenvalues.len() {
+        let c2 = projected_rhs_squared[[eig, output]];
+        let mode = modal_kernels(rho, cache.penalty_eigenvalues[eig]);
+        total_c2 += c2;
+        penalized_residual += c2 * mode.u;
+        dp_grad += c2 * mode.w;
+        dp_hess += c2 * mode.k;
+    }
+    // `r0 ≥ 0` mathematically (it is the residual deviance of the unpenalized
+    // weighted least-squares fit), so clamping at zero only removes roundoff
+    // that has no sign information left in it.
+    let unpenalized_residual = (ywy[output] - total_c2).max(0.0);
+    (unpenalized_residual, penalized_residual, dp_grad, dp_hess)
+}
+
 /// Per-output dispersion-prior term `½ν·(1 + log(2π·dp/ν))` with its analytic
 /// ρ-gradient/Hessian.
 ///
@@ -401,17 +455,9 @@ fn gaussian_reml_dispersion_term(
     nu: f64,
     rho: f64,
 ) -> TermDerivs {
-    let mut fitted_quadratic = 0.0;
-    let mut dp_grad = 0.0;
-    let mut dp_hess = 0.0;
-    for eig in 0..cache.penalty_eigenvalues.len() {
-        let c2 = projected_rhs_squared[[eig, output]];
-        let mode = modal_kernels(rho, cache.penalty_eigenvalues[eig]);
-        fitted_quadratic += c2 * mode.v;
-        dp_grad += c2 * mode.w;
-        dp_hess += c2 * mode.k;
-    }
-    let dp = ywy[output] - fitted_quadratic;
+    let (unpenalized_residual, penalized_residual, dp_grad, dp_hess) =
+        dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
+    let dp = unpenalized_residual + penalized_residual;
     TermDerivs {
         value: 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp / nu).ln()),
         grad: 0.5 * nu * dp_grad / dp,
@@ -507,7 +553,7 @@ pub fn gaussian_reml_point_eval_at_rho(
     )?;
     let eval = prepared.evaluate(rho);
     let coefficients = prepared.coefficients(lambda).column(0).to_owned();
-    let sigma2 = prepared.sigma2(lambda)[0];
+    let sigma2 = prepared.sigma2(rho)[0];
     Ok(GaussianRemlPointEval {
         rho,
         lambda,
@@ -1995,7 +2041,7 @@ fn gaussian_reml_multi_closed_form_from_parts(
         .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
     let coefficients = prepared.coefficients(lambda);
     let fitted = dense_ab(x, coefficients.view());
-    let sigma2 = prepared.sigma2(lambda);
+    let sigma2 = prepared.sigma2(rho);
     let (reml_grad_lambda, reml_hess_lambda) =
         rho_derivatives_to_lambda(lambda, eval.grad, eval.hess);
     Ok(GaussianRemlMultiResult {
@@ -3635,15 +3681,22 @@ impl GaussianRemlPrepared {
         dense_ab(self.cache.coefficient_basis.view(), scaled.view())
     }
 
-    fn sigma2(&self, lambda: f64) -> Array1<f64> {
+    /// Profiled dispersion `σ̂²_j = dp_j(ρ̂)/ν`, through the same cancellation-free
+    /// decomposition the objective, the domain check and the enclosure use (see
+    /// [`dispersion_residual_parts`]). Computing it as `ywy − Σ c²/(1+λδ)`
+    /// returns exactly `0` on a design that interpolates its response, which
+    /// would propagate a zero scale into every downstream covariance.
+    fn sigma2(&self, rho: f64) -> Array1<f64> {
         let nu = self.nu();
         Array1::from_iter((0..self.n_outputs).map(|j| {
-            let mut fitted_quadratic = 0.0;
-            for i in 0..self.cache.penalty_eigenvalues.len() {
-                let denom = 1.0 + lambda * self.cache.penalty_eigenvalues[i];
-                fitted_quadratic += self.projected_rhs_squared[[i, j]] / denom;
-            }
-            (self.ywy[j] - fitted_quadratic) / nu
+            let (unpenalized_residual, penalized_residual, _, _) = dispersion_residual_parts(
+                &self.cache,
+                self.ywy.view(),
+                self.projected_rhs_squared.view(),
+                j,
+                rho,
+            );
+            (unpenalized_residual + penalized_residual) / nu
         }))
     }
 }
@@ -3661,12 +3714,13 @@ fn validate_reml_profile_residuals(
     rho: f64,
 ) -> Result<(), EstimationError> {
     for output in 0..ywy.len() {
-        let mut fitted_quadratic = 0.0;
-        for eig in 0..cache.penalty_eigenvalues.len() {
-            fitted_quadratic += projected_rhs_squared[[eig, output]]
-                * modal_kernels(rho, cache.penalty_eigenvalues[eig]).v;
-        }
-        let residual = ywy[output] - fitted_quadratic;
+        // Same `r0 + Σ c²·u` decomposition the evaluator and the enclosure use.
+        // Checking the domain through the cancelling form while the search
+        // evaluates the stable one lets a fit be refused for a residual that is
+        // strictly positive, or admitted for one that is not.
+        let (unpenalized_residual, penalized_residual, _, _) =
+            dispersion_residual_parts(cache, ywy, projected_rhs_squared, output, rho);
+        let residual = unpenalized_residual + penalized_residual;
         if !(residual.is_finite() && residual > 0.0) {
             return Err(EstimationError::InvalidInput(format!(
                 "Gaussian REML profiled residual {output} is not strictly positive at rho={rho}: {residual}; the profiled dispersion has no finite value"
@@ -3889,16 +3943,19 @@ fn conservative_interval(lo: f64, hi: f64, magnitude: f64, operations: usize) ->
     }
 }
 
-/// Analytic per-eigenvalue ranges of the four `V′`/`V″` kernels over a monotone
+/// Analytic per-eigenvalue ranges of the `V′`/`V″` kernels over a monotone
 /// log-`t` window. See the module derivation above:
-/// `u=t/(1+t)` ↑, `v=1/(1+t)` ↓, `w=t/(1+t)²` unimodal (peak ¼ at t=1),
+/// `u=t/(1+t)` ↑, `w=t/(1+t)²` unimodal (peak ¼ at t=1),
 /// `k=t(1−t)/(1+t)³` with interior extrema at t = 2 ± √3.
+///
+/// `v=1/(1+t)` is deliberately absent: the residual deviance is enclosed through
+/// `dp = r0 + Σ c²·u`, never through the cancelling `dp = ywy − Σ c²·v`, so no
+/// consumer needs the `v` range and carrying it would invite the cancelling form
+/// back in.
 #[derive(Clone, Copy)]
 struct KernelRange {
     u_lo: f64,
     u_hi: f64,
-    v_lo: f64,
-    v_hi: f64,
     w_lo: f64,
     w_hi: f64,
     k_lo: f64,
@@ -3914,8 +3971,6 @@ fn kernel_ranges(log_t_lo: f64, log_t_hi: f64) -> KernelRange {
     // retains the finite limiting values when exp(log_t) is not representable.
     let u_lo = left.u;
     let u_hi = right.u;
-    let v_lo = right.v;
-    let v_hi = left.v;
 
     // t/(1+t)² unimodal, single interior peak ¼ at t=1.
     let w_a = left.w;
@@ -3948,8 +4003,6 @@ fn kernel_ranges(log_t_lo: f64, log_t_hi: f64) -> KernelRange {
     KernelRange {
         u_lo: round_down(u_lo).max(0.0),
         u_hi: round_up(u_hi),
-        v_lo: round_down(v_lo).max(0.0),
-        v_hi: round_up(v_hi),
         w_lo: round_down(w_lo).max(0.0),
         w_hi: round_up(w_hi),
         k_lo: round_down(k_lo),
@@ -4031,8 +4084,10 @@ fn reml_deriv_enclosure_profile(
     for j in 0..ywy.len() {
         let mut num_lo = 0.0; // Σ c² · w   (= dp′, ≥ 0)
         let mut num_hi = 0.0;
-        let mut sv_lo = 0.0; // Σ c² · v
-        let mut sv_hi = 0.0;
+        let mut su_lo = 0.0; // Σ c² · u   (the ρ-dependent part of dp, ≥ 0)
+        let mut su_hi = 0.0;
+        let mut c2_lo = 0.0; // Σ c², the ρ-INDEPENDENT half of dp's decomposition
+        let mut c2_hi = 0.0;
         let mut dph_lo = 0.0; // Σ c² · k   (= dp″, sign-indefinite)
         let mut dph_hi = 0.0;
         for eig in 0..cache.penalty_eigenvalues.len() {
@@ -4053,27 +4108,39 @@ fn reml_deriv_enclosure_profile(
             ) else {
                 return (Interval::entire(), Interval::entire());
             };
-            let Some(v_product) = nonnegative_product_interval(
+            let Some(u_product) = nonnegative_product_interval(
                 c2,
                 Interval {
-                    lo: kr.v_lo,
-                    hi: kr.v_hi,
+                    lo: kr.u_lo,
+                    hi: kr.u_hi,
                 },
             ) else {
                 return (Interval::entire(), Interval::entire());
             };
             num_lo = add_down(num_lo, w_product.lo);
             num_hi = add_up(num_hi, w_product.hi);
-            sv_lo = add_down(sv_lo, v_product.lo);
-            sv_hi = add_up(sv_hi, v_product.hi);
+            su_lo = add_down(su_lo, u_product.lo);
+            su_hi = add_up(su_hi, u_product.hi);
+            c2_lo = add_down(c2_lo, c2);
+            c2_hi = add_up(c2_hi, c2);
             dph_lo = add_down(dph_lo, round_down(c2 * kr.k_lo));
             dph_hi = add_up(dph_hi, round_up(c2 * kr.k_hi));
         }
-        // dp is monotone increasing. A non-positive conservative lower bound
-        // means the profiled log residual cannot be certified on this cell;
-        // never replace that mathematical failure with a tiny positive floor.
-        let dp_lo = round_down(ywy[j] - sv_hi);
-        let dp_hi = round_up(ywy[j] - sv_lo);
+        // dp is monotone increasing, and it is enclosed through the SAME
+        // `r0 + Σ c²·u` decomposition the evaluator uses (see
+        // `dispersion_residual_parts`). Bounding the cancelling form
+        // `ywy − Σ c²·v` instead put the whole quantity below the cancellation
+        // floor on a saturated design: the outward-rounded `Σ c²·v` reaches
+        // `ywy` near the small-λ end even though the true `dp` is positive
+        // there, the bound goes non-positive, and the enclosure collapses to the
+        // entire line — a cell that can be neither pruned nor certified monotone
+        // and therefore must split. In the summed form the ρ-dependent part is a
+        // sum of non-negatives and the only cancellation left sits in `r0`,
+        // which is ρ-independent and therefore identical in every cell.
+        let r0_lo = round_down(ywy[j] - c2_hi).max(0.0);
+        let r0_hi = round_up(ywy[j] - c2_lo).max(r0_lo);
+        let dp_lo = add_down(r0_lo, su_lo);
+        let dp_hi = add_up(r0_hi, su_hi);
         if !(dp_lo.is_finite() && dp_hi.is_finite() && dp_lo > 0.0 && dp_hi >= dp_lo) {
             return (Interval::entire(), Interval::entire());
         }
@@ -4304,6 +4371,76 @@ fn refine_stationary_rho_core(
     }
 }
 
+/// Intersection of two sound enclosures of the same quantity.
+///
+/// Both arguments contain the true range, so the intersection does too. A
+/// non-finite endpoint on one side simply lets the other side govern.
+fn intersect_intervals(left: Interval, right: Interval) -> Interval {
+    let lo = if right.lo.is_nan() { left.lo } else { left.lo.max(right.lo) };
+    let hi = if right.hi.is_nan() { left.hi } else { left.hi.min(right.hi) };
+    if lo > hi { left } else { Interval { lo, hi } }
+}
+
+/// Mean-value enclosure of `V′` over a cell of width `h`, from the EXACT
+/// endpoint derivatives and a sound enclosure of `V″`.
+///
+/// For any `ρ ∈ [a, b]`, `V′(ρ) = V′(a) + V″(ξ)·(ρ − a)` for some `ξ` in the
+/// cell, and `ρ − a ∈ [0, h]`, so
+/// `V′(ρ) ∈ [V′(a) + min(0, curvature.lo·h), V′(a) + max(0, curvature.hi·h)]`.
+/// The same holds anchored at `b` with `ρ − b ∈ [−h, 0]`. Taking the tighter of
+/// the two anchors costs nothing and both are rounded outward.
+///
+/// Its width is `(curvature.hi − curvature.lo)·h`, which vanishes with the cell.
+/// That is the property the direct ratio enclosure lacks (gam#2585).
+fn mean_value_derivative_enclosure(
+    at_a: Interval,
+    at_b: Interval,
+    curvature: Interval,
+    h: f64,
+) -> Interval {
+    if !(h.is_finite()
+        && h >= 0.0
+        && curvature.lo.is_finite()
+        && curvature.hi.is_finite()
+        && at_a.lo.is_finite()
+        && at_a.hi.is_finite()
+        && at_b.lo.is_finite()
+        && at_b.hi.is_finite())
+    {
+        return Interval::entire();
+    }
+    let down = round_down(curvature.lo * h).min(0.0);
+    let up = round_up(curvature.hi * h).max(0.0);
+    let from_a = Interval {
+        lo: round_down(at_a.lo + down),
+        hi: round_up(at_a.hi + up),
+    };
+    let from_b = Interval {
+        lo: round_down(at_b.lo - up),
+        hi: round_up(at_b.hi - down),
+    };
+    intersect_intervals(from_a, from_b)
+}
+
+/// Widen an enclosure until it also covers the evaluator's own endpoint values.
+///
+/// A superset of a sound enclosure is still sound, and the DFS audits every cell
+/// by requiring the computed endpoint jets to lie inside the derivative
+/// enclosure. Tightening can only make that audit harder to satisfy, so the
+/// tightened interval is extended to cover them: the pruning decision then needs
+/// the true range AND both computed endpoints to share a sign, which is strictly
+/// more conservative than either alone.
+fn widen_to_include(interval: Interval, first: f64, second: f64) -> Interval {
+    let mut out = interval;
+    for value in [first, second] {
+        if value.is_finite() {
+            out.lo = out.lo.min(value);
+            out.hi = out.hi.max(value);
+        }
+    }
+    out
+}
+
 fn interval_contains(interval: Interval, value: f64) -> bool {
     value.is_finite() && interval.lo <= value && value <= interval.hi
 }
@@ -4331,11 +4468,19 @@ fn enumerate_and_select_rho_with_controls(
     // subdivides hardest that redundancy was two thirds of the evaluation work.
     // `eval` is a deterministic function of ρ over borrowed data, so the reused
     // jets are bit-identical to the recomputed ones (#2585).
+    // Each endpoint also carries a POINT enclosure of `V′` there — `enclose(x, x)`
+    // — which has no cell-width looseness at all, only the roundoff budget. It is
+    // the anchor of the mean-value tightening below, and is cached on the stack
+    // for the same reason the jets are: a bisection introduces exactly one new ρ.
+    let lower_point = enclose(controls.lower, controls.lower).0;
+    let upper_point = enclose(controls.upper, controls.upper).0;
     let mut stack = [(
         controls.lower,
         lower_eval,
+        lower_point,
         controls.upper,
         upper_eval,
+        upper_point,
         0usize,
     ); CAP];
     let mut top = 1usize;
@@ -4357,10 +4502,40 @@ fn enumerate_and_select_rho_with_controls(
 
     while top > 0 {
         top -= 1;
-        let (a, ea, b, eb, depth) = stack[top];
+        let (a, ea, pa, b, eb, pb, depth) = stack[top];
         cells_visited += 1;
         deepest = deepest.max(depth);
-        let (dv, dvv) = enclose(a, b);
+        let (direct_dv, dvv) = enclose(a, b);
+        // Mean-value tightening of the FIRST-derivative enclosure.
+        //
+        // The direct enclosure bounds `V′ = g1 + ½ν·(dp′/dp)` by bounding the
+        // ratio's numerator and denominator independently. Each is tight to the
+        // cell width `h`, but their ratio then inherits `≈ 2h` of RELATIVE
+        // slack, and `½ν` multiplies it: the enclosure's width floors at `≈ ν·h`
+        // no matter how accurate the pieces are. Where `V′` itself is far
+        // smaller than `ν·h` — the whole small-λ stretch of a saturated design,
+        // whose `V′` decays like `e^ρ` — no cell can be pruned until
+        // `h ≲ |V′|/ν`, so the search bisects a wide band of ρ down to `~1e−6`
+        // and visits `∫ν/|V′| dρ ≈ 10⁷–10⁸` cells (gam#2585: measured 10⁶ cells
+        // per 164 s, all at depth 25, marching left to right across the window).
+        //
+        // But `V′` is differentiable on the cell with `V″` inside `dvv`, and
+        // both exact endpoint jets are already in hand, so the mean value
+        // theorem gives a second sound enclosure whose width is
+        // `(dvv.hi − dvv.lo)·h` — proportional to the CURVATURE spread rather
+        // than to `ν`, and therefore vanishing with the cell. Intersecting two
+        // sound enclosures is sound, and both endpoint jets lie in the
+        // intersection by construction, so the containment audit below is
+        // unaffected. Nothing new is computed: `ea`, `eb` and `dvv` are already
+        // on hand at this point.
+        let dv = widen_to_include(
+            intersect_intervals(
+                direct_dv,
+                mean_value_derivative_enclosure(pa, pb, dvv, b - a),
+            ),
+            ea.grad,
+            eb.grad,
+        );
         if !(dv.lo.is_finite() && dv.hi.is_finite()) {
             unbounded_enclosures += 1;
         }
@@ -4431,10 +4606,11 @@ fn enumerate_and_select_rho_with_controls(
             ));
         }
         let emid = eval(mid);
+        let pmid = enclose(mid, mid).0;
         evaluations += 1;
-        stack[top] = (mid, emid, b, eb, depth + 1);
+        stack[top] = (mid, emid, pmid, b, eb, pb, depth + 1);
         top += 1;
-        stack[top] = (a, ea, mid, emid, depth + 1);
+        stack[top] = (a, ea, pa, mid, emid, pmid, depth + 1);
         top += 1;
     }
     log::info!(
@@ -5020,6 +5196,116 @@ mod tests {
         assert!((fit.lambda - 1.0).abs() <= 1.0e-9);
         assert!((fit.coefficients[0] - 0.5).abs() <= 1.0e-9);
         assert!((fit.sigma2 - 0.5).abs() <= 1.0e-9);
+    }
+
+    /// gam#2585: a SATURATED design (`p = n`, zero residual degrees of freedom)
+    /// must not lose its profiled residual to cancellation.
+    ///
+    /// With `X = I_n` the unpenalized fit interpolates, so `r0 = ywy − Σ c²` is
+    /// exactly `0` and the whole profiled residual is `dp(ρ) = Σ c²·u(ρ)`. At the
+    /// ρ window's small-λ end that is tiny but strictly positive — here
+    /// `u ≈ 9.4e−17`, small enough that `v = 1 − u` rounds to exactly `1.0`.
+    /// Computing `dp` as the DIFFERENCE `ywy − Σ c²·v` therefore returns `0` (or
+    /// a negative rounding artefact) and destroys the quantity outright: the
+    /// domain check refuses the fit, and the interval enclosure collapses to the
+    /// entire line, which the branch-and-bound can neither prune nor certify
+    /// monotone and must therefore split.
+    ///
+    /// The summed decomposition `dp = r0 + Σ c²·u` has no cancellation in its
+    /// ρ-dependent part, so both survive. Pinned here on both halves: the fit
+    /// completes, and the leftmost cell's enclosure is finite AND contains the
+    /// endpoint jets the evaluator actually produces — a tight enclosure that
+    /// excluded them would be worse than a wide one.
+    #[test]
+    fn saturated_design_keeps_a_finite_small_lambda_enclosure_2585() {
+        let n = 8usize;
+        let mut x = Array2::<f64>::zeros((n, n));
+        for i in 0..n {
+            x[[i, i]] = 1.0;
+        }
+        let y =
+            Array2::from_shape_vec((n, 1), vec![0.7, -1.3, 2.1, 0.4, -0.9, 1.6, -0.2, 1.1])
+                .expect("saturated response");
+        // Small penalty eigenvalues put the small-λ end of the window deep
+        // enough that `1 − u` is not representable: `u ≈ e^(−30)·1e−3`.
+        let mut penalty = Array2::<f64>::zeros((n, n));
+        for i in 0..n - 1 {
+            penalty[[i, i]] = 1.0e-3;
+        }
+
+        let prepared =
+            prepare_gaussian_reml(x.view(), y.view(), penalty.view(), None, None, None)
+                .expect("saturated design must still prepare");
+
+        let a = RHO_LOWER;
+        let b = RHO_LOWER + 1.0e-3;
+        let (dv, dvv) = reml_deriv_enclosure(
+            &prepared.cache,
+            prepared.ywy.view(),
+            prepared.projected_rhs_squared.view(),
+            prepared.n_effective,
+            prepared.n_outputs,
+            a,
+            b,
+        );
+        assert!(
+            dv.lo.is_finite() && dv.hi.is_finite(),
+            "saturated small-lambda cell produced an unbounded V' enclosure [{}, {}]",
+            dv.lo,
+            dv.hi
+        );
+        assert!(
+            dvv.lo.is_finite() && dvv.hi.is_finite(),
+            "saturated small-lambda cell produced an unbounded V'' enclosure [{}, {}]",
+            dvv.lo,
+            dvv.hi
+        );
+        for rho in [a, b] {
+            let jet = prepared.evaluate(rho);
+            assert!(
+                interval_contains(dv, jet.grad),
+                "V' enclosure [{}, {}] missed the endpoint gradient {} at rho={rho}",
+                dv.lo,
+                dv.hi,
+                jet.grad
+            );
+            assert!(
+                interval_contains(dvv, jet.hess),
+                "V'' enclosure [{}, {}] missed the endpoint curvature {} at rho={rho}",
+                dvv.lo,
+                dvv.hi,
+                jet.hess
+            );
+        }
+
+        // The profiled objective itself must stay defined at the window edge.
+        // Through the cancelling difference this is exactly `0` — `v` rounds to
+        // `1.0`, `Σ c²·v` reaches `ywy`, and `log(dp)` is `-inf`; through the
+        // summed decomposition it is small but finite, so the cost, gradient and
+        // curvature are all real numbers.
+        let edge = prepared.evaluate(RHO_LOWER);
+        assert!(
+            edge.cost.is_finite() && edge.grad.is_finite() && edge.hess.is_finite(),
+            "saturated small-lambda jet is not finite: cost={} grad={} hess={}",
+            edge.cost,
+            edge.grad,
+            edge.hess
+        );
+        let sigma2 = prepared.sigma2(RHO_LOWER);
+        assert!(
+            sigma2.iter().all(|v| v.is_finite() && *v > 0.0),
+            "saturated profiled dispersion collapsed to {sigma2:?}"
+        );
+
+        // Deliberately NOT asserted: that the certified search returns a ρ̂ here.
+        // `p = n` forces `penalty_rank = p − nullity = n − nullity = ν`, and with
+        // that equality `V′(ρ) → ½(ν − rank) = 0` as ρ → −∞ identically. On this
+        // 8×8 fixture `V′(−30)` is 4e−16 — the profile is stationary at the
+        // window edge to machine precision, so no enclosure can certify a sign
+        // and a typed refusal is the honest verdict. That is a statement about
+        // the estimand, not about this file's arithmetic, and it is the reason
+        // the assertions above are about the ENCLOSURE and the JET rather than
+        // about a returned λ̂.
     }
 
     /// Profiling must be invariant to both gauges of the same penalized
