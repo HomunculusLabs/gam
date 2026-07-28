@@ -45,6 +45,10 @@ on:
         description: "Space-separated R packages to install before the run (e.g. 'nnet mgcv'). Empty = no R. A reference-quality test whose comparator is missing reports REFERENCE_ENV_MISSING and is NOT MEASURED, which is not a statement about gam."
         default: ""
         required: false
+      base_sha:
+        description: "Optional commit to check out INSTEAD of the dispatch ref. Use to run the identical filters on two commits for attribution; leave empty for the branch tip."
+        default: ""
+        required: false
 
 concurrency:
   group: focused-rust-proof-${{ github.event.inputs.issue }}-${{ github.event.inputs.package }}
@@ -114,6 +118,19 @@ jobs:
         with:
           # build.rs's human-author gate needs real history.
           fetch-depth: 0
+
+      # Attribution needs two arms that differ by ONE commit and share
+      # everything else -- same runner image, same toolchain, same filters.
+      # Re-dispatching against a tip that has since moved does not give that,
+      # and a stale local tree gives it even less. Checking out an explicit
+      # commit here keeps both arms inside this one workflow definition.
+      - name: Pin the arm to an explicit commit
+        if: ${{ github.event.inputs.base_sha != '' }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ github.event.inputs.base_sha }}"
+          echo "arm pinned to $(git rev-parse HEAD)"
+          git --no-pager log -1 --format='%h %s' HEAD
 
       # A reference-quality test calls its comparator through Rscript. Without R
       # the harness raises REFERENCE_ENV_MISSING and says so in as many words:
