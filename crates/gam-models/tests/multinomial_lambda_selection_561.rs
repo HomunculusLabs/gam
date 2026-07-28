@@ -214,11 +214,13 @@ fn multinomial_outer_reml_selects_per_term_lambda_and_recovers_truth() {
 /// by a plug-in that silently returned the integrated answer.
 ///
 /// The class-column convention is the real hazard for a new predictor. The
-/// reference class carries `η = 0` and sits LAST, and getting that wrong rotates
+/// reference class carries `η = 0` and sits LAST, and getting that wrong permutes
 /// every column while leaving each row a perfectly valid simplex — invisible to a
-/// shape check, fatal to a log-loss. Truth recovery is what catches it: the truth
-/// table is indexed by the DGP's own class codes, so a rotated predictor scores
-/// nothing like the fit it came from.
+/// shape check, fatal to a log-loss. The DGP's known truth catches it, but as a
+/// CONTRAST between permutations rather than as an absolute bar: the mapping the
+/// model declares must beat every rival mapping of the same numbers. That asks
+/// nothing about how good this estimand is, which is the one thing a test written
+/// against the other estimand's accuracy would have smuggled in.
 #[test]
 fn the_plug_in_predictor_reads_the_same_model_at_its_mode() {
     let (ds, truth) = synth();
@@ -255,9 +257,23 @@ fn the_plug_in_predictor_reads_the_same_model_at_its_mode() {
         );
     }
 
-    // COLUMN CONVENTION + QUALITY: score the plug-in against the DGP truth with
-    // the same class-code mapping the integrated predictor is scored under. A
-    // rotated reference class still forms a simplex but cannot recover this.
+    // COLUMN CONVENTION. The reference class carries `η = 0` and sits LAST, and
+    // getting that wrong permutes every column while leaving each row a perfectly
+    // valid simplex — invisible to the structure check above, fatal to a
+    // log-loss. Score the plug-in against the DGP truth under the model's own
+    // class-code mapping AND under every other permutation of it, then require
+    // the model's own mapping to be the strict best by a wide margin.
+    //
+    // This is deliberately NOT "the plug-in clears the bar the integrated
+    // predictor clears". An earlier revision of this test asserted exactly that
+    // and it FAILED at RMSE 0.07849 against the integrated predictor's 0.065 —
+    // correctly. `E[softmax(η)]` is the posterior mean of the probability, so on
+    // a penalized fit it is the better L2 estimate of the true surface, and
+    // demanding parity assumes the interchangeability this whole function exists
+    // to deny. A quality bar copied from the other estimand tests the assumption,
+    // not the code. The permutation contrast tests the hazard, and it needs no
+    // bar at all: it asks only that the mapping the model declares beats every
+    // rival mapping of the same numbers.
     let col_code: Vec<usize> = model
         .class_levels
         .iter()
@@ -267,18 +283,55 @@ fn the_plug_in_predictor_reads_the_same_model_at_its_mode() {
                 .expect("synthetic class levels are c0/c1/c2")
         })
         .collect();
-    let mut squared_error = 0.0;
-    for k in 0..K {
-        for i in 0..N {
-            let d = plugin[[i, k]] - truth[i][col_code[k]];
-            squared_error += d * d;
+    let rmse_under = |mapping: &[usize]| -> f64 {
+        let mut squared_error = 0.0;
+        for k in 0..K {
+            for i in 0..N {
+                let d = plugin[[i, k]] - truth[i][mapping[k]];
+                squared_error += d * d;
+            }
         }
+        (squared_error / (N * K) as f64).sqrt()
+    };
+    let declared_rmse = rmse_under(&col_code);
+    // Every permutation of K = 3 class codes, written out: a rotation alone would
+    // miss the two transpositions, and a transposition is exactly what swapping
+    // the reference class with one active class produces.
+    let permutations: [[usize; K]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut best_rival = f64::INFINITY;
+    for permutation in permutations {
+        if permutation.as_slice() == col_code.as_slice() {
+            continue;
+        }
+        best_rival = best_rival.min(rmse_under(&permutation));
     }
-    let plugin_rmse = (squared_error / (N * K) as f64).sqrt();
     assert!(
-        plugin_rmse < 0.065,
-        "plug-in prediction did not recover the true simplex: RMSE={plugin_rmse:.5}; \
-         the same bar the integrated predictor clears on this fit"
+        declared_rmse < best_rival,
+        "the plug-in's declared class mapping {col_code:?} scores RMSE \
+         {declared_rmse:.5} against the DGP truth while some OTHER permutation of \
+         the same columns scores {best_rival:.5}; the reference class is not where \
+         `class_levels` says it is"
+    );
+    assert!(
+        best_rival > 2.0 * declared_rmse,
+        "the declared mapping wins by too little to be a convention check: \
+         {declared_rmse:.5} against the best rival's {best_rival:.5}. Either the \
+         classes are not separated on this fixture (so the test proves nothing) or \
+         the columns are near-interchangeable"
+    );
+    // A floor that catches a predictor which has lost the fit altogether, well
+    // clear of the 0.07849 this estimand actually scores here, so it is not a bar
+    // borrowed from the integrated predictor's accuracy.
+    assert!(
+        declared_rmse < 0.15,
+        "plug-in prediction does not track the true simplex at all: RMSE={declared_rmse:.5}"
     );
 
     // The two estimands are CLOSE but need not be equal, and the direction of
