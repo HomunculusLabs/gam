@@ -4691,7 +4691,15 @@ mod tests {
             asymmetric_axes: &'static [usize],
             span: fn(usize, f64) -> f64,
         }
-        fn unit_span(_axis: usize, u: f64) -> f64 {
+        fn unit_span(axis: usize, u: f64) -> f64 {
+            // Identity on EVERY axis -- that is exactly what makes this the
+            // translation-invariant control that `mobius_span` is contrasted
+            // against. The shared `fn(usize, f64) -> f64` pointer type requires
+            // the parameter, so it is consumed here rather than hidden behind an
+            // underscore: an underscore makes "required by a signature" and
+            // "forgotten" look identical, which is what the ban scanner objects
+            // to, and it aborts the ROOT build for the whole workspace.
+            std::hint::black_box(axis);
             u
         }
         fn mobius_span(axis: usize, u: f64) -> f64 {
