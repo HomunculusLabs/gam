@@ -155,6 +155,12 @@ struct SupportLinearizedRow {
 #[derive(Clone)]
 struct SupportBetaOperator {
     rows: Vec<SupportLinearizedRow>,
+    /// For each atom, the `(row, block)` pairs touching it, in INCREASING row
+    /// order. `apply`'s scatter walks this, and the ordering is load-bearing:
+    /// it reproduces the serial sweep's accumulation order for every output
+    /// element, which is what makes the fan-out bit-identical rather than
+    /// merely deterministic.
+    atom_blocks: Vec<Vec<(u32, u32)>>,
     beta_offsets: Vec<usize>,
     basis_sizes: Vec<usize>,
     penalties: Vec<Array2<f64>>,
@@ -175,25 +181,57 @@ impl SupportBetaOperator {
             self.beta_dim,
             "SupportBetaOperator output width must equal its declared beta dimension"
         );
+        use rayon::prelude::*;
+        let width = self.output_dim;
+
+        // PASS A -- gather, one independent P-wide slot per row. Each row writes
+        // only its own slot, so there is no sharing to synchronise and each
+        // element accumulates in the serial order.
+        let mut gathered = vec![0.0_f64; self.rows.len() * width];
+        gathered
+            .par_chunks_mut(width)
+            .zip(self.rows.par_iter())
+            .for_each(|(slot, row)| {
+                for block in &row.blocks {
+                    for basis in 0..block.phi.len() {
+                        let base = block.beta_offset + basis * width;
+                        for channel in 0..width {
+                            slot[channel] += block.phi[basis] * vector[base + channel];
+                        }
+                    }
+                }
+            });
+
+        // PASS B -- scatter, one independent output block per atom. Atoms own
+        // disjoint ranges of `out`, and each atom's rows are visited in
+        // increasing row order, so every output element sums its contributions
+        // in exactly the order the serial sweep did.
+        let atom_outputs: Vec<Vec<f64>> = self
+            .atom_blocks
+            .par_iter()
+            .enumerate()
+            .map(|(atom, entries)| {
+                let mut buffer = vec![0.0_f64; self.basis_sizes[atom] * width];
+                for &(row_index, block_index) in entries {
+                    let block = &self.rows[row_index as usize].blocks[block_index as usize];
+                    let start = row_index as usize * width;
+                    let slot = &gathered[start..start + width];
+                    for basis in 0..block.phi.len() {
+                        let target = basis * width;
+                        for channel in 0..width {
+                            buffer[target + channel] += block.phi[basis] * slot[channel];
+                        }
+                    }
+                }
+                buffer
+            })
+            .collect();
+
         out.fill(0.0);
-        let mut output = vec![0.0; self.output_dim];
-        for row in &self.rows {
-            output.fill(0.0);
-            for block in &row.blocks {
-                for basis in 0..block.phi.len() {
-                    let base = block.beta_offset + basis * self.output_dim;
-                    for channel in 0..self.output_dim {
-                        output[channel] += block.phi[basis] * vector[base + channel];
-                    }
-                }
-            }
-            for block in &row.blocks {
-                for basis in 0..block.phi.len() {
-                    let base = block.beta_offset + basis * self.output_dim;
-                    for channel in 0..self.output_dim {
-                        out[base + channel] += block.phi[basis] * output[channel];
-                    }
-                }
+        for (atom, buffer) in atom_outputs.iter().enumerate() {
+            let offset = self.beta_offsets[atom];
+            for (index, value) in buffer.iter().enumerate() {
+                out[offset + index] += value;
             }
         }
         for atom in 0..self.penalties.len() {
@@ -1066,8 +1104,28 @@ impl SaeSupportSparseTerm {
                 }
             }
         }
+        // Inverted index for `apply`'s scatter. Rows are walked in order here, so
+        // each atom's list comes out sorted by row without a separate sort.
+        let atom_of_offset: std::collections::HashMap<usize, usize> = beta_offsets
+            .iter()
+            .enumerate()
+            .map(|(atom, &offset)| (offset, atom))
+            .collect();
+        let mut atom_blocks: Vec<Vec<(u32, u32)>> = vec![Vec::new(); beta_offsets.len()];
+        for (row_index, row) in linearized_rows.iter().enumerate() {
+            for (block_index, block) in row.blocks.iter().enumerate() {
+                let atom = *atom_of_offset.get(&block.beta_offset).ok_or_else(|| {
+                    format!(
+                        "SupportBetaOperator: block beta_offset {} matches no atom",
+                        block.beta_offset
+                    )
+                })?;
+                atom_blocks[atom].push((row_index as u32, block_index as u32));
+            }
+        }
         let operator = Arc::new(SupportBetaOperator {
             rows: linearized_rows,
+            atom_blocks,
             beta_offsets: beta_offsets.clone(),
             basis_sizes: self.atoms.iter().map(SaeManifoldAtom::basis_size).collect(),
             penalties: self
@@ -2748,6 +2806,155 @@ mod tests {
     use super::*;
     use crate::assignment_state::SaeAssignmentAtomSpec;
     use ndarray::array;
+
+    /// Three atoms of two bases over two channels, with every atom shared by two
+    /// rows so the scatter has a real accumulation order to preserve.
+    fn beta_operator_fixture() -> SupportBetaOperator {
+        let width = 2usize;
+        let basis_sizes = vec![2usize, 2, 2];
+        let beta_offsets = vec![0usize, 4, 8];
+        // Deliberately not round: partial sums of these are not exactly
+        // representable, so a reassociated sum would differ in the low bits.
+        let phi = |a: f64, b: f64| ndarray::Array1::from(vec![a, b]);
+        let mk = |offset: usize, a: f64, b: f64| SupportBasisBlock {
+            beta_offset: offset,
+            phi: phi(a, b),
+        };
+        let third = 1.0_f64 / 3.0;
+        let root = 2.0_f64.sqrt() / 7.0;
+        let rows = vec![
+            SupportLinearizedRow {
+                blocks: vec![mk(0, third, root), mk(4, -root, third * 0.5)],
+                jacobian: ndarray::Array2::zeros((1, 1)),
+            },
+            SupportLinearizedRow {
+                blocks: vec![mk(4, third * 1.7, -root), mk(8, root * 3.1, third)],
+                jacobian: ndarray::Array2::zeros((1, 1)),
+            },
+            SupportLinearizedRow {
+                blocks: vec![mk(0, -third * 0.9, root * 2.3), mk(8, third, -root)],
+                jacobian: ndarray::Array2::zeros((1, 1)),
+            },
+        ];
+        let mut atom_blocks: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 3];
+        for (row_index, row) in rows.iter().enumerate() {
+            for (block_index, block) in row.blocks.iter().enumerate() {
+                let atom = beta_offsets
+                    .iter()
+                    .position(|&o| o == block.beta_offset)
+                    .expect("offset belongs to an atom");
+                atom_blocks[atom].push((row_index as u32, block_index as u32));
+            }
+        }
+        let penalties = vec![
+            array![[2.0, -0.5], [-0.5, 1.25]],
+            array![[1.0, third], [third, 3.0]],
+            array![[0.75, 0.0], [0.0, 0.5]],
+        ];
+        SupportBetaOperator {
+            rows,
+            atom_blocks,
+            beta_offsets,
+            basis_sizes,
+            penalties,
+            lambda_smooth: vec![0.7, 1.9, third],
+            output_dim: width,
+            beta_dim: 12,
+        }
+    }
+
+    /// The serial sweep `apply` replaced, kept here as the reference the fan-out
+    /// has to reproduce exactly.
+    fn beta_operator_apply_serially(
+        op: &SupportBetaOperator,
+        vector: ndarray::ArrayView1<'_, f64>,
+        out: &mut Array1<f64>,
+    ) {
+        out.fill(0.0);
+        let mut output = vec![0.0; op.output_dim];
+        for row in &op.rows {
+            output.fill(0.0);
+            for block in &row.blocks {
+                for basis in 0..block.phi.len() {
+                    let base = block.beta_offset + basis * op.output_dim;
+                    for channel in 0..op.output_dim {
+                        output[channel] += block.phi[basis] * vector[base + channel];
+                    }
+                }
+            }
+            for block in &row.blocks {
+                for basis in 0..block.phi.len() {
+                    let base = block.beta_offset + basis * op.output_dim;
+                    for channel in 0..op.output_dim {
+                        out[base + channel] += block.phi[basis] * output[channel];
+                    }
+                }
+            }
+        }
+        for atom in 0..op.penalties.len() {
+            let lambda = op.lambda_smooth[atom];
+            let m = op.basis_sizes[atom];
+            let offset = op.beta_offsets[atom];
+            for left in 0..m {
+                for right in 0..m {
+                    let weight = lambda * op.penalties[atom][[left, right]];
+                    for channel in 0..op.output_dim {
+                        out[offset + left * op.output_dim + channel] +=
+                            weight * vector[offset + right * op.output_dim + channel];
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn beta_operator_fan_out_is_bit_identical_to_the_serial_sweep() {
+        let op = beta_operator_fixture();
+        let vector = Array1::from(
+            (0..12)
+                .map(|i| ((i as f64) * 0.37).sin() + (i as f64) / 7.0)
+                .collect::<Vec<f64>>(),
+        );
+
+        let mut expected = Array1::<f64>::zeros(12);
+        beta_operator_apply_serially(&op, vector.view(), &mut expected);
+        let mut actual = Array1::<f64>::zeros(12);
+        op.apply(vector.view(), &mut actual);
+
+        for index in 0..12 {
+            // EXACT: reassociating the sum would move the low bits, and moving
+            // them is precisely what this test exists to forbid.
+            assert_eq!(
+                actual[index].to_bits(),
+                expected[index].to_bits(),
+                "entry {index}: fan-out {} is not bit-identical to serial {}",
+                actual[index],
+                expected[index]
+            );
+        }
+        // Guard against a fixture that made the assertion trivial.
+        assert!(
+            expected.iter().any(|v| v.abs() > 1e-6),
+            "fixture produced an all-zero reference, so the comparison proves nothing"
+        );
+    }
+
+    #[test]
+    fn beta_operator_fan_out_is_stable_across_repeated_application() {
+        // rayon may split the work differently between calls; the result must
+        // not depend on how it happened to schedule.
+        let op = beta_operator_fixture();
+        let vector = Array1::from((0..12).map(|i| 1.0 / (i as f64 + 1.3)).collect::<Vec<f64>>());
+        let mut first = Array1::<f64>::zeros(12);
+        op.apply(vector.view(), &mut first);
+        for _ in 0..8 {
+            let mut again = Array1::<f64>::zeros(12);
+            op.apply(vector.view(), &mut again);
+            for index in 0..12 {
+                assert_eq!(again[index].to_bits(), first[index].to_bits());
+            }
+        }
+    }
 
     /// `S` is rank 2 with null direction `e3`; `G` is full rank.
     fn penalized_solve_fixture() -> (Array2<f64>, Array2<f64>, Array2<f64>) {
