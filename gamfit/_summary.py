@@ -30,6 +30,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "deviance",
     "reml_score",
     "raw_reml_score",
+    "reml_score_unavailable",
     "null_space_logdet",
     "null_dim",
     "iterations",
@@ -164,8 +165,20 @@ class Summary:
     reml_score : float or None
         Comparable REML / LAML cost at convergence, including the
         rank-aware Tierney-Kadane null-space normalizer when available.
+        ``None`` when the fit has **no** criterion at all rather than one that
+        was not recorded: an exactly-interpolating Gaussian fit has
+        :math:`\hat\varphi = 0`, so its restricted likelihood is unbounded and
+        every score derived from it is undefined.
+        :attr:`reml_score_unavailable` then carries the explanation, and
+        :meth:`Model.evidence` / :func:`gamfit.compare_models` refuse the model
+        by name instead of ranking a stand-in value.
     raw_reml_score : float or None
         Raw outer-loop REML / LAML cost before the null-space normalizer.
+        ``None`` under exactly the condition described for :attr:`reml_score`.
+    reml_score_unavailable : str or None
+        Why this fit has no criterion. Present exactly when
+        :attr:`raw_reml_score` is ``None``, so an absence is never reported
+        without its reason.
     null_space_logdet : float or None
         Log-determinant of the null-space penalty Gram block; used by the
         evidence calculation.
@@ -244,6 +257,7 @@ class Summary:
     deviance: float | None = None
     reml_score: float | None = None
     raw_reml_score: float | None = None
+    reml_score_unavailable: str | None = None
     null_space_logdet: float | None = None
     null_dim: float | None = None
     iterations: int | None = None
@@ -384,6 +398,8 @@ class Summary:
             lines.append(f"  Deviance: {self.deviance:g}")
         if self.reml_score is not None:
             lines.append(f"  REML score: {self.reml_score:g}")
+        elif self.reml_score_unavailable is not None:
+            lines.append("  REML score: none (exact fit; criterion unbounded)")
         if self.edf_total is not None:
             lines.append(f"  Effective dof: {self.edf_total:g}")
         if self.iterations is not None:

@@ -3385,8 +3385,44 @@ impl UnifiedFitResult {
     /// unbounded — see the field documentation. Callers that rank, compare, or
     /// normalize must propagate the absence, not substitute a number for it;
     /// [`Self::require_reml_score`] produces the standard refusal.
+    ///
+    /// The answer is decided by [`Self::at_zero_dispersion_boundary`] and not
+    /// by the stored number alone. Payloads written before the criterion could
+    /// be absent carry `0.0` at that boundary — the placeholder, not a
+    /// criterion — so a legacy model loaded from disk gets the same honest
+    /// answer as a fresh fit, without a migration pass over saved artifacts.
     pub fn reml_score(&self) -> Option<f64> {
         self.reml_score
+            .filter(|_| !self.at_zero_dispersion_boundary())
+    }
+
+    /// `true` at the exact-fit Gaussian boundary: a profiled Gaussian scale
+    /// estimated as exactly zero.
+    ///
+    /// This is the single state in which a fit has neither a normalized
+    /// Lebesgue density nor a REML/LAML criterion — the fitted mean reproduces
+    /// the response, so `φ̂ = 0` and both the full likelihood and the restricted
+    /// likelihood are unbounded. It is DERIVED from the fit's own persisted
+    /// family, scale metadata and `σ̂`, so a model loaded from disk reaches the
+    /// same verdict as the live one, and no separate flag can drift from it.
+    pub fn at_zero_dispersion_boundary(&self) -> bool {
+        self.likelihood_family
+            .as_ref()
+            .is_some_and(|family| family.is_gaussian_identity())
+            && matches!(self.likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
+            && self.standard_deviation == 0.0
+    }
+
+    /// The fit's log-likelihood, or `None` when the fit declined to claim one.
+    ///
+    /// The decline is the same boundary as the criterion's: `log_likelihood`
+    /// carries `0.0` under [`LogLikelihoodNormalization::UserProvided`] there,
+    /// which states that no normalized density exists — a fact a consumer that
+    /// reads the bare `f64` cannot see. Ranking on that zero is how an
+    /// exactly-interpolating fit scores `−2·0 + 2·edf` in a conditional-AIC
+    /// comparison and wins on nothing.
+    pub fn reported_log_likelihood(&self) -> Option<f64> {
+        (!self.at_zero_dispersion_boundary()).then_some(self.log_likelihood)
     }
 
     /// The fit's criterion, or the canonical refusal explaining why the fit has
@@ -3405,6 +3441,7 @@ impl UnifiedFitResult {
     /// [`Self::reml_score`] is absent.
     pub fn penalized_objective(&self) -> Option<f64> {
         self.penalized_objective
+            .filter(|_| !self.at_zero_dispersion_boundary())
     }
 
     /// Replace the criterion with the value a later outer solve produced at
@@ -3559,6 +3596,24 @@ impl UnifiedFitResult {
             crate::bail_invalid_estim!(
                 "UnifiedFitResult reml_score and penalized_objective must be present or absent \
                  together; got reml_score={reml_score:?}, penalized_objective={penalized_objective:?}"
+            );
+        }
+        // The exact-fit Gaussian boundary is not a place a criterion can exist:
+        // `φ̂ = 0` makes the profiled restricted likelihood unbounded, so any
+        // number offered here is a stand-in for `−∞`. Enforcing it at the ONE
+        // constructor means no present or future route can reintroduce the
+        // placeholder that #2595 traced `Summary.raw_reml_score = 0.0` to,
+        // whether it arrives from a fast path, a saved payload, or a re-stamp.
+        let at_boundary = likelihood_family
+            .as_ref()
+            .is_some_and(|family| family.is_gaussian_identity())
+            && matches!(likelihood_scale, LikelihoodScaleMetadata::ProfiledGaussian)
+            && standard_deviation == 0.0;
+        if at_boundary && let Some(reml_score) = reml_score {
+            crate::bail_invalid_estim!(
+                "UnifiedFitResult reports a REML/LAML criterion {reml_score} at the exact-fit \
+                 Gaussian boundary (profiled scale sigma_hat = 0), where the restricted \
+                 likelihood is unbounded and no finite criterion exists; report `None`"
             );
         }
         if let Some(g) = outer_gradient_norm {

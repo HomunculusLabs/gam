@@ -4534,6 +4534,26 @@ const REML_SCORE_KEYS: &[&str] = &["reml_score", "evidence", "laml", "score"];
 
 const RAW_REML_SCORE_KEYS: &[&str] = &["raw_reml_score"];
 
+/// Payload key carrying WHY a summary has no criterion (#2595). Present exactly
+/// when `raw_reml_score` / `reml_score` are `null`.
+const REML_UNAVAILABLE_KEYS: &[&str] = &["reml_score_unavailable"];
+
+/// The refusal a ranking surface raises when the summary it was handed has no
+/// criterion to rank.
+///
+/// Reads the payload's own recorded reason when there is one, so the user is
+/// told what actually happened to their fit rather than that a field is
+/// "missing" — the field is present, and it is `null` on purpose.
+fn no_criterion_error(payload: &serde_json::Value, surface: &str) -> pyo3::PyErr {
+    match json_lookup_str(payload, REML_UNAVAILABLE_KEYS) {
+        Some(reason) => py_value_error(format!("{surface}: {reason}")),
+        None => py_value_error(format!(
+            "{surface}: this model summary carries no reml_score / evidence field"
+        )),
+    }
+}
+
+
 const EDF_KEYS: &[&str] = &["edf_total", "edf", "effective_dof"];
 
 const LOG_LIK_KEYS: &[&str] = &["log_likelihood", "loglik", "log_lik"];
@@ -4712,9 +4732,7 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
         return Ok(score);
     }
     match view {
-        RemlFitView::SavedSummary(_) => Err(PyValueError::new_err(
-            "Model summary is missing a reml_score / evidence field",
-        )),
+        RemlFitView::SavedSummary(payload) => Err(no_criterion_error(payload, "compare_models")),
         RemlFitView::PythonObject(fit) => Err(PyTypeError::new_err(format!(
             "compare_models: cannot extract reml_score from {}; pass a gamfit.Model, \
              a dict with 'reml_score', or an object exposing .evidence",
@@ -4786,7 +4804,7 @@ fn ranking_score_from_summary_payload(payload: &serde_json::Value) -> PyResult<f
 fn comparable_reml_score_from_summary_payload(payload: &serde_json::Value) -> PyResult<f64> {
     let raw = json_lookup_f64(payload, RAW_REML_SCORE_KEYS)
         .or_else(|| json_lookup_f64(payload, REML_SCORE_KEYS))
-        .ok_or_else(|| py_value_error("saved model payload is missing reml_score".to_string()))?;
+        .ok_or_else(|| no_criterion_error(payload, "model evidence"))?;
     if !raw.is_finite() {
         return Err(py_value_error(
             "saved model payload reml_score must be finite".to_string(),

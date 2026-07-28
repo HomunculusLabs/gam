@@ -1717,7 +1717,11 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         group_metadata: model.payload().group_metadata.clone(),
         deployment_extensions: model.payload().deployment_extensions.clone(),
         deviance: fit.deviance,
-        log_likelihood: Some(fit.log_likelihood),
+        // Declined at the same boundary and for the same reason as the
+        // criterion: with `φ̂ = 0` there is no normalized density, and the
+        // stored `0.0` is the `UserProvided` tag saying so. Emitting it as a
+        // number lets `compare_models` rank an exact fit on `−2·0 + 2·edf`.
+        log_likelihood: fit.reported_log_likelihood(),
         n_obs: Some(fit.training_sample_size()),
         reml_score,
         raw_reml_score,
