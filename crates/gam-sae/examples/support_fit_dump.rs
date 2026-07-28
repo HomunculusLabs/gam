@@ -359,14 +359,47 @@ fn main() -> Result<(), String> {
         previous_move = move_size;
         lambda = updated;
         ard = updated_ard;
-        report = term_seed.term.solve_fixed_point(
+        // The same acceptance ladder as the initial solve: a re-solve that
+        // misses its cap still holds a usable iterate, and returning Err here
+        // is what discarded a four-round REML arm at its round-4 cap.
+        report = match term_seed.term.solve_fixed_point(
             centered.view(),
             &lambda,
             &ard,
             max_cycles,
             1.0e-4,
             1.0,
-        )?;
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                eprintln!("[reml] round solve NOT CONVERGED at 1e-4: {error}");
+                let mut accepted = None;
+                for tolerance in [1.0e-2_f64, 1.0e-1, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
+                    match term_seed.term.solve_fixed_point(
+                        centered.view(),
+                        &lambda,
+                        &ard,
+                        20,
+                        tolerance,
+                        1.0,
+                    ) {
+                        Ok(report) => {
+                            eprintln!("[reml] round certified only at tolerance {tolerance:.0e}");
+                            accepted = Some(report);
+                            break;
+                        }
+                        Err(_) => {}
+                    }
+                }
+                match accepted {
+                    Some(report) => report,
+                    None => {
+                        eprintln!("[reml] round unrecoverable; keeping the previous round's report and stopping the ladder");
+                        break;
+                    }
+                }
+            }
+        };
     }
     // Evidence-supported curvature degrees of freedom per atom: the census that
     // says whether an atom's bend is paid for, rather than whether it exists.
