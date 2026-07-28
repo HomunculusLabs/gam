@@ -444,6 +444,179 @@ pub(crate) fn cs_val(u: f64) -> (f64, f64) {
     }
 }
 
+/// Curvature-normalised tangent `tn(r)` and its `r`-derivative.
+///
+/// `tn(r) = r·S(u)/C(u)` with `u = κr²`, the sqrt-free form this module already
+/// uses for `exp`. Differentiating through `u`:
+///
+/// ```text
+///   tn′(r) = S/C + 2κr²·(S′C − SC′)/C²,   S′ = (C − S)/(2u),  C′ = −S/2
+/// ```
+///
+/// where `S′`, `C′` are the `u`-derivatives supplied by [`cs_stacks`], so no new
+/// series is introduced. Both branches of the curvature sign and `κ = 0` are
+/// covered by the same expression; at `u = 0` the stack supplies `S = C = 1`,
+/// `S′ = −1/6`, `C′ = −1/2`, giving `tn(r) = r` and `tn′(r) = 1` exactly.
+fn tn_and_derivative(kappa: f64, r: f64) -> GeometryResult<(f64, f64)> {
+    let u = kappa * r * r;
+    let (c_stack, s_stack) = cs_stacks(u);
+    let (c, s) = (c_stack[0], s_stack[0]);
+    if c.abs() <= GEOMETRY_EPS {
+        return Err(GeometryError::Singular(
+            "constant-curvature Dirichlet weight at a conjugate point (cos(√κ r) = 0)",
+        ));
+    }
+    let (c_prime, s_prime) = (c_stack[1], s_stack[1]);
+    let tn = r * s / c;
+    let tn_prime = s / c + 2.0 * kappa * r * r * (s_prime * c - s * c_prime) / (c * c);
+    Ok((tn, tn_prime))
+}
+
+/// Pullback Dirichlet Gram of a basis whose latent is the TANGENT COORDINATE at
+/// the origin of `M_κ` — the κ-generic form of
+/// [`crate::manifolds::poincare::conformal_dirichlet_penalty`].
+///
+/// # Why this exists
+///
+/// The hyperbolic version hardcodes `κ = −1` through `require_negative_curvature`,
+/// which makes a SAE Poincaré atom a fixed-geometry special case rather than a
+/// member of the `S^d ← ℝ^d → H^d` family. Freeing κ is what lets one atom cover
+/// the whole family, so `Poincare` stops being its own topology and becomes
+/// `κ < 0` of a constant-curvature atom (#2604, #2603).
+///
+/// A kernel basis cannot serve that role: the κ-generic RKHS kernel is
+/// Matérn-½ and has a cusp at every center, which a fitted latent coordinate
+/// differentiates through (measured in
+/// `geodesic_exponential_kernel_has_unbounded_curvature_at_a_center`). A
+/// tangent-chart monomial basis is `C^∞`, and the geometry lives here instead.
+///
+/// # The weight
+///
+/// `S = Σ_n Φ′(t_n)ᵀ G(t_n) Φ′(t_n)` with `G = √det h · h⁻¹` for the pullback
+/// metric `h = (D exp₀)ᵀ (λ²δ) (D exp₀)`. `D exp₀(t)` is diagonal in the radial
+/// frame with tangential eigenvalue `e_t` (multiplicity `d−1`) and radial `e_r`:
+///
+/// ```text
+///   e_t = tn(r)/r,   e_r = tn′(r),   λ = 2/(1 + κ·tn(r)²),   r = ‖t‖
+///   G(t) = λ^{d−2}[ e_t^{d−3} e_r (I − t̂t̂ᵀ) + e_t^{d−1} e_r⁻¹ t̂t̂ᵀ ]
+/// ```
+///
+/// This is the SAME expression the hyperbolic version documents, with
+/// `tanh(s)/s → tn(r)/r`, `sech²(s) → tn′(r)`, `2cosh²(s) → 2/(1 + κ·tn(r)²)`.
+///
+/// # Two exact reductions pin it
+///
+/// * **κ = −1** reproduces `conformal_dirichlet_penalty` entry for entry — the
+///   same quantity by a different route, not merely a close one.
+/// * **κ = 0** gives `G ≡ 2^{d−2} I` identically (not just as a `‖t‖ → 0`
+///   limit), because `e_t = e_r = 1` and `λ = 2` for every `t`.
+///
+/// Both are asserted below. A wrong derivation fails one immediately, which is
+/// the whole reason this is safe to write down.
+pub fn constant_curvature_dirichlet_penalty(
+    coords: ArrayView2<'_, f64>,
+    basis_jacobian: ndarray::ArrayView3<'_, f64>,
+    kappa: f64,
+) -> GeometryResult<Array2<f64>> {
+    if !kappa.is_finite() {
+        return Err(GeometryError::InvalidPoint(
+            "constant-curvature Dirichlet weight needs a finite kappa",
+        ));
+    }
+    let n = coords.nrows();
+    let d = coords.ncols();
+    let jet_shape = basis_jacobian.shape();
+    if jet_shape[0] != n {
+        return Err(GeometryError::DimensionMismatch {
+            context: "constant_curvature_dirichlet_penalty: jacobian rows vs coords rows",
+            expected: n,
+            got: jet_shape[0],
+        });
+    }
+    if jet_shape[2] != d {
+        return Err(GeometryError::DimensionMismatch {
+            context: "constant_curvature_dirichlet_penalty: jacobian latent axes vs coords cols",
+            expected: d,
+            got: jet_shape[2],
+        });
+    }
+    let m = jet_shape[1];
+    let mut gram = Array2::<f64>::zeros((m, m));
+    if n == 0 || m == 0 {
+        return Ok(gram);
+    }
+    let e_iso = d as i32 - 2;
+    let e_perp = d as i32 - 3;
+    let e_rad = d as i32 - 1;
+    let mut grad = vec![0.0_f64; m];
+    let mut proj = vec![0.0_f64; m];
+    for row in 0..n {
+        let t = coords.row(row);
+        let norm = t.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let (e_t, e_r, lambda) = if norm <= GEOMETRY_EPS {
+            // `D exp₀(0) = I`; the radial block below switches itself off.
+            (1.0, 1.0, 2.0)
+        } else {
+            let (tn, tn_prime) = tn_and_derivative(kappa, norm)?;
+            let gauge = 1.0 + kappa * tn * tn;
+            if gauge <= GEOMETRY_EPS {
+                return Err(GeometryError::InvalidPoint(
+                    "constant-curvature Dirichlet weight: exp of the tangent coordinate leaves the chart",
+                ));
+            }
+            (tn / norm, tn_prime, 2.0 / gauge)
+        };
+        if !(e_t > 0.0 && e_r > 0.0 && lambda.is_finite()) {
+            continue;
+        }
+        let lam_pow = lambda.powi(e_iso);
+        let iso_coeff = lam_pow * e_t.powi(e_perp) * e_r;
+        let rad_coeff = lam_pow * e_t.powi(e_rad) / e_r;
+        if !(iso_coeff.is_finite() && rad_coeff.is_finite()) {
+            continue;
+        }
+        for axis in 0..d {
+            for k in 0..m {
+                grad[k] = basis_jacobian[[row, k, axis]];
+            }
+            for i in 0..m {
+                let gi = grad[i];
+                if gi == 0.0 {
+                    continue;
+                }
+                let scaled = iso_coeff * gi;
+                for j in 0..m {
+                    gram[[i, j]] += scaled * grad[j];
+                }
+            }
+        }
+        if norm > GEOMETRY_EPS {
+            let radial_weight = rad_coeff - iso_coeff;
+            if radial_weight != 0.0 {
+                let inv_norm = 1.0 / norm;
+                for k in 0..m {
+                    let mut acc = 0.0;
+                    for axis in 0..d {
+                        acc += basis_jacobian[[row, k, axis]] * t[axis];
+                    }
+                    proj[k] = acc * inv_norm;
+                }
+                for i in 0..m {
+                    let pi = proj[i];
+                    if pi == 0.0 {
+                        continue;
+                    }
+                    let scaled = radial_weight * pi;
+                    for j in 0..m {
+                        gram[[i, j]] += scaled * proj[j];
+                    }
+                }
+            }
+        }
+    }
+    Ok(gram)
+}
+
 /// The unified constant-curvature manifold `M_κ` in the κ-stereographic
 /// chart. See the module documentation for the model and conventions.
 #[derive(Clone, Debug)]
@@ -1580,4 +1753,132 @@ mod tests {
             }
         }
     }
+
+    /// REDUCTION 1. At `κ = −1` the κ-generic weight must reproduce the
+    /// hyperbolic `conformal_dirichlet_penalty` ENTRY FOR ENTRY — the same
+    /// quantity by a different route, not a close approximation. The two share
+    /// no code: one branches on `tanh`/`sech²`/`cosh²`, the other evaluates the
+    /// curvature-normalised series. Agreement is therefore evidence about the
+    /// derivation rather than about a shared implementation.
+    #[test]
+    fn kappa_generic_dirichlet_reduces_to_the_hyperbolic_penalty_at_minus_one() {
+        use crate::manifolds::poincare::conformal_dirichlet_penalty;
+        let coords = ndarray::arr2(&[[0.12_f64, -0.30], [0.44, 0.05], [-0.21, 0.37]]);
+        let mut jacobian = ndarray::Array3::<f64>::zeros((3, 4, 2));
+        for row in 0..3 {
+            for k in 0..4 {
+                for axis in 0..2 {
+                    jacobian[[row, k, axis]] =
+                        0.3 * (row as f64 + 1.0) - 0.17 * (k as f64) + 0.41 * (axis as f64);
+                }
+            }
+        }
+        let hyperbolic =
+            conformal_dirichlet_penalty(coords.view(), jacobian.view(), -1.0).unwrap();
+        let generic =
+            constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), -1.0).unwrap();
+        assert_eq!(hyperbolic.dim(), generic.dim());
+        let mut worst = 0.0_f64;
+        for i in 0..hyperbolic.nrows() {
+            for j in 0..hyperbolic.ncols() {
+                let scale = hyperbolic[[i, j]].abs().max(1.0);
+                worst = worst.max((hyperbolic[[i, j]] - generic[[i, j]]).abs() / scale);
+            }
+        }
+        assert!(
+            worst <= 1.0e-12,
+            "the kappa-generic weight must reduce EXACTLY to the hyperbolic one at \
+             kappa = -1; worst relative gap {worst:.3e}"
+        );
+    }
+
+    /// REDUCTION 2. At `κ = 0` the geometry is flat and the tangent coordinate is
+    /// the chart, so `e_t = e_r = 1` and `λ = 2` for EVERY `t` — hence
+    /// `G ≡ 2^{d−2} I` identically, not merely in the `‖t‖ → 0` limit the
+    /// hyperbolic doc records. The Gram must therefore be exactly
+    /// `2^{d−2} · Σ_n Σ_a Φ′_a Φ′_aᵀ`, computed here independently.
+    #[test]
+    fn kappa_generic_dirichlet_is_the_flat_gram_at_zero_curvature() {
+        let coords = ndarray::arr2(&[[0.12_f64, -0.30], [0.44, 0.05], [-0.21, 0.37]]);
+        let (n, d, m) = (3usize, 2usize, 4usize);
+        let mut jacobian = ndarray::Array3::<f64>::zeros((n, m, d));
+        for row in 0..n {
+            for k in 0..m {
+                for axis in 0..d {
+                    jacobian[[row, k, axis]] =
+                        0.7 * (row as f64) - 0.23 * (k as f64) + 0.31 * (axis as f64) + 0.5;
+                }
+            }
+        }
+        let generic =
+            constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), 0.0).unwrap();
+        let weight = 2.0_f64.powi(d as i32 - 2);
+        let mut expected = Array2::<f64>::zeros((m, m));
+        for row in 0..n {
+            for axis in 0..d {
+                for i in 0..m {
+                    for j in 0..m {
+                        expected[[i, j]] +=
+                            weight * jacobian[[row, i, axis]] * jacobian[[row, j, axis]];
+                    }
+                }
+            }
+        }
+        let mut worst = 0.0_f64;
+        for i in 0..m {
+            for j in 0..m {
+                let scale = expected[[i, j]].abs().max(1.0);
+                worst = worst.max((expected[[i, j]] - generic[[i, j]]).abs() / scale);
+            }
+        }
+        assert!(
+            worst <= 1.0e-12,
+            "at kappa = 0 the weight must be exactly the flat Gram 2^(d-2)·sum Phi' Phi'^T; \
+             worst relative gap {worst:.3e}"
+        );
+    }
+
+    /// The weight is a genuine function of curvature, and positive-definite on
+    /// both sides of flat. Without this the two reductions above could both pass
+    /// for a weight that ignored `κ` outside those points.
+    #[test]
+    fn kappa_generic_dirichlet_moves_with_curvature_and_stays_psd() {
+        let coords = ndarray::arr2(&[[0.10_f64, -0.20], [0.25, 0.05]]);
+        let mut jacobian = ndarray::Array3::<f64>::zeros((2, 3, 2));
+        for row in 0..2 {
+            for k in 0..3 {
+                for axis in 0..2 {
+                    jacobian[[row, k, axis]] = 0.4 + 0.2 * (k as f64) - 0.3 * (axis as f64)
+                        + 0.11 * (row as f64);
+                }
+            }
+        }
+        let flat =
+            constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), 0.0).unwrap();
+        for &kappa in &[-1.5_f64, -0.4, 0.4, 1.5] {
+            let g =
+                constant_curvature_dirichlet_penalty(coords.view(), jacobian.view(), kappa).unwrap();
+            let gap = (0..3)
+                .flat_map(|i| (0..3).map(move |j| (i, j)))
+                .fold(0.0_f64, |acc, (i, j)| acc.max((g[[i, j]] - flat[[i, j]]).abs()));
+            assert!(
+                gap > 1.0e-6,
+                "the weight must actually depend on kappa; kappa={kappa} matched flat"
+            );
+            // Symmetric PSD: it is a sum of outer products with positive weights.
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (g[[i, j]] - g[[j, i]]).abs() <= 1.0e-12,
+                        "the Dirichlet Gram must be symmetric at kappa={kappa}"
+                    );
+                }
+                assert!(
+                    g[[i, i]] >= -1.0e-12,
+                    "a PSD Gram cannot have a negative diagonal at kappa={kappa}"
+                );
+            }
+        }
+    }
+
 }
