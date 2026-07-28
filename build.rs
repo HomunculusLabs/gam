@@ -208,6 +208,13 @@ fn main() {
         &mut dead_guard_const_offenders,
     );
 
+    // Empty brace blocks, on one line or spread over several. An empty
+    // function is an unimplemented stub wearing a green check; an empty
+    // `else` / match arm is a branch that swallows what reached it. Both
+    // are pressure to restructure rather than to fill the block in.
+    let mut empty_block_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+    scan_for_empty_blocks(&manifest_dir, &manifest_dir, &mut empty_block_offenders);
+
     // Underscore function parameter names. `_name: T` silences the
     // unused-parameter warning by hiding it from the lint rather than fixing
     // it. Use the parameter, restructure the API so it isn't passed, or
@@ -482,6 +489,17 @@ fn main() {
                 "const <name>: bool = <literal> (dead-by-construction guard — use cfg or delete)"
                     .to_string(),
             rows: dead_guard_const_offenders
+                .iter()
+                .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
+                .collect(),
+        });
+    }
+
+    if !empty_block_offenders.is_empty() {
+        sections.push(Section {
+            title: "empty block body (handle the case, or restructure so the block does not exist)"
+                .to_string(),
+            rows: empty_block_offenders
                 .iter()
                 .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
                 .collect(),
@@ -1436,13 +1454,17 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // silencer for a signal someone did not want to read. Delete it, or
         // make the call site stop requiring it.
         //
-        // Empty block bodies: `fn f() {}`, `if cond {}`, `for x in xs {}`.
-        // An empty function is an unimplemented stub wearing a green check;
-        // an empty `if` is a condition evaluated for nothing. Strict
-        // everywhere — a test with an empty body passes vacuously, which is
-        // exactly the failure mode this table exists to stop.
-        (") {}", "empty block body", false),
-        (") { }", "empty block body", false),
+        // Empty brace bodies (`fn f() {}`, `else {}`, `_ => {}`) have their
+        // own scanner — `scan_for_empty_blocks` — because a lexical needle
+        // is dodged by a line break.
+        //
+        // `_ => ()` and `{ () }` are the brace-free spellings of the same
+        // thing: an arm or block that evaluates to nothing. An empty
+        // catch-all arm in particular means every variant the author did not
+        // enumerate silently does nothing, and a variant added later
+        // inherits that silence instead of a compile error.
+        ("_ => ()", "_ => ()", false),
+        ("{ () }", "empty block body", false),
         // No-op closures. `|_| ()` / `|_| {}` is the callback spelling of
         // `let _ = x;`: an observer wired up to discard what it observes, or
         // a required-argument placeholder. `res.map(|_| ())` in particular
@@ -1452,6 +1474,13 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         ("|_| {}", "no-op closure", false),
         ("|_, _| ()", "no-op closure", false),
         ("|_, _| {}", "no-op closure", false),
+        // Constant-valued predicates. `|_| true` / `|_| false` answer a
+        // question the callee bothered to ask by ignoring the argument; the
+        // caller wants a different entry point, not a rigged predicate.
+        ("|_| true", "constant closure", false),
+        ("|_| false", "constant closure", false),
+        ("|_, _| true", "constant closure", false),
+        ("|_, _| false", "constant closure", false),
         // `std::convert::identity` is a function whose contract is to do
         // nothing. Every use is a slot that should have been left empty.
         ("convert::identity", "convert::identity", false),
@@ -1462,17 +1491,20 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         ("if false", "if false", false),
         ("while true", "while true", false),
         ("while false", "while false", false),
-        // `_ => ()` is an empty catch-all arm: every variant the author did
-        // not enumerate silently does nothing, and a new variant added later
-        // inherits that silence instead of a compile error.
-        ("_ => ()", "_ => ()", false),
-        // `return ();` is a bare `return` with extra syntax.
+        // `return ();` is a bare `return` with extra syntax, and `-> ()` is
+        // the unit return type spelled out — both are annotation that says
+        // nothing the absence of annotation did not already say.
         ("return ();", "return ()", false),
-        // `let () = expr;` and `if let _ = expr` are the pattern-shaped
-        // dodges around the banned `let _ = expr;` — same discard, spelled
-        // so a name-based scanner misses it.
+        ("-> ()", "-> ()", false),
+        // The pattern-shaped dodges around the banned `let _ = expr;`:
+        // `let () = expr;` destructures the unit, `_ = expr;` is the
+        // 2021-edition destructuring assignment, `if let _` / `while let _`
+        // bind an irrefutable wildcard. Same discard, spelled so a
+        // name-based scanner misses it.
         ("let () =", "let () =", false),
+        ("_ = ", "_ = (discarding assignment)", false),
         ("if let _", "if let _", false),
+        ("while let _", "while let _", false),
         // `#[rustfmt::skip]` opts a region out of the formatter the way
         // `#[allow(...)]` opts it out of a lint. Same "turn the tool off
         // rather than fix the code" failure mode; banned identically.
@@ -4403,6 +4435,52 @@ fn collect_scannable_files(root: &Path, dir: &Path, files: &mut Vec<ScannedFile>
             .to_path_buf();
         files.push(ScannedFile { rel, content });
     }
+}
+
+/// Flags every brace block whose body is empty: `fn f() {}`, `else {}`,
+/// `loop {}`, `Err(_) => {}`, `impl T for U {}`, and the same constructs
+/// with the braces on separate lines. A lexical needle cannot do this job —
+/// `) {}` is dodged by pressing Enter — so the check walks the stripped
+/// source and reports any `{` whose next non-whitespace character is `}`.
+///
+/// Comments are stripped before the walk, so a block holding only a comment
+/// counts as empty. That is deliberate: `Err(_) => { // nothing to do }` is
+/// a branch that swallows an error, and the comment explaining why is not
+/// the handling. Either handle it, or restructure so the branch does not
+/// exist — narrow the enum, split the trait, add the entry point that does
+/// not take the callback. Build.rs is exempt.
+fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, usize, String)>) {
+    visit_files(root, dir, &mut |rel, content| {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == "build.rs" {
+            return;
+        }
+        if rel.extension().and_then(OsStr::to_str) != Some("rs") {
+            return;
+        }
+        if !content.contains('{') {
+            return;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let stripped = strip_file_lines(content);
+        for idx in 0..stripped.len() {
+            for (col, ch) in stripped[idx].char_indices() {
+                if ch != '{' {
+                    continue;
+                }
+                let mut rest = stripped[idx][col + 1..].trim_start();
+                let mut j = idx;
+                while rest.is_empty() && j + 1 < stripped.len() {
+                    j += 1;
+                    rest = stripped[j].trim_start();
+                }
+                if rest.starts_with('}') {
+                    let raw = lines.get(idx).copied().unwrap_or("");
+                    offenders.push((rel.to_path_buf(), idx + 1, raw.to_string()));
+                }
+            }
+        }
+    });
 }
 
 /// Flags function definitions whose parameter list contains an underscore
