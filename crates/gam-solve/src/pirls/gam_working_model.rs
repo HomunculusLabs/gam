@@ -1564,11 +1564,12 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         // `accepted_state.gradient` — the inner solve converged on the ordinary
         // penalized-MLE stationarity `∇(−ℓ+½βᵀSβ)=0` instead of the
         // Firth-penalized stationarity `∇(−ℓ+½βᵀSβ)−∇Φ=0`. The returned β̂ then
-        // sat at the WRONG mode, breaking the outer LAML envelope identity, so
-        // the analytic smoothing-selection gradient disagreed with the finite
-        // difference of the cost for every Firth fit routed through the LM
-        // line search (gam#1821). Keep Firth active for the candidate so the
-        // whole line search optimizes one coherent Firth-penalized objective.
+        // sat at the WRONG mode, breaking the outer LAML envelope identity
+        // (the dense path carries no KKT-residual correction), so the analytic
+        // smoothing-selection gradient disagreed with the finite difference of
+        // the cost for every Firth fit routed through the LM line search
+        // (gam#1821). Keep Firth active for the candidate so the whole line
+        // search optimizes one coherent Firth-penalized objective.
         self.update_with_curvature(beta, curvature)
     }
 

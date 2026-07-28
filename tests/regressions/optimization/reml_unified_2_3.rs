@@ -19,7 +19,6 @@ use gam::estimate::{
     fit_gam,
 };
 use gam::smooth::BlockwisePenalty;
-use gam::solver::model_types::{ProjectedKktResidual, StationarityNorm};
 use gam::solver::estimate::reml::reml_outer_engine::{
     DenseSpectralOperator, DispersionHandling, HessianFactorization, InnerSolutionBuilder,
     PenaltyCoordinate, PenaltyLogdetDerivs, compute_efs_update, compute_hybrid_efs_update,
@@ -518,7 +517,6 @@ fn build_gaussian_inner_solution(
         .expect("penalty root S₁");
     let r2 = gam::solver::estimate::reml::reml_outer_engine::penalty_matrix_root(&s2)
         .expect("penalty root S₂");
-    let coefficient_dimension = beta.len();
 
     InnerSolutionBuilder::new(
         log_likelihood,
@@ -532,13 +530,6 @@ fn build_gaussian_inner_solution(
         ],
         penalty_logdet,
         DispersionHandling::ProfiledGaussian,
-        ProjectedKktResidual::from_active_projected(Array1::zeros(coefficient_dimension))
-            .certify_stationarity(
-                f64::MIN_POSITIVE,
-                coefficient_dimension,
-                StationarityNorm::Infinity,
-            )
-            .expect("direct Gaussian solve is stationary"),
     )
     .build()
 }
