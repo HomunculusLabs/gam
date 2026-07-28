@@ -126,7 +126,7 @@ pub fn build_sae_minimal_seed(
         .atom_basis
         .iter()
         .map(|kind| sae_atom_basis_kind_from_str(kind))
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     let mut seed_coords =
         sae_pca_seed_initial_coords(request.target, &basis_kinds, &request.atom_dim)?;
     if basis_kinds

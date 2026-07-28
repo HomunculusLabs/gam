@@ -183,7 +183,8 @@ pub fn sae_build_atom_plans(
     }
     let mut plans: Vec<SaeAtomBuildPlan> = Vec::with_capacity(k_atoms);
     for atom_idx in 0..k_atoms {
-        let kind = sae_atom_basis_kind_from_str(&atom_basis[atom_idx]);
+        let kind = sae_atom_basis_kind_from_str(&atom_basis[atom_idx])
+            .map_err(|error| format!("sae_build_atom_plans: atom {atom_idx}: {error}"))?;
         let d = atom_dim[atom_idx];
         if d == 0 {
             return Err(format!(

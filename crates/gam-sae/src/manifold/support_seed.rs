@@ -205,7 +205,8 @@ fn resolve_support_atoms(
     let mut effective_atom_dim = Vec::with_capacity(atom_basis.len());
     let mut atom_specs = Vec::with_capacity(atom_basis.len());
     for atom in 0..atom_basis.len() {
-        let kind = sae_atom_basis_kind_from_str(&atom_basis[atom]);
+        let kind = sae_atom_basis_kind_from_str(&atom_basis[atom])
+            .map_err(|error| format!("support-sparse atom {atom}: {error}"))?;
         let (latent_dim, spec) = effective_atom(atom_dim[atom], &kind, atom)?;
         atom_kinds.push(kind);
         effective_atom_dim.push(latent_dim);
@@ -530,7 +531,8 @@ pub fn build_sae_support_term_seed(
     for atom in 0..k_atoms {
         let effective_dim = request.assignment.atom_coord_dim(atom);
         let public_dim = request.atom_dim[atom];
-        let kind = sae_atom_basis_kind_from_str(&request.atom_basis[atom]);
+        let kind = sae_atom_basis_kind_from_str(&request.atom_basis[atom])
+            .map_err(|error| format!("build_sae_support_seed: atom {atom}: {error}"))?;
         let design_rows = if matches!(
             kind,
             SaeAtomBasisKind::Duchon

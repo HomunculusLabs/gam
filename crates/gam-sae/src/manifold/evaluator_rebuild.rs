@@ -99,10 +99,58 @@ pub fn build_sae_basis_evaluators(
         .collect()
 }
 
-/// Native [`SaeAtomBasisKind`] for an exact canonical basis token. Public and
-/// Rust fit front doors validate seed tokens before calling this converter;
-/// `Precomputed` remains an internal representation for typed native artifacts.
-pub fn sae_atom_basis_kind_from_str(value: &str) -> SaeAtomBasisKind {
+/// The canonical basis tokens a caller may name. Single source of truth for
+/// both the parser and the error message that rejects everything else, so the
+/// two cannot drift apart.
+pub const SAE_ATOM_BASIS_TOKENS: [&str; 13] = [
+    "duchon",
+    "periodic",
+    "sphere",
+    "torus",
+    "projective_plane",
+    "klein_bottle",
+    "linear",
+    "linear_block",
+    "euclidean",
+    "poincare",
+    "cylinder",
+    "mobius",
+    "finite_set",
+];
+
+/// Native [`SaeAtomBasisKind`] for a CALLER-SUPPLIED basis token.
+///
+/// An unrecognized token is an error here, named at the boundary it entered.
+/// It used to fall through to `Precomputed(token)`, which meant a typo did not
+/// fail at parse: it became a precomputed atom and died much later with "has no
+/// analytic sparse-seed chart", a message about a kind the caller never asked
+/// for. That is how `"auto"` became `Precomputed("auto")`.
+///
+/// This function's previous doc asserted that "public and Rust fit front doors
+/// validate seed tokens before calling this converter" — an invariant nothing
+/// enforced. The converter now enforces it itself, which is the only place it
+/// can be guaranteed.
+///
+/// Deserializing a persisted artifact is the *other* contract, where an
+/// unrecognized name genuinely does mean a caller-provided basis; that path
+/// uses [`sae_atom_basis_kind_from_artifact_str`].
+pub fn sae_atom_basis_kind_from_str(value: &str) -> Result<SaeAtomBasisKind, String> {
+    match sae_atom_basis_kind_from_artifact_str(value) {
+        SaeAtomBasisKind::Precomputed(unknown) => Err(format!(
+            "unknown atom basis {unknown:?}; expected one of {}",
+            SAE_ATOM_BASIS_TOKENS.join(", ")
+        )),
+        known => Ok(known),
+    }
+}
+
+/// Native [`SaeAtomBasisKind`] for a token read back from a PERSISTED artifact.
+///
+/// Here an unrecognized name is not a typo — a typed native artifact may carry
+/// a caller-provided precomputed basis under its own label, and round-tripping
+/// it is the whole point. Callers taking user input want
+/// [`sae_atom_basis_kind_from_str`] instead, which refuses the same string.
+pub fn sae_atom_basis_kind_from_artifact_str(value: &str) -> SaeAtomBasisKind {
     match value {
         "duchon" => SaeAtomBasisKind::Duchon,
         "periodic" => SaeAtomBasisKind::Periodic,
