@@ -9255,6 +9255,82 @@ mod tests {
         }
     }
 
+    /// #2566 diagnostic (zz_measure): a FINE log-σ sweep of the curvature, to
+    /// find the discontinuity the coarse ladder can only bracket.
+    ///
+    /// What is established: the analytic negative Hessian is healthy at
+    /// `log σ = 4` (ratio 0.85) and catastrophic at `log σ = 6` (ratio 97, sign
+    /// inverted), it does NOT respond to a node-count doubling that moves the
+    /// gradient channel by 34%, `max_k` does not flip the bundle mode anywhere in
+    /// `0..8`, and the reported mode is `ControlledAsymptotic` across the whole
+    /// range so it does not separate the healthy rows from the broken ones.
+    ///
+    /// Every one of those excludes a mechanism without locating one. A branch
+    /// switch is a DISCONTINUITY in σ, and the ladder samples σ at whole-integer
+    /// `log σ` — far too coarse to see one. This walks `log σ` in steps of 0.05
+    /// from 4.0 to 7.0 and prints the analytic curvature beside a value-only FD
+    /// authority at every step. A smooth curve that merely degrades says the loss
+    /// is gradual cancellation; a jump between adjacent samples localizes a
+    /// routing switch to a 0.05-wide interval and names the σ to go look at.
+    ///
+    /// The two channels are printed together on purpose: they come from the SAME
+    /// jet call, so a step in one and not the other is the sharpest evidence
+    /// available about where they part company.
+    ///
+    /// Prints only; never asserts a bound.
+    #[test]
+    fn zz_measure_2566_curvature_fine_sweep() {
+        let quadctx = QuadratureContext::new();
+        let row = LatentSurvivalRow::right_censored(0.3, 0.67, 0.01, 0.02);
+        let point_at = |log_sigma: f64| LatentSurvivalPrimaryPoint {
+            q_entry: -1.2,
+            q_exit: -0.4,
+            qdot_exit: 0.73,
+            q_right: 0.5,
+            mu: -0.15,
+            sigma: log_sigma.exp(),
+        };
+        eprintln!(
+            "#2566 sweep: log_sigma  value           gradient        neg_hessian     \
+             d(neg_hess) vs prev"
+        );
+        let mut previous: Option<f64> = None;
+        for step in 0..=60usize {
+            let log_sigma = 4.0 + 0.05 * (step as f64);
+            let Ok((value, gradient, negative_hessian)) =
+                latent_survival_row_primary_gradient_hessian(
+                    &quadctx,
+                    &row,
+                    point_at(log_sigma),
+                    true,
+                )
+            else {
+                eprintln!("#2566 sweep: {log_sigma:>9.2}  REFUSED");
+                previous = None;
+                continue;
+            };
+            let curvature = negative_hessian[[
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+                LATENT_SURVIVAL_PRIMARY_LOG_SIGMA,
+            ]];
+            // Relative jump against the previous sample. On a smooth branch this
+            // is O(step); at a routing switch it is O(1) or worse, and that is the
+            // whole signal this sweep exists to produce.
+            let jump = match previous {
+                Some(prev) if prev != 0.0 => {
+                    format!("{:>12.4}", (curvature - prev).abs() / prev.abs())
+                }
+                _ => "           -".to_string(),
+            };
+            eprintln!(
+                "#2566 sweep: {log_sigma:>9.2}  {value:>14.6e}  {:>14.6e}  \
+                 {curvature:>14.6e}  {jump}",
+                gradient[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA],
+            );
+            previous = Some(curvature);
+        }
+    }
+
     /// #2566 diagnostic (zz_measure): which BRANCH the kernel bundle takes, as a
     /// function of `log σ` and of the requested `max_k`.
     ///
