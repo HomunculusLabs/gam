@@ -1365,6 +1365,7 @@ mod tests {
             if scale > 0.0 { (b - a).abs() / scale } else { 0.0 }
         };
         let mut worst_stable = 0.0_f64;
+        let mut worst_differenced = 0.0_f64;
         let mut sign_flips_differenced = 0usize;
         let mut sign_flips_stable = 0usize;
         for pair in rows.windows(2) {
@@ -1373,6 +1374,10 @@ mod tests {
             let stable_jump = jump(s0, s1);
             if stable_jump > worst_stable {
                 worst_stable = stable_jump;
+            }
+            let differenced_jump = jump(d0, d1);
+            if differenced_jump > worst_differenced {
+                worst_differenced = differenced_jump;
             }
             if d0 * d1 < 0.0 {
                 sign_flips_differenced += 1;
@@ -1383,8 +1388,22 @@ mod tests {
             }
         }
         println!(
-            "[2610] worst stable step jump={worst_stable:.6}  \
+            "[2610] worst step jump: differenced={worst_differenced:.6} stable={worst_stable:.6}  \
              sign flips: differenced={sign_flips_differenced} stable={sign_flips_stable}"
+        );
+
+        // The control. Asserting only that the STABLE channel behaves would pass
+        // just as happily on a fixture that never reaches the cancelling regime,
+        // and would then be proving nothing at all. Both channels are read off
+        // the SAME bundles, so this pins that the ladder really does destroy the
+        // differenced form here -- if this ever stops firing, the fixture has
+        // drifted out of the regime and the assertions below are vacuous.
+        assert!(
+            worst_differenced > 1.0 || sign_flips_differenced > 0,
+            "#2610 control: the differenced form must actually degrade on this ladder, \
+             otherwise this test cannot distinguish a repair from a fixture that never \
+             reached the cancellation regime (worst jump {worst_differenced}, \
+             {sign_flips_differenced} sign flips)"
         );
 
         assert!(
