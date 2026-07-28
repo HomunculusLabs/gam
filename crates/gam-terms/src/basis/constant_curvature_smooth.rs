@@ -1280,4 +1280,76 @@ mod tests {
             );
         }
     }
+
+    /// The geodesic-exponential kernel is Matérn-½, so it has a CUSP at every
+    /// center — and that is what blocks a constant-curvature SAE ATOM.
+    ///
+    /// The distinction is between the two ways a basis gets used. A GAM smooth
+    /// evaluates its design at FIXED data rows and never differentiates with
+    /// respect to the input, so a cusp in `x` is invisible to it and this kernel
+    /// is exactly right there. A SAE atom's latent coordinate is a FITTED
+    /// parameter: its solve consumes `∂Φ/∂t` and `∂²Φ/∂t²` (the
+    /// `SaeBasisSecondJet` contract feeding the Newton/Schur assembly). At a
+    /// center the first derivative is direction-dependent and the second is
+    /// unbounded, so a Newton step there has no curvature to trust.
+    ///
+    /// This measures it rather than citing it: the central second difference of
+    /// `K` along a fixed direction through a center is compared against the same
+    /// quantity a smooth distance away. If the kernel were `C²` both would
+    /// converge; instead the at-center value grows like `1/h` while the offset
+    /// one converges, and the test asserts a decade of separation.
+    ///
+    /// The kernel is not at fault. Geodesic distance is conditionally negative
+    /// definite on all three space forms, so `exp(−c·d_κ)` is PD for EVERY κ —
+    /// which is precisely why it was chosen, and smoother radial families lose
+    /// that guarantee on spheres. The obstruction is real and belongs to the
+    /// atom design, not to this module.
+    #[test]
+    fn geodesic_exponential_kernel_has_unbounded_curvature_at_a_center() {
+        let kappa = 0.0_f64;
+        let ell = 1.0_f64;
+        let center = ndarray::arr2(&[[0.0_f64, 0.0]]);
+
+        // Second difference of `h -> K(center + h·e_x, center)` at the center,
+        // and at a point a fixed distance away where the kernel is smooth.
+        let curvature_at = |base: [f64; 2], h: f64| -> f64 {
+            let probe = ndarray::arr2(&[
+                [base[0] - h, base[1]],
+                [base[0], base[1]],
+                [base[0] + h, base[1]],
+            ]);
+            let k =
+                constant_curvature_kernel_matrix(probe.view(), center.view(), kappa, ell).unwrap();
+            (k[[0, 0]] - 2.0 * k[[1, 0]] + k[[2, 0]]) / (h * h)
+        };
+
+        let mut at_center = Vec::new();
+        let mut off_center = Vec::new();
+        for &h in &[1.0e-2_f64, 1.0e-3, 1.0e-4] {
+            at_center.push(curvature_at([0.0, 0.0], h).abs());
+            off_center.push(curvature_at([0.5, 0.0], h).abs());
+        }
+
+        // Away from the center the second difference converges: successive
+        // refinements agree.
+        assert!(
+            (off_center[2] - off_center[1]).abs() <= 1.0e-3 * off_center[1].max(1.0),
+            "the kernel must be C² away from its centers; got {off_center:?}"
+        );
+        // At the center it diverges like 1/h: each 10x refinement multiplies it
+        // by ~10, so three decades of h separate by ~100x.
+        assert!(
+            at_center[2] > 10.0 * at_center[0],
+            "a Matérn-½ cusp must make the second difference diverge as h -> 0; \
+             got {at_center:?}"
+        );
+        assert!(
+            at_center[2] > 100.0 * off_center[2],
+            "the at-center curvature must dwarf the smooth-region curvature; \
+             at-center {:?} vs off-center {:?}",
+            at_center[2],
+            off_center[2]
+        );
+    }
+
 }
