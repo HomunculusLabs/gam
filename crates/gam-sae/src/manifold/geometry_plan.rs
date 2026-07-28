@@ -17,6 +17,18 @@ pub enum SaeBasisResolution {
         order: usize,
     },
     SphereChart,
+    /// Real spherical harmonics through `degree`, evaluated in AMBIENT
+    /// coordinates on the unit sphere (`latent_dim == 3`).
+    ///
+    /// The pole-free alternative to [`Self::SphereChart`]: same function space
+    /// at degree 2 and richer above it, but parameterized by the ambient unit
+    /// vector, so there is no latitude boundary, no longitude gauge at the
+    /// poles, and the trust-region metric IS the round metric. Distinguished
+    /// from the chart by `latent_dim` (3 vs 2), so both forms coexist and a
+    /// persisted artifact always says which one it is.
+    AmbientSphereHarmonics {
+        degree: usize,
+    },
     TorusHarmonics {
         per_axis_order: usize,
     },
@@ -56,6 +68,12 @@ pub enum SaeBasisResolution {
 pub enum SaeReferenceMetricPlan {
     UnitCircle,
     SphereChart,
+    /// The round unit sphere `S²` with its Laplace-Beltrami roughness. Paired
+    /// with [`SaeBasisResolution::AmbientSphereHarmonics`], whose columns are
+    /// `L²(S²)`-orthonormal, so the roughness operator is exactly diagonal --
+    /// the same operator [`SaeReferenceMetricPlan::RoundProjectivePlane`]
+    /// already uses on this sphere's antipodal quotient.
+    RoundSphere,
     /// Flat rectangular torus with aspect `A = cosh(tau) >= 1`; `tau = 0`
     /// is square. This is the exact flat comparator for the donut at the same
     /// `tau` and therefore the same aspect.
@@ -142,6 +160,17 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::SphereChart,
                 SaeReferenceMetricPlan::SphereChart,
             ) => true,
+            // The ambient sphere is keyed by `latent_dim == 3`: an S² atom
+            // carries three ambient coordinates for its two intrinsic
+            // dimensions, which is exactly what buys it a global chart. The
+            // chart arm above (`latent_dim == 2`) stays valid, so persisted
+            // plans keep deserializing and the two forms never alias.
+            (
+                SaeAtomBasisKind::Sphere,
+                3,
+                SaeBasisResolution::AmbientSphereHarmonics { degree },
+                SaeReferenceMetricPlan::RoundSphere,
+            ) => *degree >= 1,
             (
                 SaeAtomBasisKind::Torus,
                 2,
@@ -296,6 +325,10 @@ impl SaeAtomGeometryPlan {
         match &self.resolution {
             SaeBasisResolution::PeriodicHarmonics { order } => sae_periodic_basis_size(*order),
             SaeBasisResolution::SphereChart => Ok(SAE_SPHERE_BASIS_SIZE),
+            SaeBasisResolution::AmbientSphereHarmonics { degree } => {
+                AmbientSphereHarmonicEvaluator::new(*degree)
+                    .map(|evaluator| evaluator.basis_size())
+            }
             SaeBasisResolution::TorusHarmonics { per_axis_order } => {
                 TorusHarmonicEvaluator::new(self.latent_dim, *per_axis_order)
                     .map(|evaluator| evaluator.basis_size())
@@ -339,6 +372,9 @@ impl SaeAtomGeometryPlan {
                 PeriodicHarmonicEvaluator::new(sae_periodic_basis_size(*order)?)?,
             ),
             SaeBasisResolution::SphereChart => Arc::new(SphereChartEvaluator),
+            SaeBasisResolution::AmbientSphereHarmonics { degree } => {
+                Arc::new(AmbientSphereHarmonicEvaluator::new(*degree)?)
+            }
             SaeBasisResolution::TorusHarmonics { per_axis_order } => Arc::new(
                 TorusHarmonicEvaluator::new(self.latent_dim, *per_axis_order)?,
             ),
@@ -449,6 +485,10 @@ impl SaeAtomGeometryPlan {
             (SaeBasisResolution::SphereChart, SaeReferenceMetricPlan::SphereChart) => {
                 Ok(sphere_chart_reference_penalty())
             }
+            (
+                SaeBasisResolution::AmbientSphereHarmonics { degree },
+                SaeReferenceMetricPlan::RoundSphere,
+            ) => round_sphere_reference_penalty(*degree, 2),
             (
                 SaeBasisResolution::TorusHarmonics { per_axis_order },
                 SaeReferenceMetricPlan::FlatRectangularTorus { tau },
@@ -597,6 +637,37 @@ fn sphere_chart_reference_penalty() -> Array2<f64> {
         penalty[[column, column]] = 12.0 / 5.0;
     }
     penalty
+}
+
+/// Laplace--Beltrami roughness Gram of the ambient sphere basis, raised to
+/// `power`.
+///
+/// The columns are `L²(S²)`-orthonormal real harmonics, so the roughness
+/// operator is EXACTLY diagonal with `[l(l+1)]^power` -- no quadrature and no
+/// approximation, unlike the fixed chart's hand-tabulated seven entries. This
+/// is the identical construction
+/// [`QuotientSpectralEvaluator::spectral_penalty`] applies to this sphere's
+/// antipodal quotient, so the round sphere and `RP²` are smoothed by the same
+/// operator at the same power rather than by two separately-derived tables.
+fn round_sphere_reference_penalty(degree: usize, power: u32) -> Result<Array2<f64>, String> {
+    if power == 0 {
+        return Err("round_sphere_reference_penalty requires power >= 1".to_string());
+    }
+    let exponent = i32::try_from(power)
+        .map_err(|_| format!("round_sphere_reference_penalty: power {power} exceeds i32::MAX"))?;
+    let modes = AmbientSphereHarmonicEvaluator::new(degree)?.spectral_modes();
+    let width = modes.len();
+    let mut penalty = Array2::<f64>::zeros((width, width));
+    for (column, mode) in modes.iter().enumerate() {
+        let value = mode.l2_gram_weight * mode.laplace_eigenvalue.powi(exponent);
+        if !value.is_finite() {
+            return Err(format!(
+                "round_sphere_reference_penalty: overflowed at column {column} (degree {degree})"
+            ));
+        }
+        penalty[[column, column]] = value;
+    }
+    Ok(penalty)
 }
 
 /// Squared Laplace--Beltrami Gram for a flat rectangular torus of aspect
@@ -1164,6 +1235,73 @@ fn polynomial_reference_penalty(latent_dim: usize, degree: usize) -> Array2<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ambient sphere plan is keyed by `latent_dim == 3` and must not be
+    /// constructible at the chart's `latent_dim == 2` -- three ambient
+    /// coordinates for two intrinsic dimensions is exactly what buys the global
+    /// chart, so a 2-wide "ambient" plan would be a silently broken atom.
+    /// The chart plan must keep validating, since both forms coexist.
+    #[test]
+    fn ambient_sphere_plan_requires_three_ambient_coordinates() {
+        let ambient = SaeAtomGeometryPlan::new(
+            SaeAtomBasisKind::Sphere,
+            3,
+            SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+            SaeReferenceMetricPlan::RoundSphere,
+        )
+        .expect("the ambient sphere plan is valid at latent_dim 3");
+        assert_eq!(ambient.basis_size().unwrap(), 9);
+        assert_eq!(ambient.reference_metric(), &SaeReferenceMetricPlan::RoundSphere);
+
+        assert!(
+            SaeAtomGeometryPlan::new(
+                SaeAtomBasisKind::Sphere,
+                2,
+                SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
+                SaeReferenceMetricPlan::RoundSphere,
+            )
+            .is_err(),
+            "an ambient sphere at latent_dim 2 must be refused, not silently charted"
+        );
+
+        assert!(
+            SaeAtomGeometryPlan::new(
+                SaeAtomBasisKind::Sphere,
+                2,
+                SaeBasisResolution::SphereChart,
+                SaeReferenceMetricPlan::SphereChart,
+            )
+            .is_ok(),
+            "the chart plan must keep validating while both forms coexist"
+        );
+    }
+
+    /// The ambient roughness operator is the Laplace-Beltrami spectrum itself,
+    /// so it is diagonal with `[l(l+1)]²` -- exact, not tabulated. Degree 1
+    /// gives `0, 4, 4, 4`; degree 2 adds five `36`s.
+    #[test]
+    fn ambient_sphere_penalty_is_the_exact_laplace_spectrum() {
+        let penalty = round_sphere_reference_penalty(2, 2).unwrap();
+        assert_eq!(penalty.dim(), (9, 9));
+        let expected = [0.0, 4.0, 4.0, 4.0, 36.0, 36.0, 36.0, 36.0, 36.0];
+        for (column, want) in expected.iter().enumerate() {
+            assert!(
+                (penalty[[column, column]] - want).abs() <= 1.0e-12,
+                "column {column}: got {}, want {want}",
+                penalty[[column, column]]
+            );
+            for other in 0..9 {
+                if other != column {
+                    assert_eq!(
+                        penalty[[column, other]],
+                        0.0,
+                        "the orthonormal harmonic roughness Gram must be diagonal"
+                    );
+                }
+            }
+        }
+        assert!(round_sphere_reference_penalty(2, 0).is_err());
+    }
 
     #[test]
     fn quotient_plan_is_the_only_width_and_metric_authority() {
