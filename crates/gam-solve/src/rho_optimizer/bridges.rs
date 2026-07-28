@@ -1506,12 +1506,12 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
                 // noise, not a globally-infeasible neighbourhood.
                 self.consecutive_probe_refusals = 0;
                 log::info!(
-                    "[STAGE] outer eval end order=Value elapsed={:.3}s theta={} cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={})",
+                    "[STAGE] outer eval end order=Value elapsed={:.3}s cost={:.6e} trial_rho_distance={:.3e} (first-order bridge, iter={}) theta={}",
                     stage_start.elapsed().as_secs_f64(),
-                    format_outer_theta(x),
                     cost,
                     trial_rho_distance,
-                    self.iter_count
+                    self.iter_count,
+                    format_outer_theta(x),
                 );
             }
             Err(err) if err.is_recoverable() => {
@@ -1698,13 +1698,13 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
         self.value_probe_cache
             .retain(|entry| value_probe_reject_outcome(&entry.outcome));
         log::info!(
-            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s theta={} cost={:.6e} |g|={:.3e} g={} (first-order bridge, iter={})",
+            "[STAGE] outer eval end order=ValueAndGradient elapsed={:.3}s cost={:.6e} |g|={:.3e} (first-order bridge, iter={}) theta={} g={}",
             stage_start.elapsed().as_secs_f64(),
-            format_outer_theta(x),
             eval.cost,
             g_norm,
-            format_outer_theta(&gradient),
             self.iter_count,
+            format_outer_theta(x),
+            format_outer_theta(&gradient),
         );
         self.iter_count = self.iter_count.saturating_add(1);
         // Cost-stall halt (#1089). `eval_grad` is invoked by `opt::Bfgs` at
