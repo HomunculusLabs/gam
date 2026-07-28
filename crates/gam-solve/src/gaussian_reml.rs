@@ -6622,7 +6622,7 @@ mod tests {
         // Scoped so the visitor's mutable borrow of `roots` ends before the
         // assertions below read it.
         let selection = {
-            let mut collect_root = |root: StationaryRoot, _| roots.push(root);
+            let mut collect_root = |root: StationaryRoot, _: &ObjectiveEval| roots.push(root);
             enumerate_and_select_rho(&eval, &enclose, Some(-20.0), Some(&mut collect_root))
                 .expect("profile certificate")
         };
@@ -6791,7 +6791,7 @@ mod tests {
             };
             let mut roots = Vec::new();
             let selection = {
-                let mut collect_rho = |root: StationaryRoot, _| roots.push(root.rho);
+                let mut collect_rho = |root: StationaryRoot, _: &ObjectiveEval| roots.push(root.rho);
                 enumerate_and_select_rho(&eval, &enclose, None, Some(&mut collect_rho)).unwrap()
             };
             let selected = selection.rho;
