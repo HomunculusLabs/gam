@@ -561,3 +561,193 @@ fn manifold_beats_linear_joint_streaming_1026() {
         );
     }
 }
+
+/// #2502 — the d>=2 arm at MEASURED parameter parity, against a REAL sphere.
+///
+/// The published "d>=2 loses decisively" number is unsupported for two reasons
+/// with one root: it ASSERTED a parameter count instead of measuring one. The
+/// sphere atom was built as a cylinder when the arm ran, and parity was derived
+/// from an assumed 7-column `(lat, lon)` chart width. The pole-free ambient
+/// basis carries the full `l <= 2` harmonics -- NINE columns -- so the arm
+/// labelled "param parity" at K=1818 in fact carried ~18% more decoder
+/// parameters than the linear arm it lost to.
+///
+/// So this measures. Decoder width is read off `phi.ncols()` per atom, which is
+/// the realized column count of the basis that was actually built; the mixed
+/// arm's `K` is then derived from that measurement. No width is assumed.
+///
+/// Reconstruction is at the ridge-LSQ SEED (the same construction
+/// `objective_and_seed` scores), evaluated on a DISJOINT split: coordinates are
+/// re-seeded on held-out rows and the TRAIN decoder is frozen. That is a
+/// generalization measure, but of the seed rather than of the converged outer
+/// fit -- it does not reproduce the campaign's 250-cycle EV and must not be
+/// compared against those numbers.
+///
+/// KNOWN CONFOUND -- read the printed EVs with this in mind. The aggregation
+/// here AVERAGES all `K` atoms' full-data fits, whereas a real SAE routes each
+/// row to its top-`s` active atoms. Averaging rewards HOMOGENEITY as such: many
+/// similar linear atoms average coherently, while a heterogeneous portfolio
+/// whose atoms carry different coordinate systems averages incoherently. So the
+/// linear arm's margin here is inflated by an unknown amount, and the mixed
+/// arm's EV can even go NEGATIVE (worse than the mean) for a reason that is
+/// about the aggregation, not the parameterization.
+///
+/// What this test therefore establishes is the PARITY MACHINERY -- a measured,
+/// skew-guarded, real-ambient-sphere comparison harness -- plus the measured
+/// per-atom cost ratio, which is a property of the bases alone and is NOT
+/// affected by the confound. The EV ORDERING needs routed reconstruction before
+/// it can carry the weight the published table put on it.
+#[test]
+fn d2_portfolio_loses_at_measured_parameter_parity_2502() {
+    // Arm construction: per-atom basis kinds/dims, so the mixed portfolio is a
+    // genuine mixture rather than a homogeneous fit under a mixed label.
+    fn arm(
+        z: ArrayView2<'_, f64>,
+        z_test: ArrayView2<'_, f64>,
+        kinds: &[SaeAtomBasisKind],
+        dims: &[usize],
+        evals: &[Arc<dyn SaeBasisSecondJet>],
+    ) -> (usize, f64) {
+        let k = kinds.len();
+        let p = z.ncols();
+        let seed = sae_pca_seed_initial_coords(z, kinds, dims).expect("train seed");
+        let seed_test = sae_pca_seed_initial_coords(z_test, kinds, dims).expect("test seed");
+        let mut params = 0usize;
+        let n_test = z_test.nrows();
+        let mut recon = Array2::<f64>::zeros((n_test, p));
+        for a in 0..k {
+            let d = dims[a];
+            let coords = seed.slice(s![a, .., 0..d]).to_owned();
+            let (phi, _) = evals[a].evaluate(coords.view()).expect("train phi");
+            let mm = phi.ncols();
+            // MEASURED cost of this atom: its realized decoder is mm x p.
+            params += mm * p;
+            let mut xtx = fast_atb(&phi, &phi);
+            for i in 0..mm {
+                xtx[[i, i]] += 1.0e-8;
+            }
+            let xtz = fast_atb(&phi, &z.to_owned());
+            let decoder = xtx
+                .cholesky(Side::Lower)
+                .expect("seed gram is PD")
+                .solve_mat(&xtz);
+            // Held-out: re-seed coordinates, FREEZE the train decoder.
+            let coords_t = seed_test.slice(s![a, .., 0..d]).to_owned();
+            let (phi_t, _) = evals[a].evaluate(coords_t.view()).expect("test phi");
+            let fitted = phi_t.dot(&decoder);
+            for row in 0..n_test {
+                for col in 0..p {
+                    recon[[row, col]] += fitted[[row, col]] / k as f64;
+                }
+            }
+        }
+        let mut resid = 0.0_f64;
+        let mut total = 0.0_f64;
+        let mean = z_test.mean_axis(ndarray::Axis(0)).expect("test mean");
+        for row in 0..n_test {
+            for col in 0..p {
+                let r = z_test[[row, col]] - recon[[row, col]];
+                resid += r * r;
+                let c = z_test[[row, col]] - mean[col];
+                total += c * c;
+            }
+        }
+        (params, 1.0 - resid / total.max(1.0e-30))
+    }
+
+    let z = planted_circle_embedded(600, 8, 0.03);
+    let z_test = planted_circle_embedded(400, 8, 0.03);
+
+    let linear_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("linear evaluator"));
+    let euclid_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(EuclideanPatchEvaluator::new(2, 2).expect("euclidean evaluator"));
+    let periodic_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(PeriodicHarmonicEvaluator::new(3).expect("periodic evaluator"));
+    let sphere_eval: Arc<dyn SaeBasisSecondJet> =
+        Arc::new(crate::basis::AmbientSphereHarmonicEvaluator::new(2).expect("sphere evaluator"));
+
+    // Stage 1 -- MEASURE per-atom cost of each arm on a small probe.
+    let probe = 10usize;
+    let lin_kinds = vec![SaeAtomBasisKind::Linear; probe];
+    let lin_dims = vec![1usize; probe];
+    let lin_evals = vec![linear_eval.clone(); probe];
+    let (lin_probe_params, _) = arm(z.view(), z_test.view(), &lin_kinds, &lin_dims, &lin_evals);
+
+    // The published portfolio, `atom % 5`: linear, euclidean, periodic, sphere,
+    // sphere -- whose sphere entries NOW resolve to the ambient harmonic basis.
+    let cycle: [(SaeAtomBasisKind, usize, usize); 5] = [
+        (SaeAtomBasisKind::Linear, 1, 0),
+        (SaeAtomBasisKind::EuclideanPatch, 2, 1),
+        (SaeAtomBasisKind::Periodic, 1, 2),
+        (SaeAtomBasisKind::Sphere, 3, 3),
+        (SaeAtomBasisKind::Sphere, 3, 3),
+    ];
+    let evals_by_slot = [
+        linear_eval.clone(),
+        euclid_eval.clone(),
+        periodic_eval.clone(),
+        sphere_eval.clone(),
+    ];
+    let mix = |k: usize| {
+        let mut kinds = Vec::with_capacity(k);
+        let mut dims = Vec::with_capacity(k);
+        let mut evals: Vec<Arc<dyn SaeBasisSecondJet>> = Vec::with_capacity(k);
+        for a in 0..k {
+            let (kind, d, slot) = cycle[a % cycle.len()].clone();
+            kinds.push(kind);
+            dims.push(d);
+            evals.push(evals_by_slot[slot].clone());
+        }
+        (kinds, dims, evals)
+    };
+    let (pk, pd, pe) = mix(probe);
+    let (mix_probe_params, _) = arm(z.view(), z_test.view(), &pk, &pd, &pe);
+
+    let lin_per_atom = lin_probe_params as f64 / probe as f64;
+    let mix_per_atom = mix_probe_params as f64 / probe as f64;
+    let cost_ratio = mix_per_atom / lin_per_atom;
+    println!(
+        "[2502-parity] measured per-atom decoder params: linear={lin_per_atom:.1} \
+         mixed={mix_per_atom:.1}  ratio={cost_ratio:.3}x"
+    );
+
+    // Stage 2 -- the comparison at the K the MEASUREMENT chose.
+    let k_lin = 60usize;
+    let k_mix = ((k_lin as f64) / cost_ratio).round().max(1.0) as usize;
+    let lk = vec![SaeAtomBasisKind::Linear; k_lin];
+    let ld = vec![1usize; k_lin];
+    let le = vec![linear_eval.clone(); k_lin];
+    let (lin_params, lin_ev) = arm(z.view(), z_test.view(), &lk, &ld, &le);
+    let (mk, md, me) = mix(k_mix);
+    let (mix_params, mix_ev) = arm(z.view(), z_test.view(), &mk, &md, &me);
+
+    let skew = (mix_params as f64 - lin_params as f64).abs() / (lin_params as f64);
+    println!(
+        "[2502-parity] linear K={k_lin} params={lin_params} heldout_EV={lin_ev:.4}"
+    );
+    println!(
+        "[2502-parity] mixed  K={k_mix} params={mix_params} heldout_EV={mix_ev:.4}"
+    );
+    println!(
+        "[2502-parity] realized skew={:.1}%  linear_EV - mixed_EV = {:+.4}",
+        skew * 100.0,
+        lin_ev - mix_ev
+    );
+
+    // The guard the original comparison lacked: refuse to call this parity if it
+    // is not. A skew this large is what made the K=1818 arm not-a-parity-arm.
+    assert!(
+        skew <= 0.05,
+        "this is NOT a parity comparison: realized skew {:.1}% (linear {} vs mixed {} \
+         decoder params). Do not report an EV difference across it.",
+        skew * 100.0,
+        lin_params,
+        mix_params
+    );
+    assert!(
+        lin_ev.is_finite() && mix_ev.is_finite(),
+        "both arms must produce a finite held-out EV; got linear={lin_ev} mixed={mix_ev}"
+    );
+}
+
