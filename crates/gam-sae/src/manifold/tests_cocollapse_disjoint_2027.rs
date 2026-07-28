@@ -81,8 +81,10 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
     let target = two_circle_whitened_target(n, p, 0.05);
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let dims = vec![d; k];
-    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).expect("the PCA seed covers every declared atom basis kind and dim");
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
+    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims)
+        .expect("the PCA seed covers every declared atom basis kind and dim");
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m)
+        .expect("a periodic harmonic evaluator exists for this odd basis count"));
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -91,7 +93,8 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
+        let (phi, jet) = evaluator.evaluate(coords.view())
+            .expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -343,7 +346,8 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
     }
     let shifted_flat: Array1<f64> = shifted.iter().copied().collect();
     term.assignment.coords[1].set_flat(shifted_flat.view());
-    term.atoms[1].refresh_basis(shifted.view()).expect("the atom basis refreshes at the supplied coords");
+    term.atoms[1].refresh_basis(shifted.view())
+        .expect("the atom basis refreshes at the supplied coords");
     assert!(
         term.structural_coherence_collapse_detected()
             .expect("collapse detection is defined for a fully built term")
@@ -383,7 +387,8 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
 fn overcomplete_k3_planar_term(n: usize, p: usize, m: usize, duplicate: bool) -> SaeManifoldTerm {
     let d = 1usize;
     let k = 3usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m)
+        .expect("a periodic harmonic evaluator exists for this odd basis count"));
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
     let mut decoder = Array3::<f64>::zeros((k, m, p));
@@ -401,7 +406,8 @@ fn overcomplete_k3_planar_term(n: usize, p: usize, m: usize, duplicate: bool) ->
         for row in 0..n {
             coords[[row, 0]] = ((row as f64) / (n as f64) + phase).rem_euclid(1.0);
         }
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
+        let (phi, jet) = evaluator.evaluate(coords.view())
+            .expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -514,8 +520,10 @@ fn k2_periodic_term_from_target(target: &Array2<f64>, m: usize) -> SaeManifoldTe
     let k = 2usize;
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let dims = vec![d; k];
-    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).expect("the PCA seed covers every declared atom basis kind and dim");
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
+    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims)
+        .expect("the PCA seed covers every declared atom basis kind and dim");
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m)
+        .expect("a periodic harmonic evaluator exists for this odd basis count"));
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -524,7 +532,8 @@ fn k2_periodic_term_from_target(target: &Array2<f64>, m: usize) -> SaeManifoldTe
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
+        let (phi, jet) = evaluator.evaluate(coords.view())
+            .expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties

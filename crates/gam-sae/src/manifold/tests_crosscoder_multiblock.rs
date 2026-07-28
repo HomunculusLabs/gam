@@ -52,7 +52,9 @@ fn circle_atom(
     coords: &Array2<f64>,
     p_tot: usize,
 ) -> SaeManifoldAtom {
-    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture coords are finite and lie inside the evaluator chart");
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture coords are finite and lie inside the evaluator chart");
     let m = phi.ncols();
     SaeManifoldAtom::new_with_provided_function_gram(
         "cc",
@@ -83,7 +85,8 @@ fn build_k1(
         AssignmentMode::softmax(1.0),
     )
     .expect("the fixture logits, coord blocks and manifolds all have length k");
-    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture atoms and assignment agree on the atom count");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the fixture atoms and assignment agree on the atom count");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     (term, rho)
 }

@@ -61,7 +61,7 @@ fn build_circle_term(n: usize, p: usize) -> SaeManifoldTerm {
         Array2::<f64>::zeros((m, p)),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("phi, jet, decoder and gram were built with matching shapes")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let logits = Array2::<f64>::from_elem((n, 1), 2.0); // gated ON (logit 2 > threshold 0)
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -70,8 +70,9 @@ fn build_circle_term(n: usize, p: usize) -> SaeManifoldTerm {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::threshold_gate(1.0, 0.0),
     )
-    .unwrap();
-    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+    .expect("one logit column, coord block and manifold for the single atom");
+    SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the single atom and its assignment agree on atom count")
 }
 
 fn fit_circle(n: usize, p: usize, amp: f64) -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
@@ -83,7 +84,7 @@ fn fit_circle(n: usize, p: usize, amp: f64) -> (SaeManifoldTerm, Array2<f64>, Sa
     // decoder exactly, so the EV precondition cannot depend on an unrelated
     // joint-optimizer trajectory.
     term.refit_decoder_least_squares_at_current_state(target.view(), Some(&rho))
-        .unwrap();
+        .expect("the planted chart is full rank, so its conditional decoder solves");
     (term, target, rho)
 }
 

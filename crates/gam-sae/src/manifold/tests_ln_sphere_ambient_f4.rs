@@ -74,7 +74,7 @@ fn circle_term(
     coords: &Array2<f64>,
     p_tot: usize,
 ) -> (SaeManifoldTerm, SaeManifoldRho) {
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
     let m = phi.ncols();
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "circle",
@@ -85,7 +85,7 @@ fn circle_term(
         Array2::<f64>::zeros((m, p_tot)),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
     .with_basis_second_jet(evaluator.clone());
     let n = coords.nrows();
     let logits = Array2::<f64>::from_elem((n, 1), ON);
@@ -95,8 +95,8 @@ fn circle_term(
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("fixture assignment: one logit column and one coord block per atom");
+    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("fixture term: every atom's basis width matches its assignment block");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     (term, rho)
 }
@@ -150,7 +150,9 @@ fn fit_and_measure(
     term.set_guards_enabled(false);
     term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
         .expect("circle fit must complete");
-    let fitted = term.try_fitted_for_rho(&rho).unwrap();
+    let fitted = term
+        .try_fitted_for_rho(&rho)
+        .expect("the circle fit completed above, so a fitted surface exists");
     fitted_norm_cv(&fitted)
 }
 
@@ -160,7 +162,7 @@ fn fit_and_measure(
 #[test]
 fn ln_sphere_fit_removes_flat_spurious_curvature_and_radial_residual() {
     let (n, p, s) = (240usize, 6usize, 0.4_f64);
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(9).unwrap()); // harmonics 1..=4
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(9).expect("an odd harmonic count is a valid periodic basis size")); // harmonics 1..=4
     let (x, _theta) = plant(n, p, s, 0x1234_5678);
     let seed = seed_coords(&x);
 
@@ -176,7 +178,8 @@ fn ln_sphere_fit_removes_flat_spurious_curvature_and_radial_residual() {
     // FLAT: reconstruct the raw activation.
     let flat_cv = fit_and_measure(&evaluator, &seed, &x);
     // SPHERE: reconstruct the LN-projected direction (the real code path).
-    let (u, _norms) = ln_sphere_project(x.view(), None).unwrap();
+    let (u, _norms) = ln_sphere_project(x.view(), None)
+        .expect("planted activations are strictly positive, so LN projection is defined");
     let sph_cv = fit_and_measure(&evaluator, &seed, &u);
     eprintln!(
         "F4 s={s} planted_cv={cv:.3} | FLAT fit_norm_cv={flat_cv:.4} | SPHERE fit_norm_cv={sph_cv:.4}"
@@ -208,14 +211,15 @@ fn ln_sphere_fit_removes_flat_spurious_curvature_and_radial_residual() {
 #[test]
 fn flat_spurious_curvature_grows_with_norm_variation_sphere_invariant() {
     let (n, p) = (240usize, 6usize);
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(9).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(9).expect("an odd harmonic count is a valid periodic basis size"));
     let mut flat_curve = Vec::new();
     let mut sphere_curve = Vec::new();
     for &s in &[0.0_f64, 0.2, 0.45] {
         let (x, _theta) = plant(n, p, s, 0xABCD_0001);
         let seed = seed_coords(&x);
         let flat_cv = fit_and_measure(&evaluator, &seed, &x);
-        let (u, _) = ln_sphere_project(x.view(), None).unwrap();
+        let (u, _) = ln_sphere_project(x.view(), None)
+        .expect("planted activations are strictly positive, so LN projection is defined");
         let sph_cv = fit_and_measure(&evaluator, &seed, &u);
         flat_curve.push(flat_cv);
         sphere_curve.push(sph_cv);

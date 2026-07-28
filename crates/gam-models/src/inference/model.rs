@@ -4417,11 +4417,23 @@ impl FittedModel {
         let mut writer = std::io::BufWriter::new(file);
         let ser_result = serde_json::to_writer(&mut writer, &normalized);
         if let Err(e) = ser_result {
-            // Best-effort temp cleanup on serialization failure. flush
-            // returns io::Result<()>; discarding via `.ok()` is enough.
-            std::io::Write::flush(&mut writer).ok();
+            // Best-effort temp cleanup on serialization failure: the
+            // serialization error below is the one the caller acts on, so
+            // neither of these may replace it. Log them so a temp file left
+            // behind in the model directory is explainable.
+            if let Err(flush_err) = std::io::Write::flush(&mut writer) {
+                log::debug!(
+                    "model publish: flushing the failed temp '{}' errored: {flush_err}",
+                    tmp.display()
+                );
+            }
             drop(writer);
-            fs::remove_file(&tmp).ok();
+            if let Err(rm_err) = fs::remove_file(&tmp) {
+                log::debug!(
+                    "model publish: could not remove the failed temp '{}': {rm_err}",
+                    tmp.display()
+                );
+            }
             return Err(FittedModelError::PayloadCorrupt {
                 reason: format!("failed to serialize model: {e}"),
             });
@@ -4435,10 +4447,23 @@ impl FittedModel {
             .map_err(|e| FittedModelError::PayloadCorrupt {
                 reason: format!("failed to flush model '{}': {}", tmp.display(), e.error()),
             })?;
-        inner.sync_all().ok();
+        if let Err(sync_err) = inner.sync_all() {
+            // The rename below still publishes the model, so this is not fatal
+            // — but the contents are no longer known to have reached disk, and
+            // that is exactly what a post-crash truncated model looks like.
+            log::warn!(
+                "model publish: fsync of '{}' failed, contents may not survive a crash: {sync_err}",
+                tmp.display()
+            );
+        }
         drop(inner);
         if let Err(e) = fs::rename(&tmp, path) {
-            fs::remove_file(&tmp).ok();
+            if let Err(rm_err) = fs::remove_file(&tmp) {
+                log::debug!(
+                    "model publish: could not remove the unpublished temp '{}': {rm_err}",
+                    tmp.display()
+                );
+            }
             return Err(FittedModelError::PayloadCorrupt {
                 reason: format!("failed to publish model '{}': {e}", path.display()),
             });
@@ -4447,8 +4472,16 @@ impl FittedModel {
         // across a crash; without this, the rename can be lost even though
         // file contents reached disk. Best-effort on platforms that don't
         // support opening a directory for fsync.
-        if let Ok(d) = fs::File::open(parent) {
-            d.sync_all().ok();
+        if let Ok(d) = fs::File::open(parent)
+            && let Err(sync_err) = d.sync_all()
+        {
+            // Platforms that cannot fsync a directory land here; the model file
+            // itself is already durable, only the rename's durability is
+            // unconfirmed.
+            log::debug!(
+                "model publish: directory fsync of '{}' failed: {sync_err}",
+                parent.display()
+            );
         }
         Ok(())
     }

@@ -1030,7 +1030,7 @@ impl ImplicitDesignPsiDerivative {
     {
         let Some(st) = self.streaming.as_ref() else {
             return Err(BasisError::InvalidInput(
-                "streaming_accumulate_knot_vector<G> needs the streaming radial state, but this implicit \
+                "streaming_accumulate_knot_vector needs the streaming radial state, but this implicit \
                  ψ-derivative operator was built without one"
                     .to_string(),
             ));
@@ -1106,7 +1106,7 @@ impl ImplicitDesignPsiDerivative {
     {
         let Some(st) = self.streaming.as_ref() else {
             return Err(BasisError::InvalidInput(
-                "streaming_forward_mul<G> needs the streaming radial state, but this implicit \
+                "streaming_forward_mul needs the streaming radial state, but this implicit \
                  ψ-derivative operator was built without one"
                     .to_string(),
             ));
@@ -1177,7 +1177,7 @@ impl ImplicitDesignPsiDerivative {
     {
         let Some(st) = self.streaming.as_ref() else {
             return Err(BasisError::InvalidInput(
-                "streaming_materialize<G> needs the streaming radial state, but this implicit \
+                "streaming_materialize needs the streaming radial state, but this implicit \
                  ψ-derivative operator was built without one"
                     .to_string(),
             ));

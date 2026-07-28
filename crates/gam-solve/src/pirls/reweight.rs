@@ -837,32 +837,50 @@ where
                     // present). Subsequent attempts mutate the cached matrix's
                     // diagonal in place — symbolic structure (col_ptr/row_idx)
                     // is identical, only diagonal values change.
+                    // `compute_lm_d2` builds this from the Hessian diagonal, so
+                    // it is contiguous in every path that reaches here; a
+                    // non-contiguous view would silently mis-damp rather than
+                    // fail, so refuse instead of panicking.
+                    let lm_d2_slice = lm_d2.as_slice().ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            "sparse PIRLS LM damping requires a contiguous D^2 diagonal"
+                                .to_string(),
+                        )
+                    })?;
                     if cached_sparse_regularized.is_none() {
                         let sparse_reg = add_scaled_diagonal_to_upper_sparse(
                             h_sparse,
                             loop_lambda,
-                            lm_d2.as_slice().unwrap(),
+                            lm_d2_slice,
                         )?;
                         cached_sparse_regularized = Some(sparse_reg);
                         sparse_applied_lambda = loop_lambda;
                     } else {
                         let delta = loop_lambda - sparse_applied_lambda;
                         if delta != 0.0 {
-                            let cached = cached_sparse_regularized.as_mut().unwrap();
-                            update_scaled_diagonal_in_place(
-                                cached,
-                                delta,
-                                lm_d2.as_slice().unwrap(),
-                            )
-                            .map_err(|e| {
-                                EstimationError::InvalidInput(format!(
-                                    "sparse diagonal in-place update failed: {e}"
-                                ))
+                            let cached = cached_sparse_regularized.as_mut().ok_or_else(|| {
+                                EstimationError::InvalidInput(
+                                    "sparse PIRLS regularized cache went missing between the \
+                                     emptiness test and its in-place diagonal update"
+                                        .to_string(),
+                                )
                             })?;
+                            update_scaled_diagonal_in_place(cached, delta, lm_d2_slice)
+                                .map_err(|e| {
+                                    EstimationError::InvalidInput(format!(
+                                        "sparse diagonal in-place update failed: {e}"
+                                    ))
+                                })?;
                             sparse_applied_lambda = loop_lambda;
                         }
                     }
-                    let sparse_reg_ref = cached_sparse_regularized.as_ref().unwrap();
+                    let sparse_reg_ref = cached_sparse_regularized.as_ref().ok_or_else(|| {
+                        EstimationError::InvalidInput(
+                            "sparse PIRLS regularized cache is populated by the branch above \
+                             before it is factorized"
+                                .to_string(),
+                        )
+                    })?;
                     let factor = factorize_sparse_spd(sparse_reg_ref)?;
                     solve_sparse_spd_into(&factor, &state.gradient, &mut newton_direction)?;
                     newton_direction.mapv_inplace(|g| -g);

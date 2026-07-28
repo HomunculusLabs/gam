@@ -34,8 +34,13 @@ fn tiny_objective(salt: u64) -> (SaeManifoldOuterObjective, Array1<f64>) {
         z[[i, 2]] = 0.4 * (2.0 * theta).cos() + noise();
         z[[i, 3]] = 0.4 * (2.0 * theta).sin() + noise();
     }
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("the fixture's harmonic order is a valid periodic basis order"));
-    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("the fixture's harmonic order is a valid periodic basis order"),
+    );
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture's coordinate block is a valid input for this evaluator");
     let m = phi.ncols();
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "ckpt-e2e",
@@ -56,7 +61,8 @@ fn tiny_objective(salt: u64) -> (SaeManifoldOuterObjective, Array1<f64>) {
         AssignmentMode::softmax(1.0),
     )
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
-    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the fixture's atoms and assignment describe the same latent blocks");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)])
         .for_assignment(AssignmentMode::softmax(1.0));
     let flat = rho.to_flat();

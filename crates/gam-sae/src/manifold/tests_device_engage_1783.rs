@@ -67,7 +67,7 @@ fn framed_circle_term() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("decoder, phi and jet were built against the same basis width m")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     // Target = the exact decoded curve, so the isometry gauge has a live pullback
     // metric (the `#795` fixtures use the same construction).
@@ -78,8 +78,9 @@ fn framed_circle_term() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("one coord block and one manifold for the single-atom fixture");
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the assignment was built with exactly one block for this one atom");
     let rho = SaeManifoldRho::new(0.0, 0.8_f64.ln(), vec![array![1.0_f64.ln()]]);
     (term, target, rho)
 }

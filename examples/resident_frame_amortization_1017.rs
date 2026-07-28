@@ -95,7 +95,9 @@ fn main() {
     );
 
     // ---- timing: N solves each way (warm pass excluded) ----
-    frame.solve_gradient(&g_t, &g_beta).ok();
+    frame
+        .solve_gradient(&g_t, &g_beta)
+        .expect("warm-up resident solve: the timed loop below requires the same solve to succeed");
     let mut resident_total = Duration::ZERO;
     for _ in 0..n_solves {
         let start = Instant::now();
@@ -104,7 +106,8 @@ fn main() {
         std::hint::black_box(s.delta_beta.len());
     }
 
-    solve_arrow_newton_step(&sys, ridge_t, ridge_beta).ok();
+    solve_arrow_newton_step(&sys, ridge_t, ridge_beta)
+        .expect("warm-up reupload solve: the timed loop below requires the same solve to succeed");
     let mut reupload_total = Duration::ZERO;
     for _ in 0..n_solves {
         let start = Instant::now();

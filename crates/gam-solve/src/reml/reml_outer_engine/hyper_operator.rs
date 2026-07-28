@@ -93,7 +93,8 @@ pub(crate) fn composite_trace_implicit_batched(
 
     for group in &group_starts {
         if group.len() >= 2 {
-            let lead = as_implicit(operators[group[0]].as_ref()).expect("a group leader is by construction an index that matched as_implicit");
+            let lead = as_implicit(operators[group[0]].as_ref())
+                .expect("a group leader is by construction an index that matched as_implicit");
             let xf = match cache {
                 Some(c) => lead.cached_xf(factor, c),
                 None => Arc::new(lead.compute_xf(factor)),
@@ -101,7 +102,9 @@ pub(crate) fn composite_trace_implicit_batched(
             let axes: Vec<(usize, &Array2<f64>, Option<&Array1<f64>>)> = group
                 .iter()
                 .map(|&k| {
-                    let op = as_implicit(operators[k].as_ref()).expect("a group member is by construction an index that matched as_implicit");
+                    let op = as_implicit(operators[k].as_ref()).expect(
+                        "a group member is by construction an index that matched as_implicit",
+                    );
                     (op.axis, &op.s_psi, op.c_x_psi_beta.as_deref())
                 })
                 .collect();
@@ -173,7 +176,9 @@ pub(crate) fn trace_projected_factors_batched(
             let axes: Vec<(usize, &Array2<f64>, Option<&Array1<f64>>)> = group
                 .iter()
                 .map(|&idx| {
-                    let op = as_implicit(operators[idx].as_ref()).expect("a group member is by construction an index that matched as_implicit");
+                    let op = as_implicit(operators[idx].as_ref()).expect(
+                        "a group member is by construction an index that matched as_implicit",
+                    );
                     (op.axis, &op.s_psi, op.c_x_psi_beta.as_deref())
                 })
                 .collect();
@@ -312,7 +317,8 @@ pub(crate) fn trace_projected_operator_terms_batched(
         let axes: Vec<(usize, &Array2<f64>, Option<&Array1<f64>>)> = group
             .iter()
             .map(|&term_idx| {
-                let op = as_implicit(terms[term_idx].2).expect("a group member is by construction an index that matched as_implicit");
+                let op = as_implicit(terms[term_idx].2)
+                    .expect("a group member is by construction an index that matched as_implicit");
                 (op.axis, &op.s_psi, op.c_x_psi_beta.as_deref())
             })
             .collect();

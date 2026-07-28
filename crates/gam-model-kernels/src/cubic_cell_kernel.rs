@@ -2971,7 +2971,9 @@ where
     }
 
     // ── Right tail cell: [rightmost_split, +∞) ──
-    let (rightmost, rightmost_edge) = *split_points.last().unwrap();
+    let (rightmost, rightmost_edge) = *split_points
+        .last()
+        .expect("split_points is non-empty here; the empty case returned at the guard above");
     let right_probe = interval_probe_point(rightmost, f64::INFINITY)?;
     let right_score_span = score_span_at(right_probe)?;
     let right_link_span = link_span_at(a + b * right_probe)?;

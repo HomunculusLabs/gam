@@ -39,8 +39,12 @@ fn parabola_atom(
     col_quad: usize,
     coords: &Array2<f64>,
 ) -> SaeManifoldAtom {
-    let evaluator = Arc::new(EuclideanPatchEvaluator::new(1, 2).unwrap());
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let evaluator = Arc::new(
+        EuclideanPatchEvaluator::new(1, 2).expect("dim 1, degree 2 is a valid Euclidean patch"),
+    );
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture coords lie in the Euclidean patch domain");
     // A degree-2 patch basis has three columns: the constant, degree-1, and
     // degree-2 functions of `t` (index 1 is linear, index 2 is quadratic).
     let m = phi.ncols();
@@ -56,7 +60,7 @@ fn parabola_atom(
         decoder,
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("phi, jet, decoder and gram were built with matching shapes")
     .with_basis_evaluator(evaluator)
 }
 

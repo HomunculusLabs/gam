@@ -643,7 +643,9 @@ fn gauss_jordan_inverse(a: &[Vec<f64>], what: &str) -> Result<Vec<Vec<f64>>, Str
     for col in 0..d {
         let piv = (col..d)
             .max_by(|&i, &j| aug[i][col].abs().total_cmp(&aug[j][col].abs()))
-            .unwrap();
+            .ok_or_else(|| {
+                format!("spline scan: no pivot candidate in column {col} of {d} in {what}")
+            })?;
         let p = aug[piv][col];
         if !(p.is_finite() && p.abs() > 0.0) {
             return Err(format!(

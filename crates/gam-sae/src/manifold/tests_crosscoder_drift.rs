@@ -62,9 +62,14 @@ fn build_term(
     let n = 8usize;
     // `new` takes NUM_BASIS (odd: constant + sin/cos pairs), not the harmonic
     // order — realize the M = 2H + 1 the constant above documents.
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(2 * H + 1).unwrap());
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(2 * H + 1)
+            .expect("2H+1 is odd and positive, the basis width this evaluator requires"),
+    );
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(i, _)| i as f64 / n as f64);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("fixture coords are finite and inside the unit-period circle chart");
     let m = phi.ncols();
 
     let p_tot = P * angles_per_atom[0].len();
@@ -82,7 +87,7 @@ fn build_term(
                 decoder,
                 Array2::<f64>::eye(m),
             )
-            .unwrap()
+            .expect("decoder, phi and jet widths agree by construction above")
         })
         .collect();
     let k = atoms.len();
@@ -94,13 +99,15 @@ fn build_term(
         vec![LatentManifold::Circle { period: 1.0 }; k],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("one coord block and one manifold per atom, matching the logits' k columns");
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("the assignment was built with exactly one block per atom");
 
     let labels: Vec<String> = (0..block_dims.len())
         .map(|l| format!("layer{}", l + 1))
         .collect();
-    let layout = CrosscoderLayout::new(P, block_dims, labels, block_log_lambda).unwrap();
+    let layout = CrosscoderLayout::new(P, block_dims, labels, block_log_lambda)
+        .expect("block dims, labels and per-block log-lambdas are all the same length");
     (term, layout)
 }
 

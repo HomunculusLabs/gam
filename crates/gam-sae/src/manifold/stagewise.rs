@@ -1263,17 +1263,21 @@ fn backfit_sweep(
     term.assignment.validate_rho_domain(rho)?;
     term.set_guards_enabled(false);
     // Routing step: re-solve gates + coordinates jointly at frozen decoders. A
-    // failed assemble is a no-op (the state stays at the last good iterate); the
-    // `.ok()` discards the must-use result without an underscore-let.
-    term.run_fixed_decoder_arrow_schur(
+    // failed assemble is a no-op — the state stays at the last good iterate, so
+    // the stage is still well-defined and must not abort. It is not, however,
+    // uninteresting: a routing step that never lands leaves the gates where the
+    // previous stage put them, which is worth seeing when a stagewise fit
+    // stalls.
+    if let Err(err) = term.run_fixed_decoder_arrow_schur(
         target,
         rho,
         registry,
         1,
         config.learning_rate,
         config.ridge_ext_coord,
-    )
-    .ok();
+    ) {
+        log::debug!("stagewise routing step declined; keeping the last good iterate: {err}");
+    }
     // Warm joint polish (guards off): reassigns credit across atoms via the
     // damped Newton line search. Warm-started from the composed dictionary, so the
     // co-collapse that bites the cold-start joint fit cannot arise here.

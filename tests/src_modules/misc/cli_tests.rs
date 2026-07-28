@@ -23,6 +23,19 @@ use crate::config_resolve::{
     SurvivalInverseLinkInput, parse_survival_inverse_link as parse_config_survival_inverse_link,
 };
 use clap::Parser;
+
+/// Delete a test's temporary output file, reporting rather than swallowing a
+/// failure. Cleanup runs after the assertions, so a failure cannot invalidate
+/// the test that just passed — but a leaked temp file can collide with a later
+/// run's fixture, and an error nobody prints makes that impossible to diagnose.
+fn remove_temp_file(path: &std::path::Path) {
+    if let Err(err) = fs::remove_file(path) {
+        eprintln!(
+            "cli test cleanup: could not remove {}: {err}",
+            path.display()
+        );
+    }
+}
 use csv::StringRecord;
 use gam::MatrixMaterializationError;
 use gam::basis::{
@@ -4487,7 +4500,7 @@ fn survival_prediction_csv_includes_explicit_semantics_columns() {
         "survival output schema changed unexpectedly"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4512,7 +4525,7 @@ fn survival_binary_prediction_csv_includes_explicit_semantics_columns() {
         "survival binary output schema changed unexpectedly"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4556,7 +4569,7 @@ fn survival_prediction_csv_emits_bounds_without_std_error() {
         "survival output must include bounds when supplied without std_error",
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4607,7 +4620,7 @@ fn survival_prediction_csv_errors_on_half_supplied_bounds() {
         "upper-only error message wrong: {err_upper_only}"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4651,7 +4664,7 @@ fn survival_binary_prediction_csv_emits_bounds_without_std_error() {
         "survival binary output must include bounds when supplied without std_error",
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4697,7 +4710,7 @@ fn survival_binary_prediction_csv_errors_on_half_supplied_bounds() {
         "upper-only binary error message wrong: {err_upper_only}"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4723,7 +4736,7 @@ fn prediction_csv_can_prepend_id_column() {
     assert_eq!(lines.next(), Some("p1,0.500000000000,0.620000000000"));
     assert_eq!(lines.next(), Some("p2,-0.250000000000,0.440000000000"));
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4762,7 +4775,7 @@ fn gaussian_location_scale_prediction_csv_includes_sigma_column() {
         "gaussian location-scale output schema changed unexpectedly"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4803,7 +4816,7 @@ fn gaussian_location_scale_prediction_csv_includes_boundswhen_present() {
         "gaussian location-scale output bounds schema changed unexpectedly"
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]
@@ -4852,7 +4865,7 @@ fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_
         )
     );
 
-    fs::remove_file(&path).ok();
+    remove_temp_file(&path);
 }
 
 #[test]

@@ -1018,7 +1018,19 @@ impl MatrixFreeSpdOperator {
                     (matrix, self.n_dim)
                 }
             };
-        let result = DenseSpectralOperator::from_symmetric_with_mode(&matrix, self.mode).ok();
+        let result = match DenseSpectralOperator::from_symmetric_with_mode(&matrix, self.mode) {
+            Ok(operator) => Some(operator),
+            Err(err) => {
+                // `None` here silently demotes the caller to a slower path.
+                // Say why, or the demotion is indistinguishable from "not
+                // requested" in a profile.
+                log::warn!(
+                    "[matrix_free_spd] dense spectral materialization declined at n_dim={}: {err}",
+                    self.n_dim
+                );
+                None
+            }
+        };
         log::info!(
             "[STAGE] matrix_free_spd materialize n_dim={} matvec_count={} elapsed={:.3}s",
             self.n_dim,

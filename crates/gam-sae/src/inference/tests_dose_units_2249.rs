@@ -65,7 +65,8 @@ fn categorical_fisher_row_metric(p_probs: &[f64]) -> RowMetric {
             flat[i * k + c] = sqrt_pc * (e_ci - p_probs[i]);
         }
     }
-    let u = Array2::from_shape_vec((1, k * k), flat).expect("flat was built with exactly k*k entries just above");
+    let u = Array2::from_shape_vec((1, k * k), flat)
+        .expect("flat was built with exactly k*k entries just above");
     RowMetric::output_fisher(Arc::new(u), k, k)
         .expect("the (1, k*k) row factor matches the declared p = rank = k")
         .with_fisher_factor_kind(gam_problem::FisherFactorKind::ExactFull)

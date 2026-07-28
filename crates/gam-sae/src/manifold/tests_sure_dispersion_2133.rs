@@ -63,9 +63,9 @@ fn fitted_circle(
             x[[i, j]] += sigma * lcg_normal(&mut s);
         }
     }
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("an odd harmonic count is a valid periodic basis size"));
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r] / TAU);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, 0]] = radius;
     decoder[[2, 1]] = radius;
@@ -78,7 +78,7 @@ fn fitted_circle(
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("fixture atom: basis width, latent dim and decoder shape agree by construction")
     .with_basis_second_jet(evaluator.clone());
     let logits = Array2::<f64>::from_elem((n, 1), 3.0);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -87,8 +87,8 @@ fn fitted_circle(
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("fixture assignment: one logit column and one coord block per atom");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("fixture term: every atom's basis width matches its assignment block");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 80, 1.0, 1e-7, 1e-7)
@@ -108,7 +108,7 @@ fn hand_correction(
 ) -> (f64, f64) {
     let p = term.output_dim();
     let n = term.n_obs();
-    let sj = term.atom_second_jets().unwrap();
+    let sj = term.atom_second_jets().expect("the periodic basis was installed with a second jet above");
     let periods = term.assignment.coords[0].effective_axis_periods();
     let mut g1 = vec![0.0; p];
     let mut g2 = vec![0.0; p];
@@ -118,10 +118,10 @@ fn hand_correction(
     for i in 0..n {
         term.assignment
             .try_assignments_row_into(i, &mut a_row)
-            .unwrap();
+            .expect("row index is below n_obs and the buffer is k_atoms wide");
         let a_k = a_row[0];
         let t = term.assignment.coords[0].row(i)[0];
-        let alpha = rho.ard_precisions().unwrap()[0][0];
+        let alpha = rho.ard_precisions().expect("the fixture rho was built with one ARD precision per atom")[0][0];
         let v_pp = ArdAxisPrior::eval(alpha, t, periods[0]).psd_majorizer_hess();
         term.atoms[0].fill_decoded_derivative_row(i, 0, &mut g1);
         term.atoms[0].fill_decoded_second_derivative_row(&sj[0], i, 0, &mut g2);
@@ -148,7 +148,9 @@ fn hand_correction(
 fn sure_correction_wiring_and_stability_2133() {
     let (n, p) = (160usize, 6usize);
     let (term, rho, x) = fitted_circle(n, p, 1.0, 0.30, 0x2133_5A1E_0000_0001);
-    let residual = term.reconstruction_residual(x.view(), &rho).unwrap();
+    let residual = term
+        .reconstruction_residual(x.view(), &rho)
+        .expect("the joint fit above converged, so the residual is defined");
 
     // Residual is consistent with the atom basis on EVERY row (fitted from the
     // decoded primitives equals reconstruction_residual + x). This is exactly the
@@ -159,7 +161,7 @@ fn sure_correction_wiring_and_stability_2133() {
     for i in 0..n {
         term.assignment
             .try_assignments_row_into(i, &mut a_row)
-            .unwrap();
+            .expect("row index is below n_obs and the buffer is k_atoms wide");
         term.atoms[0].fill_decoded_row(i, &mut decoded);
         for k in 0..p {
             let fitted_k = a_row[0] * decoded[k];
@@ -174,7 +176,7 @@ fn sure_correction_wiring_and_stability_2133() {
     // Production correction == independent hand recomputation (wiring correct).
     let correction = term
         .coordinate_sure_deflation_correction(residual.view(), &rho)
-        .unwrap();
+        .expect("guards are disabled and the fit converged, so the correction is defined");
     let (hand, max_abs_row) = hand_correction(&term, &rho, &residual);
     eprintln!(
         "[#2133 wiring] correction={correction:.6} hand={hand:.6} max|Δedf/row|={max_abs_row:.4}"
@@ -202,8 +204,10 @@ fn sure_correction_wiring_and_stability_2133() {
 fn sure_correction_matches_fd_divergence_2133() {
     let (n, p, radius) = (160usize, 6usize, 1.0);
     let (term, rho, x) = fitted_circle(n, p, radius, 0.30, 0x2133_C0FF_EE00_0002);
-    let residual = term.reconstruction_residual(x.view(), &rho).unwrap();
-    let alpha = rho.ard_precisions().unwrap()[0][0];
+    let residual = term
+        .reconstruction_residual(x.view(), &rho)
+        .expect("the joint fit above converged, so the residual is defined");
+    let alpha = rho.ard_precisions().expect("the fixture rho was built with one ARD precision per atom")[0][0];
     let periods = term.assignment.coords[0].effective_axis_periods();
 
     // Evaluate the atom's fitted image f(t) = a_k·Φ(t)·B and its coordinate MAP by
@@ -214,17 +218,18 @@ fn sure_correction_matches_fd_divergence_2133() {
         .map(|i| {
             term.assignment
                 .try_assignments_row_into(i, &mut a_row)
-                .unwrap();
+                .expect("row index is below n_obs and the buffer is k_atoms wide");
             a_row[0]
         })
         .collect();
-    let ev = PeriodicHarmonicEvaluator::new(3).unwrap();
+    let ev = PeriodicHarmonicEvaluator::new(3).expect("an odd harmonic count is a valid periodic basis size");
     let decoder = term.atoms[0].decoder_coefficients().clone();
     // f, f', f'' at arbitrary t (a·Φ·B and its coordinate derivatives).
     let jets_at = |t: f64, a: f64| -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let coords = Array2::<f64>::from_elem((1, 1), t.rem_euclid(1.0));
-        let (phi, jet) = ev.evaluate(coords.view()).unwrap();
-        let sj = crate::manifold::SaeBasisSecondJet::second_jet(&ev, coords.view()).unwrap();
+        let (phi, jet) = ev.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
+        let sj = crate::manifold::SaeBasisSecondJet::second_jet(&ev, coords.view())
+            .expect("fixture coords are already wrapped into the evaluator's unit period");
         let (mut f, mut fp, mut fpp) = (vec![0.0; p], vec![0.0; p], vec![0.0; p]);
         for b in 0..decoder.nrows() {
             for c in 0..p {
@@ -277,7 +282,7 @@ fn sure_correction_matches_fd_divergence_2133() {
     };
 
     // FD divergence + analytic GN baseline and exact (GN+correction) per row.
-    let sj = term.atom_second_jets().unwrap();
+    let sj = term.atom_second_jets().expect("the periodic basis was installed with a second jet above");
     let mut g1 = vec![0.0; p];
     let mut g2 = vec![0.0; p];
     let (mut fd_div, mut gn_div, mut exact_div) = (0.0_f64, 0.0_f64, 0.0_f64);

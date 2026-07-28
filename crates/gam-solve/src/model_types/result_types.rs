@@ -160,7 +160,8 @@ mod per_term_edf_tests {
                 smoothing_correction_method_first_order: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(36)),
                 reparam_qs: None,
-                dispersion: Dispersion::estimated(1.0).unwrap(),
+                dispersion: Dispersion::estimated(1.0)
+                    .expect("1.0 is a valid estimated dispersion"),
                 beta_covariance: None,
                 beta_standard_errors: None,
                 beta_covariance_corrected: None,
@@ -248,7 +249,8 @@ mod per_term_edf_tests {
                 smoothing_correction_method_first_order: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
-                dispersion: Dispersion::estimated(1.0).unwrap(),
+                dispersion: Dispersion::estimated(1.0)
+                    .expect("1.0 is a valid estimated dispersion"),
                 beta_covariance: None,
                 beta_standard_errors: None,
                 beta_covariance_corrected: None,
@@ -322,7 +324,8 @@ mod per_term_edf_tests {
                 smoothing_correction_method_first_order: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
-                dispersion: Dispersion::estimated(1.0).unwrap(),
+                dispersion: Dispersion::estimated(1.0)
+                    .expect("1.0 is a valid estimated dispersion"),
                 beta_covariance: None,
                 beta_standard_errors: None,
                 beta_covariance_corrected: None,
@@ -526,7 +529,8 @@ mod per_term_edf_tests {
                 smoothing_correction_method_first_order: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(eye(p)),
                 reparam_qs: None,
-                dispersion: Dispersion::estimated(1.0).unwrap(),
+                dispersion: Dispersion::estimated(1.0)
+                    .expect("1.0 is a valid estimated dispersion"),
                 beta_covariance: None,
                 beta_standard_errors: None,
                 beta_covariance_corrected: None,
@@ -2717,7 +2721,8 @@ mod assembly_inner_status_gate_tests {
                 smoothing_correction_method_first_order: None,
                 penalized_hessian: gam_problem::dispersion_cov::UnscaledPrecision::wrap(hessian),
                 reparam_qs: None,
-                dispersion: Dispersion::estimated(1.0).unwrap(),
+                dispersion: Dispersion::estimated(1.0)
+                    .expect("1.0 is a valid estimated dispersion"),
                 beta_covariance: None,
                 beta_standard_errors: None,
                 beta_covariance_corrected: None,

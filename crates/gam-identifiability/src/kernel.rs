@@ -149,8 +149,12 @@ pub fn aux_richness_metrics(aux: ArrayView2<f64>, latents: ArrayView2<f64>) -> A
         // Centre A and Z.
         let mut a_c = aux.to_owned();
         let mut z_c = latents.to_owned();
-        let a_mean = a_c.mean_axis(Axis(0)).expect("the n >= need_rows >= 1 guard above rules out an empty axis");
-        let z_mean = z_c.mean_axis(Axis(0)).expect("the n >= need_rows >= 1 guard above rules out an empty axis");
+        let a_mean = a_c
+            .mean_axis(Axis(0))
+            .expect("the n >= need_rows >= 1 guard above rules out an empty axis");
+        let z_mean = z_c
+            .mean_axis(Axis(0))
+            .expect("the n >= need_rows >= 1 guard above rules out an empty axis");
         for mut row in a_c.rows_mut() {
             row -= &a_mean;
         }

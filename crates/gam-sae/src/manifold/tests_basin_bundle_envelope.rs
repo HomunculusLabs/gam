@@ -96,24 +96,28 @@ fn two_circle_periodic_term(
     let dim = 1usize;
     let num_basis = 1 + 2 * harmonics;
     let evaluator: Arc<dyn SaeBasisSecondJet> =
-        Arc::new(PeriodicHarmonicEvaluator::new(num_basis).expect("a periodic harmonic evaluator exists for this odd basis count"));
+        Arc::new(PeriodicHarmonicEvaluator::new(num_basis)
+            .expect("a periodic harmonic evaluator exists for this odd basis count"));
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let atom_dims = vec![dim; k];
-    let seed_coords = sae_pca_seed_initial_coords(z, &basis_kinds, &atom_dims).expect("the PCA seed covers every declared atom basis kind and dim");
+    let seed_coords = sae_pca_seed_initial_coords(z, &basis_kinds, &atom_dims)
+        .expect("the PCA seed covers every declared atom basis kind and dim");
     let mut atoms = Vec::with_capacity(k);
     let mut coords_blocks = Vec::with_capacity(k);
     let mut manifolds = Vec::with_capacity(k);
     let mut rss = 0.0_f64;
     for atom_idx in 0..k {
         let coords = seed_coords.slice(s![atom_idx, .., 0..dim]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
+        let (phi, jet) = evaluator.evaluate(coords.view())
+            .expect("the periodic evaluator accepts the seeded coordinate block");
         let mm = phi.ncols();
         let mut xtx = fast_atb(&phi, &phi);
         for i in 0..mm {
             xtx[[i, i]] += 1.0e-8;
         }
         let xtz = fast_atb(&phi, &z.to_owned());
-        let decoder = xtx.cholesky(Side::Lower).expect("the ridged Gram matrix is positive definite").solve_mat(&xtz);
+        let decoder = xtx.cholesky(Side::Lower)
+            .expect("the ridged Gram matrix is positive definite").solve_mat(&xtz);
         let fitted = phi.dot(&decoder);
         for row in 0..n {
             for col in 0..p {
@@ -143,7 +147,8 @@ fn two_circle_periodic_term(
         SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coords_blocks, manifolds, mode)
             .expect("the fixture blocks, manifolds and mode agree in shape");
     (
-        SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment form a valid manifold term"),
+        SaeManifoldTerm::new(atoms, assignment)
+            .expect("the fixture atoms and assignment form a valid manifold term"),
         seed_dispersion,
     )
 }

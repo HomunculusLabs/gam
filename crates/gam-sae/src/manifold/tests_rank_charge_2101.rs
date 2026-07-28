@@ -49,9 +49,14 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
             x[[i, j]] += 0.05 * lcg_normal(&mut s);
         }
     }
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("the fixture's harmonic order is a valid periodic basis order"));
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("the fixture's harmonic order is a valid periodic basis order"),
+    );
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r] / std::f64::consts::TAU);
-    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture's coordinate block is a valid input for this evaluator");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, 0]] = 1.0;
     decoder[[2, 1]] = 1.0;
@@ -74,7 +79,8 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the fixture's atoms and assignment describe the same latent blocks");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
@@ -243,14 +249,19 @@ fn fit_circle_subset(
 ) -> (SaeManifoldTerm, SaeManifoldRho) {
     let n = x.nrows();
     let p = x.ncols();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("the fixture's harmonic order is a valid periodic basis order"));
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(3)
+            .expect("the fixture's harmonic order is a valid periodic basis order"),
+    );
     let mut atoms = Vec::new();
     let mut coord_blocks = Vec::new();
     let mut manifolds = Vec::new();
     for &c in circles {
         let coords =
             Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r][c] / std::f64::consts::TAU);
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
+        let (phi, jet) = evaluator
+            .evaluate(coords.view())
+            .expect("the fixture's coordinate block is a valid input for this evaluator");
         let mut decoder = Array2::<f64>::zeros((3, p));
         decoder[[1, 2 * c]] = 1.0;
         decoder[[2, 2 * c + 1]] = 1.0;
@@ -277,7 +288,8 @@ fn fit_circle_subset(
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
-    let mut term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
+    let mut term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("the fixture's atoms and assignment describe the same latent blocks");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); circles.len()]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
@@ -559,13 +571,9 @@ fn rank_charge_vetoes_zero_realised_rank_atom() {
 
 #[test]
 fn rank_charge_prices_zero_dof_without_re_adjudicating_disappearance() {
-    let zero_charge = super::construction::rank_adjusted_quasi_laplace_complexity(
-        1.0,
-        0.5,
-        &[0.0],
-        &[10.0],
-    )
-    .expect("the upstream same-state signal proof owns decoder disappearance");
+    let zero_charge =
+        super::construction::rank_adjusted_quasi_laplace_complexity(1.0, 0.5, &[0.0], &[10.0])
+            .expect("the upstream same-state signal proof owns decoder disappearance");
     assert_eq!(zero_charge, 0.25);
 
     let error = super::construction::rank_adjusted_quasi_laplace_complexity(

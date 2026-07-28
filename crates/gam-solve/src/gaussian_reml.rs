@@ -6983,11 +6983,15 @@ pub fn gaussian_reml_fit_blocks_backward_analytic(
     let n = y.len();
     let f_blocks = designs.len();
     let mut offsets = Vec::with_capacity(f_blocks + 1);
-    offsets.push(0_usize);
+    let mut cursor = 0_usize;
+    offsets.push(cursor);
     for design in designs {
-        offsets.push(offsets.last().copied().unwrap() + design.ncols());
+        cursor += design.ncols();
+        offsets.push(cursor);
     }
-    let p_total = *offsets.last().unwrap();
+    // The fold's running total IS the last offset, so there is nothing to
+    // re-read and no emptiness to assert.
+    let p_total = cursor;
     if n == 0 || p_total == 0 {
         return Err(EstimationError::InvalidInput(
             "gaussian_reml_fit_blocks_backward requires non-empty rows and at least one coefficient column"

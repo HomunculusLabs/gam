@@ -215,7 +215,8 @@ fn build_softmax_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
         AssignmentMode::softmax(0.8),
     )
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
-    SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks")
+    SaeManifoldTerm::new(atoms, assignment)
+        .expect("the fixture's atoms and assignment describe the same latent blocks")
 }
 
 /// A `WhitenedStructured` per-row precision fitted over `(n, p)` correlated,

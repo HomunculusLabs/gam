@@ -66,9 +66,11 @@ pub struct Gauge {
 
 fn starts_from_widths(widths: &[usize]) -> Vec<usize> {
     let mut starts = Vec::with_capacity(widths.len() + 1);
-    starts.push(0);
+    let mut cursor = 0usize;
+    starts.push(cursor);
     for w in widths {
-        starts.push(starts.last().copied().unwrap() + w);
+        cursor += w;
+        starts.push(cursor);
     }
     starts
 }
@@ -669,9 +671,21 @@ impl Gauge {
         }
         let mut block_starts_raw = self.block_starts_raw.clone();
         let mut block_starts_reduced = self.block_starts_reduced.clone();
+        // Both partitions are documented as length `n_blocks + 1` starting at
+        // 0, so each already ends at its own total; read that total once and
+        // carry it rather than re-deriving it (and re-asserting non-emptiness)
+        // on every extra width.
+        let mut raw_cursor = block_starts_raw.last().copied().expect(
+            "block_starts_raw is a length n_blocks+1 partition, so it always holds its leading 0",
+        );
+        let mut reduced_cursor = block_starts_reduced.last().copied().expect(
+            "block_starts_reduced is a length n_blocks+1 partition, so it always holds its leading 0",
+        );
         for &w in extra_raw_widths {
-            block_starts_raw.push(block_starts_raw.last().copied().unwrap() + w);
-            block_starts_reduced.push(block_starts_reduced.last().copied().unwrap() + w);
+            raw_cursor += w;
+            reduced_cursor += w;
+            block_starts_raw.push(raw_cursor);
+            block_starts_reduced.push(reduced_cursor);
         }
         let mut affine_shift = Array1::<f64>::zeros(raw_total + extra_total);
         affine_shift

@@ -19,7 +19,10 @@ fn build_invariance_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
     let p = 32usize;
     let k = 8usize;
     let m = 5usize; // periodic basis width (odd; M = 2*harmonics+1 for harmonics=2)
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("the fixture's harmonic order is a valid periodic basis order"));
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(m)
+            .expect("the fixture's harmonic order is a valid periodic basis order"),
+    );
 
     let mut atoms = Vec::with_capacity(k);
     let mut coord_blocks = Vec::with_capacity(k);
@@ -27,7 +30,9 @@ fn build_invariance_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
         let coords = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| {
             ((row as f64 * 0.013 + atom_idx as f64 * 0.071) % 1.0).fract()
         });
-        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
+        let (phi, jet) = evaluator
+            .evaluate(coords.view())
+            .expect("the fixture's coordinate block is a valid input for this evaluator");
         let decoder = Array2::<f64>::from_shape_fn((m, p), |(i, j)| {
             0.1 * ((i as f64 + 1.0) * 0.3 - (j as f64) * 0.017 + atom_idx as f64 * 0.05).sin()
         });
@@ -55,7 +60,8 @@ fn build_invariance_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManifoldRho) 
         AssignmentMode::softmax(0.8),
     )
     .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
-    let term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("the fixture's atoms and assignment describe the same latent blocks");
     let target = Array2::<f64>::from_shape_fn((n, p), |(row, col)| {
         0.05 * ((row as f64) * 0.011 - (col as f64) * 0.023).cos()
     });
@@ -305,7 +311,8 @@ pub(crate) fn newton_trial_state_is_rayon_thread_count_invariant_2242() {
         serial.atoms.iter().zip(&parallel.atoms).enumerate()
     {
         assert_eq!(
-            serial_atom.decoder_coefficients(), parallel_atom.decoder_coefficients(),
+            serial_atom.decoder_coefficients(),
+            parallel_atom.decoder_coefficients(),
             "atom {atom_idx} decoder differs across Rayon policies"
         );
         assert_eq!(

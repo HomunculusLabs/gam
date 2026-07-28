@@ -64,8 +64,13 @@ impl log::Log for RhoPhaseLogger {
 static RHO_PHASE_LOGGER: RhoPhaseLogger = RhoPhaseLogger;
 
 fn install_rho_phase_logger() {
-    log::set_logger(&RHO_PHASE_LOGGER).ok();
-    log::set_max_level(log::LevelFilter::Debug);
+    // Only raise the level filter when THIS logger is the one that got
+    // installed. Another test in the same binary may have installed its own
+    // first, in which case its filter — not ours — is the one that governs its
+    // output, and stomping it would change that test's behaviour.
+    if log::set_logger(&RHO_PHASE_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
 }
 
 /// Two-feature Gaussian-identity fixture: a smooth additive signal on each of

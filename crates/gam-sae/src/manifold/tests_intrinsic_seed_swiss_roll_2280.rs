@@ -71,7 +71,9 @@ fn gentle_sheet_grid(curvature: f64) -> Array2<f64> {
 fn heldout_tps_r2(coords: &Array2<f64>, z: &Array2<f64>) -> f64 {
     let n = z.nrows();
     let p = z.ncols();
-    let cmean = coords.mean_axis(ndarray::Axis(0)).expect("the latent chart has at least one row");
+    let cmean = coords
+        .mean_axis(ndarray::Axis(0))
+        .expect("the latent chart has at least one row");
     let mut cstd = [0.0_f64; 2];
     for k in 0..2 {
         cstd[k] = (coords
@@ -115,7 +117,10 @@ fn heldout_tps_r2(coords: &Array2<f64>, z: &Array2<f64>) -> f64 {
         *dgn += scale * 1e-8;
     }
     let rhs = fast_atb(&phi_tr, &z_tr);
-    let decoder = gram.cholesky(faer::Side::Lower).expect("the thin-plate Gram carries a max_diag*1e-8 ridge, so it is positive definite").solve_mat(&rhs);
+    let decoder = gram
+        .cholesky(faer::Side::Lower)
+        .expect("the thin-plate Gram carries a max_diag*1e-8 ridge, so it is positive definite")
+        .solve_mat(&rhs);
     let mut mean_t = vec![0.0_f64; p];
     for &row in &test {
         for c in 0..p {

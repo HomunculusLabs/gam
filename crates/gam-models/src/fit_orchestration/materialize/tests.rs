@@ -657,11 +657,18 @@ fn issue_1561_locscale_large_scale_basis_does_not_crash_joint_newton() {
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::fit_orchestration::entry::fit_from_formula("y ~ s(x, bs='tp')", &data, &config)
         }));
-        let result = caught.unwrap_or_else(|_| {
+        let result = caught.unwrap_or_else(|payload| {
+            // The payload IS the evidence: without it this reports only that
+            // something unwound, which is the least useful half of the finding.
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("<panic payload was not a string>");
             panic!(
                 "#1561: location-scale fit with a k={k} scale smooth PANICKED inside the \
                  joint-Newton solver; a valid model spec must fit or return a catchable error, \
-                 never unwind"
+                 never unwind: {detail}"
             )
         });
         match result {

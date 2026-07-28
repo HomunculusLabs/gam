@@ -121,7 +121,9 @@ fn read_column(path: &Path, name: &str) -> Vec<f64> {
             let rec = rec.expect("predict csv row");
             rec[idx]
                 .parse::<f64>()
-                .unwrap_or_else(|_| panic!("non-numeric `{name}`: {:?}", &rec[idx]))
+                .unwrap_or_else(|err| {
+                    panic!("non-numeric `{name}`: {:?} ({err})", &rec[idx])
+                })
         })
         .collect()
 }

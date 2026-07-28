@@ -810,7 +810,8 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
     let gradient_fd_vec: Vec<f64> = (0..primary.total)
         .map(|u| (plus.gradient[u] - minus.gradient[u]) / (2.0 * step))
         .collect();
-    h3_rows.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("fixture scores are finite, so the ordering is total"));
+    h3_rows.sort_by(|a, b| b.0.partial_cmp(&a.0)
+        .expect("fixture scores are finite, so the ordering is total"));
     eprintln!("#2347 top H->t3 gaps (err | [block(u),block(v)] | analytic=base.third fd=d(H) | base.hessian | order2 gaps at u,v):");
     for &(err, u, v, analytic, fd, hess) in h3_rows.iter().take(12) {
         let gh_u = derivative_ladder_relative_error(hessian_direction[u], gradient_fd_vec[u]);
@@ -931,7 +932,8 @@ fn zz_measure_2347_t4_richardson() {
             rows.push((err, u, v));
         }
     }
-    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("fixture scores are finite, so the ordering is total"));
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0)
+        .expect("fixture scores are finite, so the ordering is total"));
     eprintln!("#2347 t4 top gaps (err | [block(u),block(v)] | analytic | fd@steps):");
     for &(err, u, v) in rows.iter().take(12) {
         eprintln!(
@@ -1104,7 +1106,8 @@ fn zz_measure_2347_pure_direction_h_to_t3_ladder() {
                 rows.push((err, u, v, base.third[[u, v]], third_fd));
             }
         }
-        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("fixture scores are finite, so the ordering is total"));
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0)
+            .expect("fixture scores are finite, so the ordering is total"));
         eprintln!("#2347 PURE dir={name} (mag {magnitude:+.2}): max_h3={max_h3:.3e}");
         for &(err, u, v, analytic, fd) in rows.iter().take(4) {
             eprintln!(

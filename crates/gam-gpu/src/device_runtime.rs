@@ -49,9 +49,7 @@ impl std::fmt::Display for GpuAbsence {
             Self::UnsupportedPlatform => {
                 f.write_str("CUDA support is unavailable on this platform")
             }
-            Self::DriverUnavailable { reason } | Self::NoDevice { reason } => {
-                f.write_str(reason)
-            }
+            Self::DriverUnavailable { reason } | Self::NoDevice { reason } => f.write_str(reason),
         }
     }
 }
@@ -316,9 +314,7 @@ impl GpuRuntime {
             outcome
         });
         match cached {
-            Ok(GpuAvailability::Available(runtime)) => {
-                Ok(GpuAvailabilityRef::Available(runtime))
-            }
+            Ok(GpuAvailability::Available(runtime)) => Ok(GpuAvailabilityRef::Available(runtime)),
             Ok(GpuAvailability::Absent(reason)) => Ok(GpuAvailabilityRef::Absent(reason)),
             Err(error) => Err(error.clone()),
         }
@@ -646,7 +642,9 @@ fn cuda_device_info(ordinal: usize, ctx: &CudaContext) -> Result<GpuDeviceInfo, 
     Ok(GpuDeviceInfo {
         ordinal,
         name: result::device::get_name(device).unwrap_or_else(|err| {
-            log::debug!("CUDA device {ordinal}: name query failed ({err}); using a positional label");
+            log::debug!(
+                "CUDA device {ordinal}: name query failed ({err}); using a positional label"
+            );
             format!("CUDA device {ordinal}")
         }),
         capability: super::device::GpuCapability::from_compute_capability(major, minor),
@@ -901,9 +899,11 @@ mod policy_resolution_contract_tests {
                 matches!(absence, GpuAbsence::DriverUnavailable { .. }),
                 "{code:?} must classify as an unavailable driver"
             );
-            let resolved =
-                GpuRuntime::resolve_availability(GpuPolicy::Auto, Ok(GpuAvailabilityRef::Absent(&absence)))
-                    .expect("Auto must accept driver-environment absence");
+            let resolved = GpuRuntime::resolve_availability(
+                GpuPolicy::Auto,
+                Ok(GpuAvailabilityRef::Absent(&absence)),
+            )
+            .expect("Auto must accept driver-environment absence");
             assert!(resolved.is_none(), "Auto must fall back to CPU on {code:?}");
             let required_error = GpuRuntime::resolve_availability(
                 GpuPolicy::Required,
@@ -987,7 +987,9 @@ mod tests {
             Err(GpuError::DriverLibraryUnavailable { .. }) => assert!(
                 matches!(
                     GpuRuntime::availability(),
-                    Ok(GpuAvailabilityRef::Absent(GpuAbsence::DriverUnavailable { .. }))
+                    Ok(GpuAvailabilityRef::Absent(
+                        GpuAbsence::DriverUnavailable { .. }
+                    ))
                 ),
                 "typed driver absence must remain absence through runtime availability"
             ),

@@ -106,7 +106,7 @@ fn octahedron_sphere_points() -> Array2<f64> {
             -1.0,
         ],
     )
-    .unwrap()
+    .expect("6 octahedron vertices x 3 coordinates matches the (6, 3) shape")
 }
 
 #[test]

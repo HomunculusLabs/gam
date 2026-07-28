@@ -7972,7 +7972,10 @@ impl OuterObjective for BimodalTerminalObjective {
         // Install the owned coefficient mode: record the objective value the
         // mode carries, exactly as the custom-family evaluator does.
         let installed = self.basin_solve(rho).cost;
-        *self.finalize_installed.lock().expect("the finalize_installed mutex is not poisoned") = Some(installed);
+        *self
+            .finalize_installed
+            .lock()
+            .expect("the finalize_installed mutex is not poisoned") = Some(installed);
         Ok(())
     }
     fn owns_terminal_coefficient_mode(&self) -> bool {

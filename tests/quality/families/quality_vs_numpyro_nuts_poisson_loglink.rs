@@ -211,7 +211,12 @@ fn gam_nuts_poisson_loglink_predicts_heldout_counts() {
         }
     }
     let agg_ds = load_csvwith_inferred_schema(&tmp).expect("load aggregated csv");
-    std::fs::remove_file(&tmp).ok();
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        // The aggregated CSV has already been loaded, so this cannot affect the
+        // comparison below — but a temp file that will not delete is worth
+        // seeing rather than discarding.
+        eprintln!("cleanup: could not remove {}: {err}", tmp.display());
+    }
 
     // ---- fit count ~ s(age) + s(los) with gam (Poisson / log link) --------
     // This full-data fit selects the smoothing parameters by REML and FREEZES

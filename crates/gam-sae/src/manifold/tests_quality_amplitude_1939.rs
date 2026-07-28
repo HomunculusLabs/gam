@@ -79,8 +79,9 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
     let d = 1usize;
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let dims = vec![d; k];
-    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).unwrap();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims)
+        .expect("the planted target has full enough rank to seed k 1-D atoms");
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("an odd harmonic count is a valid periodic basis size"));
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -88,7 +89,7 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("fixture coords are already wrapped into the evaluator's unit period");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -109,7 +110,7 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
         0.0,
         None,
     )
-    .unwrap();
+    .expect("least-squares decoder init: basis blocks and target share n rows");
     let mut evaluators: Vec<Option<Arc<dyn SaeBasisSecondJet>>> = Vec::new();
     for _ in 0..k {
         evaluators.push(Some(evaluator.clone()));
@@ -129,7 +130,7 @@ fn kterm_periodic(target: &Array2<f64>, k: usize, m: usize) -> SaeManifoldTerm {
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         &evaluators,
     )
-    .unwrap()
+    .expect("fixture term: every atom's basis width matches its assignment block")
 }
 
 /// Per-atom RMS of the GATED decoded contribution `a_ik · (Φ_k B_k)_i` over all
@@ -142,7 +143,10 @@ fn per_atom_contribution_rms(term: &SaeManifoldTerm) -> Vec<f64> {
     let mut sumsq = vec![0.0_f64; k];
     let mut buf = vec![0.0_f64; p];
     for row in 0..n {
-        let weights = term.assignment.try_assignments_row(row).unwrap();
+        let weights = term
+            .assignment
+            .try_assignments_row(row)
+            .expect("row index is below n_obs and the buffer is k_atoms wide");
         for atom in 0..k {
             let a_k = weights[atom];
             term.atoms[atom].fill_decoded_row(row, &mut buf);
@@ -206,15 +210,15 @@ fn existence_and_intensity_are_separately_identified_1939() {
     );
     let loss = term
         .run_joint_fit_arrow_schur(target.view(), &mut rho, None, 80, 0.05, 1.0e-3, 1.0e-3)
-        .unwrap();
+        .expect("the 3-atom amplitude fixture converges within 80 inner iterations");
     assert!(loss.total().is_finite(), "loss must stay finite");
 
     let ev = term
         .dictionary_reconstruction_ev(target.view(), &rho)
-        .unwrap();
+        .expect("the fit converged, so dictionary EV is defined");
     let loao = term
         .per_atom_loao_explained_variance(target.view(), &rho)
-        .unwrap();
+        .expect("the fit converged, so per-atom LOAO EV is defined");
     let contrib = per_atom_contribution_rms(&term);
     let even_frac: Vec<f64> = term
         .atoms
@@ -235,7 +239,11 @@ fn existence_and_intensity_are_separately_identified_1939() {
     // Rank atoms by physical contribution. The strongest and second-strongest are
     // the live atoms; the weakest is the dead-slot candidate.
     let mut order: Vec<usize> = (0..3).collect();
-    order.sort_by(|&i, &j| contrib[j].partial_cmp(&contrib[i]).unwrap());
+    order.sort_by(|&i, &j| {
+        contrib[j]
+            .partial_cmp(&contrib[i])
+            .expect("contribution RMS is finite: the fit asserted a finite loss")
+    });
     let (strong, weak, dead) = (order[0], order[1], order[2]);
 
     // (b) INTENSITY RECOVERY — the two live atoms carry the planted amplitude

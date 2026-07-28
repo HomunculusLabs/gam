@@ -47,7 +47,10 @@ pub(crate) fn threshold_gate_tiny_fixture(
     let m = 3usize;
     let tau = 1.0_f64;
     let threshold = 0.0_f64;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let evaluator = Arc::new(
+        PeriodicHarmonicEvaluator::new(m)
+            .expect("m=3 is odd and positive, the basis width this evaluator requires"),
+    );
     let mut logits = Array2::<f64>::zeros((n, k_atoms));
     let mut coords = vec![Array2::<f64>::zeros((n, 1)), Array2::<f64>::zeros((n, 1))];
     let weights = [
@@ -88,7 +91,9 @@ pub(crate) fn threshold_gate_tiny_fixture(
     }
     let mut atoms = Vec::with_capacity(k_atoms);
     for atom in 0..k_atoms {
-        let (phi, jet) = evaluator.evaluate(coords[atom].view()).unwrap();
+        let (phi, jet) = evaluator
+            .evaluate(coords[atom].view())
+            .expect("fixture coords are finite and inside the unit-period circle chart");
         let decoder = Array2::from_shape_fn((m, p), |(basis_col, out_col)| {
             weights[atom][basis_col][out_col]
         });
@@ -102,7 +107,7 @@ pub(crate) fn threshold_gate_tiny_fixture(
                 decoder,
                 Array2::<f64>::eye(m),
             )
-            .unwrap()
+            .expect("decoder is (m, p) and phi/jet come from the same evaluator")
             .with_basis_second_jet(evaluator.clone()),
         );
     }
@@ -113,8 +118,9 @@ pub(crate) fn threshold_gate_tiny_fixture(
         vec![LatentManifold::Circle { period: 1.0 }; k_atoms],
         mode,
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("k_atoms coord blocks and k_atoms manifolds match the logits' k_atoms columns");
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("the assignment was built with exactly one block per atom");
     // Moderate-penalty basin, mirroring `converged_state_with_residual`: every
     // channel stays live and the ±h FD probes stay factorizable.
     let rho = SaeManifoldRho::new(

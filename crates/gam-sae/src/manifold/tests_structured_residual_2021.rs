@@ -85,7 +85,8 @@ fn build_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
     .expect("the fixture blocks, manifolds and mode agree in shape");
-    SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment form a valid manifold term")
+    SaeManifoldTerm::new(atoms, assignment)
+        .expect("the fixture atoms and assignment form a valid manifold term")
 }
 
 /// A `WhitenedStructured` per-row precision (rank-≥1 factor + heteroscedastic
@@ -251,7 +252,8 @@ fn fit_row_metric_one_shot_matches_fit_then_row_metric_2021() {
         .expect("the structured-residual model fits the fixture input")
         .row_metric(n)
         .expect("the structured-residual model fits the fixture input");
-    let one_shot = StructuredResidualModel::fit_row_metric(input()).expect("the structured-residual row-metric fit succeeds on the fixture input");
+    let one_shot = StructuredResidualModel::fit_row_metric(input())
+        .expect("the structured-residual row-metric fit succeeds on the fixture input");
     assert!(two_step.whitens_likelihood() && one_shot.whitens_likelihood());
     let v = Array1::<f64>::from_vec(vec![0.7, -1.3, 0.4]);
     for &row in &[0usize, n / 2, n - 1] {

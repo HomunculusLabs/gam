@@ -150,7 +150,7 @@ fn smooth_negative_y_range() {
 fn smooth_with_outlier() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let noise = Normal::new(0.0, 0.05).expect("");
+    let noise = Normal::new(0.0, 0.05).expect("sd 0.05 is finite and strictly positive");
     let mut x: Vec<f64> = (0..200).map(|i| i as f64 / 199.0).collect();
     x.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let mut y: Vec<f64> = x
@@ -164,7 +164,8 @@ fn smooth_with_outlier() {
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r)
+        .expect("fixture rows are rectangular and numeric, so schema inference succeeds");
     let p = fit_1d("y~s(x,k=15)", d, &[0.5]);
     assert!(p[0].is_finite());
 }
@@ -226,9 +227,10 @@ fn sphere_dense_polar() {
 fn sphere_equatorial_data() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let u_lat = Uniform::new(-5.0_f64, 5.0).expect("");
-    let u_lon = Uniform::new(-179.0_f64, 179.0).expect("");
-    let noise = Normal::new(0.0, 0.05).expect("");
+    let u_lat = Uniform::new(-5.0_f64, 5.0).expect("latitude range -5..5 is a non-empty interval");
+    let u_lon =
+        Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is a non-empty interval");
+    let noise = Normal::new(0.0, 0.05).expect("sd 0.05 is finite and strictly positive");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(300);
     for _ in 0..300 {
@@ -241,7 +243,8 @@ fn sphere_equatorial_data() {
             y.to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r)
+        .expect("fixture rows are rectangular and numeric, so schema inference succeeds");
     let p = fit_sphere("y~sphere(lat,lon,k=20)", d, &[(0.0, 0.0), (0.0, 90.0)]);
     assert!(p.iter().all(|v| v.is_finite()));
 }
@@ -361,8 +364,8 @@ fn smooth_step_then_constant_recovers_inflection() {
 fn smooth_with_periodic_aliased_data() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let u = Uniform::new(0.0_f64, TAU).expect("");
-    let noise = Normal::new(0.0, 0.05).expect("");
+    let u = Uniform::new(0.0_f64, TAU).expect("angle range 0..TAU is a non-empty interval");
+    let noise = Normal::new(0.0, 0.05).expect("sd 0.05 is finite and strictly positive");
     let mut t: Vec<f64> = (0..200).map(|_| u.sample(&mut rng)).collect();
     t.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let y: Vec<f64> = t
@@ -375,7 +378,8 @@ fn smooth_with_periodic_aliased_data() {
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r)
+        .expect("fixture rows are rectangular and numeric, so schema inference succeeds");
     let p = fit_1d(
         "y~s(t,periodic=true,period=6.283185307179586,k=30)",
         d,

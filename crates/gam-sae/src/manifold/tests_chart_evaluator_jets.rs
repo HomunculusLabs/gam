@@ -16,7 +16,9 @@ pub(crate) fn assert_jacobian_matches_central_difference<E: SaeBasisEvaluator>(
     tolerance: f64,
 ) {
     let epsilon = 1.0e-6;
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the caller's coords lie in the evaluator's chart domain");
     let (n_rows, n_basis) = phi.dim();
     let latent_dim = coords.ncols();
     assert_eq!(jet.dim(), (n_rows, n_basis, latent_dim));
@@ -27,8 +29,12 @@ pub(crate) fn assert_jacobian_matches_central_difference<E: SaeBasisEvaluator>(
             let mut minus = coords.clone();
             plus[[row, axis]] += epsilon;
             minus[[row, axis]] -= epsilon;
-            let (phi_plus, plus_jet) = evaluator.evaluate(plus.view()).unwrap();
-            let (phi_minus, minus_jet) = evaluator.evaluate(minus.view()).unwrap();
+            let (phi_plus, plus_jet) = evaluator
+                .evaluate(plus.view())
+                .expect("the +epsilon probe stays in the chart domain");
+            let (phi_minus, minus_jet) = evaluator
+                .evaluate(minus.view())
+                .expect("the -epsilon probe stays in the chart domain");
             assert_eq!(plus_jet.dim(), jet.dim());
             assert_eq!(minus_jet.dim(), jet.dim());
 
@@ -267,8 +273,12 @@ pub(crate) fn assert_second_jet_matches_central_difference<E: SaeBasisSecondJet>
             let mut minus = coords.clone();
             plus[[row, axis_c]] += epsilon;
             minus[[row, axis_c]] -= epsilon;
-            let (_, jet_plus) = evaluator.evaluate(plus.view()).unwrap();
-            let (_, jet_minus) = evaluator.evaluate(minus.view()).unwrap();
+            let (_, jet_plus) = evaluator
+                .evaluate(plus.view())
+                .expect("the +epsilon probe stays in the chart domain");
+            let (_, jet_minus) = evaluator
+                .evaluate(minus.view())
+                .expect("the -epsilon probe stays in the chart domain");
             for basis in 0..n_basis {
                 for axis_a in 0..latent_dim {
                     let fd = (jet_plus[[row, basis, axis_a]] - jet_minus[[row, basis, axis_a]])

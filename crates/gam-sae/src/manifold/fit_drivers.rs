@@ -8643,7 +8643,9 @@ fn leading_direction_above_noise_floor(energies: &[f64]) -> bool {
     }
     let mut sorted: Vec<f64> = energies.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let peak = *sorted.last().unwrap();
+    let Some(&peak) = sorted.last() else {
+        return false;
+    };
     if !(peak > 0.0) {
         return false;
     }
