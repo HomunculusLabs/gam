@@ -257,7 +257,7 @@ impl SaeAtomGeometryPlan {
                 },
             ) => {
                 kappa.is_finite()
-                *degree == SAE_EUCLIDEAN_PATCH_MAX_DEGREE
+                    && *degree == SAE_EUCLIDEAN_PATCH_MAX_DEGREE
                     && reference_coords.nrows() > 0
                     && reference_coords.ncols() == latent_dim
                     && reference_coords.iter().all(|value| value.is_finite())
@@ -590,7 +590,6 @@ impl SaeAtomGeometryPlan {
                     reference_coords,
                 },
             ) => {
-                kappa.is_finite()
                 let (_, reference_jacobian) = evaluator.evaluate(reference_coords.view())?;
                 gam_geometry::constant_curvature_dirichlet_penalty(
                     reference_coords.view(),

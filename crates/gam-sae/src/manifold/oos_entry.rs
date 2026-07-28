@@ -1244,7 +1244,10 @@ mod tests {
             SaeAtomBasisKind::Poincare,
             2,
             crate::manifold::SaeBasisResolution::Polynomial { degree: 2 },
-            crate::manifold::SaeReferenceMetricPlan::UnitPoincareBall {
+            crate::manifold::SaeReferenceMetricPlan::ConstantCurvatureChart {
+                // The `Poincare` kind is the hyperbolic member, so unit negative
+                // curvature — the value that used to be hardcoded.
+                kappa: -1.0,
                 reference_coords: reference_coords.clone(),
             },
         )
@@ -1254,7 +1257,7 @@ mod tests {
         let atom = build_oos_atom(0, &spec, reference_coords.view(), 1).unwrap();
         assert_eq!(
             atom.reference_roughness_kind(),
-            crate::manifold::SaeReferenceRoughnessKind::PoincareConformalDirichlet
+            crate::manifold::SaeReferenceRoughnessKind::ConstantCurvatureDirichlet
         );
     }
 

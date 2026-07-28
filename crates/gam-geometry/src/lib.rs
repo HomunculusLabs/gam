@@ -29,8 +29,9 @@ pub use latent_seed::laplacian_eigenmap_coords;
 pub use manifold::{GeometryError, GeometryResult, ManifoldSpec, RiemannianManifold};
 pub use manifolds::{
     CircleManifold, ConstantCurvature, EuclideanManifold, GrassmannManifold, ProductManifold,
-    SpdManifold, SphereManifold, StiefelManifold, TorusManifold, distance_kappa_jet,
-    exp_map_kappa_jet, log_map_kappa_jet, spd_frechet_mean,
+    SpdManifold, SphereManifold, StiefelManifold, TorusManifold,
+    constant_curvature_dirichlet_penalty, distance_kappa_jet, exp_map_kappa_jet,
+    log_map_kappa_jet, spd_frechet_mean,
 };
 pub use optimizer::{RiemannianLBFGS, RiemannianObjective, RiemannianTrustRegion};
 pub use response_geometry::{

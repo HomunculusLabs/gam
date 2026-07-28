@@ -917,7 +917,7 @@ impl SaeManifoldAtom {
                 let gram = gam_geometry::constant_curvature_dirichlet_penalty(
                     reference_coords.view(),
                     basis_jacobian,
-                    *kappa,
+                    kappa,
                 )
                 .map_err(|error| {
                     format!(
@@ -2012,6 +2012,7 @@ mod tests {
         penalty[[2, 2]] = 1.0;
         let reference_roughness = if matches!(kind, SaeAtomBasisKind::Poincare) {
             SaeReferenceRoughness::ConstantCurvatureDirichlet {
+                kappa: -1.0,
                 reference_coords: Array2::from_shape_vec((n, 1), ts.to_vec()).unwrap(),
             }
         } else {
