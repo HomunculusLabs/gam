@@ -188,8 +188,19 @@ fn main() -> Result<(), String> {
         random_state: seed_arg,
     })?;
     let k_ret = term_seed.term.k_atoms();
+    // Ambient-sphere axes are EXEMPT from the per-axis Gaussian prior:
+    // ||u|| = 1 makes its energy constant on the manifold, so alpha there is
+    // pure normal-direction noise. alpha == 0.0 is the typed exemption the
+    // MacKay update respects.
     let ard: Vec<Vec<f64>> = (0..k_ret)
-        .map(|atom| vec![alpha_arg; term_seed.term.assignment.atom_coord_dim(atom)])
+        .map(|atom| {
+            let axis_alpha = if retained_basis[atom] == "sphere" {
+                0.0
+            } else {
+                alpha_arg
+            };
+            vec![axis_alpha; term_seed.term.assignment.atom_coord_dim(atom)]
+        })
         .collect();
     let lambda: Vec<f64> = vec![lambda_arg; k_ret];
     println!("seeded: retained {k_ret} of {k_atoms}");
@@ -364,6 +375,9 @@ fn main() -> Result<(), String> {
         edf.iter().filter(|value| **value < 0.01).count()
     );
     write_f64s(&format!("{out_dir}/curvature_edf.bin"), &edf)?;
+    // The per-atom smoothing the fit ACTUALLY used -- without it a wiggly
+    // curve in a gallery cannot be told apart from an under-smoothed one.
+    write_f64s(&format!("{out_dir}/lambda.bin"), &lambda)?;
     println!(
         "inner CERTIFIED in {} cycles, {:.0}s, objective {:.4e}",
         report.iterations,
@@ -424,6 +438,14 @@ fn main() -> Result<(), String> {
             match heldout {
                 Ok(rep) => {
                     let recon = te_term.reconstruct()?;
+                    // The held-out reconstruction itself, for the spliced
+                    // delta-CE criterion: splice_paired.py substitutes exactly
+                    // this matrix into the residual stream at the held-out
+                    // positions. Chart-centred; the splice adds the mean back.
+                    write_f64s(
+                        &format!("{out_dir}/heldout_recon.bin"),
+                        recon.as_slice().ok_or("recon not contiguous")?,
+                    )?;
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
                     let ss: f64 = centered_test.iter().map(|x| x * x).sum();
                     println!("HELDOUT rows={te_rows} recurred={} EV={:.4}", rep.recurred, 1.0 - sse / ss);
@@ -447,6 +469,12 @@ fn main() -> Result<(), String> {
     // usage census + per-atom rows
     let mut usage = vec![0usize; k_ret];
     let mut atom_tokens: Vec<Vec<(usize, f64, f64)>> = vec![Vec::new(); k_ret]; // (row, t, value)
+    // Full-width coordinates for d>=2 atoms: a sphere token's position is a
+    // unit 3-vector, and `atom_tokens` keeps only axis 0 -- enough for the 1-D
+    // rug plots, unplottable for a surface. Written as tokensN_<idx>.bin
+    // (row, c_1..c_w) so surface figures can show WHERE the data lives on the
+    // fitted manifold, not just what the manifold looks like.
+    let mut atom_token_coords: Vec<Vec<(usize, Vec<f64>)>> = vec![Vec::new(); k_ret];
     for row in 0..rows {
         let support = term.assignment.support_indices(row);
         let values = term.assignment.gate_params(row);
@@ -454,8 +482,11 @@ fn main() -> Result<(), String> {
             if value != 0.0 {
                 let atom = atom as usize;
                 usage[atom] += 1;
-                let t = term.assignment.coords_for_slot(row, slot)[0];
-                atom_tokens[atom].push((row, t, value));
+                let coords = term.assignment.coords_for_slot(row, slot);
+                atom_tokens[atom].push((row, coords[0], value));
+                if coords.len() > 1 {
+                    atom_token_coords[atom].push((row, coords.to_vec()));
+                }
             }
         }
     }
@@ -625,6 +656,15 @@ fn main() -> Result<(), String> {
             tok_flat.push(value);
         }
         write_f64s(&format!("{out_dir}/tokens_{idx}.bin"), &tok_flat)?;
+        if !atom_token_coords[a].is_empty() {
+            let width = atom_token_coords[a][0].1.len();
+            let mut wide: Vec<f64> = Vec::with_capacity(atom_token_coords[a].len() * (width + 1));
+            for (row, coords) in &atom_token_coords[a] {
+                wide.push(*row as f64);
+                wide.extend_from_slice(coords);
+            }
+            write_f64s(&format!("{out_dir}/tokens{width}_{idx}.bin"), &wide)?;
+        }
         manifest.push_str(&format!(
             "{}{{\"idx\":{idx},\"atom\":{a},\"kind\":\"{kind}\",\"dim\":{dim},\"grid_n\":{grid_n},\"usage\":{},\"n_tokens\":{},\"grid_lo\":{lo},\"grid_hi\":{hi}}}",
             if idx == 0 { "" } else { "," },
