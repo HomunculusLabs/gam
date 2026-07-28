@@ -3355,11 +3355,12 @@ pub const NO_CRITERION_AT_EXACT_FIT: &str =
 
 /// The exact-fit Gaussian boundary, from the three quantities that define it.
 ///
-/// A free function rather than a method so the ONE definition serves both the
-/// accessor on a built fit and the constructor gate, which runs before a `self`
-/// exists. Two copies of this predicate is precisely how a fit could come to
-/// report a criterion the accessor then refuses to read.
-fn is_zero_dispersion_boundary(
+/// A free function rather than a method so the ONE definition serves the
+/// accessor on a built fit, the constructor gate (which runs before a `self`
+/// exists), and any reconstruction that assembles those three quantities from a
+/// persisted payload. Two copies of this predicate is precisely how a fit could
+/// come to report a criterion the accessor then refuses to read.
+pub fn is_zero_dispersion_boundary(
     likelihood_family: Option<&LikelihoodSpec>,
     likelihood_scale: LikelihoodScaleMetadata,
     standard_deviation: f64,

@@ -133,6 +133,7 @@ pub use result_types::{
     RailTailEvidence,
     RailedCoordinateFact,
     NO_CRITERION_AT_EXACT_FIT, UnifiedFitResult, UnifiedFitResultParts, criterion_display,
+    is_zero_dispersion_boundary,
     ensure_finite_scalar,
     SmoothingCorrectionMethod, WorkingGeometry,
     saved_latent_cloglog_state_from_fit, saved_mixture_state_from_fit, saved_sas_state_from_fit,

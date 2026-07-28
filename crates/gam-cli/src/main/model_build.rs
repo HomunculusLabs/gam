@@ -228,7 +228,20 @@ pub(crate) fn core_saved_fit_result(
         // penalized Hessian from the fitter itself.
         let covariance_conditional = beta_covariance;
         let covariance_corrected = beta_covariance_corrected;
-        let penalized_objective = summary.reml_score;
+        // A payload written before the criterion could be absent carries `0.0`
+        // here when the reconstruction lands on the exact-fit boundary. That is
+        // the placeholder, not a criterion — drop it rather than hand it to a
+        // constructor that (rightly) refuses one, which is exactly the
+        // normalization `UnifiedFitResult::reml_score` performs at read time
+        // for the same legacy state (#2595).
+        let reml_score = summary.reml_score.filter(|_| {
+            !gam::estimate::is_zero_dispersion_boundary(
+                summary.likelihood_family.as_ref(),
+                summary.likelihood_scale,
+                standard_deviation,
+            )
+        });
+        let penalized_objective = reml_score;
         UnifiedFitResult::try_from_parts(gam::estimate::UnifiedFitResultParts {
             blocks: vec![gam::estimate::FittedBlock {
                 beta: beta.clone(),
@@ -244,7 +257,7 @@ pub(crate) fn core_saved_fit_result(
             log_likelihood_normalization: summary.log_likelihood_normalization,
             log_likelihood: summary.log_likelihood,
             deviance: summary.deviance,
-            reml_score: summary.reml_score,
+            reml_score,
             stable_penalty_term: summary.stable_penalty_term,
             penalized_objective,
             // A fit reconstructed from a saved-model summary performed no device
