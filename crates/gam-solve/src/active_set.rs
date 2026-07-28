@@ -306,29 +306,106 @@ fn least_squares_min_norm_any_shape(a: &Array2<f64>, b: &Array1<f64>) -> Option<
     }
 }
 
-pub(crate) fn compute_constraint_kkt_diagnostics(
+/// How much of a refused stationarity residual is even *closable* by a
+/// multiplier, and how much is not.
+///
+/// The KKT stationarity residual `‖grad − Aᵀλ‖∞` is one number, and on its own
+/// it cannot distinguish two completely different failures:
+///
+/// * **Unreachable** — the residual has a component ORTHOGONAL to
+///   `span(A_activeᵀ)`. No multiplier vector, of any sign, can remove it: the
+///   iterate is non-stationary along a direction the constraints do not touch,
+///   i.e. the inner solve simply has not converged.
+/// * **Blocked** — the residual lies inside `span(A_activeᵀ)` but cannot be
+///   written with `λ ≥ 0`. The point is stationary in the free directions and
+///   is pressed against the WRONG side of the cone; the working face is wrong,
+///   not the convergence.
+///
+/// Reported only where a verdict is actually rendered (the refusal message), so
+/// the O(rank · n_active · p) orthogonalization never runs on the hot path.
+/// Returns `(unreachable_inf, blocked_inf)`; `None` when the geometry cannot be
+/// formed (dimension mismatch, no active rows).
+pub(crate) fn stationarity_residual_reachability(
     beta: &Array1<f64>,
     gradient: &Array1<f64>,
     constraints: &LinearInequalityConstraints,
-) -> ConstraintKktDiagnostics {
-    let m = constraints.a.nrows();
-    let active_tolerance = ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
-
-    // Measure feasibility in the *scaled* (geometric) coordinate system the
-    // solver's tolerance is expressed in: normalize each inequality
-    // `a_i·β ≥ b_i` by ‖a_i‖ so its slack becomes the signed Euclidean
-    // distance from β to the constraint hyperplane. Without this, a row with a
-    // large norm — e.g. a B-spline endpoint *derivative* clamp, whose rows
-    // carry ‖a_i‖ ≫ 1 — reports a raw slack inflated by ‖a_i‖, so an iterate
-    // that is feasible to the solver's scaled `ACTIVE_SET_PRIMAL_FEASIBILITY_TOL`
-    // guarantee can still exceed a raw primal gate downstream and be spuriously
-    // refused. Per-row normalization makes the diagnostic scale-invariant and
-    // consistent with that contract. Dual/complementarity/stationarity are
-    // invariant under this positive per-row rescaling (with λ̂_i = ‖a_i‖·λ_i:
-    // Âᵀλ̂ = Aᵀλ and λ̂_i·ŝ_i = λ_i·s_i), so only primal feasibility and the
-    // active-set threshold change meaning — both toward the geometric distance
-    // the tolerance is meant to bound.
+) -> Option<(f64, f64)> {
     let p = constraints.a.ncols();
+    if beta.len() != p || gradient.len() != p {
+        return None;
+    }
+    let face = active_face(beta, constraints)?;
+    if face.active_idx.is_empty() {
+        // Every direction is free: the whole residual is unreachable.
+        let inf = gradient_inf_norm(gradient);
+        return Some((inf, 0.0));
+    }
+    let (_, lambda_active) =
+        project_stationarity_residual_on_constraint_cone(gradient, &face.a_active)?;
+    let mut residual = gradient.to_owned();
+    for (r, &value) in lambda_active.iter().enumerate() {
+        if value != 0.0 {
+            residual.scaled_add(-value, &face.a_active.row(r));
+        }
+    }
+
+    // Orthonormal basis of the active ROW space by modified Gram–Schmidt. The
+    // basis is at most `p`-dimensional, so the scan stops as soon as it is
+    // complete no matter how many rows are active.
+    let mut basis: Vec<Array1<f64>> = Vec::new();
+    let drop_tol = 1e-12;
+    for r in 0..face.a_active.nrows() {
+        if basis.len() == p {
+            break;
+        }
+        let mut v = face.a_active.row(r).to_owned();
+        for q in &basis {
+            let projection = q.dot(&v);
+            v.scaled_add(-projection, q);
+        }
+        let norm = v.dot(&v).sqrt();
+        if norm > drop_tol {
+            v.mapv_inplace(|value| value / norm);
+            basis.push(v);
+        }
+    }
+
+    let mut orthogonal = residual.clone();
+    for q in &basis {
+        let projection = q.dot(&residual);
+        orthogonal.scaled_add(-projection, q);
+    }
+    let unreachable = gradient_inf_norm(&orthogonal);
+    let in_row_space = &residual - &orthogonal;
+    Some((unreachable, gradient_inf_norm(&in_row_space)))
+}
+
+/// The active face at `beta`: per-row-scaled inequalities, their slacks, the
+/// indices considered active, and the gathered active rows.
+///
+/// One derivation shared by [`compute_constraint_kkt_diagnostics`] and
+/// [`stationarity_residual_reachability`], so the reported reachability split
+/// can never describe a different face than the residual it explains.
+struct ActiveFace {
+    a_scaled: Array2<f64>,
+    slack: Array1<f64>,
+    primal_feasibility: f64,
+    active_idx: Vec<usize>,
+    a_active: Array2<f64>,
+}
+
+fn active_face(
+    beta: &Array1<f64>,
+    constraints: &LinearInequalityConstraints,
+) -> Option<ActiveFace> {
+    let m = constraints.a.nrows();
+    let p = constraints.a.ncols();
+    if beta.len() != p {
+        return None;
+    }
+    // Measure feasibility in the *scaled* (geometric) coordinate system the
+    // solver's tolerance is expressed in — see the note in
+    // `compute_constraint_kkt_diagnostics`.
     let mut a_scaled = constraints.a.clone();
     let mut b_scaled = constraints.b.clone();
     for i in 0..m {
@@ -339,7 +416,6 @@ pub(crate) fn compute_constraint_kkt_diagnostics(
             b_scaled[i] *= inv;
         }
     }
-
     let mut slack = Array1::<f64>::zeros(m);
     let mut primal_feasibility: f64 = 0.0;
     for i in 0..m {
@@ -347,16 +423,63 @@ pub(crate) fn compute_constraint_kkt_diagnostics(
         slack[i] = s_i;
         primal_feasibility = primal_feasibility.max((-s_i).max(0.0));
     }
+    let active_idx: Vec<usize> = (0..m)
+        .filter(|&i| slack[i] <= ACTIVE_SET_PRIMAL_FEASIBILITY_TOL)
+        .collect();
+    let mut a_active = Array2::<f64>::zeros((active_idx.len(), p));
+    for (r, &idx) in active_idx.iter().enumerate() {
+        a_active.row_mut(r).assign(&a_scaled.row(idx));
+    }
+    Some(ActiveFace {
+        a_scaled,
+        slack,
+        primal_feasibility,
+        active_idx,
+        a_active,
+    })
+}
 
-    let active_idx: Vec<usize> = (0..m).filter(|&i| slack[i] <= active_tolerance).collect();
+pub(crate) fn compute_constraint_kkt_diagnostics(
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+    constraints: &LinearInequalityConstraints,
+) -> ConstraintKktDiagnostics {
+    let m = constraints.a.nrows();
+    let active_tolerance = ACTIVE_SET_PRIMAL_FEASIBILITY_TOL;
+
+    // Feasibility is measured in the *scaled* (geometric) coordinate system the
+    // solver's tolerance is expressed in — see `active_face`, which owns that
+    // derivation for this function and for
+    // [`stationarity_residual_reachability`].
+    let p = constraints.a.ncols();
+    let Some(ActiveFace {
+        a_scaled,
+        slack,
+        primal_feasibility,
+        active_idx,
+        a_active,
+    }) = active_face(beta, constraints)
+    else {
+        // `beta` does not match the constraint system's coefficient width. No
+        // face can be formed, so no KKT claim can be made: report the raw
+        // gradient scale and an empty active set rather than inventing one.
+        return ConstraintKktDiagnostics {
+            n_constraints: m,
+            n_active: 0,
+            primal_feasibility: f64::INFINITY,
+            dual_feasibility: 0.0,
+            complementarity: 0.0,
+            stationarity: gradient_inf_norm(gradient),
+            active_tolerance,
+            working_set_rank_deficient: false,
+            gradient_scale: gradient_inf_norm(gradient),
+        };
+    };
+
     let mut lambda = Array1::<f64>::zeros(m);
     let mut working_set_rank_deficient = false;
     if !active_idx.is_empty() {
         let n_active = active_idx.len();
-        let mut a_active = Array2::<f64>::zeros((n_active, p));
-        for (r, &idx) in active_idx.iter().enumerate() {
-            a_active.row_mut(r).assign(&a_scaled.row(idx));
-        }
         if let Some((_, lambda_active)) =
             project_stationarity_residual_on_constraint_cone(gradient, &a_active)
         {

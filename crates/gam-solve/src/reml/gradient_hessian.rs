@@ -4928,8 +4928,36 @@ impl<'a> RemlState<'a> {
                     worstrow_msg = format!("; worstrow={} worstviolation={:.3e}", worstrow, worst);
                 }
             }
+            // A bare `stat` cannot distinguish the two ways stationarity fails,
+            // and they call for opposite responses. Split the refused residual
+            // by whether ANY multiplier could have closed it (#2601):
+            //
+            //   unreachable — orthogonal to span(A_activeᵀ). No λ removes it;
+            //                 the inner solve has not converged in a FREE
+            //                 direction the constraints never touch.
+            //   blocked     — inside the active row space but not expressible
+            //                 with λ ≥ 0; the iterate is on the wrong side of
+            //                 the cone, i.e. the working face is wrong.
+            //
+            // Without this, `stat_rel = 1.000e0` reads as "the projector found
+            // nothing" when in fact it found multipliers that were simply
+            // dwarfed by a free-direction residual.
+            let reachability_msg = pr
+                .linear_constraints_transformed
+                .as_ref()
+                .and_then(|lin| {
+                    crate::active_set::stationarity_residual_reachability(
+                        pr.beta_transformed.as_ref(),
+                        &pr.penalized_gradient_transformed,
+                        lin,
+                    )
+                })
+                .map(|(unreachable, blocked)| {
+                    format!("; unreachable={unreachable:.3e} blocked={blocked:.3e}")
+                })
+                .unwrap_or_default();
             return Err(EstimationError::ParameterConstraintViolation(format!(
-                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}",
+                "KKT residuals exceed tolerance: primal={:.3e}, dual={:.3e}, comp={:.3e}, stat={:.3e} (stat_rel={:.3e} vs tol={:.3e}{}; ‖grad‖∞={:.3e}); active={}/{}{}{}",
                 kkt.primal_feasibility,
                 kkt.dual_feasibility,
                 kkt.complementarity,
@@ -4944,7 +4972,8 @@ impl<'a> RemlState<'a> {
                 kkt.gradient_scale,
                 kkt.n_active,
                 kkt.n_constraints,
-                worstrow_msg
+                worstrow_msg,
+                reachability_msg
             )));
         }
         Ok(())
@@ -7965,14 +7994,29 @@ impl<'a> RemlState<'a> {
             None,
         );
         let pirls_elapsed = pirls_start.elapsed();
-        if let Ok((ref res, ref wm)) = result {
-            log::info!(
-                "[STAGE] sigma-cubature pirls solve iters={} status={:?} max_eta={:.1} elapsed={:.3}s",
+        // Name the sigma point. A cubature point is an OFF-TRAJECTORY rho —
+        // potentially tens of log-units from the fitted one, since the sigma
+        // offset scales with the rho-posterior standard deviation and that is
+        // large exactly when a smoothing parameter is railing. Without the rho
+        // in the line, a failure here is indistinguishable in the log from a
+        // failure of the production fit (#2601).
+        let rho_text = rho
+            .iter()
+            .map(|v| format!("{v:.3}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        match result {
+            Ok((ref res, ref wm)) => log::info!(
+                "[STAGE] sigma-cubature pirls solve rho=[{rho_text}] iters={} status={:?} max_eta={:.1} elapsed={:.3}s",
                 wm.iterations,
                 res.status,
                 res.max_abs_eta,
                 pirls_elapsed.as_secs_f64(),
-            );
+            ),
+            Err(ref error) => log::info!(
+                "[STAGE] sigma-cubature pirls solve rho=[{rho_text}] FAILED in {:.3}s: {error}",
+                pirls_elapsed.as_secs_f64(),
+            ),
         }
         let (pirls_result, _) = result?;
         let pirls_result = Arc::new(pirls_result);
