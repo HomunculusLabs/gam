@@ -1013,6 +1013,23 @@ fn effective_df_floor_bound(
     // unpenalized, the floor is not enforceable for this term (a
     // single-dimension range space with the floor at its own cap), so keep the
     // uniform ceiling.
+    //
+    // KNOWN STRUCTURAL EXEMPTION (#2608). This test is `>`, and
+    // `EFFECTIVE_DF_FLOOR` is exactly `1.0`, so a RANK-1 penalty — whose edf
+    // ranges over `(0, 1]` and reaches `1` only as `λ → 0` — can never satisfy
+    // it and is skipped unconditionally. That is arithmetically forced rather
+    // than an oversight: demanding `edf ≥ 1` of a rank-1 term is a demand for
+    // `ρ = −∞`, and manufacturing a bound there would be worse than none.
+    //
+    // The consequence is not small, and it is why this is written down rather
+    // than left to be re-derived. The null-space half of a Marra–Wood double
+    // penalty IS rank-1, so the LINEAR direction of every smooth is permanently
+    // exempt from the only protection against its own collapse. On penguins
+    // that exemption is what converts "over-smoothed" into "the null model" —
+    // a linear softmax already scores 96.5% there, so the term that dies is the
+    // one carrying almost all of the signal. No amount of work on WHICH
+    // coordinates share a bound (the #2579 grouping above) touches it, because
+    // this term never reaches the bisection at all.
     let edf_max = unit_weight_term_edf_at_physical_strength(gammas, 0.0);
     if !(edf_max > EFFECTIVE_DF_FLOOR) {
         return Ok(None);
