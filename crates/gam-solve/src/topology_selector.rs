@@ -282,6 +282,7 @@ impl AutoTopologyKind {
     pub fn fuse_constant_curvature_family(
         candidates: &[Self],
         curvature_is_estimable: bool,
+        subsumes: &[AutoTopologyKind],
     ) -> Vec<Self> {
         // The fusion asserts "within a candidate, curvature is estimated". If the
         // caller cannot estimate it, that assertion would be false, and the fixed
@@ -290,13 +291,24 @@ impl AutoTopologyKind {
         if !curvature_is_estimable {
             return candidates.to_vec();
         }
+        // Estimating κ is NECESSARY but not SUFFICIENT. This fusion DELETES the
+        // fixed forms, so it is sound only for a form the caller's κ-fitting
+        // candidate actually SPANS. `is_fixed_constant_curvature_form` answers
+        // "is this a space form" — a statement about the GEOMETRY — and the two
+        // questions come apart the moment a caller realizes two space forms in
+        // different function spaces. gam-sae does exactly that: its `Euclidean`
+        // is a monomial patch (which the κ-atom reproduces exactly at κ = 0) but
+        // its `Sphere` is an AMBIENT HARMONIC basis, and a monomial patch in a
+        // tangent chart does not span the `l = 2` harmonics at any κ. Fusing it
+        // would shrink the race's span and report the loss as an estimated
+        // curvature. So the caller declares which forms it is willing to have
+        // deleted, and everything else races as itself.
+        let is_fusible =
+            |c: &AutoTopologyKind| c.is_fixed_constant_curvature_form() && subsumes.contains(c);
         let already_has_cc = candidates
             .iter()
             .any(|c| matches!(c, AutoTopologyKind::ConstantCurvature));
-        let fixed_form_count = candidates
-            .iter()
-            .filter(|c| c.is_fixed_constant_curvature_form())
-            .count();
+        let fixed_form_count = candidates.iter().filter(|c| is_fusible(c)).count();
         // Fuse when ≥2 fixed forms are present, OR when an explicit
         // ConstantCurvature candidate already subsumes ≥1 redundant fixed form.
         let should_fuse = fixed_form_count >= 2 || (already_has_cc && fixed_form_count >= 1);
@@ -306,9 +318,11 @@ impl AutoTopologyKind {
         let mut out = Vec::with_capacity(candidates.len());
         let mut emitted_cc = false;
         for &c in candidates {
-            if c.is_fixed_constant_curvature_form() {
-                // Replace the first fixed form by the fitted-κ candidate (unless
-                // an explicit one already exists); drop the rest.
+            if is_fusible(&c) {
+                // Replace the first SUBSUMED fixed form by the fitted-κ candidate
+                // (unless an explicit one already exists); drop the rest. A fixed
+                // form the caller did not declare subsumed falls through and races
+                // as itself.
                 if !already_has_cc && !emitted_cc {
                     out.push(AutoTopologyKind::ConstantCurvature);
                     emitted_cc = true;
@@ -417,6 +431,19 @@ pub struct TopologyAutoSelector {
     /// reports `Euclidean` or `Sphere`, which is exactly what it measured.
     /// Default `false` — claiming the capability is opt-in.
     pub curvature_is_estimable: bool,
+    /// The fixed space forms this caller's κ-fitting candidate actually SPANS,
+    /// and is therefore willing to have DELETED by the fusion.
+    ///
+    /// Separate from [`Self::curvature_is_estimable`] because the two claims are
+    /// different: estimability is about whether a κ is fitted, subsumption is
+    /// about whether the fitted-κ basis reproduces the fixed form it replaces.
+    /// A caller can honestly have the first and not the second — gam-sae fits κ
+    /// on a monomial tangent patch, which reproduces its `Euclidean` candidate
+    /// exactly at κ = 0 but never spans its ambient-harmonic `Sphere`.
+    ///
+    /// Defaults to both fixed forms, matching the pre-existing behaviour for
+    /// callers that realize `Euclidean` and `Sphere` in one basis family.
+    pub curvature_fusion_subsumes: &'static [AutoTopologyKind],
 }
 
 impl TopologyAutoSelector {
@@ -437,6 +464,10 @@ impl TopologyAutoSelector {
             candidates,
             score_scale: TopologyScoreScale::PerEffectiveDim,
             curvature_is_estimable: false,
+            curvature_fusion_subsumes: &[
+                AutoTopologyKind::Euclidean,
+                AutoTopologyKind::Sphere,
+            ],
         }
     }
 }
@@ -928,6 +959,7 @@ where
     let fused = AutoTopologyKind::fuse_constant_curvature_family(
         &selector.candidates,
         selector.curvature_is_estimable,
+        selector.curvature_fusion_subsumes,
     );
     let mut ranked = Vec::with_capacity(fused.len());
     let mut failed = Vec::new();
@@ -1035,6 +1067,7 @@ where
         AutoTopologyKind::fuse_constant_curvature_family(
             &selector.candidates,
             selector.curvature_is_estimable,
+            selector.curvature_fusion_subsumes,
         );
     let race = run_topology_race_parallel(candidates, |candidate| {
         // Carry the candidate kind alongside the fit so per-candidate failures
@@ -2813,6 +2846,56 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// Both fixed space forms are subsumed — the historical fusion behaviour
+    /// these cases were written against, kept explicit now that subsumption
+    /// is a declared property rather than an assumption.
+    const FUSE_BOTH: &[AutoTopologyKind] =
+        &[AutoTopologyKind::Euclidean, AutoTopologyKind::Sphere];
+
+    /// An UNSUBSUMED fixed form survives the fusion even when κ is estimable.
+    ///
+    /// This is the case gam-sae is in: it fits κ on a monomial tangent patch,
+    /// which reproduces its `Euclidean` candidate exactly at κ = 0 but never
+    /// spans its ambient-harmonic `Sphere`. Before subsumption was declared,
+    /// turning on estimability deleted BOTH — silently shrinking the race's
+    /// span and reporting the loss as an estimated curvature.
+    #[test]
+    fn fusion_deletes_only_the_forms_the_caller_declares_subsumed() {
+        let input = vec![
+            AutoTopologyKind::Euclidean,
+            AutoTopologyKind::Sphere,
+            AutoTopologyKind::ConstantCurvature,
+            AutoTopologyKind::Torus,
+        ];
+        let euclid_only: &[AutoTopologyKind] = &[AutoTopologyKind::Euclidean];
+        let fused =
+            AutoTopologyKind::fuse_constant_curvature_family(&input, true, euclid_only);
+        assert!(
+            fused.contains(&AutoTopologyKind::Sphere),
+            "an unsubsumed Sphere must race as itself, got {fused:?}"
+        );
+        assert!(
+            !fused.contains(&AutoTopologyKind::Euclidean),
+            "the subsumed Euclidean is redundant with the fitted-κ atom, got {fused:?}"
+        );
+        assert!(
+            fused.contains(&AutoTopologyKind::ConstantCurvature),
+            "the fitted-κ candidate must remain, got {fused:?}"
+        );
+        assert!(fused.contains(&AutoTopologyKind::Torus), "{fused:?}");
+
+        // Declaring BOTH subsumed reproduces the historical collapse, so the
+        // new parameter is the only thing that changed the outcome.
+        let both = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
+        assert!(!both.contains(&AutoTopologyKind::Sphere), "{both:?}");
+        assert!(!both.contains(&AutoTopologyKind::Euclidean), "{both:?}");
+
+        // Subsuming nothing leaves the set untouched: there is no redundancy to
+        // remove, so estimability alone must not delete anything.
+        let none = AutoTopologyKind::fuse_constant_curvature_family(&input, true, &[]);
+        assert_eq!(none, input, "empty subsumption must be a no-op");
+    }
+
     use super::*;
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
@@ -3753,7 +3836,7 @@ mod tests {
             AutoTopologyKind::Sphere,
             AutoTopologyKind::Torus,
         ];
-        let not_estimable = AutoTopologyKind::fuse_constant_curvature_family(&input, false);
+        let not_estimable = AutoTopologyKind::fuse_constant_curvature_family(&input, false, FUSE_BOTH);
         assert_eq!(
             not_estimable, input,
             "without the capability the fixed forms must survive unfused"
@@ -3763,7 +3846,7 @@ mod tests {
             "a ConstantCurvature candidate must never appear for a consumer that cannot fit κ"
         );
 
-        let estimable = AutoTopologyKind::fuse_constant_curvature_family(&input, true);
+        let estimable = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert!(
             estimable.contains(&AutoTopologyKind::ConstantCurvature),
             "with the capability the fixed forms fuse as #944 intends"
@@ -3780,7 +3863,7 @@ mod tests {
             AutoTopologyKind::Torus,
             AutoTopologyKind::Sphere,
         ];
-        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true);
+        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert_eq!(
             fused,
             vec![
@@ -3797,11 +3880,11 @@ mod tests {
     #[test]
     fn fuse_cc_family_leaves_single_form_intact() {
         let euclidean_only = vec![AutoTopologyKind::Euclidean, AutoTopologyKind::Circle];
-        let fused = AutoTopologyKind::fuse_constant_curvature_family(&euclidean_only, true);
+        let fused = AutoTopologyKind::fuse_constant_curvature_family(&euclidean_only, true, FUSE_BOTH);
         assert_eq!(fused, euclidean_only, "single fixed form must not be fused");
 
         let sphere_only = vec![AutoTopologyKind::Sphere];
-        let fused2 = AutoTopologyKind::fuse_constant_curvature_family(&sphere_only, true);
+        let fused2 = AutoTopologyKind::fuse_constant_curvature_family(&sphere_only, true, FUSE_BOTH);
         assert_eq!(fused2, sphere_only);
     }
 
@@ -3814,7 +3897,7 @@ mod tests {
             AutoTopologyKind::Euclidean,
             AutoTopologyKind::Circle,
         ];
-        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true);
+        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert_eq!(
             fused,
             vec![
@@ -3833,8 +3916,8 @@ mod tests {
             AutoTopologyKind::ConstantCurvature,
             AutoTopologyKind::Torus,
         ];
-        let once = AutoTopologyKind::fuse_constant_curvature_family(&input, true);
-        let twice = AutoTopologyKind::fuse_constant_curvature_family(&once, true);
+        let once = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
+        let twice = AutoTopologyKind::fuse_constant_curvature_family(&once, true, FUSE_BOTH);
         assert_eq!(once, twice, "fuse must be idempotent");
         assert_eq!(once, input, "already-fused list must be unchanged");
     }
@@ -3847,7 +3930,7 @@ mod tests {
             AutoTopologyKind::Torus,
             AutoTopologyKind::Cylinder,
         ];
-        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true);
+        let fused = AutoTopologyKind::fuse_constant_curvature_family(&input, true, FUSE_BOTH);
         assert_eq!(fused, input);
     }
 }

@@ -4215,29 +4215,18 @@ fn race_spec_set(
         // The race is over EXACTLY the candidate set we built; do not let the
         // selector's constant-curvature fuse drop one — pass them through as-is.
         candidates: specs.iter().map(|s| s.kind).collect(),
-        // κ IS now estimable here (#2604): the `ConstantCurvature` candidate
-        // above carries a fitted `kappa` in `rho`, and the outer gradient
-        // carries `dH/dkappa_a = lambda_a * dS_a/dkappa`. The earlier reason for
-        // this `false` — "this race fits no κ" — is therefore DEAD, and is not
-        // what keeps the flag down.
-        //
-        // What keeps it down is that this flag does not gate ESTIMATION, it
-        // gates `fuse_constant_curvature_family`, which DELETES every
-        // `is_fixed_constant_curvature_form` candidate and replaces them with
-        // the κ-fitting one. That is only sound for a fixed form the fused
-        // candidate SUBSUMES. It subsumes `Euclidean` exactly — at `kappa = 0`
-        // it is the same monomial patch in the same chart. It does NOT subsume
-        // `Sphere`, which this race realizes as `AmbientSphereHarmonics`: a
-        // monomial patch in a tangent chart does not span the `l = 2` spherical
-        // harmonics, and no κ makes it do so. Fusing would swap the basis and
-        // LOSE that span, reporting the loss as "curvature was estimated".
-        //
-        // So estimability is necessary but NOT sufficient for the fusion, and
-        // flipping this to `true` requires the subsumption claim, not the
-        // estimation one. Until the fusion is expressed over candidates the
-        // fitted-κ atom actually spans, the fixed forms race as themselves and
-        // `ConstantCurvature` races beside them as a third, honest candidate.
-        curvature_is_estimable: false,
+        // κ IS estimable here (#2604): the `ConstantCurvature` candidate above
+        // carries a fitted `kappa` in `rho`, and the outer gradient carries
+        // `dH/dkappa_a = lambda_a * dS_a/dkappa`, analytic and FD-matched. The
+        // old reason for `false` — "this race fits no κ" — is dead, so the
+        // capability is now declared truthfully...
+        curvature_is_estimable: true,
+        // ...but only `Euclidean` is declared SUBSUMED. The fitted-κ atom is a
+        // monomial patch in the tangent chart, so at κ = 0 it IS the Euclidean
+        // patch — same basis, same chart — and racing both is racing the same
+        // model twice. It is not the ambient-harmonic `Sphere` at any κ, so the
+        // sphere stays in the race as itself.
+        curvature_fusion_subsumes: &[AutoTopologyKind::Euclidean],
         // PER-OBSERVATION normalization (a common `n` divisor across candidates).
         // The candidate scores are now PROPER closed-form REML marginal
         // likelihoods (see `fit_topology_candidate`), which ALREADY price model
@@ -4260,13 +4249,15 @@ fn race_spec_set(
     // (Euclidean κ = 0 ∪ Sphere κ > 0) into ONE estimated-κ `ConstantCurvature`
     // candidate. The premise is right for `Euclidean` — flat-vs-curved IS a
     // curvature estimation rather than two discrete topologies — and this race
-    // now DOES fit κ, so the old objection ("no consumer fits κ") is gone.
+    // now DOES fit κ, so the fusion fires and the redundant flat patch is gone.
     //
-    // The fusion still does not fire, for a sharper reason: it deletes the fixed
-    // forms, and deletion is only sound where the fitted-κ atom spans what it
-    // replaces. It spans the flat patch (κ = 0 is the same monomial patch); it
-    // does not span the AMBIENT-HARMONIC sphere. See `curvature_is_estimable`
-    // above for the full argument.
+    // It fires for `Euclidean` ONLY. The fusion deletes what it fuses, and
+    // deletion is sound only where the fitted-κ atom spans what it replaces: it
+    // spans the flat patch (κ = 0 is the same monomial patch in the same chart)
+    // and does not span the AMBIENT-HARMONIC sphere at any κ. That is why the
+    // selector declares `curvature_fusion_subsumes: &[Euclidean]` rather than
+    // relying on `is_fixed_constant_curvature_form`, which answers a question
+    // about GEOMETRY when the fusion needs one about SPAN.
     //
     // Realizing the fused candidate by the sphere basis (as this used to do) does
     // not rescue the premise either. A unit-curvature sphere cannot express κ = 0,
