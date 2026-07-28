@@ -1093,6 +1093,36 @@ impl AmbientSphereHarmonicEvaluator {
         self.columns.len()
     }
 
+    /// Upper bound on `|∂^g Φ_col|` over the unit sphere, for EVERY column and
+    /// every mixed partial of total order `g`: `column_jet_bound() · degree^g`.
+    ///
+    /// Derived, not tabulated. Each column is `N · Q(z) · A_m(x, y)`, and `Q`
+    /// and `A` depend on DISJOINT variables, so a mixed partial factors exactly
+    /// with no Leibniz cross-terms:
+    ///
+    /// ```text
+    ///   ∂^p_x ∂^q_y ∂^r_z [N · Q(z) · A_m(x,y)]  =  N · Q^{(r)}(z) · ∂^p_x ∂^q_y A_m
+    /// ```
+    ///
+    /// On `‖u‖ = 1` both factors are bounded by a falling factorial capped at the
+    /// degree: `|Q^{(r)}| ≤ ‖Q‖₁ · degree^r` since every power in `Q` is at most
+    /// `degree`, and `|∂^p_x ∂^q_y A_m| ≤ (|m|)^{p+q} ≤ degree^{p+q}` from the
+    /// identity `∂^p_x ∂^q_y w^a = i^q a^{↓(p+q)} w^{a−p−q}` with `|w| ≤ 1`.
+    /// Multiplying gives `N · ‖Q‖₁ · degree^g`, independent of the point — so the
+    /// bound is global and needs no chart region.
+    pub fn column_jet_bound(&self) -> f64 {
+        self.columns
+            .iter()
+            .map(|column| {
+                let coefficient_norm: f64 = column.assoc_derivatives[0]
+                    .iter()
+                    .map(|coefficient| coefficient.abs())
+                    .sum();
+                column.norm * coefficient_norm
+            })
+            .fold(0.0_f64, f64::max)
+    }
+
     /// Exact `(l, m)` and Laplace-eigenvalue metadata in evaluator column order,
     /// in the same layout and units as [`SphericalHarmonicEvaluator`] — the two
     /// evaluators are the same basis in different coordinates, so a quotient

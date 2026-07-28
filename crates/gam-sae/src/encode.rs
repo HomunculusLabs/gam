@@ -67,9 +67,10 @@ use opt::{AcceptedStep, BacktrackConfig, backtracking_line_search};
 
 use crate::candidate_index::{AtomFrameSketch, SaeCandidateIndex, auto_candidate_budget};
 use crate::manifold::{
-    AffineCoordinateEvaluator, CylinderHarmonicEvaluator, DuchonCoordinateEvaluator,
+    AffineCoordinateEvaluator, AmbientSphereHarmonicEvaluator, CylinderHarmonicEvaluator,
+    DuchonCoordinateEvaluator,
     EuclideanPatchEvaluator, PeriodicHarmonicEvaluator, SaeBasisEvaluator, SaeManifoldAtom,
-    SphereChartEvaluator, TorusHarmonicEvaluator,
+    TorusHarmonicEvaluator,
 };
 use gam_linalg::faer_ndarray::FaerEigh;
 
@@ -262,32 +263,27 @@ pub(crate) fn torus_jet_sup(num_harmonics: usize, latent_dim: usize, order: u32)
     omega.powi(order as i32) * (latent_dim as f64).powi(order as i32)
 }
 
-impl BasisHessianLipschitz for SphereChartEvaluator {
-    /// The 7-column lat/lon chart `[1, x, y, z, xy, yz, xz]` with
-    /// `x = cos(lat)cos(lon)`, `y = cos(lat)sin(lon)`, `z = sin(lat)`. Each of
-    /// `x, y, z` is a product of two unit-frequency trig factors, so its `g`-th
-    /// coordinate jet is a sum of `2^g` products of `{sin,cos}` (each `≤ 1`):
-    /// magnitude `≤ 2^g` for `g ≥ 1`, `≤ 1` for `g = 0`. The bilinear columns
-    /// `xy, yz, xz` are products of two such coordinates; by Leibniz over the
-    /// product, their `g`-th jet is bounded by `Σ_{i=0}^{g} C(g,i)·(2^i)·(2^{g−i})
-    /// = (2+2)^g = 4^g` (using `‖∂^i u‖ ≤ 2^i`, `|u| ≤ 1`). The bilinear columns
-    /// dominate, so the per-column sup is `4^g` (`g ≥ 1`). Bounds are global
-    /// constants — the chart box `lat ∈ [-π/2, π/2]` does not enlarge them.
-    fn value_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        1.0
+impl BasisHessianLipschitz for AmbientSphereHarmonicEvaluator {
+    /// Global bounds from [`AmbientSphereHarmonicEvaluator::column_jet_bound`]:
+    /// `|∂^g Φ| ≤ bound · degree^g` on `‖u‖ = 1`, for every column and every
+    /// mixed partial of order `g`. Derived from the columns' own coefficients
+    /// rather than tabulated, so raising the working degree updates the bound
+    /// instead of invalidating it. Independent of the point, hence of the chart
+    /// region.
+    fn value_sup(&self, _chart: &ChartRegion) -> f64 {
+        self.column_jet_bound()
     }
-    fn jacobian_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        4.0
+
+    fn jacobian_sup(&self, _chart: &ChartRegion) -> f64 {
+        self.column_jet_bound() * self.degree() as f64
     }
-    fn hessian_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        16.0
+
+    fn hessian_sup(&self, _chart: &ChartRegion) -> f64 {
+        self.column_jet_bound() * (self.degree() as f64).powi(2)
     }
-    fn third_sup(&self, chart: &ChartRegion) -> f64 {
-        chart.assert_valid();
-        64.0
+
+    fn third_sup(&self, _chart: &ChartRegion) -> f64 {
+        self.column_jet_bound() * (self.degree() as f64).powi(3)
     }
 }
 
@@ -916,7 +912,9 @@ pub(crate) fn family_jet_sups(
             JetSups::from_family(&ev, chart)
         }
         Sphere => {
-            let ev = SphereChartEvaluator;
+            let ev = AmbientSphereHarmonicEvaluator::new(
+                crate::manifold::SAE_AMBIENT_SPHERE_DEFAULT_DEGREE,
+            )?;
             JetSups::from_family(&ev, chart)
         }
         ProjectivePlane | KleinBottle => {
@@ -4340,7 +4338,7 @@ pub(crate) fn regular_product_grid(
 }
 
 /// Lat/lon sphere chart grid: `lat ∈ [−π/2, π/2]`, `lon ∈ [−π, π)`, matching
-/// the [`crate::manifold::SphereChartEvaluator`] convention.
+/// the ambient unit-vector convention.
 pub(crate) fn sphere_latlon_grid(resolution: usize) -> Array2<f64> {
     use std::f64::consts::PI;
     // Per-axis cap derived from the shared point budget rather than a hardcoded
