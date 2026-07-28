@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "gamfit solver log level for this run (empty = quiet default). Use 'info' to make budget spend attributable per scenario; the stream is uploaded as an artifact and is NOT committed."
+        default: ""
+        required: false
 
 # #2443/#2437: a fuzz run's value IS the corpus/findings it produced, so the
 # scheduled run is keyed on `github.sha` and never cancelled — under ref-keying a
@@ -83,8 +88,22 @@ jobs:
         run: Rscript -e 'install.packages(c("mgcv","jsonlite"), repos="https://cloud.r-project.org", Ncpus=max(1L, parallel::detectCores()-1L))'
 
       - name: Run fuzzer
+        env:
+          LOG_LEVEL: ${{ github.event.inputs.log_level }}
         run: |
           set -o pipefail
+          # #2584: stdout is the in-tree ledger (`fuzz_output.txt` is COMMITTED by
+          # publish-gha-results, so it must stay small); stderr carries the solver
+          # stream and goes to an artifact-only file. Raising the level globally
+          # into the committed file would check in a six-figure-line log nightly.
+          level_args=()
+          if [[ -n "${LOG_LEVEL:-}" ]]; then
+            level_args=(--log-level "$LOG_LEVEL")
+          fi
+          # The step shell is `bash -e`, so the pipeline must be un-guarded for
+          # its exit code to be CAPTURED rather than abort the step: a failing
+          # run is exactly when the stderr tail below is worth having in-tree.
+          set +e
           python bench/fuzz_vs_mgcv.py \
             --n-trials 100 \
             --top 30 \
@@ -92,7 +111,18 @@ jobs:
             --r-timeout 60 \
             --max-scenario-cost 200000 \
             --max-total-seconds 3300 \
-            2>&1 | tee fuzz_output.txt
+            "${level_args[@]}" \
+            2> fuzz_solver.log | tee fuzz_output.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          # Keep the committed ledger small but never blind: a crash tail still
+          # lands in-tree, while the full stream stays artifact-only.
+          {
+            echo
+            echo "----- stderr tail (full stream: fuzz-results artifact, fuzz_solver.log) -----"
+            tail -n 200 fuzz_solver.log || true
+          } >> fuzz_output.txt
+          exit "$status"
 
       - name: Upload fuzz results
         if: always()
@@ -102,6 +132,7 @@ jobs:
           path: |
             bench/fuzz_results.jsonl
             fuzz_output.txt
+            fuzz_solver.log
           if-no-files-found: warn
 
 

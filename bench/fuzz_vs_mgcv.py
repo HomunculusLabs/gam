@@ -800,7 +800,26 @@ def main() -> None:
     parser.add_argument("--max-total-seconds", type=int, default=None)
     parser.add_argument("--max-scenario-cost", type=float, default=200_000.0)
     parser.add_argument("--baseline-json", type=str, default=None)
+    # #2584: the nightly stream runs below `info`, so a run that eats its whole
+    # budget cannot say WHICH scenario ate it -- nothing is attributable. The
+    # level is opt-in rather than always-on because the extension installs its
+    # logger at a deliberately quiet `warn` default (#1688) and that stream
+    # carries real per-evaluation compute (eigendecompositions), not just I/O:
+    # turning it on nightly would slow the very budget this is meant to explain.
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        choices=["off", "error", "warn", "info", "debug", "trace"],
+        help="gamfit solver log level (default: leave the quiet warn default alone)",
+    )
     args = parser.parse_args()
+
+    if args.log_level is not None:
+        # `RUST_LOG` alone does nothing here: the extension installs its own
+        # stderr logger at import, so the level must be set through the shim.
+        rust_module().set_log_level(args.log_level)
+        print(f"gamfit solver log level set to {args.log_level!r}", flush=True)
 
     try:
         _check_mgcv_available()
