@@ -5172,7 +5172,8 @@ pub fn auto_init_length_scale_in_basis(data: ArrayView2<'_, f64>, basis: &mut Sm
         // knot/column constructions with no kernel bandwidth, and the
         // `Sphere` / `ConstantCurvature` / `MeasureJet` / `Duchon` specs carry
         // no `length_scale` field to resolve.
-        SmoothBasisSpec::FactorSmooth { .. }
+        SmoothBasisSpec::BSpline1D { .. }
+        | SmoothBasisSpec::FactorSmooth { .. }
         | SmoothBasisSpec::Sphere { .. }
         | SmoothBasisSpec::ConstantCurvature { .. }
         | SmoothBasisSpec::MeasureJet { .. }

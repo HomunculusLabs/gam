@@ -839,10 +839,10 @@ pub trait CustomFamily {
             "exact Newton joint gradient evaluation",
         );
         assert!(
-            specs.len() == states.len(),
+            specs.len() == block_states.len(),
             "a family hook received {} block specs for {} block states",
             specs.len(),
-            states.len()
+            block_states.len()
         );
         Ok(None)
     }
@@ -1050,14 +1050,14 @@ pub trait CustomFamily {
         // a NaN coefficient reaching a family hook is a bug in the caller,
         // and naming the block makes the report attributable (#780 ban).
         assert!(
-            states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
+            block_states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
         );
         assert!(
-            specs.len() == states.len(),
+            specs.len() == block_states.len(),
             "a family hook received {} block specs for {} block states",
             specs.len(),
-            states.len()
+            block_states.len()
         );
         assert_valid_blockspecs(specs, "matrix-free inner-joint preference");
         assert_states_match_specs(block_states, specs, "matrix-free inner-joint preference");
