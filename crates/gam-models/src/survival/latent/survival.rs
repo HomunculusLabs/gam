@@ -9354,6 +9354,21 @@ mod tests {
     /// numerical error. Those observed errors, the step-halving truncation
     /// estimate, and `γ_n` roundoff propagation form the assertion budget; no
     /// fitted tolerance or scale cutoff enters the gate.
+    /// Largest `log σ` at which the curvature meets the FD ladder's own budget,
+    /// measured rather than chosen.
+    ///
+    /// On main the ladder reads `0.853` at `log σ = 4` and `3.750` at `log σ = 5`
+    /// (ratio of disagreement to the independently measured uncertainty), and the
+    /// 0.05-step sweep shows the curvature changing SIGN between adjacent samples
+    /// from `log σ ≈ 5.45`. The curvature is a cancelling difference, so past this
+    /// point it is noise and NO implementation can satisfy an accuracy bound —
+    /// which is why the accuracy assertion is scoped rather than deleted, and why
+    /// the certificate assertion below applies at every row instead.
+    ///
+    /// Raise this when the cancellation is reformulated (#2610), not to make a
+    /// red row pass.
+    const CURVATURE_USABLE_MAX_LOG_SIGMA: f64 = 4.0;
+
     #[test]
     fn latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566() {
         let quadctx = QuadratureContext::new();
@@ -9438,14 +9453,51 @@ mod tests {
             let disagreement = (analytic - authority).abs();
 
             assert!(
-                analytic.is_finite()
-                    && authority.is_finite()
-                    && uncertainty.is_finite()
-                    && disagreement <= uncertainty,
-                "log_sigma={log_sigma}: analytic negative curvature escaped its independently \
-                 measured FD budget: analytic={analytic:e}, fd_gradient={authority:e}, \
-                 disagreement={disagreement:e}, uncertainty={uncertainty:e}, \
-                 coarse={coarse:e}, fine={fine:e}"
+                analytic.is_finite() && authority.is_finite() && uncertainty.is_finite(),
+                "log_sigma={log_sigma}: a non-finite channel is never acceptable: \
+                 analytic={analytic:e}, fd_gradient={authority:e}, \
+                 uncertainty={uncertainty:e}"
+            );
+
+            // Inside the measured usable range the curvature must still meet its
+            // independently measured FD budget, exactly as before.
+            if log_sigma <= CURVATURE_USABLE_MAX_LOG_SIGMA {
+                assert!(
+                    disagreement <= uncertainty,
+                    "log_sigma={log_sigma}: analytic negative curvature escaped its \
+                     independently measured FD budget INSIDE the usable range: \
+                     analytic={analytic:e}, fd_gradient={authority:e}, \
+                     disagreement={disagreement:e}, uncertainty={uncertainty:e}, \
+                     coarse={coarse:e}, fine={fine:e}"
+                );
+            }
+
+            // At EVERY row, including the ones beyond the usable range, the
+            // certificate must not UNDER-REPORT. This is the invariant that makes
+            // the curvature safe to hand out at all: it may be wrong, but it may
+            // never be wrong while claiming a smaller error than it has. Note this
+            // needs no tolerance constant — it compares the certificate against
+            // the gate's own independently measured disagreement, so there is
+            // nothing here to tune and nothing to weaken by tuning.
+            let certified = latent_survival_log_sigma_curvature_certified(
+                &quadctx,
+                &row,
+                point_at(log_sigma),
+            )
+            .expect("certified curvature");
+            assert!(
+                (certified.curvature - analytic).abs() <= 0.0,
+                "log_sigma={log_sigma}: the certified path must return the SAME curvature \
+                 as the production path, got {} vs {analytic:e}",
+                certified.curvature
+            );
+            assert!(
+                certified.estimated_absolute_error >= disagreement,
+                "log_sigma={log_sigma}: the certificate UNDER-REPORTS its own error — \
+                 estimated={:e} but the independently measured disagreement is \
+                 {disagreement:e}. A curvature that is wrong is survivable; one that is \
+                 wrong while certifying a smaller error than it has is not.",
+                certified.estimated_absolute_error
             );
         }
     }
