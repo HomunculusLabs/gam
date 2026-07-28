@@ -1624,8 +1624,13 @@ fn compute_test_mask(content: &str, rel: &Path) -> Vec<bool> {
         || rel_str.starts_with("bench/")
         || rel_str.starts_with("benches/")
         || rel_str.starts_with("examples/")
-        || path_matches_crates_test_or_example(&rel_str)
-        || file_stem_is_exempt_test_module(rel);
+        || path_matches_crates_test_or_example(&rel_str);
+    // NOT by file name. A stem of `tests_*` / `*_tests` used to grant a file in
+    // `src/` the full test-scope exemption — `dbg!`, `todo!`, `println!`,
+    // `thread::sleep` and the rest — which made `git mv` a one-step bypass of a
+    // dozen rules. A file under `src/` that really is test-only says so with a
+    // `#![cfg(test)]` inner attribute, which the block below honours: a claim
+    // the compiler enforces, not a claim in a filename.
     if file_is_test {
         mask.fill(true);
         return mask;
@@ -1701,21 +1706,6 @@ fn compute_test_mask(content: &str, rel: &Path) -> Vec<bool> {
     }
 
     mask
-}
-
-/// True when the file's stem matches the same naming pattern that
-/// `is_exempt_test_submodule_name` accepts for `#[cfg(test)] mod ...`
-/// blocks: `tests`, `test_support`, `tests_*`, or `*_tests`. When a
-/// mechanically-split `mod foo_tests { ... }` inlined via `include!` is
-/// extracted into its own file (the cohesive-module decomposition the
-/// part-file ban demands), the module body lands in a file whose stem
-/// equals the module name. The whole file is then test scope by the
-/// same rule that exempted the inline `mod`.
-fn file_stem_is_exempt_test_module(rel: &Path) -> bool {
-    let Some(stem) = rel.file_stem().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    is_exempt_test_submodule_name(stem)
 }
 
 /// Recognize `#![cfg(test)]` (inner attribute, applies to the enclosing
@@ -4370,18 +4360,6 @@ fn collect_scannable_files(root: &Path, dir: &Path, files: &mut Vec<ScannedFile>
     for entry in read.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
-        // This directory is compiled into build.rs itself. Keep it outside the
-        // source-hygiene corpus for the same reason build.rs is exempt: policy
-        // implementation necessarily names/prints the constructs it rejects.
-        // Its Rust compiler dependency and the explicit rerun directive above
-        // still make every edit rebuild and execute the policy self-probes.
-        if path
-            .strip_prefix(root)
-            .ok()
-            .is_some_and(|rel| rel.starts_with("build_support"))
-        {
-            continue;
-        }
         if path
             .strip_prefix(root)
             .ok()
