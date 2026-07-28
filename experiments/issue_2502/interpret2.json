@@ -1,0 +1,111 @@
+[
+ {
+  "atom": 3215,
+  "kind": "linear",
+  "n": 4324,
+  "adj_r2": 0.3409812126243672,
+  "drivers": "log_freq -0.68, is_capital -0.21, seq_pos -0.13",
+  "top_token_share": 0.919750231267345,
+  "digit_share": 0.00023126734505087883
+ },
+ {
+  "atom": 2177,
+  "kind": "linear",
+  "n": 2783,
+  "adj_r2": 0.64426708738418,
+  "drivers": "has_space -0.74, log_freq -0.12, is_punct -0.09",
+  "top_token_share": 0.7430830039525692,
+  "digit_share": 0.0032339202299676607
+ },
+ {
+  "atom": 2881,
+  "kind": "linear",
+  "n": 1728,
+  "adj_r2": 0.10610502790030474,
+  "drivers": "seq_pos +0.29, is_punct -0.16, has_space +0.07",
+  "top_token_share": 0.2586805555555556,
+  "digit_share": 0.048032407407407406
+ },
+ {
+  "atom": 3517,
+  "kind": "linear",
+  "n": 1600,
+  "adj_r2": 0.05734658942294979,
+  "drivers": "is_punct -0.22, tok_len +0.09, log_freq +0.08",
+  "top_token_share": 0.21,
+  "digit_share": 0.0425
+ },
+ {
+  "atom": 1565,
+  "kind": "euclidean",
+  "n": 3493,
+  "adj_r2": 0.2576249404803965,
+  "drivers": "tok_len -0.50, has_space +0.29, is_punct -0.11",
+  "top_token_share": 0.006584597766962496,
+  "digit_share": 0.005439450329229888
+ },
+ {
+  "atom": 3945,
+  "kind": "euclidean",
+  "n": 3002,
+  "adj_r2": 0.16410937377897972,
+  "drivers": "seq_pos -0.39, is_punct -0.10, tok_len -0.07",
+  "top_token_share": 0.4950033311125916,
+  "digit_share": 0.03597601598934044
+ },
+ {
+  "atom": 1339,
+  "kind": "euclidean",
+  "n": 2827,
+  "adj_r2": 0.6579097836121912,
+  "drivers": "is_punct +0.53, has_space -0.29, tok_len -0.24",
+  "top_token_share": 0.4064379200565971,
+  "digit_share": 0.024053767244428724
+ },
+ {
+  "atom": 1611,
+  "kind": "euclidean",
+  "n": 2770,
+  "adj_r2": 0.06453497924488782,
+  "drivers": "has_space -0.19, log_freq +0.19, is_punct -0.18",
+  "top_token_share": 0.18411552346570398,
+  "digit_share": 0.06101083032490975
+ },
+ {
+  "atom": 385,
+  "kind": "periodic",
+  "n": 2826,
+  "adj_r2": 0.010925162580361358,
+  "drivers": "log_freq +0.10, is_punct +0.04, seq_pos -0.03",
+  "top_token_share": 0.9858457183297947,
+  "digit_share": 0.0
+ },
+ {
+  "atom": 616,
+  "kind": "periodic",
+  "n": 2309,
+  "adj_r2": 0.7391003959796439,
+  "drivers": "log_freq +0.92, is_punct -0.27, tok_len +0.12",
+  "top_token_share": 0.5699436985708098,
+  "digit_share": 0.017756604590731917
+ },
+ {
+  "atom": 494,
+  "kind": "periodic",
+  "n": 2099,
+  "adj_r2": 0.2490388783973454,
+  "drivers": "log_freq +0.47, tok_len +0.23, is_digit -0.09",
+  "top_token_share": 0.8670795616960457,
+  "digit_share": 0.00857551214864221
+ },
+ {
+  "atom": 586,
+  "kind": "periodic",
+  "n": 2007,
+  "adj_r2": 0.25417974925333553,
+  "drivers": "log_freq +0.50, seq_pos +0.02, has_space +0.01",
+  "top_token_share": 0.46985550572994517,
+  "digit_share": 0.9995017438963627,
+  "digit_value_spearman": -0.3659272111907942
+ }
+]
