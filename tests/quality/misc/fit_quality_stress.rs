@@ -763,6 +763,38 @@ fn zz_measure_hifreq_tensor_k8_lambda_readout() {
 // non-finite or on an incomparable scale, that is reading (1). One run separates
 // them, and until now nothing could.
 //
+// MEASURED, on the RESIZED design (`c0a076a71`, so `n = 1024`, `p = 576`,
+// `p/n = 0.5625` -- no longer saturated). Reading (2): all three candidates are
+// finite and on one scale, and `initial.sp` STILL picks the ceiling.
+//
+//   [STAGE] PIRLS row-chunk generation chunks=1 n=1024 p=576 nnz=589824
+//   [STAGE] logdet S rho_dim=3 penalty_rank=575
+//   [OUTER] standard REML initial.sp selected seed: [0,0,0] -> [30,30,30]
+//           (scored: base=1.031664449e3 initial_sp=9.658386681e2
+//            summed_diagonal=7.590703143e2; bounds -12.000..30.000)
+//   [STAGE] standard REML: seed screening cascade start seeds=5 initial_cap=3
+//   [STAGE] seed-screen stage=0 seed=3/5 cap=3 cost=2.070444e1   <- best of 5
+//
+// So un-saturating the design did NOT move this heuristic's preference, and the
+// issue's premise needs one more correction on top of the saturation one: THIS
+// LINE DOES NOT NAME THE OPTIMIZER'S STARTING POINT. `initial.sp` contributes ONE
+// candidate to a 5-seed screening cascade (`rho_optimizer/seed_screening.rs`),
+// and the cascade's ranking is what picks the start. The two report on different
+// evaluators -- a `compute_cost` score against a cap-3 PIRLS cost -- so the
+// numbers above are NOT comparable across that boundary and no ratio between them
+// means anything. What is legitimate to conclude is narrower and still useful:
+// the seed line alone never determined where the fit began, so "converged in one
+// iteration because the seed is on the wall" cannot be read off it.
+//
+// `penalty_rank = 575` of `p = 576` also pins the joint penalty nullity at
+// exactly 1 -- the intercept -- which is the `mp` the collapse check in
+// `gam_solve::estimate::collapsed_to_penalty_null_space` measures `edf` against
+// for this fixture.
+//
+// Still unmeasured: the k10 fit's converged `edf` on the resized grid. This probe
+// exhausts the focused lane's 600s execution budget mid-fit, so that number needs
+// the nightly slow-timeout lane rather than a dispatch.
+//
 // zz_measure discipline: numbers eprintln'd, NO assertion. The name contains
 // `hifreq_tensor_k10` so it inherits the dedicated slow-timeout override in
 // `.config/nextest.toml`.
