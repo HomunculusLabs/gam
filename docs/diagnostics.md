@@ -5,6 +5,17 @@ A fitted `Model` exposes five inspection methods:
 | Method | Returns | Contents |
 | --- | --- | --- |
 | `summary()` | `Summary` | Formula, family/link name, model class, deviance, REML/LAML score (in the `reml_score` field), per-coefficient table, smoothing parameters (`lambdas`), group metadata, and deployment extensions. |
+
+`reml_score` and `raw_reml_score` are `None` when the fit has **no**
+criterion, which is a different statement from "not recorded". A Gaussian
+fit whose fitted mean reproduces the response to floating-point resolution
+has `sigma_hat = 0`, so its restricted likelihood is unbounded and every
+score derived from it — the comparable REML/LAML headline, `Model.evidence`,
+`Model.bayes_factor_vs`, `gamfit.compare_models` — is undefined rather than
+large. `Summary.reml_score_unavailable` then carries the explanation, and
+those ranking surfaces raise it instead of ranking a stand-in value. Compare
+such a model on predictive accuracy, or refit on data whose response is not
+an exact function of the design.
 | `diagnose(data)` | `Diagnostics` | Observed values, predicted columns, residuals, and aggregate metrics for models whose prediction output includes `"mean"`. |
 | `check(data)` | `SchemaCheck` | Schema validation result with structured issues. |
 | `plot(data, x=, kind=)` | `matplotlib.axes.Axes` | Prediction / residual / observed-vs-predicted plot. |

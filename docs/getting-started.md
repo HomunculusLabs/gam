@@ -128,7 +128,9 @@ model.report("out.html")            # standalone HTML report
 name, model class, deviance, REML/LAML criterion (in the `reml_score`
 field), per-coefficient estimates with optional standard errors,
 smoothing parameters, covariance metadata, deployment extensions, and
-group metadata.
+group metadata. `reml_score` is `None` on an exactly-interpolating fit,
+whose restricted likelihood is unbounded — see
+[diagnostics.md](diagnostics.md).
 
 See [diagnostics.md](diagnostics.md) for the full list.
 

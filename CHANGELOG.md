@@ -1,3 +1,19 @@
+## Unreleased
+
+- **A fit that has no criterion says so, everywhere (#2595).** `Summary.reml_score`
+  and `raw_reml_score` were `0.0` on every exactly-interpolating Gaussian fit,
+  because `UnifiedFitResult` had no way to express "no criterion exists here" and
+  the exact-fit route had to write a placeholder to satisfy a finiteness contract.
+  When the fitted mean reproduces the response to floating-point resolution the
+  profiled scale is exactly zero and the restricted likelihood is unbounded, so
+  the criterion is not small — it does not exist. It is now typed-absent, the
+  boundary is recognized where the dispersion is estimated (so every entry point
+  reaches the same verdict on the same data), the one constructor rejects a
+  criterion at that boundary, and `Model.evidence`, `Model.bayes_factor_vs` and
+  `gamfit.compare_models` refuse such a model by name instead of ranking a
+  stand-in. `Summary.reml_score_unavailable` carries the explanation. Saved
+  models load without a migration pass.
+
 ## gamfit 0.1.261 (2026-07-26)
 
 This explicit Python release carries the 60 commits after 0.1.260 without
