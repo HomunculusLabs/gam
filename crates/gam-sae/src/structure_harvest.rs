@@ -2913,23 +2913,6 @@ fn topology_candidates_for_dim(
         out
     };
 
-    // The ambient sphere coordinate is a DIRECTION: the leading seed frame
-    // carried onto the unit sphere. Normalisation belongs to the manifold, not
-    // to this call site, so it goes through `project_point` -- the same
-    // authority the retraction and the seed path use.
-    let sphere_coords_ambient = || -> Array2<f64> {
-        let raw = coords_d(3);
-        let manifold = LatentManifold::Sphere { dim: 3 };
-        let mut out = Array2::<f64>::zeros(raw.dim());
-        for row in 0..raw.nrows() {
-            let projected = manifold.project_point(raw.row(row));
-            for axis in 0..3 {
-                out[[row, axis]] = projected[axis];
-            }
-        }
-        out
-    };
-
     let mut specs: Vec<TopologyCandidateSpec> = Vec::new();
     match d_k {
         1 => {
@@ -2995,22 +2978,27 @@ fn topology_candidates_for_dim(
                 AutoTopologyKind::Sphere,
                 SaeAtomGeometryPlan::new(
                     SaeAtomBasisKind::Sphere,
-                    3,
-                    SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
-                    SaeReferenceMetricPlan::RoundSphere,
+                    2,
+                    SaeBasisResolution::SphereChart,
+                    SaeReferenceMetricPlan::SphereChart,
                 )?,
-                // The sphere candidate races as an actual sphere: an ambient
-                // unit 3-vector, whose retraction has no cut and no boundary and
-                // whose uniform metric restricts to the round metric. The
-                // superseded `(lat, lon)` chart raced a CYLINDER -- the pole was
-                // an `Interval` bound the optimiser could not cross, the trust
-                // region was wrong by `cos²(lat)`, and the fixed 7-column block
-                // was not closed under `SO(3)`, so the candidate's achievable
-                // fit depended on where the chart's pole happened to fall
-                // relative to the data. Degree 2 spans all five `l = 2`
-                // harmonics, where the chart held only three of them.
-                LatentManifold::Sphere { dim: 3 },
-                sphere_coords_ambient(),
+                // The `SphereChartEvaluator` is a (lat, lon) intrinsic chart, so
+                // the latent manifold is the 2-D product of a bounded latitude
+                // interval and a wrapped longitude circle — NOT
+                // `LatentManifold::Sphere { dim: 2 }`, which would demand ambient
+                // unit 3-vectors the chart never produces. This matches the
+                // production seeding (`AtomTopology::Sphere` →
+                // Product[Interval(-π/2, π/2), Circle(τ)] in `sae::manifold::atom`).
+                LatentManifold::Product(vec![
+                    LatentManifold::Interval {
+                        lo: -std::f64::consts::FRAC_PI_2,
+                        hi: std::f64::consts::FRAC_PI_2,
+                    },
+                    LatentManifold::Circle {
+                        period: std::f64::consts::TAU,
+                    },
+                ]),
+                coords_d(2),
             )?);
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::ProjectivePlane,
@@ -4233,8 +4221,8 @@ pub struct PrimaryTopologyChoice {
     pub basis_kind: SaeAtomBasisKind,
     /// Width of the coordinate the seed dictionary must allocate — a STORAGE
     /// width, not a count of degrees of freedom. They differ for `S²`, which is
-    /// intrinsically 2-D but carried as an ambient unit 3-vector. Price an atom
-    /// by `geometry.intrinsic_dim()`; index its storage by this.
+    /// intrinsically 2-D but would be carried as an ambient unit 3-vector.
+    /// Price an atom by `geometry.intrinsic_dim()`; index its storage by this.
     pub latent_dim: usize,
     /// Complete geometry selected by evidence, after resolution growth. This is
     /// the only way a continuously optimized reference metric can cross the
@@ -4459,48 +4447,33 @@ pub fn discover_primary_atom_topologies(
                 }
                 sheet_coords = Some(coords);
                 if n_pcs >= 3 {
-                    // Sphere: the unit-normalized leading 3-frame, kept AS a
-                    // direction. The superseded chart computed exactly this
-                    // vector and then threw it away into `asin`/`atan2`, buying
-                    // a pole the optimiser could not cross and a longitude that
-                    // is pure gauge there. Normalisation is the manifold's, via
-                    // `project_point`, so there is one authority for it.
-                    let sphere_manifold = LatentManifold::Sphere { dim: 3 };
-                    let mut coords = Array2::<f64>::zeros((n_obs, 3));
+                    // Sphere: (lat, lon) of the unit-normalized leading 3-frame.
+                    let mut coords = Array2::<f64>::zeros((n_obs, 2));
                     for row in 0..n_obs {
-                        let raw = ndarray::Array1::from_vec(vec![
-                            proj[[row, 0]],
-                            proj[[row, 1]],
-                            proj[[row, 2]],
-                        ]);
-                        let projected = sphere_manifold.project_point(raw.view());
-                        for axis in 0..3 {
-                            coords[[row, axis]] = projected[axis];
-                        }
+                        let (x, y, z) = (proj[[row, 0]], proj[[row, 1]], proj[[row, 2]]);
+                        let norm = (x * x + y * y + z * z).sqrt().max(1e-12);
+                        coords[[row, 0]] = (z / norm).clamp(-1.0, 1.0).asin();
+                        coords[[row, 1]] = y.atan2(x);
                     }
                     specs.push(TopologyCandidateSpec::new(
                         AutoTopologyKind::Sphere,
                         SaeAtomGeometryPlan::new(
                             SaeAtomBasisKind::Sphere,
-                            3,
-                            SaeBasisResolution::AmbientSphereHarmonics { degree: 2 },
-                            SaeReferenceMetricPlan::RoundSphere,
+                            2,
+                            SaeBasisResolution::SphereChart,
+                            SaeReferenceMetricPlan::SphereChart,
                         )?,
-                        sphere_manifold,
+                        LatentManifold::Product(vec![
+                            LatentManifold::Interval {
+                                lo: -std::f64::consts::FRAC_PI_2,
+                                hi: std::f64::consts::FRAC_PI_2,
+                            },
+                            LatentManifold::Circle {
+                                period: std::f64::consts::TAU,
+                            },
+                        ]),
                         coords.clone(),
                     )?);
-                    // `RP²` still races on the `(lat, lon)` cover, so it needs
-                    // its own 2-wide coordinates rather than the sphere's
-                    // ambient direction. It inherits the cover's pole defects
-                    // until its quotient evaluator is rebuilt on the ambient
-                    // cover -- tracked on #2602; the character table transfers
-                    // unchanged, because the ambient and chart harmonics are the
-                    // same basis in different coordinates.
-                    let mut cover_coords = Array2::<f64>::zeros((n_obs, 2));
-                    for row in 0..n_obs {
-                        cover_coords[[row, 0]] = coords[[row, 2]].clamp(-1.0, 1.0).asin();
-                        cover_coords[[row, 1]] = coords[[row, 1]].atan2(coords[[row, 0]]);
-                    }
                     specs.push(TopologyCandidateSpec::new(
                         AutoTopologyKind::ProjectivePlane,
                         SaeAtomGeometryPlan::projective_plane(1)?,
@@ -4513,7 +4486,7 @@ pub fn discover_primary_atom_topologies(
                                 period: std::f64::consts::TAU,
                             },
                         ]),
-                        cover_coords,
+                        coords,
                     )?);
                 }
                 if n_pcs >= 3 {
