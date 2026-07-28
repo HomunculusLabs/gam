@@ -1,12 +1,12 @@
 {
   "workflow": "Focused Rust Proof",
   "job_status": "failure",
-  "run_id": "30392301481",
-  "run_number": "337",
+  "run_id": "30392818902",
+  "run_number": "339",
   "run_attempt": "1",
   "event": "workflow_dispatch",
-  "ref": "refs/heads/lane-2612-f090",
-  "sha": "5190720e8b295c921b209e988eeeb054ba75df39",
-  "completed_utc": "2026-07-28T19:47:40Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30392301481"
+  "ref": "refs/heads/lane-2612-plugin",
+  "sha": "cf2d5164a6ce58b70c19b2c323228fb3ed602db2",
+  "completed_utc": "2026-07-28T19:51:08Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30392818902"
 }
