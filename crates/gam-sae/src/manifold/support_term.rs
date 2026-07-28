@@ -1326,6 +1326,108 @@ impl SaeSupportSparseTerm {
     /// Canonical Moore-Penrose solution of a symmetric PSD normal equation.
     /// Null directions are set to zero; an RHS component in the numerical null
     /// space is a malformed normal equation and is refused.
+    /// Solve `(G + lambda*S) beta = rhs` WITHOUT ever forming `G + lambda*S`.
+    ///
+    /// Fellner-Schall legitimately sends `lambda` to ~1e16 for an atom the data
+    /// gives no bend to: that is the ladder selecting the linear rung, not a
+    /// divergence. Assembling `G + lambda*S` at that point produces a matrix
+    /// whose condition number IS `lambda`, so the rank floor
+    /// `solve_psd_minimum_norm` derives from the largest eigenvalue
+    /// (`eps * max_eig * m`) grows past the atom's real least-squares
+    /// information in `null(S)`, which is then misread as null space and the
+    /// solve refuses. The data is not missing; the floor is set by the penalty.
+    ///
+    /// Diagonalising `S` and applying the Jacobi scaling
+    /// `d_i = 1/sqrt(1 + lambda*s_i)` removes `lambda` from the conditioning
+    /// entirely: the penalty's own contribution becomes
+    /// `lambda*s_i/(1 + lambda*s_i)`, which lies in `[0, 1)` for every
+    /// `lambda`, up to and including the limit. What remains is the intrinsic
+    /// conditioning of `G`. This is an algebraic identity -- there is no
+    /// threshold, tolerance, or clamp, and both limits are exact:
+    /// `s_i = 0` leaves the unpenalised restricted least squares, and
+    /// `lambda*s_i -> infinity` sends that coefficient to zero.
+    fn solve_penalized_normal_equations(
+        gram: &Array2<f64>,
+        penalty: &Array2<f64>,
+        lambda: f64,
+        rhs: &Array2<f64>,
+        context: &str,
+    ) -> Result<Array2<f64>, String> {
+        let m = gram.nrows();
+        if penalty.dim() != (m, m) {
+            return Err(format!(
+                "{context}: penalty shape {:?} does not match gram {:?}",
+                penalty.dim(),
+                gram.dim()
+            ));
+        }
+        if !(lambda >= 0.0) || !lambda.is_finite() {
+            return Err(format!("{context}: smoothing {lambda} is not a finite non-negative scale"));
+        }
+
+        let symmetric_penalty = (penalty + &penalty.t()) * 0.5;
+        let (penalty_eigenvalues, penalty_basis) = symmetric_penalty
+            .eigh(Side::Lower)
+            .map_err(|error| format!("{context}: penalty eigendecomposition failed: {error}"))?;
+
+        // A penalty with a genuinely negative direction is not a roughness
+        // measure, and the scaling below would take the square root of a
+        // negative number; reject it rather than silently repairing it.
+        let penalty_scale = penalty_eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let penalty_tolerance = f64::EPSILON * penalty_scale * m.max(1) as f64;
+        if penalty_eigenvalues
+            .iter()
+            .any(|value| *value < -penalty_tolerance)
+        {
+            return Err(format!("{context}: smoothing penalty is not positive semidefinite"));
+        }
+
+        // Rotate into the basis where the penalty is diagonal.
+        let rotated_gram = penalty_basis.t().dot(gram).dot(&penalty_basis);
+        let rotated_rhs = penalty_basis.t().dot(rhs);
+
+        let mut scaling = vec![0.0_f64; m];
+        for mode in 0..m {
+            let eigenvalue = penalty_eigenvalues[mode].max(0.0);
+            scaling[mode] = 1.0 / (1.0 + lambda * eigenvalue).sqrt();
+        }
+
+        let mut scaled = Array2::<f64>::zeros((m, m));
+        for left in 0..m {
+            for right in 0..m {
+                scaled[[left, right]] =
+                    rotated_gram[[left, right]] * scaling[left] * scaling[right];
+            }
+        }
+        for mode in 0..m {
+            let eigenvalue = penalty_eigenvalues[mode].max(0.0);
+            // `lambda*s/(1 + lambda*s)`, written so that `lambda = inf` would
+            // give exactly 1 rather than a NaN from `inf * 0`.
+            scaled[[mode, mode]] += lambda * eigenvalue * scaling[mode] * scaling[mode];
+        }
+
+        let mut scaled_rhs = rotated_rhs;
+        for mode in 0..m {
+            for column in 0..scaled_rhs.ncols() {
+                scaled_rhs[[mode, column]] *= scaling[mode];
+            }
+        }
+
+        let solution = Self::solve_psd_minimum_norm(&scaled, &scaled_rhs, context)?;
+
+        // Undo the Jacobi scaling, then rotate back out of the penalty basis.
+        let mut unscaled = solution;
+        for mode in 0..m {
+            for column in 0..unscaled.ncols() {
+                unscaled[[mode, column]] *= scaling[mode];
+            }
+        }
+        Ok(penalty_basis.dot(&unscaled))
+    }
+
     fn solve_psd_minimum_norm(
         gram: &Array2<f64>,
         rhs: &Array2<f64>,
@@ -1708,8 +1810,11 @@ impl SaeSupportSparseTerm {
                 .map(|&atom_idx| -> Result<_, String> {
                     let m = self.atoms[atom_idx].basis_size();
                     let old_decoder = self.atoms[atom_idx].decoder_coefficients();
-                    let mut gram =
-                        self.atoms[atom_idx].smooth_penalty().clone() * lambda_smooth[atom_idx];
+                    // G ALONE. The penalty is applied inside
+                    // `solve_penalized_normal_equations`, which never forms
+                    // `G + lambda*S` -- assembling that sum is what made a
+                    // legitimately large `lambda` unsolvable.
+                    let mut gram = Array2::<f64>::zeros((m, m));
                     let mut rhs = Array2::<f64>::zeros((m, self.output_dim));
                     // #2575: the atom's basis rows and decoded images used to be
                     // two fresh `Array1`s PER ROW on the atom's support, plus
@@ -1774,8 +1879,10 @@ impl SaeSupportSparseTerm {
                         gram += &local_gram;
                         rhs += &local_rhs;
                     }
-                    let decoder = Self::solve_psd_minimum_norm(
+                    let decoder = Self::solve_penalized_normal_equations(
                         &gram,
+                        self.atoms[atom_idx].smooth_penalty(),
+                        lambda_smooth[atom_idx],
                         &rhs,
                         "SaeSupportSparseTerm::decoder_sweep",
                     )?;
@@ -2641,6 +2748,79 @@ mod tests {
     use super::*;
     use crate::assignment_state::SaeAssignmentAtomSpec;
     use ndarray::array;
+
+    /// `S` is rank 2 with null direction `e3`; `G` is full rank.
+    fn penalized_solve_fixture() -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+        let penalty = array![[2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [0.0, 0.0, 0.0]];
+        let gram = array![[3.0, 1.0, 0.5], [1.0, 4.0, 0.25], [0.5, 0.25, 2.0]];
+        let rhs = array![[1.0], [2.0], [3.0]];
+        (gram, penalty, rhs)
+    }
+
+    #[test]
+    fn penalized_solve_survives_the_smoothing_fellner_schall_actually_produces() {
+        let (gram, penalty, rhs) = penalized_solve_fixture();
+        // The magnitude Fellner-Schall reaches when an atom's roughness goes to
+        // zero -- the ladder picking the linear rung, not a divergence.
+        let lambda = 2.2e16;
+
+        // The old route: assemble `G + lambda*S` and solve it. This must FAIL,
+        // or the fix below is answering a question nobody asked.
+        let mut assembled = &penalty * lambda;
+        assembled += &gram;
+        let assembled_result = SaeSupportSparseTerm::solve_psd_minimum_norm(
+            &assembled,
+            &rhs,
+            "assembled",
+        );
+        assert!(
+            assembled_result.is_err(),
+            "assembling G + lambda*S was expected to lose null(S) to its own rank floor, \
+             but it returned {assembled_result:?}"
+        );
+
+        let solved = SaeSupportSparseTerm::solve_penalized_normal_equations(
+            &gram, &penalty, lambda, &rhs, "penalized",
+        )
+        .expect("the lambda-free scaling must solve what the assembled matrix could not");
+
+        // Exact limit, by hand: the penalty annihilates everything outside
+        // null(S) = span(e3), so beta = e3 * (rhs_3 / G_33) = e3 * 3/2.
+        assert!(solved[[0, 0]].abs() < 1e-9, "range(S) must be driven to zero, got {}", solved[[0, 0]]);
+        assert!(solved[[1, 0]].abs() < 1e-9, "range(S) must be driven to zero, got {}", solved[[1, 0]]);
+        assert!(
+            (solved[[2, 0]] - 1.5).abs() < 1e-9,
+            "null(S) must keep its unpenalised least squares value 1.5, got {}",
+            solved[[2, 0]]
+        );
+    }
+
+    #[test]
+    fn penalized_solve_agrees_with_the_assembled_matrix_where_that_is_conditioned() {
+        let (gram, penalty, rhs) = penalized_solve_fixture();
+        // Stability at 1e16 is worthless if it moved the answer at lambdas that
+        // were never in trouble.
+        for lambda in [0.0, 1e-3, 1.0, 25.0, 1e4] {
+            let mut assembled = &penalty * lambda;
+            assembled += &gram;
+            let reference =
+                SaeSupportSparseTerm::solve_psd_minimum_norm(&assembled, &rhs, "reference")
+                    .expect("well-conditioned assembled solve");
+            let solved = SaeSupportSparseTerm::solve_penalized_normal_equations(
+                &gram, &penalty, lambda, &rhs, "penalized",
+            )
+            .expect("well-conditioned scaled solve");
+            for index in 0..3 {
+                let gap = (solved[[index, 0]] - reference[[index, 0]]).abs();
+                assert!(
+                    gap < 1e-9 * reference[[index, 0]].abs().max(1.0),
+                    "lambda={lambda} entry {index}: scaled {} vs assembled {}",
+                    solved[[index, 0]],
+                    reference[[index, 0]]
+                );
+            }
+        }
+    }
     use std::sync::Arc;
 
     fn atom(
