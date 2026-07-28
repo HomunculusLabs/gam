@@ -1492,17 +1492,18 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // (`|_| {}`, `|_a, _b| {}`) is `scan_for_empty_blocks`'s job, since a
         // needle would miss every parameter spelling and every line break.
         ("|_| ()", "no-op closure", false),
-        // `.map(drop)` / `.for_each(drop)` — `drop` as a combinator argument is
-        // `|_| ()` with a shorter name. A bare `drop(expr);` statement stays
-        // legal: that is the sanctioned way to consume a value for its effect.
-        // Spelled per combinator rather than as a bare `(drop)`, which also
-        // matches a call passing a LOCAL named `drop`.
-        (".map(drop)", "drop as a combinator", false),
-        (".map_err(drop)", "drop as a combinator", false),
-        (".flat_map(drop)", "drop as a combinator", false),
-        (".and_then(drop)", "drop as a combinator", false),
-        (".for_each(drop)", "drop as a combinator", false),
-        (".inspect(drop)", "drop as a combinator", false),
+        // Throwing away the ERROR, which is the signal this table exists to
+        // protect. `.map_err(drop)` / `.map_err(|_| ())` turns "it failed
+        // because X" into "it failed", and nothing downstream can ever
+        // recover X. Propagate it, or map it to a type that still says why.
+        //
+        // Dropping the SUCCESS payload is a different thing and is NOT banned
+        // — see `MAP_PAYLOAD_DISCARD_EXEMPT`. `.for_each(drop)` /
+        // `.inspect(drop)` are neither: they iterate to do nothing at all.
+        (".map_err(drop)", "error discarded by drop", false),
+        (".map_err(|_| ())", "error discarded by drop", false),
+        (".for_each(drop)", "iteration that does nothing", false),
+        (".inspect(drop)", "iteration that does nothing", false),
         ("|_, _| ()", "no-op closure", false),
         // Constant-valued predicates. `|_| true` / `|_| false` answer a
         // question the callee bothered to ask by ignoring the argument; the
@@ -1630,6 +1631,22 @@ fn normalized_code_stream(stripped_lines: &[String]) -> (String, Vec<usize>) {
     (stream, owner)
 }
 
+/// Needles that are legitimate when they are the argument of `.map(` — the
+/// `Result<T, E> -> Result<(), E>` conversion.
+///
+/// `fn validate_rho(&self, rho) -> Result<(), String> { resolve(...).map(drop) }`
+/// is not a no-op and hides nothing: the error is propagated in full, and the
+/// success payload is dropped because the signature says this function does
+/// not return one. The alternative spelling (`resolve(...)?; Ok(())`) says the
+/// same thing in two statements. `.map_err(drop)` is the opposite and stays
+/// banned — that one destroys the signal.
+const MAP_PAYLOAD_DISCARD_EXEMPT: &[&str] = &["|_| ()"];
+
+/// True when the fragment at `pos` is the argument of `.map(`.
+fn is_map_payload_discard(stream: &str, pos: usize) -> bool {
+    stream[..pos].ends_with(".map(")
+}
+
 fn scan_for_banned_substrings(
     root: &Path,
     dir: &Path,
@@ -1664,6 +1681,10 @@ fn scan_for_banned_substrings(
             for pos in find_banned_code_fragments(&stream, needle) {
                 let idx = owner.get(pos).copied().unwrap_or(0);
                 if *test_aware && mask.get(idx).copied().unwrap_or(false) {
+                    continue;
+                }
+                if MAP_PAYLOAD_DISCARD_EXEMPT.contains(needle) && is_map_payload_discard(&stream, pos)
+                {
                     continue;
                 }
                 let raw = raw_lines.get(idx).copied().unwrap_or("");
