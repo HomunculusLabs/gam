@@ -176,17 +176,40 @@ impl SaeAtomBasisKind {
             // Both caveats are documented in full at
             // `gam_sae::basis::sphere_chart_basis_jet`; do not read this chart as
             // artefact-free spherical geometry.
-            // Treating it as `LatentManifold::Sphere { dim: 2 }` would
-            // require ambient unit-vectors of length 2 (impossible for S^2).
-            Self::Sphere | Self::ProjectivePlane => LatentManifold::Product(vec![
-                LatentManifold::Interval {
-                    lo: -std::f64::consts::FRAC_PI_2,
-                    hi: std::f64::consts::FRAC_PI_2,
-                },
-                LatentManifold::Circle {
-                    period: std::f64::consts::TAU,
-                },
-            ]),
+            // At `latent_dim == 3` the atom is instead parameterised by the
+            // AMBIENT unit vector, and every caveat above evaporates:
+            // `LatentManifold::Sphere { dim: 3 }` retracts by `(u+xi)/||u+xi||`
+            // with no cut and no boundary, projects tangentially by
+            // `v - (u.v)u`, and its uniform ambient metric restricted to the
+            // tangent space IS the round metric — so the trust region finally
+            // measures geodesic distance. Three ambient coordinates for two
+            // intrinsic dimensions is exactly the price of a global chart, and
+            // `S^2` admits no 2-D one.
+            //
+            // The width is the discriminator, matching
+            // `SaeAtomGeometryPlan`'s (kind, latent_dim, resolution, metric)
+            // matrix: `latent_dim == 3` pairs with
+            // `SaeBasisResolution::AmbientSphereHarmonics`, `latent_dim == 2`
+            // with `SphereChart`. Both forms therefore coexist and a persisted
+            // atom is never ambiguous about which geometry it was fitted under.
+            //
+            // (`LatentManifold::Sphere { dim: 2 }` would be `S^1` in `R^2` — a
+            // circle, not a sphere. The ambient width is 3.)
+            Self::Sphere | Self::ProjectivePlane => {
+                if latent_dim == 3 {
+                    LatentManifold::Sphere { dim: 3 }
+                } else {
+                    LatentManifold::Product(vec![
+                        LatentManifold::Interval {
+                            lo: -std::f64::consts::FRAC_PI_2,
+                            hi: std::f64::consts::FRAC_PI_2,
+                        },
+                        LatentManifold::Circle {
+                            period: std::f64::consts::TAU,
+                        },
+                    ])
+                }
+            }
             // `Torus` uses [`TorusHarmonicEvaluator`], which shares the
             // fraction-of-period convention with `PeriodicHarmonicEvaluator`
             // (basis is `cos(2π·h·t)`, `sin(2π·h·t)` on each axis). Each
@@ -1812,6 +1835,44 @@ impl SaeManifoldAtom {
 mod tests {
     use super::*;
     use gam_math::special::{bessel_i0_log_and_ratio, bessel_i0_log_minus_abs_and_ratio};
+
+    /// The latent width selects the sphere's geometry, and the two forms must
+    /// stay genuinely distinct: `latent_dim == 3` is the ambient unit vector
+    /// (no boundary, no cut, round metric), `latent_dim == 2` is the legacy
+    /// `(lat, lon)` chart. This pins the ambient branch as an EMBEDDED sphere
+    /// rather than a product chart, and pins the chart branch as unchanged so
+    /// existing fitted atoms keep their geometry.
+    #[test]
+    fn sphere_latent_geometry_is_selected_by_the_ambient_width() {
+        for kind in [SaeAtomBasisKind::Sphere, SaeAtomBasisKind::ProjectivePlane] {
+            let ambient = kind.latent_manifold(3);
+            assert_eq!(
+                ambient,
+                LatentManifold::Sphere { dim: 3 },
+                "{kind:?} at latent_dim 3 must be the embedded sphere"
+            );
+            // The defining property: retraction leaves the unit sphere invariant
+            // and has no boundary to clamp against, at the pole included.
+            let pole = ndarray::Array1::from_vec(vec![0.0, 0.0, 1.0]);
+            let across = ndarray::Array1::from_vec(vec![0.9, 0.0, 0.0]);
+            let moved = ambient.retract(pole.view(), across.view());
+            let norm = moved.iter().map(|v| v * v).sum::<f64>().sqrt();
+            assert!(
+                (norm - 1.0).abs() <= 1.0e-12,
+                "ambient retraction must stay on the sphere; ||u|| = {norm}"
+            );
+            assert!(
+                moved[0] > 0.5,
+                "a step across the pole must actually travel, not clamp; got {moved:?}"
+            );
+
+            let chart = kind.latent_manifold(2);
+            assert!(
+                matches!(chart, LatentManifold::Product(_)),
+                "{kind:?} at latent_dim 2 must keep the legacy chart"
+            );
+        }
+    }
 
     /// The overflow-free `(log I0(η), I1(η)/I0(η))` must satisfy the exact Bessel
     /// identity `d/dη log I0(η) = I1(η)/I0(η)` on BOTH the small-argument series
