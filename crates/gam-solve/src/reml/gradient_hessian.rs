@@ -2567,6 +2567,58 @@ impl<'a> RemlState<'a> {
             return Ok(zero());
         }
 
+        // ── Unconditional declines, BEFORE any evidence is bought ────────────
+        //
+        // The two predicates below decline the whole correction, and neither
+        // consults a single number the diagnostic produces: one reads the
+        // hyper-layout, the other the configured response family. Both are
+        // therefore constant across the entire fit.
+        //
+        // They used to sit AFTER `directional_cubic_diagnostic` — an `O(p³)`
+        // dense factorization plus `O(n·p)` cubic contractions — so every
+        // ψ-carrying model and every Beta fit paid that sweep on EVERY outer
+        // evaluation and then discarded it, guaranteed, with the decline logged
+        // as though it had been decided on evidence (gam#2584). Evidence is
+        // worth buying only when the verdict can depend on it.
+        //
+        // Hoisting them is exactly value-preserving: neither predicate reads
+        // `sampler`, `max_abs`, `directional` or `verdict`, and every path they
+        // guard returns the same `zero()` it returned before.
+
+        // External (ψ) hyper-coordinates present: the exact gradient of the
+        // realized estimator along ψ requires the field motion of `X(ψ)`,
+        // `S(ψ)` and the reparameterized basis — moments this seam does not
+        // yet carry. A spliced value whose ψ-gradient entries are zeroed (or
+        // truncated) is an objective↔gradient desync (#901, the #752/#748
+        // bug class); per the gradient exactness contract on
+        // `block_sampled_marginal_correction`, the correct response is to
+        // DECLINE the splice — value AND gradient together — rather than
+        // approximate.
+        if n_ext > 0 {
+            log::debug!(
+                "[#784] block-local fallback declined before the skewness diagnostic: \
+                 {n_ext} external (ψ) coordinate(s) present and the ψ-exact gradient \
+                 channels are not implemented; splicing a ψ-truncated gradient would \
+                 desync objective and gradient (#901)"
+            );
+            return Ok(zero());
+        }
+        // The exact score channel relies on the exponential-family unit-
+        // deviance identity dD/dμ = −2w(y−μ)/V(μ), which does not hold for
+        // the Beta pseudo-family parameterization. Decline rather than splice
+        // a gradient that is not the derivative of the spliced value.
+        if matches!(
+            reml_spec(&self.config.likelihood).response,
+            ResponseFamily::Beta { .. }
+        ) {
+            log::debug!(
+                "[#784] block-local fallback declined before the skewness diagnostic: \
+                 Beta family has no exponential-family score identity for the exact \
+                 gradient channels"
+            );
+            return Ok(zero());
+        }
+
         // Resolve the injected gam-inference sampler. When the sampler tier is
         // not linked / registered, decline the correction (zero contribution) —
         // the same safe no-op as every other decline branch here.
@@ -2589,38 +2641,6 @@ impl<'a> RemlState<'a> {
         let n_eff = c_weights.iter().filter(|&&c| c != 0.0).count() as f64;
         let verdict = laplace_trustworthiness_from_skewness(&directional, n_eff);
         if !verdict.fallback_required() {
-            return Ok(zero());
-        }
-
-        // External (ψ) hyper-coordinates present: the exact gradient of the
-        // realized estimator along ψ requires the field motion of `X(ψ)`,
-        // `S(ψ)` and the reparameterized basis — moments this seam does not
-        // yet carry. A spliced value whose ψ-gradient entries are zeroed (or
-        // truncated) is an objective↔gradient desync (#901, the #752/#748
-        // bug class); per the gradient exactness contract on
-        // `block_sampled_marginal_correction`, the correct response is to
-        // DECLINE the splice — value AND gradient together — rather than
-        // approximate.
-        if n_ext > 0 {
-            log::info!(
-                "[#784] block-local fallback declined: {n_ext} external (ψ) coordinate(s) \
-                 present and the ψ-exact gradient channels are not implemented; splicing a \
-                 ψ-truncated gradient would desync objective and gradient (#901)"
-            );
-            return Ok(zero());
-        }
-        // The exact score channel relies on the exponential-family unit-
-        // deviance identity dD/dμ = −2w(y−μ)/V(μ), which does not hold for
-        // the Beta pseudo-family parameterization. Decline rather than splice
-        // a gradient that is not the derivative of the spliced value.
-        if matches!(
-            reml_spec(&self.config.likelihood).response,
-            ResponseFamily::Beta { .. }
-        ) {
-            log::info!(
-                "[#784] block-local fallback declined: Beta family has no exponential-family \
-                 score identity for the exact gradient channels"
-            );
             return Ok(zero());
         }
 
