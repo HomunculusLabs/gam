@@ -431,14 +431,53 @@ pub(crate) const EFFECTIVE_DF_FLOOR: f64 = 1.0;
 /// `edf_max > EFFECTIVE_DF_FLOOR` the target is still the absolute floor, so
 /// every term the guard already bounded is byte-identical.
 ///
-/// Chosen on evidence, not picked. At `0.5` the penguins linear direction came
-/// back and accuracy went `0.8421 → 0.9649` (#2579), leaving one failing
-/// assertion: held-out log-loss `0.26080` against `nnet`'s `0.09494`, i.e. the
-/// right class picked but under-confidently (#2612). A larger fraction retains
-/// more of the linear df that dataset is made of, so `0.75` is the next point on
-/// that curve rather than a new guess — and if log-loss does not move, the
-/// under-confidence is not a smoothing bias and #2612 says where to look next.
-pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.75;
+/// Chosen on evidence, not picked, and the evidence is a measured curve rather
+/// than an argument. At `0.5` the penguins LINEAR direction came back and
+/// accuracy went `0.8421 → 0.9649` (#2579), leaving one failing assertion:
+/// held-out log-loss against `nnet`'s `0.09494`, i.e. the right class picked
+/// under-confidently (#2612). #2612 pre-registered a sweep and what it would
+/// mean. Three arms off one base commit, differing ONLY in this constant, on
+/// `gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet_on_real_data`:
+///
+/// ```text
+///   f     log-loss   accuracy   per-class recall
+///   0.50   0.26080    0.9649    [0.961, 0.909, 1.000]
+///   0.75   0.17614    0.9649    [0.961, 0.909, 1.000]
+///   0.85   0.14087    0.9649    [0.961, 0.909, 1.000]     bar = 0.14494
+///   0.90   0.12057    0.9649    [0.961, 0.909, 1.000]
+/// ```
+///
+/// Monotone, 0.140 nats over the sweep. Accuracy and every per-class recall are
+/// INVARIANT at every `f`, so this buys calibration without trading
+/// classification — the failure really was residual shrinkage of the linear
+/// direction, which is reading (1) of the pre-registration.
+///
+/// `0.85` AND NOT `0.90`, WHICH THE CURVE ALONE WOULD HAVE CHOSEN. The sweep
+/// above watches ONE train/test split. `f` has a second effect it cannot see:
+/// capping ρ lower means less shrinkage, hence a WIDER Laplace posterior, and
+/// `MultinomialPosteriorIntegrationControl` documents its Smolyak level ceiling
+/// as mattering only for wide posteriors. At `f = 0.90` the sibling stride-4 arm
+/// stops PREDICTING — `logistic-normal quadrature did not converge through
+/// Smolyak level 12` — against a same-base `f = 0.75` control where it passes at
+/// log-loss 0.20708. That is attributable to this constant and it is a hard
+/// failure, not a metric regression.
+///
+/// So the admissible range is bounded on BOTH sides, and by different things: the
+/// log-loss bar is crossed near `f ≈ 0.83`, and the quadrature stops certifying
+/// somewhere in `(0.85, 0.90]`. `0.85` is measured green on both arms — stride-3
+/// at 0.14087 against the 0.14494 bar, stride-4 at 0.20708 against nnet's
+/// 0.76930. The stride-3 margin is only 0.004 nats, which is thin, and the reason
+/// it cannot simply be widened is the quadrature ceiling rather than anything
+/// about smoothing. `ρ*(0.85) = ln γ − 1.73` is finite and moderate; it is `f → 1`
+/// that sends `ρ*` to `−∞`, and this is a wide margin short of it.
+///
+/// What this does NOT fix, measured rather than assumed: `predict_multinomial_formula`
+/// publishes `E[softmax(η)]` while `nnet` publishes `softmax(η̂)`, and the same
+/// fit reports `0.17614` posterior-mean against `0.16499` plug-in at `f = 0.75`.
+/// Posterior width therefore accounts for `0.011` nats — about an eighth of the
+/// gap that remained there. The rest was the mode, which is why moving this
+/// constant is the right instrument and not a coincidence.
+pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.85;
 
 /// Uniform ρ = log λ over-smoothing ceiling for the custom-family outer box, on
 /// top of which each term's per-coordinate [`EFFECTIVE_DF_FLOOR`] bound is
