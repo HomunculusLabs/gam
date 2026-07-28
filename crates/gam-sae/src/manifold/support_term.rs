@@ -1910,21 +1910,30 @@ impl SaeSupportSparseTerm {
                                 let mut local_rhs =
                                     Array2::<f64>::zeros((m, self.output_dim));
                                 let mut scratch = ActiveAtomScratch::default();
+                                // `residual_without` does not depend on the basis
+                                // index, but it was rebuilt inside the `left` loop:
+                                // the same `output_dim`-vector recomputed m times per
+                                // row (2x for a linear atom, 7x for a sphere). Form it
+                                // once per row into a reused buffer, then accumulate
+                                // each basis`s contribution as a scaled row add.
+                                let mut residual_without =
+                                    Array1::<f64>::zeros(self.output_dim);
                                 for local in 0..phi_block.nrows() {
                                     let (row, slot) = atom_rows[base + local];
                                     self.fill_active(row, slot, &mut scratch)?;
                                     let phi = scratch.phi_row();
+                                    for output in 0..self.output_dim {
+                                        residual_without[output] = target[[row, output]]
+                                            - fitted[[row, output]]
+                                            + scratch.decoded[output];
+                                    }
                                     for left in 0..m {
                                         for right in 0..m {
                                             local_gram[[left, right]] += phi[left] * phi[right];
                                         }
-                                        for output in 0..self.output_dim {
-                                            let residual_without = target[[row, output]]
-                                                - fitted[[row, output]]
-                                                + scratch.decoded[output];
-                                            local_rhs[[left, output]] +=
-                                                phi[left] * residual_without;
-                                        }
+                                        local_rhs
+                                            .row_mut(left)
+                                            .scaled_add(phi[left], &residual_without);
                                     }
                                     phi_block.row_mut(local).assign(&phi);
                                     decoded_block.row_mut(local).assign(&scratch.decoded);
@@ -2385,6 +2394,7 @@ impl SaeSupportSparseTerm {
                 }
             }
             None => {
+
                 self.assignment.project_row_coords(row, old_coords, coords_row)?;
                 return Err(format!(
                     "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
