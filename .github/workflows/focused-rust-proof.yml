@@ -41,6 +41,10 @@ on:
         description: "Issue number, used only for concurrency and display."
         default: ""
         required: false
+      r_packages:
+        description: "Space-separated R packages to install before the run (e.g. 'nnet mgcv'). Empty = no R. A reference-quality test whose comparator is missing reports REFERENCE_ENV_MISSING and is NOT MEASURED, which is not a statement about gam."
+        default: ""
+        required: false
 
 concurrency:
   group: focused-rust-proof-${{ github.event.inputs.issue }}-${{ github.event.inputs.package }}
@@ -110,6 +114,38 @@ jobs:
         with:
           # build.rs's human-author gate needs real history.
           fetch-depth: 0
+
+      # A reference-quality test calls its comparator through Rscript. Without R
+      # the harness raises REFERENCE_ENV_MISSING and says so in as many words:
+      # "NOT MEASURED here -- it is not a statement about gam either way". That is
+      # the correct behaviour and it is also indistinguishable, at the run's
+      # exit code, from gam actually failing the comparison. Opt in to R and the
+      # verdict becomes real; leave it empty and the lane is exactly as fast as
+      # before.
+      - name: Set up R for reference comparators
+        if: ${{ github.event.inputs.r_packages != '' }}
+        uses: ./.github/actions/setup-bench-r
+        with:
+          r-version: "4.4.3"
+
+      - name: Install R packages
+        if: ${{ github.event.inputs.r_packages != '' }}
+        shell: bash
+        env:
+          R_PACKAGES: ${{ github.event.inputs.r_packages }}
+        run: |
+          set -euo pipefail
+          read -r -a pkgs <<< "$R_PACKAGES"
+          for pkg in "${pkgs[@]}"; do
+            if [[ ! "$pkg" =~ ^[A-Za-z][A-Za-z0-9._]*$ ]]; then
+              echo "::error::unsupported R package name: ${pkg}"
+              exit 1
+            fi
+          done
+          printf -v quoted '"%s",' "${pkgs[@]}"
+          Rscript -e "install.packages(c(${quoted%,}), repos='https://cloud.r-project.org', Ncpus=max(1L, parallel::detectCores()-1L))"
+          Rscript -e "invisible(lapply(c(${quoted%,}), function(p) library(p, character.only=TRUE)))"
+          echo "R comparators available: ${R_PACKAGES}"
 
       - name: Set up warm Rust toolchain
         uses: ./.github/actions/setup-rust-ci
