@@ -13,6 +13,7 @@ use gam::test_support::reference::rmse;
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
 };
+use gam::faer_ndarray::FaerEigh;
 use ndarray::Array2;
 
 fn z_effect_truth(z: f64) -> f64 {
@@ -214,6 +215,30 @@ fn run_survival_case(label: &str, formula: &str, cfg_mut: impl FnOnce(&mut FitCo
         );
     }
 
+    // Structural readout: each threshold penalty's own spectrum, and the design
+    // Gram restricted to its columns. This is what decides whether two
+    // smoothing coordinates of the SAME term live on commensurate scales.
+    let gram = dense.t().dot(&dense);
+    for (k, pen) in loc_design.penalties.iter().enumerate() {
+        let m = &pen.local;
+        let (evals, _) = m
+            .clone()
+            .eigh(faer::Side::Lower)
+            .expect("penalty eigendecomposition");
+        let mut ev: Vec<f64> = evals.to_vec();
+        ev.sort_by(|a, b| b.partial_cmp(a).expect("finite penalty eigenvalue"));
+        let tr_s: f64 = ev.iter().filter(|v| **v > 0.0).sum();
+        let tr_xwx: f64 = pen.col_range.clone().map(|c| gram[[c, c]]).sum();
+        eprintln!(
+            "penalty {k}: cols={:?} nullspace_dim={:?} tr(S)={tr_s:.4e} tr(XtX|cols)={tr_xwx:.4e} \
+             mgcv_initial_sp_rho=ln(tr(XtX)/tr(S))={:.4} eigs={:?}",
+            pen.col_range,
+            loc_design.nullspace_dims.get(k),
+            (tr_xwx / tr_s).ln(),
+            ev.iter().map(|v| format!("{v:.3e}")).collect::<Vec<_>>(),
+        );
+    }
+
     let ls_design =
         build_term_collection_design(train_grid.view(), &fit.fit.resolved_log_sigmaspec)
             .expect("rebuild log-sigma design");
@@ -346,6 +371,6 @@ fn main() {
     init_parallelism();
     gam::test_support::install_diagnostic_logger();
     probe_fixture();
-    probe_2596_gaussian_control();
     probe_2596_variants();
+    probe_2596_gaussian_control();
 }

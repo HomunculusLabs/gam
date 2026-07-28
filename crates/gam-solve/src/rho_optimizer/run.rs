@@ -3101,6 +3101,86 @@ fn certify_outer_optimality_at_terminal_fidelity(
     result.final_grad_norm = Some(projected_grad_norm);
     result.final_gradient = Some(evaluation.gradient);
 
+    // #2596 — a pass that spends LESS evidence must not produce a STRONGER
+    // refusal than the pass that mints.
+    //
+    // The stationarity bound is a LADDER, and one of its rungs — the
+    // curvature-resolvability widening below — is owned by the analytic outer
+    // Hessian. `Screening` deliberately does not spend the order-four ladder
+    // (#2359), and that reservation was argued on the CURVATURE CONJUNCT:
+    // `curvature_admissible()` reads `hessian_psd != Some(false)`, so a `None`
+    // curvature verdict certifies on stationarity alone. True — but the Hessian
+    // ALSO owns a rung of the stationarity BOUND, and there `None` is not
+    // permissive: it silently reverts screening to the un-widened solver band.
+    // Screening therefore applied a strictly tighter standard than the mint, and
+    // a candidate it refused was discarded rather than deferred.
+    //
+    // Measured (#2596, lognormal location-scale AFT with a double-penalty
+    // `s(z, bs="tp", k=10)`): the BFGS converged to the correct interior optimum
+    // ρ = (0.378, −4.975) at cost 4.1926 with |Pg| = 7.29e-5 against a solver
+    // band of 5.19e-5 — refused by a factor of 1.4. Both interior seeds were
+    // refused, the multi-start fell through to the seed lattice's
+    // over-smoothing boundary candidate, and THAT certified vacuously (at a
+    // railed corner the box-KKT projection makes |Pg| identically zero) and was
+    // minted at cost 110.94. The published smoothing parameter's own LAML was
+    // 26× worse than the one the optimizer had already measured, and the fitted
+    // smooth carried none of its signal. Every sibling arm of the same suite
+    // reached the mint and got the rung that would have saved this one
+    // (`curvature-scaled flat-valley bound 1.537e-3 … widened from
+    // gradient-band 2.359e-4`); which side of the band a fit lands on is which
+    // side the last BFGS step stopped on, not a statistical distinction.
+    //
+    // So spend the ladder at screening too — but ONLY when the un-widened bound
+    // would refuse, and ONLY for the bound. The escalated curvature never
+    // reaches the curvature verdict, the rail certificate, or the tail-snap, so
+    // this can only ever turn a screening refusal into a screening
+    // certification and never the reverse. A fit that clears its first-order
+    // band is byte-identical and pays nothing, so #2359's "order four exactly
+    // once, at the mint" continues to hold for every healthy fit.
+    let screening_bound_curvature = if !wants_analytic_hessian
+        && capability.hessian.is_analytic()
+        && projected_grad_norm > stationarity_bound
+    {
+        log::info!(
+            "[CERTIFICATE] {context}: screening's first-order band would refuse \
+             (|Pg|={projected_grad_norm:.3e} > bound={stationarity_bound:.3e}, rung={}); \
+             spending the order-four ladder so this refusal is judged by the SAME \
+             stationarity bound the mint applies (#2596)",
+            bound_source.label(),
+        );
+        // A failed or malformed escalation is NOT a refusal of the candidate: it
+        // only means this rung is unavailable, which is exactly the state the
+        // pass was already in. Fall through to the un-widened comparison.
+        match obj.eval_with_order(&result.rho, OuterEvalOrder::ValueGradientHessian) {
+            Ok(escalated) => match escalated.hessian.materialize_dense() {
+                Ok(Some(hessian))
+                    if layout
+                        .validate_hessian_shape(&hessian, "outer certificate Hessian")
+                        .is_ok()
+                        && hessian.iter().all(|value| value.is_finite()) =>
+                {
+                    Some(hessian)
+                }
+                _ => {
+                    log::info!(
+                        "[CERTIFICATE] {context}: the escalated order-four evaluation \
+                         supplied no usable curvature; keeping the first-order bound"
+                    );
+                    None
+                }
+            },
+            Err(error) => {
+                log::info!(
+                    "[CERTIFICATE] {context}: the escalated order-four evaluation failed \
+                     ({error}); keeping the first-order bound"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let analytic_hessian = if wants_analytic_hessian {
         match evaluation.hessian.materialize_dense() {
             Ok(Some(hessian)) => {
@@ -3181,7 +3261,13 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // decrement scales quadratically with ‖g‖ at fixed direction, that bound is
     // `‖Pg‖·√(objective_tol/Δpred)`, which clears the actual ‖Pg‖ iff
     // `Δpred ≤ objective_tol`.
-    if let Some(hessian) = analytic_hessian.as_ref()
+    // `screening_bound_curvature` is the #2596 escalation: at `Mint` it is
+    // always `None` and this reads `analytic_hessian` exactly as before; at
+    // `Screening` it is `Some` only on the would-refuse path, and it feeds THIS
+    // rung and nothing else.
+    if let Some(hessian) = analytic_hessian
+        .as_ref()
+        .or(screening_bound_curvature.as_ref())
         && let Some(predicted_decrease) = newton_predicted_decrease(hessian, &projected_gradient)
         && predicted_decrease.is_finite()
         && predicted_decrease > 0.0
