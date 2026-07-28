@@ -3140,7 +3140,7 @@ impl WorkingModelSurvival {
                         let residual_ok = tn.is_finite() && tn < r_norm;
                         Ok((armijo_ok || residual_ok).then_some((ft, trial)))
                     },
-                    |_alpha, _ft| true,
+                    |_, _| true,
                 ) {
                     Ok(result) => result,
                     Err(never) => match never {},

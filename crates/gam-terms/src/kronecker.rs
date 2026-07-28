@@ -199,7 +199,7 @@ fn robust_eigh_faer(
             }
             Ok((eigenvalues, eigenvectors))
         },
-        |err, _ctx| {
+        |err, _| {
             BasisError::Other(format!(
                 "Eigendecomposition failed: {}",
                 FaerLinalgError::SelfAdjointEigen(err)

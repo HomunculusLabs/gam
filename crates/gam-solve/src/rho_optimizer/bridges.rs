@@ -3524,7 +3524,7 @@ impl OuterFixedPointBridge<'_> {
                 }
                 Ok(Some((cost, trial_step)))
             },
-            |_alpha, c| c.is_finite() && c <= cost_floor,
+            |_, c| c.is_finite() && c <= cost_floor,
         )?;
         Ok(accepted.map(|step| {
             let halvings = bt - 1;

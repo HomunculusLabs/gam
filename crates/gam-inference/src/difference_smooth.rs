@@ -404,7 +404,7 @@ mod tests {
                 covariance_source: CovarianceSource::Conditional,
             },
             request,
-            |_headers, rows| {
+            |_, rows| {
                 Ok(Array2::from_shape_fn((rows.len(), 2), |(row, column)| {
                     if column == 0 {
                         1.0

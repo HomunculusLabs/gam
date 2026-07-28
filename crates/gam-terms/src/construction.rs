@@ -524,7 +524,7 @@ pub(crate) fn robust_eigh_faer(
             }
             Ok((eigenvalues, eigenvectors))
         },
-        |err, _ctx| {
+        |err, _| {
             EstimationError::EigendecompositionFailed(FaerLinalgError::SelfAdjointEigen(err))
         },
     )

@@ -1,3 +1,4 @@
+#![cfg(test)]
 // Child module of `gamlss::tests` (see the `#[path]` declaration there):
 // wiggle-family FD gates, binomial location-scale expected-info and release
 // cells, NB dispersion convergence, and the zz2155 mode-geography probes.
@@ -1472,7 +1473,7 @@ pub(crate) fn expected_info_jeffreys_does_not_reward_probit_saturation() {
             gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
                 info.view(),
                 z.view(),
-                |_axis: &Array1<f64>| Ok(None),
+                |_: &Array1<f64>| Ok(None),
             )
             .expect("jeffreys term value");
         phi

@@ -4856,7 +4856,7 @@ pub(crate) fn batched_smooth_sb(
         // `items` immutably-per-tile and must stay `Sync`).
         let tile_results: std::sync::Mutex<Vec<(usize, Array2<f64>)>> =
             std::sync::Mutex::new(Vec::with_capacity(members.len()));
-        let ok = crate::gpu::pool::scatter_batched(rt, &mut items, |_ordinal, slice| {
+        let ok = crate::gpu::pool::scatter_batched(rt, &mut items, |_, slice| {
             if slice.is_empty() {
                 return Some(());
             }

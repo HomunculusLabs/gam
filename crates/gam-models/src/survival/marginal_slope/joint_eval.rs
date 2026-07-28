@@ -45,7 +45,7 @@ impl SurvivalMarginalSlopeFamily {
         let final_acc = gam_problem::outer_subsample::RowSet::All.par_try_reduce_fold(
             self.n,
             make_acc,
-            |mut acc, row, _row_weight| -> Result<_, String> {
+            |mut acc, row, _| -> Result<_, String> {
                 let (state, q_geom) = &mut acc;
                 self.row_dynamic_q_geometry_into(row, block_states, q_geom)?;
                 let (row_nll, f_pi, f_pipi) = if flex_active {

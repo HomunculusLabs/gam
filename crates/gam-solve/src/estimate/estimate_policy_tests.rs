@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::evaluation::{
     sas_effective_epsilon, sas_effective_epsilon_second, sas_log_delta_edge_barriercostgrad,
     sas_log_delta_edge_barriercostgradhess,

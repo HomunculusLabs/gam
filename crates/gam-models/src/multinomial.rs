@@ -1303,7 +1303,7 @@ fn fit_penalized_multinomial_firth_fallback(
                 Ok(spd_logdet(&cand_info)
                     .map(|cand_logdet| (objective(&cand_probs, &cand, cand_logdet), cand)))
             },
-            |_step, o1| o1 >= o0 - 1e-12,
+            |_, o1| o1 >= o0 - 1e-12,
         ) {
             Ok(result) => result,
             Err(never) => match never {},

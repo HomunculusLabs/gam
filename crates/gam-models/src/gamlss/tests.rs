@@ -1,3 +1,4 @@
+#![cfg(test)]
 // Behavior tests for the gamlss family stack (real `#[cfg(test)] mod tests`).
 // `super::*` resolves to the parent `gamlss` module, whose flat re-exports
 // surface every concern-submodule item these tests exercise.

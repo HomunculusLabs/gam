@@ -68,7 +68,7 @@ mod tests {
     fn new_with_zero_interval_emits_on_first_tick() {
         let lp = LoopProgress::new(0);
         let called = AtomicBool::new(false);
-        lp.tick(1, |_progress, _elapsed| {
+        lp.tick(1, |_, _| {
             called.store(true, Ordering::Relaxed);
         });
         assert!(
@@ -110,7 +110,7 @@ mod tests {
     fn tick_delta_zero_still_works() {
         let lp = LoopProgress::new(0);
         let seen = AtomicUsize::new(usize::MAX);
-        lp.tick(0, |progress, _elapsed| {
+        lp.tick(0, |progress, _| {
             seen.store(progress, Ordering::Relaxed);
         });
         // A zero-delta tick must not panic and leaves the counter at 0; the

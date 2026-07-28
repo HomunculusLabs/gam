@@ -2948,7 +2948,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 mode: selection,
             })
         },
-        |_theta, _specs, _designs, _row_set| {
+        |_, _, _, _| {
             Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
                 "bernoulli marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
             )

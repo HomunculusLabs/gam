@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Multinomial-logit (softmax) Taylor-jet oracle (#932, FD-free exactness).
 //!
 //! The test writes the multinomial row NLL once through generic jet algebra and

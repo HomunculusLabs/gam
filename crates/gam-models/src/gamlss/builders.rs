@@ -2335,7 +2335,7 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         mode: owned.mode,
                     })
                 },
-                |_beta: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
+                |_: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
             )
         }};
     }

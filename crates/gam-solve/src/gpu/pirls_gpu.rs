@@ -3379,7 +3379,7 @@ extern "C" __global__ void status_first_ladder(
         // SAFETY: axpy_n signature is (double, const double*, double*, int);
         // both vectors length n.
         unsafe { builder.launch(cfg) }
-            .map(|_event_pair| ())
+            .map(|_| ())
             .map_err(|e| format!("axpy launch: {e}"))
     }
 

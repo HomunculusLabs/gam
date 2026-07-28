@@ -466,7 +466,7 @@ pub(crate) fn backtrack_cost(
             let cost = obj.eval_cost(&trial)?;
             Ok(Some((cost, trial)))
         },
-        |_alpha, cost| cost.is_finite() && cost <= current_cost + descent_slack,
+        |_, cost| cost.is_finite() && cost <= current_cost + descent_slack,
     )?;
     Ok(accepted.map(|step| (step.payload, step.value, step.step)))
 }

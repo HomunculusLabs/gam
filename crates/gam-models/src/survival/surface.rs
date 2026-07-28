@@ -435,7 +435,7 @@ impl<'a> ExponentialSurvivalParameters<'a> {
     }
 
     pub fn hazard(&self, times: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
-        self.evaluate(times, |hazard, _time| hazard)
+        self.evaluate(times, |hazard, _| hazard)
     }
 }
 

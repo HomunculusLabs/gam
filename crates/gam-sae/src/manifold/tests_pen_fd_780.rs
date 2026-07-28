@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Penalized-objective finite-difference gradient contract tests, split verbatim
 //! out of `tests.rs` to keep that tracked file under the #780 10k-line gate.
 //! Declared as a sibling `#[cfg(test)] mod` in `mod.rs`.

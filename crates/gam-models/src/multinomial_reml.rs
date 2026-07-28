@@ -1637,7 +1637,7 @@ impl MultinomialFamily {
         gam_problem::outer_subsample::RowSet::All.par_reduce_fold(
             n,
             || Array1::<f64>::zeros(dim),
-            |mut acc, row, _row_weight| {
+            |mut acc, row, _| {
                 let w = self.weights[row];
                 if w == 0.0 {
                     return acc;

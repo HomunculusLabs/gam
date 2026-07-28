@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Measurement probe for #2445 / #2444 — the `DoublePenaltyNullspace` rebuild
 //! frame, before and after the structural-frame fix.
 //!

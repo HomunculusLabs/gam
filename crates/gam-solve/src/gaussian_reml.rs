@@ -749,7 +749,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
                 b,
             )
         };
-        enumerate_and_select_rho(eval, enclose, init_rho, |_r, _e| {})?.rho
+        enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho
     };
     let objective = eval(rho);
     let lambda = gam_problem::checked_exp_log_strength(rho)
@@ -3474,7 +3474,7 @@ fn gaussian_reml_cholesky_lower(xtwx: Array2<f64>) -> Result<Array2<f64>, Estima
         },
     )
     .map(|success| success.value)
-    .map_err(|_exhausted| EstimationError::ModelIsIllConditioned {
+    .map_err(|_| EstimationError::ModelIsIllConditioned {
         condition_number: f64::INFINITY,
     })
 }
@@ -4768,7 +4768,7 @@ fn rho_landscape_certificate_from_parts(
                 b,
             )
         };
-        enumerate_and_select_rho(&eval, &enclose, init_rho, |root, _e| {
+        enumerate_and_select_rho(&eval, &enclose, init_rho, |root, _| {
             root_brackets.push(root.bracket)
         })?
     };
@@ -4847,7 +4847,7 @@ fn optimize_rho(
             b,
         )
     };
-    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_r, _e| {})?.rho)
+    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho)
 }
 
 fn fill_weighted_rhs_no_alloc(
@@ -4993,7 +4993,7 @@ fn optimize_rho_no_alloc(
             b,
         )
     };
-    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_r, _e| {})?.rho)
+    Ok(enumerate_and_select_rho(eval, enclose, init_rho, |_, _| {})?.rho)
 }
 
 fn fill_coefficients_no_alloc(
@@ -6634,7 +6634,7 @@ mod tests {
         };
         // Deliberately uninformative but endpoint-valid enclosures force the
         // resolution-floor branch without an expensive production-depth tree.
-        let enclose = |_a: f64, _b: f64| (Interval::entire(), Interval::entire());
+        let enclose = |_: f64, _: f64| (Interval::entire(), Interval::entire());
         let error = enumerate_and_select_rho_with_controls(
             eval,
             enclose,
@@ -6645,7 +6645,7 @@ mod tests {
                 resolution: 0.25,
                 max_depth: 0,
             },
-            |_root, _eval| {},
+            |_, _| {},
         )
         .expect_err("ambiguous stationary structure must refuse");
         assert!(matches!(error, EstimationError::RemlDidNotConverge { .. }));

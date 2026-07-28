@@ -2968,7 +2968,7 @@ mod tests {
     }
 
     fn trivial_provider<'a>() -> HeldOutDensityProvider<'a> {
-        Box::new(|_train: &[usize], eval: &[usize]| Ok(vec![0.0; eval.len()]))
+        Box::new(|_: &[usize], eval: &[usize]| Ok(vec![0.0; eval.len()]))
     }
 
     #[test]

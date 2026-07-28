@@ -408,7 +408,7 @@ fn sim_a_false_heterogeneity_is_controlled_on_survival() {
         score[i] = 3.0 + 2.0 * xi + s_x * wi;
     }
     // Survival outcome from the latent driver w with a CONSTANT true slope.
-    let (entry, exit, event) = simulate_survival(&x, &w, |_x| beta_true, 0x9E13_55AA_7C0F_0461);
+    let (entry, exit, event) = simulate_survival(&x, &w, |_| beta_true, 0x9E13_55AA_7C0F_0461);
 
     let z_naive = full_data_ctn_z(&x, &score);
     let naive = fit_naive(
@@ -552,7 +552,7 @@ fn sim_c_scalar_target_is_robust_to_first_stage_error_on_survival() {
     }
     // ONE survival outcome (constant true slope) shared by both score
     // representations — only the Stage-1 score scale changes between them.
-    let (entry, exit, event) = simulate_survival(&x, &w, |_x| beta_true, 0xC0C1_2026_0461_0004);
+    let (entry, exit, event) = simulate_survival(&x, &w, |_| beta_true, 0xC0C1_2026_0461_0004);
 
     let grid: Vec<f64> = (0..101).map(|k| k as f64 / 100.0).collect();
 

@@ -2948,7 +2948,7 @@ pub fn marginal_slope_baseline_chain_rule_hessian(
     let hessian = RowSet::All.par_try_reduce_fold(
         n,
         || Array2::<f64>::zeros((dim, dim)),
-        |mut acc, i, _row_weight| -> Result<Array2<f64>, String> {
+        |mut acc, i, _| -> Result<Array2<f64>, String> {
             let exit_parts = marginal_slope_baseline_offset_theta_geometry(age_exit[i], cfg)?
                 .ok_or_else(|| {
                     "unexpected None from marginal-slope second partials at exit".to_string()

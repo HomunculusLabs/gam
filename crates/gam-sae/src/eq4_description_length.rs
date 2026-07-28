@@ -443,7 +443,7 @@ mod tests {
             FIXTURE_HORIZON,
             &[0.9],
             Some(1.25),
-            move |_atom, take| {
+            move |_, take| {
                 let mut selected = Array2::zeros((take.len(), contribution.ncols()));
                 for (out_row, &source_row) in take.iter().enumerate() {
                     selected
@@ -503,7 +503,7 @@ mod tests {
                 horizon,
                 &[0.9],
                 None,
-                |_atom, take| {
+                |_, take| {
                     let mut selected = Array2::zeros((take.len(), contribution.ncols()));
                     for (out_row, &source_row) in take.iter().enumerate() {
                         selected
@@ -570,7 +570,7 @@ mod tests {
                 horizon,
                 &targets,
                 None,
-                move |_atom, take| {
+                move |_, take| {
                     let mut selected = Array2::zeros((take.len(), contribution.ncols()));
                     for (out_row, &source_row) in take.iter().enumerate() {
                         selected

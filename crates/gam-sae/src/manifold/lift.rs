@@ -1225,7 +1225,7 @@ mod tests {
         let h_max = 4;
         let z = circle_code(&[(0.3, 1.0)], h_max);
         // phi returns the wrong length ⇒ must error, not panic.
-        let bad = |_t: &[f64]| (Array1::<f64>::zeros(3), Array2::<f64>::zeros((3, 1)));
+        let bad = |_: &[f64]| (Array1::<f64>::zeros(3), Array2::<f64>::zeros((3, 1)));
         let init = PolishState {
             amplitudes: vec![1.0],
             coords: vec![vec![0.3]],

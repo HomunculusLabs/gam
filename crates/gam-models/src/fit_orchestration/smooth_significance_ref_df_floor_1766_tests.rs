@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Rust-layer regression for the `smooth_significance()` LR reference-d.f.
 //! collapse (#1766), driving the real `smooth_term_lr_inference_forspec`
 //! pipeline (the same entry the Python `Model.smooth_significance` FFI calls).

@@ -1344,7 +1344,7 @@ mod tests {
             .evaluate(&matvec, 1.0e-13, 128)
             .expect("plain-CG evaluation");
         let injected = plan
-            .evaluate_with_shifted_solver(&|shift, rhs, _warm| {
+            .evaluate_with_shifted_solver(&|shift, rhs, _| {
                 Some((
                     Array1::from_iter(
                         rhs.iter()

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! `sae_row_jet_program_matches_production_row_jets_on_converged_cache` and
 //! `ordered_beta_bernoulli_outer_objective_advertises_analytic_gradient`, split verbatim out
 //! of `tests.rs` to keep that tracked file under the #780 10k-line gate.

@@ -2778,7 +2778,7 @@ fn analytic_route_unavailable_hessian_is_fatal() {
                 "legacy eager eval should not run".to_string(),
             ))
         },
-        move |_: &mut (), theta: &Array1<f64>, _order: OuterEvalOrder| {
+        move |_: &mut (), theta: &Array1<f64>, _: OuterEvalOrder| {
             Ok(OuterEval {
                 cost: theta[0] * theta[0],
                 gradient: array![2.0 * theta[0]],
@@ -6027,12 +6027,12 @@ fn thrown_screening_error_is_fatal_across_multistart_and_solver_plans() {
         (),
         {
             let calls = Arc::clone(&calls);
-            move |_: &mut (), _theta: &Array1<f64>| {
+            move |_: &mut (), _: &Array1<f64>| {
                 calls.fetch_add(1, Ordering::Relaxed);
                 Err(EstimationError::InvalidInput(SENTINEL.to_string()))
             }
         },
-        |_: &mut (), _theta: &Array1<f64>| -> Result<OuterEval, EstimationError> {
+        |_: &mut (), _: &Array1<f64>| -> Result<OuterEval, EstimationError> {
             panic!("a fatal screening error must prevent full outer evaluation")
         },
         None::<fn(&mut ())>,
@@ -6093,7 +6093,7 @@ fn initial_rho_with_single_seed_budget_skips_expensive_screening() {
         {
             let screening_calls = Arc::clone(&screening_calls);
             let screening_cap = Arc::clone(&screening_cap);
-            move |_: &mut (), _theta: &Array1<f64>| {
+            move |_: &mut (), _: &Array1<f64>| {
                 if screening_cap.load(Ordering::Relaxed) != 0 {
                     screening_calls.fetch_add(1, Ordering::Relaxed);
                 }

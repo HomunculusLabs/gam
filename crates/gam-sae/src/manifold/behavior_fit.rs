@@ -499,7 +499,7 @@ impl SaeManifoldTerm {
                         max_steps: MAX_BACKTRACK,
                     },
                     &mut trial,
-                    |_s, trial_crit| trial_crit < baseline_crit - armijo_eps,
+                    |_, trial_crit| trial_crit < baseline_crit - armijo_eps,
                 )?;
                 if forward.is_some() {
                     forward
@@ -511,7 +511,7 @@ impl SaeManifoldTerm {
                             max_steps: MAX_BACKTRACK,
                         },
                         &mut trial,
-                        |_s, trial_crit| trial_crit < baseline_crit - armijo_eps,
+                        |_, trial_crit| trial_crit < baseline_crit - armijo_eps,
                     )?
                 }
             };

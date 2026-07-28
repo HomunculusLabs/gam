@@ -2825,9 +2825,9 @@ fn curl_killer_demo_planted_circle_wins_race() {
             target.view(),
             config,
             &mut ledger,
-            |t: SaeManifoldTerm, r: SaeManifoldRho, _rows: &[usize]| Ok((t, r)),
-            |t: SaeManifoldTerm, r: SaeManifoldRho, _rows: &[usize]| Ok((t, r)),
-            |t: SaeManifoldTerm, r: SaeManifoldRho, _rows: &[usize]| Ok((t, r)),
+            |t: SaeManifoldTerm, r: SaeManifoldRho, _: &[usize]| Ok((t, r)),
+            |t: SaeManifoldTerm, r: SaeManifoldRho, _: &[usize]| Ok((t, r)),
+            |t: SaeManifoldTerm, r: SaeManifoldRho, _: &[usize]| Ok((t, r)),
         )
         .unwrap()
     };

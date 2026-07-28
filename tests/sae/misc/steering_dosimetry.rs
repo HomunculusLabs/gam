@@ -927,7 +927,7 @@ fn applied_dose_probe_payload_fails_closed() {
     ];
     for invalid in cases {
         let mut probe =
-            |_plan: &SteerPlan| -> Result<AppliedDoseObservation, String> { Ok(invalid.clone()) };
+            |_: &SteerPlan| -> Result<AppliedDoseObservation, String> { Ok(invalid.clone()) };
         let error = steer_to_target_nats(
             &term,
             &metric,

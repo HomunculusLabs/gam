@@ -1045,7 +1045,7 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
                 let objective = evaluate_objective(&candidate, &mut eta_objective_scratch)?;
                 Ok(Some((objective, candidate)))
             },
-            |_alpha, f| f.is_finite() && f <= last_objective + OBJECTIVE_DECREASE_SLACK,
+            |_, f| f.is_finite() && f <= last_objective + OBJECTIVE_DECREASE_SLACK,
         )?;
         let Some(accepted) = accepted else {
             // Every candidate failed the descent certificate. Keep the last

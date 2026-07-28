@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Regression for gam#2152 at the fit-orchestration layer.
 //!
 //! The constant-curvature smooth `curv(x, z, kappa=K)` documents `kappa=` as a

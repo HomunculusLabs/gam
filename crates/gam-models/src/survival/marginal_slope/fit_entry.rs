@@ -1456,7 +1456,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 mode: selection,
             })
         },
-        |_theta, _specs, _designs, _row_set| {
+        |_, _, _, _| {
             Err::<ExactJointEfsEvaluation<CustomFamilyJointHyperModeSelection>, String>(
                 "survival marginal-slope EFS callback invoked even though fixed-point optimization is disabled for beta-dependent exact curvature".to_string(),
             )

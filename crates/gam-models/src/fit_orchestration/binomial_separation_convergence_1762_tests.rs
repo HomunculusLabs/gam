@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end regression for #1762 at the real smooth-spline pipeline layer.
 //!
 //! A binomial-logit GAM fit to a near-perfectly-separated 1-D surface

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Unit tests for the custom-family blockwise carrier. Declared from `mod.rs`
 //! as `#[cfg(test)] mod tests;`; reaches the FD helper via `super::test_support`.
 
@@ -473,8 +474,8 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         use_outer_hessian: false,
         ..BlockwiseFitOptions::default()
     };
-    let no_dh = |_direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_u: &Array1<f64>, _v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
         Ok(None)
     };
 
@@ -651,8 +652,8 @@ pub(crate) fn joint_outer_gradient_projected_trace_drops_joint_null() {
         use_outer_hessian: false,
         ..BlockwiseFitOptions::default()
     };
-    let no_dh = |_direction: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_u: &Array1<f64>, _v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
         Ok(None)
     };
 
@@ -737,8 +738,8 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
     let h: Array2<f64> =
         array![[4.0, 0.2, 7.0], [0.2, 9.0, -3.0], [7.0, -3.0, 30.0]].mapv(|v| v * n_scale);
 
-    let no_dh = |_d: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
-    let no_d2h = |_u: &Array1<f64>, _v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
         Ok(None)
     };
 
@@ -1059,9 +1060,9 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
     // `hessian_derivative_correction_result` β-chain — not in the
     // evaluator. If it FAILS, the evaluator itself has the defect at
     // large scale + Duchon-shape S.
-    let no_dh = |_v_k: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
+    let no_dh = |_: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> { Ok(None) };
     let compute_dh = no_dh;
-    let no_d2h = |_u: &Array1<f64>, _v: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
+    let no_d2h = |_: &Array1<f64>, _: &Array1<f64>| -> Result<Option<DriftDerivResult>, String> {
         Ok(None)
     };
 

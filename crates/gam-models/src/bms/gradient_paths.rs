@@ -321,7 +321,7 @@ pub(super) fn pooled_probit_baseline(
                 let (cand_obj, _, _, _, _, _) = objective_grad_hess(cand0, cand1)?;
                 Ok(Some((cand_obj, (cand0, cand1))))
             },
-            |_scale, cand_obj| cand_obj.is_finite() && cand_obj <= obj,
+            |_, cand_obj| cand_obj.is_finite() && cand_obj <= obj,
         )?;
         match accepted {
             Some(step) => {

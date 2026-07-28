@@ -2109,7 +2109,7 @@ mod smoothness_dof_hutchinson_tests {
                 Box::new(move |k: usize| ranks[k]),
             )
         } else {
-            (term.beta_offsets(), Box::new(move |_k: usize| p))
+            (term.beta_offsets(), Box::new(move |_: usize| p))
         }
     }
 

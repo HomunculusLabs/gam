@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use crate::custom_family::custom_family_outer_derivatives;
 use gam_test_support::assert_matrix_derivativefd;

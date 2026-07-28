@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests for the survival marginal-slope family (relocated verbatim).
 
 use super::*;

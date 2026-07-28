@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! End-to-end CLI-equivalent n-sweep regression for #2273 at the real
 //! `fit_from_formula` pipeline layer.
 //!

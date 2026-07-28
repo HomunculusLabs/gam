@@ -553,7 +553,7 @@ mod tests {
         ];
         let mut rung = 0usize;
         let measured = ridders_from_stencil(
-            |_h| {
+            |_| {
                 let value = MEASURED[rung];
                 rung += 1;
                 value

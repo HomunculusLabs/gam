@@ -7090,7 +7090,7 @@ where
         );
         let mut obj = obj
             .with_seed_inner_state(
-                move |_ctx: &mut &mut NBlockExactJointState<'_, Mode>, beta: &Array1<f64>| {
+                move |_: &mut &mut NBlockExactJointState<'_, Mode>, beta: &Array1<f64>| {
                     (seed_inner_beta_fn)(beta)
                 },
             )

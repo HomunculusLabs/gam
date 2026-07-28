@@ -156,7 +156,7 @@ impl SaeManifoldTerm {
                 Box::new(move |k: usize| ranks[k]),
             )
         } else {
-            (self.beta_offsets(), Box::new(move |_k: usize| p))
+            (self.beta_offsets(), Box::new(move |_: usize| p))
         };
         let mut per_atom = vec![0.0_f64; self.atoms.len()];
         for (atom_idx, atom) in self.atoms.iter().enumerate() {

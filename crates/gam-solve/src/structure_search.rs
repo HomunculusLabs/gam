@@ -521,9 +521,9 @@ mod tests {
             budget,
             ledger,
             apply,
-            |c, _sh| Ok(-100.0 + advantage(c)),
-            |_s, _sh| Ok(-100.0),
-            |c, _sh| Ok(c),
+            |c, _| Ok(-100.0 + advantage(c)),
+            |_, _| Ok(-100.0),
+            |c, _| Ok(c),
         )
         .expect("search runs")
     }
@@ -762,9 +762,9 @@ mod tests {
             },
             &mut ledger,
             apply,
-            |_c: &Dict, _sh| Ok(0.0),
-            |_s, _sh| Ok(0.0),
-            |c, _sh| Ok(c),
+            |_: &Dict, _| Ok(0.0),
+            |_, _| Ok(0.0),
+            |c, _| Ok(c),
         );
         assert!(bad_alpha.is_err());
 
@@ -778,9 +778,9 @@ mod tests {
             },
             &mut ledger,
             apply,
-            |_c: &Dict, _sh| Ok(0.0),
-            |_s, _sh| Ok(0.0),
-            |c, _sh| Ok(c),
+            |_: &Dict, _| Ok(0.0),
+            |_, _| Ok(0.0),
+            |c, _| Ok(c),
         );
         assert!(bad_trigger.is_err());
     }
@@ -802,21 +802,21 @@ mod tests {
                 &budget,
                 &mut ledger,
                 apply,
-                |_candidate, _shard| {
+                |_, _| {
                     if failing_stage == 0 {
                         Err("candidate likelihood failed".to_string())
                     } else {
                         Ok(-1.0)
                     }
                 },
-                |_null, _shard| {
+                |_, _| {
                     if failing_stage == 1 {
                         Err("null fit failed".to_string())
                     } else {
                         Ok(-2.0)
                     }
                 },
-                |state, _shard| {
+                |state, _| {
                     if failing_stage == 2 {
                         Err("alternative refit failed".to_string())
                     } else {

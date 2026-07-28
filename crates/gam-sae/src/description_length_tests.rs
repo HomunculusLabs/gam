@@ -958,7 +958,7 @@ fn eq4_curved_advantage_and_prescreen(
             n as i64,
             &[target],
             None,
-            move |_atom, take| {
+            move |_, take| {
                 // The curved atom reconstructs the whole s-dimensional signal.
                 let mut out = Array2::zeros((take.len(), p));
                 for (out_row, &src) in take.iter().enumerate() {
@@ -1322,7 +1322,7 @@ fn eq4_matched_dictionary_advantage(d: usize, n: usize, p: usize, g_dict: usize)
             n as i64,
             &[target],
             None,
-            move |_atom, take| {
+            move |_, take| {
                 let mut out = Array2::zeros((take.len(), p));
                 for (out_row, &src) in take.iter().enumerate() {
                     for col in 0..s {

@@ -329,7 +329,7 @@ fn alo_eta_exact_frozen_curvature(
                         (r_trial.abs(), (trial, r_trial, j_trial, tol_trial))
                     }))
             },
-            |_t, merit| merit < residual.abs(),
+            |_, merit| merit < residual.abs(),
         ) {
             Ok(result) => result,
             Err(never) => match never {},

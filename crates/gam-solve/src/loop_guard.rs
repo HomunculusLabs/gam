@@ -706,7 +706,7 @@ mod tests {
 
         // Genuinely flat stall well above tol: the projection must classify it
         // unreachable and let the no-improve streak arm the guards.
-        let flat = |_cycle: usize| 150.0 * residual_tol;
+        let flat = |_: usize| 150.0 * residual_tol;
         let (flat_streak, flat_reached) = replay(&flat, 400);
         assert!(flat_reached.is_none(), "the flat stream must never certify");
         assert!(

@@ -3108,7 +3108,7 @@ impl SaeManifoldTerm {
                 Box::new(move |k: usize| ranks[k]),
             )
         } else {
-            (self.beta_offsets(), Box::new(move |_k: usize| p))
+            (self.beta_offsets(), Box::new(move |_: usize| p))
         };
         let k = cache.k;
         if self.atoms.len() >= Self::SMOOTHNESS_DOF_HUTCHINSON_MIN_ATOMS {
@@ -3194,7 +3194,7 @@ impl SaeManifoldTerm {
                 Box::new(move |k: usize| ranks[k]),
             )
         } else {
-            (self.beta_offsets(), Box::new(move |_k: usize| p))
+            (self.beta_offsets(), Box::new(move |_: usize| p))
         };
         let k = cache.k;
         // The t-RHS is identically zero for every β-only smoothness solve; build

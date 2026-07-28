@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use gam_data::load_dataset_projected;
 use gam_data::{ColumnKindTag, DataSchema, SchemaColumn};

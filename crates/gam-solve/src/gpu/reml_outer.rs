@@ -314,7 +314,7 @@ mod tests {
             seed_objective: 3.0,
             seed_gradient: Array1::zeros(1),
         };
-        let evaluator = |_rho: &Array1<f64>| -> Result<RemlOuterDeviceEval, EstimationError> {
+        let evaluator = |_: &Array1<f64>| -> Result<RemlOuterDeviceEval, EstimationError> {
             panic!("the precomputed stationary seed must satisfy the first solver evaluation")
         };
 

@@ -1663,7 +1663,7 @@ mod early_exit_soundness_tests {
         // Each row contributes log Φ = -1.0, i.e. NLL contribution 1.0; full
         // NLL over 100 rows is exactly 100.
         let rows = full_data_rows(100);
-        let row_ll = |_i: usize| -> Result<f64, String> { Ok(-1.0) };
+        let row_ll = |_: usize| -> Result<f64, String> { Ok(-1.0) };
 
         // Threshold below the full NLL → must reject.
         assert!(
@@ -1741,7 +1741,7 @@ mod early_exit_soundness_tests {
         // accumulation round-off.
         let one_ulp_above = threshold + (threshold * f64::EPSILON);
         let per_row_ll = -(one_ulp_above / n as f64);
-        let row_ll = move |_i: usize| -> Result<f64, String> { Ok(per_row_ll) };
+        let row_ll = move |_: usize| -> Result<f64, String> { Ok(per_row_ll) };
         let ll = bernoulli_margslope_line_search_ll_with_early_exit(&rows, threshold, row_ll)
             .expect(
                 "a trial whose full NLL exceeds the threshold by ~1 ULP must not be \
@@ -1756,7 +1756,7 @@ mod early_exit_soundness_tests {
         // round-off band: +1.0 NLL units at this scale is ~3.4e10 ULP) must
         // still early-reject.
         let high_per_row_ll = -((threshold + 1.0) / n as f64);
-        let high_row_ll = move |_i: usize| -> Result<f64, String> { Ok(high_per_row_ll) };
+        let high_row_ll = move |_: usize| -> Result<f64, String> { Ok(high_per_row_ll) };
         assert!(
             bernoulli_margslope_line_search_ll_with_early_exit(&rows, threshold, high_row_ll)
                 .is_err(),

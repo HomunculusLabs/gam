@@ -506,7 +506,7 @@ fn envelope_report(
                 LatentManifold::Euclidean
             }
         },
-        |_atom_idx| Some(0.0),
+        |_| Some(0.0),
         total_centered_variance,
         term.n_obs(),
         dispersion,

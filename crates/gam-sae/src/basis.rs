@@ -4488,7 +4488,7 @@ mod tests {
                 dim: 2,
                 symmetric_axes: &[0, 1],
                 asymmetric_axes: &[],
-                span: |_axis, u| 4.0 * u - 2.0,
+                span: |_, u| 4.0 * u - 2.0,
             },
         ];
 

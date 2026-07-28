@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! LOCAL zoo-micro loop (#1026) — the BSF-zoo m12 shape as an in-tree Rust
 //! harness, no python wheel, no MSI round-trip.
 //!

@@ -86,7 +86,7 @@ fn main() {
         let mut items: Vec<usize> = (0..K).collect();
         let out: std::sync::Mutex<Vec<Array2<f64>>> = std::sync::Mutex::new(Vec::new());
         let start = Instant::now();
-        let ok = gam::gpu::pool::scatter_batched(rt, &mut items, |_ord, slice| {
+        let ok = gam::gpu::pool::scatter_batched(rt, &mut items, |_, slice| {
             for &k in slice.iter() {
                 let g = gam::gpu::linalg_dispatch::try_fast_xt_diag_x(
                     phis_ref[k].view(),

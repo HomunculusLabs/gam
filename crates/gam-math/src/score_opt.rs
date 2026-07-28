@@ -3725,7 +3725,7 @@ mod tests {
             -1.0,
             1.0,
             1.0e-9,
-            |_x| -> Result<_, String> {
+            |_| -> Result<_, String> {
                 Ok(ScoreJet {
                     value: 0.0,
                     derivative: 1.0,
@@ -3757,7 +3757,7 @@ mod tests {
             -1.0,
             1.0,
             1.0e-9,
-            |_x| -> Result<_, String> {
+            |_| -> Result<_, String> {
                 Ok(ScoreJet {
                     value: 0.0,
                     derivative: -1.0,
@@ -3898,7 +3898,7 @@ mod tests {
             0.0,
             1.0,
             resolution,
-            |_x| -> Result<_, String> {
+            |_| -> Result<_, String> {
                 Ok(ScoreJet {
                     value: 3.0,
                     derivative: 0.0,
@@ -3906,7 +3906,7 @@ mod tests {
                     third: 0.0,
                 })
             },
-            |_left, _right| -> Result<_, String> {
+            |_, _| -> Result<_, String> {
                 Ok(DerivativeEnclosure {
                     score: ScoreValueEnclosure {
                         value: ClosedInterval::point(3.0),

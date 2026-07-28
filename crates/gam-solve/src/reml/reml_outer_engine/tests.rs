@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use crate::estimate::smooth_floor_dp;
 use crate::estimate::smoothing_correction::DP_FLOOR;

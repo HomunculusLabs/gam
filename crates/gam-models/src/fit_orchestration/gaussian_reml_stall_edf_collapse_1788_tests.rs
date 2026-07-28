@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Regression for #1788 at the real smooth-spline pipeline layer.
 //!
 //! For an ordinary Gaussian additive fit `y ~ s(x1)+s(x2)+s(x3)` the reported

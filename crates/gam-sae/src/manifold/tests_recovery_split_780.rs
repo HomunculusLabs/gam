@@ -1,3 +1,4 @@
+#![cfg(test)]
 // Split from tests.rs under the #780 oversized-file gate: recovery-suite +
 // registry/assignment tests from line ~6560 onward. Shared fixtures come via
 // the parent-module glob below.

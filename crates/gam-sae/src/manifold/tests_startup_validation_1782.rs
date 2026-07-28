@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! #1782 — `sae_manifold_fit` with `threshold_gate`/`softmax` assignments and
 //! `euclidean`/`linear` topologies failed at "no candidate seeds passed outer
 //! startup validation" on clean planted-circle data where `ordered_beta_bernoulli`+`circle`

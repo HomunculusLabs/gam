@@ -682,7 +682,7 @@ impl SaeManifoldTerm {
                     probe_for_row,
                     v_t_for_row,
                     &v_beta_row,
-                    |row, _q, t_row, beta_row| {
+                    |row, _, t_row, beta_row| {
                         let base = cache.row_offsets[row];
                         for (a, &value) in t_row.iter().enumerate() {
                             out_ref.t[base + a] += value;
@@ -1101,7 +1101,7 @@ impl SaeManifoldTerm {
                     Box::new(move |kk: usize| ranks[kk]),
                 )
             } else {
-                (self.beta_offsets(), Box::new(move |_kk: usize| p))
+                (self.beta_offsets(), Box::new(move |_: usize| p))
             };
         for a in 0..rho.log_lambda_smooth.len() {
             let atom = &self.atoms[a];

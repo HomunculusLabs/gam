@@ -55,7 +55,7 @@ fn predict(formula: &str, data: &gam::data::EncodedDataset, pts: &[(f64, f64)]) 
 #[test]
 fn cycle_63_cylinder_theta_only_truth_recovered() {
     init_parallelism();
-    let data = cylinder_dataset(20, 6, |theta, _h| theta.cos());
+    let data = cylinder_dataset(20, 6, |theta, _| theta.cos());
     let pts: Vec<(f64, f64)> = (0..12).map(|i| (TAU * (i as f64) / 11.0, 0.0)).collect();
     let pred = predict(
         "y ~ te(theta, h, bc=['periodic', 'natural'], period=[2*pi, None], k=6)",

@@ -247,7 +247,7 @@ fn penalty_channel_alone_decides_true_symmetries() {
     // must come back pinned — fraction 1 here, since the operator's whole
     // stiffness lies along the drift.
     let pin = OrbitPenaltyOperator {
-        apply: Box::new(|_delta_b, delta_t| {
+        apply: Box::new(|_, delta_t| {
             let n = delta_t.nrows() as f64;
             let drift = delta_t.column(0).sum() / n;
             ndarray::Array1::from(vec![10.0 * drift])

@@ -3428,7 +3428,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
         false,
         None,
         policy,
-        |theta, specs, designs, _provenance| {
+        |theta, specs, designs, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             Ok(designs[0].design.ncols() as f64
@@ -3456,7 +3456,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 mode: (),
             })
         },
-        |theta, specs, designs, _row_set| {
+        |theta, specs, designs, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert!(!designs.is_empty());
@@ -3474,7 +3474,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
                 mode: (),
             })
         },
-        |_beta: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
+        |_: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", expect_msg, e))
 }
@@ -3639,10 +3639,10 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
                 },
             })
         },
-        |_theta, _specs, _designs, _row_set| {
+        |_, _, _, _| {
             Err("fixed-point callback must stay disabled in staged regression".to_string())
         },
-        |_beta| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
+        |_| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
     )
     .expect("pilot checkpoint must continue to the exact full-data optimum");
 
@@ -6177,7 +6177,7 @@ fn exact_joint_two_block_no_spatial_fast_path_returns_fully_frozen_specs() {
                 mode: (),
             })
         },
-        |theta, specs, designs, _row_set| {
+        |theta, specs, designs, _| {
             assert_eq!(theta.len(), theta_dim);
             assert_eq!(specs.len(), 2);
             assert_eq!(designs.len(), 2);
@@ -6195,7 +6195,7 @@ fn exact_joint_two_block_no_spatial_fast_path_returns_fully_frozen_specs() {
                 mode: (),
             })
         },
-        |_beta: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
+        |_: &Array1<f64>| Ok(gam_solve::rho_optimizer::SeedOutcome::NoSlot),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "exact joint no-spatial fast path should succeed", e));
 

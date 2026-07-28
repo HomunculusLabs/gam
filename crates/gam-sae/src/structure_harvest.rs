@@ -6898,7 +6898,7 @@ pub fn run_production_structure_search(
         // exists solely so the per-candidate SCORING refit is an honest
         // predictable plug-in for the e-process; the adopted winner's polish is
         // the RETURNED dictionary and must fit every row it will be evaluated on.
-        move |adopted_term, adopted_rho, _estimation_rows| {
+        move |adopted_term, adopted_rho, _| {
             let all_rows: Vec<usize> = (0..n).collect();
             final_refit(
                 full_target_polish.view(),

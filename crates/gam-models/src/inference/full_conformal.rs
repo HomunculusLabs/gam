@@ -3350,7 +3350,7 @@ mod tests {
                         None
                     })
                 },
-                |_t, cand_nll| cand_nll <= cur,
+                |_, cand_nll| cand_nll <= cur,
             );
             let accepted = match search {
                 Ok(step) => step,

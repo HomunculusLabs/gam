@@ -2703,7 +2703,7 @@ mod tests {
         assert_eq!(hphi, Array2::<f64>::zeros((3, 3)));
 
         let outer_axis_builds = AtomicUsize::new(0);
-        let outer_base = JeffreysHphiDriftBase::prepare(h.view(), z.view(), |_axis| {
+        let outer_base = JeffreysHphiDriftBase::prepare(h.view(), z.view(), |_| {
             outer_axis_builds.fetch_add(1, Ordering::Relaxed);
             Ok(Some(Array2::zeros((3, 3))))
         })
@@ -2909,7 +2909,7 @@ mod tests {
                 Ok(Some(acc))
             },
             // H²dot[u, v] = 0 (H is β-linear).
-            |_u: &Array1<f64>, _v: &Array1<f64>| Ok(Some(Array2::<f64>::zeros((p, p)))),
+            |_: &Array1<f64>, _: &Array1<f64>| Ok(Some(Array2::<f64>::zeros((p, p)))),
         )
         .expect("mode-response drift D_β H_Φ[δ]");
 
@@ -3068,7 +3068,7 @@ mod tests {
         let pert2 = array![[0.2, 0.05, -0.15], [0.05, -0.3, 0.1], [-0.15, 0.1, 0.45]];
         let phi_at = |s: f64| -> f64 {
             let h = &h0 + &(s * &pert) + &(0.5 * s * s * &pert2);
-            joint_jeffreys_term(h.view(), z.view(), |_d: &Array1<f64>| {
+            joint_jeffreys_term(h.view(), z.view(), |_: &Array1<f64>| {
                 Ok(Some(Array2::<f64>::zeros((p, p))))
             })
             .unwrap()
@@ -3172,7 +3172,7 @@ mod tests {
                 + &(s * &explicit)
                 + &(t * &beta_derivative)
                 + &(s * t * &mixed_derivative);
-            joint_jeffreys_term(h.view(), z.view(), |_d: &Array1<f64>| {
+            joint_jeffreys_term(h.view(), z.view(), |_: &Array1<f64>| {
                 Ok(Some(Array2::<f64>::zeros((2, 2))))
             })
             .unwrap()
@@ -3636,7 +3636,7 @@ mod tests {
     pub(crate) fn empty_span_yields_zero_term() {
         let h = Array2::<f64>::eye(3);
         let z = Array2::<f64>::zeros((3, 0));
-        let hdir = |_d: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
+        let hdir = |_: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
             Ok(Some(Array2::<f64>::zeros((3, 3))))
         };
         let (phi, grad, hphi) = joint_jeffreys_term(h.view(), z.view(), hdir).unwrap();
@@ -3734,7 +3734,7 @@ mod tests {
         // well-conditioned spectra and assert the implication.
         let p = 150usize;
         let z = Array2::<f64>::eye(p);
-        let hdir = |_d: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
+        let hdir = |_: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
             Ok(Some(Array2::<f64>::zeros((p, p))))
         };
         for &lmin in &[10.0_f64, 25.0, 80.0, 200.0] {
@@ -3769,7 +3769,7 @@ mod tests {
         // where the curvature is needed.
         let p = CHEAP_CONDITIONING_PRECHECK_MIN_DIM - 1; // a small joint system
         let z = Array2::<f64>::eye(p);
-        let hdir = |_d: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
+        let hdir = |_: &Array1<f64>| -> Result<Option<Array2<f64>>, String> {
             Ok(Some(Array2::<f64>::zeros((p, p))))
         };
 

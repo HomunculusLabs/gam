@@ -7740,7 +7740,7 @@ impl SaeManifoldTerm {
                 let declined: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
                 let atoms_ref = &self.atoms;
                 let weights_ref = &weights;
-                let ok = crate::gpu::pool::scatter_batched(rt, &mut items, |_ordinal, slice| {
+                let ok = crate::gpu::pool::scatter_batched(rt, &mut items, |_, slice| {
                     for &atom_idx in slice.iter() {
                         let phi = atoms_ref[atom_idx].basis_values.view();
                         let w = weights_ref[atom_idx].view();

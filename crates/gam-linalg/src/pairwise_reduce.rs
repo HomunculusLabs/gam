@@ -670,7 +670,7 @@ mod tests {
                 assert_eq!(g.to_bits(), r.to_bits(), "threads={threads}");
             }
         }
-        assert!(par_deterministic_block_fold(0, |_| vec![0.0f64; 1], |a, _b| a).is_none());
+        assert!(par_deterministic_block_fold(0, |_| vec![0.0f64; 1], |a, _| a).is_none());
     }
 
     #[test]

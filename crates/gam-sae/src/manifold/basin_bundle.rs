@@ -453,7 +453,7 @@ mod tests {
         };
         let mut bundle = BasinBundle::new(2);
         bundle.admit(b, f64::INFINITY, |x, y| x == y).unwrap();
-        let out = bundle.evaluate(|_s: &Basin| Err::<(Basin, f64), _>("boom"));
+        let out = bundle.evaluate(|_: &Basin| Err::<(Basin, f64), _>("boom"));
         assert_eq!(out.unwrap_err(), "boom");
     }
 }

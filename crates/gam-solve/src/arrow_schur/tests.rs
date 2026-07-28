@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Unit tests for the arrow-Schur solver.
 
 use super::*;
@@ -1085,7 +1086,7 @@ pub(crate) fn proximal_correction_breaks_scalar_newton_cycle() {
             previous_value,
             &options,
             &correction,
-            |delta_t, _delta_beta| quartic_counterexample_value(t + delta_t[0]),
+            |delta_t, _| quartic_counterexample_value(t + delta_t[0]),
         )
         .expect("proximal correction should accept a descent step");
         assert!(
@@ -1720,11 +1721,11 @@ fn beta_coupling_graph_reads_the_routed_htbeta_not_the_dense_slab() {
             0,
         );
         sys.set_row_htbeta_operator(
-            |_row, x, out| {
+            |_, x, out| {
                 out[0] += x[0] + x[2];
                 out[1] += -x[0] + x[2];
             },
-            |_row, v, out| {
+            |_, v, out| {
                 out[0] += v[0] - v[1];
                 out[2] += v[0] + v[1];
             },
@@ -1776,11 +1777,11 @@ fn sparse_htbeta_transpose_never_probes_the_forward_operator() {
     let forward_counter = std::sync::Arc::clone(&forward_calls);
     let transpose_counter = std::sync::Arc::clone(&transpose_calls);
     sys.set_row_htbeta_operator(
-        move |_row, x, out| {
+        move |_, x, out| {
             forward_counter.fetch_add(1, Ordering::SeqCst);
             out[0] = 2.0 * x[0] - x[1] + 0.5 * x[2];
         },
-        move |_row, v, out| {
+        move |_, v, out| {
             transpose_counter.fetch_add(1, Ordering::SeqCst);
             out[0] += 2.0 * v[0];
             out[1] -= v[0];

@@ -196,7 +196,7 @@ pub(crate) fn custom_family_joint_jeffreys_value<
     match gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
         h_joint.view(),
         z_joint.view(),
-        |_direction: &Array1<f64>| Ok(None),
+        |_: &Array1<f64>| Ok(None),
     ) {
         Ok((phi, _grad, _hphi)) => phi,
         Err(_) => 0.0,

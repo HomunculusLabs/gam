@@ -478,7 +478,7 @@ fn fit_beta_mle(r: &[f64]) -> Option<(f64, f64, f64)> {
                     Ok(None)
                 }
             },
-            |_step, f| f >= base,
+            |_, f| f >= base,
         ) {
             Ok(v) => v,
             Err(never) => match never {},

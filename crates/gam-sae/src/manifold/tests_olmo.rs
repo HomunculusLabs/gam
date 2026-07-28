@@ -1,3 +1,4 @@
+#![cfg(test)]
 use gam_linalg::faer_ndarray::fast_ata;
 
 use super::*;

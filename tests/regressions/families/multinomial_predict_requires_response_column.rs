@@ -150,7 +150,7 @@ fn multinomial_predicts_on_label_free_and_reordered_frames() {
         &xs,
         &[
             ("x", Box::new(|x| x.to_string())),
-            ("y", Box::new(|_x| "a".to_string())),
+            ("y", Box::new(|_| "a".to_string())),
         ],
     );
     let probs_reordered =
@@ -162,7 +162,7 @@ fn multinomial_predicts_on_label_free_and_reordered_frames() {
     let with_label = predict_frame(
         &xs,
         &[
-            ("y", Box::new(|_x| "a".to_string())),
+            ("y", Box::new(|_| "a".to_string())),
             ("x", Box::new(|x| x.to_string())),
         ],
     );

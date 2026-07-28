@@ -4813,7 +4813,7 @@ mod tests {
 
         // Without the cone, the untruncated rule produces an infeasible node.
         let mut min_cone0_unconstrained = f64::INFINITY;
-        for_each_survival_posterior_node(&posterior_mean, &covariance, &[], |node, _weight| {
+        for_each_survival_posterior_node(&posterior_mean, &covariance, &[], |node, _| {
             min_cone0_unconstrained = min_cone0_unconstrained.min(node[0]);
             Ok(())
         })
@@ -4953,7 +4953,7 @@ mod tests {
         let covariance = ndarray::array![[0.5, 0.0], [0.0, 0.2]];
 
         let mut nodes = Vec::new();
-        for_each_survival_posterior_node(&posterior_mean, &covariance, &[0], |node, _weight| {
+        for_each_survival_posterior_node(&posterior_mean, &covariance, &[0], |node, _| {
             nodes.push(node[0]);
             Ok(())
         })
