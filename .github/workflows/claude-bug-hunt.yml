@@ -2,7 +2,16 @@ name: Claude Bug Hunt (real + synthetic data)
 
 on:
   schedule:
-    - cron: "0 */2 * * *"
+    # WINDOW: midnight-08:00 US Central, at most hourly.
+    #
+    # GitHub cron is fixed UTC, so a single expression has to be correct under
+    # BOTH Central offsets or it leaks outside the window for half the year:
+    #   CDT (UTC-5): 06 UTC = 01:00, 12 UTC = 07:00 Central
+    #   CST (UTC-6): 06 UTC = 00:00, 12 UTC = 06:00 Central
+    # Hours 6-12 UTC are inside midnight-08:00 Central in both, so the window is
+    # DST-safe by construction rather than by remembering to adjust it.
+    # Was every 2h round the clock (12/day); keeps its 2h spacing, now 4/day.
+    - cron: "0 6,8,10,12 * * *"
   workflow_dispatch:
 
 permissions:

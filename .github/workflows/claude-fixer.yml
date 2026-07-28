@@ -2,11 +2,18 @@ name: Claude Fixer (one issue, done properly)
 
 on:
   schedule:
-    # Every 10 minutes, midnight–07:30 US Central (CDT = UTC−5 ⇒ 05:00–12:30
-    # UTC). GitHub cron is UTC-fixed, so under winter CST (UTC−6) the window
-    # reads 23:00–06:30 Central; adjust the hours if that matters.
-    - cron: "*/10 5-11 * * *"
-    - cron: "0,10,20,30 12 * * *"
+    # WINDOW: midnight-08:00 US Central, at most hourly.
+    #
+    # GitHub cron is fixed UTC, so a single expression has to be correct under
+    # BOTH Central offsets or it leaks outside the window for half the year:
+    #   CDT (UTC-5): 06 UTC = 01:00, 12 UTC = 07:00 Central
+    #   CST (UTC-6): 06 UTC = 00:00, 12 UTC = 06:00 Central
+    # Hours 6-12 UTC are inside midnight-08:00 Central in both, so the window is
+    # DST-safe by construction rather than by remembering to adjust it.
+    # Was every 10 minutes over 05:00-12:30 UTC (~46/day), and the 05 UTC hour
+    # is 23:00 Central under CST -- outside the window it claimed. Now hourly,
+    # 7/day, and correct in both offsets.
+    - cron: "0 6-12 * * *"
   workflow_dispatch:
 
 
