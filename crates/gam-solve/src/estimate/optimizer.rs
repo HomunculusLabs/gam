@@ -1136,13 +1136,33 @@ where
                     .ok()
                     .filter(|c| c.is_finite());
                 // Keep the strictly-cheapest certified/scored candidate.
+                //
+                // #2607: this choice is a COMPARISON OF NUMBERS, and until now the
+                // log recorded only its outcome (`base -> refined`). That is not
+                // enough to read a seed that lands on a wall. On `hifreq_tensor_k10`
+                // the selected seed is the ρ ceiling in every coordinate and the fit
+                // converges in ONE outer iteration at `edf = 1.294` of `p = 576` —
+                // the intercept — and from the old line alone there is no way to
+                // tell whether the heuristic malfunctioned or whether the criterion
+                // genuinely scores the wall below the origin. Those two call for
+                // completely different fixes, so the costs that decided it are now
+                // reported next to the point they scored.
                 let mut refined = base.clone();
                 let mut best_cost = base_cost;
-                for candidate in [initial_sp, summed_diagonal].into_iter().flatten() {
+                let mut scored: Vec<(&str, Option<f64>)> = vec![("base", base_cost)];
+                for (name, candidate) in [
+                    ("initial_sp", initial_sp),
+                    ("summed_diagonal", summed_diagonal),
+                ] {
+                    let Some(candidate) = candidate else {
+                        scored.push((name, None));
+                        continue;
+                    };
                     let candidate_cost = reml_state
                         .compute_cost(&candidate)
                         .ok()
                         .filter(|c| c.is_finite());
+                    scored.push((name, candidate_cost));
                     let candidate_beats_best = match (candidate_cost, best_cost) {
                         (Some(cc), Some(bc)) => cc < bc,
                         (Some(_), None) => true,
@@ -1153,6 +1173,14 @@ where
                         best_cost = candidate_cost;
                     }
                 }
+                let scored_report = scored
+                    .iter()
+                    .map(|(name, cost)| match cost {
+                        Some(value) => format!("{name}={value:.9e}"),
+                        None => format!("{name}=unavailable"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let seed_moved = refined
                     .iter()
                     .zip(base.iter())
@@ -1164,9 +1192,12 @@ where
                 // weight-anchored emit only applies on the non-caller-seeded origin.
                 if seed_moved || (run_gaussian_anchored_prepass && !caller_seeded_rho) {
                     log::info!(
-                        "[OUTER] standard REML initial.sp selected seed: {:?} -> {:?}",
+                        "[OUTER] standard REML initial.sp selected seed: {:?} -> {:?} \
+                         (scored: {scored_report}; bounds {:.3}..{:.3})",
                         base.as_slice().unwrap_or(&[]),
-                        refined.as_slice().unwrap_or(&[])
+                        refined.as_slice().unwrap_or(&[]),
+                        seed_bounds.lower(),
+                        seed_bounds.upper(),
                     );
                     Some(refined)
                 } else {
