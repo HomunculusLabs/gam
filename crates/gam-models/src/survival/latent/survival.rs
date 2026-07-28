@@ -1542,14 +1542,19 @@ struct LatentKernelPrimaryState {
 ///
 /// Keeping these coupled channels together prevents boundary reordering and
 /// cross-row mean/scale mismatches when selecting a derivative backend.
+/// Public because [`latent_survival_log_sigma_curvature_certified`] takes it: a
+/// certificate a caller cannot invoke is not an export. Widening this was the API
+/// decision that function deferred, and the compiler was right to force it —
+/// `pub(crate)` made the whole certificate dead code, which is the build saying
+/// "this has no consumer" rather than a lint to route around (#2566).
 #[derive(Clone, Copy, Debug)]
-struct LatentSurvivalPrimaryPoint {
-    q_entry: f64,
-    q_exit: f64,
-    qdot_exit: f64,
-    q_right: f64,
-    mu: f64,
-    sigma: f64,
+pub struct LatentSurvivalPrimaryPoint {
+    pub q_entry: f64,
+    pub q_exit: f64,
+    pub qdot_exit: f64,
+    pub q_right: f64,
+    pub mu: f64,
+    pub sigma: f64,
 }
 
 impl LatentSurvivalPrimaryPoint {
@@ -3076,19 +3081,19 @@ fn latent_survival_interval_numerator_jet<const K: usize, B: LatentPrimaryJetBac
 /// independent authority says it could be wrong by. A consumer that needs a
 /// definite Hessian refuses on the ratio rather than on a scale cutoff.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CertifiedLogSigmaCurvature {
+pub struct CertifiedLogSigmaCurvature {
     /// The production negative-Hessian `∂²/∂(log σ)²` entry.
-    pub(crate) curvature: f64,
+    pub curvature: f64,
     /// Measured bound on `|curvature − truth|`: the observed disagreement with an
     /// independent finite-difference authority, plus that authority's own
     /// numerical error. Not a proved bound — an estimate, from measurement.
-    pub(crate) estimated_absolute_error: f64,
+    pub estimated_absolute_error: f64,
 }
 
 impl CertifiedLogSigmaCurvature {
     /// Relative error, or `f64::INFINITY` for a zero curvature carrying any
     /// error at all (a zero that could be anything is not a usable zero).
-    pub(crate) fn relative_error(&self) -> f64 {
+    pub fn relative_error(&self) -> f64 {
         if self.curvature == 0.0 {
             if self.estimated_absolute_error == 0.0 {
                 0.0
@@ -3101,7 +3106,7 @@ impl CertifiedLogSigmaCurvature {
     }
 
     /// Whether the curvature is usable at the caller's relative tolerance.
-    pub(crate) fn is_trustworthy(&self, relative_tolerance: f64) -> bool {
+    pub fn is_trustworthy(&self, relative_tolerance: f64) -> bool {
         self.curvature.is_finite() && self.relative_error() <= relative_tolerance
     }
 }
@@ -3170,11 +3175,7 @@ fn latent_richardson_derivative(
 /// The result is a MEASURED estimate, not a proved bound. A proved bound on the
 /// `ControlledAsymptotic` branch is a much larger piece of work; the reformulation
 /// that would remove the need for either is tracked separately.
-// Crate-visible rather than `pub`: `LatentSurvivalPrimaryPoint` is private to
-// this module, and a `pub fn` taking it is a private-in-public error. Widening the
-// point type is a real API decision and not one this certificate should force --
-// every consumer that needs the refusal today lives inside `gam-models`.
-pub(crate) fn latent_survival_log_sigma_curvature_certified(
+pub fn latent_survival_log_sigma_curvature_certified(
     quadctx: &QuadratureContext,
     row: &LatentSurvivalRow,
     point: LatentSurvivalPrimaryPoint,
