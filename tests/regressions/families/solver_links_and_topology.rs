@@ -119,10 +119,10 @@ fn topology_selector_picks_lowest_cost_and_returns_fit_metadata() {
     // `tk_score` is a minimised REML / TK cost (lower is better; see issue
     // #396 and `solver::evidence`). Circle (raw_reml 10) must beat Sphere
     // (raw_reml 20). The pre-fix descending sort returned the worst topology.
-    let selector = TopologyAutoSelector::new(Some(vec![
+    let selector = TopologyAutoSelector::new(vec![
         AutoTopologyKind::Circle,
         AutoTopologyKind::Sphere,
-    ]));
+    ]);
     let out = select_topology_with_fit(&selector, |kind| {
         Ok::<_, String>(match kind {
             AutoTopologyKind::Circle => TopologyAutoFitEvidence {
@@ -171,11 +171,11 @@ fn topology_selector_parallel_matches_sequential_winner() {
     // bit-identical winner to the sequential loop (results come back in input
     // order, ranked through the same deterministic priority selector).
     use gam::topology_selector::select_topology_with_fit_parallel;
-    let selector = TopologyAutoSelector::new(Some(vec![
+    let selector = TopologyAutoSelector::new(vec![
         AutoTopologyKind::Circle,
         AutoTopologyKind::Sphere,
         AutoTopologyKind::Torus,
-    ]));
+    ]);
     let fit_one = |kind: AutoTopologyKind| {
         Ok::<_, String>(match kind {
             AutoTopologyKind::Circle => TopologyAutoFitEvidence {
@@ -227,10 +227,10 @@ fn topology_selector_parallel_matches_sequential_winner() {
 
 #[test]
 fn topology_selector_breaks_exact_ties_deterministically_by_candidate_order() {
-    let selector = TopologyAutoSelector::new(Some(vec![
+    let selector = TopologyAutoSelector::new(vec![
         AutoTopologyKind::Torus,
         AutoTopologyKind::Cylinder,
-    ]));
+    ]);
     let out = select_topology_with_fit(&selector, |kind| {
         Ok::<_, String>(TopologyAutoFitEvidence {
             topology_name: kind.display_name(),
