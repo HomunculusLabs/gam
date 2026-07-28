@@ -6606,9 +6606,13 @@ mod tests {
             irreducible_residual / (((n_effective - 1) as f64) * q - irreducible_residual);
         let expected_rho = (expected_t / delta).ln();
         let mut roots = Vec::new();
-        let selection =
-            enumerate_and_select_rho(&eval, &enclose, Some(-20.0), |root, _| roots.push(root))
-                .expect("profile certificate");
+        // Scoped so the visitor's mutable borrow of `roots` ends before the
+        // assertions below read it.
+        let selection = {
+            let mut collect_root = |root: StationaryRoot, _| roots.push(root);
+            enumerate_and_select_rho(&eval, &enclose, Some(-20.0), Some(&mut collect_root))
+                .expect("profile certificate")
+        };
 
         assert_eq!(roots.len(), 1, "unexpected stationary set");
         assert!(
@@ -6650,7 +6654,7 @@ mod tests {
                 resolution: 0.25,
                 max_depth: 0,
             },
-            |_, _| {},
+            None,
         )
         .expect_err("ambiguous stationary structure must refuse");
         assert!(matches!(error, EstimationError::RemlDidNotConverge { .. }));
@@ -6773,9 +6777,10 @@ mod tests {
                 reml_deriv_enclosure(&cache, ywy.view(), prs.view(), n_eff, n_out, a, b)
             };
             let mut roots = Vec::new();
-            let selection =
-                enumerate_and_select_rho(&eval, &enclose, None, |root, _| roots.push(root.rho))
-                    .unwrap();
+            let selection = {
+                let mut collect_rho = |root: StationaryRoot, _| roots.push(root.rho);
+                enumerate_and_select_rho(&eval, &enclose, None, Some(&mut collect_rho)).unwrap()
+            };
             let selected = selection.rho;
             let selected_cost = eval(selected).cost;
             let tol = 1.0e-8 * (1.0 + selected_cost.abs());
