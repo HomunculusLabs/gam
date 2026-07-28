@@ -223,3 +223,63 @@ fn a_caller_box_that_is_already_inverted_is_a_typed_error_2370() {
         "typed error must name both offending bounds, got: {message}"
     );
 }
+
+/// #2608 (zz_measure): how far would a RELATIVE floor move the wall for the
+/// rank-1 term the absolute floor cannot touch?
+///
+/// `effective_df_floor_bound` opens with `if !(edf_max > EFFECTIVE_DF_FLOOR)`,
+/// and the floor is exactly `1.0`. A rank-1 penalty has a one-dimensional range
+/// space, so `edf(ρ) = γ/(γ + e^ρ)` ranges over `(0, 1]` and reaches 1 only as
+/// `λ → 0`: the test is false for every rank-1 term and the term is skipped. The
+/// null-space half of a Marra–Wood double penalty IS rank-1, so the linear
+/// direction of every smooth is unprotected — measured on penguins at
+/// `edf ≈ 4.6e-5`, i.e. dead.
+///
+/// The proposed repair is a floor RELATIVE to what the term can attain: require
+/// `edf ≥ f · edf_max` for some `f < 1`. The objection to it is that on
+/// near-separable data the Fisher weights `p(1−p)` collapse and the REML surface
+/// flattens regardless, so a relative floor might only move a wall rather than
+/// restore data-driven selection. That objection deserves a number.
+///
+/// For rank 1 the crossing is CLOSED FORM, so no bisection or fitting is needed
+/// to get it. From `γ/(γ + e^ρ) = f`:
+///
+/// ```text
+/// ρ*(f) = ln γ + ln((1 − f)/f)
+/// ```
+///
+/// which is finite for every `f ∈ (0, 1)` — so the relative floor is well posed
+/// exactly where the absolute floor is not. This prints `ρ*(f)` against the
+/// uniform ceiling the term currently keeps, so the size of the tightening is a
+/// number rather than an intuition. It does NOT settle whether the tightening
+/// helps the fit; that needs penguins. It settles that there is something real
+/// to tighten TO.
+///
+/// zz_measure discipline: prints only, asserts nothing.
+#[test]
+fn zz_measure_2608_relative_floor_wall_movement() {
+    let ceiling = EFFECTIVE_DF_CEILING;
+    eprintln!(
+        "#2608: rank-1 term, absolute floor {EFFECTIVE_DF_FLOOR} is UNREACHABLE \
+         (edf_max = 1.0 exactly, attained only as lambda -> 0) => term exempt, \
+         keeps uniform ceiling {ceiling}"
+    );
+    eprintln!("#2608: gamma   f      rho*(f)=ln(gamma)+ln((1-f)/f)   tightening vs ceiling");
+    for gamma in [1.0e-2_f64, 1.0, 1.0e2, 1.0e4] {
+        for f in [0.25_f64, 0.5, 0.75, 0.9] {
+            let rho_star = gamma.ln() + ((1.0 - f) / f).ln();
+            // edf actually retained at that rho, as a check on the closed form.
+            let retained = gamma / (gamma + rho_star.exp());
+            eprintln!(
+                "#2608: {gamma:>7.1e}  {f:>4.2}   {rho_star:>12.6}                  \
+                 {:>8.4} nats   (edf there = {retained:.6})",
+                ceiling - rho_star,
+            );
+        }
+    }
+    eprintln!(
+        "#2608: reading -- rho*(f) is FINITE for every f in (0,1), so the relative \
+         floor is well posed exactly where the absolute one is not. Whether the \
+         tightening improves the FIT is a penguins question, not this one."
+    );
+}
