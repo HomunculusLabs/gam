@@ -230,6 +230,10 @@ fn main() {
         &manifest_dir,
         &mut underscore_fn_arg_offenders,
     );
+    // Landed with a burn-down budget rather than a big bang. See
+    // `apply_underscore_param_budget`.
+    let underscore_fn_arg_offenders =
+        apply_underscore_param_budget(&manifest_dir, underscore_fn_arg_offenders);
 
     // `#[cfg(test)]` attribute directly on ANY item inside `src/` (the
     // production tree) — regardless of visibility. Tests must exercise
@@ -4096,6 +4100,119 @@ fn count_file_lines(path: &Path) -> std::io::Result<usize> {
 /// it is auto-managed by build.rs and
 /// must not be hand-edited; each non-comment line is a single repo-relative
 /// path, sorted for clean git merges.
+const UNDERSCORE_PARAM_BUDGET_FILENAME: &str = "underscore_param_budget.txt";
+
+/// Per-file allowance of underscore fn parameters, so the ban could LAND.
+///
+/// The rule is right and the remedy it names — use the value, restructure, or
+/// delete — is the correct one. But it arrived against 889 existing sites, and
+/// 347 of those are inside `impl Trait for Type` where the author cannot take the
+/// remedy: a stub or test double implementing `CustomFamily` does not use the
+/// parameter, while the REAL implementations do, so the trait cannot drop it.
+/// `serde_finite.rs` is worse — those are `impl Serializer for …`, and serde owns
+/// that signature. For those files every legal spelling is banned and no edit to
+/// the file can comply, so a big-bang ban is not "fix 889 things", it is "this
+/// repository does not build".
+///
+/// So the ban lands the way `oversized_history.txt` does: the existing count per
+/// file is recorded, any file exceeding its budget fails, and the budget RATCHETS
+/// DOWN automatically as sites are cleaned — it is rewritten to the observed
+/// count whenever that is lower, and never raised. New code cannot add an
+/// underscore parameter anywhere; existing debt is visible, per-file, and can
+/// only shrink.
+///
+/// Per-FILE counts rather than line numbers on purpose: line numbers churn with
+/// every unrelated edit, and a baseline that rots is a baseline people delete.
+fn apply_underscore_param_budget(
+    root: &Path,
+    offenders: Vec<(PathBuf, usize, String)>,
+) -> Vec<(PathBuf, usize, String)> {
+    let budget_path = root.join(UNDERSCORE_PARAM_BUDGET_FILENAME);
+    println!("cargo:rerun-if-changed={}", budget_path.display());
+    let mut budget: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    // First run in a tree with no budget file ADOPTS the current state as the
+    // baseline instead of failing on all of it. That is what makes the ban
+    // landable; every run after this one can only tighten.
+    let seeding = fs::read_to_string(&budget_path).is_err();
+    if let Ok(text) = fs::read_to_string(&budget_path) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((file, count)) = line.rsplit_once('\t') {
+                if let Ok(count) = count.trim().parse::<usize>() {
+                    budget.insert(file.trim().to_string(), count);
+                }
+            }
+        }
+    }
+
+    let mut grouped: std::collections::BTreeMap<String, Vec<(PathBuf, usize, String)>> =
+        std::collections::BTreeMap::new();
+    for offender in offenders {
+        let key = offender.0.to_string_lossy().replace('\\', "/");
+        grouped.entry(key).or_default().push(offender);
+    }
+
+    let mut kept: Vec<(PathBuf, usize, String)> = Vec::new();
+    let mut next: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (file, mut items) in grouped {
+        let found = items.len();
+        let allowed = if seeding {
+            found
+        } else {
+            budget.get(&file).copied().unwrap_or(0)
+        };
+        if found > allowed {
+            // Report every site in the file, not an arbitrary "excess" subset:
+            // the scanner cannot tell which one is new, and pointing at the wrong
+            // line is worse than pointing at all of them.
+            for (path, line, detail) in items.drain(..) {
+                kept.push((
+                    path,
+                    line,
+                    format!(
+                        "{detail} [{file}: {found} underscore params, budget {allowed} — \
+                         this file may not gain new ones; remove {} to land this change]",
+                        found - allowed
+                    ),
+                ));
+            }
+        }
+        // Ratchet: record the lower of observed and allowed, never the higher.
+        // `found < allowed` tightens the budget; `found > allowed` is the failure
+        // above and must not raise it.
+        next.insert(file, found.min(allowed));
+    }
+    // Files that cleaned up entirely drop out of the budget rather than keeping a
+    // stale allowance they could silently spend again.
+    let mut out = String::new();
+    out.push_str(
+        "# Per-file allowance of underscore fn parameters (`_name: T` / `_: T`).\n\
+         # Auto-managed by build.rs — do NOT hand-edit. The ban is enforced for any\n\
+         # file exceeding its count here; counts ratchet DOWN as sites are cleaned\n\
+         # and are never raised, so new underscore parameters cannot be added\n\
+         # anywhere. A file that reaches zero drops out entirely.\n",
+    );
+    for (file, count) in &next {
+        if *count > 0 {
+            out.push_str(file);
+            out.push('\t');
+            out.push_str(&count.to_string());
+            out.push('\n');
+        }
+    }
+    if fs::read_to_string(&budget_path).ok().as_deref() != Some(out.as_str())
+        && fs::write(&budget_path, out).is_err()
+    {
+        // Non-fatal, same as the probation ledger: a read-only checkout leaves
+        // the budget stale rather than failing the build. The next run retries.
+    }
+    kept
+}
+
 const OVERSIZED_PROBATION_LEDGER_FILENAME: &str = "oversized_history.txt";
 
 /// A file on probation (once >10k lines) must drop below this to be redeemed.
