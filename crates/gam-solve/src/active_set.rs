@@ -1317,14 +1317,46 @@ pub(crate) fn solve_kkt_direction(
             nullity,
         );
     }
-    let zero_active_rhs = Array1::<f64>::zeros(m);
+    // Make the null basis orthogonal to the row space WITHOUT dividing by a
+    // singular value.
+    //
+    // `vt.row(0..rank)` is already an ORTHONORMAL basis of `row(scaled_a)`, so
+    // the row-space component of a column `z` is `sum_i <v_i, z> v_i` and
+    // removing it is Gram-Schmidt against an orthonormal set. In exact
+    // arithmetic that is the same map as the previous correction
+    // (`V Σ⁻¹ Uᵀ (A z)` equals `V Vᵀ z`), but in floating point the two are not
+    // remotely equal: the old form first FORMS `A z` -- catastrophic
+    // cancellation exactly when `z` is nearly in the null space, which is the
+    // only case that matters here -- and then multiplies by `1/σ`, amplifying
+    // whatever survived by `1/σ_min`. On a near-rank-deficient face that is
+    // where the basis loses its accuracy.
+    //
+    // This matters because the reduced Newton solve below zeroes the gradient on
+    // `span(Z)`, while the KKT certificate measures stationarity against the
+    // TRUE tangent, the complement of `row(A)`. If those two subspaces differ,
+    // the solve faithfully zeroes the wrong one and the endpoint is accepted
+    // carrying real tangent mass -- which is what #2592 measures.
+    //
+    // Two passes: one sweep of classical Gram-Schmidt loses orthogonality when
+    // the input is already nearly dependent, and repeating it once is the
+    // standard remedy ("twice is enough").
     for column in 0..nullity {
-        let basis_column = null_basis.column(column).to_owned();
-        let residual =
-            compensated_active_residual(&scaled_a, &zero_active_rhs, &basis_column);
-        let correction =
-            minimum_norm_from_svd(&u, &singular, &vt, rank, &residual);
-        null_basis.column_mut(column).scaled_add(1.0, &correction);
+        for _ in 0..2 {
+            let mut basis_column = null_basis.column(column).to_owned();
+            for index in 0..rank {
+                let projection = vt.row(index).dot(&basis_column);
+                basis_column.scaled_add(-projection, &vt.row(index));
+            }
+            null_basis.column_mut(column).assign(&basis_column);
+        }
+        // Keep the columns unit-scaled so `ZᵀHZ` inherits `H`'s conditioning
+        // rather than the basis's. A column that collapses under the projection
+        // was not independent of the row space to begin with; leave it as the
+        // rank checks above left it rather than amplifying noise.
+        let norm = null_basis.column(column).dot(&null_basis.column(column)).sqrt();
+        if norm.is_finite() && norm > 0.0 {
+            null_basis.column_mut(column).mapv_inplace(|value| value / norm);
+        }
     }
     if !array_is_finite(&null_basis) {
         crate::bail_invalid_estim!(
