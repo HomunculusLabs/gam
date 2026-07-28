@@ -652,7 +652,7 @@ fn main() -> Result<(), String> {
     // sample the distribution it is describing.
     // "sphere" included: d>=2 only started fitting today, and a portfolio figure
     // that silently omits the surfaces shows only the part that already worked.
-    for kind in ["linear", "euclidean", "periodic", "sphere"] {
+    for kind in ["linear", "euclidean", "periodic", "sphere", "torus"] {
         let mut of_kind: Vec<usize> = (0..k_ret)
             .filter(|&a| retained_basis[a] == kind && usage[a] >= 12)
             .collect();
@@ -754,7 +754,7 @@ fn main() -> Result<(), String> {
     for (idx, &a) in picked.iter().enumerate() {
         let toks = &atom_tokens[a];
         let kind = &retained_basis[a];
-        let (lo, hi) = if kind == "periodic" {
+        let (lo, hi) = if kind == "periodic" || kind == "torus" {
             (0.0, 1.0)
         } else {
             let mut lo = f64::INFINITY;
