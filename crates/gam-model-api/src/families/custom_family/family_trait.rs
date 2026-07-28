@@ -699,6 +699,12 @@ pub trait CustomFamily {
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
         );
+        assert!(
+            specs.len() == states.len(),
+            "a family hook received {} block specs for {} block states",
+            specs.len(),
+            states.len()
+        );
         Ok(None)
     }
 
@@ -829,6 +835,12 @@ pub trait CustomFamily {
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
         );
+        assert!(
+            specs.len() == states.len(),
+            "a family hook received {} block specs for {} block states",
+            specs.len(),
+            states.len()
+        );
         Ok(None)
     }
 
@@ -906,6 +918,12 @@ pub trait CustomFamily {
         assert!(
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
+        );
+        assert!(
+            specs.len() == states.len(),
+            "a family hook received {} block specs for {} block states",
+            specs.len(),
+            states.len()
         );
         Ok(None)
     }
@@ -1048,6 +1066,12 @@ pub trait CustomFamily {
         assert!(
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
+        );
+        assert!(
+            specs.len() == states.len(),
+            "a family hook received {} block specs for {} block states",
+            specs.len(),
+            states.len()
         );
         assert_valid_blockspecs(specs, "matrix-free inner-joint preference");
         false
@@ -2024,6 +2048,12 @@ pub trait CustomFamily {
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "block {block} received a NaN coefficient"
         );
+        assert!(
+            specs.len() == states.len(),
+            "block {block} received {} block specs for {} block states",
+            specs.len(),
+            states.len()
+        );
         // Default implementation ignores this parameter.
         Ok(None)
     }
@@ -2044,18 +2074,22 @@ pub trait CustomFamily {
         states: &[ParameterBlockState],
         specs: &[ParameterBlockSpec],
         _: &CustomFamilyHyperLayout,
-        block: usize,
-        block: usize,
+        psi_i: usize,
+        psi_j: usize,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
         // The default does not consult these, but they are still a contract:
         // a NaN coefficient reaching a family hook is a bug in the caller,
-        // and naming the block makes the report attributable (#780 ban).
+        // and naming the psi pair makes the report attributable (#780 ban).
         assert!(
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
-            "block {block} received a NaN coefficient"
+            "psi pair ({psi_i}, {psi_j}) received a NaN coefficient"
         );
-        // Default implementation ignores this parameter.
-        // Default implementation ignores this parameter.
+        assert!(
+            specs.len() == states.len(),
+            "psi pair ({psi_i}, {psi_j}) received {} block specs for {} block states",
+            specs.len(),
+            states.len()
+        );
         Ok(None)
     }
 
@@ -2081,6 +2115,12 @@ pub trait CustomFamily {
         assert!(
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "a family hook received a NaN coefficient"
+        );
+        assert!(
+            specs.len() == states.len(),
+            "a family hook received {} block specs for {} block states",
+            specs.len(),
+            states.len()
         );
         Ok(None)
     }
@@ -2147,6 +2187,12 @@ pub trait CustomFamily {
         assert!(
             states.iter().all(|state| state.beta.iter().all(|v| !v.is_nan())),
             "block {block} received a NaN coefficient"
+        );
+        assert!(
+            specs.len() == states.len(),
+            "block {block} received {} block specs for {} block states",
+            specs.len(),
+            states.len()
         );
         // Default implementation ignores this parameter.
         assert!(arr.iter().all(|v| !v.is_nan()));
