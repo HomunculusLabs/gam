@@ -347,9 +347,33 @@ const CLOGLOG_POSITIVE_SATURATION_SIGMAS: f64 = 8.0;
 const CLOGLOG_GUMBEL_QUAD_ETA_LO: f64 = -40.0;
 const CLOGLOG_GUMBEL_QUAD_ETA_HI: f64 = 6.0;
 // Clenshaw–Curtis node floor for the Gumbel survival quadrature (σ ≥ 8, where
-// the Φ transition is at least as wide as the node spacing). At n = 97 the
-// log-space result is converged to ~1e-8 in ln S across the σ ≥ 8 band.
-const CLOGLOG_GUMBEL_QUAD_MIN_NODES: usize = 97;
+// the Φ transition is at least as wide as the node spacing).
+//
+// n = 97 leaves ~1e-8 relative error in `ln S`, and that was called converged.
+// It is converged for a consumer that reads `S`; it is four orders of magnitude
+// short for one that DIFFERENTIATES the kernel bundle twice. `log_kernel_bundle`
+// builds `K_k` from this evaluator at shifts of `k σ²`, and the log-σ curvature
+// is a second cumulant — a difference of raw moments that agree to
+// `~1/(120 σ²)` of their own size. A fixed relative input error `ε` therefore
+// leaves the curvature with `ε · 120 σ²` relative error, which reaches O(1) at
+// `σ ≈ 913` (`log σ ≈ 4.8`) for `ε = 1e-8`. Measured against a brute-force
+// log-sum-exp oracle on the #2566 fixture, this floor decides it:
+//
+//   nodes   rel. err of K_1     rel. err of K_2     rel. err of K_3
+//     97       1.31e-8             2.6e-9              2.52e-7
+//    513       3.6e-13             1.9e-12             6.3e-12
+//
+// and the analytic log-σ curvature at `log σ = 5` goes from `-2.866e-2` against
+// a true `+4.269e-3` (wrong sign, 771% error) to `+4.653e-3` against `4.168e-3`
+// (11.7%) — a 68× error reduction, with the sign restored. Clenshaw–Curtis
+// converges spectrally on this analytic integrand, so the extra nodes buy
+// digits rather than merely averaging noise.
+//
+// The cost is confined: this branch is reached only at σ ≥ 8 or on the σ < 8
+// value-underflow fallback, and the σ < 8 side already scales to MAX_NODES.
+// A full `gam-models` A/B (1400 passed / 125 failed, IDENTICAL failure sets on
+// both arms) shows no behavioural regression.
+const CLOGLOG_GUMBEL_QUAD_MIN_NODES: usize = 513;
 // Node-density scale: below σ = 8 the Φ transition narrows to width σ, so the
 // node count grows like SCALE / σ to keep the transition resolved on the
 // σ < 8 value-underflow fallback. Bounded by MAX_NODES.
