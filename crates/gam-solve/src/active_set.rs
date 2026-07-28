@@ -1361,11 +1361,40 @@ pub(crate) fn solve_kkt_direction(
         let factor = reduced_hessian
             .cholesky(Side::Lower)
             .map_err(EstimationError::LinearSystemSolveFailed)?;
-        let reduced_solution = factor.solvevec(&reduced_rhs);
+        let mut reduced_solution = factor.solvevec(&reduced_rhs);
         if !array_is_finite(&reduced_solution) {
             crate::bail_invalid_estim!(
                 "null-space constrained quadratic reduced solve is non-finite"
             );
+        }
+        // THIS solve is what makes the endpoint stationary on its face: it sets
+        // `Zᵀ(H beta + g) = 0`, and every downstream KKT certificate depends on
+        // it holding. Its residual was never looked at.
+        //
+        // `Z` comes from an RRQR null-space basis that is itself corrected in a
+        // loop above, so `ZᵀHZ` is a product of three inexact factors; when the
+        // face is close to rank-deficient it is ill-conditioned, and a single
+        // Cholesky substitution returns a `w` whose reduced residual is nowhere
+        // near roundoff. The endpoint then satisfies its active equalities
+        // exactly (that IS certified, two blocks below) and is all-row feasible,
+        // so the walk accepts it -- and the failure only surfaces three frames
+        // later as "failed stationarity certification", where it reads as a
+        // solver mystery rather than an unchecked linear solve.
+        //
+        // Measured (#2592): transformation-normal seed 1 reached that refusal
+        // with `residual=1.600e1` against `gradient_scale=9.908e2`, and the
+        // smallest residual ANY multipliers could achieve was `1.600e1` too --
+        // i.e. the whole 1.6% lived in the face TANGENT, which is precisely the
+        // quantity this solve is responsible for zeroing.
+        //
+        // One step of iterative refinement in the same factorization. It costs a
+        // matvec and a substitution, is the standard remedy for exactly this,
+        // and cannot move a solve that was already exact (its correction is then
+        // zero to roundoff).
+        let reduced_residual = &reduced_rhs - &reduced_hessian.dot(&reduced_solution);
+        let reduced_correction = factor.solvevec(&reduced_residual);
+        if array_is_finite(&reduced_correction) {
+            reduced_solution += &reduced_correction;
         }
         direction += &null_basis.dot(&reduced_solution);
     }
