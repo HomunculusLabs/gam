@@ -1107,6 +1107,45 @@ impl SaeManifoldTerm {
             } else {
                 (self.beta_offsets(), Box::new(move |_: usize| p))
             };
+        // #2604 — sectional curvature enters the criterion ONLY through the
+        // penalty, because a constant-curvature atom's basis is a monomial patch
+        // in the tangent coordinate and carries no κ. So `∂H/∂κ_a = λ_a·∂S_a/∂κ`,
+        // the same shape as the smoothness coordinate's `∂H/∂log λ_a = λ_a·S_a`
+        // with the Gram replaced by its derivative — which is why it slots into
+        // this assembly rather than needing a channel of its own. Every trace,
+        // the penalty energy and the rank-aware log-determinant term are then
+        // derived by the same machinery that already consumes this map.
+        for a in 0..rho.kappa.len().min(self.atoms.len()) {
+            let Some(flat) = rho.kappa_flat_index(a) else {
+                continue;
+            };
+            let atom = &self.atoms[a];
+            let Some(ds) = atom.smooth_penalty_kappa_derivative() else {
+                // An atom whose roughness is not curvature-parameterised has no
+                // κ to move; leaving the coordinate un-assembled is what makes
+                // its gradient entry exactly zero rather than silently wrong.
+                continue;
+            };
+            let m = atom.basis_size();
+            let off = beta_offsets[a];
+            let r = beta_out_dim(a);
+            let lambda = lambda_smooth[a];
+            let c = c_by_flat
+                .entry(flat)
+                .or_insert_with(|| Array2::<f64>::zeros((dim, dim)));
+            for mu in 0..m {
+                for nu in 0..m {
+                    let ds_sym = 0.5 * (ds[[nu, mu]] + ds[[mu, nu]]);
+                    let val = lambda * ds_sym;
+                    if val == 0.0 {
+                        continue;
+                    }
+                    for oc in 0..r {
+                        c[[total_t + off + nu * r + oc, total_t + off + mu * r + oc]] += val;
+                    }
+                }
+            }
+        }
         for a in 0..rho.log_lambda_smooth.len() {
             let atom = &self.atoms[a];
             let s = atom.smooth_penalty();

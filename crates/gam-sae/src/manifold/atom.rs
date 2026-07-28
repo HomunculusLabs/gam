@@ -523,6 +523,15 @@ pub struct SaeManifoldAtom {
     smooth_penalty: Array2<f64>,
     /// Which explicit declaration produced [`Self::smooth_penalty`].
     reference_roughness_kind: SaeReferenceRoughnessKind,
+    /// #2604 — `∂S/∂κ` for a constant-curvature atom, materialised beside `S`
+    /// because both `κ` and the reference coordinates are fixed at construction.
+    /// `None` for every other roughness declaration, which is what makes
+    /// curvature a coordinate only for atoms that actually have one.
+    ///
+    /// Kept here rather than recomputed from stored inputs so the derivative
+    /// cannot drift from the Gram it differentiates: they are produced by one
+    /// call site from one set of coordinates.
+    smooth_penalty_kappa_derivative: Option<Array2<f64>>,
     /// Persisted analytic geometry authority for atoms built by the native
     /// lifecycle. Hand-assembled/precomputed atoms may omit it, but an atom
     /// without this plan cannot be serialized for analytic rebuild or OOS.
@@ -645,6 +654,15 @@ impl SaeManifoldAtom {
 
     pub fn smooth_penalty(&self) -> &Array2<f64> {
         &self.smooth_penalty
+    }
+
+    /// `∂S/∂κ` when this atom's roughness is curvature-parameterised.
+    ///
+    /// This is the ENTIRE κ channel of the criterion: a constant-curvature
+    /// atom's basis is a monomial patch in the tangent coordinate and carries no
+    /// κ, so the design does not move and only the penalty does.
+    pub fn smooth_penalty_kappa_derivative(&self) -> Option<&Array2<f64>> {
+        self.smooth_penalty_kappa_derivative.as_ref()
     }
 
     pub fn reference_roughness_kind(&self) -> SaeReferenceRoughnessKind {
@@ -811,7 +829,8 @@ impl SaeManifoldAtom {
         decoder_coefficients: Array2<f64>,
         reference_roughness: SaeReferenceRoughness,
     ) -> Result<Self, String> {
-        let (smooth_penalty, reference_roughness_kind) = Self::materialize_reference_roughness(
+        let (smooth_penalty, reference_roughness_kind, smooth_penalty_kappa_derivative) =
+            Self::materialize_reference_roughness(
             &basis_kind,
             latent_dim,
             basis_jacobian.view(),
@@ -825,6 +844,7 @@ impl SaeManifoldAtom {
             decoder_coefficients,
             smooth_penalty,
             reference_roughness_kind,
+            smooth_penalty_kappa_derivative,
             basis_jacobian,
             geometry_plan: None,
             basis_evaluator: None,
@@ -874,7 +894,7 @@ impl SaeManifoldAtom {
         latent_dim: usize,
         basis_jacobian: ArrayView3<'_, f64>,
         reference_roughness: SaeReferenceRoughness,
-    ) -> Result<(Array2<f64>, SaeReferenceRoughnessKind), String> {
+    ) -> Result<(Array2<f64>, SaeReferenceRoughnessKind, Option<Array2<f64>>), String> {
         let (n, m, d) = basis_jacobian.dim();
         if d != latent_dim {
             return Err(format!(
@@ -885,6 +905,7 @@ impl SaeManifoldAtom {
             SaeReferenceRoughness::ProvidedFunctionGram(gram) => Ok((
                 Self::validate_reference_function_gram(gram, m, false)?,
                 SaeReferenceRoughnessKind::ProvidedFunctionGram,
+                None,
             )),
             SaeReferenceRoughness::ConstantCurvatureDirichlet {
                 kappa,
@@ -924,9 +945,23 @@ impl SaeManifoldAtom {
                         "SaeManifoldAtom::materialize_reference_roughness: Poincare conformal-Dirichlet Gram failed: {error}"
                     )
                 })?;
+                // Same coordinates, same jacobian, same κ — so the derivative
+                // cannot describe a different Gram than the one beside it.
+                let gram_kappa_derivative =
+                    gam_geometry::constant_curvature_dirichlet_penalty_kappa_derivative(
+                        reference_coords.view(),
+                        basis_jacobian,
+                        kappa,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "SaeManifoldAtom::materialize_reference_roughness: constant-curvature dS/dkappa failed: {error}"
+                        )
+                    })?;
                 Ok((
                     Self::validate_reference_function_gram(gram, m, true)?,
                     SaeReferenceRoughnessKind::ConstantCurvatureDirichlet,
+                    Some(gram_kappa_derivative),
                 ))
             }
         }

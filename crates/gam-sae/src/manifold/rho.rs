@@ -415,6 +415,27 @@ impl SaeManifoldRho {
     ///   per axis, broadcast to all sharing atoms — the chain rule
     ///   `∂/∂log α_j = Σ_{k owns j} ∂/∂log α_{kj}`.
     #[must_use]
+    /// Flat index of atom `k`'s sectional curvature, or `None` when this ρ
+    /// carries no curvature coordinate (the historical case).
+    ///
+    /// Curvature is the LAST tail: after the ARD block and after the crosscoder
+    /// block weights. Computing it as an offset from the end would be brittle
+    /// the next time a tail is appended — the block gradient made exactly that
+    /// mistake — so it is derived forwards from the same prefix arithmetic
+    /// `ard_flat_index` uses.
+    pub fn kappa_flat_index(&self, atom: usize) -> Option<usize> {
+        if atom >= self.kappa.len() {
+            return None;
+        }
+        let k = self.log_lambda_smooth.len();
+        let prefix = self.smooth_flat_start();
+        let ard_len = match self.ard_sharing {
+            ArdSharing::PerAtom => self.log_ard.iter().map(|a| a.len()).sum::<usize>(),
+            ArdSharing::Shared => self.max_ard_axes(),
+        };
+        Some(prefix + k + ard_len + self.log_lambda_block.len() + atom)
+    }
+
     pub fn ard_flat_index(&self, atom: usize, axis: usize) -> usize {
         let k = self.log_lambda_smooth.len();
         let prefix = self.smooth_flat_start();
