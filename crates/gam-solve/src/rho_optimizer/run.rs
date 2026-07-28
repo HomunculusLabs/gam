@@ -2884,6 +2884,16 @@ fn certify_outer_optimality_at_terminal_fidelity(
     // screened candidate of an analytic-Hessian objective fail certification
     // with "declared analytic curvature but returned none at the final point" —
     // a statement about this pass's own eval order, not about the candidate.
+    //
+    // #2596 addendum, and the reason this line is no longer the whole story:
+    // the reservation is sound for the CURVATURE VERDICT (a missing verdict is
+    // permissive) but NOT for the stationarity BOUND, one of whose rungs the
+    // same Hessian owns and where a missing rung is strictly tightening. The
+    // screening pass therefore re-acquires the Hessian, for the bound alone,
+    // when the un-widened band would refuse — see `screening_bound_curvature`
+    // below. That escalation is the reason this boolean can stay
+    // fidelity-gated: it still governs the ORDINARY path, and order four still
+    // costs nothing on any candidate that clears its first-order band.
     let wants_analytic_hessian =
         capability.hessian.is_analytic() && matches!(fidelity, CertificationFidelity::Mint);
     let order = if wants_analytic_hessian {
