@@ -1,4 +1,5 @@
 use super::*;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 pub(crate) const TK_BLOCK_SIZE: usize = 128;
 
@@ -1826,35 +1827,54 @@ impl BlockExcessTarget for Gam784BlockTarget<'_> {
         // replacing `n_draws` separate `fast_av(x_transformed, δ_s)` calls.
         let s_all = gam_linalg::faer_ndarray::fast_ab(self.x_transformed, &delta_all);
 
-        let mut out = Vec::with_capacity(n_draws);
-        let mut delta = Array1::<f64>::zeros(self.block_vecs.nrows());
-        for sidx in 0..n_draws {
-            let s_col = s_all.column(sidx);
-            let mut eta_disp = self.eta_hat.clone();
-            for i in 0..n {
-                eta_disp[i] += s_col[i];
-            }
-            let Ok((scaled_half_deviance, ngs)) = self.likelihood_surface_at(&eta_disp) else {
-                out.push((f64::INFINITY, None));
-                continue;
-            };
-            let neg_loglik_diff = scaled_half_deviance - self.base_scaled_half_deviance;
-            delta.assign(&delta_all.column(sidx));
-            let mut penalty_term = 0.0_f64;
-            for (score, &lam) in self.penalty_scores.iter().zip(self.lambdas.iter()) {
-                penalty_term += lam * score.dot(&delta);
-            }
-            let Ok(curv) = self.observed_quadratic(s_col) else {
-                out.push((f64::INFINITY, None));
-                continue;
-            };
-            let excess = neg_loglik_diff + penalty_term - 0.5 * curv;
-            if excess.is_finite() {
-                out.push((excess, Some(ngs)));
-            } else {
-                out.push((excess, None));
-            }
-        }
+        // Parallelise over DRAWS, which is where the independent work is.
+        //
+        // This loop used to be serial, and each iteration called
+        // `likelihood_surface_at` -> `deviance_eta_rows_with_log_measure_scale`,
+        // which fans out over the `n` rows with `into_par_iter()`. So the outer
+        // dimension (many genuinely independent draws) ran on one thread while
+        // the inner one (a single sweep of ~1e3 cheap rows) paid a fork/join
+        // round on every draw. That is the wrong level: the row sweep is tens of
+        // microseconds of arithmetic, and scheduling it costs the same order.
+        //
+        // Measured on the geo_latlon fuzz family (n=960, p=11, binomial-logit),
+        // where this sampler is 45% of the profile: wall clock RISES with core
+        // count -- 205.0s at 1 core, 264.3s at 4, 304.3s at 16, 555.9s at 32.
+        // More cores made it 2.7x slower, because every additional worker is
+        // another thief splitting a sweep too small to be worth splitting.
+        //
+        // Order is preserved: this is an indexed map into a `Vec`, so draw `s`
+        // still lands at position `s` and the result is bit-identical to the
+        // serial loop. The per-draw `delta` copy replaces the one shared scratch
+        // buffer; it is `p` doubles against a full n-row deviance sweep.
+        let out: Vec<(f64, Option<Array1<f64>>)> = (0..n_draws)
+            .into_par_iter()
+            .map(|sidx| {
+                let s_col = s_all.column(sidx);
+                let mut eta_disp = self.eta_hat.clone();
+                for i in 0..n {
+                    eta_disp[i] += s_col[i];
+                }
+                let Ok((scaled_half_deviance, ngs)) = self.likelihood_surface_at(&eta_disp) else {
+                    return (f64::INFINITY, None);
+                };
+                let neg_loglik_diff = scaled_half_deviance - self.base_scaled_half_deviance;
+                let delta = delta_all.column(sidx).to_owned();
+                let mut penalty_term = 0.0_f64;
+                for (score, &lam) in self.penalty_scores.iter().zip(self.lambdas.iter()) {
+                    penalty_term += lam * score.dot(&delta);
+                }
+                let Ok(curv) = self.observed_quadratic(s_col) else {
+                    return (f64::INFINITY, None);
+                };
+                let excess = neg_loglik_diff + penalty_term - 0.5 * curv;
+                if excess.is_finite() {
+                    (excess, Some(ngs))
+                } else {
+                    (excess, None)
+                }
+            })
+            .collect();
         out
     }
 }
