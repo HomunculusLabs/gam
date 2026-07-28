@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -309,11 +309,18 @@ fn main() -> Result<(), String> {
     // Optional decoder-strategy arg: "fista" runs the accelerated parallel
     // decoder update (6 majorized passes/cycle) instead of the colour-class
     // sweep -- a typed knob for the A/B, never an environment variable.
+    // Optional topology arg: "unroll" arms the occupancy census between
+    // REML rounds (#2502). Opt-in so an A/B pair shares this exact binary.
+    let unroll_arg = args.len() >= 17 && args[16] == "unroll";
+    if unroll_arg {
+        println!("topology unroll: armed");
+    }
     if args.len() >= 16 && args[15] == "fista" {
         term_seed.term.set_decoder_fista_passes(Some(6));
         println!("decoder strategy: FISTA (6 passes/cycle)");
     }
     let mut ard = ard;
+    let mut unrolled_once = false;
     while reml_arg {
         let updated = term_seed
             .term
@@ -393,6 +400,21 @@ fn main() -> Result<(), String> {
         }
         previous_move = move_size;
         lambda = updated;
+        // #2502 occupancy-earned topology, once: unroll loops whose routed
+        // tokens occupy at most half the circle, then let the next inner
+        // solve refit the freed capacity on the arc the data owns. The edf
+        // baseline is reset because converted atoms lawfully jump.
+        if unroll_arg && !unrolled_once {
+            unrolled_once = true;
+            let unrolled = term_seed.term.convert_underoccupied_loops(24, 0.5, 2502)?;
+            if !unrolled.is_empty() {
+                println!(
+                    "topology reroute: unrolled {} under-occupied loops",
+                    unrolled.len()
+                );
+                previous_move = f64::INFINITY;
+            }
+        }
         ard = updated_ard;
         // The same acceptance ladder as the initial solve: a re-solve that
         // misses its cap still holds a usable iterate, and returning Err here

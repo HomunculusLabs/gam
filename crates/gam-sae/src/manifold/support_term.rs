@@ -609,6 +609,138 @@ impl SaeSupportSparseTerm {
         self.atom_rows.iter().map(Vec::len).sum()
     }
 
+    /// #2502 occupancy-earned topology. A periodic atom whose routed tokens
+    /// occupy a small contiguous arc is a bounded curve wearing a circle: the
+    /// empty arc's shape is pure penalty extrapolation, and the closed basis
+    /// spends coefficients enforcing a closure the data never asked for
+    /// (measured: the four strongest loops in a 250k-row fit carry their
+    /// tokens on 10-30% of the circle, always ONE arc through the phase seam).
+    ///
+    /// Census each 1-D periodic atom's phases into `bins`; when the occupied
+    /// fraction is at most `max_occupancy`, rebuild the atom as a Euclidean
+    /// chart through the SAME planner pipeline the seed uses, unwrap every
+    /// routed coordinate through the largest empty gap onto `[-1, 1]`, and
+    /// zero the decoder block so the next decoder sweep refits it against the
+    /// identical routed rows. Support, routing, and every other atom are
+    /// untouched. Returns the converted atom indices.
+    pub fn convert_underoccupied_loops(
+        &mut self,
+        bins: usize,
+        max_occupancy: f64,
+        random_state: u64,
+    ) -> Result<Vec<usize>, String> {
+        let bins = bins.max(8);
+        let mut converted = Vec::new();
+        for atom_index in 0..self.k_atoms() {
+            if self.atom_axis_periods[atom_index].len() != 1 {
+                continue;
+            }
+            let Some(period) = self.atom_axis_periods[atom_index][0] else {
+                continue;
+            };
+            if !(period.is_finite() && period > 0.0) {
+                continue;
+            }
+            let pairs = self.atom_rows[atom_index].clone();
+            if pairs.is_empty() {
+                continue;
+            }
+            let mut occupied = vec![false; bins];
+            let mut fracs = Vec::with_capacity(pairs.len());
+            for &(row, slot) in &pairs {
+                let t = self.assignment.coords_for_slot(row, slot)[0];
+                let frac = (t / period).rem_euclid(1.0);
+                let bin = ((frac * bins as f64) as usize).min(bins - 1);
+                occupied[bin] = true;
+                fracs.push(frac);
+            }
+            let occupancy =
+                occupied.iter().filter(|&&hit| hit).count() as f64 / bins as f64;
+            if occupancy > max_occupancy {
+                continue;
+            }
+            // Longest circular run of empty bins; the occupied arc starts
+            // where that gap ends. The scan is O(bins^2) on a few dozen bins.
+            let mut best_len = 0usize;
+            let mut best_start = 0usize;
+            for start in 0..bins {
+                if occupied[start] {
+                    continue;
+                }
+                let mut len = 0usize;
+                while len < bins && !occupied[(start + len) % bins] {
+                    len += 1;
+                }
+                if len > best_len {
+                    best_len = len;
+                    best_start = start;
+                }
+            }
+            let arc_start = ((best_start + best_len) % bins) as f64 / bins as f64;
+            let arc_len =
+                (1.0 - best_len as f64 / bins as f64).max(1.0 / bins as f64);
+            // Fresh Euclidean atom through the seed's own planner pipeline, so
+            // every downstream shape contract holds by construction.
+            let kind = sae_atom_basis_kind_from_str("euclidean")?;
+            let design_rows = 32usize;
+            let mut plan_seed = ndarray::Array3::<f64>::zeros((1, design_rows, 1));
+            for grid in 0..design_rows {
+                plan_seed[[0, grid, 0]] =
+                    -1.0 + 2.0 * (grid as f64 / (design_rows - 1) as f64);
+            }
+            let dummy_target = Array2::<f64>::zeros((design_rows, 1));
+            let euclidean_basis = ["euclidean".to_string()];
+            let mut plans = sae_build_atom_plans(
+                dummy_target.view(),
+                &euclidean_basis,
+                &[1usize],
+                plan_seed.view(),
+                random_state.wrapping_add(atom_index as u64),
+                &[None],
+            )?;
+            let plan = plans.pop().ok_or_else(|| {
+                "convert_underoccupied_loops: planner returned no plan".to_string()
+            })?;
+            let probe_seed = ndarray::Array3::<f64>::zeros((1, 1, 1));
+            let (phi_stack, jet_stack, penalty_stack, basis_sizes, _) =
+                sae_build_padded_basis_stacks(
+                    std::slice::from_ref(&plan),
+                    probe_seed.view(),
+                    1,
+                )?;
+            let m = basis_sizes[0];
+            let phi = phi_stack.slice(ndarray::s![0, 0..1, 0..m]).to_owned();
+            let jet = jet_stack
+                .slice(ndarray::s![0, 0..1, 0..m, 0..1])
+                .to_owned();
+            let reference = SaeReferenceRoughness::ProvidedFunctionGram(
+                penalty_stack.slice(ndarray::s![0, 0..m, 0..m]).to_owned(),
+            );
+            let evaluator = plan.geometry.build_evaluator()?;
+            let replacement = SaeManifoldAtom::new(
+                format!("{}_unrolled", self.atoms[atom_index].name),
+                kind,
+                1,
+                phi,
+                jet,
+                Array2::<f64>::zeros((m, self.output_dim)),
+                reference,
+            )?
+            .with_basis_second_jet(evaluator)
+            .with_geometry_plan(plan.geometry.clone())?;
+            self.atoms[atom_index] = replacement;
+            self.assignment.convert_atom_to_euclidean(atom_index)?;
+            for (&(row, slot), &frac) in pairs.iter().zip(&fracs) {
+                let unwrapped = (frac - arc_start).rem_euclid(1.0).min(arc_len);
+                let t_new = -1.0 + 2.0 * (unwrapped / arc_len).clamp(0.0, 1.0);
+                self.assignment.set_slot_coords(row, slot, &[t_new])?;
+            }
+            self.atom_axis_periods[atom_index] = vec![None];
+            converted.push(atom_index);
+        }
+        Ok(converted)
+    }
+
     /// Route new rows against this fitted decoder without constructing a
     /// `rows × K` score matrix. Candidate reconstruction improvements are
     /// streamed one atom at a time and only the best `support_k` candidates,

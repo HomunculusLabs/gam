@@ -695,6 +695,82 @@ mod tests {
         }
     }
 
+    /// #2502: a periodic atom whose routed tokens sit on ONE contiguous arc
+    /// (wrapping the phase seam) is a bounded curve wearing a circle. The
+    /// occupancy census must unroll exactly that atom to a Euclidean chart
+    /// with in-range, order-preserving coordinates, and leave the
+    /// fully-occupied loop alone. The assignment is constructed directly so
+    /// the fixture does not depend on seed-time routing luck.
+    #[test]
+    fn under_occupied_loop_unrolls_to_euclidean() {
+        let n = 24usize;
+        let p = 5usize;
+        let k = 2usize;
+        let kind = sae_atom_basis_kind_from_str("periodic").expect("periodic kind");
+        let specs: Vec<SaeAssignmentAtomSpec> = (0..k)
+            .map(|atom| SaeAssignmentAtomSpec {
+                latent_dim: 1,
+                id_mode: gam_terms::latent::LatentIdMode::None,
+                manifold: kind.latent_manifold(1),
+                retraction: gam_problem::LatentRetractionRegistry::all_euclidean(),
+                latent_id: atom as u64 + 1,
+            })
+            .collect();
+        let period = match specs[0].manifold {
+            gam_terms::latent::LatentManifold::Circle { period } => period,
+            ref other => panic!("periodic kind must chart a circle; got {other:?}"),
+        };
+        let indices: Vec<Vec<u32>> = (0..n).map(|_| vec![0u32, 1u32]).collect();
+        let gate_params = vec![vec![1.0_f64, 1.0]; n];
+        // atom 0: one 15% arc THROUGH the seam; atom 1: the full circle.
+        let coords: Vec<Vec<f64>> = (0..n)
+            .map(|row| {
+                let phase = row as f64 / n as f64;
+                let arc = (0.925 + 0.15 * phase).rem_euclid(1.0) * period;
+                vec![arc, phase * period]
+            })
+            .collect();
+        let assignment = SaeAssignmentState::from_topk_support_heterogeneous(
+            n, k, 2, specs, indices, gate_params, coords,
+        )
+        .expect("hand-built sparse state");
+        let mut term = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+            assignment,
+            atom_basis: vec!["periodic".to_string(); k],
+            atom_dim: vec![1usize; k],
+            output_dim: p,
+            random_state: 11,
+        })
+        .expect("term seed")
+        .term;
+        let converted = term
+            .convert_underoccupied_loops(20, 0.5, 3)
+            .expect("census runs");
+        assert_eq!(converted, vec![0], "exactly the arc-bound loop unrolls");
+        assert_eq!(
+            term.assignment.atom_axis_periods(0),
+            vec![None],
+            "the unrolled atom is Euclidean"
+        );
+        assert!(
+            term.assignment.atom_axis_periods(1)[0].is_some(),
+            "the fully-occupied loop keeps its topology"
+        );
+        let mut previous = f64::NEG_INFINITY;
+        for row in 0..n {
+            let t = term.assignment.coords_for_slot(row, 0)[0];
+            assert!(
+                (-1.0..=1.0).contains(&t),
+                "row {row} unwrapped coordinate {t} must lie in the chart"
+            );
+            assert!(
+                t >= previous,
+                "unwrap must preserve arc order through the seam (row {row}: {t} < {previous})"
+            );
+            previous = t;
+        }
+    }
+
     #[test]
     fn k_10000_seed_retains_only_active_support() {
         let target = array![[1.0, -2.0], [0.5, 3.0], [-1.0, 0.25]];

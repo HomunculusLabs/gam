@@ -600,6 +600,62 @@ impl SaeAssignmentState {
         Ok(())
     }
 
+    /// #2502 occupancy-earned topology: retype one atom's coordinate block to
+    /// dimension-generic Euclidean. The caller owns the coordinate remap; this
+    /// method changes ONLY the topology metadata every sparse consumer reads
+    /// through [`Self::atom_axis_periods`] and the retraction registry.
+    pub fn convert_atom_to_euclidean(&mut self, atom: usize) -> Result<(), String> {
+        if atom >= self.k_atoms {
+            return Err(format!(
+                "SaeAssignmentState::convert_atom_to_euclidean: atom {atom} out of range K={}",
+                self.k_atoms
+            ));
+        }
+        let meta = &mut self.atom_coord_meta[atom];
+        meta.manifold = LatentManifold::Euclidean;
+        meta.retraction = LatentRetractionRegistry::all_euclidean();
+        Ok(())
+    }
+
+    /// Overwrite ONE support slot's coordinate block, projecting through the
+    /// atom's manifold exactly as [`Self::set_row_coords`] does for a row.
+    pub fn set_slot_coords(
+        &mut self,
+        row: usize,
+        slot: usize,
+        values: &[f64],
+    ) -> Result<(), String> {
+        if row >= self.n_obs || slot >= self.indices[row].len() {
+            return Err(format!(
+                "SaeAssignmentState::set_slot_coords: row {row} slot {slot} out of range"
+            ));
+        }
+        let atom = self.indices[row][slot] as usize;
+        let width = self.atom_coord_meta[atom].latent_dim;
+        if values.len() != width {
+            return Err(format!(
+                "SaeAssignmentState::set_slot_coords: value width {} != atom width {width}",
+                values.len()
+            ));
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "SaeAssignmentState::set_slot_coords: row {row} slot {slot} non-finite coordinate"
+            ));
+        }
+        let start: usize = self.indices[row][..slot]
+            .iter()
+            .map(|&prior| self.atom_coord_meta[prior as usize].latent_dim)
+            .sum();
+        let candidate = Array1::from_vec(values.to_vec());
+        let projected = self.atom_coord_meta[atom]
+            .manifold
+            .project_point(candidate.view());
+        self.coords[row][start..start + width]
+            .copy_from_slice(projected.as_slice().expect("projection is contiguous"));
+        Ok(())
+    }
+
     pub fn set_row_coords(&mut self, row: usize, values: &[f64]) -> Result<(), String> {
         if row >= self.n_obs {
             return Err(format!(
