@@ -689,9 +689,40 @@ pub(crate) fn run_outer_with_plan(
     if !explicit_initial_rho_owns_single_seed_budget
         && should_screen_seeds(config, the_plan.solver, seeds.len(), seed_budget)
     {
-        seeds = rank_seeds_with_screening(obj, config, context, &seeds).map_err(|error| {
-            EstimationError::fatal_outer_evaluation("outer seed screening", error)
-        })?;
+        // Screening RANKS the seeds; it does not decide whether they can be
+        // used. `rank_seeds_with_screening` says so itself — with no screening
+        // cap configured it returns the seeds unranked and the run proceeds —
+        // so "unranked" is an outcome this code already supports.
+        //
+        // `fatal_outer_evaluation` here overrode that unconditionally, and it
+        // overrode the producer's classification with it. Measured on the
+        // coxph-frailty arm: the refusal reached this line already typed and
+        // already correct (`Custom-family fit failed: inner solve refused this
+        // trial point: …`), `is_trial_point_infeasible()` answered true for it,
+        // and the whole fit died anyway — over a ranking.
+        //
+        // A trial-point refusal at a screening probe means that seed could not
+        // be scored, not that the problem is unfittable. Keep the generated
+        // order and let the seeds be evaluated for real; if the cause is
+        // structural it recurs there and is reported with its own context.
+        // Anything the producer did NOT call rho-local still escalates.
+        let screened = rank_seeds_with_screening(obj, config, context, &seeds);
+        seeds = match screened {
+            Ok(ranked) => ranked,
+            Err(error) if error.is_trial_point_infeasible() => {
+                log::warn!(
+                    "[OUTER] {context}: seed screening could not rank the seeds \
+                     ({error}); continuing with the generated order",
+                );
+                seeds
+            }
+            Err(error) => {
+                return Err(EstimationError::fatal_outer_evaluation(
+                    "outer seed screening",
+                    error,
+                ));
+            }
+        };
     }
     prioritize_neutral_bfgs_glm_seed(
         &mut seeds,
