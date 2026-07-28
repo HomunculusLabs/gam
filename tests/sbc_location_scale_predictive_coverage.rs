@@ -132,7 +132,7 @@ fn read_named_column(path: &Path, name: &str) -> Vec<f64> {
             let rec = rec.expect("prediction row");
             rec[idx]
                 .parse::<f64>()
-                .unwrap_or_else(|_| panic!("non-numeric `{name}` cell: {:?}", &rec[idx]))
+                .unwrap_or_else(|err| panic!("non-numeric `{name}` cell {}: {err}", &rec[idx]))
         })
         .collect()
 }

@@ -903,7 +903,13 @@ impl LatentZRankIntCalibration {
             }
         };
         // Φ⁻¹(p); clip away from {0, 1} to keep the quantile finite.
-        standard_normal_quantile(p).unwrap_or_else(|_| if p < 0.5 { -8.0 } else { 8.0 })
+        standard_normal_quantile(p).unwrap_or_else(|err| {
+            let clipped = if p < 0.5 { -8.0 } else { 8.0 };
+            log::debug!(
+                "standard_normal_quantile({p}) failed ({err}); clipping the latent score to {clipped}"
+            );
+            clipped
+        })
     }
 }
 
@@ -1665,7 +1671,13 @@ pub(crate) fn fit_conditional_latent_calibration_if_needed(
 
     // Sanity-check post-correction moments on the training sample.
     let calibrated = calibration.apply(z.view(), a_block)?;
-    let post_mean = weighted_mean(calibrated.as_slice().unwrap(), weights.view(), total_weight);
+    let post_mean = weighted_mean(
+        calibrated
+            .as_slice()
+            .expect("calibration.apply returns an owned standard-layout 1-D array"),
+        weights.view(),
+        total_weight,
+    );
     let post_var = calibrated
         .iter()
         .zip(weights.iter())

@@ -81,8 +81,8 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
     let target = two_circle_whitened_target(n, p, 0.05);
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let dims = vec![d; k];
-    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).unwrap();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).expect("the PCA seed covers every declared atom basis kind and dim");
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -91,7 +91,7 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -119,7 +119,7 @@ fn two_circle_k2_term(n: usize, p: usize, m: usize) -> (SaeManifoldTerm, Array2<
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         &evaluators,
     )
-    .unwrap();
+    .expect("the fixture assignment blocks match the declared mode");
     (term, target)
 }
 
@@ -144,12 +144,12 @@ pub(crate) fn two_circle_whitened_k2_recovers_disjoint_signal_2027() {
     );
     let loss = term
         .run_joint_fit_arrow_schur(target.view(), &mut rho, None, 60, 0.05, 1.0e-3, 1.0e-3)
-        .unwrap();
+        .expect("the joint arrow-Schur fit converges on this fixture");
     assert!(loss.total().is_finite(), "loss must stay finite");
 
     let ev = term
         .dictionary_reconstruction_ev(target.view(), &rho)
-        .unwrap();
+        .expect("reconstruction EV is defined for a fitted term");
     eprintln!(
         "[#2027 repro] K=2 whitened two-circle EV = {ev:.4}, cocollapse_reseeds = {}",
         term.dictionary_cocollapse_reseeds
@@ -172,7 +172,7 @@ pub(crate) fn sequential_deflation_gives_both_atoms_material_norm_2027() {
     let m = 5usize;
     let (mut term, target) = two_circle_k2_term(n, p, m);
     term.refit_decoder_sequential_deflation(target.view())
-        .unwrap();
+        .expect("sequential deflation refits the fixture decoders");
     let mut norms = [0.0_f64; 2];
     for (atom_idx, atom) in term.atoms.iter().enumerate() {
         norms[atom_idx] = atom
@@ -232,14 +232,14 @@ pub(crate) fn two_circle_separates_at_narrow_and_wide_widths_2027() {
         );
         let loss = term
             .run_joint_fit_arrow_schur(target.view(), &mut rho, None, 60, 0.05, 1.0e-3, 1.0e-3)
-            .unwrap();
+            .expect("the joint arrow-Schur fit converges on this fixture");
         assert!(
             loss.total().is_finite(),
             "p={p}: joint fit must return a finite loss (no thrash / NaN)"
         );
         let ev = term
             .dictionary_reconstruction_ev(target.view(), &rho)
-            .unwrap();
+            .expect("reconstruction EV is defined for a fitted term");
 
         // Per-atom decoder energy split across even vs odd output channels: circle A
         // lives on even channels, circle B on odd.
@@ -322,7 +322,7 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
     }
     assert!(
         term.structural_coherence_collapse_detected()
-            .unwrap()
+            .expect("collapse detection is defined for a fully built term")
             .is_none(),
         "orthogonal-subspace atoms must NOT be flagged as structurally collapsed"
     );
@@ -343,10 +343,10 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
     }
     let shifted_flat: Array1<f64> = shifted.iter().copied().collect();
     term.assignment.coords[1].set_flat(shifted_flat.view());
-    term.atoms[1].refresh_basis(shifted.view()).unwrap();
+    term.atoms[1].refresh_basis(shifted.view()).expect("the atom basis refreshes at the supplied coords");
     assert!(
         term.structural_coherence_collapse_detected()
-            .unwrap()
+            .expect("collapse detection is defined for a fully built term")
             .is_none(),
         "same output subspace with DIFFERENT charts is benign over-completeness and \
          must NOT be flagged (the ordered_beta_bernoulli_default_alpha false positive)"
@@ -360,10 +360,10 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
     term.assignment.coords[1].set_flat(flat0.view());
     term.atoms[1]
         .refresh_basis(term.assignment.coords[1].as_matrix().view())
-        .unwrap();
+        .expect("the atom basis refreshes at the supplied coords");
     let hit = term
         .structural_coherence_collapse_detected()
-        .unwrap()
+        .expect("collapse detection is defined for a fully built term")
         .expect("a true duplicate (identical decoder AND chart) must be flagged");
     assert_eq!((hit.0, hit.1), (0, 1), "the offending pair is (0, 1)");
     assert!(
@@ -383,7 +383,7 @@ pub(crate) fn structural_coherence_detector_fires_on_duplicate_not_orthogonal_20
 fn overcomplete_k3_planar_term(n: usize, p: usize, m: usize, duplicate: bool) -> SaeManifoldTerm {
     let d = 1usize;
     let k = 3usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
     let mut decoder = Array3::<f64>::zeros((k, m, p));
@@ -401,7 +401,7 @@ fn overcomplete_k3_planar_term(n: usize, p: usize, m: usize, duplicate: bool) ->
         for row in 0..n {
             coords[[row, 0]] = ((row as f64) / (n as f64) + phase).rem_euclid(1.0);
         }
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -434,7 +434,7 @@ fn overcomplete_k3_planar_term(n: usize, p: usize, m: usize, duplicate: bool) ->
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         &evaluators,
     )
-    .unwrap()
+    .expect("the fixture assignment blocks match the declared mode")
 }
 
 /// #2132 #2b — an OVERCOMPLETE (`K > R`) true duplicate must be detected. The old
@@ -449,7 +449,7 @@ pub(crate) fn overcomplete_duplicate_is_detected_past_the_k_gt_r_gate_2132() {
     let term = overcomplete_k3_planar_term(96, 4, 5, true);
     let hit = term
         .structural_coherence_collapse_detected()
-        .unwrap()
+        .expect("collapse detection is defined for a fully built term")
         .expect(
             "an overcomplete (K>R) true duplicate must be flagged now that the detector \
              reaches PASS 2 past the K>R gate",
@@ -474,7 +474,7 @@ pub(crate) fn overcomplete_distinct_phases_stay_silent_2132() {
     let term = overcomplete_k3_planar_term(96, 4, 5, false);
     assert!(
         term.structural_coherence_collapse_detected()
-            .unwrap()
+            .expect("collapse detection is defined for a fully built term")
             .is_none(),
         "benign overcomplete pigeonhole sharing (distinct phases) must NOT be flagged"
     );
@@ -514,8 +514,8 @@ fn k2_periodic_term_from_target(target: &Array2<f64>, m: usize) -> SaeManifoldTe
     let k = 2usize;
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let dims = vec![d; k];
-    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).unwrap();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+    let seed = sae_pca_seed_initial_coords(target.view(), &basis_kinds, &dims).expect("the PCA seed covers every declared atom basis kind and dim");
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(m).expect("a periodic harmonic evaluator exists for this odd basis count"));
 
     let mut basis_values = Array3::<f64>::zeros((k, n, m));
     let mut basis_jacobian = Array4::<f64>::zeros((k, n, m, d));
@@ -524,7 +524,7 @@ fn k2_periodic_term_from_target(target: &Array2<f64>, m: usize) -> SaeManifoldTe
     let mut coords_vec: Vec<Array2<f64>> = Vec::new();
     for atom in 0..k {
         let coords = seed.slice(s![atom, .., 0..d]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the periodic evaluator accepts the seeded coordinate block");
         basis_values.slice_mut(s![atom, .., ..]).assign(&phi);
         basis_jacobian.slice_mut(s![atom, .., .., ..]).assign(&jet);
         penalties
@@ -552,7 +552,7 @@ fn k2_periodic_term_from_target(target: &Array2<f64>, m: usize) -> SaeManifoldTe
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
         &evaluators,
     )
-    .unwrap()
+    .expect("the fixture assignment blocks match the declared mode")
 }
 
 /// #2132 births — the SEQUENTIAL-DEFLATION birth reseed must separate co-collapsed
@@ -578,7 +578,7 @@ pub(crate) fn birth_reseed_sequential_deflation_separates_curved_atoms_2132() {
     // so both atoms carry distinct signal and the sequence reseeds both.
     let reseeded = term
         .reseed_curved_atoms_sequential_deflation(&[0, 1], target.view(), &rho)
-        .unwrap();
+        .expect("reseeding is defined for the cold-decoder fixture");
     assert_eq!(
         reseeded,
         vec![0, 1],

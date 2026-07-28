@@ -59,7 +59,7 @@ mod weight_row_index_tests {
         let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
         digits
             .parse()
-            .unwrap_or_else(|_| panic!("no row number after `at row`: {message}"))
+            .unwrap_or_else(|err| panic!("no row number after `at row` ({err}): {message}"))
     }
 
     /// Regression for #1597: a negative weight and a NaN weight at the SAME

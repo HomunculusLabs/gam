@@ -36,9 +36,12 @@ fn main() {
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
     init_parallelism();
-    log::set_logger(&LOGGER)
+    if log::set_logger(&LOGGER)
         .map(|()| log::set_max_level(log::LevelFilter::Info))
-        .ok();
+        .is_err()
+    {
+        eprintln!("a global logger was already installed; leaving it in place");
+    }
 
     let mut ds = load_csvwith_inferred_schema(Path::new(HEART_CSV)).expect("load heart csv");
     let n_full = ds.values.nrows();

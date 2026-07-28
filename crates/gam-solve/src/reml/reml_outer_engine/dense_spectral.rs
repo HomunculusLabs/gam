@@ -122,7 +122,9 @@ impl DenseSpectralOperator {
         let epsilon = if mode == PseudoLogdetMode::PositiveDefinite {
             0.0
         } else {
-            spectral_epsilon(eigenvalues.as_slice().unwrap())
+            spectral_epsilon(eigenvalues.as_slice().ok_or_else(|| {
+                "dense spectral pseudo-logdet: the eigenvalue array is not contiguous".to_string()
+            })?)
         };
 
         // `active[j]` selects which eigenpairs participate in every trace

@@ -68,7 +68,7 @@ fn build_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
                 decoder,
                 Array2::<f64>::eye(2),
             )
-            .unwrap()
+            .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
         })
         .collect();
     let coords: Vec<Array2<f64>> = (0..k)
@@ -83,8 +83,8 @@ fn build_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
         manifolds,
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
-    .unwrap();
-    SaeManifoldTerm::new(atoms, assignment).unwrap()
+    .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
+    SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks")
 }
 
 fn target(n: usize, p: usize) -> Array2<f64> {
@@ -100,8 +100,8 @@ fn behavioral_fisher_identity(n: usize, p: usize) -> RowMetric {
     // probes[row, i, k] = δ_ik (same identity on every row).
     let probes =
         Array3::<f64>::from_shape_fn((n, p, p), |(_, i, k)| if i == k { 1.0 } else { 0.0 });
-    let u = pack_probe_factors(probes.view()).unwrap();
-    RowMetric::behavioral_fisher(Arc::new(u), p, p).unwrap()
+    let u = pack_probe_factors(probes.view()).expect("the fixture's probe matrix is a valid factor block");
+    RowMetric::behavioral_fisher(Arc::new(u), p, p).expect("the fixture's probe factor and dimensions define a behavioral Fisher metric")
 }
 
 /// A genuinely anisotropic `BehavioralFisher` metric: `s = 2` random probes per
@@ -122,8 +122,8 @@ fn behavioral_fisher_anisotropic(n: usize, p: usize) -> RowMetric {
         };
         base + 0.2 * lcg_normal(&mut seed)
     });
-    let u = pack_probe_factors(probes.view()).unwrap();
-    RowMetric::behavioral_fisher(Arc::new(u), p, s).unwrap()
+    let u = pack_probe_factors(probes.view()).expect("the fixture's probe matrix is a valid factor block");
+    RowMetric::behavioral_fisher(Arc::new(u), p, s).expect("the fixture's probe factor and dimensions define a behavioral Fisher metric")
 }
 
 /// GLS preserves REML: at `G = I` the `BehavioralFisher` likelihood-whitening

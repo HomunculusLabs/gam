@@ -63,7 +63,10 @@ fn pca_ev(x: ArrayView2<'_, f32>, rank: usize) -> f64 {
     // eigh returns ascending; sum of top-`rank` over total.
     let total: f64 = evals.iter().sum();
     let mut sorted: Vec<f64> = evals.to_vec();
-    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    sorted.sort_by(|a, b| {
+        b.partial_cmp(a)
+            .expect("eigenvalues of a finite covariance are finite, so the order is total")
+    });
     let top: f64 = sorted.iter().take(rank).sum();
     if total <= 1.0e-24 { 1.0 } else { top / total }
 }
@@ -154,7 +157,11 @@ fn pca_ev_held_out(x_train: ArrayView2<'_, f32>, x_test: ArrayView2<'_, f32>, ra
     let (evals, evecs) = cov.eigh(faer::Side::Lower).expect("pca eig");
     // eigh returns ascending eigenvalues; take the top-`rank` columns.
     let mut order: Vec<usize> = (0..p).collect();
-    order.sort_by(|&a, &b| evals[b].partial_cmp(&evals[a]).unwrap());
+    order.sort_by(|&a, &b| {
+        evals[b]
+            .partial_cmp(&evals[a])
+            .expect("eigenvalues of a finite covariance are finite, so the order is total")
+    });
     let keep: Vec<usize> = order.into_iter().take(rank.min(p)).collect();
     // Project test rows onto the train PCA subspace and reconstruct.
     let nte = x_test.nrows();

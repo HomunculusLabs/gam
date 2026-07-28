@@ -128,7 +128,11 @@ impl<'a> RemlState<'a> {
         synthetic_ext_count: usize,
     ) -> Result<f64, EstimationError> {
         let cost_call_idx = {
-            let mut calls = self.arena.cost_eval_count.write().unwrap();
+            let mut calls = self
+                .arena
+                .cost_eval_count
+                .write()
+                .expect("cost-eval counter lock is never held across a panic");
             *calls += 1;
             *calls
         };
@@ -1877,7 +1881,9 @@ impl<'a> RemlState<'a> {
                 let s_lambda = e_for_logdet.t().dot(e_for_logdet);
                 match s_lambda.eigh(Side::Lower) {
                     Ok((mut evals, _)) => {
-                        let v = evals.as_slice_mut().unwrap();
+                        let v = evals
+                            .as_slice_mut()
+                            .expect("eigh returns an owned standard-layout eigenvalue vector");
                         v.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
                         v.iter()
                             .map(|x| format!("{x:.3e}"))
@@ -2103,7 +2109,8 @@ impl<'a> RemlState<'a> {
         let solution_beta = inner_solution.beta.clone();
         let result = super::assembly::evaluate_solution(
             &inner_solution,
-            rho.as_slice().unwrap(),
+            rho.as_slice()
+                .expect("rho is an owned standard-layout 1-D array"),
             mode,
             prior,
         )
@@ -2198,7 +2205,8 @@ impl<'a> RemlState<'a> {
         let prior = self.build_prior(rho, eval_mode);
         let cost_result = super::assembly::evaluate_solution(
             &inner_solution,
-            rho.as_slice().unwrap(),
+            rho.as_slice()
+                .expect("rho is an owned standard-layout 1-D array"),
             eval_mode,
             prior,
         )
@@ -2241,8 +2249,10 @@ impl<'a> RemlState<'a> {
         let efs_eval = if has_psi {
             let hybrid = compute_hybrid_efs_update(
                 &inner_solution,
-                rho.as_slice().unwrap(),
-                gradient.as_slice().unwrap(),
+                rho.as_slice()
+                    .expect("rho is an owned standard-layout 1-D array"),
+                gradient.as_slice()
+                    .expect("the outer gradient is an owned standard-layout 1-D array"),
             )
             .map_err(EstimationError::InvalidInput)?;
             let psi_gradient = if hybrid.psi_indices.is_empty() {
@@ -2268,8 +2278,10 @@ impl<'a> RemlState<'a> {
         } else {
             let steps = compute_efs_update(
                 &inner_solution,
-                rho.as_slice().unwrap(),
-                gradient.as_slice().unwrap(),
+                rho.as_slice()
+                    .expect("rho is an owned standard-layout 1-D array"),
+                gradient.as_slice()
+                    .expect("the outer gradient is an owned standard-layout 1-D array"),
             )
             .map_err(EstimationError::InvalidInput)?;
             gam_problem::EfsEval {

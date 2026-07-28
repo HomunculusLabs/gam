@@ -127,7 +127,11 @@ mod linux {
             let module = ctx
                 .load_module(ptx)
                 .gpu_ctx_with(|err| format!("{label} module load failed: {err}"))?;
-            self.module.set(module).ok();
+            if self.module.set(module).is_err() {
+                // A concurrent compile of the same label won the race; its
+                // module is already in the slot and is the one we return.
+                log::debug!("{label} module slot already populated by a concurrent compile");
+            }
             Ok(self
                 .module
                 .get()

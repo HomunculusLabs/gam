@@ -86,7 +86,12 @@ fn load_sqrt_dataset(n: usize) -> gam::inference::data::EncodedDataset {
         f.write_all(csv.as_bytes()).expect("write synthetic csv");
     }
     let ds = load_csvwith_inferred_schema(&tmp).expect("load synthetic sqrt data");
-    std::fs::remove_file(&tmp).ok();
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        eprintln!(
+            "warning: could not remove temp csv {}: {err}",
+            tmp.display()
+        );
+    }
     ds
 }
 

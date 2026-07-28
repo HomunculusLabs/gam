@@ -711,7 +711,12 @@ pub(super) fn prepare_standard_latent_coord(
                 .to_string(),
         );
     }
-    let spec = specs.into_iter().next().unwrap();
+    let Some(spec) = specs.into_iter().next() else {
+        return Err(
+            "standard latent-coordinate REML found no latent smooth term to materialize"
+                .to_string(),
+        );
+    };
     if spec.n != data.values.nrows() || spec.n != y.len() {
         return Err(format!(
             "latent '{}' row count {} does not match data rows {}",

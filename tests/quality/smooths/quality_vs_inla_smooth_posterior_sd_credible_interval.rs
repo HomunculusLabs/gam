@@ -237,7 +237,7 @@ fn erf(x: f64) -> f64 {
 /// One-sample Kolmogorov–Smirnov statistic of `samples` against Uniform(0,1).
 fn ks_vs_uniform(samples: &mut [f64]) -> f64 {
     let m = samples.len();
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    samples.sort_by(|a, b| a.total_cmp(b));
     let mut d = 0.0_f64;
     for (k, &u) in samples.iter().enumerate() {
         let f_lo = k as f64 / m as f64;
@@ -297,7 +297,9 @@ fn gam_credible_intervals_are_calibrated_against_truth() {
         let y = simulate(seed, N, SIGMA, &x1, &x2);
         let csv = dataset_csv(&dir, &format!("rep{rep}"), &y, &x1, &x2);
         let (mean, sd) = gam_posterior_mean_sd(&csv, &cfg, N);
-        std::fs::remove_file(&csv).ok();
+        if let Err(err) = std::fs::remove_file(&csv) {
+        eprintln!("warning: temp CSV cleanup failed: {err}");
+    }
 
         // RMSE of the posterior mean against the known truth.
         mean_rmse_acc += rmse(&mean, &eta_true);
@@ -346,7 +348,9 @@ fn gam_credible_intervals_are_calibrated_against_truth() {
              (skipping match-or-beat arm): coverage={coverage:.3} pit_ks={ks:.4} \
              mean_rmse={mean_rmse:.4}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+        eprintln!("warning: temp dir cleanup failed: {err}");
+    }
         // (1) The posterior mean recovers the truth to within the noise level.
         assert!(
             mean_rmse <= SIGMA,
@@ -418,7 +422,9 @@ fn gam_credible_intervals_are_calibrated_against_truth() {
         .line()
     );
 
-    std::fs::remove_dir_all(&dir).ok();
+    if let Err(err) = std::fs::remove_dir_all(&dir) {
+        eprintln!("warning: temp dir cleanup failed: {err}");
+    }
 
     // ---- OBJECTIVE pass criteria -------------------------------------------
     // (1) The posterior mean recovers the truth to within the noise level.

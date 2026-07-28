@@ -374,7 +374,16 @@ fn is_cuda_compute_component(component: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn complete_mapped_cuda_stack(mapped: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    let canonical = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let canonical = |p: &Path| {
+        p.canonicalize().unwrap_or_else(|error| {
+            log::debug!(
+                "cuda stack: cannot canonicalize {}: {error}; \
+                 comparing the path as given",
+                p.display()
+            );
+            p.to_path_buf()
+        })
+    };
 
     let mut candidates = Vec::new();
     for path in mapped {

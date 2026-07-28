@@ -93,9 +93,11 @@ fn main() {
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
     init_parallelism();
-    log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(log::LevelFilter::Info))
-        .ok();
+    // Raise the level only if this call is the one that installed LOGGER;
+    // losing the race means someone else owns the level too.
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
 
     // Positional CLI args: `repro979_survival_margslope [n] [centers]`. Absent
     // args keep the defaults. (Avoids `env::var`, banned by the repo scanner.)

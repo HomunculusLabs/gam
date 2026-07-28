@@ -1142,7 +1142,13 @@ pub fn certify_phase_circuit(
     } else {
         0
     };
-    let transfer_angle = so2_polar_angle(op.view()).ok();
+    let transfer_angle = match so2_polar_angle(op.view()) {
+        Ok(angle) => Some(angle),
+        Err(err) => {
+            log::debug!("pair phase: transfer operator has no SO(2) polar angle: {err}");
+            None
+        }
+    };
     let g = so2_generator();
     let cert = certify_square_transfer(op.view(), g.view(), g.view())?;
 

@@ -1834,9 +1834,15 @@ impl<'a> RemlState<'a> {
                             std::sync::Arc::new(super::reml_outer_engine::ImplicitHyperOperator {
                                 implicit_deriv,
                                 axis,
-                                x_design: x_design_shared.clone().unwrap(),
+                                x_design: x_design_shared.clone().expect(
+                                    "implicit_first is None unless use_implicit, and \
+                                     use_implicit is x_design_shared.is_some()",
+                                ),
                                 w_diag: gam_linalg::matrix::SignedWeightsArc::from_arc(
-                                    w_diag_shared.clone().unwrap(),
+                                    w_diag_shared.clone().expect(
+                                        "w_diag_shared is Some whenever use_implicit, which \
+                                         reaching this implicit_first arm proves",
+                                    ),
                                 ),
                                 s_psi: s_tau_j.clone(),
                                 p: p_dim,

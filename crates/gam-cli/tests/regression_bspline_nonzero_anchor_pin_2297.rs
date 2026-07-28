@@ -38,7 +38,7 @@ fn parse_named_column(csv: &str, name: &str) -> Vec<f64> {
                 .unwrap_or_else(|| panic!("row has a `{name}` cell"))
                 .trim()
                 .parse::<f64>()
-                .unwrap_or_else(|_| panic!("`{name}` cell parses as f64"))
+                .unwrap_or_else(|err| panic!("`{name}` cell does not parse as f64: {err}"))
         })
         .collect()
 }

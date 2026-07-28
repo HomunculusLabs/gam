@@ -187,8 +187,14 @@ pub fn global_policy() -> GpuPolicy {
 /// configuration always sticks even if dispatch code observed the
 /// default `Auto` beforehand.
 pub fn configure_global_policy(policy: GpuPolicy) {
-    // First-writer-wins semantics; ignore a redundant late call.
-    POLICY.set(policy).ok();
+    // First-writer-wins semantics; a late call is ignored, but which policy was
+    // dropped is exactly what explains a process that ran on the wrong backend.
+    if let Err(rejected) = POLICY.set(policy) {
+        log::debug!(
+            "gam-gpu: global policy already configured as {:?}; ignoring the later {rejected:?}",
+            POLICY.get()
+        );
+    }
 }
 
 /// True when direct solver GPU entry points should be attempted.

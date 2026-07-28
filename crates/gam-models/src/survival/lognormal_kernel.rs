@@ -768,7 +768,11 @@ impl LogKernelSumJet {
         }
 
         let get_lb = |m: f64| -> &LogLognormalKernelBundle {
-            &log_bundles.iter().find(|(bm, _)| *bm == m).unwrap().1
+            &log_bundles
+                .iter()
+                .find(|(bm, _)| *bm == m)
+                .expect("the loop above pushes a bundle for every distinct term.m before any lookup")
+                .1
         };
 
         // Per-term: log magnitude, sign, and ratio jet.

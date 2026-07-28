@@ -7604,8 +7604,10 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     // own RESIDUAL_STALL_MIN_CYCLES floor anyway).
                     return false;
                 }
-                let oldest = *merit_window.front().unwrap();
-                let newest = *merit_window.back().unwrap();
+                let (Some(&oldest), Some(&newest)) = (merit_window.front(), merit_window.back())
+                else {
+                    return false;
+                };
                 if !oldest.is_finite() || !newest.is_finite() {
                     return false;
                 }
@@ -7640,13 +7642,15 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 .max(LINEAR_RATE_PROJECTION_CAP);
             let residual_tol_reachable_within_cap = residual_rate_history.len()
                 > LINEAR_RATE_WINDOW
-                && !gam_solve::loop_guard::slow_geometric_rate_exceeds_projection_cap(
-                    residual,
-                    *residual_rate_history.front().unwrap(),
-                    LINEAR_RATE_WINDOW,
-                    residual_tol,
-                    effective_projection_cap,
-                );
+                && residual_rate_history.front().is_some_and(|&oldest| {
+                    !gam_solve::loop_guard::slow_geometric_rate_exceeds_projection_cap(
+                        residual,
+                        oldest,
+                        LINEAR_RATE_WINDOW,
+                        residual_tol,
+                        effective_projection_cap,
+                    )
+                });
             if cycle + 1 >= RESIDUAL_STALL_MIN_CYCLES
                 && cycles_since_residual_improved >= RESIDUAL_STALL_NO_IMPROVE_CYCLES
                 && tr_clamped_during_stall
@@ -7838,7 +7842,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 && (!merit_still_descending_over_window()
                     || cycle + 1 >= RESIDUAL_STALL_MERIT_VETO_MAX_CYCLES)
             {
-                let oldest = *residual_rate_history.front().unwrap();
+                let oldest = *residual_rate_history
+                    .front()
+                    .expect("the guard above requires len > LINEAR_RATE_WINDOW, so the history is non-empty");
                 // Single source of truth for the slow-geometric-rate projection
                 // (gam#979): deterministic cycle-count projection, no wall-clock.
                 // The cap defers to the caller's remaining budget (floored at the

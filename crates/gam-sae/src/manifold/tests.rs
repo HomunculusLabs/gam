@@ -131,15 +131,18 @@ pub(crate) fn trivial_k1_euclidean_term() -> SaeManifoldTerm {
         Array2::<f64>::zeros((2, p)),
         Array2::<f64>::eye(2),
     )
-    .unwrap();
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction");
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((n, 1)),
         vec![Array2::<f64>::zeros((n, 1))],
         vec![LatentManifold::Euclidean],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("term fixture: every atom's row count matches the assignment's")
 }
 
 /// #795 (second root cause) — a BOUNDED low-amplitude flicker of the per-row
@@ -387,9 +390,12 @@ pub(crate) fn circle_certificate_fixture(
 ) -> SaeManifoldTerm {
     let n = 16usize;
     let p = 4usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator =
+        Arc::new(PeriodicHarmonicEvaluator::new(3).expect("3 is a positive harmonic order"));
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| row as f64 / n as f64);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture coordinates lie in the evaluator's domain");
     let mut atoms = Vec::with_capacity(planes.len());
     let mut coord_blocks = Vec::with_capacity(planes.len());
     for (atom_idx, &(axis_sin, axis_cos)) in planes.iter().enumerate() {
@@ -405,7 +411,7 @@ pub(crate) fn circle_certificate_fixture(
             decoder,
             Array2::<f64>::eye(3),
         )
-        .unwrap()
+        .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
         .with_basis_second_jet(evaluator.clone());
         atoms.push(atom);
         coord_blocks.push(coords.clone());
@@ -416,9 +422,13 @@ pub(crate) fn circle_certificate_fixture(
         vec![LatentManifold::Circle { period: 1.0 }; planes.len()],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(atoms, assignment).unwrap();
-    term.set_certificate_dispersion(1.0).unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    let mut term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("term fixture: every atom's row count matches the assignment's");
+    term.set_certificate_dispersion(1.0)
+        .expect("1.0 is a strictly positive certificate dispersion");
     term
 }
 
@@ -1463,17 +1473,11 @@ pub(crate) fn dense_assignment_budget_refuses_without_truncation() {
 struct SnapshotLinearSecondJet2521;
 
 impl SaeBasisEvaluator for SnapshotLinearSecondJet2521 {
-    fn second_jet_dyn(
-        &self,
-        coords: ArrayView2<'_, f64>,
-    ) -> Option<Result<Array4<f64>, String>> {
+    fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
     }
 
-    fn third_jet_dyn(
-        &self,
-        coords: ArrayView2<'_, f64>,
-    ) -> Option<Result<Array5<f64>, String>> {
+    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
         if coords.ncols() != 1 {
             return Some(Err(format!(
                 "SnapshotLinearSecondJet2521: coordinate width {} != 1",
@@ -1483,10 +1487,7 @@ impl SaeBasisEvaluator for SnapshotLinearSecondJet2521 {
         None
     }
 
-    fn evaluate(
-        &self,
-        coords: ArrayView2<'_, f64>,
-    ) -> Result<(Array2<f64>, Array3<f64>), String> {
+    fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
         if coords.ncols() != 1 {
             return Err(format!(
                 "SnapshotLinearSecondJet2521: coordinate width {} != 1",
@@ -1522,7 +1523,9 @@ fn structural_restore_fixture_2521() -> SaeManifoldTerm {
     // rank one while the snapshotted decoder is genuinely 2×6.
     let coords = Array2::<f64>::zeros((4, 1));
     let evaluator = Arc::new(SnapshotLinearSecondJet2521);
-    let (basis, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (basis, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture coordinates lie in the evaluator's domain");
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "rank-reduced-restore",
         SaeAtomBasisKind::Linear,
@@ -1535,7 +1538,7 @@ fn structural_restore_fixture_2521() -> SaeManifoldTerm {
         ],
         Array2::<f64>::eye(2),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_second_jet(evaluator);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::zeros((4, 1)),
@@ -1543,8 +1546,11 @@ fn structural_restore_fixture_2521() -> SaeManifoldTerm {
         vec![LatentManifold::Euclidean],
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, true),
     )
-    .unwrap();
-    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("term fixture: every atom's row count matches the assignment's")
 }
 
 /// #2521 — a mutable-state snapshot is a structural inverse across the #1117
@@ -1554,14 +1560,7 @@ pub(crate) fn snapshot_restore_round_trips_full_and_reduced_atom_topologies_2521
     let mut term = structural_restore_fixture_2521();
     term.atoms[0].decoder_frame = Some(
         GrassmannFrame::from_orthonormal(
-            array![
-                [1.0_f64],
-                [0.0],
-                [0.0],
-                [0.0],
-                [0.0],
-                [0.0]
-            ],
+            array![[1.0_f64], [0.0], [0.0], [0.0], [0.0], [0.0]],
             array![1.0],
         )
         .unwrap(),
@@ -1855,7 +1854,8 @@ pub(crate) fn accepted_iterations_reuse_arrow_and_device_frame_allocations_with_
     term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 1, 0.05, 1.0e-3, 1.0e-3)
         .expect("first accepted nonlinear iteration");
     assert_ne!(
-        term.atoms[0].decoder_coefficients(), decoder_before,
+        term.atoms[0].decoder_coefficients(),
+        decoder_before,
         "first production call must accept a state-changing step"
     );
     let first_row = term
@@ -1920,7 +1920,8 @@ pub(crate) fn accepted_iterations_reuse_arrow_and_device_frame_allocations_with_
     term.run_joint_fit_arrow_schur(target.view(), &mut rho, None, 1, 0.05, 1.0e-3, 1.0e-3)
         .expect("second accepted nonlinear iteration");
     assert_ne!(
-        term.atoms[0].decoder_coefficients(), decoder_before_second,
+        term.atoms[0].decoder_coefficients(),
+        decoder_before_second,
         "second production call must accept a state-changing step"
     );
     let second_row = term
@@ -2050,7 +2051,7 @@ pub(crate) fn small_two_atom_periodic_term() -> (SaeManifoldTerm, Array2<f64>, S
         array![[0.25], [-0.35], [0.15]],
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let atom1 = SaeManifoldAtom::new_with_provided_function_gram(
         "periodic1",
@@ -2061,7 +2062,7 @@ pub(crate) fn small_two_atom_periodic_term() -> (SaeManifoldTerm, Array2<f64>, S
         array![[-0.10], [0.20], [0.30]],
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let logits = array![
         [0.7, -0.2],
@@ -2079,8 +2080,11 @@ pub(crate) fn small_two_atom_periodic_term() -> (SaeManifoldTerm, Array2<f64>, S
         ],
         AssignmentMode::softmax(0.8),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment)
+        .expect("term fixture: every atom's row count matches the assignment's");
     let target = array![[0.12], [-0.03], [0.08], [0.20], [-0.11]];
     let rho = SaeManifoldRho::new(
         (-0.3_f64).exp().ln(),
@@ -2228,7 +2232,7 @@ fn collapse_rescue_term_and_target() -> (SaeManifoldTerm, Array2<f64>, SaeManifo
         array![[0.1, -0.2], [0.05, 0.15], [-0.1, 0.08]],
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     // Softmax K=1 → gate ≡ 1 on every row (no ordered Beta--Bernoulli α to resolve).
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -2237,8 +2241,11 @@ fn collapse_rescue_term_and_target() -> (SaeManifoldTerm, Array2<f64>, SaeManifo
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    let term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("term fixture: every atom's row count matches the assignment's");
     // target_i = mu + s_i · d, an exact affine ramp along d = (0.6, 0.8).
     let s = [-0.5, -0.3, -0.1, 0.1, 0.3, 0.5];
     let mu = [0.2, -0.1];
@@ -2735,10 +2742,14 @@ pub(crate) fn planted_circle_seed_term(
     assignment_mode: PlantedCircleAssignmentMode,
 ) -> (SaeManifoldTerm, f64) {
     let n = z.nrows();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
-    let seed_coords = sae_pca_seed_initial_coords(z, &[SaeAtomBasisKind::Periodic], &[1]).unwrap();
+    let evaluator =
+        Arc::new(PeriodicHarmonicEvaluator::new(3).expect("3 is a positive harmonic order"));
+    let seed_coords = sae_pca_seed_initial_coords(z, &[SaeAtomBasisKind::Periodic], &[1])
+        .expect("one periodic atom of latent dimension 1 is a valid seed request");
     let coords = seed_coords.slice(s![0, .., 0..1]).to_owned();
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the fixture coordinates lie in the evaluator's domain");
     let seed_gate = assignment_mode.seed_gate();
     let gated_phi = &phi * seed_gate;
     let mut xtx = fast_ata(&gated_phi);
@@ -2746,7 +2757,10 @@ pub(crate) fn planted_circle_seed_term(
         xtx[[i, i]] += 1.0e-10;
     }
     let xtz = fast_atb(&gated_phi, &z.to_owned());
-    let decoder = xtx.cholesky(Side::Lower).unwrap().solve_mat(&xtz);
+    let decoder = xtx
+        .cholesky(Side::Lower)
+        .expect("the Gram is ridged by 1e-10 on its diagonal, so it is positive definite")
+        .solve_mat(&xtz);
     let seed_fitted = gated_phi.dot(&decoder);
     let mut rss = 0.0_f64;
     for row in 0..n {
@@ -2765,7 +2779,7 @@ pub(crate) fn planted_circle_seed_term(
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(evaluator);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::from_elem((n, 1), assignment_mode.seed_logit()),
@@ -2773,9 +2787,12 @@ pub(crate) fn planted_circle_seed_term(
         vec![LatentManifold::Circle { period: 1.0 }],
         assignment_mode.mode(),
     )
-    .unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
     (
-        SaeManifoldTerm::new(vec![atom], assignment).unwrap(),
+        SaeManifoldTerm::new(vec![atom], assignment)
+            .expect("term fixture: every atom's row count matches the assignment's"),
         seed_dispersion,
     )
 }
@@ -3012,7 +3029,7 @@ pub(crate) fn small_two_atom_ordered_beta_bernoulli_term()
         array![[0.25], [-0.35], [0.15]],
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let atom1 = SaeManifoldAtom::new_with_provided_function_gram(
         "periodic1",
@@ -3023,7 +3040,7 @@ pub(crate) fn small_two_atom_ordered_beta_bernoulli_term()
         array![[-0.10], [0.20], [0.30]],
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let logits = array![
         [0.7, -0.2],
@@ -3041,8 +3058,11 @@ pub(crate) fn small_two_atom_ordered_beta_bernoulli_term()
         ],
         AssignmentMode::ordered_beta_bernoulli(0.8, 1.0, false),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment).unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    let term = SaeManifoldTerm::new(vec![atom0, atom1], assignment)
+        .expect("term fixture: every atom's row count matches the assignment's");
     let target = array![[0.12], [-0.03], [0.08], [0.20], [-0.11]];
     let rho = SaeManifoldRho::new(
         (-0.3_f64).exp().ln(),
@@ -4508,7 +4528,7 @@ fn planted_topk_sae_term(
                 decoder,
                 Array2::<f64>::eye(2),
             )
-            .unwrap(),
+            .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction"),
         );
         coord_blocks.push(coords.clone());
         manifolds.push(LatentManifold::Euclidean);
@@ -4526,8 +4546,11 @@ fn planted_topk_sae_term(
         manifolds,
         AssignmentMode::top_k_support(planted[0].len()),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    let term = SaeManifoldTerm::new(atoms, assignment)
+        .expect("term fixture: every atom's row count matches the assignment's");
     let target = Array2::<f64>::from_shape_fn((n, p), |(row, c)| 0.05 * ((row + c) as f64).sin());
     (term, target)
 }
@@ -5696,7 +5719,10 @@ pub(crate) fn sae_mechsparsity_beta_block_routes_through_arrow_schur_gb() {
 /// Smoothed sum of singular values of an `m × p` matrix, matching
 /// `NuclearNormPenalty::value` (used by the spectrum-shrinkage assertion).
 pub(crate) fn smoothed_nuclear_norm(decoder: &Array2<f64>, eps: f64) -> f64 {
-    let (_u, s, _vt) = decoder.clone().svd(false, false).unwrap();
+    let (_u, s, _vt) = decoder
+        .clone()
+        .svd(false, false)
+        .expect("the decoder is finite, so its SVD converges");
     s.iter()
         .map(|sigma| (sigma * sigma + eps * eps).sqrt() - eps)
         .sum()
@@ -5869,7 +5895,7 @@ fn hetero_compat_term(d0: usize, d1: usize) -> SaeManifoldTerm {
             Array2::<f64>::zeros((m, p)),
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction")
     };
     let manifold = |d: usize| {
         if d == 1 {
@@ -5884,12 +5910,14 @@ fn hetero_compat_term(d0: usize, d1: usize) -> SaeManifoldTerm {
         vec![manifold(d0), manifold(d1)],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
     SaeManifoldTerm::new(
         vec![make_atom("atom0", d0), make_atom("atom1", d1)],
         assignment,
     )
-    .unwrap()
+    .expect("term fixture: every atom's row count matches the assignment's")
 }
 
 /// #2098 (SPEC-8) / F6 — the heterogeneous-`d_atom` + row-block-penalty guard,
@@ -6015,7 +6043,7 @@ fn ard_atom_and_coord(
         Array2::<f64>::zeros((m, p)),
         Array2::<f64>::eye(m),
     )
-    .unwrap();
+    .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction");
     (atom, manifold, coords)
 }
 

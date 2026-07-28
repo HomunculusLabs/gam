@@ -212,7 +212,9 @@ fn gam_sphere_matches_mgcv_sos_on_geographic_surface() {
     let design = build_term_collection_design(grid.view(), &frozenspec)
         .expect("rebuild frozen sphere design at grid points");
     let gam_surface: Vec<f64> = design.design.apply(&fit.fit.beta).to_vec();
-    std::fs::remove_dir_all(&dir).ok();
+    if let Err(err) = std::fs::remove_dir_all(&dir) {
+        eprintln!("temp reference dir cleanup failed for {}: {err}", dir.display());
+    }
 
     // ---- fit the SAME data with mgcv bs="sos" and predict on the SAME grid --
     // The reference harness requires all data columns to share one length, so we

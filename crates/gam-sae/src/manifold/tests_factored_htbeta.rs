@@ -305,7 +305,7 @@ pub(crate) fn low_rank_factored_htbeta_term(
             decoder,
             Array2::<f64>::eye(m),
         )
-        .unwrap();
+        .expect("atom fixture: basis, jet, decoder and Gram shapes agree by construction");
         atom.maybe_activate_decoder_frame()
             .expect("frame activation")
             .expect("low-rank atom should activate a frame");
@@ -323,8 +323,11 @@ pub(crate) fn low_rank_factored_htbeta_term(
         manifolds,
         AssignmentMode::softmax(0.9),
     )
-    .unwrap();
-    SaeManifoldTerm::new(atoms, assignment).unwrap()
+    .expect(
+        "assignment fixture: logits, coordinate blocks and manifolds agree in block count and rows",
+    );
+    SaeManifoldTerm::new(atoms, assignment)
+        .expect("term fixture: every atom's row count matches the assignment's")
 }
 
 pub(crate) fn factored_htbeta_rho(k_atoms: usize, latent_dim: usize) -> SaeManifoldRho {

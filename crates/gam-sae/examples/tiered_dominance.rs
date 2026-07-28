@@ -27,7 +27,8 @@ use ndarray::Array2;
 use std::time::Instant;
 
 fn main() -> Result<(), String> {
-    env_logger::try_init().ok();
+    // Already-initialised is the only failure and is the intended no-op.
+    drop(env_logger::try_init());
     let args: Vec<String> = std::env::args().collect();
     if !matches!(args.len(), 8 | 9) {
         return Err(

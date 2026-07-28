@@ -1697,7 +1697,7 @@ impl TermCollectionSpec {
                             "{label} term '{}' is not frozen: Matern centers must be UserProvided",
                             st.name
                         ))
-                            .into());
+                        .into());
                     }
                     if spec
                         .length_scale
@@ -3167,7 +3167,10 @@ impl SpatialLogKappaCoords {
     pub fn term_slice(&self, term_idx: usize) -> &[f64] {
         let offset = self.term_offset(term_idx);
         let d = self.dims_per_term[term_idx];
-        &self.values.as_slice().unwrap()[offset..offset + d]
+        &self
+            .values
+            .as_slice()
+            .expect("psi values are an owned contiguous Array1")[offset..offset + d]
     }
 
     pub fn as_array(&self) -> &Array1<f64> {
@@ -4305,7 +4308,11 @@ pub fn sync_aniso_contrasts_from_metadata(spec: &mut TermCollectionSpec, design:
         if let Some(eta) = meta_aniso
             && eta.len() > 1
         {
-            set_spatial_aniso_log_scales(spec, term_idx, eta).ok();
+            if let Err(err) = set_spatial_aniso_log_scales(spec, term_idx, eta) {
+                log::debug!(
+                    "term {term_idx}: anisotropic log-scale sync skipped, keeping the existing scales: {err}"
+                );
+            }
         }
     }
 }
@@ -5541,10 +5548,7 @@ pub fn matern_operator_penalty_triplet_at_length_scale(
         let sym = (&raw + &raw.t()) * 0.5;
         let (matrix, normalization_scale) = normalize_penalty_in_constrained_space(&sym);
         candidates.push(PenaltyCandidate {
-            matrix: ConstructiveQuadratic::try_from_dense_psd(
-                matrix,
-                "Matérn operator penalty",
-            )?,
+            matrix: ConstructiveQuadratic::try_from_dense_psd(matrix, "Matérn operator penalty")?,
             source,
             normalization_scale,
             kronecker_factors: None,
@@ -6228,9 +6232,7 @@ pub fn build_tensor_bspline_basis(
                 .nrows();
             let physical_primary_terms = candidates
                 .iter()
-                .filter(|candidate| {
-                    !matches!(candidate.source, PenaltySource::TensorGlobalRidge)
-                })
+                .filter(|candidate| !matches!(candidate.source, PenaltySource::TensorGlobalRidge))
                 .map(|candidate| {
                     candidate.matrix.scaled(
                         candidate.normalization_scale,
@@ -6246,21 +6248,17 @@ pub fn build_tensor_bspline_basis(
                 if !matches!(candidate.source, PenaltySource::TensorGlobalRidge) {
                     continue;
                 }
-                let physical_ridge = candidate.matrix.scaled(
-                    candidate.normalization_scale,
-                    "physical tensor null ridge",
-                )?;
+                let physical_ridge = candidate
+                    .matrix
+                    .scaled(candidate.normalization_scale, "physical tensor null ridge")?;
                 match crate::basis::rebuild_metric_consistent_ridge(
                     &joint_primary,
                     &physical_ridge,
                 )? {
                     Some(rebuilt) => {
-                        let (_, scale) =
-                            normalize_penalty_in_constrained_space(rebuilt.dense());
-                        candidate.matrix = rebuilt.scaled(
-                            1.0 / scale,
-                            "normalized rebuilt tensor null ridge",
-                        )?;
+                        let (_, scale) = normalize_penalty_in_constrained_space(rebuilt.dense());
+                        candidate.matrix =
+                            rebuilt.scaled(1.0 / scale, "normalized rebuilt tensor null ridge")?;
                         candidate.normalization_scale = scale;
                     }
                     None => {
@@ -6439,7 +6437,6 @@ mod tensor_function_space_runtime_tests {
         assert!(message.contains("non-zero endpoint anchor"));
         assert!(message.contains("explicit model offset"));
     }
-
 }
 
 pub fn tensor_product_design_from_marginals(
@@ -7317,10 +7314,7 @@ pub fn build_pca_smooth_basis(
     let raw_score_gram = gam_linalg::faer_ndarray::fast_ata(&design);
     let penalty = pca_function_mass_penalty(raw_score_gram, design.nrows(), smooth_penalty)?;
     let filtered = filter_penalty_candidates(vec![PenaltyCandidate {
-        matrix: ConstructiveQuadratic::try_from_dense_psd(
-            penalty,
-            "PCA function-mass penalty",
-        )?,
+        matrix: ConstructiveQuadratic::try_from_dense_psd(penalty, "PCA function-mass penalty")?,
         source: PenaltySource::OperatorMass,
         normalization_scale: 1.0,
         kronecker_factors: None,
@@ -8189,8 +8183,7 @@ pub fn build_factor_smooth(
             // level has no zero-deviation fallback that means "population"),
             // and the fit path derives `levels` from this very data, so both
             // stay strict.
-            if matches!(spec.flavour, FactorSmoothFlavour::Re)
-                && spec.group_frozen_levels.is_some()
+            if matches!(spec.flavour, FactorSmoothFlavour::Re) && spec.group_frozen_levels.is_some()
             {
                 continue;
             }
@@ -9557,7 +9550,10 @@ mod factor_smooth_heldout_group_tests {
         }
     }
 
-    fn factor_smooth_term(flavour: FactorSmoothFlavour, frozen: Option<Vec<u64>>) -> SmoothTermSpec {
+    fn factor_smooth_term(
+        flavour: FactorSmoothFlavour,
+        frozen: Option<Vec<u64>>,
+    ) -> SmoothTermSpec {
         SmoothTermSpec {
             name: "fs_heldout".to_string(),
             basis: SmoothBasisSpec::FactorSmooth {
@@ -9638,9 +9634,8 @@ mod linear_term_contract_tests {
 
     #[test]
     fn missing_linear_double_penalty_deserializes_to_unpenalized_mle() {
-        let term: LinearTermSpec =
-            serde_json::from_str(r#"{"name":"x","feature_col":0}"#)
-                .expect("minimal saved linear term");
+        let term: LinearTermSpec = serde_json::from_str(r#"{"name":"x","feature_col":0}"#)
+            .expect("minimal saved linear term");
         assert!(
             !term.double_penalty,
             "descriptor and formula defaults must both preserve parametric MLE semantics"

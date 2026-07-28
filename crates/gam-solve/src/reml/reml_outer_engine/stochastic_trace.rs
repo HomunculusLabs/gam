@@ -613,7 +613,7 @@ impl StochasticTraceEstimator {
         }
 
         self.record_probe_batch(
-            Self::max_probe_variance(m2s.as_slice().unwrap(), n_drawn),
+            Self::max_probe_variance(m2s.as_slice().expect("m2s is a locally allocated contiguous accumulator"), n_drawn),
             n_drawn,
         );
         self.raise_probe_floor(n_drawn);

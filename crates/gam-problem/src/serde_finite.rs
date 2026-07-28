@@ -133,10 +133,9 @@ impl FloatWalker {
 
     fn push_index(&mut self, index: usize) -> usize {
         let restore = self.path.len();
-        // `write!` to a String is infallible; the `Result` is discarded with
-        // `.ok()` rather than `unwrap` so no panic path exists here, and rather
-        // than `let _`, which the ban scanner rejects.
-        write!(self.path, "[{index}]").ok();
+        // `fmt::Write` for `String` never returns `Err`, so this states an
+        // invariant of the sink rather than hiding a failure mode.
+        write!(self.path, "[{index}]").expect("formatting into a String is infallible");
         restore
     }
 
@@ -796,7 +795,7 @@ impl SerializeMap for MapWalker<'_> {
         // verdict) still completes.
         let rendered = key
             .serialize(KeyRenderer)
-            .unwrap_or_else(|_| "<key>".to_string());
+            .unwrap_or_else(|err| format!("<unrenderable key: {err}>"));
         self.restore = Some(self.walker.push_field(&rendered));
         self.entries += 1;
         Ok(())

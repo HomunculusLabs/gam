@@ -5463,6 +5463,8 @@ fn gaussian_reml_fit_blocks_forward<'py>(
 
     let n_rows = designs[0].as_array().nrows();
     let mut col_offsets: Vec<usize> = vec![0];
+    // Running width: the prefix-sum is carried, never re-read off the tail.
+    let mut p_total = 0usize;
     for (i, d) in designs.iter().enumerate() {
         let view = d.as_array();
         if view.nrows() != n_rows {
@@ -5479,9 +5481,9 @@ fn gaussian_reml_fit_blocks_forward<'py>(
                 "designs[{i}][{row},{col}] must be finite; got {value}"
             )));
         }
-        col_offsets.push(col_offsets[i] + view.ncols());
+        p_total += view.ncols();
+        col_offsets.push(p_total);
     }
-    let p_total = *col_offsets.last().unwrap();
     if n_rows == 0 || p_total == 0 {
         return Err(py_value_error(
             "gaussian_reml_fit_blocks_forward requires non-empty rows and at least one coefficient column"

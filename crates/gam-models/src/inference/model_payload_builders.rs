@@ -294,20 +294,33 @@ fn standard_conformal_substrates(
         return (None, None);
     }
     let weights = Array1::<f64>::ones(y.len());
-    let jackknife = crate::inference::full_conformal::GaussianJackknifePlusStats::from_design_unit_weight_normal_matrix(
+    // Either substrate may legitimately decline this design (rank, shape, or a
+    // non-invertible normal matrix). `None` is the contract, but the reason is
+    // what explains a fit that silently ships without conformal intervals.
+    let jackknife = match crate::inference::full_conformal::GaussianJackknifePlusStats::from_design_unit_weight_normal_matrix(
         x.as_ref(),
         &y,
         &weights,
         normal_matrix,
-    )
-    .ok();
-    let full = crate::inference::full_conformal::ExactFullConformalSubstrate::from_design_unit_weight_normal_matrix(
+    ) {
+        Ok(stats) => Some(stats),
+        Err(reason) => {
+            log::debug!("jackknife+ conformal substrate unavailable: {reason}");
+            None
+        }
+    };
+    let full = match crate::inference::full_conformal::ExactFullConformalSubstrate::from_design_unit_weight_normal_matrix(
         x.as_ref(),
         &y,
         &weights,
         normal_matrix,
-    )
-    .ok();
+    ) {
+        Ok(substrate) => Some(substrate),
+        Err(reason) => {
+            log::debug!("exact full-conformal substrate unavailable: {reason}");
+            None
+        }
+    };
     (jackknife, full)
 }
 

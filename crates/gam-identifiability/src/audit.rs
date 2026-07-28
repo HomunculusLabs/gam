@@ -985,7 +985,13 @@ fn audit_identifiability_impl(
             Some(stacked) => stacked
                 .try_to_dense_arc("identifiability::audit stacked_design rank geometry")
                 .map(|arc| std::borrow::Cow::Owned(arc.as_ref().clone()))
-                .unwrap_or_else(|_| std::borrow::Cow::Borrowed(&dense_blocks[idx])),
+                .unwrap_or_else(|error| {
+                    log::debug!(
+                        "identifiability audit: block {idx} stacked design would not \
+                         densify ({error}); using the plain block's rank geometry"
+                    );
+                    std::borrow::Cow::Borrowed(&dense_blocks[idx])
+                }),
             None => std::borrow::Cow::Borrowed(&dense_blocks[idx]),
         })
         .collect();

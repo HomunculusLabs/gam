@@ -87,7 +87,9 @@ fn fit_decoder(
     target: &Array2<f64>,
 ) -> Array2<f64> {
     let coords = Array2::from_shape_fn((t.len(), 1), |(i, _)| t[i]);
-    let (phi, _) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, _) = evaluator
+        .evaluate(coords.view())
+        .expect("the circle evaluator accepts any finite angle column");
     let m = phi.ncols();
     // Normal equations.
     let mut ata = vec![vec![0.0_f64; m]; m];
@@ -115,7 +117,7 @@ fn fit_decoder(
     for col in 0..m {
         let piv = (col..m)
             .max_by(|&a, &b| aug[a][col].abs().total_cmp(&aug[b][col].abs()))
-            .unwrap();
+            .expect("col < m, so the pivot range col..m is non-empty");
         aug.swap(col, piv);
         let d = aug[col][col];
         for v in aug[col].iter_mut() {
@@ -140,7 +142,9 @@ fn reconstruction_ev(
     target: &Array2<f64>,
 ) -> f64 {
     let coords = Array2::from_shape_fn((t.len(), 1), |(i, _)| t[i]);
-    let (phi, _) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, _) = evaluator
+        .evaluate(coords.view())
+        .expect("the circle evaluator accepts any finite angle column");
     let pred = phi.dot(b);
     let mean: Vec<f64> = (0..2)
         .map(|c| target.column(c).sum() / target.nrows() as f64)

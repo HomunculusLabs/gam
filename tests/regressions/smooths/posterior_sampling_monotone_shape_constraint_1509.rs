@@ -109,7 +109,12 @@ fn posterior_draws_of_monotone_smooth_stay_in_the_cone() {
     let csv = monotone_csv(300);
     let path = write_temp_csv(&csv);
     let ds = load_csvwith_inferred_schema(&path).expect("load #1509 csv");
-    std::fs::remove_file(&path).ok();
+    if let Err(error) = std::fs::remove_file(&path) {
+        eprintln!(
+            "#1509: could not remove the temporary csv at {}: {error}",
+            path.display()
+        );
+    }
 
     let (model, design) = saved_monotone_model("y ~ s(x, shape='monotone_increasing')", &ds);
     let p = design.design.ncols();

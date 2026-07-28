@@ -1941,7 +1941,11 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
         .eigh(Side::Lower)
         .map_err(|e| format!("joint penalty subspace eigendecomposition failed: {e}"))?
         .0;
-    let s_threshold = positive_eigenvalue_threshold(s_evals.as_slice().unwrap());
+    let s_threshold = positive_eigenvalue_threshold(
+        s_evals
+            .as_slice()
+            .expect("eigh returns an owned standard-layout eigenvalue vector"),
+    );
     let rank = (0..total).filter(|&j| s_evals[j] > s_threshold).count();
     if rank == 0 {
         return Ok((0.0, None));
@@ -2013,8 +2017,11 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     let (m_evals, m_evecs) = m.eigh(Side::Lower).map_err(|e| {
         format!("joint penalty subspace full Hessian eigendecomposition failed: {e}")
     })?;
-    let m_threshold = positive_eigenvalue_threshold(m_evals.as_slice().unwrap());
-    let logdet = exact_pseudo_logdet(m_evals.as_slice().unwrap(), m_threshold);
+    let m_slice = m_evals
+        .as_slice()
+        .expect("eigh returns an owned standard-layout eigenvalue vector");
+    let m_threshold = positive_eigenvalue_threshold(m_slice);
+    let logdet = exact_pseudo_logdet(m_slice, m_threshold);
     // Full Moore–Penrose pseudo-inverse `M⁺` (drop ker(H+Sλ)) in spectral
     // form: kept eigenvectors as the kernel basis, diag(1/σ) as the reduced
     // kernel. In this basis `h_proj_inverse = (U_Mᵀ M U_M)⁻¹ = diag(1/σ)`

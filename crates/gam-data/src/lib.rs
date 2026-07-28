@@ -587,7 +587,10 @@ fn load_delimited_inferred(
         total_rows += 1;
         for (j, &selected_idx) in selected_indices.iter().enumerate() {
             inference[j].observe(
-                record.get(selected_idx).unwrap().trim(),
+                record
+                    .get(selected_idx)
+                    .expect("record width was checked against the header row above")
+                    .trim(),
                 total_rows,
                 &headers[j],
             )?;
@@ -674,7 +677,10 @@ fn load_delimited_inferred(
             });
         }
         for (j, &selected_idx) in selected_indices.iter().enumerate() {
-            let raw = record.get(selected_idx).unwrap().trim();
+            let raw = record
+                .get(selected_idx)
+                .expect("record width was checked against the header row above")
+                .trim();
             values[[encoded_rows, j]] = match column_kinds[j] {
                 ColumnKindTag::Continuous | ColumnKindTag::Binary => {
                     parse_inferred_numeric_cell(raw, encoded_rows + 1, &headers[j])?
@@ -1034,7 +1040,10 @@ fn load_delimited_with_schema(
             }
             total_rows += 1;
             for j in 0..p {
-                let raw = record.get(selected_indices[j]).unwrap().trim();
+                let raw = record
+                    .get(selected_indices[j])
+                    .expect("record width was checked against the header row above")
+                    .trim();
                 flat_values.push(parse_cell_with_schema(
                     raw,
                     &col_meta[j],
@@ -1100,7 +1109,10 @@ fn load_delimited_with_schema(
         total_rows += 1;
 
         for j in 0..p {
-            let raw = record.get(selected_indices[j]).unwrap().trim();
+            let raw = record
+                    .get(selected_indices[j])
+                    .expect("record width was checked against the header row above")
+                    .trim();
             if needs_inference[j] {
                 inference[j].observe(raw, total_rows, &headers[j])?;
             } else {
@@ -1188,7 +1200,10 @@ fn load_delimited_with_schema(
             });
         }
         for j in 0..p {
-            let raw = record.get(selected_indices[j]).unwrap().trim();
+            let raw = record
+                    .get(selected_indices[j])
+                    .expect("record width was checked against the header row above")
+                    .trim();
             values[[encoded_rows, j]] = if !needs_inference[j] {
                 parse_cell_with_schema(
                     raw,
@@ -1616,7 +1631,10 @@ fn decode_arrow_batch_column_into(
 
     macro_rules! write_primitive {
         ($array_type:ty, $convert:expr) => {{
-            let array = col.as_any().downcast_ref::<$array_type>().unwrap();
+            let array = col
+                .as_any()
+                .downcast_ref::<$array_type>()
+                .expect("array type is the one this `col.data_type()` arm matched");
             write_arrow_numeric_values(
                 array.values().iter().copied().map($convert),
                 base_row,
@@ -1640,7 +1658,10 @@ fn decode_arrow_batch_column_into(
         DataType::UInt16 => write_primitive!(UInt16Array, |value: u16| value as f64),
         DataType::UInt8 => write_primitive!(UInt8Array, |value: u8| value as f64),
         DataType::Boolean => {
-            let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+            let arr = col
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("array type is BooleanArray in the DataType::Boolean arm");
             write_arrow_numeric_values(
                 (0..n_rows).map(|i| if arr.value(i) { 1.0 } else { 0.0 }),
                 base_row,

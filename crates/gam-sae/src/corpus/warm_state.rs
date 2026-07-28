@@ -299,15 +299,18 @@ impl RowWarmCache for DiskRowWarmCache {
         if let Some(store) = self.store.as_ref() {
             let payload = state.serialize();
             let fp = self.row_fingerprint(row_id);
-            store
-                .save(
-                    &fp,
-                    &payload,
-                    None,
-                    Some(u64::from(state.last_inner_iters)),
-                    EntryKind::Final,
-                )
-                .ok();
+            if let Err(err) = store.save(
+                &fp,
+                &payload,
+                None,
+                Some(u64::from(state.last_inner_iters)),
+                EntryKind::Final,
+            ) {
+                // Non-fatal by design (the LRU still holds the seed for this run),
+                // but a disk-side failure has to be observable or a silently
+                // never-persisting store looks identical to a working one.
+                log::debug!("warm-start write-through failed for row {row_id}: {err}");
+            }
         }
     }
 }

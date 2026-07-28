@@ -61,16 +61,17 @@ fn arg_usize(idx: usize, default: usize) -> usize {
 fn main() {
     gam::init_parallelism();
     // Positional argv: `repro_2128 [n] [log_level]`, log_level ∈ {0=info,1=debug}.
-    log::set_logger(&LOGGER)
-        .map(|()| {
+    match log::set_logger(&LOGGER) {
+        Ok(()) => {
             let lvl = if arg_usize(2, 1) >= 1 {
                 log::LevelFilter::Debug
             } else {
                 log::LevelFilter::Info
             };
-            log::set_max_level(lvl)
-        })
-        .ok();
+            log::set_max_level(lvl);
+        }
+        Err(error) => eprintln!("repro_2128: could not install the capture logger: {error}"),
+    }
 
     let n = arg_usize(1, 200);
     let data = build_data(n);

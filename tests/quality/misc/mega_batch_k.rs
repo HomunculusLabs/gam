@@ -23,10 +23,10 @@ fn mk_1d(
     seed: u64,
 ) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(seed);
-    let u = Uniform::new(range.0, range.1).expect("");
-    let noise = Normal::new(0.0, sigma).expect("");
+    let u = Uniform::new(range.0, range.1).expect("mk_1d is called with a finite range whose low < high");
+    let noise = Normal::new(0.0, sigma).expect("caller supplies a finite non-negative noise sigma");
     let mut x: Vec<f64> = (0..n).map(|_| u.sample(&mut rng)).collect();
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let y: Vec<f64> = x.iter().map(|&t| f(t) + noise.sample(&mut rng)).collect();
     let h = ["x", "y"].into_iter().map(String::from).collect();
     let r: Vec<StringRecord> = x
@@ -34,7 +34,7 @@ fn mk_1d(
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    encode_recordswith_inferred_schema(h, r).expect("")
+    encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column")
 }
 
 fn mk_2d(
@@ -46,9 +46,9 @@ fn mk_2d(
     seed: u64,
 ) -> gam::data::EncodedDataset {
     let mut rng = StdRng::seed_from_u64(seed);
-    let ua = Uniform::new(ra.0, ra.1).expect("");
-    let ub = Uniform::new(rb.0, rb.1).expect("");
-    let noise = Normal::new(0.0, sigma).expect("");
+    let ua = Uniform::new(ra.0, ra.1).expect("mk_2d is called with a finite `a` range whose low < high");
+    let ub = Uniform::new(rb.0, rb.1).expect("mk_2d is called with a finite `b` range whose low < high");
+    let noise = Normal::new(0.0, sigma).expect("caller supplies a finite non-negative noise sigma");
     let h = ["a", "b", "y"].into_iter().map(String::from).collect();
     let mut rows = Vec::with_capacity(n);
     for _ in 0..n {
@@ -61,7 +61,7 @@ fn mk_2d(
             y.to_string(),
         ]));
     }
-    encode_recordswith_inferred_schema(h, rows).expect("")
+    encode_recordswith_inferred_schema(h, rows).expect("each fixture record carries one field per header column")
 }
 
 fn fit1d(formula: &str, d: gam::data::EncodedDataset, xs: &[f64]) -> Vec<f64> {
@@ -129,9 +129,9 @@ fn tensor_2d_finite_at_origin() {
 fn sphere_finite_at_pole_predict() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-80.0_f64, 80.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-80.0_f64, 80.0).expect("latitude range -80..80 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -143,7 +143,7 @@ fn sphere_finite_at_pole_predict() {
             (0.5 + 0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=15)", d, &[(90.0, 0.0), (-90.0, 0.0)]);
     assert!(p.iter().all(|v| v.is_finite()));
 }
@@ -221,9 +221,9 @@ fn sphere_recovers_lon_dependent() {
 fn sphere_harmonic_finite_at_pole() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-80.0_f64, 80.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-80.0_f64, 80.0).expect("latitude range -80..80 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -235,7 +235,7 @@ fn sphere_harmonic_finite_at_pole() {
             (0.5 + 0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d(
         "y~sphere(lat,lon,method=harmonic,max_degree=4)",
         d,
@@ -403,9 +403,9 @@ fn bc_clamped_with_truth_zero_at_endpoints() {
 fn sphere_wahba_default_method_is_sobolev() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-80.0_f64, 80.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-80.0_f64, 80.0).expect("latitude range -80..80 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -417,7 +417,7 @@ fn sphere_wahba_default_method_is_sobolev() {
             (0.5 + 0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p_def = fit2d("y~sphere(lat,lon,k=15)", d.clone(), &[(45.0, 0.0)]);
     let p_sob = fit2d("y~sphere(lat,lon,k=15,kernel=sobolev)", d, &[(45.0, 0.0)]);
     assert!((p_def[0] - p_sob[0]).abs() < 1e-9);
@@ -426,9 +426,9 @@ fn sphere_wahba_default_method_is_sobolev() {
 fn sphere_wahba_pseudo_smoke_test() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-80.0_f64, 80.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-80.0_f64, 80.0).expect("latitude range -80..80 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -440,7 +440,7 @@ fn sphere_wahba_pseudo_smoke_test() {
             (0.5 + 0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=15,kernel=pseudo)", d, &[(45.0, 0.0)]);
     assert!(p[0].is_finite());
 }
@@ -488,7 +488,7 @@ fn sphere_grid_data_works() {
             ]));
         }
     }
-    let d = encode_recordswith_inferred_schema(h, rows).expect("");
+    let d = encode_recordswith_inferred_schema(h, rows).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=15)", d, &[(0.0, 0.0)]);
     assert!(p[0].is_finite());
 }
@@ -505,7 +505,7 @@ fn sphere_strict_lat_bound_at_90() {
             "1.0".to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, rows).expect("");
+    let d = encode_recordswith_inferred_schema(h, rows).expect("each fixture record carries one field per header column");
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
@@ -598,9 +598,9 @@ fn te_recovers_zero_truth() {
 #[test]
 fn smooth_handles_one_outlier_high() {
     let mut rng = StdRng::seed_from_u64(7);
-    let noise = Normal::new(0.0, 0.05).expect("");
+    let noise = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let mut x: Vec<f64> = (0..100).map(|i| i as f64 / 99.0).collect();
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let mut y: Vec<f64> = x
         .iter()
         .map(|&t| t.sin() + noise.sample(&mut rng))
@@ -612,16 +612,16 @@ fn smooth_handles_one_outlier_high() {
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit1d("y~s(x,k=10)", d, &[0.5]);
     assert!(p[0].is_finite());
 }
 #[test]
 fn smooth_handles_one_outlier_low() {
     let mut rng = StdRng::seed_from_u64(7);
-    let noise = Normal::new(0.0, 0.05).expect("");
+    let noise = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let mut x: Vec<f64> = (0..100).map(|i| i as f64 / 99.0).collect();
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let mut y: Vec<f64> = x
         .iter()
         .map(|&t| t.sin() + noise.sample(&mut rng))
@@ -633,7 +633,7 @@ fn smooth_handles_one_outlier_low() {
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit1d("y~s(x,k=10)", d, &[0.5]);
     assert!(p[0].is_finite());
 }
@@ -641,9 +641,9 @@ fn smooth_handles_one_outlier_low() {
 fn sphere_with_method_sos_alias() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -655,7 +655,7 @@ fn sphere_with_method_sos_alias() {
             (0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=10,method=sos)", d, &[(0.0, 0.0)]);
     assert!(p[0].is_finite());
 }
@@ -663,9 +663,9 @@ fn sphere_with_method_sos_alias() {
 fn sphere_with_method_mgcv_alias() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -677,7 +677,7 @@ fn sphere_with_method_mgcv_alias() {
             (0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=10,method=mgcv)", d, &[(0.0, 0.0)]);
     assert!(p[0].is_finite());
 }
@@ -716,9 +716,9 @@ fn smooth_k_consistency_check() {
 fn sphere_lat_zero_lon_varies_finite() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -730,7 +730,7 @@ fn sphere_lat_zero_lon_varies_finite() {
             (lon.to_radians().cos() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d(
         "y~sphere(lat,lon,k=15)",
         d,
@@ -741,10 +741,10 @@ fn sphere_lat_zero_lon_varies_finite() {
 #[test]
 fn periodic_handles_negative_offset_data() {
     let mut rng = StdRng::seed_from_u64(7);
-    let u = Uniform::new(-PI, PI).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let u = Uniform::new(-PI, PI).expect("angular range -PI..PI is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let mut t: Vec<f64> = (0..200).map(|_| u.sample(&mut rng)).collect();
-    t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    t.sort_by(|a, b| a.total_cmp(b));
     let y: Vec<f64> = t.iter().map(|&x| x.cos() + no.sample(&mut rng)).collect();
     let h = ["t", "y"].into_iter().map(String::from).collect();
     let r: Vec<StringRecord> = t
@@ -752,7 +752,7 @@ fn periodic_handles_negative_offset_data() {
         .zip(y.iter())
         .map(|(a, b)| StringRecord::from(vec![a.to_string(), b.to_string()]))
         .collect();
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit1d(
         "y~s(t,periodic=true,period=6.283185307179586,origin=-3.141592653589793)",
         d,
@@ -820,9 +820,9 @@ fn sphere_consistent_across_seeds() {
     let mut p_vals = Vec::new();
     for seed in [3u64, 7, 11] {
         let mut rng = StdRng::seed_from_u64(seed);
-        let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-        let un = Uniform::new(-179.0_f64, 179.0).expect("");
-        let no = Normal::new(0.0, 0.05).expect("");
+        let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+        let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+        let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
         let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
         let mut r = Vec::with_capacity(200);
         for _ in 0..200 {
@@ -834,7 +834,7 @@ fn sphere_consistent_across_seeds() {
                 (0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
             ]));
         }
-        let d = encode_recordswith_inferred_schema(h, r).expect("");
+        let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
         p_vals.push(fit2d("y~sphere(lat,lon,k=15)", d, &[(45.0, 0.0)])[0]);
     }
     let max = p_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -863,9 +863,9 @@ fn periodic_predictions_smooth_across_grid() {
 fn sphere_predictions_smooth_along_lat_band() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(200);
     for _ in 0..200 {
@@ -877,7 +877,7 @@ fn sphere_predictions_smooth_along_lat_band() {
             (0.5 + 0.3 * lat.to_radians().sin() + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let pts: Vec<(f64, f64)> = (0..30)
         .map(|i| (-70.0 + 140.0 * (i as f64) / 29.0, 0.0))
         .collect();
@@ -896,9 +896,9 @@ fn smooth_with_large_data_count_finishes() {
 fn sphere_with_minimum_basis_finite() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["lat", "lon", "y"].into_iter().map(String::from).collect();
     let mut r = Vec::with_capacity(100);
     for _ in 0..100 {
@@ -910,7 +910,7 @@ fn sphere_with_minimum_basis_finite() {
             (0.5 + no.sample(&mut rng)).to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let p = fit2d("y~sphere(lat,lon,k=5)", d, &[(0.0, 0.0)]);
     assert!(p[0].is_finite());
 }
@@ -934,11 +934,11 @@ fn periodic_with_k_equal_basis_minimum() {
 fn all_smooth_families_in_one_formula() {
     init_parallelism();
     let mut rng = StdRng::seed_from_u64(7);
-    let ux = Uniform::new(0.0_f64, 1.0).expect("");
-    let ut = Uniform::new(0.0_f64, TAU).expect("");
-    let ul = Uniform::new(-70.0_f64, 70.0).expect("");
-    let un = Uniform::new(-179.0_f64, 179.0).expect("");
-    let no = Normal::new(0.0, 0.05).expect("");
+    let ux = Uniform::new(0.0_f64, 1.0).expect("unit range 0..1 is non-empty and finite");
+    let ut = Uniform::new(0.0_f64, TAU).expect("angular range 0..TAU is non-empty and finite");
+    let ul = Uniform::new(-70.0_f64, 70.0).expect("latitude range -70..70 is non-empty and finite");
+    let un = Uniform::new(-179.0_f64, 179.0).expect("longitude range -179..179 is non-empty and finite");
+    let no = Normal::new(0.0, 0.05).expect("noise sigma 0.05 is finite and non-negative");
     let h = ["x", "theta", "lat", "lon", "y"]
         .into_iter()
         .map(String::from)
@@ -958,7 +958,7 @@ fn all_smooth_families_in_one_formula() {
             y.to_string(),
         ]));
     }
-    let d = encode_recordswith_inferred_schema(h, r).expect("");
+    let d = encode_recordswith_inferred_schema(h, r).expect("each fixture record carries one field per header column");
     let cfg = FitConfig {
         family: Some("gaussian".to_string()),
         ..FitConfig::default()
@@ -972,8 +972,10 @@ fn all_smooth_families_in_one_formula() {
     let FitResult::Standard(fit) = result else {
         panic!()
     };
-    let m = Array2::<f64>::from_shape_vec((1, 5), vec![0.5, 0.0, 0.0, 0.0, 0.0]).expect("");
-    let dsg = build_term_collection_design(m.view(), &fit.resolvedspec).expect("");
+    let m = Array2::<f64>::from_shape_vec((1, 5), vec![0.5, 0.0, 0.0, 0.0, 0.0])
+        .expect("five values exactly fill the 1x5 probe row");
+    let dsg = build_term_collection_design(m.view(), &fit.resolvedspec)
+        .expect("probe row has the column layout the fitted spec was resolved against");
     let p = dsg.design.apply(&fit.fit.beta);
     assert!(p[0].is_finite());
 }

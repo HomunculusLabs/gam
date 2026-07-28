@@ -18,6 +18,13 @@
 //! it verifies the criterion's shape; production selection stays REML through
 //! the outer engine (no grid search in production).
 
+// `manifold/mod.rs` declares this module as
+// `#[cfg(test)] mod tests_crosscoder_rho_2231;` — its single declaration. Saying so in-file
+// makes the test scope a claim the compiler enforces rather than one the
+// filename merely implies, which is what puts the fixture helpers below in
+// the same scope as the `#[test]` fns they serve.
+#![cfg(test)]
+
 use super::*;
 use gam_solve::rho_optimizer::OuterObjective;
 use gam_terms::latent::LatentManifold;

@@ -519,7 +519,9 @@ mod tests {
         assert_eq!(batch.row_ids, vec![0, 1, 2]);
         assert_eq!(batch.rows, data);
         assert!(src.next_batch().expect("end").is_none());
-        std::fs::remove_file(&path).ok();
+        if let Err(err) = std::fs::remove_file(&path) {
+            eprintln!("temp shard cleanup failed for {}: {err}", path.display());
+        }
     }
 
     #[test]
@@ -540,8 +542,12 @@ mod tests {
         }
         assert_eq!(all_ids, vec![0, 1, 2, 3, 4]);
         assert_eq!(all_vals, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        std::fs::remove_file(&pa).ok();
-        std::fs::remove_file(&pb).ok();
+        if let Err(err) = std::fs::remove_file(&pa) {
+            eprintln!("temp shard cleanup failed for {}: {err}", pa.display());
+        }
+        if let Err(err) = std::fs::remove_file(&pb) {
+            eprintln!("temp shard cleanup failed for {}: {err}", pb.display());
+        }
     }
 
     #[test]
@@ -565,7 +571,9 @@ mod tests {
             ids
         };
         assert_eq!(first, second);
-        std::fs::remove_file(&path).ok();
+        if let Err(err) = std::fs::remove_file(&path) {
+            eprintln!("temp shard cleanup failed for {}: {err}", path.display());
+        }
     }
 
     #[test]
@@ -577,9 +585,12 @@ mod tests {
         ));
         let mut f = File::create(&path).expect("create");
         f.write_all(&[0u8; 64]).expect("write");
-        f.sync_all().ok();
+        f.sync_all()
+            .expect("the bad-magic bytes must be on disk before the reader opens them");
         let err = MmapShardSource::open(&[path.clone()]);
         assert!(matches!(err, Err(ShardError::BadMagic { .. })));
-        std::fs::remove_file(&path).ok();
+        if let Err(err) = std::fs::remove_file(&path) {
+            eprintln!("temp shard cleanup failed for {}: {err}", path.display());
+        }
     }
 }

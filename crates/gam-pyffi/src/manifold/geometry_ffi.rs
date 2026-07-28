@@ -7679,7 +7679,7 @@ fn json_level_to_f64(value: &serde_json::Value) -> Result<f64, String> {
 }
 
 fn compact_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
+    serde_json::to_string(value).unwrap_or_else(|error| format!("<unserializable: {error}>"))
 }
 
 fn random_effect_penalty_index(spec: &TermCollectionSpec, term_idx: usize) -> usize {

@@ -492,7 +492,9 @@ mod tests {
         let (ids_again, vals_again) = drain(&mut remote);
         assert_eq!(ids_again, ids_r);
         assert_eq!(vals_again, vals_r);
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+        }
     }
 
     /// A store wrapper that counts whole-shard fetches and asserts the
@@ -562,7 +564,9 @@ mod tests {
         assert_eq!(ids, vec![1, 2, 3, 4, 5]);
         let fetched = store.payload_fetches.lock().unwrap();
         assert_eq!(fetched.len(), 6, "each shard payload fetched exactly once");
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+        }
     }
 
     #[test]
@@ -589,6 +593,8 @@ mod tests {
         let store = Arc::new(FsObjectStore::new(dir.clone()));
         let err = ObjectStoreShardSource::open(store);
         assert!(matches!(err, Err(ShardError::WidthMismatch { .. })));
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            eprintln!("temp object store cleanup failed for {}: {err}", dir.display());
+        }
     }
 }

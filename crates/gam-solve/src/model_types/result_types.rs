@@ -382,7 +382,11 @@ mod per_term_edf_tests {
         // The defect: the last by-level smooth's trace window runs off the end of
         // `penalty_block_trace` (len = n_levels) and collapses to 0 EDF.
         assert!(
-            buggy_edfs.last().copied().unwrap() <= tol,
+            buggy_edfs
+                .last()
+                .copied()
+                .expect("the loop above pushed at least one EDF")
+                <= tol,
             "expected the buggy cursor to zero the last level's EDF, got {:?}",
             buggy_edfs
         );
@@ -451,7 +455,11 @@ mod per_term_edf_tests {
             buggy_edfs.push(edf);
         }
         assert!(
-            buggy_edfs.last().copied().unwrap() <= tol,
+            buggy_edfs
+                .last()
+                .copied()
+                .expect("the loop above pushed at least one EDF")
+                <= tol,
             "the penalized-only cursor must zero the last level's EDF, got {buggy_edfs:?}"
         );
 
@@ -3987,15 +3995,15 @@ impl UnifiedFitResult {
         // does not enter the covariance, so a d.f. change leaves `Vb`/`Vp`
         // untouched. When there is no inference block there is nothing whose
         // dispersion could be estimated, so treat it as fixed and bail.
-        if !self
-            .inference
-            .as_ref()
-            .is_some_and(|inference| inference.dispersion.is_estimated())
-        {
+        let Some(dispersion) = self.inference.as_ref().map(|inference| inference.dispersion)
+        else {
+            return Ok(1.0);
+        };
+        if !dispersion.is_estimated() {
             return Ok(1.0);
         }
         let sigma_ratio = var_ratio.sqrt();
-        let mut rescaled_dispersion = self.inference.as_ref().unwrap().dispersion;
+        let mut rescaled_dispersion = dispersion;
         rescaled_dispersion
             .rescale_estimate(var_ratio)
             .map_err(|err| EstimationError::InvalidInput(err.to_string()))?;

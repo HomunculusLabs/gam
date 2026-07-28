@@ -8,21 +8,27 @@ impl<'a> RemlState<'a> {
     pub(crate) fn ift_quality_step_cap(&self, default_cap: f64) -> f64 {
         self.ift_quality_runtime
             .lock()
-            .unwrap()
+            .expect("IFT quality runtime mutex poisoned")
             .next_step_cap
             .filter(|cap| cap.is_finite() && *cap > 0.0)
             .unwrap_or(default_cap)
     }
 
     pub(crate) fn take_ift_quality_flat_override(&self) -> bool {
-        let mut state = self.ift_quality_runtime.lock().unwrap();
+        let mut state = self
+            .ift_quality_runtime
+            .lock()
+            .expect("IFT quality runtime mutex poisoned");
         let fallback = state.fallback_next_flat;
         state.fallback_next_flat = false;
         fallback
     }
 
     pub(crate) fn clear_ift_quality_runtime_state(&self) {
-        *self.ift_quality_runtime.lock().unwrap() = Default::default();
+        *self
+            .ift_quality_runtime
+            .lock()
+            .expect("IFT quality runtime mutex poisoned") = Default::default();
     }
 
     pub(crate) fn record_ift_prediction_quality(
@@ -33,7 +39,10 @@ impl<'a> RemlState<'a> {
         if !quality.is_finite() || quality < 0.0 || !current_cap.is_finite() || current_cap <= 0.0 {
             return None;
         }
-        let mut state = self.ift_quality_runtime.lock().unwrap();
+        let mut state = self
+            .ift_quality_runtime
+            .lock()
+            .expect("IFT quality runtime mutex poisoned");
         state.quality_history.push(quality);
         while state.quality_history.len() > IFT_QUALITY_HISTORY_CAP {
             state.quality_history.remove(0);
@@ -53,13 +62,19 @@ impl<'a> RemlState<'a> {
     }
 
     pub(crate) fn reset_hypergradient_budget_controller(&self) {
-        *self.hypergradient_runtime.lock().unwrap() = None;
+        *self
+            .hypergradient_runtime
+            .lock()
+            .expect("hypergradient runtime mutex poisoned") = None;
     }
 
     pub(crate) fn hypergradient_trace_state(
         &self,
     ) -> Arc<Mutex<super::reml_outer_engine::StochasticTraceState>> {
-        let mut slot = self.hypergradient_runtime.lock().unwrap();
+        let mut slot = self
+            .hypergradient_runtime
+            .lock()
+            .expect("hypergradient runtime mutex poisoned");
         let state = slot.get_or_insert_with(HyperGradientRuntimeState::new);
         Arc::clone(&state.trace_state)
     }
@@ -83,7 +98,7 @@ impl<'a> RemlState<'a> {
         let tau = self
             .hypergradient_runtime
             .lock()
-            .unwrap()
+            .expect("hypergradient runtime mutex poisoned")
             .as_ref()?
             .adaptive_kkt_override?;
         if !tau.is_finite() || tau <= 0.0 {
@@ -114,7 +129,10 @@ impl<'a> RemlState<'a> {
             return;
         }
 
-        let mut slot = self.hypergradient_runtime.lock().unwrap();
+        let mut slot = self
+            .hypergradient_runtime
+            .lock()
+            .expect("hypergradient runtime mutex poisoned");
         let state = slot.get_or_insert_with(HyperGradientRuntimeState::new);
         let (e_linear, sigma_sq, k, current_floor) = {
             let trace = match state.trace_state.lock() {
@@ -296,9 +314,14 @@ impl<'a> RemlState<'a> {
         // precompute in sync with the polished coefficient vector.
         self.warm_start_beta
             .write()
-            .unwrap()
+            .expect("warm-start beta lock poisoned")
             .replace(Coefficients::new(beta_original.clone()));
-        if self.ift_warm_start_cache.read().unwrap().is_some() {
+        if self
+            .ift_warm_start_cache
+            .read()
+            .expect("IFT warm-start cache lock poisoned")
+            .is_some()
+        {
             let lambda_s_beta_blocks = {
                 use rayon::prelude::*;
                 let blocks: Vec<ndarray::Array1<f64>> = self
@@ -313,7 +336,12 @@ impl<'a> RemlState<'a> {
                     .collect();
                 (!blocks.is_empty()).then_some(blocks)
             };
-            if let Some(cache) = self.ift_warm_start_cache.write().unwrap().as_mut() {
+            if let Some(cache) = self
+                .ift_warm_start_cache
+                .write()
+                .expect("IFT warm-start cache lock poisoned")
+                .as_mut()
+            {
                 cache.beta_original = beta_original.clone();
                 cache.lambda_s_beta_blocks = lambda_s_beta_blocks;
             }
@@ -434,7 +462,7 @@ impl<'a> RemlState<'a> {
         self.cache_manager
             .current_eval_bundle
             .read()
-            .unwrap()
+            .expect("current outer-eval bundle lock poisoned")
             .as_ref()
             .map(|bundle| bundle.ridge_passport.delta())
     }
@@ -584,8 +612,12 @@ impl<'a> RemlState<'a> {
             && self.kronecker_factored.is_some()
             && kron.num_penalties() == rho.len()
         {
-            let (logdet, rank, det1, det2) =
-                kron.logdet_rank_and_derivatives(lambdas.as_slice().unwrap(), ridge);
+            let (logdet, rank, det1, det2) = kron.logdet_rank_and_derivatives(
+                lambdas
+                    .as_slice()
+                    .expect("lambdas is an owned contiguous Array1"),
+                ridge,
+            );
             (rank, logdet, det1, det2)
         } else if !self.canonical_penalties.is_empty()
             && self.canonical_penalties.len() == rho.len()
@@ -3033,7 +3065,11 @@ impl<'a> RemlState<'a> {
 
     pub(crate) fn invalidate_link_dependent_state(&self) {
         self.cache_manager.clear_eval_and_factor_caches();
-        self.cache_manager.pirls_cache.write().unwrap().clear();
+        self.cache_manager
+            .pirls_cache
+            .write()
+            .expect("PIRLS result cache lock poisoned")
+            .clear();
         // Under a link change the previous link's working-weight
         // curvature differs from the new link's, so the previous
         // solve's β / H_pen / Cholesky factor / damping / iter-count
@@ -3059,12 +3095,30 @@ impl<'a> RemlState<'a> {
     /// invalidation boundary and produce β-drift regressions
     /// (caught by `tests/warm_start_quality_regression.rs`).
     pub(crate) fn clear_warm_start_predictor_state(&self) {
-        self.warm_start_beta.write().unwrap().take();
-        self.warm_start_rho.write().unwrap().take();
-        self.prev_warm_start_beta.write().unwrap().take();
-        self.prev_warm_start_rho.write().unwrap().take();
-        self.ift_warm_start_cache.write().unwrap().take();
-        self.ift_cached_factor.write().unwrap().take();
+        self.warm_start_beta
+            .write()
+            .expect("warm-start beta lock poisoned")
+            .take();
+        self.warm_start_rho
+            .write()
+            .expect("warm-start rho lock poisoned")
+            .take();
+        self.prev_warm_start_beta
+            .write()
+            .expect("previous warm-start beta lock poisoned")
+            .take();
+        self.prev_warm_start_rho
+            .write()
+            .expect("previous warm-start rho lock poisoned")
+            .take();
+        self.ift_warm_start_cache
+            .write()
+            .expect("IFT warm-start cache lock poisoned")
+            .take();
+        self.ift_cached_factor
+            .write()
+            .expect("IFT cached factor lock poisoned")
+            .take();
         self.clear_ift_mode_response_cache();
     }
 
@@ -3073,11 +3127,17 @@ impl<'a> RemlState<'a> {
     }
 
     pub(crate) fn clear_joint_ift_mode_response_cache(&self) {
-        *self.ift_joint_mode_response_slot.lock().unwrap() = None;
+        *self
+            .ift_joint_mode_response_slot
+            .lock()
+            .expect("IFT joint mode-response slot mutex poisoned") = None;
     }
 
     pub(crate) fn clear_ift_mode_response_cache(&self) {
-        *self.ift_mode_response_slot.lock().unwrap() = None;
+        *self
+            .ift_mode_response_slot
+            .lock()
+            .expect("IFT mode-response slot mutex poisoned") = None;
     }
 
     pub(crate) fn mode_response_cols_for_warm_start(
@@ -3131,7 +3191,10 @@ impl<'a> RemlState<'a> {
         }
         let rho_col_count = rho_cols.as_ref().map_or(0, Array2::ncols);
         let ext_col_count = ext_cols.as_ref().map_or(0, Array2::ncols);
-        *self.ift_mode_response_slot.lock().unwrap() = Some(IftModeResponseRuntimeCache {
+        *self
+            .ift_mode_response_slot
+            .lock()
+            .expect("IFT mode-response slot mutex poisoned") = Some(IftModeResponseRuntimeCache {
             rho: rho.clone(),
             rho_mode_response_cols: rho_cols.clone(),
             ext_mode_response_cols: ext_cols.clone(),
@@ -3203,7 +3266,10 @@ impl<'a> RemlState<'a> {
             self.clear_joint_ift_mode_response_cache();
             return;
         }
-        *self.ift_joint_mode_response_slot.lock().unwrap() =
+        *self
+            .ift_joint_mode_response_slot
+            .lock()
+            .expect("IFT joint mode-response slot mutex poisoned") =
             Some(IftJointModeResponseRuntimeCache {
                 theta,
                 rho_dim: rho.len(),
@@ -3223,7 +3289,10 @@ impl<'a> RemlState<'a> {
         &self,
         cache: &super::IftWarmStartCache,
     ) -> Option<Array2<f64>> {
-        let guard = self.ift_mode_response_slot.lock().unwrap();
+        let guard = self
+            .ift_mode_response_slot
+            .lock()
+            .expect("IFT mode-response slot mutex poisoned");
         let cached = guard.as_ref()?;
         if cached.rho.len() != cache.rho.len()
             || cached
@@ -3255,7 +3324,10 @@ impl<'a> RemlState<'a> {
     ) -> Option<(Coefficients, IftPredictionOutcome)> {
         let theta = self.pending_joint_ift_theta()?;
         let cache = {
-            let guard = self.ift_joint_mode_response_slot.lock().unwrap();
+            let guard = self
+                .ift_joint_mode_response_slot
+                .lock()
+                .expect("IFT joint mode-response slot mutex poisoned");
             guard.as_ref()?.clone()
         };
         if cache.active_constraints {
@@ -3352,7 +3424,10 @@ impl<'a> RemlState<'a> {
         let Some(theta) = self.pending_joint_ift_theta() else {
             return false;
         };
-        let guard = self.ift_joint_mode_response_slot.lock().unwrap();
+        let guard = self
+            .ift_joint_mode_response_slot
+            .lock()
+            .expect("IFT joint mode-response slot mutex poisoned");
         let Some(cache) = guard.as_ref() else {
             return false;
         };
@@ -3401,7 +3476,10 @@ impl<'a> RemlState<'a> {
         }
         self.runtime_mixture_link_state = mixture_link_state;
         self.runtime_sas_link_state = sas_link_state;
-        *self.persistent_warm_start_key.write().unwrap() = None;
+        *self
+            .persistent_warm_start_key
+            .write()
+            .expect("persistent warm-start key lock poisoned") = None;
         self.persistent_warm_start_loaded
             .store(false, Ordering::Relaxed);
         self.invalidate_link_dependent_state();
@@ -4405,27 +4483,49 @@ impl<'a> RemlState<'a> {
         self.kronecker_factored = kronecker_factored;
         // The Gaussian-fixed cache is keyed to (X, y, w, offset); replacing the
         // design invalidates it. The new surface will repopulate it on demand.
-        *self.gaussian_fixed_cache.write().unwrap() = None;
+        *self
+            .gaussian_fixed_cache
+            .write()
+            .expect("Gaussian fixed-design cache lock poisoned") = None;
         // The conditioned-frame ψ-gram derivative is keyed to the same design;
         // a new design invalidates it. The installing trial repopulates it.
-        *self.gaussian_psi_gram_deriv.write().unwrap() = None;
+        *self
+            .gaussian_psi_gram_deriv
+            .write()
+            .expect("Gaussian psi-Gram derivative cache lock poisoned") = None;
         // The GLM frozen-W conditioned-frame ψ-gram derivative is keyed to the
         // same design + ψ; a new design invalidates it. The installing trial
         // repopulates it.
-        *self.glm_psi_gram_deriv.write().unwrap() = None;
+        *self
+            .glm_psi_gram_deriv
+            .write()
+            .expect("GLM psi-Gram derivative cache lock poisoned") = None;
         // The frozen-W GLM first-step Gram is keyed to the same design + ψ; a
         // new design invalidates it. The installing trial repopulates it.
-        *self.glm_first_step_gram.write().unwrap() = None;
+        *self
+            .glm_first_step_gram
+            .write()
+            .expect("GLM first-step Gram cache lock poisoned") = None;
         // The flat-warm-start GLM first-step Gram is keyed to the previous
         // surface's design and warm β; a surface reset invalidates both.
-        *self.flat_glm_first_step_gram.write().unwrap() = None;
-        *self.persistent_warm_start_key.write().unwrap() = None;
+        *self
+            .flat_glm_first_step_gram
+            .write()
+            .expect("flat-GLM first-step Gram cache lock poisoned") = None;
+        *self
+            .persistent_warm_start_key
+            .write()
+            .expect("persistent warm-start key lock poisoned") = None;
         self.persistent_warm_start_loaded
             .store(false, Ordering::Relaxed);
         self.persistent_warm_start_store_suppression
             .store(0, Ordering::Relaxed);
         self.cache_manager.clear_eval_and_factor_caches();
-        self.cache_manager.pirls_cache.write().unwrap().clear();
+        self.cache_manager
+            .pirls_cache
+            .write()
+            .expect("PIRLS result cache lock poisoned")
+            .clear();
         // The new surface has a different design / penalty system /
         // working-weight curvature, so every warm-start signal calibrated
         // to the previous surface is now stale. Wipe in lockstep — see
@@ -4513,7 +4613,11 @@ impl<'a> RemlState<'a> {
         // Gaussian Gram cache and its ψ-derivative are NOT cleared here: those
         // are re-keyed to ψ_new by the tensor lane (`install_psi_gram_statistics`).
         self.cache_manager.clear_eval_and_factor_caches();
-        self.cache_manager.pirls_cache.write().unwrap().clear();
+        self.cache_manager
+            .pirls_cache
+            .write()
+            .expect("PIRLS result cache lock poisoned")
+            .clear();
         Ok(())
     }
 
@@ -4543,14 +4647,20 @@ impl<'a> RemlState<'a> {
     /// non-Gaussianity in the posterior. Typical value: `Some(1e-6)`.
     pub(crate) fn set_penalty_shrinkage_floor(&mut self, floor: Option<f64>) {
         self.penalty_shrinkage_floor = floor;
-        *self.persistent_warm_start_key.write().unwrap() = None;
+        *self
+            .persistent_warm_start_key
+            .write()
+            .expect("persistent warm-start key lock poisoned") = None;
         self.persistent_warm_start_loaded
             .store(false, Ordering::Relaxed);
     }
 
     pub(crate) fn set_rho_prior(&mut self, prior: RhoPrior) {
         self.rho_prior = prior;
-        *self.persistent_warm_start_key.write().unwrap() = None;
+        *self
+            .persistent_warm_start_key
+            .write()
+            .expect("persistent warm-start key lock poisoned") = None;
         self.persistent_warm_start_loaded
             .store(false, Ordering::Relaxed);
     }
@@ -4563,7 +4673,10 @@ impl<'a> RemlState<'a> {
             return;
         }
         self.analytic_penalty_registry_fingerprint = fingerprint;
-        *self.persistent_warm_start_key.write().unwrap() = None;
+        *self
+            .persistent_warm_start_key
+            .write()
+            .expect("persistent warm-start key lock poisoned") = None;
         self.persistent_warm_start_loaded
             .store(false, Ordering::Relaxed);
     }
@@ -4744,7 +4857,11 @@ impl<'a> RemlState<'a> {
         &self,
         current_key: &Option<Vec<u64>>,
     ) -> Option<f64> {
-        let guard = self.cache_manager.current_outer_eval.read().unwrap();
+        let guard = self
+            .cache_manager
+            .current_outer_eval
+            .read()
+            .expect("current outer-eval slot lock poisoned");
         let (cached_key, eval) = guard.as_ref()?;
         if current_key
             .as_ref()
@@ -5010,7 +5127,12 @@ impl<'a> RemlState<'a> {
                         .eigh(Side::Lower)
                         .map_err(EstimationError::EigendecompositionFailed)?;
                     let rank = if self.canonical_penalties.is_empty() {
-                        positive_penalty_rank_and_logdet(evals.as_slice().unwrap()).0
+                        positive_penalty_rank_and_logdet(
+                            evals
+                                .as_slice()
+                                .expect("eigh returns an owned contiguous eigenvalue Array1"),
+                        )
+                        .0
                     } else {
                         self.canonical_penalties
                             .iter()
@@ -5035,14 +5157,22 @@ impl<'a> RemlState<'a> {
         }
 
         if self.canonical_penalties.is_empty() {
-            return positive_penalty_rank_and_logdet(penalty_subspace.evals.as_slice().unwrap());
+            return positive_penalty_rank_and_logdet(
+                penalty_subspace
+                    .evals
+                    .as_slice()
+                    .expect("penalty-subspace eigenvalues are an owned contiguous Array1"),
+            );
         }
 
         // eigh returns eigenvalues sorted ascending; the structural null
         // directions live at the bottom of the spectrum. Sum the top
         // `structural_rank` log-eigenvalues for log|S|+.
         let p = penalty_subspace.evals.len();
-        let evals_slice = penalty_subspace.evals.as_slice().unwrap();
+        let evals_slice = penalty_subspace
+            .evals
+            .as_slice()
+            .expect("penalty-subspace eigenvalues are an owned contiguous Array1");
         let log_det: f64 = evals_slice
             .iter()
             .skip(p.saturating_sub(penalty_subspace.rank))
@@ -5133,8 +5263,11 @@ impl<'a> RemlState<'a> {
         let (h_evals, h_evecs) = h_sym
             .eigh(Side::Lower)
             .map_err(EstimationError::EigendecompositionFailed)?;
-        let h_thr =
-            super::reml_outer_engine::positive_eigenvalue_threshold(h_evals.as_slice().unwrap());
+        let h_thr = super::reml_outer_engine::positive_eigenvalue_threshold(
+            h_evals
+                .as_slice()
+                .expect("eigh returns an owned contiguous eigenvalue Array1"),
+        );
         let kept: Vec<usize> = (0..p).filter(|&j| h_evals[j] > h_thr).collect();
         if kept.is_empty() {
             // No positive curvature anywhere: nothing identified, nothing to
@@ -5158,7 +5291,12 @@ impl<'a> RemlState<'a> {
         let log_det = if kept.len() == p {
             h_evals.iter().map(|&s| s.ln()).sum()
         } else {
-            super::reml_outer_engine::exact_pseudo_logdet(h_evals.as_slice().unwrap(), h_thr)
+            super::reml_outer_engine::exact_pseudo_logdet(
+                h_evals
+                    .as_slice()
+                    .expect("eigh returns an owned contiguous eigenvalue Array1"),
+                h_thr,
+            )
         };
 
         // Spectral form of H_pen⁺: U_H (p × r) and diag(1/σ). In this basis
@@ -5212,10 +5350,22 @@ impl<'a> RemlState<'a> {
                 // `predict_warm_start_beta_with_source` for tangent-line
                 // extrapolation across outer iterations.
                 {
-                    let mut prev_beta_w = self.prev_warm_start_beta.write().unwrap();
-                    let mut prev_rho_w = self.prev_warm_start_rho.write().unwrap();
-                    let mut cur_beta_w = self.warm_start_beta.write().unwrap();
-                    let mut cur_rho_w = self.warm_start_rho.write().unwrap();
+                    let mut prev_beta_w = self
+                        .prev_warm_start_beta
+                        .write()
+                        .expect("previous warm-start beta lock poisoned");
+                    let mut prev_rho_w = self
+                        .prev_warm_start_rho
+                        .write()
+                        .expect("previous warm-start rho lock poisoned");
+                    let mut cur_beta_w = self
+                        .warm_start_beta
+                        .write()
+                        .expect("warm-start beta lock poisoned");
+                    let mut cur_rho_w = self
+                        .warm_start_rho
+                        .write()
+                        .expect("warm-start rho lock poisoned");
                     *prev_beta_w = cur_beta_w.take();
                     *prev_rho_w = cur_rho_w.take();
                     cur_beta_w.replace(Coefficients::new(beta_original.clone()));
@@ -5264,7 +5414,10 @@ impl<'a> RemlState<'a> {
                     }
                 };
                 {
-                    let mut cache_w = self.ift_warm_start_cache.write().unwrap();
+                    let mut cache_w = self
+                        .ift_warm_start_cache
+                        .write()
+                        .expect("IFT warm-start cache lock poisoned");
                     cache_w.replace(super::IftWarmStartCache {
                         beta_original,
                         rho: ndarray::Array1::zeros(0),
@@ -5278,7 +5431,10 @@ impl<'a> RemlState<'a> {
                 // H_pen; replacing the IFT cache invalidates it. Drop
                 // here so the next predict call lazily refactors the
                 // new H_pen and stashes the new factor.
-                self.ift_cached_factor.write().unwrap().take();
+                self.ift_cached_factor
+                    .write()
+                    .expect("IFT cached factor lock poisoned")
+                    .take();
                 self.clear_ift_mode_response_cache();
             }
             _ => {
@@ -5303,7 +5459,10 @@ impl<'a> RemlState<'a> {
             || pr.reparam_result.s_transformed.nrows() != pr.penalized_hessian_transformed.nrows()
             || pr.reparam_result.s_transformed.ncols() != pr.penalized_hessian_transformed.ncols()
         {
-            *self.flat_glm_first_step_gram.write().unwrap() = None;
+            *self
+                .flat_glm_first_step_gram
+                .write()
+                .expect("flat-GLM first-step Gram cache lock poisoned") = None;
             return;
         }
 
@@ -5330,12 +5489,18 @@ impl<'a> RemlState<'a> {
             // caching — the warm-started trial then restreams the Gram, which
             // is the memory-safe fallback this cache only accelerates.
             let governor = gam_runtime::resource::MemoryGovernor::global();
-            *self.flat_glm_first_step_gram.write().unwrap() = governor
+            *self
+                .flat_glm_first_step_gram
+                .write()
+                .expect("flat-GLM first-step Gram cache lock poisoned") = governor
                 .try_reserve_dense_f64(self.p, self.p, "reml::flat_glm_first_step_gram")
                 .ok()
                 .map(|reservation| reservation.bind(Arc::new(gram_original)));
         } else {
-            *self.flat_glm_first_step_gram.write().unwrap() = None;
+            *self
+                .flat_glm_first_step_gram
+                .write()
+                .expect("flat-GLM first-step Gram cache lock poisoned") = None;
         }
     }
 
@@ -5346,13 +5511,21 @@ impl<'a> RemlState<'a> {
         if !self.warm_start_enabled.load(Ordering::Relaxed) {
             return;
         }
-        self.warm_start_rho.write().unwrap().replace(rho.to_owned());
+        self.warm_start_rho
+            .write()
+            .expect("warm-start rho lock poisoned")
+            .replace(rho.to_owned());
         // Stamp the IFT cache's ρ slot so the predictor can compute
         // Δρ = ρ_new − ρ_cache. Skipped if the slot was cleared in
         // between (e.g. a concurrent failure path); the predictor will
         // see an empty `rho` (length 0) and fall back to the
         // tangent-line / flat warm-start path.
-        if let Some(cache) = self.ift_warm_start_cache.write().unwrap().as_mut() {
+        if let Some(cache) = self
+            .ift_warm_start_cache
+            .write()
+            .expect("IFT warm-start cache lock poisoned")
+            .as_mut()
+        {
             cache.rho = rho.to_owned();
         }
     }
@@ -5428,7 +5601,12 @@ impl<'a> RemlState<'a> {
     }
 
     pub(crate) fn persistent_warm_start_cache_key(&self) -> Option<String> {
-        if let Some(key) = self.persistent_warm_start_key.read().unwrap().clone() {
+        if let Some(key) = self
+            .persistent_warm_start_key
+            .read()
+            .expect("persistent warm-start key lock poisoned")
+            .clone()
+        {
             return Some(key);
         }
         let mut hasher = Fingerprinter::new();
@@ -5489,7 +5667,7 @@ impl<'a> RemlState<'a> {
         let key = hasher.finish_hex();
         self.persistent_warm_start_key
             .write()
-            .unwrap()
+            .expect("persistent warm-start key lock poisoned")
             .replace(key.clone());
         Some(key)
     }
@@ -5511,7 +5689,7 @@ impl<'a> RemlState<'a> {
         let key = self.persistent_latent_values_cache_key()?;
         self.persistent_latent_values_cache
             .write()
-            .unwrap()
+            .expect("persistent latent-values cache lock poisoned")
             .lookup(&key, n_obs, latent_dim)
     }
 
@@ -5524,7 +5702,7 @@ impl<'a> RemlState<'a> {
         };
         self.persistent_latent_values_cache
             .write()
-            .unwrap()
+            .expect("persistent latent-values cache lock poisoned")
             .insert(key, values.clone());
     }
 
@@ -5547,7 +5725,12 @@ impl<'a> RemlState<'a> {
         {
             return;
         }
-        if self.warm_start_beta.read().unwrap().is_some() {
+        if self
+            .warm_start_beta
+            .read()
+            .expect("warm-start beta lock poisoned")
+            .is_some()
+        {
             return;
         }
         let Some(key) = self.persistent_warm_start_cache_key() else {
@@ -5566,16 +5749,23 @@ impl<'a> RemlState<'a> {
         {
             self.warm_start_beta
                 .write()
-                .unwrap()
+                .expect("warm-start beta lock poisoned")
                 .replace(Coefficients::new(Array1::from_vec(record.beta)));
             self.warm_start_rho
                 .write()
-                .unwrap()
+                .expect("warm-start rho lock poisoned")
                 .replace(Array1::from_vec(record.rho));
-            *self.prev_warm_start_beta.write().unwrap() = record
+            *self
+                .prev_warm_start_beta
+                .write()
+                .expect("previous warm-start beta lock poisoned") = record
                 .prev_beta
                 .map(|beta| Coefficients::new(Array1::from_vec(beta)));
-            *self.prev_warm_start_rho.write().unwrap() = record.prev_rho.map(Array1::from_vec);
+            *self
+                .prev_warm_start_rho
+                .write()
+                .expect("previous warm-start rho lock poisoned") =
+                record.prev_rho.map(Array1::from_vec);
         }
         self.last_inner_iters
             .store(record.last_inner_iters, Ordering::Relaxed);
@@ -5630,17 +5820,31 @@ impl<'a> RemlState<'a> {
         // outer trial puts filesystem eviction scans directly in the optimizer
         // hot loop. Checkpoint sparsely so long fits remain recoverable while
         // ordinary fits and posterior probes stay CPU-bound.
-        let eval_count = *self.arena.cost_eval_count.read().unwrap();
+        let eval_count = *self
+            .arena
+            .cost_eval_count
+            .read()
+            .expect("arena cost-eval counter lock poisoned");
         if eval_count % 1024 != 0 {
             return;
         }
         let Some(key) = self.persistent_warm_start_cache_key() else {
             return;
         };
-        let Some(beta) = self.warm_start_beta.read().unwrap().as_ref().cloned() else {
+        let Some(beta) = self
+            .warm_start_beta
+            .read()
+            .expect("warm-start beta lock poisoned")
+            .as_ref()
+            .cloned()
+        else {
             return;
         };
-        let rho_opt: Option<Array1<f64>> = self.warm_start_rho.read().unwrap().clone();
+        let rho_opt: Option<Array1<f64>> = self
+            .warm_start_rho
+            .read()
+            .expect("warm-start rho lock poisoned")
+            .clone();
         let Some(rho) = rho_opt else {
             return;
         };
@@ -5654,13 +5858,13 @@ impl<'a> RemlState<'a> {
         record.prev_rho = self
             .prev_warm_start_rho
             .read()
-            .unwrap()
+            .expect("previous warm-start rho lock poisoned")
             .as_ref()
             .map(|rho: &Array1<f64>| rho.to_vec());
         record.prev_beta = self
             .prev_warm_start_beta
             .read()
-            .unwrap()
+            .expect("previous warm-start beta lock poisoned")
             .as_ref()
             .map(|coefficients| coefficients.0.to_vec());
         record.last_inner_iters = self.last_inner_iters.load(Ordering::Relaxed);
@@ -5739,7 +5943,10 @@ impl<'a> RemlState<'a> {
             return self
                 .predict_warm_start_beta_joint_ift_with_outcome(new_rho, current_ift_step_cap);
         }
-        let cache_guard = self.ift_warm_start_cache.read().unwrap();
+        let cache_guard = self
+            .ift_warm_start_cache
+            .read()
+            .expect("IFT warm-start cache lock poisoned");
         let cache = cache_guard.as_ref()?;
         // Early short-circuit: detect both the no-op case (every
         // |Δρ_k| below the numerical-noise floor → predictor reduces
@@ -5831,7 +6038,10 @@ impl<'a> RemlState<'a> {
         // and we never observe a factor that doesn't match the cached
         // matrix.
         let factor_arc: Arc<dyn gam_linalg::matrix::FactorizedSystem> = {
-            let read_guard = self.ift_cached_factor.read().unwrap();
+            let read_guard = self
+                .ift_cached_factor
+                .read()
+                .expect("IFT cached factor lock poisoned");
             if let Some(arc) = read_guard.as_ref() {
                 // Cache hit: H_pen factor was already computed by an
                 // earlier predict call at the same surface. The
@@ -5868,7 +6078,10 @@ impl<'a> RemlState<'a> {
                     factorize_start.elapsed().as_secs_f64(),
                 );
                 let arc: Arc<dyn gam_linalg::matrix::FactorizedSystem> = Arc::from(new_factor);
-                let mut write_guard = self.ift_cached_factor.write().unwrap();
+                let mut write_guard = self
+                    .ift_cached_factor
+                    .write()
+                    .expect("IFT cached factor lock poisoned");
                 // Race window: another reader may have populated the
                 // slot between our drop(read_guard) and the write lock
                 // acquisition. Prefer the existing entry to keep the
@@ -5920,7 +6133,11 @@ impl<'a> RemlState<'a> {
             return None;
         }
         if self.take_ift_quality_flat_override()
-            && let Some(cur_beta) = self.warm_start_beta.read().unwrap().clone()
+            && let Some(cur_beta) = self
+                .warm_start_beta
+                .read()
+                .expect("warm-start beta lock poisoned")
+                .clone()
         {
             return Some((cur_beta, WarmStartPredictionSource::Flat));
         }
@@ -5934,8 +6151,16 @@ impl<'a> RemlState<'a> {
                 reml_spec(&self.config.likelihood).response,
                 ResponseFamily::Gaussian
             )
-            && self.flat_glm_first_step_gram.read().unwrap().is_some()
-            && let Some(cur_beta) = self.warm_start_beta.read().unwrap().clone()
+            && self
+                .flat_glm_first_step_gram
+                .read()
+                .expect("flat-GLM first-step Gram cache lock poisoned")
+                .is_some()
+            && let Some(cur_beta) = self
+                .warm_start_beta
+                .read()
+                .expect("warm-start beta lock poisoned")
+                .clone()
         {
             return Some((cur_beta, WarmStartPredictionSource::Flat));
         }
@@ -5960,10 +6185,26 @@ impl<'a> RemlState<'a> {
             };
             return Some((predicted, source));
         }
-        let cur_beta = self.warm_start_beta.read().unwrap().clone()?;
-        let cur_rho: Option<Array1<f64>> = self.warm_start_rho.read().unwrap().clone();
-        let prev_beta: Option<Coefficients> = self.prev_warm_start_beta.read().unwrap().clone();
-        let prev_rho: Option<Array1<f64>> = self.prev_warm_start_rho.read().unwrap().clone();
+        let cur_beta = self
+            .warm_start_beta
+            .read()
+            .expect("warm-start beta lock poisoned")
+            .clone()?;
+        let cur_rho: Option<Array1<f64>> = self
+            .warm_start_rho
+            .read()
+            .expect("warm-start rho lock poisoned")
+            .clone();
+        let prev_beta: Option<Coefficients> = self
+            .prev_warm_start_beta
+            .read()
+            .expect("previous warm-start beta lock poisoned")
+            .clone();
+        let prev_rho: Option<Array1<f64>> = self
+            .prev_warm_start_rho
+            .read()
+            .expect("previous warm-start rho lock poisoned")
+            .clone();
         let (cur_rho, prev_beta, prev_rho): (Array1<f64>, Coefficients, Array1<f64>) =
             match (cur_rho, prev_beta, prev_rho) {
                 (Some(cr), Some(pb), Some(pr)) => (cr, pb, pr),
@@ -6173,7 +6414,7 @@ impl<'a> RemlState<'a> {
                 }
                 self.warm_start_beta
                     .write()
-                    .unwrap()
+                    .expect("warm-start beta lock poisoned")
                     .replace(Coefficients::new(beta.to_owned()));
             } else {
                 // Length mismatch — common bug when a caller forgets to
@@ -6202,7 +6443,11 @@ impl<'a> RemlState<'a> {
     pub(crate) fn reset_outer_seed_state(&self) {
         self.cache_manager.invalidate_eval_bundle();
         // Drop cross-call PIRLS LRU entries: cached β may have been computed under a coarsened inner cap, so reusing them on retry skips real work and bit-replays the prior attempt.
-        self.cache_manager.pirls_cache.write().unwrap().clear();
+        self.cache_manager
+            .pirls_cache
+            .write()
+            .expect("PIRLS result cache lock poisoned")
+            .clear();
         // The outer is restarting from a fresh seed — the previous
         // trajectory's warm-start signals are calibrated to a different
         // ρ-path and would mislead both predictors and the adaptive cap
@@ -6281,7 +6526,10 @@ impl<'a> RemlState<'a> {
         {
             return false;
         }
-        *self.gaussian_fixed_cache.write().unwrap() = Some(cache);
+        *self
+            .gaussian_fixed_cache
+            .write()
+            .expect("Gaussian fixed-design cache lock poisoned") = Some(cache);
         true
     }
 
@@ -6300,7 +6548,10 @@ impl<'a> RemlState<'a> {
         if gram.nrows() != self.p || gram.ncols() != self.p {
             return false;
         }
-        *self.glm_first_step_gram.write().unwrap() = Some(gram);
+        *self
+            .glm_first_step_gram
+            .write()
+            .expect("GLM first-step Gram cache lock poisoned") = Some(gram);
         true
     }
 
@@ -6308,7 +6559,10 @@ impl<'a> RemlState<'a> {
     /// (re)installing for the current ψ, so a stale previous-ψ Gram is never
     /// consumed when the current trial is out-of-window or has drifted.
     pub(crate) fn clear_glm_first_step_gram(&self) {
-        *self.glm_first_step_gram.write().unwrap() = None;
+        *self
+            .glm_first_step_gram
+            .write()
+            .expect("GLM first-step Gram cache lock poisoned") = None;
     }
 
     /// The frozen-W GLM first-step Gram for the current in-window drift-OK trial,
@@ -6317,7 +6571,7 @@ impl<'a> RemlState<'a> {
     pub(crate) fn glm_first_step_gram(&self) -> Option<Arc<ndarray::Array2<f64>>> {
         self.glm_first_step_gram
             .read()
-            .unwrap()
+            .expect("GLM first-step Gram cache lock poisoned")
             .as_ref()
             .map(Arc::clone)
     }
@@ -6325,7 +6579,7 @@ impl<'a> RemlState<'a> {
     pub(crate) fn flat_glm_first_step_gram(&self) -> Option<Arc<ndarray::Array2<f64>>> {
         self.flat_glm_first_step_gram
             .read()
-            .unwrap()
+            .expect("flat-GLM first-step Gram cache lock poisoned")
             .as_ref()
             .map(|governed| Arc::clone(governed.as_ref()))
     }
@@ -6347,7 +6601,10 @@ impl<'a> RemlState<'a> {
         {
             return false;
         }
-        *self.gaussian_psi_gram_deriv.write().unwrap() = Some(deriv);
+        *self
+            .gaussian_psi_gram_deriv
+            .write()
+            .expect("Gaussian psi-Gram derivative cache lock poisoned") = Some(deriv);
         true
     }
 
@@ -6363,8 +6620,14 @@ impl<'a> RemlState<'a> {
     /// cleared the inner solver restreams the exact Gram for this trial's
     /// design, as it does whenever no tensor is installed.
     pub(crate) fn clear_gaussian_fixed_cache(&self) {
-        *self.gaussian_fixed_cache.write().unwrap() = None;
-        *self.gaussian_psi_gram_deriv.write().unwrap() = None;
+        *self
+            .gaussian_fixed_cache
+            .write()
+            .expect("Gaussian fixed-design cache lock poisoned") = None;
+        *self
+            .gaussian_psi_gram_deriv
+            .write()
+            .expect("Gaussian psi-Gram derivative cache lock poisoned") = None;
     }
 
     /// Clear ONLY the conditioned-frame Gaussian ψ-derivative pair (#1033),
@@ -6375,7 +6638,10 @@ impl<'a> RemlState<'a> {
     /// dropped so the gradient lane falls back to the exact ∂X/∂ψ slab for this
     /// trial instead of reading a stale derivative on the fast path.
     pub(crate) fn clear_gaussian_psi_gram_deriv(&self) {
-        *self.gaussian_psi_gram_deriv.write().unwrap() = None;
+        *self
+            .gaussian_psi_gram_deriv
+            .write()
+            .expect("Gaussian psi-Gram derivative cache lock poisoned") = None;
     }
 
     /// Conditioned-frame exact ψ-derivative pair, when installed for the
@@ -6385,7 +6651,7 @@ impl<'a> RemlState<'a> {
     ) -> Option<Arc<(ndarray::Array2<f64>, ndarray::Array1<f64>)>> {
         self.gaussian_psi_gram_deriv
             .read()
-            .unwrap()
+            .expect("Gaussian psi-Gram derivative cache lock poisoned")
             .as_ref()
             .map(Arc::clone)
     }
@@ -6406,7 +6672,10 @@ impl<'a> RemlState<'a> {
         if deriv.0.nrows() != self.p || deriv.0.ncols() != self.p || deriv.1.len() != self.p {
             return false;
         }
-        *self.glm_psi_gram_deriv.write().unwrap() = Some(deriv);
+        *self
+            .glm_psi_gram_deriv
+            .write()
+            .expect("GLM psi-Gram derivative cache lock poisoned") = Some(deriv);
         true
     }
 
@@ -6415,7 +6684,10 @@ impl<'a> RemlState<'a> {
     /// previous-ψ derivative is never consumed when the current trial is
     /// out-of-window or has drifted.
     pub(crate) fn clear_glm_psi_gram_deriv(&self) {
-        *self.glm_psi_gram_deriv.write().unwrap() = None;
+        *self
+            .glm_psi_gram_deriv
+            .write()
+            .expect("GLM psi-Gram derivative cache lock poisoned") = None;
     }
 
     /// Conditioned-frame exact ψ-derivative pair for the current in-window
@@ -6427,7 +6699,7 @@ impl<'a> RemlState<'a> {
     ) -> Option<Arc<(ndarray::Array2<f64>, ndarray::Array1<f64>)>> {
         self.glm_psi_gram_deriv
             .read()
-            .unwrap()
+            .expect("GLM psi-Gram derivative cache lock poisoned")
             .as_ref()
             .map(Arc::clone)
     }
@@ -6441,7 +6713,7 @@ impl<'a> RemlState<'a> {
     ) -> Option<Arc<crate::pirls::GaussianFixedCache>> {
         self.gaussian_fixed_cache
             .read()
-            .unwrap()
+            .expect("Gaussian fixed-design cache lock poisoned")
             .as_ref()
             .map(Arc::clone)
     }
@@ -6456,14 +6728,20 @@ impl<'a> RemlState<'a> {
         }
         // Fast path — already populated.
         {
-            let guard = self.gaussian_fixed_cache.read().unwrap();
+            let guard = self
+                .gaussian_fixed_cache
+                .read()
+                .expect("Gaussian fixed-design cache lock poisoned");
             if let Some(cache) = guard.as_ref() {
                 return Some(Arc::clone(cache));
             }
         }
         // First-call construction. Re-check under the write lock so two
         // concurrent callers cannot both pay the O(N·p²) bill.
-        let mut guard = self.gaussian_fixed_cache.write().unwrap();
+        let mut guard = self
+            .gaussian_fixed_cache
+            .write()
+            .expect("Gaussian fixed-design cache lock poisoned");
         if let Some(cache) = guard.as_ref() {
             return Some(Arc::clone(cache));
         }
@@ -6562,12 +6840,18 @@ impl<'a> RemlState<'a> {
             return Ok(None);
         }
         {
-            let guard = self.gaussian_cost_only_frozen_rows.read().unwrap();
+            let guard = self
+                .gaussian_cost_only_frozen_rows
+                .read()
+                .expect("Gaussian cost-only frozen-row cache lock poisoned");
             if let Some(rows) = guard.as_ref() {
                 return Ok(Some(Arc::clone(rows)));
             }
         }
-        let mut guard = self.gaussian_cost_only_frozen_rows.write().unwrap();
+        let mut guard = self
+            .gaussian_cost_only_frozen_rows
+            .write()
+            .expect("Gaussian cost-only frozen-row cache lock poisoned");
         if let Some(rows) = guard.as_ref() {
             return Ok(Some(Arc::clone(rows)));
         }
@@ -6899,7 +7183,12 @@ impl<'a> RemlState<'a> {
         let key_opt = self.rhokey_sanitized(rho);
         if use_cache
             && let Some(key) = &key_opt
-            && let Some(cached) = self.cache_manager.pirls_cache.write().unwrap().get(key)
+            && let Some(cached) = self
+                .cache_manager
+                .pirls_cache
+                .write()
+                .expect("PIRLS result cache lock poisoned")
+                .get(key)
         {
             // Do not overwrite the current warm start from cache hits.
             // Line search / multi-eval outer loops revisit older rho keys and
@@ -6996,7 +7285,10 @@ impl<'a> RemlState<'a> {
             None
         };
         let pirls_result = {
-            let warm_start_holder = self.warm_start_beta.read().unwrap();
+            let warm_start_holder = self
+                .warm_start_beta
+                .read()
+                .expect("warm-start beta lock poisoned");
             let fallback_warm_start_ref = if self.warm_start_enabled.load(Ordering::Relaxed) {
                 warm_start_holder.as_ref()
             } else {
@@ -7686,7 +7978,7 @@ impl<'a> RemlState<'a> {
                         self.cache_manager
                             .pirls_cache
                             .write()
-                            .unwrap()
+                            .expect("PIRLS result cache lock poisoned")
                             .insert(key, Arc::new(pirls_result.compact_for_reml_cache()));
                     }
                 }
@@ -8575,8 +8867,10 @@ pub(crate) fn predict_warm_start_beta_ift_inner_with_outcome(
         let scale = dr * cache.rho[idx].exp();
         let mut rhs_slice = rhs_original.slice_mut(s![r.start..r.end]);
         if precomputed_ok {
-            // SAFE: precomputed_ok guarantees Some + length match.
-            let blocks = cache.lambda_s_beta_blocks.as_ref().unwrap();
+            let blocks = cache.lambda_s_beta_blocks.as_ref().expect(
+                "precomputed_ok is set only when lambda_s_beta_blocks is Some with a \
+                 matching block length",
+            );
             let sb_block = &blocks[idx];
             // Defensive: a fresh canonical_penalty may have a different
             // col_range size than the cache's precomputation captured.

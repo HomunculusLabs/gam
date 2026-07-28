@@ -430,7 +430,14 @@ impl GpuRuntime {
     }
 
     fn record_cpu_reason(reason: impl Into<String>) {
-        CPU_REASON.set(reason.into()).ok();
+        // First reason wins: the earliest fallback is the one that explains the
+        // rest. A later reason is dropped deliberately, and visibly.
+        if let Err(dropped) = CPU_REASON.set(reason.into()) {
+            log::debug!(
+                "CPU fallback reason already recorded as {:?}; keeping it and dropping '{dropped}'",
+                CPU_REASON.get().map(String::as_str)
+            );
+        }
     }
 }
 
@@ -638,7 +645,10 @@ fn cuda_device_info(ordinal: usize, ctx: &CudaContext) -> Result<GpuDeviceInfo, 
     let minor = attr(sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
     Ok(GpuDeviceInfo {
         ordinal,
-        name: result::device::get_name(device).unwrap_or_else(|_| format!("CUDA device {ordinal}")),
+        name: result::device::get_name(device).unwrap_or_else(|err| {
+            log::debug!("CUDA device {ordinal}: name query failed ({err}); using a positional label");
+            format!("CUDA device {ordinal}")
+        }),
         capability: super::device::GpuCapability::from_compute_capability(major, minor),
         sm_count: attr(sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?,
         max_threads_per_sm: attr(

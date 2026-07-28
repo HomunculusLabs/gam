@@ -394,7 +394,10 @@ impl SurvivalMarginalSlopeFamily {
                         a.6.add_pullback(self, row, &third)?;
                     }
                     if let Some(lift) = psi_lift.as_ref() {
-                        let q = q_geom.as_ref().unwrap();
+                        let q = q_geom.as_ref().expect(
+                            "a ψ-lift exists only when timewiggle_psi holds, which implies \
+                             timewiggle_active — exactly when q_geom is Some",
+                        );
                         a.6.add_timewiggle_psi_u_cross(self, row, q, lift, &f_pipi)?;
                         a.6.add_second_pullback_weighted(q, &pb);
                         a.6.add_timewiggle_psi_kappa_alpha(self, lift, &f_pi);
@@ -890,9 +893,13 @@ impl SurvivalMarginalSlopeFamily {
                         ),
                     )
                 };
-                let has_ij = psi_row_ij
+                // The cross-ψ row, kept only when it is present AND not
+                // identically zero. Both consumers below need the row itself,
+                // so bind it here rather than re-deriving presence from a bool
+                // and unwrapping the Option back open.
+                let psi_row_ij_active = psi_row_ij
                     .as_ref()
-                    .is_some_and(|r| r.iter().any(|v| v.abs() > 0.0));
+                    .filter(|r| r.iter().any(|v| v.abs() > 0.0));
 
                 let q_geom_lazy;
                 let (mut f_pi, mut f_pipi) = if let Some(primary) = flex_primary.as_ref() {
@@ -938,9 +945,8 @@ impl SurvivalMarginalSlopeFamily {
                 a.objective_psi_psi += dir_i.dot(&f_pipi.dot(&dir_j)) + f_pi.dot(&dir_ij);
 
                 // Score
-                if has_ij {
+                if let Some(psi_ij) = psi_row_ij_active {
                     let s_ij = f_pi.dot(&loading_i);
-                    let psi_ij = psi_row_ij.as_ref().unwrap();
                     match block_idx_i {
                         1 => a.score_m.scaled_add(s_ij, psi_ij),
                         _ => a.score_g.scaled_add(s_ij, psi_ij),
@@ -1008,7 +1014,7 @@ impl SurvivalMarginalSlopeFamily {
                 );
 
                 // Hessian
-                if has_ij {
+                if let Some(psi_ij) = psi_row_ij_active {
                     let rp_ij = f_pipi.dot(&loading_i);
                     if let Some(q) = q_geom.as_ref() {
                         a.hessian.add_rank1_psi_cross_with_q_geometry(
@@ -1016,7 +1022,7 @@ impl SurvivalMarginalSlopeFamily {
                             row,
                             q,
                             block_idx_i,
-                            psi_row_ij.as_ref().unwrap(),
+                            psi_ij,
                             &rp_ij,
                         )?;
                     } else {
@@ -1024,7 +1030,7 @@ impl SurvivalMarginalSlopeFamily {
                             self,
                             row,
                             block_idx_i,
-                            psi_row_ij.as_ref().unwrap(),
+                            psi_ij,
                             &rp_ij,
                         )?;
                     }
@@ -1087,7 +1093,10 @@ impl SurvivalMarginalSlopeFamily {
 
                 // Timewiggle psi corrections for ψ_i (terms 1,2,4,5 of eq 47)
                 if let Some(lift_i) = psi_lift_i.as_ref() {
-                    let q = q_geom.as_ref().unwrap();
+                    let q = q_geom.as_ref().expect(
+                        "a ψ_i-lift exists only when timewiggle_psi_i holds, which implies \
+                         timewiggle_active — exactly when q_geom is Some",
+                    );
                     // U_i^α cross terms with third_j Hessian
                     a.hessian
                         .add_timewiggle_psi_u_cross(self, row, q, lift_i, &third_j)?;
@@ -1100,7 +1109,10 @@ impl SurvivalMarginalSlopeFamily {
                 }
                 // Timewiggle psi corrections for ψ_j
                 if let Some(lift_j) = psi_lift_j.as_ref() {
-                    let q = q_geom.as_ref().unwrap();
+                    let q = q_geom.as_ref().expect(
+                        "a ψ_j-lift exists only when timewiggle_psi_j holds, which implies \
+                         timewiggle_active — exactly when q_geom is Some",
+                    );
                     a.hessian
                         .add_timewiggle_psi_u_cross(self, row, q, lift_j, &third_i)?;
                     let hu_j = f_pipi.dot(&dir_j);
@@ -1366,7 +1378,10 @@ impl SurvivalMarginalSlopeFamily {
                 }
                 // Timewiggle psi corrections
                 if let Some(lift) = psi_lift.as_ref() {
-                    let q = q_geom.as_ref().unwrap();
+                    let q = q_geom.as_ref().expect(
+                        "a ψ-lift exists only when timewiggle_psi holds, which implies \
+                         timewiggle_active — exactly when q_geom is Some",
+                    );
                     // U^α cross with third_beta (D_β H term)
                     acc.add_timewiggle_psi_u_cross(self, row, q, lift, &third_beta)?;
                     let second_pullback_weight = third_beta.dot(&psi_dir) + h_pi.dot(&psi_action);

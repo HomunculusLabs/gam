@@ -45,10 +45,13 @@ impl CapturedLogs {
     }
 
     fn snapshot(&self) -> Vec<String> {
+        // A poisoned lock still holds every line captured before the panic, and
+        // those lines are the whole point of the snapshot — recover them rather
+        // than reporting an empty log.
         self.lines
             .lock()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| Vec::new())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 }
 

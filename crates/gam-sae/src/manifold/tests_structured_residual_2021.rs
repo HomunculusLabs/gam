@@ -67,7 +67,7 @@ fn build_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
                 decoder,
                 Array2::<f64>::eye(2),
             )
-            .unwrap()
+            .expect("the fixture atom's basis, jet and decoder shapes agree")
         })
         .collect();
     let coords: Vec<Array2<f64>> = (0..k)
@@ -84,8 +84,8 @@ fn build_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
         manifolds,
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
-    .unwrap();
-    SaeManifoldTerm::new(atoms, assignment).unwrap()
+    .expect("the fixture blocks, manifolds and mode agree in shape");
+    SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment form a valid manifold term")
 }
 
 /// A `WhitenedStructured` per-row precision (rank-≥1 factor + heteroscedastic
@@ -166,10 +166,10 @@ fn structured_residual_metric_whitens_loss_and_gradient_2021() {
         term.row_metric().is_none(),
         "precondition: no metric ⇒ isotropic path"
     );
-    let loss_iid = term.loss(target.view(), &rho).unwrap();
+    let loss_iid = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     let sys_iid = term
         .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
+        .expect("the arrow-Schur system assembles at this fixture rho");
     let g_iid = grad_norm_sq(&sys_iid);
 
     // ---- install the WhitenedStructured metric and re-evaluate. ----
@@ -178,16 +178,16 @@ fn structured_residual_metric_whitens_loss_and_gradient_2021() {
         metric.whitens_likelihood(),
         "the fitted StructuredResidualModel metric must whiten the likelihood"
     );
-    term.set_row_metric(metric).unwrap();
+    term.set_row_metric(metric).expect("the fixture row metric is conformable with this term");
     assert!(
         term.row_metric().is_some_and(|m| m.whitens_likelihood()),
         "installed metric must report whitens_likelihood()"
     );
 
-    let loss_str = term.loss(target.view(), &rho).unwrap();
+    let loss_str = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     let sys_str = term
         .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
+        .expect("the arrow-Schur system assembles at this fixture rho");
     let g_str = grad_norm_sq(&sys_str);
 
     // (b) data-fit VALUE moved materially (whitening is active, not a no-op).
@@ -248,10 +248,10 @@ fn fit_row_metric_one_shot_matches_fit_then_row_metric_2021() {
         max_factor_rank: 2,
     };
     let two_step = StructuredResidualModel::fit(input())
-        .unwrap()
+        .expect("the structured-residual model fits the fixture input")
         .row_metric(n)
-        .unwrap();
-    let one_shot = StructuredResidualModel::fit_row_metric(input()).unwrap();
+        .expect("the structured-residual model fits the fixture input");
+    let one_shot = StructuredResidualModel::fit_row_metric(input()).expect("the structured-residual row-metric fit succeeds on the fixture input");
     assert!(two_step.whitens_likelihood() && one_shot.whitens_likelihood());
     let v = Array1::<f64>::from_vec(vec![0.7, -1.3, 0.4]);
     for &row in &[0usize, n / 2, n - 1] {

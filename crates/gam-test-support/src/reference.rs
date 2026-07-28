@@ -433,7 +433,12 @@ fn run_subprocess(kind: &ReferenceKind, columns: &[Column<'_>], body: &str) -> R
 
     let emitted = std::fs::read_to_string(&out_txt).unwrap_or_default();
     let parsed = parse_emitted(&emitted);
-    std::fs::remove_dir_all(&dir).ok();
+    if let Err(err) = std::fs::remove_dir_all(&dir) {
+        eprintln!(
+            "warning: could not remove reference scratch dir {}: {err}",
+            dir.display()
+        );
+    }
     ReferenceResult { values: parsed }
 }
 
@@ -754,7 +759,13 @@ impl QualityDiagnostics {
         label: impl Into<String>,
         fit: &gam_models::fit_orchestration::StandardFitResult,
     ) -> Self {
-        let design = design_diagnostics(&fit.design.design).ok();
+        let design = match design_diagnostics(&fit.design.design) {
+            Ok(diagnostics) => Some(diagnostics),
+            Err(err) => {
+                eprintln!("warning: design diagnostics unavailable: {err}");
+                None
+            }
+        };
         let penalties = penalty_diagnostics(
             &fit.design.penalties,
             fit.fit.lambdas.as_slice().unwrap_or(&[]),
@@ -915,7 +926,12 @@ pub fn penalty_diagnostics(
                 .local
                 .eigh(Side::Lower)
                 .map(|(e, _)| e)
-                .unwrap_or_else(|_| ndarray::Array1::from_vec(vec![f64::NAN]));
+                .unwrap_or_else(|err| {
+                    eprintln!(
+                        "warning: penalty {index} eigendecomposition failed, reporting NaN spectrum: {err}"
+                    );
+                    ndarray::Array1::from_vec(vec![f64::NAN])
+                });
             let scale = evals
                 .iter()
                 .copied()

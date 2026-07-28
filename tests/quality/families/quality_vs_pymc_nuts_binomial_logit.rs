@@ -140,7 +140,9 @@ fn gam_nuts_binomial_logit_recovers_truth_and_is_calibrated() {
         f.flush().expect("flush csv");
     }
     let ds = load_csvwith_inferred_schema(&csv_path).expect("load synthetic csv");
-    std::fs::remove_file(&csv_path).ok();
+    if let Err(err) = std::fs::remove_file(&csv_path) {
+        eprintln!("warning: temp CSV cleanup failed: {err}");
+    }
     let col = ds.column_map();
     let x_idx = col["x"];
 

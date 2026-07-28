@@ -68,7 +68,9 @@ fn build_circle_term(
     t_start: f64,
 ) -> (SaeManifoldTerm, SaeManifoldRho) {
     let coords = Array2::<f64>::from_elem((n, 1), t_start);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the periodic evaluator accepts any finite 1-D coordinate column");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, 0]] = 1.0; // cos → e0
     decoder[[2, 1]] = 1.0; // sin → e1
@@ -81,7 +83,7 @@ fn build_circle_term(
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("the circle atom is built from a (3, p) decoder and a 3x3 identity gram")
     .with_basis_second_jet(evaluator.clone());
     let logits = Array2::<f64>::from_elem((n, 1), 6.0);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -90,8 +92,9 @@ fn build_circle_term(
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("one logit block, one coordinate block and one manifold agree at K=1");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the single atom and the K=1 assignment share one latent block");
     term.set_guards_enabled(false);
     // Null the coordinate prior so the frozen-decoder read is pure (metric-only) GLS.
     let rho = SaeManifoldRho::new(-50.0, -50.0, vec![Array1::<f64>::from_elem(1, -50.0)]);
@@ -109,7 +112,9 @@ fn image_grid(
 ) -> (Vec<f64>, Array2<f64>) {
     let grid_t: Vec<f64> = (0..g).map(|i| i as f64 / g as f64).collect();
     let coords = Array2::<f64>::from_shape_fn((g, 1), |(i, _)| grid_t[i]);
-    let (phi, _jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, _jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the periodic evaluator accepts the finite grid coordinates");
     // f = phi (G,3) · decoder (3,p).
     let mut f = Array2::<f64>::zeros((g, p));
     for row in 0..g {

@@ -4875,7 +4875,9 @@ fn survival_score_grid_from_times<'py>(
         return Ok(Array1::from_vec(vec![0.0, 1.0]).into_pyarray(py).unbind());
     }
     times.sort_by(|a, b| a.total_cmp(b));
-    let max_t = *times.last().unwrap();
+    let max_t = *times
+        .last()
+        .expect("times is non-empty; the empty case returned above");
     // Data-driven, quantile-spaced evaluation grid spanning [0, max(t)]. The old
     // grid was a fixed {0,1,2,5,10,median} set whose magic constants only made
     // sense for O(1)–O(10) survival times; on any other time scale it either ran

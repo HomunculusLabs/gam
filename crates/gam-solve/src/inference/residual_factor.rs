@@ -822,10 +822,9 @@ impl StructuredResidualModel {
             sigma[[a, a]] += gamma * self.diagonal[a];
         }
         // (1−γ) · Σ_prev  (prev's per-row Σ, or I_p when prev is None).
-        match prev {
-            Some(pv) => {
+        match (prev, prev_gram) {
+            (Some(pv), Some(pg)) => {
                 let cp = pv.row_scale[row].max(f64::MIN_POSITIVE);
-                let pg = prev_gram.as_ref().unwrap();
                 for a in 0..p {
                     for b in 0..p {
                         sigma[[a, b]] += (1.0 - gamma) * cp * pg[[a, b]];
@@ -833,12 +832,17 @@ impl StructuredResidualModel {
                     sigma[[a, a]] += (1.0 - gamma) * pv.diagonal[a];
                 }
             }
-            None => {
+            (None, _) => {
                 // First-pass anchor: the MEASURED iid dispersion φ̂·I, not the
                 // unit identity (#2243 cap #2 — clean-data over-penalization).
                 for a in 0..p {
                     sigma[[a, a]] += (1.0 - gamma) * iid_anchor;
                 }
+            }
+            (Some(_), None) => {
+                return Err(
+                    "previous residual model supplied without its precomputed gram".to_string()
+                );
             }
         }
         // Symmetrize against round-off before inversion.

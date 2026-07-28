@@ -42,7 +42,7 @@ fn build_circle_term(coords_col: &Array2<f64>, decoder: &Array2<f64>) -> SaeMani
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("the fixture atom's basis, jet and decoder shapes agree")
     .with_basis_evaluator(Arc::new(TestPeriodicEvaluator));
     let logits = Array2::<f64>::from_elem((n, 1), 2.0); // gated ON (logit 2 > threshold 0)
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -51,8 +51,8 @@ fn build_circle_term(coords_col: &Array2<f64>, decoder: &Array2<f64>) -> SaeMani
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::threshold_gate(1.0, 0.0),
     )
-    .unwrap();
-    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+    .expect("the fixture assignment blocks match the declared mode");
+    SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture atoms and assignment form a valid manifold term")
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     // ================= GRADIENT CONSISTENCY (incl. ARD coord grad) =================
     let sys = term
         .assemble_arrow_schur(target.view(), &rho, None)
-        .unwrap();
+        .expect("the arrow-Schur system assembles at this fixture rho");
     let h = 1.0e-6_f64;
 
     // t-coordinate FD — guards ∂(data_fit + ARD)/∂t. A t-perturbation is invisible
@@ -96,15 +96,15 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     let mut fp = base_flat.clone();
     fp[row] = (fp[row] + h).rem_euclid(period);
     term.assignment.coords[0].set_flat(fp.view());
-    term.refresh_basis_from_current_coords().unwrap();
-    let lp = term.loss(target.view(), &rho).unwrap().total();
+    term.refresh_basis_from_current_coords().expect("the atom basis refreshes at the term's current coords");
+    let lp = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho").total();
     let mut fm = base_flat.clone();
     fm[row] = (fm[row] - h).rem_euclid(period);
     term.assignment.coords[0].set_flat(fm.view());
-    term.refresh_basis_from_current_coords().unwrap();
-    let lm = term.loss(target.view(), &rho).unwrap().total();
+    term.refresh_basis_from_current_coords().expect("the atom basis refreshes at the term's current coords");
+    let lm = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho").total();
     term.assignment.coords[0].set_flat(base_flat.view());
-    term.refresh_basis_from_current_coords().unwrap();
+    term.refresh_basis_from_current_coords().expect("the atom basis refreshes at the term's current coords");
     let gt_fd = (lp - lm) / (2.0 * h);
     let gt_analytic = sys.rows[row].gt[1];
     assert!(
@@ -122,9 +122,9 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
         let g_analytic = sys.gb[beta_idx];
         let base = term.atoms[0].decoder_coefficients()[[bm, bp]];
         term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base + h;
-        let lpp = term.loss(target.view(), &rho).unwrap().total();
+        let lpp = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho").total();
         term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base - h;
-        let lmm = term.loss(target.view(), &rho).unwrap().total();
+        let lmm = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho").total();
         term.atoms[0].decoder_coefficients_mut()[[bm, bp]] = base; // restore
         let g_fd = (lpp - lmm) / (2.0 * h);
         assert!(
@@ -134,17 +134,17 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     }
 
     // ============================ (A) NO-OP SAFETY ============================
-    let l0 = term.loss(target.view(), &rho).unwrap();
+    let l0 = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     let coords0 = term.assignment.coords[0].as_matrix().column(0).to_owned();
     let decoder0 = term.atoms[0].decoder_coefficients().clone();
     let topo = CanonicalChartTopology::Circle { period };
     // A non-uniform harmonic chart cannot recompose to 1e-9 ⇒ honest-skip.
-    let applied = term.canonicalize_atom_unit_speed_chart(0, &topo).unwrap();
+    let applied = term.canonicalize_atom_unit_speed_chart(0, &topo).expect("unit-speed canonicalization is defined for this fixture atom");
     assert!(
         !applied,
         "a non-uniform harmonic d=1 chart cannot meet the 1e-9 recomposition gate ⇒ must honest-skip"
     );
-    let l1 = term.loss(target.view(), &rho).unwrap();
+    let l1 = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     assert!(
         (l1.data_fit - l0.data_fit).abs() < 1.0e-12,
         "honest-skip must not move data_fit"
@@ -181,12 +181,12 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
         "honest-skip must leave the decoder byte-unchanged; drift {ddrift}"
     );
     // The in-loop hook re-gauges 0 atoms on this term and is a strict no-op.
-    let n_retracted = term.retract_unit_speed_charts_in_loop().unwrap();
+    let n_retracted = term.retract_unit_speed_charts_in_loop().expect("unit-speed retraction is defined on this term");
     assert_eq!(
         n_retracted, 0,
         "in-loop hook must re-gauge 0 atoms when nothing can reparam-close"
     );
-    let l2 = term.loss(target.view(), &rho).unwrap();
+    let l2 = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     assert!((l2.data_fit - l0.data_fit).abs() < 1.0e-12 && (l2.ard - l0.ard).abs() < 1.0e-12);
 
     // ============================ (B) EARLY-OUT ============================
@@ -195,14 +195,14 @@ fn unit_speed_hook_gradient_consistent_and_noop_safe_2022() {
     // everywhere, so the speed-uniformity defect is 0 < tol and the retraction
     // early-outs (None) before any recomposition.
     let uniform_decoder =
-        Array2::<f64>::from_shape_vec((3, 2), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).unwrap();
+        Array2::<f64>::from_shape_vec((3, 2), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]).expect("the literal fixture data matches the declared shape");
     let early = unit_speed_retraction(
         &TestPeriodicEvaluator,
         uniform_decoder.view(),
         coords_col.column(0),
         &topo,
     )
-    .unwrap();
+    .expect("the retraction accepts the uniform-decoder fixture");
     assert!(
         early.is_none(),
         "an already-unit-speed chart must early-out (defect < UNIT_SPEED_INLOOP_DEFECT_TOL)"
@@ -289,7 +289,7 @@ fn build_line_term(coords_col: &Array2<f64>, decoder: &Array2<f64>) -> SaeManifo
         decoder.clone(),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("the fixture atom's basis, jet and decoder shapes agree")
     .with_basis_evaluator(Arc::new(MonomialLineEvaluator));
     let logits = Array2::<f64>::from_elem((n, 1), 2.0); // gated ON (logit 2 > threshold 0)
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -298,8 +298,8 @@ fn build_line_term(coords_col: &Array2<f64>, decoder: &Array2<f64>) -> SaeManifo
         vec![LatentManifold::Euclidean],
         AssignmentMode::threshold_gate(1.0, 0.0),
     )
-    .unwrap();
-    SaeManifoldTerm::new(vec![atom], assignment).unwrap()
+    .expect("the fixture assignment blocks match the declared mode");
+    SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture atoms and assignment form a valid manifold term")
 }
 
 /// #2070 GATE (active path) — DRIVE the in-loop unit-speed retraction to
@@ -327,25 +327,25 @@ fn unit_speed_active_retraction_moves_only_ard_2070() {
     let n = coords_col.nrows();
     let p = 1usize;
     // Decoder selects the t² monomial ⇒ γ(t) = t² (single output channel).
-    let decoder = Array2::<f64>::from_shape_vec((3, p), vec![0.0, 0.0, 1.0]).unwrap();
+    let decoder = Array2::<f64>::from_shape_vec((3, p), vec![0.0, 0.0, 1.0]).expect("the literal fixture data matches the declared shape");
     let mut term = build_line_term(&coords_col, &decoder);
     let target = Array2::<f64>::from_shape_fn((n, p), |(r, _)| 0.10 + 0.05 * r as f64);
     // α = exp(0) = 1 Euclidean ARD precision; modest smoothness.
     let rho = SaeManifoldRho::new(0.0, -4.0, vec![array![0.0]]);
 
-    let l0 = term.loss(target.view(), &rho).unwrap();
+    let l0 = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     let coords0 = term.assignment.coords[0].as_matrix().column(0).to_owned();
 
     // ---- DRIVE the active retraction through the in-loop apply-path ----
     let topo = CanonicalChartTopology::Interval;
-    let applied = term.canonicalize_atom_unit_speed_chart(0, &topo).unwrap();
+    let applied = term.canonicalize_atom_unit_speed_chart(0, &topo).expect("unit-speed canonicalization is defined for this fixture atom");
     assert!(
         applied,
         "the monomial line chart's image is affine in arc-length ⇒ the ACTIVE arc-length \
          retraction MUST fire (this is the reachable faithful d=1 active path)"
     );
 
-    let l1 = term.loss(target.view(), &rho).unwrap();
+    let l1 = term.loss(target.view(), &rho).expect("the loss is defined at this fixture rho");
     let coords1 = term.assignment.coords[0].as_matrix().column(0).to_owned();
 
     // The retraction genuinely re-gauged the coordinates (not a silent no-op).
@@ -410,7 +410,7 @@ fn unit_speed_active_retraction_moves_only_ard_2070() {
     );
 
     // The in-loop hook itself runs safely on this reachable-active-path atom.
-    let n_retracted = term.retract_unit_speed_charts_in_loop().unwrap();
+    let n_retracted = term.retract_unit_speed_charts_in_loop().expect("unit-speed retraction is defined on this term");
     // The chart is now arc-length (just retracted) so the hook re-gauges 0 atoms
     // on this second call — idempotent, never perturbing a settled fit.
     assert_eq!(

@@ -144,9 +144,10 @@ fn arg_usize(idx: usize, default: usize) -> usize {
 
 fn main() {
     gam::init_parallelism();
-    log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(log::LevelFilter::Info))
-        .ok();
+    match log::set_logger(&LOGGER) {
+        Ok(()) => log::set_max_level(log::LevelFilter::Info),
+        Err(err) => eprintln!("keeping the already-installed logger: {err}"),
+    }
     let n: usize = arg_usize(1, 1500);
     let centers: usize = arg_usize(2, 4);
     let (data, spec) = build(n, centers);

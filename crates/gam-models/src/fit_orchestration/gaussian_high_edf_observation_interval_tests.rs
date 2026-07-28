@@ -35,7 +35,10 @@ fn truth(a: f64, b: f64, c: f64) -> f64 {
 
 /// One-sample Kolmogorov–Smirnov statistic against Uniform(0,1).
 fn ks_vs_uniform(mut u: Vec<f64>) -> f64 {
-    u.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    u.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("PIT values are finite; a NaN would make the KS statistic meaningless")
+    });
     let n = u.len() as f64;
     let mut d = 0.0f64;
     for (i, &ui) in u.iter().enumerate() {

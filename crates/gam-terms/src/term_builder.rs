@@ -1267,7 +1267,7 @@ fn parse_periods(
             if iter.next().is_some() {
                 return None;
             }
-            Some((first.0, values.into_iter().next().unwrap()))
+            Some((first.0, values.into_iter().next()?))
         });
     let periods = if let Some((axis, value)) = lone_periodic_broadcast {
         let mut out = vec![None; dim];
@@ -2472,8 +2472,8 @@ pub fn build_smooth_basis(
                     .to_string());
                 }
                 {
-                    let (domain_start, p_value) = if periods[0].is_some() {
-                        (origins[0].unwrap_or(minv), periods[0].unwrap())
+                    let (domain_start, p_value) = if let Some(period) = periods[0] {
+                        (origins[0].unwrap_or(minv), period)
                     } else {
                         parse_periodic_domain_1d(options, minv, maxv).map_err(|e| e.to_string())?
                     };

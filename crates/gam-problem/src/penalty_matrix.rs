@@ -208,9 +208,12 @@ impl PenaltyMatrix {
                 let p_left = left.nrows();
                 let p_right = right.nrows();
                 // v is ordered by i_left * p_right + i_right.
-                let v_mat =
-                    ndarray::ArrayView2::from_shape((p_left, p_right), v.as_slice().unwrap())
-                        .unwrap();
+                let v_mat = ndarray::ArrayView2::from_shape(
+                    (p_left, p_right),
+                    v.as_slice()
+                        .expect("penalty operand is a contiguous Array1"),
+                )
+                .expect("operand length equals p_left * p_right for this Kronecker factorization");
                 let avbt = left.dot(&v_mat).dot(&right.t());
                 let standard = avbt.as_standard_layout();
                 Array1::from_iter(standard.iter().copied())

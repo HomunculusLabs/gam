@@ -29,6 +29,13 @@
 //! localise WHICH stage drops the ball (ISA rotation, birth acceptance, or joint
 //! backfit) — the failure mode is the finding.
 
+// `manifold/mod.rs` declares this module as
+// `#[cfg(test)] mod tests_2111_dense_torus_acceptance;` — its single declaration. Saying so in-file
+// makes the test scope a claim the compiler enforces rather than one the
+// filename merely implies, which is what puts the fixture helpers below in
+// the same scope as the `#[test]` fns they serve.
+#![cfg(test)]
+
 use crate::manifold::{
     AssignmentMode, BirthCandidateDecision, BirthRejection, PeriodicHarmonicEvaluator,
     SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator, SaeManifoldAtom, SaeManifoldRho,

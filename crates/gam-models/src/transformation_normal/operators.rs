@@ -71,7 +71,16 @@ impl TransformationNormalJointHessianWorkspace {
         if hessian.iter().any(|value| !value.is_finite()) {
             return Err("CTN dense Hessian cache produced non-finite values".to_string());
         }
-        self.dense_hessian_cache.set(hessian).ok();
+        if self.dense_hessian_cache.set(hessian).is_err() {
+            // Write-once cache: a concurrent caller installed its Hessian first.
+            // The `get` below adopts the winner, so this costs only the wasted
+            // build — but it must be visible rather than silently swallowed.
+            log::debug!(
+                "CTN dense Hessian cache lost the install race at p={}; adopting the \
+                 concurrently-installed Hessian",
+                self.p_total()
+            );
+        }
         log::info!(
             "[STAGE] CTN dense Hessian cache build p={} elapsed={:.3}s",
             self.p_total(),

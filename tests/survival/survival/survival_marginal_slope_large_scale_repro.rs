@@ -54,7 +54,7 @@ impl CapturedLogs {
         self.lines
             .lock()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| Vec::new())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 }
 

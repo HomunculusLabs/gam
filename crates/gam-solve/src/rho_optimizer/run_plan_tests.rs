@@ -6890,7 +6890,7 @@ fn run_bfgs_projects_seed_before_seed_validation_eval() {
 }
 
 fn tmp_cache_session(label: &str) -> (tempfile::TempDir, Arc<CacheSession>) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the test environment provides a writable temp dir");
     let store = gam_runtime::warm_start::WarmStartStore::open(
         dir.path().to_path_buf(),
         gam_runtime::warm_start::StoreOptions {
@@ -6898,7 +6898,7 @@ fn tmp_cache_session(label: &str) -> (tempfile::TempDir, Arc<CacheSession>) {
             ttl: std::time::Duration::from_secs(60),
         },
     )
-    .unwrap();
+    .expect("a fresh temp dir opens as an empty warm-start store");
     let mut fp = gam_runtime::warm_start::Fingerprinter::new();
     fp.absorb_str(b"outer-test", label);
     let key = fp.finalize();
@@ -7884,7 +7884,7 @@ impl BimodalTerminalObjective {
     /// audit working correctly; it was the fixture that was modelling the wrong
     /// thing.
     fn basin_value(&self, rho: &Array1<f64>) -> f64 {
-        let bump = if *self.warm_bumped.lock().unwrap() {
+        let bump = if *self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned") {
             BASIN_BUMP
         } else {
             0.0
@@ -7897,7 +7897,7 @@ impl BimodalTerminalObjective {
     /// disagree unless a `reset()` re-baselines between them.
     fn basin_solve(&self, rho: &Array1<f64>) -> OuterEval {
         let cost = self.basin_value(rho);
-        let mut warm = self.warm_bumped.lock().unwrap();
+        let mut warm = self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned");
         *warm = !*warm; // consecutive warm-started solves alternate basins
         OuterEval {
             cost,
@@ -7972,14 +7972,14 @@ impl OuterObjective for BimodalTerminalObjective {
         // Install the owned coefficient mode: record the objective value the
         // mode carries, exactly as the custom-family evaluator does.
         let installed = self.basin_solve(rho).cost;
-        *self.finalize_installed.lock().unwrap() = Some(installed);
+        *self.finalize_installed.lock().expect("the finalize_installed mutex is not poisoned") = Some(installed);
         Ok(())
     }
     fn owns_terminal_coefficient_mode(&self) -> bool {
         self.owns_terminal
     }
     fn reset(&mut self) {
-        *self.warm_bumped.lock().unwrap() = false;
+        *self.warm_bumped.lock().expect("the warm_bumped mutex is not poisoned") = false;
     }
     fn seed_inner_state(&mut self, beta: &Array1<f64>) -> Result<SeedOutcome, EstimationError> {
         // The bimodal basin is carried by `warm_bumped`, not an inner-β slot —
@@ -8021,7 +8021,7 @@ fn run_bimodal_terminal(owns_terminal: bool) -> (f64, f64) {
     assert!(result.converged(), "stationary seed must converge");
     let installed = finalize_installed
         .lock()
-        .unwrap()
+        .expect("the finalize_installed mutex is not poisoned")
         .expect("finalize must have installed a terminal mode");
     (installed, result.final_value)
 }

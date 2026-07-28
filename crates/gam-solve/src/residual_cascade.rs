@@ -2314,7 +2314,7 @@ impl Core {
             } else {
                 buf.clear();
                 buf.extend_from_slice(&self.gram_diag[a..b]);
-                buf.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap());
+                buf.sort_unstable_by(|x, y| x.total_cmp(y));
                 let gram_median = buf[buf.len() / 2];
                 lambda * level.weight < COARSE_DOMINANCE * gram_median
             };
@@ -2338,7 +2338,7 @@ impl Core {
                 let a = level.col_offset;
                 let b = a + level.centers.len();
                 let mut buf: Vec<f64> = self.gram_diag[a..b].to_vec();
-                buf.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap());
+                buf.sort_unstable_by(|x, y| x.total_cmp(y));
                 let med = if buf.is_empty() {
                     0.0
                 } else {

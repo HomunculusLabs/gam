@@ -17,6 +17,13 @@
 //! cross-block quantity that only the two-block fit exposes. The test asserts the
 //! reported defect separates the two, and that the isometric defect is small.
 
+// `manifold/mod.rs` declares this module as
+// `#[cfg(test)] mod tests_behavior_isometry_2015;` — its single declaration. Saying so in-file
+// makes the test scope a claim the compiler enforces rather than one the
+// filename merely implies, which is what puts the fixture helpers below in
+// the same scope as the `#[test]` fns they serve.
+#![cfg(test)]
+
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 

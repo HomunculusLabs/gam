@@ -1372,7 +1372,11 @@ pub struct WorkingModelSurvival {
 
 impl Clone for WorkingModelSurvival {
     fn clone(&self) -> Self {
-        let workspace = self.workspace.lock().unwrap().clone();
+        let workspace = self
+            .workspace
+            .lock()
+            .expect("survival workspace mutex was not poisoned by a panicking holder")
+            .clone();
         Self {
             age_entry: self.age_entry.clone(),
             age_exit: self.age_exit.clone(),
@@ -2153,7 +2157,10 @@ impl WorkingModelSurvival {
         let mut nll = 0.0;
         let derivative_guard = self.derivative_guard();
         let derivative_guard_numerical = self.derivative_guard_numerical();
-        let mut workspace = self.workspace.lock().unwrap();
+        let mut workspace = self
+            .workspace
+            .lock()
+            .expect("survival workspace mutex was not poisoned by a panicking holder");
         workspace.reset(n);
         let SurvivalWorkspace {
             w_event,

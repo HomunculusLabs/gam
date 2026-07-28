@@ -201,7 +201,7 @@ fn build_softmax_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
                 decoder,
                 Array2::<f64>::eye(3),
             )
-            .unwrap()
+            .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
             .with_basis_evaluator(Arc::new(TestPeriodicEvaluator))
         })
         .collect();
@@ -214,8 +214,8 @@ fn build_softmax_term(n: usize, p: usize, k: usize) -> SaeManifoldTerm {
         manifolds,
         AssignmentMode::softmax(0.8),
     )
-    .unwrap();
-    SaeManifoldTerm::new(atoms, assignment).unwrap()
+    .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
+    SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks")
 }
 
 /// A `WhitenedStructured` per-row precision fitted over `(n, p)` correlated,

@@ -757,7 +757,11 @@ pub(crate) fn block_residual_jets(
     }
 
     // G⁺ and jets (eigen-perturbation).
-    let ep = eigh_pinv(&g, "local affine Gram").unwrap_or_else(|_| {
+    let ep = eigh_pinv(&g, "local affine Gram").unwrap_or_else(|err| {
+        log::debug!(
+            "measure-jet anisotropy: local affine Gram eigensolve failed ({err}); \
+             falling back to a zero projector"
+        );
         // A degenerate eigensolve here means the block geometry is singular to
         // machine precision; fall back to a zero projector (the residual then
         // reduces to CᵀWC), keeping the value finite. The isotropic path

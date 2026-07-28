@@ -1028,7 +1028,13 @@ impl ImplicitDesignPsiDerivative {
     where
         G: Fn(f64, f64, f64, &[f64]) -> f64 + Send + Sync,
     {
-        let st = self.streaming.as_ref().unwrap();
+        let Some(st) = self.streaming.as_ref() else {
+            return Err(BasisError::InvalidInput(
+                "streaming_accumulate_knot_vector<G> needs the streaming radial state, but this implicit \
+                 ψ-derivative operator was built without one"
+                    .to_string(),
+            ));
+        };
         let (n, k, dim) = (self.n, self.n_knots, self.n_axes);
         if n >= IMPLICIT_MATVEC_PAR_THRESHOLD {
             let err_flag = std::sync::atomic::AtomicBool::new(false);
@@ -1098,7 +1104,13 @@ impl ImplicitDesignPsiDerivative {
     where
         G: Fn(f64, f64, f64, &[f64]) -> f64 + Send + Sync,
     {
-        let st = self.streaming.as_ref().unwrap();
+        let Some(st) = self.streaming.as_ref() else {
+            return Err(BasisError::InvalidInput(
+                "streaming_forward_mul<G> needs the streaming radial state, but this implicit \
+                 ψ-derivative operator was built without one"
+                    .to_string(),
+            ));
+        };
         let (n, k, dim) = (self.n, self.n_knots, self.n_axes);
         if n >= IMPLICIT_MATVEC_PAR_THRESHOLD {
             let err_flag = std::sync::atomic::AtomicBool::new(false);
@@ -1163,7 +1175,13 @@ impl ImplicitDesignPsiDerivative {
     where
         G: Fn(f64, f64, f64, &[f64]) -> f64 + Send + Sync,
     {
-        let st = self.streaming.as_ref().unwrap();
+        let Some(st) = self.streaming.as_ref() else {
+            return Err(BasisError::InvalidInput(
+                "streaming_materialize<G> needs the streaming radial state, but this implicit \
+                 ψ-derivative operator was built without one"
+                    .to_string(),
+            ));
+        };
         let (n, k, dim) = (self.n, self.n_knots, self.n_axes);
         let mut raw = Array2::<f64>::zeros((n, k));
         let cs = IMPLICIT_MATVEC_CHUNK_SIZE;

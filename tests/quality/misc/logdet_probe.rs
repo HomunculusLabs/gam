@@ -91,7 +91,12 @@ fn diag_1271_dump_reml_logdet_internals() {
     // `set_logger` fails if another logger is already installed; ignore that
     // (still works if the other logger forwards, and the panic-dump fallback
     // below prints whatever we have).
-    log::set_logger(&LOGGER).ok();
+    if let Err(error) = log::set_logger(&LOGGER) {
+        log::warn!(
+            "diag_1271: the capture logger was not installed ({error}); the dump below \
+             shows only what the installed backend forwards"
+        );
+    }
     log::set_max_level(log::LevelFilter::Info);
 
     let cfg = FitConfig {

@@ -1429,8 +1429,14 @@ pub fn build_matern_operator_penalty_psi_derivatives(
         for j in 0..p {
             let (r, _s_vec) = if let Some(eta) = aniso_log_scales {
                 aniso_distance_and_components(
-                    centers.row(k).as_slice().unwrap(),
-                    centers.row(j).as_slice().unwrap(),
+                    centers
+                        .row(k)
+                        .as_slice()
+                        .expect("a row of the standard-layout centers matrix is contiguous"),
+                    centers
+                        .row(j)
+                        .as_slice()
+                        .expect("a row of the standard-layout centers matrix is contiguous"),
                     eta,
                 )
             } else {
@@ -2894,8 +2900,14 @@ pub(crate) fn build_matern_double_penalty_primarywith_psi_derivatives(
         for j in i..k {
             let r = if let Some(eta) = aniso_log_scales {
                 aniso_distance(
-                    centers.row(i).as_slice().unwrap(),
-                    centers.row(j).as_slice().unwrap(),
+                    centers
+                        .row(i)
+                        .as_slice()
+                        .expect("a row of the standard-layout centers matrix is contiguous"),
+                    centers
+                        .row(j)
+                        .as_slice()
+                        .expect("a row of the standard-layout centers matrix is contiguous"),
                     eta,
                 )
             } else {
@@ -3977,7 +3989,9 @@ mod harmonic_penalty_invariants_tests {
         // — pinned the Wahba low-degree-nullspace structure, which this Harmonic
         // method does not use. (`SPHERE_UNPENALIZED_LOW_DEGREE` governs the Wahba
         // decomposition only.) Assert the real Harmonic contract instead.
-        let l_max = spec.max_degree.unwrap();
+        let l_max = spec
+            .max_degree
+            .expect("the Harmonic sphere spec declares a max degree");
         let expected_p = l_max * (l_max + 2);
         assert_eq!(primary.ncols(), expected_p);
 

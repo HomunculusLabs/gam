@@ -546,15 +546,20 @@ impl log::Log for NfreeResetLogger {
             || msg.starts_with("[KAPPA-PHASE-CEIL")
         {
             if let Ok(mut f) = self.file.lock() {
-                writeln!(f, "{msg}").ok();
-                f.flush().ok();
+                // A logger cannot log its own write failure without recursing,
+                // so the trace file losing a record is reported on stderr.
+                if let Err(error) = writeln!(f, "{msg}").and_then(|()| f.flush()) {
+                    eprintln!("[nfree-trace] dropped a record: {error}");
+                }
             }
         }
     }
     fn flush(&self) {
         if let Ok(mut f) = self.file.lock() {
             use std::io::Write;
-            f.flush().ok();
+            if let Err(error) = f.flush() {
+                eprintln!("[nfree-trace] flush failed: {error}");
+            }
         }
     }
 }
@@ -577,7 +582,9 @@ fn install_nfree_reset_logger() {
             file: std::sync::Mutex::new(file),
         }
     });
-    log::set_logger(logger).ok();
+    // Losing the race to an already-installed logger is the documented
+    // idempotent path and carries nothing to report.
+    drop(log::set_logger(logger));
     log::set_max_level(log::LevelFilter::Info);
 }
 
@@ -585,7 +592,11 @@ fn install_nfree_reset_logger() {
 fn zzz_diag_n16000_reset_reasons() {
     install_nfree_reset_logger();
     let (aniso, bounds) = (false, (1e-2, 1e2));
-    run_fit(1000, true, aniso, bounds).ok();
+    // Warm-up only — a failure here must not fail the diagnostic, but it
+    // explains any oddity in the 16k timings below, so say so.
+    if let Err(error) = run_fit(1000, true, aniso, bounds) {
+        eprintln!("[diag-16k] warm-up fit failed: {error}");
+    }
     let r = run_kappa_trial_seconds(16_000, aniso, bounds).unwrap();
     let t = r.kappa_timing.unwrap();
     eprintln!(

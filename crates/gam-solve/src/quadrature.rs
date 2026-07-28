@@ -3003,7 +3003,12 @@ fn integrated_mixture_component_jet(
     // standalone link or as a mixture component.
     match component {
         LinkComponent::Logit => integrated_inverse_link_jet(ctx, LinkFunction::Logit, mu, sigma)
-            .unwrap_or_else(|_| integrated_logit_jet_ghq(ctx, mu, sigma)),
+            .unwrap_or_else(|error| {
+                log::debug!(
+                    "integrated logit jet at (mu={mu}, sigma={sigma}) fell back to GHQ: {error}"
+                );
+                integrated_logit_jet_ghq(ctx, mu, sigma)
+            }),
         LinkComponent::Probit => integrated_probit_jet(mu, sigma),
         LinkComponent::CLogLog => integrated_cloglog_inverse_link_jet_controlled(ctx, mu, sigma),
         LinkComponent::LogLog | LinkComponent::Cauchit => {
@@ -4838,7 +4843,7 @@ pub fn cloglog_ghq_value(ctx: &QuadratureContext, mu: f64, sigma: f64, n_nodes: 
     // (most-resolved) estimate rather than assert convergence (#2063).
     const CLOGLOG_GHQ_ORDER_LADDER: [usize; 5] = [7, 15, 21, 31, 51];
     const CLOGLOG_GHQ_CONV_TOL: f64 = 1e-10;
-    let floor = n_nodes.min(*CLOGLOG_GHQ_ORDER_LADDER.last().unwrap());
+    let floor = n_nodes.min(CLOGLOG_GHQ_ORDER_LADDER[CLOGLOG_GHQ_ORDER_LADDER.len() - 1]);
     let mut prev: Option<f64> = None;
     let mut result = 0.0_f64;
     for &n in CLOGLOG_GHQ_ORDER_LADDER.iter().filter(|&&n| n >= floor) {

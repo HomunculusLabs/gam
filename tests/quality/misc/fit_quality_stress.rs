@@ -790,11 +790,16 @@ impl log::Log for SeedCostLogger {
 #[test]
 fn zz_measure_hifreq_tensor_k10_seed_costs() {
     init_parallelism();
-    // Deliberately error-swallowing: another test in this binary may have
-    // installed a logger first, and losing the capture is a reason to print
-    // nothing, never to fail. `.ok()` rather than a `let _` binding, which the
-    // ban scanner rejects (and is right to).
-    log::set_logger(&SEED_COST_LOGGER).ok();
+    // Another test in this binary may have installed a logger first. Losing
+    // that race is a reason to capture nothing, never to fail — but it is
+    // said out loud, so an empty seed-cost log reads as "capture was off"
+    // rather than "the fit produced no costs".
+    if log::set_logger(&SEED_COST_LOGGER).is_err() {
+        eprintln!(
+            "[zz:2607] another test installed a logger first; \
+             seed-cost capture is off for this run"
+        );
+    }
     log::set_max_level(log::LevelFilter::Info);
 
     let (data, formula, n_train, sigma) = hifreq_tensor_dataset(10);

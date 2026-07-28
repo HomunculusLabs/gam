@@ -1331,9 +1331,13 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
         let mut probe = build_term();
         // Warm-start the inner latents from the amortized encoder built on the
         // running dictionary, then rank by the co-trained criterion.
-        probe
-            .warm_start_latents_from_amortized_encoder(target.view(), rho)
-            .ok();
+        if let Err(err) = probe.warm_start_latents_from_amortized_encoder(target.view(), rho)
+        {
+            // The amortized encoder is an accelerator, not a precondition: this rho
+            // still gets ranked from the cold latent seed. Report it so a warm start
+            // that silently never engages cannot masquerade as Design A.
+            eprintln!("amortized warm start unavailable at this rho ({err}); ranking from the cold seed");
+        }
         let Ok((cotrained, _loss, _consistency)) = probe
             .penalized_quasi_laplace_criterion_cotrained(
                 target.view(),
@@ -1358,9 +1362,12 @@ fn cotrained_encoder_recovers_planted_manifold_at_least_as_well_as_sequential() 
     );
     let mut cot_term = build_term();
     let mut cot_rho = best_cot_rho.clone();
-    cot_term
-        .warm_start_latents_from_amortized_encoder(target.view(), &cot_rho)
-        .ok();
+    if let Err(err) =
+        cot_term.warm_start_latents_from_amortized_encoder(target.view(), &cot_rho)
+    {
+        // Same accelerator contract as the ranking loop above.
+        eprintln!("amortized warm start unavailable at the selected rho ({err}); using the cold seed");
+    }
     cot_term
         .run_joint_fit_arrow_schur(target.view(), &mut cot_rho, None, 64, 1.0, 1.0e-4, 1.0e-4)
         .expect("co-trained warm-started inner solve converges");

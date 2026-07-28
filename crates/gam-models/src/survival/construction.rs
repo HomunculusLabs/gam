@@ -1796,14 +1796,13 @@ pub fn build_survival_time_basis(
                     }
                     match gam_linalg::faer_ndarray::FaerEigh::eigh(s_mat, faer::Side::Lower) {
                         Ok((evals, _)) => {
-                            let evals_slice: &[f64] = evals.as_slice().unwrap();
-                            let max_ev = evals_slice
+                            let max_ev = evals
                                 .iter()
                                 .copied()
                                 .fold(0.0_f64, |a, b| a.max(b.abs()))
                                 .max(1.0);
                             let threshold = 100.0 * (p as f64) * f64::EPSILON * max_ev;
-                            evals_slice.iter().filter(|&&e| e <= threshold).count()
+                            evals.iter().filter(|&&e| e <= threshold).count()
                         }
                         Err(_) => 0,
                     }

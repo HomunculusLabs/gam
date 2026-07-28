@@ -18,6 +18,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Record a best-effort maintenance failure instead of discarding it.
+///
+/// The warm-start store is a CACHE: a failed unlink, directory fsync, or
+/// eviction pass must never fail the fit that triggered it. Discarding the
+/// error outright — the previous `.ok()` — also discarded the only evidence
+/// that the cache is degrading, and a full disk, a read-only mount, and a
+/// permission fault all then present identically, as unexplained unbounded
+/// growth. `debug` keeps that observable without adding noise to a healthy run.
+fn log_best_effort<E: std::fmt::Display>(operation: &str, result: Result<(), E>) {
+    if let Err(error) = result {
+        log::debug!("warm-start store: {operation} failed: {error}");
+    }
+}
+
 /// On-disk schema version. Bump on incompatible format changes; old entries
 /// are then ignored at read time and evicted on the next save.
 pub(crate) const SCHEMA_VERSION: u32 = 1;
@@ -262,8 +276,14 @@ impl WarmStartStore {
                 }
                 lookup_cache_invalidate(&cache_key);
                 let bin = hit.meta_path.with_extension("bin");
-                fs::remove_file(&hit.meta_path).ok();
-                fs::remove_file(&bin).ok();
+                log_best_effort(
+                    "removing the expired entry's metadata",
+                    fs::remove_file(&hit.meta_path),
+                );
+                log_best_effort(
+                    "removing the expired entry's payload",
+                    fs::remove_file(&bin),
+                );
                 // Removing the entry stales any cached directory listing.
                 self.metadata_index_remove(&hit.meta_path);
                 return Ok(None);
@@ -299,8 +319,14 @@ impl WarmStartStore {
         };
         // Validate checksum
         if checksum_hex(&payload) != meta.checksum_hex {
-            fs::remove_file(&meta_path).ok();
-            fs::remove_file(&bin_path).ok();
+            log_best_effort(
+                "removing the checksum-mismatched metadata",
+                fs::remove_file(&meta_path),
+            );
+            log_best_effort(
+                "removing the checksum-mismatched payload",
+                fs::remove_file(&bin_path),
+            );
             lookup_cache_invalidate(&cache_key);
             self.metadata_index_remove(&meta_path);
             return Ok(None);
@@ -453,15 +479,30 @@ impl WarmStartStore {
                     // A sibling process' eviction removed the key dir mid-write.
                     // Clean up any partial temps, then retry the whole sequence
                     // once after recreating the dir inside `write_and_promote_entry`.
-                    fs::remove_file(&bin_tmp).ok();
-                    fs::remove_file(&meta_tmp).ok();
+                    log_best_effort(
+                        "removing a partial payload temp after a racing eviction",
+                        fs::remove_file(&bin_tmp),
+                    );
+                    log_best_effort(
+                        "removing a partial metadata temp after a racing eviction",
+                        fs::remove_file(&meta_tmp),
+                    );
                     attempt += 1;
                     continue;
                 }
                 Err(e) => {
-                    fs::remove_file(&bin_tmp).ok();
-                    fs::remove_file(&meta_tmp).ok();
-                    fs::remove_file(&bin_final).ok();
+                    log_best_effort(
+                        "removing the payload temp after a failed write",
+                        fs::remove_file(&bin_tmp),
+                    );
+                    log_best_effort(
+                        "removing the metadata temp after a failed write",
+                        fs::remove_file(&meta_tmp),
+                    );
+                    log_best_effort(
+                        "removing the promoted payload after a failed write",
+                        fs::remove_file(&bin_final),
+                    );
                     return Err(StoreError::Io(e));
                 }
             }
@@ -473,9 +514,12 @@ impl WarmStartStore {
         // makes the entry visible to lookups) can be lost. Best-effort on
         // platforms where opening a directory for fsync is not supported.
         if let Ok(d) = fs::File::open(&dir) {
-            d.sync_all().ok();
+            log_best_effort("fsyncing the key directory after promote", d.sync_all());
         }
-        self.metadata_index_upsert(&meta_final, &bin_final).ok();
+        log_best_effort(
+            "refreshing the metadata index after promote",
+            self.metadata_index_upsert(&meta_final, &bin_final),
+        );
         // 5. Best-effort eviction; failure here is non-fatal. Throttle the
         // full directory scan: maintain a process-wide approximate byte
         // total and only run eviction when the per-save counter wraps
@@ -503,7 +547,7 @@ impl WarmStartStore {
             || n.is_multiple_of(EVICT_EVERY_N_SAVES)
             || new_total > self.opts.size_budget_bytes
         {
-            self.evict_overflow().ok();
+            log_best_effort("the post-save eviction pass", self.evict_overflow());
         }
         Ok(())
     }
@@ -579,7 +623,10 @@ impl WarmStartStore {
                     .map(|mut it| it.next().is_none())
                     .unwrap_or(false)
             {
-                fs::remove_dir(&key_dir).ok();
+                log_best_effort(
+                    "removing an emptied key directory",
+                    fs::remove_dir(&key_dir),
+                );
                 if let Ok(mut index) = self.index.lock() {
                     index.by_key_dir.remove(&key_dir);
                 }
@@ -620,8 +667,14 @@ impl WarmStartStore {
             if remaining <= self.opts.size_budget_bytes {
                 break;
             }
-            fs::remove_file(&meta).ok();
-            fs::remove_file(&bin).ok();
+            log_best_effort(
+                "removing the evicted entry's metadata",
+                fs::remove_file(&meta),
+            );
+            log_best_effort(
+                "removing the evicted entry's payload",
+                fs::remove_file(&bin),
+            );
             self.metadata_index_remove(&meta);
             remaining = remaining.saturating_sub(bytes);
         }
@@ -670,7 +723,7 @@ fn write_and_promote_entry(w: &EntryWrite<'_>) -> io::Result<()> {
     {
         let mut f = fs::File::create(w.bin_tmp)?;
         f.write_all(w.payload)?;
-        f.sync_all().ok();
+        log_best_effort("fsyncing the payload temp", f.sync_all());
     }
     // Promote the bin first so a crash between the two renames leaves an
     // orphan .bin (cleaned up by `evict_overflow`) rather than a meta
@@ -687,12 +740,15 @@ fn write_and_promote_entry(w: &EntryWrite<'_>) -> io::Result<()> {
     {
         let mut f = fs::File::create(w.meta_tmp)?;
         f.write_all(&meta_json)?;
-        f.sync_all().ok();
+        log_best_effort("fsyncing the metadata temp", f.sync_all());
     }
     if let Err(e) = fs::rename(w.meta_tmp, w.meta_final) {
         // Roll back the bin we just promoted to avoid orphaning it, then
         // surface the error so the caller can retry or fail.
-        fs::remove_file(w.bin_final).ok();
+        log_best_effort(
+            "rolling back the promoted payload after a failed metadata rename",
+            fs::remove_file(w.bin_final),
+        );
         return Err(e);
     }
     Ok(())
@@ -990,7 +1046,10 @@ impl WarmStartStore {
         if let Some(dir) = meta_path.parent()
             && let Ok(d) = fs::File::open(dir)
         {
-            d.sync_all().ok();
+            log_best_effort(
+                "fsyncing the metadata directory after rewrite",
+                d.sync_all(),
+            );
         }
         self.metadata_index_remove(meta_path);
         // `entry.written_unix_secs` intentionally keeps the immutable creation
@@ -1139,8 +1198,14 @@ impl WarmStartStore {
             let mut survivors = Vec::with_capacity(cached.len());
             for entry in cached {
                 if meta_expired(meta_activity_nanos(&entry.meta), self.opts.ttl, now_nanos) {
-                    fs::remove_file(&entry.meta_path).ok();
-                    fs::remove_file(&entry.bin_path).ok();
+                    log_best_effort(
+                        "removing the TTL-expired entry's metadata",
+                        fs::remove_file(&entry.meta_path),
+                    );
+                    log_best_effort(
+                        "removing the TTL-expired entry's payload",
+                        fs::remove_file(&entry.bin_path),
+                    );
                     self.metadata_index_remove(&entry.meta_path);
                 } else {
                     survivors.push(entry);
@@ -1170,7 +1235,10 @@ impl WarmStartStore {
                 if let Some(pid) = parse_tmp_pid(name)
                     && pid != std::process::id()
                 {
-                    fs::remove_file(&path).ok();
+                    log_best_effort(
+                        "removing another process' abandoned temp",
+                        fs::remove_file(&path),
+                    );
                     mutated = true;
                 }
                 continue;
@@ -1186,7 +1254,10 @@ impl WarmStartStore {
             let bin_md = match fs::metadata(&bin) {
                 Ok(m) => m,
                 Err(_) => {
-                    fs::remove_file(&path).ok();
+                    log_best_effort(
+                        "removing metadata whose payload is missing",
+                        fs::remove_file(&path),
+                    );
                     self.metadata_index_remove(&path);
                     mutated = true;
                     continue;
@@ -1195,23 +1266,38 @@ impl WarmStartStore {
             let meta = match self.read_meta_indexed(&path, &meta_md, &bin_md) {
                 Ok(m) => m,
                 Err(_) => {
-                    fs::remove_file(&path).ok();
-                    fs::remove_file(&bin).ok();
+                    log_best_effort("removing unreadable metadata", fs::remove_file(&path));
+                    log_best_effort(
+                        "removing the payload of unreadable metadata",
+                        fs::remove_file(&bin),
+                    );
                     self.metadata_index_remove(&path);
                     mutated = true;
                     continue;
                 }
             };
             if meta.schema_version != SCHEMA_VERSION {
-                fs::remove_file(&path).ok();
-                fs::remove_file(&bin).ok();
+                log_best_effort(
+                    "removing metadata from an older schema version",
+                    fs::remove_file(&path),
+                );
+                log_best_effort(
+                    "removing the payload of older-schema metadata",
+                    fs::remove_file(&bin),
+                );
                 self.metadata_index_remove(&path);
                 mutated = true;
                 continue;
             }
             if meta_expired(meta_activity_nanos(&meta), self.opts.ttl, now_nanos) {
-                fs::remove_file(&path).ok();
-                fs::remove_file(&bin).ok();
+                log_best_effort(
+                    "removing TTL-expired metadata during the sweep",
+                    fs::remove_file(&path),
+                );
+                log_best_effort(
+                    "removing the TTL-expired payload during the sweep",
+                    fs::remove_file(&bin),
+                );
                 self.metadata_index_remove(&path);
                 mutated = true;
                 continue;
@@ -1757,7 +1843,7 @@ mod tests {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    store.evict_overflow().ok();
+                    log_best_effort("the concurrent eviction pass", store.evict_overflow());
                 }
             })
         };

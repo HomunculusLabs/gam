@@ -157,7 +157,7 @@ fn structural_rank_from_assembled(s_total: &Array2<f64>) -> Result<usize, String
         format!("PenaltyPseudologdet structural-rank eigendecomposition failed: {e}")
     })?;
     let threshold =
-        super::reml_outer_engine::positive_eigenvalue_threshold(evals.as_slice().unwrap());
+        super::reml_outer_engine::positive_eigenvalue_threshold(evals.as_slice().expect("eigh returns a freshly allocated contiguous eigenvalue array"));
     Ok(evals.iter().filter(|&&eval| eval > threshold).count())
 }
 
@@ -733,7 +733,7 @@ impl PenaltyPseudologdet {
                 format!("PenaltyPseudologdet component eigendecomposition failed: {e}")
             })?;
             let unit_threshold = super::reml_outer_engine::positive_eigenvalue_threshold(
-                unit_evals.as_slice().unwrap(),
+                unit_evals.as_slice().expect("eigh returns a freshly allocated contiguous eigenvalue array"),
             );
             for (idx, &ev) in unit_evals.iter().enumerate() {
                 if ev > unit_threshold {
@@ -853,7 +853,7 @@ impl PenaltyPseudologdet {
         //                  perturbation, so any eigenvalue ≤ r + delta is
         //                  indistinguishable from ridge-only within FP noise.
         let noise_band =
-            super::reml_outer_engine::positive_eigenvalue_threshold(evals.as_slice().unwrap());
+            super::reml_outer_engine::positive_eigenvalue_threshold(evals.as_slice().expect("eigh returns a freshly allocated contiguous eigenvalue array"));
         let boundary = match ridge {
             Some(r) if r > 0.0 => r + noise_band,
             _ => noise_band,

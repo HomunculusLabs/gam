@@ -997,9 +997,9 @@ fn planted_term(active: &[Vec<bool>]) -> (SaeManifoldTerm, SaeManifoldRho) {
     let n = active.len();
     let k = active[0].len();
     let p = 4usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("a degree-3 periodic harmonic basis is a valid evaluator spec"));
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| row as f64 / n as f64);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture coords are finite and lie inside the evaluator chart");
     let mut atoms = Vec::with_capacity(k);
     let mut coord_blocks = Vec::with_capacity(k);
     for atom_idx in 0..k {
@@ -1017,7 +1017,7 @@ fn planted_term(active: &[Vec<bool>]) -> (SaeManifoldTerm, SaeManifoldRho) {
             decoder,
             Array2::<f64>::eye(3),
         )
-        .unwrap()
+        .expect("the fixture atom's phi/jet/decoder/gram shapes agree by construction")
         .with_basis_second_jet(evaluator.clone());
         atoms.push(atom);
         coord_blocks.push(coords.clone());
@@ -1034,8 +1034,8 @@ fn planted_term(active: &[Vec<bool>]) -> (SaeManifoldTerm, SaeManifoldRho) {
         vec![LatentManifold::Circle { period: 1.0 }; k],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("the fixture logits, coord blocks and manifolds all have length k");
+    let term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment agree on the atom count");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); k]);
     (term, rho)
 }
@@ -1043,7 +1043,7 @@ fn planted_term(active: &[Vec<bool>]) -> (SaeManifoldTerm, SaeManifoldRho) {
 fn residuals_of(term: &SaeManifoldTerm) -> Array2<f64> {
     // A term scored against zero target gives R = −fitted; non-degenerate
     // residuals for the birth channel.
-    let fitted = term.try_fitted().unwrap();
+    let fitted = term.try_fitted().expect("a freshly built fixture term carries a fitted state");
     -&fitted
 }
 
@@ -1373,9 +1373,9 @@ fn tiled_circle_term(
 ) -> (SaeManifoldTerm, SaeManifoldRho) {
     assert_eq!(decoder_scale.len(), k, "one decoder scale per arc atom");
     let p = 4usize;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("a degree-3 periodic harmonic basis is a valid evaluator spec"));
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(row, _)| row as f64 / n as f64);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture coords are finite and lie inside the evaluator chart");
     let m = phi.ncols();
     let mut atoms = Vec::with_capacity(k);
     let mut coord_blocks = Vec::with_capacity(k);
@@ -1395,7 +1395,7 @@ fn tiled_circle_term(
             decoder,
             Array2::<f64>::eye(m),
         )
-        .unwrap()
+        .expect("the fixture atom's phi/jet/decoder/gram shapes agree by construction")
         .with_basis_second_jet(evaluator.clone());
         atoms.push(atom);
         coord_blocks.push(coords.clone());
@@ -1413,8 +1413,8 @@ fn tiled_circle_term(
         vec![LatentManifold::Circle { period: 1.0 }; k],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("the fixture logits, coord blocks and manifolds all have length k");
+    let term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment agree on the atom count");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); k]);
     (term, rho)
 }
@@ -2534,7 +2534,7 @@ fn linear_line_atom(name: &str, coord: &Array1<f64>, dir: &Array1<f64>) -> SaeMa
         decoder,
         Array2::<f64>::eye(2),
     )
-    .unwrap()
+    .expect("the fixture atom's phi/jet/decoder/gram shapes agree by construction")
 }
 
 /// Build a dictionary of four rectified half-atoms `±u, ±v` parking a
@@ -2607,8 +2607,8 @@ fn shattered_plane_term(gaussian: bool) -> (SaeManifoldTerm, SaeManifoldRho) {
         vec![LatentManifold::Euclidean; k],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("the fixture logits, coord blocks and manifolds all have length k");
+    let term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture atoms and assignment agree on the atom count");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); k]);
     (term, rho)
 }
@@ -2724,9 +2724,9 @@ fn single_circle_term(phase_turns: &Array1<f64>) -> (SaeManifoldTerm, SaeManifol
     let n = phase_turns.len();
     let p = 4usize;
     let radius = 3.0_f64;
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("a degree-3 periodic harmonic basis is a valid evaluator spec"));
     let coords = phase_turns.clone().insert_axis(ndarray::Axis(1));
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture coords are finite and lie inside the evaluator chart");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[2, 0]] = radius; // cos₁ · e0
     decoder[[1, 1]] = radius; // sin₁ · e1
@@ -2739,7 +2739,7 @@ fn single_circle_term(phase_turns: &Array1<f64>) -> (SaeManifoldTerm, SaeManifol
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("the fixture atom's phi/jet/decoder/gram shapes agree by construction")
     .with_basis_second_jet(evaluator.clone());
     let logits = Array2::<f64>::from_elem((n, 1), ON);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -2748,8 +2748,8 @@ fn single_circle_term(phase_turns: &Array1<f64>) -> (SaeManifoldTerm, SaeManifol
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("the fixture logits, coord blocks and manifolds all have length k");
+    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture atoms and assignment agree on the atom count");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     (term, rho)
 }

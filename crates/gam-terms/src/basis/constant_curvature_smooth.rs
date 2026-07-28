@@ -820,7 +820,7 @@ fn select_constant_curvature_centers(
         .enumerate()
         .map(|(i, row)| (i, row.dot(&row)))
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap();
+        .expect("centers has at least one row; the empty case returned above");
     for j in 0..centers.ncols() {
         centers[(closest, j)] = 0.0;
     }

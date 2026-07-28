@@ -1627,9 +1627,10 @@ fn canonicalize_for_identifiability_inner(
             // Build col_offsets for the reduced specs.
             let mut red_col_offsets: Vec<usize> = Vec::with_capacity(reduced_specs.len() + 1);
             red_col_offsets.push(0);
+            let mut red_col_end = 0usize;
             for spec in reduced_specs.iter() {
-                let prev = *red_col_offsets.last().unwrap();
-                red_col_offsets.push(prev + spec.design.ncols());
+                red_col_end += spec.design.ncols();
+                red_col_offsets.push(red_col_end);
             }
 
             // The MAP uniqueness check operates on the flat (n_rows, p_total_red)

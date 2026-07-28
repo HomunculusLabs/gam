@@ -237,24 +237,33 @@ pub(super) fn two_circle_periodic_term(
     let dim = 1usize;
     let num_basis = 1 + 2 * harmonics;
     let evaluator: Arc<dyn SaeBasisSecondJet> =
-        Arc::new(PeriodicHarmonicEvaluator::new(num_basis).unwrap());
+        Arc::new(
+        PeriodicHarmonicEvaluator::new(num_basis)
+            .expect("num_basis = 1 + 2*harmonics is a valid odd periodic basis width"),
+    );
     let basis_kinds = vec![SaeAtomBasisKind::Periodic; k];
     let atom_dims = vec![dim; k];
-    let seed_coords = sae_pca_seed_initial_coords(z, &basis_kinds, &atom_dims).unwrap();
+    let seed_coords = sae_pca_seed_initial_coords(z, &basis_kinds, &atom_dims)
+        .expect("one basis kind and one dim per atom, matching the fixture target");
     let mut atoms = Vec::with_capacity(k);
     let mut coords_blocks = Vec::with_capacity(k);
     let mut manifolds = Vec::with_capacity(k);
     let mut rss = 0.0_f64;
     for atom_idx in 0..k {
         let coords = seed_coords.slice(s![atom_idx, .., 0..dim]).to_owned();
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the seeded coords lie in the periodic chart domain");
         let mm = phi.ncols();
         let mut xtx = fast_atb(&phi, &phi);
         for i in 0..mm {
             xtx[[i, i]] += 1.0e-8;
         }
         let xtz = fast_atb(&phi, &z.to_owned());
-        let decoder = xtx.cholesky(Side::Lower).unwrap().solve_mat(&xtz);
+        let decoder = xtx
+        .cholesky(Side::Lower)
+        .expect("phi^T phi + 1e-8 I is positive definite")
+        .solve_mat(&xtz);
         let fitted = phi.dot(&decoder);
         for row in 0..n {
             for col in 0..p {
@@ -271,7 +280,7 @@ pub(super) fn two_circle_periodic_term(
             decoder,
             Array2::<f64>::eye(mm),
         )
-        .unwrap()
+        .expect("phi, jet, decoder and gram were built with matching shapes")
         .with_basis_evaluator(evaluator.clone());
         atoms.push(atom);
         coords_blocks.push(coords);
@@ -282,9 +291,10 @@ pub(super) fn two_circle_periodic_term(
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let assignment =
         SaeAssignment::from_blocks_with_mode_and_manifolds(logits, coords_blocks, manifolds, mode)
-            .unwrap();
+            .expect("one logit column, coord block and manifold per atom");
     (
-        SaeManifoldTerm::new(atoms, assignment).unwrap(),
+        SaeManifoldTerm::new(atoms, assignment)
+            .expect("atoms and assignment were built over the same k atoms"),
         seed_dispersion,
     )
 }
@@ -320,7 +330,7 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
     let contract = OuterObjective::reactive_domain_scalar_contract(&objective)
@@ -366,7 +376,10 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
     let entry_eval_result =
         OuterObjective::eval_with_order(&mut objective, &entry_rho, OuterEvalOrder::Value);
     if let Err(error) = &entry_eval_result {
-        let entry_rho_state = objective.baseline_rho.from_flat(entry_rho.view()).unwrap();
+        let entry_rho_state = objective
+            .baseline_rho
+            .from_flat(entry_rho.view())
+            .expect("entry_rho came from `to_flat` on this same rho layout");
         let system = objective
             .term
             .assemble_arrow_schur(z.view(), &entry_rho_state, None)
@@ -417,7 +430,9 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
              decoder_norms={decoder_norms:?}, lambda_smooth={:?}",
             assignment_grad_sq.sqrt(),
             chart_grad_sq.sqrt(),
-            entry_rho_state.lambda_smooth_vec().unwrap(),
+            entry_rho_state
+                .lambda_smooth_vec()
+                .expect("the fixture rho carries one smoothing block per atom"),
         );
     }
     let entry_eval =
@@ -443,7 +458,9 @@ fn reactive_entry_reseeds_nonzero_k2_seed_to_strict_separated_root_2080() {
     let quotient_kkt = objective.term.quotient_gradient_norm_from_system(
         &system,
         raw_kkt_sq,
-        &committed_rho.lambda_smooth_vec().unwrap(),
+        &committed_rho
+            .lambda_smooth_vec()
+            .expect("the fixture rho carries one smoothing block per atom"),
     );
     let tolerance = SAE_MANIFOLD_INNER_GRAD_REL_TOL * objective.term.inner_iterate_scale();
     assert!(
@@ -465,7 +482,7 @@ fn run_wide_outer_fit(
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let n_params = seed.len();
     let mut objective =
@@ -513,7 +530,7 @@ fn run_k1_generated_seed_outer_fit(
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let n_params = init_rho.to_flat().len();
     let mut objective =
         SaeManifoldOuterObjective::new(term, z.clone(), None, init_rho, 8, 0.04, 1.0e-6, 1.0e-6);
@@ -614,7 +631,7 @@ fn seeded_k1_circle_objective(
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let objective = SaeManifoldOuterObjective::new(
         term,
@@ -985,7 +1002,7 @@ fn entangled_two_circle_outer_reml_separates_2080() {
     let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
     let init_rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]; k])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let seed = init_rho.to_flat();
     let n_params = seed.len();
     let mut objective =
@@ -1087,17 +1104,25 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
         }
     }
     let evaluator: Arc<dyn SaeBasisSecondJet> =
-        Arc::new(PeriodicHarmonicEvaluator::new(m).unwrap());
+        Arc::new(
+        PeriodicHarmonicEvaluator::new(m).expect("m is a valid odd periodic basis width"),
+    );
     let seed_coords =
-        sae_pca_seed_initial_coords(z.view(), &[SaeAtomBasisKind::Periodic], &[1]).unwrap();
+        sae_pca_seed_initial_coords(z.view(), &[SaeAtomBasisKind::Periodic], &[1])
+            .expect("one periodic basis kind and one dim for the single atom");
     let coords = seed_coords.slice(s![0, .., 0..1]).to_owned();
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator
+        .evaluate(coords.view())
+        .expect("the seeded coords lie in the periodic chart domain");
     let mut xtx = fast_atb(&phi, &phi);
     for i in 0..m {
         xtx[[i, i]] += 1.0e-8;
     }
     let xtz = fast_atb(&phi, &z);
-    let decoder = xtx.cholesky(Side::Lower).unwrap().solve_mat(&xtz);
+    let decoder = xtx
+        .cholesky(Side::Lower)
+        .expect("phi^T phi + 1e-8 I is positive definite")
+        .solve_mat(&xtz);
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "circle",
         SaeAtomBasisKind::Periodic,
@@ -1107,7 +1132,7 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
         decoder,
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("phi, jet, decoder and gram were built with matching shapes")
     .with_basis_evaluator(evaluator.clone());
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         Array2::<f64>::from_elem((n, 1), 6.0),
@@ -1115,8 +1140,9 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false),
     )
-    .unwrap();
-    let base = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("one logit column, coord block and manifold for the single atom");
+    let base = SaeManifoldTerm::new(vec![atom], assignment)
+        .expect("the single atom and its assignment agree on atom count");
     // The whole smoothing sweep, from flexible (-8) through the over-smoothed tail
     // (+8) where the undamped Laplace log-det is worst conditioned.
     for &smooth in &[-8.0_f64, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0] {
@@ -1183,7 +1209,7 @@ fn profile_wide_p_criterion_cost_2080() {
         let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
             .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-            .unwrap();
+            .expect("seed dispersion is finite and strictly positive");
         let beta_dim = term.beta_dim();
 
         // Phase A: damped inner solve alone.
@@ -1242,7 +1268,7 @@ fn zz_measure_wide_p_criterion_cost_localizer_2080() {
         let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
             .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-            .unwrap();
+            .expect("seed dispersion is finite and strictly positive");
         let beta_dim = term.beta_dim();
 
         // Phase A: damped inner solve alone.
@@ -1334,7 +1360,7 @@ fn zz_measure_2439_value_vs_gradient_inner_mode() {
     let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let rho_flat = rho.to_flat();
 
     let report = |tag: &str, a: &OuterEval, b: &OuterEval| {
@@ -1436,7 +1462,7 @@ fn zz_measure_2228_value_lane_budget_sweep() {
         let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
         let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
             .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-            .unwrap();
+            .expect("seed dispersion is finite and strictly positive");
         // FULL budget (refine_progress_extension = true): the arm that must reach
         // the root the test prices against.
         let mut t = term.clone();
@@ -1514,7 +1540,7 @@ fn value_lane_prices_at_shared_fixed_point_2228() {
     // the fixture actually exercises that regime (else the invariant is vacuous).
     let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
         .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
-        .unwrap();
+        .expect("seed dispersion is finite and strictly positive");
     let rho_flat = rho.to_flat();
 
     // Sanity: the COARSE (false) refine budget must be demonstrably inadequate at

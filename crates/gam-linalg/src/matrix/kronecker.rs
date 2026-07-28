@@ -128,7 +128,7 @@ impl TensorProductDesignOperator {
             //
             // Zero-copy reshape: β is contiguous and q₁·tail_total = total_cols.
             let beta_view =
-                ndarray::ArrayView2::from_shape((q0, tail_total), vector.as_slice().unwrap())
+                ndarray::ArrayView2::from_shape((q0, tail_total), vector.as_slice().expect("the coefficient vector is contiguous; the zero-copy reshape relies on it"))
                     .expect("β reshape for GEMM");
             let temp = fast_ab(b0.as_ref(), &beta_view); // (n, tail_total)
 

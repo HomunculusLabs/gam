@@ -7169,7 +7169,7 @@ fn fit_bounded_term_collection_with_design(
     };
     let s_lambda_original = weighted_blockwise_penalty_sum(
         &design.penalties,
-        fit.lambdas.as_slice().unwrap(),
+        fit.lambdas.as_slice().expect("the fitted lambdas are a contiguous standard-layout array"),
         design.design.ncols(),
     );
     let penalty_term = beta_user.dot(&s_lambda_original.dot(&beta_user));

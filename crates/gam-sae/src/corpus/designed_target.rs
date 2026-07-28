@@ -252,7 +252,9 @@ mod tests {
         for (a, b) in collected.target.iter().zip(stored.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            log::debug!("designed-target test: removing the temp shard dir failed: {error}");
+        }
     }
 
     #[test]
@@ -295,7 +297,9 @@ mod tests {
         for (a, b) in again.target.iter().zip(collected.target.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            log::debug!("designed-target test: removing the temp shard dir failed: {error}");
+        }
     }
 
     #[test]
@@ -307,7 +311,9 @@ mod tests {
         let err = collect_designed_target(&mut src, Some(&wrong), 5, 1)
             .expect_err("mismatched measure must be rejected");
         assert!(err.contains("covers 7 rows"), "got: {err}");
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            log::debug!("designed-target test: removing the temp shard dir failed: {error}");
+        }
     }
 
     #[test]

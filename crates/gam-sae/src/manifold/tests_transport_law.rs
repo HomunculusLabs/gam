@@ -47,7 +47,7 @@ fn circle_atom(
     coords: &Array2<f64>,
     p_tot: usize,
 ) -> SaeManifoldAtom {
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
     let m = phi.ncols();
     SaeManifoldAtom::new_with_provided_function_gram(
         "cc",
@@ -58,7 +58,7 @@ fn circle_atom(
         Array2::<f64>::zeros((m, p_tot)),
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
     .with_basis_second_jet(evaluator.clone())
 }
 
@@ -77,8 +77,8 @@ fn build_k1(
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::softmax(1.0),
     )
-    .unwrap();
-    let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
+    let term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
     let rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     (term, rho)
 }

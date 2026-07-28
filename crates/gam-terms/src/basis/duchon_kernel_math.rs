@@ -1619,7 +1619,7 @@ fn gauss_legendre_01_64() -> &'static [(f64, f64)] {
             }
         }
         // Sort by node, then map [-1, 1] -> [0, 1] with the 1/2 Jacobian.
-        nodes.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        nodes.sort_by(|a, b| a.0.total_cmp(&b.0));
         nodes
             .into_iter()
             .map(|(x, w)| (0.5 * (x + 1.0), 0.5 * w))
@@ -2751,7 +2751,8 @@ mod duchon_hybrid_psd_tests {
                 };
                 assert_pow_parity("block value", block.eval(r), reference_value);
 
-                let got = polyharmonic_block_jet4(r, m as f64, d).unwrap();
+                let got = polyharmonic_block_jet4(r, m as f64, d)
+                    .expect("the polyharmonic block jet is defined at this fixture radius");
                 let got = [got.0, got.1, got.2, got.3, got.4];
                 for derivative in 0..5 {
                     let exponent = alpha - derivative as f64;
@@ -2770,7 +2771,8 @@ mod duchon_hybrid_psd_tests {
                     assert_pow_parity("jet channel", got[derivative], reference);
                 }
 
-                let got = duchon_polyharmonic_operator_block_jets(r, m, d).unwrap();
+                let got = duchon_polyharmonic_operator_block_jets(r, m, d)
+                    .expect("the operator block jets are defined at this fixture radius");
                 let got = [got.0, got.1, got.2, got.3];
                 let reference = powf_operator_reference(r, m, d);
                 for channel in 0..4 {
@@ -2812,7 +2814,7 @@ mod duchon_hybrid_psd_tests {
         let powi_sum = (0..N).fold(0.0, |sum, i| {
             let radius = std::hint::black_box(r + (i % 17) as f64 * 1.0e-6);
             sum + duchon_polyharmonic_operator_block_jets(radius, m, d)
-                .unwrap()
+                .expect("the operator block jets are defined at this benchmark radius")
                 .0
         });
         let powi_time = start.elapsed();

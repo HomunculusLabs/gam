@@ -102,14 +102,21 @@ impl LedgerStore {
             .join("gam")
             .join("sae_structure_ledger")
             .join("v1");
-        let store = WarmStartStore::open(
+        let store = match WarmStartStore::open(
             root,
             StoreOptions {
                 size_budget_bytes: LEDGER_DISK_BUDGET_BYTES,
                 ttl: Duration::from_secs(LEDGER_DISK_TTL_SECS),
             },
-        )
-        .ok();
+        ) {
+            Ok(store) => Some(store),
+            Err(err) => {
+                // An unwritable tier is a supported configuration, not a fault;
+                // the ledger then lives in memory for this process only.
+                log::debug!("sae structure ledger: disk tier unavailable ({err}); in-memory only");
+                None
+            }
+        };
         Self { key, store }
     }
 

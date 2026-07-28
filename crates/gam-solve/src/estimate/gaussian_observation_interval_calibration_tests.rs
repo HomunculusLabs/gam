@@ -59,7 +59,10 @@ fn normal_cdf(z: f64) -> f64 {
 
 /// One-sample Kolmogorov–Smirnov statistic against Uniform(0,1).
 fn ks_vs_uniform(mut u: Vec<f64>) -> f64 {
-    u.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    u.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("KS inputs are finite probabilities, so the order is total")
+    });
     let n = u.len() as f64;
     let mut d = 0.0f64;
     for (i, &ui) in u.iter().enumerate() {

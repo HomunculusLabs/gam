@@ -350,7 +350,12 @@ fn fit_once(
         f.write_all(csv.as_bytes()).expect("write synthetic csv");
     }
     let ds = load_csvwith_inferred_schema(&tmp).expect("load synthetic data");
-    std::fs::remove_file(&tmp).ok();
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        eprintln!(
+            "warning: could not remove temp csv {}: {err}",
+            tmp.display()
+        );
+    }
 
     let cfg = FitConfig {
         family: Some(case.family.to_string()),
@@ -373,7 +378,10 @@ fn fit_once(
         arm
     );
     ArmOutcome {
-        criterion: fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
+        criterion: fit
+            .fit
+            .reml_score()
+            .expect("the fit reports a REML/LAML criterion"),
         beta: fit.fit.beta.to_vec(),
         log_lambdas: fit.fit.log_lambdas.to_vec(),
     }

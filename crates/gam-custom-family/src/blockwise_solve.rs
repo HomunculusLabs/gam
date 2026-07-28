@@ -2305,7 +2305,10 @@ pub(crate) fn strict_exact_pseudo_logdet(
     // (constant ‖g‖, stuck cost — gam#808). Sharing the kernel's threshold here
     // removes the desync at the source; both are `C∞` in ρ (the positive
     // eigenspace of a PSD-shifted Hessian is structurally fixed).
-    let pos_tol = positive_eigenvalue_threshold(evals.as_slice().unwrap());
+    let evals_slice = evals.as_slice().ok_or_else(|| {
+        "strict pseudo-laplace logdet: the eigenvalue array is not contiguous".to_string()
+    })?;
+    let pos_tol = positive_eigenvalue_threshold(evals_slice);
     if evals.iter().any(|&ev| ev < -neg_tol) {
         let min_eval = evals.iter().copied().fold(f64::INFINITY, f64::min);
         let below = evals.iter().filter(|&&ev| ev < -neg_tol).count();

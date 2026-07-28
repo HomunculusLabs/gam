@@ -123,7 +123,9 @@ fn posterior_respects_nonnegative_coefficient_bound() {
     let csv = negative_slope_csv(200);
     let path = write_temp_csv(&csv, "nonneg");
     let ds = load_csvwith_inferred_schema(&path).expect("load #1507 csv");
-    std::fs::remove_file(&path).ok();
+    if let Err(err) = std::fs::remove_file(&path) {
+        eprintln!("warning: temp CSV cleanup failed: {err}");
+    }
 
     let (model, p) = saved_standard_gaussian_model("y ~ nonnegative(x)", &ds);
 
@@ -151,7 +153,9 @@ fn posterior_respects_two_sided_linear_coefficient_bounds() {
     let csv = negative_slope_csv(200);
     let path = write_temp_csv(&csv, "linbox");
     let ds = load_csvwith_inferred_schema(&path).expect("load #1507 csv");
-    std::fs::remove_file(&path).ok();
+    if let Err(err) = std::fs::remove_file(&path) {
+        eprintln!("warning: temp CSV cleanup failed: {err}");
+    }
 
     let (model, p) = saved_standard_gaussian_model("y ~ linear(x, min=-1, max=1)", &ds);
 

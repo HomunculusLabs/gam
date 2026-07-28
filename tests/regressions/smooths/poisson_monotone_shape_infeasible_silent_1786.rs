@@ -194,7 +194,9 @@ fn fit_formula(
         f.write_all(csv.as_bytes()).expect("write synthetic csv");
     }
     let ds = load_csvwith_inferred_schema(&tmp).expect("load synthetic poisson data");
-    std::fs::remove_file(&tmp).ok();
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        eprintln!("temp csv cleanup failed for {}: {err}", tmp.display());
+    }
     let n_headers = ds.headers.len();
     let x_idx = ds.column_map()["x"];
     let result = fit_from_formula(formula, &ds, cfg).map_err(|e| e.to_string())?;

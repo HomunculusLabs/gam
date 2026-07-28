@@ -11,6 +11,13 @@
 //! - engine stalls here     ⇒ run per-coordinate central differences of
 //!   `eval_cost` against `eval`'s analytic gradient AT the stalled ρ and
 //!   print both (the desync, if any, named coordinate by coordinate).
+
+// `manifold/mod.rs` declares this module as
+// `#[cfg(test)] mod tests_stall_diagnostic_2234;` — its single declaration. Saying so in-file
+// makes the test scope a claim the compiler enforces rather than one the
+// filename merely implies, which is what puts the fixture helpers below in
+// the same scope as the `#[test]` fns they serve.
+#![cfg(test)]
 use super::*;
 
 fn planted_circle_cloud() -> (Array2<f64>, usize) {

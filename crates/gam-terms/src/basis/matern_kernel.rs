@@ -3675,8 +3675,14 @@ pub fn build_matern_collocation_operator_matrices(
                 // Distance: anisotropic r = |Ah| when eta present, isotropic |h| otherwise.
                 let r = if let Some(eta) = aniso_log_scales {
                     aniso_distance_and_components(
-                        centers.row(k).as_slice().unwrap(),
-                        centers.row(j).as_slice().unwrap(),
+                        centers
+                            .row(k)
+                            .as_slice()
+                            .expect("centers is standard-layout, so every row is contiguous"),
+                        centers
+                            .row(j)
+                            .as_slice()
+                            .expect("centers is standard-layout, so every row is contiguous"),
                         eta,
                     )
                     .0

@@ -215,7 +215,9 @@ fn main() -> Result<(), String> {
             pr.k_atoms,
             pr.ev,
         );
-        std::io::stdout().flush().ok();
+        std::io::stdout()
+            .flush()
+            .map_err(|error| format!("probe stdout flush failed: {error}"))?;
         events.push(rec);
         last = now;
         if (now - t_run).as_secs_f64() > budget_s {

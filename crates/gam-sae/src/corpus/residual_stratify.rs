@@ -877,7 +877,9 @@ mod tests {
             "uniform baseline should surface few rare rows, got {rare_seen_uniform}"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            log::debug!("fixture cleanup left {} behind: {err}", dir.display());
+        }
     }
 
     #[test]
@@ -907,7 +909,9 @@ mod tests {
                 .iter()
                 .all(|&w| w.is_finite() && w >= 1.0 - 1e-12)
         );
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            log::debug!("fixture cleanup left {} behind: {err}", dir.display());
+        }
     }
 
     #[test]
@@ -923,7 +927,9 @@ mod tests {
         let b = collect_stratified_target(&mut src, &screen, 2_000, 11).expect("b");
         assert_eq!(a.row_ids, b.row_ids, "same seed ⇒ identical selection");
         assert_eq!(a.likelihood_weights, b.likelihood_weights);
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            log::debug!("fixture cleanup left {} behind: {err}", dir.display());
+        }
     }
 
     #[test]
@@ -941,7 +947,9 @@ mod tests {
         assert_eq!(collected.row_ids, (0..n as u64).collect::<Vec<_>>());
         assert!(collected.likelihood_weights.iter().all(|&w| w == 1.0));
         assert!(collected.design.strata().iter().all(|s| s.censused));
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            log::debug!("fixture cleanup left {} behind: {err}", dir.display());
+        }
     }
 
     #[test]
@@ -965,7 +973,9 @@ mod tests {
             "flat energy must give the uniform rate f = {f}, got {}",
             design.strata()[0].pi
         );
-        std::fs::remove_dir_all(&dir).ok();
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            log::debug!("fixture cleanup left {} behind: {err}", dir.display());
+        }
     }
 
     #[test]

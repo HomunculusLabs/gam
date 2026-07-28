@@ -349,7 +349,10 @@ where
     let beta_hat = reml_state
         .warm_start_beta
         .read()
-        .unwrap()
+        // The warm start is a cache: a writer that panicked mid-update poisons the
+        // lock but leaves a readable beta, and refusing to read it would fail a
+        // solve that can still proceed.
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .as_ref()
         .map(|beta| beta.0.clone())
         .ok_or_else(|| {

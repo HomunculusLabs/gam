@@ -758,7 +758,10 @@ impl<K: Eq + Hash + Clone, V: Clone + ResidentBytes> ByteLruCache<K, V> {
         let v = g.map.get(key)?.0.clone();
         // move to back (most-recently-used)
         if let Some(pos) = g.order.iter().position(|k| k == key) {
-            let k = g.order.remove(pos).unwrap();
+            let k = g
+                .order
+                .remove(pos)
+                .expect("position() returned an in-bounds index into this same deque");
             g.order.push_back(k);
         }
         Some(v)
@@ -938,7 +941,12 @@ impl<T> RayonSafeOnce<T> {
             return v;
         }
         let candidate = init();
-        self.slot.set(candidate).ok();
+        if self.slot.set(candidate).is_err() {
+            log::trace!(
+                "RayonSafeOnce: a concurrent initializer won the race; \
+                 keeping its value and discarding this candidate"
+            );
+        }
         self.slot
             .get()
             .expect("RayonSafeOnce slot populated by set() above")
@@ -955,7 +963,10 @@ impl<T: Clone> Clone for RayonSafeOnce<T> {
     fn clone(&self) -> Self {
         let cloned = Self::new();
         if let Some(value) = self.slot.get() {
-            cloned.slot.set(value.clone()).ok();
+            cloned
+                .slot
+                .set(value.clone())
+                .expect("a freshly constructed RayonSafeOnce slot is still empty");
         }
         cloned
     }
@@ -1267,8 +1278,8 @@ mod resource_policy_tests {
                 let granted = std::sync::Arc::clone(&granted);
                 let barrier = std::sync::Arc::clone(&barrier);
                 scope.spawn(move || {
-                    let held = governor.try_reserve(200, "test-race").ok();
-                    if held.is_some() {
+                    let held = governor.try_reserve(200, "test-race");
+                    if held.is_ok() {
                         granted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                     barrier.wait();

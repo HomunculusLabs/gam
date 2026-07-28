@@ -3063,8 +3063,17 @@ where
         },
         inference,
         reml_score: (!zero_covariance_boundary).then_some(outer_result.final_value),
-        outer_cost_evals: usize::try_from(*reml_state.arena.cost_eval_count.read().unwrap())
-            .unwrap_or(usize::MAX),
+        outer_cost_evals: usize::try_from(
+            // A panic elsewhere can poison this lock, but the count it guards is
+            // a diagnostic that is still perfectly readable; recover it rather
+            // than turn a reporting field into a second panic.
+            *reml_state
+                .arena
+                .cost_eval_count
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+        .unwrap_or(usize::MAX),
         inner_pirls_solves: usize::try_from(
             reml_state
                 .arena

@@ -42,7 +42,9 @@ fn fit_and_predict_on_grid(formula: &str, x: &[f64], y: &[f64]) -> Vec<f64> {
         f.write_all(csv.as_bytes()).expect("write synthetic csv");
     }
     let ds = load_csvwith_inferred_schema(&tmp).expect("load synthetic monotone data");
-    std::fs::remove_file(&tmp).ok();
+    if let Err(err) = std::fs::remove_file(&tmp) {
+        eprintln!("warning: temp CSV cleanup failed: {err}");
+    }
     let col = ds.column_map();
     let x_idx = col["x"];
 
@@ -93,7 +95,7 @@ fn monotone_increasing_shape_smooth_fits_already_monotone_data() {
     for xi in x.iter_mut() {
         *xi = next_unit();
     }
-    x.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x.sort_by(|a, b| a.total_cmp(b));
     let y: Vec<f64> = x
         .iter()
         .map(|&xi| {

@@ -351,9 +351,13 @@ impl PenaltySubspaceTrace {
         // `tol = eps · k_active · σ_max(M)`, which is the standard
         // NumPy/LAPACK convention and exactly what Codex flagged as
         // necessary in the math review.
-        let (evals, evecs) = m
-            .eigh(faer::Side::Lower)
-            .unwrap_or_else(|_| (Array1::<f64>::zeros(k_active), Array2::<f64>::eye(k_active)));
+        let (evals, evecs) = m.eigh(faer::Side::Lower).unwrap_or_else(|err| {
+            log::debug!(
+                "penalty coordinate: {k_active}x{k_active} eigendecomposition failed ({err}); \
+                     falling back to a zero spectrum in the identity basis"
+            );
+            (Array1::<f64>::zeros(k_active), Array2::<f64>::eye(k_active))
+        });
         let sigma_max = evals.iter().copied().fold(0.0_f64, f64::max).max(0.0);
         let tol = f64::EPSILON * (k_active as f64) * sigma_max.max(1.0);
         let mut m_inv = Array2::<f64>::zeros((k_active, k_active));

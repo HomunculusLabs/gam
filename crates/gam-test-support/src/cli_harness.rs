@@ -126,7 +126,9 @@ pub fn read_prediction_means(path: &Path) -> Vec<f64> {
             rec[mean_idx]
                 .parse::<f64>()
                 // SAFETY: test-support helper intentionally panics with cell context
-                .unwrap_or_else(|_| panic!("non-numeric prediction: {:?}", &rec[mean_idx]))
+                .unwrap_or_else(|error| {
+                    panic!("non-numeric prediction {:?}: {error}", &rec[mean_idx])
+                })
         })
         .collect()
 }

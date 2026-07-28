@@ -159,9 +159,9 @@ impl<'a> ProbeRunner<'a> {
         };
         // The realized log-LR of one observation under the local Gaussian model
         // is the delivered dose; the null density contributes log-likelihood 0.
-        ledger
-            .absorb_probe_outcome(claim_idx, realized_nats, 0.0)
-            .ok();
+        if let Err(err) = ledger.absorb_probe_outcome(claim_idx, realized_nats, 0.0) {
+            log::debug!("probe outcome for claim {claim_idx} was not absorbed: {err}");
+        }
     }
 
     /// The ledger index and atom index of the contested claim with the LEAST

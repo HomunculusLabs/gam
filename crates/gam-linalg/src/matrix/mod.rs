@@ -1154,7 +1154,12 @@ impl SparseDesignMatrix {
         }
         let csr = self.matrix.as_ref().to_row_major().ok()?;
         let arc = Arc::new(csr);
-        self.csr_cache.set(arc.clone()).ok();
+        if self.csr_cache.set(arc.clone()).is_err() {
+            // Another thread installed its CSR first. The cache is write-once, so
+            // the winner is authoritative; hand back that one rather than a private
+            // copy, so every caller observes the same cached matrix.
+            return self.csr_cache.get().cloned();
+        }
         Some(arc)
     }
 
@@ -2661,10 +2666,13 @@ impl BlockDesignOperator {
         }
         let mut col_offsets = Vec::with_capacity(blocks.len() + 1);
         col_offsets.push(0);
+        // Carry the running width instead of re-reading the last offset, so the
+        // prefix-sum has no partial state that could be empty.
+        let mut total_cols = 0usize;
         for b in &blocks {
-            col_offsets.push(col_offsets.last().unwrap() + b.ncols());
+            total_cols += b.ncols();
+            col_offsets.push(total_cols);
         }
-        let total_cols = *col_offsets.last().unwrap();
         Ok(Self {
             blocks,
             col_offsets,

@@ -71,7 +71,10 @@ impl KroneckerDesign {
                 let pb = right.ncols();
                 let n = left.nrows();
                 assert_eq!(beta.len(), pa * pb);
-                let beta_mat = beta.view().into_shape_with_order((pa, pb)).unwrap();
+                let beta_mat = beta
+                    .view()
+                    .into_shape_with_order((pa, pb))
+                    .expect("beta.len() == pa * pb, asserted directly above");
                 let mut result = Array1::zeros(n);
                 if let Some(right_dense) = right.as_dense_ref() {
                     let right_beta = fast_abt(right_dense, &beta_mat);

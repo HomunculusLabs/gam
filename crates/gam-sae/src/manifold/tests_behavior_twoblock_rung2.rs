@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! Rung-2 two-block joint fit: behavior as a jointly-fitted output block that
 //! shares the latent coordinate `t` and the gate `a` with the activation block.
 //!

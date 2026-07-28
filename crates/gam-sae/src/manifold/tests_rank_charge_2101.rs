@@ -49,9 +49,9 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
             x[[i, j]] += 0.05 * lcg_normal(&mut s);
         }
     }
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("the fixture's harmonic order is a valid periodic basis order"));
     let coords = Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r] / std::f64::consts::TAU);
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
     let mut decoder = Array2::<f64>::zeros((3, p));
     decoder[[1, 0]] = 1.0;
     decoder[[2, 1]] = 1.0;
@@ -64,7 +64,7 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
         decoder,
         Array2::<f64>::eye(3),
     )
-    .unwrap()
+    .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
     .with_basis_second_jet(evaluator.clone());
     let logits = Array2::<f64>::from_elem((n, 1), 3.0);
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
@@ -73,8 +73,8 @@ fn fitted_circle_term(n: usize, p: usize) -> (SaeManifoldTerm, SaeManifoldRho) {
         vec![LatentManifold::Circle { period: 1.0 }],
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+    .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
+    let mut term = SaeManifoldTerm::new(vec![atom], assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1)]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
@@ -99,7 +99,7 @@ fn rank_charge_deff_accepts_circle_and_classifies_exact_zero_spectrum() {
             1e-6,
             1e-6,
         )
-        .unwrap_or_else(|_| panic!("reml pass"));
+        .unwrap_or_else(|err| panic!("reml pass: {err}"));
     let disp = term
         .reconstruction_dispersion(&loss, &cache, &rho, None)
         .unwrap();
@@ -243,14 +243,14 @@ fn fit_circle_subset(
 ) -> (SaeManifoldTerm, SaeManifoldRho) {
     let n = x.nrows();
     let p = x.ncols();
-    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).unwrap());
+    let evaluator = Arc::new(PeriodicHarmonicEvaluator::new(3).expect("the fixture's harmonic order is a valid periodic basis order"));
     let mut atoms = Vec::new();
     let mut coord_blocks = Vec::new();
     let mut manifolds = Vec::new();
     for &c in circles {
         let coords =
             Array2::<f64>::from_shape_fn((n, 1), |(r, _)| theta[r][c] / std::f64::consts::TAU);
-        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
         let mut decoder = Array2::<f64>::zeros((3, p));
         decoder[[1, 2 * c]] = 1.0;
         decoder[[2, 2 * c + 1]] = 1.0;
@@ -263,7 +263,7 @@ fn fit_circle_subset(
             decoder,
             Array2::<f64>::eye(3),
         )
-        .unwrap()
+        .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
         .with_basis_second_jet(evaluator.clone());
         atoms.push(atom);
         coord_blocks.push(coords);
@@ -276,8 +276,8 @@ fn fit_circle_subset(
         manifolds,
         AssignmentMode::ordered_beta_bernoulli(0.7, 1.0, false),
     )
-    .unwrap();
-    let mut term = SaeManifoldTerm::new(atoms, assignment).unwrap();
+    .expect("the fixture's logits, coordinate blocks and manifolds agree in length");
+    let mut term = SaeManifoldTerm::new(atoms, assignment).expect("the fixture's atoms and assignment describe the same latent blocks");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); circles.len()]);
     term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)

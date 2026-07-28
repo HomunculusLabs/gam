@@ -65,7 +65,8 @@ fn make_csv(seed: u64) -> std::path::PathBuf {
 #[test]
 fn diag_1266_dump_ps_double_penalty_logdet() {
     init_parallelism();
-    log::set_logger(&LOGGER_1266).ok();
+    // Already-installed is the only failure and carries nothing to report.
+    drop(log::set_logger(&LOGGER_1266));
     log::set_max_level(log::LevelFilter::Info);
 
     let cfg = FitConfig {

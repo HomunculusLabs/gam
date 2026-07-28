@@ -26,7 +26,7 @@ pub(crate) fn build_isometry_atom_for_evaluator(
     p_out: usize,
     seed: f64,
 ) -> (SaeManifoldAtom, IsometryPenalty, Array1<f64>) {
-    let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+    let (phi, jet) = evaluator.evaluate(coords.view()).expect("the fixture's coordinate block is a valid input for this evaluator");
     let m = phi.ncols();
     let decoder = deterministic_decoder(m, p_out, seed);
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
@@ -38,7 +38,7 @@ pub(crate) fn build_isometry_atom_for_evaluator(
         decoder,
         Array2::<f64>::eye(m),
     )
-    .unwrap()
+    .expect("the fixture's basis, decoder and Gram blocks agree in dimension")
     .with_basis_second_jet(evaluator);
     let target_flat: Array1<f64> = coords.iter().copied().collect();
     let penalty = IsometryPenalty::new_euclidean(
@@ -58,7 +58,7 @@ pub(crate) fn assert_exact_isometry_hvp_matches_grad_fd(
     let (atom, penalty, target_flat) =
         build_isometry_atom_for_evaluator(evaluator, kind, &coords, p_out, 0.91);
     let rho = array![0.0_f64];
-    let installed = refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).unwrap();
+    let installed = refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
     assert!(
         installed,
         "second-jet cache must be installed for exact HVP test"
@@ -80,11 +80,11 @@ pub(crate) fn assert_exact_isometry_hvp_matches_grad_fd(
     let target_plus: Array1<f64> = coords_plus.iter().copied().collect();
     let target_minus: Array1<f64> = coords_minus.iter().copied().collect();
 
-    refresh_isometry_caches_from_atom(&penalty, &atom, coords_plus.view()).unwrap();
+    refresh_isometry_caches_from_atom(&penalty, &atom, coords_plus.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
     let grad_plus = penalty.grad_target(target_plus.view(), rho.view());
-    refresh_isometry_caches_from_atom(&penalty, &atom, coords_minus.view()).unwrap();
+    refresh_isometry_caches_from_atom(&penalty, &atom, coords_minus.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
     let grad_minus = penalty.grad_target(target_minus.view(), rho.view());
-    refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).unwrap();
+    refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
 
     let fd = (&grad_plus - &grad_minus).mapv(|x| x / (2.0 * eps));
     for i in 0..exact.len() {
@@ -129,7 +129,7 @@ pub(crate) fn assert_exact_isometry_hvp_collapses_to_gn_at_zero_residual(
     // exactly the GN term. `with_reference` moves the penalty by value and
     // preserves every cache slot, so the J/J2/K caches read by the HVP are
     // unchanged.
-    refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).unwrap();
+    refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
     let mut g_ref = penalty
         .pullback_metric(d)
         .expect("pullback metric is available after the cache refresh");
@@ -260,7 +260,7 @@ pub(crate) fn assert_isometry_psd_majorizer_live_after_atom_refresh(
         "psd_majorizer_hvp without a cache must be the zero block; got {pre:?}"
     );
 
-    let installed = refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).unwrap();
+    let installed = refresh_isometry_caches_from_atom(&penalty, &atom, coords.view()).expect("the fixture's isometry penalty and atom share one coordinate block");
     assert!(
         installed,
         "second-jet cache must install for the PSD-majorizer liveness test"

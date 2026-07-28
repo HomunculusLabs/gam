@@ -2598,8 +2598,10 @@ pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
         }
     }
 
-    let call = parse_function_call(raw).ok();
-    if let Some(call) = call {
+    // A term that does not parse as `name(args)` is not a function-call term;
+    // the plain-variable handling below is the answer, so there is no error here
+    // to report.
+    if let Ok(call) = parse_function_call(raw) {
         let name = call.name.to_ascii_lowercase();
         let (vars, mut options) = split_call_args(&call);
         match name.as_str() {
