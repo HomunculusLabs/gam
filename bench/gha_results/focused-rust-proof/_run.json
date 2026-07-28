@@ -1,12 +1,12 @@
 {
   "workflow": "Focused Rust Proof",
   "job_status": "success",
-  "run_id": "30361332544",
-  "run_number": "278",
+  "run_id": "30361393805",
+  "run_number": "279",
   "run_attempt": "1",
   "event": "workflow_dispatch",
-  "ref": "refs/heads/main",
-  "sha": "1387a755cd377474c504a157d73a2af63063ad12",
-  "completed_utc": "2026-07-28T13:14:16Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30361332544"
+  "ref": "refs/heads/measure/2579-invariant-joint-bound",
+  "sha": "3d8979dbf1ed010672b3c7ce4df79b789d160802",
+  "completed_utc": "2026-07-28T13:20:17Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30361393805"
 }
