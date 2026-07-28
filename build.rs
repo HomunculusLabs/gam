@@ -224,6 +224,16 @@ fn main() {
     // harder to grep for. There is no exemption — not for macro-threaded
     // tokens (`_py: Python<'_>`), not for trait-method signatures, not for
     // callback shims. Change the signature. Build.rs is exempt.
+    // Closure parameters with a fake binding name (`|_x| …`). Bare `|_|` is
+    // legal: the caller dictates a closure's parameter list, so "I ignore this
+    // argument" is a true statement. `_x` is that statement plus a lie.
+    let mut underscore_closure_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+    scan_for_underscore_closure_params(
+        &manifest_dir,
+        &manifest_dir,
+        &mut underscore_closure_offenders,
+    );
+
     let mut underscore_fn_arg_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
     scan_for_underscore_fn_args(
         &manifest_dir,
@@ -500,6 +510,17 @@ fn main() {
             title: "empty block body (handle the case, or restructure so the block does not exist)"
                 .to_string(),
             rows: empty_block_offenders
+                .iter()
+                .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
+                .collect(),
+        });
+    }
+
+    if !underscore_closure_offenders.is_empty() {
+        sections.push(Section {
+            title: "underscore closure parameter, `|_x|` (use the value, or drop the name: `|_|`)"
+                .to_string(),
+            rows: underscore_closure_offenders
                 .iter()
                 .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
                 .collect(),
@@ -1471,6 +1492,17 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // (`|_| {}`, `|_a, _b| {}`) is `scan_for_empty_blocks`'s job, since a
         // needle would miss every parameter spelling and every line break.
         ("|_| ()", "no-op closure", false),
+        // `.map(drop)` / `.for_each(drop)` — `drop` as a combinator argument is
+        // `|_| ()` with a shorter name. A bare `drop(expr);` statement stays
+        // legal: that is the sanctioned way to consume a value for its effect.
+        // Spelled per combinator rather than as a bare `(drop)`, which also
+        // matches a call passing a LOCAL named `drop`.
+        (".map(drop)", "drop as a combinator", false),
+        (".map_err(drop)", "drop as a combinator", false),
+        (".flat_map(drop)", "drop as a combinator", false),
+        (".and_then(drop)", "drop as a combinator", false),
+        (".for_each(drop)", "drop as a combinator", false),
+        (".inspect(drop)", "drop as a combinator", false),
         ("|_, _| ()", "no-op closure", false),
         // Constant-valued predicates. `|_| true` / `|_| false` answer a
         // question the callee bothered to ask by ignoring the argument; the
@@ -1516,10 +1548,17 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
 }
 
 fn line_has_banned_code_fragment(line: &str, fragment: &str) -> bool {
+    !find_banned_code_fragments(line, fragment).is_empty()
+}
+
+/// Every position in `line` where `fragment` occurs with identifier
+/// boundaries honoured. `line_has_banned_code_fragment` is the "any" form.
+fn find_banned_code_fragments(line: &str, fragment: &str) -> Vec<usize> {
+    let mut hits = Vec::new();
     let line_bytes = line.as_bytes();
     let fragment_bytes = fragment.as_bytes();
     if fragment_bytes.is_empty() || line_bytes.len() < fragment_bytes.len() {
-        return false;
+        return hits;
     }
 
     let needs_left_boundary = is_ident_byte(fragment_bytes[0]);
@@ -1533,12 +1572,12 @@ fn line_has_banned_code_fragment(line: &str, fragment: &str) -> bool {
             let right_is_bounded =
                 !needs_right_boundary || end == line_bytes.len() || !is_ident_byte(line_bytes[end]);
             if left_is_bounded && right_is_bounded {
-                return true;
+                hits.push(start);
             }
         }
         start += 1;
     }
-    false
+    hits
 }
 
 fn enforce_banned_substring_matcher_invariants() {
@@ -1557,6 +1596,38 @@ fn enforce_banned_substring_matcher_invariants() {
     ));
     assert!(line_has_banned_code_fragment("print!(\"x\")", "print!("));
     assert!(!line_has_banned_code_fragment("eprint!(\"x\")", "print!("));
+}
+
+/// Join the stripped lines into a single code stream with every run of
+/// whitespace collapsed to one space, and return the source line index for
+/// each byte of it. Two spellings of the same construct — split across lines,
+/// or padded with extra spaces — become the same bytes, so a needle cannot be
+/// dodged by reformatting.
+fn normalized_code_stream(stripped_lines: &[String]) -> (String, Vec<usize>) {
+    let mut stream = String::new();
+    let mut owner: Vec<usize> = Vec::new();
+    let mut pending_space = false;
+    for (idx, line) in stripped_lines.iter().enumerate() {
+        for ch in line.chars() {
+            if ch.is_whitespace() {
+                pending_space = true;
+                continue;
+            }
+            if pending_space && !stream.is_empty() {
+                stream.push(' ');
+                owner.push(idx);
+            }
+            pending_space = false;
+            let before = stream.len();
+            stream.push(ch);
+            while owner.len() < stream.len() {
+                owner.push(idx);
+            }
+            debug_assert_eq!(owner.len(), stream.len().max(before));
+        }
+        pending_space = true;
+    }
+    (stream, owner)
 }
 
 fn scan_for_banned_substrings(
@@ -1580,16 +1651,23 @@ fn scan_for_banned_substrings(
         // multi-line error messages that mention `panic!`, `unsafe`, etc.
         // by name) do not trip the scanner.
         let stripped_lines = strip_file_lines(content);
-        for (idx, line) in content.lines().enumerate() {
-            let stripped = stripped_lines.get(idx).map(String::as_str).unwrap_or(line);
-            let in_test = mask.get(idx).copied().unwrap_or(false);
-            for (needle, label, test_aware) in needles {
-                if *test_aware && in_test {
+        // Match against ONE whitespace-normalised stream instead of line by
+        // line. Per-line matching made a line break a bypass for every needle
+        // in the table (`|_|` on one line, `()` on the next), and made a
+        // second space one too (`|_|  ()`). Collapsing every run of
+        // whitespace — line breaks included — to a single space closes both;
+        // `owner` maps each stream byte back to the line that produced it so
+        // the report and the test mask still point at real source.
+        let (stream, owner) = normalized_code_stream(&stripped_lines);
+        let raw_lines: Vec<&str> = content.lines().collect();
+        for (needle, label, test_aware) in needles {
+            for pos in find_banned_code_fragments(&stream, needle) {
+                let idx = owner.get(pos).copied().unwrap_or(0);
+                if *test_aware && mask.get(idx).copied().unwrap_or(false) {
                     continue;
                 }
-                if line_has_banned_code_fragment(stripped, needle) {
-                    offenders.push((rel.to_path_buf(), idx + 1, *label, line.to_string()));
-                }
+                let raw = raw_lines.get(idx).copied().unwrap_or("");
+                offenders.push((rel.to_path_buf(), idx + 1, *label, raw.to_string()));
             }
         }
     });
@@ -4408,6 +4486,101 @@ fn collect_scannable_files(root: &Path, dir: &Path, files: &mut Vec<ScannedFile>
     }
 }
 
+/// Flags closure parameters with a fake binding name: `|_x| …`, `|a, _b| …`.
+///
+/// The twin of the `_name: T` fn-parameter rule, and it exists for the same
+/// reason: `_x` silences the unused-variable lint by renaming the variable
+/// instead of using it. Unlike a fn signature, a closure's parameter list is
+/// dictated by whoever calls it — `.map` will pass the element whether you
+/// want it or not — so the BARE `|_|` stays legal. It is the honest spelling
+/// of "this callback ignores its argument". `|_x|` is the same thing wearing
+/// a name that suggests otherwise; delete the name.
+///
+/// Matched on the whitespace-normalised stream, so `|_x |` and a parameter
+/// list split across lines are the same to it. Build.rs is exempt.
+fn scan_for_underscore_closure_params(
+    root: &Path,
+    dir: &Path,
+    offenders: &mut Vec<(PathBuf, usize, String)>,
+) {
+    visit_files(root, dir, &mut |rel, content| {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == "build.rs" {
+            return;
+        }
+        if rel.extension().and_then(OsStr::to_str) != Some("rs") {
+            return;
+        }
+        if !content.contains('|') {
+            return;
+        }
+        let raw_lines: Vec<&str> = content.lines().collect();
+        let stripped_lines = strip_file_lines(content);
+        let (stream, owner) = normalized_code_stream(&stripped_lines);
+        let bytes = stream.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            if bytes[i] != b'|' {
+                i += 1;
+                continue;
+            }
+            // A closure parameter list is `| … |` with both bars close
+            // together and no statement punctuation between them. Anything
+            // else (a bitwise `a | b`, an or-pattern `A | B`) either has no
+            // closing bar or holds no underscore-prefixed name, so it cannot
+            // reach the flag below.
+            let limit = (i + 200).min(bytes.len());
+            let Some(close_rel) = stream[i + 1..limit].find('|') else {
+                i += 1;
+                continue;
+            };
+            let params = &stream[i + 1..i + 1 + close_rel];
+            if params.contains(['{', '}', ';']) {
+                i += 1;
+                continue;
+            }
+            for part in split_top_level_params(params) {
+                let mut name = part.trim();
+                for prefix in ["mut ", "&mut ", "&", "ref "] {
+                    if let Some(rest) = name.strip_prefix(prefix) {
+                        name = rest.trim_start();
+                    }
+                }
+                let ident: String = name
+                    .chars()
+                    .take_while(|c| *c == '_' || c.is_ascii_alphanumeric())
+                    .collect();
+                if ident.len() > 1 && ident.starts_with('_') {
+                    let idx = owner.get(i).copied().unwrap_or(0);
+                    let raw = raw_lines.get(idx).copied().unwrap_or("");
+                    offenders.push((rel.to_path_buf(), idx + 1, raw.to_string()));
+                }
+            }
+            i += 1 + close_rel;
+        }
+    });
+}
+
+/// Split a parameter list on commas that are not inside brackets.
+fn split_top_level_params(params: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    let mut start = 0usize;
+    for (i, ch) in params.char_indices() {
+        match ch {
+            '(' | '[' | '<' | '{' => depth += 1,
+            ')' | ']' | '>' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&params[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&params[start..]);
+    out
+}
+
 /// Flags empty brace blocks in the positions where emptiness means "this
 /// path does nothing and nobody will be told": `_ => {}`, `if cond {}`,
 /// `} else {}`, `loop {}`, `|args| {}`, `mod m {}`, `struct S {}`. A lexical
@@ -4493,11 +4666,17 @@ fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, 
 fn classify_empty_block(header: &str) -> Option<&'static str> {
     let h = header.trim_end();
     if let Some(pattern) = h.strip_suffix("=>") {
-        return if pattern_has_top_level_wildcard(pattern) {
-            Some("empty wildcard match arm")
-        } else {
-            None
-        };
+        if pattern_has_top_level_wildcard(pattern) {
+            return Some("empty wildcard match arm");
+        }
+        // A named arm with an empty body is honest — adding a variant still
+        // breaks the match — EXCEPT when the variant is the error. `Err(_) =>
+        // {}` names the case only to throw it away, and nothing downstream
+        // ever learns the operation failed.
+        if line_has_banned_code_fragment(pattern, "Err(") {
+            return Some("empty error arm");
+        }
+        return None;
     }
     if h.ends_with('|') {
         return Some("empty closure body");
