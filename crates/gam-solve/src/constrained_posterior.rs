@@ -3297,6 +3297,104 @@ mod orthant_depth_measure_2601_tests {
                 }
             }
         }
+        // Where does the variance live? The Genz weight of a node is a product
+        // of conditional tail masses, and with correlated normals those walls
+        // move a lot from node to node. If the weights span decades, a handful
+        // of nodes carry the whole estimate and no point set can rescue it —
+        // the remedy is then an importance/tilting change, not a better lattice.
+        // If they are well conditioned, the point set is the problem.
+        {
+            struct WeightSpy {
+                inner: OrthantAccumulator,
+                log_weights: Vec<f64>,
+            }
+            impl OrthantNodeSink for WeightSpy {
+                fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
+                    self.log_weights.push(log_weight);
+                    self.inner.push(log_weight, point);
+                }
+            }
+            let generator = kronecker_generator(q);
+            let mut spy = WeightSpy {
+                inner: OrthantAccumulator::new(q),
+                log_weights: Vec::new(),
+            };
+            accumulate_orthant_nodes(
+                &mut spy,
+                &mean,
+                &upper,
+                None,
+                factor.view(),
+                &generator,
+                0,
+                1 << 16,
+            )
+            .expect("orthant nodes");
+            let finite: Vec<f64> = spy
+                .log_weights
+                .iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .collect();
+            let hi = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let lo = finite.iter().copied().fold(f64::INFINITY, f64::min);
+            // Effective sample size of the self-normalized weights, in the
+            // shifted scale that keeps the sums representable.
+            let sum: f64 = finite.iter().map(|v| (v - hi).exp()).sum();
+            let sum_sq: f64 = finite.iter().map(|v| (2.0 * (v - hi)).exp()).sum();
+            println!(
+                "MEASURE2601FACE weights n={} dropped={} log-range={:.3} (decades {:.2}) \
+                 ess={:.1} of {} ({:.4}%)",
+                finite.len(),
+                spy.log_weights.len() - finite.len(),
+                hi - lo,
+                (hi - lo) / std::f64::consts::LN_10,
+                sum * sum / sum_sq,
+                finite.len(),
+                100.0 * (sum * sum / sum_sq) / finite.len() as f64,
+            );
+        }
+        // Is the RULE inaccurate at the cap, or is the STOPPING CRITERION bad?
+        // The production test compares the estimate at N nodes with the one at
+        // 2N — but the 2N node set CONTAINS the N one, so the two estimates are
+        // strongly dependent and their difference is not an error bar. Measure
+        // the real thing: carry the sequence four more doublings past the cap
+        // and score every intermediate estimate against that reference.
+        {
+            let generator = kronecker_generator(q);
+            let mut accumulator = OrthantAccumulator::new(q);
+            let mut evaluated = 0usize;
+            let mut history: Vec<(usize, Array1<f64>, Array2<f64>)> = Vec::new();
+            while evaluated < (1usize << 24) {
+                let target = if evaluated == 0 {
+                    ORTHANT_MOMENT_INITIAL_POINTS
+                } else {
+                    evaluated * 2
+                };
+                accumulate_orthant_nodes(
+                    &mut accumulator,
+                    &mean,
+                    &upper,
+                    None,
+                    factor.view(),
+                    &generator,
+                    evaluated,
+                    target,
+                )
+                .expect("orthant nodes");
+                evaluated = target;
+                let (m, c) = accumulator.moments().expect("moments");
+                history.push((evaluated, m, c));
+            }
+            let (_, ref ref_m, ref ref_c) = history[history.len() - 1];
+            let reference = (ref_m.clone(), ref_c.clone());
+            let mut report = String::new();
+            for (n, m, c) in &history {
+                let truth = moment_relative_change(&(m.clone(), c.clone()), &reference, &w);
+                report.push_str(&format!(" {n}:{truth:.2e}"));
+            }
+            println!("MEASURE2601FACE error-vs-2^24{report}");
+        }
         let outcome = box_truncated_moments(&mean, &upper, &w, factor.view());
         match outcome {
             Ok((m, c)) => println!(
