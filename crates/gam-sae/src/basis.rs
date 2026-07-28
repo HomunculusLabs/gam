@@ -4500,6 +4500,70 @@ mod tests {
         );
     }
 
+    /// THE LAW, stated infinitesimally — and the exact condition that decides
+    /// which identifiability path a sphere atom is allowed to use.
+    ///
+    /// A basis on a manifold must be covariant under that manifold's own
+    /// isometries. Sliding a point along a Killing field is a motion the
+    /// geometry cannot distinguish, so it must not change WHICH functions the
+    /// atom can represent. Differentiating the finite statement:
+    ///
+    /// ```text
+    ///     d/ds Φ(flow_K(p, s))|_{s=0}  =  J(p) · K(p)   must lie in span{Φ}
+    /// ```
+    ///
+    /// `crate::identifiability::exact_orbit_fields` needs precisely this to
+    /// certify an atom on the EXACT-ORBIT path, and records that the legacy
+    /// chart fails it: *"the sphere's legacy chart basis is not closed under
+    /// ambient rotations, so sphere atoms remain on the frame path."* The
+    /// fallback is documented a few lines above as unable to represent three
+    /// `SO(3)` generators — so today `RP²` gets exact `SO(3)` Killing fields
+    /// while the sphere, whose group those generators ARE, does not.
+    ///
+    /// The ambient basis satisfies the law by construction: each degree-`l`
+    /// block is an `SO(3)` irrep, so `J·K` is a rotation within that block.
+    /// Asserting it here is what licenses moving sphere atoms onto the
+    /// exact-orbit path and DELETING that special case, rather than keeping a
+    /// weaker certificate alive to accommodate a broken chart.
+    #[test]
+    fn ambient_sphere_basis_is_closed_under_its_own_killing_fields() {
+        let (_, ambient) = sphere_sample(0x50F3, 700);
+        let evaluator = AmbientSphereHarmonicEvaluator::new(3).unwrap();
+        let (phi, jet) = evaluator.evaluate(ambient.view()).unwrap();
+        let width = evaluator.basis_size();
+        let n = ambient.nrows();
+
+        // Killing fields of `S²` in ambient coordinates: `K_a(u) = e_a × u`,
+        // the generators of `Isom(S²) = O(3)` that `AtomTopology::Sphere`
+        // already declares.
+        for axis in 0..3 {
+            let mut derivative = Array2::<f64>::zeros((n, width));
+            for row in 0..n {
+                let u = [ambient[[row, 0]], ambient[[row, 1]], ambient[[row, 2]]];
+                let k = match axis {
+                    0 => [0.0, -u[2], u[1]],
+                    1 => [u[2], 0.0, -u[0]],
+                    _ => [-u[1], u[0], 0.0],
+                };
+                for col in 0..width {
+                    let mut acc = 0.0_f64;
+                    for a in 0..3 {
+                        acc += jet[[row, col, a]] * k[a];
+                    }
+                    derivative[[row, col]] = acc;
+                }
+            }
+            let residual = span_residual(&phi, &derivative);
+            assert!(
+                residual <= 1.0e-9,
+                "Killing generator {axis} carries the ambient sphere basis OUT of its own \
+                 span (relative residual {residual:.3e}). The atom's representable function \
+                 space would then depend on where the coordinate origin was placed, and the \
+                 atom could not be certified on the exact-orbit path."
+            );
+        }
+    }
+
     /// A band-limited field on `S²` (degree ≤ 3) lies exactly in the real
     /// spherical-harmonic span, so the `Y_l^m` basis reconstructs held-out rows
     /// to near-exactness — while the fixed degree-2 lat/lon chart, which spans
