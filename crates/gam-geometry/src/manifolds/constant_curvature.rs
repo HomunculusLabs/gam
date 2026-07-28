@@ -444,33 +444,6 @@ pub(crate) fn cs_val(u: f64) -> (f64, f64) {
     }
 }
 
-/// Curvature-normalised tangent `tn(r)` and its `r`-derivative.
-///
-/// `tn(r) = r·S(u)/C(u)` with `u = κr²`, the sqrt-free form this module already
-/// uses for `exp`. Differentiating through `u`:
-///
-/// ```text
-///   tn′(r) = S/C + 2κr²·(S′C − SC′)/C²,   S′ = (C − S)/(2u),  C′ = −S/2
-/// ```
-///
-/// where `S′`, `C′` are the `u`-derivatives supplied by [`cs_stacks`], so no new
-/// series is introduced. Both branches of the curvature sign and `κ = 0` are
-/// covered by the same expression; at `u = 0` the stack supplies `S = C = 1`,
-/// `S′ = −1/6`, `C′ = −1/2`, giving `tn(r) = r` and `tn′(r) = 1` exactly.
-fn tn_and_derivative(kappa: f64, r: f64) -> GeometryResult<(f64, f64)> {
-    let u = kappa * r * r;
-    let (c_stack, s_stack) = cs_stacks(u);
-    let (c, s) = (c_stack[0], s_stack[0]);
-    if c.abs() <= GEOMETRY_EPS {
-        return Err(GeometryError::Singular(
-            "constant-curvature Dirichlet weight at a conjugate point (cos(√κ r) = 0)",
-        ));
-    }
-    let (c_prime, s_prime) = (c_stack[1], s_stack[1]);
-    let tn = r * s / c;
-    let tn_prime = s / c + 2.0 * kappa * r * r * (s_prime * c - s * c_prime) / (c * c);
-    Ok((tn, tn_prime))
-}
 
 /// Per-point weight coefficients of the constant-curvature Dirichlet Gram and
 /// their `κ`-derivatives.
