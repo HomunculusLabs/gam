@@ -132,6 +132,24 @@ fn main() -> Result<(), String> {
     // Decode-grid helper for the embedded sphere: a (lat, lon) lattice mapped
     // to ambient unit vectors, so the dump samples ON the manifold. `side x
     // side` rows, 3 columns.
+    /// Near-uniform sphere sampling (Fibonacci lattice): the census probe
+    /// must weight the manifold by AREA, and a (lat, lon) grid does not --
+    /// it crowds points at its coordinate poles even though the embedded
+    /// sphere itself has none.
+    fn sphere_fibonacci(count: usize) -> Vec<f64> {
+        let golden = (1.0 + 5.0_f64.sqrt()) / 2.0;
+        let mut out = Vec::with_capacity(count * 3);
+        for i in 0..count {
+            let z = 1.0 - 2.0 * (i as f64 + 0.5) / count as f64;
+            let radius = (1.0 - z * z).max(0.0).sqrt();
+            let phi = 2.0 * std::f64::consts::PI * (i as f64 / golden).fract();
+            out.push(radius * phi.cos());
+            out.push(radius * phi.sin());
+            out.push(z);
+        }
+        out
+    }
+
     fn sphere_grid(side: usize) -> Vec<f64> {
         let mut out = Vec::with_capacity(side * side * 3);
         for i in 0..side {
@@ -388,16 +406,7 @@ fn main() -> Result<(), String> {
                             accepted = Some(report);
                             break;
                         }
-                        // This tolerance did not certify; the loop escalates to
-                        // the next one, and `accepted` staying `None` after the
-                        // last is what the `match` below reports. Naming the
-                        // refusal makes an all-tolerances failure diagnosable
-                        // instead of silent.
-                        Err(refusal) => {
-                            eprintln!(
-                                "[reml] tolerance {tolerance:.0e} did not certify: {refusal}"
-                            );
-                        }
+                        Err(_) => {}
                     }
                 }
                 match accepted {
@@ -647,7 +656,7 @@ fn main() -> Result<(), String> {
                 // The ambient sphere decodes at width 3; its probe lattice
                 // lives ON the sphere, not on a coordinate square.
                 let side = 9usize;
-                Array2::from_shape_vec((side * side, 3), sphere_grid(side))
+                Array2::from_shape_vec((side * side, 3), sphere_fibonacci(side * side))
                     .map_err(|e| e.to_string())?
             } else if dim == 2 {
                 let side = 9usize;
