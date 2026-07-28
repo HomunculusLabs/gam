@@ -25,26 +25,11 @@ pub enum SaeBasisResolution {
     PeriodicHarmonics {
         order: usize,
     },
-    /// LEGACY, deserialization only. The fixed seven-column `(lat, lon)` chart
-    /// that `AmbientSphereHarmonics` replaced.
-    ///
-    /// No production path constructs this any more — asserted by
-    /// `no_production_path_mints_a_sphere_chart_plan`. It remains a variant
-    /// because an artifact FITTED under the chart has decoder coefficients in
-    /// the chart's seven-column basis, which are not the ambient nine; such a
-    /// model must load as the charted model it actually is, rather than be
-    /// refused or silently reinterpreted in a basis it was never fitted in.
-    ///
-    /// Its defects are recorded on #2602: the pole is an optimiser wall, the
-    /// trust-region metric is wrong by `cos²(lat)`, longitude is gauge at the
-    /// poles, the span is not closed under `SO(3)` (so sphere atoms were barred
-    /// from the exact-orbit identifiability path), and it would mint a confident
-    /// sphere from 2-D data where a sphere is not identifiable at all.
-    SphereChart,
     /// Real spherical harmonics through `degree`, evaluated in AMBIENT
     /// coordinates on the unit sphere (`latent_dim == 3`).
     ///
-    /// The pole-free alternative to [`Self::SphereChart`]: same function space
+    /// The only sphere parameterisation: same real harmonics as the removed
+    /// `(lat, lon)` chart carried, but written so they have no pole. Same space
     /// at degree 2 and richer above it, but parameterized by the ambient unit
     /// vector, so there is no latitude boundary, no longitude gauge at the
     /// poles, and the trust-region metric IS the round metric. Distinguished
@@ -100,7 +85,6 @@ pub enum SaeBasisResolution {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SaeReferenceMetricPlan {
     UnitCircle,
-    SphereChart,
     /// The round unit sphere `S²` with its Laplace-Beltrami roughness. Paired
     /// with [`SaeBasisResolution::AmbientSphereHarmonics`], whose columns are
     /// `L²(S²)`-orthonormal, so the roughness operator is exactly diagonal --
@@ -187,12 +171,6 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::PeriodicHarmonics { order },
                 SaeReferenceMetricPlan::UnitCircle,
             ) => *order >= 1,
-            (
-                SaeAtomBasisKind::Sphere,
-                2,
-                SaeBasisResolution::SphereChart,
-                SaeReferenceMetricPlan::SphereChart,
-            ) => true,
             // The ambient sphere is keyed by `latent_dim == 3`: an S² atom
             // carries three ambient coordinates for its two intrinsic
             // dimensions, which is exactly what buys it a global chart. The
@@ -395,7 +373,6 @@ impl SaeAtomGeometryPlan {
     pub fn basis_size(&self) -> Result<usize, String> {
         match &self.resolution {
             SaeBasisResolution::PeriodicHarmonics { order } => sae_periodic_basis_size(*order),
-            SaeBasisResolution::SphereChart => Ok(SAE_SPHERE_BASIS_SIZE),
             SaeBasisResolution::AmbientSphereHarmonics { degree } => {
                 AmbientSphereHarmonicEvaluator::new(*degree)
                     .map(|evaluator| evaluator.basis_size())
@@ -443,7 +420,6 @@ impl SaeAtomGeometryPlan {
             SaeBasisResolution::PeriodicHarmonics { order } => Arc::new(
                 PeriodicHarmonicEvaluator::new(sae_periodic_basis_size(*order)?)?,
             ),
-            SaeBasisResolution::SphereChart => Arc::new(SphereChartEvaluator),
             SaeBasisResolution::AmbientSphereHarmonics { degree } => {
                 Arc::new(AmbientSphereHarmonicEvaluator::new(*degree)?)
             }
@@ -557,9 +533,6 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::PeriodicHarmonics { order },
                 SaeReferenceMetricPlan::UnitCircle,
             ) => periodic_reference_penalty(*order),
-            (SaeBasisResolution::SphereChart, SaeReferenceMetricPlan::SphereChart) => {
-                Ok(sphere_chart_reference_penalty())
-            }
             (
                 SaeBasisResolution::AmbientSphereHarmonics { degree },
                 SaeReferenceMetricPlan::RoundSphere,
@@ -705,19 +678,6 @@ fn periodic_reference_penalty(order: usize) -> Result<Array2<f64>, String> {
     Ok(penalty)
 }
 
-/// Squared round-sphere Laplacian Gram for `[1,x,y,z,xy,yz,xz]` under the
-/// normalized area measure. Degree-one modes have eigenvalue 2 and L2 weight
-/// 1/3; the degree-two cross modes have eigenvalue 6 and L2 weight 1/15.
-fn sphere_chart_reference_penalty() -> Array2<f64> {
-    let mut penalty = Array2::<f64>::zeros((SAE_SPHERE_BASIS_SIZE, SAE_SPHERE_BASIS_SIZE));
-    for column in 1..=3 {
-        penalty[[column, column]] = 4.0 / 3.0;
-    }
-    for column in 4..=6 {
-        penalty[[column, column]] = 12.0 / 5.0;
-    }
-    penalty
-}
 
 /// Laplace--Beltrami roughness Gram of the ambient sphere basis, raised to
 /// `power`.
@@ -1321,12 +1281,11 @@ mod tests {
     /// coordinates for two intrinsic dimensions is exactly what buys the global
     /// chart, so a 2-wide "ambient" plan would be a silently broken atom.
     /// The chart plan must keep validating, since both forms coexist.
-    /// The chart survives only to deserialize already-fitted artifacts. If any
-    /// production constructor starts minting one again, the geometry regresses
-    /// silently — every defect on #2602 comes back with it — so the seed path is
-    /// pinned here rather than trusted.
+    /// The seed path must build the ambient sphere. The `(lat, lon)` chart it
+    /// replaced is gone entirely, so this now pins the positive statement
+    /// rather than the absence of a legacy one.
     #[test]
-    fn no_production_path_mints_a_sphere_chart_plan() {
+    fn the_seed_path_builds_the_ambient_sphere() {
         let z = Array2::<f64>::zeros((4, 3));
         let seed_coords = ndarray::Array3::<f64>::zeros((1, 4, 2));
         let plans = crate::manifold::sae_build_atom_plans(
@@ -1344,7 +1303,7 @@ mod tests {
             &SaeBasisResolution::AmbientSphereHarmonics {
                 degree: SAE_AMBIENT_SPHERE_DEFAULT_DEGREE
             },
-            "the seed path must build the ambient sphere, never the legacy chart"
+            "the seed path must build the ambient sphere"
         );
         assert_eq!(plans[0].geometry.latent_dim(), 3);
         assert_eq!(plans[0].geometry.intrinsic_dim(), 2);
@@ -1371,17 +1330,6 @@ mod tests {
             )
             .is_err(),
             "an ambient sphere at latent_dim 2 must be refused, not silently charted"
-        );
-
-        assert!(
-            SaeAtomGeometryPlan::new(
-                SaeAtomBasisKind::Sphere,
-                2,
-                SaeBasisResolution::SphereChart,
-                SaeReferenceMetricPlan::SphereChart,
-            )
-            .is_ok(),
-            "the chart plan must keep validating while both forms coexist"
         );
     }
 

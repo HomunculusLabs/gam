@@ -561,359 +561,15 @@ impl SaeBasisEvaluator for RawPeriodicCircleEvaluator {
     }
 }
 
-/// Diagonal of the chart-local seven-column sphere basis penalty.
-///
-/// The columns are `[1, x, y, z, xy, yz, xz]`; the constant column carries a
-/// numerically-negligible ridge (`1e-8`) so the penalty stays positive
-/// definite, the three degree-one columns `[x, y, z]` are penalized at unit
-/// weight, and the three bilinear columns at weight `4` (their second-order
-/// angular content).
-/// This is the single source of truth for the chart penalty shared between the
-/// core SAE path and the PyFFI `sphere_chart_basis_with_jet` helper.
-pub const SPHERE_CHART_PENALTY_DIAGONAL: [f64; 7] = [1e-8, 1.0, 1.0, 1.0, 4.0, 4.0, 4.0];
 
-/// Shared single source of truth for the chart-local sphere basis and its
-/// analytic first-derivative (lat/lon) jet.
-///
-/// `coords` is an `(N, 2)` array of latitude/longitude pairs in radians. The
-/// returned `phi` has shape `(N, 7)` with columns `[1, x, y, z, xy, yz, xz]`
-/// for the unit-sphere embedding `x = cos(lat)cos(lon)`, `y = cos(lat)sin(lon)`,
-/// `z = sin(lat)`; the returned `jet` has shape `(N, 7, 2)` with the last axis
-/// indexing `[∂/∂lat, ∂/∂lon]`.
-///
-/// NOTE: this is a lat/lon *product* chart, not an intrinsic / rotation-
-/// invariant `S²` parametrization. Two caveats follow from the chart:
-///   * **Pole gauge degeneracy.** At the poles `cos(lat) = 0`, so
-///     `x = y = xy = yz = xz = 0` and `z = ±1` for *every* longitude — all
-///     longitudes collapse to the same physical point (longitude is a gauge
-///     coordinate there). The longitude jet vanishes at the poles
-///     (`∂x/∂lon = ∂y/∂lon = 0`), so the Hessian carries a longitude gauge
-///     degeneracy while the ARD von-Mises prior can still prefer a longitude —
-///     i.e. the fit is not invariant under pole equivalence.
-///   * **Not rotationally invariant.** The quadratic block `[xy, yz, xz]` is
-///     not a rotation-invariant degree-2 spherical-harmonic basis: rotating
-///     `xy` produces `x² − y²`, which lies outside its span. A proper
-///     atlas / Wahba-style basis is a follow-up; do not read this as intrinsic.
-///
-/// Within a fixed chart the map and its jet are everywhere `C^∞` in
-/// `(lat, lon)`: every column is a
-/// polynomial in `cos`/`sin` of the two coordinates, and `cos`/`sin` are entire,
-/// so the exact analytic derivatives `∂x/∂lat = -sin(lat)cos(lon)`, … are
-/// globally smooth. Latitude is therefore **not** clamped and the latitude
-/// derivatives are **not** gated here.
-///
-/// The physical `lat ∈ [-π/2, π/2]` box that pins a canonical latitude range is
-/// enforced where it belongs — in the latent retraction / tangent projection
-/// ([`gam_terms::latent::LatentManifold::Interval`]), which clamps the
-/// coordinate after each step and zeroes only the *outward-normal* component of
-/// the tangent velocity at an active bound (a correct KKT projection). The old
-/// binary `chain_lat` gate instead zeroed the *entire* latitude jet at the
-/// boundary, making the basis nonsmooth there: an atom whose latitude reached
-/// `±π/2` saw a zero latitude gradient and froze, even for the tangential
-/// (in-box) direction along which the loss does decrease. Computing the exact
-/// jet here and letting the retraction handle the bound restores a smooth
-/// objective and the correct boundary behaviour. Both the core path
-/// ([`SphereChartEvaluator`]) and the PyFFI helper route through this function.
-pub fn sphere_chart_basis_jet(
-    coords: ArrayView2<'_, f64>,
-) -> Result<(Array2<f64>, Array3<f64>), String> {
-    if coords.ncols() != 2 {
-        return Err(format!(
-            "sphere_chart_basis_jet expects latent_dim == 2, got {}",
-            coords.ncols()
-        ));
-    }
-    let n = coords.nrows();
-    let mut phi = Array2::<f64>::zeros((n, 7));
-    let mut jet = Array3::<f64>::zeros((n, 7, 2));
-    for row in 0..n {
-        let lat = coords[[row, 0]];
-        let lon = coords[[row, 1]];
-        let clat = lat.cos();
-        let slat = lat.sin();
-        let clon = lon.cos();
-        let slon = lon.sin();
-        let x = clat * clon;
-        let y = clat * slon;
-        let z = slat;
-        phi[[row, 0]] = 1.0;
-        phi[[row, 1]] = x;
-        phi[[row, 2]] = y;
-        phi[[row, 3]] = z;
-        phi[[row, 4]] = x * y;
-        phi[[row, 5]] = y * z;
-        phi[[row, 6]] = x * z;
-
-        let dx_dlat = -slat * clon;
-        let dx_dlon = -clat * slon;
-        let dy_dlat = -slat * slon;
-        let dy_dlon = clat * clon;
-        let dz_dlat = clat;
-        jet[[row, 1, 0]] = dx_dlat;
-        jet[[row, 1, 1]] = dx_dlon;
-        jet[[row, 2, 0]] = dy_dlat;
-        jet[[row, 2, 1]] = dy_dlon;
-        jet[[row, 3, 0]] = dz_dlat;
-        jet[[row, 4, 0]] = dx_dlat * y + x * dy_dlat;
-        jet[[row, 4, 1]] = dx_dlon * y + x * dy_dlon;
-        jet[[row, 5, 0]] = dy_dlat * z + y * dz_dlat;
-        jet[[row, 5, 1]] = dy_dlon * z;
-        jet[[row, 6, 0]] = dx_dlat * z + x * dz_dlat;
-        jet[[row, 6, 1]] = dx_dlon * z;
-    }
-    Ok((phi, jet))
-}
-
-/// Lat/lon sphere chart evaluator used by the Rust-owned minimal SAE path.
-#[derive(Debug, Clone)]
-pub struct SphereChartEvaluator;
-
-impl SaeBasisEvaluator for SphereChartEvaluator {
-    fn phi_eta_split(&self, n_basis: usize) -> Result<PhiEtaSplit, String> {
-        if n_basis != 7 {
-            return Err(format!(
-                "SphereChartEvaluator::phi_eta_split: n_basis {n_basis} != 7"
-            ));
-        }
-        // Base (η-invariant) columns `[1, x, y, z]`; the quadratic cross-terms
-        // `[xy, yz, xz]` scale with `eta`. The `[x, y, z]` block is NOT linear in
-        // the chart — evaluated on the sphere it traces the unit sphere (the base
-        // topology). So `eta = 0` is the base-topology relaxation, not an affine
-        // model.
-        let mut curved = vec![false; n_basis];
-        for col in 4..7 {
-            curved[col] = true;
-        }
-        Ok(PhiEtaSplit::from_curved_mask(curved))
-    }
-
-    fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
-        Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
-    }
-
-    fn third_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array5<f64>, String>> {
-        Some(<Self as SaeBasisThirdJet>::third_jet(self, coords))
-    }
-
-    fn evaluate(&self, coords: ArrayView2<'_, f64>) -> Result<(Array2<f64>, Array3<f64>), String> {
-        sphere_chart_basis_jet(coords)
-    }
-}
-
-impl SaeBasisSecondJet for SphereChartEvaluator {
-    /// Analytic Hessian of the 7-column lat/lon sphere chart basis.
-    ///
-    /// With `x = cos(lat) cos(lon)`, `y = cos(lat) sin(lon)`, `z = sin(lat)`
-    /// the non-trivial second derivatives are
-    ///
-    /// ```text
-    /// x_{lat,lat} = -x,     x_{lon,lon} = -x,     x_{lat,lon} = sin(lat)·sin(lon)
-    /// y_{lat,lat} = -y,     y_{lon,lon} = -y,     y_{lat,lon} = -sin(lat)·cos(lon)
-    /// z_{lat,lat} = -z,     z_{lon,lon} =  0,     z_{lat,lon} =  0
-    /// ```
-    ///
-    /// Bilinear basis entries `xy, yz, xz` follow the product rule
-    /// `(fg)_{αβ} = f_{αβ} g + f_α g_β + f_β g_α + f g_{αβ}`. The map is `C^∞`
-    /// in `(lat, lon)`, so the Hessian is the exact analytic one with no clamp
-    /// or boundary gating; the `lat ∈ [-π/2, π/2]` box is enforced by the
-    /// retraction, not by truncating derivatives (see [`sphere_chart_basis_jet`]).
-    fn second_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array4<f64>, String> {
-        if coords.ncols() != 2 {
-            return Err(format!(
-                "SphereChartEvaluator::second_jet expects latent_dim == 2, got {}",
-                coords.ncols()
-            ));
-        }
-        let n = coords.nrows();
-        let mut h = Array4::<f64>::zeros((n, 7, 2, 2));
-        for row in 0..n {
-            let lat = coords[[row, 0]];
-            let lon = coords[[row, 1]];
-            let clat = lat.cos();
-            let slat = lat.sin();
-            let clon = lon.cos();
-            let slon = lon.sin();
-            let x = clat * clon;
-            let y = clat * slon;
-            let z = slat;
-            let dx = [-slat * clon, -clat * slon];
-            let dy = [-slat * slon, clat * clon];
-            let dz = [clat, 0.0];
-            let hx = [[-x, slat * slon], [slat * slon, -x]];
-            let hy = [[-y, -slat * clon], [-slat * clon, -y]];
-            let hz = [[-z, 0.0], [0.0, 0.0]];
-            for axis_a in 0..2 {
-                for axis_b in 0..2 {
-                    h[[row, 1, axis_a, axis_b]] = hx[axis_a][axis_b];
-                    h[[row, 2, axis_a, axis_b]] = hy[axis_a][axis_b];
-                    h[[row, 3, axis_a, axis_b]] = hz[axis_a][axis_b];
-                }
-            }
-            let pair = |hf: [[f64; 2]; 2],
-                        df: [f64; 2],
-                        f: f64,
-                        hg: [[f64; 2]; 2],
-                        dg: [f64; 2],
-                        g: f64|
-             -> [[f64; 2]; 2] {
-                let mut out = [[0.0; 2]; 2];
-                for axis_a in 0..2 {
-                    for axis_b in 0..2 {
-                        out[axis_a][axis_b] = hf[axis_a][axis_b] * g
-                            + df[axis_a] * dg[axis_b]
-                            + df[axis_b] * dg[axis_a]
-                            + f * hg[axis_a][axis_b];
-                    }
-                }
-                out
-            };
-            let hxy = pair(hx, dx, x, hy, dy, y);
-            let hyz = pair(hy, dy, y, hz, dz, z);
-            let hxz = pair(hx, dx, x, hz, dz, z);
-            for axis_a in 0..2 {
-                for axis_b in 0..2 {
-                    h[[row, 4, axis_a, axis_b]] = hxy[axis_a][axis_b];
-                    h[[row, 5, axis_a, axis_b]] = hyz[axis_a][axis_b];
-                    h[[row, 6, axis_a, axis_b]] = hxz[axis_a][axis_b];
-                }
-            }
-        }
-        Ok(h)
-    }
-}
-
-impl SaeBasisThirdJet for SphereChartEvaluator {
-    /// Third derivative of the 7-column lat/lon sphere chart basis
-    /// `[1, x, y, z, xy, yz, xz]`.
-    ///
-    /// Each Cartesian coordinate is *separable* in (lat, lon):
-    /// `x = cos(lat) cos(lon)`, `y = cos(lat) sin(lon)`, `z = sin(lat)·1`. A
-    /// separable coordinate's mixed derivative is the product of the per-axis
-    /// derivative of the right order, so it is fully described by two
-    /// length-4 derivative tables (orders 0..3) — one per axis. The map is
-    /// `C^∞` in `(lat, lon)`; the tables are the exact analytic derivatives
-    /// with no clamp or boundary gating (the `lat ∈ [-π/2, π/2]` box is
-    /// enforced by the retraction, see [`sphere_chart_basis_jet`]).
-    ///
-    /// The bilinear columns `xy, yz, xz` are products of two separable
-    /// coordinates; their third derivative is the symmetric triple-Leibniz sum
-    /// over the `2³` ways to route the three derivative operators to the two
-    /// factors. This is the order-3 generalization of the `pair` Leibniz used
-    /// in [`SaeBasisSecondJet::second_jet`], so the two stay structurally
-    /// identical and a finite difference of `second_jet` pins it.
-    fn third_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array5<f64>, String> {
-        if coords.ncols() != 2 {
-            return Err(format!(
-                "SphereChartEvaluator::third_jet expects latent_dim == 2, got {}",
-                coords.ncols()
-            ));
-        }
-        let n = coords.nrows();
-        let mut t3 = Array5::<f64>::zeros((n, 7, 2, 2, 2));
-        // Derivative of a separable coordinate along axes `ax` (each 0 = lat,
-        // 1 = lon): product of the lat table at order `#lat` and the lon table
-        // at order `#lon`.
-        let single = |lat: &[f64; 4], lon: &[f64; 4], ax: [usize; 3]| -> f64 {
-            let n_lat = ax.iter().filter(|&&q| q == 0).count();
-            lat[n_lat] * lon[3 - n_lat]
-        };
-        // Third derivative of a product of two separable coordinates: sum over
-        // all 2³ routings of the three operators to factor f vs g (Leibniz).
-        let product = |f_lat: &[f64; 4],
-                       f_lon: &[f64; 4],
-                       g_lat: &[f64; 4],
-                       g_lon: &[f64; 4],
-                       ax: [usize; 3]|
-         -> f64 {
-            let mut acc = 0.0;
-            for mask in 0u8..8 {
-                let (mut f_lat_n, mut f_lon_n, mut g_lat_n, mut g_lon_n) = (0, 0, 0, 0);
-                for (i, &axis) in ax.iter().enumerate() {
-                    let to_f = (mask >> i) & 1 == 1;
-                    match (to_f, axis == 0) {
-                        (true, true) => f_lat_n += 1,
-                        (true, false) => f_lon_n += 1,
-                        (false, true) => g_lat_n += 1,
-                        (false, false) => g_lon_n += 1,
-                    }
-                }
-                acc += f_lat[f_lat_n] * f_lon[f_lon_n] * g_lat[g_lat_n] * g_lon[g_lon_n];
-            }
-            acc
-        };
-        for row in 0..n {
-            let lat = coords[[row, 0]];
-            let lon = coords[[row, 1]];
-            let clat = lat.cos();
-            let slat = lat.sin();
-            let clon = lon.cos();
-            let slon = lon.sin();
-            // Per-axis derivative tables, orders 0..3 (exact analytic, no clamp).
-            let cos_lat = [clat, -slat, -clat, slat];
-            let sin_lat = [slat, clat, -slat, -clat];
-            let cos_lon = [clon, -slon, -clon, slon];
-            let sin_lon = [slon, clon, -slon, -clon];
-            let const_lon = [1.0, 0.0, 0.0, 0.0];
-            // x = cos(lat)cos(lon), y = cos(lat)sin(lon), z = sin(lat).
-            let (x_lat, x_lon) = (&cos_lat, &cos_lon);
-            let (y_lat, y_lon) = (&cos_lat, &sin_lon);
-            let (z_lat, z_lon) = (&sin_lat, &const_lon);
-            for axis_a in 0..2 {
-                for axis_b in 0..2 {
-                    for axis_c in 0..2 {
-                        let ax = [axis_a, axis_b, axis_c];
-                        t3[[row, 1, axis_a, axis_b, axis_c]] = single(x_lat, x_lon, ax);
-                        t3[[row, 2, axis_a, axis_b, axis_c]] = single(y_lat, y_lon, ax);
-                        t3[[row, 3, axis_a, axis_b, axis_c]] = single(z_lat, z_lon, ax);
-                        t3[[row, 4, axis_a, axis_b, axis_c]] =
-                            product(x_lat, x_lon, y_lat, y_lon, ax);
-                        t3[[row, 5, axis_a, axis_b, axis_c]] =
-                            product(y_lat, y_lon, z_lat, z_lon, ax);
-                        t3[[row, 6, axis_a, axis_b, axis_c]] =
-                            product(x_lat, x_lon, z_lat, z_lon, ax);
-                    }
-                }
-            }
-        }
-        Ok(t3)
-    }
-}
-
-/// One real spherical-harmonic column `Y_l^m`, fixed at construction.
-///
-/// Each column factors as `R_{l,m}(lat) · T_m(lon)` — a pure-latitude
-/// amplitude times a pure-longitude phase — so its full jet in `(lat, lon)` is
-/// the separable outer product of the two per-axis derivative tables. The
-/// latitude amplitude is `R_{l,m}(lat) = N_{l,m} · cos(lat)^{|m|} · Q(sin lat)`,
-/// where `Q = d^{|m|}/du^{|m|} P_l(u)` is the `|m|`-th `u`-derivative of the
-/// Legendre polynomial (the associated-Legendre function's polynomial part) and
-/// `N_{l,m}` is the orthonormalization constant. The `(-1)^m` Condon–Shortley
-/// phase is intentionally dropped: it is a per-column sign the decoder absorbs
-/// and it has no effect on the span, orthonormality, or reconstruction.
-#[derive(Debug, Clone)]
-struct SphHarmonicColumn {
-    /// Spherical-harmonic degree `l`.
-    degree: usize,
-    /// Signed order `m ∈ [-l, l]`: `m ≥ 0` uses `cos(m·lon)`, `m < 0` uses
-    /// `sin(|m|·lon)`.
-    m: i64,
-    /// `|m|`, the `cos(lat)` power and the Legendre `u`-derivative order.
-    am: usize,
-    /// Orthonormalization constant `N_{l,m}` (includes the `√2` for `m ≠ 0`).
-    norm: f64,
-    /// `Q = d^{|m|}/du^{|m|} P_l(u)`, ascending powers of `u = sin(lat)`.
-    assoc: Vec<f64>,
-    /// `true` iff `l ≥ 2` — the curved (η-dialed) refinement above the base
-    /// monopole+dipole sphere embedding.
-    curved: bool,
-}
 
 /// Real orthonormal spherical-harmonic evaluator on `S^2`, charted by
 /// `(lat, lon)` with `x = cos(lat)cos(lon)`, `y = cos(lat)sin(lon)`,
-/// `z = sin(lat)` (matching [`SphereChartEvaluator`]).
+/// `z = sin(lat)`.
 ///
 /// This is the rotation-covariant basis the fixed 7-column
-/// [`SphereChartEvaluator`] is not: its columns are the `(degree+1)²` real
+/// the removed fixed seven-column chart was not: its columns are the
+/// `(degree+1)²` real
 /// spherical harmonics `Y_l^m`, `l = 0..=degree`, `m = -l..=l`, an orthonormal
 /// basis for every band-limited field on the sphere. The degree-2 chart spans
 /// only `[1, x, y, z, xy, yz, xz]` — the monopole, the dipole, and *three of the
@@ -929,7 +585,7 @@ struct SphHarmonicColumn {
 /// pole gauge degeneracy is intrinsic to the lat/lon chart, not this basis: at
 /// `cos(lat) = 0` every `m ≠ 0` harmonic and its longitude derivative vanish, so
 /// all longitudes collapse to one physical point. That is handled exactly where
-/// [`SphereChartEvaluator`] handles it — by the retraction / tangent projection
+/// [`AmbientSphereHarmonicEvaluator`] handles it — by the retraction / tangent projection
 /// enforcing the `lat ∈ [-π/2, π/2]` box and the pole-seam seeding (issue
 /// #1890) — never by truncating a derivative.
 #[derive(Debug, Clone)]
@@ -4513,7 +4169,7 @@ mod tests {
     /// outside its span — its achievable fit depends on the arbitrary
     /// orientation of the chart's pole relative to the data.
     #[test]
-    fn ambient_sphere_span_is_rotation_closed_and_the_fixed_chart_is_not() {
+    fn ambient_sphere_span_is_rotation_closed_and_a_truncated_block_is_not() {
         let (chart_coords, ambient_coords) = sphere_sample(0x120F, 900);
         let axis = [1.0, 1.0, 1.0];
         let theta = 0.7_f64;
@@ -4546,15 +4202,31 @@ mod tests {
             "ambient harmonic span must be closed under SO(3); residual {ambient_residual:.3e}"
         );
 
-        let (chart_phi, _) = SphereChartEvaluator.evaluate(chart_coords.view()).unwrap();
-        let (chart_phi_rotated, _) =
-            SphereChartEvaluator.evaluate(rotated_chart.view()).unwrap();
-        let chart_residual = span_residual(&chart_phi, &chart_phi_rotated);
+        // NEGATIVE CONTROL, synthesised rather than borrowed. Drop two of the
+        // five `l = 2` columns to reproduce exactly the defect the removed
+        // `(lat, lon)` chart had — it carried three of the five quadrupoles —
+        // and confirm that such a span is measurably NOT rotation-closed. Built
+        // here instead of by keeping the chart alive, so the control tests the
+        // PROPERTY (an incomplete degree block breaks covariance) rather than
+        // one obsolete type, and it cannot silently rot with that type.
+        let keep: Vec<usize> = (0..phi.ncols()).filter(|&c| c != 7 && c != 8).collect();
+        let truncate = |full: &Array2<f64>| -> Array2<f64> {
+            let mut out = Array2::<f64>::zeros((full.nrows(), keep.len()));
+            for (target, &source) in keep.iter().enumerate() {
+                for row in 0..full.nrows() {
+                    out[[row, target]] = full[[row, source]];
+                }
+            }
+            out
+        };
+        let partial = truncate(&phi);
+        let partial_rotated = truncate(&phi_rotated);
+        let partial_residual = span_residual(&partial, &partial_rotated);
         assert!(
-            chart_residual >= 1.0e-3,
-            "the fixed 7-column chart is NOT rotation-closed (three of five l=2 \
-             harmonics); if this now passes, the chart gained the missing \
-             quadrupoles and this negative control is stale. residual {chart_residual:.3e}"
+            partial_residual >= 1.0e-3,
+            "a degree-2 block missing two of its five harmonics must NOT be \
+             rotation-closed; if this passes, the control is vacuous and the \
+             positive assertion above proves nothing. residual {partial_residual:.3e}"
         );
     }
 
@@ -4691,15 +4363,7 @@ mod tests {
             asymmetric_axes: &'static [usize],
             span: fn(usize, f64) -> f64,
         }
-        fn unit_span(axis: usize, u: f64) -> f64 {
-            // Identity on EVERY axis -- that is exactly what makes this the
-            // translation-invariant control that `mobius_span` is contrasted
-            // against. The shared `fn(usize, f64) -> f64` pointer type requires
-            // the parameter, so it is consumed here rather than hidden behind an
-            // underscore: an underscore makes "required by a signature" and
-            // "forgotten" look identical, which is what the ban scanner objects
-            // to, and it aborts the ROOT build for the whole workspace.
-            std::hint::black_box(axis);
+        fn unit_span(_axis: usize, u: f64) -> f64 {
             u
         }
         fn mobius_span(axis: usize, u: f64) -> f64 {
@@ -4872,13 +4536,17 @@ mod tests {
         let train_rows: Vec<usize> = (0..n).filter(|r| r % 4 != 0).collect();
 
         let sh_r2 = heldout_r2(&basis3, &target, &train_rows, &test_rows);
-        let (fixed_phi, _) = SphereChartEvaluator.evaluate(coords.view()).unwrap();
+        // The old comparator was the fixed seven-column chart. It is gone, so the
+        // baseline is now a degree-1 harmonic basis: strictly band-limited below
+        // the planted degree, which is the property that made the chart lose.
+        let low_band = SphericalHarmonicEvaluator::new(1).unwrap();
+        let (fixed_phi, _) = low_band.evaluate(coords.view()).unwrap();
         let fixed_r2 = heldout_r2(&fixed_phi, &target, &train_rows, &test_rows);
 
         assert!(
             sh_r2 > 0.999,
             "the spherical-harmonic basis must reconstruct a band-limited sphere \
-             field to near-exactness; SH held-out R²={sh_r2}, fixed-chart R²={fixed_r2}"
+             field to near-exactness; SH held-out R²={sh_r2}, degree-1 R²={fixed_r2}"
         );
         assert!(
             fixed_r2 < 0.9,
@@ -5431,13 +5099,17 @@ mod tests {
 
     #[test]
     fn default_evaluate_into_matches_for_unspecialized_evaluator() {
-        // SphereChartEvaluator does not override `evaluate_into`, so this pins the
-        // allocate-and-copy DEFAULT trait method against `evaluate`.
-        let eval = SphereChartEvaluator;
+        // `AmbientSphereHarmonicEvaluator` does not override `evaluate_into`, so
+        // this pins the allocate-and-copy DEFAULT trait method against
+        // `evaluate`. (It replaced the chart evaluator, which played this role
+        // for the same reason.)
+        let eval = AmbientSphereHarmonicEvaluator::new(2).unwrap();
         let coords_a =
-            Array2::from_shape_vec((3, 2), vec![0.2, 0.5, -0.4, 1.1, 0.9, -0.7]).unwrap();
+            Array2::from_shape_vec((3, 3), vec![0.2, 0.5, -0.4, 1.1, 0.9, -0.7, 0.3, -0.2, 0.8])
+                .unwrap();
         let coords_b =
-            Array2::from_shape_vec((3, 2), vec![-0.1, 0.3, 0.6, -0.9, -0.5, 0.8]).unwrap();
+            Array2::from_shape_vec((3, 3), vec![-0.1, 0.3, 0.6, -0.9, -0.5, 0.8, 0.4, 0.1, -0.6])
+                .unwrap();
         assert_into_matches_evaluate(&eval, &coords_a);
         assert_workspace_reuse(&eval, &coords_a, &coords_b);
     }
