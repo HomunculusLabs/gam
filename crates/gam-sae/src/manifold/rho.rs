@@ -309,17 +309,17 @@ impl SaeManifoldRho {
     /// byte-identical layout. The block order must match a term's
     /// [`crate::manifold::CrosscoderLayout::block_dims`].
     #[must_use]
+    pub fn with_log_lambda_block(mut self, log_lambda_block: Vec<f64>) -> Self {
+        self.log_lambda_block = log_lambda_block;
+        self
+    }
+
     /// Attach per-atom sectional curvatures (atom order). Empty restores the
     /// curvature-free layout, which is what every dictionary without a
     /// constant-curvature atom carries.
     #[must_use]
     pub fn with_curvature(mut self, kappa: Vec<f64>) -> Self {
         self.kappa = kappa;
-        self
-    }
-
-    pub fn with_log_lambda_block(mut self, log_lambda_block: Vec<f64>) -> Self {
-        self.log_lambda_block = log_lambda_block;
         self
     }
 
