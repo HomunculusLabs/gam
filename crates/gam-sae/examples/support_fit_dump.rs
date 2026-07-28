@@ -372,7 +372,35 @@ fn main() -> Result<(), String> {
             let x_test = Array2::from_shape_vec((te_rows, cols), te).map_err(|e| format!("{e}"))?;
             let centered_test = &x_test - &mean;
             let mut te_term = term_seed.term.reroute_fixed_decoder_ard(centered_test.view(), top_k, 0, &ard)?;
-            match te_term.solve_coordinates_fixed_decoder(centered_test.view(), &ard, 400, 1.0e-4, 1.0) {
+            // A held-out solve that misses its KKT bound by a sliver still holds a
+            // perfectly scoreable iterate -- refusing to SCORE it threw away the one
+            // number a 45-minute REML arm existed to produce (measured: refused at
+            // rel 1.2047e-4 against a 1e-4 bound). Mirror the fit-side ladder:
+            // escalate the tolerance, and report which rung certified so the
+            // caveat travels with the number; only an ERROR other than
+            // non-recurrence stays fatal to the eval.
+            let heldout = (|| {
+                let mut last_error = String::new();
+                for tolerance in [1.0e-4, 2.0e-4, 5.0e-4, 1.0e-3] {
+                    match te_term.solve_coordinates_fixed_decoder(
+                        centered_test.view(),
+                        &ard,
+                        400,
+                        tolerance,
+                        1.0,
+                    ) {
+                        Ok(rep) => {
+                            if tolerance > 1.0e-4 {
+                                println!("HELDOUT certified only at tolerance {tolerance:.0e}");
+                            }
+                            return Ok(rep);
+                        }
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(last_error)
+            })();
+            match heldout {
                 Ok(rep) => {
                     let recon = te_term.reconstruct()?;
                     let sse: f64 = centered_test.iter().zip(recon.iter()).map(|(x, r)| (x - r).powi(2)).sum();
