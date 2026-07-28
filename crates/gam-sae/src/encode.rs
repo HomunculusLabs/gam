@@ -274,25 +274,25 @@ impl BasisHessianLipschitz for AmbientSphereHarmonicEvaluator {
         // These four bounds are genuinely chart-INDEPENDENT (see the doc above:
         // they come from the columns' own coefficients on the unit sphere, not
         // from any point). The `BasisHessianLipschitz` trait fixes the signature,
-        // so the parameter is consumed rather than hidden behind an underscore --
-        // an underscore makes "required by the trait" and "forgotten" look
-        // identical, and it aborts the ROOT build for the whole workspace.
-        std::hint::black_box(chart);
+        // so the parameter cannot be deleted; it is consumed by asserting the
+        // precondition every caller of this trait already owes -- a chart with a
+        // non-finite radius is not a region and no bound over it means anything.
+        debug_assert!(chart.radius.is_finite(), "chart radius must be finite");
         self.column_jet_bound()
     }
 
     fn jacobian_sup(&self, chart: &ChartRegion) -> f64 {
-        std::hint::black_box(chart);
+        debug_assert!(chart.radius.is_finite(), "chart radius must be finite");
         self.column_jet_bound() * self.degree() as f64
     }
 
     fn hessian_sup(&self, chart: &ChartRegion) -> f64 {
-        std::hint::black_box(chart);
+        debug_assert!(chart.radius.is_finite(), "chart radius must be finite");
         self.column_jet_bound() * (self.degree() as f64).powi(2)
     }
 
     fn third_sup(&self, chart: &ChartRegion) -> f64 {
-        std::hint::black_box(chart);
+        debug_assert!(chart.radius.is_finite(), "chart radius must be finite");
         self.column_jet_bound() * (self.degree() as f64).powi(3)
     }
 }
