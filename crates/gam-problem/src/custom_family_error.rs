@@ -73,14 +73,65 @@ pub enum CustomFamilyError {
     /// the unpenalised direction.
     #[error("MAP estimate non-unique: {}", error)]
     MapUniquenessFailure { error: MapUniquenessError },
+    /// A numerical verdict the inner solve reached AT ONE TRIAL POINT: no
+    /// Laplace mode here, this active face's curvature refuses certification
+    /// here, this quadratic subproblem is degenerate here.
+    ///
+    /// Like [`Self::InnerSolveNotConverged`] this is a statement about one
+    /// `theta`, not about the problem — an indefinite coefficient point at one
+    /// rho is an ordinary Laplace mode at another — so the outer search should
+    /// reject the trial and step away, which is what the inner solver's own
+    /// logs say should happen. It is a separate variant because
+    /// `InnerSolveNotConverged` carries a fixed cycles/theta_dim/rho_dim/psi_dim
+    /// shape and a message specifically about refusing to expose profile
+    /// derivatives; reusing it for a curvature refusal would state something
+    /// untrue.
+    #[error("inner solve refused this trial point: {reason}")]
+    TrialPointRefused { reason: String },
+}
+
+impl CustomFamilyError {
+    /// A numerical refusal raised while evaluating at one trial point.
+    ///
+    /// The named constructor exists so a boundary that *knows* it is reporting
+    /// a rho-local failure can say so, rather than leaning on the blanket
+    /// `From<String>` below and hoping its default is right.
+    pub fn trial_point(reason: impl Into<String>) -> Self {
+        Self::TrialPointRefused {
+            reason: reason.into(),
+        }
+    }
 }
 
 impl From<String> for CustomFamilyError {
+    /// # Why this lands on `TrialPointRefused` and not `InvalidInput`
+    ///
+    /// A `String` cannot carry the one bit the outer smoothing search needs —
+    /// is this failure a property of the trial point, or of the problem? — so
+    /// any conversion from it must answer by default. This one used to answer
+    /// `InvalidInput`, the variant [`Self::is_trial_point_infeasible`] returns
+    /// `false` for, and gam-custom-family's inner solver reports *every*
+    /// refusal as `Err(String)`. So "there is no Laplace mode at this rho", a
+    /// verdict about one rho, was graded fatal and killed the whole fit at the
+    /// first probe, at an optimizer whose seed loop has the correct branch one
+    /// line above the one it took (gam#2590).
+    ///
+    /// The default is not a coin flip, because the two mistakes are not
+    /// comparable:
+    ///
+    /// * A structural failure graded rho-local recurs at every probed rho. The
+    ///   seed loop exhausts, the run still fails, and it fails quoting this
+    ///   same reason — after a bounded number of cheap, identical inner
+    ///   failures.
+    /// * A rho-local refusal graded structural aborts a fit that was
+    ///   perfectly fittable one rho away. Measured twice: #2553, #2590.
+    ///
+    /// So where the type system forces a guess, the guess must be
+    /// "trial point". Where a caller knows better in either direction, it
+    /// should construct the variant it means — [`Self::trial_point`] or the
+    /// structural variant — instead of routing through here.
     fn from(value: String) -> Self {
-        Self::InvalidInput {
-            context: "custom-family string boundary",
-            reason: value,
-        }
+        Self::TrialPointRefused { reason: value }
     }
 }
 
@@ -135,10 +186,28 @@ mod tests {
     }
 
     #[test]
-    fn from_string_creates_invalid_input_with_boundary_context() {
-        let err = CustomFamilyError::from("string error".to_string());
-        assert!(matches!(err, CustomFamilyError::InvalidInput { .. }));
-        assert!(err.to_string().contains("string error"));
+    fn a_string_boundary_refusal_is_recoverable_not_invalid_input() {
+        // The regression this exists for (gam#2590): the refusal used to
+        // arrive as `InvalidInput`, which classifies fatal, so an outer
+        // optimizer explicitly built to step away from an infeasible trial
+        // point aborted the whole fit at the first one it met.
+        let err = CustomFamilyError::from("no Laplace mode at this rho".to_string());
+        assert!(matches!(err, CustomFamilyError::TrialPointRefused { .. }));
+        assert!(err.is_trial_point_infeasible());
+        assert!(err.to_string().contains("no Laplace mode at this rho"));
+        assert_eq!(
+            CustomFamilyError::trial_point("x").to_string(),
+            CustomFamilyError::from("x".to_string()).to_string(),
+            "the named constructor and the blanket conversion must agree"
+        );
+        assert!(
+            !CustomFamilyError::InvalidInput {
+                context: "c",
+                reason: "r".to_string(),
+            }
+            .is_trial_point_infeasible(),
+            "`InvalidInput` must keep meaning what it says"
+        );
     }
 
     #[test]
@@ -169,6 +238,9 @@ impl CustomFamilyError {
             // The inner solve missed its KKT condition at THIS theta. The
             // outer search can step away; the problem is fine.
             Self::InnerSolveNotConverged { .. } => true,
+            // Likewise rho-local: a numerical refusal evaluated at one trial
+            // point, which becomes true or false by moving theta (gam#2590).
+            Self::TrialPointRefused { .. } => true,
             // Everything else is a property of the configuration, the
             // data, or the numerics, and does not become true or false by
             // moving theta.

@@ -756,11 +756,70 @@ impl EstimationError {
     /// `true`. Everything else stays fatal, which is the conservative
     /// direction: misclassifying a structural failure as recoverable
     /// would let the search grind through a problem that can never work.
+    /// The match is deliberately exhaustive with no wildcard arm, for the
+    /// same reason [`CustomFamilyError::is_trial_point_infeasible`] is: under
+    /// a `_ => false` a newly added variant is classified *fatal* by the
+    /// absence of a decision, and whoever adds it is never asked. That is how
+    /// a rho-local refusal reached this function as `RemlOptimizationFailed` —
+    /// a variant that carries only prose — and aborted a fit the outer search
+    /// was equipped to walk away from (#2590).
     #[must_use]
     pub fn is_trial_point_infeasible(&self) -> bool {
         match self {
+            // The producer classified it; ask it (#2553).
             Self::CustomFamily(err) => err.is_trial_point_infeasible(),
-            _ => false,
+            // ⚠ KNOWN DIVERGENCE, deliberately left alone. These five are
+            // exactly [`Self::is_inner_solve_retreat`]'s list, and that
+            // method's own words for them are "the inner problem at this rho
+            // is too hard to evaluate, try a different rho" — which is this
+            // predicate's definition. So two classifiers of one question
+            // disagree, and a P-IRLS budget exhaustion is a retreat at one
+            // layer and a fatal at this one.
+            //
+            // Reclassifying them belongs to its own change with its own
+            // measurement: the outer-objective boundary consumes THIS
+            // predicate, so flipping five long-standing verdicts changes which
+            // trials the search survives across every family at once. #2590 is
+            // about refusals that were never classified at all, and mixing the
+            // two would make neither attributable.
+            Self::ModelIsIllConditioned { .. }
+            | Self::PerfectSeparationDetected { .. }
+            | Self::MultinomialSeparationDetected { .. }
+            | Self::PirlsDidNotConverge { .. }
+            | Self::FixedLambdaNewtonDidNotConverge { .. }
+            // A structural failure, an already-terminal outer verdict, or a
+            // statement about the configuration, the data, or the prediction
+            // request: none of these becomes true or false by moving rho.
+            | Self::InvalidStabilization { .. }
+            | Self::BasisError { .. }
+            | Self::LinearSystemSolveFailed { .. }
+            | Self::EigendecompositionFailed { .. }
+            | Self::PenaltySpectrumNonFinite { .. }
+            | Self::PenaltySpectrumIndefinite { .. }
+            | Self::ParameterConstraintViolation { .. }
+            | Self::BlockOrthogonalRemlDidNotConverge { .. }
+            | Self::NegativeBinomialAlternationDidNotConverge { .. }
+            | Self::PrefitPerfectSeparationDetected { .. }
+            | Self::PrefitLinearSeparationDetected { .. }
+            | Self::PrefitRankDeficientDesignDetected { .. }
+            | Self::PrefitNearDegenerateDesignDetected { .. }
+            | Self::HessianNotPositiveDefinite { .. }
+            | Self::RemlOptimizationFailed { .. }
+            | Self::OuterObjectiveEvaluationFailed { .. }
+            | Self::RemlDidNotConverge { .. }
+            | Self::FitDidNotConverge { .. }
+            | Self::GradientUnavailable { .. }
+            | Self::LayoutError { .. }
+            | Self::ModelOverparameterized { .. }
+            | Self::InvalidInput { .. }
+            | Self::InverseLinkDomainViolation { .. }
+            | Self::PirlsRowGeometryUnrepresentable { .. }
+            | Self::ExactTweedieSeriesWorkLimit { .. }
+            | Self::LogStrengthDomainViolation { .. }
+            | Self::MonotoneRoot { .. }
+            | Self::CalibratorTrainingFailed { .. }
+            | Self::InvalidSpecification { .. }
+            | Self::PredictionError { .. } => false,
         }
     }
 
@@ -806,6 +865,66 @@ impl EstimationError {
                 | EstimationError::PirlsDidNotConverge { .. }
                 | EstimationError::FixedLambdaNewtonDidNotConverge { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod trial_point_classification_tests {
+    use super::*;
+
+    /// Pins the divergence documented in `is_trial_point_infeasible` so it is
+    /// a recorded state of the code rather than an accident: every variant
+    /// `is_inner_solve_retreat` calls a retreat is, today, NOT a trial-point
+    /// infeasibility. Whoever unifies them will delete this test, which is the
+    /// intent — it exists to make the unification a deliberate act.
+    #[test]
+    fn the_retreat_list_and_the_infeasibility_list_still_disagree() {
+        let retreats = [
+            EstimationError::ModelIsIllConditioned {
+                condition_number: 1.0e18,
+            },
+            EstimationError::PerfectSeparationDetected {
+                iteration: 3,
+                max_abs_eta: 1.0e3,
+            },
+            EstimationError::MultinomialSeparationDetected {
+                iteration: 3,
+                max_abs_eta: 1.0e3,
+                active_class_index: 1,
+                row_index: 2,
+            },
+            EstimationError::PirlsDidNotConverge {
+                max_iterations: 40,
+                last_change: 1.0e-2,
+            },
+        ];
+        for error in retreats {
+            assert!(
+                error.is_inner_solve_retreat(),
+                "fixture must be a retreat: {error}"
+            );
+            assert!(
+                !error.is_trial_point_infeasible(),
+                "unifying the two classifiers is a deliberate change with its own \
+                 measurement; delete this test when you make it: {error}"
+            );
+        }
+    }
+
+    /// The failure #2590 is about: a refusal produced at one rho must not be
+    /// graded fatal because it crossed a boundary that kept only its text.
+    #[test]
+    fn a_custom_family_trial_point_refusal_stays_recoverable() {
+        let reason = "joint Newton returned an indefinite mode at this rho";
+        assert!(
+            EstimationError::CustomFamily(CustomFamilyError::trial_point(reason))
+                .is_trial_point_infeasible()
+        );
+        assert!(
+            !EstimationError::RemlOptimizationFailed(reason.to_string())
+                .is_trial_point_infeasible(),
+            "the prose-only variant is exactly what must NOT carry a rho-local refusal"
+        );
     }
 }
 

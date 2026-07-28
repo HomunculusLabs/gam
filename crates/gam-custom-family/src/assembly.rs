@@ -2281,21 +2281,33 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
 }
 
 pub(crate) fn normalize_outer_eval_error_detail(error: &str) -> &str {
-    // Any `String` round-tripped through `CustomFamilyError::From<String>`
-    // gets re-wrapped as `InvalidInput { context: "custom-family string
-    // boundary", … }`, which `Display`s as `custom-family invalid input
-    // in custom-family string boundary: <reason>`. Strip that "boundary"
-    // wrapper first, then the historical bare `custom-family invalid
-    // input: ` form, so the `last objective error: …` summary surfaces
-    // the inner reason root cause once — not the doubly-wrapped form
-    // that masked the synthetic-failure marker the outer-objective error
-    // contract pins.
-    let stripped = error
-        .strip_prefix("custom-family invalid input in custom-family string boundary: ")
-        .unwrap_or(error);
-    stripped
-        .strip_prefix("custom-family invalid input: ")
-        .unwrap_or(stripped)
+    // A `String` round-tripped through `From<String> for CustomFamilyError` and
+    // back out through `Display` arrives carrying that variant's own prose. The
+    // `last objective error: …` summary wants the inner reason once, not the
+    // doubly-wrapped form — which is also what masked the synthetic-failure
+    // marker the outer-objective error contract pins.
+    //
+    // This function exists because the boundary destroyed information and
+    // someone had to rebuild it by parsing prose. #2590 removed the destruction
+    // (the round trip now lands on `TrialPointRefused`, whose classification
+    // survives it), but the wrapper text still has to come off here, and the
+    // two historical `InvalidInput` forms are still produced by call sites that
+    // construct that variant deliberately. Strip all three, longest first.
+    const WRAPPERS: [&str; 3] = [
+        "custom-family invalid input in custom-family string boundary: ",
+        "inner solve refused this trial point: ",
+        "custom-family invalid input: ",
+    ];
+    let mut stripped = error;
+    loop {
+        let Some(next) = WRAPPERS
+            .iter()
+            .find_map(|wrapper| stripped.strip_prefix(wrapper))
+        else {
+            return stripped;
+        };
+        stripped = next;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

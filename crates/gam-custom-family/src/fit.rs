@@ -1814,8 +1814,33 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     Ok(OuterEval::infeasible(rho.len()))
                 }
                 Err(e) => {
+                    // The outer-objective evaluator's whole contract is "produce
+                    // the REML/LAML objective AT THIS rho", so every failure it
+                    // can report is a failure to evaluate at this rho, and the
+                    // outer optimizer's documented response to that is to reject
+                    // the trial and step away. Stringifying it into
+                    // `RemlOptimizationFailed` erased that: the variant carries
+                    // prose, `is_trial_point_infeasible` answers `false` for it,
+                    // and `into_objective_error` therefore graded a rho-local
+                    // refusal `Fatal`. A correctly typed
+                    // `CustomFamilyError::InnerSolveNotConverged` — a variant
+                    // that says in its own name that the trial point is
+                    // infeasible — died the same death here, which is why fixing
+                    // only the producer's type changed the message and not the
+                    // outcome (#2590).
+                    //
+                    // The classification is not a guess. If the cause really is
+                    // rho-independent it recurs at every probed rho, the seed
+                    // loop exhausts, and the run still ends — with this same
+                    // reason quoted, after a bounded number of cheap identical
+                    // failures. The reverse mistake killed fits that were
+                    // perfectly fittable one rho away (#2553, #2590). The two
+                    // costs are not comparable, so the boundary takes the safe
+                    // one.
                     outer.last_error = Some(e.clone());
-                    Err(EstimationError::RemlOptimizationFailed(e))
+                    Err(EstimationError::CustomFamily(
+                        CustomFamilyError::trial_point(e),
+                    ))
                 }
             };
         }
@@ -1902,11 +1927,13 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 return Ok(OuterEval::infeasible(rho.len()));
             }
             Err(e) => {
-                // Genuine evaluator failure (for example, invalid linear
-                // algebra) is not a trial-level infeasibility. Surface it as a
-                // hard error instead of letting strategy fallback obscure it.
+                // A failure to evaluate the objective at this rho is a
+                // statement about this rho — see the value-only probe above for
+                // why the boundary owns that classification (#2590).
                 outer.last_error = Some(e.clone());
-                return Err(EstimationError::RemlOptimizationFailed(e));
+                return Err(EstimationError::CustomFamily(
+                    CustomFamilyError::trial_point(e),
+                ));
             }
         };
         let inner_beta_hint = Some(Array1::from_iter(
@@ -2021,10 +2048,12 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     Ok(f64::INFINITY)
                 }
                 Err(e) => {
-                    // Genuine evaluator failure is not data-driven trial
-                    // infeasibility, so it remains a hard error.
+                    // A failure to evaluate the cost at this rho is a
+                    // statement about this rho (#2590).
                     outer.last_error = Some(e.clone());
-                    Err(EstimationError::RemlOptimizationFailed(e))
+                    Err(EstimationError::CustomFamily(
+                        CustomFamilyError::trial_point(e),
+                    ))
                 }
             }
         },
@@ -2080,10 +2109,12 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     ))
                 }
                 Err(e) => {
-                    // Genuine eval-error (internal computation failure) — NOT
-                    // data-driven. Hard Err so a real bug surfaces.
+                    // A failure to build the EFS update at this rho is a
+                    // statement about this rho (#2590).
                     outer.last_error = Some(e.clone());
-                    Err(EstimationError::RemlOptimizationFailed(e))
+                    Err(EstimationError::CustomFamily(
+                        CustomFamilyError::trial_point(e),
+                    ))
                 }
             }
         }),
@@ -2113,8 +2144,12 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     ))
                 }
                 Err(e) => {
+                    // A failure to screen this seed is a statement about this
+                    // seed's rho (#2590).
                     outer.last_error = Some(e.clone());
-                    Err(EstimationError::RemlOptimizationFailed(e))
+                    Err(EstimationError::CustomFamily(
+                        CustomFamilyError::trial_point(e),
+                    ))
                 }
             }
         },

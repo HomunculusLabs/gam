@@ -418,26 +418,43 @@ fn clip_infeasible_candidate_to_certified_feasible_chord(
     if direction.iter().any(|value| !value.is_finite()) {
         return Err("feasible-chord direction overflowed binary64".into());
     }
-    let (raw_boundary_step, blocking_row) = constraints
+    // The ratio test is an ACCELERATOR here, not the authority.
+    //
+    // It answers a different question from `max_scaled_violation` — "where
+    // does this chord cross a hyperplane, in exact arithmetic" versus "is this
+    // EVALUATED point on the wrong side of a row" — and at the magnitudes that
+    // reach this function the two disagree. Measured (#2590): a candidate
+    // infeasible by `4.701406e-32` on row 34 for which the ratio test reported
+    // no blocking row at all. The cheap predicate then vetoed the precise one
+    // and the whole fit died, at a function whose entire job is to repair a
+    // violation that small.
+    //
+    // The bisection below needs no ratio test to be correct. Step 0 is the
+    // reference, already certified feasible; step 1 is the candidate, whose
+    // evaluated violation is positive by the premise checked above. An
+    // ordered-bit search on the SAME predicate that declared the infeasibility
+    // is therefore always bracketed and always terminates. Use the ratio test
+    // only to start that search closer to the answer, and fall back to the
+    // whole chord when it declines to answer.
+    let (raw_boundary_step, ratio_test_row) = constraints
         .max_feasible_step(reference.view(), direction.view(), &[])
         .map_err(|error| format!("feasible-chord boundary ratio test failed: {error}"))?;
-    let boundary_step = if raw_boundary_step == 0.0 {
-        0.0
-    } else {
+    let boundary_step = if raw_boundary_step.is_finite() && (0.0..=1.0).contains(&raw_boundary_step)
+    {
         raw_boundary_step
+    } else {
+        1.0
     };
-    let Some(blocking_row) = blocking_row else {
+    // Which row the clip is ATTRIBUTED to. The ratio test's answer when it has
+    // one; otherwise the row whose evaluated violation is what forced the clip,
+    // which is the row the chord actually ran into.
+    let Some(blocking_row) = ratio_test_row.or(candidate_worst_row) else {
         return Err(format!(
-            "infeasible QP endpoint has no blocking constraint on its feasible chord \
-             (candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?})"
+            "infeasible QP endpoint names no violated row \
+             (candidate_scaled_violation={candidate_violation:.6e}@{candidate_worst_row:?}, \
+             ratio_test_step={raw_boundary_step:.6e})"
         ));
     };
-    if !boundary_step.is_finite() || !(0.0..=1.0).contains(&boundary_step) {
-        return Err(format!(
-            "feasible-chord boundary ratio is outside [0,1] \
-             (step={boundary_step:.6e}, blocking_row={blocking_row})"
-        ));
-    }
 
     let point_at = |step: f64| reference + &(&direction * step);
     let mut certified_step = boundary_step;
