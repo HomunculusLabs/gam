@@ -7852,6 +7852,7 @@ impl<'a> RemlState<'a> {
     pub(crate) fn execute_pirls_stateless_for_cubature(
         &self,
         rho: &Array1<f64>,
+        centre_beta: Option<&Coefficients>,
     ) -> Result<Arc<PirlsResult>, EstimationError> {
         let mut pirls_config = self.config.as_pirls_config();
         pirls_config.link_kind = self.runtime_inverse_link();
@@ -7981,9 +7982,17 @@ impl<'a> RemlState<'a> {
             problem,
             penalty,
             &pirls_config,
-            // No warm start: sigma points are off the outer trajectory and
-            // a stale warm start would couple parallel sigma fits.
-            None,
+            // Seeded from the converged CENTRE mode, not from a per-point
+            // cache. `centre_beta` is one immutable constant shared by every
+            // sigma point, so the fits stay independent of each other and of
+            // the production trajectory — the property this stateless callee
+            // exists to guarantee. What it buys is a seed that is both near
+            // (beta_hat is continuous in rho) and, for a constrained fit,
+            // FEASIBLE; the cold seed is neither, and at an off-trajectory rho
+            // the resulting all-rows-tight active-set face does not recover
+            // (#2601, #873). `None` keeps the old cold-start behaviour for any
+            // caller that has no centre fit to offer.
+            centre_beta,
             // No adaptive-KKT outer-grad lookup: the outer-grad state is
             // owned by the production trajectory and the sigma points are
             // not on it.

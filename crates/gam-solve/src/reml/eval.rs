@@ -82,7 +82,13 @@ pub enum SmoothingCorrectionOutcome {
     FirstOrder {
         correction: Option<Array2<f64>>,
         rho_covariance: Option<Array2<f64>>,
-        reason: &'static str,
+        /// Why the cubature upgrade was not taken. `Cow` rather than
+        /// `&'static str` because one of these reasons is not a fixed
+        /// classification but a propagated numerical failure — the typed error
+        /// from a sigma point's inner solve — and collapsing that to a constant
+        /// would discard the only description of what actually went wrong
+        /// (#2601).
+        reason: std::borrow::Cow<'static, str>,
         severity: SmoothingCorrectionFallbackSeverity,
         method: Option<SmoothingCorrectionMethod>,
     },
@@ -225,9 +231,15 @@ pub(crate) fn device_pirls_stage3_ready() -> Result<bool, gam_gpu::gpu_error::Gp
 /// `n ≥ row_kernel_min_n`, dense design). A pre-admission `Ok(None)` uses the
 /// CPU executor; once admitted, typed geometry/runtime failures propagate and
 /// are never retried on a different implementation.
+///
+/// `centre_fit` is the converged fit at `rho_hat`. Its coefficient vector is
+/// handed to every sigma point as a shared, immutable seed — see
+/// [`sigma_cubature_evaluate_cpu_rayon`] for why that is not the cross-call
+/// state the stateless callee exists to avoid.
 pub(crate) fn sigma_cubature_dispatch(
     state: &RemlState<'_>,
     sigma_points: &[Array1<f64>],
+    centre_fit: Option<&PirlsResult>,
 ) -> Result<Vec<SigmaPointResult>, EstimationError> {
     let stage3_ready = device_pirls_stage3_ready().map_err(|error| {
         EstimationError::RemlOptimizationFailed(format!(
@@ -257,7 +269,7 @@ pub(crate) fn sigma_cubature_dispatch(
         }
     }
 
-    sigma_cubature_evaluate_cpu_rayon(state, sigma_points)
+    sigma_cubature_evaluate_cpu_rayon(state, sigma_points, centre_fit)
 }
 
 /// GPU stream-pool sigma-cubature evaluator.
@@ -397,14 +409,46 @@ pub(crate) fn sigma_cubature_evaluate_gpu_stream_pool(
 /// leaky proxy that still let writes through (e.g. the adaptive-cap
 /// feedback and last_pirls_lm_lambda paths) and serialized unrelated
 /// REML evaluations racing the cubature window.
+///
+/// ## Why the sigma points are SEEDED and still stateless
+///
+/// The callee threads no MUTABLE cross-call state — that is what makes the
+/// sigma fits independent of the production trajectory and of each other. A
+/// shared *immutable* seed is a different thing entirely: `centre_beta` is the
+/// converged coefficient vector at `rho_hat`, one constant, identical for every
+/// point, read-only, and computed before any sigma fit starts. It couples
+/// nothing.
+///
+/// It matters most for the case that motivated it. `beta_hat(rho)` is
+/// continuous in rho, so the centre mode is the natural seed for a perturbation
+/// of rho — and for a SHAPE-CONSTRAINED fit it is also a *feasible* one. The
+/// cold seed is not: `default_beta_guess_external` lands on or outside the
+/// constraint cone, and for a homogeneous curvature cone the projection that
+/// repairs it starts the inner active-set QP from a face with every row tight.
+/// That is the #873 degenerate-vertex regime, and at an off-trajectory rho
+/// (where lambda can be many decades from its fitted value) the QP does not
+/// recover from it — measured as `LmStepSearchExhausted` with the LM parameter
+/// pinned at its ceiling, on a fit whose own inner solves all reached
+/// ‖g‖ ~ 1e-13 (#2601).
 pub(crate) fn sigma_cubature_evaluate_cpu_rayon(
     state: &RemlState<'_>,
     sigma_points: &[Array1<f64>],
+    centre_fit: Option<&PirlsResult>,
 ) -> Result<Vec<SigmaPointResult>, EstimationError> {
+    // Map the centre mode back to the ORIGINAL coefficient basis once: the
+    // per-rho reparameterization `Qs` differs at every sigma point, and
+    // `fit_model_for_fixed_rho_with_adaptive_kkt` takes its warm start in the
+    // original basis and applies each point's own transform itself.
+    let centre_beta = centre_fit.map(|fit| {
+        Coefficients::new(fit.reparam_result.qs.dot(fit.beta_transformed.as_ref()))
+    });
     let rows: Vec<Result<SigmaPointResult, EstimationError>> = (0..sigma_points.len())
         .into_par_iter()
         .map(|idx| -> Result<SigmaPointResult, EstimationError> {
-            let fit_point = state.execute_pirls_stateless_for_cubature(&sigma_points[idx])?;
+            let fit_point = state.execute_pirls_stateless_for_cubature(
+                &sigma_points[idx],
+                centre_beta.as_ref(),
+            )?;
             let h_point = map_hessian_to_original_basis(fit_point.as_ref())?;
             let cov_point = crate::gpu_kernels::sigma_cubature::certified_sigma_point_covariance(
                 &h_point,
@@ -800,7 +844,8 @@ impl<'a> RemlState<'a> {
                 rho_covariance: first_order_rho_covariance,
             });
         }
-        let first_order_routine = |correction: Option<Array2<f64>>, reason: &'static str| {
+        let first_order_routine = |correction: Option<Array2<f64>>,
+                                   reason: std::borrow::Cow<'static, str>| {
             SmoothingCorrectionOutcome::FirstOrder {
                 correction,
                 rho_covariance: first_order_rho_covariance.clone(),
@@ -809,7 +854,8 @@ impl<'a> RemlState<'a> {
                 method: first_order_method,
             }
         };
-        let first_order_numerical = |correction: Option<Array2<f64>>, reason: &'static str| {
+        let first_order_numerical = |correction: Option<Array2<f64>>,
+                                     reason: std::borrow::Cow<'static, str>| {
             SmoothingCorrectionOutcome::FirstOrder {
                 correction,
                 rho_covariance: first_order_rho_covariance.clone(),
@@ -854,19 +900,19 @@ impl<'a> RemlState<'a> {
             }
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "n_rho == 0: unified corrected covariance equals H^{-1}",
+                "n_rho == 0: unified corrected covariance equals H^{-1}".into(),
             ));
         }
         if n_rho > AUTO_CUBATURE_MAX_RHO_DIM {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "n_rho exceeds AUTO_CUBATURE_MAX_RHO_DIM: cubature cost prohibitive",
+                "n_rho exceeds AUTO_CUBATURE_MAX_RHO_DIM: cubature cost prohibitive".into(),
             ));
         }
         if final_fit.beta_transformed.len() > AUTO_CUBATURE_MAX_BETA_DIM {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "beta dimension exceeds AUTO_CUBATURE_MAX_BETA_DIM: cubature cost prohibitive",
+                "beta dimension exceeds AUTO_CUBATURE_MAX_BETA_DIM: cubature cost prohibitive".into(),
             ));
         }
         let near_boundary = final_rho
@@ -912,7 +958,7 @@ impl<'a> RemlState<'a> {
         {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "first-order V_rho rank-deficient: cubature would impute spurious variance",
+                "first-order V_rho rank-deficient: cubature would impute spurious variance".into(),
             ));
         }
 
@@ -925,7 +971,7 @@ impl<'a> RemlState<'a> {
                 Err(_) => {
                     return self.finalize_smoothing_outcome(first_order_numerical(
                         first_order_correction,
-                        "rho Hessian compute_lamlhessian_consistent failed",
+                        "rho Hessian compute_lamlhessian_consistent failed".into(),
                     ));
                 }
             }
@@ -947,7 +993,7 @@ impl<'a> RemlState<'a> {
                 log::warn!("sigma cubature refused invalid ridge metadata: {error}");
                 return self.finalize_smoothing_outcome(first_order_numerical(
                     first_order_correction,
-                    "rho Hessian produced invalid cubature-ridge metadata",
+                    "rho Hessian produced invalid cubature-ridge metadata".into(),
                 ));
             }
         };
@@ -963,7 +1009,7 @@ impl<'a> RemlState<'a> {
                 log::warn!("sigma cubature refused explicitly ridged rho Hessian: {error}");
                 return self.finalize_smoothing_outcome(first_order_numerical(
                     first_order_correction,
-                    "explicitly ridged rho Hessian failed exact SPD inversion",
+                    "explicitly ridged rho Hessian failed exact SPD inversion".into(),
                 ));
             }
         };
@@ -975,7 +1021,7 @@ impl<'a> RemlState<'a> {
         if !near_boundary && !highgrad && max_rhovar < AUTO_CUBATURE_RHOVAR_TRIGGER {
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "post-inversion rho posterior variance below trigger threshold",
+                "post-inversion rho posterior variance below trigger threshold".into(),
             ));
         }
 
@@ -986,7 +1032,7 @@ impl<'a> RemlState<'a> {
             Err(_) => {
                 return self.finalize_smoothing_outcome(first_order_numerical(
                     first_order_correction,
-                    "eigendecomposition of inverse rho-Hessian failed",
+                    "eigendecomposition of inverse rho-Hessian failed".into(),
                 ));
             }
         };
@@ -1004,7 +1050,7 @@ impl<'a> RemlState<'a> {
         if eig_pairs.is_empty() {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
-                "inverse rho-Hessian has no positive eigenvalues above numerical floor",
+                "inverse rho-Hessian has no positive eigenvalues above numerical floor".into(),
             ));
         }
         eig_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1012,7 +1058,7 @@ impl<'a> RemlState<'a> {
         if !totalvar.is_finite() || totalvar <= 0.0 {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
-                "positive-eigenvalue total mass non-finite or non-positive",
+                "positive-eigenvalue total mass non-finite or non-positive".into(),
             ));
         }
 
@@ -1037,7 +1083,7 @@ impl<'a> RemlState<'a> {
         if rank == 0 {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
-                "variance-truncation produced rank 0 (unreachable guard)",
+                "variance-truncation produced rank 0 (unreachable guard)".into(),
             ));
         }
 
@@ -1048,7 +1094,7 @@ impl<'a> RemlState<'a> {
             // the first-order delta is the documented outcome.
             return self.finalize_smoothing_outcome(first_order_routine(
                 first_order_correction,
-                "no base covariance supplied: nothing for cubature to upgrade",
+                "no base covariance supplied: nothing for cubature to upgrade".into(),
             ));
         };
         let p = base_cov.nrows();
@@ -1076,7 +1122,7 @@ impl<'a> RemlState<'a> {
         if sigma_points.is_empty() {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
-                "empty sigma-point set (unreachable guard)",
+                "empty sigma-point set (unreachable guard)".into(),
             ));
         }
 
@@ -1087,7 +1133,39 @@ impl<'a> RemlState<'a> {
         // stream-pool path once `pirls-row-v3` Stage 3 and `bms-flex-v3`
         // Phase 5 land the device-resident inner PIRLS the GPU
         // executor needs.
-        let point_results = sigma_cubature_dispatch(self, &sigma_points)?;
+        // A sigma point is an OFF-TRAJECTORY rho: `final_rho ± sqrt(rank·λ_k)·v_k`
+        // in log-smoothing units, and that offset is largest exactly when the
+        // rho posterior is broad — which is the case cubature exists FOR. The
+        // inner solve there is a genuinely different problem from the fitted
+        // one, and for a shape-constrained fit it can be an intractable one (a
+        // cold-started active-set QP at λ many decades from the optimum).
+        //
+        // Every other way this function can fail — the rho-Hessian refusing
+        // inversion, the eigendecomposition failing, the ridge metadata being
+        // invalid, the assembled covariance going non-finite — degrades to the
+        // first-order correction with a recorded reason and severity, because
+        // cubature is an UPGRADE over a correction that is already computed and
+        // already correct. This one call propagated instead, so a failure to
+        // refine the *uncertainty* destroyed a point estimate that had already
+        // converged and certified: `gamfit.fit(frame, "y ~ s(x)",
+        // constraints={"s(x)": "convex"})` returned `Parameter constraint
+        // violation: KKT residuals exceed tolerance` for a fit whose own inner
+        // solves all reached ‖g‖ ≈ 1e-13 (#2601).
+        //
+        // Fall back on the same contract as every sibling branch. The severity
+        // is `NumericalFailure`, not `Routine` — this is a numerical failure of
+        // the upgrade, it increments the failure counter, and it logs at WARN
+        // with the propagated error, so it is recorded rather than silent.
+        let point_results = match sigma_cubature_dispatch(self, &sigma_points, Some(final_fit)) {
+            Ok(results) => results,
+            Err(error) => {
+                return self.finalize_smoothing_outcome(first_order_numerical(
+                    first_order_correction,
+                    format!("sigma-point inner solve failed at an off-trajectory rho: {error}")
+                        .into(),
+                ));
+            }
+        };
 
         // Dispersion scaling of the curvature (conditional-covariance) term.
         //
@@ -1116,7 +1194,7 @@ impl<'a> RemlState<'a> {
         if !total_cov.iter().all(|v| v.is_finite()) {
             return self.finalize_smoothing_outcome(first_order_numerical(
                 first_order_correction,
-                "assembled total covariance contains non-finite entries",
+                "assembled total covariance contains non-finite entries".into(),
             ));
         }
         symmetrize_in_place(&mut total_cov);
@@ -2355,7 +2433,7 @@ mod smoothing_correction_outcome_tests {
     use std::sync::atomic::Ordering;
 
     pub(crate) fn make_first_order(
-        reason: &'static str,
+        reason: std::borrow::Cow<'static, str>,
         severity: SmoothingCorrectionFallbackSeverity,
         with_matrix: bool,
     ) -> SmoothingCorrectionOutcome {
@@ -2433,7 +2511,7 @@ mod smoothing_correction_outcome_tests {
     #[test]
     pub(crate) fn first_order_routine_branch_label_and_extraction() {
         let outcome = make_first_order(
-            "n_rho == 0",
+            "n_rho == 0".into(),
             SmoothingCorrectionFallbackSeverity::Routine,
             true,
         );
@@ -2444,7 +2522,7 @@ mod smoothing_correction_outcome_tests {
     #[test]
     pub(crate) fn first_order_numerical_branch_label_and_extraction() {
         let outcome = make_first_order(
-            "rho Hessian inversion failed after ridge regularization",
+            "rho Hessian inversion failed after ridge regularization".into(),
             SmoothingCorrectionFallbackSeverity::NumericalFailure,
             true,
         );
@@ -2455,7 +2533,7 @@ mod smoothing_correction_outcome_tests {
     #[test]
     pub(crate) fn first_order_without_matrix_returns_none() {
         let outcome = make_first_order(
-            "no base covariance supplied",
+            "no base covariance supplied".into(),
             SmoothingCorrectionFallbackSeverity::Routine,
             false,
         );
@@ -2588,7 +2666,7 @@ mod smoothing_correction_outcome_tests {
             // Qs-mapped H⁻¹ is the dispersion-free base covariance the
             // correction upgrades.
             let final_fit = state
-                .execute_pirls_stateless_for_cubature(&final_rho)
+                .execute_pirls_stateless_for_cubature(&final_rho, None)
                 .expect("inner PIRLS at near-boundary rho");
             let h_orig = map_hessian_to_original_basis(final_fit.as_ref())
                 .expect("map Hessian to original basis");
@@ -2712,14 +2790,21 @@ mod smoothing_correction_outcome_tests {
             "positive-eigenvalue total mass non-finite or non-positive",
             "variance-truncation produced rank 0 (unreachable guard)",
             "empty sigma-point set (unreachable guard)",
-            "one or more sigma-point inner PIRLS fits failed",
+            // A sigma point's inner solve failing is a NUMERICAL-severity
+            // fallback carrying the propagated typed error, not a fixed
+            // classification string — hence the `Cow` (#2601).
+            "sigma-point inner solve failed at an off-trajectory rho: <typed error>",
             "assembled total covariance contains non-finite entries",
         ];
         for r in reasons.iter() {
             assert!(!r.is_empty(), "classification reason must not be empty");
-            let routine = make_first_order(r, SmoothingCorrectionFallbackSeverity::Routine, true);
+            let routine = make_first_order(
+                std::borrow::Cow::Borrowed(r),
+                SmoothingCorrectionFallbackSeverity::Routine,
+                true,
+            );
             let numerical = make_first_order(
-                r,
+                std::borrow::Cow::Borrowed(r),
                 SmoothingCorrectionFallbackSeverity::NumericalFailure,
                 true,
             );
