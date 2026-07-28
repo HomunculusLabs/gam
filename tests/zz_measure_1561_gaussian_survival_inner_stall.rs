@@ -155,7 +155,7 @@ fn summarize_locscale(result: Result<FitResult, String>, wall_ms: f64) -> String
                 "CONVERGED wall_ms={wall_ms:.0} outer_iter={} reml={:.4} |g|={} \
                  log_lambdas={:?}",
                 u.outer_iterations,
-                u.reml_score,
+                u.reml_score().unwrap_or(f64::NAN),
                 u.outer_gradient_norm
                     .map(|g| format!("{g:.3e}"))
                     .unwrap_or_else(|| "none".to_string()),

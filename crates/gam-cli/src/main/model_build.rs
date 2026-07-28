@@ -304,7 +304,12 @@ pub(crate) struct SavedFitSummary {
     pub(crate) deviance: f64,
     pub(crate) stable_penalty_term: f64,
     pub(crate) max_abs_eta: f64,
-    pub(crate) reml_score: f64,
+    /// The fit's REML/LAML criterion, or `None` when the fit has none at all
+    /// (an exactly-interpolating Gaussian fit; see
+    /// `UnifiedFitResult::reml_score`). Serialized as `null` in that case, and
+    /// the reconstructed fit carries the same absence rather than a zero
+    /// (#2595).
+    pub(crate) reml_score: Option<f64>,
     /// Analytic outer-stationarity certificate proving the smoothing coordinate
     /// converged. `None` only when the fit ran no outer iterations (fixed-λ);
     /// whenever the fit optimized ρ this must carry the live certificate so the
@@ -323,7 +328,9 @@ impl SavedFitSummary {
         ensure_finite_scalar("fit_result.deviance", self.deviance)?;
         ensure_finite_scalar("fit_result.stable_penalty_term", self.stable_penalty_term)?;
         ensure_finite_scalar("fit_result.max_abs_eta", self.max_abs_eta)?;
-        ensure_finite_scalar("fit_result.reml_score", self.reml_score)?;
+        if let Some(reml_score) = self.reml_score {
+            ensure_finite_scalar("fit_result.reml_score", reml_score)?;
+        }
         Ok(self)
     }
 
@@ -361,7 +368,7 @@ impl SavedFitSummary {
             deviance: fit.deviance,
             stable_penalty_term,
             max_abs_eta,
-            reml_score: fit.reml_score,
+            reml_score: fit.reml_score(),
             // Carry the live analytic certificate forward. Deriving it from the
             // sealed convergence evidence keeps the reconstructed fit's outer
             // stationarity proof identical to the one the optimizer minted; a
@@ -509,9 +516,9 @@ mod tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 1,
             outer_converged: true,
@@ -618,9 +625,9 @@ mod tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 1,
             outer_converged: true,

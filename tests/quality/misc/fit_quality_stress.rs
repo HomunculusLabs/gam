@@ -700,7 +700,7 @@ fn zz_measure_hifreq_tensor_k8_lambda_readout() {
          collapsed edf ⇒ (b) rail-to-null / #2392 family",
         fit.fit.beta.len(),
         fit.fit.edf_total().unwrap_or(f64::NAN),
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.outer_iterations,
     );
 }

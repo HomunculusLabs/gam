@@ -315,10 +315,10 @@ fn check_case(shape: &Shape, n: usize, degen: Degeneracy, seed: u64) -> Result<(
     }
 
     // I3 finite objective.
-    if !fit.fit.reml_score.is_finite() {
+    if !fit.fit.reml_score().is_some_and(f64::is_finite) {
         return Err(format!(
-            "{repro}\n  I3 VIOLATED: non-finite reml_score {}",
-            fit.fit.reml_score
+            "{repro}\n  I3 VIOLATED: non-finite reml_score {:?}",
+            fit.fit.reml_score()
         ));
     }
     if !fit.fit.log_likelihood.is_finite() {

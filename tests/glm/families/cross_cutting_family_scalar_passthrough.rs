@@ -77,7 +77,7 @@ fn cross_cutting_tweedie_negbin_beta_scalars_passthrough() {
         "Tweedie deviance should change with p"
     );
     assert!(
-        (tw_15.reml_score - tw_17.reml_score).abs() > 1e-8,
+        (tw_15.reml_score().expect("the fit reports a REML/LAML criterion") - tw_17.reml_score().expect("the fit reports a REML/LAML criterion")).abs() > 1e-8,
         "Tweedie REML score should change with p"
     );
 
@@ -117,7 +117,7 @@ fn cross_cutting_tweedie_negbin_beta_scalars_passthrough() {
         nb_seed8.deviance
     );
     assert!(
-        (nb_seed2.reml_score - nb_seed8.reml_score).abs() < 1e-6,
+        (nb_seed2.reml_score().expect("the fit reports a REML/LAML criterion") - nb_seed8.reml_score().expect("the fit reports a REML/LAML criterion")).abs() < 1e-6,
         "NegBin REML score must be independent of the seed theta (theta is estimated)"
     );
     let theta_seed2 = nb_seed2
@@ -178,7 +178,7 @@ fn cross_cutting_tweedie_negbin_beta_scalars_passthrough() {
         be_seed30.deviance
     );
     assert!(
-        (be_seed10.reml_score - be_seed30.reml_score).abs() < 1e-6,
+        (be_seed10.reml_score().expect("the fit reports a REML/LAML criterion") - be_seed30.reml_score().expect("the fit reports a REML/LAML criterion")).abs() < 1e-6,
         "Beta REML score must be independent of the seed phi (phi is estimated)"
     );
     let phi_seed10 = be_seed10

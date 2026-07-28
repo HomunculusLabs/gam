@@ -949,9 +949,9 @@ mod tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: -1.2,
             deviance: 2.4,
-            reml_score: 0.7,
+            reml_score: Some(0.7),
             stable_penalty_term: 0.3,
-            penalized_objective: 2.2,
+            penalized_objective: Some(2.2),
             used_device: false,
             // `outer_iterations: 0` sidesteps the analytic-certificate
             // requirement in `UnifiedFitResult::try_from_parts` (a fit is

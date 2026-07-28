@@ -228,7 +228,7 @@ fn matern_fit_term_collection_gaussian_simulated_10dwith_exact_adaptive_regulari
     assert!(diag.epsilon_g.is_finite() && diag.epsilon_g > 0.0);
     assert!(diag.epsilon_c.is_finite() && diag.epsilon_c > 0.0);
     assert_eq!(diag.maps.len(), 1);
-    assert!(fitted.fit.reml_score.is_finite());
+    assert!(fitted.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite());
 
     let pred_mean = fitted.design.design.to_dense().dot(&fitted.fit.beta) + &offset;
     assert!(pred_mean.iter().all(|v| v.is_finite()));

@@ -151,7 +151,7 @@ fn fit_once(data: &Array2<f64>, spec: &BernoulliMarginalSlopeTermSpec) -> FitDig
         Ok(FitResult::BernoulliMarginalSlope(out)) => FitDigest {
             log_lambdas: out.fit.log_lambdas.clone(),
             beta: out.fit.beta.clone(),
-            reml_score: out.fit.reml_score,
+            reml_score: out.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
             outer_iterations: out.fit.outer_iterations,
         },
         Ok(_) => panic!("wrong FitResult variant"),

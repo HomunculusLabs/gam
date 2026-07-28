@@ -82,8 +82,8 @@ fn omitted_gamma_prior_matches_uninformed_fit_bitwise() {
         assert_relative_eq!(b, e, max_relative = 1e-12);
     }
     assert_relative_eq!(
-        base.fit.reml_score,
-        empty.fit.reml_score,
+        base.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
+        empty.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         max_relative = 1e-12
     );
 }

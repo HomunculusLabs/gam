@@ -172,7 +172,7 @@ fn gam_tensor_te_2d_tweedie_matches_mgcv() {
         .expect("fitted Tweedie model must carry valid dispersion");
     eprintln!(
         "[diag] gam tweedie: outer_converged=certified outer_iterations={} grad_norm={:?} reml_score={:.6} gam_phi={:.6}",
-        fit.fit.outer_iterations, fit.fit.outer_gradient_norm, fit.fit.reml_score, gam_phi,
+        fit.fit.outer_iterations, fit.fit.outer_gradient_norm, fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"), gam_phi,
     );
     eprintln!("[diag] gam tweedie lambdas={:?}", fit.fit.lambdas.to_vec());
     eprintln!(

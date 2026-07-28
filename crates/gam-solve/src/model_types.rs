@@ -132,7 +132,7 @@ pub use result_types::{
     CertifiedRung, CurvatureEvidence, OuterStationarityCertificate, RailCoordinate,
     RailTailEvidence,
     RailedCoordinateFact,
-    UnifiedFitResult, UnifiedFitResultParts,
+    NO_CRITERION_AT_EXACT_FIT, UnifiedFitResult, UnifiedFitResultParts, criterion_display,
     ensure_finite_scalar,
     SmoothingCorrectionMethod, WorkingGeometry,
     saved_latent_cloglog_state_from_fit, saved_mixture_state_from_fit, saved_sas_state_from_fit,

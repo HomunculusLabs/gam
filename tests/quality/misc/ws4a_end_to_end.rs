@@ -109,7 +109,7 @@ fn run_fit(req: FitRequest<'_>) -> FitSummary {
         .map(|inf| inf.edf_by_block.clone())
         .unwrap_or_default();
     FitSummary {
-        reml: fit.fit.fit.reml_score,
+        reml: fit.fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         edf_by_block,
         beta: fit.fit.fit.beta.to_vec(),
     }

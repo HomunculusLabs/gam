@@ -1559,7 +1559,7 @@ mod adaptive_bounded_duchon_tests {
         assert!(diag.epsilon_c.is_finite() && diag.epsilon_c > 0.0);
         assert_eq!(diag.maps.len(), 1);
         assert!(fit.fit.beta.iter().all(|v| v.is_finite()));
-        assert!(fit.fit.reml_score.is_finite());
+        assert!(fit.fit.reml_score().is_some_and(f64::is_finite));
         let outer_certificate = fit
             .fit
             .convergence_evidence()
@@ -1660,7 +1660,7 @@ mod adaptive_bounded_duchon_tests {
             "pure Duchon carries no operator triplet, so the Charbonnier overlay must not run"
         );
         assert!(fit.fit.beta.iter().all(|v| v.is_finite()));
-        assert!(fit.fit.reml_score.is_finite());
+        assert!(fit.fit.reml_score().is_some_and(f64::is_finite));
     }
 
     #[test]

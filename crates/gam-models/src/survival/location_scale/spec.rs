@@ -290,9 +290,14 @@ pub struct SurvivalLocationScaleFitResultParts {
     pub lambdas_log_sigma: Array1<f64>,
     pub lambdas_linkwiggle: Option<Array1<f64>>,
     pub log_likelihood: f64,
-    pub reml_score: f64,
+    /// The fit's REML/LAML criterion, or `None` when the fit has none at all
+    /// (the exact-fit boundary; see `UnifiedFitResult::reml_score`). Carried
+    /// through rather than defaulted so a survival assembly cannot mint a
+    /// criterion its inner fit declined to state (#2595).
+    pub reml_score: Option<f64>,
     pub stable_penalty_term: f64,
-    pub penalized_objective: f64,
+    /// Absent exactly when [`Self::reml_score`] is absent.
+    pub penalized_objective: Option<f64>,
     /// Whether any GPU device executed part of this fit (GPU-flag propagation).
     /// Survival location-scale runs on the CPU path, so this is `false`; it is
     /// carried so the assembled `UnifiedFitResultParts` reports a real value.
@@ -554,12 +559,16 @@ pub fn survival_fit_from_parts(
     }
     ensure_finite_scalar_estimation("survival_fit.log_likelihood", log_likelihood)
         .map_err(|e| e.to_string())?;
-    ensure_finite_scalar_estimation("survival_fit.reml_score", reml_score)
-        .map_err(|e| e.to_string())?;
+    if let Some(reml_score) = reml_score {
+        ensure_finite_scalar_estimation("survival_fit.reml_score", reml_score)
+            .map_err(|e| e.to_string())?;
+    }
     ensure_finite_scalar_estimation("survival_fit.stable_penalty_term", stable_penalty_term)
         .map_err(|e| e.to_string())?;
-    ensure_finite_scalar_estimation("survival_fit.penalized_objective", penalized_objective)
-        .map_err(|e| e.to_string())?;
+    if let Some(penalized_objective) = penalized_objective {
+        ensure_finite_scalar_estimation("survival_fit.penalized_objective", penalized_objective)
+            .map_err(|e| e.to_string())?;
+    }
     if let Some(g) = outer_gradient_norm {
         ensure_finite_scalar_estimation("survival_fit.outer_gradient_norm", g)
             .map_err(|e| e.to_string())?;

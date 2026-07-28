@@ -173,7 +173,7 @@ fn gam_matern_family_recovers_truth_across_nu() {
              gam_lambdas={:?} gam_log_lambdas={:?} \
              gam_edf_by_block={:?} gam_block_trace={:?} \
              mgcv_reml={mgcv_reml:.4} mgcv_edf={mgcv_edf:.4} mgcv_sp={mgcv_sp:?}",
-            fit.fit.reml_score,
+            fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
             fit.fit.lambdas.to_vec(),
             fit.fit.log_lambdas.to_vec(),
             fit.fit.edf_by_block().to_vec(),

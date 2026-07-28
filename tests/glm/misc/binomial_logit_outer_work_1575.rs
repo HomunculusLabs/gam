@@ -145,7 +145,7 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
     // clear the solver's score-relative stationarity bound (checked below). This
     // is the load-bearing correctness gate — a non-stationary stuck mode (an
     // overfit, or a coarse-inner-solve stall) would fail it.
-    assert!(fit.reml_score.is_finite(), "reml_score must be finite");
+    assert!(fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(), "reml_score must be finite");
     let edf = fit
         .edf_total()
         .expect("inference EDF must be present for an inference fit");
@@ -167,7 +167,7 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
 
     eprintln!(
         "RECORD_1575 reml_score={:.10} edf={:.10} outer_cost_evals={} inner_pirls_solves={} outer_grad_norm={:?} converged=certified",
-        fit.reml_score, edf, fit.outer_cost_evals, fit.inner_pirls_solves, fit.outer_gradient_norm
+        fit.reml_score().expect("the fit reports a REML/LAML criterion"), edf, fit.outer_cost_evals, fit.inner_pirls_solves, fit.outer_gradient_norm
     );
 
     // Fit existence is the sealed convergence proof (SPEC 20).
@@ -188,14 +188,14 @@ fn binomial_logit_reml_outer_work_bounded_1575() {
     // while certifying the true flat-valley optimum.
     if let Some(g) = fit.outer_gradient_norm {
         let score_relative_stationarity_bound =
-            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
+            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
         assert!(
             g <= score_relative_stationarity_bound,
             "final outer gradient norm {g} exceeds the score-relative stationarity \
              bound {score_relative_stationarity_bound} (= min(1e-3·(1+|score|), 1.0), \
              score={}) — the converged optimum is NOT stationary even by the \
              score-relative criterion, so the optimum changed / the fit is stuck",
-            fit.reml_score
+            fit.reml_score().expect("the fit reports a REML/LAML criterion")
         );
     }
 
@@ -287,7 +287,7 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
     .expect("3-smooth Firth-ON logit REML fit should succeed");
 
     // Correctness: finite fit, converged, EDF in the structurally valid band.
-    assert!(fit.reml_score.is_finite(), "reml_score must be finite");
+    assert!(fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(), "reml_score must be finite");
     assert!(
         fit.beta.iter().all(|b| b.is_finite()),
         "beta must be finite"
@@ -301,7 +301,7 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
     );
     // Fit existence is the sealed convergence proof (SPEC 20).
     if let Some(g) = fit.outer_gradient_norm {
-        let bound = gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
+        let bound = gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
         assert!(
             g <= bound,
             "Firth-ON final outer gradient norm {g} exceeds score-relative \
@@ -311,7 +311,7 @@ fn binomial_logit_reml_firth_on_outer_work_bounded_1575() {
 
     eprintln!(
         "RECORD_1575_FIRTH reml_score={:.10} edf={:.10} outer_cost_evals={} inner_pirls_solves={} converged=certified",
-        fit.reml_score, edf, fit.outer_cost_evals, fit.inner_pirls_solves
+        fit.reml_score().expect("the fit reports a REML/LAML criterion"), edf, fit.outer_cost_evals, fit.inner_pirls_solves
     );
 
     // Outer-work budget: the Firth path does more per-eval work but the eval/solve

@@ -430,7 +430,7 @@ pub(crate) fn run_report_spline_scan(
         formula: model.formula.clone(),
         n_obs: Some(scan.training_sample_size()),
         deviance: scan.deviance(),
-        reml_score: -scan.restricted_loglik,
+        reml_score: Some(-scan.restricted_loglik),
         iterations: 0,
         convergence_status: "exact (state-space spline scan)".to_string(),
         converged: true,
@@ -519,7 +519,7 @@ pub(crate) fn run_report_residual_cascade(
         // Gaussian-identity deviance ≡ the penalized residual quadratic
         // `y'Wy − ĉ'X'Wy` the fit profiles σ² from.
         deviance: fit.rss_pen,
-        reml_score: -fit.restricted_loglik,
+        reml_score: Some(-fit.restricted_loglik),
         iterations: 0,
         convergence_status: "exact (multiresolution residual cascade)".to_string(),
         converged: true,
@@ -636,8 +636,9 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
             unified.convergence_evidence().inner_status().label()
         ));
         notes.push(format!(
-            "Log-likelihood: {:.4}, penalized objective: {:.4}",
-            unified.log_likelihood, unified.penalized_objective
+            "Log-likelihood: {:.4}, penalized objective: {}",
+            unified.log_likelihood,
+            gam::estimate::criterion_display(unified.penalized_objective())
         ));
     }
     let mut diagnostics = None;
@@ -980,7 +981,7 @@ pub(crate) fn run_report(args: ReportArgs) -> Result<(), String> {
         formula: model.formula.clone(),
         n_obs,
         deviance: fit.deviance,
-        reml_score: fit.reml_score,
+        reml_score: fit.reml_score(),
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

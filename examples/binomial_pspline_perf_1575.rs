@@ -178,12 +178,12 @@ fn build_and_fit(n: usize, k: usize, firth: bool) {
     let dt = t0.elapsed();
 
     println!(
-        "PSPLINE_1575 n={n:6} k={k} p={p}  time={:8.3}s  outer_cost_evals={:5}  inner_pirls_solves={:5}  firth={}  reml_score={:.6}  edf={:.4}  grad={:?}  conv=certified  lambdas={:?}",
+        "PSPLINE_1575 n={n:6} k={k} p={p}  time={:8.3}s  outer_cost_evals={:5}  inner_pirls_solves={:5}  firth={}  reml_score={:?}  edf={:.4}  grad={:?}  conv=certified  lambdas={:?}",
         dt.as_secs_f64(),
         fit.outer_cost_evals,
         fit.inner_pirls_solves,
         firth,
-        fit.reml_score,
+        fit.reml_score(),
         fit.edf_total().unwrap_or(f64::NAN),
         fit.outer_gradient_norm,
         fit.lambdas

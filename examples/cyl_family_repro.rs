@@ -153,7 +153,7 @@ fn poisson_level_diagnostic(
     );
     eprintln!(
         "      deviance={:.4}  reml_score={:.4}  outer_converged=certified",
-        fit.fit.deviance, fit.fit.reml_score
+        fit.fit.deviance, fit.fit.reml_score().expect("the fit reports a REML/LAML criterion")
     );
 
     // --- (3) independent UNPENALIZED Poisson IRLS on the identical design ---

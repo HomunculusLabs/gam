@@ -367,13 +367,13 @@ fn fit_once(
         panic!("[{}/{}] expected a Standard GAM fit", case.name, arm);
     };
     assert!(
-        fit.fit.reml_score.is_finite(),
+        fit.fit.reml_score().is_some_and(f64::is_finite),
         "[{}/{}] non-finite criterion value",
         case.name,
         arm
     );
     ArmOutcome {
-        criterion: fit.fit.reml_score,
+        criterion: fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         beta: fit.fit.beta.to_vec(),
         log_lambdas: fit.fit.log_lambdas.to_vec(),
     }

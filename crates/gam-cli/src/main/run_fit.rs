@@ -661,7 +661,7 @@ fn run_canonical_standard_fit(
                 collect_smooth_structure_warnings(&result.resolvedspec, &dataset.headers, "model");
             print_spatial_aniso_scales(&result.resolvedspec);
             cli_out!(
-                "{} fit | family={} | status={} | iterations={} | terms={} | edf={:.3} | loglik={:.6e} | objective={:.6e}",
+                "{} fit | family={} | status={} | iterations={} | terms={} | edf={:.3} | loglik={:.6e} | objective={}",
                 model_label,
                 family.name(),
                 result.fit.convergence_evidence().inner_status().label(),
@@ -669,7 +669,9 @@ fn run_canonical_standard_fit(
                 result.resolvedspec.smooth_terms.len() + result.resolvedspec.linear_terms.len(),
                 result.fit.edf_total().unwrap_or(f64::NAN),
                 result.fit.log_likelihood,
-                result.fit.reml_score,
+                // An exactly-interpolating Gaussian fit has no criterion at
+                // all; printing a stand-in would read as one (#2595).
+                gam::estimate::criterion_display(result.fit.reml_score()),
             );
             if let Some(out) = args.out.as_ref() {
                 compact_fit_result_for_batch(&mut result.fit);

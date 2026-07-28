@@ -101,7 +101,7 @@ fn gam_duchon_1d_matches_mgcv_ds() {
             .iter()
             .map(|v| (v * 1000.0).round() / 1000.0)
             .collect::<Vec<_>>(),
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.outer_iterations,
     );
 

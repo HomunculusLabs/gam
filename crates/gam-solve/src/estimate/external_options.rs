@@ -36,8 +36,13 @@ pub struct ExternalOptimResult {
     pub artifacts: FitArtifacts,
     pub geometry: Option<FitGeometry>,
     pub inference: Option<FitInference>,
-    /// Complete REML/LAML objective value used for smoothing selection.
-    pub reml_score: f64,
+    /// Complete REML/LAML objective value used for smoothing selection, or
+    /// `None` when the converged fit sits on the zero-dispersion Gaussian
+    /// boundary and therefore has no finite criterion value at all. Same
+    /// contract as [`crate::estimate::UnifiedFitResult::reml_score`]; the
+    /// boundary is DETECTED here, where the dispersion is actually estimated,
+    /// rather than predicted by an entry-level shape rule (#2595).
+    pub reml_score: Option<f64>,
     pub fitted_link: FittedLinkState,
     /// Number of outer REML cost-only evaluations executed during the fit
     /// (the count the outer optimizer's trust-region/line-search probes drive,

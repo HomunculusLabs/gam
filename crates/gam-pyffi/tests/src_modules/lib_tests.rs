@@ -880,7 +880,15 @@ fn gaussian_reml_fit_blocks_forward_native(
     } else {
         Array1::zeros(lambdas.len())
     };
-    Ok((beta, fitted, lambdas, log_lambdas, fit.reml_score, edf))
+    Ok((
+        beta,
+        fitted,
+        lambdas,
+        log_lambdas,
+        fit.reml_score()
+            .expect("the blockwise reference fit reports its criterion"),
+        edf,
+    ))
 }
 
 fn blocks_profile_reml_score(

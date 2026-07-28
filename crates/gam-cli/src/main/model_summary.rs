@@ -338,7 +338,7 @@ pub(crate) fn build_model_summary(
     Ok(ModelSummary {
         family: family.pretty_name().to_string(),
         deviance_explained,
-        reml_score: Some(fit.reml_score),
+        reml_score: fit.reml_score(),
         parametric_terms,
         smooth_terms,
         coefficient_se_source: display_uncertainty.map(|view| view.definition),

@@ -669,7 +669,9 @@ fn glm_reml_fit_latent_impl(
         latent_prior_score +=
             analytic_penalty_value_for_targets(registry, t_flat, Some(fit.beta.view()))?;
     }
-    fit.reml_score += latent_prior_score;
+    // The latent prior is an additive term on the criterion, so it moves a
+    // criterion that exists and does not create one that does not (#2595).
+    fit.reml_score = fit.reml_score.map(|score| score + latent_prior_score);
     Ok((fit, design, t_mat, aux_strength_state))
 }
 

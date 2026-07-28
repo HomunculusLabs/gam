@@ -211,7 +211,7 @@ fn saved_fit_summary_fixture() -> SavedFitSummary {
         deviance: 0.0,
         stable_penalty_term: 0.0,
         max_abs_eta: 0.0,
-        reml_score: 0.0,
+        reml_score: Some(0.0),
         criterion_certificate: None,
     }
 }
@@ -1962,9 +1962,9 @@ fn nonlinear_saved_model_with_hessian_only_remains_persistable_and_predictable()
         log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
         log_likelihood: -1.0,
         deviance: 2.0,
-        reml_score: 0.0,
+        reml_score: Some(0.0),
         stable_penalty_term: 0.0,
-        penalized_objective: 1.0,
+        penalized_objective: Some(1.0),
         used_device: false,
         outer_iterations: 0,
         outer_converged: true,
@@ -2866,9 +2866,9 @@ fn compact_fit_result_for_batch_preserves_unified_geometry_invariant() {
         log_likelihood_normalization: LogLikelihoodNormalization::UserProvided,
         log_likelihood: -2.0,
         deviance: 4.0,
-        reml_score: 0.0,
+        reml_score: Some(0.0),
         stable_penalty_term: 0.25,
-        penalized_objective: 2.25,
+        penalized_objective: Some(2.25),
         used_device: false,
         outer_iterations: 2,
         outer_converged: true,
@@ -2970,7 +2970,7 @@ fn core_saved_fit_result_json_roundtripswith_finite_summary() {
             deviance: 1.5,
             stable_penalty_term: 0.4,
             max_abs_eta: 2.0,
-            reml_score: 0.95,
+            reml_score: Some(0.95),
             criterion_certificate: None,
         },
     );
@@ -2980,7 +2980,7 @@ fn core_saved_fit_result_json_roundtripswith_finite_summary() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "deserialize fit result", e));
     assert_eq!(parsed.outer_gradient_norm, Some(0.25));
     assert_eq!(parsed.deviance, 1.5);
-    assert_eq!(parsed.reml_score, 0.95);
+    assert_eq!(parsed.reml_score(), Some(0.95));
 }
 
 #[test]

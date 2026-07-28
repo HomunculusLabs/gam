@@ -140,9 +140,9 @@ mod per_term_edf_tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,
@@ -227,9 +227,9 @@ mod per_term_edf_tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,
@@ -302,9 +302,9 @@ mod per_term_edf_tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,
@@ -498,9 +498,9 @@ mod per_term_edf_tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,
@@ -2689,9 +2689,9 @@ mod assembly_inner_status_gate_tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,
@@ -3353,6 +3353,18 @@ pub const NO_CRITERION_AT_EXACT_FIT: &str =
      are undefined for an exactly-interpolating fit; compare it on predictive accuracy \
      instead, or refit on data whose response is not an exact function of the design";
 
+/// Render a possibly-absent criterion for human output.
+///
+/// One helper so every reporting surface — CLI fit lines, the HTML report, the
+/// survival runners — says the same words about the same state, instead of each
+/// picking its own placeholder for "there is no criterion".
+pub fn criterion_display(value: Option<f64>) -> String {
+    value.map_or_else(
+        || "none (exact fit: criterion unbounded)".to_string(),
+        |value| format!("{value:.6e}"),
+    )
+}
+
 impl UnifiedFitResult {
     /// Proof carried by every fitted model. Callers never need to re-check a
     /// convergence boolean; construction has already consumed and validated
@@ -3393,6 +3405,30 @@ impl UnifiedFitResult {
     /// [`Self::reml_score`] is absent.
     pub fn penalized_objective(&self) -> Option<f64> {
         self.penalized_objective
+    }
+
+    /// Replace the criterion with the value a later outer solve produced at
+    /// this same fit.
+    ///
+    /// Sets both faces of the objective at once: the constructor requires them
+    /// to be present or absent together, and two independent setters would let
+    /// a caller satisfy one and not the other on an already-built result, where
+    /// nothing re-validates.
+    pub fn set_criterion(&mut self, value: Option<f64>) {
+        self.reml_score = value;
+        self.penalized_objective = value;
+    }
+
+    /// Shift the criterion by an additive constant — a response-rescaling
+    /// Jacobian, a normalizer, any term that moves the objective without
+    /// re-solving it.
+    ///
+    /// Absent stays absent: a constant added to a criterion that does not
+    /// exist still does not exist, and silently materializing one here is the
+    /// exact substitution this type was made optional to prevent.
+    pub fn shift_criterion(&mut self, delta: f64) {
+        self.reml_score = self.reml_score.map(|value| value + delta);
+        self.penalized_objective = self.penalized_objective.map(|value| value + delta);
     }
 
     /// Denominator degrees of freedom for estimated-scale Wald/F references.

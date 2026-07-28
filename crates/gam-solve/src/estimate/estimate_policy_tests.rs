@@ -675,9 +675,9 @@ fn decode_invariant_test_parts() -> UnifiedFitResultParts {
         log_likelihood_normalization: LogLikelihoodNormalization::Full,
         log_likelihood: -1.2,
         deviance: 2.4,
-        reml_score: 0.7,
+        reml_score: Some(0.7),
         stable_penalty_term: 0.3,
-        penalized_objective: 2.2,
+        penalized_objective: Some(2.2),
         used_device: false,
         outer_iterations: 3,
         outer_converged: true,
@@ -2114,13 +2114,27 @@ fn estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363() {
         // whatever wobble the current solver happens to produce, and would then
         // stop measuring the invariant and start measuring the wobble. The
         // reports carry the ulp distance so a regression says how far it moved.
-        if let Some(gap) = first_bitwise_gap(
-            std::slice::from_ref(&cold.reml_score),
-            std::slice::from_ref(&warm.reml_score),
-        ) {
-            failures.push(format!(
-                "[{name}] the outer criterion depends on cache state: {gap}"
-            ));
+        match (cold.reml_score, warm.reml_score) {
+            (Some(cold_score), Some(warm_score)) => {
+                if let Some(gap) = first_bitwise_gap(
+                    std::slice::from_ref(&cold_score),
+                    std::slice::from_ref(&warm_score),
+                ) {
+                    failures.push(format!(
+                        "[{name}] the outer criterion depends on cache state: {gap}"
+                    ));
+                }
+            }
+            // Presence itself is part of the invariant: a fit that has a
+            // criterion cold and none warm (or the reverse) is exactly the
+            // cache-dependent provenance this guard exists to catch.
+            (cold_score, warm_score) if cold_score.is_some() != warm_score.is_some() => {
+                failures.push(format!(
+                    "[{name}] the outer criterion's EXISTENCE depends on cache state: \
+                     cold={cold_score:?} warm={warm_score:?}"
+                ));
+            }
+            _ => {}
         }
         if let Some(gap) = first_bitwise_gap(
             cold.beta.as_slice().expect("contiguous cold β"),

@@ -2068,7 +2068,11 @@ pub fn fixed_kappa_profiled_reml_score(
         options,
         &fixed_kappa_options,
     )?;
-    let score = fit.fit.reml_score;
+    let Some(score) = fit.fit.reml_score() else {
+        crate::bail_invalid_estim!(
+            "fixed-κ profiled fit at κ={kappa} has no REML/LAML score to profile against"
+        );
+    };
     if !score.is_finite() {
         crate::bail_invalid_estim!(
             "fixed-κ profiled fit at κ={kappa} returned a non-finite REML/LAML score"
@@ -2674,7 +2678,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
     // score consistent with the gate decision; the refit serves as a
     // β/inference harvester at the certified (ρ*, ψ*).
     let mut fit = optimized.fit;
-    fit.reml_score = joint_final_value;
+    fit.set_criterion(Some(joint_final_value));
     let optimized_result = FittedTermCollectionWithSpec {
         fit,
         design: optimized.design,
@@ -7604,8 +7608,7 @@ fn try_exact_joint_latent_coord_optimization(
     ctx.evaluator
         .store_persistent_latent_values(&fitted_latent_values);
     let mut fit = optimized.fit;
-    fit.reml_score = result.final_value;
-    fit.penalized_objective = result.final_value;
+    fit.set_criterion(Some(result.final_value));
     Ok(FittedTermCollectionWithSpec {
         fit,
         design: optimized.design,

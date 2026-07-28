@@ -361,7 +361,7 @@ fn recovery_bc_anchored_left_endpoint_recovery() {
         fit.fit.edf_total().expect("Gaussian fit reports total EDF"),
         fit.fit.edf_by_block(),
         fit.fit.log_lambdas.to_vec(),
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.outer_iterations,
     );
     assert!(

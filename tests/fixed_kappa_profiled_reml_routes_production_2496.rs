@@ -134,7 +134,7 @@ fn fixed_kappa_score_equals_independently_pinned_full_production_fit() {
         },
     )
     .expect("independently pinned complete production fit");
-    let direct_score = direct.fit.reml_score;
+    let direct_score = direct.fit.reml_score();
 
     assert!(
         direct.design.penalties.len() >= 2,
@@ -150,10 +150,9 @@ fn fixed_kappa_score_equals_independently_pinned_full_production_fit() {
         "fixture must exercise a material fitted penalty contribution, got {}",
         direct.fit.stable_penalty_term,
     );
-    assert!(
-        direct_score.is_finite(),
-        "independently pinned production fit must expose a canonical REML/LAML score"
-    );
+    let direct_score = direct_score
+        .filter(|score| score.is_finite())
+        .expect("independently pinned production fit must expose a canonical REML/LAML score");
     assert!(
         (routed - direct_score).abs() <= 1.0e-11 * (1.0 + direct_score.abs()),
         "fixed-kappa diagnostic {routed:.16e} diverged from independently pinned \

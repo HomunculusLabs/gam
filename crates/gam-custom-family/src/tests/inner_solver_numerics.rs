@@ -406,9 +406,10 @@ pub(crate) fn objective_includes_solverridge_quadratic_term() {
     let beta = result.block_states[0].beta[0];
     let expected_penalty = 0.5 * ridge * beta * beta;
     assert!(
-        (result.penalized_objective - expected_penalty).abs() < 1e-12,
-        "penalized objective should equal ridge quadratic term when ll=0 and S=0; got {}, expected {}",
-        result.penalized_objective,
+        (result.penalized_objective().expect("objective present") - expected_penalty).abs()
+            < 1e-12,
+        "penalized objective should equal ridge quadratic term when ll=0 and S=0; got {:?}, expected {}",
+        result.penalized_objective(),
         expected_penalty
     );
 }
@@ -1847,9 +1848,9 @@ pub(crate) fn exact_newton_pseudo_laplace_objective_uses_logdet_h_without_logdet
     .expect("pseudo-laplace exact-newton fit");
     let expected = 0.5 * 2.0_f64.ln();
     assert!(
-        (fit.penalized_objective - expected).abs() < 1e-8,
-        "pseudo-Laplace objective mismatch: got {}, expected {}",
-        fit.penalized_objective,
+        (fit.penalized_objective().expect("objective present") - expected).abs() < 1e-8,
+        "pseudo-Laplace objective mismatch: got {:?}, expected {}",
+        fit.penalized_objective(),
         expected
     );
 }
@@ -2114,9 +2115,9 @@ pub(crate) fn pseudo_laplace_exact_newton_symmetrizes_nearly_symmetrichessian() 
     )
     .expect("nearly symmetric pseudo-laplace Hessian should be accepted after symmetrization");
     assert!(
-        fit.penalized_objective.is_finite(),
-        "expected finite pseudo-laplace objective, got {}",
-        fit.penalized_objective
+        fit.penalized_objective().is_some_and(f64::is_finite),
+        "expected finite pseudo-laplace objective, got {:?}",
+        fit.penalized_objective()
     );
 }
 

@@ -297,7 +297,7 @@ fn run_case(label: &str, mean_formula: &str, noise_formula: &str, n: usize) -> f
 
     let lambdas = fit.fit.lambdas.to_vec();
     let log_lambdas = fit.fit.log_lambdas.to_vec();
-    let reml = fit.fit.reml_score;
+    let reml = fit.fit.reml_score();
     let (edf_by_block, edf_total) = if let Some(inf) = fit.fit.inference.as_ref() {
         (inf.edf_by_block.clone(), inf.edf_total)
     } else {
@@ -315,7 +315,7 @@ fn run_case(label: &str, mean_formula: &str, noise_formula: &str, n: usize) -> f
     eprintln!("[{label}] SCHUR_C3 {schur}");
 
     eprintln!(
-        "[{label}] pearson={corr:.5} rmse_ls={rmse_ls:.5} rmse_mu={rmse_mu:.5} reml={reml:.4} \
+        "[{label}] pearson={corr:.5} rmse_ls={rmse_ls:.5} rmse_mu={rmse_mu:.5} reml={reml:?} \
          | lambdas={} log_lambdas={} | edf_by_block={} edf_total={edf_total:.3} \
          | response_scale={response_scale:.4} outer_conv=certified iters={} spectrum={spectrum:?}",
         fmt_vec(&lambdas),

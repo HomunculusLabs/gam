@@ -629,10 +629,14 @@ pub enum EstimationError {
     #[error(
         "Fit assembly rejected a non-converged optimization state: inner status \
          {inner_status}, outer status {outer_status}, after {outer_iterations} outer \
-         iteration(s); final objective {final_value:.6e}; stationarity {stationarity}, \
+         iteration(s); final objective {}; stationarity {stationarity}, \
          step {step}. The best rho checkpoint is \
          {rho_checkpoint:?} and the resume token is {resume_token:?}; no fitted-model \
-         API was constructed."
+         API was constructed.",
+        .final_value.map_or_else(
+            || "unavailable (this fit has no criterion value)".to_string(),
+            |value| format!("{value:.6e}"),
+        ),
     )]
     FitDidNotConverge {
         /// Diagnostic inner-solver terminal status. This is deliberately a
@@ -643,8 +647,10 @@ pub enum EstimationError {
         outer_status: String,
         /// Completed outer iterations at the rejected checkpoint.
         outer_iterations: usize,
-        /// Objective value at the best available checkpoint.
-        final_value: f64,
+        /// Objective value at the best available checkpoint, or `None` when the
+        /// rejected fit has no criterion value at all (the exact-fit Gaussian
+        /// boundary). A refusal must not invent an objective it could not read.
+        final_value: Option<f64>,
         /// The first-order residual together with the bound it was weighed
         /// against, or an explicit statement that no comparison was made.
         stationarity: FitStationarityEvidence,

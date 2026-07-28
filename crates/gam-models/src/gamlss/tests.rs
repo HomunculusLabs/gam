@@ -5229,7 +5229,7 @@ pub(crate) fn gaussian_location_scale_termswith_matern_spatial_blocks_fit_finite
         &spatial_kappa_options(),
     )
     .expect("gaussian location-scale spatial fit");
-    assert!(fit.fit.penalized_objective.is_finite());
+    assert!(fit.fit.penalized_objective().is_some_and(f64::is_finite));
     assert_eq!(fit.fit.block_states.len(), 2);
 }
 
@@ -5353,7 +5353,7 @@ pub(crate) fn binomial_location_scale_termswith_matern_spatial_blocks_fit_finite
         &spatial_kappa_options(),
     )
     .expect("binomial location-scale spatial fit");
-    assert!(fit.fit.penalized_objective.is_finite());
+    assert!(fit.fit.penalized_objective().is_some_and(f64::is_finite));
     assert_eq!(fit.fit.block_states.len(), 2);
 }
 
@@ -5391,7 +5391,7 @@ pub(crate) fn binomial_location_scalewiggle_termswith_matern_spatial_blocks_fit_
         &spatial_kappa_options(),
     )
     .expect("binomial location-scale wiggle spatial fit");
-    assert!(fit.fit.penalized_objective.is_finite());
+    assert!(fit.fit.penalized_objective().is_some_and(f64::is_finite));
     assert_eq!(fit.fit.block_states.len(), 3);
 }
 
@@ -6934,7 +6934,8 @@ impl Zz2155Problem {
         beta_w = Some(new_beta_w.clone());
         if delta <= 1.0e-9 {
             return Ok((
-                fit.penalized_objective,
+                fit.penalized_objective()
+                    .expect("the alternating gamlss inner solve reports its objective"),
                 fit.deviance,
                 beta_eta,
                 new_beta_w,

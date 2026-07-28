@@ -181,13 +181,13 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
     eprintln!(
         "#1575 binomial/logit REML: n={N} k={K} p={}  time={:.3}s  \
          outer_cost_evals={}  inner_pirls_solves={}  \
-         grad_norm={:?}  reml={:.6}  edf={:.4}  lambdas={:?}",
+         grad_norm={:?}  reml={:?}  edf={:.4}  lambdas={:?}",
         1 + N_SMOOTH * K,
         dt.as_secs_f64(),
         fit.outer_cost_evals,
         fit.inner_pirls_solves,
         fit.outer_gradient_norm,
-        fit.reml_score,
+        fit.reml_score(),
         fit.edf_total().unwrap_or(f64::NAN),
         fit.lambdas
             .iter()
@@ -207,11 +207,13 @@ fn binomial_logit_reml_outer_cost_is_bounded_1575() {
         "the three smooths collapsed toward their affine penalty null spaces: \
          edf={edf:.4}, expected the nonlinear signal-recovery basin near 18.5 (#2519)",
     );
+    let reml = fit
+        .reml_score()
+        .expect("a penalized binomial fit has a REML criterion");
     assert!(
-        fit.reml_score < 550.0,
-        "the optimizer certified the wrong high-penalty basin: REML={:.6}, \
+        reml < 550.0,
+        "the optimizer certified the wrong high-penalty basin: REML={reml:.6}, \
          expected the measured signal-recovery basin near 503.7 (#2519)",
-        fit.reml_score,
     );
     // mgcv's REML Newton converges in well under ~15 outer iterations on this
     // family of problem. Pin a generous multiple so the test fails loudly if

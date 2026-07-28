@@ -2675,9 +2675,9 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
                 log_likelihood_normalization: gam_spec::LogLikelihoodNormalization::UserProvided,
                 log_likelihood: final_eval.obs.log_likelihood,
                 deviance,
-                reml_score: final_fit.penalized_objective,
+                reml_score: final_fit.penalized_objective(),
                 stable_penalty_term,
-                penalized_objective: final_fit.penalized_objective,
+                penalized_objective: final_fit.penalized_objective(),
                 used_device: false,
                 outer_iterations,
                 outer_converged: certified_outer_present,
@@ -7285,6 +7285,7 @@ fn fit_bounded_term_collection_with_design(
             // Sealed `UnifiedFitResult`: existence certifies inner+outer
             // convergence (see `try_from_parts`), so the status is Converged.
             let pirls_status_val = gam_solve::pirls::PirlsStatus::Converged;
+            let fit_objective = fit.penalized_objective();
             UnifiedFitResult::try_from_parts(UnifiedFitResultParts {
                 blocks: vec![gam_solve::estimate::FittedBlock {
                     beta: beta_user.clone(),
@@ -7300,9 +7301,9 @@ fn fit_bounded_term_collection_with_design(
                 log_likelihood_normalization: gam_spec::LogLikelihoodNormalization::UserProvided,
                 log_likelihood: eta_state.log_likelihood,
                 deviance,
-                reml_score: fit.penalized_objective,
+                reml_score: fit_objective,
                 stable_penalty_term: penalty_term,
-                penalized_objective: fit.penalized_objective,
+                penalized_objective: fit_objective,
                 used_device: false,
                 outer_iterations: fit.outer_iterations,
                 // Sealed result ⇒ outer convergence was certified at assembly.
@@ -7773,8 +7774,8 @@ pub(crate) fn spatial_length_scale_term_indices(spec: &TermCollectionSpec) -> Ve
 /// user's chosen ρ. Skipping straight to the rho-only path avoids that
 /// waste and respects the user's explicit kernel-scale input.
 fn fit_score(fit: &UnifiedFitResult) -> f64 {
-    if fit.reml_score.is_finite() {
-        return fit.reml_score;
+    if let Some(score) = fit.reml_score().filter(|value| value.is_finite()) {
+        return score;
     }
     let score = 0.5 * fit.deviance + 0.5 * fit.stable_penalty_term;
     if score.is_finite() {

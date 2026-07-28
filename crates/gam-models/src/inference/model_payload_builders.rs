@@ -496,6 +496,11 @@ fn truncate_marginal_slope_influence_absorber(
     // narrowed reassembly, which revalidates the preserved artifacts.
     let pirls_status = fit_result.convergence_evidence().inner_status();
     let training_sample_size = fit_result.training_sample_size();
+    // Read through the accessors before destructuring: the criterion pair is
+    // private so that no consumer can substitute a number for an absent one,
+    // and a narrowing reassembly must carry the absence forward unchanged.
+    let reml_score = fit_result.reml_score();
+    let penalized_objective = fit_result.penalized_objective();
     let UnifiedFitResult {
         mut blocks,
         log_lambdas,
@@ -505,9 +510,7 @@ fn truncate_marginal_slope_influence_absorber(
         log_likelihood_normalization,
         log_likelihood,
         deviance,
-        reml_score,
         stable_penalty_term,
-        penalized_objective,
         used_device,
         outer_iterations,
         outer_gradient_norm,

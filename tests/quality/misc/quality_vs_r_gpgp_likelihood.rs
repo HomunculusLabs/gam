@@ -117,7 +117,7 @@ fn gam_matern_loglik(x: &[f64], y: &[f64], nu: f64) -> f64 {
         panic!("expected a standard Gaussian GAM fit for matern() smooth");
     };
     // reml_score is the minimised objective; the marginal log-likelihood is −score.
-    -fit.fit.reml_score
+    -fit.fit.reml_score().expect("the fit reports a REML/LAML criterion")
 }
 
 /// Fit gam's ν=0.5 Matérn on (`x_tr`, `y_tr`) and return its mean prediction at

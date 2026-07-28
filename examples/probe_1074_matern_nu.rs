@@ -99,7 +99,7 @@ fn main() {
             edf,
             ls,
             fit.fit.log_lambdas.to_vec(),
-            fit.fit.reml_score,
+            fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         ))
     };
 

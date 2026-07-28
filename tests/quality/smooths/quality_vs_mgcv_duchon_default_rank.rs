@@ -168,7 +168,7 @@ fn assert_duchon_1d_default_rank(n: usize, sigma: f64, seed: u64, k_mgcv: usize,
          gam_lambdas={:?} gam_log_lambdas={:?} \
          gam_edf_by_block={:?} gam_block_trace={:?} \
          mgcv_reml={mgcv_reml:.4} mgcv_edf={mgcv_edf:.4} mgcv_sp={mgcv_sp:?}",
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.edf_total().expect("gam reports total edf"),
         fit.fit.lambdas.to_vec(),
         fit.fit.log_lambdas.to_vec(),
@@ -355,7 +355,7 @@ fn assert_duchon_2d_default_rank(n: usize, sigma: f64, seed: u64, k_mgcv: usize,
          gam_lambdas={:?} gam_log_lambdas={:?} \
          gam_edf_by_block={:?} gam_block_trace={:?} \
          mgcv_reml={mgcv_reml:.4} mgcv_edf={mgcv_edf:.4} mgcv_sp={mgcv_sp:?}",
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.edf_total().expect("gam reports total edf"),
         fit.fit.lambdas.to_vec(),
         fit.fit.log_lambdas.to_vec(),

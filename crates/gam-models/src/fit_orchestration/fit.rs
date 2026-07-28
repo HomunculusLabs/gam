@@ -1546,8 +1546,7 @@ pub(crate) fn rescale_gaussian_location_scale_to_raw(
         let ln_s = s.ln();
         result.fit.fit.log_likelihood -= n_obs * ln_s;
         result.fit.fit.deviance += 2.0 * n_obs * ln_s;
-        result.fit.fit.reml_score += n_obs * ln_s;
-        result.fit.fit.penalized_objective += n_obs * ln_s;
+        result.fit.fit.shift_criterion(n_obs * ln_s);
     }
 
     result.response_scale = s;
@@ -2324,9 +2323,9 @@ fn survival_unified_fit_result(
         log_likelihood_normalization: gam_problem::LogLikelihoodNormalization::UserProvided,
         log_likelihood: state.log_likelihood,
         deviance: state.deviance,
-        reml_score,
+        reml_score: Some(reml_score),
         stable_penalty_term: state.penalty_term,
-        penalized_objective: reml_score,
+        penalized_objective: Some(reml_score),
         used_device: false,
         // The OUTER counts come from the smoothing selection, NOT the inner PIRLS
         // `summary` (#2301 defect D). When a certificate is present its projected

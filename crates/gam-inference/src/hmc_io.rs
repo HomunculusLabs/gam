@@ -1437,9 +1437,9 @@ mod tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: -1.0,
             deviance: 2.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             // Fixed-fit semantics (outer_iterations = 0): these hand-built
             // fixtures carry no analytic stationarity certificate, and the
@@ -1575,9 +1575,9 @@ mod tests {
             log_likelihood_normalization: LogLikelihoodNormalization::Full,
             log_likelihood: -1.0,
             deviance: 2.0,
-            reml_score: 0.0,
+            reml_score: Some(0.0),
             stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            penalized_objective: Some(0.0),
             used_device: false,
             // Fixed-fit semantics (outer_iterations = 0): these hand-built
             // fixtures carry no analytic stationarity certificate, and the

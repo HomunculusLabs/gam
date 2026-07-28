@@ -110,7 +110,7 @@ fn flat_gamma_precision_prior_matches_uninformed_fit_bitwise() {
 
     assert_eq!(base.fit.lambdas.as_slice(), flat.fit.lambdas.as_slice());
     assert_eq!(base.fit.beta.as_slice(), flat.fit.beta.as_slice());
-    assert_eq!(base.fit.reml_score.to_bits(), flat.fit.reml_score.to_bits());
+    assert_eq!(base.fit.reml_score().expect("the fit reports a REML/LAML criterion").to_bits(), flat.fit.reml_score().expect("the fit reports a REML/LAML criterion").to_bits());
 }
 
 #[test]

@@ -138,7 +138,7 @@ fn zz_measure_duchon_sin8_lambda_gap() {
         let prod_loglam = fit.fit.log_lambdas.to_vec();
         let prod_lam = fit.fit.lambdas.to_vec();
         let prod_edf = fit.fit.edf_total();
-        let prod_score = fit.fit.reml_score;
+        let prod_score = fit.fit.reml_score();
 
         // test-grid design (frozen spec) for predictions
         let n_t = x_test.len();
@@ -190,7 +190,7 @@ fn zz_measure_duchon_sin8_lambda_gap() {
             train_design.penalties.len()
         );
         eprintln!(
-            "  PROD gam  : log_lambda={prod_loglam:?} lambda={prod_lam:?}\n              edf={prod_edf:?} reml_score={prod_score:.4} max_err={prod_max:.4} amp_pp={:.4}",
+            "  PROD gam  : log_lambda={prod_loglam:?} lambda={prod_lam:?}\n              edf={prod_edf:?} reml_score={prod_score:?} max_err={prod_max:.4} amp_pp={:.4}",
             amp_pp(&prod_pred)
         );
         eprintln!(
@@ -245,7 +245,7 @@ fn zz_measure_duchon_null_recovery_lambda_gap() {
     let prod_loglam = fit.fit.log_lambdas.to_vec();
     let prod_lam = fit.fit.lambdas.to_vec();
     let prod_edf = fit.fit.edf_total();
-    let prod_score = fit.fit.reml_score;
+    let prod_score = fit.fit.reml_score();
 
     let mut mt = Array2::<f64>::zeros((m, ncols));
     for (i, &t) in x_test.iter().enumerate() {
@@ -307,7 +307,7 @@ fn zz_measure_duchon_null_recovery_lambda_gap() {
         train_design.nullspace_dims,
     );
     eprintln!(
-        "  PROD gam  : log_lambda={prod_loglam:?}\n              lambda={prod_lam:?}\n              edf={prod_edf:?} reml_score={prod_score:.4} max_dev_from_mean={prod_dev:.4} (fails at >=0.25)",
+        "  PROD gam  : log_lambda={prod_loglam:?}\n              lambda={prod_lam:?}\n              edf={prod_edf:?} reml_score={prod_score:?} max_dev_from_mean={prod_dev:.4} (fails at >=0.25)",
     );
     eprintln!(
         "  CF   gam  : rho={:.4} lambda={:.4e} edf={:.3} reml_score={:.4} max_dev={cf_dev:.4}",

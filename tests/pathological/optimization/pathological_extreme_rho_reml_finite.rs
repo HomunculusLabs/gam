@@ -27,7 +27,7 @@ fn extreme_rho_bounds_keep_reml_finite() {
         )
         .expect("fit should complete at extreme rho");
         assert!(
-            fit.reml_score.is_finite(),
+            fit.reml_score().is_some_and(f64::is_finite),
             "REML score must be finite at rho={rho}"
         );
     }

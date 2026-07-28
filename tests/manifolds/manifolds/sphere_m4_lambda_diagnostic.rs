@@ -78,7 +78,7 @@ fn sphere_m_sweep_lambda_diagnostic() {
         let beta = &fit.fit.beta;
         let beta_l2 = beta.iter().map(|v| v * v).sum::<f64>().sqrt();
         let outer_iters = fit.fit.outer_iterations;
-        let reml_score = fit.fit.reml_score;
+        let reml_score = fit.fit.reml_score();
         let outer_grad_norm = fit.fit.outer_gradient_norm;
 
         eprintln!("[diag] m={m} lambdas        = {:?}", lambdas.to_vec());
@@ -89,7 +89,7 @@ fn sphere_m_sweep_lambda_diagnostic() {
             beta_l2
         );
         eprintln!(
-            "[diag] m={m} REML score     = {reml_score:.6}   outer_iters={outer_iters}  \
+            "[diag] m={m} REML score     = {reml_score:?}   outer_iters={outer_iters}  \
              outer_converged=certified  outer_grad_norm={outer_grad_norm:?}"
         );
 

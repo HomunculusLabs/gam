@@ -113,9 +113,9 @@ fn beta_regression_fits_with_positive_slope() {
         fit.fit.beta
     );
     assert!(
-        fit.fit.reml_score.is_finite(),
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(),
         "beta REML score must be finite, got {}",
-        fit.fit.reml_score
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion")
     );
 
     // The simulated mean is logit-increasing in x, so the fitted response must
@@ -176,9 +176,9 @@ fn beta_regression_fits_clean_monotone_separation_prone() {
         fit.fit.beta
     );
     assert!(
-        fit.fit.reml_score.is_finite(),
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(),
         "beta REML score must be finite, got {}",
-        fit.fit.reml_score
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion")
     );
 
     // The steep monotone-increasing mean must be recovered on the logit scale.

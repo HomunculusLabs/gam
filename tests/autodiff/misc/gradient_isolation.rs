@@ -345,8 +345,13 @@ fn conditioned_helpercost_matches_fittedobjective() {
     .expect("conditioned helper cost");
 
     assert!(
-        (helpercost - result.reml_score).abs() < 1e-7,
-        "conditioned helper cost should match fitted REML score: helper={helpercost} fit={}",
+        (helpercost
+            - result
+                .reml_score
+                .expect("the conditioned fit reports its criterion"))
+        .abs()
+            < 1e-7,
+        "conditioned helper cost should match fitted REML score: helper={helpercost} fit={:?}",
         result.reml_score
     );
 }

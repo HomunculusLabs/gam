@@ -290,13 +290,12 @@ fn closed_form_scalar_matches_existing_gaussian_reml_path() {
             "coefficient {idx} mismatch: closed={a} existing={b}"
         );
     }
-    let reml_rel =
-        (closed.reml_score - existing.reml_score).abs() / closed.reml_score.abs().max(1.0);
+    let closed_reml = closed.reml_score;
+    let existing_reml = existing.reml_score().expect("the fit reports a REML/LAML criterion");
+    let reml_rel = (closed_reml - existing_reml).abs() / closed_reml.abs().max(1.0);
     assert!(
-        (closed.reml_score - existing.reml_score).abs() < 0.5 || reml_rel < 1e-2,
-        "REML mismatch: closed={} existing={} rel_diff={reml_rel}",
-        closed.reml_score,
-        existing.reml_score
+        (closed_reml - existing_reml).abs() < 0.5 || reml_rel < 1e-2,
+        "REML mismatch: closed={closed_reml} existing={existing_reml} rel_diff={reml_rel}",
     );
     let fitted: Array1<f64> = x.dot(&closed.coefficients);
     for (idx, (&a, &b)) in closed.fitted.iter().zip(fitted.iter()).enumerate() {

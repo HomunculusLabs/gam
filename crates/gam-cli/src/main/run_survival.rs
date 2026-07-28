@@ -739,11 +739,11 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         };
         let fitted_inverse_link = fit.inverse_link.clone();
         cli_out!(
-            "survival location-scale fit | status={} | iterations={} | loglik={:.6e} | objective={:.6e}",
+            "survival location-scale fit | status={} | iterations={} | loglik={:.6e} | objective={}",
             fit.fit.fit.convergence_evidence().inner_status().label(),
             fit.fit.fit.outer_iterations,
             fit.fit.fit.log_likelihood,
-            fit.fit.fit.reml_score
+            gam::estimate::criterion_display(fit.fit.fit.reml_score())
         );
         if let Some(out) = args.out {
             let mut fit_result = compact_saved_survival_location_scale_fit_result(
@@ -1028,11 +1028,11 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             }
         };
         cli_out!(
-            "survival marginal-slope fit | status={} | iterations={} | loglik={:.6e} | objective={:.6e} | baseline_slope={:.4}",
+            "survival marginal-slope fit | status={} | iterations={} | loglik={:.6e} | objective={} | baseline_slope={:.4}",
             fit.fit.convergence_evidence().inner_status().label(),
             fit.fit.outer_iterations,
             fit.fit.log_likelihood,
-            fit.fit.reml_score,
+            gam::estimate::criterion_display(fit.fit.reml_score()),
             fit.baseline_slope,
         );
         if let Some(out) = args.out {
@@ -1380,7 +1380,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             }
         };
         cli_out!(
-            "{} fit | status={} | iterations={} | loglik={:.6e} | objective={:.6e}",
+            "{} fit | status={} | iterations={} | loglik={:.6e} | objective={}",
             if likelihood_mode == SurvivalLikelihoodMode::Latent {
                 "latent survival"
             } else {
@@ -1389,7 +1389,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             fit.convergence_evidence().inner_status().label(),
             fit.outer_iterations,
             fit.log_likelihood,
-            fit.reml_score,
+            gam::estimate::criterion_display(fit.reml_score()),
         );
         if let Some(out) = args.out {
             let is_latent_survival = likelihood_mode == SurvivalLikelihoodMode::Latent;
@@ -1524,13 +1524,13 @@ fn run_canonical_survival_transformation(
         .unwrap_or(0) as usize;
 
     cli_out!(
-        "survival fit | likelihood={} | causes={} | status={} | iterations={} | loglik={:.6e} | objective={:.6e}",
+        "survival fit | likelihood={} | causes={} | status={} | iterations={} | loglik={:.6e} | objective={}",
         survival_likelihood_modename(result.likelihood_mode),
         cause_count.max(1),
         result.fit.convergence_evidence().inner_status().label(),
         result.fit.outer_iterations,
         result.fit.log_likelihood,
-        result.fit.reml_score,
+        gam::estimate::criterion_display(result.fit.reml_score()),
     );
 
     if let Some(out) = args.out.as_ref() {

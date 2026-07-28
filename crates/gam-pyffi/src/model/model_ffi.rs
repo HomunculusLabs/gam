@@ -250,8 +250,24 @@ struct SummaryPayload {
     /// reserved for non-model summary kinds.
     #[serde(skip_serializing_if = "Option::is_none")]
     n_obs: Option<usize>,
-    reml_score: f64,
-    raw_reml_score: f64,
+    /// Cross-model comparable criterion: `raw_reml_score` plus the rank-aware
+    /// Tierney-Kadane normalizer over the penalty null space.
+    ///
+    /// `null` — together with `raw_reml_score` — when the fit has **no**
+    /// criterion at all, which is a different statement from "not recorded":
+    /// an exactly-interpolating Gaussian fit has `φ̂ = 0`, so its restricted
+    /// likelihood is unbounded and every score derived from it is undefined.
+    /// `reml_score_unavailable` carries the explanation in that case, and every
+    /// ranking surface refuses rather than substituting a number (#2595).
+    reml_score: Option<f64>,
+    /// The outer optimizer's own criterion value, un-normalized. `null` under
+    /// exactly the condition described on `reml_score`.
+    raw_reml_score: Option<f64>,
+    /// Why this fit has no criterion. Present iff `raw_reml_score` is `null`;
+    /// the two are emitted together so a reader never sees an absence without
+    /// its reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reml_score_unavailable: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     null_space_logdet: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5612,7 +5628,7 @@ fn gaussian_reml_fit_blocks_forward<'py>(
     out.set_item("fitted", fitted_2d.into_pyarray(py))?;
     out.set_item("lambdas", lambdas.into_pyarray(py))?;
     out.set_item("log_lambdas", log_lambdas_arr.into_pyarray(py))?;
-    out.set_item("reml_score", fit.reml_score)?;
+    out.set_item("reml_score", fit.reml_score())?;
     out.set_item("edf", edf_arr.into_pyarray(py))?;
     out.set_item(
         "col_offsets",

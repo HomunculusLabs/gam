@@ -13,7 +13,11 @@ pub struct ReportInput {
     pub formula: String,
     pub n_obs: Option<usize>,
     pub deviance: f64,
-    pub reml_score: f64,
+    /// The fit's REML/LAML criterion, or `None` when the fit has none at all
+    /// (an exactly-interpolating Gaussian fit; see
+    /// `UnifiedFitResult::reml_score`). The report prints the absence rather
+    /// than a stand-in number (#2595).
+    pub reml_score: Option<f64>,
     pub iterations: usize,
     /// Human-readable P-IRLS / outer convergence status (e.g. "Converged",
     /// "Max iterations reached"). Plain text so report.rs stays free of gam
@@ -514,7 +518,13 @@ pub fn render_html(input: &ReportInput) -> Result<String, String> {
         summary_pairs.push(("Observations", format!("{}", n)));
     }
     summary_pairs.push(("Deviance", fmt_num(input.deviance)));
-    summary_pairs.push(("REML / LAML", fmt_num(input.reml_score)));
+    summary_pairs.push((
+        "REML / LAML",
+        input.reml_score.map_or_else(
+            || "none (exact fit: criterion unbounded)".to_string(),
+            fmt_num,
+        ),
+    ));
     if let Some(r2) = input.r_squared {
         summary_pairs.push(("R-squared", format!("{:.6}", r2)));
     }
@@ -1383,7 +1393,7 @@ mod tests {
             formula: formula.to_string(),
             n_obs: Some(100),
             deviance: 42.5,
-            reml_score: -17.3,
+            reml_score: Some(-17.3),
             iterations: 5,
             convergence_status: "Converged".to_string(),
             converged: true,

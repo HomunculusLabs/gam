@@ -122,7 +122,7 @@ fn gam_te_3d_recovers_nonadditive_surface() {
             .iter()
             .map(|v| (v * 1000.0).round() / 1000.0)
             .collect::<Vec<_>>(),
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.outer_iterations,
     );
 

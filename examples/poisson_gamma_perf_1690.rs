@@ -205,11 +205,11 @@ fn build_and_fit(family: ResponseFamily, fam_label: &str, n: usize, k: usize) {
     let dt = t0.elapsed();
 
     println!(
-        "PERF_1690 fam={fam_label:8} n={n:6} k={k} p={p}  time={:8.3}s  outer_cost_evals={:5}  inner_pirls_solves={:5}  reml_score={:.6}  edf={:.4}  grad={:?}  conv=certified  lambdas={:?}",
+        "PERF_1690 fam={fam_label:8} n={n:6} k={k} p={p}  time={:8.3}s  outer_cost_evals={:5}  inner_pirls_solves={:5}  reml_score={:?}  edf={:.4}  grad={:?}  conv=certified  lambdas={:?}",
         dt.as_secs_f64(),
         fit.outer_cost_evals,
         fit.inner_pirls_solves,
-        fit.reml_score,
+        fit.reml_score(),
         fit.edf_total().unwrap_or(f64::NAN),
         fit.outer_gradient_norm,
         fit.lambdas

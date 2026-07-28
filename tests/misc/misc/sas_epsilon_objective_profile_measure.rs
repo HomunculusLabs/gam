@@ -116,7 +116,11 @@ fn fixed_link_reml(
         &opts,
     )
     .expect("fixed-ε SAS fit");
-    (fit.reml_score, fit.deviance)
+    (
+        fit.reml_score()
+            .expect("the SAS profile fit reports its criterion"),
+        fit.deviance,
+    )
 }
 
 #[test]
@@ -219,8 +223,8 @@ fn sas_epsilon_objective_profile_measure() {
         log_delta_true.exp()
     );
     eprintln!(
-        "  reml_score={:+.6e}  outer_iters={}  outer_converged=certified  outer_grad_norm={:?}",
-        fit.reml_score, fit.outer_iterations, fit.outer_gradient_norm
+        "  reml_score={:?}  outer_iters={}  outer_converged=certified  outer_grad_norm={:?}",
+        fit.reml_score(), fit.outer_iterations, fit.outer_gradient_norm
     );
 
     // ANALYTIC gradient the optimizer received at the opening evals. The ε
@@ -279,5 +283,5 @@ fn sas_epsilon_objective_profile_measure() {
     eprintln!("===== END MEASURE =====");
 
     // Measurement only: assert the runs completed, never the recovery quality.
-    assert!(fit.reml_score.is_finite());
+    assert!(fit.reml_score().is_some_and(f64::is_finite));
 }

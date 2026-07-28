@@ -392,7 +392,7 @@ fn gam_rw2_pspline_predicts_held_out_at_least_as_well_as_inla_on_real_data() {
             .iter()
             .map(|v| (v * 1000.0).round() / 1000.0)
             .collect::<Vec<_>>(),
-        fit.fit.reml_score,
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fit.fit.outer_iterations,
     );
 

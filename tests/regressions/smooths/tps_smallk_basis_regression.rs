@@ -495,7 +495,7 @@ fn tps_reml_fit_must_not_oversmooth_seed118_style_additive_signal() {
         oracle_r2,
         oracle_r2 - r2,
         fitted.fit.log_lambdas.to_vec(),
-        fitted.fit.reml_score,
+        fitted.fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         fitted.fit.outer_gradient_norm
     );
     assert!(

@@ -56,7 +56,10 @@ fn fit_and_take_certificate(
     let FitResult::Standard(fit) = result else {
         panic!("expected a standard GAM fit");
     };
-    let reml_score = fit.fit.reml_score;
+    let reml_score = fit
+        .fit
+        .reml_score()
+        .expect("the fit reports a REML/LAML criterion");
     let cert = fit.fit.artifacts.rho_posterior_certificate.clone().expect(
         "a smooth-term Gaussian GAM has ρ parameters and an SPD outer Hessian, so the \
              Tier-0 ρ-posterior certificate must be present on the real fit artifact",

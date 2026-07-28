@@ -1703,13 +1703,13 @@ mod tests {
             .expect("dense fit reports edf");
 
         eprintln!(
-            "[#1344] sparse-native: lambda={:?} edf={:.6} reml={:.6}",
+            "[#1344] sparse-native: lambda={:?} edf={:.6} reml={:?}",
             sparse_res.lambdas.as_slice().unwrap(),
             sparse_edf,
             sparse_res.reml_score
         );
         eprintln!(
-            "[#1344] dense:         lambda={:?} edf={:.6} reml={:.6}",
+            "[#1344] dense:         lambda={:?} edf={:.6} reml={:?}",
             dense_res.lambdas.as_slice().unwrap(),
             dense_edf,
             dense_res.reml_score

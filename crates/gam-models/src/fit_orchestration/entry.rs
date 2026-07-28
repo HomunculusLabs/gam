@@ -638,6 +638,10 @@ fn deterministic_gaussian_standard_fit(
     penalized_hessian.scaled_add(lambda_full, &unit_penalty);
     // Symmetrize defensively against accumulated round-off before the Cholesky.
     penalized_hessian = (&penalized_hessian + &penalized_hessian.t()) * 0.5;
+    // βᵀS(λ)β at the λ this fit reports, from the same `unit_penalty` that
+    // entered the Hessian above — so the reported penalty quadratic and the
+    // reported curvature are the same S and the same λ by construction.
+    let penalty_quadratic = lambda_full * beta.dot(&unit_penalty.dot(&beta));
     // Effective degrees of freedom from the influence matrix `F = H⁻¹ XᵀWX`,
     // decomposed per penalty by the SAME trace formula the standard REML path
     // (`estimate.rs`) and the survival fast-path (`survival_transformation_edf`)
@@ -780,12 +784,27 @@ fn deterministic_gaussian_standard_fit(
             lambdas,
             likelihood_family: Some(request.family.clone()),
             likelihood_scale: gam_problem::LikelihoodScaleMetadata::ProfiledGaussian,
+            // Dispatch has certified that the fitted mean reproduces the
+            // response, so `φ̂ = 0` and the profiled Gaussian likelihood is
+            // unbounded: neither a normalized log-density nor a REML/LAML
+            // criterion exists here. Both are DECLINED — the log-likelihood by
+            // the `UserProvided` tag it has always carried, the criterion by
+            // the absence `UnifiedFitResult` gained in #2595. Writing `0.0`
+            // into `reml_score` was the only option before that, and it is what
+            // made `Summary.raw_reml_score` report a criterion of zero on every
+            // exactly-interpolating fit.
             log_likelihood_normalization: gam_problem::LogLikelihoodNormalization::UserProvided,
             log_likelihood: 0.0,
             deviance: 0.0,
-            reml_score: 0.0,
-            stable_penalty_term: 0.0,
-            penalized_objective: 0.0,
+            reml_score: None,
+            // βᵀS(λ)β at the reported λ, measured rather than asserted. It is
+            // zero on both dispatch branches — the exact-parametric branch has
+            // no penalty at all, and the constant-response branch puts every
+            // coefficient in the intercept block, which no penalty covers — but
+            // the fit record should carry the value the fit has, not the value
+            // its dispatch conditions imply.
+            stable_penalty_term: penalty_quadratic,
+            penalized_objective: None,
             used_device: false,
             outer_iterations: 0,
             outer_converged: true,

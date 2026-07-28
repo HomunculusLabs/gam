@@ -5459,7 +5459,12 @@ pub(crate) fn returned_mode_finalizer_preserves_owned_mode_without_family_replay
         evaluations_before_finalization,
         "finalization must consume the selected mode and cached Hessian without replaying the family",
     );
-    assert_eq!(fit.penalized_objective.to_bits(), selected_objective_bits);
+    assert_eq!(
+        fit.penalized_objective()
+            .expect("a custom-family fit reports its objective")
+            .to_bits(),
+        selected_objective_bits
+    );
     assert_eq!(fit.outer_iterations, certified_outer.iterations());
     assert_eq!(fit.outer_gradient_norm, Some(0.0));
     assert!(

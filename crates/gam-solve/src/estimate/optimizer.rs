@@ -2916,6 +2916,15 @@ where
     // the widening history of `exact_unpenalized_gaussian_beta` (which had to
     // grow from the intercept subspace to any exact affine fit) shows how that
     // prediction keeps coming up short.
+    //
+    // The SAME reasoning applies to the smoothing criterion, which until #2595
+    // had no way to say it: `V_r` profiles the scale, so at `φ̂ = 0` its data
+    // term is `½ν·log(D_p/ν) → −∞`. The number the outer optimizer happened to
+    // stop at there is a function of the last ulp of β, not a criterion — so it
+    // is declined here rather than reported, and `UnifiedFitResult::reml_score`
+    // carries the absence all the way to `Summary.raw_reml_score`,
+    // `compare_models` and the Bayes-factor path, which now refuse it by name
+    // instead of ranking a fabricated value.
     let (log_likelihood, log_likelihood_normalization) = if zero_covariance_boundary {
         (0.0, LogLikelihoodNormalization::UserProvided)
     } else {
@@ -2970,7 +2979,7 @@ where
             ..Default::default()
         },
         inference,
-        reml_score: outer_result.final_value,
+        reml_score: (!zero_covariance_boundary).then_some(outer_result.final_value),
         outer_cost_evals: usize::try_from(*reml_state.arena.cost_eval_count.read().unwrap())
             .unwrap_or(usize::MAX),
         inner_pirls_solves: usize::try_from(

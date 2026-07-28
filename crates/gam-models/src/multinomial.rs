@@ -4592,7 +4592,8 @@ mod reference_class_invariance_tests {
                 None,
             )
             .expect("fixed-lambda inner solve at the checkpoint must converge");
-            fit.reml_score
+            fit.reml_score()
+                .expect("a fixed-lambda custom-family solve reports its criterion")
         };
         let v_plain = v_at_with(&rho_star, false);
         let v_laml = v_at_with(&rho_star, true);
@@ -4625,7 +4626,10 @@ mod reference_class_invariance_tests {
             eprintln!(
                 "#2349 decompose: reml_score={:.9e} penalized_objective={:.9e} \
                  log_likelihood={:.9e} deviance={:.9e}",
-                fit.reml_score, fit.penalized_objective, fit.log_likelihood, fit.deviance
+                fit.reml_score().unwrap_or(f64::NAN),
+                fit.penalized_objective().unwrap_or(f64::NAN),
+                fit.log_likelihood,
+                fit.deviance
             );
         }
         let h = 1.0e-3;
@@ -4695,9 +4699,9 @@ mod reference_class_invariance_tests {
                 Ok(fit) => eprintln!(
                     "#2349 warm-from(delta={delta:+.1}): V={:.9e} (cold {:.9e}, refusal 2.687403e2) \
                      gap_to_cold={:+.3e}",
-                    fit.reml_score,
+                    fit.reml_score().unwrap_or(f64::NAN),
                     v_laml,
-                    fit.reml_score - v_laml
+                    fit.reml_score().unwrap_or(f64::NAN) - v_laml
                 ),
                 Err(e) => eprintln!(
                     "#2349 warm-from(delta={delta:+.1}): inner REFUSED honestly: {}",

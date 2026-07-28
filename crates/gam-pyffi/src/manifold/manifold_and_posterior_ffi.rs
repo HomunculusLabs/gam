@@ -1600,8 +1600,9 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         // null_dim is left unset: the scan does not compute the penalized-Hessian
         // null-space logdet the TK normalizer needs, so `comparable_reml_score`
         // returns the raw cost unchanged (and `evidence()` stays well-defined).
-        reml_score: scan.reml_cost,
-        raw_reml_score: scan.reml_cost,
+        reml_score: Some(scan.reml_cost),
+        raw_reml_score: Some(scan.reml_cost),
+        reml_score_unavailable: None,
         null_space_logdet: None,
         null_dim: None,
         iterations: 0,
@@ -1695,13 +1696,20 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
             std_error: standard_errors.and_then(|values| values.get(index).copied()),
         })
         .collect();
-    let raw_reml_score = fit.reml_score;
-    let reml_score = comparable_reml_score(
-        raw_reml_score,
-        fit.artifacts.null_space_dim.map(|dim| dim as f64),
-        fit.artifacts.null_space_logdet,
-    )
-    .map_err(|err| format!("failed to compute comparable REML score: {err}"))?;
+    // A fit with no criterion normalizes to no criterion: the Tierney-Kadane
+    // term is a correction TO a score, not a score, so applying it to a stand-in
+    // would manufacture exactly the comparable number this fit cannot have.
+    let raw_reml_score = fit.reml_score();
+    let reml_score = raw_reml_score
+        .map(|raw| {
+            comparable_reml_score(
+                raw,
+                fit.artifacts.null_space_dim.map(|dim| dim as f64),
+                fit.artifacts.null_space_logdet,
+            )
+            .map_err(|err| format!("failed to compute comparable REML score: {err}"))
+        })
+        .transpose()?;
     let payload = SummaryPayload {
         formula: model.payload().formula.clone(),
         family_name: model.likelihood().pretty_name().to_string(),
@@ -1713,6 +1721,9 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         n_obs: Some(fit.training_sample_size()),
         reml_score,
         raw_reml_score,
+        reml_score_unavailable: raw_reml_score
+            .is_none()
+            .then_some(gam::solver::estimate::NO_CRITERION_AT_EXACT_FIT),
         null_space_logdet: fit.artifacts.null_space_logdet,
         null_dim: fit.artifacts.null_space_dim.map(|dim| dim as f64),
         iterations: fit.outer_iterations,
@@ -2013,7 +2024,7 @@ fn scan_report_html(model: &FittedModel, scan: &ScanIntrospection) -> Result<Str
         formula: model.payload().formula.clone(),
         n_obs: Some(scan.training_sample_size),
         deviance: scan.deviance,
-        reml_score: scan.reml_cost,
+        reml_score: Some(scan.reml_cost),
         iterations: 0,
         convergence_status: "exact (state-space spline scan)".to_string(),
         converged: true,
@@ -2087,7 +2098,7 @@ fn report_html_impl(model_bytes: &[u8]) -> Result<String, String> {
         formula: model.payload().formula.clone(),
         n_obs: Some(fit.training_sample_size()),
         deviance: fit.deviance,
-        reml_score: fit.reml_score,
+        reml_score: fit.reml_score(),
         iterations: fit.outer_iterations,
         convergence_status: fit
             .convergence_evidence()

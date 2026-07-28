@@ -103,9 +103,9 @@ fn group_random_intercept_fits_above_sparse_exact_threshold() {
         PirlsStatus::Converged
     );
     assert!(
-        fit.fit.reml_score.is_finite(),
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(),
         "reml_score must be finite, got {}",
-        fit.fit.reml_score
+        fit.fit.reml_score().expect("the fit reports a REML/LAML criterion")
     );
 
     // The exact root cause: the smoothing-parameter uncertainty correction must
@@ -178,7 +178,7 @@ fn group_random_intercept_just_below_threshold_still_fits() {
         fit.fit.convergence_evidence().inner_status(),
         PirlsStatus::Converged
     );
-    assert!(fit.fit.reml_score.is_finite());
+    assert!(fit.fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite());
     assert!(
         fit.fit.covariance_corrected.is_some(),
         "control fit must also materialize Vp"

@@ -72,7 +72,7 @@ fn poisson_gamma_single_smooth_outer_work_1690() {
         };
         let fit = fit.fit;
 
-        assert!(fit.reml_score.is_finite(), "{family}: reml_score finite");
+        assert!(fit.reml_score().expect("the fit reports a REML/LAML criterion").is_finite(), "{family}: reml_score finite");
         assert!(
             fit.beta.iter().all(|b| b.is_finite()),
             "{family}: beta finite"
@@ -88,7 +88,7 @@ fn poisson_gamma_single_smooth_outer_work_1690() {
         eprintln!(
             "RECORD_1690 family={family} reml_score={:.10} edf={:.6} \
              outer_cost_evals={} inner_pirls_solves={} grad_norm={:?} converged=certified",
-            fit.reml_score,
+            fit.reml_score().expect("the fit reports a REML/LAML criterion"),
             edf,
             fit.outer_cost_evals,
             fit.inner_pirls_solves,
@@ -110,13 +110,13 @@ fn poisson_gamma_single_smooth_outer_work_1690() {
             panic!("{family}: converged fit must report an outer gradient norm")
         });
         let score_relative_bound =
-            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score);
+            gam::solver::rho_optimizer::flat_valley_converged_grad_bound(fit.reml_score().expect("the fit reports a REML/LAML criterion"));
         assert!(
             grad_norm.is_finite() && grad_norm <= score_relative_bound,
             "{family}: converged fit reports |g|={grad_norm:.6e} that does NOT clear the \
              score-relative stationarity bound {score_relative_bound:.6e} (score={:.6}) — \
              a converged flag without a stationarity certificate",
-            fit.reml_score,
+            fit.reml_score().expect("the fit reports a REML/LAML criterion"),
         );
 
         // Outer-work upper bound. A plain 1-parameter smooth must not explode the
