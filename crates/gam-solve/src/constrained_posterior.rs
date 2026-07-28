@@ -3184,6 +3184,129 @@ mod tests {
 mod orthant_depth_measure_2601_tests {
     use super::*;
 
+    /// The face that actually refuses (#2601), lifted out of the failing fit
+    /// rather than guessed at.
+    ///
+    /// Captured from `y ~ s(x, shape=monotone_decreasing)` on 300 rows of clean
+    /// increasing linear data — the `[monotone_decreasing]` parametrisation of
+    /// `test_gaussian_reml_fit_all_shape_constraints_do_not_panic`. All eleven
+    /// monotonicity coordinates are active, and the face lands exactly where the
+    /// synthetic sweep above says the rule breaks:
+    ///
+    ///   wall depth   -0.66 .. +2.65 sd   (mild; two walls are on the FEASIBLE side)
+    ///   max |corr|    0.691              (the sweep's worst regime is ~0.6)
+    ///   corr eigenvalues 0.144 .. 1.920
+    ///
+    /// That is the confirmation the synthetic sweep needed: depth here is
+    /// unremarkable, and the correlation is squarely in the band that fails.
+    ///
+    /// Kept as a measurement rather than an assertion until the rule is
+    /// replaced, so the trail is on the record and any candidate remedy is
+    /// judged against the real geometry instead of an AR(1) stand-in.
+    #[test]
+    fn the_face_that_refuses_2601_is_the_swept_worst_regime() {
+        let mean = Array1::from_vec(vec![
+            -1.73263658148929162e-01, -1.61028415044015161e-01, -1.53745491056003519e-01, -1.14020228922959738e-01,
+            -1.13372022294778579e-01, -5.68386260921473555e-02, -2.01787006225858517e-02, 7.79317061445884696e-04,
+            1.73520774327455551e-03, 2.00473386863282976e-02, 4.22790949294645502e-02,
+        ]);
+        let w = Array2::from_shape_vec(
+            (11, 11),
+            vec![
+                4.28613165678045412e-03, -6.40620724624387243e-04, -6.68752057617351208e-04,
+                -5.83957865274831135e-04, -5.55233848052857893e-04, -7.90532734874588739e-04,
+                -8.09846363272953844e-04, -2.35978352506513071e-04, -4.59953354398140966e-04,
+                -2.40276816847910670e-04, -4.66860409610777736e-04, -6.40620724624387243e-04,
+                4.30519348418363125e-03, -5.77958088890881253e-04, -7.08255560103122385e-04,
+                -6.52329255706248488e-04, -4.23821703180157501e-04, -7.53554384768477959e-04,
+                -1.29045376459765944e-04, -2.55856263721782311e-04, -3.25781213177120355e-04,
+                -6.88688636712164021e-04, -6.68752057617351208e-04, -5.77958088890881253e-04,
+                4.33564940679504254e-03, -6.74857893211149419e-04, -6.22390211789637811e-04,
+                -7.39567533429216599e-04, -4.59996677084055332e-04, -3.33480282492368946e-04,
+                -7.09611827680745955e-04, -1.43809374573677527e-04, -2.85910172307334801e-04,
+                -5.83957865274831135e-04, -7.08255560103122385e-04, -6.74857893211149419e-04,
+                4.23561983569142528e-03, -3.68170739599590739e-04, -2.42878795544258373e-04,
+                -6.65817316820568449e-04, -7.99047220448408411e-05, -1.55911037671571136e-04,
+                -1.76197943321878327e-04, -2.51754204620259080e-04, -5.55233848052857893e-04,
+                -6.52329255706248488e-04, -6.22390211789637811e-04, -3.68170739599590739e-04,
+                4.29588162752489629e-03, -7.57152955247313302e-04, -2.80188801979815898e-04,
+                -2.28980327675770300e-04, -3.66373527157145380e-04, -9.83175770979363879e-05,
+                -1.94759571987295659e-04, -7.90532734874588739e-04, -4.23821703180157501e-04,
+                -7.39567533429216599e-04, -2.42878795544258373e-04, -7.57152955247313302e-04,
+                4.82590971142383366e-03, -2.30789443520484135e-04, 5.11092628516201207e-04,
+                4.74012818803116673e-04, -1.01494286876908989e-04, -2.04446376075374456e-04,
+                -8.09846363272953844e-04, -7.53554384768477959e-04, -4.59996677084055332e-04,
+                -6.65817316820568449e-04, -2.80188801979815898e-04, -2.30789443520484135e-04,
+                4.97201788205004890e-03, -9.74102815703460092e-05, -1.93235956110176968e-04,
+                5.67517929096417986e-04, 5.90297796785945318e-04, -2.35978352506513071e-04,
+                -1.29045376459765944e-04, -3.33480282492368946e-04, -7.99047220448408411e-05,
+                -2.28980327675770300e-04, 5.11092628516201207e-04, -9.74102815703460092e-05,
+                1.15689169020833748e-03, 1.48276767553545967e-03, -4.51194193048010442e-05,
+                -9.11302898497036765e-05, -4.59953354398140966e-04, -2.55856263721782311e-04,
+                -7.09611827680745955e-04, -1.55911037671571136e-04, -3.66373527157145380e-04,
+                4.74012818803116673e-04, -1.93235956110176968e-04, 1.48276767553545967e-03,
+                4.05500634945223787e-03, -8.98171912603273025e-05, -1.81408583551147815e-04,
+                -2.40276816847910670e-04, -3.25781213177120355e-04, -1.43809374573677527e-04,
+                -1.76197943321878327e-04, -9.83175770979363879e-05, -1.01494286876908989e-04,
+                5.67517929096417986e-04, -4.51194193048010442e-05, -8.98171912603273025e-05,
+                1.17935427809862667e-03, 1.52706063180176217e-03, -4.66860409610777736e-04,
+                -6.88688636712164021e-04, -2.85910172307334801e-04, -2.51754204620259080e-04,
+                -1.94759571987295659e-04, -2.04446376075374456e-04, 5.90297796785945318e-04,
+                -9.11302898497036765e-05, -1.81408583551147815e-04, 1.52706063180176217e-03,
+                4.14230573743777988e-03,
+            ],
+        )
+        .expect("11x11 captured constraint-normal covariance");
+
+        let q = mean.len();
+        let sd: Vec<f64> = (0..q).map(|i| f64::sqrt(w[[i, i]])).collect();
+        let depth: Vec<f64> = (0..q).map(|i| -mean[i] / sd[i]).collect();
+        let depth_min = depth.iter().copied().fold(f64::INFINITY, f64::min);
+        let depth_max = depth.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mut corr_max = 0.0f64;
+        for i in 0..q {
+            for j in 0..i {
+                corr_max = corr_max.max(f64::abs(w[[i, j]] / (sd[i] * sd[j])));
+            }
+        }
+        // Pin the geometry itself: if a future capture drifts, the conclusion
+        // drawn from it must not be quietly inherited.
+        assert!(
+            depth_max < 3.0 && depth_min < 0.0,
+            "the refusing face is MILD in depth ({depth_min:.2}..{depth_max:.2} sd), \
+             which is what rules depth out as the cause"
+        );
+        assert!(
+            corr_max > 0.6,
+            "the refusing face is strongly correlated (max |corr| = {corr_max:.3}), \
+             which is the regime the sweep shows failing"
+        );
+
+        let upper = vec![f64::INFINITY; q];
+        let mut factor = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            for j in 0..=i {
+                let mut sum = w[[i, j]];
+                for k in 0..j {
+                    sum -= factor[[i, k]] * factor[[j, k]];
+                }
+                if i == j {
+                    factor[[i, i]] = sum.sqrt();
+                } else {
+                    factor[[i, j]] = sum / factor[[j, j]];
+                }
+            }
+        }
+        let outcome = box_truncated_moments(&mean, &upper, &w, factor.view());
+        match outcome {
+            Ok((m, c)) => println!(
+                "MEASURE2601FACE converged mean[0]={:.6e} var[0]={:.6e}",
+                m[0], c[[0, 0]]
+            ),
+            Err(reason) => println!("MEASURE2601FACE refused: {reason}"),
+        }
+    }
+
     /// Genz--Bretz variable reordering, applied as an EXPERIMENT on top of the
     /// existing rule so the two orders are measured on identical faces.
     ///
