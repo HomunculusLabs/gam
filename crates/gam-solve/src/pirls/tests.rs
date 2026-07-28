@@ -3981,7 +3981,7 @@ mod root_cause_tests {
         };
 
         let summary =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("active-constraint KKT point should be accepted as converged");
 
         assert_eq!(summary.status, PirlsStatus::Converged);
@@ -4203,7 +4203,7 @@ mod root_cause_tests {
             &mut model,
             Coefficients::new(array![0.0]),
             &options,
-            |_| {},
+            None,
         ) {
             Ok(_) => panic!("candidate evaluation failures should exhaust LM retries and surface"),
             Err(err) => err,
@@ -4264,7 +4264,7 @@ mod root_cause_tests {
             &mut model,
             Coefficients::new(array![0.0]),
             &options,
-            |_| {},
+            None,
         ) {
             Ok(_) => panic!("permanent candidate failures should surface immediately"),
             Err(err) => err,
@@ -4306,7 +4306,7 @@ mod root_cause_tests {
             &mut model,
             Coefficients::new(array![0.0]),
             &options,
-            |_| {},
+            None,
         ) {
             Ok(_) => panic!("Firth candidate reevaluation failures should not loop indefinitely"),
             Err(err) => err,
@@ -4361,7 +4361,7 @@ mod root_cause_tests {
             &mut model,
             Coefficients::new(array![0.0]),
             &options,
-            |_| {},
+            None,
         ) {
             Ok(_) => panic!("permanent Firth candidate failures should surface immediately"),
             Err(err) => err,
@@ -4410,7 +4410,7 @@ mod root_cause_tests {
         };
 
         let result =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("plateaued accepted step should still return a final state");
 
         // The plateau case ACCEPTS the candidate step (it's a noise-scale
@@ -4449,7 +4449,7 @@ mod root_cause_tests {
         };
 
         let result =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("the exact final-state decrement certifies iteration exhaustion");
 
         assert_eq!(model.exact_calls, 1);
@@ -4480,7 +4480,7 @@ mod root_cause_tests {
         };
 
         let result =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("the exact final-state decrement certifies a soft LM stall");
 
         assert_eq!(model.exact_calls, 1);
@@ -4507,7 +4507,7 @@ mod root_cause_tests {
         };
 
         let result =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("long constrained objective plateau should preserve the final state");
 
         assert_eq!(
@@ -4542,7 +4542,7 @@ mod root_cause_tests {
         };
 
         let result =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("noise-scale rejected step should still preserve the current state");
 
         // The candidate is objectively worse, so the LM trial is rejected.
@@ -4961,7 +4961,7 @@ mod root_cause_tests {
             arrow_schur: None,
         };
         let summary =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("converged scalar model should produce a result");
         assert!(
             matches!(
@@ -5021,7 +5021,7 @@ mod root_cause_tests {
             arrow_schur: None,
         };
         let summary =
-            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, |_| {})
+            runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
                 .expect("canonical surrogate model should converge");
         assert!(
             matches!(

@@ -7083,7 +7083,7 @@ fn structural_survival_fit_is_time_unit_invariant() {
                 adaptive_kkt_tolerance: None,
                 arrow_schur: None,
             },
-            |_| {},
+            None,
         )
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "fit structural survival model", e));
         assert!(

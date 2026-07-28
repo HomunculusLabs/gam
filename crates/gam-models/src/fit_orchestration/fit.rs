@@ -1927,7 +1927,7 @@ fn optimize_survival_transformation_smoothing(
             &mut candidate,
             gam_problem::Coefficients::new(warm_beta.borrow().clone()),
             &opts,
-            |_| {},
+            None,
         )?;
         // The envelope gradient exists only at a certified beta optimum. A
         // finite exhausted state is a checkpoint, not a derivative-bearing
@@ -3200,7 +3200,7 @@ pub(crate) fn fit_survival_transformation_model(
                     &mut model,
                     gam_problem::Coefficients::new(beta0),
                     &opts,
-                    |_| {},
+                    None,
                 )
                 .map_err(|error| {
                     format!(
@@ -3346,7 +3346,7 @@ pub(crate) fn fit_survival_transformation_model(
         &mut model,
         gam_problem::Coefficients::new(beta_start),
         &opts,
-        |_| {},
+        None,
     )
     .map_err(|error| {
         format!(

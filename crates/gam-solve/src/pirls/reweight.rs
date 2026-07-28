@@ -218,15 +218,17 @@ pub(crate) fn constraint_kkt_admits_progress_exhausted_stall(
     }
 }
 
-pub fn runworking_model_pirls<M, F>(
+/// `iteration_callback` is optional: most callers want the fit and nothing else,
+/// and spelling that as `|_| {}` is a closure whose body is empty. `None` says it
+/// as data at the call site (#780 ban).
+pub fn runworking_model_pirls<M>(
     model: &mut M,
     mut beta: Coefficients,
     options: &WorkingModelPirlsOptions,
-    mut iteration_callback: F,
+    mut iteration_callback: Option<&mut dyn FnMut(&WorkingModelIterationInfo)>,
 ) -> Result<WorkingModelPirlsResult, EstimationError>
 where
     M: WorkingModel + ?Sized,
-    F: FnMut(&WorkingModelIterationInfo),
 {
     const CONSTRAINED_OBJECTIVE_PLATEAU_STREAK: usize = 20;
 
@@ -1424,13 +1426,15 @@ where
                         );
                         let deviance_change = actual_reduction;
 
-                        iteration_callback(&WorkingModelIterationInfo {
-                            iteration: iter,
-                            deviance: accepted_state.deviance,
-                            gradient_norm: candidategrad_norm,
-                            step_size: 1.0,
-                            step_halving: lm_bound.used(), // repurpose as attempt count
-                        });
+                        if let Some(observe) = iteration_callback.as_deref_mut() {
+                            observe(&WorkingModelIterationInfo {
+                                iteration: iter,
+                                deviance: accepted_state.deviance,
+                                gradient_norm: candidategrad_norm,
+                                step_size: 1.0,
+                                step_halving: lm_bound.used(), // attempt count
+                            });
+                        }
 
                         lastgradient_norm = candidategrad_norm;
                         last_deviance_change = deviance_change;

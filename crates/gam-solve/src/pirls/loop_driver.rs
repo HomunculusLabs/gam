@@ -1788,7 +1788,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         &mut working_model,
         Coefficients::new(initial_beta),
         &options,
-        &mut iteration_logger,
+        Some(&mut iteration_logger),
     )?;
 
     // ── Gamma dispersion: re-estimate the shape at the *converged* η (#678) ──
@@ -1890,7 +1890,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 &mut working_model,
                 working_summary.beta.clone(),
                 &options,
-                &mut iteration_logger,
+                Some(&mut iteration_logger),
             )?;
         }
     }
@@ -1976,7 +1976,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                     &mut working_model,
                     working_summary.beta.clone(),
                     &options,
-                    &mut iteration_logger,
+                    Some(&mut iteration_logger),
                 )?;
             }
         }
@@ -2079,7 +2079,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 &mut working_model,
                 working_summary.beta.clone(),
                 &options,
-                &mut iteration_logger,
+                Some(&mut iteration_logger),
             )?;
         }
     }
@@ -2175,7 +2175,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
                 &mut working_model,
                 working_summary.beta.clone(),
                 &options,
-                &mut iteration_logger,
+                Some(&mut iteration_logger),
             )?;
         }
     }

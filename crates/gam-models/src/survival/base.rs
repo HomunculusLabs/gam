@@ -2990,7 +2990,7 @@ impl WorkingModelSurvival {
             &mut candidate,
             Coefficients::new(beta0.clone()),
             &opts,
-            |_| {},
+            None,
         )?;
         let mut beta = summary.beta.as_ref().to_owned();
 
