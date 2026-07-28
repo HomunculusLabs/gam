@@ -634,10 +634,11 @@ mod tests {
         let k = 10usize;
         let basis: Vec<String> = (0..k)
             .map(|atom| {
-                match atom % 5 {
+                match atom % 6 {
                     0 => "linear",
                     1 => "euclidean",
                     2 => "periodic",
+                    3 => "torus",
                     _ => "sphere",
                 }
                 .to_string()
@@ -645,7 +646,7 @@ mod tests {
             .collect();
         let dims: Vec<usize> = basis
             .iter()
-            .map(|b| if b == "sphere" { 2 } else { 1 })
+            .map(|b| if b == "sphere" || b == "torus" { 2 } else { 1 })
             .collect();
         let seed = build_sae_support_seed(SaeSupportSeedRequest {
             target: target.view(),

@@ -93,6 +93,23 @@ fn main() -> Result<(), String> {
     let mut atom_basis = vec![topology_arg.clone(); k_atoms];
     if topology_arg == "auto" {
         resolve_support_auto_atoms(&mut atom_basis);
+    } else if topology_arg == "rich" {
+        // Every topology the lane can fit, weighted by what today's censuses
+        // and steering tables earned: linear stays the routing base, the
+        // strong steerers (periodic, euclidean) and the mega-atom producer
+        // (embedded sphere) carry the curved share, and the torus enters at
+        // one atom in eight -- its 49-function basis is exactly the capacity
+        // a working shrinkage ladder exists to police.
+        for (atom, basis) in atom_basis.iter_mut().enumerate() {
+            *basis = match atom % 8 {
+                0 | 1 => "linear",
+                2 => "euclidean",
+                3 | 4 => "periodic",
+                5 | 6 => "sphere",
+                7 | _ => "torus",
+            }
+            .to_string();
+        }
     } else if topology_arg == "mixed" {
         // `auto` is a 1-D-only portfolio (linear/euclidean/periodic), which is
         // why every atom this harness has ever fitted is a CURVE. `mixed` spans
