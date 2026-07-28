@@ -1930,9 +1930,20 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     };
     // Along the raw coefficient direction `δ` the exact curvature is `γ_min`
     // (`δᵀ H_pen δ = γ_min`), so a step `s·δ` lowers the quadratic model by
-    // `½ s² |γ_min|`. Pick the `s` at which that guaranteed second-order decrease
-    // clears solver noise, then cap the DISPLACEMENT at a fraction of the current
-    // coefficient scale so the escape stays local.
+    // `½ s² |γ_min|` — monotonically in `s` and WITHOUT BOUND. A direction of
+    // negative curvature has no interior optimum to aim at, so nothing about
+    // the model itself bounds `s`. The only legitimate ceilings are the two
+    // that say where the model stops being usable: locality (the quadratic is
+    // trusted only near β) and feasibility (the step must stay in the
+    // polytope). Both are applied below.
+    //
+    // `decrease_floor` is the `s` at which the guaranteed decrease `½s²|γ_min|`
+    // first clears solver noise. That is a FLOOR — a shorter escape cannot be
+    // distinguished from not moving — and it was previously combined with the
+    // locality cap by `min`, which made every escape exactly as short as noise
+    // permitted. Newton is attracted to stationary points, so from that
+    // distance it walked straight back down to the same saddle: #2587 measured
+    // `lambda_min` unchanged to seven significant figures across both escapes.
     let gamma_min = lambda_min.abs();
     if !(gamma_min.is_finite() && gamma_min > 0.0) {
         return Err(format!(
@@ -1945,9 +1956,18 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     }
     let beta = flatten_state_betas(states, specs);
     let beta_norm = beta.dot(&beta).sqrt();
-    let decrease_scaled = (2.0 * objective_tol.max(1e-8) / gamma_min).sqrt();
-    let displacement_cap = 0.1 * (1.0 + beta_norm) / direction_norm;
-    let base_magnitude = decrease_scaled.min(displacement_cap);
+    let decrease_floor = (2.0 * objective_tol.max(1e-8) / gamma_min).sqrt();
+    // A failed escape carries exactly one piece of information: the length it
+    // used was inside the basin the solve then fell back into. Recomputed from
+    // the returned saddle with the same inputs, the next escape would be
+    // bit-identical to the last, so the `MAX_SADDLE_ESCAPES` budget could never
+    // do anything the first attempt did not — spending it was structurally a
+    // repetition, not a retry. Widen the trusted neighbourhood once per spent
+    // escape so the budget is a ladder. The bound is `MAX_SADDLE_ESCAPES`, so
+    // the widest escape stays within `0.1·2^(MAX-1)` of the coefficient scale.
+    let escape_widening = f64::from(1u32 << saddle_escapes_used.min(16) as u32);
+    let locality_cap = escape_widening * 0.1 * (1.0 + beta_norm) / direction_norm;
+    let base_magnitude = locality_cap.max(decrease_floor);
     // Feasibility. The tangent-projected direction satisfies the ACTIVE rows to
     // first order; truncate strictly inside the first INACTIVE blocker, in the
     // scaled-slack terms the active-set solvers use (row norm cancels in the
@@ -2001,9 +2021,25 @@ fn resolve_constrained_converged_mode<F: CustomFamily + Clone + Send + Sync + 's
     let magnitude = base_magnitude.min(feasible_cap);
     if !(magnitude.is_finite() && magnitude > 0.0) {
         return Err(format!(
-            "joint Newton returned-mode curvature is a strict saddle (lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}) with no feasible escape length along the negative-curvature tangent",
+            "joint Newton returned-mode curvature is a strict saddle (lambda_min={lambda_min:.6e} < -floor={numerical_floor:.6e}) with no feasible escape length along the negative-curvature tangent (locality_cap={locality_cap:.6e}, decrease_floor={decrease_floor:.6e}, feasible_cap={feasible_cap:.6e})",
         ));
     }
+    // Which of the three terms BINDS is the whole diagnosis when an escape
+    // fails to escape, and it is not recoverable from `alpha` alone (#2587 cost
+    // a measurement cycle to establish that `decrease_floor` was binding).
+    log::info!(
+        "[PIRLS/joint-Newton saddle-escape sizing] lambda_min={lambda_min:.6e} \
+         locality_cap={locality_cap:.6e} decrease_floor={decrease_floor:.6e} \
+         feasible_cap={feasible_cap:.6e} widening={escape_widening:.1} \
+         magnitude={magnitude:.6e} binding={}",
+        if magnitude >= feasible_cap {
+            "feasible"
+        } else if base_magnitude <= decrease_floor {
+            "decrease_floor"
+        } else {
+            "locality"
+        },
+    );
     Ok(ConstrainedModeResolution::Escape {
         direction,
         alpha: sign * magnitude,
