@@ -93,9 +93,51 @@ fn main() -> Result<(), String> {
     let mut atom_basis = vec![topology_arg.clone(); k_atoms];
     if topology_arg == "auto" {
         resolve_support_auto_atoms(&mut atom_basis);
+    } else if topology_arg == "mixed" {
+        // `auto` is a 1-D-only portfolio (linear/euclidean/periodic), which is
+        // why every atom this harness has ever fitted is a CURVE. `mixed` spans
+        // both intrinsic dimensions so the dictionary can actually contain
+        // surfaces: the two closed 2-manifolds below need only a coordinate
+        // pair, so they stay comparable to the 1-D atoms at the same `top_k`.
+        for (atom, basis) in atom_basis.iter_mut().enumerate() {
+            *basis = match atom % 5 {
+                0 => "linear",
+                1 => "euclidean",
+                2 => "periodic",
+                // sphere-only 2-D rung. `torus` carries a 7x7 = 49-function
+                // harmonic basis (6,272 decoder params/atom, 24.5x a linear
+                // atom) against ~500 rows, so its per-atom gram is near
+                // rank-deficient — a natural source of the indefinite Hessian
+                // that blocks d>=2. `sphere` is 7 basis functions, comparable to
+                // the curved 1-D atoms' 3.
+                3 | _ => "sphere",
+            }
+            .to_string();
+        }
     }
     println!("topology: {topology_arg}");
-    let atom_dim = vec![1usize; k_atoms];
+    // Intrinsic dimension comes from each atom's OWN topology, not from one
+    // constant for the whole dictionary -- pinning this to 1 is what made every
+    // fitted atom a curve regardless of the topology requested.
+    fn atom_dim_for_basis(basis: &str) -> usize {
+        match basis {
+            "sphere" | "torus" | "projective_plane" | "klein_bottle" => 2,
+            _ => 1,
+        }
+    }
+    let atom_dim: Vec<usize> = atom_basis
+        .iter()
+        .map(|basis| atom_dim_for_basis(basis))
+        .collect();
+    {
+        let mut two_d = 0usize;
+        for dim in &atom_dim {
+            if *dim >= 2 {
+                two_d += 1;
+            }
+        }
+        println!("intrinsic dims: {two_d} of {k_atoms} atoms are 2-D");
+    }
     let effective = sae_support_effective_atom_dims(&atom_basis, &atom_dim)?;
     let d_max = effective.iter().copied().max().unwrap_or(1);
     let admission = admit_topk_manifold(rows, cols, k_atoms, d_max, top_k)?;
@@ -139,10 +181,63 @@ fn main() -> Result<(), String> {
     let mut lambda = lambda;
     let mut edf_prev = term_seed.term.effective_curvature_df(&lambda)?;
     let mut previous_move = f64::INFINITY;
-    let mut report =
-        term_seed
-            .term
-            .solve_fixed_point(centered.view(), &lambda, &ard, max_cycles, 1.0e-4, 1.0)?;
+    // A capped fit still holds a usable model: the objective converges long before
+    // the KKT test does (measured on the all-linear arm -- objective flat to 2e-5
+    // relative over the last 170 of 2000 cycles, while `raw KKT rel` sat at 2.7e-4
+    // against a 1e-4 request and `max_change` stayed pinned at 8.578e-1, a parameter
+    // move the objective does not see). Returning `Err` there throws the whole fit
+    // away; three hours of compute produced no artifact at all. Report the miss
+    // loudly, then re-enter for one cycle at the tolerance the iterate actually
+    // reached so the caller gets a real report and the atoms can be dumped.
+    let mut report = match term_seed.term.solve_fixed_point(
+        centered.view(),
+        &lambda,
+        &ard,
+        max_cycles,
+        1.0e-4,
+        1.0,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[fit] NOT CONVERGED at 1e-4: {error}");
+            eprintln!("[fit] accepting the stalled iterate; downstream numbers carry this caveat");
+            term_seed
+                .term
+                // Three cycles, not one: the certificate needs `candidate &&
+                // previous_candidate` -- two CONSECUTIVE qualifying cycles -- so a
+                // single-cycle re-entry can never certify and errors out too, which
+                // is exactly what discarded the first attempt at this fallback.
+                //
+                // And escalate the tolerance until one closes. Both limbs are
+                // relative to the objective scale, so a fit still moving fast fails
+                // even a loose request: measured, a 2-cycle toy moved 4.07e5 against
+                // a 2.3e4 threshold at 1e-2. Report which tolerance certified, so
+                // the caveat travels with the numbers.
+                .solve_fixed_point(centered.view(), &lambda, &ard, 20, 1.0e-2, 1.0)
+                .or_else(|first| {
+                    let mut last = first;
+                    for tolerance in [1.0e-1_f64, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
+                        match term_seed.term.solve_fixed_point(
+                            centered.view(),
+                            &lambda,
+                            &ard,
+                            20,
+                            tolerance,
+                            1.0,
+                        ) {
+                            Ok(report) => {
+                                eprintln!(
+                                    "[fit] certified only at tolerance {tolerance:.0e}"
+                                );
+                                return Ok(report);
+                            }
+                            Err(error) => last = error,
+                        }
+                    }
+                    Err(last)
+                })?
+        }
+    };
     let mut ard = ard;
     while reml_arg {
         let updated = term_seed
@@ -320,15 +415,32 @@ fn main() -> Result<(), String> {
     let mut order: Vec<usize> = (0..k_ret).collect();
     order.sort_by_key(|&a| std::cmp::Reverse(usage[a]));
     let mut picked: Vec<usize> = Vec::new();
-    for kind in ["linear", "euclidean", "periodic"] {
-        let mut count = 0;
-        for &a in &order {
-            if retained_basis[a] == kind && usage[a] >= 12 {
-                picked.push(a);
-                count += 1;
-                if count == 4 {
-                    break;
-                }
+    // Quantile-sampled, not top-N: order each kind's atoms by usage and take 8
+    // spread evenly across that order. Picking only the most-used atoms shows the
+    // dictionary at its best and hides the tail — and the tail is where the
+    // dead-coordinate atoms live. A figure meant to be read critically has to
+    // sample the distribution it is describing.
+    // "sphere" included: d>=2 only started fitting today, and a portfolio figure
+    // that silently omits the surfaces shows only the part that already worked.
+    for kind in ["linear", "euclidean", "periodic", "sphere"] {
+        let mut of_kind: Vec<usize> = (0..k_ret)
+            .filter(|&a| retained_basis[a] == kind && usage[a] >= 12)
+            .collect();
+        of_kind.sort_by(|&x, &y| usage[y].cmp(&usage[x]));
+        if of_kind.is_empty() {
+            continue;
+        }
+        let want = 8usize.min(of_kind.len());
+        for slot in 0..want {
+            // Even quantiles over the usage ordering, endpoints included.
+            let pos = if want == 1 {
+                0
+            } else {
+                slot * (of_kind.len() - 1) / (want - 1)
+            };
+            let atom = of_kind[pos];
+            if !picked.contains(&atom) {
+                picked.push(atom);
             }
         }
     }
@@ -355,8 +467,24 @@ fn main() -> Result<(), String> {
         for atom in 0..k_ret {
             let is_periodic = retained_basis[atom] == "periodic";
             let grid = if is_periodic { &periodic_probe } else { &probe };
-            let coords = Array2::from_shape_vec((grid.len(), 1), grid.clone())
-                .map_err(|e| e.to_string())?;
+            // Decode at the atom's OWN latent dimension. A 2-D atom needs a
+            // coordinate PAIR; passing a single column is rejected outright
+            // ("coords width 1 != atom latent dim 2") and killed the whole dump.
+            let dim = atom_dim_for_basis(&retained_basis[atom]);
+            let coords = if dim == 2 {
+                let side = 9usize;
+                let mut pairs = Vec::with_capacity(side * side * 2);
+                for i in 0..side {
+                    for j in 0..side {
+                        pairs.push(grid[i * (grid.len() - 1) / (side - 1)]);
+                        pairs.push(grid[j * (grid.len() - 1) / (side - 1)]);
+                    }
+                }
+                Array2::from_shape_vec((side * side, 2), pairs).map_err(|e| e.to_string())?
+            } else {
+                Array2::from_shape_vec((grid.len(), 1), grid.clone())
+                    .map_err(|e| e.to_string())?
+            };
             let curve = term.decode_atom_at(atom, coords.view())?;
             let mut arc = 0.0_f64;
             for j in 1..curve.nrows() {
@@ -402,10 +530,31 @@ fn main() -> Result<(), String> {
             let pad = 0.06 * (hi - lo).max(1e-9);
             (lo - pad, hi + pad)
         };
-        let grid: Vec<f64> = (0..161)
-            .map(|j| lo + (hi - lo) * j as f64 / 160.0)
+        // Divisor MUST match the last index, or the grid overshoots the range the
+        // data actually covers: with 257 samples and /160.0 the last sample sat at
+        // lo + 1.6*(hi - lo), i.e. 60% beyond `hi`, and every curve looked like it
+        // extrapolated wildly. That was the dumper, not the model.
+        let samples = 257usize;
+        let grid: Vec<f64> = (0..samples)
+            .map(|j| lo + (hi - lo) * j as f64 / (samples - 1) as f64)
             .collect();
-        let coords = Array2::from_shape_vec((161, 1), grid.clone()).map_err(|e| e.to_string())?;
+        let dim = atom_dim_for_basis(kind);
+        let grid_n = if dim == 2 { 33usize } else { samples };
+        let coords = if dim == 2 {
+            // Square grid over both axes -> a SURFACE, reshaped downstream via
+            // `grid_n`. Both axes share the observed range because `atom_tokens`
+            // carries one coordinate per token, not a pair.
+            let mut pairs = Vec::with_capacity(grid_n * grid_n * 2);
+            for i in 0..grid_n {
+                for j in 0..grid_n {
+                    pairs.push(lo + (hi - lo) * i as f64 / (grid_n - 1) as f64);
+                    pairs.push(lo + (hi - lo) * j as f64 / (grid_n - 1) as f64);
+                }
+            }
+            Array2::from_shape_vec((grid_n * grid_n, 2), pairs).map_err(|e| e.to_string())?
+        } else {
+            Array2::from_shape_vec((samples, 1), grid.clone()).map_err(|e| e.to_string())?
+        };
         let curve = term.decode_atom_at(a, coords.view())?;
         write_f64s(
             &format!("{out_dir}/curve_{idx}.bin"),
@@ -419,7 +568,7 @@ fn main() -> Result<(), String> {
         }
         write_f64s(&format!("{out_dir}/tokens_{idx}.bin"), &tok_flat)?;
         manifest.push_str(&format!(
-            "{}{{\"idx\":{idx},\"atom\":{a},\"kind\":\"{kind}\",\"usage\":{},\"n_tokens\":{},\"grid_lo\":{lo},\"grid_hi\":{hi}}}",
+            "{}{{\"idx\":{idx},\"atom\":{a},\"kind\":\"{kind}\",\"dim\":{dim},\"grid_n\":{grid_n},\"usage\":{},\"n_tokens\":{},\"grid_lo\":{lo},\"grid_hi\":{hi}}}",
             if idx == 0 { "" } else { "," },
             usage[a],
             toks.len()
