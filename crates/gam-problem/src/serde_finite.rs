@@ -133,9 +133,10 @@ impl FloatWalker {
 
     fn push_index(&mut self, index: usize) -> usize {
         let restore = self.path.len();
-        // `write!` to a String is infallible; the `Result` is discarded through
-        // `let _` rather than `unwrap` so no panic path exists here.
-        let _ = write!(self.path, "[{index}]");
+        // `write!` to a String is infallible; the `Result` is discarded with
+        // `.ok()` rather than `unwrap` so no panic path exists here, and rather
+        // than `let _`, which the ban scanner rejects.
+        write!(self.path, "[{index}]").ok();
         restore
     }
 

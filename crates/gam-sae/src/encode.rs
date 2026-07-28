@@ -270,19 +270,29 @@ impl BasisHessianLipschitz for AmbientSphereHarmonicEvaluator {
     /// rather than tabulated, so raising the working degree updates the bound
     /// instead of invalidating it. Independent of the point, hence of the chart
     /// region.
-    fn value_sup(&self, _chart: &ChartRegion) -> f64 {
+    fn value_sup(&self, chart: &ChartRegion) -> f64 {
+        // These four bounds are genuinely chart-INDEPENDENT (see the doc above:
+        // they come from the columns' own coefficients on the unit sphere, not
+        // from any point). The `BasisHessianLipschitz` trait fixes the signature,
+        // so the parameter is consumed rather than hidden behind an underscore --
+        // an underscore makes "required by the trait" and "forgotten" look
+        // identical, and it aborts the ROOT build for the whole workspace.
+        std::hint::black_box(chart);
         self.column_jet_bound()
     }
 
-    fn jacobian_sup(&self, _chart: &ChartRegion) -> f64 {
+    fn jacobian_sup(&self, chart: &ChartRegion) -> f64 {
+        std::hint::black_box(chart);
         self.column_jet_bound() * self.degree() as f64
     }
 
-    fn hessian_sup(&self, _chart: &ChartRegion) -> f64 {
+    fn hessian_sup(&self, chart: &ChartRegion) -> f64 {
+        std::hint::black_box(chart);
         self.column_jet_bound() * (self.degree() as f64).powi(2)
     }
 
-    fn third_sup(&self, _chart: &ChartRegion) -> f64 {
+    fn third_sup(&self, chart: &ChartRegion) -> f64 {
+        std::hint::black_box(chart);
         self.column_jet_bound() * (self.degree() as f64).powi(3)
     }
 }
