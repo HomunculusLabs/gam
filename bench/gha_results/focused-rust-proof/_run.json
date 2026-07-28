@@ -1,12 +1,12 @@
 {
   "workflow": "Focused Rust Proof",
-  "job_status": "success",
-  "run_id": "30390135346",
-  "run_number": "333",
+  "job_status": "failure",
+  "run_id": "30389627634",
+  "run_number": "331",
   "run_attempt": "1",
   "event": "workflow_dispatch",
-  "ref": "refs/heads/lane-2607-collapse",
-  "sha": "57247635cec6eb83bd7e565de25d32df51425c82",
-  "completed_utc": "2026-07-28T19:11:20Z",
-  "run_url": "https://github.com/SauersML/gam/actions/runs/30390135346"
+  "ref": "refs/heads/main",
+  "sha": "e6f27336a778349b6fc120a0ee0d81fc7293e94f",
+  "completed_utc": "2026-07-28T19:14:48Z",
+  "run_url": "https://github.com/SauersML/gam/actions/runs/30389627634"
 }
