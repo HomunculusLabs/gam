@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -274,7 +274,7 @@ fn main() -> Result<(), String> {
     // Optional decoder-strategy arg: "fista" runs the accelerated parallel
     // decoder update (6 majorized passes/cycle) instead of the colour-class
     // sweep -- a typed knob for the A/B, never an environment variable.
-    if args.len() >= 15 && args[14] == "fista" {
+    if args.len() >= 16 && args[15] == "fista" {
         term_seed.term.set_decoder_fista_passes(Some(6));
         println!("decoder strategy: FISTA (6 passes/cycle)");
     }

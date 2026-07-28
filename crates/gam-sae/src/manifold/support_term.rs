@@ -2707,7 +2707,7 @@ impl SaeSupportSparseTerm {
                 // whole fitted model over one unmeasurable row.
                 let floor_required = 1.0e-4 * 2.0_f64.powi(-24) * directional;
                 if floor_required <= objective_resolution {
-                    log::info!(
+                    log::debug!(
                         "coordinate row {row}: line search unmeasurable at its floor \
                          (required decrease {floor_required:.3e} <= objective resolution \
                          {objective_resolution:.3e}, raw KKT max={raw_gradient_max:.3e}); \
