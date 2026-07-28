@@ -49,6 +49,87 @@ fn required_field<'py>(
     })
 }
 
+/// Extract a 2-D f64 payload field from either a numpy array (the pickle
+/// round-trip) or nested lists (the JSON round-trip). One loader, two carriers
+/// -- the values are the same numbers either way, so the type must not decide
+/// which files can be reopened (#2567).
+fn extract_f64_matrix(value: &Bound<'_, PyAny>, what: &str) -> PyResult<Array2<f64>> {
+    if let Ok(array) = value.extract::<PyReadonlyArray2<'_, f64>>() {
+        return Ok(array.as_array().to_owned());
+    }
+    let rows: Vec<Vec<f64>> = value.extract().map_err(|_| {
+        py_value_error(format!(
+            "ManifoldSAESupport.from_dict: {what} is neither a 2-D float array nor nested lists"
+        ))
+    })?;
+    let width = rows.first().map(Vec::len).unwrap_or(0);
+    if rows.iter().any(|row| row.len() != width) {
+        return Err(py_value_error(format!(
+            "ManifoldSAESupport.from_dict: {what} rows have unequal lengths"
+        )));
+    }
+    let flat: Vec<f64> = rows.iter().flatten().copied().collect();
+    Array2::from_shape_vec((rows.len(), width), flat)
+        .map_err(|error| py_value_error(format!("ManifoldSAESupport.from_dict: {what}: {error}")))
+}
+
+/// The u32 counterpart of [`extract_f64_matrix`] for the support index grid.
+fn extract_u32_matrix(value: &Bound<'_, PyAny>, what: &str) -> PyResult<Array2<u32>> {
+    if let Ok(array) = value.extract::<PyReadonlyArray2<'_, u32>>() {
+        return Ok(array.as_array().to_owned());
+    }
+    let rows: Vec<Vec<u32>> = value.extract().map_err(|_| {
+        py_value_error(format!(
+            "ManifoldSAESupport.from_dict: {what} is neither a 2-D u32 array nor nested lists"
+        ))
+    })?;
+    let width = rows.first().map(Vec::len).unwrap_or(0);
+    if rows.iter().any(|row| row.len() != width) {
+        return Err(py_value_error(format!(
+            "ManifoldSAESupport.from_dict: {what} rows have unequal lengths"
+        )));
+    }
+    let flat: Vec<u32> = rows.iter().flatten().copied().collect();
+    Array2::from_shape_vec((rows.len(), width), flat)
+        .map_err(|error| py_value_error(format!("ManifoldSAESupport.from_dict: {what}: {error}")))
+}
+
+/// 1-D f64 field: numpy array or plain list.
+fn extract_f64_vector(value: &Bound<'_, PyAny>, what: &str) -> PyResult<Vec<f64>> {
+    if let Ok(array) = value.extract::<PyReadonlyArray1<'_, f64>>() {
+        return Ok(array.as_array().to_vec());
+    }
+    value.extract::<Vec<f64>>().map_err(|_| {
+        py_value_error(format!(
+            "ManifoldSAESupport.from_dict: {what} is neither a 1-D float array nor a list"
+        ))
+    })
+}
+
+/// JSON refuses non-finite numbers, so the save path names the field instead
+/// of silently emitting null; every scalar this guards is certified finite by
+/// the fit that produced it, so a trip here is a real defect upstream.
+fn require_finite_for_json(name: &str, value: f64) -> PyResult<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(py_value_error(format!(
+            "ManifoldSAESupport.save: {name} is {value}, which JSON cannot carry; \
+             refusing to write a payload that could not be reloaded"
+        )))
+    }
+}
+
+fn matrix_json(matrix: &Array2<f64>) -> serde_json::Value {
+    serde_json::Value::Array(
+        matrix
+            .rows()
+            .into_iter()
+            .map(|row| serde_json::Value::Array(row.iter().map(|&v| serde_json::json!(v)).collect()))
+            .collect(),
+    )
+}
+
 #[pyclass(module = "gamfit._rust", name = "ManifoldSAESupport", frozen)]
 pub(crate) struct SupportSparseManifoldSaeCore {
     term: SaeSupportSparseTerm,
@@ -379,43 +460,34 @@ impl SupportSparseManifoldSaeCore {
         let atom_dim: Vec<usize> = required_field(payload, "atom_dim")?.extract()?;
         let support_k: usize = required_field(payload, "top_k")?.extract()?;
         let training_mean: Vec<f64> = required_field(payload, "training_mean")?.extract()?;
-        let fitted = required_field(payload, "fitted")?
-            .extract::<PyReadonlyArray2<'_, f64>>()?
-            .as_array()
-            .to_owned();
-        let support_indices = required_field(payload, "support_indices")?
-            .extract::<PyReadonlyArray2<'_, u32>>()?
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|row| row.to_vec())
-            .collect::<Vec<_>>();
-        let support_values = required_field(payload, "support_values")?
-            .extract::<PyReadonlyArray2<'_, f64>>()?
-            .as_array()
-            .rows()
-            .into_iter()
-            .map(|row| row.to_vec())
-            .collect::<Vec<_>>();
+        let fitted = extract_f64_matrix(&required_field(payload, "fitted")?, "fitted")?;
+        let support_indices = extract_u32_matrix(
+            &required_field(payload, "support_indices")?,
+            "support_indices",
+        )?
+        .rows()
+        .into_iter()
+        .map(|row| row.to_vec())
+        .collect::<Vec<_>>();
+        let support_values = extract_f64_matrix(
+            &required_field(payload, "support_values")?,
+            "support_values",
+        )?
+        .rows()
+        .into_iter()
+        .map(|row| row.to_vec())
+        .collect::<Vec<_>>();
         let coord_items: Vec<Bound<'_, PyAny>> =
             required_field(payload, "coords")?.extract()?;
         let mut coords = Vec::with_capacity(coord_items.len());
         for item in &coord_items {
-            coords.push(
-                item.extract::<PyReadonlyArray1<'_, f64>>()?
-                    .as_array()
-                    .to_vec(),
-            );
+            coords.push(extract_f64_vector(item, "coords")?);
         }
         let decoder_items: Vec<Bound<'_, PyAny>> =
             required_field(payload, "decoder_blocks")?.extract()?;
         let mut decoder_blocks = Vec::with_capacity(decoder_items.len());
         for item in &decoder_items {
-            decoder_blocks.push(
-                item.extract::<PyReadonlyArray2<'_, f64>>()?
-                    .as_array()
-                    .to_owned(),
-            );
+            decoder_blocks.push(extract_f64_matrix(item, "decoder_blocks")?);
         }
         let log_lambda_smooth: Vec<f64> =
             required_field(payload, "log_lambda_smooth")?.extract()?;
@@ -469,6 +541,79 @@ impl SupportSparseManifoldSaeCore {
             trust_radius,
             tolerance,
             random_state,
+        })
+    }
+
+    /// Write the tagged JSON payload for `gamfit.load` (#2567 follow-up: the
+    /// pickle round-trip worked, the JSON leg had no writer). Field-for-field
+    /// the same payload as [`Self::to_dict`], with arrays carried as nested
+    /// lists -- which [`Self::from_dict`] now accepts from either carrier.
+    fn save(&self, path: &str) -> PyResult<()> {
+        let support = support_indices(&self.term).map_err(py_value_error)?;
+        let support_json = serde_json::Value::Array(
+            support
+                .rows()
+                .into_iter()
+                .map(|row| {
+                    serde_json::Value::Array(
+                        row.iter().map(|&v| serde_json::json!(v)).collect(),
+                    )
+                })
+                .collect(),
+        );
+        let coords_json = serde_json::Value::Array(
+            (0..self.term.n_obs())
+                .map(|row| {
+                    serde_json::Value::Array(
+                        self.term
+                            .assignment
+                            .coords_row(row)
+                            .iter()
+                            .map(|&v| serde_json::json!(v))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+        let decoders_json = serde_json::Value::Array(
+            self.term
+                .atoms
+                .iter()
+                .map(|atom| matrix_json(atom.decoder_coefficients()))
+                .collect(),
+        );
+        let payload = serde_json::json!({
+            "schema": SUPPORT_SCHEMA_TAG,
+            "requested_k": self.requested_k,
+            "retained_atom_indices": self.retained_atom_indices,
+            "atom_basis": self.atom_basis,
+            "atom_dim": self.atom_dim,
+            "top_k": self.support_k,
+            "training_mean": self.training_mean,
+            "fitted": matrix_json(&self.fitted),
+            "support_indices": support_json,
+            "support_values": matrix_json(&support_values(&self.term)),
+            "coords": coords_json,
+            "decoder_blocks": decoders_json,
+            "log_lambda_smooth": self.log_lambda_smooth,
+            "ard_precisions": self.ard_precisions,
+            "criterion": require_finite_for_json("criterion", self.criterion)?,
+            "certificates": self.certificates,
+            "termination": self.termination,
+            "reconstruction_r2": require_finite_for_json(
+                "reconstruction_r2",
+                self.reconstruction_r2,
+            )?,
+            "max_iter": self.max_iter,
+            "trust_radius": require_finite_for_json("trust_radius", self.trust_radius)?,
+            "tolerance": require_finite_for_json("tolerance", self.tolerance)?,
+            "random_state": self.random_state,
+        });
+        let text = serde_json::to_string(&payload).map_err(|error| {
+            py_value_error(format!("ManifoldSAESupport.save: serialization failed: {error}"))
+        })?;
+        std::fs::write(path, text).map_err(|error| {
+            py_value_error(format!("ManifoldSAESupport.save: writing {path:?} failed: {error}"))
         })
     }
 
