@@ -416,7 +416,7 @@ fn main() -> Result<(), String> {
         // baseline is reset because converted atoms lawfully jump.
         if unroll_arg && !unrolled_once {
             unrolled_once = true;
-            let unrolled = term_seed.term.convert_underoccupied_loops(24, 0.5, 2502)?;
+            let unrolled = term_seed.term.convert_underoccupied_loops(2502)?;
             if !unrolled.is_empty() {
                 println!(
                     "topology reroute: unrolled {} under-occupied loops",

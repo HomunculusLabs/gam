@@ -631,11 +631,8 @@ impl SaeSupportSparseTerm {
     /// untouched. Returns the converted atom indices.
     pub fn convert_underoccupied_loops(
         &mut self,
-        bins: usize,
-        max_occupancy: f64,
         random_state: u64,
     ) -> Result<Vec<usize>, String> {
-        let bins = bins.max(8);
         let mut converted = Vec::new();
         for atom_index in 0..self.k_atoms() {
             if self.atom_axis_periods[atom_index].len() != 1 {
@@ -651,44 +648,50 @@ impl SaeSupportSparseTerm {
             if pairs.is_empty() {
                 continue;
             }
-            let mut occupied = vec![false; bins];
             let mut fracs = Vec::with_capacity(pairs.len());
             for &(row, slot) in &pairs {
                 let t = self.assignment.coords_for_slot(row, slot)[0];
-                let frac = (t / period).rem_euclid(1.0);
-                let bin = ((frac * bins as f64) as usize).min(bins - 1);
-                occupied[bin] = true;
-                fracs.push(frac);
+                fracs.push((t / period).rem_euclid(1.0));
             }
-            let occupancy =
-                occupied.iter().filter(|&&hit| hit).count() as f64 / bins as f64;
-            if occupancy > max_occupancy {
+            // Exact largest-gap test, no binning. Under the null that a
+            // closed loop's usage is uniform on the circle, the largest of
+            // the n circular spacings G satisfies the exact bound
+            //     P(G >= g) <= n * (1 - g)^(n-1),
+            // so the observed gap g* refutes the closed topology at the
+            // sample-size-derived level 1/n exactly when
+            //     (n - 1) * ln(1 - g*) <= -2 ln n.
+            // The level is 1/n rather than a tuned constant: one expected
+            // false unroll per n routed tokens, vanishing for real atoms.
+            let mut sorted = fracs.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite phase"));
+            let n_tokens = sorted.len();
+            let mut gap_len = 0.0_f64;
+            let mut gap_start = 0.0_f64;
+            for i in 0..n_tokens {
+                let here = sorted[i];
+                let next = if i + 1 == n_tokens {
+                    sorted[0] + 1.0
+                } else {
+                    sorted[i + 1]
+                };
+                if next - here > gap_len {
+                    gap_len = next - here;
+                    gap_start = here;
+                }
+            }
+            let n_f = n_tokens as f64;
+            let refuted = gap_len < 1.0
+                && (n_f - 1.0) * (1.0 - gap_len).ln() <= -2.0 * n_f.ln()
+                || gap_len >= 1.0;
+            if !refuted {
                 continue;
             }
-            // Longest circular run of empty bins; the occupied arc starts
-            // where that gap ends. The scan is O(bins^2) on a few dozen bins.
-            let mut best_len = 0usize;
-            let mut best_start = 0usize;
-            for start in 0..bins {
-                if occupied[start] {
-                    continue;
-                }
-                let mut len = 0usize;
-                while len < bins && !occupied[(start + len) % bins] {
-                    len += 1;
-                }
-                if len > best_len {
-                    best_len = len;
-                    best_start = start;
-                }
-            }
-            let arc_start = ((best_start + best_len) % bins) as f64 / bins as f64;
-            let arc_len =
-                (1.0 - best_len as f64 / bins as f64).max(1.0 / bins as f64);
+            let arc_start = (gap_start + gap_len).rem_euclid(1.0);
+            let arc_len = 1.0 - gap_len;
             // Fresh Euclidean atom through the seed's own planner pipeline, so
             // every downstream shape contract holds by construction.
             let kind = sae_atom_basis_kind_from_str("euclidean")?;
-            let design_rows = 32usize;
+            let design_rows = super::support_seed::planner_design_rows(&kind);
             let mut plan_seed = ndarray::Array3::<f64>::zeros((1, design_rows, 1));
             for grid in 0..design_rows {
                 plan_seed[[0, grid, 0]] =
@@ -737,8 +740,12 @@ impl SaeSupportSparseTerm {
             self.atoms[atom_index] = replacement;
             self.assignment.convert_atom_to_euclidean(atom_index)?;
             for (&(row, slot), &frac) in pairs.iter().zip(&fracs) {
-                let unwrapped = (frac - arc_start).rem_euclid(1.0).min(arc_len);
-                let t_new = -1.0 + 2.0 * (unwrapped / arc_len).clamp(0.0, 1.0);
+                let t_new = if arc_len > 0.0 {
+                    let unwrapped = (frac - arc_start).rem_euclid(1.0).min(arc_len);
+                    -1.0 + 2.0 * (unwrapped / arc_len).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 self.assignment.set_slot_coords(row, slot, &[t_new])?;
             }
             self.atom_axis_periods[atom_index] = vec![None];
@@ -2043,6 +2050,12 @@ impl SaeSupportSparseTerm {
         self.validate_ard(ard_precisions)?;
         let mut updated = ard_precisions.to_vec();
         let mut scratch = ActiveAtomScratch::default();
+        // (atom, axis, periodic?, gamma, energy) for every axis with any
+        // evidence; the pooled hyperprior below is estimated from this same
+        // pass, WITHIN topology groups -- a periodic axis's coordinate energy
+        // is bounded by its period while a Euclidean axis's is not, so one
+        // pooled mean across both would shrink each toward the other's scale.
+        let mut pooled: Vec<(usize, usize, bool, f64, f64)> = Vec::new();
         for atom_idx in 0..self.k_atoms() {
             let dim = self.assignment.atom_coord_dim(atom_idx);
             if dim == 0 || self.atom_rows[atom_idx].is_empty() {
@@ -2076,7 +2089,18 @@ impl SaeSupportSparseTerm {
                     if !(curvature > 0.0) {
                         continue;
                     }
-                    energy[axis] += prior.sq_equiv;
+                    // Posterior SECOND MOMENT, not the point estimate: the
+                    // Gauss-Newton curvature is the axis's posterior
+                    // precision, so E[t^2 | data] = t_hat^2 + 1/curvature.
+                    // With the point estimate alone the alternation ratchets:
+                    // each round's shrink lowers sum t_hat^2, which raises
+                    // the next alpha, which shrinks harder (measured on the
+                    // micro-bed: alpha median 6.6 -> 25.8 across two rounds
+                    // while lambda collapsed 1.5 -> 0.36). The variance term
+                    // floors the energy at count/curvature, so
+                    // alpha <= curvature always -- the update cannot outrun
+                    // the evidence that feeds it.
+                    energy[axis] += prior.sq_equiv + 1.0 / curvature;
                     // The slot's well-determined fraction, clamped to [0, 1]:
                     // curvature carries the prior majorizer, so alpha/curvature
                     // can exceed 1 only through majorizer slack, never evidence.
@@ -2085,33 +2109,44 @@ impl SaeSupportSparseTerm {
                 }
             }
             for axis in 0..dim {
-                // gamma == 0 means the prior already owns the axis: updating
-                // from no likelihood evidence is exactly the runaway, so keep
-                // the incoming precision instead. The 1% determination floor
-                // is the same statement at finite precision -- measured, axes
-                // under it drove alpha 33 -> 172 -> 4.8e3 -> 1.6e5 across
-                // four rounds (each round's smaller gamma dividing a smaller
-                // energy), and the resulting priors pinned the OUT-OF-SAMPLE
-                // coordinate solve hard enough to refuse the held-out eval.
-                if count[axis] > 0.0
-                    && gamma[axis] > 0.01 * count[axis]
-                    && energy[axis] > 1.0e-4 * count[axis]
-                {
-                    // Damped fixed-point step: an initial selection from the
-                    // near-zero seed may jump to 64 outright (the measured
-                    // healthy round-1 attractor is ~33); after that one round
-                    // moves alpha by at most 4x in either direction (the
-                    // measured ESCAPE rate was ~28x/round, so damping turns
-                    // it into a drift the stall rule ends); and 1e3 is a
-                    // conditioning ceiling -- tangent curvature on this data
-                    // is O(1..100), so beyond ~1e3 a larger alpha changes no
-                    // decision, only the stiffness that froze the held-out
-                    // solve.
-                    let incoming = ard_precisions[atom_idx][axis];
-                    let candidate = (gamma[axis] / energy[axis])
-                        .min((incoming * 4.0).max(64.0))
-                        .max(incoming / 4.0)
-                        .min(1.0e3);
+                if count[axis] > 0.0 {
+                    pooled.push((
+                        atom_idx,
+                        axis,
+                        periods[axis].is_some(),
+                        gamma[axis],
+                        energy[axis],
+                    ));
+                }
+            }
+        }
+        // Unit-information empirical-Bayes pooling (Kass-Wasserman): every
+        // axis is shrunk toward the dictionary's pooled precision with
+        // exactly ONE average axis of prior evidence,
+        //     alpha = (gamma + mean_gamma) / (energy + mean_energy).
+        // A well-determined axis dominates its own estimate; a thin-evidence
+        // axis inherits the pooled value instead of dividing two near-zeros.
+        // This replaces the former determination floors, damping factors and
+        // ceiling outright: at K=8096 (~250 rows/atom) those rails did not
+        // prevent the escape, they became its resting place -- the population
+        // median sat ON the 1e3 ceiling while lambda collapsed, train EV
+        // 0.8522 against held-out 0.5907. Pooling removes the mechanism
+        // (near-zero/near-zero division) rather than capping its output.
+        for group_periodic in [false, true] {
+            let group: Vec<&(usize, usize, bool, f64, f64)> = pooled
+                .iter()
+                .filter(|entry| entry.2 == group_periodic)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            let axes = group.len() as f64;
+            let mean_gamma = group.iter().map(|entry| entry.3).sum::<f64>() / axes;
+            let mean_energy = group.iter().map(|entry| entry.4).sum::<f64>() / axes;
+            for &(atom_idx, axis, _, gamma_axis, energy_axis) in group {
+                let denominator = energy_axis + mean_energy;
+                if denominator > 0.0 {
+                    let candidate = (gamma_axis + mean_gamma) / denominator;
                     if candidate.is_finite() && candidate > 0.0 {
                         updated[atom_idx][axis] = candidate;
                     }

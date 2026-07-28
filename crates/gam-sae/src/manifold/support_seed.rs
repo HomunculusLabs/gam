@@ -101,6 +101,24 @@ fn better(lhs: RankedAtom, rhs: RankedAtom) -> bool {
     lhs.score > rhs.score || (lhs.score == rhs.score && lhs.atom < rhs.atom)
 }
 
+/// Chart-sample count the atom planner is seeded with: the flat-basis kinds
+/// size their basis from the seed's span so they need a spread of samples;
+/// analytic kinds derive their basis from the geometry alone. ONE owner for
+/// the convention -- the topology conversion reuses it.
+pub(crate) fn planner_design_rows(kind: &SaeAtomBasisKind) -> usize {
+    if matches!(
+        kind,
+        SaeAtomBasisKind::Duchon
+            | SaeAtomBasisKind::Linear
+            | SaeAtomBasisKind::EuclideanPatch
+            | SaeAtomBasisKind::Poincare
+    ) {
+        32
+    } else {
+        1
+    }
+}
+
 fn effective_atom(
     public_dim: usize,
     kind: &SaeAtomBasisKind,
@@ -533,17 +551,7 @@ pub fn build_sae_support_term_seed(
         let public_dim = request.atom_dim[atom];
         let kind = sae_atom_basis_kind_from_str(&request.atom_basis[atom])
             .map_err(|error| format!("build_sae_support_seed: atom {atom}: {error}"))?;
-        let design_rows = if matches!(
-            kind,
-            SaeAtomBasisKind::Duchon
-                | SaeAtomBasisKind::Linear
-                | SaeAtomBasisKind::EuclideanPatch
-                | SaeAtomBasisKind::Poincare
-        ) {
-            32
-        } else {
-            1
-        };
+        let design_rows = planner_design_rows(&kind);
         // `sae_build_atom_plans` interprets periodic public_dim as harmonic
         // order before reducing to a 1-D chart, so its temporary seed width
         // must cover both the public and effective dimensions.
@@ -744,7 +752,7 @@ mod tests {
         .expect("term seed")
         .term;
         let converted = term
-            .convert_underoccupied_loops(20, 0.5, 3)
+            .convert_underoccupied_loops(3)
             .expect("census runs");
         assert_eq!(converted, vec![0], "exactly the arc-bound loop unrolls");
         assert_eq!(
