@@ -2962,7 +2962,7 @@ fn basis_with_jet<'py>(
                 penalty.into_pyarray(py).unbind(),
             ))
         }
-        "sphere" => sphere_chart_basis_with_jet(py, t),
+        "sphere" => ambient_sphere_basis_with_jet(py, t, 2),
         "bspline" | "b_spline" | "b-spline" => {
             let coords = t.as_array();
             if coords.ncols() != 1 {
@@ -3804,23 +3804,35 @@ fn sphere_basis_jet_with_centers<'py>(
     Ok(jet.into_pyarray(py).unbind())
 }
 
-/// Chart-local seven-column sphere basis with analytic lat/lon jet.
+/// Real spherical harmonics on `S²` in AMBIENT coordinates, with analytic jet.
 ///
-/// `t` is an `(N, 2)` array of latitude/longitude pairs in radians. The
-/// columns are `[1, x, y, z, xy, yz, xz]` for the unit-sphere embedding.
-#[pyfunction(signature = (t))]
-fn sphere_chart_basis_with_jet<'py>(
+/// `t` is an `(N, 3)` array of unit vectors `(x, y, z)`. The columns are the
+/// `(degree+1)²` real harmonics through `degree`, and the returned penalty is
+/// the exact Laplace-Beltrami spectrum `[l(l+1)]²` — derived, not tabulated.
+///
+/// This replaced a seven-column `(lat, lon)` chart helper. `S²` admits no
+/// global 2-D chart, and that one paid for it: the poles were an optimiser
+/// boundary, longitude was gauge there, the trust-region metric was wrong by
+/// `cos²(lat)`, and the span was not closed under `SO(3)`. The ambient form has
+/// none of those, and at degree 2 it spans all five `l = 2` harmonics where the
+/// chart carried three.
+#[pyfunction(signature = (t, degree = 2))]
+fn ambient_sphere_basis_with_jet<'py>(
     py: Python<'py>,
     t: PyReadonlyArray2<'py, f64>,
+    degree: usize,
 ) -> PyResult<(Py<PyArray2<f64>>, Py<PyArray3<f64>>, Py<PyArray2<f64>>)> {
-    // The chart-local sphere basis, its lat/lon jet, and the saturated-latitude
-    // `chain_lat` gating all live in the core SAE path; this helper only routes
-    // the caller's coordinates through that single source of truth and converts
-    // the returned arrays into Python-facing buffers. Keeping the math in one
-    // place is what prevents the core and PyFFI derivatives from drifting.
+    // The evaluator and its spectrum live in the core SAE path; this helper only
+    // routes the caller's coordinates through that single source of truth, which
+    // is what keeps the core and PyFFI derivatives from drifting.
     let coords = t.as_array();
-    let (phi, jet) = sphere_chart_basis_jet(coords).map_err(py_value_error)?;
-    let penalty = Array2::from_diag(&Array1::from_vec(SPHERE_CHART_PENALTY_DIAGONAL.to_vec()));
+    let evaluator = AmbientSphereHarmonicEvaluator::new(degree).map_err(py_value_error)?;
+    let (phi, jet) = evaluator.evaluate(coords).map_err(py_value_error)?;
+    let modes = evaluator.spectral_modes();
+    let mut penalty = Array2::<f64>::zeros((modes.len(), modes.len()));
+    for (column, mode) in modes.iter().enumerate() {
+        penalty[[column, column]] = mode.l2_gram_weight * mode.laplace_eigenvalue.powi(2);
+    }
     Ok((
         phi.into_pyarray(py).unbind(),
         jet.into_pyarray(py).unbind(),

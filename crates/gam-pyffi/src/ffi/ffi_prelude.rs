@@ -179,11 +179,11 @@ pub(crate) use gam::terms::sae::sparse_dict::{
 };
 
 pub(crate) use gam::terms::sae::manifold::{
-    GumbelTemperatureSchedule, SPHERE_CHART_PENALTY_DIAGONAL, SaeAtomGeometryPlan,
+    AmbientSphereHarmonicEvaluator, GumbelTemperatureSchedule, SaeAtomGeometryPlan,
     SaeFisherRowMetricRequest, SaeFitAssignmentKind, SaeFitSeedReport, SaeFitSeedRequest,
     SaeMinimalSeedReport, SaeMinimalSeedRequest, ScheduleKind, build_sae_fisher_row_metric,
-    build_sae_fit_seed, build_sae_minimal_seed, sae_atom_basis_kind_name, sae_fitted_atom_plans,
-    sphere_chart_basis_jet,
+    SaeBasisEvaluator, build_sae_fit_seed, build_sae_minimal_seed, sae_atom_basis_kind_name,
+    sae_fitted_atom_plans,
 };
 
 pub(crate) use gam::terms::decoders::skip_transcoder::{
