@@ -106,8 +106,11 @@ fn main() {
     // in the tuple is underscore-prefixed. Every such binding silences
     // the type system's unused-value feedback. Use or delete: bind a real
     // name and read it, or call the expression for its effect without a
-    // binding (e.g. `drop(expr)` or just `expr;` for `Result` consumers
-    // wrapped behind an explicit check).
+    // binding (e.g. `drop(expr)` for a value whose Drop is the point, or
+    // `expr;` for a `Result` consumer wrapped behind an explicit check).
+    // NOT `.ok();` — that spelling is banned for the same reason `let _ =`
+    // is: it converts a failure into an `Option` nobody looks at. Handle the
+    // error or propagate it.
     let mut underscore_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
     scan_for_let_underscore(&manifest_dir, &manifest_dir, &mut underscore_offenders);
 
@@ -1501,6 +1504,23 @@ fn banned_substrings() -> &'static [(&'static str, &'static str, bool)] {
         // — see `MAP_PAYLOAD_DISCARD_EXEMPT`. `.for_each(drop)` /
         // `.inspect(drop)` are neither: they iterate to do nothing at all.
         (".map_err(drop)", "error discarded by drop", false),
+        (".unwrap_or_else(|_", "error discarded by drop", false),
+        // `.ok();` in STATEMENT position: the `Result` becomes an `Option`
+        // that nothing reads, so the failure reaches nobody. Handle it
+        // (`if let Err(error) = ...`) or propagate it (`?`). `.ok()` inside a
+        // larger expression — `.ok()?`, `if let Some(v) = f().ok()` — is a
+        // conversion whose absence the caller still has to deal with, and is
+        // not matched here.
+        (".ok();", "error discarded by `.ok();`", false),
+        // `.unwrap()` is `panic!()` with the reason left out, in a file where
+        // `panic!()` must carry a `// SAFETY:` line and `todo!` /
+        // `unimplemented!` / `unreachable!` are banned outright. It was the
+        // last unexplained-panic spelling still legal. `.expect("why")` stays
+        // legal: the message IS the justification the panic rule asks for.
+        // Test-aware — an unwrap in a test is how a test asserts.
+        (".unwrap()", "unwrap: a panic with the reason left out", true),
+        // `.expect("")` is `.unwrap()` wearing the justified form's clothes.
+        (".expect(\"\")", "unwrap: a panic with the reason left out", false),
         (".map_err(|_| ())", "error discarded by drop", false),
         (".for_each(drop)", "iteration that does nothing", false),
         (".inspect(drop)", "iteration that does nothing", false),
