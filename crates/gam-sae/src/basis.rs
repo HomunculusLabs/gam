@@ -4244,6 +4244,260 @@ mod tests {
         1.0 - residual / total
     }
 
+    /// Rodrigues rotation of a 3-vector about a (not necessarily unit) axis.
+    fn rotate_vector(v: [f64; 3], axis: [f64; 3], theta: f64) -> [f64; 3] {
+        let norm = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        let k = [axis[0] / norm, axis[1] / norm, axis[2] / norm];
+        let (s, c) = theta.sin_cos();
+        let kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+        let cross = [
+            k[1] * v[2] - k[2] * v[1],
+            k[2] * v[0] - k[0] * v[2],
+            k[0] * v[1] - k[1] * v[0],
+        ];
+        [
+            v[0] * c + cross[0] * s + k[0] * kv * (1.0 - c),
+            v[1] * c + cross[1] * s + k[1] * kv * (1.0 - c),
+            v[2] * c + cross[2] * s + k[2] * kv * (1.0 - c),
+        ]
+    }
+
+    /// Relative residual of least-squares projecting every column of `target`
+    /// onto the column span of `phi`. Zero exactly when the target lies in the
+    /// span, so it reads as a direct test of span CLOSURE.
+    fn span_residual(phi: &Array2<f64>, target: &Array2<f64>) -> f64 {
+        use faer::Side;
+        use gam_linalg::faer_ndarray::FaerCholesky;
+        let p = phi.ncols();
+        let q = target.ncols();
+        let mut gram = Array2::<f64>::zeros((p, p));
+        let mut rhs = Array2::<f64>::zeros((p, q));
+        for row in 0..phi.nrows() {
+            for a in 0..p {
+                for b in 0..p {
+                    gram[[a, b]] += phi[[row, a]] * phi[[row, b]];
+                }
+                for c in 0..q {
+                    rhs[[a, c]] += phi[[row, a]] * target[[row, c]];
+                }
+            }
+        }
+        let scale = gram.diag().iter().copied().fold(0.0_f64, f64::max);
+        for d in gram.diag_mut().iter_mut() {
+            *d += scale * 64.0 * f64::EPSILON;
+        }
+        let coefficients = gram.cholesky(Side::Lower).unwrap().solve_mat(&rhs);
+        let fitted = phi.dot(&coefficients);
+        let (mut residual, mut total) = (0.0_f64, 0.0_f64);
+        for row in 0..target.nrows() {
+            for c in 0..q {
+                residual += (target[[row, c]] - fitted[[row, c]]).powi(2);
+                total += target[[row, c]].powi(2);
+            }
+        }
+        (residual / total.max(f64::MIN_POSITIVE)).sqrt()
+    }
+
+    /// Deterministic uniform sample of unit 3-vectors, returned in BOTH
+    /// parameterizations so chart and ambient evaluators see the same points.
+    fn sphere_sample(seed: u64, n: usize) -> (Array2<f64>, Array2<f64>) {
+        let mut rng = uniform_stream(seed);
+        let mut chart = Array2::<f64>::zeros((n, 2));
+        let mut ambient = Array2::<f64>::zeros((n, 3));
+        for row in 0..n {
+            let lat = (2.0 * rng() - 1.0).asin();
+            let lon = 2.0 * std::f64::consts::PI * rng();
+            chart[[row, 0]] = lat;
+            chart[[row, 1]] = lon;
+            ambient[[row, 0]] = lat.cos() * lon.cos();
+            ambient[[row, 1]] = lat.cos() * lon.sin();
+            ambient[[row, 2]] = lat.sin();
+        }
+        (chart, ambient)
+    }
+
+    /// The ambient evaluator is not a NEW basis — it is the same real harmonics
+    /// written in `(x, y, z)`. On the sphere the two must agree to rounding, and
+    /// that equality is what lets the ambient form inherit the chart's
+    /// orthonormality and spectral metadata instead of re-deriving them.
+    #[test]
+    fn ambient_sphere_matches_chart_on_the_sphere() {
+        let (chart_coords, ambient_coords) = sphere_sample(0x5B4E, 512);
+        let chart = SphericalHarmonicEvaluator::new(3).unwrap();
+        let ambient = AmbientSphereHarmonicEvaluator::new(3).unwrap();
+        assert_eq!(chart.basis_size(), ambient.basis_size());
+        let (phi_chart, _) = chart.evaluate(chart_coords.view()).unwrap();
+        let (phi_ambient, _) = ambient.evaluate(ambient_coords.view()).unwrap();
+        let mut worst = 0.0_f64;
+        for row in 0..phi_chart.nrows() {
+            for col in 0..phi_chart.ncols() {
+                worst = worst.max((phi_chart[[row, col]] - phi_ambient[[row, col]]).abs());
+            }
+        }
+        assert!(
+            worst <= 1.0e-12,
+            "ambient and chart spherical harmonics disagree on S²: max |Δ| = {worst:.3e}"
+        );
+    }
+
+    /// The ambient jets are exact polynomial derivatives, so they must match
+    /// central differences in the AMBIENT coordinates — including the second
+    /// jet, which the Newton/Schur assembly consumes directly.
+    #[test]
+    fn ambient_sphere_jets_match_finite_differences() {
+        let (_, ambient_coords) = sphere_sample(0xDEF7, 24);
+        let ambient = AmbientSphereHarmonicEvaluator::new(3).unwrap();
+        let (_, jet) = ambient.evaluate(ambient_coords.view()).unwrap();
+        let hessian = ambient.second_jet(ambient_coords.view()).unwrap();
+        let h = 1.0e-5_f64;
+        let (mut worst_first, mut worst_second) = (0.0_f64, 0.0_f64);
+        for row in 0..ambient_coords.nrows() {
+            let base = [
+                ambient_coords[[row, 0]],
+                ambient_coords[[row, 1]],
+                ambient_coords[[row, 2]],
+            ];
+            for axis_a in 0..3 {
+                let (mut plus, mut minus) = (base, base);
+                plus[axis_a] += h;
+                minus[axis_a] -= h;
+                let (phi_plus, jet_plus) =
+                    ambient.evaluate(at_coords(plus).view()).unwrap();
+                let (phi_minus, jet_minus) =
+                    ambient.evaluate(at_coords(minus).view()).unwrap();
+                for col in 0..ambient.basis_size() {
+                    let fd = (phi_plus[[0, col]] - phi_minus[[0, col]]) / (2.0 * h);
+                    worst_first = worst_first.max((fd - jet[[row, col, axis_a]]).abs());
+                }
+                // Second jet: difference the analytic FIRST jet, so the check is
+                // independent of the Hessian's own derivation.
+                for col in 0..ambient.basis_size() {
+                    for axis_b in 0..3 {
+                        let fd = (jet_plus[[0, col, axis_b]] - jet_minus[[0, col, axis_b]])
+                            / (2.0 * h);
+                        worst_second =
+                            worst_second.max((fd - hessian[[row, col, axis_b, axis_a]]).abs());
+                    }
+                }
+            }
+        }
+        assert!(
+            worst_first <= 1.0e-6,
+            "ambient first jet disagrees with finite differences: {worst_first:.3e}"
+        );
+        assert!(
+            worst_second <= 1.0e-5,
+            "ambient second jet disagrees with finite differences: {worst_second:.3e}"
+        );
+    }
+
+    /// Pack one ambient point into an `(1, 3)` coordinate array.
+    fn at_coords(point: [f64; 3]) -> Array2<f64> {
+        let mut single = Array2::<f64>::zeros((1, 3));
+        for axis in 0..3 {
+            single[[0, axis]] = point[axis];
+        }
+        single
+    }
+
+    /// THE POLE TEST. At `u = (0, 0, ±1)` the `(lat, lon)` chart's longitude jet
+    /// is identically zero — every longitude names the same physical point, so
+    /// `H_tt`'s longitude block is singular there and the coordinate carries no
+    /// information. The ambient parameterization has no such point: the pole is
+    /// an ordinary unit vector, and the two tangent directions at it (`x` and
+    /// `y`) carry full first-order signal.
+    #[test]
+    fn ambient_sphere_has_no_pole_degeneracy() {
+        let ambient = AmbientSphereHarmonicEvaluator::new(2).unwrap();
+        let chart = SphericalHarmonicEvaluator::new(2).unwrap();
+        for &pole_z in &[1.0_f64, -1.0_f64] {
+            let (_, jet) = ambient.evaluate(at_coords([0.0, 0.0, pole_z]).view()).unwrap();
+            let mut chart_coords = Array2::<f64>::zeros((1, 2));
+            chart_coords[[0, 0]] = pole_z * std::f64::consts::FRAC_PI_2;
+            chart_coords[[0, 1]] = 0.9;
+            let (_, chart_jet) = chart.evaluate(chart_coords.view()).unwrap();
+
+            let mut chart_longitude = 0.0_f64;
+            for col in 0..chart.basis_size() {
+                chart_longitude = chart_longitude.max(chart_jet[[0, col, 1]].abs());
+            }
+            assert!(
+                chart_longitude <= 1.0e-12,
+                "chart longitude jet should collapse at the pole (that is the defect); got {chart_longitude:.3e}"
+            );
+
+            let mut ambient_tangential = 0.0_f64;
+            for col in 0..ambient.basis_size() {
+                for axis in 0..2 {
+                    ambient_tangential = ambient_tangential.max(jet[[0, col, axis]].abs());
+                    assert!(
+                        jet[[0, col, axis]].is_finite(),
+                        "ambient jet must stay finite at the pole"
+                    );
+                }
+            }
+            assert!(
+                ambient_tangential >= 0.1,
+                "ambient basis must carry tangential signal AT the pole; got {ambient_tangential:.3e}"
+            );
+        }
+    }
+
+    /// THE ROTATION TEST, and the reason the fixed chart block is not a sphere
+    /// atom. A basis on `S²` deserves the name only if its SPAN is closed under
+    /// `SO(3)`: physics does not care where we put the pole, so a rotated copy
+    /// of a representable field must still be representable. Each degree-`l`
+    /// harmonic block is an `SO(3)` irrep, so the ambient basis is closed
+    /// exactly. The fixed 7-column chart `[1, x, y, z, xy, yz, xz]` holds only
+    /// three of the five `l = 2` harmonics, so rotating `xy` produces `x²−y²`
+    /// outside its span — its achievable fit depends on the arbitrary
+    /// orientation of the chart's pole relative to the data.
+    #[test]
+    fn ambient_sphere_span_is_rotation_closed_and_the_fixed_chart_is_not() {
+        let (chart_coords, ambient_coords) = sphere_sample(0x120F, 900);
+        let axis = [1.0, 1.0, 1.0];
+        let theta = 0.7_f64;
+
+        let mut rotated_ambient = Array2::<f64>::zeros(ambient_coords.dim());
+        let mut rotated_chart = Array2::<f64>::zeros(chart_coords.dim());
+        for row in 0..ambient_coords.nrows() {
+            let turned = rotate_vector(
+                [
+                    ambient_coords[[row, 0]],
+                    ambient_coords[[row, 1]],
+                    ambient_coords[[row, 2]],
+                ],
+                axis,
+                theta,
+            );
+            for a in 0..3 {
+                rotated_ambient[[row, a]] = turned[a];
+            }
+            rotated_chart[[row, 0]] = turned[2].clamp(-1.0, 1.0).asin();
+            rotated_chart[[row, 1]] = turned[1].atan2(turned[0]);
+        }
+
+        let ambient = AmbientSphereHarmonicEvaluator::new(2).unwrap();
+        let (phi, _) = ambient.evaluate(ambient_coords.view()).unwrap();
+        let (phi_rotated, _) = ambient.evaluate(rotated_ambient.view()).unwrap();
+        let ambient_residual = span_residual(&phi, &phi_rotated);
+        assert!(
+            ambient_residual <= 1.0e-8,
+            "ambient harmonic span must be closed under SO(3); residual {ambient_residual:.3e}"
+        );
+
+        let (chart_phi, _) = SphereChartEvaluator.evaluate(chart_coords.view()).unwrap();
+        let (chart_phi_rotated, _) =
+            SphereChartEvaluator.evaluate(rotated_chart.view()).unwrap();
+        let chart_residual = span_residual(&chart_phi, &chart_phi_rotated);
+        assert!(
+            chart_residual >= 1.0e-3,
+            "the fixed 7-column chart is NOT rotation-closed (three of five l=2 \
+             harmonics); if this now passes, the chart gained the missing \
+             quadrupoles and this negative control is stale. residual {chart_residual:.3e}"
+        );
+    }
+
     /// A band-limited field on `S²` (degree ≤ 3) lies exactly in the real
     /// spherical-harmonic span, so the `Y_l^m` basis reconstructs held-out rows
     /// to near-exactness — while the fixed degree-2 lat/lon chart, which spans
