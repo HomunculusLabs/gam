@@ -1351,7 +1351,8 @@ pub(crate) fn run_outer_with_plan(
                         .with_hessian_fallback_policy(HessianFallbackPolicy::Error);
                     if let Some(feedback) = config.outer_inner_cap.as_ref() {
                         solver = solver.with_observer(OuterAcceptObserver {
-                            feedback: feedback.clone(),
+                            feedback: Some(feedback.clone()),
+                            accepted_steps: None,
                         });
                     }
                     if let Some(r) = sanitized_operator_trust_restart_radius(
@@ -1577,7 +1578,8 @@ pub(crate) fn run_outer_with_plan(
                     }
                     if let Some(feedback) = config.outer_inner_cap.as_ref() {
                         optimizer = optimizer.with_observer(OuterAcceptObserver {
-                            feedback: feedback.clone(),
+                            feedback: Some(feedback.clone()),
+                            accepted_steps: None,
                         });
                     }
                     // On the exact-Hessian ARC route, forbid both (a)
@@ -1962,6 +1964,11 @@ pub(crate) fn run_outer_with_plan(
                     // tolerances do not disable the mgcv-style flat-valley stop.
                     let cost_stall_exit: Arc<Mutex<Option<CostStallExit>>> =
                         Arc::new(Mutex::new(None));
+                    // Accepted-outer-step channel from the observer back into
+                    // the bridge's cost-stall guard (#2613). Same shape as the
+                    // exit cell above and for the same reason: the observer and
+                    // the objective are two values both moved into `opt::Bfgs`.
+                    let accepted_steps: Arc<AcceptedStepLedger> = Arc::default();
                     let cost_stall_rel_tol = config
                         .rel_cost_tolerance
                         .unwrap_or(config.tolerance * 1.0e-2)
@@ -1997,6 +2004,9 @@ pub(crate) fn run_outer_with_plan(
                         cost_stall: Some(cost_stall_guard),
                         cost_stall_bounds: Some((lo.clone(), hi.clone())),
                         consecutive_probe_refusals: 0,
+                        accepted_steps: Some(Arc::clone(&accepted_steps)),
+                        pending_first_order: Vec::new(),
+                        incumbent: Some((seed.clone(), seed_eval.cost)),
                     };
                     // Hand the precomputed (cost, gradient) seed eval to
                     // `opt::Bfgs` so its first internal `eval_grad` call is
@@ -2122,11 +2132,16 @@ pub(crate) fn run_outer_with_plan(
                     if let Some(caps) = bfgs_axis_step_caps(config, layout) {
                         optimizer = optimizer.with_axis_step_caps(caps);
                     }
-                    if let Some(feedback) = config.outer_inner_cap.as_ref() {
-                        optimizer = optimizer.with_observer(OuterAcceptObserver {
-                            feedback: feedback.clone(),
-                        });
-                    }
+                    // The observer is installed UNCONDITIONALLY on this route
+                    // (#2613). It used to be gated on `outer_inner_cap`, the
+                    // only consumer at the time; the cost-stall guard now
+                    // depends on the same accepted-step signal to tell an
+                    // accepted outer iterate from a line-search trial, and that
+                    // guard is present on every BFGS seed.
+                    optimizer = optimizer.with_observer(OuterAcceptObserver {
+                        feedback: config.outer_inner_cap.clone(),
+                        accepted_steps: Some(Arc::clone(&accepted_steps)),
+                    });
                     let bfgs_start = std::time::Instant::now();
                     let outcome = optimizer.run();
                     let bfgs_elapsed = bfgs_start.elapsed().as_secs_f64();

@@ -2771,6 +2771,9 @@ fn first_order_bridge_keeps_true_gradient_on_repeated_flat_cost() {
         cost_stall: None,
         cost_stall_bounds: None,
         consecutive_probe_refusals: 0,
+        accepted_steps: None,
+        pending_first_order: Vec::new(),
+        incumbent: None,
     };
 
     let first = FirstOrderObjective::eval_grad(&mut bridge, &array![0.0])
@@ -3442,6 +3445,9 @@ fn bfgs_bridge_halts_infeasible_probe_run_back_to_cached_seed() {
         cost_stall: Some(guard),
         cost_stall_bounds: Some((lo, hi)),
         consecutive_probe_refusals: 0,
+        accepted_steps: None,
+        pending_first_order: Vec::new(),
+        incumbent: None,
     };
 
     // A real BFGS line search probes a *sequence of distinct* trial ρ along its

@@ -99,6 +99,38 @@ pub(crate) struct OuterFirstOrderBridge<'a> {
     /// noise (a few recoverable probes followed by an accepted step) never
     /// trips this guard.
     pub(crate) consecutive_probe_refusals: usize,
+    /// Accepted-outer-step signal published by [`OuterAcceptObserver`] (#2613).
+    ///
+    /// The cost-stall guard above counts *accepted outer steps*. Before #2613
+    /// the bridge folded every `eval_grad` call into it, on the premise —
+    /// written into the fold site's own comment — that `opt::Bfgs` calls
+    /// `eval_grad` only at accepted iterates and routes line-search probes
+    /// through `eval_cost`. That premise is false: the Strong-Wolfe search
+    /// evaluates the GRADIENT at every trial that clears Armijo, because the
+    /// curvature condition `|g(α)ᵀd| ≤ c₂|g(0)ᵀd|` needs it. A zoom that
+    /// bisects toward a point therefore feeds the guard a run of iterates whose
+    /// costs differ negligibly — of course they do, they are converging — and
+    /// the guard reads its own window of "6 consecutive accepted steps with no
+    /// improvement" as a flat valley and halts the solver *inside* one
+    /// iteration, before `opt`'s own rescue ladder (global-best salvage, then
+    /// trust-region dogleg) gets a turn.
+    ///
+    /// `opt::OptimizerObserver`'s doc names this exact hazard — "which
+    /// conflates trial-eval probes with real outer steps" — and gam already
+    /// used `on_step_accepted` to drive the inner-PIRLS cap. This wires the
+    /// same signal to the guard, which is the place it is load-bearing.
+    ///
+    /// `None` leaves the pre-#2613 fold-every-eval behaviour, which is what the
+    /// routes without a cost-stall guard want anyway (they never fold).
+    pub(crate) accepted_steps: Option<Arc<AcceptedStepLedger>>,
+    /// First-order evaluations made since the last accepted step, oldest first.
+    /// Drained by [`Self::drain_accepted_steps`]. Empty whenever
+    /// `accepted_steps` is `None`.
+    pub(crate) pending_first_order: Vec<PendingOuterEval>,
+    /// `(ρ, cost)` of the last iterate known to be accepted — the seed, then
+    /// each accepted step. The reference point for reconciling
+    /// [`AcceptedOuterStep`] against [`Self::pending_first_order`].
+    pub(crate) incumbent: Option<(Array1<f64>, f64)>,
 }
 
 pub(crate) const VALUE_PROBE_CACHE_CAPACITY: usize = 256;
@@ -1521,6 +1553,10 @@ pub(crate) fn remember_value_probe(
 
 impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
     fn eval_cost(&mut self, x: &Array1<f64>) -> Result<f64, ObjectiveEvalError> {
+        // Consume any accepted-step signal `opt` published since the previous
+        // evaluation before doing anything else: a stalled verdict must halt
+        // this call rather than pay another inner solve first (#2613).
+        self.drain_accepted_steps()?;
         // Per-axis line-search step caps now live natively in opt::Bfgs
         // (`with_axis_step_caps`), which shortens the BFGS direction before
         // line search instead of poisoning the Wolfe bracket with a
@@ -1714,6 +1750,10 @@ impl ZerothOrderObjective for OuterFirstOrderBridge<'_> {
 impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
     fn eval_grad(&mut self, x: &Array1<f64>) -> Result<FirstOrderSample, ObjectiveEvalError> {
         self.layout.validate_point_len(x, "outer eval failed")?;
+        // Consume any accepted-step signal `opt` published since the previous
+        // evaluation before doing anything else: a stalled verdict must halt
+        // this call rather than pay another inner solve first (#2613).
+        self.drain_accepted_steps()?;
         // Drive the outer-aware inner-PIRLS cap from accepted outer
         // iterations, BEFORE invoking the inner solve. Cap stays fixed
         // within line-search cost probes (`eval_cost` never touches the
@@ -1797,28 +1837,28 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
             format_outer_theta(&gradient),
         );
         self.iter_count = self.iter_count.saturating_add(1);
-        // Cost-stall halt (#1089). `eval_grad` is invoked by `opt::Bfgs` at
-        // each accepted iterate (line-search COST probes go through `eval_cost`,
-        // not here), so folding the objective in here counts accepted outer
-        // steps. When the REML score has stopped improving over
-        // `COST_STALL_WINDOW` consecutive accepted steps, halt BFGS by returning
-        // a sentinel `Fatal` (an observer cannot stop `opt::Bfgs`; an error is
-        // the only in-band way to halt it). The runner rebuilds the outer result
-        // from the published best iterate — but whether that result is reported
-        // CONVERGED is decided by the guard's STATIONARITY test, not by
-        // cost-flatness alone: a stall whose projected gradient still exceeds the
-        // outer gradient tolerance is a flat-valley floor (`converged = false`),
-        // a stationary one is a real optimum (`converged = true`). Both share the
-        // sentinel; the verdict rides on the published `CostStallExit.converged`.
+        // Cost-stall bookkeeping (#1089, corrected by #2613). This evaluation
+        // is NOT necessarily an accepted outer iterate. The premise that used
+        // to sit here — "`eval_grad` is invoked by `opt::Bfgs` at each accepted
+        // iterate (line-search COST probes go through `eval_cost`, not here)" —
+        // is false: the Strong-Wolfe search evaluates the GRADIENT at every
+        // trial that clears Armijo, because the curvature condition needs it.
+        // So the sample is recorded here and folded by
+        // `drain_accepted_steps` once `opt` reports, through
+        // `OuterAcceptObserver`, which one it accepted. See the
+        // `accepted_steps` field doc for what the conflation cost.
+        //
         // #1426: read the inner-PIRLS convergence flag for the solve THIS eval
         // just ran (the feedback atomics are updated by `execute_pirls_if_needed`
         // after each non-screening solve, so the snapshot now reflects this ρ).
-        // A non-converged inner solve makes the reported cost/gradient
-        // untrustworthy; the guard must not record it as best-so-far nor count it
-        // toward a stall. `None` (no feedback wired) defaults to `true` so routes
-        // without inner-cap feedback are unchanged.
+        // A non-finite / non-converged inner solve makes the reported
+        // cost/gradient untrustworthy; the guard must not record it as
+        // best-so-far nor count it toward a stall. `None` (no feedback wired)
+        // defaults to `true` so routes without inner-cap feedback are unchanged.
+        // It is captured HERE rather than at fold time because the snapshot is
+        // only valid immediately after this ρ's solve.
         let inner_converged = inner_solve_converged(self.outer_inner_cap.as_ref());
-        if let Some(guard) = self.cost_stall.as_mut() {
+        if self.cost_stall.is_some() {
             // The stall guard's stationarity test must use the bound-PROJECTED
             // gradient norm (KKT residual), not the raw `g_norm` above — a
             // separation fit pins log-λ directions at the bound with a
@@ -1829,9 +1869,166 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
             // certificate uses (#2412): a coordinate creeping onto the ceiling
             // must not keep an outward pull here that certification discards,
             // or the guard never reaches the verdict certification would give.
-            let projected_g_norm =
+            let projected_grad_norm =
                 rail_projected_gradient_norm(x, &gradient, self.cost_stall_bounds.as_ref());
-            match guard.observe(x, eval.cost, projected_g_norm, inner_converged) {
+            let sample = PendingOuterEval {
+                rho: x.clone(),
+                cost: eval.cost,
+                projected_grad_norm,
+                inner_converged,
+            };
+            match self.accepted_steps.is_some() {
+                true => {
+                    if self.pending_first_order.len() >= PENDING_FIRST_ORDER_CAPACITY {
+                        self.pending_first_order.remove(0);
+                    }
+                    self.pending_first_order.push(sample);
+                }
+                // No accept signal wired (a caller that built the bridge
+                // directly, e.g. a unit test): every gradient eval is folded,
+                // which is the pre-#2613 behaviour and is safe on any driver
+                // that really does call `eval_grad` once per accepted step.
+                false => self.fold_accepted_iterate(&sample)?,
+            }
+        }
+        Ok(FirstOrderSample {
+            value: eval.cost,
+            gradient,
+        })
+    }
+}
+
+impl OuterFirstOrderBridge<'_> {
+    /// Consume every accepted outer step `opt` has reported since the last
+    /// evaluation and fold the corresponding iterate into the cost-stall guard
+    /// (#2613).
+    ///
+    /// Called at the top of `eval_cost` and `eval_grad`, which is the earliest
+    /// the bridge can act: `on_step_accepted` fires *after* the line search
+    /// that produced the step, so the signal is always one evaluation old. A
+    /// stalled verdict returns the sentinel `Fatal` from whichever call
+    /// observes it — an observer cannot stop `opt::Bfgs`, an error is the only
+    /// in-band way.
+    fn drain_accepted_steps(&mut self) -> Result<(), ObjectiveEvalError> {
+        let Some(ledger) = self.accepted_steps.clone() else {
+            return Ok(());
+        };
+        if self.cost_stall.is_none() {
+            return Ok(());
+        }
+        let steps = ledger.drain();
+        if steps.is_empty() {
+            return Ok(());
+        }
+        let mut outcome = Ok(());
+        for step in &steps {
+            match self.resolve_accepted_iterate(step) {
+                Some(sample) => {
+                    self.incumbent = Some((sample.rho.clone(), sample.cost));
+                    outcome = self.fold_accepted_iterate(&sample);
+                    if outcome.is_err() {
+                        break;
+                    }
+                }
+                None => log::debug!(
+                    "[OUTER] accepted outer step {} (step_norm={:.3e}, actual_decrease={:.3e}) \
+                     matched none of the {} first-order evaluations since the last accept; \
+                     the cost-stall guard skips it rather than fold a point opt did not accept",
+                    step.iter,
+                    step.step_norm,
+                    step.actual_decrease,
+                    self.pending_first_order.len(),
+                ),
+            }
+        }
+        self.pending_first_order.clear();
+        outcome
+    }
+
+    /// Decide WHICH pending first-order evaluation is the iterate `opt`
+    /// accepted.
+    ///
+    /// `opt::StepInfo` carries no point: only `actual_decrease = f_k − f_next`
+    /// and `step_norm = ‖x_next − x_k‖`. Both are reconcilable against the
+    /// bridge's own incumbent, and the cost is the sharper of the two (an f64
+    /// criterion value pins an iterate; a step LENGTH does not distinguish two
+    /// trials equidistant from `x_k`). So match on the reconstructed cost
+    /// first, newest candidate wins, and fall back to the step length only when
+    /// no cost matches — which happens when `opt` moved the incumbent through
+    /// one of its rescue paths (global-best salvage, trust-region dogleg), none
+    /// of which fire the observer, leaving this bridge's incumbent stale.
+    fn resolve_accepted_iterate(&self, step: &AcceptedOuterStep) -> Option<PendingOuterEval> {
+        if self.pending_first_order.is_empty() {
+            return None;
+        }
+        let target = self
+            .incumbent
+            .as_ref()
+            .map(|(_, cost)| cost - step.actual_decrease)
+            .filter(|target| target.is_finite());
+        if let Some(target) = target {
+            let slack = ACCEPTED_STEP_COST_MATCH_ULPS * f64::EPSILON * (1.0 + target.abs());
+            if let Some(found) = self
+                .pending_first_order
+                .iter()
+                .rev()
+                .find(|entry| (entry.cost - target).abs() <= slack)
+            {
+                return Some(found.clone());
+            }
+        }
+        // Step-length fallback. Without a usable incumbent ρ there is nothing
+        // to measure a length against, so take the most recent evaluation —
+        // the line search returns the trial it evaluated last on every path
+        // that does not go through a rescue.
+        let Some((incumbent_rho, _)) = self.incumbent.as_ref() else {
+            return self.pending_first_order.last().cloned();
+        };
+        if !step.step_norm.is_finite() {
+            return self.pending_first_order.last().cloned();
+        }
+        self.pending_first_order
+            .iter()
+            .rev()
+            .map(|entry| {
+                let moved = entry
+                    .rho
+                    .iter()
+                    .zip(incumbent_rho.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f64>()
+                    .sqrt();
+                (entry, (moved - step.step_norm).abs())
+            })
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(entry, _)| entry.clone())
+    }
+
+    /// Fold one ACCEPTED outer iterate into the cost-stall guard and act on the
+    /// verdict.
+    ///
+    /// When the REML score has stopped improving over `COST_STALL_WINDOW`
+    /// consecutive accepted steps, halt BFGS by returning a sentinel `Fatal`.
+    /// The runner rebuilds the outer result from the published best iterate —
+    /// but whether that result is reported CONVERGED is decided by the guard's
+    /// STATIONARITY test, not by cost-flatness alone: a stall whose projected
+    /// gradient still exceeds the outer gradient tolerance is a flat-valley
+    /// floor (`converged = false`), a stationary one is a real optimum
+    /// (`converged = true`). Both share the sentinel; the verdict rides on the
+    /// published `CostStallExit.converged`.
+    fn fold_accepted_iterate(
+        &mut self,
+        sample: &PendingOuterEval,
+    ) -> Result<(), ObjectiveEvalError> {
+        let Some(guard) = self.cost_stall.as_mut() else {
+            return Ok(());
+        };
+            match guard.observe(
+                &sample.rho,
+                sample.cost,
+                sample.projected_grad_norm,
+                sample.inner_converged,
+            ) {
                 CostStallVerdict::Continue => {}
                 CostStallVerdict::StuckKeepDescending {
                     residual_grad_norm,
@@ -1905,11 +2102,7 @@ impl FirstOrderObjective for OuterFirstOrderBridge<'_> {
                     return Err(ObjectiveEvalError::fatal(COST_STALL_CONVERGED_SENTINEL.to_string()));
                 }
             }
-        }
-        Ok(FirstOrderSample {
-            value: eval.cost,
-            gradient,
-        })
+        Ok(())
     }
 }
 
@@ -2607,7 +2800,14 @@ impl SecondOrderObjective for OuterSecondOrderBridge<'_> {
 /// `accepted_iter` from the feedback channel instead of inferring
 /// it from raw eval counts.
 pub(crate) struct OuterAcceptObserver {
-    pub(crate) feedback: InnerProgressFeedback,
+    /// Inner-PIRLS cap channel. `None` on routes that do not schedule the
+    /// inner solve from the outer trajectory; the observer is still installed
+    /// for [`Self::accepted_steps`].
+    pub(crate) feedback: Option<InnerProgressFeedback>,
+    /// Accepted-outer-step ledger shared with [`OuterFirstOrderBridge`], which
+    /// drains it to decide which of its own evaluations were accepted iterates
+    /// (#2613). `None` on routes with no cost-stall guard.
+    pub(crate) accepted_steps: Option<Arc<AcceptedStepLedger>>,
 }
 
 impl OptimizerObserver for OuterAcceptObserver {
@@ -2619,9 +2819,97 @@ impl OptimizerObserver for OuterAcceptObserver {
             info.predicted_decrease,
             info.actual_decrease,
         );
-        self.feedback.accepted_iter.fetch_add(1, Ordering::Relaxed);
+        if let Some(feedback) = self.feedback.as_ref() {
+            feedback.accepted_iter.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(ledger) = self.accepted_steps.as_ref() {
+            ledger.push(AcceptedOuterStep {
+                iter: info.iter,
+                step_norm: info.step_norm,
+                actual_decrease: info.actual_decrease,
+            });
+        }
     }
 }
+
+/// One accepted outer step as `opt` reports it through
+/// [`opt::OptimizerObserver::on_step_accepted`].
+///
+/// `StepInfo` carries no point, cost or gradient — only the two scalars below
+/// plus the iteration index — so the bridge identifies WHICH of its own
+/// evaluations was accepted by reconciling them against its incumbent. See
+/// [`OuterFirstOrderBridge::drain_accepted_steps`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AcceptedOuterStep {
+    pub(crate) iter: usize,
+    /// `‖x_next − x_k‖`.
+    pub(crate) step_norm: f64,
+    /// `f_k − f_next`.
+    pub(crate) actual_decrease: f64,
+}
+
+/// Accepted-outer-step channel from [`OuterAcceptObserver`] to
+/// [`OuterFirstOrderBridge`] (#2613).
+///
+/// The observer and the objective are two separate values, both moved into
+/// `opt::Bfgs`, so the only way for the accept signal to reach the objective's
+/// cost-stall guard is a shared cell. Entries are pushed by the observer as
+/// `opt` accepts steps and drained by the bridge on its next evaluation — the
+/// accept fires *after* the line search that produced it, so the bridge cannot
+/// consume it any earlier.
+#[derive(Debug, Default)]
+pub(crate) struct AcceptedStepLedger {
+    steps: Mutex<Vec<AcceptedOuterStep>>,
+}
+
+impl AcceptedStepLedger {
+    fn push(&self, step: AcceptedOuterStep) {
+        if let Ok(mut steps) = self.steps.lock() {
+            steps.push(step);
+        }
+    }
+
+    /// Take everything queued so far, oldest first.
+    fn drain(&self) -> Vec<AcceptedOuterStep> {
+        match self.steps.lock() {
+            Ok(mut steps) => std::mem::take(&mut *steps),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// One first-order outer evaluation the bridge has made and that `opt` has not
+/// yet classified as accepted or rejected (#2613).
+///
+/// Everything the cost-stall guard needs is captured HERE, at evaluation time,
+/// rather than re-derived when the accept arrives: `projected_grad_norm` needs
+/// the rail-relaxed box, and `inner_converged` is a snapshot of the
+/// inner-progress feedback that is only valid immediately after this ρ's solve.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingOuterEval {
+    pub(crate) rho: Array1<f64>,
+    pub(crate) cost: f64,
+    pub(crate) projected_grad_norm: f64,
+    pub(crate) inner_converged: bool,
+}
+
+/// Cap on [`OuterFirstOrderBridge::pending_first_order`]. One BFGS iteration
+/// spends at most a bracketing phase plus a 15-attempt zoom plus a
+/// backtracking fallback plus a coordinate rescue; 256 is far above that and
+/// bounds the memory a pathological direction can pin.
+pub(crate) const PENDING_FIRST_ORDER_CAPACITY: usize = 256;
+
+/// Relative slack when matching a pending evaluation's cost against the cost
+/// reconstructed from `StepInfo.actual_decrease`.
+///
+/// `actual_decrease = f_k − f_next` is one subtraction of two f64s, and the
+/// bridge reconstructs `f_next = incumbent − actual_decrease` with one more.
+/// Each rounds at most a half-ulp of the larger operand, so eight ulps is a
+/// generous two-sided envelope that still cannot collide two genuinely
+/// different iterates: consecutive line-search trials on a criterion flat
+/// enough to sit inside eight ulps of each other are the same point for every
+/// purpose the guard has.
+pub(crate) const ACCEPTED_STEP_COST_MATCH_ULPS: f64 = 8.0;
 
 /// Bridge that exposes gam's outer objective as an
 /// `opt::OperatorObjective`. Used on the matrix-free trust-region
