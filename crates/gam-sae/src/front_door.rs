@@ -180,6 +180,19 @@ pub(crate) fn admit_topk_manifold_with_budget(
     // machine; accepting it would make model representation depend on available
     // RAM and would reintroduce the N×K state this admission exists to forbid.
     if ledger.streaming_admitted {
+        // #2573 — say which device this lane runs on, and why, at the moment the
+        // lane is chosen. The support-sparse curved lane has NO device kernels
+        // (every consumer of gam-sae's GPU kernels is the dense lane), so an
+        // overcomplete fit executes entirely on the CPU no matter what device
+        // policy the caller asked for. `gpu="required"` is refused at the
+        // binding, where the policy is known; `auto` and `off` legitimately run
+        // here, and this line is what stops that from being a silent no-op --
+        // the filing's 2 h 06 m fit at 0% GPU reported success and said nothing.
+        log::info!(
+            "[SAE] lane=CurvedStreaming (K={n_atoms} > P={output_dim}, k_active={support_k}): \
+             device=CPU. The support-sparse overcomplete lane has no GPU kernels, so this fit \
+             runs on the host regardless of the requested device policy (#2573)."
+        );
         return Ok(SaeFitAdmission {
             lane: SaeFitLane::CurvedStreaming,
             topk_budget: Some(ledger),

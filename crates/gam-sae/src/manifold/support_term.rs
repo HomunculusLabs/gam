@@ -3784,11 +3784,30 @@ impl SaeSupportSparseTerm {
         }
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
         let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
+        // #2517 — report the certificate PER BLOCK, not as one scalar. The two
+        // blocks are different quantities reached by different sweeps: the
+        // decoder block is the exact-PSD-solve's own residual, the coordinate
+        // block is the damped coordinate sweep's. A single `max` over both
+        // cannot say which sweep failed to reach its own stationarity, so every
+        // reader of this refusal has had to guess. Measured across eight shapes
+        // (n 120..480, P 4..8, K 9..24, top_k 1..3, residual 1e-4 and 1e-2)
+        // this refusal fires in EVERY arm at relative KKT 1.5e-3..9.7e-3 while
+        // `max_change` is already ~1e-3, i.e. the iterate has stopped moving
+        // and the certificate has not been reached — the split is what
+        // distinguishes "a sweep is not solving its block" from "the blocks
+        // disagree at the joint point".
         Err(format!(
-            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; last parameter max_change={last_max_change:.6e}, gauge-invariant limbs required)",
+            "SaeSupportSparseTerm::solve_fixed_point did not recur within {max_iter} cycles \
+             (raw KKT max={:.6e}, relative to objective {:.6e}: {:.6e}; \
+             per block: decoder max={:.6e} l2={:.6e}, coordinate max={:.6e} l2={:.6e}; \
+             last parameter max_change={last_max_change:.6e}, gauge-invariant limbs required)",
             stationarity.max_abs(),
             objective,
-            stationarity.max_abs() / objective.abs().max(1.0)
+            stationarity.max_abs() / objective.abs().max(1.0),
+            stationarity.decoder_max_abs,
+            stationarity.decoder_l2,
+            stationarity.coordinate_max_abs,
+            stationarity.coordinate_l2,
         ))
     }
 }
