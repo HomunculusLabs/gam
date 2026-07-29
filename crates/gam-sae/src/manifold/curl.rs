@@ -657,11 +657,26 @@ pub fn coalesce_antipodal(
 /// its null mean and vetoes the circles it was added to find. A statistic argued
 /// for on paper and never measured is how a screen acquires a veto nobody notices.
 ///
-/// # Cost
+/// # Cost, and why it is not what the budget suggests
 ///
 /// Ranks are computed once. Each surrogate is then one shuffle of the rank vector
 /// and one dot product — Spearman's `ρ` is Pearson's on ranks, and the rank
 /// marginals are permutation-invariant, so only `Σᵢ rank(aᵢ)·rank(b_{π(i)})` moves.
+///
+/// Naively that is `B` draws per candidate and `B` grows with the family size, so a
+/// census would be quadratic in the number of pairs it screens. It is not, because
+/// **the e-value depends only on the EVENT that no surrogate reaches the
+/// observation**, and once one does the indicator is zero for good. Stopping at the
+/// first exceedance leaves `e` exactly the same random variable and costs a
+/// candidate with true p-value `p` about `1/p` draws instead of `B`. The full
+/// budget is spent only on the handful of planes that are going to clear, which is
+/// what makes an exhaustive exact test over tens of thousands of pairs affordable
+/// at all.
+///
+/// The p-value pays for that. It is exact (`1/(B+1)`) for a plane that clears, and
+/// for one that does not it is the inverse-binomial estimate `2/(t+1)` at the
+/// stopping draw `t` — enough to rank the refusals, not a calibrated quantity. The
+/// e-value, which is what the ledger consumes, is unaffected.
 ///
 /// Returns `(p_value, e_value, rho, null_rho_mean, null_rho_sd)`. The p-value is the
 /// exact lower-tail Monte-Carlo value; the e-value is the indicator
@@ -740,6 +755,7 @@ pub fn ring_permutation_evidence(
         z ^ (z >> 31)
     };
     let mut exceed = 0usize;
+    let mut drawn = 0usize;
     let (mut sum_r, mut sum_r2) = (0.0_f64, 0.0_f64);
     for _draw in 0..replicates {
         for i in (1..n).rev() {
@@ -751,18 +767,24 @@ pub fn ring_permutation_evidence(
             .zip(centred_b.iter())
             .map(|(x, y)| x * y)
             .sum();
-        if cross <= cross_obs {
-            exceed += 1;
-        }
         let r = rho_of(cross);
         sum_r += r;
         sum_r2 += r * r;
+        drawn += 1;
+        if cross <= cross_obs {
+            exceed = 1;
+            break;
+        }
     }
-    let bf = replicates as f64;
-    let mk = sum_r / bf;
-    let sk = (sum_r2 / bf - mk * mk).max(0.0).sqrt();
-    let p_value = (1.0 + exceed as f64) / (bf + 1.0);
-    let e_value = if exceed == 0 { bf + 1.0 } else { 0.0 };
+    let df = drawn as f64;
+    let mk = sum_r / df;
+    let sk = (sum_r2 / df - mk * mk).max(0.0).sqrt();
+    let e_value = if exceed == 0 {
+        replicates as f64 + 1.0
+    } else {
+        0.0
+    };
+    let p_value = (1.0 + exceed as f64) / (df + 1.0);
     Ok((p_value, e_value, rho_obs, mk, sk))
 }
 
