@@ -4309,9 +4309,41 @@ mod refinement_decision_tests {
     /// extension) while `criterion` and the selected `normalized_logdet` come
     /// from [`CascadeRemlProfile::evaluate`]. Two implementations of one
     /// quantity is exactly the arrangement that lets a criterion drift, so the
-    /// two are held to agreement in value, slope and curvature here. The bound
-    /// is the summation roundoff of the mode sums both perform — `rank·eps`
-    /// relative — and nothing about the fixture is free to widen it.
+    /// two are held to agreement in value, slope and curvature here.
+    ///
+    /// The tolerance is the forward error of the arithmetic the two routes
+    /// actually perform, read off THIS fixture's spectral moments at each
+    /// evaluation point. It is not `rank·eps`, and the reason is measured:
+    ///
+    /// 1. THE TWO ROUTES DO NOT EVALUATE AT THE SAME LAMBDA. The cascade
+    ///    exponentiates `rho` through `checked_exp_log_strength`, i.e. the
+    ///    platform `exp` (sub-ulp); [`AffineRemlProfile::evaluate`] uses
+    ///    `certified_exp_representative`, the midpoint of an outward-rounded
+    ///    enclosure that is hundreds of ulps wide. Neither route may adopt the
+    ///    other's: the cascade's criterion has to describe the lambda the fit
+    ///    is actually solved at, and the affine profile's exponential has to be
+    ///    the one its own enclosure is stated in. Over this domain the measured
+    ///    `|lambda_affine - lambda_cascade| / lambda` runs to `2.59e-14`. A
+    ///    RELATIVE shift `delta` in lambda IS an absolute shift `delta` in
+    ///    `rho`, so every mode kernel moves by its own `d/drho` times `delta`,
+    ///    and each accumulator below is charged exactly that. At
+    ///    `rho = -2.6396` this term alone is `|curvature|·delta =
+    ///    2.302 · 1.67e-14 = 3.8e-14`, which is the whole of the measured
+    ///    `3.9e-14` slope disagreement that `rank·eps = 3.77e-15` was being
+    ///    asked to cover.
+    /// 2. The mode sums are sums of `rank` terms of SIZE, not of size one. The
+    ///    determinant slope is `sum_i t_i` with `t_i = theta_i/(theta_i +
+    ///    lambda)`, so its Wilkinson error is `rank·eps·sum_i t_i`; at that same
+    ///    `rho`, `sum_i t_i = 10.71`, i.e. `4.0e-14` and not `3.8e-15`. The
+    ///    profiled residual `R = anchor - S1` is the one subtraction of
+    ///    near-equal positives, so its error carries the cancellation factor
+    ///    `anchor/R` (up to `4.13` at the small-lambda end) — the same factor
+    ///    [`spectral_and_solved_residual_forms_agree`] charges — and the score
+    ///    multiplies it by `dof`.
+    ///
+    /// Every factor below is computed from the fixture at the evaluation point;
+    /// nothing is a fitted constant, and the assertion is on ABSOLUTE
+    /// disagreement so a normalization cannot quietly absorb a growing gap.
     #[test]
     fn affine_view_is_the_same_score_as_the_cascade_jet() {
         let (x1, x2, y) = dense_fixture(6);
@@ -4324,59 +4356,104 @@ mod refinement_decision_tests {
             .affine_view()
             .expect("affine view")
             .expect("the dense route must expose an affine view");
-        let (lo, hi) = profile.log_lambda_domain().expect("domain");
-        let rank = (design.core.m - design.core.nullity()) as f64;
-        let dof = (design.core.y.len() - design.core.nullity()) as f64;
         let CascadeResidualForm::Spectral(spectrum) = &profile.residual else {
             panic!("the dense route must carry the spectral residual form");
         };
-        let bound = rank * f64::EPSILON;
+        let (lo, hi) = profile.log_lambda_domain().expect("domain");
+        let rank = (design.core.m - design.core.nullity()) as f64;
+        let dof = (design.core.y.len() - design.core.nullity()) as f64;
+        let eps = f64::EPSILON;
 
-        let mut worst = 0.0_f64;
         for step in 0..=8 {
             let log_lambda = lo + (hi - lo) * step as f64 / 8.0;
             let cascade = profile.evaluate(log_lambda).expect("cascade jet").jet;
             let spectral = affine.evaluate(log_lambda).expect("affine jet");
-            let lambda = log_lambda.exp();
-            let certified =
-                gam_math::score_opt::certified_exp_representative(log_lambda).expect("exp");
-            let (rss, s2, s3, _) = spectrum.moments(lambda);
+
+            // The two exponentials the two routes run, and the `rho` shift
+            // between them.
+            let lambda =
+                gam_problem::checked_exp_log_strength(log_lambda).expect("cascade lambda");
+            let affine_lambda = gam_math::score_opt::certified_exp_representative(log_lambda)
+                .expect("affine lambda");
+            let shift = (affine_lambda - lambda).abs() / lambda;
+
+            let (rss, s2, s3, s4) = spectrum.moments(lambda);
             let anchor = spectrum.anchor_energy[0];
-            let mut t_sum = 0.0_f64;
-            let mut logistic_curvature = 0.0_f64;
+            // The magnitudes the three determinant accumulators run over, and
+            // the `d/drho` of each summand: `d/drho log(1 + theta/lambda) = -t`
+            // and `d/drho t = -t(1-t)`.
             let mut logdet_magnitude = 0.0_f64;
+            let mut slope_magnitude = 0.0_f64;
+            let mut curvature_magnitude = 0.0_f64;
             for &theta in &spectrum.eigenvalue {
                 let t = theta / (theta + lambda);
-                t_sum += t;
-                logistic_curvature += t * (1.0 - t);
                 logdet_magnitude += (1.0 + theta / lambda).ln().abs();
+                slope_magnitude += t;
+                curvature_magnitude += t * (1.0 - t);
             }
-            let rss_d1 = lambda * s2;
-            let rss_d2 = rss_d1 - 2.0 * lambda * lambda * s3;
-            println!(
-                "DIAG rho={log_lambda} lambda={lambda} lambda_gap={:e} rank={rank} dof={dof} \
-                 anchor={anchor} rss={rss} cancellation={:e} rss_d1={rss_d1} rss_d2={rss_d2} \
-                 s2={s2} s3={s3} t_sum={t_sum} logistic_curvature={logistic_curvature} \
-                 logdet_magnitude={logdet_magnitude} log_d1={:e} log_d2={:e}",
-                (certified - lambda).abs() / lambda,
-                anchor / rss,
-                rss_d1 / rss,
-                rss_d2 / rss - (rss_d1 / rss) * (rss_d1 / rss),
-            );
-            for (name, a, b) in [
+
+            // Residual derivatives in `rho`, and the SUM OF MAGNITUDES of each
+            // cancelling form — which is what a forward-error argument is
+            // entitled to charge:
+            //   first  = R'   = lambda S2
+            //   second = R''  = R' - 2 lambda^2 S3
+            //   third  = R''' = R' - 6 lambda^2 S3 + 6 lambda^3 S4.
+            let lambda_squared = lambda * lambda;
+            let lambda_cubed = lambda_squared * lambda;
+            let first = lambda * s2;
+            let second = first - 2.0 * lambda_squared * s3;
+            let second_magnitude = first + 2.0 * lambda_squared * s3;
+            let third_magnitude = first + 6.0 * lambda_squared * s3 + 6.0 * lambda_cubed * s4;
+
+            // Each route accumulates `rank` terms sequentially and rounds a
+            // handful of elementary operations per term, so each carries
+            // `(rank + 4)·eps` relative on its own sum; the comparison is
+            // charged both.
+            let sum_eps = 2.0 * (rank + 4.0) * eps;
+            let residual_error = sum_eps * anchor + first * shift;
+            let first_error = sum_eps * first + second_magnitude * shift;
+            let second_error = sum_eps * second_magnitude + third_magnitude * shift;
+            let log_first = first / rss;
+            let log_first_error = first_error / rss + log_first.abs() * residual_error / rss;
+            let log_second_error = second_error / rss
+                + (second / rss).abs() * residual_error / rss
+                + 2.0 * log_first.abs() * log_first_error;
+
+            let determinant_value_error = sum_eps * logdet_magnitude + slope_magnitude * shift;
+            let determinant_slope_error = sum_eps * slope_magnitude + curvature_magnitude * shift;
+            // The cascade forms the curvature summand as `t·(1-t)`, and `1-t`
+            // cancels as `t -> 1`: one eps of `t` per mode. The affine route
+            // carries the same complement as `lambda·s/h` and never subtracts.
+            let determinant_curvature_error = sum_eps * curvature_magnitude
+                + eps * slope_magnitude
+                + curvature_magnitude * shift;
+
+            let bounds = [
+                0.5 * (determinant_value_error
+                    + dof * (residual_error / rss + 2.0 * eps * (rss / dof).ln().abs())),
+                0.5 * (determinant_slope_error + dof * log_first_error),
+                0.5 * (determinant_curvature_error + dof * log_second_error),
+            ];
+            for ((name, a, b), bound) in [
                 ("value", cascade.value, spectral.value),
                 ("derivative", cascade.derivative, spectral.derivative),
                 ("curvature", cascade.curvature, spectral.curvature),
-            ] {
-                let gap = (a - b).abs() / (1.0 + b.abs());
-                worst = worst.max(gap / bound);
-                println!("DIAG {name} rho={log_lambda} cascade={a} affine={b} gap={gap:e}");
+            ]
+            .into_iter()
+            .zip(bounds)
+            {
+                let gap = (a - b).abs();
+                assert!(
+                    gap <= bound,
+                    "{name} disagrees at log lambda {log_lambda}: cascade {a}, affine {b} \
+                     (absolute {gap:e} exceeds the two routes' own forward error {bound:e}, \
+                      whose terms are the lambda shift {shift:e}, the mode sums \
+                      {slope_magnitude:e} / {curvature_magnitude:e} / {logdet_magnitude:e}, \
+                      and the residual cancellation anchor/R {:e})",
+                    anchor / rss
+                );
             }
         }
-        assert!(
-            worst <= 1.0,
-            "worst gap is {worst} times the mode-sum roundoff {bound:e}"
-        );
     }
 
     #[test]
