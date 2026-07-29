@@ -225,7 +225,35 @@ fn saved_fit_summary_fixture() -> SavedFitSummary {
         stable_penalty_term: 0.0,
         max_abs_eta: 0.0,
         reml_score: Some(0.0),
-        criterion_certificate: None,
+        // A CONVERGED summary, which is what every user of this fixture means
+        // by it. SPEC 20 -- "a fit object must only ever come from a converged
+        // optimization" -- is enforced by the sealed constructor, and
+        // `core_saved_fit_result_preserves_summary_metrics` says so in as many
+        // words: "a non-converged saved summary is unrepresentable now ... pin
+        // that a CONVERGED summary mints".
+        //
+        // With `criterion_certificate: None` this fixture was not that. Any
+        // test that set `iterations > 0` on it described a fit whose outer loop
+        // ran and produced no stationarity proof, and assembly refused it with
+        // "Fit assembly rejected a non-converged optimization state: inner
+        // status Converged, outer status outer iterations ran without an
+        // analytic stationarity certificate". The gate is right; the fixture
+        // was contradicting the thing it exists to represent.
+        criterion_certificate: Some(gam::estimate::OuterCriterionCertificate {
+            stationarity: gam::estimate::OuterStationarityCertificate::AnalyticGradient {
+                grad_norm: 1e-8,
+                projected_grad_norm: 1e-8,
+                bound: 1e-4,
+                rung: gam::model_types::CertifiedRung {
+                    label: "solver-band".to_string(),
+                    derived_standard: false,
+                },
+            },
+            curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
+            lambdas_railed: Vec::new(),
+            railed_facts: Vec::new(),
+            curvature_floor: None,
+        }),
     }
 }
 
@@ -3110,7 +3138,24 @@ fn core_saved_fit_result_json_roundtripswith_finite_summary() {
             stable_penalty_term: 0.4,
             max_abs_eta: 2.0,
             reml_score: Some(0.95),
-            criterion_certificate: None,
+            // Same contract as the shared fixture: a saved fit is a CONVERGED
+            // fit (SPEC 20), and without a certificate the assembly refuses to
+            // mint one from a summary whose outer loop ran.
+            criterion_certificate: Some(gam::estimate::OuterCriterionCertificate {
+                stationarity: gam::estimate::OuterStationarityCertificate::AnalyticGradient {
+                    grad_norm: 1e-8,
+                    projected_grad_norm: 1e-8,
+                    bound: 1e-4,
+                    rung: gam::model_types::CertifiedRung {
+                        label: "solver-band".to_string(),
+                        derived_standard: false,
+                    },
+                },
+                curvature: gam::model_types::CurvatureEvidence::Measured { psd: true },
+                lambdas_railed: Vec::new(),
+                railed_facts: Vec::new(),
+                curvature_floor: None,
+            }),
         },
     );
     let payload = serde_json::to_string(&fit)
