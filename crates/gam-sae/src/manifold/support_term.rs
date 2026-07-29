@@ -1059,29 +1059,66 @@ impl SaeSupportSparseTerm {
                     }
                     vec![best_t]
                 } else {
-                    let raw: Vec<f64> = (0..atom.latent_dim())
-                        .map(|axis| {
-                            let raw = super::support_seed::projection(
-                                row_values,
-                                atom_index,
-                                axis + 1,
-                                random_state,
-                            );
-                            super::support_seed::chart_coordinate(atom.basis_kind(), axis, raw)
-                        })
-                        .collect();
-                    // A candidate must LIE ON the manifold it scores -- the
-                    // same invariant the seed path enforces. chart_coordinate
-                    // is per-axis and cannot express the unit-norm constraint
-                    // that couples an ambient sphere's axes; without this
-                    // projection a reroute installs off-manifold coordinates
-                    // and the tangent projector at a non-unit point stops
-                    // being a projection (measured: rhs_dot_delta = -0.67
-                    // killed the first embedded-sphere fit).
+                    // One trial per basis coefficient -- the SAME resolution
+                    // rule the 1-D grid uses -- instead of one hashed point.
+                    // Each trial is hash-drawn at a distinct salt and
+                    // projected onto the manifold (the on-manifold invariant
+                    // the seed path enforces; an off-manifold candidate's
+                    // tangent projector stops being a projection, measured
+                    // rhs_dot_delta = -0.67 on the first embedded sphere).
+                    // A d>=2 atom now competes on the same footing as a 1-D
+                    // atom rather than at wherever one hash landed.
                     let manifold = atom.basis_kind().latent_manifold(atom.latent_dim());
-                    manifold
-                        .project_point(Array1::from_vec(raw).view())
-                        .to_vec()
+                    let trials = atom.basis_size().max(2);
+                    let mut best_s = f64::NEG_INFINITY;
+                    let mut best_cand: Vec<f64> = Vec::new();
+                    for trial in 0..trials {
+                        let raw: Vec<f64> = (0..atom.latent_dim())
+                            .map(|axis| {
+                                let raw = super::support_seed::projection(
+                                    row_values,
+                                    atom_index,
+                                    axis + 1 + trial * atom.latent_dim(),
+                                    random_state,
+                                );
+                                super::support_seed::chart_coordinate(
+                                    atom.basis_kind(),
+                                    axis,
+                                    raw,
+                                )
+                            })
+                            .collect();
+                        let cand = manifold
+                            .project_point(Array1::from_vec(raw).view())
+                            .to_vec();
+                        let c_try =
+                            Array2::from_shape_vec((1, atom.latent_dim()), cand.clone())
+                                .map_err(|error| {
+                                    format!("reroute d>=2 trial: {error}")
+                                })?;
+                        if let Some(ev) = atom.basis_evaluator.as_ref() {
+                            let (phi_try, _) = ev.evaluate(c_try.view())?;
+                            let dec = phi_try.row(0).dot(atom.decoder_coefficients());
+                            let s_try: f64 = row
+                                .iter()
+                                .zip(dec.iter())
+                                .map(|(truth, fit)| 2.0 * truth * fit - fit * fit)
+                                .sum();
+                            if s_try > best_s {
+                                best_s = s_try;
+                                best_cand = cand;
+                            }
+                        }
+                    }
+                    if best_cand.is_empty() {
+                        manifold
+                            .project_point(
+                                Array1::from_vec(vec![0.0; atom.latent_dim()]).view(),
+                            )
+                            .to_vec()
+                    } else {
+                        best_cand
+                    }
                 };
                 let coordinate =
                     Array2::from_shape_vec((1, atom.latent_dim()), candidate_coords.clone())
