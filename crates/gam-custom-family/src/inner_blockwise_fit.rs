@@ -2483,6 +2483,13 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         && seed.block_beta.len() == states.len()
         && seed.active_sets.len() == states.len()
     {
+        log::debug!(
+            "[WARM-KEY] seed.rho.len={} block_coords={} block_match={} joint_lambdas={:?}",
+            seed.rho.len(),
+            block_log_lambdas.iter().map(|v| v.len()).sum::<usize>(),
+            warm_start_matches_block_log_lambdas(seed, block_log_lambdas),
+            joint_bundle.map(|b| b.log_lambdas().to_vec()),
+        );
         if warm_start_matches_block_log_lambdas(seed, block_log_lambdas)
             && let Some(cached) = seed.cached_inner.as_ref()
             && cached.converged

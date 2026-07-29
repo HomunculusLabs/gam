@@ -1021,6 +1021,11 @@ pub(crate) fn effective_df_floor_rho_upper_bounds(
             }
         }
     }
+    log::debug!(
+        "[EDF-FLOOR] emitted rho upper bounds (ceiling={:.3}): {:?}",
+        rho_box.ceiling(),
+        upper.iter().map(|b| (b * 1e6).round() / 1e6).collect::<Vec<_>>(),
+    );
     Ok(upper)
 }
 
@@ -1166,6 +1171,13 @@ fn effective_df_floor_bound(
         }
     }
     let rho_star = 0.5 * (lo + hi);
+    log::debug!(
+        "[EDF-FLOOR] rank={} edf_max={edf_max:.6} target={target:.6} rho*={rho_star:.6} \
+         box=[{lower:.3},{ceiling:.3}] gamma_min={:.6e} gamma_max={:.6e}",
+        gammas.iter().filter(|g| **g > 0.0).count(),
+        gammas.iter().cloned().fold(f64::INFINITY, f64::min),
+        gammas.iter().cloned().fold(0.0_f64, f64::max),
+    );
     // Guarding on `lower` keeps the emitted upper strictly above the box floor.
     // Callers apply tightest-wins: a coordinate must retain the floor for EVERY
     // term contributing to it.
