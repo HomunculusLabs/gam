@@ -2722,13 +2722,31 @@ mod smoothing_correction_outcome_tests {
 
             // Real outer-gradient norm at the forced ρ (finite, for the gate's
             // highgrad arm); near_boundary already guarantees cubature entry.
-            let finalgrad = state.compute_gradient(&final_rho).unwrap_or_else(|err| {
-                log::debug!(
-                    "[REML gate] outer gradient unavailable at the forced ρ ({err}); \
-                     reporting a zero-length gradient"
-                );
-                Array1::<f64>::zeros(0)
-            });
+            // Do NOT swallow a failed outer gradient into a zero-LENGTH array.
+            //
+            // This previously fell back to `Array1::zeros(0)` behind a
+            // `log::debug!`, which no test harness in this crate has a backend
+            // for. A zero-length outer gradient is not a small gradient: it is
+            // an EMPTY identified subspace, so `first_order.active_rank` is 0,
+            // `V_ρ` comes back as `[[0.0]]`, and
+            // `compute_smoothing_correction_auto` correctly declines to
+            // escalate with "first-order V_rho rank-deficient". The test then
+            // reports only that a correction matrix was absent.
+            //
+            // Measured: moving `final_rho` from `RHO_BOUND − 1` to an interior
+            // `0.0` changed nothing — same `[[0.0]]`, same reason — which rules
+            // out the near-boundary saturation I first blamed and leaves this
+            // silent substitution as the candidate. If the gradient really is
+            // unavailable on this route, that is the finding and it must be
+            // said out loud rather than converted into a degenerate input.
+            let finalgrad = state
+                .compute_gradient(&final_rho)
+                .unwrap_or_else(|err| panic!(
+                    "outer gradient unavailable at rho={final_rho:?}: {err}. \
+                     A zero-length substitute would empty the identified subspace \
+                     and make the cubature precondition fail for a reason that has \
+                     nothing to do with this test's subject."
+                ));
             let finalgrad_norm = finalgrad.dot(&finalgrad).sqrt();
 
             let before = SMOOTHING_CORRECTION_CUBATURE_COUNT.load(Ordering::SeqCst);
