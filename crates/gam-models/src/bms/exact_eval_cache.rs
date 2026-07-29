@@ -8,10 +8,15 @@ pub(super) fn log_exact_work(n: usize) -> bool {
     n >= EXACT_WORK_LOG_MIN_ROWS
 }
 
-/// Current cgroup-aware process-memory allowance from the runtime's single
-/// authoritative OS probe.
+/// Live cgroup-aware process-memory allowance, resampled on every call.
+///
+/// This is the OOM guard's reading and only the OOM guard's: it feeds the
+/// global-pin check that refuses to commit a *new* co-resident cache, which is
+/// the one decision that has to see the machine as it is right now. The
+/// worthwhileness route takes the monotone floor
+/// ([`observe_capacity_floor`]) so a shape cannot flip mid-fit.
 pub(super) fn runtime_available_memory_bytes() -> u64 {
-    gam_runtime::resource::detect_memory_availability().available_bytes()
+    gam_runtime::resource::resample_memory_availability().available_bytes()
 }
 
 /// Process-global counter of bytes currently pinned by live BMS row-primary

@@ -502,8 +502,18 @@ pub(crate) fn sae_topk_curved_budget_from_budget(
     budget
 }
 
+/// The host-memory figure every SAE budget is derived from.
+///
+/// This is the process's ONE availability observation (`gam_runtime`'s
+/// governor took it; see [`gam_runtime::resource::process_memory_availability`]),
+/// not a fresh probe. Before #2560 it resampled `/proc/meminfo` plus five
+/// cgroup files on every call, which put ~1100 six-file probes per second on
+/// the row-jet path — over half the wall clock of a stuck fit — and, worse,
+/// let the *value* move under a fit: the row-jet tile geometry and the GMRES
+/// restart length are both sized from it, so two runs of one fit could take
+/// different Krylov paths because another tenant allocated in between.
 pub(crate) fn sae_process_available_memory_bytes() -> usize {
-    gam_runtime::resource::detect_memory_availability().available_bytes_usize()
+    gam_runtime::resource::process_available_memory_bytes()
 }
 
 /// Pure in-core budget rule, factored out of [`sae_host_in_core_budget_bytes`]
@@ -542,6 +552,61 @@ pub(crate) const fn sae_host_in_core_budget_from_available(available: usize) -> 
 pub(crate) fn sae_host_in_core_budget_bytes() -> (usize, usize) {
     let available = sae_process_available_memory_bytes();
     (sae_host_in_core_budget_from_available(available), available)
+}
+
+#[cfg(test)]
+mod host_budget_is_stationary_tests {
+    //! #2560. The SAE budget is consulted per unit of work — once per row-jet
+    //! window, once per contracted RHS/HVP sweep, once per GMRES restart
+    //! sizing — so what it costs and whether it MOVES are both properties of
+    //! the fit, not of the call site. Two invariants, one test each:
+    //! it costs no probes, and it does not move.
+    use super::*;
+    use gam_runtime::resource::memory_availability_probe_count;
+
+    /// The number of budget lookups a single row-jet sweep of a modest fit
+    /// performs (one per window over a few thousand rows, times the
+    /// jet/RHS/HVP consumers). Deliberately larger than any realistic sweep:
+    /// the assertion is that the cost is O(1) in this count.
+    const SWEEP_LOOKUPS: usize = 50_000;
+
+    #[test]
+    fn a_budget_sweep_costs_no_memory_probes() {
+        // Prime the process observation: the FIRST lookup in a process may
+        // initialize the governor's `OnceLock` (one probe, by construction).
+        let primed = sae_host_in_core_budget_bytes();
+        let before = memory_availability_probe_count();
+        for _ in 0..SWEEP_LOOKUPS {
+            std::hint::black_box(sae_host_in_core_budget_bytes());
+        }
+        let probes = memory_availability_probe_count() - before;
+        assert_eq!(
+            probes, 0,
+            "{SWEEP_LOOKUPS} budget lookups took {probes} OS/cgroup probes; each probe opens \
+             /proc/meminfo plus the cgroup limit/usage files, so a per-work-unit probe puts that \
+             syscall traffic on the row-jet path (#2560 measured ~1100 six-file probes/second, \
+             over half the wall clock of a stuck fit). The budget must come from the process's \
+             one sampled observation. Primed reading: {primed:?}"
+        );
+    }
+
+    #[test]
+    fn the_budget_does_not_move_under_a_fit() {
+        // Determinism, not speed: the row-jet tile geometry and the GMRES
+        // restart length are sized from this number, so if it moves, two runs
+        // of one fit can take different Krylov paths because another tenant on
+        // the box allocated in between.
+        let first = sae_host_in_core_budget_bytes();
+        for turn in 0..SWEEP_LOOKUPS {
+            let again = sae_host_in_core_budget_bytes();
+            assert_eq!(
+                again, first,
+                "the host budget moved at lookup {turn}: {again:?} vs {first:?}. Available memory \
+                 is a live, shared quantity owned by the machine; a fit that reads it more than \
+                 once is a fit whose route depends on what else the box was doing (#2560)."
+            );
+        }
+    }
 }
 
 #[cfg(test)]

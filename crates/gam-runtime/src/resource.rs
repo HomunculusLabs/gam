@@ -149,16 +149,69 @@ impl std::fmt::Display for MemoryAvailability {
     }
 }
 
-/// Refresh and return the OS and cgroup observations that govern process
-/// memory admission. This is the single system-memory authority shared by the
-/// global governor and specialized runtime planners.
-pub fn detect_memory_availability() -> MemoryAvailability {
+/// Number of completed OS/cgroup availability probes in this process.
+///
+/// Every [`resample_memory_availability`] call opens and parses `/proc/meminfo`
+/// plus the four to five cgroup files behind [`detect_cgroup_memory`], so this
+/// counter is a direct census of that syscall traffic. It exists so a planner
+/// can assert *in a test* that its budget decisions cost a bounded number of
+/// probes rather than one per unit of work (#2560).
+pub fn memory_availability_probe_count() -> u64 {
+    MEMORY_AVAILABILITY_PROBES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static MEMORY_AVAILABILITY_PROBES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Take a **fresh** reading of the OS and cgroup memory observations.
+///
+/// This is a syscall-bearing probe, not an accessor: it refreshes `sysinfo`
+/// (`/proc/meminfo`) and re-reads the cgroup limit/usage files on every call,
+/// and the value it returns *moves* — available memory is a live, shared
+/// quantity owned by the whole machine, not by this process.
+///
+/// Call this only where a live reading is the point (an OOM guard immediately
+/// before committing an allocation). Anything that *routes* — picks a
+/// strategy, sizes a plan, chooses an operator — must use
+/// [`process_memory_availability`] instead, because a route derived from a
+/// moving quantity makes the fitted answer depend on what else the box was
+/// doing (SPEC-20: a fit object must only ever come from a converged
+/// optimization, and reproducibly so).
+pub fn resample_memory_availability() -> MemoryAvailability {
     static SYSTEM: OnceLock<Mutex<sysinfo::System>> = OnceLock::new();
     let system = SYSTEM.get_or_init(|| Mutex::new(sysinfo::System::new()));
     let mut system = system.lock().expect("sysinfo system mutex poisoned");
     system.refresh_memory();
     let cgroup = detect_cgroup_memory();
+    MEMORY_AVAILABILITY_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     MemoryAvailability::from_observation(system.available_memory(), cgroup)
+}
+
+/// The process's memory availability: **one** observation, taken once, shared
+/// by every planner in the process.
+///
+/// This is the same reading the [`MemoryGovernor`] sized its budget from, so a
+/// planner that admits a plan against this figure and the governor that then
+/// accounts the allocation cannot disagree about how much memory the process
+/// believes it has. Two consequences follow, and both are the point:
+///
+/// * **Free.** It is an atomic-free borrow of an already-initialized static —
+///   no syscalls, no parsing, no allocation — so it can sit on the hottest
+///   inner loop without a caching layer of its own.
+/// * **Constant.** Two runs of the same fit in one process see byte-identical
+///   budgets, so any route chosen from it is reproducible. Planners used to
+///   defend against the movement themselves (a monotone high-water floor in
+///   BMS, a per-term captured field in the SAE); a stationary primitive is what
+///   makes those compensations unnecessary rather than load-bearing.
+pub fn process_memory_availability() -> &'static MemoryAvailability {
+    &MemoryGovernor::global().ledger.availability
+}
+
+/// The process's available-memory figure in bytes, saturating to `usize`.
+/// Convenience over [`process_memory_availability`] for planners that only
+/// need the scalar.
+pub fn process_available_memory_bytes() -> usize {
+    process_memory_availability().available_bytes_usize()
 }
 
 /// Convert one provenance-preserving availability observation to the process
@@ -231,10 +284,14 @@ pub struct MemoryGovernor {
 
 impl MemoryGovernor {
     /// The process-wide governor. Budget detection runs once, on first use.
+    ///
+    /// This `OnceLock` is where the process's single availability observation
+    /// is taken; [`process_memory_availability`] hands the same observation to
+    /// every other planner rather than probing again.
     pub fn global() -> &'static MemoryGovernor {
         static GLOBAL: OnceLock<MemoryGovernor> = OnceLock::new();
         GLOBAL.get_or_init(|| {
-            let availability = detect_memory_availability();
+            let availability = resample_memory_availability();
             MemoryGovernor::with_detected_availability(availability)
         })
     }
