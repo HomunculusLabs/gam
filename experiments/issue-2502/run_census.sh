@@ -32,7 +32,7 @@ fi
 if [ ! -d "$HOME/venv" ]; then
   python3 -m venv "$HOME/venv"
   "$HOME/venv/bin/pip" install -q --upgrade pip
-  "$HOME/venv/bin/pip" install -q torch transformers datasets safetensors matplotlib numpy
+  "$HOME/venv/bin/pip" install -q torch transformers accelerate datasets safetensors matplotlib numpy
 fi
 PY=$HOME/venv/bin/python
 
