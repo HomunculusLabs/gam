@@ -61,7 +61,9 @@
 //! hooks that the dense path consumes, not a separately maintained surrogate.
 
 use crate::estimate::EstimationError;
-use crate::rho_optimizer::{OuterCapability, OuterObjective, OuterPlan, OuterResult};
+use crate::rho_optimizer::{
+    OuterCapability, OuterObjective, OuterPlan, OuterResult, OuterResultOrigin,
+};
 use faer::Side;
 use gam_linalg::faer_ndarray::{FaerArrayView, factorize_symmetricwith_fallback};
 use gam_linalg::matrix::FactorizedSystem;
@@ -160,6 +162,7 @@ impl PerAtomEfsResult {
             self.converged,
             plan_used,
         );
+        result.origin = OuterResultOrigin::PerAtomFellnerSchall;
         result.final_grad_norm = Some(self.final_step_inf_norm);
         result
     }

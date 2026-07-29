@@ -1146,6 +1146,45 @@ impl OuterTermination {
 
 /// Result of a completed outer optimization.
 #[derive(Clone, Debug)]
+/// Which lane actually produced an [`OuterResult`].
+///
+/// `OuterResult::solver_termination` is `None` whenever no `opt` solver
+/// produced the result, and its own doc names three ways that happens — a
+/// cache short-circuit, a synthesized checkpoint, the per-atom Fellner–Schall
+/// lane — without recording WHICH. A refusal then reads
+/// `termination=<no opt solver produced this result>` and the reader is left to
+/// infer the lane from iteration counts, which is the #2465 shape: the decision
+/// is made, and the basis for it is dropped by the emitter that holds it. On
+/// the #1575 binomial fixture that absence is the whole question — a result at
+/// `|Pg| = 5.991e-1` after 13 of 300 permitted outer iterations, PSD Hessian,
+/// nothing railed, is a search that stopped with descent still available, and
+/// "which lane stopped it" is the first thing anyone needs.
+///
+/// [`OuterResult::new`] defaults to [`Self::Solver`]; the gam-side lanes that
+/// synthesize a result overwrite it at their construction site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OuterResultOrigin {
+    /// An `opt` solver ran and its solution was translated into this result.
+    Solver,
+    /// A seed was accepted as its own optimum with zero outer iterations.
+    SeedAcceptedWithoutIteration,
+    /// ARC exhausted its budget on a last iterate WORSE than the best feasible
+    /// iterate it had seen, so the best iterate was substituted (#1371/#1476).
+    ArcBestIterateSubstitution,
+    /// ARC hit a run of infeasible probes with no synchronized Hessian, so a
+    /// checkpoint was rebuilt from the stored best iterate.
+    ArcInfeasibleStallCheckpoint,
+    /// The BFGS cost-stall guard halted the search and published its best
+    /// iterate, which was rebuilt into this result.
+    BfgsCostStallExit,
+    /// The per-atom Fellner–Schall frontier lane.
+    PerAtomFellnerSchall,
+    /// The parameter space is empty; there was nothing to optimize.
+    EmptyParameterSpace,
+    /// A caller-supplied point audited without running any optimizer.
+    StationaryPointAudit,
+}
+
 pub struct OuterResult {
     /// Optimized log-smoothing parameters.
     pub rho: Array1<f64>,
@@ -1284,6 +1323,8 @@ pub struct OuterResult {
     /// gradient unfreezes it — no silent clamping of a coordinate that stops
     /// wanting the rail).
     pub active_set_reseed: Option<ActiveSetReseed>,
+    /// Which lane produced this result. See [`OuterResultOrigin`].
+    pub origin: OuterResultOrigin,
 }
 
 /// An active-set reduction reseed (#2392): re-run the outer search with a set of
@@ -1327,6 +1368,7 @@ impl OuterResult {
             saddle_escape_reseed: None,
             wrong_rail_reseed: None,
             active_set_reseed: None,
+            origin: OuterResultOrigin::Solver,
         }
     }
 
@@ -1518,6 +1560,7 @@ pub fn audit_stationary_point(
     // sample is the authority being audited, and infinity records that no
     // optimizer-produced terminal value exists to compare against it.
     let mut result = OuterResult::new(rho, f64::INFINITY, 0, false, selected_plan);
+    result.origin = OuterResultOrigin::StationaryPointAudit;
     match certify_outer_optimality(obj, &config, context, &mut result) {
         Ok(certificate) => {
             result.criterion_certificate = Some(certificate);
@@ -2410,7 +2453,12 @@ fn outer_nonconvergence_error(
     // flat-valley cost stall from an iteration budget. All three are already on
     // the result and cost nothing to print.
     let reason = format!(
-        "{reason}; solver provenance: claimed_converged={}{}{}{}",
+        "{reason}; solver provenance: origin={:?}, plan={}, claimed_converged={}{}{}{}",
+        // #2465 at a fifth site. `termination=<no opt solver produced this
+        // result>` says an `opt` solver did not decide this, and stops there;
+        // `origin` says WHICH lane did. Both are already on the result.
+        result.origin,
+        result.plan_used,
         result.solver_claimed_convergence(),
         // #2547: `stop_reason` is the coarse projection. `termination` is
         // the test the solver actually applied plus the quantity it was
@@ -2444,6 +2492,14 @@ fn outer_nonconvergence_error(
     // #2465: the line search's own verdict, when one failed. `StepSizeTooSmall`
     // and `MaxAttempts` are different defects with different repairs, and
     // "line_search_failed" alone distinguishes neither.
+    // The cost-stall guard's measured probe-noise floor, when it published one.
+    // A stall halted against a noise bound and a stall halted against the
+    // score-relative flat band are different verdicts, and only the first
+    // carries this.
+    let reason = match result.flat_noise_grad_bound {
+        Some(bound) => format!("{reason}, flat_noise_grad_bound={bound:.6e}"),
+        None => reason,
+    };
     let reason = match result.line_search_failure {
         Some((failure_reason, max_attempts)) => format!(
             "{reason}, line_search={failure_reason:?} after {max_attempts} attempt(s) \
@@ -6463,14 +6519,10 @@ pub(crate) fn run_outer_uncertified(
     if cap.n_params == 0 {
         let cost = obj.eval_cost(&Array1::zeros(0))?;
         let the_plan = plan(&cap);
-        return Ok(outer_result_with_gradient_norm(
-            Array1::zeros(0),
-            cost,
-            0,
-            Some(0.0),
-            true,
-            the_plan,
-        ));
+        let mut result =
+            outer_result_with_gradient_norm(Array1::zeros(0), cost, 0, Some(0.0), true, the_plan);
+        result.origin = OuterResultOrigin::EmptyParameterSpace;
+        return Ok(result);
     }
 
     // Build the ordered list of capabilities to attempt: primary first, then

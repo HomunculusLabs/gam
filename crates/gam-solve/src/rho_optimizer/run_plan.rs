@@ -981,7 +981,8 @@ pub(crate) fn run_outer_with_plan(
         install_matching_initial_inner_seed(obj, config, seed, context)?;
         if let Some(seed_cost) = obj.accept_seed_without_outer_iterations(seed)? {
             started_seeds += 1;
-            let candidate = OuterResult::new(seed.clone(), seed_cost, 0, true, *the_plan);
+            let mut candidate = OuterResult::new(seed.clone(), seed_cost, 0, true, *the_plan);
+            candidate.origin = OuterResultOrigin::SeedAcceptedWithoutIteration;
             match CertifiedOuterCandidate::from_solver_claim(obj, config, context, candidate) {
                 Ok(candidate) => {
                     if candidate_improves_best(
@@ -1662,14 +1663,17 @@ pub(crate) fn run_outer_with_plan(
                                         last_solution.final_value,
                                         best.value,
                                     );
-                                    Ok(outer_result_with_gradient_norm(
+                                    let mut result = outer_result_with_gradient_norm(
                                         best.rho,
                                         best.value,
                                         best.iterations,
                                         Some(best.grad_norm),
                                         false,
                                         *the_plan,
-                                    ))
+                                    );
+                                    result.origin =
+                                        OuterResultOrigin::ArcBestIterateSubstitution;
+                                    Ok(result)
                                 }
                                 _ => {
                                     Ok(solution_into_outer_result(*last_solution, false, *the_plan))
@@ -1697,6 +1701,8 @@ pub(crate) fn run_outer_with_plan(
                                         false,
                                         *the_plan,
                                     );
+                                    result.origin =
+                                        OuterResultOrigin::ArcInfeasibleStallCheckpoint;
                                     // #2241 — carry the guard's measured probe-
                                     // noise-floor bound so the final analytic
                                     // certificate honors the same flat band the
@@ -2244,6 +2250,7 @@ pub(crate) fn run_outer_with_plan(
                                         exit.converged,
                                         *the_plan,
                                     );
+                                    result.origin = OuterResultOrigin::BfgsCostStallExit;
                                     // #2241 — carry the guard's measured probe-
                                     // noise-floor bound so the final analytic
                                     // certificate honors the same flat band the
