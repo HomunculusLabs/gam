@@ -8877,18 +8877,33 @@ fn screening_at_a_clean_optimum_spends_no_order_four_2596() {
 
 /// Replay the #2392 recovery objective with every outer evaluation logged, so
 /// the line-search path between the pull-back seed and the 12.0258 stall is
-/// visible instead of inferred. Signal test: it asserts nothing about the
-/// optimum, only that the run terminates; the `eprintln` stream is the output.
+/// visible instead of inferred. Signal test: it makes no claim about the
+/// optimum, only that the audit refuses the wrong rail, publishes an inward
+/// pull-back, and that the recovery run terminates; the `eprintln` stream is
+/// the output.
+///
+/// It RUNS. `#[ignore]` is a build-stopper here (`build.rs`'s ban scanner), and
+/// the reason that rule exists is exactly this shape: an ignored test is one
+/// nobody notices going red. The assertions above the print stream — the
+/// `expect_err` on the upper rail and the `expect` on the reseed — are the
+/// contract, and they hold at the tree this landed on.
 #[test]
-#[ignore = "zz_measure diagnostic: prints the trajectory, asserts nothing"]
 fn zz_measure_2613_gradient_only_stiff_ridge_trajectory() {
     const AMPLITUDE: f64 = 1.0e4;
     const RHO_STAR: f64 = 12.0;
 
-    let _ = env_logger::builder()
+    // A second `try_init` in one process is an `Err`, and that is the expected
+    // state whenever another test installed the logger first. Either way trace
+    // output is reachable, which is all this diagnostic needs; the result is
+    // reported rather than discarded.
+    if env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
         .is_test(false)
-        .try_init();
+        .try_init()
+        .is_err()
+    {
+        log::debug!("zz_measure #2613: a logger was already installed by another test");
+    }
 
     let calls = Arc::new(Mutex::new(Vec::<(char, f64, f64, f64)>::new()));
     let cost_log = Arc::clone(&calls);
