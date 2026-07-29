@@ -2304,7 +2304,7 @@ pub(crate) fn certificate_railed_coordinates(
 /// inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StationarityBoundSource {
-    /// `outer_gradient_tolerance(config).threshold(cost, |g|)` -- the raw band.
+    /// `outer_stationarity_band_at(config, cost)` -- the raw band.
     SolverBand,
     /// `flat_valley_converged_grad_bound(cost)`, gated on a `CostStallFlatValley`
     /// exit, reported at the band its formula gives.
@@ -3160,7 +3160,10 @@ fn certify_outer_optimality_at_terminal_fidelity(
             );
         }
     }
-    let solver_bound = outer_gradient_tolerance(config).threshold(evaluation.cost, grad_norm);
+    // Anchored at the criterion value of the point being JUDGED, which is what
+    // the mgcv `magic` rule means and what the solver's own band deliberately
+    // no longer does (#2613): see `outer_stationarity_band_at`.
+    let solver_bound = outer_stationarity_band_at(config, evaluation.cost);
     let mut bound_source = StationarityBoundSource::SolverBand;
     let mut stationarity_bound = if matches!(
         result.operator_stop_reason,
@@ -6998,23 +7001,90 @@ pub(crate) fn certify_resume_made_progress(
     retried_value.is_finite() && retried_value < prior_value - floor
 }
 
-pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientTolerance {
-    let abs = config
+/// The user-requested outer precision, expressed relative to the criterion's
+/// magnitude — the mgcv `magic` rule `‖g‖ ≤ τ·(1 + |V|)`.
+///
+/// This is a CONVERGENCE tolerance, not a resolution floor: at the default
+/// `τ = 1e-5` it sits ~670× above the arithmetic floor `√ε`. What it needs from
+/// the caller is `|V|`, and the whole content of #2613 is *which* `|V|`.
+#[inline]
+pub(crate) fn outer_cost_relative_tolerance(config: &OuterConfig) -> f64 {
+    config.rel_cost_tolerance.unwrap_or(config.tolerance)
+}
+
+/// The arithmetic resolution of the declared objective scale.
+///
+/// A matrix-factorization REML/LAML score cannot resolve relative perturbations
+/// below the forward-error scale √ε. Requiring a smaller absolute residual made
+/// gradient-only / operator-curvature objectives impossible to certify unless
+/// an unrelated Hessian or probe-noise rescue happened to be available (#2269).
+#[inline]
+fn outer_arithmetic_gradient_floor(config: &OuterConfig) -> f64 {
+    config
         .objective_scale
-        // A matrix-factorization REML/LAML score cannot resolve relative
-        // perturbations below the forward-error scale √ε. Requiring a smaller
-        // absolute residual made gradient-only / operator-curvature objectives
-        // impossible to certify unless an unrelated Hessian or probe-noise
-        // rescue happened to be available (#2269). This is the arithmetic
-        // resolution of the declared objective scale, not a fitted tolerance.
         .map(|scale| config.tolerance.max(scale * f64::EPSILON.sqrt()))
-        .unwrap_or(config.tolerance);
+        .unwrap_or(config.tolerance)
+}
+
+/// The stationarity band handed to the SOLVER, and to the cost-stall guard's
+/// stationarity gate.
+///
+/// It is a function of the DECLARED problem and of nothing else. `opt` resolves
+/// a `GradientTolerance` exactly once, at run start, against the seed cost —
+/// so handing it a `rel_cost` component makes the band a function of where a
+/// seed happened to land. On #2392's exponentially stiff recovery that produced
+/// an eighteen-order spread across the seeds of ONE fit: a generated lattice
+/// seed at `ρ = 1.0`, where the criterion is `1.79e13`, gave
+///
+///     termination=gradient_tolerance(|g|=1.522998e-4 < 1.792397e8)
+///
+/// i.e. the solver claimed convergence on the wrong rail against a threshold no
+/// gradient can fail. A stationarity test that depends on the starting point is
+/// not a stationarity test: two seeds converging to the same optimum must reach
+/// the same verdict.
+///
+/// So the cost-relative term is anchored on `objective_scale` — a property of
+/// the data (`n_obs` on the routes that set it), fixed for the whole fit. On
+/// those routes this is magnitude-preserving, because a REML/LAML score is a
+/// sum over `n` rows and `1 + |V| = O(n)` is what `1 + scale` already says.
+///
+/// When no scale is declared, gam does not know the criterion's magnitude, and
+/// the honest band is the absolute tolerance the caller asked for. It does NOT
+/// silently substitute a trajectory point for the thing it does not know. The
+/// consequence — an outer loop that keeps stepping past the point a
+/// score-relative band would have stopped at — is bounded by the cost-stall
+/// guard, whose own score-relative rung
+/// (`flat_valley_converged_grad_bound(best_value)`) is anchored at the BEST
+/// iterate and is therefore the correctly-anchored version of the same idea.
+///
+/// The certificate keeps the point-anchored form, which is what mgcv means:
+/// see [`outer_stationarity_band_at`].
+pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientTolerance {
+    let mut abs = outer_arithmetic_gradient_floor(config);
+    if let Some(scale) = config.objective_scale {
+        abs = abs.max(outer_cost_relative_tolerance(config) * (1.0 + scale));
+    }
     GradientTolerance {
         abs,
         rel_initial_grad: None,
-        rel_cost: Some(config.rel_cost_tolerance.unwrap_or(config.tolerance)),
+        // Never delegated: `opt`'s only anchor is the seed. See above.
+        rel_cost: None,
         projected: true,
     }
+}
+
+/// The stationarity band a CERTIFICATE applies at the point it is judging.
+///
+/// Same formula, correct anchor: `cost_at_point` is the criterion value of the
+/// candidate optimum, which is what the mgcv `magic` rule means by `f₀` and
+/// what every consumer of a certificate reads the bound as. Unlike the solver's
+/// band this one is resolved per point, so it costs nothing to anchor it right.
+pub(crate) fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
+    let arithmetic = outer_arithmetic_gradient_floor(config);
+    if !cost_at_point.is_finite() {
+        return arithmetic;
+    }
+    arithmetic.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()))
 }
 
 pub(crate) fn outer_max_iterations(value: usize) -> Result<MaxIterations, EstimationError> {

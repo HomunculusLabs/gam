@@ -635,7 +635,8 @@ pub(crate) struct CostStallGuard {
     /// Projected outer gradient-norm threshold that the best iterate must clear
     /// for a cost stall to count as a genuine stationary optimum. This is the
     /// SAME threshold the normal BFGS convergence path uses
-    /// (`outer_gradient_tolerance(config).threshold(seed_cost, ‖g_0‖)`),
+    /// (`outer_gradient_tolerance(config).abs`, which since #2613 is a function
+    /// of the DECLARED problem and not of the seed the search started from),
     /// evaluated once at seed. A cost stall above this threshold is a
     /// flat-valley stall, reported `converged = false`.
     grad_threshold: f64,

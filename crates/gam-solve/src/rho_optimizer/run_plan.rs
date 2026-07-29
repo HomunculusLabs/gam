@@ -1493,11 +1493,14 @@ pub(crate) fn run_outer_with_plan(
                         .rel_cost_tolerance
                         .unwrap_or(config.tolerance * 1.0e-2)
                         .max(COST_STALL_REL_TOL_FLOOR);
-                    let arc_seed_grad_norm =
-                        seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                    let cost_stall_grad_threshold = grad_tol
-                        .threshold(seed_eval.cost, arc_seed_grad_norm)
-                        .max(COST_STALL_PROJECTED_GRAD_FLOOR);
+                    // `grad_tol.abs` IS the whole band since #2613: the
+                    // cost-relative component is no longer anchored on a
+                    // trajectory point, so there is nothing left for
+                    // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
+                    // directly keeps this site from reading as if the seed
+                    // still decided the guard's stationarity gate.
+                    let cost_stall_grad_threshold =
+                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
 
                     // Build the exact seed Hessian before enrolling the seed in
                     // the stall guard. The guard must know whether its incumbent
@@ -1994,9 +1997,14 @@ pub(crate) fn run_outer_with_plan(
                     // bound-pinned separation fits.
                     let seed_grad_norm =
                         seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                    let cost_stall_grad_threshold = grad_tol
-                        .threshold(seed_eval.cost, seed_grad_norm)
-                        .max(COST_STALL_PROJECTED_GRAD_FLOOR);
+                    // `grad_tol.abs` IS the whole band since #2613: the
+                    // cost-relative component is no longer anchored on a
+                    // trajectory point, so there is nothing left for
+                    // `threshold(seed_cost, ‖g₀‖)` to resolve. Using the field
+                    // directly keeps this site from reading as if the seed
+                    // still decided the guard's stationarity gate.
+                    let cost_stall_grad_threshold =
+                        grad_tol.abs.max(COST_STALL_PROJECTED_GRAD_FLOOR);
                     let mut cost_stall_guard = CostStallGuard::new(
                         cost_stall_rel_tol,
                         COST_STALL_WINDOW,
