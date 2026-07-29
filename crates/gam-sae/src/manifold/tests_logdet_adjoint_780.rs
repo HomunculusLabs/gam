@@ -2238,7 +2238,16 @@ fn sae_logdet_theta_adjoint_from_probes_refuses_deflated_rows_2080() {
         FdAnchorRegime::deflated(),
         rho_ladder_family(
             &term,
-            sparse_lift_ladder(&rho, &[0.5, 0.2, 0.0, -0.3, -0.6, -1.0]),
+            // Deflation is driven by the assignment-strength penalty, so the
+            // ladder has to reach a lift strong enough to deflate a row. It
+            // topped out at 0.5 and none of its members deflates any more, so
+            // the gate hard-failed on its own premise. The sibling
+            // PD_BASIN_SPARSE_LIFTS ladder already spans up to 2.4; this one now
+            // covers the same upper range before descending.
+            sparse_lift_ladder(
+                &rho,
+                &[2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0],
+            ),
             5,
         ),
     );
