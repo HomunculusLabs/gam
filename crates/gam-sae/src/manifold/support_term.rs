@@ -384,7 +384,13 @@ pub struct SaeSupportSparseTerm {
     /// `Some(passes)` selects the accelerated parallel decoder update for
     /// this term's fixed-point solves; `None` keeps the exact colour-class
     /// Gauss-Seidel sweep. See [`Self::set_decoder_fista_passes`].
-    decoder_fista_passes: Option<usize>,    /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
+    decoder_fista_passes: Option<usize>,    /// #2502 variable priced L0: when true AND pricing is armed, the router
+    /// stops admitting a row's atoms once the priced gain turns non-positive
+    /// (keeping at least one), instead of filling every TopK slot. The
+    /// stopping rule is derived from the same description-length bill the
+    /// ranking already pays -- no new constants.
+    variable_priced_support: bool,
+    /// `Some(sigma2)` arms DoF-priced admission (#2502): every support
     /// ranking expression subtracts the amortized description length of the
     /// atom's own parameters, `2*sigma2*ln2 * (m*P*(1/2)log2 N) / firings`,
     /// and the certified objective carries the matching per-used-atom charge.
@@ -453,9 +459,9 @@ impl SaeSupportSparseTerm {
         let mut atom_rows = vec![Vec::new(); k_atoms];
         for row in 0..assignment.n_obs() {
             let support = assignment.support_indices(row);
-            if support.len() != support_k {
+            if support.len() > support_k || support.is_empty() {
                 return Err(format!(
-                    "SaeSupportSparseTerm::new: row {row} support width {} != top_k={support_k}",
+                    "SaeSupportSparseTerm::new: row {row} support width {} must be in 1..=top_k={support_k}",
                     support.len()
                 ));
             }
@@ -473,6 +479,7 @@ impl SaeSupportSparseTerm {
             atom_rows,
             decoder_fista_passes: None,
             admission_dof_sigma2: None,
+            variable_priced_support: false,
             atom_axis_periods,
         })
     }
@@ -949,6 +956,13 @@ impl SaeSupportSparseTerm {
                         if best_atom == usize::MAX {
                             break;
                         }
+                        if self.variable_priced_support
+                            && self.admission_dof_sigma2.is_some()
+                            && !picked.is_empty()
+                            && best_gain <= 0.0
+                        {
+                            break;
+                        }
                         taken[best_atom] = true;
                         for c in 0..self.output_dim {
                             residual[c] -= gamma[[best_slot, c]];
@@ -996,6 +1010,7 @@ impl SaeSupportSparseTerm {
             let mut routed = Self::new(self.atoms.clone(), assignment)?;
             routed.decoder_fista_passes = self.decoder_fista_passes;
             routed.admission_dof_sigma2 = self.admission_dof_sigma2;
+            routed.variable_priced_support = self.variable_priced_support;
             return Ok(routed);
         }
         type RowRoute = (Vec<u32>, Vec<f64>, Vec<f64>);
@@ -1105,6 +1120,16 @@ impl SaeSupportSparseTerm {
                     }
                 }
             }
+            if self.variable_priced_support
+                && self.admission_dof_sigma2.is_some()
+                && selected.len() > 1
+            {
+                let best = selected
+                    .iter()
+                    .map(|candidate| candidate.score)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                selected.retain(|candidate| candidate.score > 0.0 || candidate.score == best);
+            }
             selected.sort_by_key(|candidate| candidate.atom);
             let row_indices: Vec<u32> =
                 selected.iter().map(|candidate| candidate.atom as u32).collect();
@@ -1149,6 +1174,7 @@ impl SaeSupportSparseTerm {
         let mut routed = Self::new(self.atoms.clone(), assignment)?;
         routed.decoder_fista_passes = self.decoder_fista_passes;
         routed.admission_dof_sigma2 = self.admission_dof_sigma2;
+        routed.variable_priced_support = self.variable_priced_support;
         Ok(routed)
     }
 
@@ -2577,6 +2603,12 @@ impl SaeSupportSparseTerm {
     /// objective scale, twice that on the router's gain scale).
     pub fn set_admission_dof_pricing(&mut self, sigma2: Option<f64>) {
         self.admission_dof_sigma2 = sigma2;
+    }
+
+    /// See the `variable_priced_support` field: derived per-token L0 under
+    /// priced admission. No effect unless pricing is armed.
+    pub fn set_variable_priced_support(&mut self, enabled: bool) {
+        self.variable_priced_support = enabled;
     }
 
     pub fn set_decoder_fista_passes(&mut self, passes: Option<usize>) {

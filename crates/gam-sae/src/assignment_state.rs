@@ -262,7 +262,10 @@ impl SaeAssignmentState {
             ));
         }
         for i in 0..n_obs {
-            if indices[i].len() != support_k || gate_params[i].len() != support_k {
+            if indices[i].len() > support_k
+                || indices[i].is_empty()
+                || gate_params[i].len() != indices[i].len()
+            {
                 return Err(format!(
                     "SaeAssignmentState::from_topk_support_heterogeneous: row {i} widths must be indices={support_k}, gate_params={support_k}; got {}, {}",
                     indices[i].len(),

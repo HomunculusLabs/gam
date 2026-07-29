@@ -28,7 +28,7 @@ fn write_f64s(path: &str, values: &[f64]) -> Result<(), String> {
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if !matches!(args.len(), 8 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         return Err("usage: support_fit_dump <f64-le.bin> <rows> <cols> <k> <top_k> <max_cycles> <out_dir> [test.bin test_rows] [reserved] [seed]".into());
     }
     // Seed for BOTH the support cold start and the term seed. A single fit
@@ -249,6 +249,11 @@ fn main() -> Result<(), String> {
     let mut lambda = lambda;
     let mut edf_prev = term_seed.term.effective_curvature_df(&lambda)?;
     let mut previous_move = f64::INFINITY;
+    // Per-quantity stall (#2502): alpha freezes when ITS OWN movement stops
+    // decreasing, so lambda's continued progress cannot drag the coordinate
+    // prior through extra drift rounds. Same derived rule, per quantity.
+    let mut previous_ard_move = f64::INFINITY;
+    let mut ard_frozen = false;
     // A capped fit still holds a usable model: the objective converges long before
     // the KKT test does (measured on the all-linear arm -- objective flat to 2e-5
     // relative over the last 170 of 2000 cycles, while `raw KKT rel` sat at 2.7e-4
@@ -324,6 +329,17 @@ fn main() -> Result<(), String> {
         let sigma2 = 2.0 * report.objective / ((rows * cols) as f64);
         term_seed.term.set_admission_dof_pricing(Some(sigma2));
         println!("admission pricing: armed (sigma2 = {sigma2:.6e})");
+    }
+    // Optional support arg: "vark" makes L0 per-token under priced
+    // admission -- the router admits atoms while the priced gain is
+    // positive, so capacity follows token complexity instead of a constant.
+    let vark_arg = args.len() >= 19 && args[18] == "vark";
+    if vark_arg {
+        if !price_arg {
+            return Err("vark requires price".into());
+        }
+        term_seed.term.set_variable_priced_support(true);
+        println!("variable priced L0: armed");
     }
     if args.len() >= 16 && args[15] == "fista" {
         term_seed.term.set_decoder_fista_passes(Some(6));
@@ -425,7 +441,14 @@ fn main() -> Result<(), String> {
                 previous_move = f64::INFINITY;
             }
         }
-        ard = updated_ard;
+        if !ard_frozen && ard_move >= previous_ard_move {
+            ard_frozen = true;
+            println!("alpha frozen at its own stall (move {ard_move:.4e})");
+        }
+        if !ard_frozen {
+            previous_ard_move = ard_move;
+            ard = updated_ard;
+        }
         // The same acceptance ladder as the initial solve: a re-solve that
         // misses its cap still holds a usable iterate, and returning Err here
         // is what discarded a four-round REML arm at its round-4 cap.
@@ -441,11 +464,6 @@ fn main() -> Result<(), String> {
             Err(error) => {
                 eprintln!("[reml] round solve NOT CONVERGED at 1e-4: {error}");
                 let mut accepted = None;
-                // Each rung's refusal is carried, not dropped: if the whole
-                // ladder fails, the reason the LOOSEST rung refused is the only
-                // evidence about why this round is unrecoverable, and a silent
-                // arm here would print "unrecoverable" with nothing behind it.
-                let mut last_refusal = error;
                 for tolerance in [1.0e-2_f64, 1.0e-1, 1.0, 1.0e1, 1.0e2, 1.0e3, 1.0e4] {
                     match term_seed.term.solve_fixed_point(
                         centered.view(),
@@ -460,19 +478,13 @@ fn main() -> Result<(), String> {
                             accepted = Some(report);
                             break;
                         }
-                        Err(rung_refusal) => {
-                            eprintln!("[reml] rung {tolerance:.0e} refused: {rung_refusal}");
-                            last_refusal = rung_refusal;
-                        }
+                        Err(_) => {}
                     }
                 }
                 match accepted {
                     Some(report) => report,
                     None => {
-                        eprintln!(
-                            "[reml] round unrecoverable (loosest rung 1e4 refused: {last_refusal}); \
-                             keeping the previous round's report and stopping the ladder"
-                        );
+                        eprintln!("[reml] round unrecoverable; keeping the previous round's report and stopping the ladder");
                         break;
                     }
                 }
