@@ -845,6 +845,79 @@ fn ball_symmetrize(a: &mut BallMat, m: usize) {
 /// This intersection restores proof information supplied by the statistical
 /// model; it is not a numerical tolerance. A wholly negative or non-finite
 /// diagonal still signals an inconsistent enclosure and fails closed.
+/// `(I − u e₀ᵀ) · X · (I − w e₀ᵀ)ᵀ`, componentwise.
+///
+/// The congruence the Joseph-form derivative identity `dP⁺ = A dP Aᵀ` needs
+/// (#2614). Expanding with `A = I − u e₀ᵀ`:
+///
+/// ```text
+///   (A X Aᵀ)[i][j] = X[i][j] − u_i X[0][j] − w_j X[i][0] + u_i w_j X[0][0]
+/// ```
+#[inline]
+fn congruence_identity_minus_rank_one(
+    x: &BallMat,
+    u: &BallVec,
+    w: &BallVec,
+    order: usize,
+) -> BallMat {
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            out[i][j] = x[i][j]
+                .sub(u[i].mul(x[0][j]))
+                .sub(w[j].mul(x[i][0]))
+                .add(u[i].mul(w[j]).mul(x[0][0]));
+        }
+    }
+    out
+}
+
+/// `(−u e₀ᵀ) X (I − w e₀ᵀ)ᵀ  +  (I − w e₀ᵀ) X (−u e₀ᵀ)ᵀ`.
+///
+/// The two always appear as this symmetric pair in the higher jets, where the
+/// differentiated factor `A′ = −K′ e₀ᵀ` sits on one side and `A` on the other.
+/// Expanding the left term:
+///
+/// ```text
+///   ((−u e₀ᵀ) X Aᵀ)[i][j] = −u_i X[0][j] + u_i w_j X[0][0]
+/// ```
+///
+/// and the right term is its transpose.
+#[inline]
+fn congruence_rank_one_left_symmetrized(
+    x: &BallMat,
+    u: &BallVec,
+    w: &BallVec,
+    order: usize,
+) -> BallMat {
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            let left = u[i].mul(w[j]).mul(x[0][0]).sub(u[i].mul(x[0][j]));
+            let right = u[j].mul(w[i]).mul(x[0][0]).sub(u[j].mul(x[i][0]));
+            out[i][j] = left.add(right);
+        }
+    }
+    out
+}
+
+/// `(−u e₀ᵀ) X (−w e₀ᵀ)ᵀ`, which collapses to the outer product `u wᵀ X[0][0]`.
+#[inline]
+fn congruence_rank_one_both(
+    x: &BallMat,
+    u: &BallVec,
+    w: &BallVec,
+    order: usize,
+) -> BallMat {
+    let mut out = [[Ball::ZERO; MAX_ORDER]; MAX_ORDER];
+    for i in 0..order {
+        for j in 0..order {
+            out[i][j] = u[i].mul(w[j]).mul(x[0][0]);
+        }
+    }
+    out
+}
+
 /// Intersect the proper innovation variance with its exact lower bound `R_t`.
 ///
 /// `F̃_t = H P*_t Hᵀ + R_t`, and `P*` is a covariance, so `H P* Hᵀ ≥ 0` exactly
@@ -1443,39 +1516,63 @@ fn run_filter_ball(
             }
 
             let mut p_new = p_star;
-            let mut p_new_d1 = p_star_d1;
-            let mut p_new_d2 = p_star_d2;
-            let mut p_new_d3 = p_star_d3;
             for i in 0..order {
                 for j in 0..order {
-                    let mm = m_star[i].mul(m_star[j]);
-                    let mm_d1 = m_star_d1[i]
-                        .mul(m_star[j])
-                        .add(m_star[i].mul(m_star_d1[j]));
-                    let mm_d2 = m_star_d2[i]
-                        .mul(m_star[j])
-                        .add(m_star_d1[i].mul(m_star_d1[j]).scale(2.0))
-                        .add(m_star[i].mul(m_star_d2[j]));
-                    let mm_d3 = m_star_d3[i]
-                        .mul(m_star[j])
-                        .add(m_star_d2[i].mul(m_star_d1[j]).scale(3.0))
-                        .add(m_star_d1[i].mul(m_star_d2[j]).scale(3.0))
-                        .add(m_star[i].mul(m_star_d3[j]));
-                    let s0 = mm.mul(inv_f);
-                    let s1 = mm_d1.sub(s0.mul(f_star_d1)).mul(inv_f);
-                    let s2 = mm_d2
-                        .sub(s1.mul(f_star_d1).scale(2.0))
-                        .sub(s0.mul(f_star_d2))
-                        .mul(inv_f);
-                    let s3 = mm_d3
-                        .sub(s2.mul(f_star_d1).scale(3.0))
-                        .sub(s1.mul(f_star_d2).scale(3.0))
-                        .sub(s0.mul(f_star_d3))
-                        .mul(inv_f);
-                    p_new[i][j] = p_new[i][j].sub(s0);
-                    p_new_d1[i][j] = p_new_d1[i][j].sub(s1);
-                    p_new_d2[i][j] = p_new_d2[i][j].sub(s2);
-                    p_new_d3[i][j] = p_new_d3[i][j].sub(s3);
+                    p_new[i][j] = p_new[i][j].sub(m_star[i].mul(m_star[j]).mul(inv_f));
+                }
+            }
+            // Derivative covariances through the JOSEPH form, which for the
+            // derivative jets is not a reformulation but an exact cancellation
+            // (#2614).
+            //
+            // Writing `A = I − K e₀ᵀ`, the update is `P⁺ = A P` and the Joseph
+            // form `P⁺ = A P Aᵀ + R K Kᵀ` is algebraically identical. `R` is
+            // `1/wₜ` — data, not a function of ρ — so differentiating the
+            // Joseph form gives
+            //
+            //     dP⁺ = A dP Aᵀ + dK·(R Kᵀ − M⁺ᵀ) + (R K − M⁺)·dKᵀ
+            //
+            // and the first column of the UPDATED covariance is
+            //
+            //     M⁺ = P⁺e₀ = M − M·P₀₀/F = M·(F − P₀₀)/F = M·R/F = R·K
+            //
+            // so `R K − M⁺ = 0` EXACTLY and both `dK` terms vanish:
+            //
+            //     dP⁺ = A · dP · Aᵀ
+            //
+            // The first derivative is a pure congruence of the derivative, and
+            // `dK` does not enter it at all. That matters here because the
+            // subtractive form this replaces built each `s_k` from products of
+            // derivative quantities divided by `F`, so an interval evaluation
+            // widened multiplicatively at every one of the ~180 updates until
+            // the accumulators saturated at `[−∞, +∞]` while their centres
+            // stayed exact. The congruence enters the derivative LINEARLY with
+            // value-side coefficients, and in the scalar case reads
+            // `dP⁺/dρ = (R/F)²·dP⁻/dρ` with `0 < R/F < 1` — a contraction where
+            // the old form accumulated a cancelling difference.
+            //
+            // Nothing here is a bound, a tolerance or a restored invariant: it
+            // is the same quantity through an expression that does not cancel,
+            // so it cannot make a non-stationary point certify.
+            let d1_pred = p_star_d1;
+            let d2_pred = p_star_d2;
+            let d3_pred = p_star_d3;
+            let p_new_d1 = congruence_identity_minus_rank_one(&d1_pred, &gain, &gain, order);
+            let mut p_new_d2 = congruence_identity_minus_rank_one(&d2_pred, &gain, &gain, order);
+            let d2_cross = congruence_rank_one_left_symmetrized(&d1_pred, &gain_d1, &gain, order);
+            let mut p_new_d3 = congruence_identity_minus_rank_one(&d3_pred, &gain, &gain, order);
+            let d3_cross_second =
+                congruence_rank_one_left_symmetrized(&d2_pred, &gain_d1, &gain, order);
+            let d3_cross_first =
+                congruence_rank_one_left_symmetrized(&d1_pred, &gain_d2, &gain, order);
+            let d3_both = congruence_rank_one_both(&d1_pred, &gain_d1, &gain_d1, order);
+            for i in 0..order {
+                for j in 0..order {
+                    p_new_d2[i][j] = p_new_d2[i][j].add(d2_cross[i][j]);
+                    p_new_d3[i][j] = p_new_d3[i][j]
+                        .add(d3_cross_second[i][j].scale(2.0))
+                        .add(d3_both[i][j].scale(2.0))
+                        .add(d3_cross_first[i][j]);
                 }
             }
             p_star = p_new;
