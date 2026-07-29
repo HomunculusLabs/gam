@@ -4955,6 +4955,29 @@ pub(crate) fn one_step_returned_saddle_specs() -> Vec<ParameterBlockSpec> {
         .collect()
 }
 
+/// The returned-saddle blocks, with one real smoothing coordinate on the
+/// convex `x` block.
+///
+/// A certified outer optimum is a statement about an outer coordinate vector,
+/// so any test that finalizes a mode against one needs the mode to *have* an
+/// outer coordinate: the finalizer's identity guard compares the certified
+/// theta against the owned mode's `[rho | manifest values]`, and a mode carried
+/// out of a zero-dimensional outer problem can only match a zero-dimensional
+/// certificate. Penalizing `x` supplies that coordinate without disturbing the
+/// saddle the fixture exists to exhibit — the negative curvature lives in the
+/// unpenalized `y` block, so `H = diag(1 + lambda, -1)` at the returned point
+/// is still a strict saddle.
+pub(crate) fn one_step_returned_saddle_specs_with_outer_coordinate() -> Vec<ParameterBlockSpec> {
+    let mut specs = one_step_returned_saddle_specs();
+    let penalized = specs
+        .first_mut()
+        .expect("the returned-saddle fixture has an x block");
+    penalized.penalties = vec![PenaltyMatrix::Dense(array![[1.0]])];
+    penalized.nullspace_dims = vec![0];
+    penalized.initial_log_lambdas = array![0.0];
+    specs
+}
+
 #[test]
 pub(crate) fn fresh_exact_mode_curvature_certificate_detects_returned_strict_saddle() {
     let family = OneStepReturnedSaddleFamily::new(0.125);
@@ -5726,7 +5749,7 @@ pub(crate) fn failed_terminal_probe_clears_stale_owned_mode() {
 #[test]
 pub(crate) fn returned_mode_finalizer_preserves_owned_mode_without_family_replay() {
     let family = OneStepReturnedSaddleFamily::new(0.125);
-    let specs = one_step_returned_saddle_specs();
+    let specs = one_step_returned_saddle_specs_with_outer_coordinate();
     let options = BlockwiseFitOptions {
         inner_max_cycles: 2,
         use_remlobjective: false,
@@ -5736,11 +5759,15 @@ pub(crate) fn returned_mode_finalizer_preserves_owned_mode_without_family_replay
     let hyper_layout = Arc::new(test_design_hyper_layout(
         (0..specs.len()).map(|_| Vec::new()).collect(),
     ));
+    // The mode is evaluated at the same one-coordinate theta the certificate
+    // below is issued at; the finalizer's identity guard rejects any other
+    // pairing, and rightly so.
+    let selected_theta = Array1::zeros(1);
     let selection = evaluate_custom_family_joint_hyper_best_mode_shared(
         &family,
         &specs,
         &options,
-        &Array1::zeros(0),
+        &selected_theta,
         hyper_layout,
         &[None],
         EvalMode::ValueOnly,
@@ -5756,7 +5783,6 @@ pub(crate) fn returned_mode_finalizer_preserves_owned_mode_without_family_replay
         .collect();
     let evaluations_before_finalization = family.evaluations.load(Ordering::Relaxed);
 
-    let selected_theta = Array1::zeros(1);
     let certified_outer = certified_test_outer(
         selected_theta.clone(),
         f64::from_bits(selected_objective_bits),
