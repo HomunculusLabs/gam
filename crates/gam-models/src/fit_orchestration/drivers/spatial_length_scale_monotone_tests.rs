@@ -404,4 +404,115 @@ mod spatial_length_scale_monotone_tests {
         }
     }
 
+    /// #2454 MEASUREMENT (reports, never fails): where the joint spatial route
+    /// STARTS, against where the baseline it is graded against ENDED.
+    ///
+    /// The monotone gate compares `joint_final_value` (the joint optimizer's
+    /// certified cost over the ±`JOINT_RHO_BOUND` ρ box, at a ψ clamped into the
+    /// data-derived κ window) against `fit_score(&baseline)` (a standard scalar-ρ
+    /// fit over the ±`RHO_BOUND` box at the SPEC's length scale). Those are two
+    /// different feasible sets. If the baseline's own ρ̂ or ψ is outside the joint
+    /// box, `theta0` is a CLAMPED — hence strictly worse — point, and the
+    /// certificate can fail with the optimizer having descended perfectly.
+    ///
+    /// Prints, for the fixture #2454 was opened against: the baseline's ρ̂ and
+    /// score; the joint route's ρ/ψ box; `theta0` before and after clamping; and
+    /// the criterion at both. Whoever reads this can separate "the optimizer went
+    /// uphill" from "the gate compares two different problems" in one run.
+    #[test]
+    fn zz_measure_joint_route_startup_against_baseline_2454() {
+        let n = 60usize;
+        let d = 2usize;
+        let mut data = Array2::<f64>::zeros((n, d));
+        let mut y = Array1::<f64>::zeros(n);
+        for i in 0..n {
+            let x0 = i as f64 / (n as f64 - 1.0);
+            let x1 = (i as f64 * 0.17).sin();
+            data[[i, 0]] = x0;
+            data[[i, 1]] = x1;
+            y[i] = (3.0 * x0).cos() + 0.35 * x1;
+        }
+        let weights = Array1::ones(n);
+        let offset = Array1::zeros(n);
+        let spec = TermCollectionSpec {
+            linear_terms: vec![],
+            random_effect_terms: vec![],
+            smooth_terms: vec![SmoothTermSpec {
+                name: "matern".to_string(),
+                basis: SmoothBasisSpec::Matern {
+                    feature_cols: vec![0, 1],
+                    spec: MaternBasisSpec {
+                        periodic: None,
+                        center_strategy: CenterStrategy::FarthestPoint { num_centers: 12 },
+                        length_scale: gam_terms::basis::MaternLengthScale::fixed(12.0),
+                        nu: MaternNu::FiveHalves,
+                        include_intercept: false,
+                        double_penalty: true,
+                        identifiability: MaternIdentifiability::CenterSumToZero,
+                        aniso_log_scales: None,
+                    },
+                    input_scale: None,
+                },
+                shape: ShapeConstraint::None,
+                joint_null_rotation: None,
+            }],
+        };
+        let fit_opts = FitOptions {
+            max_iter: 40,
+            penalty_shrinkage_floor: None,
+            ..FitOptions::default()
+        };
+        /// The ρ box the joint spatial route hands its optimizer, mirrored from
+        /// the private `spatial_optimization::JOINT_RHO_BOUND` so this probe can
+        /// report the clamp without widening that constant's visibility.
+        const JOINT_RHO_BOUND_MIRROR: f64 = 12.0;
+
+        let baseline = fit_term_collection_forspec(
+            data.view(),
+            y.view(),
+            weights.view(),
+            offset.view(),
+            &spec,
+            LikelihoodSpec::gaussian_identity(),
+            &fit_opts,
+        )
+        .unwrap_or_else(|e| panic!("baseline fit failed: {e:?}"));
+        let rho_hat = baseline.fit.lambdas.mapv(f64::ln);
+        eprintln!(
+            "[zz-start-2454] baseline score={:+.10e} rho_hat={:?} joint_rho_bound=±{}",
+            fit_score(&baseline.fit),
+            rho_hat.to_vec(),
+            JOINT_RHO_BOUND_MIRROR,
+        );
+        let clamped: Vec<f64> = rho_hat
+            .iter()
+            .map(|&r| r.clamp(-JOINT_RHO_BOUND_MIRROR, JOINT_RHO_BOUND_MIRROR))
+            .collect();
+        let moved = rho_hat
+            .iter()
+            .zip(clamped.iter())
+            .filter(|(a, b)| (*a - *b).abs() > 0.0)
+            .count();
+        eprintln!(
+            "[zz-start-2454] theta0 rho after clamp={clamped:?} coordinates_moved_by_clamp={moved}"
+        );
+
+        let design = build_term_collection_design(data.view(), &spec)
+            .unwrap_or_else(|e| panic!("design failed: {e:?}"));
+        let resolved = freeze_term_collection_from_design(&spec, &design)
+            .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
+        let kappa_options = SpatialLengthScaleOptimizationOptions::default();
+        let (psi_lower, psi_upper) =
+            gam_terms::smooth::spatial_term_psi_bounds(data.view(), &resolved, 0, &kappa_options)
+                .unwrap_or_else(|e| panic!("psi bounds: {e:?}"));
+        let seed_length_scale =
+            get_spatial_length_scale(&resolved, 0).expect("resolved length scale");
+        let psi_seed = -seed_length_scale.ln();
+        eprintln!(
+            "[zz-start-2454] psi seed={psi_seed:+.8} (length_scale={seed_length_scale:.6}) \
+             psi_box=[{psi_lower:+.8}, {psi_upper:+.8}] after_clamp={:+.8} clamped={}",
+            psi_seed.clamp(psi_lower, psi_upper),
+            psi_seed < psi_lower || psi_seed > psi_upper,
+        );
+    }
 }
