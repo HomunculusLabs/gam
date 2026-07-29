@@ -39,7 +39,8 @@ pub enum CustomFamilyError {
     /// verdicts on the same error (#2553). Choosing the variant that says
     /// what happened removes the need to guess.
     #[error(
-        "custom-family inner solve did not converge after {cycles} cycle(s); \
+        "custom-family inner solve did not converge after {cycles} cycle(s) \
+         (projected KKT residual |r|_inf={kkt_residual:?} against tol={kkt_tol:?}); \
          refusing to expose profile objective derivatives for theta_dim={theta_dim} \
          (rho_dim={rho_dim}, psi_dim={psi_dim}). The analytic outer gradient/Hessian \
          require the inner KKT equation F_beta(beta, theta)=0; returning a value with \
@@ -48,6 +49,17 @@ pub enum CustomFamilyError {
     )]
     InnerSolveNotConverged {
         cycles: usize,
+        /// Sup-norm of the projected KKT residual at the terminal inner iterate,
+        /// i.e. the quantity this refusal was decided against. A cycle count
+        /// alone cannot distinguish a solve that ran out of budget one order
+        /// from its tolerance — where the budget is the thing to look at — from
+        /// one sitting many orders away, which is a stalled or diverging solve
+        /// and a different defect entirely. `None` when the producing solver
+        /// path emits no typed KKT diagnostic (blockwise NR fallback,
+        /// eager-stop), which is itself worth seeing in the refusal.
+        kkt_residual: Option<f64>,
+        /// The stationarity tolerance `kkt_residual` was compared against.
+        kkt_tol: Option<f64>,
         theta_dim: usize,
         rho_dim: usize,
         psi_dim: usize,

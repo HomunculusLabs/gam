@@ -1716,6 +1716,8 @@ mod trial_infeasibility_classification_tests {
     fn inner_solve_nonconvergence_is_recoverable_and_carries_its_type() {
         let err = EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
             cycles: 12,
+            kkt_residual: Some(4.2e-3),
+            kkt_tol: Some(1e-8),
             theta_dim: 5,
             rho_dim: 3,
             psi_dim: 2,
@@ -1767,6 +1769,8 @@ mod trial_infeasibility_classification_tests {
     fn classification_does_not_depend_on_the_rendered_message() {
         let infeasible = EstimationError::CustomFamily(CustomFamilyError::InnerSolveNotConverged {
             cycles: 1,
+            kkt_residual: Some(1.0),
+            kkt_tol: Some(1e-8),
             theta_dim: 1,
             rho_dim: 1,
             psi_dim: 0,

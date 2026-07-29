@@ -106,6 +106,16 @@ impl ProjectedKktResidual {
     pub fn subspace(&self) -> KktResidualSubspace {
         self.subspace
     }
+
+    /// Sup-norm of the projected residual — the scalar a stationarity verdict is
+    /// actually taken on. A refusal that reports only its cycle count cannot say
+    /// whether the solve was one order from the tolerance or ten, and those have
+    /// different causes; this is the number to put next to the count.
+    pub fn inf_norm(&self) -> f64 {
+        self.residual
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+    }
 }
 
 // ===========================================================================

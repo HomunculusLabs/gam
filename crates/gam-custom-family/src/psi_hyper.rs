@@ -1580,6 +1580,15 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         // reached opposite verdicts.
         return Err(CustomFamilyError::InnerSolveNotConverged {
             cycles: inner.cycles,
+            // Carry the quantity the verdict was taken on. `inner.kkt_residual`
+            // is live here and was previously dropped, so the refusal could say
+            // only how many cycles ran — which cannot tell a budget-limited
+            // solve apart from a stalled one.
+            kkt_residual: inner.kkt_residual.as_ref().map(ProjectedKktResidual::inf_norm),
+            kkt_tol: inner
+                .kkt_residual
+                .as_ref()
+                .and_then(ProjectedKktResidual::residual_tol),
             theta_dim,
             rho_dim,
             psi_dim,
