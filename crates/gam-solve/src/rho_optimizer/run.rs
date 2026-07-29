@@ -3881,10 +3881,20 @@ fn certify_outer_optimality_at_terminal_fidelity(
         //   (2) ACTIVE-SET REDUCTION: no wrong rail, but the INTERIOR is not
         //       stationary while a rail is present — the railed coordinate's
         //       ill-conditioned Hessian row poisons the joint step. Freeze the
-        //       rail(s) at their bound and re-run so the interior converges in the
-        //       reduced space; the plan runner re-certifies the polished point
-        //       under the ORIGINAL box, so a frozen coordinate whose gradient
-        //       turns inward there un-freezes (no silent clamping).
+        //       KKT-ACTIVE rail(s) at their bound and re-run so the interior
+        //       converges in the reduced space; the plan runner re-certifies the
+        //       polished point under the ORIGINAL box, so the reduction can
+        //       never redefine the feasible set.
+        //
+        //       "Active" is decided by the PROJECTOR, at freeze time, not by
+        //       distance to a bound (#2454): a coordinate on its bound whose
+        //       projected gradient survives still has feasible descent and is
+        //       left free. This is where the un-freeze has to happen. Doing it
+        //       after the reduced solve is not available — the retry is one-shot
+        //       (`allow_tail_snap` is cleared on it, so no second reseed can be
+        //       published) and the only path back off a frozen bound is the
+        //       wrong-rail pull-back, which demands a clean opposite-sign
+        //       exponential tail and declines on any coordinate that has none.
         // (1) takes precedence: a wrong rail must be pulled back, never frozen.
         if allow_tail_snap && !certificate_railed.is_empty() {
             let beta_norm = terminal_beta
@@ -4036,6 +4046,31 @@ fn certify_outer_optimality_at_terminal_fidelity(
                 "{summary}; rail tests: [{}]",
                 rail_test_summary(&result.rho, &certificate_railed, config)
             );
+        }
+        // #2465 again, one level up: the `solver provenance` this refusal is
+        // about to append reports the terminating `|g|` of the run that produced
+        // `result`. When that run executed under an active-set reduction, its
+        // box PINNED some coordinates (`lower == upper`) and its `|g|` therefore
+        // ranges over the FREE ones only, while `|Pg|` above ranges over all of
+        // θ under the model domain. The two are then not the same quantity, and
+        // nothing in the string said so: on #2454's Matérn fixture the refusal
+        // read `claimed_converged=true, gradient_tolerance(|g|=1.029235e-4 <
+        // 5.487011e-4)` beside `|Pg|=4.316e0`, a four-order gap that is entirely
+        // the pinned ψ coordinate and looks like a contradiction until the two
+        // coordinate sets are named. Name them.
+        if let Some((search_lower, search_upper)) = config.search_bounds_override.as_ref() {
+            let pinned: Vec<usize> = (0..search_lower.len().min(search_upper.len()))
+                .filter(|&k| search_lower[k] == search_upper[k])
+                .collect();
+            if !pinned.is_empty() {
+                summary = format!(
+                    "{summary}; NOTE the run that produced this point searched a REDUCED box \
+                     with coordinate(s) {pinned:?} pinned (active-set reduction), so the \
+                     solver-provenance |g| below ranges over the FREE coordinates only and is \
+                     NOT comparable with the |Pg| above, which ranges over all of theta under \
+                     the model domain"
+                );
+            }
         }
         if let Some(note) = asymptote_rail_note {
             summary = format!("{summary}; asymptote-rail declined: {note}");
@@ -6126,12 +6161,20 @@ pub(crate) fn run_outer(
                 // (frozen) box so the interior converges without the railed
                 // coordinate's ill-conditioned Hessian row poisoning the step. The
                 // loop re-certifies the polished point under the ORIGINAL box at
-                // the top of the next iteration (`certify_diagnose_and_install`
-                // captures the original `config`), so a frozen coordinate whose
-                // gradient turns inward there un-freezes through the wrong-rail
-                // path — no silent clamping — while a genuine rail certifies with
-                // the interior now stationary. `config.clone()` reset each
-                // iteration, so the frozen box never persists past this run.
+                // the top of the next iteration (`certify_outer_optimality` reads
+                // `model_domain_bounds`, which `search_bounds_override` cannot
+                // redefine), so the reduction can narrow the SEARCH but never the
+                // feasible set a certificate is judged against. `config.clone()`
+                // reset each iteration, so the frozen box never persists past
+                // this run.
+                //
+                // A coordinate is only frozen here if the projector had already
+                // zeroed it (#2454), i.e. it was on an active constraint when the
+                // freeze was taken. That test is at freeze time deliberately: the
+                // retry is one-shot, so there is no second reduction to undo a
+                // wrong freeze, and the only path back off a frozen bound is the
+                // wrong-rail pull-back, which needs a clean opposite-sign
+                // exponential tail and declines on any coordinate without one.
                 if let Some(frozen_bounds) = active_set_bounds {
                     retry_cfg.search_bounds_override = Some(frozen_bounds);
                 }
