@@ -7079,12 +7079,20 @@ pub(crate) fn outer_gradient_tolerance(config: &OuterConfig) -> GradientToleranc
 /// candidate optimum, which is what the mgcv `magic` rule means by `f₀` and
 /// what every consumer of a certificate reads the bound as. Unlike the solver's
 /// band this one is resolved per point, so it costs nothing to anchor it right.
+///
+/// Floored at the SOLVER's band by construction. A certificate tighter than the
+/// threshold the optimizer was told to reach manufactures the "solver claimed
+/// convergence, certificate refused" family out of nothing but a disagreement
+/// between two spellings of one tolerance: the solver stops exactly where it
+/// was asked to and the certificate then declares the stop illegitimate. The
+/// certificate may be LOOSER — that is what the score-relative widening is for
+/// — but never stricter.
 pub(crate) fn outer_stationarity_band_at(config: &OuterConfig, cost_at_point: f64) -> f64 {
-    let arithmetic = outer_arithmetic_gradient_floor(config);
+    let solver_band = outer_gradient_tolerance(config).abs;
     if !cost_at_point.is_finite() {
-        return arithmetic;
+        return solver_band;
     }
-    arithmetic.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()))
+    solver_band.max(outer_cost_relative_tolerance(config) * (1.0 + cost_at_point.abs()))
 }
 
 pub(crate) fn outer_max_iterations(value: usize) -> Result<MaxIterations, EstimationError> {

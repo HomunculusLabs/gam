@@ -9302,3 +9302,168 @@ fn accepted_step_resolves_by_cost_not_by_recency_2613() {
         "and its ρ must travel with it: {published:?}",
     );
 }
+
+// ─── #2613 the stationarity band's anchor ─────────────────────────────────────
+
+/// #2613 — the band the SOLVER is judged against must not move when the search
+/// is started somewhere else.
+///
+/// `opt` resolves a `GradientTolerance` once, at run start, against the seed
+/// cost. Delegating a `rel_cost` component therefore made `1 + |V(seed)|` the
+/// anchor, and on #2392's exponentially stiff recovery that spread the band
+/// over eighteen orders across the seeds of ONE fit: a lattice seed at ρ = 1.0,
+/// where the criterion is 1.79e13, produced `|g| < 1.792397e8` — a threshold no
+/// gradient can fail — and the solver claimed convergence on the wrong rail.
+#[test]
+fn solver_stationarity_band_is_seed_invariant_2613() {
+    let config = OuterConfig {
+        tolerance: 1.0e-5,
+        objective_scale: Some(1_000.0),
+        ..OuterConfig::default()
+    };
+    let band = outer_gradient_tolerance(&config);
+    assert!(
+        band.rel_cost.is_none(),
+        "a cost-relative component is resolved by opt against the SEED cost, which is \
+         precisely the anchor #2613 removes",
+    );
+    assert!(
+        band.rel_initial_grad.is_none(),
+        "likewise for a seed-gradient-relative component",
+    );
+    // The #2392 lattice seed and the optimum it is trying to reach, seventeen
+    // orders apart in criterion value.
+    let at_lattice_seed = band.threshold(1.792_396_548_924e13, 3.584_853e13);
+    let at_optimum = band.threshold(-5.0e3, 0.0);
+    assert_eq!(
+        at_lattice_seed.to_bits(),
+        at_optimum.to_bits(),
+        "the solver band moved with the seed: {at_lattice_seed:.6e} vs {at_optimum:.6e}",
+    );
+    assert!(
+        at_lattice_seed < 1.0,
+        "a stationarity threshold of {at_lattice_seed:.6e} is not a stationarity test",
+    );
+}
+
+/// #2613 — and the CERTIFICATE keeps the mgcv `magic` rule it always meant:
+/// `‖g‖ ≤ τ·(1 + |V|)` anchored at the criterion value of the point being
+/// judged. That anchor was never wrong; it is resolved per point, so anchoring
+/// it right costs nothing. Naming the two bands separately is what makes the
+/// asymmetry impossible to reintroduce.
+#[test]
+fn certificate_stationarity_band_still_tracks_the_judged_point_2613() {
+    let config = OuterConfig {
+        tolerance: 1.0e-5,
+        objective_scale: Some(1_000.0),
+        ..OuterConfig::default()
+    };
+    let at_optimum = outer_stationarity_band_at(&config, -5.0e3);
+    let at_a_far_worse_point = outer_stationarity_band_at(&config, -5.0e6);
+    assert!(
+        at_a_far_worse_point > at_optimum,
+        "the certificate band must scale with the criterion at the point it judges: \
+         {at_a_far_worse_point:.6e} vs {at_optimum:.6e}",
+    );
+    // 1e-5 · (1 + 5000), the value the #2392 recovery certifies against.
+    assert!(
+        (at_optimum - 5.001e-2).abs() <= 1.0e-9,
+        "certificate band at V = -5e3 should be τ·(1+|V|) = 5.001e-2, got {at_optimum:.9e}",
+    );
+    // A non-finite criterion licenses no score-relative widening at all: the
+    // band falls back to the solver's, which is where the invariant below
+    // starts.
+    assert_eq!(
+        outer_stationarity_band_at(&config, f64::NAN).to_bits(),
+        outer_gradient_tolerance(&config).abs.to_bits(),
+        "a non-finite cost must fall back to the declared band, never widen",
+    );
+}
+
+/// #2613 — the certificate's band is never STRICTER than the band the solver
+/// was told to reach.
+///
+/// A certificate tighter than the solver's threshold manufactures the "solver
+/// claimed convergence, certificate refused" family out of nothing but a
+/// disagreement between two spellings of one tolerance: the optimizer stops
+/// exactly where it was asked to and is then told the stop was illegitimate.
+/// Looser is fine — that is what the score-relative widening is for. The sweep
+/// below covers the regime where the point's own criterion is SMALLER than the
+/// declared scale, which is the only way the two can cross.
+#[test]
+fn certificate_band_never_undercuts_the_solver_band_2613() {
+    for scale in [None, Some(1.0), Some(80.0), Some(1_000.0), Some(1.0e6)] {
+        for tolerance in [1.0e-8, 1.0e-5, 1.0e-3] {
+            let config = OuterConfig {
+                tolerance,
+                objective_scale: scale,
+                ..OuterConfig::default()
+            };
+            let solver_band = outer_gradient_tolerance(&config).abs;
+            for cost in [
+                0.0,
+                -1.0e-9,
+                1.0,
+                -80.0,
+                1.0e3,
+                -5.0e3,
+                1.0e12,
+                f64::NAN,
+                f64::INFINITY,
+            ] {
+                let certificate_band = outer_stationarity_band_at(&config, cost);
+                assert!(
+                    certificate_band >= solver_band,
+                    "certificate band {certificate_band:.6e} undercuts the solver band                      {solver_band:.6e} at scale={scale:?} tolerance={tolerance:.0e}                      cost={cost:.3e}",
+                );
+                assert!(
+                    certificate_band.is_finite() && certificate_band > 0.0,
+                    "a stationarity bound must be a usable positive number, got                      {certificate_band:?} at scale={scale:?} tolerance={tolerance:.0e}                      cost={cost:.3e}",
+                );
+            }
+        }
+    }
+}
+
+/// #2613 — moving the anchor from the seed to the declared scale is
+/// MAGNITUDE-PRESERVING on the routes that declare one, which is why it is not
+/// a tightening in disguise.
+///
+/// A REML/LAML score is a sum over `n` rows, so `1 + |V| = O(n)` is exactly
+/// what `1 + objective_scale` says when the scale is `n_obs`. The declared band
+/// must land on the same order as the point-anchored band evaluated at a
+/// criterion of that size.
+#[test]
+fn declared_objective_scale_preserves_the_score_relative_magnitude_2613() {
+    let n_obs = 1_000.0;
+    let config = OuterConfig {
+        tolerance: 1.0e-5,
+        objective_scale: Some(n_obs),
+        ..OuterConfig::default()
+    };
+    let declared = outer_gradient_tolerance(&config).abs;
+    let at_a_score_of_that_size = outer_stationarity_band_at(&config, -n_obs);
+    let ratio = declared / at_a_score_of_that_size;
+    assert!(
+        (0.5..=2.0).contains(&ratio),
+        "the declared band {declared:.6e} and the point-anchored band \
+         {at_a_score_of_that_size:.6e} at |V| = n must agree to within a factor of two \
+         (ratio {ratio:.3})",
+    );
+    // Without a declared scale gam does not know the criterion's magnitude, and
+    // says so by falling back to the absolute tolerance rather than
+    // substituting a trajectory point for it. The cost-stall guard's
+    // `flat_valley_converged_grad_bound(best_value)` — anchored at the BEST
+    // iterate, i.e. the correctly-anchored version of the same idea — is what
+    // covers that case.
+    let undeclared = OuterConfig {
+        tolerance: 1.0e-5,
+        objective_scale: None,
+        ..OuterConfig::default()
+    };
+    assert_eq!(
+        outer_gradient_tolerance(&undeclared).abs.to_bits(),
+        1.0e-5_f64.to_bits(),
+        "an undeclared route must get its own absolute tolerance, not a guess",
+    );
+}
