@@ -1802,7 +1802,6 @@ pub(crate) fn assignment_prior_log_strength_hdiag_weighted(
         } => {
             let sparsity_strength = rho.lambda_sparse()?;
             let inv_tau = 1.0 / temperature;
-            let inv_tau2 = inv_tau * inv_tau;
             let k = assignment.k_atoms();
             let mut d = Array1::<f64>::zeros(target.len());
             for idx in 0..target.len() {
@@ -1810,12 +1809,20 @@ pub(crate) fn assignment_prior_log_strength_hdiag_weighted(
                 if assignment.logit_is_fixed(idx % k) {
                     continue;
                 }
-                let logit = target[idx];
-                let activation = gam_linalg::utils::stable_logistic((logit - threshold) * inv_tau);
-                let slope = activation * (1.0 - activation);
                 // #991 — row `idx / k`'s design weight.
                 let w_row = row_weights.map_or(1.0, |w| w[idx / k]);
-                d[idx] = w_row * sparsity_strength * slope * (1.0 - 2.0 * activation) * inv_tau2;
+                // #2520 — `∂/∂ρ_sparse` of the curvature `B` actually carries.
+                // `smooth_psd_clamp` is homogeneous of degree 1 in its
+                // prefactor and the prefactor carries `λ_sparse`, so that
+                // derivative IS the majorizer; reading the shared seam is what
+                // keeps this channel exact without a second derivation.
+                d[idx] = ThresholdGateLogitCurvature::eval(
+                    w_row * sparsity_strength,
+                    target[idx],
+                    threshold,
+                    inv_tau,
+                )
+                .psd_majorizer_hess();
             }
             Ok(d)
         }
@@ -1849,6 +1856,119 @@ pub(crate) fn assignment_prior_log_strength_hdiag_weighted(
         // early return; the support carries no free logits at all).
         AssignmentMode::TopK { .. } => Ok(Array1::<f64>::zeros(target.len())),
     }
+}
+
+/// The ThresholdGate sparsity prior's curvature at ONE logit, split into the
+/// PSD majorizer the Newton/Schur factor declares and the non-positive
+/// remainder that restores the exact signed curvature.
+///
+/// #2520. The exact second derivative of `λ·σ((ℓ−θ)/τ)` is
+/// `λ·s·(1 − 2a)/τ²` with `a = σ((ℓ−θ)/τ)` and `s = a(1−a) ≥ 0`, which is
+/// NEGATIVE for every logit above the threshold — the sigmoid penalty is
+/// concave there. Written into `B` verbatim it made the per-row `H_tt` block
+/// indefinite on exactly the atoms the gate had switched ON, and the
+/// factorization then spectrally deflated those directions to unit stiffness:
+/// #1419's pathology, on the one prior family that never received #1419's
+/// treatment.
+///
+/// The split is [`SaeManifoldAtom`]'s periodic-ARD pair
+/// (`psd_majorizer_hess` / `negative_hessian_remainder`) applied verbatim, and
+/// it introduces NO new constant: the signed factor `1 − 2a ∈ (−1, 1)` is
+/// dimensionless and lives on the same scale as the ARD axis's `cos κt ∈
+/// [−1, 1]`, so #2339's derived softplus temperature transfers with its
+/// derivation intact.
+///
+/// Homogeneity is load-bearing exactly as it is for ARD:
+/// [`gam_linalg::utils::smooth_psd_clamp`] is degree-1 in its prefactor, and
+/// the prefactor carries `λ_sparse`, so
+/// `∂/∂ρ_sparse[majorizer] == majorizer` and the log-strength ρ-channel
+/// ([`assignment_prior_log_strength_hdiag_weighted`]) stays exact by reading
+/// the same seam rather than by a separate derivation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ThresholdGateLogitCurvature {
+    activation: f64,
+    exact: f64,
+    majorized: f64,
+}
+
+impl ThresholdGateLogitCurvature {
+    /// `strength` is the design-weighted prior strength `w_row·λ_sparse`; the
+    /// caller keeps that convention so value, gradient and curvature share one
+    /// weighting (#991).
+    pub(crate) fn eval(strength: f64, logit: f64, threshold: f64, inv_tau: f64) -> Self {
+        let activation = gam_linalg::utils::stable_logistic((logit - threshold) * inv_tau);
+        let slope = activation * (1.0 - activation);
+        // Non-negative magnitude, and the dimensionless signed factor it
+        // multiplies. The clamp acts on the second and scales with the first.
+        let magnitude = strength * slope * inv_tau * inv_tau;
+        let signed = 1.0 - 2.0 * activation;
+        Self {
+            activation,
+            exact: magnitude * signed,
+            majorized: gam_linalg::utils::smooth_psd_clamp(magnitude, signed),
+        }
+    }
+
+    /// `a = σ((ℓ−θ)/τ)`, shared with the gradient so both read one evaluation.
+    pub(crate) fn activation(self) -> f64 {
+        self.activation
+    }
+
+    /// Positive-semidefinite curvature written into `B`.
+    pub(crate) fn psd_majorizer_hess(self) -> f64 {
+        self.majorized
+    }
+
+    /// Signed correction with `psd_majorizer_hess + negative_hessian_remainder
+    /// == exact` bit-for-bit, so `A = B + ΔC` is unchanged as an operator.
+    /// Non-positive, because `softplus_{τ₀}(c) ≥ max(c, 0) ≥ c`.
+    pub(crate) fn negative_hessian_remainder(self) -> f64 {
+        self.exact - self.majorized
+    }
+}
+
+/// The ΔC channel of the ThresholdGate prior: the non-positive remainder
+/// `exact − majorizer` per flat `(row·K + atom)` logit, masked identically to
+/// the curvature [`assignment_prior_grad_hdiag_weighted`] writes into `B`.
+///
+/// #2520. Reads the same [`ThresholdGateLogitCurvature`] seam and the same
+/// [`mask_fixed_logit_entries`] rule as the majorizer, so `A = B + ΔC` cannot
+/// drift by construction. Every non-ThresholdGate mode returns zeros: their
+/// majorizers are exact, or their remainder travels its own channel (ordered
+/// Beta--Bernoulli's rank-one HVP).
+pub(crate) fn threshold_gate_negative_hessian_remainder_weighted(
+    assignment: &SaeAssignment,
+    rho: &SaeManifoldRho,
+    row_weights: Option<&[f64]>,
+) -> Result<Array1<f64>, String> {
+    assignment.validate_rho_domain(rho)?;
+    let target = flat_logits(assignment.logits.view());
+    let mut remainder = Array1::<f64>::zeros(target.len());
+    let AssignmentMode::ThresholdGate {
+        temperature,
+        threshold,
+    } = assignment.mode
+    else {
+        return Ok(remainder);
+    };
+    for row in 0..assignment.n_obs() {
+        validate_finite_logits(assignment.logits.row(row), row)?;
+    }
+    let sparsity_strength = rho.lambda_sparse()?;
+    let inv_tau = 1.0 / temperature;
+    let k = assignment.k_atoms();
+    for idx in 0..target.len() {
+        let w_row = row_weights.map_or(1.0, |w| w[idx / k]);
+        let curvature = ThresholdGateLogitCurvature::eval(
+            w_row * sparsity_strength,
+            target[idx],
+            threshold,
+            inv_tau,
+        );
+        remainder[idx] = curvature.negative_hessian_remainder();
+    }
+    mask_fixed_logit_entries(assignment, &mut remainder);
+    Ok(remainder)
 }
 
 /// Zero the entries of a flat `(n·K)` per-(row, atom) array whose atom is a FIXED
@@ -2047,19 +2167,30 @@ pub(crate) fn assignment_prior_grad_hdiag_weighted(
             // deliberately NOT bundled with the #2500 gradient fix.
             let sparsity_strength = rho.lambda_sparse()?;
             let inv_tau = 1.0 / temperature;
-            let inv_tau2 = inv_tau * inv_tau;
             let k = assignment.k_atoms();
             let mut g = Array1::<f64>::zeros(target.len());
             let mut d = Array1::<f64>::zeros(target.len());
             for idx in 0..target.len() {
-                let logit = target[idx];
-                let activation = gam_linalg::utils::stable_logistic((logit - threshold) * inv_tau);
-                let slope = activation * (1.0 - activation);
                 // #991 — row `idx / k`'s design weight scales this row's prior
                 // gradient AND curvature identically (both linear in strength).
                 let w_row = row_weights.map_or(1.0, |w| w[idx / k]);
-                g[idx] = w_row * sparsity_strength * slope * inv_tau;
-                d[idx] = w_row * sparsity_strength * slope * (1.0 - 2.0 * activation) * inv_tau2;
+                let strength = w_row * sparsity_strength;
+                let curvature = ThresholdGateLogitCurvature::eval(
+                    strength,
+                    target[idx],
+                    threshold,
+                    inv_tau,
+                );
+                let activation = curvature.activation();
+                g[idx] = strength * activation * (1.0 - activation) * inv_tau;
+                // #2520 — the PSD majorizer, not the exact signed curvature.
+                // `ΔC` restores the concave half through
+                // `threshold_gate_negative_hessian_remainder_weighted`, so the
+                // EXACT operator `A = B + ΔC` is unchanged while `B` — the
+                // thing that gets factored, and whose ½log|B| the criterion
+                // prices — is positive semidefinite like every other
+                // assignment/coordinate prior in the crate.
+                d[idx] = curvature.psd_majorizer_hess();
             }
             (g, d)
         }

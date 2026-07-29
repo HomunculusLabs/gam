@@ -310,6 +310,8 @@ mod tests_schur_seed_refusal_1782;
 #[cfg(test)]
 mod tests_smooth_clamp_2339;
 #[cfg(test)]
+mod tests_threshold_gate_majorizer_2520;
+#[cfg(test)]
 mod tests_sparse_curvature_operator_2500;
 
 #[cfg(test)]

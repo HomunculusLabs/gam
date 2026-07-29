@@ -638,6 +638,20 @@ impl SaeManifoldTerm {
             AssignmentMode::OrderedBetaBernoulli { .. }
         )
         .then(|| Array1::<f64>::zeros(n * k_atoms));
+        // #2520 — the ThresholdGate prior's concave half, dropped by the PSD
+        // majorizer `B` now declares and restored here so `A = B + ΔC` is still
+        // the exact signed curvature. Diagonal in the logit slots, so unlike
+        // ordered Beta--Bernoulli it needs no direction gather.
+        let threshold_gate_remainder = match self.assignment.mode {
+            AssignmentMode::ThresholdGate { .. } => Some(
+                crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+                    &self.assignment,
+                    rho,
+                    row_loss_w,
+                )?,
+            ),
+            _ => None,
+        };
         if matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) {
             // #2304 resident path for the residual-curvature blocks (1a)+(1b):
             // the raw second/mixed jets are contracted on device (when the plan
@@ -890,6 +904,27 @@ impl SaeManifoldTerm {
                     out.t[base + a] += w_row * neg * v_t[a];
                 }
             }
+
+            // (3b) #2520 threshold gate: the same shape as (3), on logit slots
+            // rather than coordinate slots. `B` now carries the PSD majorizer
+            // `smooth_psd_clamp(w·λ·s/τ², 1 − 2a)`, so `ΔC` must carry the
+            // non-positive remainder or `A` would no longer be the exact signed
+            // curvature and every exact-Hessian consumer (the IFT response, the
+            // terminal Newton polish, the #2336 attributability test) would be
+            // differentiating a different operator than it declares. The
+            // remainder is already design-weighted and fixed-logit masked by the
+            // producer, exactly as the majorizer is.
+            if let Some(remainder) = threshold_gate_remainder.as_ref() {
+                for (a, va) in jets.vars.iter().enumerate() {
+                    let SaeLocalRowVar::Logit { atom } = *va else {
+                        continue;
+                    };
+                    let neg = remainder[row * k_atoms + atom];
+                    if neg != 0.0 {
+                        out.t[base + a] += neg * v_t[a];
+                    }
+                }
+            }
         }
 
         // (4) ordered Beta--Bernoulli: exact integrated-marginal Hessian minus
@@ -952,11 +987,33 @@ impl SaeManifoldTerm {
             .collect();
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let row_loss_w = self.row_loss_weights.as_deref();
+        // #2520 — the ThresholdGate's own concave half is the SAME kind of
+        // exactly-known, bounded `E ⪰ 0` as the periodic-ARD clamp: `B` declares
+        // `smooth_psd_clamp(w·λ·s/τ², 1 − 2a)` and drops the negative part, so a
+        // mode whose only indefiniteness IS that dropped part is attributable
+        // and must be PRICED under #2336 rather than refused. Reads the same
+        // producer as the ΔC channel, so E and ΔC cannot disagree.
+        let threshold_gate_remainder =
+            crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+                &self.assignment,
+                rho,
+                row_loss_w,
+            )?;
+        let k_atoms = self.k_atoms();
         for row in 0..self.n_obs() {
             let base = cache.row_offsets[row];
             let vars = self.row_vars_for_cache_row(row, cache)?;
             let w_row = row_loss_w.map_or(1.0, |w| w[row]);
             for (a, va) in vars.iter().enumerate() {
+                if let SaeLocalRowVar::Logit { atom } = *va {
+                    // E = B − A, so E = −ΔC ≥ 0 here. The remainder already
+                    // carries `w_row` (its producer applies the #991 weight).
+                    let neg = threshold_gate_remainder[row * k_atoms + atom];
+                    if neg != 0.0 {
+                        e_diag[base + a] += -neg;
+                    }
+                    continue;
+                }
                 let SaeLocalRowVar::Coord { atom, axis } = *va else {
                     continue;
                 };
